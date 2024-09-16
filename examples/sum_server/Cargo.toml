@@ -1,0 +1,9 @@
+[package]
+name = "sum_server"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+sum_proto ={ path = "../sum_proto" }
+libtirpc-sys = { git = "https://github.com/vmingchen/libtirpc-sys.git", branch = "master"}

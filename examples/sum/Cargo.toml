@@ -1,0 +1,10 @@
+[package]
+name = "example"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ming Chen <v.mingchen@gmail.com>"]
+
+[dependencies]
+clap = { workspace = true }
+libntirpc-sys = { workspace = true }
+xdr-codec = { workspace = true }

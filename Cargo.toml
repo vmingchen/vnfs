@@ -1,11 +1,9 @@
-[package]
-name = "vnfs"
-version = "0.0.1"
-edition = "2021"
-license = "MIT OR Apache-2.0"
-description = "Vectorized NFS client API in Rust"
-readme = "README.md"
-repository = "https://github.com/vmingchen/vnfs"
-keywords = ["NFS", "vectorized"]
+[workspace]
+members = ["vnfs", "examples/sum", "examples/sum_proto", "examples/sum_server"]
+resolver = "2"
 
-[dependencies]
+[workspace.dependencies]
+clap = { version = "4.5.17", features = ["derive"] }
+libntirpc-sys = "0.1.0"
+xdr-codec = "0.4.4"
+xdrgen = "0.4.4"
