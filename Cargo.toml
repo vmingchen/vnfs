@@ -1,5 +1,5 @@
 [workspace]
-members = ["vnfs", "examples/sum", "examples/sum_proto", "examples/sum_server"]
+members = ["vnfs", "examples/sum", "examples/sum_lib"]
 resolver = "2"
 
 [workspace.dependencies]

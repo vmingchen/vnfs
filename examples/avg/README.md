@@ -1,1 +1,1 @@
-A test adapted from https://www.linuxjournal.com/article/2204
+An example adapted from https://www.linuxjournal.com/article/2204

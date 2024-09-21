@@ -6,5 +6,4 @@ authors = ["Ming Chen <v.mingchen@gmail.com>"]
 
 [dependencies]
 clap = { workspace = true }
-libntirpc-sys = { workspace = true }
-xdr-codec = { workspace = true }
+sum_lib = { path = "../sum_lib" }

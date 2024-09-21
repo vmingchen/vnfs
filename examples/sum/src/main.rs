@@ -1,66 +1,83 @@
-use std::{env, ffi::CStr};
-
-use clap::{Parser, Subcommand};
-#[allow(non_camel_case_types)]
-use libntirpc_sys as ntirpc;
-
-const PROGRAM : ntirpc::rpcprog_t = 22888;
-const VERSION : ntirpc::rpcvers_t = 1;
-const PORT: ntirpc::in_port_t = 8088;
-
-// SAFETY: FFI
-const HOST : &'static CStr = unsafe {
-    CStr::from_bytes_with_nul_unchecked(b"localhost\0")
-};
-
-#[no_mangle]
-unsafe extern "C" fn sum_svc(svc_req: *mut ntirpc::svc_req) {
-}
-
-fn serve() {
-    // SAFETY: FFI
-    unsafe {
-        let nc_tcp = ntirpc::NC_TCP.as_ptr() as *const i8;
-        let netconfig = ntirpc::getnetconfigent(nc_tcp);
-        if netconfig.is_null() {
-            panic!("ntirpc::getnetconfigent failed");
-        }
-        ntirpc::rpcb_unset(PROGRAM, VERSION, netconfig);
-
-        let xprt = ntirpc::svc_tp_ncreate(Some(sum_svc), PROGRAM, VERSION, netconfig);
-        if xprt.is_null() {
-            panic!("ntirpc::svc_tp_ncreate failed");
-        }
-
-        ntirpc::freenetconfigent(netconfig);
-    }
-}
-    // ntirpc::clnt_ncreate_timed()
-    // ntirpc::svc_tp_ncreate(arg1, arg2, arg3, arg4)
-
-fn call(a: i32, b: i32) -> i32 {
-    a + b
-}
-
-#[derive(Parser)]
-#[command(version, about, long_about = None)]
-#[command(propagate_version = true)]
-struct Cli {
-    #[command(subcommand)]
-    command: SumCommand,
-}
-
-#[derive(Clone, Subcommand)]
-enum SumCommand {
-    Serve,
-    Call{a: i32, b: i32},
-}
+use std::{env, ffi::{c_void, CString}, process::abort};
 
 fn main() {
-    let cli = Cli::parse();
+    let (host, a, b) = if env::args().count() == 3 {
+        let a = env::args().nth(1).unwrap().parse::<i32>().expect("a");
+        let b = env::args().nth(2).unwrap().parse::<i32>().expect("b");
+        (CString::new("localhost"), a, b)
+    } else if env::args().count() == 4 {
+        let host = env::args().nth(1).expect("host");
+        let a = env::args().nth(2).unwrap().parse::<i32>().expect("a");
+        let b = env::args().nth(3).unwrap().parse::<i32>().expect("b");
+        (CString::new(host), a, b)
+    } else {
+        panic!("Usage: 'sum <a> <b>' OR 'sum <host> <a> <b>'")
+    };
 
-    match &cli.command {
-        SumCommand::Serve => serve(),
-        SumCommand::Call{a, b} => println!("{}", call(*a, *b)),
+    let args = Box::new(sum_lib::sum_args { a, b });
+
+    let host = Box::new(host.unwrap());
+
+    const SUMPROC : sum_lib::rpcproc_t = 1;
+
+    unsafe {
+        let clnt = sum_lib::clnt_create(
+            host.as_ptr(),
+            sum_lib::SUMPROG,
+            sum_lib::SUMVERS,
+            c"udp".as_ptr(),
+        );
+
+        if clnt.is_null() {
+            panic!("clnt_create failed");
+        }
+
+        let args = Box::into_raw(args);
+
+        let res = Box::new(0);
+        let res: *mut i32 = Box::into_raw(res);
+
+        let clnt_ops = (*clnt).cl_ops;
+
+        let call_fn = (*clnt_ops).cl_call.expect("cl_call");
+
+        let timeout = sum_lib::timeval {
+            tv_sec: 25,
+            tv_usec: 0,
+        };
+
+        let arg_xdr: unsafe extern "C" fn(*mut sum_lib::XDR, ...) -> i32 =
+            std::mem::transmute(sum_lib::xdr_sum_args as usize);
+
+        let res_xdr: unsafe extern "C" fn(*mut sum_lib::XDR, ...) -> i32 =
+            std::mem::transmute(sum_lib::xdr_int as usize);
+
+        let rpc_res = call_fn(
+            clnt,
+            SUMPROC,
+            Some(arg_xdr),
+            args as *mut c_void,
+            Some(res_xdr),
+            res as *mut c_void,
+            timeout,
+        );
+        if rpc_res != 0 { 
+            sum_lib::clnt_perror(clnt, c"clnt_call failed".as_ptr());
+            abort();
+        }
+
+        let res = sum_lib::sum_1(args, clnt);
+        if res.is_null() {
+            sum_lib::clnt_perror(clnt, c"sum_1 failed".as_ptr());
+            abort();
+        } else {
+            println!("{} + {} = {}", a, b, *res);
+        }
+
+        // clean up
+        let _ = Box::from_raw(args);
+        // `res`` will be freed by `clnt_destroy`
+        let destroy_fn = (*clnt_ops).cl_destroy.expect("cl_destroy");
+        destroy_fn(clnt);
     }
 }
