@@ -9,4 +9,6 @@ repository = "https://github.com/vmingchen/vnfs"
 keywords = ["NFS", "vectorized"]
 
 [dependencies]
+libc = { workspace = true }
 libntirpc-sys = { workspace = true }
+nfsv41-sys = { workspace = true }

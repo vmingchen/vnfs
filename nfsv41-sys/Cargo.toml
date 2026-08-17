@@ -1,0 +1,13 @@
+[package]
+name = "nfsv41-sys"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Bindings for the NFSv4.1 protocol structs and XDR codecs (nfsv41.h)"
+links = "nfsv41"
+
+[dependencies]
+libntirpc-sys = { workspace = true }
+
+[build-dependencies]
+bindgen = "0.72"

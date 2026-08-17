@@ -1,0 +1,18 @@
+#!/bin/sh
+# Runs cargo fmt and clippy before each commit.
+#
+# Install with:  git config core.hooksPath .githooks
+# Bypass once with: git commit --no-verify
+
+set -e
+
+# Only run when Rust files are staged.
+if ! git diff --cached --name-only | grep -qE '\.rs$'; then
+    exit 0
+fi
+
+echo "Running cargo fmt --check..."
+cargo fmt --all -- --check
+
+echo "Running cargo clippy..."
+cargo clippy --all-targets -- -D warnings
