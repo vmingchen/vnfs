@@ -8,11 +8,22 @@
 //! ```
 
 use nfsv41_sys::nfsstat4_NFS4ERR_EXIST;
-use vnfs::tc::*;
-use vnfs::TxnClient;
+use vnfs::nfs::*;
+use vnfs::NfsVecFs;
 
-fn client() -> TxnClient {
-    TxnClient::connect("127.0.0.1").expect("connect to local nfs server")
+mod common;
+
+#[test]
+fn shared_suite_on_nfs() {
+    // The same assertions that run against the std::fs DummyVecFs must pass
+    // on the NFS backend.
+    let mut c = client();
+    let dir = format!("/tcore_{}", std::process::id());
+    common::run_suite(&mut c, &dir);
+}
+
+fn client() -> NfsVecFs {
+    NfsVecFs::connect("127.0.0.1").expect("connect to local nfs server")
 }
 
 /// Unique working directory for a test, created on demand. Each test gets its
@@ -57,7 +68,7 @@ fn open_by_path_and_close() {
     let tf = c
         .open(&f, libc::O_CREAT | libc::O_RDWR, 0o644)
         .expect("open/create");
-    assert_eq!(tf.ftype, TcFileType::Descriptor);
+    assert_eq!(tf.ftype, VfFileType::Descriptor);
     c.close(&tf).expect("close");
 }
 
@@ -123,14 +134,13 @@ fn writev_then_readv() {
     let mut c = client();
 
     let payload = b"the quick brown fox jumps over the lazy dog\n".to_vec();
-    let mut w = TcIoVec::from_path(&f, 0, payload.len(), payload.clone());
+    let mut w = VfIoVec::from_path(&f, 0, payload.len(), payload.clone());
     w.is_creation = true;
-    c.writev(std::slice::from_mut(&mut w), false)
-        .expect("writev");
+    c.writev(std::slice::from_mut(&mut w)).expect("writev");
     assert_eq!(w.length, payload.len(), "all bytes written");
 
-    let mut r = TcIoVec::from_path(&f, 0, payload.len(), Vec::new());
-    c.readv(std::slice::from_mut(&mut r), false).expect("readv");
+    let mut r = VfIoVec::from_path(&f, 0, payload.len(), Vec::new());
+    c.readv(std::slice::from_mut(&mut r)).expect("readv");
     assert_eq!(r.data, payload, "read back what was written");
     assert!(!r.is_failure);
 }
@@ -141,13 +151,13 @@ fn readv_eof() {
     let f = format!("{}/short.txt", dir);
     let mut c = client();
     let payload = b"abcdefghij".to_vec();
-    let mut w = TcIoVec::from_path(&f, 0, payload.len(), payload.clone());
+    let mut w = VfIoVec::from_path(&f, 0, payload.len(), payload.clone());
     w.is_creation = true;
-    c.writev(std::slice::from_mut(&mut w), false).unwrap();
+    c.writev(std::slice::from_mut(&mut w)).unwrap();
 
     // Ask for more than exists: must not fail and must hit EOF.
-    let mut r = TcIoVec::from_path(&f, 0, 100, Vec::new());
-    c.readv(std::slice::from_mut(&mut r), false).expect("readv");
+    let mut r = VfIoVec::from_path(&f, 0, 100, Vec::new());
+    c.readv(std::slice::from_mut(&mut r)).expect("readv");
     assert_eq!(r.length, payload.len());
     assert!(r.is_eof, "short read must set eof");
 }
@@ -160,11 +170,11 @@ fn readv_multiple_files() {
     for (i, name) in ["x", "y", "z"].iter().enumerate() {
         let f = format!("{}/{}.txt", dir, name);
         let payload = vec![b'a' + i as u8; 8];
-        let mut w = TcIoVec::from_path(&f, 0, payload.len(), payload);
+        let mut w = VfIoVec::from_path(&f, 0, payload.len(), payload);
         w.is_creation = true;
-        c.writev(std::slice::from_mut(&mut w), false).unwrap();
-        let mut r = TcIoVec::from_path(&f, 0, 8, Vec::new());
-        c.readv(std::slice::from_mut(&mut r), false).unwrap();
+        c.writev(std::slice::from_mut(&mut w)).unwrap();
+        let mut r = VfIoVec::from_path(&f, 0, 8, Vec::new());
+        c.readv(std::slice::from_mut(&mut r)).unwrap();
         iovs.push(r);
     }
     assert_eq!(iovs[0].data, vec![b'a'; 8]);
@@ -176,11 +186,11 @@ fn readv_multiple_files() {
 // getattrs / stat / lstat / fstat / exists
 // ---------------------------------------------------------------------------
 
-fn make_file(path: &str, content: &[u8]) -> TxnClient {
+fn make_file(path: &str, content: &[u8]) -> NfsVecFs {
     let mut c = client();
-    let mut w = TcIoVec::from_path(path, 0, content.len(), content.to_vec());
+    let mut w = VfIoVec::from_path(path, 0, content.len(), content.to_vec());
     w.is_creation = true;
-    c.writev(std::slice::from_mut(&mut w), false).unwrap();
+    c.writev(std::slice::from_mut(&mut w)).unwrap();
     c
 }
 
@@ -229,11 +239,11 @@ fn getattrsv() {
     let mut attrs = Vec::new();
     for name in ["g0", "g1", "g2"] {
         let f = format!("{}/{}.txt", dir, name);
-        let mut w = TcIoVec::from_path(&f, 0, 3, vec![b'x'; 3]);
+        let mut w = VfIoVec::from_path(&f, 0, 3, vec![b'x'; 3]);
         w.is_creation = true;
-        c.writev(std::slice::from_mut(&mut w), false).unwrap();
-        attrs.push(TcAttrs {
-            file: TcFile::from_path(&f),
+        c.writev(std::slice::from_mut(&mut w)).unwrap();
+        attrs.push(VfAttrs {
+            file: VfFile::from_path(&f),
             masks: AttrMask {
                 has_mode: true,
                 has_size: true,
@@ -241,10 +251,10 @@ fn getattrsv() {
                 has_fileid: true,
                 ..AttrMask::default()
             },
-            ..TcAttrs::default()
+            ..VfAttrs::default()
         });
     }
-    c.getattrsv(&mut attrs, false).expect("getattrsv");
+    c.getattrsv(&mut attrs).expect("getattrsv");
     for a in &attrs {
         assert_eq!(a.size, 3);
         assert!(a.fileid != 0);
@@ -260,18 +270,15 @@ fn setattrsv_mode() {
     let dir = setup_dir("setattrs");
     let f = format!("{}/perm.txt", dir);
     let mut c = make_file(&f, b"data");
-    c.setattrsv(
-        &[TcAttrs {
-            file: TcFile::from_path(&f),
-            masks: AttrMask {
-                has_mode: true,
-                ..AttrMask::default()
-            },
-            mode: 0o600,
-            ..TcAttrs::default()
-        }],
-        false,
-    )
+    c.setattrsv(&[VfAttrs {
+        file: VfFile::from_path(&f),
+        masks: AttrMask {
+            has_mode: true,
+            ..AttrMask::default()
+        },
+        mode: 0o600,
+        ..VfAttrs::default()
+    }])
     .expect("setattrsv");
     let st = c.stat(&f).expect("stat");
     assert_eq!(st.mode & 0o777, 0o600);
@@ -283,18 +290,15 @@ fn setattrsv_size_truncate() {
     let f = format!("{}/trunc.txt", dir);
     let content = b"abcdefghijklmnop".to_vec();
     let mut c = make_file(&f, &content);
-    c.setattrsv(
-        &[TcAttrs {
-            file: TcFile::from_path(&f),
-            masks: AttrMask {
-                has_size: true,
-                ..AttrMask::default()
-            },
-            size: 5,
-            ..TcAttrs::default()
-        }],
-        false,
-    )
+    c.setattrsv(&[VfAttrs {
+        file: VfFile::from_path(&f),
+        masks: AttrMask {
+            has_size: true,
+            ..AttrMask::default()
+        },
+        size: 5,
+        ..VfAttrs::default()
+    }])
     .expect("setattrsv");
     let st = c.stat(&f).expect("stat");
     assert_eq!(st.size, 5);
@@ -305,18 +309,15 @@ fn lsetattrsv() {
     let dir = setup_dir("lsetattrs");
     let f = format!("{}/l.txt", dir);
     let mut c = make_file(&f, b"data");
-    c.lsetattrsv(
-        &[TcAttrs {
-            file: TcFile::from_path(&f),
-            masks: AttrMask {
-                has_mode: true,
-                ..AttrMask::default()
-            },
-            mode: 0o640,
-            ..TcAttrs::default()
-        }],
-        false,
-    )
+    c.lsetattrsv(&[VfAttrs {
+        file: VfFile::from_path(&f),
+        masks: AttrMask {
+            has_mode: true,
+            ..AttrMask::default()
+        },
+        mode: 0o640,
+        ..VfAttrs::default()
+    }])
     .expect("lsetattrsv");
     assert_eq!(c.stat(&f).unwrap().mode & 0o777, 0o640);
 }
@@ -332,9 +333,9 @@ fn listdir() {
     c.ensure_dir(&format!("{}/sub", dir), 0o755).unwrap();
     for (i, name) in ["a.txt", "b.txt", "c.txt"].iter().enumerate() {
         let f = format!("{}/{}", dir, name);
-        let mut w = TcIoVec::from_path(&f, 0, 4, vec![b'a' + i as u8; 4]);
+        let mut w = VfIoVec::from_path(&f, 0, 4, vec![b'a' + i as u8; 4]);
         w.is_creation = true;
-        c.writev(std::slice::from_mut(&mut w), false).unwrap();
+        c.writev(std::slice::from_mut(&mut w)).unwrap();
     }
     let contents = c
         .listdir(&dir, AttrMask::default(), 0, false)
@@ -353,9 +354,9 @@ fn listdir_recursive() {
     let mut c = client();
     c.ensure_dir(&format!("{}/d1/d2", dir), 0o755).unwrap();
     for f in [format!("{}/top.txt", dir), format!("{}/d1/deep.txt", dir)] {
-        let mut w = TcIoVec::from_path(&f, 0, 2, b"ok".to_vec());
+        let mut w = VfIoVec::from_path(&f, 0, 2, b"ok".to_vec());
         w.is_creation = true;
-        c.writev(std::slice::from_mut(&mut w), false).unwrap();
+        c.writev(std::slice::from_mut(&mut w)).unwrap();
     }
     let contents = c
         .listdir(&dir, AttrMask::default(), 0, true)
@@ -382,8 +383,8 @@ fn renamev() {
     let f = format!("{}/old.txt", dir);
     let g = format!("{}/new.txt", dir);
     let mut c = make_file(&f, b"rename me");
-    let pairs = [(TcFile::from_path(&f), TcFile::from_path(&g))];
-    c.renamev(&pairs, false).expect("renamev");
+    let pairs = [(VfFile::from_path(&f), VfFile::from_path(&g))];
+    c.renamev(&pairs).expect("renamev");
     assert!(!c.exists(&f), "old name gone");
     assert!(c.exists(&g), "new name present");
     assert_eq!(c.stat(&g).unwrap().size, 9);
@@ -414,9 +415,9 @@ fn unlinkv() {
     ];
     let refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
     for f in &files {
-        let mut w = TcIoVec::from_path(f, 0, 1, b"z".to_vec());
+        let mut w = VfIoVec::from_path(f, 0, 1, b"z".to_vec());
         w.is_creation = true;
-        c.writev(std::slice::from_mut(&mut w), false).unwrap();
+        c.writev(std::slice::from_mut(&mut w)).unwrap();
     }
     c.unlinkv(&refs).expect("unlinkv");
     for f in &files {
@@ -429,10 +430,10 @@ fn removev() {
     let dir = setup_dir("removev");
     let mut c = client();
     let f = format!("{}/rv.txt", dir);
-    let mut w = TcIoVec::from_path(&f, 0, 1, b"r".to_vec());
+    let mut w = VfIoVec::from_path(&f, 0, 1, b"r".to_vec());
     w.is_creation = true;
-    c.writev(std::slice::from_mut(&mut w), false).unwrap();
-    c.removev(&[TcFile::from_path(&f)], false).expect("removev");
+    c.writev(std::slice::from_mut(&mut w)).unwrap();
+    c.removev(&[VfFile::from_path(&f)]).expect("removev");
     assert!(!c.exists(&f));
 }
 
@@ -445,18 +446,15 @@ fn mkdirv() {
     let dir = setup_dir("mkdirv");
     let d = format!("{}/nd", dir);
     let mut c = client();
-    c.mkdirv(
-        &[TcAttrs {
-            file: TcFile::from_path(&d),
-            masks: AttrMask {
-                has_mode: true,
-                ..AttrMask::default()
-            },
-            mode: 0o750,
-            ..TcAttrs::default()
-        }],
-        false,
-    )
+    c.mkdirv(&[VfAttrs {
+        file: VfFile::from_path(&d),
+        masks: AttrMask {
+            has_mode: true,
+            ..AttrMask::default()
+        },
+        mode: 0o750,
+        ..VfAttrs::default()
+    }])
     .expect("mkdirv");
     let st = c.stat(&d).expect("stat dir");
     assert_eq!(st.ftype, 2, "NF4DIR");
@@ -495,8 +493,8 @@ fn symlinkv_readlinkv() {
     let news: Vec<String> = (0..2).map(|i| format!("{}/ln{}", dir, i)).collect();
     let old_refs: Vec<&str> = olds.iter().map(|s| s.as_str()).collect();
     let new_refs: Vec<&str> = news.iter().map(|s| s.as_str()).collect();
-    c.symlinkv(&old_refs, &new_refs, false).expect("symlinkv");
-    let targets = c.readlinkv(&new_refs, false).expect("readlinkv");
+    c.symlinkv(&old_refs, &new_refs).expect("symlinkv");
+    let targets = c.readlinkv(&new_refs).expect("readlinkv");
     for (t, o) in targets.iter().zip(&olds) {
         assert_eq!(String::from_utf8_lossy(t), *o);
     }
@@ -514,7 +512,7 @@ fn hardlinkv() {
     let mut c = make_file(&src, b"linked data");
     let olds = [src.as_str()];
     let news = [dst.as_str()];
-    c.hardlinkv(&olds, &news, false).expect("hardlinkv");
+    c.hardlinkv(&olds, &news).expect("hardlinkv");
     assert!(c.exists(&dst));
     let s1 = c.stat(&src).unwrap();
     let s2 = c.stat(&dst).unwrap();
@@ -546,9 +544,9 @@ fn rm_recursive_api() {
         format!("{}/x/deep", dir),
         format!("{}/x/y/deep2", dir),
     ] {
-        let mut w = TcIoVec::from_path(&f, 0, 1, b"d".to_vec());
+        let mut w = VfIoVec::from_path(&f, 0, 1, b"d".to_vec());
         w.is_creation = true;
-        c.writev(std::slice::from_mut(&mut w), false).unwrap();
+        c.writev(std::slice::from_mut(&mut w)).unwrap();
     }
     assert!(c.exists(&format!("{}/x/deep", dir)));
     rm_recursive(&mut c, &dir).expect("rm_recursive");
@@ -561,9 +559,9 @@ fn rm_nonrecursive_keeps_subdirs() {
     let mut c = client();
     let file = format!("{}/keepdir/target", dir);
     c.ensure_dir(&format!("{}/keepdir", dir), 0o755).unwrap();
-    let mut w = TcIoVec::from_path(&file, 0, 1, b"k".to_vec());
+    let mut w = VfIoVec::from_path(&file, 0, 1, b"k".to_vec());
     w.is_creation = true;
-    c.writev(std::slice::from_mut(&mut w), false).unwrap();
+    c.writev(std::slice::from_mut(&mut w)).unwrap();
     // Non-recursive removal of the directory fails because it is not empty.
     let r = c.rm(&[dir.as_str()], false);
     assert!(
@@ -577,16 +575,16 @@ fn rm_nonrecursive_keeps_subdirs() {
 // Helpers used by the new-call tests
 // ---------------------------------------------------------------------------
 
-fn write_file(c: &mut TxnClient, path: &str, data: &[u8]) {
-    let mut w = TcIoVec::from_path(path, 0, data.len(), data.to_vec());
+fn write_file(c: &mut NfsVecFs, path: &str, data: &[u8]) {
+    let mut w = VfIoVec::from_path(path, 0, data.len(), data.to_vec());
     w.is_creation = true;
-    c.writev(std::slice::from_mut(&mut w), false).unwrap();
+    c.writev(std::slice::from_mut(&mut w)).unwrap();
 }
 
-fn read_all(c: &mut TxnClient, path: &str) -> Vec<u8> {
+fn read_all(c: &mut NfsVecFs, path: &str) -> Vec<u8> {
     let size = c.stat(path).expect("stat").size as usize;
-    let mut r = TcIoVec::from_path(path, 0, size, Vec::new());
-    c.readv(std::slice::from_mut(&mut r), false).expect("readv");
+    let mut r = VfIoVec::from_path(path, 0, size, Vec::new());
+    c.readv(std::slice::from_mut(&mut r)).expect("readv");
     assert_eq!(r.length, size, "read full file");
     r.data
 }
@@ -625,20 +623,20 @@ fn fseek_set_cur_end() {
         .expect("open");
 
     let payload = b"0123456789".to_vec();
-    let mut w = TcIoVec::from_fd(tf.fd, 0, payload.len(), payload.clone());
-    c.writev(std::slice::from_mut(&mut w), false).unwrap();
+    let mut w = VfIoVec::from_fd(tf.fd, 0, payload.len(), payload.clone());
+    c.writev(std::slice::from_mut(&mut w)).unwrap();
     assert_eq!(c.fseek(&mut tf.clone(), 0, SEEK_END).unwrap(), 10);
 
-    // SEEK_SET then read via TC_OFFSET_CUR.
+    // SEEK_SET then read via VF_OFFSET_CUR.
     assert_eq!(c.fseek(&mut tf.clone(), 4, SEEK_SET).unwrap(), 4);
-    let mut r = TcIoVec::from_fd(tf.fd, TC_OFFSET_CUR, 6, Vec::new());
-    c.readv(std::slice::from_mut(&mut r), false).unwrap();
+    let mut r = VfIoVec::from_fd(tf.fd, VF_OFFSET_CUR, 6, Vec::new());
+    c.readv(std::slice::from_mut(&mut r)).unwrap();
     assert_eq!(r.data, b"456789", "read at current offset after fseek");
 
     // SEEK_CUR advances from the tracked offset (4 + 6 = 10).
     assert_eq!(c.fseek(&mut tf.clone(), -4, SEEK_CUR).unwrap(), 6);
-    let mut r = TcIoVec::from_fd(tf.fd, TC_OFFSET_CUR, 4, Vec::new());
-    c.readv(std::slice::from_mut(&mut r), false).unwrap();
+    let mut r = VfIoVec::from_fd(tf.fd, VF_OFFSET_CUR, 4, Vec::new());
+    c.readv(std::slice::from_mut(&mut r)).unwrap();
     assert_eq!(r.data, b"6789");
 
     c.close(&tf).unwrap();
@@ -657,12 +655,12 @@ fn dupv_copies_extent() {
     write_file(&mut c, &src, b"abcdefghij");
 
     let pairs = [ExtentPair::new(&src, 4, &dst, 0, 4)];
-    c.dupv(&pairs, false).expect("dupv");
+    c.dupv(&pairs).expect("dupv");
     assert_eq!(read_all(&mut c, &dst), b"efgh");
 
-    // TC_EXTENT length u64::MAX copies to end-of-file.
+    // VF_EXTENT length u64::MAX copies to end-of-file.
     let whole = format!("{}/whole.bin", dir);
-    c.copyv(&[ExtentPair::new(&src, 2, &whole, 0, u64::MAX)], false)
+    c.copyv(&[ExtentPair::new(&src, 2, &whole, 0, u64::MAX)])
         .expect("copyv whole file");
     assert_eq!(read_all(&mut c, &whole), b"cdefghij");
 }
@@ -675,10 +673,8 @@ fn ldupv_and_lcopyv() {
     let d2 = format!("{}/d2.txt", dir);
     let mut c = client();
     write_file(&mut c, &src, b"0123456789");
-    c.ldupv(&[ExtentPair::new(&src, 0, &d1, 0, 5)], false)
-        .unwrap();
-    c.lcopyv(&[ExtentPair::new(&src, 5, &d2, 0, 5)], false)
-        .unwrap();
+    c.ldupv(&[ExtentPair::new(&src, 0, &d1, 0, 5)]).unwrap();
+    c.lcopyv(&[ExtentPair::new(&src, 5, &d2, 0, 5)]).unwrap();
     assert_eq!(read_all(&mut c, &d1), b"01234");
     assert_eq!(read_all(&mut c, &d2), b"56789");
 }
@@ -706,22 +702,22 @@ fn write_adb_blocknums_and_pattern() {
         adb_pattern_size: 3,
         adb_pattern_data: b"PAT".to_vec(),
     };
-    c.write_adb(std::slice::from_mut(&mut a), false)
+    c.write_adb(std::slice::from_mut(&mut a))
         .expect("write_adb");
     assert_eq!(a.adb_block_count, 3, "all blocks written");
 
     for (i, expected_adbn) in [100u64, 101, 102].iter().enumerate() {
         let base = i as u64 * 1024;
-        let mut bn = TcIoVec::from_path(&f, base, 8, Vec::new());
-        c.readv(std::slice::from_mut(&mut bn), false).unwrap();
+        let mut bn = VfIoVec::from_path(&f, base, 8, Vec::new());
+        c.readv(std::slice::from_mut(&mut bn)).unwrap();
         assert_eq!(
             u64::from_be_bytes(bn.data[0..8].try_into().unwrap()),
             *expected_adbn,
             "ADBN of block {}",
             i
         );
-        let mut pt = TcIoVec::from_path(&f, base + 8, 3, Vec::new());
-        c.readv(std::slice::from_mut(&mut pt), false).unwrap();
+        let mut pt = VfIoVec::from_path(&f, base + 8, 3, Vec::new());
+        c.readv(std::slice::from_mut(&mut pt)).unwrap();
         assert_eq!(pt.data, b"PAT", "pattern of block {}", i);
     }
 }
@@ -740,7 +736,7 @@ fn listdirv_callback() {
     }
 
     let mut seen: Vec<String> = Vec::new();
-    let mut cb = |e: &TcAttrs, d: &str| {
+    let mut cb = |e: &VfAttrs, d: &str| {
         assert_eq!(d, dir);
         seen.push(e.file.path.clone().unwrap().to_string_lossy().into_owned());
         true
@@ -752,7 +748,7 @@ fn listdirv_callback() {
 
     // A callback returning false stops early.
     let mut count = 0usize;
-    let mut stop = |_: &TcAttrs, _: &str| {
+    let mut stop = |_: &VfAttrs, _: &str| {
         count += 1;
         false
     };
@@ -810,20 +806,20 @@ fn batched_readv_writev_many_files() {
         tfs.push(c.open(&f, libc::O_CREAT | libc::O_RDWR, 0o644).unwrap());
     }
 
-    let mut writes: Vec<TcIoVec> = tfs
+    let mut writes: Vec<VfIoVec> = tfs
         .iter()
-        .map(|tf| TcIoVec::from_fd(tf.fd, 0, 3, vec![b'a' + (tf.fd - 1) as u8; 3]))
+        .map(|tf| VfIoVec::from_fd(tf.fd, 0, 3, vec![b'a' + (tf.fd - 1) as u8; 3]))
         .collect();
-    c.writev(&mut writes, false).expect("batched writev");
+    c.writev(&mut writes).expect("batched writev");
     for (i, w) in writes.iter().enumerate() {
         assert_eq!(w.length, 3, "write {} wrote 3 bytes", i);
     }
 
-    let mut reads: Vec<TcIoVec> = tfs
+    let mut reads: Vec<VfIoVec> = tfs
         .iter()
-        .map(|tf| TcIoVec::from_fd(tf.fd, 0, 3, Vec::new()))
+        .map(|tf| VfIoVec::from_fd(tf.fd, 0, 3, Vec::new()))
         .collect();
-    c.readv(&mut reads, false).expect("batched readv");
+    c.readv(&mut reads).expect("batched readv");
     for (i, r) in reads.iter().enumerate() {
         let expect = vec![b'a' + i as u8; 3];
         assert_eq!(r.data, expect, "read {} content", i);
@@ -873,41 +869,38 @@ fn batch_exceeds_compound_op_limit() {
     }
 
     // Batched writev across all 10 open files.
-    let mut writes: Vec<TcIoVec> = files
+    let mut writes: Vec<VfIoVec> = files
         .iter()
-        .map(|tf| TcIoVec::from_fd(tf.fd, 0, 2, vec![b'a' + (tf.fd - 1) as u8; 2]))
+        .map(|tf| VfIoVec::from_fd(tf.fd, 0, 2, vec![b'a' + (tf.fd - 1) as u8; 2]))
         .collect();
-    c.writev(&mut writes, false)
-        .expect("batched writev (10 files)");
+    c.writev(&mut writes).expect("batched writev (10 files)");
 
     // Batched getattrsv / setattrsv on all 10 paths.
-    let mut attrs: Vec<TcAttrs> = paths
+    let mut attrs: Vec<VfAttrs> = paths
         .iter()
-        .map(|p| TcAttrs {
-            file: TcFile::from_path(p),
+        .map(|p| VfAttrs {
+            file: VfFile::from_path(p),
             masks: AttrMask {
                 has_mode: true,
                 has_size: true,
                 ..AttrMask::default()
             },
-            ..TcAttrs::default()
+            ..VfAttrs::default()
         })
         .collect();
-    c.getattrsv(&mut attrs, false)
-        .expect("getattrsv (10 files)");
+    c.getattrsv(&mut attrs).expect("getattrsv (10 files)");
     for a in &attrs {
         assert_eq!(a.size, 2);
         assert_eq!(a.mode & 0o777, 0o600);
     }
-    c.setattrsv(&attrs, false).expect("setattrsv (10 files)");
+    c.setattrsv(&attrs).expect("setattrsv (10 files)");
 
     // Batched readv back.
-    let mut reads: Vec<TcIoVec> = files
+    let mut reads: Vec<VfIoVec> = files
         .iter()
-        .map(|tf| TcIoVec::from_fd(tf.fd, 0, 2, Vec::new()))
+        .map(|tf| VfIoVec::from_fd(tf.fd, 0, 2, Vec::new()))
         .collect();
-    c.readv(&mut reads, false)
-        .expect("batched readv (10 files)");
+    c.readv(&mut reads).expect("batched readv (10 files)");
     for (i, r) in reads.iter().enumerate() {
         assert_eq!(r.data, vec![b'a' + i as u8; 2], "read {} content", i);
     }
