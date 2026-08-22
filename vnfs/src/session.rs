@@ -99,8 +99,8 @@ impl Session {
             ca_maxrequestsize: 4 * 1024 * 1024,
             ca_maxresponsesize: 4 * 1024 * 1024,
             ca_maxresponsesize_cached: 4 * 1024 * 1024,
-            ca_maxoperations: 16,
-            ca_maxrequests: 16,
+            ca_maxoperations: 256,
+            ca_maxrequests: 256,
             ca_rdma_ird: channel_attrs4__bindgen_ty_1 {
                 ca_rdma_ird_len: 0,
                 ca_rdma_ird_val: std::ptr::null_mut(),

@@ -462,6 +462,7 @@ impl Compound {
             Some(wrap_compound4res),
             &mut res as *mut _ as *mut c_void,
         )?;
+        compound_stats_record(&self.args);
         Ok(CompoundRes { res })
     }
 
@@ -628,4 +629,62 @@ impl CompoundRes {
     pub fn getattr_bytes(&self, i: usize) -> Vec<u8> {
         self.getattr(i).to_vec()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Compound statistics (diagnostics)
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Counters for the compounds sent: total count, total operations (including
+/// the implicit SEQUENCE), and total encoded request bytes.
+pub static COMPOUND_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static COMPOUND_OPS: AtomicU64 = AtomicU64::new(0);
+pub static COMPOUND_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static COMPOUND_MAX_OPS: AtomicU64 = AtomicU64::new(0);
+
+fn compound_stats_record(args: &COMPOUND4args) {
+    let ops = args.argarray.argarray_len as u64;
+    COMPOUND_COUNT.fetch_add(1, Ordering::Relaxed);
+    COMPOUND_OPS.fetch_add(ops, Ordering::Relaxed);
+    COMPOUND_MAX_OPS.fetch_max(ops, Ordering::Relaxed);
+    if std::env::var("VNFS_DUMP").as_deref() == Ok("1") && ops > 100 {
+        let mut buf = String::new();
+        let n = args.argarray.argarray_val;
+        for i in 0..args.argarray.argarray_len as usize {
+            use std::fmt::Write;
+            let op = unsafe { (*n.add(i)).argop };
+            if i > 0 {
+                buf.push(' ');
+            }
+            let _ = write!(buf, "{}", op);
+        }
+        eprintln!("[dump] compound ops={}: {}", ops, buf);
+    }
+    // Measure the encoded request size with a scratch encode.
+    let mut xdr: XDR = unsafe { std::mem::zeroed() };
+    let mut buf = vec![0u8; 4 * 1024 * 1024];
+    unsafe {
+        xdrmem_ncreate(
+            &mut xdr,
+            buf.as_mut_ptr() as *mut c_char,
+            buf.len() as u32,
+            xdr_op_XDR_ENCODE,
+        );
+        if xdr_wrap_COMPOUND4args(&mut xdr, args as *const _ as *mut _) {
+            let len = xdr.x_data.offset_from(xdr.x_v.vio_base) as u64;
+            COMPOUND_BYTES.fetch_add(len, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Aggregate compound statistics, resetting the counters.
+pub fn compound_stats() -> (u64, u64, u64, u64) {
+    (
+        COMPOUND_COUNT.swap(0, Ordering::Relaxed),
+        COMPOUND_OPS.swap(0, Ordering::Relaxed),
+        COMPOUND_BYTES.swap(0, Ordering::Relaxed),
+        COMPOUND_MAX_OPS.swap(0, Ordering::Relaxed),
+    )
 }

@@ -342,7 +342,17 @@ impl AttrMask {
     }
 }
 
-/// File attributes, mirroring `struct tc_attrs`.
+/// A directory and its entries, as returned by [`VecFs::walk`]. `path` is the
+/// directory's root-relative path; `entries` are its immediate children.
+#[derive(Debug, Clone)]
+pub struct WalkEntry {
+    pub path: String,
+    pub entries: Vec<VfAttrs>,
+}
+
+/// File attributes, mirroring `struct tc_attrs`. `mode` is the full `st_mode`
+/// (permission bits plus `S_IFMT` file-type bits); the `mtime/atime/ctime`
+/// fields hold seconds and nanoseconds.
 #[derive(Debug, Clone, Default)]
 pub struct VfAttrs {
     pub file: VfFile,
@@ -352,6 +362,16 @@ pub struct VfAttrs {
     pub size: u64,
     pub nlink: u32,
     pub fileid: u64,
+    pub uid: u32,
+    pub gid: u32,
+    pub rdev: u64,
+    pub blocks: u64,
+    pub mtime_sec: i64,
+    pub mtime_nsec: u32,
+    pub atime_sec: i64,
+    pub atime_nsec: u32,
+    pub ctime_sec: i64,
+    pub ctime_nsec: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +434,52 @@ pub trait VecFs {
         max_count: usize,
         recursive: bool,
     ) -> VfResult<Vec<VfAttrs>>;
+
+    /// Recursively enumerate `root`, returning each directory with its entries.
+    ///
+    /// `sort` orders a directory's entries the way the caller's presentation
+    /// layer would (so subdirectories are visited in the same order the caller
+    /// lists them). The default implementation recurses via
+    /// [`listdir`](Self::listdir); a backend may override it to batch many
+    /// directories into few large compounds.
+    fn walk(
+        &mut self,
+        root: &str,
+        masks: AttrMask,
+        sort: &dyn Fn(&str, &mut Vec<VfAttrs>),
+    ) -> VfResult<Vec<WalkEntry>> {
+        fn rec<F: VecFs + ?Sized>(
+            fs: &mut F,
+            dir: &str,
+            masks: AttrMask,
+            sort: &dyn Fn(&str, &mut Vec<VfAttrs>),
+            out: &mut Vec<WalkEntry>,
+        ) -> VfResult<()> {
+            let mut entries = fs.listdir(dir, masks, 0, false)?;
+            sort(dir, &mut entries);
+            let subdirs: Vec<String> = entries
+                .iter()
+                .filter(|e| e.ftype == NF4DIR)
+                .filter_map(|e| {
+                    e.file
+                        .path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned())
+                })
+                .collect();
+            out.push(WalkEntry {
+                path: dir.to_string(),
+                entries,
+            });
+            for s in subdirs {
+                rec(fs, &s, masks, sort, out)?;
+            }
+            Ok(())
+        }
+        let mut out = Vec::new();
+        rec(self, root, masks, sort, &mut out)?;
+        Ok(out)
+    }
 
     /// Rename a list of file pairs, `tc_renamev()`.
     fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes;

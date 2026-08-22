@@ -4,6 +4,9 @@
 //! to an NFSv4.1 server, coalesces vector operations into as few compounds as
 //! the server supports, and destroys its session/clientid on drop.
 
+// bindgen emits lowercase constants (e.g. nfs_ftype4_NF4DIR) matched here.
+#![allow(non_upper_case_globals)]
+
 use std::path::PathBuf;
 
 use nfsv41_sys::*;
@@ -456,19 +459,7 @@ impl NfsVecFs {
                 };
                 // Attributes come back inline from READDIR for ATTR_IDS.
                 let vals = parse_attrs(&e.attrs).unwrap_or_default();
-                a.ftype = vals.ftype.unwrap_or(0);
-                if masks.has_mode {
-                    a.mode = vals.mode.unwrap_or(0);
-                }
-                if masks.has_size {
-                    a.size = vals.size.unwrap_or(0);
-                }
-                if masks.has_nlink {
-                    a.nlink = vals.nlink.unwrap_or(0);
-                }
-                if masks.has_fileid {
-                    a.fileid = vals.fileid.unwrap_or(0);
-                }
+                apply_attrs(&mut a, &vals);
                 let is_dir = a.ftype == nfs_ftype4_NF4DIR;
                 out.push(a);
                 if recursive && is_dir {
@@ -493,6 +484,49 @@ impl NfsVecFs {
             }
         }
         self.unlink(path)
+    }
+
+    /// Read every page of directory `fh`, returning its entries as `VfAttrs`.
+    fn readdir_all(
+        &mut self,
+        fh: &FileHandle,
+        dir_path: &str,
+        masks: &AttrMask,
+    ) -> VfResult<Vec<VfAttrs>> {
+        let mut all: Vec<crate::client::DirEntry> = Vec::new();
+        let mut cookie = 0u64;
+        loop {
+            let page = self
+                .nfs
+                .readdir(fh, cookie)
+                .map_err(|e| VfError::from_rpc(0, e))?;
+            cookie = page.last().map(|d| d.cookie).unwrap_or(0);
+            all.extend(page);
+            if cookie == 0 {
+                break;
+            }
+        }
+        Ok(all
+            .iter()
+            .map(|de| Self::dir_entry_to_attrs(dir_path, masks, de))
+            .collect())
+    }
+
+    /// Convert a raw READDIR entry into a `VfAttrs` with a full path.
+    fn dir_entry_to_attrs(
+        parent_path: &str,
+        masks: &AttrMask,
+        de: &crate::client::DirEntry,
+    ) -> VfAttrs {
+        let path = join_path(parent_path.trim_matches('/'), &de.name);
+        let mut a = VfAttrs {
+            file: VfFile::from_path(&format!("/{}", path)),
+            masks: *masks,
+            ..VfAttrs::default()
+        };
+        let vals = parse_attrs(&de.attrs).unwrap_or_default();
+        apply_attrs(&mut a, &vals);
+        a
     }
 
     fn copy_extent(&mut self, p: &ExtentPair) -> VfResult<()> {
@@ -731,7 +765,11 @@ impl VecFs for NfsVecFs {
                 e.index = i;
                 e
             })?;
-            let mode = if a.masks.has_mode { Some(a.mode) } else { None };
+            let mode = if a.masks.has_mode {
+                Some(a.mode & 0o7777)
+            } else {
+                None
+            };
             let size = if a.masks.has_size { Some(a.size) } else { None };
             if mode.is_none() && size.is_none() {
                 return Err(VfError {
@@ -755,6 +793,127 @@ impl VecFs for NfsVecFs {
     ) -> VfResult<Vec<VfAttrs>> {
         let mut out = Vec::new();
         self.listdir_rec(dir, masks, max_count, recursive, &mut out)?;
+        Ok(out)
+    }
+
+    /// Recursively enumerate `root` using level-order batching: every
+    /// directory at a level is resolved and listed together in compounds of up
+    /// to `MAX_COMPOUND_OPS` operations (`[PUTFH parent, LOOKUP child, GETFH,
+    /// READDIR]` per directory), then large directories' remaining READDIR
+    /// pages are drained in batched continuation compounds.
+    /// Recursively enumerate `root`, returning directories in ls -R
+    /// pre-order (a worklist: each directory is followed by its sorted
+    /// subdirectories, then their subtrees). Listing is batched per level in
+    /// compounds of up to `MAX_COMPOUND_OPS` operations
+    /// (`[PUTFH parent, LOOKUP child, GETFH, READDIR]` per directory), with
+    /// large directories' remaining READDIR pages drained in batched
+    /// continuation compounds. `sort` orders each directory's entries (and
+    /// hence the subdirectory visit order) exactly as the caller would.
+    fn walk(
+        &mut self,
+        root: &str,
+        masks: AttrMask,
+        sort: &dyn Fn(&str, &mut Vec<VfAttrs>),
+    ) -> VfResult<Vec<WalkEntry>> {
+        let root_fh = self.resolve(root)?;
+        let mut collected: std::collections::HashMap<String, Vec<VfAttrs>> =
+            std::collections::HashMap::new();
+        let root_attrs = self.readdir_all(&root_fh, root, &masks)?;
+        let mut root_sorted = root_attrs.clone();
+        sort(root, &mut root_sorted);
+        collected.insert(root.to_string(), root_attrs);
+
+        // Frontier of (parent handle, child directory path) to list next.
+        let mut frontier: Vec<(FileHandle, String)> = root_sorted
+            .iter()
+            .filter(|e| e.ftype == nfs_ftype4_NF4DIR)
+            .map(|e| {
+                (
+                    root_fh.clone(),
+                    e.file.path.as_ref().unwrap().to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+
+        while !frontier.is_empty() {
+            // Resolve + list every frontier directory in batched compounds.
+            let ops: Vec<(FileHandle, String)> = frontier
+                .iter()
+                .map(|(fh, p)| (fh.clone(), p.rsplit('/').next().unwrap().to_string()))
+                .collect();
+            let results = self
+                .nfs
+                .readdir_children(&ops)
+                .map_err(|e| VfError::from_rpc(0, e))?;
+
+            // Drain remaining READDIR pages, batched across all directories.
+            let mut accumulated: Vec<Vec<crate::client::DirEntry>> =
+                results.iter().map(|r| r.entries.clone()).collect();
+            let mut pending: Vec<(usize, FileHandle, u64)> = results
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.cookie != 0)
+                .map(|(i, r)| (i, r.fh.clone(), r.cookie))
+                .collect();
+            while !pending.is_empty() {
+                let ops: Vec<(FileHandle, u64)> =
+                    pending.iter().map(|(_, fh, c)| (fh.clone(), *c)).collect();
+                let cont = self
+                    .nfs
+                    .readdir_pages(&ops)
+                    .map_err(|e| VfError::from_rpc(0, e))?;
+                let mut next_pending = Vec::new();
+                for ((idx, _, _), (entries, cookie)) in pending.iter().zip(cont) {
+                    accumulated[*idx].extend(entries);
+                    if cookie != 0 {
+                        next_pending.push((*idx, results[*idx].fh.clone(), cookie));
+                    }
+                }
+                pending = next_pending;
+            }
+
+            // Record each directory's entries and seed the next level.
+            let mut next_frontier: Vec<(FileHandle, String)> = Vec::new();
+            for idx in 0..results.len() {
+                let result = &results[idx];
+                let path = frontier[idx].1.clone();
+                let mut attrs = Vec::with_capacity(accumulated[idx].len());
+                for de in &accumulated[idx] {
+                    attrs.push(Self::dir_entry_to_attrs(&path, &masks, de));
+                }
+                let mut sorted = attrs.clone();
+                sort(&path, &mut sorted);
+                for a in &sorted {
+                    if a.ftype == nfs_ftype4_NF4DIR {
+                        next_frontier.push((
+                            result.fh.clone(),
+                            a.file.path.as_ref().unwrap().to_string_lossy().into_owned(),
+                        ));
+                    }
+                }
+                collected.insert(path, attrs);
+            }
+            frontier = next_frontier;
+        }
+
+        // Emit in ls -R pre-order: a directory, then each of its subdirectories
+        // (in sorted order) and their subtrees.
+        let mut out = Vec::with_capacity(collected.len());
+        let mut stack: Vec<String> = vec![root.to_string()];
+        while let Some(dir) = stack.pop() {
+            let entries = collected.remove(&dir).unwrap_or_default();
+            let mut sorted = entries.clone();
+            sort(&dir, &mut sorted);
+            let subs: Vec<String> = sorted
+                .iter()
+                .filter(|e| e.ftype == nfs_ftype4_NF4DIR)
+                .map(|e| e.file.path.as_ref().unwrap().to_string_lossy().into_owned())
+                .collect();
+            for s in subs.iter().rev() {
+                stack.push(s.clone());
+            }
+            out.push(WalkEntry { path: dir, entries });
+        }
         Ok(out)
     }
 
@@ -854,7 +1013,7 @@ impl VecFs for NfsVecFs {
                     .map_err(|e| VfError::failure(i, e.err_no))?;
                 setattrs.push(crate::client::SetattrOp {
                     fh,
-                    mode: Some(a.mode),
+                    mode: Some(a.mode & 0o7777),
                     size: None,
                 });
             }
@@ -1067,26 +1226,46 @@ struct AttrValues {
     size: Option<u64>,
     nlink: Option<u32>,
     fileid: Option<u64>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    rdev: Option<u64>,
+    blocks: Option<u64>,
+    mtime: Option<(i64, u32)>,
+    atime: Option<(i64, u32)>,
+    ctime: Option<(i64, u32)>,
 }
 
-/// Supported FATTR4 attribute ids, in the order they are encoded.
-const ATTR_IDS: [u32; 5] = [
+/// The full set of supported FATTR4 ids, in wire (increasing) order. Must
+/// match `crate::client::READDIR_ATTRS`.
+const FULL_ATTR_IDS: [u32; 11] = [
     FATTR4_TYPE,
     FATTR4_SIZE,
     FATTR4_FILEID,
     FATTR4_MODE,
     FATTR4_NUMLINKS,
+    FATTR4_OWNER,
+    FATTR4_OWNER_GROUP,
+    FATTR4_RAWDEV,
+    FATTR4_SPACE_USED,
+    FATTR4_TIME_ACCESS,
+    FATTR4_TIME_MODIFY,
 ];
 
 fn request_mask_to_attr_list(masks: &AttrMask) -> Vec<u32> {
     let mut ids = Vec::new();
-    for id in ATTR_IDS {
+    for id in FULL_ATTR_IDS {
         let wanted = match id {
             FATTR4_TYPE => true, // always fetch type (cheap, aids listdir)
             FATTR4_SIZE => masks.has_size,
             FATTR4_FILEID => masks.has_fileid,
             FATTR4_MODE => masks.has_mode,
             FATTR4_NUMLINKS => masks.has_nlink,
+            FATTR4_OWNER => masks.has_uid,
+            FATTR4_OWNER_GROUP => masks.has_gid,
+            FATTR4_RAWDEV => masks.has_rdev,
+            FATTR4_SPACE_USED => masks.has_blocks,
+            FATTR4_TIME_ACCESS => masks.has_atime,
+            FATTR4_TIME_MODIFY => masks.has_mtime,
             _ => false,
         };
         if wanted {
@@ -1096,37 +1275,9 @@ fn request_mask_to_attr_list(masks: &AttrMask) -> Vec<u32> {
     ids
 }
 
-/// Parse a GETATTR / READDIR-entry attribute list encoded for `ATTR_IDS`.
+/// Parse a READDIR-entry attribute list encoded for `READDIR_ATTRS`.
 fn parse_attrs(list: &[u8]) -> VfResult<AttrValues> {
-    let mut off = 0usize;
-    let mut v = AttrValues::default();
-    let rd32 = |off: &mut usize| -> VfResult<u32> {
-        if *off + 4 > list.len() {
-            return Err(VfError::failure(0, VF_ERR_RPC));
-        }
-        let r = u32::from_be_bytes([list[*off], list[*off + 1], list[*off + 2], list[*off + 3]]);
-        *off += 4;
-        Ok(r)
-    };
-    let rd64 = |off: &mut usize| -> VfResult<u64> {
-        if *off + 8 > list.len() {
-            return Err(VfError::failure(0, VF_ERR_RPC));
-        }
-        let r = u64::from_be_bytes(list[*off..*off + 8].try_into().unwrap());
-        *off += 8;
-        Ok(r)
-    };
-    for id in ATTR_IDS {
-        match id {
-            FATTR4_TYPE => v.ftype = Some(rd32(&mut off)?),
-            FATTR4_SIZE => v.size = Some(rd64(&mut off)?),
-            FATTR4_FILEID => v.fileid = Some(rd64(&mut off)?),
-            FATTR4_MODE => v.mode = Some(rd32(&mut off)?),
-            FATTR4_NUMLINKS => v.nlink = Some(rd32(&mut off)?),
-            _ => unreachable!(),
-        }
-    }
-    Ok(v)
+    parse_attr_list(&FULL_ATTR_IDS, list)
 }
 
 /// Parse a raw GETATTR attribute list encoded for the given ids (in id order).
@@ -1150,18 +1301,53 @@ fn parse_attr_list(ids: &[u32], list: &[u8]) -> VfResult<AttrValues> {
             FATTR4_NUMLINKS => {
                 v.nlink = Some(read_u32(list, &mut off)?);
             }
+            FATTR4_OWNER => {
+                v.uid = parse_uid(&read_str(list, &mut off)?);
+            }
+            FATTR4_OWNER_GROUP => {
+                v.gid = parse_gid(&read_str(list, &mut off)?);
+            }
+            FATTR4_RAWDEV => {
+                let major = read_u32(list, &mut off)?;
+                let minor = read_u32(list, &mut off)?;
+                v.rdev = Some(libc::makedev(major, minor));
+            }
+            FATTR4_SPACE_USED => {
+                v.blocks = Some(read_u64(list, &mut off)? / 512);
+            }
+            FATTR4_TIME_ACCESS => {
+                v.atime = Some(read_nfstime(list, &mut off)?);
+            }
+            FATTR4_TIME_MODIFY => {
+                v.mtime = Some(read_nfstime(list, &mut off)?);
+            }
             _ => unreachable!(),
         }
     }
     Ok(v)
 }
 
-/// Fill `a` from parsed values where the mask requests the attribute.
+/// `S_IFMT` type bits for an NFSv4 file type code.
+fn s_ifmt(ftype: u32) -> u32 {
+    match ftype {
+        nfs_ftype4_NF4REG => 0o100000,  // S_IFREG
+        nfs_ftype4_NF4DIR => 0o040000,  // S_IFDIR
+        nfs_ftype4_NF4LNK => 0o120000,  // S_IFLNK
+        nfs_ftype4_NF4BLK => 0o060000,  // S_IFBLK
+        nfs_ftype4_NF4CHR => 0o020000,  // S_IFCHR
+        nfs_ftype4_NF4FIFO => 0o010000, // S_IFIFO
+        nfs_ftype4_NF4SOCK => 0o140000, // S_IFSOCK
+        _ => 0,
+    }
+}
+
+/// Fill `a` from parsed values where the mask requests the attribute. `mode`
+/// is the permission bits plus the `S_IFMT` bits derived from `ftype`.
 fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
     a.ftype = v.ftype.unwrap_or(0);
     if a.masks.has_mode {
         if let Some(mode) = v.mode {
-            a.mode = mode;
+            a.mode = mode | s_ifmt(a.ftype);
         }
     }
     if a.masks.has_size {
@@ -1179,6 +1365,98 @@ fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
             a.fileid = fileid;
         }
     }
+    if a.masks.has_uid {
+        if let Some(uid) = v.uid {
+            a.uid = uid;
+        }
+    }
+    if a.masks.has_gid {
+        if let Some(gid) = v.gid {
+            a.gid = gid;
+        }
+    }
+    if a.masks.has_rdev {
+        if let Some(rdev) = v.rdev {
+            a.rdev = rdev;
+        }
+    }
+    if a.masks.has_blocks {
+        if let Some(blocks) = v.blocks {
+            a.blocks = blocks;
+        }
+    }
+    if a.masks.has_mtime {
+        if let Some((s, n)) = v.mtime {
+            a.mtime_sec = s;
+            a.mtime_nsec = n;
+        }
+    }
+    if a.masks.has_atime {
+        if let Some((s, n)) = v.atime {
+            a.atime_sec = s;
+            a.atime_nsec = n;
+        }
+    }
+    if a.masks.has_ctime {
+        if let Some((s, n)) = v.ctime {
+            a.ctime_sec = s;
+            a.ctime_nsec = n;
+        }
+    }
+}
+
+/// Resolve an NFS owner/group string ("1000" or "name@domain") to a numeric id.
+fn name_to_id(s: &[u8], is_group: bool) -> Option<u32> {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static CACHE: RefCell<HashMap<(String, bool), Option<u32>>> = RefCell::new(HashMap::new());
+    }
+    let key = (String::from_utf8_lossy(s).into_owned(), is_group);
+    CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if let Some(v) = cache.get(&key) {
+            return *v;
+        }
+        let v = name_to_id_uncached(&key.0, is_group);
+        cache.insert(key, v);
+        v
+    })
+}
+
+fn name_to_id_uncached(t: &str, is_group: bool) -> Option<u32> {
+    let t = t.trim();
+    if let Ok(v) = t.parse::<u32>() {
+        return Some(v);
+    }
+    // Strip an "@domain" suffix and reverse-look-up the name.
+    let base = t.split('@').next().unwrap_or(t);
+    let cname = std::ffi::CString::new(base).ok()?;
+    unsafe {
+        if is_group {
+            let gr = libc::getgrnam(cname.as_ptr());
+            if gr.is_null() {
+                None
+            } else {
+                Some((*gr).gr_gid)
+            }
+        } else {
+            let pw = libc::getpwnam(cname.as_ptr());
+            if pw.is_null() {
+                None
+            } else {
+                Some((*pw).pw_uid)
+            }
+        }
+    }
+}
+
+fn parse_uid(s: &[u8]) -> Option<u32> {
+    name_to_id(s, false)
+}
+
+fn parse_gid(s: &[u8]) -> Option<u32> {
+    name_to_id(s, true)
 }
 
 fn read_u32(buf: &[u8], off: &mut usize) -> VfResult<u32> {
@@ -1197,4 +1475,26 @@ fn read_u64(buf: &[u8], off: &mut usize) -> VfResult<u64> {
     let v = u64::from_be_bytes(buf[*off..*off + 8].try_into().unwrap());
     *off += 8;
     Ok(v)
+}
+
+/// Read an XDR `nfstime4`: `int64 seconds; uint32 nseconds` (12 bytes).
+fn read_nfstime(buf: &[u8], off: &mut usize) -> VfResult<(i64, u32)> {
+    if *off + 12 > buf.len() {
+        return Err(VfError::failure(0, VF_ERR_RPC));
+    }
+    let secs = i64::from_be_bytes(buf[*off..*off + 8].try_into().unwrap());
+    let nsec = u32::from_be_bytes(buf[*off + 8..*off + 12].try_into().unwrap());
+    *off += 12;
+    Ok((secs, nsec))
+}
+
+/// Read an XDR `utf8string`: length + padded bytes.
+fn read_str(buf: &[u8], off: &mut usize) -> VfResult<Vec<u8>> {
+    let len = read_u32(buf, off)? as usize;
+    if *off + len > buf.len() {
+        return Err(VfError::failure(0, VF_ERR_RPC));
+    }
+    let s = buf[*off..*off + len].to_vec();
+    *off += (len + 3) & !3;
+    Ok(s)
 }

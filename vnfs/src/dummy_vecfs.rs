@@ -130,7 +130,7 @@ impl DummyVecFs {
             NF4REG
         };
         if a.masks.has_mode {
-            a.mode = md.mode() & 0o7777;
+            a.mode = md.mode();
         }
         if a.masks.has_size {
             a.size = md.len();
@@ -140,6 +140,30 @@ impl DummyVecFs {
         }
         if a.masks.has_fileid {
             a.fileid = md.ino();
+        }
+        if a.masks.has_uid {
+            a.uid = md.uid();
+        }
+        if a.masks.has_gid {
+            a.gid = md.gid();
+        }
+        if a.masks.has_rdev {
+            a.rdev = md.rdev();
+        }
+        if a.masks.has_blocks {
+            a.blocks = md.blocks();
+        }
+        if a.masks.has_mtime {
+            a.mtime_sec = md.mtime();
+            a.mtime_nsec = md.mtime_nsec() as u32;
+        }
+        if a.masks.has_atime {
+            a.atime_sec = md.atime();
+            a.atime_nsec = md.atime_nsec() as u32;
+        }
+        if a.masks.has_ctime {
+            a.ctime_sec = md.ctime();
+            a.ctime_nsec = md.ctime_nsec() as u32;
         }
     }
 
