@@ -438,11 +438,12 @@ impl NfsVecFs {
             return Ok(());
         }
         let dirfh = self.resolve(dir)?;
+        let ids = request_mask_to_attr_list(&masks);
         let mut cookie = 0u64;
         loop {
             let entries = self
                 .nfs
-                .readdir(&dirfh, cookie)
+                .readdir(&dirfh, cookie, &ids)
                 .map_err(|e| VfError::from_rpc(0, e))?;
             if entries.is_empty() {
                 break;
@@ -457,8 +458,8 @@ impl NfsVecFs {
                     masks,
                     ..VfAttrs::default()
                 };
-                // Attributes come back inline from READDIR for ATTR_IDS.
-                let vals = parse_attrs(&e.attrs).unwrap_or_default();
+                // Attributes come back inline from READDIR for the requested ids.
+                let vals = parse_attr_list(&ids, &e.attrs).unwrap_or_default();
                 apply_attrs(&mut a, &vals);
                 let is_dir = a.ftype == nfs_ftype4_NF4DIR;
                 out.push(a);
@@ -493,12 +494,13 @@ impl NfsVecFs {
         dir_path: &str,
         masks: &AttrMask,
     ) -> VfResult<Vec<VfAttrs>> {
+        let ids = request_mask_to_attr_list(masks);
         let mut all: Vec<crate::client::DirEntry> = Vec::new();
         let mut cookie = 0u64;
         loop {
             let page = self
                 .nfs
-                .readdir(fh, cookie)
+                .readdir(fh, cookie, &ids)
                 .map_err(|e| VfError::from_rpc(0, e))?;
             cookie = page.last().map(|d| d.cookie).unwrap_or(0);
             all.extend(page);
@@ -508,14 +510,17 @@ impl NfsVecFs {
         }
         Ok(all
             .iter()
-            .map(|de| Self::dir_entry_to_attrs(dir_path, masks, de))
+            .map(|de| Self::dir_entry_to_attrs(dir_path, masks, &ids, de))
             .collect())
     }
 
-    /// Convert a raw READDIR entry into a `VfAttrs` with a full path.
+    /// Convert a raw READDIR entry into a `VfAttrs` with a full path. `ids`
+    /// must be the attribute list that was requested for the READDIR (in the
+    /// same order), so the reply values can be decoded positionally.
     fn dir_entry_to_attrs(
         parent_path: &str,
         masks: &AttrMask,
+        ids: &[u32],
         de: &crate::client::DirEntry,
     ) -> VfAttrs {
         let path = join_path(parent_path.trim_matches('/'), &de.name);
@@ -524,7 +529,7 @@ impl NfsVecFs {
             masks: *masks,
             ..VfAttrs::default()
         };
-        let vals = parse_attrs(&de.attrs).unwrap_or_default();
+        let vals = parse_attr_list(ids, &de.attrs).unwrap_or_default();
         apply_attrs(&mut a, &vals);
         a
     }
@@ -816,6 +821,7 @@ impl VecFs for NfsVecFs {
         sort: &dyn Fn(&str, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<WalkEntry>> {
         let root_fh = self.resolve(root)?;
+        let ids = request_mask_to_attr_list(&masks);
         let mut collected: std::collections::HashMap<String, Vec<VfAttrs>> =
             std::collections::HashMap::new();
         let root_attrs = self.readdir_all(&root_fh, root, &masks)?;
@@ -843,7 +849,7 @@ impl VecFs for NfsVecFs {
                 .collect();
             let results = self
                 .nfs
-                .readdir_children(&ops)
+                .readdir_children(&ops, &ids)
                 .map_err(|e| VfError::from_rpc(0, e))?;
 
             // Drain remaining READDIR pages, batched across all directories.
@@ -860,7 +866,7 @@ impl VecFs for NfsVecFs {
                     pending.iter().map(|(_, fh, c)| (fh.clone(), *c)).collect();
                 let cont = self
                     .nfs
-                    .readdir_pages(&ops)
+                    .readdir_pages(&ops, &ids)
                     .map_err(|e| VfError::from_rpc(0, e))?;
                 let mut next_pending = Vec::new();
                 for ((idx, _, _), (entries, cookie)) in pending.iter().zip(cont) {
@@ -879,7 +885,7 @@ impl VecFs for NfsVecFs {
                 let path = frontier[idx].1.clone();
                 let mut attrs = Vec::with_capacity(accumulated[idx].len());
                 for de in &accumulated[idx] {
-                    attrs.push(Self::dir_entry_to_attrs(&path, &masks, de));
+                    attrs.push(Self::dir_entry_to_attrs(&path, &masks, &ids, de));
                 }
                 let mut sorted = attrs.clone();
                 sort(&path, &mut sorted);
@@ -1233,13 +1239,15 @@ struct AttrValues {
     mtime: Option<(i64, u32)>,
     atime: Option<(i64, u32)>,
     ctime: Option<(i64, u32)>,
+    has_named_attr: Option<bool>,
 }
 
 /// The full set of supported FATTR4 ids, in wire (increasing) order. Must
 /// match `crate::client::READDIR_ATTRS`.
-const FULL_ATTR_IDS: [u32; 11] = [
+const FULL_ATTR_IDS: [u32; 12] = [
     FATTR4_TYPE,
     FATTR4_SIZE,
+    FATTR4_NAMED_ATTR,
     FATTR4_FILEID,
     FATTR4_MODE,
     FATTR4_NUMLINKS,
@@ -1257,6 +1265,7 @@ fn request_mask_to_attr_list(masks: &AttrMask) -> Vec<u32> {
         let wanted = match id {
             FATTR4_TYPE => true, // always fetch type (cheap, aids listdir)
             FATTR4_SIZE => masks.has_size,
+            FATTR4_NAMED_ATTR => masks.has_named_attr,
             FATTR4_FILEID => masks.has_fileid,
             FATTR4_MODE => masks.has_mode,
             FATTR4_NUMLINKS => masks.has_nlink,
@@ -1275,11 +1284,6 @@ fn request_mask_to_attr_list(masks: &AttrMask) -> Vec<u32> {
     ids
 }
 
-/// Parse a READDIR-entry attribute list encoded for `READDIR_ATTRS`.
-fn parse_attrs(list: &[u8]) -> VfResult<AttrValues> {
-    parse_attr_list(&FULL_ATTR_IDS, list)
-}
-
 /// Parse a raw GETATTR attribute list encoded for the given ids (in id order).
 fn parse_attr_list(ids: &[u32], list: &[u8]) -> VfResult<AttrValues> {
     let mut v = AttrValues::default();
@@ -1291,6 +1295,9 @@ fn parse_attr_list(ids: &[u32], list: &[u8]) -> VfResult<AttrValues> {
             }
             FATTR4_SIZE => {
                 v.size = Some(read_u64(list, &mut off)?);
+            }
+            FATTR4_NAMED_ATTR => {
+                v.has_named_attr = Some(read_u32(list, &mut off)? != 0);
             }
             FATTR4_FILEID => {
                 v.fileid = Some(read_u64(list, &mut off)?);
@@ -1345,6 +1352,7 @@ fn s_ifmt(ftype: u32) -> u32 {
 /// is the permission bits plus the `S_IFMT` bits derived from `ftype`.
 fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
     a.ftype = v.ftype.unwrap_or(0);
+    a.has_named_attr = v.has_named_attr.unwrap_or(false);
     if a.masks.has_mode {
         if let Some(mode) = v.mode {
             a.mode = mode | s_ifmt(a.ftype);

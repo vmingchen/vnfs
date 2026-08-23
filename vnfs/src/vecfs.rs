@@ -322,6 +322,10 @@ pub struct AttrMask {
     pub has_atime: bool,
     pub has_mtime: bool,
     pub has_ctime: bool,
+    /// Request FATTR4_NAMED_ATTR (the per-object "has named attributes"
+    /// boolean). Costs the server a per-entry xattr enumeration, so only
+    /// request it when the caller needs it (e.g. ls long format).
+    pub has_named_attr: bool,
 }
 
 impl AttrMask {
@@ -338,6 +342,7 @@ impl AttrMask {
             has_atime: true,
             has_mtime: true,
             has_ctime: true,
+            has_named_attr: true,
         }
     }
 }
@@ -372,6 +377,9 @@ pub struct VfAttrs {
     pub atime_nsec: u32,
     pub ctime_sec: i64,
     pub ctime_nsec: u32,
+    /// FATTR4_NAMED_ATTR: TRUE iff the object has a non-empty named
+    /// attribute directory (i.e. at least one `user.*` xattr).
+    pub has_named_attr: bool,
 }
 
 // ---------------------------------------------------------------------------

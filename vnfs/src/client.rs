@@ -150,10 +150,12 @@ const MAX_COMPOUND_OPS: usize = 256;
 /// FATTR4 attribute ids requested for every READDIR entry, in wire order.
 /// Keep in sync with the parse order in `nfs.rs::parse_attrs`. Note:
 /// FATTR4_TIME_CREATE is intentionally absent (ganesha omits it, and it maps
-/// to creation time, not stat's ctime).
-pub const READDIR_ATTRS: [u32; 11] = [
+/// to creation time, not stat's ctime). FATTR4_NAMED_ATTR is the per-object
+/// "has a non-empty named attribute directory" boolean (RFC 5661 s5.8.1.8).
+pub const READDIR_ATTRS: [u32; 12] = [
     FATTR4_TYPE,
     FATTR4_SIZE,
+    FATTR4_NAMED_ATTR,
     FATTR4_FILEID,
     FATTR4_MODE,
     FATTR4_NUMLINKS,
@@ -625,12 +627,19 @@ impl NfsClient {
 
     /// READDIR `dir` starting at `cookie`; returns entries with names, next
     /// cookies, and requested attributes. Skips "." and "..".
-    pub fn readdir(&mut self, dir: &FileHandle, cookie: u64) -> RpcResult<Vec<DirEntry>> {
+    /// READDIR `dir` from `cookie`, requesting the given FATTR4 attributes
+    /// for each entry.
+    pub fn readdir(
+        &mut self,
+        dir: &FileHandle,
+        cookie: u64,
+        attrs: &[u32],
+    ) -> RpcResult<Vec<DirEntry>> {
         let mut c = Compound::new();
         c.tag(b"readdir");
         c.putfh(&dir.as_nfs_fh());
         let zeroverf: verifier4 = [0; 8];
-        c.readdir(cookie, &zeroverf, 256 * 1024, 1024 * 1024, &READDIR_ATTRS);
+        c.readdir(cookie, &zeroverf, 256 * 1024, 1024 * 1024, attrs);
         let res = self.session.compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         Ok(Self::collect_readdir(res.readdir(2)).0)
@@ -679,10 +688,12 @@ impl NfsClient {
 
     /// For each `(parent, child_name)` pair, LOOKUP the child, GETFH its
     /// handle, and READDIR its first page -- all in as few compounds as
-    /// possible (`[PUTFH parent, LOOKUP, GETFH, READDIR]` per child).
+    /// possible (`[PUTFH parent, LOOKUP, GETFH, READDIR]` per child), each
+    /// READDIR requesting `attrs` per entry.
     pub fn readdir_children(
         &mut self,
         ops: &[(FileHandle, String)],
+        attrs: &[u32],
     ) -> RpcResult<Vec<ChildListing>> {
         let per_chunk = (MAX_COMPOUND_OPS - 1) / 4;
         let mut out = Vec::with_capacity(ops.len());
@@ -694,7 +705,7 @@ impl NfsClient {
                 c.putfh(&pfh.as_nfs_fh());
                 c.lookup(name.as_bytes());
                 c.getfh();
-                c.readdir(0, &zeroverf, 256 * 1024, 1024 * 1024, &READDIR_ATTRS);
+                c.readdir(0, &zeroverf, 256 * 1024, 1024 * 1024, attrs);
             }
             let res = self.session.compound(&mut c)?;
             self.session.expect_all_ok(&res)?;
@@ -712,10 +723,12 @@ impl NfsClient {
     }
 
     /// For each `(fh, cookie)`, continue READDIR with the next page in as few
-    /// compounds as possible (`[PUTFH fh, READDIR(cookie)]` per dir).
+    /// compounds as possible (`[PUTFH fh, READDIR(cookie)]` per dir), each
+    /// READDIR requesting `attrs` per entry.
     pub fn readdir_pages(
         &mut self,
         ops: &[(FileHandle, u64)],
+        attrs: &[u32],
     ) -> RpcResult<Vec<(Vec<DirEntry>, u64)>> {
         let per_chunk = (MAX_COMPOUND_OPS - 1) / 2;
         let mut out = Vec::with_capacity(ops.len());
@@ -725,7 +738,7 @@ impl NfsClient {
             c.tag(b"readdir_pages");
             for (fh, cookie) in chunk {
                 c.putfh(&fh.as_nfs_fh());
-                c.readdir(*cookie, &zeroverf, 256 * 1024, 1024 * 1024, &READDIR_ATTRS);
+                c.readdir(*cookie, &zeroverf, 256 * 1024, 1024 * 1024, attrs);
             }
             let res = self.session.compound(&mut c)?;
             self.session.expect_all_ok(&res)?;

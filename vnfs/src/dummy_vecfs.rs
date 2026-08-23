@@ -120,7 +120,16 @@ impl DummyVecFs {
         }
     }
 
-    fn fill_attrs(&self, a: &mut VfAttrs, md: &std::fs::Metadata) {
+    /// Whether the object has at least one extended attribute (llistxattr).
+    fn has_xattr(path: &str) -> bool {
+        use std::ffi::CString;
+        let Ok(cpath) = CString::new(path) else {
+            return false;
+        };
+        unsafe { libc::llistxattr(cpath.as_ptr(), std::ptr::null_mut(), 0) > 0 }
+    }
+
+    fn fill_attrs(&self, a: &mut VfAttrs, path: &str, md: &std::fs::Metadata) {
         let ft = md.file_type();
         a.ftype = if ft.is_dir() {
             NF4DIR
@@ -129,6 +138,7 @@ impl DummyVecFs {
         } else {
             NF4REG
         };
+        a.has_named_attr = Self::has_xattr(path);
         if a.masks.has_mode {
             a.mode = md.mode();
         }
@@ -289,7 +299,8 @@ impl DummyVecFs {
             let md = entry
                 .metadata()
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
-            self.fill_attrs(&mut a, &md);
+            let real = self.resolve(&path);
+            self.fill_attrs(&mut a, &real.to_string_lossy(), &md);
             let is_dir = a.ftype == NF4DIR;
             out.push(a);
             if recursive && is_dir {
@@ -508,7 +519,7 @@ impl VecFs for DummyVecFs {
                 e
             })?;
             let md = std::fs::metadata(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-            self.fill_attrs(a, &md);
+            self.fill_attrs(a, &p.to_string_lossy(), &md);
         }
         Ok(())
     }
