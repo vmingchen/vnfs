@@ -79,4 +79,15 @@ fn main() {
         .expect("Unable to generate bindings")
         .write_to_file(out_dir.join("bindings.rs"))
         .expect("Couldn't write bindings!");
+
+    // Edition 2024 requires extern blocks to be `unsafe`; rewrite the
+    // generated ones that bindgen still emits as plain `extern "C" {`,
+    // leaving the blocks bindgen already marks `unsafe` untouched.
+    let bindings_path = out_dir.join("bindings.rs");
+    let generated = std::fs::read_to_string(&bindings_path).expect("read bindings");
+    let rewritten = generated
+        .replace("unsafe extern \"C\" {", "\u{0}unsafe_extern\u{0}")
+        .replace("extern \"C\" {", "unsafe extern \"C\" {")
+        .replace("\u{0}unsafe_extern\u{0}", "unsafe extern \"C\" {");
+    std::fs::write(&bindings_path, rewritten).expect("rewrite bindings");
 }

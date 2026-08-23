@@ -13,6 +13,6 @@
 // crate must also link the dynamic library. `#[link]` ensures rustc
 // re-emits -lntirpc at final link time whenever this rlib is pulled in.
 #[link(name = "ntirpc", kind = "dylib")]
-extern "C" {}
+unsafe extern "C" {}
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));

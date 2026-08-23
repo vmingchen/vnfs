@@ -2,6 +2,7 @@
 //! with the nfsv41.h codecs through a libntirpc memory XDR, decode them
 //! back, and verify the fields match.
 
+#![allow(unsafe_op_in_unsafe_fn)]
 use nfsv41_sys::*;
 use std::os::raw::c_char;
 

@@ -7,6 +7,7 @@
 //! symlink coverage is via LOOKUP / READDIR / REMOVE / RENAME / CREATE and
 //! READLINK instead.
 
+#![allow(unsafe_op_in_unsafe_fn)]
 use nfsv41_sys::*;
 use std::os::raw::c_char;
 
