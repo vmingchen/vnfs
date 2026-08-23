@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "Vectorized NFS client API in Rust"
 readme = "README.md"
 repository = "https://github.com/vmingchen/vnfs"
+documentation = "https://docs.rs/vnfs"
 keywords = ["NFS", "vectorized"]
 
 [dependencies]
