@@ -282,10 +282,10 @@ impl NfsVecFs {
 
     /// Record the new read/write offset of an open (descriptor) file.
     fn advance_offset(&mut self, file: &VfFile, new_offset: u64) {
-        if file.ftype == VfFileType::Descriptor {
-            if let Some(o) = self.open_files.get_mut(&file.fd) {
-                o.cur_offset = new_offset;
-            }
+        if file.ftype == VfFileType::Descriptor
+            && let Some(o) = self.open_files.get_mut(&file.fd)
+        {
+            o.cur_offset = new_offset;
         }
     }
 
@@ -1122,14 +1122,14 @@ impl VecFs for NfsVecFs {
                         break;
                     }
                 }
-                if p.adb_reloff_pattern != u64::MAX && !p.adb_pattern_data.is_empty() {
-                    if let Err(e) =
+                if p.adb_reloff_pattern != u64::MAX
+                    && !p.adb_pattern_data.is_empty()
+                    && let Err(e) =
                         self.nfs
                             .write(&fh, &sid, base + p.adb_reloff_pattern, &p.adb_pattern_data)
-                    {
-                        failed = Some(VfError::from_rpc(i, e));
-                        break;
-                    }
+                {
+                    failed = Some(VfError::from_rpc(i, e));
+                    break;
                 }
                 written += 1;
             }
@@ -1353,63 +1353,63 @@ fn s_ifmt(ftype: u32) -> u32 {
 fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
     a.ftype = v.ftype.unwrap_or(0);
     a.has_named_attr = v.has_named_attr.unwrap_or(false);
-    if a.masks.has_mode {
-        if let Some(mode) = v.mode {
-            a.mode = mode | s_ifmt(a.ftype);
-        }
+    if a.masks.has_mode
+        && let Some(mode) = v.mode
+    {
+        a.mode = mode | s_ifmt(a.ftype);
     }
-    if a.masks.has_size {
-        if let Some(size) = v.size {
-            a.size = size;
-        }
+    if a.masks.has_size
+        && let Some(size) = v.size
+    {
+        a.size = size;
     }
-    if a.masks.has_nlink {
-        if let Some(nlink) = v.nlink {
-            a.nlink = nlink;
-        }
+    if a.masks.has_nlink
+        && let Some(nlink) = v.nlink
+    {
+        a.nlink = nlink;
     }
-    if a.masks.has_fileid {
-        if let Some(fileid) = v.fileid {
-            a.fileid = fileid;
-        }
+    if a.masks.has_fileid
+        && let Some(fileid) = v.fileid
+    {
+        a.fileid = fileid;
     }
-    if a.masks.has_uid {
-        if let Some(uid) = v.uid {
-            a.uid = uid;
-        }
+    if a.masks.has_uid
+        && let Some(uid) = v.uid
+    {
+        a.uid = uid;
     }
-    if a.masks.has_gid {
-        if let Some(gid) = v.gid {
-            a.gid = gid;
-        }
+    if a.masks.has_gid
+        && let Some(gid) = v.gid
+    {
+        a.gid = gid;
     }
-    if a.masks.has_rdev {
-        if let Some(rdev) = v.rdev {
-            a.rdev = rdev;
-        }
+    if a.masks.has_rdev
+        && let Some(rdev) = v.rdev
+    {
+        a.rdev = rdev;
     }
-    if a.masks.has_blocks {
-        if let Some(blocks) = v.blocks {
-            a.blocks = blocks;
-        }
+    if a.masks.has_blocks
+        && let Some(blocks) = v.blocks
+    {
+        a.blocks = blocks;
     }
-    if a.masks.has_mtime {
-        if let Some((s, n)) = v.mtime {
-            a.mtime_sec = s;
-            a.mtime_nsec = n;
-        }
+    if a.masks.has_mtime
+        && let Some((s, n)) = v.mtime
+    {
+        a.mtime_sec = s;
+        a.mtime_nsec = n;
     }
-    if a.masks.has_atime {
-        if let Some((s, n)) = v.atime {
-            a.atime_sec = s;
-            a.atime_nsec = n;
-        }
+    if a.masks.has_atime
+        && let Some((s, n)) = v.atime
+    {
+        a.atime_sec = s;
+        a.atime_nsec = n;
     }
-    if a.masks.has_ctime {
-        if let Some((s, n)) = v.ctime {
-            a.ctime_sec = s;
-            a.ctime_nsec = n;
-        }
+    if a.masks.has_ctime
+        && let Some((s, n)) = v.ctime
+    {
+        a.ctime_sec = s;
+        a.ctime_nsec = n;
     }
 }
 

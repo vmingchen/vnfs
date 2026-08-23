@@ -8,8 +8,8 @@
 //! ```
 
 use nfsv41_sys::nfsstat4_NFS4ERR_EXIST;
-use vnfs::nfs::*;
 use vnfs::NfsVecFs;
+use vnfs::nfs::*;
 
 mod common;
 

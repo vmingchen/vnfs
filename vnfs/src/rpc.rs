@@ -15,7 +15,7 @@ pub const NFSPROC4_COMPOUND: rpcproc_t = 1;
 static SVC_INITED: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "C" fn svc_req_alloc(xprt: *mut SVCXPRT, xdrs: *mut XDR) -> *mut svc_req {
-    let req = libc::calloc(1, std::mem::size_of::<svc_req>()) as *mut svc_req;
+    let req = unsafe { libc::calloc(1, std::mem::size_of::<svc_req>()) } as *mut svc_req;
     unsafe {
         (*req).rq_xprt = xprt;
         (*req).rq_xdrs = xdrs;

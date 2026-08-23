@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::{symlink, FileExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt, symlink};
 use std::path::PathBuf;
 
 use crate::vecfs::*;
@@ -113,10 +113,10 @@ impl DummyVecFs {
     }
 
     fn advance_offset(&mut self, file: &VfFile, new: u64) {
-        if file.ftype == VfFileType::Descriptor {
-            if let Some(o) = self.open_files.get_mut(&file.fd) {
-                o.cur_offset = new;
-            }
+        if file.ftype == VfFileType::Descriptor
+            && let Some(o) = self.open_files.get_mut(&file.fd)
+        {
+            o.cur_offset = new;
         }
     }
 

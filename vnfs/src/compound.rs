@@ -9,14 +9,14 @@ use std::os::raw::{c_char, c_void};
 use nfsv41_sys::*;
 
 use crate::error::RpcResult;
-use crate::rpc::{RpcClient, NFSPROC4_COMPOUND};
+use crate::rpc::{NFSPROC4_COMPOUND, RpcClient};
 
 unsafe extern "C" fn wrap_compound4args(xdrs: *mut libntirpc_sys::XDR, objp: *mut c_void) -> bool {
-    xdr_wrap_COMPOUND4args(xdrs as *mut nfsv41_sys::XDR, objp as *mut COMPOUND4args)
+    unsafe { xdr_wrap_COMPOUND4args(xdrs as *mut nfsv41_sys::XDR, objp as *mut COMPOUND4args) }
 }
 
 unsafe extern "C" fn wrap_compound4res(xdrs: *mut libntirpc_sys::XDR, objp: *mut c_void) -> bool {
-    xdr_wrap_COMPOUND4res(xdrs as *mut nfsv41_sys::XDR, objp as *mut COMPOUND4res)
+    unsafe { xdr_wrap_COMPOUND4res(xdrs as *mut nfsv41_sys::XDR, objp as *mut COMPOUND4res) }
 }
 
 /// A COMPOUND4args under construction. Owns backing buffers for every
@@ -455,6 +455,7 @@ impl Compound {
         self.args.argarray.argarray_len = self.ops.len() as u_int;
         self.args.argarray.argarray_val = self.ops.as_mut_ptr();
         let mut res: COMPOUND4res = unsafe { std::mem::zeroed() };
+        let t0 = std::time::Instant::now();
         rpc.call(
             NFSPROC4_COMPOUND,
             Some(wrap_compound4args),
@@ -462,6 +463,8 @@ impl Compound {
             Some(wrap_compound4res),
             &mut res as *mut _ as *mut c_void,
         )?;
+        RPC_TIME_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
+        RPC_CALLS.fetch_add(1, Ordering::Relaxed);
         compound_stats_record(&self.args);
         Ok(CompoundRes { res })
     }
@@ -643,6 +646,8 @@ pub static COMPOUND_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static COMPOUND_OPS: AtomicU64 = AtomicU64::new(0);
 pub static COMPOUND_BYTES: AtomicU64 = AtomicU64::new(0);
 pub static COMPOUND_MAX_OPS: AtomicU64 = AtomicU64::new(0);
+pub static RPC_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static RPC_TIME_US: AtomicU64 = AtomicU64::new(0);
 
 fn compound_stats_record(args: &COMPOUND4args) {
     let ops = args.argarray.argarray_len as u64;
@@ -686,5 +691,13 @@ pub fn compound_stats() -> (u64, u64, u64, u64) {
         COMPOUND_OPS.swap(0, Ordering::Relaxed),
         COMPOUND_BYTES.swap(0, Ordering::Relaxed),
         COMPOUND_MAX_OPS.swap(0, Ordering::Relaxed),
+    )
+}
+
+/// Aggregate RPC round-trip timing, resetting the counters.
+pub fn rpc_stats() -> (u64, u64) {
+    (
+        RPC_CALLS.swap(0, Ordering::Relaxed),
+        RPC_TIME_US.swap(0, Ordering::Relaxed),
     )
 }

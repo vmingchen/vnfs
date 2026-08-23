@@ -1,8 +1,8 @@
 //! A shared test suite run against any [`VecFs`] implementation, proving both
 //! backends (NFS and the `std::fs` dummy) behave identically.
 
-use vnfs::vecfs::*;
 use vnfs::VecFs;
+use vnfs::vecfs::*;
 
 /// Run a broad set of vectorized-filesystem assertions against `fs`, using
 /// paths under `base` (which must be unique per caller).
@@ -95,12 +95,16 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     let entries = fs
         .listdir(&dir, AttrMask::default(), 0, false)
         .expect("listdir");
-    assert!(entries
-        .iter()
-        .any(|e| e.file.path.as_ref().unwrap().ends_with("renamed.txt")));
-    assert!(entries
-        .iter()
-        .any(|e| e.file.path.as_ref().unwrap().ends_with("sub")));
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.file.path.as_ref().unwrap().ends_with("renamed.txt"))
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.file.path.as_ref().unwrap().ends_with("sub"))
+    );
 
     // listdirv callback.
     let mut seen = 0usize;

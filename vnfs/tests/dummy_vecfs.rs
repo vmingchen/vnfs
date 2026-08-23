@@ -4,8 +4,8 @@
 
 mod common;
 
-use vnfs::dummy_vecfs::DummyVecFs;
 use vnfs::VecFs;
+use vnfs::dummy_vecfs::DummyVecFs;
 
 /// A `DummyVecFs` rooted at a fresh unique temp directory.
 fn dummy() -> DummyVecFs {

@@ -1,7 +1,7 @@
 [package]
 name = "vnfs"
-version = "0.0.1"
-edition = "2021"
+version = "0.0.2"
+edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Vectorized NFS client API in Rust"
 readme = "README.md"
