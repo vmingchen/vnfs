@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.dependencies]
 clap = { version = "4.5.17", features = ["derive"] }
 libc = "0.2"
-libntirpc-sys = { path = "../gh/libntirpc-sys", version = "0.2.0" }
+libntirpc-sys = "0.2.1"
 nfsv41-sys = { path = "nfsv41-sys", version = "0.1.0" }
 xdr-codec = "0.4.4"
 xdrgen = "0.4.4"
