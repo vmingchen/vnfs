@@ -19,6 +19,6 @@ pub mod vecfs;
 pub use dummy_vecfs::DummyVecFs;
 pub use nfs::NfsVecFs;
 pub use vecfs::{
-    Adb, AttrMask, ExtentPair, VecFs, VfAttrs, VfError, VfFile, VfIoVec, VfPathBase, VfRes,
-    VfResult, VfType, WalkEntry,
+    Adb, AttrMask, ExtentPair, ReadOp, ReadResult, SeekFrom, VecFs, VfAttrs, VfError, VfFile,
+    VfPathBase, VfRes, VfResult, VfType, WalkEntry, WriteOp, WriteResult,
 };

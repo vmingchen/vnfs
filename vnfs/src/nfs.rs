@@ -36,6 +36,28 @@ pub struct NfsVecFs {
 }
 
 impl NfsVecFs {
+    fn getattrsv_impl(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
+        let mut ops = Vec::with_capacity(attrs.len());
+        let mut ids_list = Vec::with_capacity(attrs.len());
+        for (i, a) in attrs.iter().enumerate() {
+            let fh = self.resolve_tcfile(&a.file, follow).map_err(|mut e| {
+                e.index = i;
+                e
+            })?;
+            let ids = request_mask_to_attr_list(&a.masks);
+            ids_list.push(ids.clone());
+            ops.push(crate::client::GetattrOp { fh, attrs: ids });
+        }
+        let results = self
+            .nfs
+            .getattr_many(&ops)
+            .map_err(|e| VfError::from_rpc(0, e))?;
+        for ((a, ids), list) in attrs.iter_mut().zip(ids_list).zip(results) {
+            let v = parse_attr_list(&ids, &list)?;
+            apply_attrs(a, &v);
+        }
+        Ok(())
+    }
     /// Connect to the NFS server at `host` and resolve the export root.
     pub fn connect(host: &str) -> VfResult<NfsVecFs> {
         let nfs = NfsClient::connect(host).map_err(|e| VfError::from_rpc(0, e))?;
@@ -167,12 +189,13 @@ impl NfsVecFs {
     /// implicitly for path-based iovecs. The third element reports whether
     /// the file was opened here and must be closed again (to avoid leaving
     /// open-owner state that would make the client undestroyable).
-    fn resolve_iov_file(
+    fn resolve_file(
         &mut self,
-        iov: &VfIoVec,
+        file: &VfFile,
+        is_creation: bool,
         for_write: bool,
     ) -> VfResult<(FileHandle, stateid4, bool)> {
-        match &iov.file {
+        match file {
             VfFile::Descriptor(fd) => {
                 let o = self
                     .open_files
@@ -190,7 +213,7 @@ impl NfsVecFs {
                 } else {
                     OPEN4_SHARE_ACCESS_READ
                 };
-                let (fh, sid) = self.open_impl(dir, name, access, iov.is_creation, false)?;
+                let (fh, sid) = self.open_impl(dir, name, access, is_creation, false)?;
                 Ok((fh, sid, true))
             }
             VfFile::Current(None) | VfFile::Null | VfFile::Saved => {
@@ -199,63 +222,48 @@ impl NfsVecFs {
         }
     }
 
-    /// Batched readv for open (descriptor) iovecs: one compound per chunk of
-    /// files, each carrying `[PUTFH, READ]` for every iovec.
-    fn readv_batch(&mut self, reads: &mut [VfIoVec]) -> VfRes {
+    /// Batched readv for open (descriptor) ops: one compound per chunk of
+    /// files, each carrying `[PUTFH, READ]` for every op.
+    fn readv_batch(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         let mut ops = Vec::with_capacity(reads.len());
         let mut offsets = Vec::with_capacity(reads.len());
-        for (i, iov) in reads.iter_mut().enumerate() {
-            let off = match self.resolve_offset(&iov.file, iov.offset) {
-                Ok(off) => off,
-                Err(e) => {
-                    iov.is_failure = true;
-                    return Err(VfError {
-                        index: i,
-                        err_no: e.err_no,
-                    });
-                }
-            };
-            let o = match self.open_files.get(&iov.file.fd().unwrap()).cloned() {
-                Some(o) => o,
-                None => {
-                    iov.is_failure = true;
-                    return Err(VfError::failure(i, nfsstat4_NFS4ERR_BAD_STATEID));
-                }
-            };
+        for (i, op) in reads.iter().enumerate() {
+            let off = self.resolve_offset(&op.file, op.offset).map_err(|mut e| {
+                e.index = i;
+                e
+            })?;
+            let o = self
+                .open_files
+                .get(&op.file.fd().unwrap())
+                .cloned()
+                .ok_or_else(|| VfError::failure(i, nfsstat4_NFS4ERR_BAD_STATEID))?;
             ops.push(crate::client::ReadOp {
                 fh: o.fh,
                 stateid: o.stateid,
                 offset: off,
-                count: iov.length.min(u32::MAX as usize) as u32,
+                count: op.length.min(u32::MAX as usize) as u32,
             });
             offsets.push(off);
         }
-        match self.nfs.readv(&ops) {
-            Ok(results) => {
-                for ((iov, data), off) in reads.iter_mut().zip(results).zip(offsets) {
-                    let requested = iov.length;
-                    iov.data = data;
-                    iov.length = iov.data.len();
-                    iov.is_eof = iov.data.len() < requested;
-                    self.advance_offset(&iov.file, off + iov.data.len() as u64);
-                }
-                Ok(())
+        let results = self.nfs.readv(&ops).map_err(|e| {
+            let idx = e.op_index.saturating_sub(2) / 2;
+            VfError {
+                index: idx.min(reads.len()),
+                err_no: e.status,
             }
-            Err(e) => {
-                let idx = e.op_index.saturating_sub(2) / 2;
-                let idx = idx.min(reads.len());
-                for (i, iov) in reads.iter_mut().enumerate() {
-                    if i >= idx {
-                        iov.is_failure = true;
-                        iov.length = 0;
-                    }
-                }
-                Err(VfError {
-                    index: idx,
-                    err_no: e.status,
-                })
-            }
+        })?;
+        let mut out = Vec::with_capacity(reads.len());
+        for ((op, data), off) in reads.iter().zip(results).zip(offsets) {
+            let eof = data.len() < op.length;
+            self.advance_offset(&op.file, off + data.len() as u64);
+            out.push(ReadResult {
+                file: op.file.clone(),
+                offset: off,
+                data,
+                eof,
+            });
         }
+        Ok(out)
     }
 
     /// Resolve a special offset (`VF_OFFSET_CUR` / `VF_OFFSET_END`) to a
@@ -268,7 +276,7 @@ impl NfsVecFs {
                 Ok(0)
             }
         } else if off == VF_OFFSET_END {
-            let fh = self.resolve_tcfile(file)?;
+            let fh = self.resolve_tcfile(file, true)?;
             self.file_size(&fh)
         } else {
             Ok(off)
@@ -284,11 +292,12 @@ impl NfsVecFs {
         }
     }
 
-    fn readv_one(&mut self, iov: &mut VfIoVec) -> VfResult<()> {
-        let (fh, stateid, close_after) = self.resolve_iov_file(iov, false)?;
-        let want = iov.length.min(u32::MAX as usize) as u32;
-        let mut offset = self.resolve_offset(&iov.file, iov.offset)?;
+    fn readv_one(&mut self, op: &ReadOp) -> VfResult<ReadResult> {
+        let (fh, stateid, close_after) = self.resolve_file(&op.file, false, false)?;
+        let want = op.length.min(u32::MAX as usize) as u32;
+        let mut offset = self.resolve_offset(&op.file, op.offset)?;
         let mut got = Vec::new();
+        let mut eof = false;
         let result = loop {
             let remaining = want.saturating_sub(got.len() as u32);
             let chunk = self
@@ -296,14 +305,14 @@ impl NfsVecFs {
                 .read(&fh, &stateid, offset, remaining)
                 .map_err(|e| VfError::from_rpc(0, e))?;
             if chunk.is_empty() {
-                iov.is_eof = true;
+                eof = true;
                 break Ok(());
             }
             let before = got.len();
             got.extend_from_slice(&chunk);
             offset += chunk.len() as u64;
             if chunk.len() < (want as usize).saturating_sub(before) {
-                iov.is_eof = true;
+                eof = true;
             }
             if chunk.len() < remaining as usize || got.len() >= want as usize {
                 break Ok(());
@@ -313,83 +322,75 @@ impl NfsVecFs {
             let _ = self.nfs.close(&fh, &stateid);
         }
         result?;
-        iov.length = got.len();
-        iov.data = got;
-        self.advance_offset(&iov.file, offset);
-        Ok(())
+        self.advance_offset(&op.file, offset);
+        Ok(ReadResult {
+            file: op.file.clone(),
+            offset: op.offset,
+            data: got,
+            eof,
+        })
     }
 
-    /// Batched writev for open (descriptor) iovecs.
-    fn writev_batch(&mut self, writes: &mut [VfIoVec]) -> VfRes {
+    /// Batched writev for open (descriptor) ops.
+    fn writev_batch(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
         let mut ops = Vec::with_capacity(writes.len());
         let mut offsets = Vec::with_capacity(writes.len());
-        for (i, iov) in writes.iter_mut().enumerate() {
-            let off = match self.resolve_offset(&iov.file, iov.offset) {
-                Ok(off) => off,
-                Err(e) => {
-                    iov.is_failure = true;
-                    return Err(VfError {
-                        index: i,
-                        err_no: e.err_no,
-                    });
-                }
-            };
-            let o = match self.open_files.get(&iov.file.fd().unwrap()).cloned() {
-                Some(o) => o,
-                None => {
-                    iov.is_failure = true;
-                    return Err(VfError::failure(i, nfsstat4_NFS4ERR_BAD_STATEID));
-                }
-            };
+        for (i, op) in writes.iter().enumerate() {
+            let off = self.resolve_offset(&op.file, op.offset).map_err(|mut e| {
+                e.index = i;
+                e
+            })?;
+            let o = self
+                .open_files
+                .get(&op.file.fd().unwrap())
+                .cloned()
+                .ok_or_else(|| VfError::failure(i, nfsstat4_NFS4ERR_BAD_STATEID))?;
             ops.push(crate::client::WriteOp {
                 fh: o.fh,
                 stateid: o.stateid,
                 offset: off,
-                data: iov.data.clone(),
+                data: op.data.clone(),
             });
             offsets.push(off);
         }
-        match self.nfs.writev(&ops) {
-            Ok(results) => {
-                for ((iov, (n, committed)), off) in writes.iter_mut().zip(results).zip(offsets) {
-                    iov.length = n as usize;
-                    iov.is_write_stable = committed == stable_how4_FILE_SYNC4;
-                    self.advance_offset(&iov.file, off + n as u64);
-                }
-                Ok(())
+        let results = self.nfs.writev(&ops).map_err(|e| {
+            let idx = e.op_index.saturating_sub(2) / 2;
+            VfError {
+                index: idx.min(writes.len()),
+                err_no: e.status,
             }
-            Err(e) => {
-                let idx = e.op_index.saturating_sub(2) / 2;
-                let idx = idx.min(writes.len());
-                for (i, iov) in writes.iter_mut().enumerate() {
-                    if i >= idx {
-                        iov.is_failure = true;
-                        iov.length = 0;
-                    }
-                }
-                Err(VfError {
-                    index: idx,
-                    err_no: e.status,
-                })
-            }
+        })?;
+        let mut out = Vec::with_capacity(writes.len());
+        for ((op, (n, committed)), off) in writes.iter().zip(results).zip(offsets) {
+            self.advance_offset(&op.file, off + n as u64);
+            out.push(WriteResult {
+                file: op.file.clone(),
+                offset: off,
+                written: n as usize,
+                stable: committed == stable_how4_FILE_SYNC4,
+            });
         }
+        Ok(out)
     }
 
-    fn writev_one(&mut self, iov: &mut VfIoVec) -> VfResult<()> {
-        let (fh, stateid, close_after) = self.resolve_iov_file(iov, true)?;
-        let offset = self.resolve_offset(&iov.file, iov.offset)?;
+    fn writev_one(&mut self, op: &WriteOp) -> VfResult<WriteResult> {
+        let (fh, stateid, close_after) = self.resolve_file(&op.file, op.creation, true)?;
+        let offset = self.resolve_offset(&op.file, op.offset)?;
         let result = self
             .nfs
-            .write(&fh, &stateid, offset, &iov.data)
+            .write(&fh, &stateid, offset, &op.data)
             .map_err(|e| VfError::from_rpc(0, e));
         if close_after {
             let _ = self.nfs.close(&fh, &stateid);
         }
         let (n, committed) = result?;
-        iov.length = n as usize;
-        iov.is_write_stable = committed == stable_how4_FILE_SYNC4;
-        self.advance_offset(&iov.file, offset + n as u64);
-        Ok(())
+        self.advance_offset(&op.file, offset + n as u64);
+        Ok(WriteResult {
+            file: op.file.clone(),
+            offset: op.offset,
+            written: n as usize,
+            stable: committed == stable_how4_FILE_SYNC4,
+        })
     }
 
     /// The size in bytes of `fh`.
@@ -402,7 +403,7 @@ impl NfsVecFs {
         read_u64(&list, &mut off)
     }
 
-    fn resolve_tcfile(&mut self, f: &VfFile) -> VfResult<FileHandle> {
+    fn resolve_tcfile(&mut self, f: &VfFile, follow: bool) -> VfResult<FileHandle> {
         match f {
             VfFile::Descriptor(fd) => self
                 .open_files
@@ -410,11 +411,45 @@ impl NfsVecFs {
                 .map(|o| o.fh.clone())
                 .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_BAD_STATEID)),
             VfFile::Path { path, .. } | VfFile::Current(Some(path)) => {
-                self.resolve(&path.to_string_lossy())
+                let path = path.to_string_lossy();
+                if follow {
+                    self.resolve_follow(&path)
+                } else {
+                    self.resolve(&path)
+                }
             }
             VfFile::Current(None) | VfFile::Null | VfFile::Saved => {
                 Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL))
             }
+        }
+    }
+
+    /// Resolve `path` and follow a chain of symlinks at the end of it (for
+    /// `stat` semantics), with a hop limit to break cycles. Intermediate
+    /// symlink components are not traversed (LOOKUP cannot descend into a
+    /// symlink).
+    fn resolve_follow(&mut self, path: &str) -> VfResult<FileHandle> {
+        let mut remaining = path.to_string();
+        let mut hops = 0usize;
+        loop {
+            let fh = self.resolve(&remaining)?;
+            let t = self
+                .nfs
+                .getattr(&fh, &[FATTR4_TYPE])
+                .map_err(|e| VfError::from_rpc(0, e))?;
+            let mut off = 0usize;
+            if read_u32(&t, &mut off).unwrap_or(0) != nfs_ftype4_NF4LNK {
+                return Ok(fh);
+            }
+            if hops >= 40 {
+                return Err(VfError::failure(0, nfsstat4_NFS4ERR_IO)); // symlink loop
+            }
+            let target = self
+                .nfs
+                .readlink(&fh)
+                .map_err(|e| VfError::from_rpc(0, e))?;
+            remaining = self.abs_path(&String::from_utf8_lossy(&target));
+            hops += 1;
         }
     }
 
@@ -649,57 +684,35 @@ impl VecFs for NfsVecFs {
         format!("/{}", self.cwd.to_string_lossy())
     }
 
-    fn readv(&mut self, reads: &mut [VfIoVec]) -> VfRes {
-        for iov in reads.iter_mut() {
-            iov.is_failure = false;
-            iov.is_eof = false;
-        }
-        if !reads.is_empty() && reads.iter().all(|i| i.file.is_descriptor()) {
+    fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        if !reads.is_empty() && reads.iter().all(|r| r.file.is_descriptor()) {
             return self.readv_batch(reads);
         }
-        for (i, iov) in reads.iter_mut().enumerate() {
-            let res = self.readv_one(iov);
-            match res {
-                Ok(()) => {}
-                Err(e) => {
-                    iov.is_failure = true;
-                    iov.length = 0;
-                    return Err(VfError {
-                        index: i,
-                        err_no: e.err_no,
-                    });
-                }
-            }
+        let mut out = Vec::with_capacity(reads.len());
+        for (i, op) in reads.iter().enumerate() {
+            out.push(self.readv_one(op).map_err(|mut e| {
+                e.index = i;
+                e
+            })?);
         }
-        Ok(())
+        Ok(out)
     }
 
-    fn writev(&mut self, writes: &mut [VfIoVec]) -> VfRes {
-        for iov in writes.iter_mut() {
-            iov.is_failure = false;
-            iov.is_eof = false;
-        }
-        if !writes.is_empty() && writes.iter().all(|i| i.file.is_descriptor()) {
+    fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+        if !writes.is_empty() && writes.iter().all(|w| w.file.is_descriptor()) {
             return self.writev_batch(writes);
         }
-        for (i, iov) in writes.iter_mut().enumerate() {
-            match self.writev_one(iov) {
-                Ok(()) => {}
-                Err(e) => {
-                    iov.is_failure = true;
-                    iov.length = 0;
-                    return Err(VfError {
-                        index: i,
-                        err_no: e.err_no,
-                    });
-                }
-            }
+        let mut out = Vec::with_capacity(writes.len());
+        for (i, op) in writes.iter().enumerate() {
+            out.push(self.writev_one(op).map_err(|mut e| {
+                e.index = i;
+                e
+            })?);
         }
-        Ok(())
+        Ok(out)
     }
 
-    fn fseek(&mut self, tcf: &mut VfFile, offset: i64, whence: i32) -> VfResult<i64> {
-        use libc::{SEEK_CUR, SEEK_END, SEEK_SET};
+    fn fseek(&mut self, tcf: &mut VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
         if !tcf.is_descriptor() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
@@ -709,9 +722,9 @@ impl VecFs for NfsVecFs {
             .map(|o| o.cur_offset)
             .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_BAD_STATEID))?;
         let new = match whence {
-            SEEK_SET => offset,
-            SEEK_CUR => cur as i64 + offset,
-            SEEK_END => {
+            SeekFrom::Set => offset,
+            SeekFrom::Cur => cur as i64 + offset,
+            SeekFrom::End => {
                 let fh = self
                     .open_files
                     .get(&tcf.fd().unwrap())
@@ -720,7 +733,6 @@ impl VecFs for NfsVecFs {
                 let size = self.file_size(&fh)?;
                 size as i64 + offset
             }
-            _ => return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL)),
         };
         if new < 0 {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
@@ -731,41 +743,30 @@ impl VecFs for NfsVecFs {
     }
 
     fn getattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
-        let mut ops = Vec::with_capacity(attrs.len());
-        let mut ids_list = Vec::with_capacity(attrs.len());
-        for (i, a) in attrs.iter().enumerate() {
-            let fh = self.resolve_tcfile(&a.file).map_err(|mut e| {
-                e.index = i;
-                e
-            })?;
-            let ids = request_mask_to_attr_list(&a.masks);
-            ids_list.push(ids.clone());
-            ops.push(crate::client::GetattrOp { fh, attrs: ids });
-        }
-        let results = self
-            .nfs
-            .getattr_many(&ops)
-            .map_err(|e| VfError::from_rpc(0, e))?;
-        for ((a, ids), list) in attrs.iter_mut().zip(ids_list).zip(results) {
-            let v = parse_attr_list(&ids, &list)?;
-            apply_attrs(a, &v);
-        }
-        Ok(())
+        self.getattrsv_impl(attrs, true)
+    }
+
+    fn lgetattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
+        self.getattrsv_impl(attrs, false)
     }
 
     fn setattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
         let mut ops = Vec::with_capacity(attrs.len());
         for (i, a) in attrs.iter().enumerate() {
-            let fh = self.resolve_tcfile(&a.file).map_err(|mut e| {
+            let fh = self.resolve_tcfile(&a.file, true).map_err(|mut e| {
                 e.index = i;
                 e
             })?;
-            let mode = if a.masks.has_mode {
+            let mode = if a.masks.contains(AttrMask::MODE) {
                 Some(a.mode & 0o7777)
             } else {
                 None
             };
-            let size = if a.masks.has_size { Some(a.size) } else { None };
+            let size = if a.masks.contains(AttrMask::SIZE) {
+                Some(a.size)
+            } else {
+                None
+            };
             if mode.is_none() && size.is_none() {
                 return Err(VfError {
                     index: i,
@@ -804,11 +805,11 @@ impl VecFs for NfsVecFs {
     /// large directories' remaining READDIR pages drained in batched
     /// continuation compounds. `sort` orders each directory's entries (and
     /// hence the subdirectory visit order) exactly as the caller would.
-    fn walk(
+    fn walk<F: Fn(&str, &mut Vec<VfAttrs>)>(
         &mut self,
         root: &str,
         masks: AttrMask,
-        sort: &dyn Fn(&str, &mut Vec<VfAttrs>),
+        sort: F,
     ) -> VfResult<Vec<WalkEntry>> {
         let root_fh = self.resolve(root)?;
         let ids = request_mask_to_attr_list(&masks);
@@ -998,7 +999,7 @@ impl VecFs for NfsVecFs {
         // Apply modes (the handles come from re-resolving the new dirs).
         let mut setattrs = Vec::new();
         for (i, a) in dirs.iter().enumerate() {
-            if a.masks.has_mode {
+            if a.masks.contains(AttrMask::MODE) {
                 let path = a.file.path().unwrap().to_string_lossy().to_string();
                 let fh = self
                     .resolve(&path)
@@ -1083,8 +1084,9 @@ impl VecFs for NfsVecFs {
         Ok(())
     }
 
-    fn write_adb(&mut self, patterns: &mut [Adb]) -> VfRes {
-        for (i, p) in patterns.iter_mut().enumerate() {
+    fn write_adb(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
+        let mut counts = Vec::with_capacity(patterns.len());
+        for (i, p) in patterns.iter().enumerate() {
             let full = self.abs_path(&p.path);
             let (dir, name) = match split_path(&full) {
                 Ok(x) => x,
@@ -1119,13 +1121,13 @@ impl VecFs for NfsVecFs {
                 }
                 written += 1;
             }
-            p.adb_block_count = written;
             let _ = self.nfs.close(&fh, &sid);
             if let Some(e) = failed {
                 return Err(e);
             }
+            counts.push(written);
         }
-        Ok(())
+        Ok(counts)
     }
 
     fn rm(&mut self, objs: &[&str], recursive: bool) -> VfRes {
@@ -1145,18 +1147,13 @@ impl VecFs for NfsVecFs {
         symlinks: bool,
         _use_server_side_copy: bool,
     ) -> VfRes {
-        if !self.exists(dst) {
+        if !self.exists(dst)? {
             self.ensure_dir(dst, 0o755).map_err(|mut e| {
                 e.index = 0;
                 e
             })?;
         }
-        let masks = AttrMask {
-            has_mode: true,
-            has_size: true,
-            has_fileid: true,
-            ..AttrMask::default()
-        };
+        let masks = AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID;
         let entries = self.listdir(src_dir, masks, 0, false)?;
         for e in entries {
             let name = e
@@ -1249,17 +1246,17 @@ fn request_mask_to_attr_list(masks: &AttrMask) -> Vec<u32> {
     for id in FULL_ATTR_IDS {
         let wanted = match id {
             FATTR4_TYPE => true, // always fetch type (cheap, aids listdir)
-            FATTR4_SIZE => masks.has_size,
-            FATTR4_NAMED_ATTR => masks.has_named_attr,
-            FATTR4_FILEID => masks.has_fileid,
-            FATTR4_MODE => masks.has_mode,
-            FATTR4_NUMLINKS => masks.has_nlink,
-            FATTR4_OWNER => masks.has_uid,
-            FATTR4_OWNER_GROUP => masks.has_gid,
-            FATTR4_RAWDEV => masks.has_rdev,
-            FATTR4_SPACE_USED => masks.has_blocks,
-            FATTR4_TIME_ACCESS => masks.has_atime,
-            FATTR4_TIME_MODIFY => masks.has_mtime,
+            FATTR4_SIZE => masks.contains(AttrMask::SIZE),
+            FATTR4_NAMED_ATTR => masks.contains(AttrMask::NAMED_ATTR),
+            FATTR4_FILEID => masks.contains(AttrMask::FILEID),
+            FATTR4_MODE => masks.contains(AttrMask::MODE),
+            FATTR4_NUMLINKS => masks.contains(AttrMask::NLINK),
+            FATTR4_OWNER => masks.contains(AttrMask::UID),
+            FATTR4_OWNER_GROUP => masks.contains(AttrMask::GID),
+            FATTR4_RAWDEV => masks.contains(AttrMask::RDEV),
+            FATTR4_SPACE_USED => masks.contains(AttrMask::BLOCKS),
+            FATTR4_TIME_ACCESS => masks.contains(AttrMask::ATIME),
+            FATTR4_TIME_MODIFY => masks.contains(AttrMask::MTIME),
             _ => false,
         };
         if wanted {
@@ -1338,59 +1335,59 @@ fn s_ifmt(ftype: u32) -> u32 {
 fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
     a.ftype = v.ftype.map(VfType::from_nfs).unwrap_or(VfType::Regular);
     a.has_named_attr = v.has_named_attr.unwrap_or(false);
-    if a.masks.has_mode
+    if a.masks.contains(AttrMask::MODE)
         && let Some(mode) = v.mode
     {
         a.mode = mode | s_ifmt(a.ftype.as_nfs());
     }
-    if a.masks.has_size
+    if a.masks.contains(AttrMask::SIZE)
         && let Some(size) = v.size
     {
         a.size = size;
     }
-    if a.masks.has_nlink
+    if a.masks.contains(AttrMask::NLINK)
         && let Some(nlink) = v.nlink
     {
         a.nlink = nlink;
     }
-    if a.masks.has_fileid
+    if a.masks.contains(AttrMask::FILEID)
         && let Some(fileid) = v.fileid
     {
         a.fileid = fileid;
     }
-    if a.masks.has_uid
+    if a.masks.contains(AttrMask::UID)
         && let Some(uid) = v.uid
     {
         a.uid = uid;
     }
-    if a.masks.has_gid
+    if a.masks.contains(AttrMask::GID)
         && let Some(gid) = v.gid
     {
         a.gid = gid;
     }
-    if a.masks.has_rdev
+    if a.masks.contains(AttrMask::RDEV)
         && let Some(rdev) = v.rdev
     {
         a.rdev = rdev;
     }
-    if a.masks.has_blocks
+    if a.masks.contains(AttrMask::BLOCKS)
         && let Some(blocks) = v.blocks
     {
         a.blocks = blocks;
     }
-    if a.masks.has_mtime
+    if a.masks.contains(AttrMask::MTIME)
         && let Some((s, n)) = v.mtime
     {
         a.mtime_sec = s;
         a.mtime_nsec = n;
     }
-    if a.masks.has_atime
+    if a.masks.contains(AttrMask::ATIME)
         && let Some((s, n)) = v.atime
     {
         a.atime_sec = s;
         a.atime_nsec = n;
     }
-    if a.masks.has_ctime
+    if a.masks.contains(AttrMask::CTIME)
         && let Some((s, n)) = v.ctime
     {
         a.ctime_sec = s;

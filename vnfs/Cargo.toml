@@ -10,6 +10,7 @@ documentation = "https://docs.rs/vnfs"
 keywords = ["NFS", "vectorized"]
 
 [dependencies]
+bitflags = "2.6"
 libc = { workspace = true }
 libntirpc-sys = { workspace = true }
 nfsv41-sys = { workspace = true }

@@ -13,30 +13,28 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // writev / readv via paths.
     let payload = b"the quick brown fox jumps over the lazy dog".to_vec();
-    let mut w = VfIoVec::from_path(&f, 0, payload.len(), payload.clone());
-    w.is_creation = true;
-    fs.writev(std::slice::from_mut(&mut w)).expect("writev");
-    assert_eq!(w.length, payload.len());
+    let mut w = WriteOp::from_path(&f, 0, payload.clone());
+    w.creation = true;
+    let wr = &fs.writev(&[w]).expect("writev")[0];
+    assert_eq!(wr.written, payload.len());
 
-    let mut r = VfIoVec::from_path(&f, 0, payload.len(), Vec::new());
-    fs.readv(std::slice::from_mut(&mut r)).expect("readv");
+    let r = &fs
+        .readv(&[ReadOp::from_path(&f, 0, payload.len())])
+        .expect("readv")[0];
     assert_eq!(r.data, payload);
-    assert!(!r.is_failure);
+    assert!(!r.eof);
 
     // stat / exists / file_type.
     let st = fs.stat(&f).expect("stat");
     assert_eq!(st.size, payload.len() as u64);
     assert!(st.fileid != 0);
-    assert!(fs.exists(&f));
+    assert!(fs.exists(&f).unwrap());
     assert_eq!(fs.file_type(&f).unwrap(), VfType::Regular);
 
     // setattrs: truncate to 5 bytes, then mode.
     fs.setattrsv(&[VfAttrs {
         file: VfFile::from_path(&f),
-        masks: AttrMask {
-            has_size: true,
-            ..AttrMask::default()
-        },
+        masks: AttrMask::SIZE,
         size: 5,
         ..VfAttrs::default()
     }])
@@ -51,11 +49,12 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // open / descriptor write / fseek / descriptor read.
     let tf = fs.open(&f, libc::O_RDWR, 0).expect("open");
-    let mut w = VfIoVec::from_fd(tf.fd().unwrap(), 0, 5, b"hello".to_vec());
-    fs.writev(std::slice::from_mut(&mut w)).expect("writev fd");
-    assert_eq!(fs.fseek(&mut tf.clone(), 0, libc::SEEK_SET).unwrap(), 0);
-    let mut r = VfIoVec::from_fd(tf.fd().unwrap(), VF_OFFSET_CUR, 5, Vec::new());
-    fs.readv(std::slice::from_mut(&mut r)).expect("readv fd");
+    fs.writev(&[WriteOp::from_fd(tf.fd().unwrap(), 0, b"hello".to_vec())])
+        .expect("writev fd");
+    assert_eq!(fs.fseek(&mut tf.clone(), 0, SeekFrom::Set).unwrap(), 0);
+    let r = &fs
+        .readv(&[ReadOp::from_fd(tf.fd().unwrap(), VF_OFFSET_CUR, 5)])
+        .expect("readv fd")[0];
     assert_eq!(r.data, b"hello");
     fs.close(&tf).expect("close");
 
@@ -63,6 +62,31 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     let link = format!("{}/ln", dir);
     fs.symlink(&f, &link).expect("symlink");
     assert_eq!(fs.readlink(&link).unwrap(), f.as_bytes());
+
+    // stat follows symlinks; lstat does not. (Relative target so both the
+    // NFS and std::fs backends can resolve it.)
+    let sbase = format!("{}/lnstat", dir);
+    let rel = std::path::Path::new(&f)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    fs.symlink(&rel, &sbase).expect("symlink lnstat");
+    assert_eq!(
+        fs.stat(&sbase).unwrap().ftype,
+        VfType::Regular,
+        "stat follows"
+    );
+    assert_eq!(
+        fs.lstat(&sbase).unwrap().ftype,
+        VfType::Symlink,
+        "lstat stays"
+    );
+    assert_eq!(
+        fs.stat(&sbase).unwrap().size,
+        fs.stat(&f).unwrap().size,
+        "stat resolves to the target"
+    );
 
     // hardlink.
     let hard = format!("{}/hard", dir);
@@ -74,8 +98,8 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     let renamed = format!("{}/renamed.txt", dir);
     fs.renamev(&[(VfFile::from_path(&f), VfFile::from_path(&renamed))])
         .expect("renamev");
-    assert!(fs.exists(&renamed));
-    assert!(!fs.exists(&f));
+    assert!(fs.exists(&renamed).unwrap());
+    assert!(!fs.exists(&f).unwrap());
 
     // openv / closev.
     let more = format!("{}/more", dir);
@@ -137,12 +161,12 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     let cpdst = format!("{}/cpdst", dir);
     fs.ensure_dir(&format!("{}/inner", cpsrc), 0o755).unwrap();
     let srcfile = format!("{}/inner/data.txt", cpsrc);
-    let mut w = VfIoVec::from_path(&srcfile, 0, 3, b"xyz".to_vec());
-    w.is_creation = true;
-    fs.writev(std::slice::from_mut(&mut w)).unwrap();
+    let mut w = WriteOp::from_path(&srcfile, 0, b"xyz".to_vec());
+    w.creation = true;
+    fs.writev(&[w]).unwrap();
     fs.cp_recursive(&cpsrc, &cpdst, true, false)
         .expect("cp_recursive");
-    assert!(fs.exists(&format!("{}/inner/data.txt", cpdst)));
+    assert!(fs.exists(&format!("{}/inner/data.txt", cpdst)).unwrap());
 
     // chdir / getcwd.
     fs.chdir(&sub).expect("chdir");
@@ -150,5 +174,5 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // rm recursive removes the whole tree.
     fs.rm(&[dir.as_str()], true).expect("rm recursive");
-    assert!(!fs.exists(&dir));
+    assert!(!fs.exists(&dir).unwrap());
 }

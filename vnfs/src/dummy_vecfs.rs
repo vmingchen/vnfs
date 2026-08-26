@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt, symlink};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::vecfs::*;
 
@@ -27,6 +27,21 @@ pub struct DummyVecFs {
 }
 
 impl DummyVecFs {
+    fn getattrsv_impl(
+        &mut self,
+        attrs: &mut [VfAttrs],
+        stat: impl Fn(&Path) -> std::io::Result<std::fs::Metadata>,
+    ) -> VfRes {
+        for (i, a) in attrs.iter_mut().enumerate() {
+            let p = self.tcfile_path(&a.file).map_err(|mut e| {
+                e.index = i;
+                e
+            })?;
+            let md = stat(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            self.fill_attrs(a, &p.to_string_lossy(), &md);
+        }
+        Ok(())
+    }
     /// Create a client rooted at `root` (created if missing).
     pub fn new(root: PathBuf) -> DummyVecFs {
         std::fs::create_dir_all(&root).expect("create dummy root");
@@ -131,46 +146,46 @@ impl DummyVecFs {
             VfType::Regular
         };
         a.has_named_attr = Self::has_xattr(path);
-        if a.masks.has_mode {
+        if a.masks.contains(AttrMask::MODE) {
             a.mode = md.mode();
         }
-        if a.masks.has_size {
+        if a.masks.contains(AttrMask::SIZE) {
             a.size = md.len();
         }
-        if a.masks.has_nlink {
+        if a.masks.contains(AttrMask::NLINK) {
             a.nlink = md.nlink() as u32;
         }
-        if a.masks.has_fileid {
+        if a.masks.contains(AttrMask::FILEID) {
             a.fileid = md.ino();
         }
-        if a.masks.has_uid {
+        if a.masks.contains(AttrMask::UID) {
             a.uid = md.uid();
         }
-        if a.masks.has_gid {
+        if a.masks.contains(AttrMask::GID) {
             a.gid = md.gid();
         }
-        if a.masks.has_rdev {
+        if a.masks.contains(AttrMask::RDEV) {
             a.rdev = md.rdev();
         }
-        if a.masks.has_blocks {
+        if a.masks.contains(AttrMask::BLOCKS) {
             a.blocks = md.blocks();
         }
-        if a.masks.has_mtime {
+        if a.masks.contains(AttrMask::MTIME) {
             a.mtime_sec = md.mtime();
             a.mtime_nsec = md.mtime_nsec() as u32;
         }
-        if a.masks.has_atime {
+        if a.masks.contains(AttrMask::ATIME) {
             a.atime_sec = md.atime();
             a.atime_nsec = md.atime_nsec() as u32;
         }
-        if a.masks.has_ctime {
+        if a.masks.contains(AttrMask::CTIME) {
             a.ctime_sec = md.ctime();
             a.ctime_nsec = md.ctime_nsec() as u32;
         }
     }
 
-    fn readv_one(&mut self, iov: &mut VfIoVec) -> VfResult<usize> {
-        let (file, off, descriptor) = match &iov.file {
+    fn readv_one(&mut self, op: &ReadOp) -> VfResult<ReadResult> {
+        let (file, off, descriptor) = match &op.file {
             VfFile::Descriptor(fd) => {
                 let o = self
                     .open_files
@@ -181,46 +196,48 @@ impl DummyVecFs {
                     .metadata()
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?
                     .len();
-                let off = self.resolve_offset(&iov.file, iov.offset, len)?;
+                let off = self.resolve_offset(&op.file, op.offset, len)?;
                 let f = o
                     .file
                     .try_clone()
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 (f, off, true)
             }
-            VfFile::Path { .. } | VfFile::Current(_) => {
-                let p = self.tcfile_path(&iov.file)?;
-                let mut opts = OpenOptions::new();
-                opts.read(true);
-                if iov.is_creation {
-                    opts.create(true);
-                }
-                let f = opts
+            VfFile::Path { .. } | VfFile::Current(Some(_)) => {
+                let p = self.tcfile_path(&op.file)?;
+                let f = OpenOptions::new()
+                    .read(true)
                     .open(&p)
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 let len = f
                     .metadata()
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?
                     .len();
-                let off = self.resolve_offset(&iov.file, iov.offset, len)?;
+                let off = self.resolve_offset(&op.file, op.offset, len)?;
                 (f, off, false)
             }
-            _ => return Err(VfError::unsupported(0)),
+            VfFile::Current(None) | VfFile::Null | VfFile::Saved => {
+                return Err(VfError::unsupported(0));
+            }
         };
-        let mut buf = vec![0u8; iov.length];
+        let mut buf = vec![0u8; op.length];
         let n = file
             .read_at(&mut buf, off)
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         buf.truncate(n);
-        iov.data = buf;
         if descriptor {
-            self.advance_offset(&iov.file, off + n as u64);
+            self.advance_offset(&op.file, off + n as u64);
         }
-        Ok(n)
+        Ok(ReadResult {
+            file: op.file.clone(),
+            offset: op.offset,
+            data: buf,
+            eof: n < op.length,
+        })
     }
 
-    fn writev_one(&mut self, iov: &mut VfIoVec) -> VfResult<usize> {
-        let (file, off, descriptor) = match &iov.file {
+    fn writev_one(&mut self, op: &WriteOp) -> VfResult<WriteResult> {
+        let (file, off, descriptor) = match &op.file {
             VfFile::Descriptor(fd) => {
                 let o = self
                     .open_files
@@ -231,18 +248,18 @@ impl DummyVecFs {
                     .metadata()
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?
                     .len();
-                let off = self.resolve_offset(&iov.file, iov.offset, len)?;
+                let off = self.resolve_offset(&op.file, op.offset, len)?;
                 let f = o
                     .file
                     .try_clone()
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 (f, off, true)
             }
-            VfFile::Path { .. } | VfFile::Current(_) => {
-                let p = self.tcfile_path(&iov.file)?;
+            VfFile::Path { .. } | VfFile::Current(Some(_)) => {
+                let p = self.tcfile_path(&op.file)?;
                 let mut opts = OpenOptions::new();
                 opts.write(true);
-                if iov.is_creation {
+                if op.creation {
                     opts.create(true);
                 }
                 let f = opts
@@ -252,17 +269,24 @@ impl DummyVecFs {
                     .metadata()
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?
                     .len();
-                let off = self.resolve_offset(&iov.file, iov.offset, len)?;
+                let off = self.resolve_offset(&op.file, op.offset, len)?;
                 (f, off, false)
             }
-            _ => return Err(VfError::unsupported(0)),
+            VfFile::Current(None) | VfFile::Null | VfFile::Saved => {
+                return Err(VfError::unsupported(0));
+            }
         };
-        file.write_all_at(&iov.data, off)
+        file.write_all_at(&op.data, off)
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         if descriptor {
-            self.advance_offset(&iov.file, off + iov.data.len() as u64);
+            self.advance_offset(&op.file, off + op.data.len() as u64);
         }
-        Ok(iov.data.len())
+        Ok(WriteResult {
+            file: op.file.clone(),
+            offset: op.offset,
+            written: op.data.len(),
+            stable: true,
+        })
     }
 
     fn listdir_rec(
@@ -424,53 +448,29 @@ impl VecFs for DummyVecFs {
         format!("/{}", self.cwd.to_string_lossy())
     }
 
-    fn readv(&mut self, reads: &mut [VfIoVec]) -> VfRes {
-        for (i, iov) in reads.iter_mut().enumerate() {
-            iov.is_failure = false;
-            iov.is_eof = false;
-            let requested = iov.length;
-            match self.readv_one(iov) {
-                Ok(n) => {
-                    iov.length = n;
-                    iov.is_eof = n < requested;
-                }
-                Err(e) => {
-                    iov.is_failure = true;
-                    iov.length = 0;
-                    return Err(VfError {
-                        index: i,
-                        err_no: e.err_no,
-                    });
-                }
-            }
+    fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        let mut out = Vec::with_capacity(reads.len());
+        for (i, op) in reads.iter().enumerate() {
+            out.push(self.readv_one(op).map_err(|mut e| {
+                e.index = i;
+                e
+            })?);
         }
-        Ok(())
+        Ok(out)
     }
 
-    fn writev(&mut self, writes: &mut [VfIoVec]) -> VfRes {
-        for (i, iov) in writes.iter_mut().enumerate() {
-            iov.is_failure = false;
-            iov.is_eof = false;
-            match self.writev_one(iov) {
-                Ok(n) => {
-                    iov.length = n;
-                    iov.is_write_stable = true;
-                }
-                Err(e) => {
-                    iov.is_failure = true;
-                    iov.length = 0;
-                    return Err(VfError {
-                        index: i,
-                        err_no: e.err_no,
-                    });
-                }
-            }
+    fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+        let mut out = Vec::with_capacity(writes.len());
+        for (i, op) in writes.iter().enumerate() {
+            out.push(self.writev_one(op).map_err(|mut e| {
+                e.index = i;
+                e
+            })?);
         }
-        Ok(())
+        Ok(out)
     }
 
-    fn fseek(&mut self, tcf: &mut VfFile, offset: i64, whence: i32) -> VfResult<i64> {
-        use libc::{SEEK_CUR, SEEK_END, SEEK_SET};
+    fn fseek(&mut self, tcf: &mut VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
         if !tcf.is_descriptor() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
@@ -480,9 +480,9 @@ impl VecFs for DummyVecFs {
             .map(|o| o.cur_offset)
             .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
         let new = match whence {
-            SEEK_SET => offset,
-            SEEK_CUR => cur as i64 + offset,
-            SEEK_END => {
+            SeekFrom::Set => offset,
+            SeekFrom::Cur => cur as i64 + offset,
+            SeekFrom::End => {
                 let o = self
                     .open_files
                     .get(&tcf.fd().unwrap())
@@ -494,7 +494,6 @@ impl VecFs for DummyVecFs {
                     .len();
                 len as i64 + offset
             }
-            _ => return Err(VfError::failure(0, ERR_INVAL)),
         };
         if new < 0 {
             return Err(VfError::failure(0, ERR_INVAL));
@@ -505,15 +504,11 @@ impl VecFs for DummyVecFs {
     }
 
     fn getattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
-        for (i, a) in attrs.iter_mut().enumerate() {
-            let p = self.tcfile_path(&a.file).map_err(|mut e| {
-                e.index = i;
-                e
-            })?;
-            let md = std::fs::metadata(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-            self.fill_attrs(a, &p.to_string_lossy(), &md);
-        }
-        Ok(())
+        self.getattrsv_impl(attrs, |p| std::fs::metadata(p))
+    }
+
+    fn lgetattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
+        self.getattrsv_impl(attrs, |p| std::fs::symlink_metadata(p))
     }
 
     fn setattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
@@ -522,11 +517,11 @@ impl VecFs for DummyVecFs {
                 e.index = i;
                 e
             })?;
-            if a.masks.has_mode {
+            if a.masks.contains(AttrMask::MODE) {
                 std::fs::set_permissions(&p, std::fs::Permissions::from_mode(a.mode & 0o7777))
                     .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             }
-            if a.masks.has_size {
+            if a.masks.contains(AttrMask::SIZE) {
                 let f = OpenOptions::new()
                     .write(true)
                     .open(&p)
@@ -592,7 +587,7 @@ impl VecFs for DummyVecFs {
                 .to_string();
             let p = self.resolve(&path);
             std::fs::create_dir(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-            if a.masks.has_mode {
+            if a.masks.contains(AttrMask::MODE) {
                 let _ =
                     std::fs::set_permissions(&p, std::fs::Permissions::from_mode(a.mode & 0o7777));
             }
@@ -641,8 +636,9 @@ impl VecFs for DummyVecFs {
         Ok(())
     }
 
-    fn write_adb(&mut self, patterns: &mut [Adb]) -> VfRes {
-        for (i, p) in patterns.iter_mut().enumerate() {
+    fn write_adb(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
+        let mut counts = Vec::with_capacity(patterns.len());
+        for (i, p) in patterns.iter().enumerate() {
             let path = self.resolve(&p.path);
             let file = OpenOptions::new()
                 .write(true)
@@ -664,9 +660,9 @@ impl VecFs for DummyVecFs {
                 }
                 written += 1;
             }
-            p.adb_block_count = written;
+            counts.push(written);
         }
-        Ok(())
+        Ok(counts)
     }
 
     fn rm(&mut self, objs: &[&str], recursive: bool) -> VfRes {
@@ -686,18 +682,13 @@ impl VecFs for DummyVecFs {
         symlinks: bool,
         _use_server_side_copy: bool,
     ) -> VfRes {
-        if !self.exists(dst) {
+        if !self.exists(dst)? {
             self.ensure_dir(dst, 0o755).map_err(|mut e| {
                 e.index = 0;
                 e
             })?;
         }
-        let masks = AttrMask {
-            has_mode: true,
-            has_size: true,
-            has_fileid: true,
-            ..AttrMask::default()
-        };
+        let masks = AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID;
         let entries = self.listdir(src_dir, masks, 0, false)?;
         for e in entries {
             let name = e

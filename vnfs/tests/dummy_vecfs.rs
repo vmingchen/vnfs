@@ -37,35 +37,33 @@ fn dummy_getcwd() {
 
 #[test]
 fn dummy_write_read_roundtrip() {
-    use vnfs::{VecFs, VfIoVec};
+    use vnfs::{ReadOp, VecFs, WriteOp};
 
     let mut fs = dummy();
     fs.ensure_dir("/data", 0o755).unwrap();
     let payload = b"roundtrip content".to_vec();
-    let mut w = VfIoVec::from_path("/data/f", 0, payload.len(), payload.clone());
-    w.is_creation = true;
-    fs.writev(std::slice::from_mut(&mut w)).unwrap();
+    fs.writev(&[WriteOp::from_path("/data/f", 0, payload.clone()).with_creation()])
+        .unwrap();
 
-    let mut r = VfIoVec::from_path("/data/f", 0, payload.len(), Vec::new());
-    fs.readv(std::slice::from_mut(&mut r)).unwrap();
+    let r = &fs
+        .readv(&[ReadOp::from_path("/data/f", 0, payload.len())])
+        .unwrap()[0];
     assert_eq!(r.data, payload);
 }
 
 #[test]
 fn dummy_errors_on_missing_file() {
-    use vnfs::{VecFs, VfError, VfIoVec};
+    use vnfs::{ReadOp, VecFs, VfError};
 
     let mut fs = dummy();
     fs.ensure_dir("/data", 0o755).unwrap();
-    let mut r = VfIoVec::from_path("/data/missing", 0, 8, Vec::new());
-    let res = fs.readv(std::slice::from_mut(&mut r));
+    let res = fs.readv(&[ReadOp::from_path("/data/missing", 0, 8)]);
     match res {
         Err(VfError { index, err_no }) => {
             assert_eq!(index, 0);
-            assert!(r.is_failure);
             assert_eq!(err_no, 2, "ENOENT");
         }
-        Ok(()) => panic!("readv of missing file must fail"),
+        Ok(_) => panic!("readv of missing file must fail"),
     }
 }
 
