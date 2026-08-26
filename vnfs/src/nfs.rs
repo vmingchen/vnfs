@@ -173,19 +173,16 @@ impl NfsVecFs {
         for_write: bool,
     ) -> VfResult<(FileHandle, stateid4, bool)> {
         match &iov.file {
-            f if f.ftype == VfFileType::Descriptor => {
+            VfFile::Descriptor(fd) => {
                 let o = self
                     .open_files
-                    .get(&f.fd)
+                    .get(fd)
                     .cloned()
                     .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_BAD_STATEID))?;
                 Ok((o.fh, o.stateid, false))
             }
-            f if f.ftype == VfFileType::Path || f.ftype == VfFileType::Current => {
-                let path = match f.path.as_ref() {
-                    Some(p) => p.to_string_lossy().to_string(),
-                    None => return Err(VfError::failure(0, nfsstat4_NFS4ERR_NOENT)),
-                };
+            VfFile::Path { path, .. } | VfFile::Current(Some(path)) => {
+                let path = path.to_string_lossy().to_string();
                 let full = self.abs_path(&path);
                 let (dir, name) = split_path(&full)?;
                 let access = if for_write {
@@ -196,7 +193,9 @@ impl NfsVecFs {
                 let (fh, sid) = self.open_impl(dir, name, access, iov.is_creation, false)?;
                 Ok((fh, sid, true))
             }
-            _ => Err(VfError::unsupported(0)),
+            VfFile::Current(None) | VfFile::Null | VfFile::Saved => {
+                Err(VfError::failure(0, nfsstat4_NFS4ERR_NOENT))
+            }
         }
     }
 
@@ -216,7 +215,7 @@ impl NfsVecFs {
                     });
                 }
             };
-            let o = match self.open_files.get(&iov.file.fd).cloned() {
+            let o = match self.open_files.get(&iov.file.fd().unwrap()).cloned() {
                 Some(o) => o,
                 None => {
                     iov.is_failure = true;
@@ -263,12 +262,8 @@ impl NfsVecFs {
     /// concrete file offset; plain offsets pass through.
     fn resolve_offset(&mut self, file: &VfFile, off: u64) -> VfResult<u64> {
         if off == VF_OFFSET_CUR {
-            if file.ftype == VfFileType::Descriptor {
-                Ok(self
-                    .open_files
-                    .get(&file.fd)
-                    .map(|o| o.cur_offset)
-                    .unwrap_or(0))
+            if let Some(fd) = file.fd() {
+                Ok(self.open_files.get(&fd).map(|o| o.cur_offset).unwrap_or(0))
             } else {
                 Ok(0)
             }
@@ -282,8 +277,8 @@ impl NfsVecFs {
 
     /// Record the new read/write offset of an open (descriptor) file.
     fn advance_offset(&mut self, file: &VfFile, new_offset: u64) {
-        if file.ftype == VfFileType::Descriptor
-            && let Some(o) = self.open_files.get_mut(&file.fd)
+        if let Some(fd) = file.fd()
+            && let Some(o) = self.open_files.get_mut(&fd)
         {
             o.cur_offset = new_offset;
         }
@@ -339,7 +334,7 @@ impl NfsVecFs {
                     });
                 }
             };
-            let o = match self.open_files.get(&iov.file.fd).cloned() {
+            let o = match self.open_files.get(&iov.file.fd().unwrap()).cloned() {
                 Some(o) => o,
                 None => {
                     iov.is_failure = true;
@@ -408,20 +403,18 @@ impl NfsVecFs {
     }
 
     fn resolve_tcfile(&mut self, f: &VfFile) -> VfResult<FileHandle> {
-        match f.ftype {
-            VfFileType::Descriptor => self
+        match f {
+            VfFile::Descriptor(fd) => self
                 .open_files
-                .get(&f.fd)
+                .get(fd)
                 .map(|o| o.fh.clone())
                 .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_BAD_STATEID)),
-            VfFileType::Path | VfFileType::Current => {
-                let path = f
-                    .path
-                    .as_ref()
-                    .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_INVAL))?;
+            VfFile::Path { path, .. } | VfFile::Current(Some(path)) => {
                 self.resolve(&path.to_string_lossy())
             }
-            _ => Err(VfError::unsupported(0)),
+            VfFile::Current(None) | VfFile::Null | VfFile::Saved => {
+                Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL))
+            }
         }
     }
 
@@ -461,7 +454,7 @@ impl NfsVecFs {
                 // Attributes come back inline from READDIR for the requested ids.
                 let vals = parse_attr_list(&ids, &e.attrs).unwrap_or_default();
                 apply_attrs(&mut a, &vals);
-                let is_dir = a.ftype == nfs_ftype4_NF4DIR;
+                let is_dir = a.ftype == VfType::Directory;
                 out.push(a);
                 if recursive && is_dir {
                     self.listdir_rec(&path, masks, max_count, recursive, out)?;
@@ -476,11 +469,11 @@ impl NfsVecFs {
     }
 
     fn rm_one(&mut self, path: &str, recursive: bool) -> VfResult<()> {
-        let ft = self.file_type(path).unwrap_or(0);
-        if ft == nfs_ftype4_NF4DIR && recursive {
+        let ft = self.file_type(path).unwrap_or(VfType::Regular);
+        if ft == VfType::Directory && recursive {
             let entries = self.listdir(path, AttrMask::default(), usize::MAX, false)?;
             for e in entries {
-                let p = e.file.path.unwrap().to_string_lossy().to_string();
+                let p = e.file.path().unwrap().to_string_lossy().to_string();
                 self.rm_one(&p, true)?;
             }
         }
@@ -587,18 +580,15 @@ impl VecFs for NfsVecFs {
 
     fn open_by_path(
         &mut self,
-        dirfd: i32,
+        base: VfPathBase,
         pathname: &str,
         flags: i32,
         mode: u32,
     ) -> VfResult<VfFile> {
         use libc::{O_CREAT, O_EXCL, O_TRUNC};
-        let full = if pathname.starts_with('/') {
-            pathname.trim_start_matches('/').to_string()
-        } else if dirfd == VF_FD_CWD {
-            self.cwd.join(pathname).to_string_lossy().to_string()
-        } else {
-            return Err(VfError::unsupported(0));
+        let full = match base {
+            VfPathBase::Abs => pathname.trim_start_matches('/').to_string(),
+            VfPathBase::Cwd => self.cwd.join(pathname).to_string_lossy().to_string(),
         };
         let (dir, name) = split_path(&full)?;
         let access = Self::flags_to_access(flags);
@@ -633,12 +623,12 @@ impl VecFs for NfsVecFs {
     }
 
     fn close(&mut self, tcf: &VfFile) -> VfResult<()> {
-        if tcf.ftype != VfFileType::Descriptor {
+        if !tcf.is_descriptor() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
         let open = self
             .open_files
-            .remove(&tcf.fd)
+            .remove(&tcf.fd().unwrap())
             .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_BAD_STATEID))?;
         self.nfs
             .close(&open.fh, &open.stateid)
@@ -664,7 +654,7 @@ impl VecFs for NfsVecFs {
             iov.is_failure = false;
             iov.is_eof = false;
         }
-        if !reads.is_empty() && reads.iter().all(|i| i.file.ftype == VfFileType::Descriptor) {
+        if !reads.is_empty() && reads.iter().all(|i| i.file.is_descriptor()) {
             return self.readv_batch(reads);
         }
         for (i, iov) in reads.iter_mut().enumerate() {
@@ -689,11 +679,7 @@ impl VecFs for NfsVecFs {
             iov.is_failure = false;
             iov.is_eof = false;
         }
-        if !writes.is_empty()
-            && writes
-                .iter()
-                .all(|i| i.file.ftype == VfFileType::Descriptor)
-        {
+        if !writes.is_empty() && writes.iter().all(|i| i.file.is_descriptor()) {
             return self.writev_batch(writes);
         }
         for (i, iov) in writes.iter_mut().enumerate() {
@@ -714,19 +700,23 @@ impl VecFs for NfsVecFs {
 
     fn fseek(&mut self, tcf: &mut VfFile, offset: i64, whence: i32) -> VfResult<i64> {
         use libc::{SEEK_CUR, SEEK_END, SEEK_SET};
-        if tcf.ftype != VfFileType::Descriptor {
+        if !tcf.is_descriptor() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
         let cur = self
             .open_files
-            .get(&tcf.fd)
+            .get(&tcf.fd().unwrap())
             .map(|o| o.cur_offset)
             .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_BAD_STATEID))?;
         let new = match whence {
             SEEK_SET => offset,
             SEEK_CUR => cur as i64 + offset,
             SEEK_END => {
-                let fh = self.open_files.get(&tcf.fd).map(|o| o.fh.clone()).unwrap();
+                let fh = self
+                    .open_files
+                    .get(&tcf.fd().unwrap())
+                    .map(|o| o.fh.clone())
+                    .unwrap();
                 let size = self.file_size(&fh)?;
                 size as i64 + offset
             }
@@ -832,11 +822,11 @@ impl VecFs for NfsVecFs {
         // Frontier of (parent handle, child directory path) to list next.
         let mut frontier: Vec<(FileHandle, String)> = root_sorted
             .iter()
-            .filter(|e| e.ftype == nfs_ftype4_NF4DIR)
+            .filter(|e| e.ftype == VfType::Directory)
             .map(|e| {
                 (
                     root_fh.clone(),
-                    e.file.path.as_ref().unwrap().to_string_lossy().into_owned(),
+                    e.file.path().unwrap().to_string_lossy().into_owned(),
                 )
             })
             .collect();
@@ -890,10 +880,10 @@ impl VecFs for NfsVecFs {
                 let mut sorted = attrs.clone();
                 sort(&path, &mut sorted);
                 for a in &sorted {
-                    if a.ftype == nfs_ftype4_NF4DIR {
+                    if a.ftype == VfType::Directory {
                         next_frontier.push((
                             result.fh.clone(),
-                            a.file.path.as_ref().unwrap().to_string_lossy().into_owned(),
+                            a.file.path().unwrap().to_string_lossy().into_owned(),
                         ));
                     }
                 }
@@ -912,8 +902,8 @@ impl VecFs for NfsVecFs {
             sort(&dir, &mut sorted);
             let subs: Vec<String> = sorted
                 .iter()
-                .filter(|e| e.ftype == nfs_ftype4_NF4DIR)
-                .map(|e| e.file.path.as_ref().unwrap().to_string_lossy().into_owned())
+                .filter(|e| e.ftype == VfType::Directory)
+                .map(|e| e.file.path().unwrap().to_string_lossy().into_owned())
                 .collect();
             for s in subs.iter().rev() {
                 stack.push(s.clone());
@@ -927,12 +917,10 @@ impl VecFs for NfsVecFs {
         let mut ops = Vec::with_capacity(pairs.len());
         for (i, (src, dst)) in pairs.iter().enumerate() {
             let sp = src
-                .path
-                .as_ref()
+                .path()
                 .ok_or_else(|| VfError::failure(i, nfsstat4_NFS4ERR_INVAL))?;
             let dp = dst
-                .path
-                .as_ref()
+                .path()
                 .ok_or_else(|| VfError::failure(i, nfsstat4_NFS4ERR_INVAL))?;
             let s = sp.to_string_lossy().to_string();
             let d = dp.to_string_lossy().to_string();
@@ -964,8 +952,7 @@ impl VecFs for NfsVecFs {
         let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (i, f) in files.iter().enumerate() {
             let path = f
-                .path
-                .as_ref()
+                .path()
                 .ok_or_else(|| VfError::failure(i, nfsstat4_NFS4ERR_INVAL))?
                 .to_string_lossy()
                 .to_string();
@@ -990,8 +977,7 @@ impl VecFs for NfsVecFs {
         for (i, a) in dirs.iter().enumerate() {
             let path = a
                 .file
-                .path
-                .as_ref()
+                .path()
                 .ok_or_else(|| VfError::failure(i, nfsstat4_NFS4ERR_INVAL))?
                 .to_string_lossy()
                 .to_string();
@@ -1013,7 +999,7 @@ impl VecFs for NfsVecFs {
         let mut setattrs = Vec::new();
         for (i, a) in dirs.iter().enumerate() {
             if a.masks.has_mode {
-                let path = a.file.path.as_ref().unwrap().to_string_lossy().to_string();
+                let path = a.file.path().unwrap().to_string_lossy().to_string();
                 let fh = self
                     .resolve(&path)
                     .map_err(|e| VfError::failure(i, e.err_no))?;
@@ -1175,16 +1161,15 @@ impl VecFs for NfsVecFs {
         for e in entries {
             let name = e
                 .file
-                .path
-                .as_ref()
+                .path()
                 .and_then(|p| p.file_name())
                 .map(|f| f.to_string_lossy().into_owned())
                 .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_INVAL))?;
             let src_child = format!("{}/{}", src_dir.trim_end_matches('/'), name);
             let dst_child = format!("{}/{}", dst.trim_end_matches('/'), name);
-            if e.ftype == nfs_ftype4_NF4DIR {
+            if e.ftype == VfType::Directory {
                 self.cp_recursive(&src_child, &dst_child, symlinks, false)?;
-            } else if e.ftype == nfs_ftype4_NF4LNK && symlinks {
+            } else if e.ftype == VfType::Symlink && symlinks {
                 let target = self.readlink(&src_child).map_err(|mut e| {
                     e.index = 0;
                     e
@@ -1351,12 +1336,12 @@ fn s_ifmt(ftype: u32) -> u32 {
 /// Fill `a` from parsed values where the mask requests the attribute. `mode`
 /// is the permission bits plus the `S_IFMT` bits derived from `ftype`.
 fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
-    a.ftype = v.ftype.unwrap_or(0);
+    a.ftype = v.ftype.map(VfType::from_nfs).unwrap_or(VfType::Regular);
     a.has_named_attr = v.has_named_attr.unwrap_or(false);
     if a.masks.has_mode
         && let Some(mode) = v.mode
     {
-        a.mode = mode | s_ifmt(a.ftype);
+        a.mode = mode | s_ifmt(a.ftype.as_nfs());
     }
     if a.masks.has_size
         && let Some(size) = v.size

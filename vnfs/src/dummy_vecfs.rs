@@ -75,33 +75,25 @@ impl DummyVecFs {
 
     /// The real path a `VfFile` refers to.
     fn tcfile_path(&self, f: &VfFile) -> VfResult<PathBuf> {
-        match f.ftype {
-            VfFileType::Descriptor => {
+        match f {
+            VfFile::Descriptor(fd) => {
                 let open = self
                     .open_files
-                    .get(&f.fd)
+                    .get(fd)
                     .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
                 Ok(self.resolve(&open.path))
             }
-            VfFileType::Path | VfFileType::Current => {
-                let path = f
-                    .path
-                    .as_ref()
-                    .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+            VfFile::Path { path, .. } | VfFile::Current(Some(path)) => {
                 Ok(self.resolve(&path.to_string_lossy()))
             }
-            _ => Err(VfError::unsupported(0)),
+            VfFile::Current(None) | VfFile::Null | VfFile::Saved => Err(VfError::unsupported(0)),
         }
     }
 
     fn resolve_offset(&self, file: &VfFile, off: u64, len: u64) -> VfResult<u64> {
         if off == VF_OFFSET_CUR {
-            if file.ftype == VfFileType::Descriptor {
-                Ok(self
-                    .open_files
-                    .get(&file.fd)
-                    .map(|o| o.cur_offset)
-                    .unwrap_or(0))
+            if let Some(fd) = file.fd() {
+                Ok(self.open_files.get(&fd).map(|o| o.cur_offset).unwrap_or(0))
             } else {
                 Ok(0)
             }
@@ -113,8 +105,8 @@ impl DummyVecFs {
     }
 
     fn advance_offset(&mut self, file: &VfFile, new: u64) {
-        if file.ftype == VfFileType::Descriptor
-            && let Some(o) = self.open_files.get_mut(&file.fd)
+        if let Some(fd) = file.fd()
+            && let Some(o) = self.open_files.get_mut(&fd)
         {
             o.cur_offset = new;
         }
@@ -132,11 +124,11 @@ impl DummyVecFs {
     fn fill_attrs(&self, a: &mut VfAttrs, path: &str, md: &std::fs::Metadata) {
         let ft = md.file_type();
         a.ftype = if ft.is_dir() {
-            NF4DIR
+            VfType::Directory
         } else if ft.is_symlink() {
-            NF4LNK
+            VfType::Symlink
         } else {
-            NF4REG
+            VfType::Regular
         };
         a.has_named_attr = Self::has_xattr(path);
         if a.masks.has_mode {
@@ -179,10 +171,10 @@ impl DummyVecFs {
 
     fn readv_one(&mut self, iov: &mut VfIoVec) -> VfResult<usize> {
         let (file, off, descriptor) = match &iov.file {
-            f if f.ftype == VfFileType::Descriptor => {
+            VfFile::Descriptor(fd) => {
                 let o = self
                     .open_files
-                    .get(&f.fd)
+                    .get(fd)
                     .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
                 let len = o
                     .file
@@ -196,8 +188,8 @@ impl DummyVecFs {
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 (f, off, true)
             }
-            f if f.ftype == VfFileType::Path || f.ftype == VfFileType::Current => {
-                let p = self.tcfile_path(f)?;
+            VfFile::Path { .. } | VfFile::Current(_) => {
+                let p = self.tcfile_path(&iov.file)?;
                 let mut opts = OpenOptions::new();
                 opts.read(true);
                 if iov.is_creation {
@@ -229,10 +221,10 @@ impl DummyVecFs {
 
     fn writev_one(&mut self, iov: &mut VfIoVec) -> VfResult<usize> {
         let (file, off, descriptor) = match &iov.file {
-            f if f.ftype == VfFileType::Descriptor => {
+            VfFile::Descriptor(fd) => {
                 let o = self
                     .open_files
-                    .get(&f.fd)
+                    .get(fd)
                     .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
                 let len = o
                     .file
@@ -246,8 +238,8 @@ impl DummyVecFs {
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 (f, off, true)
             }
-            f if f.ftype == VfFileType::Path || f.ftype == VfFileType::Current => {
-                let p = self.tcfile_path(f)?;
+            VfFile::Path { .. } | VfFile::Current(_) => {
+                let p = self.tcfile_path(&iov.file)?;
                 let mut opts = OpenOptions::new();
                 opts.write(true);
                 if iov.is_creation {
@@ -301,7 +293,7 @@ impl DummyVecFs {
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
             let real = self.resolve(&path);
             self.fill_attrs(&mut a, &real.to_string_lossy(), &md);
-            let is_dir = a.ftype == NF4DIR;
+            let is_dir = a.ftype == VfType::Directory;
             out.push(a);
             if recursive && is_dir {
                 self.listdir_rec(&path, masks, max_count, recursive, out)?;
@@ -354,11 +346,11 @@ impl DummyVecFs {
     }
 
     fn rm_one(&mut self, path: &str, recursive: bool) -> VfResult<()> {
-        let ft = self.file_type(path).unwrap_or(0);
-        if ft == NF4DIR && recursive {
+        let ft = self.file_type(path).unwrap_or(VfType::Regular);
+        if ft == VfType::Directory && recursive {
             let entries = self.listdir(path, AttrMask::default(), usize::MAX, false)?;
             for e in entries {
-                let p = e.file.path.unwrap().to_string_lossy().to_string();
+                let p = e.file.path().unwrap().to_string_lossy().to_string();
                 self.rm_one(&p, true)?;
             }
         }
@@ -377,13 +369,13 @@ impl VecFs for DummyVecFs {
 
     fn open_by_path(
         &mut self,
-        dirfd: i32,
+        base: VfPathBase,
         pathname: &str,
         flags: i32,
         mode: u32,
     ) -> VfResult<VfFile> {
         use libc::O_CREAT;
-        if dirfd != VF_FD_CWD && !pathname.starts_with('/') {
+        if base != VfPathBase::Cwd && !pathname.starts_with('/') {
             return Err(VfError::unsupported(0));
         }
         let p = self.resolve(pathname);
@@ -406,11 +398,11 @@ impl VecFs for DummyVecFs {
     }
 
     fn close(&mut self, tcf: &VfFile) -> VfResult<()> {
-        if tcf.ftype != VfFileType::Descriptor {
+        if !tcf.is_descriptor() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
         self.open_files
-            .remove(&tcf.fd)
+            .remove(&tcf.fd().unwrap())
             .map(|_| ())
             .ok_or_else(|| VfError::failure(0, ERR_EBADF))
     }
@@ -479,12 +471,12 @@ impl VecFs for DummyVecFs {
 
     fn fseek(&mut self, tcf: &mut VfFile, offset: i64, whence: i32) -> VfResult<i64> {
         use libc::{SEEK_CUR, SEEK_END, SEEK_SET};
-        if tcf.ftype != VfFileType::Descriptor {
+        if !tcf.is_descriptor() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
         let cur = self
             .open_files
-            .get(&tcf.fd)
+            .get(&tcf.fd().unwrap())
             .map(|o| o.cur_offset)
             .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
         let new = match whence {
@@ -493,7 +485,7 @@ impl VecFs for DummyVecFs {
             SEEK_END => {
                 let o = self
                     .open_files
-                    .get(&tcf.fd)
+                    .get(&tcf.fd().unwrap())
                     .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
                 let len = o
                     .file
@@ -560,14 +552,8 @@ impl VecFs for DummyVecFs {
 
     fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
         for (i, (src, dst)) in pairs.iter().enumerate() {
-            let sp = src
-                .path
-                .as_ref()
-                .ok_or_else(|| VfError::failure(i, ERR_INVAL))?;
-            let dp = dst
-                .path
-                .as_ref()
-                .ok_or_else(|| VfError::failure(i, ERR_INVAL))?;
+            let sp = src.path().ok_or_else(|| VfError::failure(i, ERR_INVAL))?;
+            let dp = dst.path().ok_or_else(|| VfError::failure(i, ERR_INVAL))?;
             std::fs::rename(
                 self.resolve(&sp.to_string_lossy()),
                 self.resolve(&dp.to_string_lossy()),
@@ -580,8 +566,7 @@ impl VecFs for DummyVecFs {
     fn removev(&mut self, files: &[VfFile]) -> VfRes {
         for (i, f) in files.iter().enumerate() {
             let path = f
-                .path
-                .as_ref()
+                .path()
                 .ok_or_else(|| VfError::failure(i, ERR_INVAL))?
                 .to_string_lossy()
                 .to_string();
@@ -601,8 +586,7 @@ impl VecFs for DummyVecFs {
         for (i, a) in dirs.iter().enumerate() {
             let path = a
                 .file
-                .path
-                .as_ref()
+                .path()
                 .ok_or_else(|| VfError::failure(i, ERR_INVAL))?
                 .to_string_lossy()
                 .to_string();
@@ -718,16 +702,15 @@ impl VecFs for DummyVecFs {
         for e in entries {
             let name = e
                 .file
-                .path
-                .as_ref()
+                .path()
                 .and_then(|p| p.file_name())
                 .map(|f| f.to_string_lossy().into_owned())
                 .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
             let src_child = format!("{}/{}", src_dir.trim_end_matches('/'), name);
             let dst_child = format!("{}/{}", dst.trim_end_matches('/'), name);
-            if e.ftype == NF4DIR {
+            if e.ftype == VfType::Directory {
                 self.cp_recursive(&src_child, &dst_child, symlinks, false)?;
-            } else if e.ftype == NF4LNK && symlinks {
+            } else if e.ftype == VfType::Symlink && symlinks {
                 let target = self.readlink(&src_child).map_err(|mut e| {
                     e.index = 0;
                     e

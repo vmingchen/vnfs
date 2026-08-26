@@ -68,7 +68,7 @@ fn open_by_path_and_close() {
     let tf = c
         .open(&f, libc::O_CREAT | libc::O_RDWR, 0o644)
         .expect("open/create");
-    assert_eq!(tf.ftype, VfFileType::Descriptor);
+    assert!(tf.is_descriptor());
     c.close(&tf).expect("close");
 }
 
@@ -120,7 +120,7 @@ fn chdir_getcwd() {
     // Relative resolution now happens against the new cwd.
     c.mkdir("rel", 0o755).expect("mkdir relative");
     let st = c.stat("/").expect("stat export root via absolute path");
-    assert_eq!(st.ftype, 2, "root is a directory");
+    assert_eq!(st.ftype, VfType::Directory, "root is a directory");
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +342,7 @@ fn listdir() {
         .expect("listdir");
     let names: Vec<&str> = contents
         .iter()
-        .map(|a| a.file.path.as_ref().unwrap().to_str().unwrap())
+        .map(|a| a.file.path().unwrap().to_str().unwrap())
         .collect();
     assert!(names.iter().any(|n| n.ends_with("a.txt")));
     assert!(names.iter().any(|n| n.ends_with("sub")));
@@ -363,7 +363,7 @@ fn listdir_recursive() {
         .expect("listdir recursive");
     let joined: Vec<String> = contents
         .iter()
-        .map(|a| a.file.path.as_ref().unwrap().to_string_lossy().to_string())
+        .map(|a| a.file.path().unwrap().to_string_lossy().to_string())
         .collect();
     assert!(
         joined.iter().any(|p| p.ends_with("deep.txt")),
@@ -457,7 +457,7 @@ fn mkdirv() {
     }])
     .expect("mkdirv");
     let st = c.stat(&d).expect("stat dir");
-    assert_eq!(st.ftype, 2, "NF4DIR");
+    assert_eq!(st.ftype, VfType::Directory, "NF4DIR");
     assert_eq!(st.mode & 0o777, 0o750);
 }
 
@@ -623,19 +623,19 @@ fn fseek_set_cur_end() {
         .expect("open");
 
     let payload = b"0123456789".to_vec();
-    let mut w = VfIoVec::from_fd(tf.fd, 0, payload.len(), payload.clone());
+    let mut w = VfIoVec::from_fd(tf.fd().unwrap(), 0, payload.len(), payload.clone());
     c.writev(std::slice::from_mut(&mut w)).unwrap();
     assert_eq!(c.fseek(&mut tf.clone(), 0, SEEK_END).unwrap(), 10);
 
     // SEEK_SET then read via VF_OFFSET_CUR.
     assert_eq!(c.fseek(&mut tf.clone(), 4, SEEK_SET).unwrap(), 4);
-    let mut r = VfIoVec::from_fd(tf.fd, VF_OFFSET_CUR, 6, Vec::new());
+    let mut r = VfIoVec::from_fd(tf.fd().unwrap(), VF_OFFSET_CUR, 6, Vec::new());
     c.readv(std::slice::from_mut(&mut r)).unwrap();
     assert_eq!(r.data, b"456789", "read at current offset after fseek");
 
     // SEEK_CUR advances from the tracked offset (4 + 6 = 10).
     assert_eq!(c.fseek(&mut tf.clone(), -4, SEEK_CUR).unwrap(), 6);
-    let mut r = VfIoVec::from_fd(tf.fd, VF_OFFSET_CUR, 4, Vec::new());
+    let mut r = VfIoVec::from_fd(tf.fd().unwrap(), VF_OFFSET_CUR, 4, Vec::new());
     c.readv(std::slice::from_mut(&mut r)).unwrap();
     assert_eq!(r.data, b"6789");
 
@@ -738,7 +738,7 @@ fn listdirv_callback() {
     let mut seen: Vec<String> = Vec::new();
     let mut cb = |e: &VfAttrs, d: &str| {
         assert_eq!(d, dir);
-        seen.push(e.file.path.clone().unwrap().to_string_lossy().into_owned());
+        seen.push(e.file.path().unwrap().to_string_lossy().into_owned());
         true
     };
     c.listdirv(&[dir.as_str()], AttrMask::default(), 0, false, &mut cb)
@@ -808,7 +808,14 @@ fn batched_readv_writev_many_files() {
 
     let mut writes: Vec<VfIoVec> = tfs
         .iter()
-        .map(|tf| VfIoVec::from_fd(tf.fd, 0, 3, vec![b'a' + (tf.fd - 1) as u8; 3]))
+        .map(|tf| {
+            VfIoVec::from_fd(
+                tf.fd().unwrap(),
+                0,
+                3,
+                vec![b'a' + (tf.fd().unwrap() - 1) as u8; 3],
+            )
+        })
         .collect();
     c.writev(&mut writes).expect("batched writev");
     for (i, w) in writes.iter().enumerate() {
@@ -817,7 +824,7 @@ fn batched_readv_writev_many_files() {
 
     let mut reads: Vec<VfIoVec> = tfs
         .iter()
-        .map(|tf| VfIoVec::from_fd(tf.fd, 0, 3, Vec::new()))
+        .map(|tf| VfIoVec::from_fd(tf.fd().unwrap(), 0, 3, Vec::new()))
         .collect();
     c.readv(&mut reads).expect("batched readv");
     for (i, r) in reads.iter().enumerate() {
@@ -871,7 +878,14 @@ fn batch_exceeds_compound_op_limit() {
     // Batched writev across all 10 open files.
     let mut writes: Vec<VfIoVec> = files
         .iter()
-        .map(|tf| VfIoVec::from_fd(tf.fd, 0, 2, vec![b'a' + (tf.fd - 1) as u8; 2]))
+        .map(|tf| {
+            VfIoVec::from_fd(
+                tf.fd().unwrap(),
+                0,
+                2,
+                vec![b'a' + (tf.fd().unwrap() - 1) as u8; 2],
+            )
+        })
         .collect();
     c.writev(&mut writes).expect("batched writev (10 files)");
 
@@ -898,7 +912,7 @@ fn batch_exceeds_compound_op_limit() {
     // Batched readv back.
     let mut reads: Vec<VfIoVec> = files
         .iter()
-        .map(|tf| VfIoVec::from_fd(tf.fd, 0, 2, Vec::new()))
+        .map(|tf| VfIoVec::from_fd(tf.fd().unwrap(), 0, 2, Vec::new()))
         .collect();
     c.readv(&mut reads).expect("batched readv (10 files)");
     for (i, r) in reads.iter().enumerate() {

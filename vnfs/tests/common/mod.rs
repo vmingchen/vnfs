@@ -28,7 +28,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     assert_eq!(st.size, payload.len() as u64);
     assert!(st.fileid != 0);
     assert!(fs.exists(&f));
-    assert_eq!(fs.file_type(&f).unwrap(), NF4REG);
+    assert_eq!(fs.file_type(&f).unwrap(), VfType::Regular);
 
     // setattrs: truncate to 5 bytes, then mode.
     fs.setattrsv(&[VfAttrs {
@@ -46,15 +46,15 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // mkdir.
     let sub = format!("{}/sub", dir);
     fs.mkdir(&sub, 0o750).expect("mkdir");
-    assert_eq!(fs.stat(&sub).unwrap().ftype, NF4DIR);
+    assert_eq!(fs.stat(&sub).unwrap().ftype, VfType::Directory);
     assert_eq!(fs.stat(&sub).unwrap().mode & 0o777, 0o750);
 
     // open / descriptor write / fseek / descriptor read.
     let tf = fs.open(&f, libc::O_RDWR, 0).expect("open");
-    let mut w = VfIoVec::from_fd(tf.fd, 0, 5, b"hello".to_vec());
+    let mut w = VfIoVec::from_fd(tf.fd().unwrap(), 0, 5, b"hello".to_vec());
     fs.writev(std::slice::from_mut(&mut w)).expect("writev fd");
     assert_eq!(fs.fseek(&mut tf.clone(), 0, libc::SEEK_SET).unwrap(), 0);
-    let mut r = VfIoVec::from_fd(tf.fd, VF_OFFSET_CUR, 5, Vec::new());
+    let mut r = VfIoVec::from_fd(tf.fd().unwrap(), VF_OFFSET_CUR, 5, Vec::new());
     fs.readv(std::slice::from_mut(&mut r)).expect("readv fd");
     assert_eq!(r.data, b"hello");
     fs.close(&tf).expect("close");
@@ -98,12 +98,12 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     assert!(
         entries
             .iter()
-            .any(|e| e.file.path.as_ref().unwrap().ends_with("renamed.txt"))
+            .any(|e| e.file.path().unwrap().ends_with("renamed.txt"))
     );
     assert!(
         entries
             .iter()
-            .any(|e| e.file.path.as_ref().unwrap().ends_with("sub"))
+            .any(|e| e.file.path().unwrap().ends_with("sub"))
     );
 
     // listdirv callback.

@@ -14,10 +14,6 @@ use crate::error::RpcError;
 // Constants (mirroring tc_api.h)
 // ---------------------------------------------------------------------------
 
-pub const VF_FD_NULL: i32 = -1;
-pub const VF_FD_CWD: i32 = -2;
-pub const VF_FD_ABS: i32 = -3;
-
 pub const VF_OFFSET_END: u64 = u64::MAX;
 pub const VF_OFFSET_CUR: u64 = u64::MAX - 1;
 
@@ -35,10 +31,14 @@ pub const ERR_NOTDIR: u32 = 20;
 pub const ERR_ISDIR: u32 = 21;
 pub const ERR_INVAL: u32 = 22;
 
-/// NFSv4 file type codes used by [`VfAttrs::ftype`] and recursion logic.
+/// NFSv4 wire type codes (NF4*), used to decode/encode [`VfType`].
 pub const NF4REG: u32 = 1;
 pub const NF4DIR: u32 = 2;
+pub const NF4BLK: u32 = 3;
+pub const NF4CHR: u32 = 4;
 pub const NF4LNK: u32 = 5;
+pub const NF4SOCK: u32 = 6;
+pub const NF4FIFO: u32 = 7;
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -114,76 +114,126 @@ pub(crate) fn join_path(dir: &str, name: &str) -> String {
 // File references
 // ---------------------------------------------------------------------------
 
+/// The base a path is resolved against, replacing the C `VF_FD_CWD` /
+/// `VF_FD_ABS` sentinel descriptors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VfFileType {
-    Null,
-    Descriptor,
-    Path,
-    Handle,
-    Current,
-    Saved,
+pub enum VfPathBase {
+    /// Relative to the client's current working directory.
+    Cwd,
+    /// Absolute.
+    Abs,
 }
 
-/// A reference to a file, mirroring the C `tc_file` struct. Open state is
-/// tracked by the backend (keyed by the descriptor), so this is just the
-/// descriptor / path / kind.
-#[derive(Debug, Clone)]
-pub struct VfFile {
-    pub ftype: VfFileType,
-    /// For `Path`: `VF_FD_CWD` / `VF_FD_ABS` (or an open fd for fd-relative
-    /// paths). For `Descriptor`: the backend-assigned file descriptor.
-    pub fd: i32,
-    /// The path for `Path`/`Current` variants.
-    pub path: Option<PathBuf>,
+/// A reference to a file: an open descriptor, a path, or a special
+/// pseudo-file. This is the Rust-native form of the C `tc_file` tagged
+/// struct (`type` + `fd` + `path`), where the variant *is* the tag.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum VfFile {
+    /// No file.
+    #[default]
+    Null,
+    /// An open file descriptor (backend-assigned).
+    Descriptor(i32),
+    /// A path, absolute or relative to the client's cwd.
+    Path { base: VfPathBase, path: PathBuf },
+    /// The client's current working directory, optionally with a relative
+    /// path below it.
+    Current(Option<PathBuf>),
+    /// The saved (previous) directory.
+    Saved,
 }
 
 impl VfFile {
     pub fn from_path(path: &str) -> VfFile {
-        let fd = if path.starts_with('/') {
-            VF_FD_ABS
+        let base = if path.starts_with('/') {
+            VfPathBase::Abs
         } else {
-            VF_FD_CWD
+            VfPathBase::Cwd
         };
-        VfFile {
-            ftype: VfFileType::Path,
-            fd,
-            path: Some(PathBuf::from(path)),
+        VfFile::Path {
+            base,
+            path: PathBuf::from(path),
         }
     }
 
     pub fn from_fd(fd: i32) -> VfFile {
-        VfFile {
-            ftype: VfFileType::Descriptor,
-            fd,
-            path: None,
-        }
+        VfFile::Descriptor(fd)
     }
 
     /// VF_FILE_CURRENT, with an optional path relative to the client's
     /// current working directory.
     pub fn current(relpath: Option<&str>) -> VfFile {
-        VfFile {
-            ftype: VfFileType::Current,
-            fd: -1,
-            path: relpath.map(PathBuf::from),
-        }
+        VfFile::Current(relpath.map(PathBuf::from))
     }
 
     pub fn saved() -> VfFile {
-        VfFile {
-            ftype: VfFileType::Saved,
-            fd: -1,
-            path: None,
+        VfFile::Saved
+    }
+
+    /// Whether this references an open descriptor.
+    pub fn is_descriptor(&self) -> bool {
+        matches!(self, VfFile::Descriptor(_))
+    }
+
+    /// The open descriptor, if this is a `Descriptor`.
+    pub fn fd(&self) -> Option<i32> {
+        match self {
+            VfFile::Descriptor(fd) => Some(*fd),
+            _ => None,
+        }
+    }
+
+    /// The path, for `Path` and `Current(Some(..))`.
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            VfFile::Path { path, .. } => Some(path),
+            VfFile::Current(Some(p)) => Some(p),
+            _ => None,
         }
     }
 }
 
-impl Default for VfFile {
-    fn default() -> VfFile {
-        VfFile {
-            ftype: VfFileType::Null,
-            fd: VF_FD_NULL,
-            path: None,
+/// The NFSv4 object type, replacing the raw `NF4*` wire codes in
+/// [`VfAttrs::ftype`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VfType {
+    #[default]
+    Regular,
+    Directory,
+    Symlink,
+    BlockDevice,
+    CharDevice,
+    Fifo,
+    Socket,
+    /// Any other (or unknown) NFSv4 type code.
+    Other(u32),
+}
+
+impl VfType {
+    pub fn from_nfs(code: u32) -> VfType {
+        match code {
+            NF4REG => VfType::Regular,
+            NF4DIR => VfType::Directory,
+            NF4LNK => VfType::Symlink,
+            NF4BLK => VfType::BlockDevice,
+            NF4CHR => VfType::CharDevice,
+            NF4FIFO => VfType::Fifo,
+            NF4SOCK => VfType::Socket,
+            other => VfType::Other(other),
+        }
+    }
+
+    /// The NFSv4 wire type code.
+    pub fn as_nfs(&self) -> u32 {
+        match self {
+            VfType::Regular => NF4REG,
+            VfType::Directory => NF4DIR,
+            VfType::Symlink => NF4LNK,
+            VfType::BlockDevice => NF4BLK,
+            VfType::CharDevice => NF4CHR,
+            VfType::Fifo => NF4FIFO,
+            VfType::Socket => NF4SOCK,
+            VfType::Other(code) => *code,
         }
     }
 }
@@ -362,7 +412,7 @@ pub struct WalkEntry {
 pub struct VfAttrs {
     pub file: VfFile,
     pub masks: AttrMask,
-    pub ftype: u32,
+    pub ftype: VfType,
     pub mode: u32,
     pub size: u64,
     pub nlink: u32,
@@ -398,12 +448,12 @@ pub trait VecFs {
     /// client's current working directory if it is relative).
     fn abs_path(&self, path: &str) -> String;
 
-    /// Open a file by path, similar to `tc_open_by_path(2)`. `dirfd` may be
-    /// `VF_FD_CWD` or `VF_FD_ABS`. When `O_CREAT` is set, `mode` is applied
-    /// to the new file.
+    /// Open a file by path, similar to `tc_open_by_path(2)`. `base` is
+    /// `VfPathBase::Cwd` or `VfPathBase::Abs`. When `O_CREAT` is set, `mode`
+    /// is applied to the new file.
     fn open_by_path(
         &mut self,
-        dirfd: i32,
+        base: VfPathBase,
         pathname: &str,
         flags: i32,
         mode: u32,
@@ -467,13 +517,8 @@ pub trait VecFs {
             sort(dir, &mut entries);
             let subdirs: Vec<String> = entries
                 .iter()
-                .filter(|e| e.ftype == NF4DIR)
-                .filter_map(|e| {
-                    e.file
-                        .path
-                        .as_ref()
-                        .map(|p| p.to_string_lossy().into_owned())
-                })
+                .filter(|e| e.ftype == VfType::Directory)
+                .filter_map(|e| e.file.path().map(|p| p.to_string_lossy().into_owned()))
                 .collect();
             out.push(WalkEntry {
                 path: dir.to_string(),
@@ -529,7 +574,7 @@ pub trait VecFs {
 
     /// Open a file by path, `tc_open()`.
     fn open(&mut self, pathname: &str, flags: i32, mode: u32) -> VfResult<VfFile> {
-        self.open_by_path(VF_FD_CWD, pathname, flags, mode)
+        self.open_by_path(VfPathBase::Cwd, pathname, flags, mode)
     }
 
     /// Open several files at once, each with its own flags and mode,
@@ -621,8 +666,8 @@ pub trait VecFs {
         self.lstat(path).is_ok()
     }
 
-    /// Return the file type of `path` (a `NF4*` value).
-    fn file_type(&mut self, path: &str) -> VfResult<u32> {
+    /// Return the file type of `path`.
+    fn file_type(&mut self, path: &str) -> VfResult<VfType> {
         Ok(self.stat(path)?.ftype)
     }
 
