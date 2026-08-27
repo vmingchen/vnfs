@@ -33,10 +33,7 @@ impl DummyVecFs {
         stat: impl Fn(&Path) -> std::io::Result<std::fs::Metadata>,
     ) -> VfRes {
         for (i, a) in attrs.iter_mut().enumerate() {
-            let p = self.tcfile_path(&a.file).map_err(|mut e| {
-                e.index = i;
-                e
-            })?;
+            let p = self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?;
             let md = stat(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             self.fill_attrs(a, &p.to_string_lossy(), &md);
         }
@@ -98,24 +95,22 @@ impl DummyVecFs {
                     .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
                 Ok(self.resolve(&open.path))
             }
-            VfFile::Path { path, .. } | VfFile::Current(Some(path)) => {
-                Ok(self.resolve(&path.to_string_lossy()))
+            VfFile::Path { .. } | VfFile::Current(_) => {
+                let path = self.vf_path(f)?;
+                Ok(self.root.join(path))
             }
-            VfFile::Current(None) | VfFile::Null | VfFile::Saved => Err(VfError::unsupported(0)),
+            VfFile::Null | VfFile::Saved => Err(VfError::unsupported(0)),
         }
     }
 
-    fn resolve_offset(&self, file: &VfFile, off: u64, len: u64) -> VfResult<u64> {
-        if off == VF_OFFSET_CUR {
-            if let Some(fd) = file.fd() {
-                Ok(self.open_files.get(&fd).map(|o| o.cur_offset).unwrap_or(0))
-            } else {
-                Ok(0)
-            }
-        } else if off == VF_OFFSET_END {
-            Ok(len)
-        } else {
-            Ok(off)
+    fn resolve_offset(&self, file: &VfFile, off: VfOffset, len: u64) -> VfResult<u64> {
+        match off {
+            VfOffset::At(offset) => Ok(offset),
+            VfOffset::Cur => match file.fd() {
+                Some(fd) => Ok(self.open_files.get(&fd).map(|o| o.cur_offset).unwrap_or(0)),
+                None => Err(VfError::failure(0, ERR_INVAL)),
+            },
+            VfOffset::End => Ok(len),
         }
     }
 
@@ -146,42 +141,75 @@ impl DummyVecFs {
             VfType::Regular
         };
         a.has_named_attr = Self::has_xattr(path);
+        a.returned = AttrMask::empty();
         if a.masks.contains(AttrMask::MODE) {
             a.mode = md.mode();
+            a.returned.insert(AttrMask::MODE);
         }
         if a.masks.contains(AttrMask::SIZE) {
             a.size = md.len();
+            a.returned.insert(AttrMask::SIZE);
         }
         if a.masks.contains(AttrMask::NLINK) {
             a.nlink = md.nlink() as u32;
+            a.returned.insert(AttrMask::NLINK);
         }
         if a.masks.contains(AttrMask::FILEID) {
             a.fileid = md.ino();
+            a.returned.insert(AttrMask::FILEID);
         }
         if a.masks.contains(AttrMask::UID) {
             a.uid = md.uid();
+            a.returned.insert(AttrMask::UID);
         }
         if a.masks.contains(AttrMask::GID) {
             a.gid = md.gid();
+            a.returned.insert(AttrMask::GID);
         }
         if a.masks.contains(AttrMask::RDEV) {
             a.rdev = md.rdev();
+            a.returned.insert(AttrMask::RDEV);
         }
         if a.masks.contains(AttrMask::BLOCKS) {
             a.blocks = md.blocks();
+            a.returned.insert(AttrMask::BLOCKS);
         }
         if a.masks.contains(AttrMask::MTIME) {
             a.mtime_sec = md.mtime();
             a.mtime_nsec = md.mtime_nsec() as u32;
+            a.returned.insert(AttrMask::MTIME);
         }
         if a.masks.contains(AttrMask::ATIME) {
             a.atime_sec = md.atime();
             a.atime_nsec = md.atime_nsec() as u32;
+            a.returned.insert(AttrMask::ATIME);
         }
         if a.masks.contains(AttrMask::CTIME) {
             a.ctime_sec = md.ctime();
             a.ctime_nsec = md.ctime_nsec() as u32;
+            a.returned.insert(AttrMask::CTIME);
         }
+        if a.masks.contains(AttrMask::NAMED_ATTR) {
+            a.has_named_attr = Self::has_xattr(path);
+            a.returned.insert(AttrMask::NAMED_ATTR);
+        }
+    }
+
+    fn setattr_one(&mut self, a: &VfAttrs, i: usize) -> VfResult<()> {
+        let p = self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?;
+        if a.masks.contains(AttrMask::MODE) {
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(a.mode & 0o7777))
+                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+        }
+        if a.masks.contains(AttrMask::SIZE) {
+            let f = OpenOptions::new()
+                .write(true)
+                .open(&p)
+                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            f.set_len(a.size)
+                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+        }
+        Ok(())
     }
 
     fn readv_one(&mut self, op: &ReadOp) -> VfResult<ReadResult> {
@@ -203,7 +231,7 @@ impl DummyVecFs {
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 (f, off, true)
             }
-            VfFile::Path { .. } | VfFile::Current(Some(_)) => {
+            VfFile::Path { .. } | VfFile::Current(_) => {
                 let p = self.tcfile_path(&op.file)?;
                 let f = OpenOptions::new()
                     .read(true)
@@ -216,7 +244,7 @@ impl DummyVecFs {
                 let off = self.resolve_offset(&op.file, op.offset, len)?;
                 (f, off, false)
             }
-            VfFile::Current(None) | VfFile::Null | VfFile::Saved => {
+            VfFile::Null | VfFile::Saved => {
                 return Err(VfError::unsupported(0));
             }
         };
@@ -230,7 +258,7 @@ impl DummyVecFs {
         }
         Ok(ReadResult {
             file: op.file.clone(),
-            offset: op.offset,
+            offset: off,
             data: buf,
             eof: n < op.length,
         })
@@ -255,7 +283,7 @@ impl DummyVecFs {
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 (f, off, true)
             }
-            VfFile::Path { .. } | VfFile::Current(Some(_)) => {
+            VfFile::Path { .. } | VfFile::Current(_) => {
                 let p = self.tcfile_path(&op.file)?;
                 let mut opts = OpenOptions::new();
                 opts.write(true);
@@ -272,7 +300,7 @@ impl DummyVecFs {
                 let off = self.resolve_offset(&op.file, op.offset, len)?;
                 (f, off, false)
             }
-            VfFile::Current(None) | VfFile::Null | VfFile::Saved => {
+            VfFile::Null | VfFile::Saved => {
                 return Err(VfError::unsupported(0));
             }
         };
@@ -283,7 +311,7 @@ impl DummyVecFs {
         }
         Ok(WriteResult {
             file: op.file.clone(),
-            offset: op.offset,
+            offset: off,
             written: op.data.len(),
             stable: true,
         })
@@ -305,6 +333,9 @@ impl DummyVecFs {
         let rd = std::fs::read_dir(&p).map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         for entry in rd {
             let entry = entry.map_err(|e| VfError::failure(0, Self::errno(&e)))?;
+            if reached_limit(out) {
+                break;
+            }
             let name = entry.file_name().to_string_lossy().into_owned();
             let path = join_path(dir.trim_matches('/'), &name);
             let mut a = VfAttrs {
@@ -451,10 +482,7 @@ impl VecFs for DummyVecFs {
     fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         let mut out = Vec::with_capacity(reads.len());
         for (i, op) in reads.iter().enumerate() {
-            out.push(self.readv_one(op).map_err(|mut e| {
-                e.index = i;
-                e
-            })?);
+            out.push(self.readv_one(op).map_err(|e| e.with_index(i))?);
         }
         Ok(out)
     }
@@ -462,15 +490,12 @@ impl VecFs for DummyVecFs {
     fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
         let mut out = Vec::with_capacity(writes.len());
         for (i, op) in writes.iter().enumerate() {
-            out.push(self.writev_one(op).map_err(|mut e| {
-                e.index = i;
-                e
-            })?);
+            out.push(self.writev_one(op).map_err(|e| e.with_index(i))?);
         }
         Ok(out)
     }
 
-    fn fseek(&mut self, tcf: &mut VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
+    fn fseek(&mut self, tcf: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
         if !tcf.is_descriptor() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
@@ -512,23 +537,30 @@ impl VecFs for DummyVecFs {
     }
 
     fn setattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
+        const SETTABLE: AttrMask = AttrMask::MODE.union(AttrMask::SIZE);
         for (i, a) in attrs.iter().enumerate() {
-            let p = self.tcfile_path(&a.file).map_err(|mut e| {
-                e.index = i;
-                e
-            })?;
-            if a.masks.contains(AttrMask::MODE) {
-                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(a.mode & 0o7777))
-                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            if !a.masks.difference(SETTABLE).is_empty() {
+                return Err(VfError::unsupported(i));
             }
-            if a.masks.contains(AttrMask::SIZE) {
-                let f = OpenOptions::new()
-                    .write(true)
-                    .open(&p)
-                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-                f.set_len(a.size)
-                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            self.setattr_one(a, i)?;
+        }
+        Ok(())
+    }
+
+    fn lsetattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
+        const SETTABLE: AttrMask = AttrMask::MODE.union(AttrMask::SIZE);
+        for (i, a) in attrs.iter().enumerate() {
+            if !a.masks.difference(SETTABLE).is_empty() {
+                return Err(VfError::unsupported(i));
             }
+            let p = self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?;
+            let md =
+                std::fs::symlink_metadata(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            if md.file_type().is_symlink() {
+                // No portable lchmod/ltruncate: refuse rather than follow.
+                return Err(VfError::unsupported(i));
+            }
+            self.setattr_one(a, i)?;
         }
         Ok(())
     }
@@ -547,25 +579,19 @@ impl VecFs for DummyVecFs {
 
     fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
         for (i, (src, dst)) in pairs.iter().enumerate() {
-            let sp = src.path().ok_or_else(|| VfError::failure(i, ERR_INVAL))?;
-            let dp = dst.path().ok_or_else(|| VfError::failure(i, ERR_INVAL))?;
-            std::fs::rename(
-                self.resolve(&sp.to_string_lossy()),
-                self.resolve(&dp.to_string_lossy()),
-            )
-            .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            let sp = self.vf_path(src).map_err(|e| e.with_index(i))?;
+            let dp = self.vf_path(dst).map_err(|e| e.with_index(i))?;
+            std::fs::rename(self.root.join(sp), self.root.join(dp))
+                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
         }
         Ok(())
     }
 
     fn removev(&mut self, files: &[VfFile]) -> VfRes {
         for (i, f) in files.iter().enumerate() {
-            let path = f
-                .path()
-                .ok_or_else(|| VfError::failure(i, ERR_INVAL))?
-                .to_string_lossy()
-                .to_string();
-            let p = self.resolve(&path);
+            let p = self
+                .root
+                .join(self.vf_path(f).map_err(|e| e.with_index(i))?);
             let md =
                 std::fs::symlink_metadata(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             if md.is_dir() && !md.file_type().is_symlink() {
@@ -579,13 +605,9 @@ impl VecFs for DummyVecFs {
 
     fn mkdirv(&mut self, dirs: &[VfAttrs]) -> VfRes {
         for (i, a) in dirs.iter().enumerate() {
-            let path = a
-                .file
-                .path()
-                .ok_or_else(|| VfError::failure(i, ERR_INVAL))?
-                .to_string_lossy()
-                .to_string();
-            let p = self.resolve(&path);
+            let p = self
+                .root
+                .join(self.vf_path(&a.file).map_err(|e| e.with_index(i))?);
             std::fs::create_dir(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             if a.masks.contains(AttrMask::MODE) {
                 let _ =
@@ -628,10 +650,24 @@ impl VecFs for DummyVecFs {
 
     fn dupv(&mut self, pairs: &[ExtentPair]) -> VfRes {
         for (i, p) in pairs.iter().enumerate() {
-            self.copy_extent(p).map_err(|mut e| {
-                e.index = i;
-                e
-            })?;
+            self.copy_extent(p).map_err(|e| e.with_index(i))?;
+        }
+        Ok(())
+    }
+
+    fn lcopyv(&mut self, pairs: &[ExtentPair]) -> VfRes {
+        for (i, p) in pairs.iter().enumerate() {
+            let sp = self.resolve(&p.src_path);
+            let md =
+                std::fs::symlink_metadata(&sp).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            if md.file_type().is_symlink() {
+                let target =
+                    std::fs::read_link(&sp).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+                symlink(&target, self.resolve(&p.dst_path))
+                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            } else {
+                self.copy_extent(p).map_err(|e| e.with_index(i))?;
+            }
         }
         Ok(())
     }
@@ -667,10 +703,7 @@ impl VecFs for DummyVecFs {
 
     fn rm(&mut self, objs: &[&str], recursive: bool) -> VfRes {
         for (i, o) in objs.iter().enumerate() {
-            self.rm_one(o, recursive).map_err(|mut e| {
-                e.index = i;
-                e
-            })?;
+            self.rm_one(o, recursive).map_err(|e| e.with_index(i))?;
         }
         Ok(())
     }
@@ -683,10 +716,7 @@ impl VecFs for DummyVecFs {
         _use_server_side_copy: bool,
     ) -> VfRes {
         if !self.exists(dst)? {
-            self.ensure_dir(dst, 0o755).map_err(|mut e| {
-                e.index = 0;
-                e
-            })?;
+            self.ensure_dir(dst, 0o755).map_err(|e| e.with_index(0))?;
         }
         let masks = AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID;
         let entries = self.listdir(src_dir, masks, 0, false)?;
@@ -702,21 +732,13 @@ impl VecFs for DummyVecFs {
             if e.ftype == VfType::Directory {
                 self.cp_recursive(&src_child, &dst_child, symlinks, false)?;
             } else if e.ftype == VfType::Symlink && symlinks {
-                let target = self.readlink(&src_child).map_err(|mut e| {
-                    e.index = 0;
-                    e
-                })?;
+                let target = self.readlink(&src_child).map_err(|e| e.with_index(0))?;
                 self.symlink(&String::from_utf8_lossy(&target), &dst_child)
-                    .map_err(|mut e| {
-                        e.index = 0;
-                        e
-                    })?;
+                    .map_err(|e| e.with_index(0))?;
             } else {
                 let pair = ExtentPair::new(&src_child, 0, &dst_child, 0, u64::MAX);
-                self.dupv(std::slice::from_ref(&pair)).map_err(|mut e| {
-                    e.index = 0;
-                    e
-                })?;
+                self.dupv(std::slice::from_ref(&pair))
+                    .map_err(|e| e.with_index(0))?;
             }
         }
         Ok(())

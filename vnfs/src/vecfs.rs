@@ -5,6 +5,15 @@
 //! trait so any filesystem can implement it: the NFSv4.1 client
 //! ([`crate::nfs::NfsVecFs`]) and a `std::fs`-backed dummy
 //! ([`crate::dummy_vecfs::DummyVecFs`]). Vector operations take Rust slices.
+//!
+//! # Path and name representation
+//!
+//! Paths are root-relative strings: an absolute path starts with `/` and is
+//! resolved against the filesystem root (for NFS, the export root), while a
+//! relative path is resolved against the client's current working directory
+//! (see [`VecFs::abs_path`] and [`VecFs::vf_path`]). Component names are
+//! UTF-8 `String`s/`PathBuf`s; NFS component names that are not valid UTF-8
+//! cannot be represented through this API.
 
 use std::path::{Path, PathBuf};
 
@@ -13,9 +22,6 @@ use crate::error::RpcError;
 // ---------------------------------------------------------------------------
 // Constants (mirroring tc_api.h)
 // ---------------------------------------------------------------------------
-
-pub const VF_OFFSET_END: u64 = u64::MAX;
-pub const VF_OFFSET_CUR: u64 = u64::MAX - 1;
 
 /// Errors that have no filesystem status (transport / client side).
 pub const VF_ERR_RPC: u32 = 0xFFFF_FFFF;
@@ -44,37 +50,117 @@ pub const NF4FIFO: u32 = 7;
 // Result types
 // ---------------------------------------------------------------------------
 
-/// Index of the first failed operation plus its error number, mirroring the
-/// C `tc_res` struct.
+/// The failure of one operation in a vectorized call.
+///
+/// Either a filesystem status failure attributable to a specific operation
+/// index, or a transport / client-side failure (where the index is
+/// best-effort: backends report 0 when the failure cannot be attributed).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VfError {
-    pub index: usize,
-    pub err_no: u32,
+#[non_exhaustive]
+pub enum VfError {
+    /// A filesystem status failure; `err_no` is errno-style or an NFS4ERR
+    /// code, mirroring the C `tc_res` struct.
+    Op { index: usize, err_no: u32 },
+    /// A transport / client-side failure with a human-readable message; there
+    /// is no filesystem status ([`err_no`](VfError::err_no) reports
+    /// [`VF_ERR_RPC`]).
+    Transport { index: usize, message: String },
 }
 
 impl VfError {
     pub fn failure(index: usize, err_no: u32) -> VfError {
-        VfError { index, err_no }
+        VfError::Op { index, err_no }
     }
 
-    /// Convert a low-level [`RpcError`] (which already carries the failing op
-    /// index and NFS status) into a `tc` error. `index` is the caller's
-    /// operation index, which may differ from the compound-internal op index.
-    pub fn from_rpc(index: usize, e: RpcError) -> VfError {
-        VfError {
+    /// A transport / client-side failure. `index` is best-effort (0 when the
+    /// failure cannot be attributed to a specific operation).
+    pub fn transport(index: usize, message: impl Into<String>) -> VfError {
+        VfError::Transport {
             index,
-            err_no: e.status,
+            message: message.into(),
         }
     }
 
     pub fn unsupported(index: usize) -> VfError {
         VfError::failure(index, VF_ERR_UNSUPPORTED)
     }
+
+    /// The operation index this error refers to (best-effort for transport
+    /// failures).
+    pub fn index(&self) -> usize {
+        match self {
+            VfError::Op { index, .. } | VfError::Transport { index, .. } => *index,
+        }
+    }
+
+    /// The filesystem status code, or [`VF_ERR_RPC`] for transport failures.
+    pub fn err_no(&self) -> u32 {
+        match self {
+            VfError::Op { err_no, .. } => *err_no,
+            VfError::Transport { .. } => VF_ERR_RPC,
+        }
+    }
+
+    /// Whether this is a transport / client-side failure (no filesystem
+    /// status).
+    pub fn is_transport(&self) -> bool {
+        matches!(self, VfError::Transport { .. })
+    }
+
+    /// Convert a low-level [`RpcError`] into a `VfError`, attributing the
+    /// failure to `index` in the caller's operation array. `index` is the
+    /// caller's operation index, which may differ from the compound-internal
+    /// op index; for transport failures the index is best-effort. The
+    /// transport message (if any) is preserved.
+    pub fn from_rpc(e: RpcError, index: usize) -> VfError {
+        if e.is_transport() {
+            VfError::Transport {
+                index,
+                message: e.message,
+            }
+        } else {
+            VfError::Op {
+                index,
+                err_no: e.status,
+            }
+        }
+    }
+
+    /// Like [`from_rpc`](VfError::from_rpc), but trusts `e.op_index` as the
+    /// caller-relative operation index. The batched client helpers translate
+    /// compound positions to caller indices before returning, so batched
+    /// backend calls can use this directly.
+    pub fn from_rpc_indexed(e: RpcError) -> VfError {
+        if e.is_transport() {
+            VfError::Transport {
+                index: e.op_index,
+                message: e.message,
+            }
+        } else {
+            VfError::Op {
+                index: e.op_index,
+                err_no: e.status,
+            }
+        }
+    }
+
+    /// Re-attribute this error to a different operation index.
+    pub fn with_index(self, index: usize) -> VfError {
+        match self {
+            VfError::Op { err_no, .. } => VfError::Op { index, err_no },
+            VfError::Transport { message, .. } => VfError::Transport { index, message },
+        }
+    }
 }
 
 impl std::fmt::Display for VfError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "op {} failed: {}", self.index, self.err_no)
+        match self {
+            VfError::Op { index, err_no } => write!(f, "op {} failed: {}", index, err_no),
+            VfError::Transport { index, message } => {
+                write!(f, "op {} transport error: {}", index, message)
+            }
+        }
     }
 }
 
@@ -89,18 +175,16 @@ pub type VfRes = VfResult<()>;
 // Path helpers (backend-agnostic)
 // ---------------------------------------------------------------------------
 
-/// Split `path` into its parent directory path and final component. Built on
-/// [`Path`] so repeated separators are handled.
-pub(crate) fn split_path(path: &str) -> VfResult<(&str, &str)> {
+/// Split `path` into its parent directory path and final component, returning
+/// the errno on failure (there is no operation index at this layer; callers
+/// attach one). Built on [`Path`] so repeated separators are handled.
+pub(crate) fn split_path(path: &str) -> Result<(&str, &str), u32> {
     let trimmed = path.trim_matches('/');
     if trimmed.is_empty() {
-        return Err(VfError::failure(0, ERR_NOENT));
+        return Err(ERR_NOENT);
     }
     let p = Path::new(trimmed);
-    let name = p
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| VfError::failure(0, ERR_NOENT))?;
+    let name = p.file_name().and_then(|n| n.to_str()).ok_or(ERR_NOENT)?;
     let dir = p.parent().and_then(|d| d.to_str()).unwrap_or("");
     Ok((dir, name))
 }
@@ -131,6 +215,7 @@ pub enum VfPathBase {
 /// How [`VecFs::fseek`] interprets its offset, mirroring `SEEK_SET` /
 /// `SEEK_CUR` / `SEEK_END` as an enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SeekFrom {
     Set,
     Cur,
@@ -141,18 +226,24 @@ pub enum SeekFrom {
 /// pseudo-file. This is the Rust-native form of the C `tc_file` tagged
 /// struct (`type` + `fd` + `path`), where the variant *is* the tag.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum VfFile {
     /// No file.
     #[default]
     Null,
     /// An open file descriptor (backend-assigned).
     Descriptor(i32),
-    /// A path, absolute or relative to the client's cwd.
+    /// A path; the [`VfPathBase`] records whether it is absolute or relative
+    /// to the client's cwd. Note that the raw path (see
+    /// [`path`](VfFile::path)) does not itself record the base; use
+    /// [`VecFs::vf_path`] to resolve a `VfFile` honoring its base.
     Path { base: VfPathBase, path: PathBuf },
     /// The client's current working directory, optionally with a relative
-    /// path below it.
+    /// path below it. `Current(None)` is the cwd itself (usable as a stat
+    /// target, but not as a file for read/write).
     Current(Option<PathBuf>),
-    /// The saved (previous) directory.
+    /// The saved (previous) directory, mirroring the C sentinel. No current
+    /// backend produces or consumes this; operations on it fail.
     Saved,
 }
 
@@ -196,7 +287,9 @@ impl VfFile {
         }
     }
 
-    /// The path, for `Path` and `Current(Some(..))`.
+    /// The raw path, for `Path` and `Current(Some(..))`. This does not
+    /// resolve `VfPathBase` or the client cwd; use [`VecFs::vf_path`] for the
+    /// resolved root-relative form.
     pub fn path(&self) -> Option<&Path> {
         match self {
             VfFile::Path { path, .. } => Some(path),
@@ -255,18 +348,34 @@ impl VfType {
 // I/O vectors and attributes
 // ---------------------------------------------------------------------------
 
+/// The offset of a read or write operation.
+///
+/// Unlike the C API's raw `u64` sentinels (`u64::MAX` / `u64::MAX - 1`), a
+/// distinct type means an absolute offset can never collide with the special
+/// "current position" / "end of file" meanings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VfOffset {
+    /// An absolute file offset.
+    At(u64),
+    /// The current read/write position of an open descriptor.
+    Cur,
+    /// The end of the file.
+    End,
+}
+
 /// One element of a batched read, replacing the C `tc_iovec` (which mixed
 /// input and output fields in a single mutable struct).
 #[derive(Debug, Clone)]
 pub struct ReadOp {
     pub file: VfFile,
-    pub offset: u64,
+    pub offset: VfOffset,
     /// Number of bytes to fetch.
     pub length: usize,
 }
 
 impl ReadOp {
-    pub fn new(file: VfFile, offset: u64, length: usize) -> ReadOp {
+    pub fn new(file: VfFile, offset: VfOffset, length: usize) -> ReadOp {
         ReadOp {
             file,
             offset,
@@ -274,25 +383,37 @@ impl ReadOp {
         }
     }
 
-    pub fn from_path(path: &str, offset: u64, length: usize) -> ReadOp {
+    /// A read at an absolute offset.
+    pub fn at(file: VfFile, offset: u64, length: usize) -> ReadOp {
+        ReadOp::new(file, VfOffset::At(offset), length)
+    }
+
+    pub fn from_path(path: &str, offset: VfOffset, length: usize) -> ReadOp {
         ReadOp::new(VfFile::from_path(path), offset, length)
     }
 
-    /// A read from an open descriptor, for `VF_OFFSET_CUR` (sequential)
-    /// reads.
-    pub fn from_fd(fd: i32, offset: u64, length: usize) -> ReadOp {
+    /// A read from an open descriptor, typically at [`VfOffset::Cur`]
+    /// (sequential) reads.
+    pub fn from_fd(fd: i32, offset: VfOffset, length: usize) -> ReadOp {
         ReadOp::new(VfFile::from_fd(fd), offset, length)
     }
 }
 
 /// The result of one [`ReadOp`]: the data and whether end-of-file was hit.
+/// `file` echoes the request's file reference so results can be paired back
+/// to mixed fd/path inputs without reordering assumptions.
 #[derive(Debug, Clone)]
 pub struct ReadResult {
     pub file: VfFile,
-    /// The offset the read actually started at.
+    /// The resolved offset the read actually started at (never `Cur`/`End`
+    /// sentinels).
     pub offset: u64,
     pub data: Vec<u8>,
-    /// True if the read reached end-of-file.
+    /// True if the read reached end-of-file (the backend's EOF signal, or a
+    /// nonzero-length read that returned fewer bytes than requested). A
+    /// backend with a server EOF flag (e.g. NFS) may report `true` even when
+    /// the requested length was returned exactly, because the read ended at
+    /// EOF. Always false for zero-length reads.
     pub eof: bool,
 }
 
@@ -300,14 +421,14 @@ pub struct ReadResult {
 #[derive(Debug, Clone)]
 pub struct WriteOp {
     pub file: VfFile,
-    pub offset: u64,
+    pub offset: VfOffset,
     pub data: Vec<u8>,
     /// Create the file if it does not exist.
     pub creation: bool,
 }
 
 impl WriteOp {
-    pub fn new(file: VfFile, offset: u64, data: Vec<u8>) -> WriteOp {
+    pub fn new(file: VfFile, offset: VfOffset, data: Vec<u8>) -> WriteOp {
         WriteOp {
             file,
             offset,
@@ -316,11 +437,16 @@ impl WriteOp {
         }
     }
 
-    pub fn from_path(path: &str, offset: u64, data: Vec<u8>) -> WriteOp {
+    /// A write at an absolute offset.
+    pub fn at(file: VfFile, offset: u64, data: Vec<u8>) -> WriteOp {
+        WriteOp::new(file, VfOffset::At(offset), data)
+    }
+
+    pub fn from_path(path: &str, offset: VfOffset, data: Vec<u8>) -> WriteOp {
         WriteOp::new(VfFile::from_path(path), offset, data)
     }
 
-    pub fn from_fd(fd: i32, offset: u64, data: Vec<u8>) -> WriteOp {
+    pub fn from_fd(fd: i32, offset: VfOffset, data: Vec<u8>) -> WriteOp {
         WriteOp::new(VfFile::from_fd(fd), offset, data)
     }
 
@@ -331,11 +457,12 @@ impl WriteOp {
     }
 }
 
-/// The result of one [`WriteOp`].
+/// The result of one [`WriteOp`]. `file` echoes the request's file reference.
 #[derive(Debug, Clone)]
 pub struct WriteResult {
     pub file: VfFile,
-    /// The offset the write actually started at.
+    /// The resolved offset the write actually started at (never `Cur`/`End`
+    /// sentinels).
     pub offset: u64,
     pub written: usize,
     /// Whether the server committed the write to stable storage.
@@ -460,7 +587,14 @@ pub struct WalkEntry {
 #[derive(Debug, Clone, Default)]
 pub struct VfAttrs {
     pub file: VfFile,
+    /// Requested attributes for a get/set call; also which attributes the
+    /// caller cares about.
     pub masks: AttrMask,
+    /// Which requested attributes were actually returned (populated by
+    /// `getattrsv` / `lgetattrsv`). A field is only meaningful when its bit is
+    /// set here; `masks` alone cannot distinguish "not requested" from
+    /// "requested but not returned" from "returned as zero".
+    pub returned: AttrMask,
     pub ftype: VfType,
     pub mode: u32,
     pub size: u64,
@@ -494,7 +628,10 @@ pub trait VecFs {
     // -- required -----------------------------------------------------------
 
     /// Return the root-relative form of `path` (resolving it against the
-    /// client's current working directory if it is relative).
+    /// client's current working directory if it is relative), without a
+    /// leading `/`. [`getcwd`](Self::getcwd) is the display form (with a
+    /// leading `/`); [`vf_path`](Self::vf_path) resolves a [`VfFile`] the same
+    /// way while honoring its [`VfPathBase`].
     fn abs_path(&self, path: &str) -> String;
 
     /// Open a file by path, similar to `tc_open_by_path(2)`. `base` is
@@ -525,8 +662,12 @@ pub trait VecFs {
     /// request, or fails at the first failing operation.
     fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>>;
 
-    /// Reposition the read/write offset of an open file, `tc_fseek()`.
-    fn fseek(&mut self, tcf: &mut VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64>;
+    /// Reposition the read/write offset of an open file, `tc_fseek()`. The
+    /// offset lives in backend state keyed by the descriptor; `tcf` is not
+    /// modified (hence `&VfFile`). Returns the new offset. Note that
+    /// [`SeekFrom::End`] needs the file size, which is an extra round trip on
+    /// backends that do not cache it.
+    fn fseek(&mut self, tcf: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64>;
 
     /// Get attributes of an array of files, `tc_getattrsv()`. Follows
     /// symlinks to the target.
@@ -536,10 +677,24 @@ pub trait VecFs {
     /// attributes are for the symlink itself, `tc_lgetattrsv()`.
     fn lgetattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes;
 
-    /// Set attributes (mode / size) on an array of files, `tc_setattrsv()`.
+    /// Set attributes on an array of files, `tc_setattrsv()`. Only
+    /// [`AttrMask::MODE`] and [`AttrMask::SIZE`] are supported; requesting any
+    /// other bit fails with [`VF_ERR_UNSUPPORTED`] at that index, and an
+    /// empty mask is a no-op. Follows symlinks to the target.
     fn setattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes;
 
+    /// Like [`setattrsv`](Self::setattrsv) but does not follow symlinks:
+    /// attributes are set on the symlink itself, `tc_lsetattrsv()`. Backends
+    /// without a non-following setter (e.g. no `lchmod` on Linux) must fail
+    /// with [`VF_ERR_UNSUPPORTED`] for symlinks rather than silently follow.
+    fn lsetattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes;
+
     /// List a directory, `tc_listdir()`. Returns entry paths and attributes.
+    ///
+    /// `max_count` limits the number of entries returned per directory (0
+    /// means no limit). Entry `VfFile`s are absolute (root-relative) paths.
+    /// With `recursive`, entries of nested directories are included depth-
+    /// first (still subject to `max_count`).
     fn listdir(
         &mut self,
         dir: &str,
@@ -555,17 +710,17 @@ pub trait VecFs {
     /// lists them). The default implementation recurses via
     /// [`listdir`](Self::listdir); a backend may override it to batch many
     /// directories into few large compounds.
-    fn walk<F: Fn(&str, &mut Vec<VfAttrs>)>(
+    fn walk(
         &mut self,
         root: &str,
         masks: AttrMask,
-        sort: F,
+        sort: &mut dyn FnMut(&str, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<WalkEntry>> {
-        fn rec<F: VecFs + ?Sized, S: Fn(&str, &mut Vec<VfAttrs>)>(
+        fn rec<F: VecFs + ?Sized>(
             fs: &mut F,
             dir: &str,
             masks: AttrMask,
-            sort: &S,
+            sort: &mut dyn FnMut(&str, &mut Vec<VfAttrs>),
             out: &mut Vec<WalkEntry>,
         ) -> VfResult<()> {
             let mut entries = fs.listdir(dir, masks, 0, false)?;
@@ -585,7 +740,7 @@ pub trait VecFs {
             Ok(())
         }
         let mut out = Vec::new();
-        rec(self, root, masks, &sort, &mut out)?;
+        rec(self, root, masks, sort, &mut out)?;
         Ok(out)
     }
 
@@ -607,8 +762,14 @@ pub trait VecFs {
     /// Create hard links, `tc_hardlinkv()`.
     fn hardlinkv(&mut self, oldpaths: &[&str], newpaths: &[&str]) -> VfRes;
 
-    /// Copy extents by reading and writing, `tc_dupv()` / `tc_lcopyv()`.
+    /// Copy extents by reading and writing, `tc_dupv()`. Follows symlinks
+    /// (copies the target's contents).
     fn dupv(&mut self, pairs: &[ExtentPair]) -> VfRes;
+
+    /// Copy extents without following symlinks, `tc_lcopyv()`: symlinks are
+    /// recreated as symlinks with the same target; other objects are copied
+    /// by data (like [`dupv`](Self::dupv)).
+    fn lcopyv(&mut self, pairs: &[ExtentPair]) -> VfRes;
 
     /// Write Application Data Blocks, `tc_write_adb()`. Returns the number
     /// of blocks written for each ADB.
@@ -628,32 +789,57 @@ pub trait VecFs {
 
     // -- defaults -----------------------------------------------------------
 
+    /// Resolve a [`VfFile`] to its root-relative path (no leading `/`),
+    /// honoring `VfPathBase::Abs`/`VfPathBase::Cwd` and the client's current
+    /// working directory. Descriptors, `Null`, and `Saved` are not paths and
+    /// fail with [`ERR_INVAL`]. Backends should use this when a method needs
+    /// the file's path, so a `VfFile` resolves identically across all trait
+    /// methods.
+    fn vf_path(&self, file: &VfFile) -> VfResult<String> {
+        match file {
+            VfFile::Path {
+                base: VfPathBase::Abs,
+                path,
+            } => Ok(path.to_string_lossy().trim_start_matches('/').to_string()),
+            VfFile::Path {
+                base: VfPathBase::Cwd,
+                path,
+            }
+            | VfFile::Current(Some(path)) => Ok(self.abs_path(&path.to_string_lossy())),
+            VfFile::Current(None) => Ok(self.abs_path("")),
+            VfFile::Descriptor(_) | VfFile::Null | VfFile::Saved => {
+                Err(VfError::failure(0, ERR_INVAL))
+            }
+        }
+    }
+
     /// Open a file by path, `tc_open()`.
     fn open(&mut self, pathname: &str, flags: i32, mode: u32) -> VfResult<VfFile> {
         self.open_by_path(VfPathBase::Cwd, pathname, flags, mode)
     }
 
-    /// Read from a single file, `tc_read()`.
+    /// Read from a single file at an absolute offset, `tc_read()`.
     fn read(&mut self, file: &VfFile, offset: u64, length: usize) -> VfResult<Vec<u8>> {
-        let mut r = self.readv(&[ReadOp::new(file.clone(), offset, length)])?;
+        let mut r = self.readv(&[ReadOp::at(file.clone(), offset, length)])?;
         Ok(r.remove(0).data)
     }
 
-    /// Write to a single file, `tc_write()`.
+    /// Write to a single file at an absolute offset, `tc_write()`.
     fn write(&mut self, file: &VfFile, offset: u64, data: &[u8]) -> VfResult<usize> {
-        let mut w = self.writev(&[WriteOp::new(file.clone(), offset, data.to_vec())])?;
+        let mut w = self.writev(&[WriteOp::at(file.clone(), offset, data.to_vec())])?;
         Ok(w.remove(0).written)
     }
 
     /// Open several files at once, each with its own flags and mode,
-    /// `tc_openv()`.
+    /// `tc_openv()`. `flags`, `modes`, and `paths` must have equal lengths;
+    /// a mismatch fails with [`ERR_INVAL`] at index 0.
     fn openv(&mut self, paths: &[&str], flags: &[i32], modes: &[u32]) -> VfResult<Vec<VfFile>> {
+        if paths.len() != flags.len() || paths.len() != modes.len() {
+            return Err(VfError::failure(0, ERR_INVAL));
+        }
         let mut out = Vec::with_capacity(paths.len());
         for (i, ((p, flag), mode)) in paths.iter().zip(flags).zip(modes).enumerate() {
-            out.push(self.open(p, *flag, *mode).map_err(|mut e| {
-                e.index = i;
-                e
-            })?);
+            out.push(self.open(p, *flag, *mode).map_err(|e| e.with_index(i))?);
         }
         Ok(out)
     }
@@ -669,17 +855,9 @@ pub trait VecFs {
     /// Close several files, `tc_closev()`.
     fn closev(&mut self, files: &[VfFile]) -> VfRes {
         for (i, f) in files.iter().enumerate() {
-            self.close(f).map_err(|mut e| {
-                e.index = i;
-                e
-            })?;
+            self.close(f).map_err(|e| e.with_index(i))?;
         }
         Ok(())
-    }
-
-    /// `tc_lsetattrsv()`.
-    fn lsetattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
-        self.setattrsv(attrs)
     }
 
     /// Stat a path, `tc_stat()`. Follows symlinks to the target.
@@ -716,40 +894,36 @@ pub trait VecFs {
     }
 
     /// Whether `path` exists, distinguishing "not found" from other errors
-    /// (e.g. permission denied) that are returned as `Err`.
+    /// (e.g. permission denied) that are returned as `Err`. Uses
+    /// `lstat` semantics: a dangling symlink exists.
     fn exists(&mut self, path: &str) -> VfResult<bool> {
         match self.lstat(path) {
             Ok(_) => Ok(true),
-            Err(e) if e.err_no == ERR_NOENT => Ok(false),
+            Err(e) if e.err_no() == ERR_NOENT => Ok(false),
             Err(e) => Err(e),
         }
     }
 
-    /// Return the file type of `path`.
+    /// Return the file type of `path` itself (`lstat` semantics: a symlink
+    /// reports [`VfType::Symlink`] rather than its target's type).
     fn file_type(&mut self, path: &str) -> VfResult<VfType> {
-        Ok(self.stat(path)?.ftype)
+        Ok(self.lstat(path)?.ftype)
     }
 
     /// List directories with a callback, `tc_listdirv()`. Returning `false`
     /// stops the listing early.
-    fn listdirv<F>(
+    fn listdirv(
         &mut self,
         dirs: &[&str],
         masks: AttrMask,
         max_entries: usize,
         recursive: bool,
-        cb: &mut F,
-    ) -> VfRes
-    where
-        F: FnMut(&VfAttrs, &str) -> bool,
-    {
+        cb: &mut dyn FnMut(&VfAttrs, &str) -> bool,
+    ) -> VfRes {
         for (i, d) in dirs.iter().enumerate() {
             let entries = self
                 .listdir(d, masks, max_entries, recursive)
-                .map_err(|mut e| {
-                    e.index = i;
-                    e
-                })?;
+                .map_err(|e| e.with_index(i))?;
             for e in &entries {
                 if !cb(e, d) {
                     return Ok(());
@@ -795,26 +969,26 @@ pub trait VecFs {
         Ok(v.remove(0))
     }
 
-    /// `tc_ldupv()`.
+    /// `tc_ldupv()`: same read/write extent copy as
+    /// [`dupv`](Self::dupv). Retained for C API parity; a backend that
+    /// distinguishes a "local" copy should override.
     fn ldupv(&mut self, pairs: &[ExtentPair]) -> VfRes {
         self.dupv(pairs)
     }
 
-    /// `tc_copyv()` / `tc_lcopyv()`: server-side copy. No backend provides a
-    /// server-side COPY, so this falls back to the read/write copy of
-    /// [`dupv`](Self::dupv).
+    /// `tc_copyv()`: server-side copy where the backend supports it. The
+    /// default implementation performs a client-side read/write copy via
+    /// [`dupv`](Self::dupv); backends with a server-side COPY should
+    /// override.
     fn copyv(&mut self, pairs: &[ExtentPair]) -> VfRes {
-        self.dupv(pairs)
-    }
-
-    /// `tc_lcopyv()`.
-    fn lcopyv(&mut self, pairs: &[ExtentPair]) -> VfRes {
         self.dupv(pairs)
     }
 
     /// Create a directory and all its ancestors, `tc_ensure_dir()`. Uses
     /// `mkdir` and accepts an existing directory (`EEXIST`) instead of an
-    /// exists-then-mkdir check, avoiding the race between the two.
+    /// exists-then-mkdir check, avoiding the race between the two. `dir` is
+    /// resolved against the cwd via [`abs_path`](Self::abs_path) and then
+    /// rebuilt as an absolute (root-relative) path.
     fn ensure_dir(&mut self, dir: &str, mode: u32) -> VfResult<()> {
         use std::path::Component;
         let mut so_far = PathBuf::new();
@@ -824,7 +998,7 @@ pub trait VecFs {
                 let full = format!("/{}", so_far.to_string_lossy());
                 match self.mkdir(&full, mode) {
                     Ok(()) => {}
-                    Err(e) if e.err_no == ERR_EXIST => {}
+                    Err(e) if e.err_no() == ERR_EXIST => {}
                     Err(e) => return Err(e),
                 }
             }
@@ -836,4 +1010,448 @@ pub trait VecFs {
 /// `tc_rm_recursive()`.
 pub fn rm_recursive(fs: &mut impl VecFs, dir: &str) -> VfRes {
     fs.rm(&[dir], true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dummy_vecfs::DummyVecFs;
+    use crate::error::RpcError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    /// A unique temporary directory that is removed on drop.
+    struct TempRoot(PathBuf);
+
+    impl TempRoot {
+        fn new(tag: &str) -> TempRoot {
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let p = std::env::temp_dir().join(format!(
+                "vnfs-vecfs-test-{}-{}-{}",
+                tag,
+                std::process::id(),
+                n
+            ));
+            let _ = std::fs::remove_dir_all(&p);
+            TempRoot(p)
+        }
+    }
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A fresh dummy backend rooted at a unique temp directory.
+    fn fs(tag: &str) -> (TempRoot, DummyVecFs) {
+        let root = TempRoot::new(tag);
+        let fs = DummyVecFs::new(root.0.clone());
+        (root, fs)
+    }
+
+    fn write(fs: &mut DummyVecFs, path: &str, data: &[u8]) {
+        fs.writev(&[WriteOp::at(VfFile::from_path(path), 0, data.to_vec()).with_creation()])
+            .expect("write");
+    }
+
+    // ------------------------------------------------------------------
+    // Path helpers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn split_path_helpers() {
+        assert_eq!(split_path("/a/b").unwrap(), ("a", "b"));
+        assert_eq!(split_path("a/b/").unwrap(), ("a", "b"));
+        assert_eq!(split_path("a").unwrap(), ("", "a"));
+        assert_eq!(split_path("///a//b").unwrap(), ("a", "b"));
+        assert_eq!(split_path("/"), Err(ERR_NOENT));
+        assert_eq!(split_path(""), Err(ERR_NOENT));
+        assert_eq!(join_path("", "x"), "x");
+        assert_eq!(join_path("a", "x"), "a/x");
+    }
+
+    // ------------------------------------------------------------------
+    // VfError
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn vf_error_preserves_transport_message() {
+        let e = VfError::from_rpc(RpcError::transport("connection refused"), 3);
+        assert!(e.is_transport());
+        assert_eq!(e.index(), 3);
+        assert_eq!(e.err_no(), VF_ERR_RPC);
+        assert!(e.to_string().contains("connection refused"));
+
+        // Server status errors stay Op errors with the caller-supplied index.
+        let e = VfError::from_rpc(RpcError::op(4, ERR_NOENT), 1);
+        assert!(!e.is_transport());
+        assert_eq!(e.index(), 1);
+        assert_eq!(e.err_no(), ERR_NOENT);
+    }
+
+    #[test]
+    fn vf_error_indexed_and_remap() {
+        let e = VfError::from_rpc_indexed(RpcError::op(4, ERR_EXIST));
+        assert_eq!((e.index(), e.err_no()), (4, ERR_EXIST));
+        assert_eq!(e.with_index(9).index(), 9);
+        assert_eq!(VfError::transport(2, "boom").with_index(5).index(), 5);
+    }
+
+    // ------------------------------------------------------------------
+    // Offsets: no sentinel collision, Cur/End resolution, result offsets
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn absolute_offset_at_u64_max_minus_one_is_not_cur() {
+        let (_root, mut fs) = fs("huge-offset");
+        write(&mut fs, "/f", b"abcdefgh");
+        let fd = fs.open("/f", 0, 0).unwrap();
+        fs.fseek(&fd, 2, SeekFrom::Set).unwrap();
+
+        // Previously u64::MAX - 1 collided with the VF_OFFSET_CUR sentinel and
+        // would have read from the current position (2) instead. With the
+        // typed offset it is an absolute offset: the platform may reject it
+        // (pread beyond i64::MAX) or return an empty read, but never data
+        // from the current position.
+        match fs.readv(&[ReadOp::new(fd.clone(), VfOffset::At(u64::MAX - 1), 8)]) {
+            Err(e) => assert_eq!(e.err_no(), ERR_INVAL),
+            Ok(r) => {
+                assert!(r[0].data.is_empty());
+                assert!(r[0].eof);
+            }
+        }
+        fs.close(&fd).unwrap();
+    }
+
+    #[test]
+    fn cur_offset_reads_resolve_and_advance() {
+        let (_root, mut fs) = fs("cur");
+        write(&mut fs, "/f", b"hello world");
+        let fd = fs.open("/f", libc::O_RDWR, 0).unwrap();
+        assert_eq!(fs.fseek(&fd, 0, SeekFrom::End).unwrap(), 11);
+
+        let w = fs
+            .writev(&[WriteOp::new(fd.clone(), VfOffset::Cur, b"XY".to_vec())])
+            .unwrap();
+        assert_eq!(w[0].offset, 11); // resolved current position
+        let w = fs
+            .writev(&[WriteOp::new(fd.clone(), VfOffset::Cur, b"Z".to_vec())])
+            .unwrap();
+        assert_eq!(w[0].offset, 13);
+
+        let r = fs
+            .readv(&[ReadOp::new(fd.clone(), VfOffset::Cur, 100)])
+            .unwrap();
+        assert_eq!(r[0].offset, 14); // resolved, not the Cur sentinel
+        assert!(r[0].data.is_empty());
+        assert!(r[0].eof);
+        fs.close(&fd).unwrap();
+    }
+
+    #[test]
+    fn end_offset_writes_append_and_reads_at_end() {
+        let (_root, mut fs) = fs("end");
+        write(&mut fs, "/f", b"hello world");
+
+        let fd = fs.open("/f", libc::O_RDWR, 0).unwrap();
+        let w = fs
+            .writev(&[WriteOp::new(fd.clone(), VfOffset::End, b"!".to_vec())])
+            .unwrap();
+        assert_eq!(w[0].offset, 11);
+        fs.close(&fd).unwrap();
+
+        // A read positioned at End starts at the file size, so it is at EOF.
+        let r = fs
+            .readv(&[ReadOp::new(VfFile::from_path("/f"), VfOffset::End, 5)])
+            .unwrap();
+        assert_eq!(r[0].offset, 12); // the resolved start is the file size
+        assert!(r[0].data.is_empty());
+        assert!(r[0].eof);
+
+        let r = fs
+            .readv(&[ReadOp::new(VfFile::from_path("/f"), VfOffset::End, 100)])
+            .unwrap();
+        assert!(r[0].eof);
+        assert_eq!(fs.stat("/f").unwrap().size, 12);
+    }
+
+    #[test]
+    fn eof_is_only_true_at_end() {
+        let (_root, mut fs) = fs("eof");
+        write(&mut fs, "/f", b"abc");
+
+        let r = fs
+            .readv(&[ReadOp::at(VfFile::from_path("/f"), 0, 3)])
+            .unwrap();
+        assert_eq!(r[0].data, b"abc");
+        assert!(!r[0].eof);
+
+        let r = fs
+            .readv(&[ReadOp::at(VfFile::from_path("/f"), 0, 4)])
+            .unwrap();
+        assert_eq!(r[0].data, b"abc");
+        assert!(r[0].eof);
+
+        // Zero-length reads never report EOF.
+        let r = fs
+            .readv(&[ReadOp::at(VfFile::from_path("/f"), 0, 0)])
+            .unwrap();
+        assert!(r[0].data.is_empty());
+        assert!(!r[0].eof);
+    }
+
+    #[test]
+    fn fseek_takes_shared_ref_and_works() {
+        let (_root, mut fs) = fs("fseek");
+        write(&mut fs, "/f", b"hello world");
+        let fd = fs.open("/f", 0, 0).unwrap();
+
+        assert_eq!(fs.fseek(&fd, 6, SeekFrom::Set).unwrap(), 6);
+        let r = fs
+            .readv(&[ReadOp::new(fd.clone(), VfOffset::Cur, 5)])
+            .unwrap();
+        assert_eq!(r[0].data, b"world");
+
+        assert_eq!(fs.fseek(&fd, -5, SeekFrom::End).unwrap(), 6);
+        assert_eq!(fs.fseek(&fd, 0, SeekFrom::Cur).unwrap(), 6);
+        assert_eq!(
+            fs.fseek(&fd, -100, SeekFrom::Set).unwrap_err().err_no(),
+            ERR_INVAL
+        );
+        fs.close(&fd).unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // VfFile base/cwd resolution is honored by every path-taking method
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cwd_relative_unlink_targets_cwd() {
+        let (_root, mut fs) = fs("cwd-unlink");
+        fs.mkdir("/sub", 0o755).unwrap();
+        fs.chdir("sub").unwrap();
+
+        write(&mut fs, "a", b"x"); // cwd-relative write
+        fs.unlink("a").unwrap();
+
+        // The file was removed from sub/, not from the root.
+        assert!(!fs.exists("a").unwrap());
+        assert_eq!(fs.lstat("/a").unwrap_err().err_no(), ERR_NOENT);
+    }
+
+    #[test]
+    fn renamev_honors_path_base() {
+        let (_root, mut fs) = fs("rename-base");
+        fs.mkdir("/sub", 0o755).unwrap();
+        write(&mut fs, "/src", b"1");
+        write(&mut fs, "/sub/src2", b"2");
+        fs.chdir("sub").unwrap();
+
+        // base Abs with a non-slash path is root-relative even after chdir.
+        let abs_src = VfFile::Path {
+            base: VfPathBase::Abs,
+            path: PathBuf::from("src"),
+        };
+        let abs_dst = VfFile::Path {
+            base: VfPathBase::Abs,
+            path: PathBuf::from("dst"),
+        };
+        fs.renamev(&[(abs_src, abs_dst)]).unwrap();
+        assert!(!fs.exists("/src").unwrap());
+        assert!(fs.exists("/dst").unwrap());
+
+        // base Cwd resolves against the cwd.
+        let cwd_src = VfFile::Path {
+            base: VfPathBase::Cwd,
+            path: PathBuf::from("src2"),
+        };
+        let cwd_dst = VfFile::Path {
+            base: VfPathBase::Cwd,
+            path: PathBuf::from("dst2"),
+        };
+        fs.renamev(&[(cwd_src, cwd_dst)]).unwrap();
+        assert!(!fs.exists("/sub/src2").unwrap());
+        assert!(fs.exists("/sub/dst2").unwrap());
+    }
+
+    #[test]
+    fn vf_path_rejects_descriptors() {
+        let (_root, mut fs) = fs("vf-path");
+        write(&mut fs, "/f", b"x");
+        let fd = fs.open("/f", 0, 0).unwrap();
+        assert_eq!(fs.vf_path(&fd).unwrap_err().err_no(), ERR_INVAL);
+        fs.close(&fd).unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Attributes: returned tracking, strict setattrsv, lsetattrsv
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn getattrsv_reports_returned_mask() {
+        let (_root, mut fs) = fs("returned");
+        write(&mut fs, "/f", b"x");
+
+        let a = fs.stat("/f").unwrap();
+        assert_eq!(a.returned, AttrMask::stat());
+        assert!(a.returned.contains(AttrMask::MODE));
+
+        let mut a = VfAttrs {
+            file: VfFile::from_path("/f"),
+            masks: AttrMask::MODE | AttrMask::SIZE | AttrMask::MTIME,
+            ..VfAttrs::default()
+        };
+        fs.getattrsv(std::slice::from_mut(&mut a)).unwrap();
+        assert_eq!(
+            a.returned,
+            AttrMask::MODE | AttrMask::SIZE | AttrMask::MTIME
+        );
+    }
+
+    #[test]
+    fn setattrsv_rejects_unsupported_bits() {
+        let (_root, mut fs) = fs("setattr-strict");
+        write(&mut fs, "/f", b"x");
+
+        let mut a = VfAttrs {
+            file: VfFile::from_path("/f"),
+            masks: AttrMask::MTIME,
+            mtime_sec: 1,
+            ..VfAttrs::default()
+        };
+        assert_eq!(
+            fs.setattrsv(std::slice::from_ref(&a)).unwrap_err().err_no(),
+            VF_ERR_UNSUPPORTED
+        );
+
+        a.masks = AttrMask::MODE | AttrMask::MTIME;
+        assert_eq!(
+            fs.setattrsv(std::slice::from_ref(&a)).unwrap_err().err_no(),
+            VF_ERR_UNSUPPORTED
+        );
+
+        // MODE-only still works.
+        a.masks = AttrMask::MODE;
+        a.mode = 0o640;
+        fs.setattrsv(std::slice::from_ref(&a)).unwrap();
+        assert_eq!(fs.lstat("/f").unwrap().mode & 0o7777, 0o640);
+    }
+
+    #[test]
+    fn lsetattrsv_does_not_follow_symlinks() {
+        let (_root, mut fs) = fs("lsetattr");
+        write(&mut fs, "/target", b"x");
+        fs.symlink("/target", "/link").unwrap();
+
+        // No portable lchmod: the dummy backend refuses symlinks instead of
+        // silently following them.
+        let a = VfAttrs {
+            file: VfFile::from_path("/link"),
+            masks: AttrMask::MODE,
+            mode: 0o600,
+            ..VfAttrs::default()
+        };
+        assert_eq!(
+            fs.lsetattrsv(std::slice::from_ref(&a))
+                .unwrap_err()
+                .err_no(),
+            VF_ERR_UNSUPPORTED
+        );
+
+        // Regular files are set normally.
+        let a = VfAttrs {
+            file: VfFile::from_path("/target"),
+            masks: AttrMask::MODE,
+            mode: 0o600,
+            ..VfAttrs::default()
+        };
+        fs.lsetattrsv(std::slice::from_ref(&a)).unwrap();
+        assert_eq!(fs.lstat("/target").unwrap().mode & 0o7777, 0o600);
+    }
+
+    // ------------------------------------------------------------------
+    // exists / file_type use lstat semantics
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn exists_and_file_type_use_lstat_semantics() {
+        let (_root, mut fs) = fs("lstat");
+        write(&mut fs, "/f", b"x");
+        fs.symlink("missing-target", "/dangling").unwrap();
+
+        assert!(fs.exists("/dangling").unwrap());
+        assert_eq!(fs.file_type("/dangling").unwrap(), VfType::Symlink);
+        assert_eq!(fs.file_type("/f").unwrap(), VfType::Regular);
+    }
+
+    // ------------------------------------------------------------------
+    // openv length contract, listdir limits, walk via dyn VecFs
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn openv_rejects_mismatched_lengths() {
+        let (_root, mut fs) = fs("openv");
+        use libc::O_CREAT;
+        let e = fs.openv(&["/a", "/b"], &[O_CREAT], &[0o644]).unwrap_err();
+        assert_eq!((e.index(), e.err_no()), (0, ERR_INVAL));
+    }
+
+    #[test]
+    fn listdir_zero_max_count_is_unlimited() {
+        let (_root, mut fs) = fs("listdir");
+        fs.mkdir("/d", 0o755).unwrap();
+        write(&mut fs, "/d/a", b"1");
+        write(&mut fs, "/d/b", b"2");
+
+        let all = fs.listdir("/d", AttrMask::default(), 0, false).unwrap();
+        assert_eq!(all.len(), 2);
+        let one = fs.listdir("/d", AttrMask::default(), 1, false).unwrap();
+        assert_eq!(one.len(), 1);
+    }
+
+    #[test]
+    fn walk_works_through_dyn_vecfs() {
+        let (_root, mut fs) = fs("walk-dyn");
+        fs.mkdir("/sub", 0o755).unwrap();
+        write(&mut fs, "/sub/a", b"1");
+
+        let mut dyn_fs: Box<dyn VecFs> = Box::new(fs);
+        let mut visited: Vec<String> = Vec::new();
+        let entries = dyn_fs
+            .walk("", AttrMask::stat(), &mut |dir, _| {
+                visited.push(dir.to_string())
+            })
+            .unwrap();
+        assert_eq!(visited.len(), 2); // root + /sub
+        assert_eq!(entries.len(), 2);
+        let sub = entries.iter().find(|w| w.path.ends_with("sub")).unwrap();
+        assert_eq!(sub.entries.len(), 1);
+        assert_eq!(sub.entries[0].ftype, VfType::Regular);
+    }
+
+    #[test]
+    fn lcopyv_copies_symlinks_as_symlinks() {
+        let (_root, mut fs) = fs("lcopyv");
+        write(&mut fs, "/target", b"data");
+        fs.symlink("target", "/link").unwrap();
+
+        let pair = ExtentPair::new("/link", 0, "/link-copy", 0, u64::MAX);
+        fs.lcopyv(std::slice::from_ref(&pair)).unwrap();
+        assert_eq!(fs.file_type("/link-copy").unwrap(), VfType::Symlink);
+        assert_eq!(
+            fs.readlink("/link-copy").unwrap(),
+            fs.readlink("/link").unwrap()
+        );
+
+        // dupv copies the target's data instead.
+        let pair = ExtentPair::new("/link", 0, "/link-dup", 0, u64::MAX);
+        fs.dupv(std::slice::from_ref(&pair)).unwrap();
+        assert_eq!(fs.file_type("/link-dup").unwrap(), VfType::Regular);
+        assert_eq!(
+            fs.read(&VfFile::from_path("/link-dup"), 0, 4).unwrap(),
+            b"data"
+        );
+    }
 }

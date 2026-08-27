@@ -226,19 +226,18 @@ impl NfsClient {
     /// Each i-th read in a compound is at resop `2 + 2*i` (SEQUENCE, PUTFH,
     /// READ, PUTFH, READ, ...). The kernel nfsd does not serve multiple READ
     /// ops per compound correctly; use an nfs-ganesha server for this.
-    pub fn readv(&mut self, ops: &[ReadOp]) -> RpcResult<Vec<Vec<u8>>> {
-        let mut out = Vec::with_capacity(ops.len());
-        let per_chunk = (MAX_COMPOUND_OPS - 1) / 2;
-        for chunk in ops.chunks(per_chunk) {
-            let mut c = Compound::new();
-            c.tag(b"readv");
-            for op in chunk {
+    /// Returns the data and the server's EOF flag per request, in request
+    /// order.
+    pub fn readv(&mut self, ops: &[ReadOp]) -> RpcResult<Vec<(Vec<u8>, bool)>> {
+        self.batch_ops(
+            b"readv",
+            2,
+            ops,
+            |c, op, _| {
                 c.putfh(&op.fh.as_nfs_fh());
                 c.read(&op.stateid, op.offset, op.count);
-            }
-            let res = self.session.compound(&mut c)?;
-            self.session.expect_all_ok(&res)?;
-            for (i, _) in chunk.iter().enumerate() {
+            },
+            |res, i| {
                 let ok = res.read(2 + 2 * i);
                 let len = ok.data.data_len as usize;
                 let data = if len == 0 {
@@ -247,43 +246,51 @@ impl NfsClient {
                     unsafe { std::slice::from_raw_parts(ok.data.data_val as *const u8, len) }
                         .to_vec()
                 };
-                out.push(data);
-            }
-        }
-        Ok(out)
+                (data, ok.eof != 0)
+            },
+        )
     }
 
+    /// WRITE several `[PUTFH, WRITE]` pairs in as few compounds as possible;
+    /// returns (bytes written, commit mode) per request.
     pub fn writev(&mut self, ops: &[WriteOp]) -> RpcResult<Vec<(u32, u32)>> {
-        let mut out = Vec::with_capacity(ops.len());
-        let per_chunk = (MAX_COMPOUND_OPS - 1) / 2;
-        for chunk in ops.chunks(per_chunk) {
-            let mut c = Compound::new();
-            c.tag(b"writev");
-            for op in chunk {
+        self.batch_ops(
+            b"writev",
+            2,
+            ops,
+            |c, op, _| {
                 c.putfh(&op.fh.as_nfs_fh());
                 c.write(&op.stateid, op.offset, stable_how4_FILE_SYNC4, &op.data);
-            }
-            let res = self.session.compound(&mut c)?;
-            self.session.expect_all_ok(&res)?;
-            for (i, _) in chunk.iter().enumerate() {
+            },
+            |res, i| {
                 let ok = res.write(2 + 2 * i);
-                out.push((ok.count, ok.committed));
-            }
-        }
-        Ok(out)
+                (ok.count, ok.committed)
+            },
+        )
     }
 
     /// REMOVE several names from `dir` in one compound. REMOVE leaves the
     /// current filehandle on `dir`, so consecutive REMOVEs chain.
     pub fn remove_many(&mut self, dir: &FileHandle, names: &[&str]) -> RpcResult<()> {
+        let map = |op_index: usize| {
+            op_index
+                .saturating_sub(1)
+                .min(names.len().saturating_sub(1))
+        };
         let mut c = Compound::new();
         c.tag(b"removev");
         c.putfh(&dir.as_nfs_fh());
         for n in names {
             c.remove(n.as_bytes());
         }
-        let res = self.session.compound(&mut c)?;
-        self.session.expect_all_ok(&res)?;
+        let res = self.session.compound(&mut c).map_err(|e| {
+            let idx = map(e.op_index);
+            e.with_op_index(idx)
+        })?;
+        self.session.expect_all_ok(&res).map_err(|e| {
+            let idx = map(e.op_index);
+            e.with_op_index(idx)
+        })?;
         Ok(())
     }
 
@@ -330,18 +337,37 @@ impl NfsClient {
         mut add: impl FnMut(&mut Compound, &T, usize),
         extract: impl Fn(&CompoundRes, usize) -> R,
     ) -> RpcResult<Vec<R>> {
+        /// Translate a compound-internal resop index (0 = SEQUENCE) to the
+        /// caller's request index: element `i` occupies resops
+        /// `1 + per_op*i .. 1 + per_op*(i+1)`.
+        fn caller_index(
+            op_index: usize,
+            per_op: usize,
+            chunk_start: usize,
+            chunk_len: usize,
+        ) -> usize {
+            let local = op_index.saturating_sub(1) / per_op;
+            chunk_start + local.min(chunk_len.saturating_sub(1))
+        }
         let chunk_size = (MAX_COMPOUND_OPS - 1) / per_op;
         let mut out = Vec::with_capacity(ops.len());
         let mut global = 0usize;
         for chunk in ops.chunks(chunk_size) {
+            let chunk_start = global;
             let mut c = Compound::new();
             c.tag(tag);
             for op in chunk {
                 add(&mut c, op, global);
                 global += 1;
             }
-            let res = self.session.compound(&mut c)?;
-            self.session.expect_all_ok(&res)?;
+            let res = self.session.compound(&mut c).map_err(|e| {
+                let idx = caller_index(e.op_index, per_op, chunk_start, chunk.len());
+                e.with_op_index(idx)
+            })?;
+            self.session.expect_all_ok(&res).map_err(|e| {
+                let idx = caller_index(e.op_index, per_op, chunk_start, chunk.len());
+                e.with_op_index(idx)
+            })?;
             for (i, _) in chunk.iter().enumerate() {
                 out.push(extract(&res, i));
             }
@@ -502,14 +528,15 @@ impl NfsClient {
         Ok(())
     }
 
-    /// READ `count` bytes at `offset`; returns the data read.
+    /// READ `count` bytes at `offset`; returns the data read and the server's
+    /// EOF flag.
     pub fn read(
         &mut self,
         fh: &FileHandle,
         stateid: &stateid4,
         offset: u64,
         count: u32,
-    ) -> RpcResult<Vec<u8>> {
+    ) -> RpcResult<(Vec<u8>, bool)> {
         let mut c = Compound::new();
         c.tag(b"read");
         c.putfh(&fh.as_nfs_fh());
@@ -518,11 +545,13 @@ impl NfsClient {
         self.session.expect_all_ok(&res)?;
         let ok = res.read(2);
         let len = ok.data.data_len as usize;
-        if len == 0 {
-            return Ok(Vec::new());
-        }
-        let data = unsafe { std::slice::from_raw_parts(ok.data.data_val as *const u8, len) };
-        Ok(data.to_vec())
+        let data = if len == 0 {
+            Vec::new()
+        } else {
+            let data = unsafe { std::slice::from_raw_parts(ok.data.data_val as *const u8, len) };
+            data.to_vec()
+        };
+        Ok((data, ok.eof != 0))
     }
 
     /// WRITE `data` at `offset` with FILE_SYNC stability; returns bytes
@@ -699,6 +728,10 @@ impl NfsClient {
         let mut out = Vec::with_capacity(ops.len());
         let zeroverf: verifier4 = [0; 8];
         for chunk in ops.chunks(per_chunk) {
+            let map = |op_index: usize| {
+                let local = op_index.saturating_sub(1) / 4;
+                chunk.len().saturating_sub(1).min(local)
+            };
             let mut c = Compound::new();
             c.tag(b"readdir_children");
             for (pfh, name) in chunk {
@@ -707,8 +740,14 @@ impl NfsClient {
                 c.getfh();
                 c.readdir(0, &zeroverf, 256 * 1024, 1024 * 1024, attrs);
             }
-            let res = self.session.compound(&mut c)?;
-            self.session.expect_all_ok(&res)?;
+            let res = self.session.compound(&mut c).map_err(|e| {
+                let idx = map(e.op_index);
+                e.with_op_index(idx)
+            })?;
+            self.session.expect_all_ok(&res).map_err(|e| {
+                let idx = map(e.op_index);
+                e.with_op_index(idx)
+            })?;
             for (i, _) in chunk.iter().enumerate() {
                 let fh = res.getfh(3 + 4 * i);
                 let (entries, cookie) = Self::collect_readdir(res.readdir(4 + 4 * i));
@@ -734,14 +773,24 @@ impl NfsClient {
         let mut out = Vec::with_capacity(ops.len());
         let zeroverf: verifier4 = [0; 8];
         for chunk in ops.chunks(per_chunk) {
+            let map = |op_index: usize| {
+                let local = op_index.saturating_sub(1) / 2;
+                chunk.len().saturating_sub(1).min(local)
+            };
             let mut c = Compound::new();
             c.tag(b"readdir_pages");
             for (fh, cookie) in chunk {
                 c.putfh(&fh.as_nfs_fh());
                 c.readdir(*cookie, &zeroverf, 256 * 1024, 1024 * 1024, attrs);
             }
-            let res = self.session.compound(&mut c)?;
-            self.session.expect_all_ok(&res)?;
+            let res = self.session.compound(&mut c).map_err(|e| {
+                let idx = map(e.op_index);
+                e.with_op_index(idx)
+            })?;
+            self.session.expect_all_ok(&res).map_err(|e| {
+                let idx = map(e.op_index);
+                e.with_op_index(idx)
+            })?;
             for (i, _) in chunk.iter().enumerate() {
                 let (entries, cookie) = Self::collect_readdir(res.readdir(2 + 2 * i));
                 out.push((entries, cookie));

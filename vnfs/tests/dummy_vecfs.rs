@@ -4,8 +4,8 @@
 
 mod common;
 
-use vnfs::VecFs;
 use vnfs::dummy_vecfs::DummyVecFs;
+use vnfs::{VecFs, VfOffset};
 
 /// A `DummyVecFs` rooted at a fresh unique temp directory.
 fn dummy() -> DummyVecFs {
@@ -42,26 +42,26 @@ fn dummy_write_read_roundtrip() {
     let mut fs = dummy();
     fs.ensure_dir("/data", 0o755).unwrap();
     let payload = b"roundtrip content".to_vec();
-    fs.writev(&[WriteOp::from_path("/data/f", 0, payload.clone()).with_creation()])
+    fs.writev(&[WriteOp::from_path("/data/f", VfOffset::At(0), payload.clone()).with_creation()])
         .unwrap();
 
     let r = &fs
-        .readv(&[ReadOp::from_path("/data/f", 0, payload.len())])
+        .readv(&[ReadOp::from_path("/data/f", VfOffset::At(0), payload.len())])
         .unwrap()[0];
     assert_eq!(r.data, payload);
 }
 
 #[test]
 fn dummy_errors_on_missing_file() {
-    use vnfs::{ReadOp, VecFs, VfError};
+    use vnfs::{ReadOp, VecFs, VfOffset};
 
     let mut fs = dummy();
     fs.ensure_dir("/data", 0o755).unwrap();
-    let res = fs.readv(&[ReadOp::from_path("/data/missing", 0, 8)]);
+    let res = fs.readv(&[ReadOp::from_path("/data/missing", VfOffset::At(0), 8)]);
     match res {
-        Err(VfError { index, err_no }) => {
-            assert_eq!(index, 0);
-            assert_eq!(err_no, 2, "ENOENT");
+        Err(e) => {
+            assert_eq!(e.index(), 0);
+            assert_eq!(e.err_no(), 2, "ENOENT");
         }
         Ok(_) => panic!("readv of missing file must fail"),
     }

@@ -73,15 +73,12 @@ fn read_hello(client: &mut NfsClient) -> Result<(), RpcError> {
     let mut offset = 0u64;
     let mut content = Vec::new();
     loop {
-        let chunk = client.read(&fh, &stateid, offset, 4096)?;
-        if chunk.is_empty() {
+        let (chunk, eof) = client.read(&fh, &stateid, offset, 4096)?;
+        if chunk.is_empty() || eof {
             break;
         }
         offset += chunk.len() as u64;
         content.extend_from_slice(&chunk);
-        if chunk.len() < 4096 {
-            break;
-        }
     }
     println!(
         "hello.txt content ({} bytes): {:?}",
@@ -104,7 +101,7 @@ fn write_read_back(client: &mut NfsClient) -> Result<(), RpcError> {
     println!("wrote {} bytes, committed {}", n, committed);
     assert_eq!(n as usize, data.len());
 
-    let read_back = client.read(&fh, &stateid, 0, data.len() as u32)?;
+    let (read_back, _eof) = client.read(&fh, &stateid, 0, data.len() as u32)?;
     println!(
         "read back {} bytes: {:?}",
         read_back.len(),

@@ -83,7 +83,7 @@ fn open_excl_fails_if_exists() {
     // O_EXCL on an existing file must fail with NFS4ERR_EXIST (17), surfaced
     // directly by the structured error (no string parsing).
     match r {
-        Err(e) => assert_eq!(e.err_no, nfsstat4_NFS4ERR_EXIST, "got {:?}", e),
+        Err(e) => assert_eq!(e.err_no(), nfsstat4_NFS4ERR_EXIST, "got {:?}", e),
         Ok(_) => panic!("O_EXCL on existing file must fail"),
     }
 }
@@ -135,12 +135,12 @@ fn writev_then_readv() {
 
     let payload = b"the quick brown fox jumps over the lazy dog\n".to_vec();
     let wr = &c
-        .writev(&[WriteOp::from_path(&f, 0, payload.clone()).with_creation()])
+        .writev(&[WriteOp::from_path(&f, VfOffset::At(0), payload.clone()).with_creation()])
         .expect("writev")[0];
     assert_eq!(wr.written, payload.len(), "all bytes written");
 
     let r = &c
-        .readv(&[ReadOp::from_path(&f, 0, payload.len())])
+        .readv(&[ReadOp::from_path(&f, VfOffset::At(0), payload.len())])
         .expect("readv")[0];
     assert_eq!(r.data, payload, "read back what was written");
 }
@@ -151,11 +151,13 @@ fn readv_eof() {
     let f = format!("{}/short.txt", dir);
     let mut c = client();
     let payload = b"abcdefghij".to_vec();
-    c.writev(&[WriteOp::from_path(&f, 0, payload.clone()).with_creation()])
+    c.writev(&[WriteOp::from_path(&f, VfOffset::At(0), payload.clone()).with_creation()])
         .unwrap();
 
     // Ask for more than exists: must not fail and must hit EOF.
-    let r = &c.readv(&[ReadOp::from_path(&f, 0, 100)]).expect("readv")[0];
+    let r = &c
+        .readv(&[ReadOp::from_path(&f, VfOffset::At(0), 100)])
+        .expect("readv")[0];
     assert_eq!(r.data.len(), payload.len());
     assert!(r.eof, "short read must set eof");
 }
@@ -168,9 +170,11 @@ fn readv_multiple_files() {
     for (i, name) in ["x", "y", "z"].iter().enumerate() {
         let f = format!("{}/{}.txt", dir, name);
         let payload = vec![b'a' + i as u8; 8];
-        c.writev(&[WriteOp::from_path(&f, 0, payload).with_creation()])
+        c.writev(&[WriteOp::from_path(&f, VfOffset::At(0), payload).with_creation()])
             .unwrap();
-        let r = &c.readv(&[ReadOp::from_path(&f, 0, 8)]).unwrap()[0];
+        let r = &c
+            .readv(&[ReadOp::from_path(&f, VfOffset::At(0), 8)])
+            .unwrap()[0];
         iovs.push(r.data.clone());
     }
     assert_eq!(iovs[0], vec![b'a'; 8]);
@@ -184,7 +188,7 @@ fn readv_multiple_files() {
 
 fn make_file(path: &str, content: &[u8]) -> NfsVecFs {
     let mut c = client();
-    c.writev(&[WriteOp::from_path(path, 0, content.to_vec()).with_creation()])
+    c.writev(&[WriteOp::from_path(path, VfOffset::At(0), content.to_vec()).with_creation()])
         .unwrap();
     c
 }
@@ -234,7 +238,7 @@ fn getattrsv() {
     let mut attrs = Vec::new();
     for name in ["g0", "g1", "g2"] {
         let f = format!("{}/{}.txt", dir, name);
-        c.writev(&[WriteOp::from_path(&f, 0, vec![b'x'; 3]).with_creation()])
+        c.writev(&[WriteOp::from_path(&f, VfOffset::At(0), vec![b'x'; 3]).with_creation()])
             .unwrap();
         attrs.push(VfAttrs {
             file: VfFile::from_path(&f),
@@ -312,8 +316,10 @@ fn listdir() {
     c.ensure_dir(&format!("{}/sub", dir), 0o755).unwrap();
     for (i, name) in ["a.txt", "b.txt", "c.txt"].iter().enumerate() {
         let f = format!("{}/{}", dir, name);
-        c.writev(&[WriteOp::from_path(&f, 0, vec![b'a' + i as u8; 4]).with_creation()])
-            .unwrap();
+        c.writev(&[
+            WriteOp::from_path(&f, VfOffset::At(0), vec![b'a' + i as u8; 4]).with_creation(),
+        ])
+        .unwrap();
     }
     let contents = c
         .listdir(&dir, AttrMask::default(), 0, false)
@@ -332,7 +338,7 @@ fn listdir_recursive() {
     let mut c = client();
     c.ensure_dir(&format!("{}/d1/d2", dir), 0o755).unwrap();
     for f in [format!("{}/top.txt", dir), format!("{}/d1/deep.txt", dir)] {
-        c.writev(&[WriteOp::from_path(&f, 0, b"ok".to_vec()).with_creation()])
+        c.writev(&[WriteOp::from_path(&f, VfOffset::At(0), b"ok".to_vec()).with_creation()])
             .unwrap();
     }
     let contents = c
@@ -392,7 +398,7 @@ fn unlinkv() {
     ];
     let refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
     for f in &files {
-        c.writev(&[WriteOp::from_path(f, 0, b"z".to_vec()).with_creation()])
+        c.writev(&[WriteOp::from_path(f, VfOffset::At(0), b"z".to_vec()).with_creation()])
             .unwrap();
     }
     c.unlinkv(&refs).expect("unlinkv");
@@ -406,7 +412,7 @@ fn removev() {
     let dir = setup_dir("removev");
     let mut c = client();
     let f = format!("{}/rv.txt", dir);
-    c.writev(&[WriteOp::from_path(&f, 0, b"r".to_vec()).with_creation()])
+    c.writev(&[WriteOp::from_path(&f, VfOffset::At(0), b"r".to_vec()).with_creation()])
         .unwrap();
     c.removev(&[VfFile::from_path(&f)]).expect("removev");
     assert!(!c.exists(&f).unwrap());
@@ -516,7 +522,7 @@ fn rm_recursive_api() {
         format!("{}/x/deep", dir),
         format!("{}/x/y/deep2", dir),
     ] {
-        c.writev(&[WriteOp::from_path(&f, 0, b"d".to_vec()).with_creation()])
+        c.writev(&[WriteOp::from_path(&f, VfOffset::At(0), b"d".to_vec()).with_creation()])
             .unwrap();
     }
     assert!(c.exists(&format!("{}/x/deep", dir)).unwrap());
@@ -530,7 +536,7 @@ fn rm_nonrecursive_keeps_subdirs() {
     let mut c = client();
     let file = format!("{}/keepdir/target", dir);
     c.ensure_dir(&format!("{}/keepdir", dir), 0o755).unwrap();
-    c.writev(&[WriteOp::from_path(&file, 0, b"k".to_vec()).with_creation()])
+    c.writev(&[WriteOp::from_path(&file, VfOffset::At(0), b"k".to_vec()).with_creation()])
         .unwrap();
     // Non-recursive removal of the directory fails because it is not empty.
     let r = c.rm(&[dir.as_str()], false);
@@ -546,13 +552,15 @@ fn rm_nonrecursive_keeps_subdirs() {
 // ---------------------------------------------------------------------------
 
 fn write_file(c: &mut NfsVecFs, path: &str, data: &[u8]) {
-    c.writev(&[WriteOp::from_path(path, 0, data.to_vec()).with_creation()])
+    c.writev(&[WriteOp::from_path(path, VfOffset::At(0), data.to_vec()).with_creation()])
         .unwrap();
 }
 
 fn read_all(c: &mut NfsVecFs, path: &str) -> Vec<u8> {
     let size = c.stat(path).expect("stat").size as usize;
-    let r = &c.readv(&[ReadOp::from_path(path, 0, size)]).expect("readv")[0];
+    let r = &c
+        .readv(&[ReadOp::from_path(path, VfOffset::At(0), size)])
+        .expect("readv")[0];
     assert_eq!(r.data.len(), size, "read full file");
     r.data.clone()
 }
@@ -590,21 +598,25 @@ fn fseek_set_cur_end() {
         .expect("open");
 
     let payload = b"0123456789".to_vec();
-    c.writev(&[WriteOp::from_fd(tf.fd().unwrap(), 0, payload.clone())])
-        .unwrap();
-    assert_eq!(c.fseek(&mut tf.clone(), 0, SeekFrom::End).unwrap(), 10);
+    c.writev(&[WriteOp::from_fd(
+        tf.fd().unwrap(),
+        VfOffset::At(0),
+        payload.clone(),
+    )])
+    .unwrap();
+    assert_eq!(c.fseek(&tf, 0, SeekFrom::End).unwrap(), 10);
 
-    // SeekFrom::Set then read via VF_OFFSET_CUR.
-    assert_eq!(c.fseek(&mut tf.clone(), 4, SeekFrom::Set).unwrap(), 4);
+    // SeekFrom::Set then read via VfOffset::Cur.
+    assert_eq!(c.fseek(&tf, 4, SeekFrom::Set).unwrap(), 4);
     let r = &c
-        .readv(&[ReadOp::from_fd(tf.fd().unwrap(), VF_OFFSET_CUR, 6)])
+        .readv(&[ReadOp::from_fd(tf.fd().unwrap(), VfOffset::Cur, 6)])
         .unwrap()[0];
     assert_eq!(r.data, b"456789", "read at current offset after fseek");
 
     // SeekFrom::Cur advances from the tracked offset (4 + 6 = 10).
-    assert_eq!(c.fseek(&mut tf.clone(), -4, SeekFrom::Cur).unwrap(), 6);
+    assert_eq!(c.fseek(&tf, -4, SeekFrom::Cur).unwrap(), 6);
     let r = &c
-        .readv(&[ReadOp::from_fd(tf.fd().unwrap(), VF_OFFSET_CUR, 4)])
+        .readv(&[ReadOp::from_fd(tf.fd().unwrap(), VfOffset::Cur, 4)])
         .unwrap()[0];
     assert_eq!(r.data, b"6789");
 
@@ -676,14 +688,18 @@ fn write_adb_blocknums_and_pattern() {
 
     for (i, expected_adbn) in [100u64, 101, 102].iter().enumerate() {
         let base = i as u64 * 1024;
-        let bn = &c.readv(&[ReadOp::from_path(&f, base, 8)]).unwrap()[0];
+        let bn = &c
+            .readv(&[ReadOp::from_path(&f, VfOffset::At(base), 8)])
+            .unwrap()[0];
         assert_eq!(
             u64::from_be_bytes(bn.data[0..8].try_into().unwrap()),
             *expected_adbn,
             "ADBN of block {}",
             i
         );
-        let pt = &c.readv(&[ReadOp::from_path(&f, base + 8, 3)]).unwrap()[0];
+        let pt = &c
+            .readv(&[ReadOp::from_path(&f, VfOffset::At(base + 8), 3)])
+            .unwrap()[0];
         assert_eq!(pt.data, b"PAT", "pattern of block {}", i);
     }
 }
@@ -777,7 +793,7 @@ fn batched_readv_writev_many_files() {
         .map(|tf| {
             WriteOp::from_fd(
                 tf.fd().unwrap(),
-                0,
+                VfOffset::At(0),
                 vec![b'a' + (tf.fd().unwrap() - 1) as u8; 3],
             )
         })
@@ -789,7 +805,7 @@ fn batched_readv_writev_many_files() {
 
     let reads: Vec<ReadOp> = tfs
         .iter()
-        .map(|tf| ReadOp::from_fd(tf.fd().unwrap(), 0, 3))
+        .map(|tf| ReadOp::from_fd(tf.fd().unwrap(), VfOffset::At(0), 3))
         .collect();
     let rres = c.readv(&reads).expect("batched readv");
     for (i, r) in rres.iter().enumerate() {
@@ -845,7 +861,7 @@ fn batch_exceeds_compound_op_limit() {
         .map(|tf| {
             WriteOp::from_fd(
                 tf.fd().unwrap(),
-                0,
+                VfOffset::At(0),
                 vec![b'a' + (tf.fd().unwrap() - 1) as u8; 2],
             )
         })
@@ -871,7 +887,7 @@ fn batch_exceeds_compound_op_limit() {
     // Batched readv back.
     let reads: Vec<ReadOp> = files
         .iter()
-        .map(|tf| ReadOp::from_fd(tf.fd().unwrap(), 0, 2))
+        .map(|tf| ReadOp::from_fd(tf.fd().unwrap(), VfOffset::At(0), 2))
         .collect();
     let rres = c.readv(&reads).expect("batched readv (10 files)");
     for (i, r) in rres.iter().enumerate() {

@@ -10,6 +10,13 @@ pub const STATUS_TRANSPORT: u32 = u32::MAX;
 ///
 /// Callers can inspect [`status`](RpcError::status) directly instead of
 /// parsing error strings.
+///
+/// `op_index` is the index of the failing operation in the caller's request
+/// slice: the batched compound helpers (`readv`, `writev`, `getattr_many`,
+/// ...) translate compound positions to caller-relative indices before
+/// returning. For single-operation helpers it is the position within the
+/// compound (typically 2: `SEQUENCE`, `PUTFH`, op). Transport failures always
+/// report `op_index == 0`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RpcError {
     /// Index of the failing operation within the compound.
@@ -42,6 +49,15 @@ impl RpcError {
     /// Whether this is a transport failure rather than an NFS status.
     pub fn is_transport(&self) -> bool {
         self.status == STATUS_TRANSPORT
+    }
+
+    /// Re-attribute this error to a different operation index (used by the
+    /// batched helpers to translate compound positions to caller indices).
+    pub fn with_op_index(self, index: usize) -> RpcError {
+        RpcError {
+            op_index: index,
+            ..self
+        }
     }
 }
 

@@ -13,16 +13,18 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // writev / readv via paths.
     let payload = b"the quick brown fox jumps over the lazy dog".to_vec();
-    let mut w = WriteOp::from_path(&f, 0, payload.clone());
+    let mut w = WriteOp::from_path(&f, VfOffset::At(0), payload.clone());
     w.creation = true;
     let wr = &fs.writev(&[w]).expect("writev")[0];
     assert_eq!(wr.written, payload.len());
 
     let r = &fs
-        .readv(&[ReadOp::from_path(&f, 0, payload.len())])
+        .readv(&[ReadOp::from_path(&f, VfOffset::At(0), payload.len())])
         .expect("readv")[0];
     assert_eq!(r.data, payload);
-    assert!(!r.eof);
+    // eof is the backend's EOF signal: NFS reports it for an exact-to-EOF
+    // read, the std::fs backend only for short reads. Either way no more data
+    // is available, so only the data itself is asserted here.
 
     // stat / exists / file_type.
     let st = fs.stat(&f).expect("stat");
@@ -49,11 +51,15 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // open / descriptor write / fseek / descriptor read.
     let tf = fs.open(&f, libc::O_RDWR, 0).expect("open");
-    fs.writev(&[WriteOp::from_fd(tf.fd().unwrap(), 0, b"hello".to_vec())])
-        .expect("writev fd");
-    assert_eq!(fs.fseek(&mut tf.clone(), 0, SeekFrom::Set).unwrap(), 0);
+    fs.writev(&[WriteOp::from_fd(
+        tf.fd().unwrap(),
+        VfOffset::At(0),
+        b"hello".to_vec(),
+    )])
+    .expect("writev fd");
+    assert_eq!(fs.fseek(&tf, 0, SeekFrom::Set).unwrap(), 0);
     let r = &fs
-        .readv(&[ReadOp::from_fd(tf.fd().unwrap(), VF_OFFSET_CUR, 5)])
+        .readv(&[ReadOp::from_fd(tf.fd().unwrap(), VfOffset::Cur, 5)])
         .expect("readv fd")[0];
     assert_eq!(r.data, b"hello");
     fs.close(&tf).expect("close");
@@ -161,7 +167,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     let cpdst = format!("{}/cpdst", dir);
     fs.ensure_dir(&format!("{}/inner", cpsrc), 0o755).unwrap();
     let srcfile = format!("{}/inner/data.txt", cpsrc);
-    let mut w = WriteOp::from_path(&srcfile, 0, b"xyz".to_vec());
+    let mut w = WriteOp::from_path(&srcfile, VfOffset::At(0), b"xyz".to_vec());
     w.creation = true;
     fs.writev(&[w]).unwrap();
     fs.cp_recursive(&cpsrc, &cpdst, true, false)

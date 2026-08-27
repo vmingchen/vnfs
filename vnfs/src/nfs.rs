@@ -36,14 +36,41 @@ pub struct NfsVecFs {
 }
 
 impl NfsVecFs {
+    fn setattrsv_impl(&mut self, attrs: &[VfAttrs], follow: bool) -> VfRes {
+        const SETTABLE: AttrMask = AttrMask::MODE.union(AttrMask::SIZE);
+        let mut ops = Vec::with_capacity(attrs.len());
+        for (i, a) in attrs.iter().enumerate() {
+            let unsupported = a.masks.difference(SETTABLE);
+            if !unsupported.is_empty() {
+                return Err(VfError::unsupported(i));
+            }
+            let fh = self
+                .resolve_tcfile(&a.file, follow)
+                .map_err(|e| e.with_index(i))?;
+            let mode = if a.masks.contains(AttrMask::MODE) {
+                Some(a.mode & 0o7777)
+            } else {
+                None
+            };
+            let size = if a.masks.contains(AttrMask::SIZE) {
+                Some(a.size)
+            } else {
+                None
+            };
+            ops.push(crate::client::SetattrOp { fh, mode, size });
+        }
+        self.nfs
+            .setattr_many(&ops)
+            .map_err(VfError::from_rpc_indexed)
+    }
+
     fn getattrsv_impl(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
         let mut ops = Vec::with_capacity(attrs.len());
         let mut ids_list = Vec::with_capacity(attrs.len());
         for (i, a) in attrs.iter().enumerate() {
-            let fh = self.resolve_tcfile(&a.file, follow).map_err(|mut e| {
-                e.index = i;
-                e
-            })?;
+            let fh = self
+                .resolve_tcfile(&a.file, follow)
+                .map_err(|e| e.with_index(i))?;
             let ids = request_mask_to_attr_list(&a.masks);
             ids_list.push(ids.clone());
             ops.push(crate::client::GetattrOp { fh, attrs: ids });
@@ -51,7 +78,7 @@ impl NfsVecFs {
         let results = self
             .nfs
             .getattr_many(&ops)
-            .map_err(|e| VfError::from_rpc(0, e))?;
+            .map_err(VfError::from_rpc_indexed)?;
         for ((a, ids), list) in attrs.iter_mut().zip(ids_list).zip(results) {
             let v = parse_attr_list(&ids, &list)?;
             apply_attrs(a, &v);
@@ -60,7 +87,7 @@ impl NfsVecFs {
     }
     /// Connect to the NFS server at `host` and resolve the export root.
     pub fn connect(host: &str) -> VfResult<NfsVecFs> {
-        let nfs = NfsClient::connect(host).map_err(|e| VfError::from_rpc(0, e))?;
+        let nfs = NfsClient::connect(host).map_err(|e| VfError::from_rpc(e, 0))?;
         Ok(NfsVecFs {
             nfs,
             cwd: PathBuf::new(),
@@ -75,7 +102,7 @@ impl NfsVecFs {
     fn resolve(&mut self, path: &str) -> VfResult<FileHandle> {
         self.nfs
             .resolve(&self.abs_path(path))
-            .map_err(|e| VfError::from_rpc(0, e))
+            .map_err(|e| VfError::from_rpc(e, 0))
     }
 
     /// Map fcntl-style flags to an NFSv4 share access mode.
@@ -98,7 +125,7 @@ impl NfsVecFs {
         create: bool,
         excl: bool,
     ) -> VfResult<(FileHandle, stateid4)> {
-        let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(0, e))?;
+        let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(e, 0))?;
         let mode = match (create, excl) {
             (false, _) => OpenCreate::NoCreate,
             (true, true) => OpenCreate::Exclusive,
@@ -106,7 +133,7 @@ impl NfsVecFs {
         };
         self.nfs
             .open(&dirfh, name, access, mode)
-            .map_err(|e| VfError::from_rpc(0, e))
+            .map_err(|e| VfError::from_rpc(e, 0))
     }
 
     /// Shared implementation of the openv variants using batched OPENs.
@@ -122,8 +149,8 @@ impl NfsVecFs {
         let mut need_trunc = Vec::with_capacity(paths.len());
         for (i, p) in paths.iter().enumerate() {
             let full = self.abs_path(p);
-            let (dir, name) = split_path(&full).map_err(|e| VfError::failure(i, e.err_no))?;
-            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(i, e))?;
+            let (dir, name) = split_path(&full).map_err(|e| VfError::failure(i, e))?;
+            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(e, i))?;
             let access = Self::flags_to_access(flags[i]);
             let create = flags[i] & O_CREAT != 0;
             let excl = flags[i] & O_EXCL != 0;
@@ -145,7 +172,7 @@ impl NfsVecFs {
         let results = self
             .nfs
             .open_many(&opens)
-            .map_err(|e| VfError::from_rpc(0, e))?;
+            .map_err(VfError::from_rpc_indexed)?;
 
         // Apply per-file mode / O_TRUNC with a single SETATTR compound.
         let mut setattr_ops = Vec::new();
@@ -168,7 +195,7 @@ impl NfsVecFs {
         if !setattr_ops.is_empty() {
             self.nfs
                 .setattr_many(&setattr_ops)
-                .map_err(|e| VfError::from_rpc(0, e))?;
+                .map_err(VfError::from_rpc_indexed)?;
         }
 
         let mut out = Vec::with_capacity(results.len());
@@ -204,10 +231,9 @@ impl NfsVecFs {
                     .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_BAD_STATEID))?;
                 Ok((o.fh, o.stateid, false))
             }
-            VfFile::Path { path, .. } | VfFile::Current(Some(path)) => {
-                let path = path.to_string_lossy().to_string();
-                let full = self.abs_path(&path);
-                let (dir, name) = split_path(&full)?;
+            VfFile::Path { .. } | VfFile::Current(_) => {
+                let full = self.vf_path(file)?;
+                let (dir, name) = split_path(&full).map_err(|e| VfError::failure(0, e))?;
                 let access = if for_write {
                     OPEN4_SHARE_ACCESS_BOTH
                 } else {
@@ -216,9 +242,7 @@ impl NfsVecFs {
                 let (fh, sid) = self.open_impl(dir, name, access, is_creation, false)?;
                 Ok((fh, sid, true))
             }
-            VfFile::Current(None) | VfFile::Null | VfFile::Saved => {
-                Err(VfError::failure(0, nfsstat4_NFS4ERR_NOENT))
-            }
+            VfFile::Null | VfFile::Saved => Err(VfError::failure(0, nfsstat4_NFS4ERR_NOENT)),
         }
     }
 
@@ -228,10 +252,9 @@ impl NfsVecFs {
         let mut ops = Vec::with_capacity(reads.len());
         let mut offsets = Vec::with_capacity(reads.len());
         for (i, op) in reads.iter().enumerate() {
-            let off = self.resolve_offset(&op.file, op.offset).map_err(|mut e| {
-                e.index = i;
-                e
-            })?;
+            let off = self
+                .resolve_offset(&op.file, op.offset)
+                .map_err(|e| e.with_index(i))?;
             let o = self
                 .open_files
                 .get(&op.file.fd().unwrap())
@@ -245,16 +268,9 @@ impl NfsVecFs {
             });
             offsets.push(off);
         }
-        let results = self.nfs.readv(&ops).map_err(|e| {
-            let idx = e.op_index.saturating_sub(2) / 2;
-            VfError {
-                index: idx.min(reads.len()),
-                err_no: e.status,
-            }
-        })?;
+        let results = self.nfs.readv(&ops).map_err(VfError::from_rpc_indexed)?;
         let mut out = Vec::with_capacity(reads.len());
-        for ((op, data), off) in reads.iter().zip(results).zip(offsets) {
-            let eof = data.len() < op.length;
+        for ((op, (data, eof)), off) in reads.iter().zip(results).zip(offsets) {
             self.advance_offset(&op.file, off + data.len() as u64);
             out.push(ReadResult {
                 file: op.file.clone(),
@@ -266,20 +282,18 @@ impl NfsVecFs {
         Ok(out)
     }
 
-    /// Resolve a special offset (`VF_OFFSET_CUR` / `VF_OFFSET_END`) to a
-    /// concrete file offset; plain offsets pass through.
-    fn resolve_offset(&mut self, file: &VfFile, off: u64) -> VfResult<u64> {
-        if off == VF_OFFSET_CUR {
-            if let Some(fd) = file.fd() {
-                Ok(self.open_files.get(&fd).map(|o| o.cur_offset).unwrap_or(0))
-            } else {
-                Ok(0)
+    /// Resolve a [`VfOffset`] to a concrete file offset.
+    fn resolve_offset(&mut self, file: &VfFile, off: VfOffset) -> VfResult<u64> {
+        match off {
+            VfOffset::At(offset) => Ok(offset),
+            VfOffset::Cur => match file.fd() {
+                Some(fd) => Ok(self.open_files.get(&fd).map(|o| o.cur_offset).unwrap_or(0)),
+                None => Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL)),
+            },
+            VfOffset::End => {
+                let fh = self.resolve_tcfile(file, true)?;
+                self.file_size(&fh)
             }
-        } else if off == VF_OFFSET_END {
-            let fh = self.resolve_tcfile(file, true)?;
-            self.file_size(&fh)
-        } else {
-            Ok(off)
         }
     }
 
@@ -294,27 +308,33 @@ impl NfsVecFs {
 
     fn readv_one(&mut self, op: &ReadOp) -> VfResult<ReadResult> {
         let (fh, stateid, close_after) = self.resolve_file(&op.file, false, false)?;
-        let want = op.length.min(u32::MAX as usize) as u32;
-        let mut offset = self.resolve_offset(&op.file, op.offset)?;
+        let want = op.length;
+        let start = self.resolve_offset(&op.file, op.offset)?;
+        let mut offset = start;
         let mut got = Vec::new();
         let mut eof = false;
         let result = loop {
-            let remaining = want.saturating_sub(got.len() as u32);
-            let chunk = self
+            let remaining = want.saturating_sub(got.len());
+            if remaining == 0 {
+                break Ok(());
+            }
+            let (chunk, chunk_eof) = self
                 .nfs
-                .read(&fh, &stateid, offset, remaining)
-                .map_err(|e| VfError::from_rpc(0, e))?;
+                .read(
+                    &fh,
+                    &stateid,
+                    offset,
+                    remaining.min(u32::MAX as usize) as u32,
+                )
+                .map_err(|e| VfError::from_rpc(e, 0))?;
             if chunk.is_empty() {
                 eof = true;
                 break Ok(());
             }
-            let before = got.len();
             got.extend_from_slice(&chunk);
             offset += chunk.len() as u64;
-            if chunk.len() < (want as usize).saturating_sub(before) {
-                eof = true;
-            }
-            if chunk.len() < remaining as usize || got.len() >= want as usize {
+            eof = chunk_eof || chunk.len() < remaining;
+            if eof || got.len() >= want {
                 break Ok(());
             }
         };
@@ -325,7 +345,7 @@ impl NfsVecFs {
         self.advance_offset(&op.file, offset);
         Ok(ReadResult {
             file: op.file.clone(),
-            offset: op.offset,
+            offset: start,
             data: got,
             eof,
         })
@@ -336,10 +356,9 @@ impl NfsVecFs {
         let mut ops = Vec::with_capacity(writes.len());
         let mut offsets = Vec::with_capacity(writes.len());
         for (i, op) in writes.iter().enumerate() {
-            let off = self.resolve_offset(&op.file, op.offset).map_err(|mut e| {
-                e.index = i;
-                e
-            })?;
+            let off = self
+                .resolve_offset(&op.file, op.offset)
+                .map_err(|e| e.with_index(i))?;
             let o = self
                 .open_files
                 .get(&op.file.fd().unwrap())
@@ -353,13 +372,7 @@ impl NfsVecFs {
             });
             offsets.push(off);
         }
-        let results = self.nfs.writev(&ops).map_err(|e| {
-            let idx = e.op_index.saturating_sub(2) / 2;
-            VfError {
-                index: idx.min(writes.len()),
-                err_no: e.status,
-            }
-        })?;
+        let results = self.nfs.writev(&ops).map_err(VfError::from_rpc_indexed)?;
         let mut out = Vec::with_capacity(writes.len());
         for ((op, (n, committed)), off) in writes.iter().zip(results).zip(offsets) {
             self.advance_offset(&op.file, off + n as u64);
@@ -379,7 +392,7 @@ impl NfsVecFs {
         let result = self
             .nfs
             .write(&fh, &stateid, offset, &op.data)
-            .map_err(|e| VfError::from_rpc(0, e));
+            .map_err(|e| VfError::from_rpc(e, 0));
         if close_after {
             let _ = self.nfs.close(&fh, &stateid);
         }
@@ -387,7 +400,7 @@ impl NfsVecFs {
         self.advance_offset(&op.file, offset + n as u64);
         Ok(WriteResult {
             file: op.file.clone(),
-            offset: op.offset,
+            offset,
             written: n as usize,
             stable: committed == stable_how4_FILE_SYNC4,
         })
@@ -398,7 +411,7 @@ impl NfsVecFs {
         let list = self
             .nfs
             .getattr(fh, &[FATTR4_SIZE])
-            .map_err(|e| VfError::from_rpc(0, e))?;
+            .map_err(|e| VfError::from_rpc(e, 0))?;
         let mut off = 0;
         read_u64(&list, &mut off)
     }
@@ -410,17 +423,15 @@ impl NfsVecFs {
                 .get(fd)
                 .map(|o| o.fh.clone())
                 .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_BAD_STATEID)),
-            VfFile::Path { path, .. } | VfFile::Current(Some(path)) => {
-                let path = path.to_string_lossy();
+            VfFile::Path { .. } | VfFile::Current(_) => {
+                let path = self.vf_path(f)?;
                 if follow {
                     self.resolve_follow(&path)
                 } else {
-                    self.resolve(&path)
+                    self.nfs.resolve(&path).map_err(|e| VfError::from_rpc(e, 0))
                 }
             }
-            VfFile::Current(None) | VfFile::Null | VfFile::Saved => {
-                Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL))
-            }
+            VfFile::Null | VfFile::Saved => Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL)),
         }
     }
 
@@ -432,11 +443,17 @@ impl NfsVecFs {
         let mut remaining = path.to_string();
         let mut hops = 0usize;
         loop {
-            let fh = self.resolve(&remaining)?;
+            // `path` is already root-relative (from `vf_path`); resolve
+            // straight from the export root instead of re-applying
+            // `abs_path`, which would join the cwd a second time.
+            let fh = self
+                .nfs
+                .resolve(&remaining)
+                .map_err(|e| VfError::from_rpc(e, 0))?;
             let t = self
                 .nfs
                 .getattr(&fh, &[FATTR4_TYPE])
-                .map_err(|e| VfError::from_rpc(0, e))?;
+                .map_err(|e| VfError::from_rpc(e, 0))?;
             let mut off = 0usize;
             if read_u32(&t, &mut off).unwrap_or(0) != nfs_ftype4_NF4LNK {
                 return Ok(fh);
@@ -447,8 +464,21 @@ impl NfsVecFs {
             let target = self
                 .nfs
                 .readlink(&fh)
-                .map_err(|e| VfError::from_rpc(0, e))?;
-            remaining = self.abs_path(&String::from_utf8_lossy(&target));
+                .map_err(|e| VfError::from_rpc(e, 0))?;
+            let target = String::from_utf8_lossy(&target);
+            // Resolve the target relative to the symlink's parent directory
+            // (POSIX semantics), or from the export root for absolute targets.
+            // `remaining` is the symlink's own root-relative path, so the
+            // result is root-relative here (no `abs_path` re-resolution).
+            remaining = if let Some(t) = target.strip_prefix('/') {
+                t.to_string()
+            } else {
+                let parent = match remaining.rfind('/') {
+                    Some(idx) => &remaining[..=idx],
+                    None => "",
+                };
+                format!("{}{}", parent, target)
+            };
             hops += 1;
         }
     }
@@ -472,7 +502,7 @@ impl NfsVecFs {
             let entries = self
                 .nfs
                 .readdir(&dirfh, cookie, &ids)
-                .map_err(|e| VfError::from_rpc(0, e))?;
+                .map_err(|e| VfError::from_rpc(e, 0))?;
             if entries.is_empty() {
                 break;
             }
@@ -529,7 +559,7 @@ impl NfsVecFs {
             let page = self
                 .nfs
                 .readdir(fh, cookie, &ids)
-                .map_err(|e| VfError::from_rpc(0, e))?;
+                .map_err(|e| VfError::from_rpc(e, 0))?;
             cookie = page.last().map(|d| d.cookie).unwrap_or(0);
             all.extend(page);
             if cookie == 0 {
@@ -565,8 +595,8 @@ impl NfsVecFs {
     fn copy_extent(&mut self, p: &ExtentPair) -> VfResult<()> {
         let sfull = self.abs_path(&p.src_path);
         let dfull = self.abs_path(&p.dst_path);
-        let (sdir, sname) = split_path(&sfull)?;
-        let (ddir, dname) = split_path(&dfull)?;
+        let (sdir, sname) = split_path(&sfull).map_err(|e| VfError::failure(0, e))?;
+        let (ddir, dname) = split_path(&dfull).map_err(|e| VfError::failure(0, e))?;
         let (sfh, ssid) = self.open_impl(sdir, sname, OPEN4_SHARE_ACCESS_READ, false, false)?;
         let (dfh, dsid) = self.open_impl(ddir, dname, OPEN4_SHARE_ACCESS_WRITE, true, false)?;
 
@@ -584,15 +614,15 @@ impl NfsVecFs {
             };
             let chunk_len = remaining.min(1 << 20) as u32;
             let chunk = match self.nfs.read(&sfh, &ssid, so, chunk_len) {
-                Ok(c) => c,
-                Err(e) => break Err(VfError::from_rpc(0, e)),
+                Ok((c, _)) => c,
+                Err(e) => break Err(VfError::from_rpc(e, 0)),
             };
             if chunk.is_empty() {
                 break Ok(()); // EOF
             }
             let n = match self.nfs.write(&dfh, &dsid, doff, &chunk) {
                 Ok((n, _)) => n as u64,
-                Err(e) => break Err(VfError::from_rpc(0, e)),
+                Err(e) => break Err(VfError::from_rpc(e, 0)),
             };
             so += n;
             doff += n;
@@ -625,7 +655,7 @@ impl VecFs for NfsVecFs {
             VfPathBase::Abs => pathname.trim_start_matches('/').to_string(),
             VfPathBase::Cwd => self.cwd.join(pathname).to_string_lossy().to_string(),
         };
-        let (dir, name) = split_path(&full)?;
+        let (dir, name) = split_path(&full).map_err(|e| VfError::failure(0, e))?;
         let access = Self::flags_to_access(flags);
         let create = flags & O_CREAT != 0;
         let excl = flags & O_EXCL != 0;
@@ -633,12 +663,12 @@ impl VecFs for NfsVecFs {
         if create {
             self.nfs
                 .setattr(&fh, Some(mode & 0o7777), None)
-                .map_err(|e| VfError::from_rpc(0, e))?;
+                .map_err(|e| VfError::from_rpc(e, 0))?;
         }
         if flags & O_TRUNC != 0 {
             self.nfs
                 .setattr(&fh, None, Some(0))
-                .map_err(|e| VfError::from_rpc(0, e))?;
+                .map_err(|e| VfError::from_rpc(e, 0))?;
         }
         self.next_fd += 1;
         let open = OpenFile {
@@ -667,7 +697,7 @@ impl VecFs for NfsVecFs {
             .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_BAD_STATEID))?;
         self.nfs
             .close(&open.fh, &open.stateid)
-            .map_err(|e| VfError::from_rpc(0, e))
+            .map_err(|e| VfError::from_rpc(e, 0))
     }
 
     fn chdir(&mut self, path: &str) -> VfResult<()> {
@@ -690,10 +720,7 @@ impl VecFs for NfsVecFs {
         }
         let mut out = Vec::with_capacity(reads.len());
         for (i, op) in reads.iter().enumerate() {
-            out.push(self.readv_one(op).map_err(|mut e| {
-                e.index = i;
-                e
-            })?);
+            out.push(self.readv_one(op).map_err(|e| e.with_index(i))?);
         }
         Ok(out)
     }
@@ -704,15 +731,12 @@ impl VecFs for NfsVecFs {
         }
         let mut out = Vec::with_capacity(writes.len());
         for (i, op) in writes.iter().enumerate() {
-            out.push(self.writev_one(op).map_err(|mut e| {
-                e.index = i;
-                e
-            })?);
+            out.push(self.writev_one(op).map_err(|e| e.with_index(i))?);
         }
         Ok(out)
     }
 
-    fn fseek(&mut self, tcf: &mut VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
+    fn fseek(&mut self, tcf: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
         if !tcf.is_descriptor() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
@@ -751,33 +775,11 @@ impl VecFs for NfsVecFs {
     }
 
     fn setattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
-        let mut ops = Vec::with_capacity(attrs.len());
-        for (i, a) in attrs.iter().enumerate() {
-            let fh = self.resolve_tcfile(&a.file, true).map_err(|mut e| {
-                e.index = i;
-                e
-            })?;
-            let mode = if a.masks.contains(AttrMask::MODE) {
-                Some(a.mode & 0o7777)
-            } else {
-                None
-            };
-            let size = if a.masks.contains(AttrMask::SIZE) {
-                Some(a.size)
-            } else {
-                None
-            };
-            if mode.is_none() && size.is_none() {
-                return Err(VfError {
-                    index: i,
-                    err_no: VF_ERR_UNSUPPORTED,
-                });
-            }
-            ops.push(crate::client::SetattrOp { fh, mode, size });
-        }
-        self.nfs
-            .setattr_many(&ops)
-            .map_err(|e| VfError::from_rpc(0, e))
+        self.setattrsv_impl(attrs, true)
+    }
+
+    fn lsetattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
+        self.setattrsv_impl(attrs, false)
     }
 
     fn listdir(
@@ -792,11 +794,6 @@ impl VecFs for NfsVecFs {
         Ok(out)
     }
 
-    /// Recursively enumerate `root` using level-order batching: every
-    /// directory at a level is resolved and listed together in compounds of up
-    /// to `MAX_COMPOUND_OPS` operations (`[PUTFH parent, LOOKUP child, GETFH,
-    /// READDIR]` per directory), then large directories' remaining READDIR
-    /// pages are drained in batched continuation compounds.
     /// Recursively enumerate `root`, returning directories in ls -R
     /// pre-order (a worklist: each directory is followed by its sorted
     /// subdirectories, then their subtrees). Listing is batched per level in
@@ -805,11 +802,11 @@ impl VecFs for NfsVecFs {
     /// large directories' remaining READDIR pages drained in batched
     /// continuation compounds. `sort` orders each directory's entries (and
     /// hence the subdirectory visit order) exactly as the caller would.
-    fn walk<F: Fn(&str, &mut Vec<VfAttrs>)>(
+    fn walk(
         &mut self,
         root: &str,
         masks: AttrMask,
-        sort: F,
+        sort: &mut dyn FnMut(&str, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<WalkEntry>> {
         let root_fh = self.resolve(root)?;
         let ids = request_mask_to_attr_list(&masks);
@@ -841,7 +838,7 @@ impl VecFs for NfsVecFs {
             let results = self
                 .nfs
                 .readdir_children(&ops, &ids)
-                .map_err(|e| VfError::from_rpc(0, e))?;
+                .map_err(VfError::from_rpc_indexed)?;
 
             // Drain remaining READDIR pages, batched across all directories.
             let mut accumulated: Vec<Vec<crate::client::DirEntry>> =
@@ -858,7 +855,7 @@ impl VecFs for NfsVecFs {
                 let cont = self
                     .nfs
                     .readdir_pages(&ops, &ids)
-                    .map_err(|e| VfError::from_rpc(0, e))?;
+                    .map_err(VfError::from_rpc_indexed)?;
                 let mut next_pending = Vec::new();
                 for ((idx, _, _), (entries, cookie)) in pending.iter().zip(cont) {
                     accumulated[*idx].extend(entries);
@@ -917,24 +914,18 @@ impl VecFs for NfsVecFs {
     fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
         let mut ops = Vec::with_capacity(pairs.len());
         for (i, (src, dst)) in pairs.iter().enumerate() {
-            let sp = src
-                .path()
-                .ok_or_else(|| VfError::failure(i, nfsstat4_NFS4ERR_INVAL))?;
-            let dp = dst
-                .path()
-                .ok_or_else(|| VfError::failure(i, nfsstat4_NFS4ERR_INVAL))?;
-            let s = sp.to_string_lossy().to_string();
-            let d = dp.to_string_lossy().to_string();
-            let (sdir, sname) = split_path(&s).map_err(|e| VfError::failure(i, e.err_no))?;
-            let (ddir, dname) = split_path(&d).map_err(|e| VfError::failure(i, e.err_no))?;
+            let s = self.vf_path(src).map_err(|e| e.with_index(i))?;
+            let d = self.vf_path(dst).map_err(|e| e.with_index(i))?;
+            let (sdir, sname) = split_path(&s).map_err(|e| VfError::failure(i, e))?;
+            let (ddir, dname) = split_path(&d).map_err(|e| VfError::failure(i, e))?;
             let sdirfh = self
                 .nfs
                 .resolve(sdir)
-                .map_err(|e| VfError::from_rpc(i, e))?;
+                .map_err(|e| VfError::from_rpc(e, i))?;
             let ddirfh = self
                 .nfs
                 .resolve(ddir)
-                .map_err(|e| VfError::from_rpc(i, e))?;
+                .map_err(|e| VfError::from_rpc(e, i))?;
             ops.push(crate::client::RenameOp {
                 srcdir: sdirfh,
                 oldname: sname.to_string(),
@@ -944,7 +935,7 @@ impl VecFs for NfsVecFs {
         }
         self.nfs
             .rename_many(&ops)
-            .map_err(|e| VfError::from_rpc(0, e))
+            .map_err(VfError::from_rpc_indexed)
     }
 
     fn removev(&mut self, files: &[VfFile]) -> VfRes {
@@ -952,23 +943,19 @@ impl VecFs for NfsVecFs {
         // Group by parent directory to batch REMOVEs.
         let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (i, f) in files.iter().enumerate() {
-            let path = f
-                .path()
-                .ok_or_else(|| VfError::failure(i, nfsstat4_NFS4ERR_INVAL))?
-                .to_string_lossy()
-                .to_string();
-            let (dir, name) = split_path(&path).map_err(|e| VfError::failure(i, e.err_no))?;
+            let path = self.vf_path(f).map_err(|e| e.with_index(i))?;
+            let (dir, name) = split_path(&path).map_err(|e| VfError::failure(i, e))?;
             groups
                 .entry(dir.to_string())
                 .or_default()
                 .push(name.to_string());
         }
         for (dir, names) in &groups {
-            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(0, e))?;
+            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(e, 0))?;
             let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             self.nfs
                 .remove_many(&dirfh, &refs)
-                .map_err(|e| VfError::from_rpc(0, e))?;
+                .map_err(VfError::from_rpc_indexed)?;
         }
         Ok(())
     }
@@ -976,15 +963,9 @@ impl VecFs for NfsVecFs {
     fn mkdirv(&mut self, dirs: &[VfAttrs]) -> VfRes {
         let mut creates = Vec::with_capacity(dirs.len());
         for (i, a) in dirs.iter().enumerate() {
-            let path = a
-                .file
-                .path()
-                .ok_or_else(|| VfError::failure(i, nfsstat4_NFS4ERR_INVAL))?
-                .to_string_lossy()
-                .to_string();
-            let full = self.abs_path(&path);
-            let (dir, name) = split_path(&full).map_err(|e| VfError::failure(i, e.err_no))?;
-            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(i, e))?;
+            let path = self.vf_path(&a.file).map_err(|e| e.with_index(i))?;
+            let (dir, name) = split_path(&path).map_err(|e| VfError::failure(i, e))?;
+            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(e, i))?;
             creates.push(crate::client::CreateOp {
                 dir: dirfh,
                 name: name.to_string(),
@@ -994,16 +975,18 @@ impl VecFs for NfsVecFs {
         }
         self.nfs
             .create_many(&creates)
-            .map_err(|e| VfError::from_rpc(0, e))?;
+            .map_err(VfError::from_rpc_indexed)?;
 
         // Apply modes (the handles come from re-resolving the new dirs).
         let mut setattrs = Vec::new();
         for (i, a) in dirs.iter().enumerate() {
             if a.masks.contains(AttrMask::MODE) {
-                let path = a.file.path().unwrap().to_string_lossy().to_string();
+                let path = self.vf_path(&a.file).map_err(|e| e.with_index(i))?;
+                // `path` is already root-relative (from `vf_path`).
                 let fh = self
+                    .nfs
                     .resolve(&path)
-                    .map_err(|e| VfError::failure(i, e.err_no))?;
+                    .map_err(|e| VfError::from_rpc(e, i))?;
                 setattrs.push(crate::client::SetattrOp {
                     fh,
                     mode: Some(a.mode & 0o7777),
@@ -1014,7 +997,7 @@ impl VecFs for NfsVecFs {
         if !setattrs.is_empty() {
             self.nfs
                 .setattr_many(&setattrs)
-                .map_err(|e| VfError::from_rpc(0, e))?;
+                .map_err(VfError::from_rpc_indexed)?;
         }
         Ok(())
     }
@@ -1026,8 +1009,8 @@ impl VecFs for NfsVecFs {
         let mut ops = Vec::with_capacity(oldpaths.len());
         for (i, (old, new)) in oldpaths.iter().zip(newpaths).enumerate() {
             let full = self.abs_path(new);
-            let (dir, name) = split_path(&full).map_err(|e| VfError::failure(i, e.err_no))?;
-            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(i, e))?;
+            let (dir, name) = split_path(&full).map_err(|e| VfError::failure(i, e))?;
+            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(e, i))?;
             ops.push(crate::client::CreateOp {
                 dir: dirfh,
                 name: name.to_string(),
@@ -1037,18 +1020,18 @@ impl VecFs for NfsVecFs {
         }
         self.nfs
             .create_many(&ops)
-            .map_err(|e| VfError::from_rpc(0, e))
+            .map_err(VfError::from_rpc_indexed)
     }
 
     fn readlinkv(&mut self, paths: &[&str]) -> VfResult<Vec<Vec<u8>>> {
         let mut ops = Vec::with_capacity(paths.len());
         for (i, p) in paths.iter().enumerate() {
-            let fh = self.resolve(p).map_err(|e| VfError::failure(i, e.err_no))?;
+            let fh = self.resolve(p).map_err(|e| e.with_index(i))?;
             ops.push(crate::client::ReadlinkOp { fh });
         }
         self.nfs
             .readlink_many(&ops)
-            .map_err(|e| VfError::from_rpc(0, e))
+            .map_err(VfError::from_rpc_indexed)
     }
 
     fn hardlinkv(&mut self, oldpaths: &[&str], newpaths: &[&str]) -> VfRes {
@@ -1057,29 +1040,36 @@ impl VecFs for NfsVecFs {
         }
         let mut ops = Vec::with_capacity(oldpaths.len());
         for (i, (old, new)) in oldpaths.iter().zip(newpaths).enumerate() {
-            let src = self
-                .resolve(old)
-                .map_err(|e| VfError::failure(i, e.err_no))?;
+            let src = self.resolve(old).map_err(|e| e.with_index(i))?;
             let full = self.abs_path(new);
-            let (dir, name) = split_path(&full).map_err(|e| VfError::failure(i, e.err_no))?;
-            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(i, e))?;
+            let (dir, name) = split_path(&full).map_err(|e| VfError::failure(i, e))?;
+            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(e, i))?;
             ops.push(crate::client::LinkOp {
                 dstdir: dirfh,
                 src,
                 newname: name.to_string(),
             });
         }
-        self.nfs
-            .link_many(&ops)
-            .map_err(|e| VfError::from_rpc(0, e))
+        self.nfs.link_many(&ops).map_err(VfError::from_rpc_indexed)
     }
 
     fn dupv(&mut self, pairs: &[ExtentPair]) -> VfRes {
         for (i, p) in pairs.iter().enumerate() {
-            self.copy_extent(p).map_err(|mut e| {
-                e.index = i;
-                e
-            })?;
+            self.copy_extent(p).map_err(|e| e.with_index(i))?;
+        }
+        Ok(())
+    }
+
+    fn lcopyv(&mut self, pairs: &[ExtentPair]) -> VfRes {
+        for (i, p) in pairs.iter().enumerate() {
+            let src = self.lstat(&p.src_path).map_err(|e| e.with_index(i))?;
+            if src.ftype == VfType::Symlink {
+                let target = self.readlink(&p.src_path).map_err(|e| e.with_index(i))?;
+                self.symlink(&String::from_utf8_lossy(&target), &p.dst_path)
+                    .map_err(|e| e.with_index(i))?;
+            } else {
+                self.copy_extent(p).map_err(|e| e.with_index(i))?;
+            }
         }
         Ok(())
     }
@@ -1090,11 +1080,11 @@ impl VecFs for NfsVecFs {
             let full = self.abs_path(&p.path);
             let (dir, name) = match split_path(&full) {
                 Ok(x) => x,
-                Err(e) => return Err(VfError::failure(i, e.err_no)),
+                Err(e) => return Err(VfError::failure(i, e)),
             };
             let (fh, sid) = match self.open_impl(dir, name, OPEN4_SHARE_ACCESS_WRITE, true, false) {
                 Ok(x) => x,
-                Err(e) => return Err(VfError::failure(i, e.err_no)),
+                Err(e) => return Err(e.with_index(i)),
             };
             let mut written = 0usize;
             let mut failed: Option<VfError> = None;
@@ -1106,7 +1096,7 @@ impl VecFs for NfsVecFs {
                         .nfs
                         .write(&fh, &sid, base + p.adb_reloff_blocknum, &adbn)
                     {
-                        failed = Some(VfError::from_rpc(i, e));
+                        failed = Some(VfError::from_rpc(e, i));
                         break;
                     }
                 }
@@ -1116,7 +1106,7 @@ impl VecFs for NfsVecFs {
                         self.nfs
                             .write(&fh, &sid, base + p.adb_reloff_pattern, &p.adb_pattern_data)
                 {
-                    failed = Some(VfError::from_rpc(i, e));
+                    failed = Some(VfError::from_rpc(e, i));
                     break;
                 }
                 written += 1;
@@ -1132,10 +1122,7 @@ impl VecFs for NfsVecFs {
 
     fn rm(&mut self, objs: &[&str], recursive: bool) -> VfRes {
         for (i, o) in objs.iter().enumerate() {
-            self.rm_one(o, recursive).map_err(|mut e| {
-                e.index = i;
-                e
-            })?;
+            self.rm_one(o, recursive).map_err(|e| e.with_index(i))?;
         }
         Ok(())
     }
@@ -1148,10 +1135,7 @@ impl VecFs for NfsVecFs {
         _use_server_side_copy: bool,
     ) -> VfRes {
         if !self.exists(dst)? {
-            self.ensure_dir(dst, 0o755).map_err(|mut e| {
-                e.index = 0;
-                e
-            })?;
+            self.ensure_dir(dst, 0o755).map_err(|e| e.with_index(0))?;
         }
         let masks = AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID;
         let entries = self.listdir(src_dir, masks, 0, false)?;
@@ -1167,21 +1151,12 @@ impl VecFs for NfsVecFs {
             if e.ftype == VfType::Directory {
                 self.cp_recursive(&src_child, &dst_child, symlinks, false)?;
             } else if e.ftype == VfType::Symlink && symlinks {
-                let target = self.readlink(&src_child).map_err(|mut e| {
-                    e.index = 0;
-                    e
-                })?;
+                let target = self.readlink(&src_child).map_err(|e| e.with_index(0))?;
                 self.symlink(&String::from_utf8_lossy(&target), &dst_child)
-                    .map_err(|mut e| {
-                        e.index = 0;
-                        e
-                    })?;
+                    .map_err(|e| e.with_index(0))?;
             } else {
                 let pair = ExtentPair::new(&src_child, 0, &dst_child, 0, u64::MAX);
-                self.copy_extent(&pair).map_err(|mut e| {
-                    e.index = 0;
-                    e
-                })?;
+                self.copy_extent(&pair).map_err(|e| e.with_index(0))?;
             }
         }
         Ok(())
@@ -1334,64 +1309,81 @@ fn s_ifmt(ftype: u32) -> u32 {
 /// is the permission bits plus the `S_IFMT` bits derived from `ftype`.
 fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
     a.ftype = v.ftype.map(VfType::from_nfs).unwrap_or(VfType::Regular);
-    a.has_named_attr = v.has_named_attr.unwrap_or(false);
+    a.returned = AttrMask::empty();
     if a.masks.contains(AttrMask::MODE)
         && let Some(mode) = v.mode
     {
         a.mode = mode | s_ifmt(a.ftype.as_nfs());
+        a.returned.insert(AttrMask::MODE);
     }
     if a.masks.contains(AttrMask::SIZE)
         && let Some(size) = v.size
     {
         a.size = size;
+        a.returned.insert(AttrMask::SIZE);
     }
     if a.masks.contains(AttrMask::NLINK)
         && let Some(nlink) = v.nlink
     {
         a.nlink = nlink;
+        a.returned.insert(AttrMask::NLINK);
     }
     if a.masks.contains(AttrMask::FILEID)
         && let Some(fileid) = v.fileid
     {
         a.fileid = fileid;
+        a.returned.insert(AttrMask::FILEID);
     }
     if a.masks.contains(AttrMask::UID)
         && let Some(uid) = v.uid
     {
         a.uid = uid;
+        a.returned.insert(AttrMask::UID);
     }
     if a.masks.contains(AttrMask::GID)
         && let Some(gid) = v.gid
     {
         a.gid = gid;
+        a.returned.insert(AttrMask::GID);
     }
     if a.masks.contains(AttrMask::RDEV)
         && let Some(rdev) = v.rdev
     {
         a.rdev = rdev;
+        a.returned.insert(AttrMask::RDEV);
     }
     if a.masks.contains(AttrMask::BLOCKS)
         && let Some(blocks) = v.blocks
     {
         a.blocks = blocks;
+        a.returned.insert(AttrMask::BLOCKS);
     }
     if a.masks.contains(AttrMask::MTIME)
         && let Some((s, n)) = v.mtime
     {
         a.mtime_sec = s;
         a.mtime_nsec = n;
+        a.returned.insert(AttrMask::MTIME);
     }
     if a.masks.contains(AttrMask::ATIME)
         && let Some((s, n)) = v.atime
     {
         a.atime_sec = s;
         a.atime_nsec = n;
+        a.returned.insert(AttrMask::ATIME);
     }
     if a.masks.contains(AttrMask::CTIME)
         && let Some((s, n)) = v.ctime
     {
         a.ctime_sec = s;
         a.ctime_nsec = n;
+        a.returned.insert(AttrMask::CTIME);
+    }
+    if a.masks.contains(AttrMask::NAMED_ATTR)
+        && let Some(has) = v.has_named_attr
+    {
+        a.has_named_attr = has;
+        a.returned.insert(AttrMask::NAMED_ATTR);
     }
 }
 
