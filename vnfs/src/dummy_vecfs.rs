@@ -2,7 +2,11 @@
 //! the vectorized API also works on non-NFS filesystems.
 //!
 //! `"/"` maps to the `root` directory passed to [`DummyVecFs::new`]; all
-//! writes stay under that root.
+//! writes stay under that root. Paths are normalized lexically (`.` and `..`
+//! cannot escape the root), and path-based file operations resolve symlinks
+//! and refuse targets outside the root (`ERR_ACCES`). Operations that never
+//! follow symlinks (unlink, readlink, lstat, listing) operate on the
+//! normalized path itself.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -21,29 +25,40 @@ struct DummyOpen {
 /// A local-filesystem [`VecFs`]. `"/"` is the `root` directory.
 pub struct DummyVecFs {
     root: PathBuf,
+    /// Canonical form of `root`, used for containment checks.
+    root_canon: PathBuf,
     cwd: PathBuf,
     next_fd: i32,
     open_files: HashMap<i32, DummyOpen>,
 }
 
 impl DummyVecFs {
-    fn getattrsv_impl(
-        &mut self,
-        attrs: &mut [VfAttrs],
-        stat: impl Fn(&Path) -> std::io::Result<std::fs::Metadata>,
-    ) -> VfRes {
+    fn getattrsv_impl(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
         for (i, a) in attrs.iter_mut().enumerate() {
-            let p = self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?;
-            let md = stat(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            let lexical = self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?;
+            let p = if follow {
+                self.real_path(&lexical).map_err(|e| e.with_index(i))?
+            } else {
+                lexical
+            };
+            let md = if follow {
+                std::fs::metadata(&p)
+            } else {
+                std::fs::symlink_metadata(&p)
+            }
+            .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             self.fill_attrs(a, &p.to_string_lossy(), &md);
         }
         Ok(())
     }
+
     /// Create a client rooted at `root` (created if missing).
     pub fn new(root: PathBuf) -> DummyVecFs {
         std::fs::create_dir_all(&root).expect("create dummy root");
+        let root_canon = std::fs::canonicalize(&root).expect("canonicalize dummy root");
         DummyVecFs {
             root,
+            root_canon,
             cwd: PathBuf::new(),
             next_fd: 0,
             open_files: HashMap::new(),
@@ -51,12 +66,55 @@ impl DummyVecFs {
     }
 
     /// Map a (possibly cwd-relative) path onto the real filesystem.
+    /// The result is lexically normalized and cannot escape `root` via `..`.
     fn resolve(&self, path: &str) -> PathBuf {
-        if path.starts_with('/') {
-            self.root.join(path.trim_start_matches('/'))
+        let suffix = if path.starts_with('/') {
+            path.trim_start_matches('/').to_string()
         } else {
-            self.root.join(&self.cwd).join(path)
+            self.cwd.join(path).to_string_lossy().into_owned()
+        };
+        self.root.join(normalize_root_relative(&suffix))
+    }
+
+    /// Resolve `p` (already mapped under the root) to a real path that is
+    /// guaranteed to stay under the root, following symlinks for existing
+    /// objects and verifying the parent for paths that do not exist yet.
+    /// Dangling symlinks are resolved one level at a time so an external
+    /// target is refused even when it does not exist.
+    fn real_path(&self, p: &Path) -> VfResult<PathBuf> {
+        self.real_path_depth(p, 0)
+    }
+
+    fn real_path_depth(&self, p: &Path, depth: usize) -> VfResult<PathBuf> {
+        if depth > 40 {
+            return Err(VfError::failure(0, ERR_ACCES)); // symlink loop / too deep
         }
+        if let Ok(c) = std::fs::canonicalize(p) {
+            if c.starts_with(&self.root_canon) {
+                return Ok(c);
+            }
+            return Err(VfError::failure(0, ERR_ACCES));
+        }
+        // Dangling symlink: resolve its target and re-check.
+        if let Ok(md) = std::fs::symlink_metadata(p)
+            && md.file_type().is_symlink()
+        {
+            let target = std::fs::read_link(p).map_err(|e| VfError::failure(0, Self::errno(&e)))?;
+            let target_path = if target.is_absolute() {
+                target
+            } else {
+                p.parent().unwrap_or(Path::new("")).join(target)
+            };
+            return self.real_path_depth(&target_path, depth + 1);
+        }
+        // Does not exist yet: the parent must be inside the root.
+        let parent = p.parent().unwrap_or(Path::new(""));
+        let canon_parent =
+            std::fs::canonicalize(parent).map_err(|e| VfError::failure(0, Self::errno(&e)))?;
+        if !canon_parent.starts_with(&self.root_canon) {
+            return Err(VfError::failure(0, ERR_ACCES));
+        }
+        Ok(canon_parent.join(p.file_name().unwrap_or_default()))
     }
 
     fn errno(e: &std::io::Error) -> u32 {
@@ -196,7 +254,9 @@ impl DummyVecFs {
     }
 
     fn setattr_one(&mut self, a: &VfAttrs, i: usize) -> VfResult<()> {
-        let p = self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?;
+        let p = self
+            .real_path(&self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?)
+            .map_err(|e| e.with_index(i))?;
         if a.masks.contains(AttrMask::MODE) {
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(a.mode & 0o7777))
                 .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
@@ -232,7 +292,7 @@ impl DummyVecFs {
                 (f, off, true)
             }
             VfFile::Path { .. } | VfFile::Current(_) => {
-                let p = self.tcfile_path(&op.file)?;
+                let p = self.real_path(&self.tcfile_path(&op.file)?)?;
                 let f = OpenOptions::new()
                     .read(true)
                     .open(&p)
@@ -284,7 +344,7 @@ impl DummyVecFs {
                 (f, off, true)
             }
             VfFile::Path { .. } | VfFile::Current(_) => {
-                let p = self.tcfile_path(&op.file)?;
+                let p = self.real_path(&self.tcfile_path(&op.file)?)?;
                 let mut opts = OpenOptions::new();
                 opts.write(true);
                 if op.creation {
@@ -358,8 +418,8 @@ impl DummyVecFs {
     }
 
     fn copy_extent(&mut self, p: &ExtentPair) -> VfResult<()> {
-        let sp = self.resolve(&p.src_path);
-        let dp = self.resolve(&p.dst_path);
+        let sp = self.real_path(&self.resolve(&p.src_path))?;
+        let dp = self.real_path(&self.resolve(&p.dst_path))?;
         let src = OpenOptions::new()
             .read(true)
             .open(&sp)
@@ -415,11 +475,12 @@ impl DummyVecFs {
 
 impl VecFs for DummyVecFs {
     fn abs_path(&self, path: &str) -> String {
-        if path.starts_with('/') {
+        let root_rel = if path.starts_with('/') {
             path.trim_start_matches('/').to_string()
         } else {
             self.cwd.join(path).to_string_lossy().to_string()
-        }
+        };
+        normalize_root_relative(&root_rel)
     }
 
     fn open_by_path(
@@ -430,10 +491,15 @@ impl VecFs for DummyVecFs {
         mode: u32,
     ) -> VfResult<VfFile> {
         use libc::O_CREAT;
-        if base != VfPathBase::Cwd && !pathname.starts_with('/') {
-            return Err(VfError::unsupported(0));
-        }
-        let p = self.resolve(pathname);
+        // `VfPathBase::Abs` treats the path as root-relative (like NFS);
+        // `Cwd` resolves against the current directory.
+        let resolved = match base {
+            VfPathBase::Abs => self
+                .root
+                .join(normalize_root_relative(pathname.trim_start_matches('/'))),
+            VfPathBase::Cwd => self.resolve(pathname),
+        };
+        let p = self.real_path(&resolved)?;
         let file = Self::open_options(flags)
             .open(&p)
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
@@ -463,15 +529,11 @@ impl VecFs for DummyVecFs {
     }
 
     fn chdir(&mut self, path: &str) -> VfResult<()> {
-        let p = self.resolve(path);
+        let p = self.real_path(&self.resolve(path))?;
         if !p.is_dir() {
             return Err(VfError::failure(0, ERR_NOTDIR));
         }
-        self.cwd = if path.starts_with('/') {
-            PathBuf::from(path.trim_start_matches('/'))
-        } else {
-            self.cwd.join(path)
-        };
+        self.cwd = PathBuf::from(self.abs_path(path));
         Ok(())
     }
 
@@ -529,11 +591,11 @@ impl VecFs for DummyVecFs {
     }
 
     fn getattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
-        self.getattrsv_impl(attrs, |p| std::fs::metadata(p))
+        self.getattrsv_impl(attrs, true)
     }
 
     fn lgetattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
-        self.getattrsv_impl(attrs, |p| std::fs::symlink_metadata(p))
+        self.getattrsv_impl(attrs, false)
     }
 
     fn setattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
@@ -581,7 +643,10 @@ impl VecFs for DummyVecFs {
         for (i, (src, dst)) in pairs.iter().enumerate() {
             let sp = self.vf_path(src).map_err(|e| e.with_index(i))?;
             let dp = self.vf_path(dst).map_err(|e| e.with_index(i))?;
-            std::fs::rename(self.root.join(sp), self.root.join(dp))
+            let dp = self
+                .real_path(&self.root.join(dp))
+                .map_err(|e| e.with_index(i))?;
+            std::fs::rename(self.root.join(sp), dp)
                 .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
         }
         Ok(())
@@ -606,8 +671,12 @@ impl VecFs for DummyVecFs {
     fn mkdirv(&mut self, dirs: &[VfAttrs]) -> VfRes {
         for (i, a) in dirs.iter().enumerate() {
             let p = self
-                .root
-                .join(self.vf_path(&a.file).map_err(|e| e.with_index(i))?);
+                .real_path(
+                    &self
+                        .root
+                        .join(self.vf_path(&a.file).map_err(|e| e.with_index(i))?),
+                )
+                .map_err(|e| e.with_index(i))?;
             std::fs::create_dir(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             if a.masks.contains(AttrMask::MODE) {
                 let _ =
@@ -622,7 +691,10 @@ impl VecFs for DummyVecFs {
             return Err(VfError::failure(0, ERR_INVAL));
         }
         for (i, (old, new)) in oldpaths.iter().zip(newpaths).enumerate() {
-            symlink(old, self.resolve(new)).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            let new = self
+                .real_path(&self.resolve(new))
+                .map_err(|e| e.with_index(i))?;
+            symlink(old, new).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
         }
         Ok(())
     }
@@ -642,7 +714,10 @@ impl VecFs for DummyVecFs {
             return Err(VfError::failure(0, ERR_INVAL));
         }
         for (i, (old, new)) in oldpaths.iter().zip(newpaths).enumerate() {
-            std::fs::hard_link(self.resolve(old), self.resolve(new))
+            let new = self
+                .real_path(&self.resolve(new))
+                .map_err(|e| e.with_index(i))?;
+            std::fs::hard_link(self.resolve(old), new)
                 .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
         }
         Ok(())
@@ -663,8 +738,10 @@ impl VecFs for DummyVecFs {
             if md.file_type().is_symlink() {
                 let target =
                     std::fs::read_link(&sp).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-                symlink(&target, self.resolve(&p.dst_path))
-                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+                let dst = self
+                    .real_path(&self.resolve(&p.dst_path))
+                    .map_err(|e| e.with_index(i))?;
+                symlink(&target, dst).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             } else {
                 self.copy_extent(p).map_err(|e| e.with_index(i))?;
             }
@@ -675,7 +752,9 @@ impl VecFs for DummyVecFs {
     fn write_adb(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
         for (i, p) in patterns.iter().enumerate() {
-            let path = self.resolve(&p.path);
+            let path = self
+                .real_path(&self.resolve(&p.path))
+                .map_err(|e| e.with_index(i))?;
             let file = OpenOptions::new()
                 .write(true)
                 .create(true)

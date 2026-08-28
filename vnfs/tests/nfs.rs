@@ -105,6 +105,32 @@ fn openv_closev() {
     c.closev(&files).expect("closev");
 }
 
+#[test]
+fn openv_append_writes_at_end() {
+    let dir = setup_dir("openv_append");
+    let paths = [
+        format!("{}/a.txt", dir),
+        format!("{}/b.txt", dir),
+        format!("{}/c.txt", dir),
+    ];
+    let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    let mut c = client();
+    let files = c
+        .openv_simple(&refs, libc::O_CREAT | libc::O_RDWR | libc::O_APPEND, 0o644)
+        .expect("openv_simple append");
+    for f in &files {
+        c.writev(&[WriteOp::new(f.clone(), VfOffset::At(0), b"ab".to_vec())])
+            .unwrap();
+        c.writev(&[WriteOp::new(f.clone(), VfOffset::At(0), b"cd".to_vec())])
+            .unwrap();
+    }
+    c.closev(&files).expect("closev");
+    for p in &paths {
+        assert_eq!(c.stat(p).unwrap().size, 4, "append via openv");
+        assert_eq!(c.read(&VfFile::from_path(p), 0, 4).unwrap(), b"abcd");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // chdir / getcwd
 // ---------------------------------------------------------------------------

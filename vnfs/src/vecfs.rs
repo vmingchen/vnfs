@@ -36,6 +36,7 @@ pub const ERR_EXIST: u32 = 17;
 pub const ERR_NOTDIR: u32 = 20;
 pub const ERR_ISDIR: u32 = 21;
 pub const ERR_INVAL: u32 = 22;
+pub const ERR_ACCES: u32 = 13;
 
 /// NFSv4 wire type codes (NF4*), used to decode/encode [`VfType`].
 pub const NF4REG: u32 = 1;
@@ -196,6 +197,23 @@ pub(crate) fn join_path(dir: &str, name: &str) -> String {
     } else {
         PathBuf::from(dir).join(name).to_string_lossy().into_owned()
     }
+}
+
+/// Lexically normalize a root-relative path (no leading `/`): drop `.` and
+/// empty components, apply `..` by popping the last component (clamped at the
+/// root, so a leading `..` is ignored, matching `/..` == `/`).
+pub(crate) fn normalize_root_relative(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for comp in path.split('/') {
+        match comp {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            c => parts.push(c),
+        }
+    }
+    parts.join("/")
 }
 
 // ---------------------------------------------------------------------------
@@ -800,7 +818,9 @@ pub trait VecFs {
             VfFile::Path {
                 base: VfPathBase::Abs,
                 path,
-            } => Ok(path.to_string_lossy().trim_start_matches('/').to_string()),
+            } => Ok(normalize_root_relative(
+                path.to_string_lossy().trim_start_matches('/'),
+            )),
             VfFile::Path {
                 base: VfPathBase::Cwd,
                 path,
@@ -1072,6 +1092,18 @@ mod tests {
         assert_eq!(join_path("a", "x"), "a/x");
     }
 
+    #[test]
+    fn normalize_root_relative_helper() {
+        assert_eq!(normalize_root_relative(""), "");
+        assert_eq!(normalize_root_relative("a"), "a");
+        assert_eq!(normalize_root_relative("./a"), "a");
+        assert_eq!(normalize_root_relative("a/./b/"), "a/b");
+        assert_eq!(normalize_root_relative("a//b"), "a/b");
+        assert_eq!(normalize_root_relative("a/../b"), "b");
+        assert_eq!(normalize_root_relative("../a"), "a");
+        assert_eq!(normalize_root_relative("../../a/b/../c"), "a/c");
+    }
+
     // ------------------------------------------------------------------
     // VfError
     // ------------------------------------------------------------------
@@ -1283,6 +1315,109 @@ mod tests {
         let fd = fs.open("/f", 0, 0).unwrap();
         assert_eq!(fs.vf_path(&fd).unwrap_err().err_no(), ERR_INVAL);
         fs.close(&fd).unwrap();
+    }
+
+    // ------------------------------------------------------------------
+    // Dummy root sandbox: `..` and symlinks cannot escape the root
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn dummy_root_clamps_dotdot() {
+        let (root, mut fs) = fs("sandbox-dotdot");
+
+        // Writing through ".." lands inside the root, not in its parent.
+        fs.writev(&[
+            WriteOp::at(VfFile::from_path("/../escape"), 0, b"x".to_vec()).with_creation(),
+        ])
+        .unwrap();
+        assert!(fs.exists("/escape").unwrap());
+        assert!(!root.0.parent().unwrap().join("escape").exists());
+
+        // "/.." and "/../../x" stay under the root.
+        let st = fs.stat("/..").unwrap();
+        assert_eq!(st.ftype, VfType::Directory);
+        fs.writev(&[
+            WriteOp::at(VfFile::from_path("/../sub1/../../sub2"), 0, b"y".to_vec()).with_creation(),
+        ])
+        .unwrap();
+        assert!(fs.exists("/sub2").unwrap());
+        assert!(!root.0.parent().unwrap().join("sub2").exists());
+
+        // A lexical "a/../b" path resolves to b.
+        write(&mut fs, "/a", b"");
+        fs.renamev(&[(VfFile::from_path("/a"), VfFile::from_path("/x/../b"))])
+            .unwrap();
+        assert!(fs.exists("/b").unwrap());
+        assert!(!fs.exists("/x").unwrap());
+    }
+
+    #[test]
+    fn dummy_root_rejects_symlink_escape() {
+        let (root, mut fs) = fs("sandbox-symlink");
+        write(&mut fs, "/target", b"inside");
+
+        // Absolute target outside the root: read/write through it is refused.
+        let outside = root.0.parent().unwrap().join("outside-target");
+        std::fs::write(&outside, b"outside").unwrap();
+        fs.symlink(outside.to_str().unwrap(), "/evil").unwrap();
+
+        assert_eq!(
+            fs.readv(&[ReadOp::at(VfFile::from_path("/evil"), 0, 8)])
+                .unwrap_err()
+                .err_no(),
+            ERR_ACCES,
+            "read through escaping symlink"
+        );
+        assert_eq!(
+            fs.writev(&[WriteOp::at(VfFile::from_path("/evil"), 0, b"x".to_vec())])
+                .unwrap_err()
+                .err_no(),
+            ERR_ACCES,
+            "write through escaping symlink"
+        );
+
+        // The link itself can still be inspected and removed (no-follow).
+        assert_eq!(fs.lstat("/evil").unwrap().ftype, VfType::Symlink);
+        fs.readlink("/evil").unwrap();
+        fs.unlink("/evil").unwrap();
+
+        // A dangling symlink to an outside absolute path is refused for
+        // creation too, instead of creating the target outside the root.
+        let dangling = root.0.parent().unwrap().join("never-created");
+        fs.symlink(dangling.to_str().unwrap(), "/evil2").unwrap();
+        assert_eq!(
+            fs.writev(
+                &[WriteOp::at(VfFile::from_path("/evil2"), 0, b"x".to_vec()).with_creation()]
+            )
+            .unwrap_err()
+            .err_no(),
+            ERR_ACCES
+        );
+        assert!(!dangling.exists());
+        let _ = std::fs::remove_file(&outside);
+
+        // A dangling symlink whose target is inside the root is created
+        // through (POSIX O_CREAT semantics).
+        fs.symlink("internal-target", "/ok-link").unwrap();
+        fs.writev(&[WriteOp::at(VfFile::from_path("/ok-link"), 0, b"z".to_vec()).with_creation()])
+            .unwrap();
+        assert_eq!(
+            fs.read(&VfFile::from_path("/internal-target"), 0, 1)
+                .unwrap(),
+            b"z"
+        );
+    }
+
+    #[test]
+    fn dummy_open_by_path_abs_is_root_relative() {
+        let (_root, mut fs) = fs("open-abs");
+        let fd = fs
+            .open_by_path(VfPathBase::Abs, "rel", libc::O_CREAT | libc::O_RDWR, 0o644)
+            .unwrap();
+        fs.writev(&[WriteOp::new(fd.clone(), VfOffset::At(0), b"x".to_vec())])
+            .unwrap();
+        fs.close(&fd).unwrap();
+        assert!(fs.exists("/rel").unwrap());
     }
 
     // ------------------------------------------------------------------

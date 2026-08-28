@@ -17,13 +17,15 @@ use crate::vecfs::*;
 // Re-export the shared types/trait so `use vnfs::nfs::*` works.
 pub use crate::vecfs::*;
 
-/// An open file on the NFS server: resolved handle, open stateid and the
-/// current read/write offset (for `tc_fseek`).
+/// An open file on the NFS server: resolved handle, open stateid, the current
+/// read/write offset (for `tc_fseek`), and whether it was opened with
+/// `O_APPEND` (writes then always go to the end of the file).
 #[derive(Debug, Clone)]
 struct OpenFile {
     fh: FileHandle,
     stateid: stateid4,
     cur_offset: u64,
+    append: bool,
 }
 
 /// An NFSv4.1 client exposing the vectorized [`VecFs`] API.
@@ -47,6 +49,19 @@ impl NfsVecFs {
             let fh = self
                 .resolve_tcfile(&a.file, follow)
                 .map_err(|e| e.with_index(i))?;
+            if !follow {
+                // NFSv4 has no non-following mode/size setter for symlinks;
+                // refuse like the `std::fs` backend instead of pretending the
+                // SETATTR applied to the link.
+                let list = self
+                    .nfs
+                    .getattr(&fh, &[FATTR4_TYPE])
+                    .map_err(|e| VfError::from_rpc(e, 0))?;
+                let mut off = 0;
+                if read_u32(&list, &mut off).unwrap_or(0) == nfs_ftype4_NF4LNK {
+                    return Err(VfError::unsupported(i));
+                }
+            }
             let mode = if a.masks.contains(AttrMask::MODE) {
                 Some(a.mode & 0o7777)
             } else {
@@ -143,7 +158,7 @@ impl NfsVecFs {
         flags: &[i32],
         modes: &[u32],
     ) -> VfResult<Vec<VfFile>> {
-        use libc::{O_CREAT, O_EXCL, O_TRUNC};
+        use libc::{O_APPEND, O_CREAT, O_EXCL, O_TRUNC};
         let mut opens = Vec::with_capacity(paths.len());
         let mut need_mode = Vec::with_capacity(paths.len());
         let mut need_trunc = Vec::with_capacity(paths.len());
@@ -199,12 +214,13 @@ impl NfsVecFs {
         }
 
         let mut out = Vec::with_capacity(results.len());
-        for (fh, stateid) in results {
+        for (i, (fh, stateid)) in results.into_iter().enumerate() {
             self.next_fd += 1;
             let open = OpenFile {
                 fh,
                 stateid,
                 cur_offset: 0,
+                append: flags[i] & O_APPEND != 0,
             };
             self.open_files.insert(self.next_fd, open);
             out.push(VfFile::from_fd(self.next_fd));
@@ -228,11 +244,14 @@ impl NfsVecFs {
                     .open_files
                     .get(fd)
                     .cloned()
-                    .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_BAD_STATEID))?;
+                    .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
                 Ok((o.fh, o.stateid, false))
             }
-            VfFile::Path { .. } | VfFile::Current(_) => {
-                let full = self.vf_path(file)?;
+            VfFile::Path { .. } | VfFile::Current(Some(_)) => {
+                // OPEN cannot target a symlink's final component, so follow
+                // the link chain first (creation follows dangling links and
+                // creates the target, matching POSIX O_CREAT semantics).
+                let full = self.follow_target_path(&self.vf_path(file)?)?;
                 let (dir, name) = split_path(&full).map_err(|e| VfError::failure(0, e))?;
                 let access = if for_write {
                     OPEN4_SHARE_ACCESS_BOTH
@@ -242,7 +261,8 @@ impl NfsVecFs {
                 let (fh, sid) = self.open_impl(dir, name, access, is_creation, false)?;
                 Ok((fh, sid, true))
             }
-            VfFile::Null | VfFile::Saved => Err(VfError::failure(0, nfsstat4_NFS4ERR_NOENT)),
+            VfFile::Current(None) => Err(VfError::failure(0, ERR_ISDIR)),
+            VfFile::Null | VfFile::Saved => Err(VfError::failure(0, ERR_NOENT)),
         }
     }
 
@@ -259,7 +279,7 @@ impl NfsVecFs {
                 .open_files
                 .get(&op.file.fd().unwrap())
                 .cloned()
-                .ok_or_else(|| VfError::failure(i, nfsstat4_NFS4ERR_BAD_STATEID))?;
+                .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
             ops.push(crate::client::ReadOp {
                 fh: o.fh,
                 stateid: o.stateid,
@@ -294,6 +314,25 @@ impl NfsVecFs {
                 let fh = self.resolve_tcfile(file, true)?;
                 self.file_size(&fh)
             }
+        }
+    }
+
+    /// The offset a write should use: like [`resolve_offset`](Self::resolve_offset),
+    /// but descriptors opened with `O_APPEND` always write at the end of the
+    /// file (one extra size query per write).
+    fn write_offset(&mut self, file: &VfFile, off: VfOffset) -> VfResult<u64> {
+        let offset = self.resolve_offset(file, off)?;
+        let append_fh = match file.fd() {
+            Some(fd) => self
+                .open_files
+                .get(&fd)
+                .filter(|o| o.append)
+                .map(|o| o.fh.clone()),
+            None => None,
+        };
+        match append_fh {
+            Some(fh) => self.file_size(&fh),
+            None => Ok(offset),
         }
     }
 
@@ -357,13 +396,13 @@ impl NfsVecFs {
         let mut offsets = Vec::with_capacity(writes.len());
         for (i, op) in writes.iter().enumerate() {
             let off = self
-                .resolve_offset(&op.file, op.offset)
+                .write_offset(&op.file, op.offset)
                 .map_err(|e| e.with_index(i))?;
             let o = self
                 .open_files
                 .get(&op.file.fd().unwrap())
                 .cloned()
-                .ok_or_else(|| VfError::failure(i, nfsstat4_NFS4ERR_BAD_STATEID))?;
+                .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
             ops.push(crate::client::WriteOp {
                 fh: o.fh,
                 stateid: o.stateid,
@@ -388,7 +427,7 @@ impl NfsVecFs {
 
     fn writev_one(&mut self, op: &WriteOp) -> VfResult<WriteResult> {
         let (fh, stateid, close_after) = self.resolve_file(&op.file, op.creation, true)?;
-        let offset = self.resolve_offset(&op.file, op.offset)?;
+        let offset = self.write_offset(&op.file, op.offset)?;
         let result = self
             .nfs
             .write(&fh, &stateid, offset, &op.data)
@@ -422,7 +461,7 @@ impl NfsVecFs {
                 .open_files
                 .get(fd)
                 .map(|o| o.fh.clone())
-                .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_BAD_STATEID)),
+                .ok_or_else(|| VfError::failure(0, ERR_EBADF)),
             VfFile::Path { .. } | VfFile::Current(_) => {
                 let path = self.vf_path(f)?;
                 if follow {
@@ -435,52 +474,59 @@ impl NfsVecFs {
         }
     }
 
-    /// Resolve `path` and follow a chain of symlinks at the end of it (for
-    /// `stat` semantics), with a hop limit to break cycles. Intermediate
-    /// symlink components are not traversed (LOOKUP cannot descend into a
-    /// symlink).
-    fn resolve_follow(&mut self, path: &str) -> VfResult<FileHandle> {
-        let mut remaining = path.to_string();
+    /// Resolve a symlink target against the link's parent directory (POSIX
+    /// semantics), returning a normalized root-relative path. Absolute
+    /// targets resolve from the export root.
+    fn resolve_target(link_path: &str, target: &str) -> String {
+        if let Some(t) = target.strip_prefix('/') {
+            normalize_root_relative(t)
+        } else {
+            let parent = match link_path.rfind('/') {
+                Some(idx) => &link_path[..=idx],
+                None => "",
+            };
+            normalize_root_relative(&format!("{}{}", parent, target))
+        }
+    }
+
+    /// Follow a chain of symlinks at the end of `root_rel` (a root-relative
+    /// path), returning the final root-relative path, with a hop limit to
+    /// break cycles. A missing final target returns the current path so
+    /// creation-style callers can create through a dangling link; other
+    /// callers will fail with NOENT when they open it.
+    ///
+    /// Note: symlinks in *intermediate* components are still not traversed
+    /// (NFS LOOKUP cannot descend into a symlink, and this client has no way
+    /// to obtain an intermediate symlink's handle).
+    fn follow_target_path(&mut self, root_rel: &str) -> VfResult<String> {
+        let mut current = root_rel.to_string();
         let mut hops = 0usize;
         loop {
-            // `path` is already root-relative (from `vf_path`); resolve
-            // straight from the export root instead of re-applying
-            // `abs_path`, which would join the cwd a second time.
-            let fh = self
-                .nfs
-                .resolve(&remaining)
-                .map_err(|e| VfError::from_rpc(e, 0))?;
-            let t = self
-                .nfs
-                .getattr(&fh, &[FATTR4_TYPE])
-                .map_err(|e| VfError::from_rpc(e, 0))?;
-            let mut off = 0usize;
-            if read_u32(&t, &mut off).unwrap_or(0) != nfs_ftype4_NF4LNK {
-                return Ok(fh);
+            let abs = format!("/{}", current);
+            let st = match self.lstat(&abs) {
+                Ok(s) => s,
+                Err(e) if e.err_no() == ERR_NOENT => return Ok(current),
+                Err(e) => return Err(e),
+            };
+            if st.ftype != VfType::Symlink {
+                return Ok(current);
             }
             if hops >= 40 {
                 return Err(VfError::failure(0, nfsstat4_NFS4ERR_IO)); // symlink loop
             }
-            let target = self
-                .nfs
-                .readlink(&fh)
-                .map_err(|e| VfError::from_rpc(e, 0))?;
-            let target = String::from_utf8_lossy(&target);
-            // Resolve the target relative to the symlink's parent directory
-            // (POSIX semantics), or from the export root for absolute targets.
-            // `remaining` is the symlink's own root-relative path, so the
-            // result is root-relative here (no `abs_path` re-resolution).
-            remaining = if let Some(t) = target.strip_prefix('/') {
-                t.to_string()
-            } else {
-                let parent = match remaining.rfind('/') {
-                    Some(idx) => &remaining[..=idx],
-                    None => "",
-                };
-                format!("{}{}", parent, target)
-            };
+            let target = self.readlink(&abs)?;
+            current = Self::resolve_target(&current, &String::from_utf8_lossy(&target));
             hops += 1;
         }
+    }
+
+    /// Resolve `path` and follow a chain of symlinks at the end of it (for
+    /// `stat` semantics).
+    fn resolve_follow(&mut self, path: &str) -> VfResult<FileHandle> {
+        let final_path = self.follow_target_path(path)?;
+        self.nfs
+            .resolve(&final_path)
+            .map_err(|e| VfError::from_rpc(e, 0))
     }
 
     fn listdir_rec(
@@ -592,11 +638,14 @@ impl NfsVecFs {
         a
     }
 
-    fn copy_extent(&mut self, p: &ExtentPair) -> VfResult<()> {
-        let sfull = self.abs_path(&p.src_path);
-        let dfull = self.abs_path(&p.dst_path);
-        let (sdir, sname) = split_path(&sfull).map_err(|e| VfError::failure(0, e))?;
-        let (ddir, dname) = split_path(&dfull).map_err(|e| VfError::failure(0, e))?;
+    fn copy_extent(
+        &mut self,
+        src_root_rel: &str,
+        dst_root_rel: &str,
+        p: &ExtentPair,
+    ) -> VfResult<()> {
+        let (sdir, sname) = split_path(src_root_rel).map_err(|e| VfError::failure(0, e))?;
+        let (ddir, dname) = split_path(dst_root_rel).map_err(|e| VfError::failure(0, e))?;
         let (sfh, ssid) = self.open_impl(sdir, sname, OPEN4_SHARE_ACCESS_READ, false, false)?;
         let (dfh, dsid) = self.open_impl(ddir, dname, OPEN4_SHARE_ACCESS_WRITE, true, false)?;
 
@@ -636,11 +685,12 @@ impl NfsVecFs {
 
 impl VecFs for NfsVecFs {
     fn abs_path(&self, path: &str) -> String {
-        if path.starts_with('/') {
+        let root_rel = if path.starts_with('/') {
             path.trim_start_matches('/').to_string()
         } else {
             self.cwd.join(path).to_string_lossy().to_string()
-        }
+        };
+        normalize_root_relative(&root_rel)
     }
 
     fn open_by_path(
@@ -650,11 +700,12 @@ impl VecFs for NfsVecFs {
         flags: i32,
         mode: u32,
     ) -> VfResult<VfFile> {
-        use libc::{O_CREAT, O_EXCL, O_TRUNC};
+        use libc::{O_APPEND, O_CREAT, O_EXCL, O_TRUNC};
         let full = match base {
             VfPathBase::Abs => pathname.trim_start_matches('/').to_string(),
             VfPathBase::Cwd => self.cwd.join(pathname).to_string_lossy().to_string(),
         };
+        let full = normalize_root_relative(&full);
         let (dir, name) = split_path(&full).map_err(|e| VfError::failure(0, e))?;
         let access = Self::flags_to_access(flags);
         let create = flags & O_CREAT != 0;
@@ -675,6 +726,7 @@ impl VecFs for NfsVecFs {
             fh,
             stateid,
             cur_offset: 0,
+            append: flags & O_APPEND != 0,
         };
         self.open_files.insert(self.next_fd, open);
         Ok(VfFile::from_fd(self.next_fd))
@@ -694,19 +746,18 @@ impl VecFs for NfsVecFs {
         let open = self
             .open_files
             .remove(&tcf.fd().unwrap())
-            .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_BAD_STATEID))?;
+            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
         self.nfs
             .close(&open.fh, &open.stateid)
             .map_err(|e| VfError::from_rpc(e, 0))
     }
 
     fn chdir(&mut self, path: &str) -> VfResult<()> {
-        let _fh = self.resolve(path)?; // verify it exists
-        self.cwd = if path.starts_with('/') {
-            PathBuf::from(path.trim_start_matches('/'))
-        } else {
-            self.cwd.join(path)
-        };
+        let st = self.stat(path)?;
+        if st.ftype != VfType::Directory {
+            return Err(VfError::failure(0, ERR_NOTDIR));
+        }
+        self.cwd = PathBuf::from(self.abs_path(path));
         Ok(())
     }
 
@@ -744,7 +795,7 @@ impl VecFs for NfsVecFs {
             .open_files
             .get(&tcf.fd().unwrap())
             .map(|o| o.cur_offset)
-            .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_BAD_STATEID))?;
+            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
         let new = match whence {
             SeekFrom::Set => offset,
             SeekFrom::Cur => cur as i64 + offset,
@@ -1055,7 +1106,16 @@ impl VecFs for NfsVecFs {
 
     fn dupv(&mut self, pairs: &[ExtentPair]) -> VfRes {
         for (i, p) in pairs.iter().enumerate() {
-            self.copy_extent(p).map_err(|e| e.with_index(i))?;
+            // Follow final-component symlinks for both ends, matching the
+            // `std::fs` backend (OPEN cannot target a symlink directly).
+            let src = self
+                .follow_target_path(&self.abs_path(&p.src_path))
+                .map_err(|e| e.with_index(i))?;
+            let dst = self
+                .follow_target_path(&self.abs_path(&p.dst_path))
+                .map_err(|e| e.with_index(i))?;
+            self.copy_extent(&src, &dst, p)
+                .map_err(|e| e.with_index(i))?;
         }
         Ok(())
     }
@@ -1068,7 +1128,11 @@ impl VecFs for NfsVecFs {
                 self.symlink(&String::from_utf8_lossy(&target), &p.dst_path)
                     .map_err(|e| e.with_index(i))?;
             } else {
-                self.copy_extent(p).map_err(|e| e.with_index(i))?;
+                let dst = self
+                    .follow_target_path(&self.abs_path(&p.dst_path))
+                    .map_err(|e| e.with_index(i))?;
+                self.copy_extent(&self.abs_path(&p.src_path), &dst, p)
+                    .map_err(|e| e.with_index(i))?;
             }
         }
         Ok(())
@@ -1156,7 +1220,14 @@ impl VecFs for NfsVecFs {
                     .map_err(|e| e.with_index(0))?;
             } else {
                 let pair = ExtentPair::new(&src_child, 0, &dst_child, 0, u64::MAX);
-                self.copy_extent(&pair).map_err(|e| e.with_index(0))?;
+                let src = self
+                    .follow_target_path(&self.abs_path(&src_child))
+                    .map_err(|e| e.with_index(0))?;
+                let dst = self
+                    .follow_target_path(&self.abs_path(&dst_child))
+                    .map_err(|e| e.with_index(0))?;
+                self.copy_extent(&src, &dst, &pair)
+                    .map_err(|e| e.with_index(0))?;
             }
         }
         Ok(())

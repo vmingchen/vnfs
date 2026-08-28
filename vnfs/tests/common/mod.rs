@@ -174,6 +174,118 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         .expect("cp_recursive");
     assert!(fs.exists(&format!("{}/inner/data.txt", cpdst)).unwrap());
 
+    // "." and ".." path components resolve identically in both backends.
+    let base_name = std::path::Path::new(&dir)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        fs.stat(&format!("{}/./renamed.txt", dir)).unwrap().size,
+        fs.stat(&renamed).unwrap().size,
+        "dot component"
+    );
+    assert_eq!(
+        fs.stat(&format!("{}/../{}/renamed.txt", dir, base_name))
+            .unwrap()
+            .size,
+        fs.stat(&renamed).unwrap().size,
+        "dotdot component stays inside the tree"
+    );
+
+    // chdir onto a regular file is refused (NOTDIR) by both backends.
+    assert_eq!(
+        fs.chdir(&renamed).unwrap_err().err_no(),
+        ERR_NOTDIR,
+        "chdir to a file"
+    );
+
+    // O_APPEND writes always go to the end of the file.
+    let app = format!("{}/append.txt", dir);
+    let afd = fs
+        .open(&app, libc::O_CREAT | libc::O_RDWR | libc::O_APPEND, 0o644)
+        .expect("open append");
+    fs.writev(&[WriteOp::new(afd.clone(), VfOffset::At(0), b"ab".to_vec())])
+        .unwrap();
+    fs.writev(&[WriteOp::new(afd.clone(), VfOffset::At(0), b"cd".to_vec())])
+        .unwrap();
+    fs.close(&afd).unwrap();
+    let got = fs.read(&VfFile::from_path(&app), 0, 8).unwrap();
+    assert_eq!(got, b"abcd", "O_APPEND appends regardless of offset");
+
+    // dupv follows a symlink source and copies the target's data.
+    let dup_link = format!("{}/dup_link", dir);
+    let dup_copy = format!("{}/dup_copy", dir);
+    let dup_target = format!("{}/dup_target", dir);
+    fs.writev(&[
+        WriteOp::at(VfFile::from_path(&dup_target), 0, b"linkdata".to_vec()).with_creation(),
+    ])
+    .unwrap();
+    let rel_name = std::path::Path::new(&dup_target)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    fs.symlink(&rel_name, &dup_link).unwrap();
+    fs.dupv(&[ExtentPair::new(&dup_link, 0, &dup_copy, 0, u64::MAX)])
+        .unwrap();
+    let st = fs.stat(&dup_copy).unwrap();
+    assert_eq!(st.ftype, VfType::Regular, "dupv copies target data");
+    assert_eq!(st.size, 8);
+    assert_eq!(
+        fs.read(&VfFile::from_path(&dup_copy), 0, 8).unwrap(),
+        b"linkdata"
+    );
+
+    // lsetattrsv refuses symlinks instead of pretending to set them.
+    let lsa = VfAttrs {
+        file: VfFile::from_path(&dup_link),
+        masks: AttrMask::MODE,
+        mode: 0o600,
+        ..VfAttrs::default()
+    };
+    assert_eq!(
+        fs.lsetattrsv(&[lsa]).unwrap_err().err_no(),
+        VF_ERR_UNSUPPORTED,
+        "lsetattrsv on a symlink"
+    );
+
+    // Closing an already-closed descriptor reports EBADF on both backends.
+    assert_eq!(
+        fs.close(&tf).unwrap_err().err_no(),
+        ERR_EBADF,
+        "close of a closed descriptor"
+    );
+
+    // open_by_path with an Abs base and a relative-looking path is
+    // root-relative in both backends.
+    let abs_rel = format!("{}/absrel.txt", base.trim_start_matches('/'));
+    let f2 = fs
+        .open_by_path(
+            VfPathBase::Abs,
+            &abs_rel,
+            libc::O_CREAT | libc::O_RDWR,
+            0o644,
+        )
+        .expect("open_by_path Abs relative");
+    fs.writev(&[WriteOp::new(f2.clone(), VfOffset::At(0), b"ar".to_vec())])
+        .unwrap();
+    fs.close(&f2).unwrap();
+    assert_eq!(
+        fs.read(&VfFile::from_path(&format!("/{}", abs_rel)), 0, 2)
+            .unwrap(),
+        b"ar"
+    );
+
+    // Writing through `Current(None)` (the cwd itself) is not a file op.
+    assert_eq!(
+        fs.writev(&[WriteOp::at(VfFile::current(None), 0, b"x".to_vec()).with_creation()])
+            .unwrap_err()
+            .err_no(),
+        ERR_ISDIR,
+        "write to Current(None)"
+    );
+
     // chdir / getcwd.
     fs.chdir(&sub).expect("chdir");
     assert!(fs.getcwd().ends_with("/sub"));
