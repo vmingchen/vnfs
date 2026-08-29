@@ -37,12 +37,16 @@ class Nfs4AbstractFixtures(AbstractFixtures):
     def fs(self, request):
         if request.param == "dummy":
             root = tempfile.mkdtemp(prefix="vnfs_abstract_")
-            yield fsspec.filesystem("nfs4", backend="dummy", dummy_root=root)
+            yield fsspec.filesystem(
+                "nfs4", backend="dummy", dummy_root=root, auto_mkdir=True
+            )
             return
         if not _nfs_reachable():
             pytest.skip("local NFSv4.1 server (127.0.0.1) is not reachable")
         nfs_root = f"git/vnfs_fs_abstract_{os.getpid()}_{uuid.uuid4().hex[:8]}"
-        fs = fsspec.filesystem("nfs4", host="127.0.0.1", root=nfs_root)
+        fs = fsspec.filesystem(
+            "nfs4", host="127.0.0.1", root=nfs_root, auto_mkdir=True
+        )
         fs.mkdir("nfs4:///", create_parents=True)
         yield fs
         try:

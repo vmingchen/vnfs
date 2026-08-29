@@ -243,10 +243,21 @@ impl NfsClient {
     /// the dummy backend's filesystem root (a unique temp directory when
     /// omitted).
     #[new]
-    #[pyo3(signature = (host, backend="nfs", root=None))]
-    fn new(host: &str, backend: &str, root: Option<String>) -> PyResult<Self> {
+    #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None))]
+    fn new(
+        host: &str,
+        backend: &str,
+        root: Option<String>,
+        compound_size_limit: Option<usize>,
+    ) -> PyResult<Self> {
         let fs: Box<dyn vnfs::VecFs + Send> = match backend {
-            "nfs" => Box::new(NfsVecFs::connect(host).map_err(|e| to_py_err(e, Some(host)))?),
+            "nfs" => {
+                let mut nfs = NfsVecFs::connect(host).map_err(|e| to_py_err(e, Some(host)))?;
+                if let Some(limit) = compound_size_limit {
+                    nfs.set_max_compound_bytes(limit);
+                }
+                Box::new(nfs)
+            }
             "dummy" => {
                 let root_path = match root {
                     Some(r) => PathBuf::from(r),

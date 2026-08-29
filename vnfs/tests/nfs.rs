@@ -846,6 +846,297 @@ fn path_writev_follows_final_symlink() {
 }
 
 #[test]
+fn writev_path_compresses_shared_prefix() {
+    // Files in nested directories sharing a prefix: the shared directory walk
+    // happens once (relative LOOKUPs from the saved fh), not per file.
+    let dir = setup_dir("compress");
+    let mut c = client();
+    let base = format!("{}/p/a", dir);
+    let f0 = format!("{}/f0", base);
+    let f1 = format!("{}/b/f1", base);
+    let f2 = format!("{}/b/c/f2", base);
+    c.ensure_dir(&format!("{}/b/c", base), 0o755).unwrap();
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let res = c
+        .writev(&[
+            WriteOp::at(VfFile::from_path(&f0), 0, b"0".to_vec()).with_creation(),
+            WriteOp::at(VfFile::from_path(&f1), 0, b"1".to_vec()).with_creation(),
+            WriteOp::at(VfFile::from_path(&f2), 0, b"2".to_vec()).with_creation(),
+        ])
+        .unwrap();
+    assert_eq!(res.len(), 3);
+    let (compounds, ops, _, _) = vnfs::compound::compound_stats();
+    assert_eq!(compounds, 1, "compressed writev must stay one compound");
+    // Re-walking /p/a from the root for each new directory would cost more
+    // ops than the relative LOOKUP walk from the saved directory.
+    assert!(
+        ops < 24,
+        "shared prefix should be walked once; used {} ops",
+        ops
+    );
+    assert_eq!(c.read(&VfFile::from_path(&f2), 0, 1).unwrap(), b"2");
+}
+
+#[test]
+fn readv_writev_mixes_descriptors_and_paths() {
+    let dir = setup_dir("mixed");
+    let mut c = client();
+    let fpath = format!("{}/pathfile", dir);
+    let fdpath = format!("{}/fdfile", dir);
+    let fd = c
+        .open(&fdpath, libc::O_CREAT | libc::O_RDWR, 0o644)
+        .unwrap();
+
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let w = c
+        .writev(&[
+            WriteOp::new(fd.clone(), VfOffset::At(0), b"fd-data".to_vec()),
+            WriteOp::at(VfFile::from_path(&fpath), 0, b"path-data".to_vec()).with_creation(),
+        ])
+        .unwrap();
+    assert_eq!(w.len(), 2);
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(compounds, 1, "mixed writev must be one compound");
+
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let r = c
+        .readv(&[
+            ReadOp::new(fd.clone(), VfOffset::At(0), 7),
+            ReadOp::at(VfFile::from_path(&fpath), 0, 9),
+        ])
+        .unwrap();
+    assert_eq!(r[0].data, b"fd-data");
+    assert_eq!(r[1].data, b"path-data");
+    assert!(r[0].file.is_descriptor(), "result echoes the descriptor op");
+    assert!(r[1].file.path().is_some(), "result echoes the path op");
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(compounds, 1, "mixed readv must be one compound");
+    c.close(&fd).unwrap();
+}
+
+#[test]
+fn writev_respects_compound_size_limit() {
+    let dir = setup_dir("payload");
+    let mut c = client();
+    // 4 files x 64 KiB; a 100 KiB cap allows one file per compound.
+    c.set_max_compound_bytes(100 * 1024);
+    let paths: Vec<String> = (0..4).map(|i| format!("{}/f{}", dir, i)).collect();
+    let payload = vec![b'x'; 64 * 1024];
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let ops: Vec<WriteOp> = paths
+        .iter()
+        .map(|p| WriteOp::at(VfFile::from_path(p), 0, payload.clone()).with_creation())
+        .collect();
+    let res = c.writev(&ops).unwrap();
+    assert_eq!(res.len(), 4);
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(compounds, 4, "payload cap must split into 4 compounds");
+    for p in &paths {
+        assert_eq!(c.stat(p).unwrap().size, payload.len() as u64);
+    }
+}
+
+#[test]
+fn writev_partial_failure_reports_failing_index() {
+    // Contract test: the failing index is attributed correctly, the prefix
+    // executed, and the suffix was not reached. (A whole-batch fallback would
+    // also satisfy this; the openv/removev tests below discriminate resume.)
+    let dir = setup_dir("resume");
+    let mut c = client();
+    let f0 = format!("{}/f0", dir);
+    // A missing PARENT (not a missing file: UNCHECKED create would make one).
+    let missing = format!("{}/no/such/dir/f1", dir);
+    let f2 = format!("{}/f2", dir);
+    let e = c
+        .writev(&[
+            WriteOp::at(VfFile::from_path(&f0), 0, b"x".to_vec()).with_creation(),
+            WriteOp::at(VfFile::from_path(&missing), 0, b"y".to_vec()).with_creation(),
+            WriteOp::at(VfFile::from_path(&f2), 0, b"z".to_vec()).with_creation(),
+        ])
+        .unwrap_err();
+    assert_eq!(
+        e.index(),
+        1,
+        "failure must be attributed to the missing file"
+    );
+    // The prefix op executed before the failure; the suffix was not reached.
+    assert!(c.exists(&f0).unwrap());
+    assert!(!c.exists(&format!("{}/no", dir)).unwrap());
+    assert!(!c.exists(&f2).unwrap());
+}
+
+#[test]
+fn openv_partial_failure_resumes_from_failing_index() {
+    // O_EXCL makes this discriminating: a whole-batch fallback would re-open
+    // f0 (already created by the merged prefix) and fail with NFS4ERR_EXIST
+    // at index 0. Resume keeps the prefix and fails at the missing parent,
+    // index 1.
+    let dir = setup_dir("openv_resume");
+    let mut c = client();
+    let f0 = format!("{}/f0", dir);
+    let bad = format!("{}/no/such/dir/f1", dir);
+    let f2 = format!("{}/f2", dir);
+    let refs = [f0.as_str(), bad.as_str(), f2.as_str()];
+    let flags = [libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 3];
+    let modes = [0o644; 3];
+    let e = c.openv(&refs, &flags, &modes).unwrap_err();
+    assert_eq!(e.index(), 1, "resume must fail at the missing parent");
+    assert!(c.exists(&f0).unwrap(), "prefix open created f0");
+    assert!(!c.exists(&f2).unwrap(), "suffix was not attempted");
+}
+
+#[test]
+fn removev_partial_failure_resumes_from_failing_index() {
+    // A whole-batch fallback would re-remove f0 (already removed by the
+    // merged prefix) and fail with NOENT at index 0. Resume fails at the
+    // missing path, index 1.
+    let dir = setup_dir("removev_resume");
+    let mut c = client();
+    let f0 = format!("{}/f0", dir);
+    let bad = format!("{}/missing", dir);
+    let f2 = format!("{}/f2", dir);
+    for p in [&f0, &f2] {
+        write_file(&mut c, p, b"x");
+    }
+    let files: Vec<VfFile> = [f0.as_str(), bad.as_str(), f2.as_str()]
+        .iter()
+        .map(|p| VfFile::from_path(p))
+        .collect();
+    let e = c.removev(&files).unwrap_err();
+    assert_eq!(e.index(), 1, "resume must fail at the missing path");
+    assert!(!c.exists(&f0).unwrap(), "prefix was removed");
+    assert!(c.exists(&f2).unwrap(), "suffix was not attempted");
+}
+
+#[test]
+fn listdirv_batches_many_directories() {
+    // 10 sibling directories: resolve + READDIR in a few compounds instead of
+    // one round trip per directory.
+    let dir = setup_dir("listdirv_batch");
+    let mut c = client();
+    for i in 0..10 {
+        c.ensure_dir(&format!("{}/d{}", dir, i), 0o755).unwrap();
+        write_file(&mut c, &format!("{}/d{}/f", dir, i), b"x");
+    }
+    let dirs: Vec<String> = (0..10).map(|i| format!("{}/d{}", dir, i)).collect();
+    let refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let mut seen = 0usize;
+    let mut cb = |_: &VfAttrs, _: &str| {
+        seen += 1;
+        true
+    };
+    c.listdirv(&refs, AttrMask::stat(), 0, false, &mut cb)
+        .unwrap();
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(seen, 10);
+    assert!(
+        compounds <= 6,
+        "10 directories should list in a few compounds, got {}",
+        compounds
+    );
+}
+
+#[test]
+fn mkdirv_batches_parent_resolution() {
+    let dir = setup_dir("mkdirv_batch");
+    let mut c = client();
+    let paths: Vec<String> = (0..8).map(|i| format!("{}/d{}", dir, i)).collect();
+    let attrs: Vec<VfAttrs> = paths
+        .iter()
+        .map(|p| VfAttrs {
+            file: VfFile::from_path(p),
+            masks: AttrMask::MODE,
+            mode: 0o751,
+            ..VfAttrs::default()
+        })
+        .collect();
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    c.mkdirv(&attrs).unwrap();
+    let compounds = vnfs::compound::compound_stats().0;
+    assert!(
+        compounds <= 8,
+        "mkdirv of 8 dirs should batch parent resolution, got {}",
+        compounds
+    );
+    for p in &paths {
+        assert_eq!(c.stat(p).unwrap().mode & 0o777, 0o751);
+    }
+}
+
+#[test]
+fn mkdirv_partial_failure_applies_prefix_modes() {
+    // A mid-batch EEXIST must still apply the requested modes to the
+    // directories that were created before the failure.
+    let dir = setup_dir("mkdirv_resume");
+    let mut c = client();
+    let d1 = format!("{}/d1", dir);
+    c.mkdir(&d1, 0o755).unwrap();
+    let d0 = format!("{}/d0", dir);
+    let d2 = format!("{}/d2", dir);
+    let attrs: Vec<VfAttrs> = [d0.as_str(), d1.as_str(), d2.as_str()]
+        .iter()
+        .map(|p| VfAttrs {
+            file: VfFile::from_path(p),
+            masks: AttrMask::MODE,
+            mode: 0o711,
+            ..VfAttrs::default()
+        })
+        .collect();
+    let e = c.mkdirv(&attrs).unwrap_err();
+    assert_eq!(e.index(), 1, "EEXIST on the pre-created directory");
+    assert_eq!(
+        c.stat(&d0).unwrap().mode & 0o777,
+        0o711,
+        "prefix mode applied despite the failure"
+    );
+    assert!(!c.exists(&d2).unwrap());
+}
+
+#[test]
+fn symlinkv_readlinkv_hardlinkv_batch_resolution() {
+    let dir = setup_dir("link_batch");
+    let mut c = client();
+    // 5 symlinks in one directory: one batched parent resolve + one CREATE.
+    let targets: Vec<String> = (0..5).map(|i| format!("target{}", i)).collect();
+    let links: Vec<String> = (0..5).map(|i| format!("{}/l{}", dir, i)).collect();
+    let t_refs: Vec<&str> = targets.iter().map(String::as_str).collect();
+    let l_refs: Vec<&str> = links.iter().map(String::as_str).collect();
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    c.symlinkv(&t_refs, &l_refs).unwrap();
+    let compounds = vnfs::compound::compound_stats().0;
+    assert!(
+        compounds <= 4,
+        "symlinkv of 5 links should batch parent resolution, got {}",
+        compounds
+    );
+    // readlinkv of all links: one batched resolve + one READLINK.
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let got = c.readlinkv(&l_refs).unwrap();
+    assert_eq!(got.len(), 5);
+    let compounds = vnfs::compound::compound_stats().0;
+    assert!(
+        compounds <= 4,
+        "readlinkv of 5 links should batch resolution, got {}",
+        compounds
+    );
+    // hardlinkv: sources + destination parents batched, then one LINK.
+    let hard: Vec<String> = (0..5).map(|i| format!("{}/h{}", dir, i)).collect();
+    let h_refs: Vec<&str> = hard.iter().map(String::as_str).collect();
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    c.hardlinkv(&l_refs, &h_refs).unwrap();
+    let compounds = vnfs::compound::compound_stats().0;
+    assert!(
+        compounds <= 7,
+        "hardlinkv of 5 links should batch resolution, got {}",
+        compounds
+    );
+    for (i, h) in hard.iter().enumerate() {
+        assert_eq!(c.readlink(h).unwrap(), targets[i].as_bytes());
+    }
+}
+
+#[test]
 fn openv_ocreat_preserves_existing_mode() {
     let dir = setup_dir("openv_mode");
     let mut c = client();

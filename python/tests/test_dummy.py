@@ -1,5 +1,6 @@
 """Unit tests for vnfs_fs on the local-directory (dummy) backend."""
 
+import fsspec
 import pytest
 
 from .common import run_correctness_suite
@@ -58,3 +59,32 @@ def test_compound_stats_available(dummy_fs):
     stats = dummy_fs._client.compound_stats()
     assert len(stats) == 4
     assert stats == dummy_fs._client.compound_stats()
+
+
+def test_pipe_missing_parent_raises_by_default(dummy_fs):
+    # Aligned with LocalFileSystem(auto_mkdir=False): writing into a missing
+    # directory is an error, not an implicit mkdir.
+    with pytest.raises(FileNotFoundError):
+        dummy_fs.pipe({"nfs4:///no/such/dir/a.txt": b"x"})
+    with pytest.raises(FileNotFoundError):
+        dummy_fs.touch("nfs4:///no/such/dir/b.txt")
+
+
+def test_pipe_auto_mkdir_creates_parents(tmp_path):
+    fs = fsspec.filesystem(
+        "nfs4", backend="dummy", dummy_root=str(tmp_path / "root"), auto_mkdir=True
+    )
+    fs.pipe({"nfs4:///a/deep/dir/a.txt": b"x"})
+    assert fs.cat_file("nfs4:///a/deep/dir/a.txt") == b"x"
+    assert fs.isdir("nfs4:///a/deep/dir")
+
+
+def test_pipe_existing_target_and_parent(dummy_fs):
+    dummy_fs.mkdir("nfs4:///dir1", create_parents=True)
+    dummy_fs.pipe({"nfs4:///dir1/a.txt": b"old-long-content"})
+    # Existing parent: succeeds.
+    dummy_fs.pipe({"nfs4:///dir1/b.txt": b"world"})
+    assert dummy_fs.cat_file("nfs4:///dir1/b.txt") == b"world"
+    # Existing target: overwritten and truncated (wb semantics).
+    dummy_fs.pipe({"nfs4:///dir1/a.txt": b"hi"})
+    assert dummy_fs.cat_file("nfs4:///dir1/a.txt") == b"hi"

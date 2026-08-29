@@ -6,7 +6,11 @@ __version__: str
 
 class NfsClient:
     def __init__(
-        self, host: str, backend: str = "nfs", root: Optional[str] = None
+        self,
+        host: str,
+        backend: str = "nfs",
+        root: Optional[str] = None,
+        compound_size_limit: Optional[int] = None,
     ) -> None: ...
     def stat(self, path: str) -> dict: ...
     def lstat(self, path: str) -> dict: ...

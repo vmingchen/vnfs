@@ -250,12 +250,27 @@ class Nfs4FileSystem(AbstractFileSystem):
     protocol = "nfs4"
     root_marker = "/"
 
-    def __init__(self, host="127.0.0.1", root="", backend="nfs", dummy_root=None, **kwargs):
+    def __init__(
+        self,
+        host="127.0.0.1",
+        root="",
+        backend="nfs",
+        dummy_root=None,
+        auto_mkdir=False,
+        compound_size_limit=None,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.host = host
         self.backend = backend
+        # Like LocalFileSystem: write-mode operations create missing parent
+        # directories only when auto_mkdir is set.
+        self.auto_mkdir = auto_mkdir
+        # Per-compound payload cap (bytes) for merged path I/O; None uses the
+        # native default (1 MiB).
+        self.compound_size_limit = compound_size_limit
         self._root = root.strip("/")
-        self._client = _native.NfsClient(host, backend, dummy_root)
+        self._client = _native.NfsClient(host, backend, dummy_root, compound_size_limit)
 
     # -- path handling -----------------------------------------------------
 
@@ -453,8 +468,10 @@ class Nfs4FileSystem(AbstractFileSystem):
         try:
             self._client.write_many(native, datas)
         except FileNotFoundError:
-            # Like LocalFileSystem(auto_mkdir=True), create missing parents
-            # once, then retry (only pays round trips when a parent is absent).
+            if not self.auto_mkdir:
+                raise
+            # Create missing parents once, then retry (only pays round trips
+            # when a parent is absent).
             for parent in sorted({posixpath.dirname(p) for p in paths}):
                 if parent not in ("", "/"):
                     self._client.ensure_dir(self._native_path(parent), 0o755)
@@ -479,12 +496,20 @@ class Nfs4FileSystem(AbstractFileSystem):
     # -- open / file objects ----------------------------------------------
 
     def _open(self, path, mode="rb", block_size=None, autocommit=True, cache_options=None, **kwargs):
+        if self.auto_mkdir and any(c in mode for c in "wax"):
+            parent = self._parent(path)
+            if parent not in ("", "/"):
+                self._client.ensure_dir(self._native_path(parent), 0o755)
         return Nfs4File(self, self._strip_protocol(path), mode)
 
     def open_many(self, open_files):
         """Open a list of ``OpenFile`` objects in one openv batch."""
         paths = [self._strip_protocol(f.path) for f in open_files]
         modes = [f.mode for f in open_files]
+        if self.auto_mkdir and any(any(c in m for c in "wax") for m in modes):
+            for parent in sorted({posixpath.dirname(p) for p in paths}):
+                if parent not in ("", "/"):
+                    self._client.ensure_dir(self._native_path(parent), 0o755)
         fds = self._client.open_many([self._native_path(p) for p in paths], modes)
         return [Nfs4File(self, p, m, fd=fd) for p, m, fd in zip(paths, modes, fds)]
 
@@ -557,7 +582,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         if not self.isfile(src):
             raise FileNotFoundError(src)
         parent = self._parent(dst)
-        if parent not in ("", "/"):
+        if self.auto_mkdir and parent not in ("", "/"):
             self._client.ensure_dir(self._native_path(parent), 0o755)
         self._copy_pairs([(src, dst)], "raise")
 
@@ -611,13 +636,13 @@ class Nfs4FileSystem(AbstractFileSystem):
         ]
         copied, errors = self._client.copy_many(native_pairs)
         if errors and all(err == 2 for err in errors.values()):
-            # Missing destination parents (matching cp_file's auto_mkdir):
-            # create them once, then retry.
-            parents = {posixpath.dirname(b) for _, b in native_pairs}
-            for parent in sorted(parents):
-                if parent not in ("", "/"):
-                    self._client.ensure_dir(parent, 0o755)
-            copied, errors = self._client.copy_many(native_pairs)
+            if self.auto_mkdir:
+                # Missing destination parents: create them once, then retry.
+                parents = {posixpath.dirname(b) for _, b in native_pairs}
+                for parent in sorted(parents):
+                    if parent not in ("", "/"):
+                        self._client.ensure_dir(parent, 0o755)
+                copied, errors = self._client.copy_many(native_pairs)
         if errors:
             i = min(errors)
             exc = _oserror(errors[i], pairs[i][0])

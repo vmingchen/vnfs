@@ -129,3 +129,29 @@ def test_open_files_reads_are_batched(nfs_fs):
     for f in files:
         f.close()
     assert contents == [b"hello"] * 10
+
+
+def test_compound_size_limit_is_configurable(nfs_fs):
+    """fsspec.filesystem('nfs4', compound_size_limit=...) controls the
+    per-compound payload cap: a small cap splits one pipe into several
+    compounds, and the data still round-trips."""
+    fs = fsspec.filesystem(
+        "nfs4",
+        host="127.0.0.1",
+        root=nfs_fs._root + "_limit",
+        compound_size_limit=64 * 1024,
+    )
+    fs.mkdir("nfs4:///", create_parents=True)
+    try:
+        paths = [f"nfs4:///f{i}.txt" for i in range(4)]
+        data = b"x" * 64 * 1024
+        fs._client.compound_stats()
+        fs.pipe({p: data for p in paths})
+        count = fs._client.compound_stats()[0]
+        # 64 KiB writes under a 64 KiB cap: one write compound per file
+        # (4) plus one merged truncate compound (1).
+        assert count >= 5, count
+        for p in paths:
+            assert fs.cat_file(p) == data
+    finally:
+        fs.rm("nfs4:///", recursive=True)

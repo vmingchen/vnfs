@@ -9,7 +9,7 @@ use std::os::raw::c_char;
 use nfsv41_sys::*;
 
 use crate::compound::{Compound, CompoundRes};
-use crate::error::RpcResult;
+use crate::error::{RpcError, RpcResult};
 use crate::session::Session;
 use crate::vecfs::split_path;
 
@@ -57,7 +57,13 @@ impl FileHandle {
 pub struct NfsClient {
     session: Session,
     root: FileHandle,
+    /// Maximum estimated encoded bytes per merged compound (0 = unlimited).
+    /// Mirrors txn-compound's 1 MiB `CPD_LIMIT` default.
+    pub max_compound_bytes: usize,
 }
+
+/// Default per-compound payload cap for merged path I/O.
+pub const DEFAULT_MAX_COMPOUND_BYTES: usize = 1 << 20;
 
 /// How an OPEN handles a file that does not exist yet.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -198,20 +204,32 @@ pub const READDIR_ATTRS: [u32; 13] = [
 // Merged (single-compound) path I/O
 // ---------------------------------------------------------------------------
 
+/// A file reference for a merged compound: a path resolved in-compound, or a
+/// pre-resolved open-file handle (descriptor ops, mixed into the same
+/// compound with PUTFH).
+pub enum FileRef {
+    Path(String),
+    Handle(FileHandle),
+}
+
 /// One path-based WRITE for a merged compound. The path is root-relative
 /// (no leading slash); the offset is already resolved to an absolute value.
 pub struct PathWriteOp {
-    pub path: String,
+    pub file: FileRef,
     pub offset: u64,
     pub data: Vec<u8>,
     pub create: bool,
+    /// Real stateid for descriptor ops (None for path ops, which open and
+    /// use the special stateid in-compound).
+    pub stateid: Option<stateid4>,
 }
 
 /// One path-based READ for a merged compound.
 pub struct PathReadOp {
-    pub path: String,
+    pub file: FileRef,
     pub offset: u64,
     pub count: u32,
+    pub stateid: Option<stateid4>,
 }
 
 /// Per-op results of a merged path compound. `counts`/`committed` are `None`
@@ -239,7 +257,7 @@ pub struct PathReadOutcome {
 
 /// One path-based GETATTR for a merged compound.
 pub struct PathGetattrOp {
-    pub path: String,
+    pub file: FileRef,
     pub attrs: Vec<u32>,
 }
 
@@ -251,7 +269,7 @@ pub struct PathGetattrOutcome {
 
 /// One path-based SETATTR for a merged compound.
 pub struct PathSetattrOp {
-    pub path: String,
+    pub file: FileRef,
     pub mode: Option<u32>,
     pub size: Option<u64>,
     /// Request the object's own type (needed for symlink handling).
@@ -311,9 +329,11 @@ struct CfhCursor {
 
 impl CfhCursor {
     /// Make the current fh the parent of `path` and leave it in the saved-fh
-    /// slot (resolving from the export root once per unique directory).
-    /// Returns the leaf component and the number of ops appended, or None if
-    /// the path is malformed.
+    /// slot. When a directory is already saved, the walk is relative to it
+    /// (LOOKUPP for "..", LOOKUP for shared-prefix descendants) whenever that
+    /// is cheaper than re-resolving from PUTROOTFH, so shared prefixes are
+    /// never re-walked. Returns the leaf component and the number of ops
+    /// appended, or None if the path is malformed.
     fn set_parent(&mut self, c: &mut Compound, path: &str) -> Option<(String, usize)> {
         let (dir, leaf) = split_path(path).ok()?;
         if self.saved_dir.as_deref() == Some(dir) {
@@ -326,7 +346,35 @@ impl CfhCursor {
             }
             return Some((leaf.to_string(), ops));
         }
-        // Resolve a (possibly new) parent directory from the export root.
+        let mut ops = 0;
+        if let Some(saved) = self.saved_dir.clone() {
+            if !self.at_saved {
+                c.restorefh();
+                ops += 1;
+                self.at_saved = true;
+            }
+            let saved_comps = dir_comps(&saved);
+            let target_comps = dir_comps(dir);
+            let common = common_prefix_len(&saved_comps, &target_comps);
+            let ups = saved_comps.len() - common;
+            let downs = target_comps.len() - common;
+            if ups + downs < 1 + target_comps.len() {
+                for _ in 0..ups {
+                    c.lookupp();
+                    ops += 1;
+                }
+                for comp in &target_comps[common..] {
+                    c.lookup(comp.as_bytes());
+                    ops += 1;
+                }
+                c.savefh();
+                ops += 1;
+                self.saved_dir = Some(dir.to_string());
+                self.at_saved = true;
+                return Some((leaf.to_string(), ops));
+            }
+        }
+        // Resolve the parent directory from the export root.
         let mut ops = 1; // PUTROOTFH
         c.putrootfh();
         for comp in dir.split('/').filter(|s| !s.is_empty()) {
@@ -353,6 +401,31 @@ impl CfhCursor {
             }
             return Some((leaf.to_string(), ops));
         }
+        let mut ops = 0;
+        if let Some(saved) = self.saved_dir.clone() {
+            if !self.at_saved {
+                c.restorefh();
+                ops += 1;
+                self.at_saved = true;
+            }
+            let saved_comps = dir_comps(&saved);
+            let target_comps = dir_comps(dir);
+            let common = common_prefix_len(&saved_comps, &target_comps);
+            let ups = saved_comps.len() - common;
+            let downs = target_comps.len() - common;
+            if ups + downs < 1 + target_comps.len() {
+                for _ in 0..ups {
+                    c.lookupp();
+                    ops += 1;
+                }
+                for comp in &target_comps[common..] {
+                    c.lookup(comp.as_bytes());
+                    ops += 1;
+                }
+                self.at_saved = false;
+                return Some((leaf.to_string(), ops));
+            }
+        }
         let mut ops = 1; // PUTROOTFH
         c.putrootfh();
         for comp in dir.split('/').filter(|s| !s.is_empty()) {
@@ -363,11 +436,26 @@ impl CfhCursor {
         Some((leaf.to_string(), ops))
     }
 
+    /// Make the current fh a known open-file handle (descriptor ops). The
+    /// saved fh is untouched, so a later path op can still RESTOREFH back.
+    fn set_handle(&mut self, c: &mut Compound, fh: &FileHandle) {
+        c.putfh(&fh.as_nfs_fh());
+        self.at_saved = false;
+    }
+
     /// Note that an operation (OPEN/LOOKUP/...) moved the current fh away
     /// from the saved fh.
     fn descend(&mut self) {
         self.at_saved = false;
     }
+}
+
+fn dir_comps(dir: &str) -> Vec<&str> {
+    dir.split('/').filter(|s| !s.is_empty()).collect()
+}
+
+fn common_prefix_len(a: &[&str], b: &[&str]) -> usize {
+    a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }
 
 /// Maps compound op positions (resarray indices; 0 = SEQUENCE) to the
@@ -432,7 +520,17 @@ impl NfsClient {
     pub fn connect(host: &str) -> RpcResult<NfsClient> {
         let mut session = Session::connect(host)?;
         let root = session_mount_root(&mut session)?;
-        Ok(NfsClient { session, root })
+        Ok(NfsClient {
+            session,
+            root,
+            max_compound_bytes: DEFAULT_MAX_COMPOUND_BYTES,
+        })
+    }
+
+    /// Set the per-compound payload cap for merged path I/O (bytes; 0 =
+    /// unlimited).
+    pub fn set_max_compound_bytes(&mut self, bytes: usize) {
+        self.max_compound_bytes = bytes;
     }
 
     pub fn root(&self) -> &FileHandle {
@@ -770,10 +868,25 @@ impl NfsClient {
                 let idx = caller_index(e.op_index, per_op, chunk_start, chunk.len());
                 e.with_op_index(idx)
             })?;
-            self.session.expect_all_ok(&res).map_err(|e| {
-                let idx = caller_index(e.op_index, per_op, chunk_start, chunk.len());
-                e.with_op_index(idx)
-            })?;
+            // Attribute a failing op to the right caller index. When the
+            // server reports the failed op in the reply we find it by
+            // scanning; when it aborts mid-compound and only sets the
+            // compound-level status, the failing op is the first one whose
+            // result is missing.
+            let bad = (0..res.nops()).find(|&i| res.op_status(i) != nfsstat4_NFS4_OK);
+            match bad {
+                Some(i) => {
+                    let idx = caller_index(i, per_op, chunk_start, chunk.len());
+                    return Err(RpcError::op(idx, res.op_status(i)));
+                }
+                None if res.status() != nfsstat4_NFS4_OK => {
+                    let present = res.nops().saturating_sub(1);
+                    let local = present / per_op;
+                    let idx = chunk_start + local.min(chunk.len() - 1);
+                    return Err(RpcError::op(idx, res.status()));
+                }
+                None => {}
+            }
             for (i, _) in chunk.iter().enumerate() {
                 out.push(extract(&res, i));
             }
@@ -994,71 +1107,99 @@ impl NfsClient {
                 b"writev2"
             });
             let mut opened_path: Option<String> = None;
+            let mut fh_at_opened = false;
             let mut opens_in_chunk = 0usize;
             let base_seq = self.session.path_owner.seqid;
+            let mut payload = 0usize;
 
             while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
                 let op = &ops[global];
-                if opened_path.as_deref() == Some(op.path.as_str()) {
-                    // Same file: the current fh is still the opened file.
-                    map.begin(global);
-                    c.write(
-                        &SPECIAL_STATEID,
-                        op.offset,
-                        stable_how4_FILE_SYNC4,
-                        op.data.as_slice(),
-                    );
-                    map.note_ops(1);
-                    map.end();
-                    global += 1;
-                    continue;
-                }
-                if close_in_compound && opened_path.is_some() {
-                    // Close the previous file while its fh is still current.
-                    c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
-                    map.note_ops(1);
-                    opened_path = None;
+                let est = 128 + op.data.len();
+                if payload > 0
+                    && self.max_compound_bytes > 0
+                    && payload + est > self.max_compound_bytes
+                {
+                    break;
                 }
                 map.begin(global);
-                let (leaf, nops) = match cursor.set_parent(&mut c, &op.path) {
-                    Some(x) => x,
-                    None => {
-                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                        global = n;
-                        break;
+                match &op.file {
+                    FileRef::Path(p) => {
+                        if opened_path.as_deref() == Some(p.as_str()) && fh_at_opened {
+                            // Same file: the current fh is still the opened file.
+                            c.write(
+                                &SPECIAL_STATEID,
+                                op.offset,
+                                stable_how4_FILE_SYNC4,
+                                op.data.as_slice(),
+                            );
+                            map.note_ops(1);
+                            map.end();
+                            payload += est;
+                            global += 1;
+                            continue;
+                        }
+                        if close_in_compound && opened_path.is_some() && fh_at_opened {
+                            // Close the previous file while its fh is current.
+                            c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
+                            map.note_ops(1);
+                            opened_path = None;
+                        }
+                        let (leaf, nops) = match cursor.set_parent(&mut c, p) {
+                            Some(x) => x,
+                            None => {
+                                failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                                global = n;
+                                break;
+                            }
+                        };
+                        map.note_ops(nops);
+                        let create = if op.create {
+                            OpenCreate::Unchecked
+                        } else {
+                            OpenCreate::NoCreate
+                        };
+                        c.open_claim_null(
+                            base_seq + opens_in_chunk as u32,
+                            OPEN4_SHARE_ACCESS_BOTH,
+                            OPEN4_SHARE_DENY_NONE,
+                            self.session.clientid,
+                            &self.session.path_owner.name,
+                            make_open_how(create, self.session.path_owner.verifier),
+                            leaf.as_bytes(),
+                        );
+                        opens_in_chunk += 1;
+                        map.note_ops(1);
+                        if !close_in_compound {
+                            c.getfh();
+                            map.note_ops(1);
+                        }
+                        opened_path = Some(p.clone());
+                        fh_at_opened = true;
+                        c.write(
+                            &SPECIAL_STATEID,
+                            op.offset,
+                            stable_how4_FILE_SYNC4,
+                            op.data.as_slice(),
+                        );
+                        map.note_ops(1);
+                        cursor.descend();
                     }
-                };
-                map.note_ops(nops);
-                let create = if op.create {
-                    OpenCreate::Unchecked
-                } else {
-                    OpenCreate::NoCreate
-                };
-                c.open_claim_null(
-                    base_seq + opens_in_chunk as u32,
-                    OPEN4_SHARE_ACCESS_BOTH,
-                    OPEN4_SHARE_DENY_NONE,
-                    self.session.clientid,
-                    &self.session.path_owner.name,
-                    make_open_how(create, self.session.path_owner.verifier),
-                    leaf.as_bytes(),
-                );
-                opens_in_chunk += 1;
-                map.note_ops(1);
-                if !close_in_compound {
-                    c.getfh();
-                    map.note_ops(1);
+                    FileRef::Handle(fh) => {
+                        if close_in_compound && opened_path.is_some() && fh_at_opened {
+                            c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
+                            map.note_ops(1);
+                            opened_path = None;
+                        }
+                        cursor.set_handle(&mut c, fh);
+                        map.note_ops(1);
+                        let sid = op.stateid.as_ref().unwrap_or(&SPECIAL_STATEID);
+                        c.write(sid, op.offset, stable_how4_FILE_SYNC4, op.data.as_slice());
+                        map.note_ops(1);
+                        fh_at_opened = false;
+                    }
                 }
-                opened_path = Some(op.path.clone());
-                c.write(
-                    &SPECIAL_STATEID,
-                    op.offset,
-                    stable_how4_FILE_SYNC4,
-                    op.data.as_slice(),
-                );
-                map.note_ops(1);
                 map.end();
-                cursor.descend();
+                payload += est;
                 global += 1;
                 // A new directory's resolution could exceed the reserve.
                 if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
@@ -1184,54 +1325,82 @@ impl NfsClient {
                 b"readv2"
             });
             let mut opened_path: Option<String> = None;
+            let mut fh_at_opened = false;
             let mut opens_in_chunk = 0usize;
             let base_seq = self.session.path_owner.seqid;
+            let mut payload = 0usize;
 
             while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
                 let op = &ops[global];
-                if opened_path.as_deref() == Some(op.path.as_str()) {
-                    map.begin(global);
-                    c.read(&SPECIAL_STATEID, op.offset, op.count);
-                    map.note_ops(1);
-                    map.end();
-                    global += 1;
-                    continue;
-                }
-                if close_in_compound && opened_path.is_some() {
-                    c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
-                    map.note_ops(1);
-                    opened_path = None;
+                let est = 128 + op.count as usize;
+                if payload > 0
+                    && self.max_compound_bytes > 0
+                    && payload + est > self.max_compound_bytes
+                {
+                    break;
                 }
                 map.begin(global);
-                let (leaf, nops) = match cursor.set_parent(&mut c, &op.path) {
-                    Some(x) => x,
-                    None => {
-                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                        global = n;
-                        break;
+                match &op.file {
+                    FileRef::Path(p) => {
+                        if opened_path.as_deref() == Some(p.as_str()) && fh_at_opened {
+                            c.read(&SPECIAL_STATEID, op.offset, op.count);
+                            map.note_ops(1);
+                            map.end();
+                            payload += est;
+                            global += 1;
+                            continue;
+                        }
+                        if close_in_compound && opened_path.is_some() && fh_at_opened {
+                            c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
+                            map.note_ops(1);
+                            opened_path = None;
+                        }
+                        let (leaf, nops) = match cursor.set_parent(&mut c, p) {
+                            Some(x) => x,
+                            None => {
+                                failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                                global = n;
+                                break;
+                            }
+                        };
+                        map.note_ops(nops);
+                        c.open_claim_null(
+                            base_seq + opens_in_chunk as u32,
+                            OPEN4_SHARE_ACCESS_READ,
+                            OPEN4_SHARE_DENY_NONE,
+                            self.session.clientid,
+                            &self.session.path_owner.name,
+                            make_open_how(OpenCreate::NoCreate, self.session.path_owner.verifier),
+                            leaf.as_bytes(),
+                        );
+                        opens_in_chunk += 1;
+                        map.note_ops(1);
+                        if !close_in_compound {
+                            c.getfh();
+                            map.note_ops(1);
+                        }
+                        opened_path = Some(p.clone());
+                        fh_at_opened = true;
+                        c.read(&SPECIAL_STATEID, op.offset, op.count);
+                        map.note_ops(1);
+                        cursor.descend();
                     }
-                };
-                map.note_ops(nops);
-                c.open_claim_null(
-                    base_seq + opens_in_chunk as u32,
-                    OPEN4_SHARE_ACCESS_READ,
-                    OPEN4_SHARE_DENY_NONE,
-                    self.session.clientid,
-                    &self.session.path_owner.name,
-                    make_open_how(OpenCreate::NoCreate, self.session.path_owner.verifier),
-                    leaf.as_bytes(),
-                );
-                opens_in_chunk += 1;
-                map.note_ops(1);
-                if !close_in_compound {
-                    c.getfh();
-                    map.note_ops(1);
+                    FileRef::Handle(fh) => {
+                        if close_in_compound && opened_path.is_some() && fh_at_opened {
+                            c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
+                            map.note_ops(1);
+                            opened_path = None;
+                        }
+                        cursor.set_handle(&mut c, fh);
+                        map.note_ops(1);
+                        let sid = op.stateid.as_ref().unwrap_or(&SPECIAL_STATEID);
+                        c.read(sid, op.offset, op.count);
+                        map.note_ops(1);
+                        fh_at_opened = false;
+                    }
                 }
-                opened_path = Some(op.path.clone());
-                c.read(&SPECIAL_STATEID, op.offset, op.count);
-                map.note_ops(1);
                 map.end();
-                cursor.descend();
+                payload += est;
                 global += 1;
                 if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
                     break;
@@ -1346,24 +1515,41 @@ impl NfsClient {
             let mut map = OpMap::new();
             let mut c = Compound::new();
             c.tag(b"getattrv1");
+            let mut payload = 0usize;
             while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
                 let op = &ops[global];
+                let est = 256;
+                if payload > 0
+                    && self.max_compound_bytes > 0
+                    && payload + est > self.max_compound_bytes
+                {
+                    break;
+                }
                 map.begin(global);
-                let (leaf, nops) = match cursor.set_parent(&mut c, &op.path) {
-                    Some(x) => x,
-                    None => {
-                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                        global = n;
-                        break;
+                match &op.file {
+                    FileRef::Path(p) => {
+                        let (leaf, nops) = match cursor.set_parent(&mut c, p) {
+                            Some(x) => x,
+                            None => {
+                                failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                                global = n;
+                                break;
+                            }
+                        };
+                        map.note_ops(nops);
+                        c.lookup(leaf.as_bytes());
+                        map.note_ops(1);
                     }
-                };
-                map.note_ops(nops);
-                c.lookup(leaf.as_bytes());
-                map.note_ops(1);
+                    FileRef::Handle(fh) => {
+                        cursor.set_handle(&mut c, fh);
+                        map.note_ops(1);
+                    }
+                }
                 c.getattr(&op.attrs);
                 map.note_ops(1);
                 map.end();
                 cursor.descend();
+                payload += est;
                 global += 1;
                 if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
                     break;
@@ -1372,6 +1558,17 @@ impl NfsClient {
             let res = self.session.compound(&mut c)?;
             if let Some((caller, st)) = first_failed_range(&res, &map.ranges) {
                 failed = Some((caller, st));
+                // Keep the prefix results (the caller resumes from here).
+                for (c, s, e) in &map.ranges {
+                    if *c >= caller {
+                        continue;
+                    }
+                    for j in *s..*e {
+                        if res.op(j).resop == nfs_opnum4_NFS4_OP_GETATTR {
+                            lists[*c] = Some(res.getattr_bytes(j));
+                        }
+                    }
+                }
                 break;
             }
             for (caller, s, e) in &map.ranges {
@@ -1408,20 +1605,36 @@ impl NfsClient {
             let mut map = OpMap::new();
             let mut c = Compound::new();
             c.tag(b"setattrv1");
+            let mut payload = 0usize;
             while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
                 let op = &ops[global];
+                let est = 256;
+                if payload > 0
+                    && self.max_compound_bytes > 0
+                    && payload + est > self.max_compound_bytes
+                {
+                    break;
+                }
                 map.begin(global);
-                let (leaf, nops) = match cursor.set_parent(&mut c, &op.path) {
-                    Some(x) => x,
-                    None => {
-                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                        global = n;
-                        break;
+                match &op.file {
+                    FileRef::Path(p) => {
+                        let (leaf, nops) = match cursor.set_parent(&mut c, p) {
+                            Some(x) => x,
+                            None => {
+                                failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                                global = n;
+                                break;
+                            }
+                        };
+                        map.note_ops(nops);
+                        c.lookup(leaf.as_bytes());
+                        map.note_ops(1);
                     }
-                };
-                map.note_ops(nops);
-                c.lookup(leaf.as_bytes());
-                map.note_ops(1);
+                    FileRef::Handle(fh) => {
+                        cursor.set_handle(&mut c, fh);
+                        map.note_ops(1);
+                    }
+                }
                 if op.check_type {
                     c.getattr(&[FATTR4_TYPE]);
                     map.note_ops(1);
@@ -1430,6 +1643,7 @@ impl NfsClient {
                 map.note_ops(1);
                 map.end();
                 cursor.descend();
+                payload += est;
                 global += 1;
                 if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
                     break;
@@ -1438,6 +1652,19 @@ impl NfsClient {
             let res = self.session.compound(&mut c)?;
             if let Some((caller, st)) = first_failed_range(&res, &map.ranges) {
                 failed = Some((caller, st));
+                // Keep the prefix types (the caller resumes from here).
+                for (c, s, e) in &map.ranges {
+                    if *c >= caller {
+                        continue;
+                    }
+                    for j in *s..*e {
+                        if res.op(j).resop == nfs_opnum4_NFS4_OP_GETATTR {
+                            let b = res.getattr_bytes(j);
+                            types[*c] = (b.len() >= 4)
+                                .then(|| u32::from_be_bytes(b[0..4].try_into().unwrap()));
+                        }
+                    }
+                }
                 break;
             }
             for (caller, s, e) in &map.ranges {
@@ -1474,8 +1701,16 @@ impl NfsClient {
             c.tag(b"openv1");
             let mut opens_in_chunk = 0usize;
             let base_seq = self.session.path_owner.seqid;
+            let mut payload = 0usize;
             while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
                 let op = &ops[global];
+                let est = 256;
+                if payload > 0
+                    && self.max_compound_bytes > 0
+                    && payload + est > self.max_compound_bytes
+                {
+                    break;
+                }
                 map.begin(global);
                 let (leaf, nops) = match cursor.set_parent(&mut c, &op.path) {
                     Some(x) => x,
@@ -1524,6 +1759,7 @@ impl NfsClient {
                 }
                 map.end();
                 cursor.descend();
+                payload += est;
                 global += 1;
                 if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
                     break;
@@ -1533,6 +1769,19 @@ impl NfsClient {
             let res = self.session.compound(&mut c)?;
             if let Some((caller, st)) = first_failed_range(&res, &map.ranges) {
                 failed = Some((caller, st));
+                // Keep the prefix opens (the caller resumes from here).
+                for (c, s, e) in &map.ranges {
+                    if *c >= caller {
+                        continue;
+                    }
+                    for j in *s..*e {
+                        if res.op(j).resop == nfs_opnum4_NFS4_OP_OPEN {
+                            let stateid = res.open(j).stateid;
+                            let fh = res.getfh(j + 1);
+                            opened[*c] = Some((FileHandle::from_nfs_fh(fh), stateid));
+                        }
+                    }
+                }
                 break;
             }
             for (caller, s, e) in &map.ranges {
@@ -1567,7 +1816,15 @@ impl NfsClient {
             let mut map = OpMap::new();
             let mut c = Compound::new();
             c.tag(b"removev1");
+            let mut payload = 0usize;
             while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
+                let est = 128;
+                if payload > 0
+                    && self.max_compound_bytes > 0
+                    && payload + est > self.max_compound_bytes
+                {
+                    break;
+                }
                 map.begin(global);
                 let (leaf, nops) = match cursor.set_parent(&mut c, &paths[global]) {
                     Some(x) => x,
@@ -1583,6 +1840,7 @@ impl NfsClient {
                 map.end();
                 // REMOVE leaves the current fh on the parent: cursor state
                 // is unchanged.
+                payload += est;
                 global += 1;
                 if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
                     break;
@@ -1633,8 +1891,16 @@ impl NfsClient {
             let mut map = OpMap::new();
             let mut c = Compound::new();
             c.tag(b"renamev1");
+            let mut payload = 0usize;
             while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
                 let pair = &pairs[global];
+                let est = 256;
+                if payload > 0
+                    && self.max_compound_bytes > 0
+                    && payload + est > self.max_compound_bytes
+                {
+                    break;
+                }
                 map.begin(global);
                 let (sname, snops) = match cursor.set_parent(&mut c, &pair.src) {
                     Some(x) => x,
@@ -1658,6 +1924,7 @@ impl NfsClient {
                 map.note_ops(1);
                 map.end();
                 cursor.descend(); // RENAME moved the current fh
+                payload += est;
                 global += 1;
                 if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
                     break;
