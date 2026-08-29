@@ -5,6 +5,7 @@ Each test runs against both backends (dummy + NFS, when reachable). They are
 written to fail on the pre-fix behavior and pass after the fixes.
 """
 
+import datetime
 import io
 
 import pytest
@@ -107,3 +108,66 @@ def test_ukey_changes_on_rename_like_local(fs):
     fs.mv("nfs4:///a.txt", "nfs4:///b.txt")
     after = fs.ukey("nfs4:///b.txt")
     assert before != after
+
+
+def test_cat_file_and_ranges_negative_bounds(fs):
+    # fsspec's cat_file/cat_ranges contract: negative start/end are offsets
+    # backwards from the end, like Python slices.
+    fs.pipe_file("nfs4:///f.txt", b"0123456789")
+    assert fs.cat_file("nfs4:///f.txt", start=-3) == b"789"
+    assert fs.cat_file("nfs4:///f.txt", end=-1) == b"012345678"
+    assert fs.cat_file("nfs4:///f.txt", start=-4, end=-1) == b"678"
+    ranges = fs.cat_ranges(
+        ["nfs4:///f.txt", "nfs4:///f.txt"], [-3, 0], [-1, 4]
+    )
+    assert ranges == [b"78", b"0123"]
+
+
+def test_cat_glob_single_match_returns_dict(fs):
+    # A glob that expands to a single file is still an expansion: base cat
+    # returns {path: data}, not raw bytes.
+    fs.pipe_file("nfs4:///only.txt", b"x")
+    out = fs.cat("nfs4:///only.*")
+    assert isinstance(out, dict)
+    assert out == {"/only.txt": b"x"}
+
+
+def test_mv_file_into_existing_directory(fs):
+    # Like LocalFileSystem (shutil.move) and base mv (copy+rm), moving a file
+    # onto an existing directory moves it inside.
+    fs.mkdir("nfs4:///dest", create_parents=True)
+    fs.pipe_file("nfs4:///src.txt", b"x")
+    fs.mv("nfs4:///src.txt", "nfs4:///dest")
+    assert not fs.exists("nfs4:///src.txt")
+    assert fs.cat_file("nfs4:///dest/src.txt") == b"x"
+
+
+def test_transaction_commits_on_exit(fs):
+    # fsspec transaction contract (see test_local.py test_commit_discard):
+    # writes are deferred until the transaction exits; on normal exit they
+    # are committed.
+    with fs.transaction:
+        with fs.open("nfs4:///tx.txt", "wb") as fh:
+            fh.write(b"tx")
+        assert not fs.exists("nfs4:///tx.txt")
+    assert fs._transaction is None
+    assert fs.cat_file("nfs4:///tx.txt") == b"tx"
+
+
+def test_transaction_discards_on_error(fs):
+    with pytest.raises(RuntimeError):
+        with fs.transaction:
+            with fs.open("nfs4:///tx2.txt", "wb") as fh:
+                fh.write(b"tx2")
+            raise RuntimeError("boom")
+    assert fs._transaction is None
+    assert not fs.exists("nfs4:///tx2.txt")
+
+
+def test_created_modified_are_utc_aware(fs):
+    # LocalFileSystem returns tz-aware UTC datetimes.
+    fs.pipe_file("nfs4:///f.txt", b"x")
+    created = fs.created("nfs4:///f.txt")
+    modified = fs.modified("nfs4:///f.txt")
+    assert created.tzinfo is not None and created.utcoffset() == datetime.timedelta(0)
+    assert modified.tzinfo is not None and modified.utcoffset() == datetime.timedelta(0)

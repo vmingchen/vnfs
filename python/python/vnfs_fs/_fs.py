@@ -231,6 +231,93 @@ class Nfs4File(io.RawIOBase):
         return self._size()
 
 
+class _DeferredWriteFile:
+    """Write-only buffer that lands on the filesystem only at ``commit()``.
+
+    fsspec transaction semantics (see ``Transaction`` and
+    ``test_local.py::test_commit_discard``): a file opened inside a
+    transaction must not exist until the transaction completes; on a normal
+    exit it is committed, on an exception it is discarded.
+    """
+
+    def __init__(self, fs, path, mode="wb"):
+        self.fs = fs
+        self.path = path  # internal path
+        self.mode = mode
+        self._buffer = bytearray()
+        self._pos = 0
+        self._closed = False
+        self._committed = False
+
+    def writable(self):
+        return True
+
+    def readable(self):
+        return False
+
+    def seekable(self):
+        return True
+
+    def write(self, data):
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
+        if isinstance(data, str):
+            raise TypeError("a bytes-like object is required, not 'str'")
+        n = len(data)
+        end = self._pos + n
+        if end > len(self._buffer):
+            self._buffer.extend(b"\0" * (end - len(self._buffer)))
+        self._buffer[self._pos : end] = data
+        self._pos = end
+        return n
+
+    def seek(self, offset, whence=0):
+        if whence == 0:
+            new = offset
+        elif whence == 1:
+            new = self._pos + offset
+        elif whence == 2:
+            new = len(self._buffer) + offset
+        else:
+            raise ValueError(f"invalid whence: {whence}")
+        if new < 0:
+            raise ValueError("negative seek position")
+        self._pos = new
+        return new
+
+    def tell(self):
+        return self._pos
+
+    def flush(self):
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    def close(self):
+        # The buffer is retained: the target is written at commit().
+        self._closed = True
+
+    def commit(self):
+        if self._committed:
+            return
+        self.fs._write_batch([self.path], [bytes(self._buffer)])
+        self._committed = True
+        self._closed = True
+
+    def discard(self):
+        self._buffer.clear()
+        self._committed = True
+        self._closed = True
+
+    @property
+    def closed(self):
+        return self._closed
+
+
 class Nfs4FileSystem(AbstractFileSystem):
     """An fsspec filesystem over the vectorized vnfs NFSv4.1 client.
 
@@ -362,11 +449,19 @@ class Nfs4FileSystem(AbstractFileSystem):
 
     def created(self, path):
         ts = self.info(path).get("created")
-        return datetime.datetime.fromtimestamp(ts) if ts is not None else None
+        return (
+            datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+            if ts is not None
+            else None
+        )
 
     def modified(self, path):
         ts = self.info(path).get("modified")
-        return datetime.datetime.fromtimestamp(ts) if ts is not None else None
+        return (
+            datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+            if ts is not None
+            else None
+        )
 
     def ukey(self, path):
         info = self.info(path)
@@ -421,7 +516,7 @@ class Nfs4FileSystem(AbstractFileSystem):
     def cat(self, path, recursive=False, on_error="raise", **kwargs):
         if isinstance(path, str):
             paths = self.expand_path(path, recursive=recursive, **kwargs)
-            if len(paths) == 1:
+            if len(paths) == 1 and paths[0] == self._strip_protocol(path):
                 # Single literal path: cat_file semantics (raise on error).
                 return self.cat_file(paths[0], **kwargs)
             return self._cat_batch(paths, on_error)
@@ -435,6 +530,13 @@ class Nfs4FileSystem(AbstractFileSystem):
 
     def cat_file(self, path, start=None, end=None, **kwargs):
         internal = self._strip_protocol(path)
+        if (start is not None and start < 0) or (end is not None and end < 0):
+            # Slice semantics: negative bounds are offsets from the end.
+            size = self.size(internal)
+            if start is not None and start < 0:
+                start = max(0, size + start)
+            if end is not None and end < 0:
+                end = size + end
         data, errors = self._client.read_many(
             [self._native_path(internal)], [start if start is not None else 0], [end]
         )
@@ -454,9 +556,26 @@ class Nfs4FileSystem(AbstractFileSystem):
         if len(starts) != len(paths) or len(ends) != len(paths):
             raise ValueError("starts/ends must match paths")
         internals = [self._strip_protocol(p) for p in paths]
-        data, errors = self._client.read_many(
-            [self._native_path(p) for p in internals], starts, ends
-        )
+        native = [self._native_path(p) for p in internals]
+        errors = {}
+        if any(
+            (s is not None and s < 0) or (e is not None and e < 0)
+            for s, e in zip(starts, ends)
+        ):
+            # Slice semantics: resolve negative bounds with one size fetch.
+            stats, stat_errors = self._client.stat_many(native)
+            errors.update(stat_errors)
+            sizes = [s["size"] if s is not None else 0 for s in stats]
+            starts = [
+                max(0, s + sizes[i]) if (s is not None and s < 0) else s
+                for i, s in enumerate(starts)
+            ]
+            ends = [
+                sizes[i] + e if (e is not None and e < 0) else e
+                for i, e in enumerate(ends)
+            ]
+        data, read_errors = self._client.read_many(native, starts, ends)
+        errors.update(read_errors)
         out = []
         for i, p in enumerate(internals):
             if i in errors:
@@ -508,11 +627,15 @@ class Nfs4FileSystem(AbstractFileSystem):
     # -- open / file objects ----------------------------------------------
 
     def _open(self, path, mode="rb", block_size=None, autocommit=True, cache_options=None, **kwargs):
+        internal = self._strip_protocol(path)
+        if not autocommit and any(c in mode for c in "wax"):
+            # fsspec transactions: defer the write until commit()/discard().
+            return _DeferredWriteFile(self, internal, mode)
         if self.auto_mkdir and any(c in mode for c in "wax"):
             parent = self._parent(path)
             if parent not in ("", "/"):
                 self._client.ensure_dir(self._native_path(parent), 0o755)
-        return Nfs4File(self, self._strip_protocol(path), mode)
+        return Nfs4File(self, internal, mode)
 
     def open_many(self, open_files):
         """Open a list of ``OpenFile`` objects in one openv batch."""
@@ -598,7 +721,15 @@ class Nfs4FileSystem(AbstractFileSystem):
                 for a, b in zip(path1, path2)
             ]
         else:
-            pairs = [(self._strip_protocol(path1), self._strip_protocol(path2))]
+            src = self._strip_protocol(path1)
+            dst = self._strip_protocol(path2)
+            if src == dst:
+                return
+            if self.isdir(dst):
+                # Like shutil.move / base copy+rm: moving onto an existing
+                # directory moves the source inside it.
+                dst = posixpath.join(dst, posixpath.basename(src))
+            pairs = [(src, dst)]
         self._client.rename_many(
             [(self._native_path(a), self._native_path(b)) for a, b in pairs]
         )
