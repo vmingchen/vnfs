@@ -117,9 +117,7 @@ def test_cat_file_and_ranges_negative_bounds(fs):
     assert fs.cat_file("nfs4:///f.txt", start=-3) == b"789"
     assert fs.cat_file("nfs4:///f.txt", end=-1) == b"012345678"
     assert fs.cat_file("nfs4:///f.txt", start=-4, end=-1) == b"678"
-    ranges = fs.cat_ranges(
-        ["nfs4:///f.txt", "nfs4:///f.txt"], [-3, 0], [-1, 4]
-    )
+    ranges = fs.cat_ranges(["nfs4:///f.txt", "nfs4:///f.txt"], [-3, 0], [-1, 4])
     assert ranges == [b"78", b"0123"]
 
 
@@ -189,8 +187,6 @@ def test_large_file_bulk_operations(fs):
     assert fs.cat_file("nfs4:///wb.bin") == big
     with fs.open("nfs4:///big.bin", "rb") as fh:
         assert fh.read() == big
-    ranges = fs.cat_ranges(
-        ["nfs4:///big.bin"], [1024 * 1024 - 10], [1024 * 1024 + 10]
-    )
+    ranges = fs.cat_ranges(["nfs4:///big.bin"], [1024 * 1024 - 10], [1024 * 1024 + 10])
     assert ranges[0] == big[1024 * 1024 - 10 : 1024 * 1024 + 10]
     assert fs.du("nfs4:///big.bin") == len(big)

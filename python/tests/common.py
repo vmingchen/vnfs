@@ -9,8 +9,20 @@ def run_correctness_suite(fs):
 
     # -- info / ls ---------------------------------------------------------
     info = fs.info("nfs4:///")
-    for key in ("name", "type", "size", "mode", "uid", "gid", "nlink", "fileid",
-                "created", "modified", "checksum", "islink"):
+    for key in (
+        "name",
+        "type",
+        "size",
+        "mode",
+        "uid",
+        "gid",
+        "nlink",
+        "fileid",
+        "created",
+        "modified",
+        "checksum",
+        "islink",
+    ):
         assert key in info, f"info missing {key}"
     assert info["type"] == "directory"
     assert info["name"].startswith("nfs4://")
@@ -43,9 +55,7 @@ def run_correctness_suite(fs):
     out = fs.cat(["nfs4:///dir/a.txt", "nfs4:///dir/b.txt"])
     assert set(out.values()) == {b"alpha", b"beta"}
 
-    ranges = fs.cat_ranges(
-        ["nfs4:///dir/a.txt", "nfs4:///dir/b.txt"], [0, 1], [3, 5]
-    )
+    ranges = fs.cat_ranges(["nfs4:///dir/a.txt", "nfs4:///dir/b.txt"], [0, 1], [3, 5])
     assert ranges == [b"alp", b"eta"]
 
     # on_error semantics: missing paths yield exceptions per key.
@@ -54,9 +64,7 @@ def run_correctness_suite(fs):
     )
     assert returned["/dir/a.txt"] == b"alpha"
     assert isinstance(returned["/dir/missing.txt"], FileNotFoundError)
-    omitted = fs.cat(
-        ["nfs4:///dir/a.txt", "nfs4:///dir/missing.txt"], on_error="omit"
-    )
+    omitted = fs.cat(["nfs4:///dir/a.txt", "nfs4:///dir/missing.txt"], on_error="omit")
     assert set(omitted) == {"/dir/a.txt"}
     try:
         fs.cat(["nfs4:///dir/a.txt", "nfs4:///dir/missing.txt"])
@@ -163,7 +171,10 @@ def run_correctness_suite(fs):
     fs.mv("nfs4:///mv-dst.txt", "nfs4:///mv-dst2.txt")
     fs.pipe({"nfs4:///l1.txt": b"1", "nfs4:///l2.txt": b"2"})
     fs.mv(["nfs4:///l1.txt", "nfs4:///l2.txt"], ["nfs4:///m1.txt", "nfs4:///m2.txt"])
-    assert fs.cat(["nfs4:///m1.txt", "nfs4:///m2.txt"]) == {"/m1.txt": b"1", "/m2.txt": b"2"}
+    assert fs.cat(["nfs4:///m1.txt", "nfs4:///m2.txt"]) == {
+        "/m1.txt": b"1",
+        "/m2.txt": b"2",
+    }
 
     fs.cp("nfs4:///m1.txt", "nfs4:///c1.txt")
     assert fs.cat_file("nfs4:///c1.txt") == b"1"
@@ -204,7 +215,9 @@ def run_correctness_suite(fs):
     assert fs.readlink("nfs4:///rel-link") == "target.txt"
     assert fs.ls("nfs4:///", detail=True)[0]["islink"] in (True, False)
     fs.hardlink("nfs4:///target.txt", "nfs4:///hard.txt")
-    assert fs.info("nfs4:///target.txt")["fileid"] == fs.info("nfs4:///hard.txt")["fileid"]
+    assert (
+        fs.info("nfs4:///target.txt")["fileid"] == fs.info("nfs4:///hard.txt")["fileid"]
+    )
     # A dangling symlink still exists (lstat semantics).
     fs.symlink("no-such-target", "nfs4:///dangling")
     assert fs.exists("nfs4:///dangling")

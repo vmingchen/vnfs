@@ -1,18 +1,29 @@
 #!/bin/sh
-# Runs cargo fmt and clippy before each commit.
+# Runs black (Python) and cargo fmt/clippy (Rust) before each commit.
 #
 # Install with:  git config core.hooksPath .githooks
 # Bypass once with: git commit --no-verify
 
 set -e
 
-# Only run when Rust files are staged.
-if ! git diff --cached --name-only | grep -qE '\.rs$'; then
-    exit 0
+staged=$(git diff --cached --name-only)
+
+# Format Python with black whenever a .py/.pyi file is staged.
+if echo "$staged" | grep -qE '\.(py|pyi)$'; then
+    if [ -x .venv/bin/black ]; then
+        black=".venv/bin/black"
+    else
+        black="black"
+    fi
+    echo "Running black --check..."
+    "$black" --check python/python/vnfs_fs python/tests
 fi
 
-echo "Running cargo fmt --check..."
-cargo fmt --all -- --check
+# Only run the Rust checks when Rust files are staged.
+if echo "$staged" | grep -qE '\.rs$'; then
+    echo "Running cargo fmt --check..."
+    cargo fmt --all -- --check
 
-echo "Running cargo clippy..."
-cargo clippy --all-targets -- -D warnings
+    echo "Running cargo clippy..."
+    cargo clippy --all-targets -- -D warnings
+fi

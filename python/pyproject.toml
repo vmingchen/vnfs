@@ -13,6 +13,11 @@ dependencies = ["fsspec"]
 
 [project.optional-dependencies]
 test = ["pytest"]
+dev = ["black", "pytest"]
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
 
 [tool.maturin]
 module-name = "vnfs_fs._native"

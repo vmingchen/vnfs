@@ -436,8 +436,7 @@ class Nfs4FileSystem(AbstractFileSystem):
             info = self.info(internal, **kwargs)
             return [info] if detail else [info["name"]]
         infos = [
-            _info_dict(self._fullpath(self._internalize(e["name"])), e)
-            for e in entries
+            _info_dict(self._fullpath(self._internalize(e["name"])), e) for e in entries
         ]
         infos.sort(key=lambda d: d["name"])
         if detail:
@@ -573,7 +572,9 @@ class Nfs4FileSystem(AbstractFileSystem):
             raise _oserror(errors[0], internal)
         return data[0]
 
-    def cat_ranges(self, paths, starts, ends, max_gap=None, on_error="return", **kwargs):
+    def cat_ranges(
+        self, paths, starts, ends, max_gap=None, on_error="return", **kwargs
+    ):
         if max_gap is not None:
             raise NotImplementedError("max_gap is not supported")
         if not isinstance(paths, list):
@@ -705,9 +706,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         local = LocalFileSystem(auto_mkdir=True)
         # Classify directories with one stat_many batch (the per-path isdir
         # checks in the base implementation cost one compound each).
-        native_all = [
-            self._native_path(self._strip_protocol(r)) for r in rpaths
-        ]
+        native_all = [self._native_path(self._strip_protocol(r)) for r in rpaths]
         stats, _stat_errors = self._client.stat_many(native_all)
         pairs = []
         for i, (r, l) in enumerate(zip(rpaths, lpaths)):
@@ -807,7 +806,15 @@ class Nfs4FileSystem(AbstractFileSystem):
 
     # -- open / file objects ----------------------------------------------
 
-    def _open(self, path, mode="rb", block_size=None, autocommit=True, cache_options=None, **kwargs):
+    def _open(
+        self,
+        path,
+        mode="rb",
+        block_size=None,
+        autocommit=True,
+        cache_options=None,
+        **kwargs,
+    ):
         internal = self._strip_protocol(path)
         if not autocommit and any(c in mode for c in "wax"):
             # fsspec transactions: defer the write until commit()/discard().
@@ -929,7 +936,9 @@ class Nfs4FileSystem(AbstractFileSystem):
             self._client.ensure_dir(self._native_path(parent), 0o755)
         self._copy_pairs([(src, dst)], "raise")
 
-    def copy(self, path1, path2, recursive=False, maxdepth=None, on_error=None, **kwargs):
+    def copy(
+        self, path1, path2, recursive=False, maxdepth=None, on_error=None, **kwargs
+    ):
         if on_error is None:
             on_error = "ignore" if recursive else "raise"
         if isinstance(path1, list) and isinstance(path2, list):
@@ -974,9 +983,7 @@ class Nfs4FileSystem(AbstractFileSystem):
     def _copy_pairs(self, pairs, on_error):
         if not pairs:
             return
-        native_pairs = [
-            (self._native_path(a), self._native_path(b)) for a, b in pairs
-        ]
+        native_pairs = [(self._native_path(a), self._native_path(b)) for a, b in pairs]
         copied, errors = self._client.copy_many(native_pairs)
         if errors and all(err == 2 for err in errors.values()):
             if self.auto_mkdir:
@@ -1029,7 +1036,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         except (FileNotFoundError, OSError) as e:
             if self.isfile(internal):
                 info = self.info(internal)
-                files = {"" : info} if detail else [""]
+                files = {"": info} if detail else [""]
                 yield internal, [], files
                 return
             if on_error == "raise":
@@ -1049,9 +1056,7 @@ class Nfs4FileSystem(AbstractFileSystem):
             by_dir[self._internalize(dir_path)] = (dirs, files)
         root_depth = _depth(internal)
         order = [
-            d
-            for d in by_dir
-            if maxdepth is None or _depth(d) <= root_depth + maxdepth
+            d for d in by_dir if maxdepth is None or _depth(d) <= root_depth + maxdepth
         ]
         if not topdown:
             order = list(reversed(order))
@@ -1093,7 +1098,9 @@ class Nfs4FileSystem(AbstractFileSystem):
         if withdirs and self.isdir(internal):
             info = self.info(internal)
             sizes[info["name"]] = info.get("size") or 0
-        for _, dirs, files in self.walk(internal, maxdepth=maxdepth, detail=True, **kwargs):
+        for _, dirs, files in self.walk(
+            internal, maxdepth=maxdepth, detail=True, **kwargs
+        ):
             for info in files.values():
                 sizes[info["name"]] = info.get("size") or 0
             if withdirs:

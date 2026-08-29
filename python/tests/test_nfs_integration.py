@@ -45,9 +45,7 @@ def test_round_trip_bounds(nfs_fs):
     assert cat_count == 1, cat_count
 
     # cat_ranges: one merged read compound (no stat).
-    _, ranges_count = _measured(
-        fs, lambda: fs.cat_ranges(paths, [0] * n, [6] * n)
-    )
+    _, ranges_count = _measured(fs, lambda: fs.cat_ranges(paths, [0] * n, [6] * n))
     assert ranges_count == 1, ranges_count
 
     # OpenFiles: one merged openv compound on enter, one closev on exit.
@@ -79,9 +77,7 @@ def test_round_trip_bounds(nfs_fs):
     # cp: merged stat + read + write + truncate compounds (bounded).
     _, cp_count = _measured(
         fs,
-        lambda: fs.cp(
-            dsts, [_unique(nfs_fs, f"cp/{i}.txt") for i in range(n)]
-        ),
+        lambda: fs.cp(dsts, [_unique(nfs_fs, f"cp/{i}.txt") for i in range(n)]),
     )
     assert cp_count <= 4, cp_count
 
@@ -100,9 +96,7 @@ def test_round_trips_do_not_scale_with_file_count(nfs_fs):
 
     def counts(n):
         paths = [_unique(nfs_fs, f"scale/{i}.txt") for i in range(n)]
-        _, pipe_c = _measured(
-            fs, lambda: fs.pipe({p: b"x" for p in paths})
-        )
+        _, pipe_c = _measured(fs, lambda: fs.pipe({p: b"x" for p in paths}))
         _, cat_c = _measured(fs, lambda: fs.cat(paths))
         _, rm_c = _measured(fs, lambda: fs.rm(paths))
         return pipe_c, cat_c, rm_c
