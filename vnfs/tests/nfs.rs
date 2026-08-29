@@ -750,13 +750,13 @@ fn dupv_copies_extent() {
     let mut c = client();
     write_file(&mut c, &src, b"abcdefghij");
 
-    let pairs = [ExtentPair::new(&src, 4, &dst, 0, 4)];
+    let pairs = [ExtentPair::new(&src, 4, &dst, 0, Some(4))];
     c.dupv(&pairs).expect("dupv");
     assert_eq!(read_all(&mut c, &dst), b"efgh");
 
-    // VF_EXTENT length u64::MAX copies to end-of-file.
+    // ExtentPair length None copies to end-of-file.
     let whole = format!("{}/whole.bin", dir);
-    c.copyv(&[ExtentPair::new(&src, 2, &whole, 0, u64::MAX)])
+    c.copyv(&[ExtentPair::new(&src, 2, &whole, 0, None)])
         .expect("copyv whole file");
     assert_eq!(read_all(&mut c, &whole), b"cdefghij");
 }
@@ -769,8 +769,10 @@ fn ldupv_and_lcopyv() {
     let d2 = format!("{}/d2.txt", dir);
     let mut c = client();
     write_file(&mut c, &src, b"0123456789");
-    c.ldupv(&[ExtentPair::new(&src, 0, &d1, 0, 5)]).unwrap();
-    c.lcopyv(&[ExtentPair::new(&src, 5, &d2, 0, 5)]).unwrap();
+    c.ldupv(&[ExtentPair::new(&src, 0, &d1, 0, Some(5))])
+        .unwrap();
+    c.lcopyv(&[ExtentPair::new(&src, 5, &d2, 0, Some(5))])
+        .unwrap();
     assert_eq!(read_all(&mut c, &d1), b"01234");
     assert_eq!(read_all(&mut c, &d2), b"56789");
 }
@@ -792,10 +794,9 @@ fn write_adb_blocknums_and_pattern() {
         adb_offset: 0,
         adb_block_size: 1024,
         adb_block_count: 3,
-        adb_reloff_blocknum: 0,
+        adb_reloff_blocknum: Some(0),
         adb_block_num: 100,
-        adb_reloff_pattern: 8,
-        adb_pattern_size: 3,
+        adb_reloff_pattern: Some(8),
         adb_pattern_data: b"PAT".to_vec(),
     };
     let counts = c.write_adb(&[a]).expect("write_adb");

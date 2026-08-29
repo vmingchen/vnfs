@@ -380,9 +380,9 @@ impl NfsVecFs {
                 continue;
             }
             match f {
-                VfFile::Current(None) => return Err(VfError::failure(i, ERR_ISDIR)),
-                VfFile::Null | VfFile::Saved => return Err(VfError::failure(i, ERR_NOENT)),
-                VfFile::Path { .. } | VfFile::Current(Some(_)) => {}
+                VfFile::Cwd => return Err(VfError::failure(i, ERR_ISDIR)),
+                VfFile::Saved => return Err(VfError::failure(i, ERR_NOENT)),
+                VfFile::Path { .. } | VfFile::CwdPath(_) => {}
                 VfFile::Descriptor(_) => unreachable!(),
             }
             let full = self.vf_path(f).map_err(|e| e.with_index(i))?;
@@ -665,7 +665,7 @@ impl NfsVecFs {
                 .get(fd)
                 .map(|o| o.fh.clone())
                 .ok_or_else(|| VfError::failure(0, ERR_EBADF)),
-            VfFile::Path { .. } | VfFile::Current(_) => {
+            VfFile::Path { .. } | VfFile::Cwd | VfFile::CwdPath(_) => {
                 let path = self.vf_path(f)?;
                 if follow {
                     self.resolve_follow(&path)
@@ -673,7 +673,7 @@ impl NfsVecFs {
                     self.resolve_path(&path, false)
                 }
             }
-            VfFile::Null | VfFile::Saved => Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL)),
+            VfFile::Saved => Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL)),
         }
     }
 
@@ -884,14 +884,12 @@ impl NfsVecFs {
         let mut doff = p.dst_offset;
         let mut copied: u64 = 0;
         let result = loop {
-            if p.length != u64::MAX && copied >= p.length {
+            if let Some(length) = p.length
+                && copied >= length
+            {
                 break Ok(());
             }
-            let remaining = if p.length == u64::MAX {
-                u64::MAX
-            } else {
-                p.length - copied
-            };
+            let remaining = p.length.map_or(u64::MAX, |l| l - copied);
             let chunk_len = remaining.min(1 << 20) as u32;
             let chunk = match self.nfs.read(&sfh, &ssid, so, chunk_len) {
                 Ok((c, _)) => c,
@@ -1480,21 +1478,18 @@ impl VecFs for NfsVecFs {
             let mut failed: Option<VfError> = None;
             for b in 0..p.adb_block_count {
                 let base = p.adb_offset.saturating_add(b as u64 * p.adb_block_size);
-                if p.adb_reloff_blocknum != u64::MAX {
+                if let Some(reloff) = p.adb_reloff_blocknum {
                     let adbn = (p.adb_block_num + b as u64).to_be_bytes();
-                    if let Err(e) = self
-                        .nfs
-                        .write(&fh, &sid, base + p.adb_reloff_blocknum, &adbn)
-                    {
+                    if let Err(e) = self.nfs.write(&fh, &sid, base + reloff, &adbn) {
                         failed = Some(VfError::from_rpc(e, i));
                         break;
                     }
                 }
-                if p.adb_reloff_pattern != u64::MAX
+                if let Some(reloff) = p.adb_reloff_pattern
                     && !p.adb_pattern_data.is_empty()
-                    && let Err(e) =
-                        self.nfs
-                            .write(&fh, &sid, base + p.adb_reloff_pattern, &p.adb_pattern_data)
+                    && let Err(e) = self
+                        .nfs
+                        .write(&fh, &sid, base + reloff, &p.adb_pattern_data)
                 {
                     failed = Some(VfError::from_rpc(e, i));
                     break;
@@ -1545,7 +1540,7 @@ impl VecFs for NfsVecFs {
                 self.symlink(&String::from_utf8_lossy(&target), &dst_child)
                     .map_err(|e| e.with_index(0))?;
             } else {
-                let pair = ExtentPair::new(&src_child, 0, &dst_child, 0, u64::MAX);
+                let pair = ExtentPair::new(&src_child, 0, &dst_child, 0, None);
                 let src = self
                     .follow_target_path(&self.abs_path(&src_child))
                     .map_err(|e| e.with_index(0))?;

@@ -64,8 +64,12 @@ pub enum VfError {
     Op { index: usize, err_no: u32 },
     /// A transport / client-side failure with a human-readable message; there
     /// is no filesystem status ([`err_no`](VfError::err_no) reports
-    /// [`VF_ERR_RPC`]).
-    Transport { index: usize, message: String },
+    /// [`VF_ERR_RPC`]). `index` is `None` when the failure cannot be
+    /// attributed to any operation.
+    Transport {
+        index: Option<usize>,
+        message: String,
+    },
 }
 
 impl VfError {
@@ -73,11 +77,11 @@ impl VfError {
         VfError::Op { index, err_no }
     }
 
-    /// A transport / client-side failure. `index` is best-effort (0 when the
-    /// failure cannot be attributed to a specific operation).
-    pub fn transport(index: usize, message: impl Into<String>) -> VfError {
+    /// A transport / client-side failure. `index` is best-effort; pass `None`
+    /// when the failure cannot be attributed to a specific operation.
+    pub fn transport(index: impl Into<Option<usize>>, message: impl Into<String>) -> VfError {
         VfError::Transport {
-            index,
+            index: index.into(),
             message: message.into(),
         }
     }
@@ -87,10 +91,20 @@ impl VfError {
     }
 
     /// The operation index this error refers to (best-effort for transport
-    /// failures).
+    /// failures; 0 when unknown).
     pub fn index(&self) -> usize {
         match self {
-            VfError::Op { index, .. } | VfError::Transport { index, .. } => *index,
+            VfError::Op { index, .. } => *index,
+            VfError::Transport { index, .. } => index.unwrap_or(0),
+        }
+    }
+
+    /// The operation index as an `Option`; `None` only for a transport
+    /// failure that cannot be attributed to any operation.
+    pub fn index_opt(&self) -> Option<usize> {
+        match self {
+            VfError::Op { index, .. } => Some(*index),
+            VfError::Transport { index, .. } => *index,
         }
     }
 
@@ -113,15 +127,15 @@ impl VfError {
     /// caller's operation index, which may differ from the compound-internal
     /// op index; for transport failures the index is best-effort. The
     /// transport message (if any) is preserved.
-    pub fn from_rpc(e: RpcError, index: usize) -> VfError {
+    pub fn from_rpc(e: RpcError, index: impl Into<Option<usize>>) -> VfError {
         if e.is_transport() {
             VfError::Transport {
-                index,
+                index: index.into(),
                 message: e.message,
             }
         } else {
             VfError::Op {
-                index,
+                index: index.into().unwrap_or(0),
                 err_no: e.status,
             }
         }
@@ -132,24 +146,18 @@ impl VfError {
     /// compound positions to caller indices before returning, so batched
     /// backend calls can use this directly.
     pub fn from_rpc_indexed(e: RpcError) -> VfError {
-        if e.is_transport() {
-            VfError::Transport {
-                index: e.op_index,
-                message: e.message,
-            }
-        } else {
-            VfError::Op {
-                index: e.op_index,
-                err_no: e.status,
-            }
-        }
+        let idx = e.op_index;
+        VfError::from_rpc(e, Some(idx))
     }
 
     /// Re-attribute this error to a different operation index.
     pub fn with_index(self, index: usize) -> VfError {
         match self {
             VfError::Op { err_no, .. } => VfError::Op { index, err_no },
-            VfError::Transport { message, .. } => VfError::Transport { index, message },
+            VfError::Transport { message, .. } => VfError::Transport {
+                index: Some(index),
+                message,
+            },
         }
     }
 }
@@ -158,8 +166,15 @@ impl std::fmt::Display for VfError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             VfError::Op { index, err_no } => write!(f, "op {} failed: {}", index, err_no),
-            VfError::Transport { index, message } => {
-                write!(f, "op {} transport error: {}", index, message)
+            VfError::Transport {
+                index: Some(index),
+                message,
+            } => write!(f, "op {} transport error: {}", index, message),
+            VfError::Transport {
+                index: None,
+                message,
+            } => {
+                write!(f, "transport error: {}", message)
             }
         }
     }
@@ -171,6 +186,10 @@ pub type VfResult<T> = Result<T, VfError>;
 /// Result of a compound-style operation: `()` on success, or the index and
 /// error of the first failing operation.
 pub type VfRes = VfResult<()>;
+
+/// An open file descriptor (backend-assigned), the Rust spelling of the C
+/// `int` fd.
+pub type Fd = std::os::fd::RawFd;
 
 // ---------------------------------------------------------------------------
 // Path helpers (backend-agnostic)
@@ -246,20 +265,19 @@ pub enum SeekFrom {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VfFile {
-    /// No file.
+    /// The client's current working directory (a stat target, but not a file
+    /// for read/write). Also the `Default` placeholder.
     #[default]
-    Null,
+    Cwd,
     /// An open file descriptor (backend-assigned).
-    Descriptor(i32),
+    Descriptor(Fd),
     /// A path; the [`VfPathBase`] records whether it is absolute or relative
     /// to the client's cwd. Note that the raw path (see
     /// [`path`](VfFile::path)) does not itself record the base; use
     /// [`VecFs::vf_path`] to resolve a `VfFile` honoring its base.
     Path { base: VfPathBase, path: PathBuf },
-    /// The client's current working directory, optionally with a relative
-    /// path below it. `Current(None)` is the cwd itself (usable as a stat
-    /// target, but not as a file for read/write).
-    Current(Option<PathBuf>),
+    /// A path relative to the client's current working directory.
+    CwdPath(PathBuf),
     /// The saved (previous) directory, mirroring the C sentinel. No current
     /// backend produces or consumes this; operations on it fail.
     Saved,
@@ -278,14 +296,18 @@ impl VfFile {
         }
     }
 
-    pub fn from_fd(fd: i32) -> VfFile {
+    pub fn from_fd(fd: Fd) -> VfFile {
         VfFile::Descriptor(fd)
     }
 
-    /// VF_FILE_CURRENT, with an optional path relative to the client's
-    /// current working directory.
-    pub fn current(relpath: Option<&str>) -> VfFile {
-        VfFile::Current(relpath.map(PathBuf::from))
+    /// VF_FILE_CURRENT: the client's current working directory itself.
+    pub fn cwd() -> VfFile {
+        VfFile::Cwd
+    }
+
+    /// A path relative to the client's current working directory.
+    pub fn cwd_path(path: impl Into<PathBuf>) -> VfFile {
+        VfFile::CwdPath(path.into())
     }
 
     pub fn saved() -> VfFile {
@@ -298,20 +320,20 @@ impl VfFile {
     }
 
     /// The open descriptor, if this is a `Descriptor`.
-    pub fn fd(&self) -> Option<i32> {
+    pub fn fd(&self) -> Option<Fd> {
         match self {
             VfFile::Descriptor(fd) => Some(*fd),
             _ => None,
         }
     }
 
-    /// The raw path, for `Path` and `Current(Some(..))`. This does not
-    /// resolve `VfPathBase` or the client cwd; use [`VecFs::vf_path`] for the
+    /// The raw path, for `Path` and `CwdPath`. This does not resolve
+    /// `VfPathBase` or the client cwd; use [`VecFs::vf_path`] for the
     /// resolved root-relative form.
     pub fn path(&self) -> Option<&Path> {
         match self {
             VfFile::Path { path, .. } => Some(path),
-            VfFile::Current(Some(p)) => Some(p),
+            VfFile::CwdPath(p) => Some(p),
             _ => None,
         }
     }
@@ -412,7 +434,7 @@ impl ReadOp {
 
     /// A read from an open descriptor, typically at [`VfOffset::Cur`]
     /// (sequential) reads.
-    pub fn from_fd(fd: i32, offset: VfOffset, length: usize) -> ReadOp {
+    pub fn from_fd(fd: Fd, offset: VfOffset, length: usize) -> ReadOp {
         ReadOp::new(VfFile::from_fd(fd), offset, length)
     }
 }
@@ -464,7 +486,7 @@ impl WriteOp {
         WriteOp::new(VfFile::from_path(path), offset, data)
     }
 
-    pub fn from_fd(fd: i32, offset: VfOffset, data: Vec<u8>) -> WriteOp {
+    pub fn from_fd(fd: Fd, offset: VfOffset, data: Vec<u8>) -> WriteOp {
         WriteOp::new(VfFile::from_fd(fd), offset, data)
     }
 
@@ -494,8 +516,8 @@ pub struct ExtentPair {
     pub dst_path: String,
     pub src_offset: u64,
     pub dst_offset: u64,
-    /// Bytes to copy; `u64::MAX` means "from src_offset to end of file".
-    pub length: u64,
+    /// Bytes to copy; `None` means "from src_offset to end of file".
+    pub length: Option<u64>,
 }
 
 impl ExtentPair {
@@ -505,7 +527,7 @@ impl ExtentPair {
         src_offset: u64,
         dst_path: &str,
         dst_offset: u64,
-        length: u64,
+        length: Option<u64>,
     ) -> ExtentPair {
         ExtentPair {
             src_path: src_path.to_string(),
@@ -525,13 +547,13 @@ pub struct Adb {
     pub adb_block_size: u64,
     /// Blocks to write.
     pub adb_block_count: usize,
-    /// Relative offset within a block to write the ADBN; `u64::MAX` = none.
-    pub adb_reloff_blocknum: u64,
+    /// Relative offset within a block to write the ADBN; `None` = no ADBN.
+    pub adb_reloff_blocknum: Option<u64>,
     /// ADBN of the first ADB.
     pub adb_block_num: u64,
-    /// Relative offset within a block to write the pattern; `u64::MAX` = none.
-    pub adb_reloff_pattern: u64,
-    pub adb_pattern_size: usize,
+    /// Relative offset within a block to write the pattern; `None` = no
+    /// pattern. The pattern bytes are `adb_pattern_data`.
+    pub adb_reloff_pattern: Option<u64>,
     pub adb_pattern_data: Vec<u8>,
 }
 
@@ -550,10 +572,9 @@ impl Adb {
             adb_offset: offset,
             adb_block_size: block_size,
             adb_block_count: block_count,
-            adb_reloff_blocknum: reloff_blocknum,
+            adb_reloff_blocknum: Some(reloff_blocknum),
             adb_block_num: first_adbn,
-            adb_reloff_pattern: u64::MAX,
-            adb_pattern_size: 0,
+            adb_reloff_pattern: None,
             adb_pattern_data: Vec::new(),
         }
     }
@@ -734,31 +755,24 @@ pub trait VecFs {
         masks: AttrMask,
         sort: &mut dyn FnMut(&str, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<WalkEntry>> {
-        fn rec<F: VecFs + ?Sized>(
-            fs: &mut F,
-            dir: &str,
-            masks: AttrMask,
-            sort: &mut dyn FnMut(&str, &mut Vec<VfAttrs>),
-            out: &mut Vec<WalkEntry>,
-        ) -> VfResult<()> {
-            let mut entries = fs.listdir(dir, masks, 0, false)?;
-            sort(dir, &mut entries);
+        // Explicit stack (pre-order, subdirectories visited in the order the
+        // sort callback produced) so deep trees cannot overflow the call
+        // stack.
+        let mut out = Vec::new();
+        let mut stack = vec![root.to_string()];
+        while let Some(dir) = stack.pop() {
+            let mut entries = self.listdir(&dir, masks, 0, false)?;
+            sort(&dir, &mut entries);
             let subdirs: Vec<String> = entries
                 .iter()
                 .filter(|e| e.ftype == VfType::Directory)
                 .filter_map(|e| e.file.path().map(|p| p.to_string_lossy().into_owned()))
                 .collect();
-            out.push(WalkEntry {
-                path: dir.to_string(),
-                entries,
-            });
-            for s in subdirs {
-                rec(fs, &s, masks, sort, out)?;
+            for s in subdirs.iter().rev() {
+                stack.push(s.clone());
             }
-            Ok(())
+            out.push(WalkEntry { path: dir, entries });
         }
-        let mut out = Vec::new();
-        rec(self, root, masks, sort, &mut out)?;
         Ok(out)
     }
 
@@ -825,11 +839,9 @@ pub trait VecFs {
                 base: VfPathBase::Cwd,
                 path,
             }
-            | VfFile::Current(Some(path)) => Ok(self.abs_path(&path.to_string_lossy())),
-            VfFile::Current(None) => Ok(self.abs_path("")),
-            VfFile::Descriptor(_) | VfFile::Null | VfFile::Saved => {
-                Err(VfError::failure(0, ERR_INVAL))
-            }
+            | VfFile::CwdPath(path) => Ok(self.abs_path(&path.to_string_lossy())),
+            VfFile::Cwd => Ok(self.abs_path("")),
+            VfFile::Descriptor(_) | VfFile::Saved => Err(VfError::failure(0, ERR_INVAL)),
         }
     }
 
@@ -840,14 +852,14 @@ pub trait VecFs {
 
     /// Read from a single file at an absolute offset, `tc_read()`.
     fn read(&mut self, file: &VfFile, offset: u64, length: usize) -> VfResult<Vec<u8>> {
-        let mut r = self.readv(&[ReadOp::at(file.clone(), offset, length)])?;
-        Ok(r.remove(0).data)
+        let r = self.readv(&[ReadOp::at(file.clone(), offset, length)])?;
+        Ok(r.into_iter().next().expect("one result").data)
     }
 
     /// Write to a single file at an absolute offset, `tc_write()`.
     fn write(&mut self, file: &VfFile, offset: u64, data: &[u8]) -> VfResult<usize> {
-        let mut w = self.writev(&[WriteOp::at(file.clone(), offset, data.to_vec())])?;
-        Ok(w.remove(0).written)
+        let w = self.writev(&[WriteOp::at(file.clone(), offset, data.to_vec())])?;
+        Ok(w.into_iter().next().expect("one result").written)
     }
 
     /// Open several files at once, each with its own flags and mode,
@@ -985,8 +997,8 @@ pub trait VecFs {
 
     /// Read a symlink target, `tc_readlink()`.
     fn readlink(&mut self, path: &str) -> VfResult<Vec<u8>> {
-        let mut v = self.readlinkv(std::slice::from_ref(&path))?;
-        Ok(v.remove(0))
+        let v = self.readlinkv(std::slice::from_ref(&path))?;
+        Ok(v.into_iter().next().expect("one result"))
     }
 
     /// `tc_ldupv()`: same read/write extent copy as
@@ -1113,13 +1125,22 @@ mod tests {
         let e = VfError::from_rpc(RpcError::transport("connection refused"), 3);
         assert!(e.is_transport());
         assert_eq!(e.index(), 3);
+        assert_eq!(e.index_opt(), Some(3));
         assert_eq!(e.err_no(), VF_ERR_RPC);
         assert!(e.to_string().contains("connection refused"));
+
+        // An unattributable transport failure has no op index.
+        let e = VfError::from_rpc(RpcError::transport("server gone"), None);
+        assert!(e.is_transport());
+        assert_eq!(e.index_opt(), None);
+        assert_eq!(e.index(), 0);
+        assert!(!e.to_string().contains("op "));
 
         // Server status errors stay Op errors with the caller-supplied index.
         let e = VfError::from_rpc(RpcError::op(4, ERR_NOENT), 1);
         assert!(!e.is_transport());
         assert_eq!(e.index(), 1);
+        assert_eq!(e.index_opt(), Some(1));
         assert_eq!(e.err_no(), ERR_NOENT);
     }
 
@@ -1127,8 +1148,10 @@ mod tests {
     fn vf_error_indexed_and_remap() {
         let e = VfError::from_rpc_indexed(RpcError::op(4, ERR_EXIST));
         assert_eq!((e.index(), e.err_no()), (4, ERR_EXIST));
+        assert_eq!(e.index_opt(), Some(4));
         assert_eq!(e.with_index(9).index(), 9);
         assert_eq!(VfError::transport(2, "boom").with_index(5).index(), 5);
+        assert_eq!(VfError::transport(None, "boom").index_opt(), None);
     }
 
     // ------------------------------------------------------------------
@@ -1315,6 +1338,38 @@ mod tests {
         let fd = fs.open("/f", 0, 0).unwrap();
         assert_eq!(fs.vf_path(&fd).unwrap_err().err_no(), ERR_INVAL);
         fs.close(&fd).unwrap();
+    }
+
+    #[test]
+    fn vf_file_cwd_and_cwd_path_resolution() {
+        let (_root, mut fs) = fs("cwd-variants");
+        fs.mkdir("/sub", 0o755).unwrap();
+        write(&mut fs, "/sub/f", b"x");
+
+        // `cwd()` is the cwd itself; `cwd_path` is relative to it.
+        assert_eq!(fs.vf_path(&VfFile::cwd()).unwrap(), "");
+        assert_eq!(
+            VfFile::cwd_path("f").path(),
+            Some(std::path::Path::new("f"))
+        );
+        fs.chdir("/sub").unwrap();
+        assert_eq!(fs.vf_path(&VfFile::cwd()).unwrap(), "sub");
+        assert_eq!(fs.vf_path(&VfFile::cwd_path("f")).unwrap(), "sub/f");
+
+        // The cwd is a stat target but not a file for read/write.
+        let mut a = VfAttrs {
+            file: VfFile::cwd(),
+            masks: AttrMask::stat(),
+            ..VfAttrs::default()
+        };
+        fs.getattrsv(std::slice::from_mut(&mut a)).unwrap();
+        assert_eq!(a.ftype, VfType::Directory);
+        assert_eq!(
+            fs.readv(&[ReadOp::new(VfFile::cwd(), VfOffset::At(0), 1)])
+                .unwrap_err()
+                .err_no(),
+            ERR_ISDIR
+        );
     }
 
     // ------------------------------------------------------------------
@@ -1683,7 +1738,7 @@ mod tests {
         write(&mut fs, "/target", b"data");
         fs.symlink("target", "/link").unwrap();
 
-        let pair = ExtentPair::new("/link", 0, "/link-copy", 0, u64::MAX);
+        let pair = ExtentPair::new("/link", 0, "/link-copy", 0, None);
         fs.lcopyv(std::slice::from_ref(&pair)).unwrap();
         assert_eq!(fs.file_type("/link-copy").unwrap(), VfType::Symlink);
         assert_eq!(
@@ -1692,7 +1747,7 @@ mod tests {
         );
 
         // dupv copies the target's data instead.
-        let pair = ExtentPair::new("/link", 0, "/link-dup", 0, u64::MAX);
+        let pair = ExtentPair::new("/link", 0, "/link-dup", 0, None);
         fs.dupv(std::slice::from_ref(&pair)).unwrap();
         assert_eq!(fs.file_type("/link-dup").unwrap(), VfType::Regular);
         assert_eq!(

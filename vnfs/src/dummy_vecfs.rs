@@ -154,11 +154,11 @@ impl DummyVecFs {
                     .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
                 Ok(self.resolve(&open.path))
             }
-            VfFile::Path { .. } | VfFile::Current(_) => {
+            VfFile::Path { .. } | VfFile::Cwd | VfFile::CwdPath(_) => {
                 let path = self.vf_path(f)?;
                 Ok(self.root.join(path))
             }
-            VfFile::Null | VfFile::Saved => Err(VfError::unsupported(0)),
+            VfFile::Saved => Err(VfError::unsupported(0)),
         }
     }
 
@@ -300,7 +300,7 @@ impl DummyVecFs {
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 (f, off, true)
             }
-            VfFile::Path { .. } | VfFile::Current(_) => {
+            VfFile::Path { .. } | VfFile::Cwd | VfFile::CwdPath(_) => {
                 let p = self.real_path(&self.tcfile_path(&op.file)?)?;
                 let f = OpenOptions::new()
                     .read(true)
@@ -313,7 +313,7 @@ impl DummyVecFs {
                 let off = self.resolve_offset(&op.file, op.offset, len)?;
                 (f, off, false)
             }
-            VfFile::Null | VfFile::Saved => {
+            VfFile::Saved => {
                 return Err(VfError::unsupported(0));
             }
         };
@@ -358,7 +358,7 @@ impl DummyVecFs {
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 (f, off, true)
             }
-            VfFile::Path { .. } | VfFile::Current(_) => {
+            VfFile::Path { .. } | VfFile::Cwd | VfFile::CwdPath(_) => {
                 let p = self.real_path(&self.tcfile_path(&op.file)?)?;
                 let mut opts = OpenOptions::new();
                 opts.write(true);
@@ -375,7 +375,7 @@ impl DummyVecFs {
                 let off = self.resolve_offset(&op.file, op.offset, len)?;
                 (f, off, false)
             }
-            VfFile::Null | VfFile::Saved => {
+            VfFile::Saved => {
                 return Err(VfError::unsupported(0));
             }
         };
@@ -449,14 +449,12 @@ impl DummyVecFs {
         let mut doff = p.dst_offset;
         let mut copied: u64 = 0;
         loop {
-            if p.length != u64::MAX && copied >= p.length {
+            if let Some(length) = p.length
+                && copied >= length
+            {
                 break;
             }
-            let remaining = if p.length == u64::MAX {
-                u64::MAX
-            } else {
-                p.length - copied
-            };
+            let remaining = p.length.map_or(u64::MAX, |l| l - copied);
             let chunk_len = remaining.min(1 << 20) as usize;
             let mut buf = vec![0u8; chunk_len];
             let n = src
@@ -807,13 +805,15 @@ impl VecFs for DummyVecFs {
             let mut written = 0usize;
             for b in 0..p.adb_block_count {
                 let base = p.adb_offset.saturating_add(b as u64 * p.adb_block_size);
-                if p.adb_reloff_blocknum != u64::MAX {
+                if let Some(reloff) = p.adb_reloff_blocknum {
                     let adbn = (p.adb_block_num + b as u64).to_be_bytes();
-                    file.write_all_at(&adbn, base + p.adb_reloff_blocknum)
+                    file.write_all_at(&adbn, base + reloff)
                         .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
                 }
-                if p.adb_reloff_pattern != u64::MAX && !p.adb_pattern_data.is_empty() {
-                    file.write_all_at(&p.adb_pattern_data, base + p.adb_reloff_pattern)
+                if let Some(reloff) = p.adb_reloff_pattern
+                    && !p.adb_pattern_data.is_empty()
+                {
+                    file.write_all_at(&p.adb_pattern_data, base + reloff)
                         .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
                 }
                 written += 1;
@@ -858,7 +858,7 @@ impl VecFs for DummyVecFs {
                 self.symlink(&String::from_utf8_lossy(&target), &dst_child)
                     .map_err(|e| e.with_index(0))?;
             } else {
-                let pair = ExtentPair::new(&src_child, 0, &dst_child, 0, u64::MAX);
+                let pair = ExtentPair::new(&src_child, 0, &dst_child, 0, None);
                 self.dupv(std::slice::from_ref(&pair))
                     .map_err(|e| e.with_index(0))?;
             }

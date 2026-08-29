@@ -176,7 +176,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // dupv extent copy (whole file).
     let copy = format!("{}/copy.txt", dir);
-    fs.dupv(&[ExtentPair::new(&renamed, 0, &copy, 0, u64::MAX)])
+    fs.dupv(&[ExtentPair::new(&renamed, 0, &copy, 0, None)])
         .expect("dupv");
     assert_eq!(
         fs.stat(&copy).unwrap().size,
@@ -190,7 +190,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         .unwrap();
     fs.writev(&[WriteOp::at(VfFile::from_path(&long), 0, b"abcdef".to_vec()).with_creation()])
         .unwrap();
-    fs.dupv(&[ExtentPair::new(&short, 0, &long, 0, u64::MAX)])
+    fs.dupv(&[ExtentPair::new(&short, 0, &long, 0, None)])
         .unwrap();
     let st = fs.stat(&long).unwrap();
     assert_eq!(st.size, 2, "dupv truncates the destination");
@@ -286,8 +286,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // write_adb: two blocks with ADBN at block offset 0.
     let adbf = format!("{}/adb.bin", dir);
     let mut a = Adb::blocknum_only(&adbf, 0, 1024, 2, 0, 100);
-    a.adb_reloff_pattern = 8;
-    a.adb_pattern_size = 3;
+    a.adb_reloff_pattern = Some(8);
     a.adb_pattern_data = b"PAT".to_vec();
     fs.write_adb(std::slice::from_mut(&mut a))
         .expect("write_adb");
@@ -391,7 +390,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         .to_string_lossy()
         .into_owned();
     fs.symlink(&rel_name, &dup_link).unwrap();
-    fs.dupv(&[ExtentPair::new(&dup_link, 0, &dup_copy, 0, u64::MAX)])
+    fs.dupv(&[ExtentPair::new(&dup_link, 0, &dup_copy, 0, None)])
         .unwrap();
     let st = fs.stat(&dup_copy).unwrap();
     assert_eq!(st.ftype, VfType::Regular, "dupv copies target data");
@@ -443,7 +442,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // Writing through `Current(None)` (the cwd itself) is not a file op.
     assert_eq!(
-        fs.writev(&[WriteOp::at(VfFile::current(None), 0, b"x".to_vec()).with_creation()])
+        fs.writev(&[WriteOp::at(VfFile::cwd(), 0, b"x".to_vec()).with_creation()])
             .unwrap_err()
             .err_no(),
         ERR_ISDIR,
