@@ -1,5 +1,9 @@
 //! High-level NFSv4.1 operations on top of the session.
 
+// bindgen emits lowercase constants (e.g. nfs_opnum4_NFS4_OP_WRITE) matched
+// here in patterns; silence the style lint for those.
+#![allow(non_upper_case_globals)]
+
 use std::os::raw::c_char;
 
 use nfsv41_sys::*;
@@ -7,6 +11,7 @@ use nfsv41_sys::*;
 use crate::compound::{Compound, CompoundRes};
 use crate::error::RpcResult;
 use crate::session::Session;
+use crate::vecfs::split_path;
 
 /// An NFS file handle owned by the client.
 #[derive(Clone, Debug)]
@@ -63,7 +68,19 @@ pub enum OpenCreate {
     Exclusive,
     /// Create with GUARDED4 semantics: create if absent, succeed if present.
     Guarded,
+    /// Create with UNCHECKED4 semantics: create if absent, open if present.
+    /// Lets a compound skip the existence probe entirely.
+    Unchecked,
 }
+
+/// The NFSv4.1 special stateid (seqid 1, zero "other") that Ganesha resolves
+/// to "the current stateid of the current filehandle" for READ/WRITE/CLOSE,
+/// mirroring the txn-compound client's `CURSID`. This is what lets OPEN +
+/// WRITE + CLOSE all live in one compound.
+const SPECIAL_STATEID: stateid4 = stateid4 {
+    seqid: 1,
+    other: [0; 12],
+};
 
 /// An entry returned by READDIR.
 #[derive(Clone, Debug)]
@@ -176,6 +193,239 @@ pub const READDIR_ATTRS: [u32; 13] = [
     FATTR4_TIME_METADATA,
     FATTR4_TIME_MODIFY,
 ];
+
+// ---------------------------------------------------------------------------
+// Merged (single-compound) path I/O
+// ---------------------------------------------------------------------------
+
+/// One path-based WRITE for a merged compound. The path is root-relative
+/// (no leading slash); the offset is already resolved to an absolute value.
+pub struct PathWriteOp {
+    pub path: String,
+    pub offset: u64,
+    pub data: Vec<u8>,
+    pub create: bool,
+}
+
+/// One path-based READ for a merged compound.
+pub struct PathReadOp {
+    pub path: String,
+    pub offset: u64,
+    pub count: u32,
+}
+
+/// Per-op results of a merged path compound. `counts`/`committed` are `None`
+/// for ops that never executed (the compound aborted at `failed`).
+pub struct PathWriteOutcome {
+    pub counts: Vec<Option<u32>>,
+    pub committed: Vec<Option<u32>>,
+    /// Open stateids (with their filehandles) created by the compound; used
+    /// by the separate-close form and for best-effort cleanup on failure.
+    pub opened: Vec<(FileHandle, stateid4)>,
+    /// First failing caller-relative op index + NFS status, if any.
+    pub failed: Option<(usize, u32)>,
+    /// The trailing in-compound CLOSE failed (special stateid unsupported).
+    pub close_failed: Option<u32>,
+}
+
+/// Per-op results of a merged path read compound.
+pub struct PathReadOutcome {
+    pub data: Vec<Option<Vec<u8>>>,
+    pub eof: Vec<Option<bool>>,
+    pub opened: Vec<(FileHandle, stateid4)>,
+    pub failed: Option<(usize, u32)>,
+    pub close_failed: Option<u32>,
+}
+
+/// One path-based GETATTR for a merged compound.
+pub struct PathGetattrOp {
+    pub path: String,
+    pub attrs: Vec<u32>,
+}
+
+pub struct PathGetattrOutcome {
+    /// Raw XDR attribute lists per op (in the requested order).
+    pub lists: Vec<Option<Vec<u8>>>,
+    pub failed: Option<(usize, u32)>,
+}
+
+/// One path-based SETATTR for a merged compound.
+pub struct PathSetattrOp {
+    pub path: String,
+    pub mode: Option<u32>,
+    pub size: Option<u64>,
+    /// Request the object's own type (needed for symlink handling).
+    pub check_type: bool,
+}
+
+pub struct PathSetattrOutcome {
+    /// The object's own NFS type per op (when `check_type`), else None.
+    pub types: Vec<Option<u32>>,
+    pub failed: Option<(usize, u32)>,
+}
+
+/// One path-based OPEN for a merged compound.
+pub struct PathOpenOp {
+    pub path: String,
+    pub access: u32,
+    pub create: OpenCreate,
+    /// Mode to apply on creation (UNCHECKED createattrs / post-open for
+    /// EXCLUSIVE creates).
+    pub mode: Option<u32>,
+    pub truncate: bool,
+}
+
+pub struct PathOpenOutcome {
+    /// (filehandle, stateid) per op; None for ops that did not complete.
+    pub opened: Vec<Option<(FileHandle, stateid4)>>,
+    pub failed: Option<(usize, u32)>,
+}
+
+pub struct PathRemoveOutcome {
+    pub removed: Vec<Option<()>>,
+    pub failed: Option<(usize, u32)>,
+}
+
+/// One path-based RENAME pair for a merged compound.
+pub struct PathRenamePair {
+    pub src: String,
+    pub dst: String,
+}
+
+pub struct PathRenameOutcome {
+    pub renamed: Vec<Option<()>>,
+    pub failed: Option<(usize, u32)>,
+}
+
+/// Compound-local "current filehandle" tracking, mirroring the txn-compound
+/// client: the parent directory of the current batch is resolved once
+/// (PUTROOTFH + LOOKUPs) and SAVEFH'd; child operations climb back to it with
+/// RESTOREFH instead of re-resolving from the root.
+#[derive(Default)]
+struct CfhCursor {
+    /// Root-relative path of the directory currently in the saved-fh slot.
+    saved_dir: Option<String>,
+    /// Whether the compound's current fh currently equals the saved fh.
+    at_saved: bool,
+}
+
+impl CfhCursor {
+    /// Make the current fh the parent of `path` and leave it in the saved-fh
+    /// slot (resolving from the export root once per unique directory).
+    /// Returns the leaf component and the number of ops appended, or None if
+    /// the path is malformed.
+    fn set_parent(&mut self, c: &mut Compound, path: &str) -> Option<(String, usize)> {
+        let (dir, leaf) = split_path(path).ok()?;
+        if self.saved_dir.as_deref() == Some(dir) {
+            let mut ops = 0;
+            if !self.at_saved {
+                // We are below the saved parent; climb back with RESTOREFH.
+                c.restorefh();
+                ops += 1;
+                self.at_saved = true;
+            }
+            return Some((leaf.to_string(), ops));
+        }
+        // Resolve a (possibly new) parent directory from the export root.
+        let mut ops = 1; // PUTROOTFH
+        c.putrootfh();
+        for comp in dir.split('/').filter(|s| !s.is_empty()) {
+            c.lookup(comp.as_bytes());
+            ops += 1;
+        }
+        c.savefh();
+        ops += 1;
+        self.saved_dir = Some(dir.to_string());
+        self.at_saved = true;
+        Some((leaf.to_string(), ops))
+    }
+
+    /// Make the current fh the parent of `path` WITHOUT saving it (used by
+    /// RENAME, which needs the saved-fh slot to keep the source directory).
+    fn set_current_parent(&mut self, c: &mut Compound, path: &str) -> Option<(String, usize)> {
+        let (dir, leaf) = split_path(path).ok()?;
+        if self.saved_dir.as_deref() == Some(dir) {
+            let mut ops = 0;
+            if !self.at_saved {
+                c.restorefh();
+                ops += 1;
+                self.at_saved = true;
+            }
+            return Some((leaf.to_string(), ops));
+        }
+        let mut ops = 1; // PUTROOTFH
+        c.putrootfh();
+        for comp in dir.split('/').filter(|s| !s.is_empty()) {
+            c.lookup(comp.as_bytes());
+            ops += 1;
+        }
+        self.at_saved = false; // current fh differs from the saved one
+        Some((leaf.to_string(), ops))
+    }
+
+    /// Note that an operation (OPEN/LOOKUP/...) moved the current fh away
+    /// from the saved fh.
+    fn descend(&mut self) {
+        self.at_saved = false;
+    }
+}
+
+/// Maps compound op positions (resarray indices; 0 = SEQUENCE) to the
+/// caller-relative op whose range contains them, so a mid-compound failure
+/// can be attributed to the right caller index.
+#[derive(Default)]
+struct OpMap {
+    /// (caller_index, first_op, end_op_exclusive) per caller op.
+    ranges: Vec<(usize, usize, usize)>,
+    next: usize,
+}
+
+impl OpMap {
+    fn new() -> OpMap {
+        // resarray[0] is the implicit SEQUENCE.
+        OpMap {
+            ranges: Vec::new(),
+            next: 1,
+        }
+    }
+
+    fn begin(&mut self, caller: usize) {
+        self.ranges.push((caller, self.next, self.next));
+    }
+
+    fn end(&mut self) {
+        if let Some(last) = self.ranges.last_mut() {
+            last.2 = self.next;
+        }
+    }
+
+    fn note_ops(&mut self, n: usize) {
+        self.next += n;
+    }
+}
+
+/// The first op range that is incomplete or contains a failing op, as
+/// `(caller_index, nfs_status)`.
+fn first_failed_range(res: &CompoundRes, ranges: &[(usize, usize, usize)]) -> Option<(usize, u32)> {
+    for (caller, s, e) in ranges {
+        let mut bad: Option<u32> = None;
+        let upto = (*e).min(res.nops());
+        for j in *s..upto {
+            let st = res.op_status(j);
+            if st != nfsstat4_NFS4_OK {
+                bad = Some(st);
+                break;
+            }
+        }
+        if bad.is_none() && *e > res.nops() {
+            bad = Some(res.status());
+        }
+        if let Some(st) = bad {
+            return Some((*caller, st));
+        }
+    }
+    None
+}
 
 impl NfsClient {
     /// Connect, run the session handshake, and resolve the export root.
@@ -701,6 +951,744 @@ impl NfsClient {
         self.close_many_slot(ops, OwnerSlot::Path)
     }
 
+    /// Batched path-based WRITEs in one compound per chunk:
+    ///
+    /// `[SEQUENCE, PUTROOTFH, LOOKUP <parent>, SAVEFH, OPEN, WRITE,
+    /// RESTOREFH, OPEN, WRITE, ..., CLOSE]`
+    ///
+    /// The parent directory is resolved once and SAVEFH'd; each file is
+    /// OPENed (UNCHECKED create, so no existence probe), WRITten with the
+    /// special stateid, and the compound climbs back with RESTOREFH. When
+    /// `close_in_compound` is set the final CLOSE uses the special stateid
+    /// (Ganesha resolves it to the current open); otherwise the open
+    /// stateids/filehandles are returned so the caller can CLOSE in a
+    /// follow-up compound (the portable fallback).
+    ///
+    /// On a mid-compound failure, ops before the failing op are reported in
+    /// `counts`/`committed` and `failed` carries the caller-relative index
+    /// and NFS status.
+    pub fn writev_path_compound(
+        &mut self,
+        ops: &[PathWriteOp],
+        close_in_compound: bool,
+    ) -> RpcResult<PathWriteOutcome> {
+        let n = ops.len();
+        let mut counts: Vec<Option<u32>> = vec![None; n];
+        let mut committed: Vec<Option<u32>> = vec![None; n];
+        let mut opened: Vec<(FileHandle, stateid4)> = Vec::new();
+        let mut failed: Option<(usize, u32)> = None;
+        let mut close_failed: Option<u32> = None;
+        // Worst case per file: RESTOREFH + CLOSE + OPEN (+GETFH) + WRITE.
+        let per_file = 4;
+        let reserve = 24;
+
+        let mut global = 0usize;
+        while global < n {
+            let chunk_start = global;
+            let mut cursor = CfhCursor::default();
+            let mut map = OpMap::new();
+            let mut c = Compound::new();
+            c.tag(if close_in_compound {
+                b"writev1"
+            } else {
+                b"writev2"
+            });
+            let mut opened_path: Option<String> = None;
+            let mut opens_in_chunk = 0usize;
+            let base_seq = self.session.path_owner.seqid;
+
+            while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
+                let op = &ops[global];
+                if opened_path.as_deref() == Some(op.path.as_str()) {
+                    // Same file: the current fh is still the opened file.
+                    map.begin(global);
+                    c.write(
+                        &SPECIAL_STATEID,
+                        op.offset,
+                        stable_how4_FILE_SYNC4,
+                        op.data.as_slice(),
+                    );
+                    map.note_ops(1);
+                    map.end();
+                    global += 1;
+                    continue;
+                }
+                if close_in_compound && opened_path.is_some() {
+                    // Close the previous file while its fh is still current.
+                    c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
+                    map.note_ops(1);
+                    opened_path = None;
+                }
+                map.begin(global);
+                let (leaf, nops) = match cursor.set_parent(&mut c, &op.path) {
+                    Some(x) => x,
+                    None => {
+                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                        global = n;
+                        break;
+                    }
+                };
+                map.note_ops(nops);
+                let create = if op.create {
+                    OpenCreate::Unchecked
+                } else {
+                    OpenCreate::NoCreate
+                };
+                c.open_claim_null(
+                    base_seq + opens_in_chunk as u32,
+                    OPEN4_SHARE_ACCESS_BOTH,
+                    OPEN4_SHARE_DENY_NONE,
+                    self.session.clientid,
+                    &self.session.path_owner.name,
+                    make_open_how(create, self.session.path_owner.verifier),
+                    leaf.as_bytes(),
+                );
+                opens_in_chunk += 1;
+                map.note_ops(1);
+                if !close_in_compound {
+                    c.getfh();
+                    map.note_ops(1);
+                }
+                opened_path = Some(op.path.clone());
+                c.write(
+                    &SPECIAL_STATEID,
+                    op.offset,
+                    stable_how4_FILE_SYNC4,
+                    op.data.as_slice(),
+                );
+                map.note_ops(1);
+                map.end();
+                cursor.descend();
+                global += 1;
+                // A new directory's resolution could exceed the reserve.
+                if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
+                    break;
+                }
+            }
+
+            if close_in_compound && opened_path.is_some() {
+                c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
+                map.note_ops(1);
+            }
+            self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
+
+            let res = self.session.compound(&mut c)?;
+            // Find the first incomplete/failed range.
+            let mut range_failed = None;
+            let mut done = 0usize;
+            for (caller, s, e) in &map.ranges {
+                let mut bad: Option<(usize, u32)> = None;
+                let upto = (*e).min(res.nops());
+                for j in *s..upto {
+                    let st = res.op_status(j);
+                    if st != nfsstat4_NFS4_OK {
+                        bad = Some((j, st));
+                        break;
+                    }
+                }
+                if bad.is_none() && *e > res.nops() {
+                    bad = Some((res.nops(), res.status()));
+                }
+                if let Some((_, st)) = bad {
+                    range_failed = Some((*caller, st));
+                    done = *caller;
+                    break;
+                }
+                done = *caller + 1;
+            }
+            if let Some((caller, st)) = range_failed {
+                failed = Some((caller, st));
+                for i in caller + 1..n {
+                    counts[i] = None;
+                    committed[i] = None;
+                }
+            }
+            // Extract results and opened stateids from the resarray.
+            for (caller, s, e) in &map.ranges {
+                if *caller >= done {
+                    continue;
+                }
+                for j in *s..(*e).min(res.nops()) {
+                    let ro = res.op(j);
+                    unsafe {
+                        match ro.resop {
+                            nfs_opnum4_NFS4_OP_WRITE => {
+                                let ok = ro.nfs_resop4_u.opwrite.WRITE4res_u.resok4;
+                                counts[*caller] = Some(ok.count);
+                                committed[*caller] = Some(ok.committed);
+                            }
+                            nfs_opnum4_NFS4_OP_OPEN if !close_in_compound => {
+                                // Paired with the GETFH right after it.
+                                let stateid = res.open(j).stateid;
+                                let fh = res.getfh(j + 1);
+                                opened.push((FileHandle::from_nfs_fh(fh), stateid));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            // The trailing CLOSE (close_in_compound form) sits outside any
+            // file range; report a failure there so the caller can fall back
+            // to the separate-close form.
+            if close_in_compound && range_failed.is_none() && opened_path.is_some() {
+                let last = map.ranges.last().map(|(_, _, e)| *e).unwrap_or(1);
+                if last <= res.nops() && res.op_status(last) != nfsstat4_NFS4_OK {
+                    close_failed = Some(res.op_status(last));
+                }
+            }
+            if failed.is_some() {
+                break;
+            }
+            if chunk_start == global {
+                // No progress (capacity check failed even for one op): bail.
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
+        }
+        Ok(PathWriteOutcome {
+            counts,
+            committed,
+            opened,
+            failed,
+            close_failed,
+        })
+    }
+
+    /// Batched path-based READs in one compound per chunk, same shape as
+    /// [`writev_path_compound`](Self::writev_path_compound) but with READ and
+    /// no creation.
+    pub fn readv_path_compound(
+        &mut self,
+        ops: &[PathReadOp],
+        close_in_compound: bool,
+    ) -> RpcResult<PathReadOutcome> {
+        let n = ops.len();
+        let mut data: Vec<Option<Vec<u8>>> = vec![None; n];
+        let mut eof: Vec<Option<bool>> = vec![None; n];
+        let mut opened: Vec<(FileHandle, stateid4)> = Vec::new();
+        let mut failed: Option<(usize, u32)> = None;
+        let mut close_failed: Option<u32> = None;
+        let per_file = 4;
+        let reserve = 24;
+
+        let mut global = 0usize;
+        while global < n {
+            let chunk_start = global;
+            let mut cursor = CfhCursor::default();
+            let mut map = OpMap::new();
+            let mut c = Compound::new();
+            c.tag(if close_in_compound {
+                b"readv1"
+            } else {
+                b"readv2"
+            });
+            let mut opened_path: Option<String> = None;
+            let mut opens_in_chunk = 0usize;
+            let base_seq = self.session.path_owner.seqid;
+
+            while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
+                let op = &ops[global];
+                if opened_path.as_deref() == Some(op.path.as_str()) {
+                    map.begin(global);
+                    c.read(&SPECIAL_STATEID, op.offset, op.count);
+                    map.note_ops(1);
+                    map.end();
+                    global += 1;
+                    continue;
+                }
+                if close_in_compound && opened_path.is_some() {
+                    c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
+                    map.note_ops(1);
+                    opened_path = None;
+                }
+                map.begin(global);
+                let (leaf, nops) = match cursor.set_parent(&mut c, &op.path) {
+                    Some(x) => x,
+                    None => {
+                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                        global = n;
+                        break;
+                    }
+                };
+                map.note_ops(nops);
+                c.open_claim_null(
+                    base_seq + opens_in_chunk as u32,
+                    OPEN4_SHARE_ACCESS_READ,
+                    OPEN4_SHARE_DENY_NONE,
+                    self.session.clientid,
+                    &self.session.path_owner.name,
+                    make_open_how(OpenCreate::NoCreate, self.session.path_owner.verifier),
+                    leaf.as_bytes(),
+                );
+                opens_in_chunk += 1;
+                map.note_ops(1);
+                if !close_in_compound {
+                    c.getfh();
+                    map.note_ops(1);
+                }
+                opened_path = Some(op.path.clone());
+                c.read(&SPECIAL_STATEID, op.offset, op.count);
+                map.note_ops(1);
+                map.end();
+                cursor.descend();
+                global += 1;
+                if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
+                    break;
+                }
+            }
+
+            if close_in_compound && opened_path.is_some() {
+                c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
+                map.note_ops(1);
+            }
+            self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
+
+            let res = self.session.compound(&mut c)?;
+            let mut range_failed = None;
+            let mut done = 0usize;
+            for (caller, s, e) in &map.ranges {
+                let mut bad: Option<(usize, u32)> = None;
+                let upto = (*e).min(res.nops());
+                for j in *s..upto {
+                    let st = res.op_status(j);
+                    if st != nfsstat4_NFS4_OK {
+                        bad = Some((j, st));
+                        break;
+                    }
+                }
+                if bad.is_none() && *e > res.nops() {
+                    bad = Some((res.nops(), res.status()));
+                }
+                if let Some((_, st)) = bad {
+                    range_failed = Some((*caller, st));
+                    done = *caller;
+                    break;
+                }
+                done = *caller + 1;
+            }
+            if let Some((caller, st)) = range_failed {
+                failed = Some((caller, st));
+                for i in caller + 1..n {
+                    data[i] = None;
+                    eof[i] = None;
+                }
+            }
+            for (caller, s, e) in &map.ranges {
+                if *caller >= done {
+                    continue;
+                }
+                for j in *s..(*e).min(res.nops()) {
+                    let ro = res.op(j);
+                    unsafe {
+                        match ro.resop {
+                            nfs_opnum4_NFS4_OP_READ => {
+                                let ok = ro.nfs_resop4_u.opread.READ4res_u.resok4;
+                                let len = ok.data.data_len as usize;
+                                let bytes = if len == 0 {
+                                    Vec::new()
+                                } else {
+                                    std::slice::from_raw_parts(ok.data.data_val as *const u8, len)
+                                        .to_vec()
+                                };
+                                data[*caller] = Some(bytes);
+                                eof[*caller] = Some(ok.eof != 0);
+                            }
+                            nfs_opnum4_NFS4_OP_OPEN if !close_in_compound => {
+                                let stateid = res.open(j).stateid;
+                                let fh = res.getfh(j + 1);
+                                opened.push((FileHandle::from_nfs_fh(fh), stateid));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if close_in_compound && range_failed.is_none() && opened_path.is_some() {
+                let last = map.ranges.last().map(|(_, _, e)| *e).unwrap_or(1);
+                if last <= res.nops() && res.op_status(last) != nfsstat4_NFS4_OK {
+                    close_failed = Some(res.op_status(last));
+                }
+            }
+            if failed.is_some() {
+                break;
+            }
+            if chunk_start == global {
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
+        }
+        Ok(PathReadOutcome {
+            data,
+            eof,
+            opened,
+            failed,
+            close_failed,
+        })
+    }
+
+    /// Batched path-based GETATTRs in one compound per chunk:
+    /// `[SEQUENCE, PUTROOTFH, LOOKUP <parent>, SAVEFH, LOOKUP, GETATTR,
+    /// RESTOREFH, LOOKUP, GETATTR, ...]`.
+    pub fn getattr_path_compound(
+        &mut self,
+        ops: &[PathGetattrOp],
+    ) -> RpcResult<PathGetattrOutcome> {
+        let n = ops.len();
+        let mut lists: Vec<Option<Vec<u8>>> = vec![None; n];
+        let mut failed: Option<(usize, u32)> = None;
+        let per_file = 4; // RESTOREFH + LOOKUP + GETATTR + margin
+        let reserve = 16;
+        let mut global = 0usize;
+        while global < n {
+            let chunk_start = global;
+            let mut cursor = CfhCursor::default();
+            let mut map = OpMap::new();
+            let mut c = Compound::new();
+            c.tag(b"getattrv1");
+            while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
+                let op = &ops[global];
+                map.begin(global);
+                let (leaf, nops) = match cursor.set_parent(&mut c, &op.path) {
+                    Some(x) => x,
+                    None => {
+                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                        global = n;
+                        break;
+                    }
+                };
+                map.note_ops(nops);
+                c.lookup(leaf.as_bytes());
+                map.note_ops(1);
+                c.getattr(&op.attrs);
+                map.note_ops(1);
+                map.end();
+                cursor.descend();
+                global += 1;
+                if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
+                    break;
+                }
+            }
+            let res = self.session.compound(&mut c)?;
+            if let Some((caller, st)) = first_failed_range(&res, &map.ranges) {
+                failed = Some((caller, st));
+                break;
+            }
+            for (caller, s, e) in &map.ranges {
+                for j in *s..*e {
+                    if res.op(j).resop == nfs_opnum4_NFS4_OP_GETATTR {
+                        lists[*caller] = Some(res.getattr_bytes(j));
+                    }
+                }
+            }
+            if chunk_start == global {
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
+        }
+        Ok(PathGetattrOutcome { lists, failed })
+    }
+
+    /// Batched path-based SETATTRs in one compound per chunk. When
+    /// `check_type` is set, each file's own type is fetched (for symlink
+    /// handling by the caller).
+    pub fn setattr_path_compound(
+        &mut self,
+        ops: &[PathSetattrOp],
+    ) -> RpcResult<PathSetattrOutcome> {
+        let n = ops.len();
+        let mut types: Vec<Option<u32>> = vec![None; n];
+        let mut failed: Option<(usize, u32)> = None;
+        let per_file = 5; // RESTOREFH + LOOKUP + [GETATTR] + SETATTR + margin
+        let reserve = 16;
+        let mut global = 0usize;
+        while global < n {
+            let chunk_start = global;
+            let mut cursor = CfhCursor::default();
+            let mut map = OpMap::new();
+            let mut c = Compound::new();
+            c.tag(b"setattrv1");
+            while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
+                let op = &ops[global];
+                map.begin(global);
+                let (leaf, nops) = match cursor.set_parent(&mut c, &op.path) {
+                    Some(x) => x,
+                    None => {
+                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                        global = n;
+                        break;
+                    }
+                };
+                map.note_ops(nops);
+                c.lookup(leaf.as_bytes());
+                map.note_ops(1);
+                if op.check_type {
+                    c.getattr(&[FATTR4_TYPE]);
+                    map.note_ops(1);
+                }
+                c.setattr(op.mode, op.size);
+                map.note_ops(1);
+                map.end();
+                cursor.descend();
+                global += 1;
+                if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
+                    break;
+                }
+            }
+            let res = self.session.compound(&mut c)?;
+            if let Some((caller, st)) = first_failed_range(&res, &map.ranges) {
+                failed = Some((caller, st));
+                break;
+            }
+            for (caller, s, e) in &map.ranges {
+                for j in *s..*e {
+                    if res.op(j).resop == nfs_opnum4_NFS4_OP_GETATTR {
+                        let b = res.getattr_bytes(j);
+                        types[*caller] =
+                            (b.len() >= 4).then(|| u32::from_be_bytes(b[0..4].try_into().unwrap()));
+                    }
+                }
+            }
+            if chunk_start == global {
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
+        }
+        Ok(PathSetattrOutcome { types, failed })
+    }
+
+    /// Batched path-based OPENs in one compound per chunk, returning the
+    /// opened (filehandle, stateid) pairs (the caller keeps them open).
+    pub fn openv_path_compound(&mut self, ops: &[PathOpenOp]) -> RpcResult<PathOpenOutcome> {
+        let n = ops.len();
+        let mut opened: Vec<Option<(FileHandle, stateid4)>> = vec![None; n];
+        let mut failed: Option<(usize, u32)> = None;
+        let per_file = 6; // RESTOREFH + OPEN + GETFH + [SETATTR x2] + margin
+        let reserve = 16;
+        let mut global = 0usize;
+        while global < n {
+            let chunk_start = global;
+            let mut cursor = CfhCursor::default();
+            let mut map = OpMap::new();
+            let mut c = Compound::new();
+            c.tag(b"openv1");
+            let mut opens_in_chunk = 0usize;
+            let base_seq = self.session.path_owner.seqid;
+            while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
+                let op = &ops[global];
+                map.begin(global);
+                let (leaf, nops) = match cursor.set_parent(&mut c, &op.path) {
+                    Some(x) => x,
+                    None => {
+                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                        global = n;
+                        break;
+                    }
+                };
+                map.note_ops(nops);
+                match op.create {
+                    OpenCreate::Unchecked => {
+                        let mode = op.mode.unwrap_or(0o644);
+                        c.open_claim_null_create_mode(
+                            base_seq + opens_in_chunk as u32,
+                            op.access,
+                            OPEN4_SHARE_DENY_NONE,
+                            self.session.clientid,
+                            &self.session.path_owner.name,
+                            leaf.as_bytes(),
+                            mode,
+                        );
+                    }
+                    create => c.open_claim_null(
+                        base_seq + opens_in_chunk as u32,
+                        op.access,
+                        OPEN4_SHARE_DENY_NONE,
+                        self.session.clientid,
+                        &self.session.path_owner.name,
+                        make_open_how(create, self.session.path_owner.verifier),
+                        leaf.as_bytes(),
+                    ),
+                }
+                opens_in_chunk += 1;
+                map.note_ops(1);
+                c.getfh();
+                map.note_ops(1);
+                if op.create == OpenCreate::Exclusive {
+                    // EXCLUSIVE create always created the file; apply mode.
+                    c.setattr(Some(op.mode.unwrap_or(0o644) & 0o7777), None);
+                    map.note_ops(1);
+                }
+                if op.truncate {
+                    c.setattr(None, Some(0));
+                    map.note_ops(1);
+                }
+                map.end();
+                cursor.descend();
+                global += 1;
+                if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
+                    break;
+                }
+            }
+            self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
+            let res = self.session.compound(&mut c)?;
+            if let Some((caller, st)) = first_failed_range(&res, &map.ranges) {
+                failed = Some((caller, st));
+                break;
+            }
+            for (caller, s, e) in &map.ranges {
+                for j in *s..*e {
+                    if res.op(j).resop == nfs_opnum4_NFS4_OP_OPEN {
+                        let stateid = res.open(j).stateid;
+                        let fh = res.getfh(j + 1);
+                        opened[*caller] = Some((FileHandle::from_nfs_fh(fh), stateid));
+                    }
+                }
+            }
+            if chunk_start == global {
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
+        }
+        Ok(PathOpenOutcome { opened, failed })
+    }
+
+    /// Batched path-based REMOVEs in one compound per chunk. REMOVE keeps
+    /// the current fh on the parent, so same-directory removals chain.
+    pub fn removev_path_compound(&mut self, paths: &[String]) -> RpcResult<PathRemoveOutcome> {
+        let n = paths.len();
+        let mut removed: Vec<Option<()>> = vec![None; n];
+        let mut failed: Option<(usize, u32)> = None;
+        let per_file = 3; // RESTOREFH + REMOVE + margin
+        let reserve = 16;
+        let mut global = 0usize;
+        while global < n {
+            let chunk_start = global;
+            let mut cursor = CfhCursor::default();
+            let mut map = OpMap::new();
+            let mut c = Compound::new();
+            c.tag(b"removev1");
+            while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
+                map.begin(global);
+                let (leaf, nops) = match cursor.set_parent(&mut c, &paths[global]) {
+                    Some(x) => x,
+                    None => {
+                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                        global = n;
+                        break;
+                    }
+                };
+                map.note_ops(nops);
+                c.remove(leaf.as_bytes());
+                map.note_ops(1);
+                map.end();
+                // REMOVE leaves the current fh on the parent: cursor state
+                // is unchanged.
+                global += 1;
+                if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
+                    break;
+                }
+            }
+            let res = self.session.compound(&mut c)?;
+            let done = first_failed_range(&res, &map.ranges);
+            match done {
+                Some((caller, st)) => {
+                    failed = Some((caller, st));
+                    for (c, _, _) in &map.ranges {
+                        if *c < caller {
+                            removed[*c] = Some(());
+                        }
+                    }
+                    break;
+                }
+                None => {
+                    for (c, _, _) in &map.ranges {
+                        removed[*c] = Some(());
+                    }
+                }
+            }
+            if chunk_start == global {
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
+        }
+        Ok(PathRemoveOutcome { removed, failed })
+    }
+
+    /// Batched path-based RENAMEs in one compound per chunk. Each pair is
+    /// `[.. SAVEFH src-dir, .., RENAME]`; RENAME uses the saved fh as the
+    /// source directory and the current fh as the destination directory.
+    pub fn renamev_path_compound(
+        &mut self,
+        pairs: &[PathRenamePair],
+    ) -> RpcResult<PathRenameOutcome> {
+        let n = pairs.len();
+        let mut renamed: Vec<Option<()>> = vec![None; n];
+        let mut failed: Option<(usize, u32)> = None;
+        let per_file = 8; // two dir resolutions + RENAME + margin
+        let reserve = 16;
+        let mut global = 0usize;
+        while global < n {
+            let chunk_start = global;
+            let mut cursor = CfhCursor::default();
+            let mut map = OpMap::new();
+            let mut c = Compound::new();
+            c.tag(b"renamev1");
+            while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
+                let pair = &pairs[global];
+                map.begin(global);
+                let (sname, snops) = match cursor.set_parent(&mut c, &pair.src) {
+                    Some(x) => x,
+                    None => {
+                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                        global = n;
+                        break;
+                    }
+                };
+                map.note_ops(snops);
+                let (dname, dnops) = match cursor.set_current_parent(&mut c, &pair.dst) {
+                    Some(x) => x,
+                    None => {
+                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                        global = n;
+                        break;
+                    }
+                };
+                map.note_ops(dnops);
+                c.rename(sname.as_bytes(), dname.as_bytes());
+                map.note_ops(1);
+                map.end();
+                cursor.descend(); // RENAME moved the current fh
+                global += 1;
+                if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
+                    break;
+                }
+            }
+            let res = self.session.compound(&mut c)?;
+            let done = first_failed_range(&res, &map.ranges);
+            match done {
+                Some((caller, st)) => {
+                    failed = Some((caller, st));
+                    for (c, _, _) in &map.ranges {
+                        if *c < caller {
+                            renamed[*c] = Some(());
+                        }
+                    }
+                    break;
+                }
+                None => {
+                    for (c, _, _) in &map.ranges {
+                        renamed[*c] = Some(());
+                    }
+                }
+            }
+            if chunk_start == global {
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
+        }
+        Ok(PathRenameOutcome { renamed, failed })
+    }
+
     fn close_many_slot(&mut self, ops: &[CloseOp], slot: OwnerSlot) -> RpcResult<()> {
         let base = match slot {
             OwnerSlot::User => self.session.open_owner.seqid,
@@ -1098,6 +2086,26 @@ fn make_open_how(create: OpenCreate, verifier: verifier4) -> openflag4 {
             openflag4_u: openflag4__bindgen_ty_1 {
                 how: createhow4 {
                     mode: createmode4_GUARDED4,
+                    createhow4_u: createhow4__bindgen_ty_1 {
+                        createattrs: fattr4 {
+                            attrmask: bitmap4 {
+                                bitmap4_len: 0,
+                                map: [0; 3],
+                            },
+                            attr_vals: attrlist4 {
+                                attrlist4_len: 0,
+                                attrlist4_val: std::ptr::null_mut(),
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        OpenCreate::Unchecked => openflag4 {
+            opentype: opentype4_OPEN4_CREATE,
+            openflag4_u: openflag4__bindgen_ty_1 {
+                how: createhow4 {
+                    mode: createmode4_UNCHECKED4,
                     createhow4_u: createhow4__bindgen_ty_1 {
                         createattrs: fattr4 {
                             attrmask: bitmap4 {

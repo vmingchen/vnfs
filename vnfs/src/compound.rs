@@ -193,6 +193,56 @@ impl Compound {
         });
     }
 
+    /// Like [`open_claim_null`](Self::open_claim_null) but with an
+    /// `OPEN4_CREATE`/`UNCHECKED4` openhow carrying a creation mode in its
+    /// createattrs (applied by the server only when the file is created).
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_claim_null_create_mode(
+        &mut self,
+        seqid: u32,
+        share_access: u32,
+        share_deny: u32,
+        clientid: clientid4,
+        owner_name: &[u8],
+        claim_file: &[u8],
+        mode: u32,
+    ) {
+        let mut map = [0u32; 3];
+        map[1] |= 1 << (FATTR4_MODE % 32);
+        let mut vals = Vec::with_capacity(4);
+        vals.extend_from_slice(&mode.to_be_bytes());
+        let (vptr, vlen) = self.keep(&vals);
+        let openhow = openflag4 {
+            opentype: opentype4_OPEN4_CREATE,
+            openflag4_u: openflag4__bindgen_ty_1 {
+                how: createhow4 {
+                    mode: createmode4_UNCHECKED4,
+                    createhow4_u: createhow4__bindgen_ty_1 {
+                        createattrs: fattr4 {
+                            attrmask: bitmap4 {
+                                bitmap4_len: 2,
+                                map,
+                            },
+                            attr_vals: attrlist4 {
+                                attrlist4_len: vlen,
+                                attrlist4_val: vptr,
+                            },
+                        },
+                    },
+                },
+            },
+        };
+        self.open_claim_null(
+            seqid,
+            share_access,
+            share_deny,
+            clientid,
+            owner_name,
+            openhow,
+            claim_file,
+        );
+    }
+
     pub fn read(&mut self, stateid: &stateid4, offset: u64, count: u32) {
         let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
         op.argop = nfs_opnum4_NFS4_OP_READ;
@@ -418,6 +468,23 @@ impl Compound {
         self.push(op);
     }
 
+    /// RESTOREFH: make the saved filehandle the current filehandle. In
+    /// NFSv4.1 this is how a compound returns to a directory it previously
+    /// SAVEFH'd, enabling many child operations in one compound.
+    pub fn restorefh(&mut self) {
+        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
+        op.argop = nfs_opnum4_NFS4_OP_RESTOREFH;
+        self.push(op);
+    }
+
+    /// LOOKUPP: make the parent of the current filehandle the current
+    /// filehandle.
+    pub fn lookupp(&mut self) {
+        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
+        op.argop = nfs_opnum4_NFS4_OP_LOOKUPP;
+        self.push(op);
+    }
+
     /// LINK the saved filehandle into the current directory under `newname`.
     pub fn link(&mut self, newname: &[u8]) {
         let (ptr, len) = self.keep(newname);
@@ -532,6 +599,8 @@ impl CompoundRes {
                 nfs_opnum4_NFS4_OP_RENAME => ro.nfs_resop4_u.oprename.status,
                 nfs_opnum4_NFS4_OP_LINK => ro.nfs_resop4_u.oplink.status,
                 nfs_opnum4_NFS4_OP_SAVEFH => ro.nfs_resop4_u.opsavefh.status,
+                nfs_opnum4_NFS4_OP_RESTOREFH => ro.nfs_resop4_u.oprestorefh.status,
+                nfs_opnum4_NFS4_OP_LOOKUPP => ro.nfs_resop4_u.oplookupp.status,
                 nfs_opnum4_NFS4_OP_DESTROY_SESSION => ro.nfs_resop4_u.opdestroy_session.dsr_status,
                 nfs_opnum4_NFS4_OP_DESTROY_CLIENTID => {
                     ro.nfs_resop4_u.opdestroy_clientid.dcr_status

@@ -35,9 +35,39 @@ pub struct NfsVecFs {
     next_fd: i32,
     /// Canonical open-file state, keyed by the client-assigned descriptor.
     open_files: std::collections::HashMap<i32, OpenFile>,
+    /// How path-based bulk I/O is issued: one compound per batch including
+    /// CLOSE (Ganesha's special-stateid behavior), one open+I/O compound
+    /// plus a separate CLOSE compound (portable), or the old phased path.
+    merged_mode: MergedIoMode,
+}
+
+/// Which merged-compound strategy the NFS backend uses for path-based bulk
+/// I/O, downgraded automatically when the server rejects the current form.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MergedIoMode {
+    /// `[PUTROOTFH, LOOKUP, SAVEFH, OPEN, WRITE, RESTOREFH, ..., CLOSE]` in a
+    /// single compound (special-stateid CLOSE; Ganesha).
+    Full,
+    /// One open+I/O compound, then a separate CLOSE compound with the real
+    /// stateids (portable).
+    OpenWrite,
+    /// Legacy phased path: resolve + probe + open + I/O + close compounds.
+    Off,
 }
 
 impl NfsVecFs {
+    /// Force a particular merged-compound mode (diagnostics/tests): "full"
+    /// (default, one compound incl. CLOSE), "openwrite" (open+I/O compound +
+    /// separate close), or "off" (legacy phased path).
+    #[doc(hidden)]
+    pub fn set_merged_mode(&mut self, mode: &str) {
+        self.merged_mode = match mode {
+            "openwrite" => MergedIoMode::OpenWrite,
+            "off" => MergedIoMode::Off,
+            _ => MergedIoMode::Full,
+        };
+    }
+
     /// Resolve `files` to file handles in as few compounds as possible: each
     /// unique parent directory is resolved once, then all children are
     /// LOOKUPed in tolerant batches (`[PUTFH, LOOKUP, GETFH, GETATTR type]`
@@ -122,7 +152,67 @@ impl NfsVecFs {
         Ok(out)
     }
 
+    /// The merged (single-compound) setattrsv: resolve each parent once,
+    /// then LOOKUP + GETATTR type + SETATTR per file. Symlinks (either to
+    /// refuse for lsetattrsv or to follow for setattrsv) are handled
+    /// per-file via the phased path.
     fn setattrsv_impl(&mut self, attrs: &[VfAttrs], follow: bool) -> VfRes {
+        const SETTABLE: AttrMask = AttrMask::MODE.union(AttrMask::SIZE);
+        if attrs.is_empty() {
+            return Ok(());
+        }
+        for (i, a) in attrs.iter().enumerate() {
+            let unsupported = a.masks.difference(SETTABLE);
+            if !unsupported.is_empty() {
+                return Err(VfError::unsupported(i));
+            }
+        }
+        if attrs.iter().any(|a| a.file.is_descriptor()) {
+            return self.setattrsv_phased(attrs, follow);
+        }
+        let mut ops = Vec::with_capacity(attrs.len());
+        for a in attrs {
+            let path = self.vf_path(&a.file)?;
+            let mode = if a.masks.contains(AttrMask::MODE) {
+                Some(a.mode & 0o7777)
+            } else {
+                None
+            };
+            let size = if a.masks.contains(AttrMask::SIZE) {
+                Some(a.size)
+            } else {
+                None
+            };
+            ops.push(crate::client::PathSetattrOp {
+                path,
+                mode,
+                size,
+                check_type: true,
+            });
+        }
+        match self.nfs.setattr_path_compound(&ops) {
+            Ok(outcome) => {
+                if let Some((_i, _st)) = outcome.failed {
+                    return self.setattrsv_phased(attrs, follow);
+                }
+                for (i, a) in attrs.iter().enumerate() {
+                    let own_type = outcome.types[i];
+                    if own_type == Some(nfs_ftype4_NF4LNK) {
+                        if !follow {
+                            // No non-following mode/size setter for symlinks.
+                            return Err(VfError::unsupported(i));
+                        }
+                        self.setattr_one_following(i, a)?;
+                    }
+                }
+                Ok(())
+            }
+            Err(_) => self.setattrsv_phased(attrs, follow),
+        }
+    }
+
+    /// The legacy phased setattrsv (resolve_many_tcfile + setattr_many).
+    fn setattrsv_phased(&mut self, attrs: &[VfAttrs], follow: bool) -> VfRes {
         const SETTABLE: AttrMask = AttrMask::MODE.union(AttrMask::SIZE);
         for (i, a) in attrs.iter().enumerate() {
             let unsupported = a.masks.difference(SETTABLE);
@@ -161,7 +251,49 @@ impl NfsVecFs {
             .map_err(VfError::from_rpc_indexed)
     }
 
+    /// The merged (single-compound) getattrsv: resolve each parent once,
+    /// then LOOKUP + GETATTR per file. Final-component symlinks (follow
+    /// semantics) are resolved individually afterwards.
     fn getattrsv_impl(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
+        if attrs.is_empty() {
+            return Ok(());
+        }
+        if attrs.iter().any(|a| a.file.is_descriptor()) {
+            return self.getattrsv_phased(attrs, follow);
+        }
+        let mut ops = Vec::with_capacity(attrs.len());
+        for a in attrs.iter() {
+            let path = self.vf_path(&a.file)?;
+            ops.push(crate::client::PathGetattrOp {
+                path,
+                attrs: request_mask_to_attr_list(&a.masks),
+            });
+        }
+        match self.nfs.getattr_path_compound(&ops) {
+            Ok(outcome) => {
+                if let Some((_i, _st)) = outcome.failed {
+                    return self.getattrsv_phased(attrs, follow);
+                }
+                let mut symlinks = Vec::new();
+                for (i, (a, op)) in attrs.iter_mut().zip(&ops).enumerate() {
+                    let list = outcome.lists[i].as_deref().unwrap_or_default();
+                    let v = parse_attr_list(&op.attrs, list)?;
+                    apply_attrs(a, &v);
+                    if follow && a.ftype == VfType::Symlink {
+                        symlinks.push(i);
+                    }
+                }
+                for i in symlinks {
+                    self.stat_one_following(i, &mut attrs[i])?;
+                }
+                Ok(())
+            }
+            Err(_) => self.getattrsv_phased(attrs, follow),
+        }
+    }
+
+    /// The legacy phased getattrsv (resolve_many_tcfile + getattr_many).
+    fn getattrsv_phased(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
         let files: Vec<&VfFile> = attrs.iter().map(|a| &a.file).collect();
         let resolved = self.resolve_many_tcfile(&files, follow)?;
         let mut ops = Vec::with_capacity(attrs.len());
@@ -195,6 +327,44 @@ impl NfsVecFs {
         }
         Ok(())
     }
+
+    /// stat one path following final-component symlinks (phased).
+    fn stat_one_following(&mut self, index: usize, a: &mut VfAttrs) -> VfResult<()> {
+        let path = self.vf_path(&a.file).map_err(|e| e.with_index(index))?;
+        let fh = self
+            .resolve_follow(&path)
+            .map_err(|e| e.with_index(index))?;
+        let ids = request_mask_to_attr_list(&a.masks);
+        let list = self
+            .nfs
+            .getattr(&fh, &ids)
+            .map_err(|e| VfError::from_rpc(e, index))?;
+        let v = parse_attr_list(&ids, &list)?;
+        apply_attrs(a, &v);
+        Ok(())
+    }
+
+    /// setattr one path following final-component symlinks (phased).
+    fn setattr_one_following(&mut self, index: usize, a: &VfAttrs) -> VfResult<()> {
+        let path = self.vf_path(&a.file).map_err(|e| e.with_index(index))?;
+        let fh = self
+            .resolve_follow(&path)
+            .map_err(|e| e.with_index(index))?;
+        let mode = if a.masks.contains(AttrMask::MODE) {
+            Some(a.mode & 0o7777)
+        } else {
+            None
+        };
+        let size = if a.masks.contains(AttrMask::SIZE) {
+            Some(a.size)
+        } else {
+            None
+        };
+        self.nfs
+            .setattr(&fh, mode, size)
+            .map_err(|e| VfError::from_rpc(e, index))
+    }
+
     /// Connect to the NFS server at `host` and resolve the export root.
     pub fn connect(host: &str) -> VfResult<NfsVecFs> {
         let nfs = NfsClient::connect(host).map_err(|e| VfError::from_rpc(e, 0))?;
@@ -203,6 +373,7 @@ impl NfsVecFs {
             cwd: PathBuf::new(),
             next_fd: 0,
             open_files: std::collections::HashMap::new(),
+            merged_mode: MergedIoMode::Full,
         })
     }
 
@@ -333,8 +504,63 @@ impl NfsVecFs {
             .map_err(|e| VfError::from_rpc(e, 0))
     }
 
-    /// Shared implementation of the openv variants using batched OPENs.
-    fn openv_impl(
+    /// The merged (single-compound) openv: resolve each parent once, then
+    /// OPEN + GETFH (+ SETATTR for truncate / exclusive-create mode) per
+    /// file. UNCHECKED creates carry the mode in their createattrs, so no
+    /// existence probe is needed.
+    fn openv_merged(
+        &mut self,
+        paths: &[&str],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> VfResult<Vec<VfFile>> {
+        use libc::{O_APPEND, O_CREAT, O_EXCL, O_TRUNC};
+        let mut ops = Vec::with_capacity(paths.len());
+        for (i, p) in paths.iter().enumerate() {
+            let create = if flags[i] & O_CREAT != 0 {
+                if flags[i] & O_EXCL != 0 {
+                    crate::client::OpenCreate::Exclusive
+                } else {
+                    crate::client::OpenCreate::Unchecked
+                }
+            } else {
+                crate::client::OpenCreate::NoCreate
+            };
+            ops.push(crate::client::PathOpenOp {
+                path: self.abs_path(p),
+                access: Self::flags_to_access(flags[i]),
+                create,
+                mode: Some(modes[i] & 0o7777),
+                truncate: flags[i] & O_TRUNC != 0,
+            });
+        }
+        let outcome = self
+            .nfs
+            .openv_path_compound(&ops)
+            .map_err(|e| VfError::from_rpc(e, 0))?;
+        if let Some((_i, _st)) = outcome.failed {
+            return self.openv_phased(paths, flags, modes);
+        }
+        let mut out = Vec::with_capacity(paths.len());
+        for (i, o) in outcome.opened.iter().enumerate() {
+            let (fh, stateid) = o.clone().expect("completed open");
+            self.next_fd += 1;
+            self.open_files.insert(
+                self.next_fd,
+                OpenFile {
+                    fh,
+                    stateid,
+                    cur_offset: 0,
+                    append: flags[i] & O_APPEND != 0,
+                },
+            );
+            out.push(VfFile::from_fd(self.next_fd));
+        }
+        Ok(out)
+    }
+
+    /// The legacy phased openv (batched existence probe + OPENs + SETATTRs).
+    fn openv_phased(
         &mut self,
         paths: &[&str],
         flags: &[i32],
@@ -1022,6 +1248,323 @@ impl NfsVecFs {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Merged path I/O plumbing (single-compound readv/writev)
+// ---------------------------------------------------------------------------
+
+impl NfsVecFs {
+    /// The legacy phased path-based readv (resolve + probe + open + read +
+    /// close compounds).
+    fn readv_path_fallback(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        if reads.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut tmp: Vec<Option<i32>> = vec![None; reads.len()];
+        let mut files = Vec::with_capacity(reads.len());
+        let mut needs_open = false;
+        for (i, r) in reads.iter().enumerate() {
+            files.push(&r.file);
+            if !r.file.is_descriptor() {
+                needs_open = true;
+                if r.offset == VfOffset::Cur {
+                    // "current position" only exists for open descriptors.
+                    return Err(VfError::failure(i, ERR_INVAL));
+                }
+            }
+        }
+        if needs_open {
+            tmp = self.open_path_batch(&files, &vec![false; reads.len()], false)?;
+        }
+        let remapped: Vec<ReadOp> = reads
+            .iter()
+            .enumerate()
+            .map(|(i, r)| ReadOp {
+                file: match tmp[i] {
+                    Some(fd) => VfFile::from_fd(fd),
+                    None => r.file.clone(),
+                },
+                offset: r.offset,
+                length: r.length,
+            })
+            .collect();
+        let result = self.readv_batch(&remapped);
+        self.close_tmp(&tmp);
+        let mut out = result?;
+        for (i, r) in out.iter_mut().enumerate() {
+            r.file = reads[i].file.clone();
+        }
+        Ok(out)
+    }
+
+    /// One open+read compound, then a separate close compound with the real
+    /// stateids (portable fallback).
+    fn readv_path_openwrite(
+        &mut self,
+        reads: &[ReadOp],
+        path_ops: &[crate::client::PathReadOp],
+        offsets: &[u64],
+    ) -> VfResult<Vec<ReadResult>> {
+        match self.nfs.readv_path_compound(path_ops, false) {
+            Ok(outcome) => {
+                if let Some((_i, _st)) = outcome.failed {
+                    self.close_path_opens(&outcome.opened);
+                    return self.readv_path_fallback(reads);
+                }
+                self.close_path_opens(&outcome.opened);
+                Ok(self.assemble_reads(reads, offsets, &outcome.data, &outcome.eof))
+            }
+            Err(_) => self.readv_path_fallback(reads),
+        }
+    }
+
+    /// One compound for the whole batch, including the special-stateid
+    /// CLOSE. Downgrades to the open+close form if the server rejects that
+    /// CLOSE.
+    fn readv_path_full(
+        &mut self,
+        reads: &[ReadOp],
+        path_ops: &[crate::client::PathReadOp],
+        offsets: &[u64],
+    ) -> VfResult<Vec<ReadResult>> {
+        match self.nfs.readv_path_compound(path_ops, true) {
+            Ok(outcome) => {
+                if let Some((_i, st)) = outcome.failed {
+                    if Self::is_stateid_error(st) {
+                        // The special stateid itself is rejected: disable the
+                        // merged path entirely.
+                        self.merged_mode = MergedIoMode::Off;
+                    }
+                    self.close_path_opens(&outcome.opened);
+                    return self.readv_path_fallback(reads);
+                }
+                if let Some(_st) = outcome.close_failed {
+                    self.merged_mode = MergedIoMode::OpenWrite;
+                    return self.readv_path_openwrite(reads, path_ops, offsets);
+                }
+                Ok(self.assemble_reads(reads, offsets, &outcome.data, &outcome.eof))
+            }
+            Err(_) => self.readv_path_fallback(reads),
+        }
+    }
+
+    fn assemble_reads(
+        &self,
+        reads: &[ReadOp],
+        offsets: &[u64],
+        data: &[Option<Vec<u8>>],
+        eof: &[Option<bool>],
+    ) -> Vec<ReadResult> {
+        reads
+            .iter()
+            .enumerate()
+            .map(|(i, r)| ReadResult {
+                file: r.file.clone(),
+                offset: offsets[i],
+                data: data[i].clone().unwrap_or_default(),
+                eof: eof[i].unwrap_or(false),
+            })
+            .collect()
+    }
+
+    /// The legacy phased path-based writev.
+    fn writev_path_fallback(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+        if writes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut tmp: Vec<Option<i32>> = vec![None; writes.len()];
+        let mut files = Vec::with_capacity(writes.len());
+        let mut creation = Vec::with_capacity(writes.len());
+        let mut needs_open = false;
+        for (i, w) in writes.iter().enumerate() {
+            files.push(&w.file);
+            creation.push(w.creation);
+            if !w.file.is_descriptor() {
+                needs_open = true;
+                if w.offset == VfOffset::Cur {
+                    return Err(VfError::failure(i, ERR_INVAL));
+                }
+            }
+        }
+        if needs_open {
+            tmp = self.open_path_batch(&files, &creation, true)?;
+        }
+        let remapped: Vec<WriteOp> = writes
+            .iter()
+            .enumerate()
+            .map(|(i, w)| WriteOp {
+                file: match tmp[i] {
+                    Some(fd) => VfFile::from_fd(fd),
+                    None => w.file.clone(),
+                },
+                offset: w.offset,
+                data: w.data.clone(),
+                creation: false,
+            })
+            .collect();
+        let result = self.writev_batch(&remapped);
+        self.close_tmp(&tmp);
+        let mut out = result?;
+        for (i, r) in out.iter_mut().enumerate() {
+            r.file = writes[i].file.clone();
+        }
+        Ok(out)
+    }
+
+    fn writev_path_openwrite(
+        &mut self,
+        writes: &[WriteOp],
+        path_ops: &[crate::client::PathWriteOp],
+        offsets: &[u64],
+    ) -> VfResult<Vec<WriteResult>> {
+        match self.nfs.writev_path_compound(path_ops, false) {
+            Ok(outcome) => {
+                if let Some((_i, _st)) = outcome.failed {
+                    self.close_path_opens(&outcome.opened);
+                    return self.writev_path_fallback(writes);
+                }
+                self.close_path_opens(&outcome.opened);
+                Ok(self.assemble_writes(writes, offsets, &outcome.counts, &outcome.committed))
+            }
+            Err(_) => self.writev_path_fallback(writes),
+        }
+    }
+
+    fn writev_path_full(
+        &mut self,
+        writes: &[WriteOp],
+        path_ops: &[crate::client::PathWriteOp],
+        offsets: &[u64],
+    ) -> VfResult<Vec<WriteResult>> {
+        match self.nfs.writev_path_compound(path_ops, true) {
+            Ok(outcome) => {
+                if let Some((_i, st)) = outcome.failed {
+                    if Self::is_stateid_error(st) {
+                        self.merged_mode = MergedIoMode::Off;
+                    }
+                    self.close_path_opens(&outcome.opened);
+                    return self.writev_path_fallback(writes);
+                }
+                if let Some(_st) = outcome.close_failed {
+                    self.merged_mode = MergedIoMode::OpenWrite;
+                    return self.writev_path_openwrite(writes, path_ops, offsets);
+                }
+                Ok(self.assemble_writes(writes, offsets, &outcome.counts, &outcome.committed))
+            }
+            Err(_) => self.writev_path_fallback(writes),
+        }
+    }
+
+    fn assemble_writes(
+        &self,
+        writes: &[WriteOp],
+        offsets: &[u64],
+        counts: &[Option<u32>],
+        committed: &[Option<u32>],
+    ) -> Vec<WriteResult> {
+        writes
+            .iter()
+            .enumerate()
+            .map(|(i, w)| WriteResult {
+                file: w.file.clone(),
+                offset: offsets[i],
+                written: counts[i].unwrap_or(0) as usize,
+                stable: committed[i].unwrap_or(0) == stable_how4_FILE_SYNC4,
+            })
+            .collect()
+    }
+
+    /// Best-effort close of stateids opened by a merged path compound.
+    fn close_path_opens(&mut self, opens: &[(crate::client::FileHandle, stateid4)]) {
+        if opens.is_empty() {
+            return;
+        }
+        let ops: Vec<crate::client::CloseOp> = opens
+            .iter()
+            .map(|(fh, sid)| crate::client::CloseOp {
+                fh: fh.clone(),
+                stateid: *sid,
+            })
+            .collect();
+        let _ = self.nfs.close_many_path(&ops);
+    }
+
+    /// The legacy phased renamev (cached parent resolution + rename_many).
+    fn renamev_phased(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
+        let mut src_cache: std::collections::HashMap<String, FileHandle> =
+            std::collections::HashMap::new();
+        let mut dst_cache: std::collections::HashMap<String, FileHandle> =
+            std::collections::HashMap::new();
+        let mut ops = Vec::with_capacity(pairs.len());
+        for (i, (src, dst)) in pairs.iter().enumerate() {
+            let s = self.vf_path(src).map_err(|e| e.with_index(i))?;
+            let d = self.vf_path(dst).map_err(|e| e.with_index(i))?;
+            let (sdir, sname) = split_path(&s).map_err(|e| VfError::failure(i, e))?;
+            let (ddir, dname) = split_path(&d).map_err(|e| VfError::failure(i, e))?;
+            let sdirfh = match src_cache.get(sdir) {
+                Some(fh) => fh.clone(),
+                None => {
+                    let fh = self.resolve_path(sdir, true).map_err(|e| e.with_index(i))?;
+                    src_cache.insert(sdir.to_string(), fh.clone());
+                    fh
+                }
+            };
+            let ddirfh = match dst_cache.get(ddir) {
+                Some(fh) => fh.clone(),
+                None => {
+                    let fh = self.resolve_path(ddir, true).map_err(|e| e.with_index(i))?;
+                    dst_cache.insert(ddir.to_string(), fh.clone());
+                    fh
+                }
+            };
+            ops.push(crate::client::RenameOp {
+                srcdir: sdirfh,
+                oldname: sname.to_string(),
+                dstdir: ddirfh,
+                newname: dname.to_string(),
+            });
+        }
+        self.nfs
+            .rename_many(&ops)
+            .map_err(VfError::from_rpc_indexed)
+    }
+
+    /// The legacy phased removev (grouped per parent + remove_many).
+    fn removev_phased(&mut self, files: &[VfFile]) -> VfRes {
+        use std::collections::BTreeMap;
+        // Group by parent directory to batch REMOVEs.
+        let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (i, f) in files.iter().enumerate() {
+            let path = self.vf_path(f).map_err(|e| e.with_index(i))?;
+            let (dir, name) = split_path(&path).map_err(|e| VfError::failure(i, e))?;
+            groups
+                .entry(dir.to_string())
+                .or_default()
+                .push(name.to_string());
+        }
+        for (dir, names) in &groups {
+            let dirfh = self.resolve_path(dir, true).map_err(|e| e.with_index(0))?;
+            let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+            self.nfs
+                .remove_many(&dirfh, &refs)
+                .map_err(VfError::from_rpc_indexed)?;
+        }
+        Ok(())
+    }
+
+    /// Whether an NFS status indicates the special stateid was rejected
+    /// (rather than a per-file failure), so the merged path must be disabled.
+    fn is_stateid_error(status: u32) -> bool {
+        matches!(
+            status,
+            nfsstat4_NFS4ERR_BAD_STATEID
+                | nfsstat4_NFS4ERR_OLD_STATEID
+                | nfsstat4_NFS4ERR_STALE_STATEID
+                | nfsstat4_NFS4ERR_BAD_SEQID
+                | nfsstat4_NFS4ERR_NOTSUPP
+        )
+    }
+}
+
 impl VecFs for NfsVecFs {
     fn abs_path(&self, path: &str) -> String {
         let root_rel = if path.starts_with('/') {
@@ -1095,7 +1638,10 @@ impl VecFs for NfsVecFs {
         if paths.len() != flags.len() || paths.len() != modes.len() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
-        self.openv_impl(paths, flags, modes)
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.openv_merged(paths, flags, modes)
     }
 
     fn close(&mut self, tcf: &VfFile) -> VfResult<()> {
@@ -1147,84 +1693,75 @@ impl VecFs for NfsVecFs {
         if reads.is_empty() {
             return Ok(Vec::new());
         }
-        let mut tmp: Vec<Option<i32>> = vec![None; reads.len()];
-        let mut files = Vec::with_capacity(reads.len());
-        let mut needs_open = false;
+        if reads.iter().all(|r| r.file.is_descriptor()) {
+            return self.readv_batch(reads);
+        }
+        if reads.iter().any(|r| r.file.is_descriptor()) {
+            // Mixed descriptor/path batches keep the phased path.
+            return self.readv_path_fallback(reads);
+        }
+        // All path-based: resolve offsets and try the merged compound.
+        let mut path_ops = Vec::with_capacity(reads.len());
+        let mut offsets = Vec::with_capacity(reads.len());
         for (i, r) in reads.iter().enumerate() {
-            files.push(&r.file);
-            if !r.file.is_descriptor() {
-                needs_open = true;
-                if r.offset == VfOffset::Cur {
-                    // "current position" only exists for open descriptors.
-                    return Err(VfError::failure(i, ERR_INVAL));
+            let path = self.vf_path(&r.file).map_err(|e| e.with_index(i))?;
+            let off = match r.offset {
+                VfOffset::At(o) => o,
+                VfOffset::End => {
+                    let fh = self.resolve_follow(&path).map_err(|e| e.with_index(i))?;
+                    self.file_size(&fh).map_err(|e| e.with_index(i))?
                 }
-            }
+                VfOffset::Cur => return Err(VfError::failure(i, ERR_INVAL)),
+            };
+            offsets.push(off);
+            path_ops.push(crate::client::PathReadOp {
+                path,
+                offset: off,
+                count: r.length.min(u32::MAX as usize) as u32,
+            });
         }
-        if needs_open {
-            tmp = self.open_path_batch(&files, &vec![false; reads.len()], false)?;
+        match self.merged_mode {
+            MergedIoMode::Off => self.readv_path_fallback(reads),
+            MergedIoMode::OpenWrite => self.readv_path_openwrite(reads, &path_ops, &offsets),
+            MergedIoMode::Full => self.readv_path_full(reads, &path_ops, &offsets),
         }
-        let remapped: Vec<ReadOp> = reads
-            .iter()
-            .enumerate()
-            .map(|(i, r)| ReadOp {
-                file: match tmp[i] {
-                    Some(fd) => VfFile::from_fd(fd),
-                    None => r.file.clone(),
-                },
-                offset: r.offset,
-                length: r.length,
-            })
-            .collect();
-        let result = self.readv_batch(&remapped);
-        self.close_tmp(&tmp);
-        let mut out = result?;
-        for (i, r) in out.iter_mut().enumerate() {
-            r.file = reads[i].file.clone();
-        }
-        Ok(out)
     }
 
     fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
         if writes.is_empty() {
             return Ok(Vec::new());
         }
-        let mut tmp: Vec<Option<i32>> = vec![None; writes.len()];
-        let mut files = Vec::with_capacity(writes.len());
-        let mut creation = Vec::with_capacity(writes.len());
-        let mut needs_open = false;
+        if writes.iter().all(|w| w.file.is_descriptor()) {
+            return self.writev_batch(writes);
+        }
+        if writes.iter().any(|w| w.file.is_descriptor()) {
+            return self.writev_path_fallback(writes);
+        }
+        let mut path_ops = Vec::with_capacity(writes.len());
+        let mut offsets = Vec::with_capacity(writes.len());
         for (i, w) in writes.iter().enumerate() {
-            files.push(&w.file);
-            creation.push(w.creation);
-            if !w.file.is_descriptor() {
-                needs_open = true;
-                if w.offset == VfOffset::Cur {
-                    return Err(VfError::failure(i, ERR_INVAL));
+            let path = self.vf_path(&w.file).map_err(|e| e.with_index(i))?;
+            let off = match w.offset {
+                VfOffset::At(o) => o,
+                VfOffset::End => {
+                    let fh = self.resolve_follow(&path).map_err(|e| e.with_index(i))?;
+                    self.file_size(&fh).map_err(|e| e.with_index(i))?
                 }
-            }
-        }
-        if needs_open {
-            tmp = self.open_path_batch(&files, &creation, true)?;
-        }
-        let remapped: Vec<WriteOp> = writes
-            .iter()
-            .enumerate()
-            .map(|(i, w)| WriteOp {
-                file: match tmp[i] {
-                    Some(fd) => VfFile::from_fd(fd),
-                    None => w.file.clone(),
-                },
-                offset: w.offset,
+                VfOffset::Cur => return Err(VfError::failure(i, ERR_INVAL)),
+            };
+            offsets.push(off);
+            path_ops.push(crate::client::PathWriteOp {
+                path,
+                offset: off,
                 data: w.data.clone(),
-                creation: false,
-            })
-            .collect();
-        let result = self.writev_batch(&remapped);
-        self.close_tmp(&tmp);
-        let mut out = result?;
-        for (i, r) in out.iter_mut().enumerate() {
-            r.file = writes[i].file.clone();
+                create: w.creation,
+            });
         }
-        Ok(out)
+        match self.merged_mode {
+            MergedIoMode::Off => self.writev_path_fallback(writes),
+            MergedIoMode::OpenWrite => self.writev_path_openwrite(writes, &path_ops, &offsets),
+            MergedIoMode::Full => self.writev_path_full(writes, &path_ops, &offsets),
+        }
     }
 
     fn fseek(&mut self, tcf: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
@@ -1403,64 +1940,65 @@ impl VecFs for NfsVecFs {
     }
 
     fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
-        let mut src_cache: std::collections::HashMap<String, FileHandle> =
-            std::collections::HashMap::new();
-        let mut dst_cache: std::collections::HashMap<String, FileHandle> =
-            std::collections::HashMap::new();
-        let mut ops = Vec::with_capacity(pairs.len());
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        if pairs
+            .iter()
+            .any(|(s, d)| s.is_descriptor() || d.is_descriptor())
+        {
+            return self.renamev_phased(pairs);
+        }
+        let mut prs = Vec::with_capacity(pairs.len());
         for (i, (src, dst)) in pairs.iter().enumerate() {
             let s = self.vf_path(src).map_err(|e| e.with_index(i))?;
             let d = self.vf_path(dst).map_err(|e| e.with_index(i))?;
-            let (sdir, sname) = split_path(&s).map_err(|e| VfError::failure(i, e))?;
-            let (ddir, dname) = split_path(&d).map_err(|e| VfError::failure(i, e))?;
-            let sdirfh = match src_cache.get(sdir) {
-                Some(fh) => fh.clone(),
-                None => {
-                    let fh = self.resolve_path(sdir, true).map_err(|e| e.with_index(i))?;
-                    src_cache.insert(sdir.to_string(), fh.clone());
-                    fh
-                }
-            };
-            let ddirfh = match dst_cache.get(ddir) {
-                Some(fh) => fh.clone(),
-                None => {
-                    let fh = self.resolve_path(ddir, true).map_err(|e| e.with_index(i))?;
-                    dst_cache.insert(ddir.to_string(), fh.clone());
-                    fh
-                }
-            };
-            ops.push(crate::client::RenameOp {
-                srcdir: sdirfh,
-                oldname: sname.to_string(),
-                dstdir: ddirfh,
-                newname: dname.to_string(),
-            });
+            prs.push(crate::client::PathRenamePair { src: s, dst: d });
         }
-        self.nfs
-            .rename_many(&ops)
-            .map_err(VfError::from_rpc_indexed)
+        let outcome = self
+            .nfs
+            .renamev_path_compound(&prs)
+            .map_err(|e| VfError::from_rpc(e, 0))?;
+        match outcome.failed {
+            Some((i, _st)) => {
+                // Prefix [0..i) renamed; retry [i..] via the phased path,
+                // re-attributing its error to the original index.
+                let suffix = &pairs[i..];
+                self.renamev_phased(suffix).map_err(|e| {
+                    let rel = e.index();
+                    e.with_index(i + rel)
+                })
+            }
+            None => Ok(()),
+        }
     }
 
     fn removev(&mut self, files: &[VfFile]) -> VfRes {
-        use std::collections::BTreeMap;
-        // Group by parent directory to batch REMOVEs.
-        let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        if files.is_empty() {
+            return Ok(());
+        }
+        if files.iter().any(|f| f.is_descriptor()) {
+            return self.removev_phased(files);
+        }
+        let mut paths = Vec::with_capacity(files.len());
         for (i, f) in files.iter().enumerate() {
-            let path = self.vf_path(f).map_err(|e| e.with_index(i))?;
-            let (dir, name) = split_path(&path).map_err(|e| VfError::failure(i, e))?;
-            groups
-                .entry(dir.to_string())
-                .or_default()
-                .push(name.to_string());
+            paths.push(self.vf_path(f).map_err(|e| e.with_index(i))?);
         }
-        for (dir, names) in &groups {
-            let dirfh = self.resolve_path(dir, true).map_err(|e| e.with_index(0))?;
-            let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-            self.nfs
-                .remove_many(&dirfh, &refs)
-                .map_err(VfError::from_rpc_indexed)?;
+        let outcome = self
+            .nfs
+            .removev_path_compound(&paths)
+            .map_err(|e| VfError::from_rpc(e, 0))?;
+        match outcome.failed {
+            Some((i, _st)) => {
+                // Prefix [0..i) removed; retry [i..] via the phased path.
+                let suffix = &files[i..];
+                self.removev_phased(suffix).map_err(|e| {
+                    let rel = e.index();
+                    e.with_index(i + rel)
+                })
+            }
+            None => Ok(()),
         }
-        Ok(())
     }
 
     fn mkdirv(&mut self, dirs: &[VfAttrs]) -> VfRes {

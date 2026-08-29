@@ -559,6 +559,293 @@ fn path_readv_is_batched() {
 }
 
 #[test]
+fn writev_path_is_one_compound_per_dir() {
+    let dir = setup_dir("writev1");
+    let mut c = client();
+    let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let ops: Vec<WriteOp> = paths
+        .iter()
+        .map(|p| WriteOp::at(VfFile::from_path(p), 0, b"x".to_vec()).with_creation())
+        .collect();
+    let res = c.writev(&ops).unwrap();
+    assert_eq!(res.len(), 5);
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(
+        compounds, 1,
+        "path writev of N files in one dir must be a single compound, got {}",
+        compounds
+    );
+}
+
+#[test]
+fn readv_path_is_one_compound_per_dir() {
+    let dir = setup_dir("readv1");
+    let mut c = client();
+    let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
+    write_file(&mut c, &paths[0], b"hello world");
+    let payloads: Vec<Vec<u8>> = paths
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let data = format!("data-{}", i).into_bytes();
+            write_file(&mut c, p, &data);
+            data
+        })
+        .collect();
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let ops: Vec<ReadOp> = paths
+        .iter()
+        .zip(&payloads)
+        .map(|(p, d)| ReadOp::at(VfFile::from_path(p), 0, d.len()))
+        .collect();
+    let res = c.readv(&ops).unwrap();
+    assert_eq!(res.len(), 5);
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(
+        compounds, 1,
+        "path readv of N files in one dir must be a single compound, got {}",
+        compounds
+    );
+    for (r, d) in res.iter().zip(&payloads) {
+        assert_eq!(&r.data, d);
+    }
+}
+
+#[test]
+fn writev_path_openwrite_form_is_two_compounds() {
+    // The portable fallback: one open+write compound, one close compound.
+    let dir = setup_dir("writev2");
+    let mut c = client();
+    c.set_merged_mode("openwrite");
+    let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
+    let payloads: Vec<Vec<u8>> = (0..5).map(|i| format!("data-{}", i).into_bytes()).collect();
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let ops: Vec<WriteOp> = paths
+        .iter()
+        .zip(&payloads)
+        .map(|(p, d)| WriteOp::at(VfFile::from_path(p), 0, d.clone()).with_creation())
+        .collect();
+    let res = c.writev(&ops).unwrap();
+    assert_eq!(res.len(), 5);
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(
+        compounds, 2,
+        "openwrite form must use 2 compounds, got {}",
+        compounds
+    );
+    // Data round-trips.
+    let back = c
+        .readv(
+            &paths
+                .iter()
+                .zip(&payloads)
+                .map(|(p, d)| ReadOp::at(VfFile::from_path(p), 0, d.len()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    for (r, d) in back.iter().zip(&payloads) {
+        assert_eq!(&r.data, d);
+    }
+}
+
+#[test]
+fn readv_path_openwrite_form_is_two_compounds() {
+    let dir = setup_dir("readv2");
+    let mut c = client();
+    let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
+    let payloads: Vec<Vec<u8>> = (0..5).map(|i| format!("data-{}", i).into_bytes()).collect();
+    for (p, d) in paths.iter().zip(&payloads) {
+        write_file(&mut c, p, d);
+    }
+    c.set_merged_mode("openwrite");
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let ops: Vec<ReadOp> = paths
+        .iter()
+        .zip(&payloads)
+        .map(|(p, d)| ReadOp::at(VfFile::from_path(p), 0, d.len()))
+        .collect();
+    let res = c.readv(&ops).unwrap();
+    assert_eq!(res.len(), 5);
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(
+        compounds, 2,
+        "openwrite form must use 2 compounds, got {}",
+        compounds
+    );
+    for (r, d) in res.iter().zip(&payloads) {
+        assert_eq!(&r.data, d);
+    }
+}
+
+#[test]
+fn getattrsv_path_is_one_compound() {
+    let dir = setup_dir("getattrv1");
+    let mut c = client();
+    let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
+    for p in &paths {
+        write_file(&mut c, p, b"x");
+    }
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let mut attrs: Vec<VfAttrs> = paths
+        .iter()
+        .map(|p| VfAttrs {
+            file: VfFile::from_path(p),
+            masks: AttrMask::stat(),
+            ..VfAttrs::default()
+        })
+        .collect();
+    c.getattrsv(&mut attrs).unwrap();
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(
+        compounds, 1,
+        "getattrsv must be one compound, got {}",
+        compounds
+    );
+    for a in &attrs {
+        assert_eq!(a.ftype, VfType::Regular);
+        assert!(a.returned.contains(AttrMask::SIZE));
+    }
+}
+
+#[test]
+fn setattrsv_path_is_one_compound() {
+    let dir = setup_dir("setattrv1");
+    let mut c = client();
+    let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
+    for p in &paths {
+        write_file(&mut c, p, b"long content");
+    }
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let attrs: Vec<VfAttrs> = paths
+        .iter()
+        .map(|p| VfAttrs {
+            file: VfFile::from_path(p),
+            masks: AttrMask::SIZE,
+            size: 3,
+            ..VfAttrs::default()
+        })
+        .collect();
+    c.setattrsv(&attrs).unwrap();
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(
+        compounds, 1,
+        "setattrsv must be one compound, got {}",
+        compounds
+    );
+    for p in &paths {
+        assert_eq!(c.stat(p).unwrap().size, 3);
+    }
+}
+
+#[test]
+fn openv_closev_path_is_one_compound_each() {
+    let dir = setup_dir("openv1");
+    let mut c = client();
+    let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
+    let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let files = c
+        .openv(&refs, &[libc::O_CREAT | libc::O_RDWR; 5], &[0o644; 5])
+        .unwrap();
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(
+        compounds, 1,
+        "openv must be one compound, got {}",
+        compounds
+    );
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    c.closev(&files).unwrap();
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(
+        compounds, 1,
+        "closev must be one compound, got {}",
+        compounds
+    );
+}
+
+#[test]
+fn removev_path_is_one_compound() {
+    let dir = setup_dir("removev1");
+    let mut c = client();
+    let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
+    for p in &paths {
+        write_file(&mut c, p, b"x");
+    }
+    let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_path(p)).collect();
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    c.removev(&files).unwrap();
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(
+        compounds, 1,
+        "removev must be one compound, got {}",
+        compounds
+    );
+    for p in &paths {
+        assert!(!c.exists(p).unwrap());
+    }
+}
+
+#[test]
+fn renamev_path_is_one_compound() {
+    let dir = setup_dir("renamev1");
+    let mut c = client();
+    let srcs: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
+    let dsts: Vec<String> = (0..5).map(|i| format!("{}/g{}", dir, i)).collect();
+    for p in &srcs {
+        write_file(&mut c, p, b"x");
+    }
+    let pairs: Vec<(VfFile, VfFile)> = srcs
+        .iter()
+        .zip(&dsts)
+        .map(|(s, d)| (VfFile::from_path(s), VfFile::from_path(d)))
+        .collect();
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    c.renamev(&pairs).unwrap();
+    let compounds = vnfs::compound::compound_stats().0;
+    assert_eq!(
+        compounds, 1,
+        "renamev must be one compound, got {}",
+        compounds
+    );
+    for d in &dsts {
+        assert!(c.exists(d).unwrap());
+    }
+}
+
+#[test]
+fn path_writev_follows_final_symlink() {
+    // The merged compound cannot OPEN a symlink (NFS4ERR_SYMLINK); the
+    // backend must fall back to the phased path and write the target.
+    let dir = setup_dir("wrsymlink");
+    let mut c = client();
+    let target = format!("{}/target", dir);
+    let link = format!("{}/link", dir);
+    write_file(&mut c, &target, b"");
+    let rel = std::path::Path::new(&target)
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    c.symlink(&rel, &link).unwrap();
+    c.writev(&[WriteOp::at(
+        VfFile::from_path(&link),
+        0,
+        b"via-link".to_vec(),
+    )])
+    .unwrap();
+    assert_eq!(
+        c.read(&VfFile::from_path(&target), 0, 8).unwrap(),
+        b"via-link"
+    );
+    // And a readv through the link reads the target.
+    let r = c
+        .readv(&[ReadOp::at(VfFile::from_path(&link), 0, 8)])
+        .unwrap();
+    assert_eq!(r[0].data, b"via-link");
+}
+
+#[test]
 fn openv_ocreat_preserves_existing_mode() {
     let dir = setup_dir("openv_mode");
     let mut c = client();

@@ -33,57 +33,57 @@ def test_round_trip_bounds(nfs_fs):
         fs.mkdir(f"nfs4:///tree/sub{i}", create_parents=True)
     paths = [_unique(nfs_fs, f"rt/{i}.txt") for i in range(n)]
 
-    # pipe: write batch + truncate batch.
+    # pipe: merged write compound + merged truncate compound.
     _, pipe_count = _measured(
         fs, lambda: fs.pipe({p: f"data-{i}".encode() for i, p in enumerate(paths)})
     )
-    assert pipe_count < 12, pipe_count
+    assert pipe_count < 4, pipe_count
 
-    # cat: one stat batch + one read batch.
+    # cat: one merged stat compound + one merged read compound.
     out, cat_count = _measured(fs, lambda: fs.cat(paths))
     assert len(out) == n
-    assert cat_count < 12, cat_count
+    assert cat_count < 4, cat_count
 
-    # cat_ranges: one read batch (no stat).
+    # cat_ranges: one merged read compound (no stat).
     _, ranges_count = _measured(
         fs, lambda: fs.cat_ranges(paths, [0] * n, [6] * n)
     )
-    assert ranges_count < 8, ranges_count
+    assert ranges_count < 3, ranges_count
 
-    # OpenFiles: one openv batch on enter, one closev batch on exit.
+    # OpenFiles: one merged openv compound on enter, one closev on exit.
     open_files = fsspec.open_files(
         "nfs4:///rt/of_*.txt", mode="wb", num=n, host=fs.host, root=fs._root
     )
     fs._client.compound_stats()
     files = open_files.__enter__()
     open_count = fs._client.compound_stats()[0]
-    assert open_count < 8, open_count
+    assert open_count < 3, open_count
     for f in files:
         f.write(b"x" * 16)
     fs._client.compound_stats()
     open_files.__exit__(None, None, None)
     commit_count = fs._client.compound_stats()[0]
-    assert commit_count < 3, commit_count
+    assert commit_count < 2, commit_count
 
-    # non-recursive rm: one removev batch.
+    # non-recursive rm: one merged removev compound.
     _, rm_count = _measured(fs, lambda: fs.rm(paths))
-    assert rm_count < 6, rm_count
+    assert rm_count < 3, rm_count
 
-    # mv: one renamev batch.
+    # mv: one merged renamev compound.
     srcs = [_unique(nfs_fs, f"mv/{i}.txt") for i in range(n)]
     dsts = [_unique(nfs_fs, f"mv2/{i}.txt") for i in range(n)]
     fs.pipe({p: b"x" for p in srcs})
     _, mv_count = _measured(fs, lambda: fs.mv(srcs, dsts))
-    assert mv_count < 8, mv_count
+    assert mv_count < 3, mv_count
 
-    # cp: size + read + write + truncate batches.
+    # cp: merged stat + read + write + truncate compounds.
     _, cp_count = _measured(
         fs,
         lambda: fs.cp(
             dsts, [_unique(nfs_fs, f"cp/{i}.txt") for i in range(n)]
         ),
     )
-    assert cp_count < 24, cp_count
+    assert cp_count < 6, cp_count
 
     # walk on a 30-node tree is level-batched.
     for i in range(5):
