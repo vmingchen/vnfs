@@ -1420,6 +1420,117 @@ mod tests {
         assert!(fs.exists("/rel").unwrap());
     }
 
+    #[test]
+    fn dummy_reports_special_file_types() {
+        let (root, mut fs) = fs("special-types");
+        let real = root.0.join("fifo");
+        let c = std::ffi::CString::new(real.to_str().unwrap()).unwrap();
+        unsafe { libc::mkfifo(c.as_ptr(), 0o644) };
+
+        let sock_path = root.0.join("sock");
+        let sock_c = std::ffi::CString::new(sock_path.to_str().unwrap()).unwrap();
+        let fd = unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            let mut addr: libc::sockaddr_un = std::mem::zeroed();
+            addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+            let bytes = sock_c.as_bytes();
+            for (i, b) in bytes.iter().take(107).enumerate() {
+                addr.sun_path[i] = *b as libc::c_char;
+            }
+            libc::bind(
+                fd,
+                &addr as *const libc::sockaddr_un as *const libc::sockaddr,
+                std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+            );
+            fd
+        };
+        assert!(fd >= 0);
+
+        assert_eq!(fs.stat("/fifo").unwrap().ftype, VfType::Fifo);
+        assert_eq!(fs.lstat("/fifo").unwrap().ftype, VfType::Fifo);
+        assert_eq!(fs.stat("/sock").unwrap().ftype, VfType::Socket);
+        let listed = fs.listdir("/", AttrMask::default(), 0, false).unwrap();
+        assert!(listed.iter().any(|e| e.ftype == VfType::Fifo));
+        assert!(listed.iter().any(|e| e.ftype == VfType::Socket));
+
+        unsafe { libc::close(fd) };
+    }
+
+    #[test]
+    fn dummy_descriptor_sees_external_truncation() {
+        let (root, mut fs) = fs("ext-trunc");
+        write(&mut fs, "/f", b"0123456789");
+        let fd = fs.open("/f", libc::O_RDWR, 0).unwrap();
+        let real = root.0.join("f");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&real)
+            .unwrap()
+            .set_len(3)
+            .unwrap();
+        let r = fs
+            .readv(&[ReadOp::new(fd.clone(), VfOffset::At(0), 10)])
+            .unwrap();
+        assert_eq!(r[0].data, b"012", "descriptor sees the new size");
+        fs.close(&fd).unwrap();
+    }
+
+    #[test]
+    fn dummy_cwd_dotdot_stays_in_root() {
+        let (root, mut fs) = fs("cwd-dotdot");
+        fs.mkdir("/a", 0o755).unwrap();
+        fs.chdir("/a").unwrap();
+
+        fs.writev(&[WriteOp::at(VfFile::from_path("../x"), 0, b"1".to_vec()).with_creation()])
+            .unwrap();
+        fs.writev(&[WriteOp::at(VfFile::from_path("a/../y"), 0, b"2".to_vec()).with_creation()])
+            .unwrap();
+        assert!(fs.exists("/x").unwrap());
+        // From cwd /a, "a/../y" resolves to /a/y (the ".." cancels the "a").
+        assert!(fs.exists("/a/y").unwrap());
+        assert!(!fs.exists("/y").unwrap());
+        assert!(!root.0.parent().unwrap().join("x").exists());
+        assert!(!root.0.parent().unwrap().join("y").exists());
+
+        // ".." from the root clamps at the root instead of escaping.
+        fs.chdir("/").unwrap();
+        fs.writev(&[WriteOp::at(VfFile::from_path("../z"), 0, b"3".to_vec()).with_creation()])
+            .unwrap();
+        assert!(fs.exists("/z").unwrap());
+        assert!(!root.0.parent().unwrap().join("z").exists());
+    }
+
+    #[test]
+    fn dummy_named_attr_detection() {
+        use std::ffi::CString;
+        let (root, mut fs) = fs("xattr");
+        write(&mut fs, "/f", b"x");
+        let real = root.0.join("f");
+        let real = real.to_string_lossy().into_owned();
+        let c = CString::new(real).unwrap();
+        let name = CString::new("user.test").unwrap();
+        let val = b"v";
+        let rc = unsafe {
+            libc::setxattr(
+                c.as_ptr(),
+                name.as_ptr(),
+                val.as_ptr() as *const libc::c_void,
+                val.len(),
+                0,
+            )
+        };
+        assert_eq!(rc, 0, "setxattr");
+
+        let mut a = VfAttrs {
+            file: VfFile::from_path("/f"),
+            masks: AttrMask::NAMED_ATTR,
+            ..VfAttrs::default()
+        };
+        fs.getattrsv(std::slice::from_mut(&mut a)).unwrap();
+        assert!(a.has_named_attr);
+        assert!(a.returned.contains(AttrMask::NAMED_ATTR));
+    }
+
     // ------------------------------------------------------------------
     // Attributes: returned tracking, strict setattrsv, lsetattrsv
     // ------------------------------------------------------------------

@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 use crate::vecfs::*;
@@ -20,6 +20,7 @@ struct DummyOpen {
     file: File,
     path: String,
     cur_offset: u64,
+    append: bool,
 }
 
 /// A local-filesystem [`VecFs`]. `"/"` is the `root` directory.
@@ -195,6 +196,14 @@ impl DummyVecFs {
             VfType::Directory
         } else if ft.is_symlink() {
             VfType::Symlink
+        } else if ft.is_fifo() {
+            VfType::Fifo
+        } else if ft.is_socket() {
+            VfType::Socket
+        } else if ft.is_block_device() {
+            VfType::BlockDevice
+        } else if ft.is_char_device() {
+            VfType::CharDevice
         } else {
             VfType::Regular
         };
@@ -336,7 +345,13 @@ impl DummyVecFs {
                     .metadata()
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?
                     .len();
-                let off = self.resolve_offset(&op.file, op.offset, len)?;
+                // O_APPEND writes always land at EOF regardless of the
+                // requested offset; report and track the real position.
+                let off = if o.append {
+                    len
+                } else {
+                    self.resolve_offset(&op.file, op.offset, len)?
+                };
                 let f = o
                     .file
                     .try_clone()
@@ -457,6 +472,9 @@ impl DummyVecFs {
             doff += n as u64;
             copied += n as u64;
         }
+        // Truncate any stale tail beyond what was copied (cp semantics).
+        dst.set_len(doff)
+            .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         Ok(())
     }
 
@@ -500,10 +518,34 @@ impl VecFs for DummyVecFs {
             VfPathBase::Cwd => self.resolve(pathname),
         };
         let p = self.real_path(&resolved)?;
-        let file = Self::open_options(flags)
-            .open(&p)
-            .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
-        if flags & O_CREAT != 0 {
+        // The mode only applies when O_CREAT actually creates the file
+        // (POSIX ignores it for existing files). Try create_new to detect
+        // creation, then fall back to a plain open on EEXIST.
+        let mut created = false;
+        let file = if flags & O_CREAT != 0 {
+            let mut opts = Self::open_options(flags);
+            opts.create_new(true);
+            match opts.open(&p) {
+                Ok(f) => {
+                    created = true;
+                    f
+                }
+                Err(e)
+                    if flags & libc::O_EXCL == 0
+                        && e.kind() == std::io::ErrorKind::AlreadyExists =>
+                {
+                    Self::open_options(flags)
+                        .open(&p)
+                        .map_err(|e| VfError::failure(0, Self::errno(&e)))?
+                }
+                Err(e) => return Err(VfError::failure(0, Self::errno(&e))),
+            }
+        } else {
+            Self::open_options(flags)
+                .open(&p)
+                .map_err(|e| VfError::failure(0, Self::errno(&e)))?
+        };
+        if created {
             let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode & 0o7777));
         }
         self.next_fd += 1;
@@ -513,6 +555,7 @@ impl VecFs for DummyVecFs {
                 file,
                 path: pathname.to_string(),
                 cur_offset: 0,
+                append: flags & libc::O_APPEND != 0,
             },
         );
         Ok(VfFile::from_fd(self.next_fd))

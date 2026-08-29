@@ -14,6 +14,15 @@ pub struct FileHandle {
     bytes: Vec<u8>,
 }
 
+/// Which open owner a client operation uses: the user-visible descriptor
+/// owner, or the internal path-op owner whose stateids never collide with
+/// caller-held descriptors.
+#[derive(Clone, Copy)]
+enum OwnerSlot {
+    User,
+    Path,
+}
+
 impl FileHandle {
     fn as_nfs_fh(&self) -> nfs_fh4 {
         nfs_fh4 {
@@ -152,7 +161,7 @@ const MAX_COMPOUND_OPS: usize = 256;
 /// FATTR4_TIME_CREATE is intentionally absent (ganesha omits it, and it maps
 /// to creation time, not stat's ctime). FATTR4_NAMED_ATTR is the per-object
 /// "has a non-empty named attribute directory" boolean (RFC 5661 s5.8.1.8).
-pub const READDIR_ATTRS: [u32; 12] = [
+pub const READDIR_ATTRS: [u32; 13] = [
     FATTR4_TYPE,
     FATTR4_SIZE,
     FATTR4_NAMED_ATTR,
@@ -164,6 +173,7 @@ pub const READDIR_ATTRS: [u32; 12] = [
     FATTR4_RAWDEV,
     FATTR4_SPACE_USED,
     FATTR4_TIME_ACCESS,
+    FATTR4_TIME_METADATA,
     FATTR4_TIME_MODIFY,
 ];
 
@@ -189,6 +199,114 @@ impl NfsClient {
         let res = self.session.compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         Ok(FileHandle::from_nfs_fh(res.getfh(3)))
+    }
+
+    /// Look up `name` below `dir`, returning the child handle and its
+    /// FATTR4_TYPE in one compound (`[PUTFH, LOOKUP, GETFH, GETATTR]`).
+    /// A symlink is returned as-is (type `NF4LNK`), so callers can follow it.
+    pub fn lookup_getattr(&mut self, dir: &FileHandle, name: &str) -> RpcResult<(FileHandle, u32)> {
+        let mut c = Compound::new();
+        c.tag(b"lookup_getattr");
+        c.putfh(&dir.as_nfs_fh());
+        c.lookup(name.as_bytes());
+        c.getfh();
+        c.getattr(&[FATTR4_TYPE]);
+        let res = self.session.compound(&mut c)?;
+        self.session.expect_all_ok(&res)?;
+        let fh = FileHandle::from_nfs_fh(res.getfh(3));
+        let t = res.getattr_bytes(4);
+        let ftype = if t.len() >= 4 {
+            u32::from_be_bytes(t[0..4].try_into().unwrap())
+        } else {
+            0
+        };
+        Ok((fh, ftype))
+    }
+
+    /// Tolerantly LOOKUP each `(parent, name)` and return the child handle and
+    /// FATTR4_TYPE (`[PUTFH, LOOKUP, GETFH, GETATTR]` per element). Failed
+    /// LOOKUPs are reported per path; only transport / compound-level
+    /// failures abort the whole call.
+    pub fn lookup_getattr_many(
+        &mut self,
+        ops: &[(FileHandle, String)],
+    ) -> RpcResult<Vec<Result<(FileHandle, u32), u32>>> {
+        let per_chunk = (MAX_COMPOUND_OPS - 1) / 4;
+        let mut out = Vec::with_capacity(ops.len());
+        for chunk in ops.chunks(per_chunk) {
+            let mut c = Compound::new();
+            c.tag(b"lookup_typev");
+            for (dir, name) in chunk {
+                c.putfh(&dir.as_nfs_fh());
+                c.lookup(name.as_bytes());
+                c.getfh();
+                c.getattr(&[FATTR4_TYPE]);
+            }
+            let res = self.session.compound(&mut c)?;
+            for (i, _) in chunk.iter().enumerate() {
+                let st_idx = 2 + 4 * i;
+                if st_idx >= res.nops() {
+                    out.push(Err(res.status()));
+                    continue;
+                }
+                if res.op_status(st_idx) == nfsstat4_NFS4_OK
+                    && 3 + 4 * i < res.nops()
+                    && 4 + 4 * i < res.nops()
+                {
+                    let fh = FileHandle::from_nfs_fh(res.getfh(3 + 4 * i));
+                    let t = res.getattr_bytes(4 + 4 * i);
+                    let ftype = if t.len() >= 4 {
+                        u32::from_be_bytes(t[0..4].try_into().unwrap())
+                    } else {
+                        0
+                    };
+                    out.push(Ok((fh, ftype)));
+                } else {
+                    out.push(Err(res.op_status(st_idx)));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Tolerantly LOOKUP each `(parent, name)` in as few compounds as
+    /// possible (`[PUTFH, LOOKUP, GETFH]` per element), returning the per-path
+    /// result. A failed LOOKUP (e.g. `NFS4ERR_NOENT`) is reported per path;
+    /// only transport / compound-level failures abort the whole call. The
+    /// returned error index, when one is produced, is the element's position
+    /// in `ops`.
+    pub fn lookup_many(
+        &mut self,
+        ops: &[(FileHandle, String)],
+    ) -> RpcResult<Vec<Result<FileHandle, u32>>> {
+        let per_chunk = (MAX_COMPOUND_OPS - 1) / 3;
+        let mut out = Vec::with_capacity(ops.len());
+        for chunk in ops.chunks(per_chunk) {
+            let mut c = Compound::new();
+            c.tag(b"lookupv");
+            for (dir, name) in chunk {
+                c.putfh(&dir.as_nfs_fh());
+                c.lookup(name.as_bytes());
+                c.getfh();
+            }
+            let res = self.session.compound(&mut c)?;
+            for (i, _) in chunk.iter().enumerate() {
+                let st_idx = 2 + 3 * i;
+                if st_idx >= res.nops() {
+                    // The server aborted the compound at an earlier failing
+                    // op and omitted the remaining resops; report the
+                    // compound status for everything from here on.
+                    out.push(Err(res.status()));
+                    continue;
+                }
+                if res.op_status(st_idx) == nfsstat4_NFS4_OK && 3 + 3 * i < res.nops() {
+                    out.push(Ok(FileHandle::from_nfs_fh(res.getfh(3 + 3 * i))));
+                } else {
+                    out.push(Err(res.op_status(st_idx)));
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Resolve a slash-separated path from the export root in a single
@@ -303,16 +421,51 @@ impl NfsClient {
         access: u32,
         create: OpenCreate,
     ) -> RpcResult<(FileHandle, stateid4)> {
+        self.open_slot(dir, name, access, create, OwnerSlot::User)
+    }
+
+    /// Like [`open`](Self::open) but uses the path-op open owner, whose
+    /// stateids never collide with caller-held descriptors.
+    pub fn open_path(
+        &mut self,
+        dir: &FileHandle,
+        name: &str,
+        access: u32,
+        create: OpenCreate,
+    ) -> RpcResult<(FileHandle, stateid4)> {
+        self.open_slot(dir, name, access, create, OwnerSlot::Path)
+    }
+
+    fn open_slot(
+        &mut self,
+        dir: &FileHandle,
+        name: &str,
+        access: u32,
+        create: OpenCreate,
+        slot: OwnerSlot,
+    ) -> RpcResult<(FileHandle, stateid4)> {
+        let (seqid, verifier, owner_name) = match slot {
+            OwnerSlot::User => (
+                self.session.open_owner.seqid,
+                self.session.open_owner.verifier,
+                self.session.open_owner.name.clone(),
+            ),
+            OwnerSlot::Path => (
+                self.session.path_owner.seqid,
+                self.session.path_owner.verifier,
+                self.session.path_owner.name.clone(),
+            ),
+        };
         let mut c = Compound::new();
         c.tag(b"open");
         c.putfh(&dir.as_nfs_fh());
-        let openhow = make_open_how(create, self.session.open_owner.verifier);
+        let openhow = make_open_how(create, verifier);
         c.open_claim_null(
-            self.session.open_owner.seqid,
+            seqid,
             access,
             OPEN4_SHARE_DENY_NONE,
             self.session.clientid,
-            &self.session.open_owner.name,
+            &owner_name,
             openhow,
             name.as_bytes(),
         );
@@ -321,7 +474,10 @@ impl NfsClient {
         self.session.expect_all_ok(&res)?;
         let stateid = res.open(2).stateid;
         let fh = res.getfh(3);
-        self.session.open_owner.seqid += 1;
+        match slot {
+            OwnerSlot::User => self.session.open_owner.seqid += 1,
+            OwnerSlot::Path => self.session.path_owner.seqid += 1,
+        }
         Ok((FileHandle::from_nfs_fh(fh), stateid))
     }
 
@@ -476,10 +632,32 @@ impl NfsClient {
     /// `[PUTFH dir, OPEN, GETFH]`. Open-owner seqids are assigned
     /// consecutively across the batch.
     pub fn open_many(&mut self, ops: &[OpenOp]) -> RpcResult<Vec<(FileHandle, stateid4)>> {
-        let base = self.session.open_owner.seqid;
-        let verifier = self.session.open_owner.verifier;
+        self.open_many_slot(ops, OwnerSlot::User)
+    }
+
+    /// Like [`open_many`](Self::open_many) but using the path-op open owner.
+    pub fn open_many_path(&mut self, ops: &[OpenOp]) -> RpcResult<Vec<(FileHandle, stateid4)>> {
+        self.open_many_slot(ops, OwnerSlot::Path)
+    }
+
+    fn open_many_slot(
+        &mut self,
+        ops: &[OpenOp],
+        slot: OwnerSlot,
+    ) -> RpcResult<Vec<(FileHandle, stateid4)>> {
+        let (base, verifier, owner_name) = match slot {
+            OwnerSlot::User => (
+                self.session.open_owner.seqid,
+                self.session.open_owner.verifier,
+                self.session.open_owner.name.clone(),
+            ),
+            OwnerSlot::Path => (
+                self.session.path_owner.seqid,
+                self.session.path_owner.verifier,
+                self.session.path_owner.name.clone(),
+            ),
+        };
         let clientid = self.session.clientid;
-        let owner_name = self.session.open_owner.name.clone();
         let n = ops.len();
         let out = self.batch_ops(
             b"openv",
@@ -505,14 +683,29 @@ impl NfsClient {
                 (FileHandle::from_nfs_fh(fh), stateid)
             },
         )?;
-        self.session.open_owner.seqid = base + n as u32;
+        match slot {
+            OwnerSlot::User => self.session.open_owner.seqid = base + n as u32,
+            OwnerSlot::Path => self.session.path_owner.seqid = base + n as u32,
+        }
         Ok(out)
     }
 
     /// CLOSE several files in as few compounds as possible. Close seqids are
     /// assigned consecutively across the batch.
     pub fn close_many(&mut self, ops: &[CloseOp]) -> RpcResult<()> {
-        let base = self.session.open_owner.seqid;
+        self.close_many_slot(ops, OwnerSlot::User)
+    }
+
+    /// Like [`close_many`](Self::close_many) but using the path-op open owner.
+    pub fn close_many_path(&mut self, ops: &[CloseOp]) -> RpcResult<()> {
+        self.close_many_slot(ops, OwnerSlot::Path)
+    }
+
+    fn close_many_slot(&mut self, ops: &[CloseOp], slot: OwnerSlot) -> RpcResult<()> {
+        let base = match slot {
+            OwnerSlot::User => self.session.open_owner.seqid,
+            OwnerSlot::Path => self.session.path_owner.seqid,
+        };
         let n = ops.len();
         let _ = self.batch_ops::<CloseOp, ()>(
             b"closev",
@@ -524,7 +717,10 @@ impl NfsClient {
             },
             |_, _| (),
         )?;
-        self.session.open_owner.seqid = base + n as u32;
+        match slot {
+            OwnerSlot::User => self.session.open_owner.seqid = base + n as u32,
+            OwnerSlot::Path => self.session.path_owner.seqid = base + n as u32,
+        }
         Ok(())
     }
 
@@ -575,13 +771,34 @@ impl NfsClient {
 
     /// CLOSE the open file.
     pub fn close(&mut self, fh: &FileHandle, stateid: &stateid4) -> RpcResult<()> {
+        self.close_slot(fh, stateid, OwnerSlot::User)
+    }
+
+    /// Like [`close`](Self::close) but using the path-op open owner.
+    pub fn close_path(&mut self, fh: &FileHandle, stateid: &stateid4) -> RpcResult<()> {
+        self.close_slot(fh, stateid, OwnerSlot::Path)
+    }
+
+    fn close_slot(
+        &mut self,
+        fh: &FileHandle,
+        stateid: &stateid4,
+        slot: OwnerSlot,
+    ) -> RpcResult<()> {
+        let seqid = match slot {
+            OwnerSlot::User => self.session.open_owner.seqid,
+            OwnerSlot::Path => self.session.path_owner.seqid,
+        };
         let mut c = Compound::new();
         c.tag(b"close");
         c.putfh(&fh.as_nfs_fh());
-        c.close(self.session.open_owner.seqid, stateid);
+        c.close(seqid, stateid);
         let res = self.session.compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
-        self.session.open_owner.seqid += 1;
+        match slot {
+            OwnerSlot::User => self.session.open_owner.seqid += 1,
+            OwnerSlot::Path => self.session.path_owner.seqid += 1,
+        }
         Ok(())
     }
 

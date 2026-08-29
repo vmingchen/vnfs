@@ -30,6 +30,34 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     let st = fs.stat(&f).expect("stat");
     assert_eq!(st.size, payload.len() as u64);
     assert!(st.fileid != 0);
+    assert!(st.nlink >= 1, "nlink");
+    assert_eq!(st.rdev, 0, "rdev of a regular file");
+    // Time attributes are populated (reported in `returned`) on both
+    // backends; exact values depend on the filesystem clock semantics.
+    let mut t = VfAttrs {
+        file: VfFile::from_path(&f),
+        masks: AttrMask::ATIME | AttrMask::MTIME | AttrMask::CTIME,
+        ..VfAttrs::default()
+    };
+    fs.getattrsv(std::slice::from_mut(&mut t)).unwrap();
+    assert_eq!(
+        t.returned,
+        AttrMask::ATIME | AttrMask::MTIME | AttrMask::CTIME,
+        "time attributes returned"
+    );
+    // A 4 KiB file occupies at least one 512-byte block on both backends
+    // (tmpfs reports 0 blocks for tiny files).
+    let big = format!("{}/big.bin", dir);
+    fs.writev(&[WriteOp::at(VfFile::from_path(&big), 0, vec![b'x'; 4096]).with_creation()])
+        .unwrap();
+    let mut b = VfAttrs {
+        file: VfFile::from_path(&big),
+        masks: AttrMask::BLOCKS,
+        ..VfAttrs::default()
+    };
+    fs.getattrsv(std::slice::from_mut(&mut b)).unwrap();
+    assert!(b.returned.contains(AttrMask::BLOCKS), "blocks returned");
+    assert!(b.blocks > 0, "blocks in 512-byte units");
     assert!(fs.exists(&f).unwrap());
     assert_eq!(fs.file_type(&f).unwrap(), VfType::Regular);
 
@@ -155,12 +183,120 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         fs.stat(&renamed).unwrap().size
     );
 
+    // dupv over a longer existing destination truncates the stale tail.
+    let short = format!("{}/short.txt", dir);
+    let long = format!("{}/long.txt", dir);
+    fs.writev(&[WriteOp::at(VfFile::from_path(&short), 0, b"ab".to_vec()).with_creation()])
+        .unwrap();
+    fs.writev(&[WriteOp::at(VfFile::from_path(&long), 0, b"abcdef".to_vec()).with_creation()])
+        .unwrap();
+    fs.dupv(&[ExtentPair::new(&short, 0, &long, 0, u64::MAX)])
+        .unwrap();
+    let st = fs.stat(&long).unwrap();
+    assert_eq!(st.size, 2, "dupv truncates the destination");
+    assert_eq!(fs.read(&VfFile::from_path(&long), 0, 8).unwrap(), b"ab");
+
+    // O_CREAT mode is ignored when the file already exists.
+    let mode_f = format!("{}/mode.txt", dir);
+    let mfd = fs
+        .open(&mode_f, libc::O_CREAT | libc::O_RDWR, 0o600)
+        .unwrap();
+    fs.close(&mfd).unwrap();
+    let mfd = fs
+        .open(&mode_f, libc::O_CREAT | libc::O_RDWR, 0o777)
+        .unwrap();
+    fs.close(&mfd).unwrap();
+    assert_eq!(
+        fs.stat(&mode_f).unwrap().mode & 0o7777,
+        0o600,
+        "O_CREAT must not chmod an existing file"
+    );
+
+    // O_CREAT | O_EXCL fails on an existing file; O_TRUNC empties it.
+    assert_eq!(
+        fs.open(&mode_f, libc::O_CREAT | libc::O_EXCL | libc::O_RDWR, 0o644)
+            .unwrap_err()
+            .err_no(),
+        ERR_EXIST
+    );
+    let tfd = fs.open(&mode_f, libc::O_RDWR | libc::O_TRUNC, 0).unwrap();
+    fs.close(&tfd).unwrap();
+    assert_eq!(
+        fs.stat(&mode_f).unwrap().size,
+        0,
+        "O_TRUNC empties the file"
+    );
+
+    // "Current position" offsets are invalid for path-based operations.
+    assert_eq!(
+        fs.readv(&[ReadOp::new(VfFile::from_path(&renamed), VfOffset::Cur, 1)])
+            .unwrap_err()
+            .err_no(),
+        ERR_INVAL
+    );
+
+    // Mixed descriptor/path batches work and echo the original files.
+    let rfd = fs.open(&renamed, libc::O_RDONLY, 0).unwrap();
+    let mixed = fs
+        .readv(&[
+            ReadOp::new(rfd.clone(), VfOffset::At(0), 2),
+            ReadOp::at(VfFile::from_path(&copy), 0, 2),
+        ])
+        .unwrap();
+    assert_eq!(mixed[0].data.len(), 2);
+    assert_eq!(mixed[1].data.len(), 2);
+    assert!(mixed[0].file.is_descriptor(), "result echoes the fd op");
+    assert!(mixed[1].file.path().is_some(), "result echoes the path op");
+    fs.close(&rfd).unwrap();
+
+    // A closed descriptor inside a batch fails at its own index with EBADF.
+    let bad = fs.open(&renamed, libc::O_RDONLY, 0).unwrap();
+    fs.close(&bad).unwrap();
+    let e = fs
+        .readv(&[
+            ReadOp::at(VfFile::from_path(&copy), 0, 1),
+            ReadOp::new(bad, VfOffset::At(0), 1),
+        ])
+        .unwrap_err();
+    assert_eq!((e.index(), e.err_no()), (1, ERR_EBADF));
+
+    // readlink/hardlink error paths.
+    assert!(fs.readlink(&renamed).is_err(), "readlink of a regular file");
+    assert!(
+        fs.hardlinkv(&["/no/such/source"], &[format!("{}/h", dir).as_str()])
+            .is_err(),
+        "hardlink of a missing source"
+    );
+
+    // ensure_dir on an existing directory is a no-op.
+    fs.ensure_dir(&sub, 0o755).expect("ensure_dir existing");
+
+    // Non-recursive rm of a non-empty directory fails.
+    let nonempty = format!("{}/nonempty", dir);
+    fs.ensure_dir(&nonempty, 0o755).unwrap();
+    fs.writev(&[WriteOp::at(
+        VfFile::from_path(&format!("{}/x", nonempty)),
+        0,
+        b"x".to_vec(),
+    )
+    .with_creation()])
+        .unwrap();
+    assert!(fs.rm(&[nonempty.as_str()], false).is_err());
+
     // write_adb: two blocks with ADBN at block offset 0.
     let adbf = format!("{}/adb.bin", dir);
     let mut a = Adb::blocknum_only(&adbf, 0, 1024, 2, 0, 100);
+    a.adb_reloff_pattern = 8;
+    a.adb_pattern_size = 3;
+    a.adb_pattern_data = b"PAT".to_vec();
     fs.write_adb(std::slice::from_mut(&mut a))
         .expect("write_adb");
     assert_eq!(a.adb_block_count, 2);
+    let adb = fs.read(&VfFile::from_path(&adbf), 0, 2048).unwrap();
+    assert_eq!(&adb[0..8], &100u64.to_be_bytes(), "ADBN block 0");
+    assert_eq!(&adb[1024..1032], &101u64.to_be_bytes(), "ADBN block 1");
+    assert_eq!(&adb[8..11], b"PAT", "pattern block 0");
+    assert_eq!(&adb[1032..1035], b"PAT", "pattern block 1");
 
     // cp_recursive copies the tree.
     let cpsrc = format!("{}/cpsrc", dir);
@@ -170,9 +306,29 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     let mut w = WriteOp::from_path(&srcfile, VfOffset::At(0), b"xyz".to_vec());
     w.creation = true;
     fs.writev(&[w]).unwrap();
+    fs.symlink("data.txt", &format!("{}/inner/link", cpsrc))
+        .unwrap();
     fs.cp_recursive(&cpsrc, &cpdst, true, false)
         .expect("cp_recursive");
     assert!(fs.exists(&format!("{}/inner/data.txt", cpdst)).unwrap());
+    assert_eq!(
+        fs.lstat(&format!("{}/inner/link", cpdst)).unwrap().ftype,
+        VfType::Symlink,
+        "cp_recursive(symlinks=true) recreates the link"
+    );
+    let cpflat = format!("{}/cpflat", dir);
+    fs.cp_recursive(&cpsrc, &cpflat, false, false)
+        .expect("cp_recursive no symlinks");
+    assert_eq!(
+        fs.lstat(&format!("{}/inner/link", cpflat)).unwrap().ftype,
+        VfType::Regular,
+        "cp_recursive(symlinks=false) copies through the link"
+    );
+    assert_eq!(
+        fs.read(&VfFile::from_path(&format!("{}/inner/link", cpflat)), 0, 3)
+            .unwrap(),
+        b"xyz"
+    );
 
     // "." and ".." path components resolve identically in both backends.
     let base_name = std::path::Path::new(&dir)
@@ -209,9 +365,17 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         .unwrap();
     fs.writev(&[WriteOp::new(afd.clone(), VfOffset::At(0), b"cd".to_vec())])
         .unwrap();
-    fs.close(&afd).unwrap();
     let got = fs.read(&VfFile::from_path(&app), 0, 8).unwrap();
     assert_eq!(got, b"abcd", "O_APPEND appends regardless of offset");
+    // The reported offsets and tracked position reflect the real append
+    // positions, not the requested (ignored) offsets.
+    let w0 = fs
+        .writev(&[WriteOp::new(afd.clone(), VfOffset::At(0), b"e".to_vec())])
+        .unwrap();
+    assert_eq!(w0[0].offset, 4, "append write reports the real offset");
+    assert_eq!(fs.fseek(&afd, 0, SeekFrom::Cur).unwrap(), 5);
+    fs.close(&afd).unwrap();
+    assert_eq!(fs.read(&VfFile::from_path(&app), 0, 8).unwrap(), b"abcde");
 
     // dupv follows a symlink source and copies the target's data.
     let dup_link = format!("{}/dup_link", dir);
@@ -285,6 +449,52 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         ERR_ISDIR,
         "write to Current(None)"
     );
+
+    // walk returns pre-order with the sort callback applied to every
+    // directory (subdirectories visited in the order the caller lists them).
+    let wroot = format!("/{}/wroot", dir.trim_start_matches('/'));
+    fs.ensure_dir(&wroot, 0o755).unwrap();
+    for (sub, file) in [("b", "f1"), ("a", "f2"), ("a", "f3")] {
+        let subp = format!("{}/{}", wroot, sub);
+        fs.ensure_dir(&subp, 0o755).unwrap();
+        fs.writev(&[WriteOp::at(
+            VfFile::from_path(&format!("{}/{}", subp, file)),
+            0,
+            b"x".to_vec(),
+        )
+        .with_creation()])
+            .unwrap();
+    }
+    let mut sort = |_dir: &str, attrs: &mut Vec<VfAttrs>| {
+        attrs.sort_by(|a, b| {
+            a.file
+                .path()
+                .unwrap()
+                .file_name()
+                .cmp(&b.file.path().unwrap().file_name())
+        });
+    };
+    let tree = fs.walk(&wroot, AttrMask::stat(), &mut sort).unwrap();
+    let order: Vec<String> = tree.iter().map(|w| w.path.clone()).collect();
+    assert_eq!(
+        order,
+        vec![
+            wroot.clone(),
+            format!("{}/a", wroot),
+            format!("{}/b", wroot),
+        ],
+        "walk pre-order follows the sorted subdirectory order"
+    );
+    for w in &tree {
+        let names: Vec<_> = w
+            .entries
+            .iter()
+            .map(|e| e.file.path().unwrap().file_name().unwrap().to_owned())
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "entries are sorted in {}", w.path);
+    }
 
     // chdir / getcwd.
     fs.chdir(&sub).expect("chdir");

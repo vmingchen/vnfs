@@ -113,11 +113,98 @@ impl NfsVecFs {
 
     // -- private helpers ----------------------------------------------------
 
-    /// Resolve `path` (absolute, or relative to the client cwd) to a handle.
+    /// Resolve `path` (absolute, or relative to the client cwd) to a handle,
+    /// following intermediate symlinks but not a final symlink.
     fn resolve(&mut self, path: &str) -> VfResult<FileHandle> {
-        self.nfs
-            .resolve(&self.abs_path(path))
-            .map_err(|e| VfError::from_rpc(e, 0))
+        self.resolve_path(&self.abs_path(path), false)
+    }
+
+    /// Resolve a root-relative path to a file handle, following symlinks in
+    /// intermediate components (POSIX pathwalk) and, when `follow_final` is
+    /// set, the final component too (for `stat`/`open` semantics).
+    ///
+    /// The fast path is a single deep-resolve compound; when the server
+    /// reports `NFS4ERR_SYMLINK` mid-path, resolution falls back to a
+    /// component-wise walk that follows each symlink with READLINK, splicing
+    /// its target into the remaining path (hop-capped at 40).
+    fn resolve_path(&mut self, root_rel: &str, follow_final: bool) -> VfResult<FileHandle> {
+        let mut path = root_rel.to_string();
+        let mut hops = 0usize;
+        loop {
+            if hops > 40 {
+                return Err(VfError::failure(0, nfsstat4_NFS4ERR_IO)); // symlink loop
+            }
+            match self.nfs.resolve(&path) {
+                Ok(fh) => {
+                    if !follow_final {
+                        return Ok(fh);
+                    }
+                    let t = self
+                        .nfs
+                        .getattr(&fh, &[FATTR4_TYPE])
+                        .map_err(|e| VfError::from_rpc(e, 0))?;
+                    let mut off = 0;
+                    if read_u32(&t, &mut off).unwrap_or(0) != nfs_ftype4_NF4LNK {
+                        return Ok(fh);
+                    }
+                    let target = self
+                        .nfs
+                        .readlink(&fh)
+                        .map_err(|e| VfError::from_rpc(e, 0))?;
+                    path = Self::resolve_target(&path, &String::from_utf8_lossy(&target));
+                    hops += 1;
+                }
+                Err(e) if e.status == nfsstat4_NFS4ERR_SYMLINK => {
+                    // An intermediate component is a symlink: walk component
+                    // by component, following each link we encounter.
+                    let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+                    if comps.is_empty() {
+                        return Err(VfError::from_rpc(e, 0));
+                    }
+                    let mut cur_fh = self.nfs.root().clone();
+                    let mut consumed = String::new();
+                    let mut followed = false;
+                    for (i, comp) in comps.iter().enumerate() {
+                        let is_last = i + 1 == comps.len();
+                        let (child, ftype) = self
+                            .nfs
+                            .lookup_getattr(&cur_fh, comp)
+                            .map_err(|e| VfError::from_rpc(e, 0))?;
+                        let full_comp = if consumed.is_empty() {
+                            (*comp).to_string()
+                        } else {
+                            format!("{}/{}", consumed, comp)
+                        };
+                        if ftype == nfs_ftype4_NF4LNK && (follow_final || !is_last) {
+                            let target = self
+                                .nfs
+                                .readlink(&child)
+                                .map_err(|e| VfError::from_rpc(e, 0))?;
+                            let rest = comps[i + 1..].join("/");
+                            let base =
+                                Self::resolve_target(&full_comp, &String::from_utf8_lossy(&target));
+                            path = if rest.is_empty() {
+                                base
+                            } else {
+                                format!("{}/{}", base, rest)
+                            };
+                            followed = true;
+                            break;
+                        }
+                        cur_fh = child;
+                        if is_last {
+                            return Ok(cur_fh);
+                        }
+                        consumed = full_comp;
+                    }
+                    if !followed {
+                        return Err(VfError::from_rpc(e, 0));
+                    }
+                    hops += 1;
+                }
+                Err(e) => return Err(VfError::from_rpc(e, 0)),
+            }
+        }
     }
 
     /// Map fcntl-style flags to an NFSv4 share access mode.
@@ -140,7 +227,7 @@ impl NfsVecFs {
         create: bool,
         excl: bool,
     ) -> VfResult<(FileHandle, stateid4)> {
-        let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(e, 0))?;
+        let dirfh = self.resolve_path(dir, true).map_err(|e| e.with_index(0))?;
         let mode = match (create, excl) {
             (false, _) => OpenCreate::NoCreate,
             (true, true) => OpenCreate::Exclusive,
@@ -159,30 +246,73 @@ impl NfsVecFs {
         modes: &[u32],
     ) -> VfResult<Vec<VfFile>> {
         use libc::{O_APPEND, O_CREAT, O_EXCL, O_TRUNC};
-        let mut opens = Vec::with_capacity(paths.len());
-        let mut need_mode = Vec::with_capacity(paths.len());
-        let mut need_trunc = Vec::with_capacity(paths.len());
+        // Batched existence probe for O_CREAT-without-O_EXCL entries, so the
+        // mode is only applied to files this call actually creates.
+        let mut probe: Vec<(usize, FileHandle, String)> = Vec::new();
+        let mut entries: Vec<(usize, FileHandle, String, u32, bool, bool)> = Vec::new();
         for (i, p) in paths.iter().enumerate() {
             let full = self.abs_path(p);
             let (dir, name) = split_path(&full).map_err(|e| VfError::failure(i, e))?;
-            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(e, i))?;
+            let dirfh = self.resolve_path(dir, true).map_err(|e| e.with_index(i))?;
             let access = Self::flags_to_access(flags[i]);
             let create = flags[i] & O_CREAT != 0;
             let excl = flags[i] & O_EXCL != 0;
-            let cmode = match (create, excl) {
-                (false, _) => OpenCreate::NoCreate,
-                (true, true) => OpenCreate::Exclusive,
-                (true, false) => OpenCreate::Guarded,
-            };
-            opens.push(crate::client::OpenOp {
-                dir: dirfh,
-                name: name.to_string(),
+            if create && !excl {
+                probe.push((i, dirfh.clone(), name.to_string()));
+            }
+            entries.push((
+                i,
+                dirfh,
+                name.to_string(),
                 access,
-                create: cmode,
-            });
-            need_mode.push(create);
-            need_trunc.push(flags[i] & O_TRUNC != 0);
+                excl,
+                flags[i] & O_TRUNC != 0,
+            ));
         }
+
+        let mut created = vec![false; paths.len()];
+        if !probe.is_empty() {
+            let lookup: Vec<(FileHandle, String)> = probe
+                .iter()
+                .map(|(_, dir, name)| (dir.clone(), name.clone()))
+                .collect();
+            let results = self
+                .nfs
+                .lookup_many(&lookup)
+                .map_err(|e| VfError::from_rpc(e, 0))?;
+            for ((orig, _, _), r) in probe.iter().zip(results) {
+                match r {
+                    Ok(_) => {}
+                    Err(status) if status == nfsstat4_NFS4ERR_NOENT => created[*orig] = true,
+                    Err(status) => return Err(VfError::failure(*orig, status)),
+                }
+            }
+        }
+        for (i, _, _, _, excl, _) in &entries {
+            if *excl {
+                created[*i] = true;
+            }
+        }
+
+        let opens: Vec<crate::client::OpenOp> = entries
+            .iter()
+            .map(|(i, dir, name, access, excl, _)| crate::client::OpenOp {
+                dir: dir.clone(),
+                name: name.clone(),
+                access: *access,
+                // Create only when the file is (believed) absent: kernel nfsd
+                // rejects CREATE_GUARDED on existing files with EXIST.
+                create: if created[*i] {
+                    if *excl {
+                        OpenCreate::Exclusive
+                    } else {
+                        OpenCreate::Guarded
+                    }
+                } else {
+                    OpenCreate::NoCreate
+                },
+            })
+            .collect();
 
         let results = self
             .nfs
@@ -192,14 +322,14 @@ impl NfsVecFs {
         // Apply per-file mode / O_TRUNC with a single SETATTR compound.
         let mut setattr_ops = Vec::new();
         for (i, (fh, _)) in results.iter().enumerate() {
-            if need_mode[i] {
+            if created[i] {
                 setattr_ops.push(crate::client::SetattrOp {
                     fh: fh.clone(),
                     mode: Some(modes[i] & 0o7777),
                     size: None,
                 });
             }
-            if need_trunc[i] {
+            if entries[i].5 {
                 setattr_ops.push(crate::client::SetattrOp {
                     fh: fh.clone(),
                     mode: None,
@@ -228,41 +358,179 @@ impl NfsVecFs {
         Ok(out)
     }
 
-    /// Resolve the file of an iovec to an (fh, stateid) pair, opening it
-    /// implicitly for path-based iovecs. The third element reports whether
-    /// the file was opened here and must be closed again (to avoid leaving
-    /// open-owner state that would make the client undestroyable).
-    fn resolve_file(
+    /// Open every path-based file in `files` in one batched OPEN compound,
+    /// returning, per original index, the temporary descriptor (or `None` for
+    /// inputs that already were descriptors). The caller must close them via
+    /// [`close_tmp`](Self::close_tmp). Errors are attributed to the original
+    /// op index.
+    fn open_path_batch(
         &mut self,
-        file: &VfFile,
-        is_creation: bool,
+        files: &[&VfFile],
+        creation: &[bool],
         for_write: bool,
-    ) -> VfResult<(FileHandle, stateid4, bool)> {
-        match file {
-            VfFile::Descriptor(fd) => {
-                let o = self
-                    .open_files
-                    .get(fd)
-                    .cloned()
-                    .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-                Ok((o.fh, o.stateid, false))
+    ) -> VfResult<Vec<Option<i32>>> {
+        // Resolve each parent directory once per distinct dir, then look up
+        // every final component in one tolerant batch (which also reports the
+        // type, so symlinks can be followed only when actually present).
+        let mut dir_cache: std::collections::HashMap<String, FileHandle> =
+            std::collections::HashMap::new();
+        let mut lookups: Vec<(usize, FileHandle, String)> = Vec::new();
+        for (i, f) in files.iter().enumerate() {
+            if f.is_descriptor() {
+                continue;
             }
-            VfFile::Path { .. } | VfFile::Current(Some(_)) => {
-                // OPEN cannot target a symlink's final component, so follow
-                // the link chain first (creation follows dangling links and
-                // creates the target, matching POSIX O_CREAT semantics).
-                let full = self.follow_target_path(&self.vf_path(file)?)?;
-                let (dir, name) = split_path(&full).map_err(|e| VfError::failure(0, e))?;
-                let access = if for_write {
-                    OPEN4_SHARE_ACCESS_BOTH
-                } else {
-                    OPEN4_SHARE_ACCESS_READ
-                };
-                let (fh, sid) = self.open_impl(dir, name, access, is_creation, false)?;
-                Ok((fh, sid, true))
+            match f {
+                VfFile::Current(None) => return Err(VfError::failure(i, ERR_ISDIR)),
+                VfFile::Null | VfFile::Saved => return Err(VfError::failure(i, ERR_NOENT)),
+                VfFile::Path { .. } | VfFile::Current(Some(_)) => {}
+                VfFile::Descriptor(_) => unreachable!(),
             }
-            VfFile::Current(None) => Err(VfError::failure(0, ERR_ISDIR)),
-            VfFile::Null | VfFile::Saved => Err(VfError::failure(0, ERR_NOENT)),
+            let full = self.vf_path(f).map_err(|e| e.with_index(i))?;
+            let (dir, name) = split_path(&full).map_err(|e| VfError::failure(i, e))?;
+            let dirfh = match dir_cache.get(dir) {
+                Some(fh) => fh.clone(),
+                None => {
+                    let fh = self.resolve_path(dir, true).map_err(|e| e.with_index(i))?;
+                    dir_cache.insert(dir.to_string(), fh.clone());
+                    fh
+                }
+            };
+            lookups.push((i, dirfh, name.to_string()));
+        }
+        if lookups.is_empty() {
+            return Ok(vec![None; files.len()]);
+        }
+        let probe: Vec<(FileHandle, String)> = lookups
+            .iter()
+            .map(|(_, dir, name)| (dir.clone(), name.clone()))
+            .collect();
+        let results = self
+            .nfs
+            .lookup_getattr_many(&probe)
+            .map_err(|e| VfError::from_rpc(e, 0))?;
+        let access = if for_write {
+            OPEN4_SHARE_ACCESS_BOTH
+        } else {
+            OPEN4_SHARE_ACCESS_READ
+        };
+        let mut opens: Vec<(usize, crate::client::OpenOp)> = Vec::new();
+        let mut subset: Vec<usize> = Vec::new();
+        for ((orig, dirfh, name), r) in lookups.iter().zip(results) {
+            match r {
+                Ok((_fh, ftype)) if ftype == nfs_ftype4_NF4LNK => {
+                    // OPEN cannot target a symlink: follow the chain (creation
+                    // follows dangling links and creates the target).
+                    let full = self
+                        .follow_target_path(&self.vf_path(files[*orig])?)
+                        .map_err(|e| e.with_index(*orig))?;
+                    let (dir, name2) = split_path(&full).map_err(|e| VfError::failure(*orig, e))?;
+                    let dirfh2 = self
+                        .resolve_path(dir, true)
+                        .map_err(|e| e.with_index(*orig))?;
+                    let create = match self.nfs.lookup_getattr(&dirfh2, name2) {
+                        Ok(_) => crate::client::OpenCreate::NoCreate,
+                        Err(e) if e.status == nfsstat4_NFS4ERR_NOENT => {
+                            if !creation[*orig] {
+                                return Err(VfError::failure(*orig, ERR_NOENT));
+                            }
+                            crate::client::OpenCreate::Guarded
+                        }
+                        Err(e) => return Err(VfError::from_rpc(e, *orig)),
+                    };
+                    opens.push((
+                        *orig,
+                        crate::client::OpenOp {
+                            dir: dirfh2,
+                            name: name2.to_string(),
+                            access,
+                            create,
+                        },
+                    ));
+                    subset.push(*orig);
+                }
+                Ok(_) => {
+                    opens.push((
+                        *orig,
+                        crate::client::OpenOp {
+                            dir: dirfh.clone(),
+                            name: name.clone(),
+                            access,
+                            create: crate::client::OpenCreate::NoCreate,
+                        },
+                    ));
+                    subset.push(*orig);
+                }
+                Err(status) if status == nfsstat4_NFS4ERR_NOENT => {
+                    if !creation[*orig] {
+                        return Err(VfError::failure(*orig, ERR_NOENT));
+                    }
+                    opens.push((
+                        *orig,
+                        crate::client::OpenOp {
+                            dir: dirfh.clone(),
+                            name: name.clone(),
+                            access,
+                            create: crate::client::OpenCreate::Guarded,
+                        },
+                    ));
+                    subset.push(*orig);
+                }
+                Err(status) => return Err(VfError::failure(*orig, status)),
+            }
+        }
+        if opens.is_empty() {
+            return Ok(vec![None; files.len()]);
+        }
+        let open_ops: Vec<crate::client::OpenOp> = opens
+            .iter()
+            .map(|(_, op)| crate::client::OpenOp {
+                dir: op.dir.clone(),
+                name: op.name.clone(),
+                access: op.access,
+                create: op.create,
+            })
+            .collect();
+        let results = self.nfs.open_many_path(&open_ops).map_err(|e| {
+            let e = VfError::from_rpc_indexed(e);
+            // open_many's index is relative to the path-only subset.
+            match subset.get(e.index()) {
+                Some(orig) => e.with_index(*orig),
+                None => e,
+            }
+        })?;
+        let mut tmp = vec![None; files.len()];
+        for (orig, (fh, stateid)) in subset.iter().zip(results) {
+            self.next_fd += 1;
+            self.open_files.insert(
+                self.next_fd,
+                OpenFile {
+                    fh,
+                    stateid,
+                    cur_offset: 0,
+                    append: false,
+                },
+            );
+            tmp[*orig] = Some(self.next_fd);
+        }
+        Ok(tmp)
+    }
+
+    /// Close and forget temporary descriptors opened by
+    /// [`open_path_batch`](Self::open_path_batch). Best-effort: never fails
+    /// the caller (the close failure would mask the real error).
+    fn close_tmp(&mut self, tmp: &[Option<i32>]) {
+        let closes: Vec<crate::client::CloseOp> = tmp
+            .iter()
+            .filter_map(|fd| {
+                let fd = (*fd)?;
+                self.open_files.remove(&fd).map(|o| crate::client::CloseOp {
+                    fh: o.fh,
+                    stateid: o.stateid,
+                })
+            })
+            .collect();
+        if !closes.is_empty() {
+            let _ = self.nfs.close_many_path(&closes);
         }
     }
 
@@ -345,51 +613,6 @@ impl NfsVecFs {
         }
     }
 
-    fn readv_one(&mut self, op: &ReadOp) -> VfResult<ReadResult> {
-        let (fh, stateid, close_after) = self.resolve_file(&op.file, false, false)?;
-        let want = op.length;
-        let start = self.resolve_offset(&op.file, op.offset)?;
-        let mut offset = start;
-        let mut got = Vec::new();
-        let mut eof = false;
-        let result = loop {
-            let remaining = want.saturating_sub(got.len());
-            if remaining == 0 {
-                break Ok(());
-            }
-            let (chunk, chunk_eof) = self
-                .nfs
-                .read(
-                    &fh,
-                    &stateid,
-                    offset,
-                    remaining.min(u32::MAX as usize) as u32,
-                )
-                .map_err(|e| VfError::from_rpc(e, 0))?;
-            if chunk.is_empty() {
-                eof = true;
-                break Ok(());
-            }
-            got.extend_from_slice(&chunk);
-            offset += chunk.len() as u64;
-            eof = chunk_eof || chunk.len() < remaining;
-            if eof || got.len() >= want {
-                break Ok(());
-            }
-        };
-        if close_after {
-            let _ = self.nfs.close(&fh, &stateid);
-        }
-        result?;
-        self.advance_offset(&op.file, offset);
-        Ok(ReadResult {
-            file: op.file.clone(),
-            offset: start,
-            data: got,
-            eof,
-        })
-    }
-
     /// Batched writev for open (descriptor) ops.
     fn writev_batch(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
         let mut ops = Vec::with_capacity(writes.len());
@@ -425,26 +648,6 @@ impl NfsVecFs {
         Ok(out)
     }
 
-    fn writev_one(&mut self, op: &WriteOp) -> VfResult<WriteResult> {
-        let (fh, stateid, close_after) = self.resolve_file(&op.file, op.creation, true)?;
-        let offset = self.write_offset(&op.file, op.offset)?;
-        let result = self
-            .nfs
-            .write(&fh, &stateid, offset, &op.data)
-            .map_err(|e| VfError::from_rpc(e, 0));
-        if close_after {
-            let _ = self.nfs.close(&fh, &stateid);
-        }
-        let (n, committed) = result?;
-        self.advance_offset(&op.file, offset + n as u64);
-        Ok(WriteResult {
-            file: op.file.clone(),
-            offset,
-            written: n as usize,
-            stable: committed == stable_how4_FILE_SYNC4,
-        })
-    }
-
     /// The size in bytes of `fh`.
     fn file_size(&mut self, fh: &FileHandle) -> VfResult<u64> {
         let list = self
@@ -467,7 +670,7 @@ impl NfsVecFs {
                 if follow {
                     self.resolve_follow(&path)
                 } else {
-                    self.nfs.resolve(&path).map_err(|e| VfError::from_rpc(e, 0))
+                    self.resolve_path(&path, false)
                 }
             }
             VfFile::Null | VfFile::Saved => Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL)),
@@ -493,11 +696,8 @@ impl NfsVecFs {
     /// path), returning the final root-relative path, with a hop limit to
     /// break cycles. A missing final target returns the current path so
     /// creation-style callers can create through a dangling link; other
-    /// callers will fail with NOENT when they open it.
-    ///
-    /// Note: symlinks in *intermediate* components are still not traversed
-    /// (NFS LOOKUP cannot descend into a symlink, and this client has no way
-    /// to obtain an intermediate symlink's handle).
+    /// callers will fail with NOENT when they open it. Intermediate symlinks
+    /// are followed via [`resolve_path`](Self::resolve_path).
     fn follow_target_path(&mut self, root_rel: &str) -> VfResult<String> {
         let mut current = root_rel.to_string();
         let mut hops = 0usize;
@@ -523,10 +723,7 @@ impl NfsVecFs {
     /// Resolve `path` and follow a chain of symlinks at the end of it (for
     /// `stat` semantics).
     fn resolve_follow(&mut self, path: &str) -> VfResult<FileHandle> {
-        let final_path = self.follow_target_path(path)?;
-        self.nfs
-            .resolve(&final_path)
-            .map_err(|e| VfError::from_rpc(e, 0))
+        self.resolve_path(path, true)
     }
 
     fn listdir_rec(
@@ -541,7 +738,8 @@ impl NfsVecFs {
         if reached_limit(out) {
             return Ok(());
         }
-        let dirfh = self.resolve(dir)?;
+        // A directory argument may itself be a symlink to a directory.
+        let dirfh = self.resolve_path(&self.abs_path(dir), true)?;
         let ids = request_mask_to_attr_list(&masks);
         let mut cookie = 0u64;
         loop {
@@ -646,8 +844,41 @@ impl NfsVecFs {
     ) -> VfResult<()> {
         let (sdir, sname) = split_path(src_root_rel).map_err(|e| VfError::failure(0, e))?;
         let (ddir, dname) = split_path(dst_root_rel).map_err(|e| VfError::failure(0, e))?;
-        let (sfh, ssid) = self.open_impl(sdir, sname, OPEN4_SHARE_ACCESS_READ, false, false)?;
-        let (dfh, dsid) = self.open_impl(ddir, dname, OPEN4_SHARE_ACCESS_WRITE, true, false)?;
+        let sdirfh = self.resolve_path(sdir, true).map_err(|e| e.with_index(0))?;
+        let ddirfh = self.resolve_path(ddir, true).map_err(|e| e.with_index(0))?;
+        let (sfh, ssid) = self
+            .nfs
+            .open_path(
+                &sdirfh,
+                sname,
+                OPEN4_SHARE_ACCESS_READ,
+                crate::client::OpenCreate::NoCreate,
+            )
+            .map_err(|e| VfError::from_rpc(e, 0))?;
+        // Kernel nfsd rejects CREATE_GUARDED on an existing file, so open the
+        // destination without create and fall back to create only on NOENT.
+        let (dfh, dsid) = match self
+            .nfs
+            .open_path(
+                &ddirfh,
+                dname,
+                OPEN4_SHARE_ACCESS_WRITE,
+                crate::client::OpenCreate::NoCreate,
+            )
+            .map_err(|e| VfError::from_rpc(e, 0))
+        {
+            Ok(x) => x,
+            Err(e) if e.err_no() == ERR_NOENT => self
+                .nfs
+                .open_path(
+                    &ddirfh,
+                    dname,
+                    OPEN4_SHARE_ACCESS_WRITE,
+                    crate::client::OpenCreate::Guarded,
+                )
+                .map_err(|e| VfError::from_rpc(e, 0))?,
+            Err(e) => return Err(e),
+        };
 
         let mut so = p.src_offset;
         let mut doff = p.dst_offset;
@@ -677,8 +908,14 @@ impl NfsVecFs {
             doff += n;
             copied += n;
         };
-        let _ = self.nfs.close(&sfh, &ssid);
-        let _ = self.nfs.close(&dfh, &dsid);
+        let _ = self.nfs.close_path(&sfh, &ssid);
+        let _ = self.nfs.close_path(&dfh, &dsid);
+        if result.is_ok() {
+            // Truncate any stale tail beyond what was copied (cp semantics).
+            self.nfs
+                .setattr(&dfh, None, Some(doff))
+                .map_err(|e| VfError::from_rpc(e, 0))?;
+        }
         result
     }
 }
@@ -706,12 +943,32 @@ impl VecFs for NfsVecFs {
             VfPathBase::Cwd => self.cwd.join(pathname).to_string_lossy().to_string(),
         };
         let full = normalize_root_relative(&full);
+        // Follow a final symlink chain so O_CREAT creates the target
+        // (POSIX semantics); OPEN cannot target a symlink directly.
+        let full = self.follow_target_path(&full)?;
         let (dir, name) = split_path(&full).map_err(|e| VfError::failure(0, e))?;
         let access = Self::flags_to_access(flags);
         let create = flags & O_CREAT != 0;
         let excl = flags & O_EXCL != 0;
-        let (fh, stateid) = self.open_impl(dir, name, access, create, excl)?;
-        if create {
+        // The mode only applies when O_CREAT actually creates the file
+        // (POSIX ignores it for existing files).
+        let created = if create {
+            if excl {
+                true
+            } else {
+                match self.nfs.resolve(&full) {
+                    Ok(_) => false,
+                    Err(e) if e.status == nfsstat4_NFS4ERR_NOENT => true,
+                    Err(e) => return Err(VfError::from_rpc(e, 0)),
+                }
+            }
+        } else {
+            false
+        };
+        // Open with NoCreate when the file already exists (kernel nfsd
+        // rejects CREATE_GUARDED on existing files with NFS4ERR_EXIST).
+        let (fh, stateid) = self.open_impl(dir, name, access, created, excl)?;
+        if created {
             self.nfs
                 .setattr(&fh, Some(mode & 0o7777), None)
                 .map_err(|e| VfError::from_rpc(e, 0))?;
@@ -766,23 +1023,85 @@ impl VecFs for NfsVecFs {
     }
 
     fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
-        if !reads.is_empty() && reads.iter().all(|r| r.file.is_descriptor()) {
-            return self.readv_batch(reads);
+        if reads.is_empty() {
+            return Ok(Vec::new());
         }
-        let mut out = Vec::with_capacity(reads.len());
-        for (i, op) in reads.iter().enumerate() {
-            out.push(self.readv_one(op).map_err(|e| e.with_index(i))?);
+        let mut tmp: Vec<Option<i32>> = vec![None; reads.len()];
+        let mut files = Vec::with_capacity(reads.len());
+        let mut needs_open = false;
+        for (i, r) in reads.iter().enumerate() {
+            files.push(&r.file);
+            if !r.file.is_descriptor() {
+                needs_open = true;
+                if r.offset == VfOffset::Cur {
+                    // "current position" only exists for open descriptors.
+                    return Err(VfError::failure(i, ERR_INVAL));
+                }
+            }
+        }
+        if needs_open {
+            tmp = self.open_path_batch(&files, &vec![false; reads.len()], false)?;
+        }
+        let remapped: Vec<ReadOp> = reads
+            .iter()
+            .enumerate()
+            .map(|(i, r)| ReadOp {
+                file: match tmp[i] {
+                    Some(fd) => VfFile::from_fd(fd),
+                    None => r.file.clone(),
+                },
+                offset: r.offset,
+                length: r.length,
+            })
+            .collect();
+        let result = self.readv_batch(&remapped);
+        self.close_tmp(&tmp);
+        let mut out = result?;
+        for (i, r) in out.iter_mut().enumerate() {
+            r.file = reads[i].file.clone();
         }
         Ok(out)
     }
 
     fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
-        if !writes.is_empty() && writes.iter().all(|w| w.file.is_descriptor()) {
-            return self.writev_batch(writes);
+        if writes.is_empty() {
+            return Ok(Vec::new());
         }
-        let mut out = Vec::with_capacity(writes.len());
-        for (i, op) in writes.iter().enumerate() {
-            out.push(self.writev_one(op).map_err(|e| e.with_index(i))?);
+        let mut tmp: Vec<Option<i32>> = vec![None; writes.len()];
+        let mut files = Vec::with_capacity(writes.len());
+        let mut creation = Vec::with_capacity(writes.len());
+        let mut needs_open = false;
+        for (i, w) in writes.iter().enumerate() {
+            files.push(&w.file);
+            creation.push(w.creation);
+            if !w.file.is_descriptor() {
+                needs_open = true;
+                if w.offset == VfOffset::Cur {
+                    return Err(VfError::failure(i, ERR_INVAL));
+                }
+            }
+        }
+        if needs_open {
+            tmp = self.open_path_batch(&files, &creation, true)?;
+        }
+        let remapped: Vec<WriteOp> = writes
+            .iter()
+            .enumerate()
+            .map(|(i, w)| WriteOp {
+                file: match tmp[i] {
+                    Some(fd) => VfFile::from_fd(fd),
+                    None => w.file.clone(),
+                },
+                offset: w.offset,
+                data: w.data.clone(),
+                creation: false,
+            })
+            .collect();
+        let result = self.writev_batch(&remapped);
+        self.close_tmp(&tmp);
+        let mut out = result?;
+        for (i, r) in out.iter_mut().enumerate() {
+            r.file = writes[i].file.clone();
         }
         Ok(out)
     }
@@ -859,7 +1178,7 @@ impl VecFs for NfsVecFs {
         masks: AttrMask,
         sort: &mut dyn FnMut(&str, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<WalkEntry>> {
-        let root_fh = self.resolve(root)?;
+        let root_fh = self.resolve_path(&self.abs_path(root), true)?;
         let ids = request_mask_to_attr_list(&masks);
         let mut collected: std::collections::HashMap<String, Vec<VfAttrs>> =
             std::collections::HashMap::new();
@@ -969,14 +1288,8 @@ impl VecFs for NfsVecFs {
             let d = self.vf_path(dst).map_err(|e| e.with_index(i))?;
             let (sdir, sname) = split_path(&s).map_err(|e| VfError::failure(i, e))?;
             let (ddir, dname) = split_path(&d).map_err(|e| VfError::failure(i, e))?;
-            let sdirfh = self
-                .nfs
-                .resolve(sdir)
-                .map_err(|e| VfError::from_rpc(e, i))?;
-            let ddirfh = self
-                .nfs
-                .resolve(ddir)
-                .map_err(|e| VfError::from_rpc(e, i))?;
+            let sdirfh = self.resolve_path(sdir, true).map_err(|e| e.with_index(i))?;
+            let ddirfh = self.resolve_path(ddir, true).map_err(|e| e.with_index(i))?;
             ops.push(crate::client::RenameOp {
                 srcdir: sdirfh,
                 oldname: sname.to_string(),
@@ -1002,7 +1315,7 @@ impl VecFs for NfsVecFs {
                 .push(name.to_string());
         }
         for (dir, names) in &groups {
-            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(e, 0))?;
+            let dirfh = self.resolve_path(dir, true).map_err(|e| e.with_index(0))?;
             let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
             self.nfs
                 .remove_many(&dirfh, &refs)
@@ -1016,7 +1329,7 @@ impl VecFs for NfsVecFs {
         for (i, a) in dirs.iter().enumerate() {
             let path = self.vf_path(&a.file).map_err(|e| e.with_index(i))?;
             let (dir, name) = split_path(&path).map_err(|e| VfError::failure(i, e))?;
-            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(e, i))?;
+            let dirfh = self.resolve_path(dir, true).map_err(|e| e.with_index(i))?;
             creates.push(crate::client::CreateOp {
                 dir: dirfh,
                 name: name.to_string(),
@@ -1061,7 +1374,7 @@ impl VecFs for NfsVecFs {
         for (i, (old, new)) in oldpaths.iter().zip(newpaths).enumerate() {
             let full = self.abs_path(new);
             let (dir, name) = split_path(&full).map_err(|e| VfError::failure(i, e))?;
-            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(e, i))?;
+            let dirfh = self.resolve_path(dir, true).map_err(|e| e.with_index(i))?;
             ops.push(crate::client::CreateOp {
                 dir: dirfh,
                 name: name.to_string(),
@@ -1094,7 +1407,7 @@ impl VecFs for NfsVecFs {
             let src = self.resolve(old).map_err(|e| e.with_index(i))?;
             let full = self.abs_path(new);
             let (dir, name) = split_path(&full).map_err(|e| VfError::failure(i, e))?;
-            let dirfh = self.nfs.resolve(dir).map_err(|e| VfError::from_rpc(e, i))?;
+            let dirfh = self.resolve_path(dir, true).map_err(|e| e.with_index(i))?;
             ops.push(crate::client::LinkOp {
                 dstdir: dirfh,
                 src,
@@ -1146,7 +1459,20 @@ impl VecFs for NfsVecFs {
                 Ok(x) => x,
                 Err(e) => return Err(VfError::failure(i, e)),
             };
-            let (fh, sid) = match self.open_impl(dir, name, OPEN4_SHARE_ACCESS_WRITE, true, false) {
+            let dirfh = match self.resolve_path(dir, true) {
+                Ok(fh) => fh,
+                Err(e) => return Err(e.with_index(i)),
+            };
+            let (fh, sid) = match self
+                .nfs
+                .open_path(
+                    &dirfh,
+                    name,
+                    OPEN4_SHARE_ACCESS_WRITE,
+                    crate::client::OpenCreate::Guarded,
+                )
+                .map_err(|e| VfError::from_rpc(e, 0))
+            {
                 Ok(x) => x,
                 Err(e) => return Err(e.with_index(i)),
             };
@@ -1175,7 +1501,7 @@ impl VecFs for NfsVecFs {
                 }
                 written += 1;
             }
-            let _ = self.nfs.close(&fh, &sid);
+            let _ = self.nfs.close_path(&fh, &sid);
             if let Some(e) = failed {
                 return Err(e);
             }
@@ -1272,7 +1598,7 @@ struct AttrValues {
 
 /// The full set of supported FATTR4 ids, in wire (increasing) order. Must
 /// match `crate::client::READDIR_ATTRS`.
-const FULL_ATTR_IDS: [u32; 12] = [
+const FULL_ATTR_IDS: [u32; 13] = [
     FATTR4_TYPE,
     FATTR4_SIZE,
     FATTR4_NAMED_ATTR,
@@ -1284,6 +1610,7 @@ const FULL_ATTR_IDS: [u32; 12] = [
     FATTR4_RAWDEV,
     FATTR4_SPACE_USED,
     FATTR4_TIME_ACCESS,
+    FATTR4_TIME_METADATA,
     FATTR4_TIME_MODIFY,
 ];
 
@@ -1302,6 +1629,7 @@ fn request_mask_to_attr_list(masks: &AttrMask) -> Vec<u32> {
             FATTR4_RAWDEV => masks.contains(AttrMask::RDEV),
             FATTR4_SPACE_USED => masks.contains(AttrMask::BLOCKS),
             FATTR4_TIME_ACCESS => masks.contains(AttrMask::ATIME),
+            FATTR4_TIME_METADATA => masks.contains(AttrMask::CTIME),
             FATTR4_TIME_MODIFY => masks.contains(AttrMask::MTIME),
             _ => false,
         };
@@ -1355,6 +1683,9 @@ fn parse_attr_list(ids: &[u32], list: &[u8]) -> VfResult<AttrValues> {
             }
             FATTR4_TIME_MODIFY => {
                 v.mtime = Some(read_nfstime(list, &mut off)?);
+            }
+            FATTR4_TIME_METADATA => {
+                v.ctime = Some(read_nfstime(list, &mut off)?);
             }
             _ => unreachable!(),
         }
@@ -1426,6 +1757,8 @@ fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
     if a.masks.contains(AttrMask::BLOCKS)
         && let Some(blocks) = v.blocks
     {
+        // `v.blocks` is already FATTR4_SPACE_USED converted to 512-byte
+        // units in `parse_attr_list` (matching the dummy's `st_blocks`).
         a.blocks = blocks;
         a.returned.insert(AttrMask::BLOCKS);
     }

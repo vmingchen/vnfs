@@ -504,6 +504,93 @@ fn symlinkv_readlinkv() {
     }
 }
 
+#[test]
+fn intermediate_symlink_components_followed() {
+    let dir = setup_dir("intermediate_link");
+    let mut c = client();
+    c.mkdir(&format!("{}/realdir", dir), 0o755).unwrap();
+    write_file(&mut c, &format!("{}/realdir/file", dir), b"data");
+    c.symlink("realdir", &format!("{}/dirlink", dir)).unwrap();
+
+    let st = c.stat(&format!("{}/dirlink/file", dir)).unwrap();
+    assert_eq!(st.ftype, VfType::Regular);
+    assert_eq!(st.size, 4);
+    assert_eq!(read_all(&mut c, &format!("{}/dirlink/file", dir)), b"data");
+
+    // Path-based operations (unlink) resolve through the intermediate link.
+    let f = format!("{}/dirlink/other", dir);
+    write_file(&mut c, &f, b"x");
+    c.unlink(&f).unwrap();
+    assert!(!c.exists(&f).unwrap());
+
+    // lstat of a path under the link still reports the final object.
+    assert_eq!(
+        c.lstat(&format!("{}/dirlink/file", dir)).unwrap().ftype,
+        VfType::Regular
+    );
+}
+
+#[test]
+fn path_readv_is_batched() {
+    let dir = setup_dir("path_batch");
+    let mut c = client();
+    let paths: Vec<String> = (0..5)
+        .map(|i| {
+            let p = format!("{}/f{}", dir, i);
+            write_file(&mut c, &p, b"x");
+            p
+        })
+        .collect();
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let ops: Vec<ReadOp> = paths
+        .iter()
+        .map(|p| ReadOp::at(VfFile::from_path(p), 0, 1))
+        .collect();
+    let res = c.readv(&ops).unwrap();
+    assert_eq!(res.len(), 5);
+    let compounds = vnfs::compound::compound_stats().0;
+    // Batching must beat the per-op open+read+close round trips.
+    assert!(
+        compounds < 3 * paths.len() as u64,
+        "path readv used {} compounds for {} reads",
+        compounds,
+        paths.len()
+    );
+}
+
+#[test]
+fn openv_ocreat_preserves_existing_mode() {
+    let dir = setup_dir("openv_mode");
+    let mut c = client();
+    let f = format!("{}/existing.txt", dir);
+    let fd = c.open(&f, libc::O_CREAT | libc::O_RDWR, 0o600).unwrap();
+    c.close(&fd).unwrap();
+
+    let g = format!("{}/new.txt", dir);
+    c.openv(
+        &[f.as_str(), g.as_str()],
+        &[libc::O_CREAT | libc::O_RDWR, libc::O_CREAT | libc::O_RDWR],
+        &[0o777, 0o640],
+    )
+    .unwrap();
+    assert_eq!(
+        c.stat(&f).unwrap().mode & 0o7777,
+        0o600,
+        "openv O_CREAT must not chmod an existing file"
+    );
+    assert_eq!(c.stat(&g).unwrap().mode & 0o7777, 0o640, "new file mode");
+}
+
+#[test]
+fn transport_error_on_unreachable_server() {
+    let e = match NfsVecFs::connect("127.0.0.1:1") {
+        Ok(_) => panic!("must fail to connect"),
+        Err(e) => e,
+    };
+    assert!(e.is_transport(), "unreachable server is a transport error");
+    assert_eq!(e.err_no(), VF_ERR_RPC);
+}
+
 // ---------------------------------------------------------------------------
 // hardlink
 // ---------------------------------------------------------------------------
@@ -646,6 +733,8 @@ fn fseek_set_cur_end() {
         .unwrap()[0];
     assert_eq!(r.data, b"6789");
 
+    // Seeking before the start is refused.
+    assert!(c.fseek(&tf, -100, SeekFrom::Set).is_err());
     c.close(&tf).unwrap();
 }
 

@@ -22,7 +22,13 @@ pub struct Session {
     pub clientid: clientid4,
     pub sessionid: sessionid4,
     slot_seqid: u32,
+    /// The open owner for user-visible descriptors (`open_by_path` /
+    /// `openv`).
     pub open_owner: OpenOwner,
+    /// A separate open owner for implicit opens made by path-based
+    /// operations, so closing an internal open never revokes a stateid the
+    /// caller still holds (kernel nfsd reuses one stateid per owner+file).
+    pub path_owner: OpenOwner,
 }
 
 impl Session {
@@ -38,6 +44,11 @@ impl Session {
             slot_seqid: 1,
             open_owner: OpenOwner {
                 name: b"vnfs-open-owner".to_vec(),
+                seqid: 0,
+                verifier: make_verifier(),
+            },
+            path_owner: OpenOwner {
+                name: b"vnfs-path-open-owner".to_vec(),
                 seqid: 0,
                 verifier: make_verifier(),
             },
