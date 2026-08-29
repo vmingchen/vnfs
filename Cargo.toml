@@ -6,6 +6,6 @@ resolver = "2"
 clap = { version = "4.5.17", features = ["derive"] }
 libc = "0.2"
 libntirpc-sys = "0.2.1"
-nfsv41-sys = { path = "nfsv41-sys", version = "0.1.0" }
+nfsv41-sys = { path = "nfsv41-sys", version = "0.1.1" }
 xdr-codec = "0.4.4"
 xdrgen = "0.4.4"
