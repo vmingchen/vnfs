@@ -1,0 +1,25 @@
+[package]
+name = "vnfs-python"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Python bindings for the vectorized vnfs NFSv4.1 client (fsspec nfs4:// filesystem)"
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+# Detached workspace: `cargo build --workspace` at the repo root must not see
+# this package (the python build is driven by maturin/pip from this directory).
+[workspace]
+
+[dependencies]
+libc = "0.2"
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
+vnfs = { path = "../vnfs" }
+# Direct dependency so the static libntirpc archive is also re-asserted at the
+# end of the final link line (see third_party/libntirpc-sys/build.rs).
+libntirpc-sys = { path = "third_party/libntirpc-sys" }
+
+[patch.crates-io]
+libntirpc-sys = { path = "third_party/libntirpc-sys" }

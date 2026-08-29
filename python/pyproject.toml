@@ -1,0 +1,22 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "vnfs-fs"
+version = "0.1.0"
+description = "fsspec NFSv4.1 filesystem backed by the vectorized vnfs client"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT OR Apache-2.0" }
+dependencies = ["fsspec"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.maturin]
+module-name = "vnfs_fs._native"
+python-source = "python"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

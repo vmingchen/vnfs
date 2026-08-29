@@ -38,29 +38,111 @@ pub struct NfsVecFs {
 }
 
 impl NfsVecFs {
+    /// Resolve `files` to file handles in as few compounds as possible: each
+    /// unique parent directory is resolved once, then all children are
+    /// LOOKUPed in tolerant batches (`[PUTFH, LOOKUP, GETFH, GETATTR type]`
+    /// per child). Returns per-index `(handle, own type)`; a failed LOOKUP
+    /// (e.g. NOENT) is reported per path. When `follow` is set, a
+    /// final-component symlink is followed through the existing per-path
+    /// resolver. Descriptors resolve straight from the open-file table.
+    fn resolve_many_tcfile(
+        &mut self,
+        files: &[&VfFile],
+        follow: bool,
+    ) -> VfResult<Vec<Result<(FileHandle, u32), u32>>> {
+        use std::collections::{BTreeMap, HashMap};
+        // Group by parent directory.
+        let mut groups: BTreeMap<String, Vec<(usize, String)>> = BTreeMap::new();
+        let mut out: Vec<Result<(FileHandle, u32), u32>> =
+            vec![Err(nfsstat4_NFS4ERR_NOENT); files.len()];
+        for (i, f) in files.iter().enumerate() {
+            if f.is_descriptor() {
+                let fd = f.fd().unwrap();
+                out[i] = match self.open_files.get(&fd) {
+                    Some(o) => Ok((o.fh.clone(), 0)),
+                    None => Err(ERR_EBADF),
+                };
+                continue;
+            }
+            let path = self.vf_path(f).map_err(|e| e.with_index(i))?;
+            if path.is_empty() {
+                // The export root itself.
+                out[i] = Ok((self.nfs.root().clone(), nfs_ftype4_NF4DIR));
+                continue;
+            }
+            let (dir, name) = split_path(&path).map_err(|e| VfError::failure(i, e))?;
+            groups
+                .entry(dir.to_string())
+                .or_default()
+                .push((i, name.to_string()));
+        }
+        let mut dir_cache: HashMap<String, FileHandle> = HashMap::new();
+        for (dir, entries) in groups {
+            let dirfh = match dir_cache.get(&dir) {
+                Some(fh) => fh.clone(),
+                None => match self.resolve_path(&dir, true) {
+                    Ok(fh) => {
+                        dir_cache.insert(dir, fh.clone());
+                        fh
+                    }
+                    Err(e) => {
+                        let err = e.err_no();
+                        for (i, _) in &entries {
+                            out[*i] = Err(err);
+                        }
+                        continue;
+                    }
+                },
+            };
+            let ops: Vec<(FileHandle, String)> = entries
+                .iter()
+                .map(|(_, name)| (dirfh.clone(), name.clone()))
+                .collect();
+            let results = self
+                .nfs
+                .lookup_getattr_many(&ops)
+                .map_err(|e| VfError::from_rpc(e, 0))?;
+            for ((i, _), r) in entries.iter().zip(results) {
+                match r {
+                    Ok((fh, ftype)) => {
+                        if follow && ftype == nfs_ftype4_NF4LNK {
+                            let full = self.vf_path(files[*i])?;
+                            out[*i] = match self.resolve_follow(&full) {
+                                Ok(fh) => Ok((fh, ftype)),
+                                Err(e) => Err(e.err_no()),
+                            };
+                        } else {
+                            out[*i] = Ok((fh, ftype));
+                        }
+                    }
+                    Err(status) => out[*i] = Err(status),
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn setattrsv_impl(&mut self, attrs: &[VfAttrs], follow: bool) -> VfRes {
         const SETTABLE: AttrMask = AttrMask::MODE.union(AttrMask::SIZE);
-        let mut ops = Vec::with_capacity(attrs.len());
         for (i, a) in attrs.iter().enumerate() {
             let unsupported = a.masks.difference(SETTABLE);
             if !unsupported.is_empty() {
                 return Err(VfError::unsupported(i));
             }
-            let fh = self
-                .resolve_tcfile(&a.file, follow)
-                .map_err(|e| e.with_index(i))?;
-            if !follow {
+        }
+        let files: Vec<&VfFile> = attrs.iter().map(|a| &a.file).collect();
+        let resolved = self.resolve_many_tcfile(&files, follow)?;
+        let mut ops = Vec::with_capacity(attrs.len());
+        for (i, a) in attrs.iter().enumerate() {
+            let (fh, ftype) = match &resolved[i] {
+                Ok(x) => x.clone(),
+                Err(status) => return Err(VfError::failure(i, *status)),
+            };
+            if !follow && ftype == nfs_ftype4_NF4LNK {
                 // NFSv4 has no non-following mode/size setter for symlinks;
                 // refuse like the `std::fs` backend instead of pretending the
                 // SETATTR applied to the link.
-                let list = self
-                    .nfs
-                    .getattr(&fh, &[FATTR4_TYPE])
-                    .map_err(|e| VfError::from_rpc(e, 0))?;
-                let mut off = 0;
-                if read_u32(&list, &mut off).unwrap_or(0) == nfs_ftype4_NF4LNK {
-                    return Err(VfError::unsupported(i));
-                }
+                return Err(VfError::unsupported(i));
             }
             let mode = if a.masks.contains(AttrMask::MODE) {
                 Some(a.mode & 0o7777)
@@ -80,15 +162,28 @@ impl NfsVecFs {
     }
 
     fn getattrsv_impl(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
+        let files: Vec<&VfFile> = attrs.iter().map(|a| &a.file).collect();
+        let resolved = self.resolve_many_tcfile(&files, follow)?;
         let mut ops = Vec::with_capacity(attrs.len());
         let mut ids_list = Vec::with_capacity(attrs.len());
+        let mut first_failure: Option<VfError> = None;
         for (i, a) in attrs.iter().enumerate() {
-            let fh = self
-                .resolve_tcfile(&a.file, follow)
-                .map_err(|e| e.with_index(i))?;
+            let fh = match &resolved[i] {
+                Ok((fh, _)) => fh.clone(),
+                Err(status) => {
+                    if first_failure.is_none() {
+                        first_failure = Some(VfError::failure(i, *status));
+                    }
+                    ids_list.push(Vec::new());
+                    continue;
+                }
+            };
             let ids = request_mask_to_attr_list(&a.masks);
             ids_list.push(ids.clone());
             ops.push(crate::client::GetattrOp { fh, attrs: ids });
+        }
+        if let Some(e) = first_failure {
+            return Err(e);
         }
         let results = self
             .nfs
@@ -248,12 +343,21 @@ impl NfsVecFs {
         use libc::{O_APPEND, O_CREAT, O_EXCL, O_TRUNC};
         // Batched existence probe for O_CREAT-without-O_EXCL entries, so the
         // mode is only applied to files this call actually creates.
+        let mut dir_cache: std::collections::HashMap<String, FileHandle> =
+            std::collections::HashMap::new();
         let mut probe: Vec<(usize, FileHandle, String)> = Vec::new();
         let mut entries: Vec<(usize, FileHandle, String, u32, bool, bool)> = Vec::new();
         for (i, p) in paths.iter().enumerate() {
             let full = self.abs_path(p);
             let (dir, name) = split_path(&full).map_err(|e| VfError::failure(i, e))?;
-            let dirfh = self.resolve_path(dir, true).map_err(|e| e.with_index(i))?;
+            let dirfh = match dir_cache.get(dir) {
+                Some(fh) => fh.clone(),
+                None => {
+                    let fh = self.resolve_path(dir, true).map_err(|e| e.with_index(i))?;
+                    dir_cache.insert(dir.to_string(), fh.clone());
+                    fh
+                }
+            };
             let access = Self::flags_to_access(flags[i]);
             let create = flags[i] & O_CREAT != 0;
             let excl = flags[i] & O_EXCL != 0;
@@ -1007,6 +1111,25 @@ impl VecFs for NfsVecFs {
             .map_err(|e| VfError::from_rpc(e, 0))
     }
 
+    fn closev(&mut self, files: &[VfFile]) -> VfRes {
+        let mut ops = Vec::with_capacity(files.len());
+        for (i, f) in files.iter().enumerate() {
+            if !f.is_descriptor() {
+                return Err(VfError::failure(i, nfsstat4_NFS4ERR_INVAL));
+            }
+            let fd = f.fd().unwrap();
+            let open = self
+                .open_files
+                .remove(&fd)
+                .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
+            ops.push(crate::client::CloseOp {
+                fh: open.fh,
+                stateid: open.stateid,
+            });
+        }
+        self.nfs.close_many(&ops).map_err(VfError::from_rpc_indexed)
+    }
+
     fn chdir(&mut self, path: &str) -> VfResult<()> {
         let st = self.stat(path)?;
         if st.ftype != VfType::Directory {
@@ -1280,14 +1403,32 @@ impl VecFs for NfsVecFs {
     }
 
     fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
+        let mut src_cache: std::collections::HashMap<String, FileHandle> =
+            std::collections::HashMap::new();
+        let mut dst_cache: std::collections::HashMap<String, FileHandle> =
+            std::collections::HashMap::new();
         let mut ops = Vec::with_capacity(pairs.len());
         for (i, (src, dst)) in pairs.iter().enumerate() {
             let s = self.vf_path(src).map_err(|e| e.with_index(i))?;
             let d = self.vf_path(dst).map_err(|e| e.with_index(i))?;
             let (sdir, sname) = split_path(&s).map_err(|e| VfError::failure(i, e))?;
             let (ddir, dname) = split_path(&d).map_err(|e| VfError::failure(i, e))?;
-            let sdirfh = self.resolve_path(sdir, true).map_err(|e| e.with_index(i))?;
-            let ddirfh = self.resolve_path(ddir, true).map_err(|e| e.with_index(i))?;
+            let sdirfh = match src_cache.get(sdir) {
+                Some(fh) => fh.clone(),
+                None => {
+                    let fh = self.resolve_path(sdir, true).map_err(|e| e.with_index(i))?;
+                    src_cache.insert(sdir.to_string(), fh.clone());
+                    fh
+                }
+            };
+            let ddirfh = match dst_cache.get(ddir) {
+                Some(fh) => fh.clone(),
+                None => {
+                    let fh = self.resolve_path(ddir, true).map_err(|e| e.with_index(i))?;
+                    dst_cache.insert(ddir.to_string(), fh.clone());
+                    fh
+                }
+            };
             ops.push(crate::client::RenameOp {
                 srcdir: sdirfh,
                 oldname: sname.to_string(),
