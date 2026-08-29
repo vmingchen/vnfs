@@ -368,6 +368,28 @@ impl Compound {
     /// corresponding attribute unchanged. Uses the zero stateid (current
     /// state).
     pub fn setattr(&mut self, mode: Option<u32>, size: Option<u64>) {
+        self.setattr_with_stateid(
+            mode,
+            size,
+            &stateid4 {
+                seqid: 0,
+                other: [0; 12],
+            },
+        );
+    }
+
+    /// Like [`setattr`](Self::setattr) but with an explicit stateid. In a
+    /// compound that already OPENed the file, pass the special "current"
+    /// stateid (seqid 1, other zeros) so the server resolves it to the open
+    /// state without invalidating the compound's current-stateid tracking
+    /// (the all-0 stateid marks it invalid, breaking a later special-stateid
+    /// CLOSE on Ganesha).
+    pub fn setattr_with_stateid(
+        &mut self,
+        mode: Option<u32>,
+        size: Option<u64>,
+        stateid: &stateid4,
+    ) {
         let mut map = [0u32; 3];
         let mut vals: Vec<u8> = Vec::new();
         if let Some(m) = mode {
@@ -388,10 +410,7 @@ impl Compound {
         let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
         op.argop = nfs_opnum4_NFS4_OP_SETATTR;
         op.nfs_argop4_u.opsetattr = SETATTR4args {
-            stateid: stateid4 {
-                seqid: 0,
-                other: [0; 12],
-            },
+            stateid: *stateid,
             obj_attributes: fattr4 {
                 attrmask: bitmap4 {
                     bitmap4_len: bitmap_len,

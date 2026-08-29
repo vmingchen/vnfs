@@ -171,3 +171,26 @@ def test_created_modified_are_utc_aware(fs):
     modified = fs.modified("nfs4:///f.txt")
     assert created.tzinfo is not None and created.utcoffset() == datetime.timedelta(0)
     assert modified.tzinfo is not None and modified.utcoffset() == datetime.timedelta(0)
+
+
+def test_large_file_bulk_operations(fs):
+    # Files larger than the server's per-op READ/WRITE limit (~1 MiB) must
+    # round-trip through every bulk path (pipe/cat/cp/write), not just the
+    # chunked Nfs4File.read().
+    big = b"x" * (2 * 1024 * 1024 + 123)
+    fs.pipe_file("nfs4:///big.bin", big)
+    assert fs.cat_file("nfs4:///big.bin") == big
+    assert fs.cat_file("nfs4:///big.bin", start=len(big) - 3) == b"xxx"
+    assert fs.cat_file("nfs4:///big.bin", end=10) == big[:10]
+    fs.cp("nfs4:///big.bin", "nfs4:///copy.bin")
+    assert fs.cat_file("nfs4:///copy.bin") == big
+    with fs.open("nfs4:///wb.bin", "wb") as fh:
+        fh.write(big)
+    assert fs.cat_file("nfs4:///wb.bin") == big
+    with fs.open("nfs4:///big.bin", "rb") as fh:
+        assert fh.read() == big
+    ranges = fs.cat_ranges(
+        ["nfs4:///big.bin"], [1024 * 1024 - 10], [1024 * 1024 + 10]
+    )
+    assert ranges[0] == big[1024 * 1024 - 10 : 1024 * 1024 + 10]
+    assert fs.du("nfs4:///big.bin") == len(big)

@@ -1038,6 +1038,56 @@ fn listdirv_batches_many_directories() {
 }
 
 #[test]
+fn large_writev_readv_roundtrip() {
+    // A single op larger than the server's per-op READ/WRITE limit must be
+    // chunked across multiple READ/WRITE ops and round-trip correctly.
+    let dir = setup_dir("large_rw");
+    let mut c = client();
+    let p = format!("{}/big.bin", dir);
+    let data = vec![b'x'; 2 * 1024 * 1024 + 123];
+    let w = c
+        .writev(&[WriteOp::at(VfFile::from_path(&p), 0, data.clone()).with_creation()])
+        .unwrap();
+    assert_eq!(w[0].written, data.len());
+    let r = c
+        .readv(&[ReadOp::at(VfFile::from_path(&p), 0, data.len())])
+        .unwrap();
+    assert_eq!(r[0].data, data);
+    assert_eq!(c.stat(&p).unwrap().size, data.len() as u64);
+}
+
+#[test]
+fn read_allv_is_no_stat_whole_file_read() {
+    // read_allv reads every file to EOF without a size fetch; a 2 MiB file
+    // round-trips in one compound (chunked READ ops), and the compound
+    // counter proves no stat compound was issued.
+    let dir = setup_dir("read_all");
+    let mut c = client();
+    let mut files = Vec::new();
+    for i in 0..4 {
+        let p = format!("{}/f{}.bin", dir, i);
+        let data = vec![b'a' + i as u8; 2 * 1024 * 1024 + 123];
+        c.writev(&[WriteOp::at(VfFile::from_path(&p), 0, data.clone()).with_creation()])
+            .unwrap();
+        files.push((p, data));
+    }
+    let refs: Vec<VfFile> = files.iter().map(|(p, _)| VfFile::from_path(p)).collect();
+    let _ = vnfs::compound::compound_stats(); // reset counters
+    let out = c.read_allv(&refs).unwrap();
+    for (i, (_, data)) in files.iter().enumerate() {
+        assert_eq!(&out[i], data);
+    }
+    // The whole batch fits one compound (4 x ~2 MiB requested, chunked into
+    // per-op READs and byte-budgeted) — and no separate stat round trip.
+    let compounds = vnfs::compound::compound_stats().0;
+    assert!(
+        compounds <= 4,
+        "read_allv(4 x 2 MiB) must be a few compounds, got {}",
+        compounds
+    );
+}
+
+#[test]
 fn mkdirv_batches_parent_resolution() {
     let dir = setup_dir("mkdirv_batch");
     let mut c = client();

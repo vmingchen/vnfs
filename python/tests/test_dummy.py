@@ -27,7 +27,13 @@ def test_lazy_read_open_does_not_open_until_io(dummy_fs):
     dummy_fs.pipe_file("nfs4:///f.txt", b"data")
     f = dummy_fs.open("nfs4:///f.txt", "rb")
     assert f._fd is None  # lazy
+    # Whole-file reads are served by the batched no-stat read_allv path and
+    # never need a descriptor (or a size stat).
     assert f.read() == b"data"
+    assert f._fd is None
+    assert f.seek(1) == 1
+    # A ranged read does open the descriptor.
+    assert f.read(2) == b"at"
     assert f._fd is not None
     f.close()
 

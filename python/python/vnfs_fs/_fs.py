@@ -4,10 +4,12 @@ import datetime
 import errno
 import hashlib
 import io
+import os
 import posixpath
 from glob import has_magic
 
 from fsspec.spec import AbstractFileSystem
+from fsspec.callbacks import DEFAULT_CALLBACK
 
 from . import _native
 
@@ -81,6 +83,7 @@ class Nfs4File(io.RawIOBase):
         self.mode = mode
         self._base_mode = _normalize_mode(mode)
         self._pos = 0
+        self._cached_size = None
         self._readable = self._base_mode in ("r", "r+", "w+", "a+", "x+")
         self._writable = self._base_mode in ("r+", "w", "w+", "a", "a+", "x", "x+")
         if fd is None and self._base_mode in ("w", "w+", "a", "a+", "x", "x+"):
@@ -108,7 +111,9 @@ class Nfs4File(io.RawIOBase):
         return self._fd
 
     def _size(self):
-        return self.fs.size(self.path)
+        if self._cached_size is None:
+            self._cached_size = self.fs.size(self.path)
+        return self._cached_size
 
     # -- io.RawIOBase ------------------------------------------------------
 
@@ -148,6 +153,17 @@ class Nfs4File(io.RawIOBase):
         if not self._readable:
             raise io.UnsupportedOperation("not readable")
         if size is None or size < 0:
+            if self._fd is None and self._pos == 0:
+                # Whole-file read: one batched read, no size stat, no OPEN.
+                data, errors = self.fs._client.read_all_many(
+                    [self.fs._native_path(self.path)]
+                )
+                if errors:
+                    raise _oserror(errors[0], self.path)
+                buf = data[0] or b""
+                self._pos = len(buf)
+                self._cached_size = len(buf)
+                return buf
             # One size fetch + one read loop instead of readall()'s
             # doubling-chunk preads.
             size = max(0, self._size() - self._pos)
@@ -178,6 +194,8 @@ class Nfs4File(io.RawIOBase):
             n = self.fs._client.write(fd, data)
         else:
             n = self.fs._client.pwrite(fd, data, self._pos)
+        if self._cached_size is not None:
+            self._cached_size = max(self._cached_size, self._pos + n)
         self._pos += n
         return n
 
@@ -208,6 +226,7 @@ class Nfs4File(io.RawIOBase):
         if size is None:
             size = self._pos
         self.fs._client.truncate(self.fs._native_path(self.path), size)
+        self._cached_size = size
         return size
 
     def flush(self):
@@ -447,6 +466,19 @@ class Nfs4FileSystem(AbstractFileSystem):
     def size(self, path):
         return self.info(path).get("size")
 
+    def sizes(self, paths):
+        """Size of each path in one stat_many batch."""
+        internals = [self._strip_protocol(p) for p in paths]
+        stats, errors = self._client.stat_many(
+            [self._native_path(p) for p in internals]
+        )
+        out = []
+        for i, p in enumerate(internals):
+            if stats[i] is None:
+                raise _oserror(errors[i], p)
+            out.append(stats[i]["size"])
+        return out
+
     def created(self, path):
         ts = self.info(path).get("created")
         return (
@@ -484,22 +516,13 @@ class Nfs4FileSystem(AbstractFileSystem):
     # -- bulk read / write -------------------------------------------------
 
     def _cat_batch(self, paths, on_error):
-        """One stat_many + one read_many for a list of internal paths."""
+        """One read_allv batch (no per-file size stats) for internal paths."""
         native = [self._native_path(p) for p in paths]
-        stats, stat_errors = self._client.stat_many(native)
-        ok = [i for i, s in enumerate(stats) if s is not None]
         data = [b""] * len(paths)
-        read_errors = {}
-        if ok:
-            ok_paths = [paths[i] for i in ok]
-            sizes = [stats[i]["size"] for i in ok]
-            dat, read_errors = self._client.read_many(
-                [self._native_path(p) for p in ok_paths], [0] * len(ok_paths), sizes
-            )
-            for j, i in enumerate(ok):
-                data[i] = dat[j] or b""
-        errors = dict(stat_errors)
-        errors.update(read_errors)
+        dat, errors = self._client.read_all_many(native)
+        for i, d in enumerate(dat):
+            if d is not None:
+                data[i] = d
         out = {}
         for i, p in enumerate(paths):
             if i in errors:
@@ -537,6 +560,12 @@ class Nfs4FileSystem(AbstractFileSystem):
                 start = max(0, size + start)
             if end is not None and end < 0:
                 end = size + end
+        if start in (None, 0) and end is None:
+            # Whole file: read_allv skips the size stat entirely.
+            data, errors = self._client.read_all_many([self._native_path(internal)])
+            if errors:
+                raise _oserror(errors[0], internal)
+            return data[0] or b""
         data, errors = self._client.read_many(
             [self._native_path(internal)], [start if start is not None else 0], [end]
         )
@@ -596,8 +625,9 @@ class Nfs4FileSystem(AbstractFileSystem):
                 if e:
                     raise FileExistsError(errno.EEXIST, f"File exists: {paths[i]!r}")
         datas = [v if isinstance(v, bytes) else bytes(v) for v in values]
+        truncate = mode != "create"
         try:
-            self._client.write_many(native, datas)
+            self._client.write_many(native, datas, truncate=truncate)
         except FileNotFoundError:
             if not self.auto_mkdir:
                 raise
@@ -606,9 +636,7 @@ class Nfs4FileSystem(AbstractFileSystem):
             for parent in sorted({posixpath.dirname(p) for p in paths}):
                 if parent not in ("", "/"):
                     self._client.ensure_dir(self._native_path(parent), 0o755)
-            self._client.write_many(native, datas)
-        # Truncate to the written length (removes a stale tail on overwrite).
-        self._client.truncate_many(native, [len(d) for d in datas])
+            self._client.write_many(native, datas, truncate=truncate)
 
     def pipe(self, path, value=None, **kwargs):
         if isinstance(path, str):
@@ -623,6 +651,159 @@ class Nfs4FileSystem(AbstractFileSystem):
 
     def pipe_file(self, path, value, mode="overwrite", **kwargs):
         self._write_batch([self._strip_protocol(path)], [value], mode)
+
+    # -- batched local <-> remote transfer --------------------------------
+
+    def get(
+        self,
+        rpath,
+        lpath,
+        recursive=False,
+        callback=DEFAULT_CALLBACK,
+        maxdepth=None,
+        **kwargs,
+    ):
+        """Copy remote files to local, fetching every file in one read_allv
+        batch instead of one round trip per file."""
+        from fsspec.implementations.local import (
+            LocalFileSystem,
+            make_path_posix,
+            trailing_sep,
+        )
+        from fsspec.utils import other_paths
+
+        if isinstance(lpath, list) and isinstance(rpath, list):
+            rpaths = rpath
+            lpaths = lpath
+        else:
+            source_is_str = isinstance(rpath, str)
+            rpaths = self.expand_path(
+                rpath, recursive=recursive, maxdepth=maxdepth, **kwargs
+            )
+            if source_is_str and (not recursive or maxdepth is not None):
+                rpaths = [p for p in rpaths if not (trailing_sep(p) or self.isdir(p))]
+                if not rpaths:
+                    return
+            if isinstance(lpath, str):
+                lpath = make_path_posix(lpath)
+            source_is_file = len(rpaths) == 1
+            dest_is_dir = isinstance(lpath, str) and (
+                trailing_sep(lpath) or LocalFileSystem().isdir(lpath)
+            )
+            exists = source_is_str and (
+                (has_magic(rpath) and source_is_file)
+                or (not has_magic(rpath) and dest_is_dir and not trailing_sep(rpath))
+            )
+            lpaths = other_paths(
+                rpaths,
+                lpath,
+                exists=exists,
+                flatten=not source_is_str,
+            )
+
+        callback.set_size(len(lpaths))
+        local = LocalFileSystem(auto_mkdir=True)
+        # Classify directories with one stat_many batch (the per-path isdir
+        # checks in the base implementation cost one compound each).
+        native_all = [
+            self._native_path(self._strip_protocol(r)) for r in rpaths
+        ]
+        stats, _stat_errors = self._client.stat_many(native_all)
+        pairs = []
+        for i, (r, l) in enumerate(zip(rpaths, lpaths)):
+            if stats[i] is not None and stats[i]["type"] == "directory":
+                local.makedirs(l, exist_ok=True)
+                callback.relative_update(0)
+            else:
+                pairs.append((r, l))
+        if not pairs:
+            return
+        native = [self._native_path(self._strip_protocol(r)) for r, _ in pairs]
+        data, errors = self._client.read_all_many(native)
+        for i, ((r, l), buf) in enumerate(zip(pairs, data)):
+            with callback.branched(r, l) as child:
+                if buf is None:
+                    raise _oserror(errors[i], r)
+                local.makedirs(local._parent(l), exist_ok=True)
+                with open(l, "wb") as out:
+                    child.set_size(len(buf))
+                    out.write(buf)
+                    child.relative_update(len(buf))
+
+    def put(
+        self,
+        lpath,
+        rpath,
+        recursive=False,
+        callback=DEFAULT_CALLBACK,
+        maxdepth=None,
+        **kwargs,
+    ):
+        """Copy local files to remote, writing every file in one writev batch
+        instead of one round trip per file."""
+        from fsspec.implementations.local import (
+            LocalFileSystem,
+            make_path_posix,
+            trailing_sep,
+        )
+        from fsspec.utils import other_paths
+
+        if isinstance(lpath, list) and isinstance(rpath, list):
+            rpaths = rpath
+            lpaths = lpath
+        else:
+            source_is_str = isinstance(lpath, str)
+            if source_is_str:
+                lpath = make_path_posix(lpath)
+            local = LocalFileSystem()
+            lpaths = local.expand_path(
+                lpath, recursive=recursive, maxdepth=maxdepth, **kwargs
+            )
+            if source_is_str and (not recursive or maxdepth is not None):
+                lpaths = [p for p in lpaths if not (trailing_sep(p) or local.isdir(p))]
+                if not lpaths:
+                    return
+            source_is_file = len(lpaths) == 1
+            dest_is_dir = isinstance(rpath, str) and (
+                trailing_sep(rpath) or self.isdir(rpath)
+            )
+            rpath = (
+                self._strip_protocol(rpath)
+                if isinstance(rpath, str)
+                else [self._strip_protocol(p) for p in rpath]
+            )
+            exists = source_is_str and (
+                (has_magic(lpath) and source_is_file)
+                or (not has_magic(lpath) and dest_is_dir and not trailing_sep(lpath))
+            )
+            rpaths = other_paths(
+                lpaths,
+                rpath,
+                exists=exists,
+                flatten=not source_is_str,
+            )
+
+        callback.set_size(len(rpaths))
+        pairs = []
+        for l, r in zip(lpaths, rpaths):
+            if os.path.isdir(l):
+                self.makedirs(r, exist_ok=True)
+                callback.relative_update(0)
+            else:
+                pairs.append((l, r))
+        if not pairs:
+            return
+        datas = []
+        for l, _ in pairs:
+            with open(l, "rb") as fh:
+                datas.append(fh.read())
+        remote_paths = [self._strip_protocol(r) for _, r in pairs]
+        mode = kwargs.get("mode", "overwrite")
+        self._write_batch(remote_paths, datas, mode=mode)
+        for (l, r), buf in zip(pairs, datas):
+            with callback.branched(l, r) as child:
+                child.set_size(len(buf))
+                child.relative_update(len(buf))
 
     # -- open / file objects ----------------------------------------------
 

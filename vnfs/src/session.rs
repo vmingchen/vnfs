@@ -22,6 +22,13 @@ pub struct Session {
     pub clientid: clientid4,
     pub sessionid: sessionid4,
     slot_seqid: u32,
+    /// Server-confirmed channel attributes from CREATE_SESSION: the
+    /// negotiated maxima for compound request size and operation count.
+    pub max_requestsize: usize,
+    /// Maximum size of a compound reply (bounds total READ data per
+    /// compound, since READ payloads travel in the reply).
+    pub max_responsesize: usize,
+    pub max_operations: usize,
     /// The open owner for user-visible descriptors (`open_by_path` /
     /// `openv`).
     pub open_owner: OpenOwner,
@@ -42,6 +49,9 @@ impl Session {
             // check_slot_seqid() accepts seqid == slot_seqid + 1, so the
             // first SEQUENCE must carry seqid 1.
             slot_seqid: 1,
+            max_requestsize: 4 * 1024 * 1024,
+            max_responsesize: 4 * 1024 * 1024,
+            max_operations: 256,
             open_owner: OpenOwner {
                 name: b"vnfs-open-owner".to_vec(),
                 seqid: 0,
@@ -148,7 +158,21 @@ impl Session {
         if st != nfsstat4_NFS4_OK {
             return Err(RpcError::op(0, st));
         }
-        self.sessionid = res.create_session(0).csr_sessionid;
+        let ok = res.create_session(0);
+        self.sessionid = ok.csr_sessionid;
+        // The server returns its confirmed channel attributes; compounds must
+        // stay under these (the client's advertised values are only a
+        // request). Clamp to sane bounds in case a server reports 0.
+        let fore = &ok.csr_fore_chan_attrs;
+        if fore.ca_maxrequestsize > 0 {
+            self.max_requestsize = fore.ca_maxrequestsize as usize;
+        }
+        if fore.ca_maxresponsesize > 0 {
+            self.max_responsesize = fore.ca_maxresponsesize as usize;
+        }
+        if fore.ca_maxoperations > 0 {
+            self.max_operations = fore.ca_maxoperations as usize;
+        }
         Ok(())
     }
 
@@ -178,7 +202,17 @@ impl Session {
             sa_cachethis: 0,
         };
         c.prepend_sequence(seq);
-        let res = c.call(&self.rpc)?;
+        let res = match c.call(&self.rpc) {
+            Ok(res) => res,
+            Err(e) => {
+                // The request may or may not have reached the server. Never
+                // reuse the seqid: a later compound with the same seqid and a
+                // different XID is classified as a replay and rejected with
+                // NFS4ERR_RETRY_UNCACHED_REP.
+                self.slot_seqid += 1;
+                return Err(e);
+            }
+        };
         if res.op_status(0) == nfsstat4_NFS4_OK {
             self.slot_seqid += 1;
         }

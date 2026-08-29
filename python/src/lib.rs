@@ -620,16 +620,61 @@ impl NfsClient {
         Ok((results, errors))
     }
 
-    /// Write files at offset 0 (creating them), one writev batch. Returns the
-    /// number of bytes written per file.
-    fn write_many(&self, paths: Vec<String>, datas: Vec<Vec<u8>>) -> PyResult<Vec<usize>> {
+    /// Read every file in full (offset 0 to EOF) in batched, no-stat reads.
+    /// Returns per-path bytes (None on failure) and an errno map.
+    fn read_all_many(&self, paths: Vec<String>) -> PyResult<ReadManyResult> {
+        let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_path(p)).collect();
+        let mut fs = self.fs.lock().map_err(lock_err)?;
+        let mut results: Vec<Option<Vec<u8>>> = vec![None; paths.len()];
+        let mut errors: ErrnoMap = HashMap::new();
+        let mut remaining: Vec<usize> = (0..paths.len()).collect();
+        while !remaining.is_empty() {
+            let subset: Vec<VfFile> = remaining.iter().map(|&i| files[i].clone()).collect();
+            match fs.read_allv(&subset) {
+                Ok(bufs) => {
+                    for (&i, buf) in remaining.iter().zip(bufs) {
+                        results[i] = Some(buf);
+                    }
+                    break;
+                }
+                Err(e) => {
+                    let Some(bi) = e.index_opt() else {
+                        return Err(to_py_err(e, None));
+                    };
+                    let bi = bi.min(remaining.len() - 1);
+                    let orig = remaining[bi];
+                    errors.insert(orig, e.err_no());
+                    remaining.remove(bi);
+                }
+            }
+        }
+        Ok((results, errors))
+    }
+
+    /// Write files at offset 0 (creating them), one writev batch; with
+    /// `truncate=True` each file is truncated to zero in the same compound.
+    /// Returns the number of bytes written per file.
+    #[pyo3(signature = (paths, datas, truncate=true))]
+    fn write_many(
+        &self,
+        paths: Vec<String>,
+        datas: Vec<Vec<u8>>,
+        truncate: bool,
+    ) -> PyResult<Vec<usize>> {
         if paths.len() != datas.len() {
             return Err(PyValueError::new_err("paths and datas length must match"));
         }
         let ops: Vec<WriteOp> = paths
             .iter()
             .zip(datas)
-            .map(|(p, d)| WriteOp::at(VfFile::from_path(p), 0, d).with_creation())
+            .map(|(p, d)| {
+                let op = WriteOp::at(VfFile::from_path(p), 0, d).with_creation();
+                if truncate {
+                    op.with_truncate()
+                } else {
+                    op
+                }
+            })
             .collect();
         let mut fs = self.fs.lock().map_err(lock_err)?;
         let res = fs.writev(&ops).map_err(|e| map_err_with_path(e, &paths))?;

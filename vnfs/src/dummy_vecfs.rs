@@ -372,6 +372,9 @@ impl DummyVecFs {
                 if op.creation {
                     opts.create(true);
                 }
+                if op.truncate {
+                    opts.truncate(true);
+                }
                 let f = opts
                     .open(&p)
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;

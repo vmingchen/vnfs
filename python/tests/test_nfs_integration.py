@@ -33,22 +33,22 @@ def test_round_trip_bounds(nfs_fs):
         fs.mkdir(f"nfs4:///tree/sub{i}", create_parents=True)
     paths = [_unique(nfs_fs, f"rt/{i}.txt") for i in range(n)]
 
-    # pipe: merged write compound + merged truncate compound.
+    # pipe: one merged write compound with in-compound truncation.
     _, pipe_count = _measured(
         fs, lambda: fs.pipe({p: f"data-{i}".encode() for i, p in enumerate(paths)})
     )
-    assert pipe_count < 4, pipe_count
+    assert pipe_count == 1, pipe_count
 
-    # cat: one merged stat compound + one merged read compound.
+    # cat: one merged no-stat read_allv compound.
     out, cat_count = _measured(fs, lambda: fs.cat(paths))
     assert len(out) == n
-    assert cat_count < 4, cat_count
+    assert cat_count == 1, cat_count
 
     # cat_ranges: one merged read compound (no stat).
     _, ranges_count = _measured(
         fs, lambda: fs.cat_ranges(paths, [0] * n, [6] * n)
     )
-    assert ranges_count < 3, ranges_count
+    assert ranges_count == 1, ranges_count
 
     # OpenFiles: one merged openv compound on enter, one closev on exit.
     open_files = fsspec.open_files(
@@ -57,40 +57,40 @@ def test_round_trip_bounds(nfs_fs):
     fs._client.compound_stats()
     files = open_files.__enter__()
     open_count = fs._client.compound_stats()[0]
-    assert open_count < 3, open_count
+    assert open_count == 1, open_count
     for f in files:
         f.write(b"x" * 16)
     fs._client.compound_stats()
     open_files.__exit__(None, None, None)
     commit_count = fs._client.compound_stats()[0]
-    assert commit_count < 2, commit_count
+    assert commit_count == 1, commit_count
 
     # non-recursive rm: one merged removev compound.
     _, rm_count = _measured(fs, lambda: fs.rm(paths))
-    assert rm_count < 3, rm_count
+    assert rm_count <= 2, rm_count
 
     # mv: one merged renamev compound.
     srcs = [_unique(nfs_fs, f"mv/{i}.txt") for i in range(n)]
     dsts = [_unique(nfs_fs, f"mv2/{i}.txt") for i in range(n)]
     fs.pipe({p: b"x" for p in srcs})
     _, mv_count = _measured(fs, lambda: fs.mv(srcs, dsts))
-    assert mv_count < 3, mv_count
+    assert mv_count == 1, mv_count
 
-    # cp: merged stat + read + write + truncate compounds.
+    # cp: merged stat + read + write + truncate compounds (bounded).
     _, cp_count = _measured(
         fs,
         lambda: fs.cp(
             dsts, [_unique(nfs_fs, f"cp/{i}.txt") for i in range(n)]
         ),
     )
-    assert cp_count < 6, cp_count
+    assert cp_count <= 4, cp_count
 
     # walk on a 30-node tree is level-batched.
     for i in range(5):
         for j in range(5):
             fs.pipe_file(_unique(nfs_fs, f"tree/sub{i}/f{j}.txt"), b"x")
     _, walk_count = _measured(fs, lambda: list(fs.walk("nfs4:///tree")))
-    assert walk_count < 12, walk_count
+    assert walk_count <= 6, walk_count
 
 
 def test_round_trips_do_not_scale_with_file_count(nfs_fs):
@@ -110,7 +110,7 @@ def test_round_trips_do_not_scale_with_file_count(nfs_fs):
     small = counts(5)
     large = counts(20)
     for small_c, large_c in zip(small, large):
-        assert large_c <= small_c + 4, (small, large)
+        assert large_c <= small_c + 1, (small, large)
 
 
 def test_open_files_reads_are_batched(nfs_fs):
@@ -148,9 +148,10 @@ def test_compound_size_limit_is_configurable(nfs_fs):
         fs._client.compound_stats()
         fs.pipe({p: data for p in paths})
         count = fs._client.compound_stats()[0]
-        # 64 KiB writes under a 64 KiB cap: one write compound per file
-        # (4) plus one merged truncate compound (1).
-        assert count >= 5, count
+        # 64 KiB writes under a 64 KiB cap: one write compound per file,
+        # with the truncate fused into each write compound (no separate
+        # truncate round trip).
+        assert count >= 4 and count <= 6, count
         for p in paths:
             assert fs.cat_file(p) == data
     finally:

@@ -465,6 +465,9 @@ pub struct WriteOp {
     pub data: Vec<u8>,
     /// Create the file if it does not exist.
     pub creation: bool,
+    /// Truncate the file to zero before writing (POSIX `O_TRUNC` semantics
+    /// fused into the same round trip as the write).
+    pub truncate: bool,
 }
 
 impl WriteOp {
@@ -474,6 +477,7 @@ impl WriteOp {
             offset,
             data,
             creation: false,
+            truncate: false,
         }
     }
 
@@ -493,6 +497,12 @@ impl WriteOp {
     /// Create the file if it does not exist.
     pub fn with_creation(mut self) -> WriteOp {
         self.creation = true;
+        self
+    }
+
+    /// Truncate the file to zero before writing, in the same round trip.
+    pub fn with_truncate(mut self) -> WriteOp {
+        self.truncate = true;
         self
     }
 }
@@ -696,6 +706,30 @@ pub trait VecFs {
     /// Read from one or more files, `tc_readv()`. Returns one result per
     /// request, or fails at the first failing operation.
     fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>>;
+
+    /// Read each file in full from offset 0, `tc_read_allv()`. Returns one
+    /// byte buffer per request in input order.
+    ///
+    /// The default implementation stats each file and reads it with
+    /// [`readv`](Self::readv); a backend may override it to read until EOF
+    /// without a separate size round trip.
+    fn read_allv(&mut self, files: &[VfFile]) -> VfResult<Vec<Vec<u8>>> {
+        let mut out = Vec::with_capacity(files.len());
+        for (i, f) in files.iter().enumerate() {
+            let mut a = VfAttrs {
+                file: f.clone(),
+                masks: AttrMask::SIZE,
+                ..VfAttrs::default()
+            };
+            self.getattrsv(std::slice::from_mut(&mut a))
+                .map_err(|e| e.with_index(i))?;
+            let mut r = self
+                .readv(&[ReadOp::new(f.clone(), VfOffset::At(0), a.size as usize)])
+                .map_err(|e| e.with_index(i))?;
+            out.push(r.pop().expect("readv returns one result per op").data);
+        }
+        Ok(out)
+    }
 
     /// Write to one or more files, `tc_writev()`. Returns one result per
     /// request, or fails at the first failing operation.
@@ -1230,6 +1264,25 @@ mod tests {
             .unwrap();
         assert!(r[0].eof);
         assert_eq!(fs.stat("/f").unwrap().size, 12);
+    }
+
+    #[test]
+    fn writev_truncate_removes_stale_tail() {
+        let (_root, mut fs) = fs("writev-truncate");
+        write(&mut fs, "/f", b"longer-than-needed");
+        fs.writev(&[WriteOp::at(VfFile::from_path("/f"), 0, b"hi".to_vec()).with_truncate()])
+            .unwrap();
+        // O_TRUNC semantics: the stale tail is gone.
+        assert_eq!(fs.read(&VfFile::from_path("/f"), 0, 100).unwrap(), b"hi");
+
+        // A plain overwrite keeps the tail (pwrite semantics).
+        write(&mut fs, "/g", b"abcdef");
+        fs.writev(&[WriteOp::at(VfFile::from_path("/g"), 0, b"xy".to_vec())])
+            .unwrap();
+        assert_eq!(
+            fs.read(&VfFile::from_path("/g"), 0, 100).unwrap(),
+            b"xycdef"
+        );
     }
 
     #[test]

@@ -754,6 +754,7 @@ impl NfsVecFs {
         files: &[&VfFile],
         creation: &[bool],
         for_write: bool,
+        truncate: &[bool],
     ) -> VfResult<Vec<Option<i32>>> {
         // Resolve each parent directory once per distinct dir, then look up
         // every final component in one tolerant batch (which also reports the
@@ -884,6 +885,26 @@ impl NfsVecFs {
                 None => e,
             }
         })?;
+        // Apply O_TRUNC semantics (the merged OPEN path does not truncate).
+        let mut setattr_ops = Vec::new();
+        for (&orig, (fh, _)) in subset.iter().zip(results.iter()) {
+            if truncate.get(orig).copied().unwrap_or(false) {
+                setattr_ops.push(crate::client::SetattrOp {
+                    fh: fh.clone(),
+                    mode: None,
+                    size: Some(0),
+                });
+            }
+        }
+        if !setattr_ops.is_empty() {
+            self.nfs.setattr_many(&setattr_ops).map_err(|e| {
+                let e = VfError::from_rpc_indexed(e);
+                match subset.get(e.index()) {
+                    Some(orig) => e.with_index(*orig),
+                    None => e,
+                }
+            })?;
+        }
         let mut tmp = vec![None; files.len()];
         for (orig, (fh, stateid)) in subset.iter().zip(results) {
             self.next_fd += 1;
@@ -923,8 +944,10 @@ impl NfsVecFs {
     /// Batched readv for open (descriptor) ops: one compound per chunk of
     /// files, each carrying `[PUTFH, READ]` for every op.
     fn readv_batch(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        let per = self.nfs.per_op_bytes();
         let mut ops = Vec::with_capacity(reads.len());
         let mut offsets = Vec::with_capacity(reads.len());
+        let mut owner = Vec::with_capacity(reads.len());
         for (i, op) in reads.iter().enumerate() {
             let off = self
                 .resolve_offset(&op.file, op.offset)
@@ -934,17 +957,50 @@ impl NfsVecFs {
                 .get(&op.file.fd().unwrap())
                 .cloned()
                 .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
-            ops.push(crate::client::ReadOp {
-                fh: o.fh,
-                stateid: o.stateid,
-                offset: off,
-                count: op.length.min(u32::MAX as usize) as u32,
-            });
+            let mut remaining = op.length;
+            let mut chunk_off = 0u64;
+            loop {
+                let n = remaining.min(per);
+                ops.push(crate::client::ReadOp {
+                    fh: o.fh.clone(),
+                    stateid: o.stateid,
+                    offset: off + chunk_off,
+                    count: n as u32,
+                });
+                owner.push(i);
+                remaining -= n;
+                if remaining == 0 {
+                    break;
+                }
+                chunk_off += n as u64;
+            }
             offsets.push(off);
         }
-        let results = self.nfs.readv(&ops).map_err(VfError::from_rpc_indexed)?;
+        // The server validates the summed READ counts of a compound against
+        // ca_maxresponsesize, so split the chunk list into reply-sized
+        // sub-batches even though each op is already per-op capped.
+        let chunks_per_compound = if self.nfs.max_response_bytes > 0 {
+            (self.nfs.read_compound_bytes().saturating_sub(128) / per).max(1)
+        } else {
+            usize::MAX
+        };
+        let mut results = Vec::with_capacity(ops.len());
+        for sub in ops.chunks(chunks_per_compound) {
+            let r = self.nfs.readv(sub).map_err(VfError::from_rpc_indexed)?;
+            results.extend(r);
+        }
         let mut out = Vec::with_capacity(reads.len());
-        for ((op, (data, eof)), off) in reads.iter().zip(results).zip(offsets) {
+        let mut ci = 0usize;
+        for (i, op) in reads.iter().enumerate() {
+            let off = offsets[i];
+            let mut data = Vec::new();
+            let mut eof = false;
+            while ci < owner.len() && owner[ci] == i {
+                let (chunk, e) = &results[ci];
+                data.extend_from_slice(chunk);
+                eof = *e;
+                ci += 1;
+            }
             self.advance_offset(&op.file, off + data.len() as u64);
             out.push(ReadResult {
                 file: op.file.clone(),
@@ -1001,8 +1057,10 @@ impl NfsVecFs {
 
     /// Batched writev for open (descriptor) ops.
     fn writev_batch(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+        let per = self.nfs.per_op_bytes();
         let mut ops = Vec::with_capacity(writes.len());
         let mut offsets = Vec::with_capacity(writes.len());
+        let mut owner = Vec::with_capacity(writes.len());
         for (i, op) in writes.iter().enumerate() {
             let off = self
                 .write_offset(&op.file, op.offset)
@@ -1012,23 +1070,55 @@ impl NfsVecFs {
                 .get(&op.file.fd().unwrap())
                 .cloned()
                 .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
-            ops.push(crate::client::WriteOp {
-                fh: o.fh,
-                stateid: o.stateid,
-                offset: off,
-                data: op.data.clone(),
-            });
+            let mut remaining = op.data.len();
+            let mut chunk_off = 0u64;
+            loop {
+                let n = remaining.min(per);
+                ops.push(crate::client::WriteOp {
+                    fh: o.fh.clone(),
+                    stateid: o.stateid,
+                    offset: off + chunk_off,
+                    data: op.data[chunk_off as usize..chunk_off as usize + n].to_vec(),
+                });
+                owner.push(i);
+                remaining -= n;
+                if remaining == 0 {
+                    break;
+                }
+                chunk_off += n as u64;
+            }
             offsets.push(off);
         }
-        let results = self.nfs.writev(&ops).map_err(VfError::from_rpc_indexed)?;
+        // Keep each compound's request under ca_maxrequestsize: the op-count
+        // batching alone would pack hundreds of MiB of WRITEs together.
+        let chunks_per_compound = if self.nfs.max_compound_bytes > 0 {
+            (self.nfs.max_compound_bytes.saturating_sub(128) / per).max(1)
+        } else {
+            usize::MAX
+        };
+        let mut results = Vec::with_capacity(ops.len());
+        for sub in ops.chunks(chunks_per_compound) {
+            let r = self.nfs.writev(sub).map_err(VfError::from_rpc_indexed)?;
+            results.extend(r);
+        }
         let mut out = Vec::with_capacity(writes.len());
-        for ((op, (n, committed)), off) in writes.iter().zip(results).zip(offsets) {
-            self.advance_offset(&op.file, off + n as u64);
+        let mut ci = 0usize;
+        for (i, op) in writes.iter().enumerate() {
+            let off = offsets[i];
+            let mut written = 0u64;
+            let mut stable = true;
+            while ci < owner.len() && owner[ci] == i {
+                let (n, committed) = &results[ci];
+                written += *n as u64;
+                stable = stable && *committed == stable_how4_FILE_SYNC4;
+                ci += 1;
+            }
+            self.advance_offset(&op.file, off + written);
             out.push(WriteResult {
                 file: op.file.clone(),
                 offset: off,
-                written: n as usize,
-                stable: committed == stable_how4_FILE_SYNC4,
+                written: written as usize,
+                stable,
             });
         }
         Ok(out)
@@ -1329,7 +1419,12 @@ impl NfsVecFs {
             }
         }
         if needs_open {
-            tmp = self.open_path_batch(&files, &vec![false; reads.len()], false)?;
+            tmp = self.open_path_batch(
+                &files,
+                &vec![false; reads.len()],
+                false,
+                &vec![false; reads.len()],
+            )?;
         }
         let remapped: Vec<ReadOp> = reads
             .iter()
@@ -1468,7 +1563,8 @@ impl NfsVecFs {
             }
         }
         if needs_open {
-            tmp = self.open_path_batch(&files, &creation, true)?;
+            let truncation: Vec<bool> = writes.iter().map(|w| w.truncate).collect();
+            tmp = self.open_path_batch(&files, &creation, true, &truncation)?;
         }
         let remapped: Vec<WriteOp> = writes
             .iter()
@@ -1481,6 +1577,7 @@ impl NfsVecFs {
                 offset: w.offset,
                 data: w.data.clone(),
                 creation: false,
+                truncate: false,
             })
             .collect();
         let result = self.writev_batch(&remapped);
@@ -1909,6 +2006,52 @@ impl VecFs for NfsVecFs {
         Ok(out)
     }
 
+    fn read_allv(&mut self, files: &[VfFile]) -> VfResult<Vec<Vec<u8>>> {
+        // Read until EOF in per-op chunks, batching every active file into
+        // each compound so round trips scale with file size, not file count.
+        // No size stat is needed: READ's EOF flag terminates each file.
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        let per = self.nfs.per_op_bytes();
+        // The window adapts to the number of active files: small files all
+        // fit the first compound (so cat(20) is one compound), while big
+        // files still get near-compound-sized windows.
+        let compound_budget = if self.nfs.max_response_bytes > 0 {
+            self.nfs.read_compound_bytes().saturating_sub(128)
+        } else {
+            per * 4
+        };
+        let max_window = per * (compound_budget / per).max(1);
+        let mut out: Vec<Vec<u8>> = files.iter().map(|_| Vec::new()).collect();
+        let mut offsets = vec![0u64; files.len()];
+        let mut active: Vec<usize> = (0..files.len()).collect();
+        while !active.is_empty() {
+            // Reserve each active file's ~128-byte per-op overhead so the
+            // whole batch packs into one compound when it fits.
+            let window = (compound_budget / active.len())
+                .saturating_sub(128)
+                .clamp(64 * 1024, max_window)
+                .max(1);
+            let reads: Vec<ReadOp> = active
+                .iter()
+                .map(|&i| ReadOp::at(files[i].clone(), offsets[i], window))
+                .collect();
+            let results = self.readv(&reads)?;
+            let mut next = Vec::with_capacity(active.len());
+            for (k, &i) in active.iter().enumerate() {
+                let r = &results[k];
+                out[i].extend_from_slice(&r.data);
+                offsets[i] = r.offset + r.data.len() as u64;
+                if !r.eof {
+                    next.push(i);
+                }
+            }
+            active = next;
+        }
+        Ok(out)
+    }
+
     fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
         if writes.is_empty() {
             return Ok(Vec::new());
@@ -1951,6 +2094,7 @@ impl VecFs for NfsVecFs {
                 offset: off,
                 data: w.data.clone(),
                 create: w.creation && !w.file.is_descriptor(),
+                truncate: w.truncate && !w.file.is_descriptor(),
                 stateid: w
                     .file
                     .fd()
