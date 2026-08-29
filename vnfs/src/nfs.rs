@@ -944,7 +944,7 @@ impl NfsVecFs {
     /// Batched readv for open (descriptor) ops: one compound per chunk of
     /// files, each carrying `[PUTFH, READ]` for every op.
     fn readv_batch(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
-        let per = self.nfs.per_op_bytes();
+        let per = self.nfs.read_per_op_bytes();
         let mut ops = Vec::with_capacity(reads.len());
         let mut offsets = Vec::with_capacity(reads.len());
         let mut owner = Vec::with_capacity(reads.len());
@@ -2013,7 +2013,7 @@ impl VecFs for NfsVecFs {
         if files.is_empty() {
             return Ok(Vec::new());
         }
-        let per = self.nfs.per_op_bytes();
+        let per = self.nfs.read_per_op_bytes();
         // The window adapts to the number of active files: small files all
         // fit the first compound (so cat(20) is one compound), while big
         // files still get near-compound-sized windows.

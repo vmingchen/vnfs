@@ -71,10 +71,11 @@ pub struct NfsClient {
 /// Upper bound for the per-compound payload cap for merged path I/O; the
 /// actual default comes from the server-confirmed `ca_maxrequestsize`.
 pub const DEFAULT_MAX_COMPOUND_BYTES: usize = 4 << 20;
-/// A single READ/WRITE op is capped well below the compound limit by NFS
-/// servers (ganesha's MaxReadSize/MaxWriteSize default to 1 MiB); larger
-/// requests must be split into multiple ops inside the compound.
-pub const MAX_OP_BYTES: usize = 1 << 20;
+/// Upper bound for a single READ/WRITE op's payload, matching the XDR codec
+/// cap `XDR_BYTES_MAXLEN_IO` (64 MiB) in nfsv41-sys. Servers with smaller
+/// per-op or per-compound limits still get their payloads split by the
+/// compound/op budgets.
+pub const MAX_OP_BYTES: usize = 64 << 20;
 
 /// How an OPEN handles a file that does not exist yet.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -585,6 +586,12 @@ impl NfsClient {
         } else {
             (self.max_response_bytes.saturating_mul(3) / 4).max(64 * 1024)
         }
+    }
+
+    /// Per-op data cap for READs: a single READ's data travels in the reply,
+    /// so it must never exceed the reply budget even alone in a compound.
+    pub fn read_per_op_bytes(&self) -> usize {
+        self.per_op_bytes().min(self.read_compound_bytes())
     }
 
     pub fn root(&self) -> &FileHandle {
@@ -1447,7 +1454,7 @@ impl NfsClient {
         let per_file = 4;
         let reserve = 8;
         let budget = self.max_ops.saturating_sub(reserve).max(per_file);
-        let per_op = self.per_op_bytes();
+        let per_op = self.read_per_op_bytes();
 
         let mut global = 0usize;
         // Bytes of ops[global] already fetched across earlier compounds
@@ -1483,7 +1490,13 @@ impl NfsClient {
                     // Reserve a little overhead even for the first file: the
                     // server validates the summed READ counts (plus resarray
                     // overhead) against ca_maxresponsesize before serving.
-                    self.read_compound_bytes().saturating_sub(payload + 128)
+                    if payload > 0 {
+                        self.read_compound_bytes().saturating_sub(payload + 128)
+                    } else {
+                        // The first op is capped at read_per_op_bytes(), so a
+                        // full-budget room never lets it overflow the reply.
+                        self.read_compound_bytes()
+                    }
                 } else {
                     usize::MAX
                 };

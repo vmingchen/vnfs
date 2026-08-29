@@ -1045,14 +1045,28 @@ fn large_writev_readv_roundtrip() {
     let mut c = client();
     let p = format!("{}/big.bin", dir);
     let data = vec![b'x'; 2 * 1024 * 1024 + 123];
+    // The 2 MiB payload must travel as a single WRITE op (the XDR I/O cap is
+    // 64 MiB, so the per-op limit is the compound budget, not 1 MiB).
+    let _ = vnfs::compound::compound_stats(); // reset counters
     let w = c
         .writev(&[WriteOp::at(VfFile::from_path(&p), 0, data.clone()).with_creation()])
         .unwrap();
     assert_eq!(w[0].written, data.len());
+    assert_eq!(
+        vnfs::compound::compound_stats().0,
+        1,
+        "writev must be 1 compound"
+    );
+    let _ = vnfs::compound::compound_stats(); // reset counters
     let r = c
         .readv(&[ReadOp::at(VfFile::from_path(&p), 0, data.len())])
         .unwrap();
     assert_eq!(r[0].data, data);
+    assert_eq!(
+        vnfs::compound::compound_stats().0,
+        1,
+        "readv must be 1 compound"
+    );
     assert_eq!(c.stat(&p).unwrap().size, data.len() as u64);
 }
 

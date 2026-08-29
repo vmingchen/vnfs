@@ -6023,7 +6023,7 @@ extern "C" {
 			return false;
 		if (!inline_xdr_bytes
 		    (xdrs, (char **)&objp->data.data_val,
-		     (u_int *) & objp->data.data_len, XDR_BYTES_MAXLEN))
+		     (u_int *) & objp->data.data_len, XDR_BYTES_MAXLEN_IO))
 			return false;
 		return true;
 	}
@@ -6403,7 +6403,7 @@ extern "C" {
 			return false;
 		if (!inline_xdr_bytes
 		    (xdrs, (char **)&objp->data.data_val,
-		     (u_int *) & objp->data.data_len, XDR_BYTES_MAXLEN))
+		     (u_int *) & objp->data.data_len, XDR_BYTES_MAXLEN_IO))
 			return false;
 		return true;
 	}

@@ -30,7 +30,12 @@
  * src/include/gsh_rpc.h.
  */
 #define XDR_ARRAY_MAXLEN 1024
+/* General-attribute opaque cap (matches NFS-Ganesha gsh_rpc.h). */
 #define XDR_BYTES_MAXLEN (1024 * 1024)
+/* READ/WRITE payloads use the I/O cap (XDR_BYTES_MAXLEN_IO upstream) instead
+ * of the 1 MiB general cap, so a single data op can carry a whole compound's
+ * budget. */
+#define XDR_BYTES_MAXLEN_IO (64 * 1024 * 1024)
 #define XDR_STRING_MAXLEN (8 * 1024)
 
 /* RPCSEC_GSS service type, normally from <rpc/auth_gss.h>. */
