@@ -90,23 +90,30 @@ impl DummyVecFs {
         if depth > 40 {
             return Err(VfError::failure(0, ERR_ACCES)); // symlink loop / too deep
         }
-        if let Ok(c) = std::fs::canonicalize(p) {
-            if c.starts_with(&self.root_canon) {
-                return Ok(c);
-            }
-            return Err(VfError::failure(0, ERR_ACCES));
-        }
-        // Dangling symlink: resolve its target and re-check.
+        // Resolve symlinks manually (before canonicalize, which would follow
+        // an OS-absolute target outside the root): an absolute target is
+        // chroot-relative, matching the NFS backend.
         if let Ok(md) = std::fs::symlink_metadata(p)
             && md.file_type().is_symlink()
         {
             let target = std::fs::read_link(p).map_err(|e| VfError::failure(0, Self::errno(&e)))?;
             let target_path = if target.is_absolute() {
-                target
+                // Chroot semantics, matching the NFS backend: an absolute
+                // target resolves inside the root (leading "/" is the root,
+                // and ".." components are clamped), so it can never escape.
+                let stripped = target.strip_prefix("/").unwrap_or(&target);
+                self.root
+                    .join(normalize_root_relative(&stripped.to_string_lossy()))
             } else {
                 p.parent().unwrap_or(Path::new("")).join(target)
             };
             return self.real_path_depth(&target_path, depth + 1);
+        }
+        if let Ok(c) = std::fs::canonicalize(p) {
+            if c.starts_with(&self.root_canon) {
+                return Ok(c);
+            }
+            return Err(VfError::failure(0, ERR_ACCES));
         }
         // Does not exist yet: the parent must be inside the root.
         let parent = p.parent().unwrap_or(Path::new(""));

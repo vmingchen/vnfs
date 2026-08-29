@@ -2,6 +2,7 @@
 
 import datetime
 import errno
+import hashlib
 import io
 import posixpath
 from glob import has_magic
@@ -31,8 +32,6 @@ def _oserror(errno_code, path):
         21: (IsADirectoryError, "Is a directory"),
     }
     cls, msg = table.get(errno_code, (OSError, f"errno {errno_code}"))
-    if cls is OSError:
-        return cls(errno_code, f"{msg}: {path!r}")
     return cls(errno_code, f"{msg}: {path!r}")
 
 
@@ -172,7 +171,7 @@ class Nfs4File(io.RawIOBase):
         if not self._writable:
             raise io.UnsupportedOperation("not writable")
         if isinstance(data, str):
-            data = data.encode()
+            raise TypeError("a bytes-like object is required, not 'str'")
         fd = self._ensure_open()
         if self._base_mode.startswith("a"):
             # O_APPEND: the backend appends regardless of the requested offset.
@@ -204,6 +203,8 @@ class Nfs4File(io.RawIOBase):
     def truncate(self, size=None):
         if self.closed:
             raise ValueError("I/O operation on closed file")
+        if not self._writable:
+            raise io.UnsupportedOperation("not writable")
         if size is None:
             size = self._pos
         self.fs._client.truncate(self.fs._native_path(self.path), size)
@@ -369,10 +370,21 @@ class Nfs4FileSystem(AbstractFileSystem):
 
     def ukey(self, path):
         info = self.info(path)
-        return f"{info.get('fileid')}:{info.get('modified')}:{info.get('size')}"
+        # Like LocalFileSystem (a hash of `info`, which includes the name),
+        # the key changes when the file is renamed as well as when its
+        # contents change.
+        return hashlib.sha256(
+            f"{info.get('name')}:{info.get('fileid')}:{info.get('modified')}:{info.get('size')}".encode()
+        ).hexdigest()
 
     def checksum(self, path):
-        return self.info(path).get("checksum")
+        # A stable, content-sensitive value: unlike the raw fileid, it
+        # changes when the file's contents change (mtime/size).
+        info = self.info(path)
+        digest = hashlib.sha256(
+            f"{info.get('fileid')}:{info.get('modified')}:{info.get('size')}".encode()
+        ).hexdigest()
+        return int(digest, 16)
 
     # -- bulk read / write -------------------------------------------------
 
@@ -511,7 +523,15 @@ class Nfs4FileSystem(AbstractFileSystem):
                 if parent not in ("", "/"):
                     self._client.ensure_dir(self._native_path(parent), 0o755)
         fds = self._client.open_many([self._native_path(p) for p in paths], modes)
-        return [Nfs4File(self, p, m, fd=fd) for p, m, fd in zip(paths, modes, fds)]
+        files = [Nfs4File(self, p, m, fd=fd) for p, m, fd in zip(paths, modes, fds)]
+        # Read-mode OpenFiles contexts do not call commit_many on exit;
+        # register the opened files on their OpenFile objects so
+        # OpenFile.__exit__ closes them (matching per-file opens on other
+        # filesystems).
+        for open_file, f in zip(open_files, files):
+            if "r" in open_file.mode:
+                open_file.fobjects = [f]
+        return files
 
     def commit_many(self, open_files):
         """Flush and close a list of files in one closev batch."""
@@ -552,6 +572,17 @@ class Nfs4FileSystem(AbstractFileSystem):
         if recursive:
             self._client.rm([self._native_path(p) for p in paths], True)
         else:
+            # Like LocalFileSystem, non-recursive rm must not remove
+            # directories (lstat so symlinks-to-directories are removed as
+            # links, matching os.remove).
+            stats, errors = self._client.lstat_many(
+                [self._native_path(p) for p in paths]
+            )
+            for i, s in enumerate(stats):
+                if s is not None and s["type"] == "directory":
+                    raise IsADirectoryError(
+                        errno.EISDIR, f"Is a directory: {paths[i]!r}"
+                    )
             self._client.remove_many([self._native_path(p) for p in paths])
 
     def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
@@ -656,7 +687,14 @@ class Nfs4FileSystem(AbstractFileSystem):
         self._write_batch([internal], [b""])
 
     def symlink(self, target, path, **kwargs):
-        self._client.symlink(target, self._native_path(self._strip_protocol(path)))
+        link = self._native_path(self._strip_protocol(path))
+        if target.startswith(("/", "nfs4://", "nfs4::")):
+            # Absolute targets are relative to the filesystem root (chroot
+            # semantics, matching LocalFileSystem's OS-absolute targets);
+            # map them through the root prefix. Relative targets are stored
+            # as-is and resolve relative to the link's directory.
+            target = self._native_path(self._strip_protocol(target))
+        self._client.symlink(target, link)
 
     def readlink(self, path):
         return self._client.readlink(self._native_path(self._strip_protocol(path)))

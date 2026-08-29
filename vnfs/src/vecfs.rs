@@ -1407,37 +1407,64 @@ mod tests {
     }
 
     #[test]
-    fn dummy_root_rejects_symlink_escape() {
+    fn dummy_root_resolves_absolute_symlink_targets_inside_root() {
         let (root, mut fs) = fs("sandbox-symlink");
         write(&mut fs, "/target", b"inside");
 
-        // Absolute target outside the root: read/write through it is refused.
+        // An absolute target is chroot-relative: "/target" is the root's
+        // "target", so reads through the link work.
+        fs.symlink("/target", "/abs-link").unwrap();
+        assert_eq!(
+            fs.read(&VfFile::from_path("/abs-link"), 0, 6).unwrap(),
+            b"inside"
+        );
+        // ".." components in an absolute target are clamped at the root.
+        fs.symlink("/sub/../target", "/dotdot-link").unwrap();
+        assert_eq!(
+            fs.read(&VfFile::from_path("/dotdot-link"), 0, 6).unwrap(),
+            b"inside"
+        );
+
+        // An OS-absolute path (e.g. the root's parent) is treated as a
+        // root-relative path: it cannot escape or touch the outside file.
         let outside = root.0.parent().unwrap().join("outside-target");
         std::fs::write(&outside, b"outside").unwrap();
+        let inside_target = root.0.join(
+            outside
+                .strip_prefix("/")
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
         fs.symlink(outside.to_str().unwrap(), "/evil").unwrap();
-
         assert_eq!(
             fs.readv(&[ReadOp::at(VfFile::from_path("/evil"), 0, 8)])
                 .unwrap_err()
                 .err_no(),
-            ERR_ACCES,
-            "read through escaping symlink"
+            ERR_NOENT,
+            "resolves inside the root where nothing exists yet"
         );
+        assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+
+        // Creating through a chroot-relative absolute target lands inside the
+        // root.
+        fs.mkdir("/subdir", 0o755).unwrap();
+        fs.symlink("/subdir/created-inside", "/evil3").unwrap();
+        fs.writev(&[WriteOp::at(VfFile::from_path("/evil3"), 0, b"x".to_vec()).with_creation()])
+            .unwrap();
         assert_eq!(
-            fs.writev(&[WriteOp::at(VfFile::from_path("/evil"), 0, b"x".to_vec())])
-                .unwrap_err()
-                .err_no(),
-            ERR_ACCES,
-            "write through escaping symlink"
+            fs.read(&VfFile::from_path("/subdir/created-inside"), 0, 1)
+                .unwrap(),
+            b"x"
         );
 
         // The link itself can still be inspected and removed (no-follow).
-        assert_eq!(fs.lstat("/evil").unwrap().ftype, VfType::Symlink);
-        fs.readlink("/evil").unwrap();
-        fs.unlink("/evil").unwrap();
+        assert_eq!(fs.lstat("/abs-link").unwrap().ftype, VfType::Symlink);
+        fs.readlink("/abs-link").unwrap();
+        fs.unlink("/abs-link").unwrap();
 
-        // A dangling symlink to an outside absolute path is refused for
-        // creation too, instead of creating the target outside the root.
+        // A dangling symlink to an absolute path still cannot touch the
+        // outside of the root when creating through it.
         let dangling = root.0.parent().unwrap().join("never-created");
         fs.symlink(dangling.to_str().unwrap(), "/evil2").unwrap();
         assert_eq!(
@@ -1446,13 +1473,15 @@ mod tests {
             )
             .unwrap_err()
             .err_no(),
-            ERR_ACCES
+            ERR_NOENT,
+            "the chroot-relative target's parent does not exist"
         );
         assert!(!dangling.exists());
+        assert!(!inside_target.exists(), "nothing was created inside either");
         let _ = std::fs::remove_file(&outside);
 
-        // A dangling symlink whose target is inside the root is created
-        // through (POSIX O_CREAT semantics).
+        // A dangling relative symlink whose target is inside the root is
+        // created through (POSIX O_CREAT semantics).
         fs.symlink("internal-target", "/ok-link").unwrap();
         fs.writev(&[WriteOp::at(VfFile::from_path("/ok-link"), 0, b"z".to_vec()).with_creation()])
             .unwrap();

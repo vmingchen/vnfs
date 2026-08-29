@@ -55,10 +55,12 @@ def test_error_mapping(dummy_fs):
 
 def test_compound_stats_available(dummy_fs):
     # The counter exists and is reset-on-read even though the dummy backend
-    # performs no compounds.
+    # performs no compounds. Reset first: the counters are process-global, so
+    # earlier NFS tests may have left a nonzero total.
+    dummy_fs._client.compound_stats()
     stats = dummy_fs._client.compound_stats()
     assert len(stats) == 4
-    assert stats == dummy_fs._client.compound_stats()
+    assert stats == (0, 0, 0, 0)
 
 
 def test_pipe_missing_parent_raises_by_default(dummy_fs):
