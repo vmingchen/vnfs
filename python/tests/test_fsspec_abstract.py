@@ -23,7 +23,7 @@ from fsspec.tests.abstract.put import AbstractPutTests
 
 
 def _nfs_reachable():
-    from vnfs_fs import _native
+    from nfs4fs import _native
 
     try:
         _native.NfsClient("127.0.0.1", "nfs")
@@ -36,14 +36,14 @@ class Nfs4AbstractFixtures(AbstractFixtures):
     @pytest.fixture(params=["dummy", "nfs"])
     def fs(self, request):
         if request.param == "dummy":
-            root = tempfile.mkdtemp(prefix="vnfs_abstract_")
+            root = tempfile.mkdtemp(prefix="nfs4fs_abstract_")
             yield fsspec.filesystem(
                 "nfs4", backend="dummy", dummy_root=root, auto_mkdir=True
             )
             return
         if not _nfs_reachable():
             pytest.skip("local NFSv4.1 server (127.0.0.1) is not reachable")
-        nfs_root = f"git/vnfs_fs_abstract_{os.getpid()}_{uuid.uuid4().hex[:8]}"
+        nfs_root = f"git/nfs4fs_abstract_{os.getpid()}_{uuid.uuid4().hex[:8]}"
         fs = fsspec.filesystem("nfs4", host="127.0.0.1", root=nfs_root, auto_mkdir=True)
         fs.mkdir("nfs4:///", create_parents=True)
         yield fs

@@ -1,4 +1,4 @@
-"""Type stubs for the Rust extension ``vnfs_fs._native``."""
+"""Type stubs for the Rust extension ``nfs4fs._native``."""
 
 from typing import Dict, List, Optional, Tuple
 

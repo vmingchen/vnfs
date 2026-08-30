@@ -1,10 +1,10 @@
-# vnfs-fs
+# nfs4fs
 
 An `fsspec` filesystem (`nfs4://`) backed by the vectorized
 [`vnfs`](../vnfs) NFSv4.1 client.
 
-The Rust extension (`vnfs_fs._native`) links libntirpc **statically**, so
-`import vnfs_fs` works without `LD_LIBRARY_PATH`.
+The Rust extension (`nfs4fs._native`) links libntirpc **statically**, so
+`import nfs4fs` works without `LD_LIBRARY_PATH`.
 
 ## Build
 
@@ -19,7 +19,7 @@ cd python
 
 ```python
 import fsspec
-import vnfs_fs  # registers the "nfs4" protocol
+import nfs4fs  # registers the "nfs4" protocol
 
 fs = fsspec.filesystem("nfs4", host="127.0.0.1", root="git/some/tree")
 fs.pipe({"nfs4:///a.txt": b"hello", "nfs4:///b.txt": b"world"})

@@ -1,7 +1,7 @@
 //! Python bindings for the vectorized vnfs NFSv4.1 client.
 //!
 //! This module exposes the [`VecFs`] surface as a `NfsClient` PyO3 class
-//! under `vnfs_fs._native`. Every fsspec bulk operation funnels through the
+//! under `nfs4fs._native`. Every fsspec bulk operation funnels through the
 //! vectorized calls here (getattrsv/lgetattrsv, readv, writev, openv/closev,
 //! removev, renamev, dupv, walk), so round trips scale with the number of
 //! batches/directories rather than the number of files.
@@ -231,7 +231,7 @@ fn mode_to_flags(mode: &str) -> PyResult<i32> {
 // ---------------------------------------------------------------------------
 
 /// One client (one TCP connection / NFS session) behind a mutex.
-#[pyclass(module = "vnfs_fs._native")]
+#[pyclass(module = "nfs4fs._native")]
 struct NfsClient {
     fs: Mutex<Box<dyn vnfs::VecFs + Send>>,
 }
@@ -262,7 +262,7 @@ impl NfsClient {
                 let root_path = match root {
                     Some(r) => PathBuf::from(r),
                     None => std::env::temp_dir().join(format!(
-                        "vnfs_fs_dummy_{}_{}",
+                        "nfs4fs_dummy_{}_{}",
                         std::process::id(),
                         std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)

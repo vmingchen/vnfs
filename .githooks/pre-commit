@@ -16,7 +16,7 @@ if echo "$staged" | grep -qE '\.(py|pyi)$'; then
         black="black"
     fi
     echo "Running black --check..."
-    "$black" --check python/python/vnfs_fs python/tests
+    "$black" --check python/python/nfs4fs python/tests
 fi
 
 # Only run the Rust checks when Rust files are staged.

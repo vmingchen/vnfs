@@ -1,7 +1,7 @@
 # Build settings for the detached python/ cargo workspace only.
 #
 # The extension links libntirpc statically (vendored libntirpc-sys patch) so
-# `import vnfs_fs` works without LD_LIBRARY_PATH. nfsv41-sys/build.rs checks
+# `import nfs4fs` works without LD_LIBRARY_PATH. nfsv41-sys/build.rs checks
 # this variable to switch from its default dynamic-link flags; the main
 # workspace never sets it, so its behavior is unchanged.
 [env]

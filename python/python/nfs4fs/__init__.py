@@ -3,7 +3,7 @@
 Importing this package registers the ``nfs4`` protocol with fsspec:
 
     import fsspec
-    import vnfs_fs
+    import nfs4fs
 
     fs = fsspec.filesystem("nfs4", host="127.0.0.1", root="git/some/tree")
 """

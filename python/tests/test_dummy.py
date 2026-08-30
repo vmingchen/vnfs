@@ -1,4 +1,4 @@
-"""Unit tests for vnfs_fs on the local-directory (dummy) backend."""
+"""Unit tests for nfs4fs on the local-directory (dummy) backend."""
 
 import fsspec
 import pytest
