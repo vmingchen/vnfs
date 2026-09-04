@@ -401,6 +401,8 @@ class Nfs4FileSystem(AbstractFileSystem):
     def _native_path(self, internal):
         """Internal ('/a/b') -> root-prefixed path for the native client."""
         if self._root:
+            if internal == "/":
+                return "/" + self._root
             return "/" + self._root + internal
         return internal
 
@@ -417,6 +419,61 @@ class Nfs4FileSystem(AbstractFileSystem):
     def _fullpath(self, internal):
         """Internal ('/a/b') -> full fsspec path ('nfs4:///a/b')."""
         return "nfs4://" + internal
+
+    # -- batched directory creation ---------------------------------------
+
+    def _ensure_dirs(self, paths, mode=0o755):
+        """``mkdir -p`` a set of internal paths with as few compounds as
+        possible: one batched existence probe, then one mkdirv batch per
+        missing depth level."""
+        paths = list(dict.fromkeys(p for p in paths if p not in ("",)))
+        if not paths:
+            return
+        native_paths = [self._native_path(p) for p in paths]
+        prefixes = set()
+        for native in native_paths:
+            comps = [c for c in native.split("/") if c]
+            prefixes.update("/" + "/".join(comps[:i]) for i in range(1, len(comps) + 1))
+        ordered = sorted(prefixes, key=lambda p: (p.count("/"), p))
+        exists = self._client.exists_many(list(ordered))
+        missing = [p for p, ok in zip(ordered, exists) if not ok]
+        by_depth = {}
+        for p in missing:
+            by_depth.setdefault(p.count("/"), []).append(p)
+        for depth in sorted(by_depth):
+            self._client.mkdir_many(by_depth[depth], mode)
+
+    def _makedirs_batched(self, paths, exist_ok=False):
+        """fsspec ``makedirs`` semantics for many paths, batched."""
+        paths = list(dict.fromkeys(self._strip_protocol(p) for p in paths))
+        if not paths:
+            return
+        native = [self._native_path(p) for p in paths]
+        lstats, lerrs = self._client.lstat_many(native)
+        missing = []
+        existing = []
+        for i, p in enumerate(paths):
+            if lstats[i] is not None:
+                existing.append((i, p))
+            else:
+                code = lerrs.get(i)
+                if code is not None and code != errno.ENOENT:
+                    raise _oserror(code, p)
+                missing.append(p)
+        if existing and not exist_ok:
+            raise FileExistsError(errno.EEXIST, f"File exists: {existing[0][1]!r}")
+        if existing:
+            estats, eerrs = self._client.stat_many(
+                [self._native_path(p) for _, p in existing]
+            )
+            for j, (_, p) in enumerate(existing):
+                if estats[j] is not None and estats[j]["type"] == "directory":
+                    continue
+                if j in eerrs and eerrs[j] != errno.ENOENT:
+                    raise _oserror(eerrs[j], p)
+                raise FileExistsError(errno.EEXIST, f"File exists: {p!r}")
+        if missing:
+            self._ensure_dirs(missing, 0o755)
 
     # -- metadata ----------------------------------------------------------
 
@@ -634,9 +691,10 @@ class Nfs4FileSystem(AbstractFileSystem):
                 raise
             # Create missing parents once, then retry (only pays round trips
             # when a parent is absent).
-            for parent in sorted({posixpath.dirname(p) for p in paths}):
-                if parent not in ("", "/"):
-                    self._client.ensure_dir(self._native_path(parent), 0o755)
+            parents = {
+                posixpath.dirname(p) for p in paths if posixpath.dirname(p) != "/"
+            }
+            self._ensure_dirs(list(parents), 0o755)
             self._client.write_many(native, datas, truncate=truncate)
 
     def pipe(self, path, value=None, **kwargs):
@@ -673,6 +731,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         )
         from fsspec.utils import other_paths
 
+        pre_stats = None
         if isinstance(lpath, list) and isinstance(rpath, list):
             rpaths = rpath
             lpaths = lpath
@@ -682,7 +741,21 @@ class Nfs4FileSystem(AbstractFileSystem):
                 rpath, recursive=recursive, maxdepth=maxdepth, **kwargs
             )
             if source_is_str and (not recursive or maxdepth is not None):
-                rpaths = [p for p in rpaths if not (trailing_sep(p) or self.isdir(p))]
+                candidates = [p for p in rpaths if not trailing_sep(p)]
+                if not candidates:
+                    return
+                cstats, cerrs = self._client.stat_many(
+                    [self._native_path(self._strip_protocol(p)) for p in candidates]
+                )
+                if cerrs:
+                    i = min(cerrs)
+                    raise _oserror(cerrs[i], candidates[i])
+                pre_stats = {p: s for p, s in zip(candidates, cstats) if s is not None}
+                rpaths = [
+                    p
+                    for p, s in zip(candidates, cstats)
+                    if s is not None and s["type"] != "directory"
+                ]
                 if not rpaths:
                     return
             if isinstance(lpath, str):
@@ -704,10 +777,12 @@ class Nfs4FileSystem(AbstractFileSystem):
 
         callback.set_size(len(lpaths))
         local = LocalFileSystem(auto_mkdir=True)
-        # Classify directories with one stat_many batch (the per-path isdir
-        # checks in the base implementation cost one compound each).
-        native_all = [self._native_path(self._strip_protocol(r)) for r in rpaths]
-        stats, _stat_errors = self._client.stat_many(native_all)
+        if pre_stats is not None:
+            stats = [pre_stats.get(r) for r in rpaths]
+        else:
+            # Classify directories with one stat_many batch.
+            native_all = [self._native_path(self._strip_protocol(r)) for r in rpaths]
+            stats, _stat_errors = self._client.stat_many(native_all)
         pairs = []
         for i, (r, l) in enumerate(zip(rpaths, lpaths)):
             if stats[i] is not None and stats[i]["type"] == "directory":
@@ -784,12 +859,15 @@ class Nfs4FileSystem(AbstractFileSystem):
 
         callback.set_size(len(rpaths))
         pairs = []
+        remote_dirs = []
         for l, r in zip(lpaths, rpaths):
             if os.path.isdir(l):
-                self.makedirs(r, exist_ok=True)
+                remote_dirs.append(r)
                 callback.relative_update(0)
             else:
                 pairs.append((l, r))
+        if remote_dirs:
+            self._makedirs_batched(remote_dirs, exist_ok=True)
         if not pairs:
             return
         datas = []
@@ -822,7 +900,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         if self.auto_mkdir and any(c in mode for c in "wax"):
             parent = self._parent(path)
             if parent not in ("", "/"):
-                self._client.ensure_dir(self._native_path(parent), 0o755)
+                self._ensure_dirs([parent], 0o755)
         return Nfs4File(self, internal, mode)
 
     def open_many(self, open_files):
@@ -830,9 +908,10 @@ class Nfs4FileSystem(AbstractFileSystem):
         paths = [self._strip_protocol(f.path) for f in open_files]
         modes = [f.mode for f in open_files]
         if self.auto_mkdir and any(any(c in m for c in "wax") for m in modes):
-            for parent in sorted({posixpath.dirname(p) for p in paths}):
-                if parent not in ("", "/"):
-                    self._client.ensure_dir(self._native_path(parent), 0o755)
+            parents = {
+                posixpath.dirname(p) for p in paths if posixpath.dirname(p) != "/"
+            }
+            self._ensure_dirs(list(parents), 0o755)
         fds = self._client.open_many([self._native_path(p) for p in paths], modes)
         files = [Nfs4File(self, p, m, fd=fd) for p, m, fd in zip(paths, modes, fds)]
         # Read-mode OpenFiles contexts do not call commit_many on exit;
@@ -858,19 +937,13 @@ class Nfs4FileSystem(AbstractFileSystem):
     def mkdir(self, path, create_parents=True, **kwargs):
         internal = self._strip_protocol(path)
         mode = (kwargs.get("mode", 0o755) or 0o755) & 0o7777
-        native = self._native_path(internal)
         if create_parents:
-            self._client.ensure_dir(native, mode)
+            self._ensure_dirs([internal], mode)
         else:
-            self._client.mkdir(native, mode)
+            self._client.mkdir(self._native_path(internal), mode)
 
     def makedirs(self, path, exist_ok=False):
-        internal = self._strip_protocol(path)
-        if self.exists(internal):
-            if exist_ok and self.isdir(internal):
-                return
-            raise FileExistsError(errno.EEXIST, f"File exists: {internal!r}")
-        self._client.ensure_dir(self._native_path(internal), 0o755)
+        self._makedirs_batched([path], exist_ok)
 
     def rmdir(self, path):
         self._client.remove_many([self._native_path(self._strip_protocol(path))])
@@ -881,7 +954,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         else:
             paths = [self._strip_protocol(p) for p in path]
         if recursive:
-            self._client.rm([self._native_path(p) for p in paths], True)
+            self._rm_recursive(paths)
         else:
             # Like LocalFileSystem, non-recursive rm must not remove
             # directories (lstat so symlinks-to-directories are removed as
@@ -895,6 +968,38 @@ class Nfs4FileSystem(AbstractFileSystem):
                         errno.EISDIR, f"Is a directory: {paths[i]!r}"
                     )
             self._client.remove_many([self._native_path(p) for p in paths])
+
+    def _rm_recursive(self, paths):
+        """Recursively remove ``paths`` with a batched walk + removev."""
+        native_paths = [self._native_path(p) for p in paths]
+        lstats, lerrs = self._client.lstat_many(native_paths)
+        if lerrs:
+            i = min(lerrs)
+            raise _oserror(lerrs[i], paths[i])
+
+        remove_files = []
+        remove_dirs = []
+        for i, p in enumerate(paths):
+            if lstats[i] is None:
+                continue
+            if lstats[i]["type"] != "directory":
+                remove_files.append(native_paths[i])
+                continue
+            remove_dirs.append(native_paths[i])
+            tree = self._client.walk(native_paths[i])
+            for _, entries in tree:
+                for e in entries:
+                    if e["type"] == "directory":
+                        remove_dirs.append(e["name"])
+                    else:
+                        remove_files.append(e["name"])
+
+        if remove_files:
+            self._client.remove_many(list(dict.fromkeys(remove_files)))
+        remove_dirs = list(dict.fromkeys(remove_dirs))
+        remove_dirs.sort(key=lambda p: p.count("/"), reverse=True)
+        if remove_dirs:
+            self._client.remove_many(remove_dirs)
 
     def mv(self, path1, path2, recursive=False, maxdepth=None, **kwargs):
         if isinstance(path1, list) or isinstance(path2, list):
@@ -922,18 +1027,58 @@ class Nfs4FileSystem(AbstractFileSystem):
             [(self._native_path(a), self._native_path(b)) for a, b in pairs]
         )
 
+    def _copy_recursive(self, src, dst, symlinks=False):
+        """Copy a directory tree with batched walk/mkdir/copy calls."""
+        native_src = self._native_path(src)
+        src = src.rstrip("/") or "/"
+        dst = dst.rstrip("/") or "/"
+        tree = self._client.walk(native_src)
+
+        dest_dirs = {dst}
+        pairs = []
+        symlink_pairs = []
+        for dir_native, entries in tree:
+            dir_int = self._internalize(dir_native)
+            rel = posixpath.relpath(dir_int, src)
+            dest_dir = posixpath.join(dst, rel) if rel != "." else dst
+            dest_dirs.add(dest_dir)
+            for e in entries:
+                child_int = self._internalize(e["name"])
+                rel_child = posixpath.relpath(child_int, src)
+                dest = posixpath.join(dst, rel_child) if rel_child != "." else dst
+                if e["type"] == "directory":
+                    dest_dirs.add(dest)
+                elif e["type"] == "symlink" and symlinks:
+                    symlink_pairs.append((child_int, dest))
+                else:
+                    pairs.append((child_int, dest))
+
+        self._ensure_dirs(list(dest_dirs), 0o755)
+        if pairs:
+            native_pairs = [
+                (self._native_path(a), self._native_path(b)) for a, b in pairs
+            ]
+            _, errors = self._client.copy_many(native_pairs)
+            if errors:
+                i = min(errors)
+                raise _oserror(errors[i], pairs[i][0])
+        for s, d in symlink_pairs:
+            target = self.readlink(s)
+            self.symlink(target, d)
+
     def cp_file(self, path1, path2, **kwargs):
         """Copy a single file (or create a directory) between two paths."""
         src = self._strip_protocol(path1)
         dst = self._strip_protocol(path2)
-        if self.isdir(src):
-            self._client.ensure_dir(self._native_path(dst), 0o755)
+        info = self.info(src)
+        if info["type"] == "directory":
+            self._ensure_dirs([dst], 0o755)
             return
-        if not self.isfile(src):
+        if info["type"] != "file":
             raise FileNotFoundError(src)
         parent = self._parent(dst)
         if self.auto_mkdir and parent not in ("", "/"):
-            self._client.ensure_dir(self._native_path(parent), 0o755)
+            self._ensure_dirs([parent], 0o755)
         self._copy_pairs([(src, dst)], "raise")
 
     def copy(
@@ -961,10 +1106,17 @@ class Nfs4FileSystem(AbstractFileSystem):
         ):
             src = self._strip_protocol(path1)
             dst = self._strip_protocol(path2)
-            if self.isdir(src) and not self.isdir(dst):
-                self._client.cp_recursive(
-                    self._native_path(src), self._native_path(dst), False
-                )
+            stats, errors = self._client.stat_many(
+                [self._native_path(src), self._native_path(dst)]
+            )
+            src_is_dir = stats[0] is not None and stats[0]["type"] == "directory"
+            dst_is_dir = stats[1] is not None and stats[1]["type"] == "directory"
+            if errors:
+                i = min(errors)
+                if errors[i] != errno.ENOENT:
+                    raise _oserror(errors[i], (src, dst)[i])
+            if src_is_dir and not dst_is_dir:
+                self._copy_recursive(src, dst, kwargs.get("symlinks", False))
                 return
         # Everything else (globs, trailing-slash semantics, maxdepth, missing
         # parents) follows the base implementation, which resolves paths via
@@ -984,15 +1136,18 @@ class Nfs4FileSystem(AbstractFileSystem):
         if not pairs:
             return
         native_pairs = [(self._native_path(a), self._native_path(b)) for a, b in pairs]
-        copied, errors = self._client.copy_many(native_pairs)
+        _, errors = self._client.copy_many(native_pairs)
         if errors and all(err == 2 for err in errors.values()):
             if self.auto_mkdir:
                 # Missing destination parents: create them once, then retry.
                 parents = {posixpath.dirname(b) for _, b in native_pairs}
-                for parent in sorted(parents):
-                    if parent not in ("", "/"):
-                        self._client.ensure_dir(parent, 0o755)
-                copied, errors = self._client.copy_many(native_pairs)
+                internal_parents = [
+                    self._internalize(parent)
+                    for parent in sorted(parents)
+                    if parent not in ("", "/")
+                ]
+                self._ensure_dirs(internal_parents, 0o755)
+                _, errors = self._client.copy_many(native_pairs)
         if errors:
             i = min(errors)
             exc = _oserror(errors[i], pairs[i][0])

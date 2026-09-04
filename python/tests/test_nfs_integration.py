@@ -74,12 +74,12 @@ def test_round_trip_bounds(nfs_fs):
     _, mv_count = _measured(fs, lambda: fs.mv(srcs, dsts))
     assert mv_count == 1, mv_count
 
-    # cp: merged stat + read + write + truncate compounds (bounded).
+    # cp: no-stat read_allv + one truncating writev compound.
     _, cp_count = _measured(
         fs,
         lambda: fs.cp(dsts, [_unique(nfs_fs, f"cp/{i}.txt") for i in range(n)]),
     )
-    assert cp_count <= 4, cp_count
+    assert cp_count == 2, cp_count
 
     # walk on a 30-node tree is level-batched.
     for i in range(5):
@@ -87,6 +87,24 @@ def test_round_trip_bounds(nfs_fs):
             fs.pipe_file(_unique(nfs_fs, f"tree/sub{i}/f{j}.txt"), b"x")
     _, walk_count = _measured(fs, lambda: list(fs.walk("nfs4:///tree")))
     assert walk_count <= 6, walk_count
+
+
+def test_recursive_tree_ops_are_batched(nfs_fs):
+    """Recursive rm/copy must walk once and batch per level instead of paying
+    per-file compounds."""
+    fs = nfs_fs
+    for i in range(4):
+        fs.mkdir(f"nfs4:///rtree/d{i}", create_parents=True)
+    fs.pipe({f"nfs4:///rtree/d{i}/f{j}.txt": b"x" for i in range(4) for j in range(4)})
+
+    _, copy_count = _measured(
+        fs, lambda: fs.copy("nfs4:///rtree", "nfs4:///rtree-copy", recursive=True)
+    )
+    assert copy_count < 60, copy_count
+    assert len(fs.find("nfs4:///rtree-copy")) == 16
+
+    _, rm_count = _measured(fs, lambda: fs.rm("nfs4:///rtree-copy", recursive=True))
+    assert rm_count < 20, rm_count
 
 
 def test_round_trips_do_not_scale_with_file_count(nfs_fs):

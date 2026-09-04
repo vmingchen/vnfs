@@ -1244,20 +1244,33 @@ impl NfsClient {
                                 }
                             };
                             map.note_ops(nops);
-                            let create = if op.create {
-                                OpenCreate::Unchecked
+                            if op.create && op.truncate {
+                                c.open_claim_null_create_mode(
+                                    base_seq + opens_in_chunk as u32,
+                                    OPEN4_SHARE_ACCESS_BOTH,
+                                    OPEN4_SHARE_DENY_NONE,
+                                    self.session.clientid,
+                                    &self.session.path_owner.name,
+                                    leaf.as_bytes(),
+                                    None,
+                                    true,
+                                );
                             } else {
-                                OpenCreate::NoCreate
-                            };
-                            c.open_claim_null(
-                                base_seq + opens_in_chunk as u32,
-                                OPEN4_SHARE_ACCESS_BOTH,
-                                OPEN4_SHARE_DENY_NONE,
-                                self.session.clientid,
-                                &self.session.path_owner.name,
-                                make_open_how(create, self.session.path_owner.verifier),
-                                leaf.as_bytes(),
-                            );
+                                let create = if op.create {
+                                    OpenCreate::Unchecked
+                                } else {
+                                    OpenCreate::NoCreate
+                                };
+                                c.open_claim_null(
+                                    base_seq + opens_in_chunk as u32,
+                                    OPEN4_SHARE_ACCESS_BOTH,
+                                    OPEN4_SHARE_DENY_NONE,
+                                    self.session.clientid,
+                                    &self.session.path_owner.name,
+                                    make_open_how(create, self.session.path_owner.verifier),
+                                    leaf.as_bytes(),
+                                );
+                            }
                             opens_in_chunk += 1;
                             map.note_ops(1);
                             if !close_in_compound {
@@ -1267,11 +1280,11 @@ impl NfsClient {
                             opened_path = Some(p.clone());
                             fh_at_opened = true;
                             newly_opened = true;
-                            if op.truncate {
+                            if op.truncate && !op.create {
                                 // Truncate in-compound right after OPEN so a
-                                // pipe/touch is a single round trip. The
-                                // special "current" stateid resolves to the
-                                // open's stateid without invalidating it.
+                                // no-create open still has O_TRUNC semantics.
+                                // Creation opens carry size=0 in OPEN's
+                                // createattrs instead.
                                 c.setattr_with_stateid(None, Some(0), &SPECIAL_STATEID);
                                 map.note_ops(1);
                             }
@@ -1947,7 +1960,8 @@ impl NfsClient {
                             self.session.clientid,
                             &self.session.path_owner.name,
                             leaf.as_bytes(),
-                            mode,
+                            Some(mode),
+                            op.truncate,
                         );
                     }
                     create => c.open_claim_null(
@@ -1967,10 +1981,6 @@ impl NfsClient {
                 if op.create == OpenCreate::Exclusive {
                     // EXCLUSIVE create always created the file; apply mode.
                     c.setattr(Some(op.mode.unwrap_or(0o644) & 0o7777), None);
-                    map.note_ops(1);
-                }
-                if op.truncate {
-                    c.setattr(None, Some(0));
                     map.note_ops(1);
                 }
                 map.end();

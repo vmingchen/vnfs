@@ -180,6 +180,11 @@ def run_correctness_suite(fs):
     assert fs.cat_file("nfs4:///c1.txt") == b"1"
     fs.cp(["nfs4:///m1.txt", "nfs4:///m2.txt"], ["nfs4:///c2.txt", "nfs4:///c3.txt"])
     assert fs.cat_file("nfs4:///c3.txt") == b"2"
+    # Copying over a longer destination truncates the stale tail (O_TRUNC
+    # semantics inside the write compound).
+    fs.pipe_file("nfs4:///c4.txt", b"this-stale-tail-must-be-removed")
+    fs.cp("nfs4:///m1.txt", "nfs4:///c4.txt")
+    assert fs.cat_file("nfs4:///c4.txt") == b"1"
 
     # cp file onto an existing directory copies into it.
     fs.mkdir("nfs4:///cpdir")

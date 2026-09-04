@@ -207,6 +207,36 @@ fn attrs_many_impl(
     Ok((results, errors))
 }
 
+/// Read every file in full (offset 0 to EOF) in batched, no-stat reads.
+/// Returns per-path bytes (None on failure) and an errno map.
+fn read_allv_impl(fs: &mut dyn vnfs::VecFs, paths: &[String]) -> Result<ReadManyResult, VfError> {
+    let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_path(p)).collect();
+    let mut results: Vec<Option<Vec<u8>>> = vec![None; paths.len()];
+    let mut errors: ErrnoMap = HashMap::new();
+    let mut remaining: Vec<usize> = (0..paths.len()).collect();
+    while !remaining.is_empty() {
+        let subset: Vec<VfFile> = remaining.iter().map(|&i| files[i].clone()).collect();
+        match fs.read_allv(&subset) {
+            Ok(bufs) => {
+                for (&i, buf) in remaining.iter().zip(bufs) {
+                    results[i] = Some(buf);
+                }
+                break;
+            }
+            Err(e) => {
+                let Some(bi) = e.index_opt() else {
+                    return Err(e);
+                };
+                let bi = bi.min(remaining.len() - 1);
+                let orig = remaining[bi];
+                errors.insert(orig, e.err_no());
+                remaining.remove(bi);
+            }
+        }
+    }
+    Ok((results, errors))
+}
+
 fn mode_to_flags(mode: &str) -> PyResult<i32> {
     use libc::{O_APPEND, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
     let base: String = mode.chars().filter(|c| *c != 'b' && *c != 't').collect();
@@ -623,32 +653,8 @@ impl NfsClient {
     /// Read every file in full (offset 0 to EOF) in batched, no-stat reads.
     /// Returns per-path bytes (None on failure) and an errno map.
     fn read_all_many(&self, paths: Vec<String>) -> PyResult<ReadManyResult> {
-        let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_path(p)).collect();
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        let mut results: Vec<Option<Vec<u8>>> = vec![None; paths.len()];
-        let mut errors: ErrnoMap = HashMap::new();
-        let mut remaining: Vec<usize> = (0..paths.len()).collect();
-        while !remaining.is_empty() {
-            let subset: Vec<VfFile> = remaining.iter().map(|&i| files[i].clone()).collect();
-            match fs.read_allv(&subset) {
-                Ok(bufs) => {
-                    for (&i, buf) in remaining.iter().zip(bufs) {
-                        results[i] = Some(buf);
-                    }
-                    break;
-                }
-                Err(e) => {
-                    let Some(bi) = e.index_opt() else {
-                        return Err(to_py_err(e, None));
-                    };
-                    let bi = bi.min(remaining.len() - 1);
-                    let orig = remaining[bi];
-                    errors.insert(orig, e.err_no());
-                    remaining.remove(bi);
-                }
-            }
-        }
-        Ok((results, errors))
+        read_allv_impl(&mut **fs, &paths).map_err(|e| to_py_err(e, None))
     }
 
     /// Write files at offset 0 (creating them), one writev batch; with
@@ -669,11 +675,7 @@ impl NfsClient {
             .zip(datas)
             .map(|(p, d)| {
                 let op = WriteOp::at(VfFile::from_path(p), 0, d).with_creation();
-                if truncate {
-                    op.with_truncate()
-                } else {
-                    op
-                }
+                if truncate { op.with_truncate() } else { op }
             })
             .collect();
         let mut fs = self.fs.lock().map_err(lock_err)?;
@@ -841,7 +843,7 @@ impl NfsClient {
         })
     }
 
-    /// Copy whole files in batches (size fetch + readv + writev + truncate,
+    /// Copy whole files in batches (no-stat read_allv + truncating writev,
     /// each constant in the number of compounds for one-dir batches).
     /// Returns `(copied_bytes, errors)`.
     fn copy_many(&self, pairs: Vec<(String, String)>) -> PyResult<CopyManyResult> {
@@ -853,45 +855,14 @@ impl NfsClient {
         let mut copied: Vec<Option<u64>> = vec![None; n];
         let mut errors: HashMap<usize, u32> = HashMap::new();
 
-        // 1. sizes.
-        let (attrs, errs) = attrs_many_impl(&mut **fs, &sources, AttrMask::SIZE, true)
-            .map_err(|e| to_py_err(e, None))?;
-        errors.extend(errs.iter().map(|(&k, &v)| (k, v)));
-        let mut remaining: Vec<usize> = (0..n).filter(|&i| !errors.contains_key(&i)).collect();
+        // 1+2. Read whole files (no separate size-stat round trip).
+        let (mut data, read_errors) =
+            read_allv_impl(&mut **fs, &sources).map_err(|e| to_py_err(e, None))?;
+        errors.extend(read_errors.iter().map(|(&k, &v)| (k, v)));
 
-        // 2. reads.
-        let mut data: Vec<Option<Vec<u8>>> = vec![None; n];
-        while !remaining.is_empty() {
-            let ops: Vec<ReadOp> = remaining
-                .iter()
-                .map(|&i| {
-                    let len = attrs[i]
-                        .as_ref()
-                        .map(|a| a.size.min(usize::MAX as u64) as usize)
-                        .unwrap_or(0);
-                    ReadOp::at(VfFile::from_path(&sources[i]), 0, len)
-                })
-                .collect();
-            match fs.readv(&ops) {
-                Ok(res) => {
-                    for (&i, r) in remaining.iter().zip(res) {
-                        data[i] = Some(r.data);
-                    }
-                    break;
-                }
-                Err(e) => {
-                    let Some(bi) = e.index_opt() else {
-                        return Err(to_py_err(e, None));
-                    };
-                    let bi = bi.min(remaining.len() - 1);
-                    let orig = remaining[bi];
-                    errors.insert(orig, e.err_no());
-                    remaining.remove(bi);
-                }
-            }
-        }
-
-        // 3. writes (creation on; open/write/close are batched by the backend).
+        // 3. writes. The in-compound O_TRUNC truncates each destination to
+        // zero; writing the whole source at offset zero then leaves exactly
+        // the source size (no separate truncate compound is needed).
         let mut remaining: Vec<usize> = (0..n).filter(|&i| data[i].is_some()).collect();
         while !remaining.is_empty() {
             let ops: Vec<WriteOp> = remaining
@@ -903,6 +874,7 @@ impl NfsClient {
                         data[i].clone().unwrap_or_default(),
                     )
                     .with_creation()
+                    .with_truncate()
                 })
                 .collect();
             match fs.writev(&ops) {
@@ -920,33 +892,6 @@ impl NfsClient {
                     let orig = remaining[bi];
                     errors.insert(orig, e.err_no());
                     data[orig] = None;
-                    remaining.remove(bi);
-                }
-            }
-        }
-
-        // 4. truncate destinations to the source size (stale-tail removal).
-        let mut remaining: Vec<usize> = (0..n).filter(|&i| copied[i].is_some()).collect();
-        while !remaining.is_empty() {
-            let attrs: Vec<VfAttrs> = remaining
-                .iter()
-                .map(|&i| VfAttrs {
-                    file: VfFile::from_path(&dests[i]),
-                    masks: AttrMask::SIZE,
-                    size: copied[i].unwrap_or(0),
-                    ..VfAttrs::default()
-                })
-                .collect();
-            match fs.setattrsv(&attrs) {
-                Ok(()) => break,
-                Err(e) => {
-                    let Some(bi) = e.index_opt() else {
-                        return Err(to_py_err(e, None));
-                    };
-                    let bi = bi.min(remaining.len() - 1);
-                    let orig = remaining[bi];
-                    errors.insert(orig, e.err_no());
-                    copied[orig] = None;
                     remaining.remove(bi);
                 }
             }

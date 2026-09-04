@@ -548,9 +548,9 @@ impl NfsVecFs {
     }
 
     /// The merged (single-compound) openv: resolve each parent once, then
-    /// OPEN + GETFH (+ SETATTR for truncate / exclusive-create mode) per
-    /// file. UNCHECKED creates carry the mode in their createattrs, so no
-    /// existence probe is needed.
+    /// OPEN + GETFH per file. UNCHECKED creates carry the mode and the
+    /// size=0 `O_TRUNC` in their createattrs, so no existence probe or
+    /// separate SETATTR is needed (RFC 8881 §18.16.3).
     fn openv_merged(
         &mut self,
         paths: &[&str],
@@ -885,7 +885,7 @@ impl NfsVecFs {
                 None => e,
             }
         })?;
-        // Apply O_TRUNC semantics (the merged OPEN path does not truncate).
+        // Apply O_TRUNC semantics in this phased fallback.
         let mut setattr_ops = Vec::new();
         for (&orig, (fh, _)) in subset.iter().zip(results.iter()) {
             if truncate.get(orig).copied().unwrap_or(false) {

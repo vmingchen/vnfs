@@ -194,8 +194,11 @@ impl Compound {
     }
 
     /// Like [`open_claim_null`](Self::open_claim_null) but with an
-    /// `OPEN4_CREATE`/`UNCHECKED4` openhow carrying a creation mode in its
-    /// createattrs (applied by the server only when the file is created).
+    /// `OPEN4_CREATE`/`UNCHECKED4` openhow carrying a creation mode and/or a
+    /// `size=0` truncation in its createattrs. The mode is applied by the
+    /// server only when the file is created; `size=0` also truncates an
+    /// existing file (the NFSv4.1 equivalent of `O_TRUNC`, RFC 8881
+    /// §18.16.3).
     #[allow(clippy::too_many_arguments)]
     pub fn open_claim_null_create_mode(
         &mut self,
@@ -205,12 +208,30 @@ impl Compound {
         clientid: clientid4,
         owner_name: &[u8],
         claim_file: &[u8],
-        mode: u32,
+        mode: Option<u32>,
+        truncate: bool,
     ) {
         let mut map = [0u32; 3];
-        map[1] |= 1 << (FATTR4_MODE % 32);
-        let mut vals = Vec::with_capacity(4);
-        vals.extend_from_slice(&mode.to_be_bytes());
+        let mut vals = Vec::with_capacity(12);
+        // Attribute values follow the bitmap in increasing attribute-id order:
+        // FATTR4_SIZE (word 0) before FATTR4_MODE (word 1).
+        if truncate {
+            map[0] |= 1 << (FATTR4_SIZE % 32);
+            vals.extend_from_slice(&0u64.to_be_bytes());
+        }
+        if let Some(mode) = mode {
+            map[1] |= 1 << (FATTR4_MODE % 32);
+            vals.extend_from_slice(&mode.to_be_bytes());
+        }
+        let bitmap_len = if map[2] != 0 {
+            3
+        } else if map[1] != 0 {
+            2
+        } else if map[0] != 0 {
+            1
+        } else {
+            0
+        };
         let (vptr, vlen) = self.keep(&vals);
         let openhow = openflag4 {
             opentype: opentype4_OPEN4_CREATE,
@@ -220,7 +241,7 @@ impl Compound {
                     createhow4_u: createhow4__bindgen_ty_1 {
                         createattrs: fattr4 {
                             attrmask: bitmap4 {
-                                bitmap4_len: 2,
+                                bitmap4_len: bitmap_len,
                                 map,
                             },
                             attr_vals: attrlist4 {
