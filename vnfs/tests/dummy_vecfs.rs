@@ -6,7 +6,7 @@ mod common;
 
 use std::path::Path;
 use vnfs::dummy_vecfs::DummyVecFs;
-use vnfs::{VecFs, VfOffset};
+use vnfs::{VecFs, VecFsExt, VfOffset};
 
 /// A `DummyVecFs` rooted at a fresh unique temp directory.
 fn dummy() -> DummyVecFs {
@@ -117,4 +117,17 @@ fn non_utf8_filenames_roundtrip() {
         .readv(&[ReadOp::from_os_path(&path, VfOffset::At(0), 4)])
         .unwrap()[0];
     assert_eq!(r.data, b"data");
+}
+
+#[test]
+fn path_extension_accepts_strings() {
+    let mut fs = dummy();
+    fs.mkdir_path("/x", 0o755).unwrap();
+    assert!(fs.exists_path("/x").unwrap());
+    assert_eq!(fs.stat_path("/x").unwrap().ftype, vnfs::VfType::Directory);
+    fs.chdir_path("/x").unwrap();
+    fs.symlink_path("missing", "dangling").unwrap();
+    assert!(fs.exists_path("dangling").unwrap());
+    fs.unlink_path("dangling").unwrap();
+    fs.rm_recursive_path("/x").unwrap();
 }

@@ -21,7 +21,7 @@ pub use dummy_vecfs::DummyVecFs;
 pub use nfs::NfsVecFs;
 pub use vecfs::{
     Adb, AttrMask, ERR_ACCES, ERR_EBADF, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT, ERR_NOTDIR,
-    ExtentPair, Fd, ReadOp, ReadResult, SeekFrom, VF_ERR_RPC, VF_ERR_UNSUPPORTED, VecFs, VfAttrs,
-    VfError, VfFile, VfOffset, VfPathBase, VfRes, VfResult, VfType, WalkEntry, WriteOp,
+    ExtentPair, Fd, ReadOp, ReadResult, SeekFrom, VF_ERR_RPC, VF_ERR_UNSUPPORTED, VecFs, VecFsExt,
+    VfAttrs, VfError, VfFile, VfOffset, VfPathBase, VfRes, VfResult, VfType, WalkEntry, WriteOp,
     WriteResult,
 };

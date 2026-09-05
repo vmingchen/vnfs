@@ -1122,6 +1122,117 @@ pub trait VecFs {
     }
 }
 
+/// `AsRef<Path>` convenience wrappers for [`VecFs`] methods.
+///
+/// The object-safe [`VecFs`] trait intentionally takes `&Path`. These
+/// wrappers accept any type that can be viewed as a path (`&str`, `String`,
+/// `PathBuf`, `&Path`, ...) and are useful for Rust callers that do not need
+/// dynamic dispatch.
+pub trait VecFsExt: VecFs {
+    fn stat_path<P: AsRef<Path>>(&mut self, path: P) -> VfResult<VfAttrs> {
+        self.stat(path.as_ref())
+    }
+
+    fn lstat_path<P: AsRef<Path>>(&mut self, path: P) -> VfResult<VfAttrs> {
+        self.lstat(path.as_ref())
+    }
+
+    fn exists_path<P: AsRef<Path>>(&mut self, path: P) -> VfResult<bool> {
+        self.exists(path.as_ref())
+    }
+
+    fn file_type_path<P: AsRef<Path>>(&mut self, path: P) -> VfResult<VfType> {
+        self.file_type(path.as_ref())
+    }
+
+    fn open_path<P: AsRef<Path>>(&mut self, path: P, flags: i32, mode: u32) -> VfResult<VfFile> {
+        self.open(path.as_ref(), flags, mode)
+    }
+
+    fn mkdir_path<P: AsRef<Path>>(&mut self, path: P, mode: u32) -> VfResult<()> {
+        self.mkdir(path.as_ref(), mode)
+    }
+
+    fn ensure_dir_path<P: AsRef<Path>>(&mut self, path: P, mode: u32) -> VfResult<()> {
+        self.ensure_dir(path.as_ref(), mode)
+    }
+
+    fn chdir_path<P: AsRef<Path>>(&mut self, path: P) -> VfResult<()> {
+        self.chdir(path.as_ref())
+    }
+
+    fn unlink_path<P: AsRef<Path>>(&mut self, path: P) -> VfResult<()> {
+        self.unlink(path.as_ref())
+    }
+
+    fn readlink_path<P: AsRef<Path>>(&mut self, path: P) -> VfResult<Vec<u8>> {
+        self.readlink(path.as_ref())
+    }
+
+    fn symlink_path<P, Q>(&mut self, oldpath: P, newpath: Q) -> VfResult<()>
+    where
+        P: AsRef<Path>,
+        Q: AsRef<Path>,
+    {
+        self.symlink(oldpath.as_ref(), newpath.as_ref())
+    }
+
+    fn listdir_path<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        masks: AttrMask,
+        max_count: usize,
+        recursive: bool,
+    ) -> VfResult<Vec<VfAttrs>> {
+        self.listdir(path.as_ref(), masks, max_count, recursive)
+    }
+
+    fn walk_path<P: AsRef<Path>>(
+        &mut self,
+        root: P,
+        masks: AttrMask,
+        sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
+    ) -> VfResult<Vec<WalkEntry>> {
+        self.walk(root.as_ref(), masks, sort)
+    }
+
+    fn openv_paths<P: AsRef<Path>>(
+        &mut self,
+        paths: &[P],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> VfResult<Vec<VfFile>> {
+        let refs: Vec<&Path> = paths.iter().map(|p| p.as_ref()).collect();
+        self.openv(&refs, flags, modes)
+    }
+
+    fn openv_simple_paths<P: AsRef<Path>>(
+        &mut self,
+        paths: &[P],
+        flags: i32,
+        mode: u32,
+    ) -> VfResult<Vec<VfFile>> {
+        let refs: Vec<&Path> = paths.iter().map(|p| p.as_ref()).collect();
+        self.openv_simple(&refs, flags, mode)
+    }
+
+    fn unlinkv_paths<P: AsRef<Path>>(&mut self, paths: &[P]) -> VfRes {
+        let refs: Vec<&Path> = paths.iter().map(|p| p.as_ref()).collect();
+        self.unlinkv(&refs)
+    }
+
+    fn rm_paths<P: AsRef<Path>>(&mut self, paths: &[P], recursive: bool) -> VfRes {
+        let refs: Vec<&Path> = paths.iter().map(|p| p.as_ref()).collect();
+        self.rm(&refs, recursive)
+    }
+
+    fn rm_recursive_path<P: AsRef<Path>>(&mut self, path: P) -> VfRes {
+        self.rm(&[path.as_ref()], true)
+    }
+}
+
+impl<T: VecFs + ?Sized> VecFsExt for T {}
+
 /// `tc_rm_recursive()`.
 pub fn rm_recursive(fs: &mut impl VecFs, dir: &Path) -> VfRes {
     fs.rm(&[dir], true)
