@@ -12,7 +12,7 @@ use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use vnfs::dummy_vecfs::DummyVecFs;
 use vnfs::nfs::NfsVecFs;
@@ -20,6 +20,15 @@ use vnfs::vecfs::{AttrMask, VfAttrs, VfError, VfFile, ERR_EBADF, ERR_NOENT};
 
 /// ABI version implemented by this library.
 pub const VFSI_ABI_VERSION: u32 = 2;
+
+macro_rules! ffi_guard {
+    ($fallback:expr, $body:block) => {{
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $body)) {
+            Ok(value) => value,
+            Err(_) => $fallback,
+        }
+    }};
+}
 
 /// Opaque filesystem handle owned by C.
 pub struct vfsi_fs {
@@ -108,7 +117,7 @@ pub type vfsi_read_paths_cb = Option<
 /// Return the ABI version implemented by the loaded library.
 #[no_mangle]
 pub extern "C" fn vfsi_abi_version() -> u32 {
-    VFSI_ABI_VERSION
+    ffi_guard!(0, { VFSI_ABI_VERSION })
 }
 
 fn mask() -> AttrMask {
@@ -130,6 +139,12 @@ fn vf_code(e: &VfError) -> c_int {
         VfError::Transport { .. } => libc::EIO,
         _ => libc::EIO,
     }
+}
+
+fn lock_or_io<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, VfError> {
+    mutex
+        .lock()
+        .map_err(|_| VfError::failure(0, libc::EIO as u32))
 }
 
 fn cstr_path(path: *const c_char) -> Option<PathBuf> {
@@ -175,23 +190,17 @@ fn vpath_for(fs: &vfsi_fs, path: &std::path::Path) -> Result<PathBuf, VfError> {
 /// Create a local-directory vfsi backend rooted at `root`.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_dummy_open(root: *const c_char, out: *mut *mut vfsi_fs) -> c_int {
-    if root.is_null() || out.is_null() {
-        return libc::EINVAL;
-    }
-    let Some(root) = cstr_path(root) else {
-        return libc::EINVAL;
-    };
-    let backend = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Ok::<_, std::io::Error>(Box::new(DummyVecFs::new(root)) as Box<dyn vnfs::VecFs>)
-    }));
-    match backend {
-        Ok(Ok(fs)) => {
-            *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
-            0
+    ffi_guard!(libc::EIO, {
+        if root.is_null() || out.is_null() {
+            return libc::EINVAL;
         }
-        Ok(Err(e)) => e.raw_os_error().unwrap_or(libc::EIO),
-        Err(_) => libc::EIO,
-    }
+        let Some(root) = cstr_path(root) else {
+            return libc::EINVAL;
+        };
+        let fs = Box::new(DummyVecFs::new(root)) as Box<dyn vnfs::VecFs>;
+        *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
+        0
+    })
 }
 
 /// Create a local-directory vfsi backend rooted at `root`, treating
@@ -204,48 +213,41 @@ pub unsafe extern "C" fn vfsi_dummy_open_mount(
     mountpoint: *const c_char,
     out: *mut *mut vfsi_fs,
 ) -> c_int {
-    if root.is_null() || mountpoint.is_null() || out.is_null() {
-        return libc::EINVAL;
-    }
-    let (Some(root), Some(mountpoint)) = (cstr_path(root), cstr_path(mountpoint)) else {
-        return libc::EINVAL;
-    };
-    let backend = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        Ok::<_, std::io::Error>(Box::new(DummyVecFs::new(root)) as Box<dyn vnfs::VecFs>)
-    }));
-    match backend {
-        Ok(Ok(fs)) => {
-            *out = make_fs(fs, mountpoint, PathBuf::from("/"));
-            0
+    ffi_guard!(libc::EIO, {
+        if root.is_null() || mountpoint.is_null() || out.is_null() {
+            return libc::EINVAL;
         }
-        Ok(Err(e)) => e.raw_os_error().unwrap_or(libc::EIO),
-        Err(_) => libc::EIO,
-    }
+        let (Some(root), Some(mountpoint)) = (cstr_path(root), cstr_path(mountpoint)) else {
+            return libc::EINVAL;
+        };
+        let fs = Box::new(DummyVecFs::new(root)) as Box<dyn vnfs::VecFs>;
+        *out = make_fs(fs, mountpoint, PathBuf::from("/"));
+        0
+    })
 }
 
 /// Connect to an NFSv4.1 server at `host` and open the export root.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_nfs_open(host: *const c_char, out: *mut *mut vfsi_fs) -> c_int {
-    if host.is_null() || out.is_null() {
-        return libc::EINVAL;
-    }
-    // SAFETY: C callers must pass a NUL-terminated host string.
-    let Ok(host) = unsafe { CStr::from_ptr(host) }.to_str() else {
-        return libc::EINVAL;
-    };
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        NfsVecFs::connect(host)
+    ffi_guard!(libc::EIO, {
+        if host.is_null() || out.is_null() {
+            return libc::EINVAL;
+        }
+        // SAFETY: C callers must pass a NUL-terminated host string.
+        let Ok(host) = unsafe { CStr::from_ptr(host) }.to_str() else {
+            return libc::EINVAL;
+        };
+        match NfsVecFs::connect(host)
             .map(|f| Box::new(f) as Box<dyn vnfs::VecFs>)
             .map_err(|e| vf_code(&e))
-    }));
-    match res {
-        Ok(Ok(fs)) => {
-            *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
-            0
+        {
+            Ok(fs) => {
+                *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
+                0
+            }
+            Err(code) => code,
         }
-        Ok(Err(code)) => code,
-        Err(_) => libc::EIO,
-    }
+    })
 }
 
 /// Connect to an NFSv4.1 server and treat `mountpoint` (a local kernel mount
@@ -256,7 +258,9 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount(
     mountpoint: *const c_char,
     out: *mut *mut vfsi_fs,
 ) -> c_int {
-    unsafe { vfsi_nfs_open_mount_export(host, c"/".as_ptr(), mountpoint, out) }
+    ffi_guard!(libc::EIO, {
+        unsafe { vfsi_nfs_open_mount_export(host, c"/".as_ptr(), mountpoint, out) }
+    })
 }
 
 /// Connect to an NFSv4.1 server, mapping a local kernel `mountpoint` to the
@@ -268,49 +272,49 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount_export(
     mountpoint: *const c_char,
     out: *mut *mut vfsi_fs,
 ) -> c_int {
-    if host.is_null() || export_root.is_null() || mountpoint.is_null() || out.is_null() {
-        return libc::EINVAL;
-    }
-    let Ok(host) = unsafe { CStr::from_ptr(host) }.to_str() else {
-        return libc::EINVAL;
-    };
-    let (Some(export_root), Some(mountpoint)) = (cstr_path(export_root), cstr_path(mountpoint))
-    else {
-        return libc::EINVAL;
-    };
-    if !export_root.is_absolute() || !mountpoint.is_absolute() {
-        return libc::EINVAL;
-    }
-    if export_root
-        .components()
-        .any(|c| matches!(c, Component::ParentDir))
-    {
-        return libc::EINVAL;
-    }
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        NfsVecFs::connect(host)
+    ffi_guard!(libc::EIO, {
+        if host.is_null() || export_root.is_null() || mountpoint.is_null() || out.is_null() {
+            return libc::EINVAL;
+        }
+        let Ok(host) = unsafe { CStr::from_ptr(host) }.to_str() else {
+            return libc::EINVAL;
+        };
+        let (Some(export_root), Some(mountpoint)) = (cstr_path(export_root), cstr_path(mountpoint))
+        else {
+            return libc::EINVAL;
+        };
+        if !export_root.is_absolute() || !mountpoint.is_absolute() {
+            return libc::EINVAL;
+        }
+        if export_root
+            .components()
+            .any(|c| matches!(c, Component::ParentDir))
+        {
+            return libc::EINVAL;
+        }
+        match NfsVecFs::connect(host)
             .map(|f| Box::new(f) as Box<dyn vnfs::VecFs>)
             .map_err(|e| vf_code(&e))
-    }));
-    match res {
-        Ok(Ok(fs)) => {
-            *out = make_fs(fs, mountpoint, export_root);
-            0
+        {
+            Ok(fs) => {
+                *out = make_fs(fs, mountpoint, export_root);
+                0
+            }
+            Err(code) => code,
         }
-        Ok(Err(code)) => code,
-        Err(_) => libc::EIO,
-    }
+    })
 }
 
 /// Destroy a filesystem handle returned by one of the `vfsi_*_open*`
 /// functions.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_free(fs: *mut vfsi_fs) {
-    if !fs.is_null() {
-        if std::env::var("VNFS_STATS").as_deref() == Ok("1") {
-            let (n, ops, bytes, max) = vnfs::compound::compound_stats();
-            if n > 0 {
-                eprintln!(
+    ffi_guard!((), {
+        if !fs.is_null() {
+            if std::env::var("VNFS_STATS").as_deref() == Ok("1") {
+                let (n, ops, bytes, max) = vnfs::compound::compound_stats();
+                if n > 0 {
+                    eprintln!(
                     "[vfsi] compounds={} avg_ops={:.2} max_ops={} avg_bytes={:.0} total_bytes={}",
                     n,
                     ops as f64 / n as f64,
@@ -318,25 +322,26 @@ pub unsafe extern "C" fn vfsi_free(fs: *mut vfsi_fs) {
                     bytes as f64 / n as f64,
                     bytes
                 );
+                }
+                let (calls, us) = vnfs::compound::rpc_stats();
+                if calls > 0 {
+                    eprintln!(
+                        "[vfsi] rpc_calls={} avg_rpc_ms={:.2} total_rpc_ms={:.1}",
+                        calls,
+                        us as f64 / calls as f64 / 1000.0,
+                        us as f64 / 1000.0
+                    );
+                }
             }
-            let (calls, us) = vnfs::compound::rpc_stats();
-            if calls > 0 {
-                eprintln!(
-                    "[vfsi] rpc_calls={} avg_rpc_ms={:.2} total_rpc_ms={:.1}",
-                    calls,
-                    us as f64 / calls as f64 / 1000.0,
-                    us as f64 / 1000.0
-                );
-            }
+            // SAFETY: frees an object previously created by this crate.
+            unsafe { drop(Box::from_raw(fs)) };
         }
-        // SAFETY: frees an object previously created by this crate.
-        unsafe { drop(Box::from_raw(fs)) };
-    }
+    })
 }
 
 fn stat_impl(fs: &vfsi_fs, path: &std::path::Path) -> Result<VfAttrs, VfError> {
     let vpath = vpath_for(fs, path)?;
-    fs.fs.lock().expect("vfsi lock poisoned").stat(&vpath)
+    lock_or_io(&fs.fs)?.stat(&vpath)
 }
 
 /// Stat `path`, following a final symlink.
@@ -346,18 +351,18 @@ pub unsafe extern "C" fn vfsi_stat(
     path: *const c_char,
     out: *mut vfsi_attrs,
 ) -> c_int {
-    let (Some(fs), Some(path), Some(out)) = (fs.as_ref(), cstr_path(path), out.as_mut()) else {
-        return libc::EINVAL;
-    };
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stat_impl(fs, &path)));
-    match res {
-        Ok(Ok(a)) => {
-            *out = vfsi_attrs::from_vf(&a);
-            0
+    ffi_guard!(libc::EIO, {
+        let (Some(fs), Some(path), Some(out)) = (fs.as_ref(), cstr_path(path), out.as_mut()) else {
+            return libc::EINVAL;
+        };
+        match stat_impl(fs, &path) {
+            Ok(a) => {
+                *out = vfsi_attrs::from_vf(&a);
+                0
+            }
+            Err(e) => vf_code(&e),
         }
-        Ok(Err(e)) => vf_code(&e),
-        Err(_) => libc::EIO,
-    }
+    })
 }
 
 fn open_impl(
@@ -367,16 +372,9 @@ fn open_impl(
     mode: u32,
 ) -> Result<i32, VfError> {
     let vpath = vpath_for(fs, path)?;
-    let file = fs
-        .fs
-        .lock()
-        .expect("vfsi lock poisoned")
-        .open(&vpath, flags, mode)?;
+    let file = lock_or_io(&fs.fs)?.open(&vpath, flags, mode)?;
     let fd = fs.next_fd.fetch_add(1, Ordering::Relaxed);
-    fs.files
-        .lock()
-        .expect("vfsi files lock poisoned")
-        .insert(fd, file);
+    lock_or_io(&fs.files)?.insert(fd, file);
     Ok(fd)
 }
 
@@ -388,39 +386,36 @@ pub unsafe extern "C" fn vfsi_open(
     flags: c_int,
     mode: u32,
 ) -> c_int {
-    let (Some(fs), Some(path)) = (fs.as_ref(), cstr_path(path)) else {
-        return -libc::EINVAL;
-    };
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        open_impl(fs, &path, flags, mode)
-    }));
-    match res {
-        Ok(Ok(fd)) => fd,
-        Ok(Err(e)) => -vf_code(&e),
-        Err(_) => -libc::EIO,
-    }
+    ffi_guard!(-libc::EIO, {
+        let (Some(fs), Some(path)) = (fs.as_ref(), cstr_path(path)) else {
+            return -libc::EINVAL;
+        };
+        match open_impl(fs, &path, flags, mode) {
+            Ok(fd) => fd,
+            Err(e) => -vf_code(&e),
+        }
+    })
 }
 
 fn close_impl(fs: &vfsi_fs, fd: i32) -> Result<(), VfError> {
-    let file = fs
-        .files
-        .lock()
-        .expect("vfsi files lock poisoned")
+    let file = lock_or_io(&fs.files)?
         .remove(&fd)
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-    fs.fs.lock().expect("vfsi lock poisoned").close(&file)
+    lock_or_io(&fs.fs)?.close(&file)
 }
 
 /// Close a descriptor opened by [`vfsi_open`].
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_close(fs: *mut vfsi_fs, fd: c_int) -> c_int {
-    let Some(fs) = fs.as_ref() else {
-        return libc::EINVAL;
-    };
-    match close_impl(fs, fd) {
-        Ok(()) => 0,
-        Err(e) => vf_code(&e),
-    }
+    ffi_guard!(libc::EIO, {
+        let Some(fs) = fs.as_ref() else {
+            return libc::EINVAL;
+        };
+        match close_impl(fs, fd) {
+            Ok(()) => 0,
+            Err(e) => vf_code(&e),
+        }
+    })
 }
 
 fn pread_impl(
@@ -430,18 +425,11 @@ fn pread_impl(
     len: usize,
     offset: u64,
 ) -> Result<usize, VfError> {
-    let file = fs
-        .files
-        .lock()
-        .expect("vfsi files lock poisoned")
+    let file = lock_or_io(&fs.files)?
         .get(&fd)
         .cloned()
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-    let data = fs
-        .fs
-        .lock()
-        .expect("vfsi lock poisoned")
-        .read(&file, offset, len)?;
+    let data = lock_or_io(&fs.fs)?.read(&file, offset, len)?;
     // SAFETY: C caller must provide a buffer of at least `len` bytes.
     unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf as *mut u8, data.len()) };
     Ok(data.len())
@@ -458,20 +446,22 @@ pub unsafe extern "C" fn vfsi_pread(
     offset: u64,
     got: *mut usize,
 ) -> c_int {
-    let (Some(fs), false, Some(buf)) = (fs.as_ref(), buf.is_null(), buf.as_mut()) else {
-        return libc::EINVAL;
-    };
-    let _ = buf;
-    match pread_impl(fs, fd, buf, len, offset) {
-        Ok(n) => {
-            if !got.is_null() {
-                // SAFETY: C caller may pass NULL, otherwise a writable usize.
-                unsafe { *got = n };
+    ffi_guard!(libc::EIO, {
+        let (Some(fs), false, Some(buf)) = (fs.as_ref(), buf.is_null(), buf.as_mut()) else {
+            return libc::EINVAL;
+        };
+        let _ = buf;
+        match pread_impl(fs, fd, buf, len, offset) {
+            Ok(n) => {
+                if !got.is_null() {
+                    // SAFETY: C caller may pass NULL, otherwise a writable usize.
+                    unsafe { *got = n };
+                }
+                0
             }
-            0
+            Err(e) => vf_code(&e),
         }
-        Err(e) => vf_code(&e),
-    }
+    })
 }
 
 fn pwrite_impl(
@@ -481,19 +471,13 @@ fn pwrite_impl(
     len: usize,
     offset: u64,
 ) -> Result<usize, VfError> {
-    let file = fs
-        .files
-        .lock()
-        .expect("vfsi files lock poisoned")
+    let file = lock_or_io(&fs.files)?
         .get(&fd)
         .cloned()
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
     // SAFETY: C caller must provide a valid buffer of `len` bytes.
     let data = unsafe { std::slice::from_raw_parts(buf as *const u8, len) };
-    fs.fs
-        .lock()
-        .expect("vfsi lock poisoned")
-        .write(&file, offset, data)
+    lock_or_io(&fs.fs)?.write(&file, offset, data)
 }
 
 /// Write `len` bytes at `offset`; writes the actual count to `*wrote`.
@@ -506,20 +490,22 @@ pub unsafe extern "C" fn vfsi_pwrite(
     offset: u64,
     wrote: *mut usize,
 ) -> c_int {
-    let (Some(fs), false, Some(buf)) = (fs.as_ref(), buf.is_null(), buf.as_ref()) else {
-        return libc::EINVAL;
-    };
-    let _ = buf;
-    match pwrite_impl(fs, fd, buf, len, offset) {
-        Ok(n) => {
-            if !wrote.is_null() {
-                // SAFETY: C caller may pass NULL, otherwise a writable usize.
-                unsafe { *wrote = n };
+    ffi_guard!(libc::EIO, {
+        let (Some(fs), false, Some(buf)) = (fs.as_ref(), buf.is_null(), buf.as_ref()) else {
+            return libc::EINVAL;
+        };
+        let _ = buf;
+        match pwrite_impl(fs, fd, buf, len, offset) {
+            Ok(n) => {
+                if !wrote.is_null() {
+                    // SAFETY: C caller may pass NULL, otherwise a writable usize.
+                    unsafe { *wrote = n };
+                }
+                0
             }
-            0
+            Err(e) => vf_code(&e),
         }
-        Err(e) => vf_code(&e),
-    }
+    })
 }
 
 /// Create a directory (`create_parents != 0` behaves like `mkdir -p`).
@@ -530,40 +516,42 @@ pub unsafe extern "C" fn vfsi_mkdir(
     mode: u32,
     create_parents: c_int,
 ) -> c_int {
-    let (Some(fs), Some(path)) = (fs.as_ref(), cstr_path(path)) else {
-        return libc::EINVAL;
-    };
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let path = vpath_for(fs, &path)?;
-        let mut f = fs.fs.lock().expect("vfsi lock poisoned");
-        if create_parents != 0 {
-            f.ensure_dir(&path, mode)
-        } else {
-            f.mkdir(&path, mode)
+    ffi_guard!(libc::EIO, {
+        let (Some(fs), Some(path)) = (fs.as_ref(), cstr_path(path)) else {
+            return libc::EINVAL;
+        };
+        let result: Result<(), VfError> = (|| {
+            let path = vpath_for(fs, &path)?;
+            let mut f = lock_or_io(&fs.fs)?;
+            if create_parents != 0 {
+                f.ensure_dir(&path, mode)
+            } else {
+                f.mkdir(&path, mode)
+            }
+        })();
+        match result {
+            Ok(()) => 0,
+            Err(e) => vf_code(&e),
         }
-    }));
-    match res {
-        Ok(Ok(())) => 0,
-        Ok(Err(e)) => vf_code(&e),
-        Err(_) => libc::EIO,
-    }
+    })
 }
 
 /// Remove a path (directories must be empty).
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_remove(fs: *mut vfsi_fs, path: *const c_char) -> c_int {
-    let (Some(fs), Some(path)) = (fs.as_ref(), cstr_path(path)) else {
-        return libc::EINVAL;
-    };
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let path = vpath_for(fs, &path)?;
-        fs.fs.lock().expect("vfsi lock poisoned").unlink(&path)
-    }));
-    match res {
-        Ok(Ok(())) => 0,
-        Ok(Err(e)) => vf_code(&e),
-        Err(_) => libc::EIO,
-    }
+    ffi_guard!(libc::EIO, {
+        let (Some(fs), Some(path)) = (fs.as_ref(), cstr_path(path)) else {
+            return libc::EINVAL;
+        };
+        let result: Result<(), VfError> = (|| {
+            let path = vpath_for(fs, &path)?;
+            lock_or_io(&fs.fs)?.unlink(&path)
+        })();
+        match result {
+            Ok(()) => 0,
+            Err(e) => vf_code(&e),
+        }
+    })
 }
 
 /// Rename `oldpath` to `newpath`.
@@ -573,23 +561,22 @@ pub unsafe extern "C" fn vfsi_rename(
     oldpath: *const c_char,
     newpath: *const c_char,
 ) -> c_int {
-    let (Some(fs), Some(old), Some(new)) = (fs.as_ref(), cstr_path(oldpath), cstr_path(newpath))
-    else {
-        return libc::EINVAL;
-    };
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let old = vpath_for(fs, &old)?;
-        let new = vpath_for(fs, &new)?;
-        fs.fs
-            .lock()
-            .expect("vfsi lock poisoned")
-            .renamev(&[(VfFile::from_os_path(&old), VfFile::from_os_path(&new))])
-    }));
-    match res {
-        Ok(Ok(())) => 0,
-        Ok(Err(e)) => vf_code(&e),
-        Err(_) => libc::EIO,
-    }
+    ffi_guard!(libc::EIO, {
+        let (Some(fs), Some(old), Some(new)) =
+            (fs.as_ref(), cstr_path(oldpath), cstr_path(newpath))
+        else {
+            return libc::EINVAL;
+        };
+        let result: Result<(), VfError> = (|| {
+            let old = vpath_for(fs, &old)?;
+            let new = vpath_for(fs, &new)?;
+            lock_or_io(&fs.fs)?.renamev(&[(VfFile::from_os_path(&old), VfFile::from_os_path(&new))])
+        })();
+        match result {
+            Ok(()) => 0,
+            Err(e) => vf_code(&e),
+        }
+    })
 }
 
 /// List `dir` and call `cb` for each entry. Returning `false` from `cb`
@@ -601,41 +588,39 @@ pub unsafe extern "C" fn vfsi_listdir(
     cb: vfsi_listdir_cb,
     userdata: *mut c_void,
 ) -> c_int {
-    let (Some(fs), Some(dir)) = (fs.as_ref(), cstr_path(dir)) else {
-        return libc::EINVAL;
-    };
-    let Some(cb) = cb else {
-        return libc::EINVAL;
-    };
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let dir = vpath_for(fs, &dir)?;
-        let entries = fs
-            .fs
-            .lock()
-            .expect("vfsi lock poisoned")
-            .listdir(&dir, mask(), 0, false)?;
-        for a in entries {
-            let name = a
-                .file
-                .path()
-                .and_then(|p| p.file_name())
-                .map(|n| n.as_bytes())
-                .and_then(cstr_from_os)
-                .unwrap_or_default();
-            let attrs = vfsi_attrs::from_vf(&a);
-            // SAFETY: callback was provided by C and is called from the same
-            // thread while `attrs`/`name` are alive.
-            if !unsafe { cb(name.as_ptr(), &attrs, userdata) } {
-                break;
+    ffi_guard!(libc::EIO, {
+        let (Some(fs), Some(dir)) = (fs.as_ref(), cstr_path(dir)) else {
+            return libc::EINVAL;
+        };
+        let Some(cb) = cb else {
+            return libc::EINVAL;
+        };
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let dir = vpath_for(fs, &dir)?;
+            let entries = lock_or_io(&fs.fs)?.listdir(&dir, mask(), 0, false)?;
+            for a in entries {
+                let name = a
+                    .file
+                    .path()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.as_bytes())
+                    .and_then(cstr_from_os)
+                    .unwrap_or_default();
+                let attrs = vfsi_attrs::from_vf(&a);
+                // SAFETY: callback was provided by C and is called from the same
+                // thread while `attrs`/`name` are alive.
+                if !unsafe { cb(name.as_ptr(), &attrs, userdata) } {
+                    break;
+                }
             }
+            Ok::<_, VfError>(())
+        }));
+        match res {
+            Ok(Ok(())) => 0,
+            Ok(Err(e)) => vf_code(&e),
+            Err(_) => libc::EIO,
         }
-        Ok::<_, VfError>(())
-    }));
-    match res {
-        Ok(Ok(())) => 0,
-        Ok(Err(e)) => vf_code(&e),
-        Err(_) => libc::EIO,
-    }
+    })
 }
 
 /// List several directories in one vectorized batch, calling `cb` for each
@@ -650,50 +635,54 @@ pub unsafe extern "C" fn vfsi_listdirv(
     cb: vfsi_listdirv_cb,
     userdata: *mut c_void,
 ) -> c_int {
-    let (Some(fs), false, false) = (fs.as_ref(), dirs.is_null(), cb.is_none()) else {
-        return libc::EINVAL;
-    };
-    let Some(cb) = cb else {
-        return libc::EINVAL;
-    };
-    let mut paths = Vec::with_capacity(count);
-    for i in 0..count {
-        // SAFETY: `dirs` points to `count` NUL-terminated strings.
-        let p = unsafe { *dirs.add(i) };
-        let Some(path) = cstr_path(p) else {
+    ffi_guard!(libc::EIO, {
+        let (Some(fs), false, false) = (fs.as_ref(), dirs.is_null(), cb.is_none()) else {
             return libc::EINVAL;
         };
-        paths.push(path);
-    }
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let original_paths = paths.clone();
-        let vpaths: Result<Vec<PathBuf>, VfError> =
-            paths.iter().map(|p| vpath_for(fs, p)).collect();
-        let vpaths = vpaths?;
-        let refs: Vec<&Path> = vpaths.iter().map(PathBuf::as_path).collect();
-        let vpath_index: std::collections::HashMap<PathBuf, usize> = vpaths
-            .iter()
-            .enumerate()
-            .map(|(i, p)| (p.clone(), i))
-            .collect();
-        let mountpoint = fs.mountpoint.clone();
-        let c_cb = cb;
-        fs.fs.lock().expect("vfsi lock poisoned").listdirv(
-            &refs,
-            mask(),
-            max_entries,
-            recursive,
-            &mut |attrs, dir| {
-                let kernel_dir = match vpath_index.get(dir) {
+        let Some(cb) = cb else {
+            return libc::EINVAL;
+        };
+        let mut paths = Vec::with_capacity(count);
+        for i in 0..count {
+            // SAFETY: `dirs` points to `count` NUL-terminated strings.
+            let p = unsafe { *dirs.add(i) };
+            let Some(path) = cstr_path(p) else {
+                return libc::EINVAL;
+            };
+            paths.push(path);
+        }
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let original_paths = paths.clone();
+            let vpaths: Result<Vec<PathBuf>, VfError> =
+                paths.iter().map(|p| vpath_for(fs, p)).collect();
+            let vpaths = vpaths?;
+            let refs: Vec<&Path> = vpaths.iter().map(PathBuf::as_path).collect();
+            let vpath_index: std::collections::HashMap<PathBuf, usize> = vpaths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| (p.clone(), i))
+                .collect();
+            let mountpoint = fs.mountpoint.clone();
+            let c_cb = cb;
+            let mut rows = Vec::new();
+            {
+                let mut backend = lock_or_io(&fs.fs)?;
+                backend.listdirv(&refs, mask(), max_entries, recursive, &mut |attrs, dir| {
+                    rows.push((attrs.clone(), dir.to_path_buf()));
+                    true
+                })?;
+            }
+            for (attrs, dir) in rows {
+                let kernel_dir = match vpath_index.get(&dir) {
                     Some(&i) => original_paths[i].clone(),
                     None => {
-                        let rel = dir.strip_prefix("/").unwrap_or(dir);
+                        let rel = dir.strip_prefix("/").unwrap_or(&dir);
                         mountpoint.join(rel)
                     }
                 };
                 let dir = kernel_dir.as_os_str().as_bytes();
                 let Some(dir) = cstr_from_os(dir) else {
-                    return false;
+                    break;
                 };
                 let name = attrs
                     .file
@@ -702,18 +691,21 @@ pub unsafe extern "C" fn vfsi_listdirv(
                     .map(|n| n.as_bytes())
                     .and_then(cstr_from_os)
                     .unwrap_or_default();
-                let a = vfsi_attrs::from_vf(attrs);
-                // SAFETY: `c_cb` was provided by C and is invoked from the
-                // same thread while its arguments are alive.
-                unsafe { c_cb(dir.as_ptr(), name.as_ptr(), &a, userdata) }
-            },
-        )
-    }));
-    match res {
-        Ok(Ok(())) => 0,
-        Ok(Err(e)) => vf_code(&e),
-        Err(_) => libc::EIO,
-    }
+                let a = vfsi_attrs::from_vf(&attrs);
+                // SAFETY: `c_cb` was provided by C and is invoked from the same
+                // thread while its arguments are alive. No filesystem mutex is held.
+                if !unsafe { c_cb(dir.as_ptr(), name.as_ptr(), &a, userdata) } {
+                    break;
+                }
+            }
+            Ok::<_, VfError>(())
+        }));
+        match res {
+            Ok(Ok(())) => 0,
+            Ok(Err(e)) => vf_code(&e),
+            Err(_) => libc::EIO,
+        }
+    })
 }
 
 /// Read the full contents of several files in one vectorized batch, calling
@@ -726,49 +718,47 @@ pub unsafe extern "C" fn vfsi_read_paths(
     cb: vfsi_read_paths_cb,
     userdata: *mut c_void,
 ) -> c_int {
-    let (Some(fs), false, false) = (fs.as_ref(), paths.is_null(), cb.is_none()) else {
-        return libc::EINVAL;
-    };
-    let Some(cb) = cb else {
-        return libc::EINVAL;
-    };
-    let mut kernel_paths = Vec::with_capacity(count);
-    for i in 0..count {
-        // SAFETY: `paths` points to `count` NUL-terminated strings.
-        let p = unsafe { *paths.add(i) };
-        let Some(path) = cstr_path(p) else {
+    ffi_guard!(libc::EIO, {
+        let (Some(fs), false, false) = (fs.as_ref(), paths.is_null(), cb.is_none()) else {
             return libc::EINVAL;
         };
-        kernel_paths.push(path);
-    }
-    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let vpaths: Result<Vec<PathBuf>, VfError> =
-            kernel_paths.iter().map(|p| vpath_for(fs, p)).collect();
-        let vpaths = vpaths?;
-        let files: Vec<VfFile> = vpaths.iter().map(|p| VfFile::from_os_path(p)).collect();
-        let datas = fs
-            .fs
-            .lock()
-            .expect("vfsi lock poisoned")
-            .read_allv(&files)?;
-        let c_cb = cb;
-        for (i, data) in datas.iter().enumerate() {
-            let Some(path) = cstr_from_os(kernel_paths[i].as_os_str().as_bytes()) else {
-                continue;
+        let Some(cb) = cb else {
+            return libc::EINVAL;
+        };
+        let mut kernel_paths = Vec::with_capacity(count);
+        for i in 0..count {
+            // SAFETY: `paths` points to `count` NUL-terminated strings.
+            let p = unsafe { *paths.add(i) };
+            let Some(path) = cstr_path(p) else {
+                return libc::EINVAL;
             };
-            // SAFETY: `c_cb` was provided by C and is invoked from the same
-            // thread while `path`/`data` are alive.
-            if !unsafe { c_cb(path.as_ptr(), data.as_ptr(), data.len(), userdata) } {
-                break;
-            }
+            kernel_paths.push(path);
         }
-        Ok::<_, VfError>(())
-    }));
-    match res {
-        Ok(Ok(())) => 0,
-        Ok(Err(e)) => vf_code(&e),
-        Err(_) => libc::EIO,
-    }
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let vpaths: Result<Vec<PathBuf>, VfError> =
+                kernel_paths.iter().map(|p| vpath_for(fs, p)).collect();
+            let vpaths = vpaths?;
+            let files: Vec<VfFile> = vpaths.iter().map(|p| VfFile::from_os_path(p)).collect();
+            let datas = lock_or_io(&fs.fs)?.read_allv(&files)?;
+            let c_cb = cb;
+            for (i, data) in datas.iter().enumerate() {
+                let Some(path) = cstr_from_os(kernel_paths[i].as_os_str().as_bytes()) else {
+                    continue;
+                };
+                // SAFETY: `c_cb` was provided by C and is invoked from the same
+                // thread while `path`/`data` are alive.
+                if !unsafe { c_cb(path.as_ptr(), data.as_ptr(), data.len(), userdata) } {
+                    break;
+                }
+            }
+            Ok::<_, VfError>(())
+        }));
+        match res {
+            Ok(Ok(())) => 0,
+            Ok(Err(e)) => vf_code(&e),
+            Err(_) => libc::EIO,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -918,6 +908,79 @@ mod tests {
             ]
         );
 
+        unsafe { vfsi_free(fs) };
+    }
+
+    #[test]
+    fn listdirv_callback_can_reenter_filesystem() {
+        let root = temp_root();
+        let mut fs: *mut vfsi_fs = std::ptr::null_mut();
+        assert_eq!(unsafe { vfsi_dummy_open(root.as_ptr(), &mut fs) }, 0);
+        let dir = CString::new("/reentrant").unwrap();
+        let path = CString::new("/reentrant/file").unwrap();
+        assert_eq!(unsafe { vfsi_mkdir(fs, dir.as_ptr(), 0o755, 1) }, 0);
+        let fd = unsafe { vfsi_open(fs, path.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o644) };
+        assert!(fd > 0);
+        assert_eq!(unsafe { vfsi_close(fs, fd) }, 0);
+
+        struct Reentrant {
+            fs: *mut vfsi_fs,
+            path: CString,
+            stat_result: c_int,
+        }
+        unsafe extern "C" fn cb(
+            _: *const c_char,
+            _: *const c_char,
+            _: *const vfsi_attrs,
+            user: *mut c_void,
+        ) -> bool {
+            let state = &mut *(user as *mut Reentrant);
+            let mut attrs = std::mem::zeroed();
+            state.stat_result = vfsi_stat(state.fs, state.path.as_ptr(), &mut attrs);
+            false
+        }
+
+        let dirs = [dir.as_ptr()];
+        let mut state = Reentrant {
+            fs,
+            path,
+            stat_result: -1,
+        };
+        assert_eq!(
+            unsafe {
+                vfsi_listdirv(
+                    fs,
+                    dirs.as_ptr(),
+                    dirs.len(),
+                    0,
+                    false,
+                    Some(cb),
+                    &mut state as *mut _ as *mut c_void,
+                )
+            },
+            0
+        );
+        assert_eq!(state.stat_result, 0);
+        unsafe { vfsi_free(fs) };
+    }
+
+    #[test]
+    fn poisoned_backend_mutex_returns_eio() {
+        let root = temp_root();
+        let mut fs: *mut vfsi_fs = std::ptr::null_mut();
+        assert_eq!(unsafe { vfsi_dummy_open(root.as_ptr(), &mut fs) }, 0);
+        let handle = unsafe { &*fs };
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = handle.fs.lock().unwrap();
+            panic!("poison backend mutex");
+        }));
+
+        let path = CString::new("/").unwrap();
+        let mut attrs = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { vfsi_stat(fs, path.as_ptr(), &mut attrs) },
+            libc::EIO
+        );
         unsafe { vfsi_free(fs) };
     }
 
