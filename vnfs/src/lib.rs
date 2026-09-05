@@ -12,6 +12,7 @@ pub mod compound;
 pub mod dummy_vecfs;
 pub mod error;
 pub mod nfs;
+mod path;
 pub mod rpc;
 pub mod session;
 pub mod vecfs;

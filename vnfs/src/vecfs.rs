@@ -18,6 +18,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::RpcError;
+#[cfg(unix)]
+use crate::path::path_from_bytes;
 
 // ---------------------------------------------------------------------------
 // Constants (mirroring tc_api.h)
@@ -285,15 +287,26 @@ pub enum VfFile {
 
 impl VfFile {
     pub fn from_path(path: &str) -> VfFile {
-        let base = if path.starts_with('/') {
+        Self::from_path_bytes(path.as_bytes())
+    }
+
+    /// Construct from arbitrary Unix path bytes.
+    #[cfg(unix)]
+    pub fn from_path_bytes(path: &[u8]) -> VfFile {
+        let base = if path.starts_with(b"/") {
             VfPathBase::Abs
         } else {
             VfPathBase::Cwd
         };
         VfFile::Path {
             base,
-            path: PathBuf::from(path),
+            path: path_from_bytes(path),
         }
+    }
+
+    /// Construct from a native Unix path.
+    pub fn from_os_path(path: &Path) -> VfFile {
+        Self::from_path_bytes(crate::path::path_bytes(path))
     }
 
     pub fn from_fd(fd: Fd) -> VfFile {
@@ -336,6 +349,12 @@ impl VfFile {
             VfFile::CwdPath(p) => Some(p),
             _ => None,
         }
+    }
+
+    /// The raw bytes of this path, if path-backed.
+    #[cfg(unix)]
+    pub fn path_bytes(&self) -> Option<&[u8]> {
+        self.path().map(crate::path::path_bytes)
     }
 }
 
@@ -522,8 +541,8 @@ pub struct WriteResult {
 /// One extent to copy, mirroring `struct tc_extent_pair`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtentPair {
-    pub src_path: String,
-    pub dst_path: String,
+    pub src_path: PathBuf,
+    pub dst_path: PathBuf,
     pub src_offset: u64,
     pub dst_offset: u64,
     /// Bytes to copy; `None` means "from src_offset to end of file".
@@ -540,8 +559,25 @@ impl ExtentPair {
         length: Option<u64>,
     ) -> ExtentPair {
         ExtentPair {
-            src_path: src_path.to_string(),
-            dst_path: dst_path.to_string(),
+            src_path: PathBuf::from(src_path),
+            dst_path: PathBuf::from(dst_path),
+            src_offset,
+            dst_offset,
+            length,
+        }
+    }
+
+    /// Construct from native paths.
+    pub fn from_os_paths(
+        src_path: &Path,
+        src_offset: u64,
+        dst_path: &Path,
+        dst_offset: u64,
+        length: Option<u64>,
+    ) -> ExtentPair {
+        ExtentPair {
+            src_path: src_path.to_path_buf(),
+            dst_path: dst_path.to_path_buf(),
             src_offset,
             dst_offset,
             length,
@@ -552,7 +588,7 @@ impl ExtentPair {
 /// An Application Data Block (ADB) pattern, mirroring `struct tc_adb`.
 #[derive(Debug, Clone)]
 pub struct Adb {
-    pub path: String,
+    pub path: PathBuf,
     pub adb_offset: u64,
     pub adb_block_size: u64,
     /// Blocks to write.
@@ -578,7 +614,7 @@ impl Adb {
         first_adbn: u64,
     ) -> Adb {
         Adb {
-            path: path.to_string(),
+            path: PathBuf::from(path),
             adb_offset: offset,
             adb_block_size: block_size,
             adb_block_count: block_count,
@@ -626,7 +662,7 @@ impl AttrMask {
 /// directory's root-relative path; `entries` are its immediate children.
 #[derive(Debug, Clone)]
 pub struct WalkEntry {
-    pub path: String,
+    pub path: PathBuf,
     pub entries: Vec<VfAttrs>,
 }
 
@@ -681,7 +717,7 @@ pub trait VecFs {
     /// leading `/`. [`getcwd`](Self::getcwd) is the display form (with a
     /// leading `/`); [`vf_path`](Self::vf_path) resolves a [`VfFile`] the same
     /// way while honoring its [`VfPathBase`].
-    fn abs_path(&self, path: &str) -> String;
+    fn abs_path(&self, path: &Path) -> PathBuf;
 
     /// Open a file by path, similar to `tc_open_by_path(2)`. `base` is
     /// `VfPathBase::Cwd` or `VfPathBase::Abs`. When `O_CREAT` is set, `mode`
@@ -689,7 +725,7 @@ pub trait VecFs {
     fn open_by_path(
         &mut self,
         base: VfPathBase,
-        pathname: &str,
+        pathname: &Path,
         flags: i32,
         mode: u32,
     ) -> VfResult<VfFile>;
@@ -698,10 +734,10 @@ pub trait VecFs {
     fn close(&mut self, tcf: &VfFile) -> VfResult<()>;
 
     /// Change the client's current directory, `tc_chdir()`.
-    fn chdir(&mut self, path: &str) -> VfResult<()>;
+    fn chdir(&mut self, path: &Path) -> VfResult<()>;
 
     /// Current working directory, `tc_getcwd()`.
-    fn getcwd(&self) -> String;
+    fn getcwd(&self) -> PathBuf;
 
     /// Read from one or more files, `tc_readv()`. Returns one result per
     /// request, or fails at the first failing operation.
@@ -770,7 +806,7 @@ pub trait VecFs {
     /// first (still subject to `max_count`).
     fn listdir(
         &mut self,
-        dir: &str,
+        dir: &Path,
         masks: AttrMask,
         max_count: usize,
         recursive: bool,
@@ -785,25 +821,25 @@ pub trait VecFs {
     /// directories into few large compounds.
     fn walk(
         &mut self,
-        root: &str,
+        root: &Path,
         masks: AttrMask,
-        sort: &mut dyn FnMut(&str, &mut Vec<VfAttrs>),
+        sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<WalkEntry>> {
         // Explicit stack (pre-order, subdirectories visited in the order the
         // sort callback produced) so deep trees cannot overflow the call
         // stack.
         let mut out = Vec::new();
-        let mut stack = vec![root.to_string()];
+        let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
             let mut entries = self.listdir(&dir, masks, 0, false)?;
-            sort(&dir, &mut entries);
-            let subdirs: Vec<String> = entries
+            sort(dir.as_path(), &mut entries);
+            let subdirs: Vec<PathBuf> = entries
                 .iter()
                 .filter(|e| e.ftype == VfType::Directory)
-                .filter_map(|e| e.file.path().map(|p| p.to_string_lossy().into_owned()))
+                .filter_map(|e| e.file.path().map(|p| p.to_path_buf()))
                 .collect();
-            for s in subdirs.iter().rev() {
-                stack.push(s.clone());
+            for s in subdirs.into_iter().rev() {
+                stack.push(s);
             }
             out.push(WalkEntry { path: dir, entries });
         }
@@ -820,13 +856,13 @@ pub trait VecFs {
     fn mkdirv(&mut self, dirs: &[VfAttrs]) -> VfRes;
 
     /// Create a list of symlinks, `tc_symlinkv()`.
-    fn symlinkv(&mut self, oldpaths: &[&str], newpaths: &[&str]) -> VfRes;
+    fn symlinkv(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes;
 
     /// Read symlink targets, `tc_readlinkv()`.
-    fn readlinkv(&mut self, paths: &[&str]) -> VfResult<Vec<Vec<u8>>>;
+    fn readlinkv(&mut self, paths: &[&Path]) -> VfResult<Vec<Vec<u8>>>;
 
     /// Create hard links, `tc_hardlinkv()`.
-    fn hardlinkv(&mut self, oldpaths: &[&str], newpaths: &[&str]) -> VfRes;
+    fn hardlinkv(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes;
 
     /// Copy extents by reading and writing, `tc_dupv()`. Follows symlinks
     /// (copies the target's contents).
@@ -842,13 +878,13 @@ pub trait VecFs {
     fn write_adb(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>>;
 
     /// Remove a list of objects, recursively when `recursive`, `tc_rm()`.
-    fn rm(&mut self, objs: &[&str], recursive: bool) -> VfRes;
+    fn rm(&mut self, objs: &[&Path], recursive: bool) -> VfRes;
 
     /// Recursively copy a directory tree, `tc_cp_recursive()`.
     fn cp_recursive(
         &mut self,
-        src_dir: &str,
-        dst: &str,
+        src_dir: &Path,
+        dst: &Path,
         symlinks: bool,
         use_server_side_copy: bool,
     ) -> VfRes;
@@ -861,26 +897,26 @@ pub trait VecFs {
     /// fail with [`ERR_INVAL`]. Backends should use this when a method needs
     /// the file's path, so a `VfFile` resolves identically across all trait
     /// methods.
-    fn vf_path(&self, file: &VfFile) -> VfResult<String> {
+    fn vf_path(&self, file: &VfFile) -> VfResult<PathBuf> {
         match file {
             VfFile::Path {
                 base: VfPathBase::Abs,
                 path,
-            } => Ok(normalize_root_relative(
-                path.to_string_lossy().trim_start_matches('/'),
-            )),
+            } => Ok(crate::path::path_from_bytes(&crate::path::normalize_bytes(
+                crate::path::path_bytes(path),
+            ))),
             VfFile::Path {
                 base: VfPathBase::Cwd,
                 path,
             }
-            | VfFile::CwdPath(path) => Ok(self.abs_path(&path.to_string_lossy())),
-            VfFile::Cwd => Ok(self.abs_path("")),
+            | VfFile::CwdPath(path) => Ok(self.abs_path(path)),
+            VfFile::Cwd => Ok(self.abs_path(Path::new(""))),
             VfFile::Descriptor(_) | VfFile::Saved => Err(VfError::failure(0, ERR_INVAL)),
         }
     }
 
     /// Open a file by path, `tc_open()`.
-    fn open(&mut self, pathname: &str, flags: i32, mode: u32) -> VfResult<VfFile> {
+    fn open(&mut self, pathname: &Path, flags: i32, mode: u32) -> VfResult<VfFile> {
         self.open_by_path(VfPathBase::Cwd, pathname, flags, mode)
     }
 
@@ -899,7 +935,7 @@ pub trait VecFs {
     /// Open several files at once, each with its own flags and mode,
     /// `tc_openv()`. `flags`, `modes`, and `paths` must have equal lengths;
     /// a mismatch fails with [`ERR_INVAL`] at index 0.
-    fn openv(&mut self, paths: &[&str], flags: &[i32], modes: &[u32]) -> VfResult<Vec<VfFile>> {
+    fn openv(&mut self, paths: &[&Path], flags: &[i32], modes: &[u32]) -> VfResult<Vec<VfFile>> {
         if paths.len() != flags.len() || paths.len() != modes.len() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
@@ -912,7 +948,7 @@ pub trait VecFs {
 
     /// Open several files at once with a shared flags and mode,
     /// `tc_openv_simple()`.
-    fn openv_simple(&mut self, paths: &[&str], flags: i32, mode: u32) -> VfResult<Vec<VfFile>> {
+    fn openv_simple(&mut self, paths: &[&Path], flags: i32, mode: u32) -> VfResult<Vec<VfFile>> {
         let flags_v = vec![flags; paths.len()];
         let modes_v = vec![mode; paths.len()];
         self.openv(paths, &flags_v, &modes_v)
@@ -927,9 +963,9 @@ pub trait VecFs {
     }
 
     /// Stat a path, `tc_stat()`. Follows symlinks to the target.
-    fn stat(&mut self, path: &str) -> VfResult<VfAttrs> {
+    fn stat(&mut self, path: &Path) -> VfResult<VfAttrs> {
         let mut a = VfAttrs {
-            file: VfFile::from_path(path),
+            file: VfFile::from_os_path(path),
             masks: AttrMask::stat(),
             ..VfAttrs::default()
         };
@@ -938,9 +974,9 @@ pub trait VecFs {
     }
 
     /// `tc_lstat()`: like [`stat`](Self::stat) but does not follow symlinks.
-    fn lstat(&mut self, path: &str) -> VfResult<VfAttrs> {
+    fn lstat(&mut self, path: &Path) -> VfResult<VfAttrs> {
         let mut a = VfAttrs {
-            file: VfFile::from_path(path),
+            file: VfFile::from_os_path(path),
             masks: AttrMask::stat(),
             ..VfAttrs::default()
         };
@@ -962,7 +998,7 @@ pub trait VecFs {
     /// Whether `path` exists, distinguishing "not found" from other errors
     /// (e.g. permission denied) that are returned as `Err`. Uses
     /// `lstat` semantics: a dangling symlink exists.
-    fn exists(&mut self, path: &str) -> VfResult<bool> {
+    fn exists(&mut self, path: &Path) -> VfResult<bool> {
         match self.lstat(path) {
             Ok(_) => Ok(true),
             Err(e) if e.err_no() == ERR_NOENT => Ok(false),
@@ -972,7 +1008,7 @@ pub trait VecFs {
 
     /// Return the file type of `path` itself (`lstat` semantics: a symlink
     /// reports [`VfType::Symlink`] rather than its target's type).
-    fn file_type(&mut self, path: &str) -> VfResult<VfType> {
+    fn file_type(&mut self, path: &Path) -> VfResult<VfType> {
         Ok(self.lstat(path)?.ftype)
     }
 
@@ -980,11 +1016,11 @@ pub trait VecFs {
     /// stops the listing early.
     fn listdirv(
         &mut self,
-        dirs: &[&str],
+        dirs: &[&Path],
         masks: AttrMask,
         max_entries: usize,
         recursive: bool,
-        cb: &mut dyn FnMut(&VfAttrs, &str) -> bool,
+        cb: &mut dyn FnMut(&VfAttrs, &Path) -> bool,
     ) -> VfRes {
         for (i, d) in dirs.iter().enumerate() {
             let entries = self
@@ -1000,20 +1036,20 @@ pub trait VecFs {
     }
 
     /// `tc_unlink()`.
-    fn unlink(&mut self, pathname: &str) -> VfResult<()> {
-        self.removev(&[VfFile::from_path(pathname)])
+    fn unlink(&mut self, pathname: &Path) -> VfResult<()> {
+        self.removev(&[VfFile::from_os_path(pathname)])
     }
 
     /// `tc_unlinkv()`.
-    fn unlinkv(&mut self, pathnames: &[&str]) -> VfRes {
-        let files: Vec<VfFile> = pathnames.iter().map(|p| VfFile::from_path(p)).collect();
+    fn unlinkv(&mut self, pathnames: &[&Path]) -> VfRes {
+        let files: Vec<VfFile> = pathnames.iter().map(|p| VfFile::from_os_path(p)).collect();
         self.removev(&files)
     }
 
     /// Create a directory, `tc_mkdir()`.
-    fn mkdir(&mut self, path: &str, mode: u32) -> VfResult<()> {
+    fn mkdir(&mut self, path: &Path, mode: u32) -> VfResult<()> {
         let a = VfAttrs {
-            file: VfFile::from_path(path),
+            file: VfFile::from_os_path(path),
             masks: AttrMask::MODE,
             mode,
             ..VfAttrs::default()
@@ -1022,7 +1058,7 @@ pub trait VecFs {
     }
 
     /// Create a symlink, `tc_symlink()`.
-    fn symlink(&mut self, oldpath: &str, newpath: &str) -> VfResult<()> {
+    fn symlink(&mut self, oldpath: &Path, newpath: &Path) -> VfResult<()> {
         self.symlinkv(
             std::slice::from_ref(&oldpath),
             std::slice::from_ref(&newpath),
@@ -1030,7 +1066,7 @@ pub trait VecFs {
     }
 
     /// Read a symlink target, `tc_readlink()`.
-    fn readlink(&mut self, path: &str) -> VfResult<Vec<u8>> {
+    fn readlink(&mut self, path: &Path) -> VfResult<Vec<u8>> {
         let v = self.readlinkv(std::slice::from_ref(&path))?;
         Ok(v.into_iter().next().expect("one result"))
     }
@@ -1055,13 +1091,13 @@ pub trait VecFs {
     /// exists-then-mkdir check, avoiding the race between the two. `dir` is
     /// resolved against the cwd via [`abs_path`](Self::abs_path) and then
     /// rebuilt as an absolute (root-relative) path.
-    fn ensure_dir(&mut self, dir: &str, mode: u32) -> VfResult<()> {
+    fn ensure_dir(&mut self, dir: &Path, mode: u32) -> VfResult<()> {
         use std::path::Component;
         let mut so_far = PathBuf::new();
-        for comp in Path::new(&self.abs_path(dir)).components() {
+        for comp in self.abs_path(dir).components() {
             if let Component::Normal(part) = comp {
                 so_far.push(part);
-                let full = format!("/{}", so_far.to_string_lossy());
+                let full = Path::new("/").join(&so_far);
                 match self.mkdir(&full, mode) {
                     Ok(()) => {}
                     Err(e) if e.err_no() == ERR_EXIST => {}
@@ -1074,7 +1110,7 @@ pub trait VecFs {
 }
 
 /// `tc_rm_recursive()`.
-pub fn rm_recursive(fs: &mut impl VecFs, dir: &str) -> VfRes {
+pub fn rm_recursive(fs: &mut impl VecFs, dir: &Path) -> VfRes {
     fs.rm(&[dir], true)
 }
 
