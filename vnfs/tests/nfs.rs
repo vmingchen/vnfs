@@ -8,7 +8,8 @@
 //! ```
 
 use nfsv41_sys::nfsstat4_NFS4ERR_EXIST;
-use std::path::Path;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::path::{Path, PathBuf};
 use vnfs::NfsVecFs;
 use vnfs::nfs::*;
 
@@ -54,7 +55,7 @@ fn init_deinit() {
     // session cleanup (DESTROY_SESSION + DESTROY_CLIENTID) runs in Drop.
     let c = client();
     let cwd = c.getcwd();
-    assert_eq!(cwd, "/");
+    assert_eq!(cwd, Path::new("/"));
     drop(c);
 }
 
@@ -68,7 +69,7 @@ fn open_by_path_and_close() {
     let f = format!("{}/f.txt", dir);
     let mut c = client();
     let tf = c
-        .open(&f, libc::O_CREAT | libc::O_RDWR, 0o644)
+        .open(Path::new(&f), libc::O_CREAT | libc::O_RDWR, 0o644)
         .expect("open/create");
     assert!(tf.is_descriptor());
     c.close(&tf).expect("close");
@@ -104,7 +105,7 @@ fn openv_closev() {
         format!("{}/b.txt", dir),
         format!("{}/c.txt", dir),
     ];
-    let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
     let mut c = client();
     let files = c
         .openv_simple(&refs, libc::O_CREAT | libc::O_RDWR, 0o644)
@@ -121,7 +122,7 @@ fn openv_append_writes_at_end() {
         format!("{}/b.txt", dir),
         format!("{}/c.txt", dir),
     ];
-    let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
     let mut c = client();
     let files = c
         .openv_simple(&refs, libc::O_CREAT | libc::O_RDWR | libc::O_APPEND, 0o644)
@@ -147,13 +148,15 @@ fn openv_append_writes_at_end() {
 fn chdir_getcwd() {
     let dir = setup_dir("chdir");
     let mut c = client();
-    assert_eq!(c.getcwd(), "/");
+    assert_eq!(c.getcwd(), Path::new("/"));
     c.chdir(Path::new(&dir)).expect("chdir");
     assert_eq!(c.getcwd(), dir);
 
     // Relative resolution now happens against the new cwd.
-    c.mkdir("rel", 0o755).expect("mkdir relative");
-    let st = c.stat("/").expect("stat export root via absolute path");
+    c.mkdir(Path::new("rel"), 0o755).expect("mkdir relative");
+    let st = c
+        .stat(Path::new("/"))
+        .expect("stat export root via absolute path");
     assert_eq!(st.ftype, VfType::Directory, "root is a directory");
 }
 
@@ -177,6 +180,23 @@ fn writev_then_readv() {
         .readv(&[ReadOp::from_path(&f, VfOffset::At(0), payload.len())])
         .expect("readv")[0];
     assert_eq!(r.data, payload, "read back what was written");
+}
+
+#[test]
+fn non_utf8_filenames_roundtrip() {
+    let dir = setup_dir("non_utf8");
+    let mut c = client();
+    let raw = b"n\xffb";
+    let child =
+        PathBuf::from(dir.clone()).join(PathBuf::from(std::ffi::OsString::from_vec(raw.to_vec())));
+    write_file(&mut c, &child, b"data");
+    assert_eq!(read_all(&mut c, &child), b"data");
+    let entries = c
+        .listdir(Path::new(&dir), AttrMask::stat(), 0, false)
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    let name = entries[0].file.path().unwrap().file_name().unwrap();
+    assert_eq!(name.as_bytes(), raw);
 }
 
 #[test]
@@ -262,7 +282,10 @@ fn exists() {
     let f = format!("{}/e.txt", dir);
     let mut c = make_file(&f, b"hi");
     assert!(c.exists(Path::new(&f)).unwrap());
-    assert!(!c.exists(&format!("{}/missing.txt", dir)).unwrap());
+    assert!(
+        !c.exists(Path::new(&format!("{}/missing.txt", dir)))
+            .unwrap()
+    );
 }
 
 #[test]
@@ -347,7 +370,8 @@ fn lsetattrsv() {
 fn listdir() {
     let dir = setup_dir("listdir");
     let mut c = client();
-    c.ensure_dir(&format!("{}/sub", dir), 0o755).unwrap();
+    c.ensure_dir(Path::new(&format!("{}/sub", dir)), 0o755)
+        .unwrap();
     for (i, name) in ["a.txt", "b.txt", "c.txt"].iter().enumerate() {
         let f = format!("{}/{}", dir, name);
         c.writev(&[
@@ -356,12 +380,9 @@ fn listdir() {
         .unwrap();
     }
     let contents = c
-        .listdir(&dir, AttrMask::default(), 0, false)
+        .listdir(Path::new(&dir), AttrMask::default(), 0, false)
         .expect("listdir");
-    let names: Vec<&str> = contents
-        .iter()
-        .map(|a| a.file.path().unwrap().to_str().unwrap())
-        .collect();
+    let names: Vec<&Path> = contents.iter().map(|a| a.file.path().unwrap()).collect();
     assert!(names.iter().any(|n| n.ends_with("a.txt")));
     assert!(names.iter().any(|n| n.ends_with("sub")));
 }
@@ -370,13 +391,14 @@ fn listdir() {
 fn listdir_recursive() {
     let dir = setup_dir("listdir_rec");
     let mut c = client();
-    c.ensure_dir(&format!("{}/d1/d2", dir), 0o755).unwrap();
+    c.ensure_dir(Path::new(&format!("{}/d1/d2", dir)), 0o755)
+        .unwrap();
     for f in [format!("{}/top.txt", dir), format!("{}/d1/deep.txt", dir)] {
         c.writev(&[WriteOp::from_path(&f, VfOffset::At(0), b"ok".to_vec()).with_creation()])
             .unwrap();
     }
     let contents = c
-        .listdir(&dir, AttrMask::default(), 0, true)
+        .listdir(Path::new(&dir), AttrMask::default(), 0, true)
         .expect("listdir recursive");
     let joined: Vec<String> = contents
         .iter()
@@ -430,7 +452,7 @@ fn unlinkv() {
         format!("{}/u2", dir),
         format!("{}/u3", dir),
     ];
-    let refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
+    let refs: Vec<&Path> = files.iter().map(Path::new).collect();
     for f in &files {
         c.writev(&[WriteOp::from_path(f, VfOffset::At(0), b"z".to_vec()).with_creation()])
             .unwrap();
@@ -492,7 +514,8 @@ fn symlink_readlink() {
     let target = format!("{}/real.txt", dir);
     let link = format!("{}/link.txt", dir);
     let mut c = make_file(&target, b"real content");
-    c.symlink(Path::new(&target), &link).expect("symlink");
+    c.symlink(Path::new(&target), Path::new(&link))
+        .expect("symlink");
     let got = c.readlink(Path::new(&link)).expect("readlink");
     assert_eq!(String::from_utf8_lossy(&got), target);
 }
@@ -503,8 +526,8 @@ fn symlinkv_readlinkv() {
     let mut c = client();
     let olds: Vec<String> = (0..2).map(|i| format!("{}/src{}", dir, i)).collect();
     let news: Vec<String> = (0..2).map(|i| format!("{}/ln{}", dir, i)).collect();
-    let old_refs: Vec<&str> = olds.iter().map(|s| s.as_str()).collect();
-    let new_refs: Vec<&str> = news.iter().map(|s| s.as_str()).collect();
+    let old_refs: Vec<&Path> = olds.iter().map(Path::new).collect();
+    let new_refs: Vec<&Path> = news.iter().map(Path::new).collect();
     c.symlinkv(&old_refs, &new_refs).expect("symlinkv");
     let targets = c.readlinkv(&new_refs).expect("readlinkv");
     for (t, o) in targets.iter().zip(&olds) {
@@ -516,24 +539,31 @@ fn symlinkv_readlinkv() {
 fn intermediate_symlink_components_followed() {
     let dir = setup_dir("intermediate_link");
     let mut c = client();
-    c.mkdir(&format!("{}/realdir", dir), 0o755).unwrap();
-    write_file(&mut c, &format!("{}/realdir/file", dir), b"data");
-    c.symlink("realdir", &format!("{}/dirlink", dir)).unwrap();
+    c.mkdir(Path::new(&format!("{}/realdir", dir)), 0o755)
+        .unwrap();
+    write_file(&mut c, Path::new(&format!("{}/realdir/file", dir)), b"data");
+    c.symlink(Path::new("realdir"), Path::new(&format!("{}/dirlink", dir)))
+        .unwrap();
 
-    let st = c.stat(&format!("{}/dirlink/file", dir)).unwrap();
+    let st = c.stat(Path::new(&format!("{}/dirlink/file", dir))).unwrap();
     assert_eq!(st.ftype, VfType::Regular);
     assert_eq!(st.size, 4);
-    assert_eq!(read_all(&mut c, &format!("{}/dirlink/file", dir)), b"data");
+    assert_eq!(
+        read_all(&mut c, Path::new(&format!("{}/dirlink/file", dir))),
+        b"data"
+    );
 
     // Path-based operations (unlink) resolve through the intermediate link.
     let f = format!("{}/dirlink/other", dir);
-    write_file(&mut c, &f, b"x");
+    write_file(&mut c, Path::new(&f), b"x");
     c.unlink(Path::new(&f)).unwrap();
     assert!(!c.exists(Path::new(&f)).unwrap());
 
     // lstat of a path under the link still reports the final object.
     assert_eq!(
-        c.lstat(&format!("{}/dirlink/file", dir)).unwrap().ftype,
+        c.lstat(Path::new(&format!("{}/dirlink/file", dir)))
+            .unwrap()
+            .ftype,
         VfType::Regular
     );
 }
@@ -545,7 +575,7 @@ fn path_readv_is_batched() {
     let paths: Vec<String> = (0..5)
         .map(|i| {
             let p = format!("{}/f{}", dir, i);
-            write_file(&mut c, &p, b"x");
+            write_file(&mut c, Path::new(&p), b"x");
             p
         })
         .collect();
@@ -591,13 +621,13 @@ fn readv_path_is_one_compound_per_dir() {
     let dir = setup_dir("readv1");
     let mut c = client();
     let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
-    write_file(&mut c, &paths[0], b"hello world");
+    write_file(&mut c, Path::new(&paths[0]), b"hello world");
     let payloads: Vec<Vec<u8>> = paths
         .iter()
         .enumerate()
         .map(|(i, p)| {
             let data = format!("data-{}", i).into_bytes();
-            write_file(&mut c, p, &data);
+            write_file(&mut c, Path::new(p), &data);
             data
         })
         .collect();
@@ -664,7 +694,7 @@ fn readv_path_openwrite_form_is_two_compounds() {
     let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
     let payloads: Vec<Vec<u8>> = (0..5).map(|i| format!("data-{}", i).into_bytes()).collect();
     for (p, d) in paths.iter().zip(&payloads) {
-        write_file(&mut c, p, d);
+        write_file(&mut c, Path::new(p), d);
     }
     c.set_merged_mode("openwrite");
     let _ = vnfs::compound::compound_stats(); // reset counters
@@ -692,7 +722,7 @@ fn getattrsv_path_is_one_compound() {
     let mut c = client();
     let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
     for p in &paths {
-        write_file(&mut c, p, b"x");
+        write_file(&mut c, Path::new(p), b"x");
     }
     let _ = vnfs::compound::compound_stats(); // reset counters
     let mut attrs: Vec<VfAttrs> = paths
@@ -722,7 +752,7 @@ fn setattrsv_path_is_one_compound() {
     let mut c = client();
     let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
     for p in &paths {
-        write_file(&mut c, p, b"long content");
+        write_file(&mut c, Path::new(p), b"long content");
     }
     let _ = vnfs::compound::compound_stats(); // reset counters
     let attrs: Vec<VfAttrs> = paths
@@ -751,7 +781,7 @@ fn openv_closev_path_is_one_compound_each() {
     let dir = setup_dir("openv1");
     let mut c = client();
     let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
-    let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
     let _ = vnfs::compound::compound_stats(); // reset counters
     let files = c
         .openv(&refs, &[libc::O_CREAT | libc::O_RDWR; 5], &[0o644; 5])
@@ -778,7 +808,7 @@ fn removev_path_is_one_compound() {
     let mut c = client();
     let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
     for p in &paths {
-        write_file(&mut c, p, b"x");
+        write_file(&mut c, Path::new(p), b"x");
     }
     let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_path(p)).collect();
     let _ = vnfs::compound::compound_stats(); // reset counters
@@ -801,7 +831,7 @@ fn renamev_path_is_one_compound() {
     let srcs: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
     let dsts: Vec<String> = (0..5).map(|i| format!("{}/g{}", dir, i)).collect();
     for p in &srcs {
-        write_file(&mut c, p, b"x");
+        write_file(&mut c, Path::new(p), b"x");
     }
     let pairs: Vec<(VfFile, VfFile)> = srcs
         .iter()
@@ -829,13 +859,13 @@ fn path_writev_follows_final_symlink() {
     let mut c = client();
     let target = format!("{}/target", dir);
     let link = format!("{}/link", dir);
-    write_file(&mut c, &target, b"");
+    write_file(&mut c, Path::new(&target), b"");
     let rel = std::path::Path::new(&target)
         .file_name()
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    c.symlink(Path::new(&rel), &link).unwrap();
+    c.symlink(Path::new(&rel), Path::new(&link)).unwrap();
     c.writev(&[WriteOp::at(
         VfFile::from_path(&link),
         0,
@@ -863,7 +893,8 @@ fn writev_path_compresses_shared_prefix() {
     let f0 = format!("{}/f0", base);
     let f1 = format!("{}/b/f1", base);
     let f2 = format!("{}/b/c/f2", base);
-    c.ensure_dir(&format!("{}/b/c", base), 0o755).unwrap();
+    c.ensure_dir(Path::new(&format!("{}/b/c", base)), 0o755)
+        .unwrap();
     let _ = vnfs::compound::compound_stats(); // reset counters
     let res = c
         .writev(&[
@@ -892,7 +923,7 @@ fn readv_writev_mixes_descriptors_and_paths() {
     let fpath = format!("{}/pathfile", dir);
     let fdpath = format!("{}/fdfile", dir);
     let fd = c
-        .open(&fdpath, libc::O_CREAT | libc::O_RDWR, 0o644)
+        .open(Path::new(&fdpath), libc::O_CREAT | libc::O_RDWR, 0o644)
         .unwrap();
 
     let _ = vnfs::compound::compound_stats(); // reset counters
@@ -969,7 +1000,7 @@ fn writev_partial_failure_reports_failing_index() {
     );
     // The prefix op executed before the failure; the suffix was not reached.
     assert!(c.exists(Path::new(&f0)).unwrap());
-    assert!(!c.exists(&format!("{}/no", dir)).unwrap());
+    assert!(!c.exists(Path::new(&format!("{}/no", dir))).unwrap());
     assert!(!c.exists(Path::new(&f2)).unwrap());
 }
 
@@ -984,7 +1015,7 @@ fn openv_partial_failure_resumes_from_failing_index() {
     let f0 = format!("{}/f0", dir);
     let bad = format!("{}/no/such/dir/f1", dir);
     let f2 = format!("{}/f2", dir);
-    let refs = [f0.as_str(), bad.as_str(), f2.as_str()];
+    let refs = [Path::new(&f0), Path::new(&bad), Path::new(&f2)];
     let flags = [libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 3];
     let modes = [0o644; 3];
     let e = c.openv(&refs, &flags, &modes).unwrap_err();
@@ -1007,7 +1038,7 @@ fn removev_partial_failure_resumes_from_failing_index() {
     let bad = format!("{}/missing", dir);
     let f2 = format!("{}/f2", dir);
     for p in [&f0, &f2] {
-        write_file(&mut c, p, b"x");
+        write_file(&mut c, Path::new(p), b"x");
     }
     let files: Vec<VfFile> = [f0.as_str(), bad.as_str(), f2.as_str()]
         .iter()
@@ -1029,14 +1060,15 @@ fn listdirv_batches_many_directories() {
     let dir = setup_dir("listdirv_batch");
     let mut c = client();
     for i in 0..10 {
-        c.ensure_dir(&format!("{}/d{}", dir, i), 0o755).unwrap();
-        write_file(&mut c, &format!("{}/d{}/f", dir, i), b"x");
+        c.ensure_dir(Path::new(&format!("{}/d{}", dir, i)), 0o755)
+            .unwrap();
+        write_file(&mut c, Path::new(&format!("{}/d{}/f", dir, i)), b"x");
     }
     let dirs: Vec<String> = (0..10).map(|i| format!("{}/d{}", dir, i)).collect();
-    let refs: Vec<&str> = dirs.iter().map(|s| s.as_str()).collect();
+    let refs: Vec<&Path> = dirs.iter().map(Path::new).collect();
     let _ = vnfs::compound::compound_stats(); // reset counters
     let mut seen = 0usize;
-    let mut cb = |_: &VfAttrs, _: &str| {
+    let mut cb = |_: &VfAttrs, _: &Path| {
         seen += 1;
         true
     };
@@ -1178,8 +1210,8 @@ fn symlinkv_readlinkv_hardlinkv_batch_resolution() {
     // 5 symlinks in one directory: one batched parent resolve + one CREATE.
     let targets: Vec<String> = (0..5).map(|i| format!("target{}", i)).collect();
     let links: Vec<String> = (0..5).map(|i| format!("{}/l{}", dir, i)).collect();
-    let t_refs: Vec<&str> = targets.iter().map(String::as_str).collect();
-    let l_refs: Vec<&str> = links.iter().map(String::as_str).collect();
+    let t_refs: Vec<&Path> = targets.iter().map(Path::new).collect();
+    let l_refs: Vec<&Path> = links.iter().map(Path::new).collect();
     let _ = vnfs::compound::compound_stats(); // reset counters
     c.symlinkv(&t_refs, &l_refs).unwrap();
     let compounds = vnfs::compound::compound_stats().0;
@@ -1200,7 +1232,7 @@ fn symlinkv_readlinkv_hardlinkv_batch_resolution() {
     );
     // hardlinkv: sources + destination parents batched, then one LINK.
     let hard: Vec<String> = (0..5).map(|i| format!("{}/h{}", dir, i)).collect();
-    let h_refs: Vec<&str> = hard.iter().map(String::as_str).collect();
+    let h_refs: Vec<&Path> = hard.iter().map(Path::new).collect();
     let _ = vnfs::compound::compound_stats(); // reset counters
     c.hardlinkv(&l_refs, &h_refs).unwrap();
     let compounds = vnfs::compound::compound_stats().0;
@@ -1226,7 +1258,7 @@ fn openv_ocreat_preserves_existing_mode() {
 
     let g = format!("{}/new.txt", dir);
     c.openv(
-        &[f.as_str(), g.as_str()],
+        &[Path::new(&f), Path::new(&g)],
         &[libc::O_CREAT | libc::O_RDWR, libc::O_CREAT | libc::O_RDWR],
         &[0o777, 0o640],
     )
@@ -1263,8 +1295,8 @@ fn hardlinkv() {
     let src = format!("{}/orig.txt", dir);
     let dst = format!("{}/hard.txt", dir);
     let mut c = make_file(&src, b"linked data");
-    let olds = [src.as_str()];
-    let news = [dst.as_str()];
+    let olds = [Path::new(&src)];
+    let news = [Path::new(&dst)];
     c.hardlinkv(&olds, &news).expect("hardlinkv");
     assert!(c.exists(Path::new(&dst)).unwrap());
     let s1 = c.stat(Path::new(&src)).unwrap();
@@ -1284,7 +1316,7 @@ fn ensure_dir() {
     let mut c = client();
     c.ensure_dir(Path::new(&nested), 0o755)
         .expect("ensure_dir nested");
-    assert!(c.exists(&format!("{}/a", dir)).unwrap());
+    assert!(c.exists(Path::new(&format!("{}/a", dir))).unwrap());
     assert!(c.exists(Path::new(&nested)).unwrap());
 }
 
@@ -1292,7 +1324,8 @@ fn ensure_dir() {
 fn rm_recursive_api() {
     let dir = setup_dir("rm_rec");
     let mut c = client();
-    c.ensure_dir(&format!("{}/x/y", dir), 0o755).unwrap();
+    c.ensure_dir(Path::new(&format!("{}/x/y", dir)), 0o755)
+        .unwrap();
     for f in [
         format!("{}/top", dir),
         format!("{}/x/deep", dir),
@@ -1301,8 +1334,8 @@ fn rm_recursive_api() {
         c.writev(&[WriteOp::from_path(&f, VfOffset::At(0), b"d".to_vec()).with_creation()])
             .unwrap();
     }
-    assert!(c.exists(&format!("{}/x/deep", dir)).unwrap());
-    rm_recursive(&mut c, &dir).expect("rm_recursive");
+    assert!(c.exists(Path::new(&format!("{}/x/deep", dir))).unwrap());
+    rm_recursive(&mut c, Path::new(&dir)).expect("rm_recursive");
     assert!(!c.exists(Path::new(&dir)).unwrap(), "whole tree removed");
 }
 
@@ -1311,11 +1344,12 @@ fn rm_nonrecursive_keeps_subdirs() {
     let dir = setup_dir("rm_norec");
     let mut c = client();
     let file = format!("{}/keepdir/target", dir);
-    c.ensure_dir(&format!("{}/keepdir", dir), 0o755).unwrap();
+    c.ensure_dir(Path::new(&format!("{}/keepdir", dir)), 0o755)
+        .unwrap();
     c.writev(&[WriteOp::from_path(&file, VfOffset::At(0), b"k".to_vec()).with_creation()])
         .unwrap();
     // Non-recursive removal of the directory fails because it is not empty.
-    let r = c.rm(&[dir.as_str()], false);
+    let r = c.rm(&[Path::new(&dir)], false);
     assert!(
         r.is_err(),
         "non-empty dir cannot be removed non-recursively"
@@ -1327,15 +1361,15 @@ fn rm_nonrecursive_keeps_subdirs() {
 // Helpers used by the new-call tests
 // ---------------------------------------------------------------------------
 
-fn write_file(c: &mut NfsVecFs, path: &str, data: &[u8]) {
-    c.writev(&[WriteOp::from_path(path, VfOffset::At(0), data.to_vec()).with_creation()])
+fn write_file(c: &mut NfsVecFs, path: &Path, data: &[u8]) {
+    c.writev(&[WriteOp::from_os_path(path, VfOffset::At(0), data.to_vec()).with_creation()])
         .unwrap();
 }
 
-fn read_all(c: &mut NfsVecFs, path: &str) -> Vec<u8> {
-    let size = c.stat(Path::new(path)).expect("stat").size as usize;
+fn read_all(c: &mut NfsVecFs, path: &Path) -> Vec<u8> {
+    let size = c.stat(path).expect("stat").size as usize;
     let r = &c
-        .readv(&[ReadOp::from_path(path, VfOffset::At(0), size)])
+        .readv(&[ReadOp::from_os_path(path, VfOffset::At(0), size)])
         .expect("readv")[0];
     assert_eq!(r.data.len(), size, "read full file");
     r.data.clone()
@@ -1350,13 +1384,13 @@ fn openv_per_file_flags_and_modes() {
     let dir = setup_dir("openv_flags");
     let mut c = client();
     let paths = [format!("{}/a.txt", dir), format!("{}/b.txt", dir)];
-    let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
     let flags = [libc::O_CREAT | libc::O_RDWR, libc::O_CREAT | libc::O_RDONLY];
     let modes = [0o600, 0o640];
     let files = c.openv(&refs, &flags, &modes).expect("openv");
     assert_eq!(files.len(), 2);
-    assert_eq!(c.stat(&paths[0]).unwrap().mode & 0o777, 0o600);
-    assert_eq!(c.stat(&paths[1]).unwrap().mode & 0o777, 0o640);
+    assert_eq!(c.stat(Path::new(&paths[0])).unwrap().mode & 0o777, 0o600);
+    assert_eq!(c.stat(Path::new(&paths[1])).unwrap().mode & 0o777, 0o640);
     c.closev(&files).unwrap();
 }
 
@@ -1370,7 +1404,7 @@ fn fseek_set_cur_end() {
     let f = format!("{}/seek.bin", dir);
     let mut c = client();
     let tf = c
-        .open(&f, libc::O_CREAT | libc::O_RDWR, 0o644)
+        .open(Path::new(&f), libc::O_CREAT | libc::O_RDWR, 0o644)
         .expect("open");
 
     let payload = b"0123456789".to_vec();
@@ -1411,17 +1445,17 @@ fn dupv_copies_extent() {
     let src = format!("{}/src.bin", dir);
     let dst = format!("{}/dst.bin", dir);
     let mut c = client();
-    write_file(&mut c, &src, b"abcdefghij");
+    write_file(&mut c, Path::new(&src), b"abcdefghij");
 
     let pairs = [ExtentPair::new(&src, 4, &dst, 0, Some(4))];
     c.dupv(&pairs).expect("dupv");
-    assert_eq!(read_all(&mut c, &dst), b"efgh");
+    assert_eq!(read_all(&mut c, Path::new(&dst)), b"efgh");
 
     // ExtentPair length None copies to end-of-file.
     let whole = format!("{}/whole.bin", dir);
     c.copyv(&[ExtentPair::new(&src, 2, &whole, 0, None)])
         .expect("copyv whole file");
-    assert_eq!(read_all(&mut c, &whole), b"cdefghij");
+    assert_eq!(read_all(&mut c, Path::new(&whole)), b"cdefghij");
 }
 
 #[test]
@@ -1431,13 +1465,13 @@ fn ldupv_and_lcopyv() {
     let d1 = format!("{}/d1.txt", dir);
     let d2 = format!("{}/d2.txt", dir);
     let mut c = client();
-    write_file(&mut c, &src, b"0123456789");
+    write_file(&mut c, Path::new(&src), b"0123456789");
     c.ldupv(&[ExtentPair::new(&src, 0, &d1, 0, Some(5))])
         .unwrap();
     c.lcopyv(&[ExtentPair::new(&src, 5, &d2, 0, Some(5))])
         .unwrap();
-    assert_eq!(read_all(&mut c, &d1), b"01234");
-    assert_eq!(read_all(&mut c, &d2), b"56789");
+    assert_eq!(read_all(&mut c, Path::new(&d1)), b"01234");
+    assert_eq!(read_all(&mut c, Path::new(&d2)), b"56789");
 }
 
 // ---------------------------------------------------------------------------
@@ -1453,7 +1487,7 @@ fn write_adb_blocknums_and_pattern() {
     // Three ADB blocks of 1024 bytes; write the ADBN (8 bytes, BE) at the
     // start of each block, and the pattern "PAT" 8 bytes into each block.
     let a = Adb {
-        path: f.clone(),
+        path: PathBuf::from(f.clone()),
         adb_offset: 0,
         adb_block_size: 1024,
         adb_block_count: 3,
@@ -1491,29 +1525,30 @@ fn write_adb_blocknums_and_pattern() {
 fn listdirv_callback() {
     let dir = setup_dir("listdirv");
     let mut c = client();
-    c.ensure_dir(&format!("{}/sub", dir), 0o755).unwrap();
+    c.ensure_dir(Path::new(&format!("{}/sub", dir)), 0o755)
+        .unwrap();
     for name in ["a.txt", "b.txt"] {
-        write_file(&mut c, &format!("{}/{}", dir, name), b"x");
+        write_file(&mut c, Path::new(&format!("{}/{}", dir, name)), b"x");
     }
 
     let mut seen: Vec<String> = Vec::new();
-    let mut cb = |e: &VfAttrs, d: &str| {
-        assert_eq!(d, dir);
+    let mut cb = |e: &VfAttrs, d: &Path| {
+        assert_eq!(d, Path::new(&dir));
         seen.push(e.file.path().unwrap().to_string_lossy().into_owned());
         true
     };
-    c.listdirv(&[dir.as_str()], AttrMask::default(), 0, false, &mut cb)
+    c.listdirv(&[Path::new(&dir)], AttrMask::default(), 0, false, &mut cb)
         .expect("listdirv");
     assert!(seen.iter().any(|p| p.ends_with("a.txt")));
     assert!(seen.iter().any(|p| p.ends_with("sub")));
 
     // A callback returning false stops early.
     let mut count = 0usize;
-    let mut stop = |_: &VfAttrs, _: &str| {
+    let mut stop = |_: &VfAttrs, _: &Path| {
         count += 1;
         false
     };
-    c.listdirv(&[dir.as_str()], AttrMask::default(), 0, false, &mut stop)
+    c.listdirv(&[Path::new(&dir)], AttrMask::default(), 0, false, &mut stop)
         .unwrap();
     assert_eq!(count, 1, "early-stop after first entry");
 }
@@ -1528,14 +1563,21 @@ fn cp_recursive_copies_tree() {
     let src = format!("{}/src", dir);
     let dst = format!("{}/dst", dir);
     let mut c = client();
-    c.ensure_dir(&format!("{}/sub", src), 0o755).unwrap();
-    write_file(&mut c, &format!("{}/a.txt", src), b"aaa");
-    write_file(&mut c, &format!("{}/sub/b.txt", src), b"bbbb");
+    c.ensure_dir(Path::new(&format!("{}/sub", src)), 0o755)
+        .unwrap();
+    write_file(&mut c, Path::new(&format!("{}/a.txt", src)), b"aaa");
+    write_file(&mut c, Path::new(&format!("{}/sub/b.txt", src)), b"bbbb");
 
-    c.cp_recursive(&src, &dst, true, false)
+    c.cp_recursive(Path::new(&src), Path::new(&dst), true, false)
         .expect("cp_recursive");
-    assert_eq!(read_all(&mut c, &format!("{}/a.txt", dst)), b"aaa");
-    assert_eq!(read_all(&mut c, &format!("{}/sub/b.txt", dst)), b"bbbb");
+    assert_eq!(
+        read_all(&mut c, Path::new(&format!("{}/a.txt", dst))),
+        b"aaa"
+    );
+    assert_eq!(
+        read_all(&mut c, Path::new(&format!("{}/sub/b.txt", dst))),
+        b"bbbb"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1550,8 +1592,11 @@ fn resolve_deep_path_single_compound() {
     let deep = format!("{}/a/b/c/d/e", dir);
     let mut c = client();
     c.ensure_dir(Path::new(&deep), 0o755).unwrap();
-    write_file(&mut c, &format!("{}/file.txt", deep), b"deep");
-    assert_eq!(read_all(&mut c, &format!("{}/file.txt", deep)), b"deep");
+    write_file(&mut c, Path::new(&format!("{}/file.txt", deep)), b"deep");
+    assert_eq!(
+        read_all(&mut c, Path::new(&format!("{}/file.txt", deep))),
+        b"deep"
+    );
 }
 
 #[test]
@@ -1609,9 +1654,9 @@ fn batched_unlinkv() {
         format!("{}/u3", dir),
     ];
     for f in &files {
-        write_file(&mut c, f, b"x");
+        write_file(&mut c, Path::new(f), b"x");
     }
-    let refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
+    let refs: Vec<&Path> = files.iter().map(Path::new).collect();
     c.unlinkv(&refs).expect("batched unlinkv");
     for f in &files {
         assert!(!c.exists(Path::new(f)).unwrap());
@@ -1631,7 +1676,7 @@ fn batch_exceeds_compound_op_limit() {
     for i in 0..n {
         let p = format!("{}/f{}.txt", dir, i);
         let tf = c
-            .open(&p, libc::O_CREAT | libc::O_RDWR, 0o600)
+            .open(Path::new(&p), libc::O_CREAT | libc::O_RDWR, 0o600)
             .expect("open");
         paths.push(p);
         files.push(tf);
@@ -1678,6 +1723,6 @@ fn batch_exceeds_compound_op_limit() {
 
     // Batched closev.
     c.closev(&files).expect("closev (10 files)");
-    c.unlinkv(&paths.iter().map(|p| p.as_str()).collect::<Vec<_>>())
+    c.unlinkv(&paths.iter().map(Path::new).collect::<Vec<_>>())
         .expect("unlinkv (10 files)");
 }

@@ -1,6 +1,7 @@
 """A correctness suite run against both the dummy and NFS backends."""
 
 import datetime
+import os as _os
 import posixpath
 
 
@@ -34,6 +35,17 @@ def run_correctness_suite(fs):
     assert fs.isfile("nfs4:///dir/a.txt")
     assert fs.isdir("nfs4:///dir")
     assert not fs.isdir("nfs4:///dir/a.txt")
+
+    # Arbitrary Unix filename bytes round-trip through Python's
+    # surrogateescape representation.
+    raw_name = b"n\xffb"
+    name = _os.fsdecode(raw_name)
+    fs.pipe_file(f"nfs4:///dir/{name}", b"bytes")
+    assert fs.cat_file(f"nfs4:///dir/{name}") == b"bytes"
+    assert (
+        _os.fsencode(fs.ls("nfs4:///dir", detail=False)[-1].split("/")[-1]) == raw_name
+    )
+    fs.rm(f"nfs4:///dir/{name}")
 
     plain = fs.ls("nfs4:///dir", detail=False)
     assert plain == ["nfs4:///dir/a.txt", "nfs4:///dir/b.txt"], plain

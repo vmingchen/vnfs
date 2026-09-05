@@ -8,12 +8,12 @@
 //!
 //! # Path and name representation
 //!
-//! Paths are root-relative strings: an absolute path starts with `/` and is
+//! Paths are native Unix [`Path`]s. An absolute path starts with `/` and is
 //! resolved against the filesystem root (for NFS, the export root), while a
 //! relative path is resolved against the client's current working directory
-//! (see [`VecFs::abs_path`] and [`VecFs::vf_path`]). Component names are
-//! UTF-8 `String`s/`PathBuf`s; NFS component names that are not valid UTF-8
-//! cannot be represented through this API.
+//! (see [`VecFs::abs_path`] and [`VecFs::vf_path`]). `PathBuf`/`OsStr`
+//! preserve arbitrary filename bytes; UTF-8 conversion is a convenience for
+//! callers that need it.
 
 use std::path::{Path, PathBuf};
 
@@ -200,6 +200,7 @@ pub type Fd = std::os::fd::RawFd;
 /// Split `path` into its parent directory path and final component, returning
 /// the errno on failure (there is no operation index at this layer; callers
 /// attach one). Built on [`Path`] so repeated separators are handled.
+#[cfg(test)]
 pub(crate) fn split_path(path: &str) -> Result<(&str, &str), u32> {
     let trimmed = path.trim_matches('/');
     if trimmed.is_empty() {
@@ -212,6 +213,7 @@ pub(crate) fn split_path(path: &str) -> Result<(&str, &str), u32> {
 }
 
 /// Join a directory path and a name with `/`.
+#[cfg(test)]
 pub(crate) fn join_path(dir: &str, name: &str) -> String {
     if dir.is_empty() {
         name.to_string()
@@ -223,6 +225,7 @@ pub(crate) fn join_path(dir: &str, name: &str) -> String {
 /// Lexically normalize a root-relative path (no leading `/`): drop `.` and
 /// empty components, apply `..` by popping the last component (clamped at the
 /// root, so a leading `..` is ignored, matching `/..` == `/`).
+#[cfg(test)]
 pub(crate) fn normalize_root_relative(path: &str) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for comp in path.split('/') {
@@ -451,6 +454,11 @@ impl ReadOp {
         ReadOp::new(VfFile::from_path(path), offset, length)
     }
 
+    /// Construct a read from a native path.
+    pub fn from_os_path(path: &Path, offset: VfOffset, length: usize) -> ReadOp {
+        ReadOp::new(VfFile::from_os_path(path), offset, length)
+    }
+
     /// A read from an open descriptor, typically at [`VfOffset::Cur`]
     /// (sequential) reads.
     pub fn from_fd(fd: Fd, offset: VfOffset, length: usize) -> ReadOp {
@@ -507,6 +515,11 @@ impl WriteOp {
 
     pub fn from_path(path: &str, offset: VfOffset, data: Vec<u8>) -> WriteOp {
         WriteOp::new(VfFile::from_path(path), offset, data)
+    }
+
+    /// Construct a write from a native path.
+    pub fn from_os_path(path: &Path, offset: VfOffset, data: Vec<u8>) -> WriteOp {
+        WriteOp::new(VfFile::from_os_path(path), offset, data)
     }
 
     pub fn from_fd(fd: Fd, offset: VfOffset, data: Vec<u8>) -> WriteOp {
@@ -1530,8 +1543,7 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
         );
-        fs.symlink(outside.to_str().unwrap(), Path::new("/evil"))
-            .unwrap();
+        fs.symlink(Path::new(&outside), Path::new("/evil")).unwrap();
         assert_eq!(
             fs.readv(&[ReadOp::at(VfFile::from_path("/evil"), 0, 8)])
                 .unwrap_err()
@@ -1565,7 +1577,7 @@ mod tests {
         // A dangling symlink to an absolute path still cannot touch the
         // outside of the root when creating through it.
         let dangling = root.0.parent().unwrap().join("never-created");
-        fs.symlink(dangling.to_str().unwrap(), Path::new("/evil2"))
+        fs.symlink(Path::new(&dangling), Path::new("/evil2"))
             .unwrap();
         assert_eq!(
             fs.writev(
@@ -1597,7 +1609,12 @@ mod tests {
     fn dummy_open_by_path_abs_is_root_relative() {
         let (_root, mut fs) = fs("open-abs");
         let fd = fs
-            .open_by_path(VfPathBase::Abs, "rel", libc::O_CREAT | libc::O_RDWR, 0o644)
+            .open_by_path(
+                VfPathBase::Abs,
+                Path::new("rel"),
+                libc::O_CREAT | libc::O_RDWR,
+                0o644,
+            )
             .unwrap();
         fs.writev(&[WriteOp::new(fd.clone(), VfOffset::At(0), b"x".to_vec())])
             .unwrap();

@@ -1,7 +1,7 @@
 //! A shared test suite run against any [`VecFs`] implementation, proving both
 //! backends (NFS and the `std::fs` dummy) behave identically.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use vnfs::VecFs;
 use vnfs::vecfs::*;
 
@@ -95,7 +95,8 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // symlink / readlink.
     let link = format!("{}/ln", dir);
-    fs.symlink(Path::new(&f), &link).expect("symlink");
+    fs.symlink(Path::new(&f), Path::new(&link))
+        .expect("symlink");
     assert_eq!(fs.readlink(Path::new(&link)).unwrap(), f.as_bytes());
 
     // stat follows symlinks; lstat does not. (Relative target so both the
@@ -106,7 +107,8 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    fs.symlink(Path::new(&rel), &sbase).expect("symlink lnstat");
+    fs.symlink(Path::new(&rel), Path::new(&sbase))
+        .expect("symlink lnstat");
     assert_eq!(
         fs.stat(Path::new(&sbase)).unwrap().ftype,
         VfType::Regular,
@@ -125,7 +127,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // hardlink.
     let hard = format!("{}/hard", dir);
-    fs.hardlinkv(&[f.as_str()], &[hard.as_str()])
+    fs.hardlinkv(&[Path::new(&f)], &[Path::new(&hard)])
         .expect("hardlinkv");
     assert_eq!(
         fs.stat(Path::new(&f)).unwrap().fileid,
@@ -134,8 +136,11 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // rename.
     let renamed = format!("{}/renamed.txt", dir);
-    fs.renamev(&[(VfFile::from_path(&f), VfFile::from_path(&renamed))])
-        .expect("renamev");
+    fs.renamev(&[(
+        VfFile::from_os_path(Path::new(&f)),
+        VfFile::from_os_path(Path::new(&renamed)),
+    )])
+    .expect("renamev");
     assert!(fs.exists(Path::new(&renamed)).unwrap());
     assert!(!fs.exists(Path::new(&f)).unwrap());
 
@@ -147,7 +152,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         format!("{}/b", more),
         format!("{}/c", more),
     ];
-    let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
     let files = fs
         .openv(&refs, &[libc::O_CREAT | libc::O_RDWR; 3], &[0o644; 3])
         .expect("openv");
@@ -155,7 +160,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // listdir (non-recursive) finds entries.
     let entries = fs
-        .listdir(&dir, AttrMask::default(), 0, false)
+        .listdir(Path::new(&dir), AttrMask::default(), 0, false)
         .expect("listdir");
     assert!(
         entries
@@ -170,11 +175,11 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // listdirv callback.
     let mut seen = 0usize;
-    let mut cb = |_: &VfAttrs, _: &str| {
+    let mut cb = |_: &VfAttrs, _: &Path| {
         seen += 1;
         true
     };
-    fs.listdirv(&[dir.as_str()], AttrMask::default(), 0, false, &mut cb)
+    fs.listdirv(&[Path::new(&dir)], AttrMask::default(), 0, false, &mut cb)
         .expect("listdirv");
     assert!(seen >= 2);
 
@@ -203,11 +208,11 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // O_CREAT mode is ignored when the file already exists.
     let mode_f = format!("{}/mode.txt", dir);
     let mfd = fs
-        .open(&mode_f, libc::O_CREAT | libc::O_RDWR, 0o600)
+        .open(Path::new(&mode_f), libc::O_CREAT | libc::O_RDWR, 0o600)
         .unwrap();
     fs.close(&mfd).unwrap();
     let mfd = fs
-        .open(&mode_f, libc::O_CREAT | libc::O_RDWR, 0o777)
+        .open(Path::new(&mode_f), libc::O_CREAT | libc::O_RDWR, 0o777)
         .unwrap();
     fs.close(&mfd).unwrap();
     assert_eq!(
@@ -276,8 +281,11 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         "readlink of a regular file"
     );
     assert!(
-        fs.hardlinkv(&["/no/such/source"], &[format!("{}/h", dir).as_str()])
-            .is_err(),
+        fs.hardlinkv(
+            &[Path::new("/no/such/source")],
+            &[Path::new(&format!("{}/h", dir))]
+        )
+        .is_err(),
         "hardlink of a missing source"
     );
 
@@ -289,13 +297,13 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     let nonempty = format!("{}/nonempty", dir);
     fs.ensure_dir(Path::new(&nonempty), 0o755).unwrap();
     fs.writev(&[WriteOp::at(
-        VfFile::from_path(&format!("{}/x", nonempty)),
+        VfFile::from_os_path(Path::new(&format!("{}/x", nonempty))),
         0,
         b"x".to_vec(),
     )
     .with_creation()])
         .unwrap();
-    assert!(fs.rm(&[nonempty.as_str()], false).is_err());
+    assert!(fs.rm(&[Path::new(&nonempty)], false).is_err());
 
     // write_adb: two blocks with ADBN at block offset 0.
     let adbf = format!("{}/adb.bin", dir);
@@ -314,32 +322,47 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // cp_recursive copies the tree.
     let cpsrc = format!("{}/cpsrc", dir);
     let cpdst = format!("{}/cpdst", dir);
-    fs.ensure_dir(&format!("{}/inner", cpsrc), 0o755).unwrap();
+    fs.ensure_dir(Path::new(&format!("{}/inner", cpsrc)), 0o755)
+        .unwrap();
     let srcfile = format!("{}/inner/data.txt", cpsrc);
     let mut w = WriteOp::from_path(&srcfile, VfOffset::At(0), b"xyz".to_vec());
     w.creation = true;
     fs.writev(&[w]).unwrap();
-    fs.symlink("data.txt", &format!("{}/inner/link", cpsrc))
-        .unwrap();
-    fs.cp_recursive(&cpsrc, &cpdst, true, false)
+    fs.symlink(
+        Path::new("data.txt"),
+        Path::new(&format!("{}/inner/link", cpsrc)),
+    )
+    .unwrap();
+    fs.cp_recursive(Path::new(&cpsrc), Path::new(&cpdst), true, false)
         .expect("cp_recursive");
-    assert!(fs.exists(&format!("{}/inner/data.txt", cpdst)).unwrap());
+    assert!(
+        fs.exists(Path::new(&format!("{}/inner/data.txt", cpdst)))
+            .unwrap()
+    );
     assert_eq!(
-        fs.lstat(&format!("{}/inner/link", cpdst)).unwrap().ftype,
+        fs.lstat(Path::new(&format!("{}/inner/link", cpdst)))
+            .unwrap()
+            .ftype,
         VfType::Symlink,
         "cp_recursive(symlinks=true) recreates the link"
     );
     let cpflat = format!("{}/cpflat", dir);
-    fs.cp_recursive(&cpsrc, &cpflat, false, false)
+    fs.cp_recursive(Path::new(&cpsrc), Path::new(&cpflat), false, false)
         .expect("cp_recursive no symlinks");
     assert_eq!(
-        fs.lstat(&format!("{}/inner/link", cpflat)).unwrap().ftype,
+        fs.lstat(Path::new(&format!("{}/inner/link", cpflat)))
+            .unwrap()
+            .ftype,
         VfType::Regular,
         "cp_recursive(symlinks=false) copies through the link"
     );
     assert_eq!(
-        fs.read(&VfFile::from_path(&format!("{}/inner/link", cpflat)), 0, 3)
-            .unwrap(),
+        fs.read(
+            &VfFile::from_os_path(Path::new(&format!("{}/inner/link", cpflat))),
+            0,
+            3
+        )
+        .unwrap(),
         b"xyz"
     );
 
@@ -350,12 +373,14 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         .to_string_lossy()
         .into_owned();
     assert_eq!(
-        fs.stat(&format!("{}/./renamed.txt", dir)).unwrap().size,
+        fs.stat(Path::new(&format!("{}/./renamed.txt", dir)))
+            .unwrap()
+            .size,
         fs.stat(Path::new(&renamed)).unwrap().size,
         "dot component"
     );
     assert_eq!(
-        fs.stat(&format!("{}/../{}/renamed.txt", dir, base_name))
+        fs.stat(Path::new(&format!("{}/../{}/renamed.txt", dir, base_name)))
             .unwrap()
             .size,
         fs.stat(Path::new(&renamed)).unwrap().size,
@@ -372,7 +397,11 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // O_APPEND writes always go to the end of the file.
     let app = format!("{}/append.txt", dir);
     let afd = fs
-        .open(&app, libc::O_CREAT | libc::O_RDWR | libc::O_APPEND, 0o644)
+        .open(
+            Path::new(&app),
+            libc::O_CREAT | libc::O_RDWR | libc::O_APPEND,
+            0o644,
+        )
         .expect("open append");
     fs.writev(&[WriteOp::new(afd.clone(), VfOffset::At(0), b"ab".to_vec())])
         .unwrap();
@@ -403,7 +432,8 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    fs.symlink(Path::new(&rel_name), &dup_link).unwrap();
+    fs.symlink(Path::new(&rel_name), Path::new(&dup_link))
+        .unwrap();
     fs.dupv(&[ExtentPair::new(&dup_link, 0, &dup_copy, 0, None)])
         .unwrap();
     let st = fs.stat(Path::new(&dup_copy)).unwrap();
@@ -440,7 +470,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     let f2 = fs
         .open_by_path(
             VfPathBase::Abs,
-            &abs_rel,
+            Path::new(&abs_rel),
             libc::O_CREAT | libc::O_RDWR,
             0o644,
         )
@@ -449,8 +479,12 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         .unwrap();
     fs.close(&f2).unwrap();
     assert_eq!(
-        fs.read(&VfFile::from_path(&format!("/{}", abs_rel)), 0, 2)
-            .unwrap(),
+        fs.read(
+            &VfFile::from_os_path(Path::new(&format!("/{}", abs_rel))),
+            0,
+            2
+        )
+        .unwrap(),
         b"ar"
     );
 
@@ -471,14 +505,14 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         let subp = format!("{}/{}", wroot, sub);
         fs.ensure_dir(Path::new(&subp), 0o755).unwrap();
         fs.writev(&[WriteOp::at(
-            VfFile::from_path(&format!("{}/{}", subp, file)),
+            VfFile::from_os_path(Path::new(&format!("{}/{}", subp, file))),
             0,
             b"x".to_vec(),
         )
         .with_creation()])
             .unwrap();
     }
-    let mut sort = |_dir: &str, attrs: &mut Vec<VfAttrs>| {
+    let mut sort = |_dir: &Path, attrs: &mut Vec<VfAttrs>| {
         attrs.sort_by(|a, b| {
             a.file
                 .path()
@@ -487,14 +521,16 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
                 .cmp(&b.file.path().unwrap().file_name())
         });
     };
-    let tree = fs.walk(&wroot, AttrMask::stat(), &mut sort).unwrap();
-    let order: Vec<String> = tree.iter().map(|w| w.path.clone()).collect();
+    let tree = fs
+        .walk(Path::new(&wroot), AttrMask::stat(), &mut sort)
+        .unwrap();
+    let order: Vec<PathBuf> = tree.iter().map(|w| w.path.clone()).collect();
     assert_eq!(
         order,
         vec![
-            wroot.clone(),
-            format!("{}/a", wroot),
-            format!("{}/b", wroot),
+            PathBuf::from(&wroot),
+            PathBuf::from(format!("{}/a", wroot)),
+            PathBuf::from(format!("{}/b", wroot)),
         ],
         "walk pre-order follows the sorted subdirectory order"
     );
@@ -506,14 +542,14 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
             .collect();
         let mut sorted = names.clone();
         sorted.sort();
-        assert_eq!(names, sorted, "entries are sorted in {}", w.path);
+        assert_eq!(names, sorted, "entries are sorted in {}", w.path.display());
     }
 
     // chdir / getcwd.
     fs.chdir(Path::new(&sub)).expect("chdir");
-    assert!(fs.getcwd().ends_with("/sub"));
+    assert_eq!(fs.getcwd().file_name(), Some(Path::new("sub").as_os_str()));
 
     // rm recursive removes the whole tree.
-    fs.rm(&[dir.as_str()], true).expect("rm recursive");
+    fs.rm(&[Path::new(&dir)], true).expect("rm recursive");
     assert!(!fs.exists(Path::new(&dir)).unwrap());
 }
