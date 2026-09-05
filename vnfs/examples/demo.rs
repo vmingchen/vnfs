@@ -64,7 +64,7 @@ fn read_hello(client: &mut NfsClient) -> Result<(), RpcError> {
     let dir = client.root().clone();
     let (fh, stateid) = client.open(
         &dir,
-        "hello.txt",
+        b"hello.txt",
         OPEN4_SHARE_ACCESS_BOTH,
         OpenCreate::NoCreate,
     )?;
@@ -91,9 +91,14 @@ fn read_hello(client: &mut NfsClient) -> Result<(), RpcError> {
 
 fn write_read_back(client: &mut NfsClient) -> Result<(), RpcError> {
     let name = format!("vnfs_scratch_{}.txt", std::process::id());
-    let dir = client.resolve("")?;
+    let dir = client.resolve(b"")?;
 
-    let (fh, stateid) = client.open(&dir, &name, OPEN4_SHARE_ACCESS_BOTH, OpenCreate::Guarded)?;
+    let (fh, stateid) = client.open(
+        &dir,
+        name.as_bytes(),
+        OPEN4_SHARE_ACCESS_BOTH,
+        OpenCreate::Guarded,
+    )?;
     println!("created {}", name);
 
     let data = b"hello from the rust vnfs client!\n0123456789\n";

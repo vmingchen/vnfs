@@ -10,15 +10,17 @@
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 
+use crate::path::{cstring_from_bytes, normalize_bytes, path_bytes, path_from_bytes};
 use crate::vecfs::*;
 
 /// Open state for a descriptor on the local filesystem.
 struct DummyOpen {
     file: File,
-    path: String,
+    path: PathBuf,
     cur_offset: u64,
     append: bool,
 }
@@ -48,7 +50,7 @@ impl DummyVecFs {
                 std::fs::symlink_metadata(&p)
             }
             .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-            self.fill_attrs(a, &p.to_string_lossy(), &md);
+            self.fill_attrs(a, &p, &md);
         }
         Ok(())
     }
@@ -68,13 +70,14 @@ impl DummyVecFs {
 
     /// Map a (possibly cwd-relative) path onto the real filesystem.
     /// The result is lexically normalized and cannot escape `root` via `..`.
-    fn resolve(&self, path: &str) -> PathBuf {
-        let suffix = if path.starts_with('/') {
-            path.trim_start_matches('/').to_string()
+    fn resolve(&self, path: &Path) -> PathBuf {
+        let suffix = if path.is_absolute() {
+            path.strip_prefix("/").unwrap_or(path).to_path_buf()
         } else {
-            self.cwd.join(path).to_string_lossy().into_owned()
+            self.cwd.join(path)
         };
-        self.root.join(normalize_root_relative(&suffix))
+        self.root
+            .join(path_from_bytes(&normalize_bytes(path_bytes(&suffix))))
     }
 
     /// Resolve `p` (already mapped under the root) to a real path that is
@@ -103,7 +106,7 @@ impl DummyVecFs {
                 // and ".." components are clamped), so it can never escape.
                 let stripped = target.strip_prefix("/").unwrap_or(&target);
                 self.root
-                    .join(normalize_root_relative(&stripped.to_string_lossy()))
+                    .join(path_from_bytes(&normalize_bytes(path_bytes(stripped))))
             } else {
                 p.parent().unwrap_or(Path::new("")).join(target)
             };
@@ -189,15 +192,14 @@ impl DummyVecFs {
     }
 
     /// Whether the object has at least one extended attribute (llistxattr).
-    fn has_xattr(path: &str) -> bool {
-        use std::ffi::CString;
-        let Ok(cpath) = CString::new(path) else {
+    fn has_xattr(path: &Path) -> bool {
+        let Some(cpath) = cstring_from_bytes(path_bytes(path)) else {
             return false;
         };
         unsafe { libc::llistxattr(cpath.as_ptr(), std::ptr::null_mut(), 0) > 0 }
     }
 
-    fn fill_attrs(&self, a: &mut VfAttrs, path: &str, md: &std::fs::Metadata) {
+    fn fill_attrs(&self, a: &mut VfAttrs, path: &Path, md: &std::fs::Metadata) {
         let ft = md.file_type();
         a.ftype = if ft.is_dir() {
             VfType::Directory
@@ -404,7 +406,7 @@ impl DummyVecFs {
 
     fn listdir_rec(
         &mut self,
-        dir: &str,
+        dir: &Path,
         masks: AttrMask,
         max_count: usize,
         recursive: bool,
@@ -421,10 +423,10 @@ impl DummyVecFs {
             if reached_limit(out) {
                 break;
             }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let path = join_path(dir.trim_matches('/'), &name);
+            let name = entry.file_name().as_bytes().to_vec();
+            let path = dir.join(path_from_bytes(&name));
             let mut a = VfAttrs {
-                file: VfFile::from_path(&format!("/{}", path)),
+                file: VfFile::from_os_path(&path),
                 masks,
                 ..VfAttrs::default()
             };
@@ -432,7 +434,7 @@ impl DummyVecFs {
                 .metadata()
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
             let real = self.resolve(&path);
-            self.fill_attrs(&mut a, &real.to_string_lossy(), &md);
+            self.fill_attrs(&mut a, &real, &md);
             let is_dir = a.ftype == VfType::Directory;
             out.push(a);
             if recursive && is_dir {
@@ -486,12 +488,12 @@ impl DummyVecFs {
         Ok(())
     }
 
-    fn rm_one(&mut self, path: &str, recursive: bool) -> VfResult<()> {
+    fn rm_one(&mut self, path: &Path, recursive: bool) -> VfResult<()> {
         let ft = self.file_type(path).unwrap_or(VfType::Regular);
         if ft == VfType::Directory && recursive {
             let entries = self.listdir(path, AttrMask::default(), usize::MAX, false)?;
             for e in entries {
-                let p = e.file.path().unwrap().to_string_lossy().to_string();
+                let p = e.file.path().unwrap().to_path_buf();
                 self.rm_one(&p, true)?;
             }
         }
@@ -500,19 +502,19 @@ impl DummyVecFs {
 }
 
 impl VecFs for DummyVecFs {
-    fn abs_path(&self, path: &str) -> String {
-        let root_rel = if path.starts_with('/') {
-            path.trim_start_matches('/').to_string()
+    fn abs_path(&self, path: &Path) -> PathBuf {
+        let root_rel = if path.is_absolute() {
+            path.strip_prefix("/").unwrap_or(path).to_path_buf()
         } else {
-            self.cwd.join(path).to_string_lossy().to_string()
+            self.cwd.join(path)
         };
-        normalize_root_relative(&root_rel)
+        path_from_bytes(&normalize_bytes(path_bytes(&root_rel)))
     }
 
     fn open_by_path(
         &mut self,
         base: VfPathBase,
-        pathname: &str,
+        pathname: &Path,
         flags: i32,
         mode: u32,
     ) -> VfResult<VfFile> {
@@ -522,7 +524,7 @@ impl VecFs for DummyVecFs {
         let resolved = match base {
             VfPathBase::Abs => self
                 .root
-                .join(normalize_root_relative(pathname.trim_start_matches('/'))),
+                .join(path_from_bytes(&normalize_bytes(path_bytes(pathname)))),
             VfPathBase::Cwd => self.resolve(pathname),
         };
         let p = self.real_path(&resolved)?;
@@ -561,7 +563,7 @@ impl VecFs for DummyVecFs {
             self.next_fd,
             DummyOpen {
                 file,
-                path: pathname.to_string(),
+                path: pathname.to_path_buf(),
                 cur_offset: 0,
                 append: flags & libc::O_APPEND != 0,
             },
@@ -579,17 +581,17 @@ impl VecFs for DummyVecFs {
             .ok_or_else(|| VfError::failure(0, ERR_EBADF))
     }
 
-    fn chdir(&mut self, path: &str) -> VfResult<()> {
+    fn chdir(&mut self, path: &Path) -> VfResult<()> {
         let p = self.real_path(&self.resolve(path))?;
         if !p.is_dir() {
             return Err(VfError::failure(0, ERR_NOTDIR));
         }
-        self.cwd = PathBuf::from(self.abs_path(path));
+        self.cwd = self.abs_path(path);
         Ok(())
     }
 
-    fn getcwd(&self) -> String {
-        format!("/{}", self.cwd.to_string_lossy())
+    fn getcwd(&self) -> PathBuf {
+        Path::new("/").join(&self.cwd)
     }
 
     fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
@@ -680,7 +682,7 @@ impl VecFs for DummyVecFs {
 
     fn listdir(
         &mut self,
-        dir: &str,
+        dir: &Path,
         masks: AttrMask,
         max_count: usize,
         recursive: bool,
@@ -737,7 +739,7 @@ impl VecFs for DummyVecFs {
         Ok(())
     }
 
-    fn symlinkv(&mut self, oldpaths: &[&str], newpaths: &[&str]) -> VfRes {
+    fn symlinkv(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         if oldpaths.len() != newpaths.len() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
@@ -750,17 +752,17 @@ impl VecFs for DummyVecFs {
         Ok(())
     }
 
-    fn readlinkv(&mut self, paths: &[&str]) -> VfResult<Vec<Vec<u8>>> {
+    fn readlinkv(&mut self, paths: &[&Path]) -> VfResult<Vec<Vec<u8>>> {
         let mut out = Vec::with_capacity(paths.len());
         for (i, p) in paths.iter().enumerate() {
             let target = std::fs::read_link(self.resolve(p))
                 .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-            out.push(target.as_os_str().as_encoded_bytes().to_vec());
+            out.push(path_bytes(&target).to_vec());
         }
         Ok(out)
     }
 
-    fn hardlinkv(&mut self, oldpaths: &[&str], newpaths: &[&str]) -> VfRes {
+    fn hardlinkv(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         if oldpaths.len() != newpaths.len() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
@@ -833,7 +835,7 @@ impl VecFs for DummyVecFs {
         Ok(counts)
     }
 
-    fn rm(&mut self, objs: &[&str], recursive: bool) -> VfRes {
+    fn rm(&mut self, objs: &[&Path], recursive: bool) -> VfRes {
         for (i, o) in objs.iter().enumerate() {
             self.rm_one(o, recursive).map_err(|e| e.with_index(i))?;
         }
@@ -842,8 +844,8 @@ impl VecFs for DummyVecFs {
 
     fn cp_recursive(
         &mut self,
-        src_dir: &str,
-        dst: &str,
+        src_dir: &Path,
+        dst: &Path,
         symlinks: bool,
         _use_server_side_copy: bool,
     ) -> VfRes {
@@ -857,18 +859,19 @@ impl VecFs for DummyVecFs {
                 .file
                 .path()
                 .and_then(|p| p.file_name())
-                .map(|f| f.to_string_lossy().into_owned())
+                .map(|f| f.as_bytes().to_vec())
                 .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
-            let src_child = format!("{}/{}", src_dir.trim_end_matches('/'), name);
-            let dst_child = format!("{}/{}", dst.trim_end_matches('/'), name);
+            let src_child = src_dir.join(path_from_bytes(&name));
+            let dst_child = dst.join(path_from_bytes(&name));
             if e.ftype == VfType::Directory {
                 self.cp_recursive(&src_child, &dst_child, symlinks, false)?;
             } else if e.ftype == VfType::Symlink && symlinks {
                 let target = self.readlink(&src_child).map_err(|e| e.with_index(0))?;
-                self.symlink(&String::from_utf8_lossy(&target), &dst_child)
+                let target_path = path_from_bytes(&target);
+                self.symlink(&target_path, &dst_child)
                     .map_err(|e| e.with_index(0))?;
             } else {
-                let pair = ExtentPair::new(&src_child, 0, &dst_child, 0, None);
+                let pair = ExtentPair::from_os_paths(&src_child, 0, &dst_child, 0, None);
                 self.dupv(std::slice::from_ref(&pair))
                     .map_err(|e| e.with_index(0))?;
             }

@@ -10,8 +10,8 @@ use nfsv41_sys::*;
 
 use crate::compound::{Compound, CompoundRes};
 use crate::error::{RpcError, RpcResult};
+use crate::path::{components_bytes, split_path_bytes};
 use crate::session::Session;
-use crate::vecfs::split_path;
 
 /// An NFS file handle owned by the client.
 #[derive(Clone, Debug)]
@@ -103,7 +103,7 @@ const SPECIAL_STATEID: stateid4 = stateid4 {
 /// An entry returned by READDIR.
 #[derive(Clone, Debug)]
 pub struct DirEntry {
-    pub name: String,
+    pub name: Vec<u8>,
     pub cookie: u64,
     /// Raw XDR-encoded attribute list, in the order requested.
     pub attrs: Vec<u8>,
@@ -153,15 +153,15 @@ pub struct ReadlinkOp {
 /// One RENAME of a batched compound: `[PUTFH src, SAVEFH, PUTFH dst, RENAME]`.
 pub struct RenameOp {
     pub srcdir: FileHandle,
-    pub oldname: String,
+    pub oldname: Vec<u8>,
     pub dstdir: FileHandle,
-    pub newname: String,
+    pub newname: Vec<u8>,
 }
 
 /// One CREATE of a batched compound, `[PUTFH dir, CREATE]` (mkdir / symlink).
 pub struct CreateOp {
     pub dir: FileHandle,
-    pub name: String,
+    pub name: Vec<u8>,
     pub ftype: nfs_ftype4,
     pub linkdata: Option<Vec<u8>>,
 }
@@ -170,13 +170,13 @@ pub struct CreateOp {
 pub struct LinkOp {
     pub dstdir: FileHandle,
     pub src: FileHandle,
-    pub newname: String,
+    pub newname: Vec<u8>,
 }
 
 /// One OPEN of a batched compound, `[PUTFH dir, OPEN, GETFH]`.
 pub struct OpenOp {
     pub dir: FileHandle,
-    pub name: String,
+    pub name: Vec<u8>,
     pub access: u32,
     pub create: OpenCreate,
 }
@@ -220,7 +220,7 @@ pub const READDIR_ATTRS: [u32; 13] = [
 /// pre-resolved open-file handle (descriptor ops, mixed into the same
 /// compound with PUTFH).
 pub enum FileRef {
-    Path(String),
+    Path(Vec<u8>),
     Handle(FileHandle),
 }
 
@@ -299,7 +299,7 @@ pub struct PathSetattrOutcome {
 
 /// One path-based OPEN for a merged compound.
 pub struct PathOpenOp {
-    pub path: String,
+    pub path: Vec<u8>,
     pub access: u32,
     pub create: OpenCreate,
     /// Mode to apply on creation (UNCHECKED createattrs / post-open for
@@ -321,8 +321,8 @@ pub struct PathRemoveOutcome {
 
 /// One path-based RENAME pair for a merged compound.
 pub struct PathRenamePair {
-    pub src: String,
-    pub dst: String,
+    pub src: Vec<u8>,
+    pub dst: Vec<u8>,
 }
 
 pub struct PathRenameOutcome {
@@ -337,7 +337,7 @@ pub struct PathRenameOutcome {
 #[derive(Default)]
 struct CfhCursor {
     /// Root-relative path of the directory currently in the saved-fh slot.
-    saved_dir: Option<String>,
+    saved_dir: Option<Vec<u8>>,
     /// Whether the compound's current fh currently equals the saved fh.
     at_saved: bool,
 }
@@ -349,9 +349,9 @@ impl CfhCursor {
     /// is cheaper than re-resolving from PUTROOTFH, so shared prefixes are
     /// never re-walked. Returns the leaf component and the number of ops
     /// appended, or None if the path is malformed.
-    fn set_parent(&mut self, c: &mut Compound, path: &str) -> Option<(String, usize)> {
-        let (dir, leaf) = split_path(path).ok()?;
-        if self.saved_dir.as_deref() == Some(dir) {
+    fn set_parent(&mut self, c: &mut Compound, path: &[u8]) -> Option<(Vec<u8>, usize)> {
+        let (dir, leaf) = split_path_bytes(path).ok()?;
+        if self.saved_dir.as_deref() == Some(&dir) {
             let mut ops = 0;
             if !self.at_saved {
                 // We are below the saved parent; climb back with RESTOREFH.
@@ -359,7 +359,7 @@ impl CfhCursor {
                 ops += 1;
                 self.at_saved = true;
             }
-            return Some((leaf.to_string(), ops));
+            return Some((leaf, ops));
         }
         let mut ops = 0;
         if let Some(saved) = self.saved_dir.clone() {
@@ -368,8 +368,8 @@ impl CfhCursor {
                 ops += 1;
                 self.at_saved = true;
             }
-            let saved_comps = dir_comps(&saved);
-            let target_comps = dir_comps(dir);
+            let saved_comps = components_bytes(&saved);
+            let target_comps = components_bytes(&dir);
             let common = common_prefix_len(&saved_comps, &target_comps);
             let ups = saved_comps.len() - common;
             let downs = target_comps.len() - common;
@@ -379,42 +379,42 @@ impl CfhCursor {
                     ops += 1;
                 }
                 for comp in &target_comps[common..] {
-                    c.lookup(comp.as_bytes());
+                    c.lookup(comp);
                     ops += 1;
                 }
                 c.savefh();
                 ops += 1;
-                self.saved_dir = Some(dir.to_string());
+                self.saved_dir = Some(dir.clone());
                 self.at_saved = true;
-                return Some((leaf.to_string(), ops));
+                return Some((leaf, ops));
             }
         }
         // Resolve the parent directory from the export root.
         let mut ops = 1; // PUTROOTFH
         c.putrootfh();
-        for comp in dir.split('/').filter(|s| !s.is_empty()) {
-            c.lookup(comp.as_bytes());
+        for comp in components_bytes(&dir) {
+            c.lookup(&comp);
             ops += 1;
         }
         c.savefh();
         ops += 1;
-        self.saved_dir = Some(dir.to_string());
+        self.saved_dir = Some(dir);
         self.at_saved = true;
-        Some((leaf.to_string(), ops))
+        Some((leaf, ops))
     }
 
     /// Make the current fh the parent of `path` WITHOUT saving it (used by
     /// RENAME, which needs the saved-fh slot to keep the source directory).
-    fn set_current_parent(&mut self, c: &mut Compound, path: &str) -> Option<(String, usize)> {
-        let (dir, leaf) = split_path(path).ok()?;
-        if self.saved_dir.as_deref() == Some(dir) {
+    fn set_current_parent(&mut self, c: &mut Compound, path: &[u8]) -> Option<(Vec<u8>, usize)> {
+        let (dir, leaf) = split_path_bytes(path).ok()?;
+        if self.saved_dir.as_deref() == Some(&dir) {
             let mut ops = 0;
             if !self.at_saved {
                 c.restorefh();
                 ops += 1;
                 self.at_saved = true;
             }
-            return Some((leaf.to_string(), ops));
+            return Some((leaf, ops));
         }
         let mut ops = 0;
         if let Some(saved) = self.saved_dir.clone() {
@@ -423,8 +423,8 @@ impl CfhCursor {
                 ops += 1;
                 self.at_saved = true;
             }
-            let saved_comps = dir_comps(&saved);
-            let target_comps = dir_comps(dir);
+            let saved_comps = components_bytes(&saved);
+            let target_comps = components_bytes(&dir);
             let common = common_prefix_len(&saved_comps, &target_comps);
             let ups = saved_comps.len() - common;
             let downs = target_comps.len() - common;
@@ -434,21 +434,21 @@ impl CfhCursor {
                     ops += 1;
                 }
                 for comp in &target_comps[common..] {
-                    c.lookup(comp.as_bytes());
+                    c.lookup(comp);
                     ops += 1;
                 }
                 self.at_saved = false;
-                return Some((leaf.to_string(), ops));
+                return Some((leaf, ops));
             }
         }
         let mut ops = 1; // PUTROOTFH
         c.putrootfh();
-        for comp in dir.split('/').filter(|s| !s.is_empty()) {
-            c.lookup(comp.as_bytes());
+        for comp in components_bytes(&dir) {
+            c.lookup(&comp);
             ops += 1;
         }
         self.at_saved = false; // current fh differs from the saved one
-        Some((leaf.to_string(), ops))
+        Some((leaf, ops))
     }
 
     /// Make the current fh a known open-file handle (descriptor ops). The
@@ -465,11 +465,7 @@ impl CfhCursor {
     }
 }
 
-fn dir_comps(dir: &str) -> Vec<&str> {
-    dir.split('/').filter(|s| !s.is_empty()).collect()
-}
-
-fn common_prefix_len(a: &[&str], b: &[&str]) -> usize {
+fn common_prefix_len<T: PartialEq>(a: &[T], b: &[T]) -> usize {
     a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }
 
@@ -599,11 +595,11 @@ impl NfsClient {
     }
 
     /// Look up a single component below `dir`.
-    pub fn lookup(&mut self, dir: &FileHandle, name: &str) -> RpcResult<FileHandle> {
+    pub fn lookup(&mut self, dir: &FileHandle, name: &[u8]) -> RpcResult<FileHandle> {
         let mut c = Compound::new();
         c.tag(b"lookup");
         c.putfh(&dir.as_nfs_fh());
-        c.lookup(name.as_bytes());
+        c.lookup(name);
         c.getfh();
         let res = self.session.compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
@@ -613,11 +609,15 @@ impl NfsClient {
     /// Look up `name` below `dir`, returning the child handle and its
     /// FATTR4_TYPE in one compound (`[PUTFH, LOOKUP, GETFH, GETATTR]`).
     /// A symlink is returned as-is (type `NF4LNK`), so callers can follow it.
-    pub fn lookup_getattr(&mut self, dir: &FileHandle, name: &str) -> RpcResult<(FileHandle, u32)> {
+    pub fn lookup_getattr(
+        &mut self,
+        dir: &FileHandle,
+        name: &[u8],
+    ) -> RpcResult<(FileHandle, u32)> {
         let mut c = Compound::new();
         c.tag(b"lookup_getattr");
         c.putfh(&dir.as_nfs_fh());
-        c.lookup(name.as_bytes());
+        c.lookup(name);
         c.getfh();
         c.getattr(&[FATTR4_TYPE]);
         let res = self.session.compound(&mut c)?;
@@ -638,7 +638,7 @@ impl NfsClient {
     /// failures abort the whole call.
     pub fn lookup_getattr_many(
         &mut self,
-        ops: &[(FileHandle, String)],
+        ops: &[(FileHandle, Vec<u8>)],
     ) -> RpcResult<Vec<Result<(FileHandle, u32), u32>>> {
         let per_chunk = (MAX_COMPOUND_OPS - 1) / 4;
         let mut out = Vec::with_capacity(ops.len());
@@ -647,7 +647,7 @@ impl NfsClient {
             c.tag(b"lookup_typev");
             for (dir, name) in chunk {
                 c.putfh(&dir.as_nfs_fh());
-                c.lookup(name.as_bytes());
+                c.lookup(name);
                 c.getfh();
                 c.getattr(&[FATTR4_TYPE]);
             }
@@ -686,7 +686,7 @@ impl NfsClient {
     /// in `ops`.
     pub fn lookup_many(
         &mut self,
-        ops: &[(FileHandle, String)],
+        ops: &[(FileHandle, Vec<u8>)],
     ) -> RpcResult<Vec<Result<FileHandle, u32>>> {
         let per_chunk = (MAX_COMPOUND_OPS - 1) / 3;
         let mut out = Vec::with_capacity(ops.len());
@@ -695,7 +695,7 @@ impl NfsClient {
             c.tag(b"lookupv");
             for (dir, name) in chunk {
                 c.putfh(&dir.as_nfs_fh());
-                c.lookup(name.as_bytes());
+                c.lookup(name);
                 c.getfh();
             }
             let res = self.session.compound(&mut c)?;
@@ -722,16 +722,14 @@ impl NfsClient {
     /// compound: `[PUTFH root, LOOKUP a, LOOKUP b, ..., GETFH]`. After each
     /// LOOKUP the current filehandle is the looked-up object, so consecutive
     /// LOOKUPs chain without intermediate round trips.
-    pub fn resolve(&mut self, path: &str) -> RpcResult<FileHandle> {
+    pub fn resolve(&mut self, path: &[u8]) -> RpcResult<FileHandle> {
         let mut c = Compound::new();
         c.tag(b"resolve");
         c.putfh(&self.root.as_nfs_fh());
         let mut ncomps = 0usize;
-        for comp in path.trim_matches('/').split('/') {
-            if !comp.is_empty() {
-                c.lookup(comp.as_bytes());
-                ncomps += 1;
-            }
+        for comp in crate::path::components_bytes(path) {
+            c.lookup(&comp);
+            ncomps += 1;
         }
         if ncomps == 0 {
             return Ok(self.root.clone());
@@ -798,7 +796,7 @@ impl NfsClient {
 
     /// REMOVE several names from `dir` in one compound. REMOVE leaves the
     /// current filehandle on `dir`, so consecutive REMOVEs chain.
-    pub fn remove_many(&mut self, dir: &FileHandle, names: &[&str]) -> RpcResult<()> {
+    pub fn remove_many(&mut self, dir: &FileHandle, names: &[Vec<u8>]) -> RpcResult<()> {
         let map = |op_index: usize| {
             op_index
                 .saturating_sub(1)
@@ -808,7 +806,7 @@ impl NfsClient {
         c.tag(b"removev");
         c.putfh(&dir.as_nfs_fh());
         for n in names {
-            c.remove(n.as_bytes());
+            c.remove(n);
         }
         let res = self.session.compound(&mut c).map_err(|e| {
             let idx = map(e.op_index);
@@ -826,7 +824,7 @@ impl NfsClient {
     pub fn open(
         &mut self,
         dir: &FileHandle,
-        name: &str,
+        name: &[u8],
         access: u32,
         create: OpenCreate,
     ) -> RpcResult<(FileHandle, stateid4)> {
@@ -838,7 +836,7 @@ impl NfsClient {
     pub fn open_path(
         &mut self,
         dir: &FileHandle,
-        name: &str,
+        name: &[u8],
         access: u32,
         create: OpenCreate,
     ) -> RpcResult<(FileHandle, stateid4)> {
@@ -848,7 +846,7 @@ impl NfsClient {
     fn open_slot(
         &mut self,
         dir: &FileHandle,
-        name: &str,
+        name: &[u8],
         access: u32,
         create: OpenCreate,
         slot: OwnerSlot,
@@ -876,7 +874,7 @@ impl NfsClient {
             self.session.clientid,
             &owner_name,
             openhow,
-            name.as_bytes(),
+            name,
         );
         c.getfh();
         let res = self.session.compound(&mut c)?;
@@ -1010,7 +1008,7 @@ impl NfsClient {
                 c.putfh(&op.srcdir.as_nfs_fh());
                 c.savefh();
                 c.putfh(&op.dstdir.as_nfs_fh());
-                c.rename(op.oldname.as_bytes(), op.newname.as_bytes());
+                c.rename(&op.oldname, &op.newname);
             },
             |_, _| (),
         )?;
@@ -1027,7 +1025,7 @@ impl NfsClient {
             ops,
             |c, op, _| {
                 c.putfh(&op.dir.as_nfs_fh());
-                c.create(op.name.as_bytes(), op.ftype, op.linkdata.as_deref());
+                c.create(&op.name, op.ftype, op.linkdata.as_deref());
             },
             |_, _| (),
         )?;
@@ -1045,7 +1043,7 @@ impl NfsClient {
                 c.putfh(&op.src.as_nfs_fh());
                 c.savefh();
                 c.putfh(&op.dstdir.as_nfs_fh());
-                c.link(op.newname.as_bytes());
+                c.link(&op.newname);
             },
             |_, _| (),
         )?;
@@ -1097,7 +1095,7 @@ impl NfsClient {
                     clientid,
                     &owner_name,
                     openhow,
-                    op.name.as_bytes(),
+                    &op.name,
                 );
                 c.getfh();
             },
@@ -1173,7 +1171,7 @@ impl NfsClient {
             } else {
                 b"writev2"
             });
-            let mut opened_path: Option<String> = None;
+            let mut opened_path: Option<Vec<u8>> = None;
             let mut fh_at_opened = false;
             let mut opens_in_chunk = 0usize;
             let base_seq = self.session.path_owner.seqid;
@@ -1226,7 +1224,7 @@ impl NfsClient {
                 let mut newly_opened = false;
                 match &op.file {
                     FileRef::Path(p) => {
-                        if opened_path.as_deref() == Some(p.as_str()) && fh_at_opened {
+                        if opened_path.as_deref() == Some(p.as_slice()) && fh_at_opened {
                             // Same file: the current fh is still the opened file.
                         } else {
                             if close_in_compound && opened_path.is_some() && fh_at_opened {
@@ -1251,7 +1249,7 @@ impl NfsClient {
                                     OPEN4_SHARE_DENY_NONE,
                                     self.session.clientid,
                                     &self.session.path_owner.name,
-                                    leaf.as_bytes(),
+                                    &leaf,
                                     None,
                                     true,
                                 );
@@ -1268,7 +1266,7 @@ impl NfsClient {
                                     self.session.clientid,
                                     &self.session.path_owner.name,
                                     make_open_how(create, self.session.path_owner.verifier),
-                                    leaf.as_bytes(),
+                                    &leaf,
                                 );
                             }
                             opens_in_chunk += 1;
@@ -1483,7 +1481,7 @@ impl NfsClient {
             } else {
                 b"readv2"
             });
-            let mut opened_path: Option<String> = None;
+            let mut opened_path: Option<Vec<u8>> = None;
             let mut fh_at_opened = false;
             let mut opens_in_chunk = 0usize;
             let base_seq = self.session.path_owner.seqid;
@@ -1539,7 +1537,7 @@ impl NfsClient {
                 let mut newly_opened = false;
                 match &op.file {
                     FileRef::Path(p) => {
-                        if opened_path.as_deref() == Some(p.as_str()) && fh_at_opened {
+                        if opened_path.as_deref() == Some(p.as_slice()) && fh_at_opened {
                             // Same file: the current fh is still the opened file.
                         } else {
                             if close_in_compound && opened_path.is_some() && fh_at_opened {
@@ -1566,7 +1564,7 @@ impl NfsClient {
                                     OpenCreate::NoCreate,
                                     self.session.path_owner.verifier,
                                 ),
-                                leaf.as_bytes(),
+                                &leaf,
                             );
                             opens_in_chunk += 1;
                             map.note_ops(1);
@@ -1766,7 +1764,7 @@ impl NfsClient {
                             }
                         };
                         map.note_ops(nops);
-                        c.lookup(leaf.as_bytes());
+                        c.lookup(&leaf);
                         map.note_ops(1);
                     }
                     FileRef::Handle(fh) => {
@@ -1856,7 +1854,7 @@ impl NfsClient {
                             }
                         };
                         map.note_ops(nops);
-                        c.lookup(leaf.as_bytes());
+                        c.lookup(&leaf);
                         map.note_ops(1);
                     }
                     FileRef::Handle(fh) => {
@@ -1959,7 +1957,7 @@ impl NfsClient {
                             OPEN4_SHARE_DENY_NONE,
                             self.session.clientid,
                             &self.session.path_owner.name,
-                            leaf.as_bytes(),
+                            &leaf,
                             Some(mode),
                             op.truncate,
                         );
@@ -1971,7 +1969,7 @@ impl NfsClient {
                         self.session.clientid,
                         &self.session.path_owner.name,
                         make_open_how(create, self.session.path_owner.verifier),
-                        leaf.as_bytes(),
+                        &leaf,
                     ),
                 }
                 opens_in_chunk += 1;
@@ -2029,7 +2027,7 @@ impl NfsClient {
 
     /// Batched path-based REMOVEs in one compound per chunk. REMOVE keeps
     /// the current fh on the parent, so same-directory removals chain.
-    pub fn removev_path_compound(&mut self, paths: &[String]) -> RpcResult<PathRemoveOutcome> {
+    pub fn removev_path_compound(&mut self, paths: &[Vec<u8>]) -> RpcResult<PathRemoveOutcome> {
         let n = paths.len();
         let mut removed: Vec<Option<()>> = vec![None; n];
         let mut failed: Option<(usize, u32)> = None;
@@ -2061,7 +2059,7 @@ impl NfsClient {
                     }
                 };
                 map.note_ops(nops);
-                c.remove(leaf.as_bytes());
+                c.remove(&leaf);
                 map.note_ops(1);
                 map.end();
                 // REMOVE leaves the current fh on the parent: cursor state
@@ -2146,7 +2144,7 @@ impl NfsClient {
                     }
                 };
                 map.note_ops(dnops);
-                c.rename(sname.as_bytes(), dname.as_bytes());
+                c.rename(&sname, &dname);
                 map.note_ops(1);
                 map.end();
                 cursor.descend(); // RENAME moved the current fh
@@ -2381,14 +2379,14 @@ impl NfsClient {
             let ent = unsafe { &*e };
             let name_len = ent.name.utf8string_len as usize;
             let name = if name_len == 0 {
-                String::new()
+                Vec::new()
             } else {
-                let name = unsafe {
+                unsafe {
                     std::slice::from_raw_parts(ent.name.utf8string_val as *const u8, name_len)
-                };
-                String::from_utf8_lossy(name).into_owned()
+                }
+                .to_vec()
             };
-            if name != "." && name != ".." {
+            if name != b"." && name != b".." {
                 let attrs_len = ent.attrs.attr_vals.attrlist4_len as usize;
                 let attrs = if attrs_len == 0 {
                     Vec::new()
@@ -2419,7 +2417,7 @@ impl NfsClient {
     /// READDIR requesting `attrs` per entry.
     pub fn readdir_children(
         &mut self,
-        ops: &[(FileHandle, String)],
+        ops: &[(FileHandle, Vec<u8>)],
         attrs: &[u32],
     ) -> RpcResult<Vec<ChildListing>> {
         let per_chunk = (MAX_COMPOUND_OPS - 1) / 4;
@@ -2434,7 +2432,7 @@ impl NfsClient {
             c.tag(b"readdir_children");
             for (pfh, name) in chunk {
                 c.putfh(&pfh.as_nfs_fh());
-                c.lookup(name.as_bytes());
+                c.lookup(name);
                 c.getfh();
                 c.readdir(0, &zeroverf, 256 * 1024, 1024 * 1024, attrs);
             }

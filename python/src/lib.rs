@@ -7,7 +7,7 @@
 //! batches/directories rather than the number of files.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use pyo3::exceptions::{
@@ -15,7 +15,7 @@ use pyo3::exceptions::{
     PyNotADirectoryError, PyOSError, PyPermissionError, PyValueError,
 };
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyString};
 
 use vnfs::compound::{compound_stats, rpc_stats};
 use vnfs::dummy_vecfs::DummyVecFs;
@@ -45,8 +45,10 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> PyErr {
 }
 
 /// Map a `VfError` onto the Python exception class that matches its errno.
-fn to_py_err(e: VfError, path: Option<&str>) -> PyErr {
-    let what = path.map(|p| format!(": '{}'", p)).unwrap_or_default();
+fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
+    let what = path
+        .map(|p| format!(": '{}'", p.display()))
+        .unwrap_or_default();
     match e {
         VfError::Transport { message, .. } => {
             PyErr::new::<PyConnectionError, _>(format!("{}{}", message, what))
@@ -74,9 +76,9 @@ fn to_py_err(e: VfError, path: Option<&str>) -> PyErr {
 }
 
 /// Attach the failing operation's path to an error from a batched call.
-fn map_err_with_path(e: VfError, paths: &[String]) -> PyErr {
+fn map_err_with_path(e: VfError, paths: &[PathBuf]) -> PyErr {
     let idx = e.index();
-    to_py_err(e, paths.get(idx).map(String::as_str))
+    to_py_err(e, paths.get(idx).map(PathBuf::as_path))
 }
 
 // ---------------------------------------------------------------------------
@@ -101,11 +103,10 @@ fn full_mask() -> AttrMask {
 fn attrs_to_dict(py: Python<'_>, a: &VfAttrs) -> PyResult<Py<PyDict>> {
     let d = PyDict::new(py);
     let r = a.returned;
-    let name = a
-        .file
-        .path()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let name: Py<PyString> = match a.file.path() {
+        Some(p) => p.as_os_str().into_pyobject(py)?.unbind(),
+        None => "".into_pyobject(py)?.unbind(),
+    };
     d.set_item("name", name)?;
     let ftype = match a.ftype {
         VfType::Regular => "file",
@@ -165,7 +166,7 @@ fn attrs_to_dict(py: Python<'_>, a: &VfAttrs) -> PyResult<Py<PyDict>> {
 /// abort with `Err`.
 fn attrs_many_impl(
     fs: &mut dyn vnfs::VecFs,
-    paths: &[String],
+    paths: &[PathBuf],
     masks: AttrMask,
     follow: bool,
 ) -> AttrsManyResult {
@@ -176,7 +177,7 @@ fn attrs_many_impl(
         let mut attrs: Vec<VfAttrs> = remaining
             .iter()
             .map(|&i| VfAttrs {
-                file: VfFile::from_path(&paths[i]),
+                file: VfFile::from_os_path(&paths[i]),
                 masks,
                 ..VfAttrs::default()
             })
@@ -209,8 +210,8 @@ fn attrs_many_impl(
 
 /// Read every file in full (offset 0 to EOF) in batched, no-stat reads.
 /// Returns per-path bytes (None on failure) and an errno map.
-fn read_allv_impl(fs: &mut dyn vnfs::VecFs, paths: &[String]) -> Result<ReadManyResult, VfError> {
-    let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_path(p)).collect();
+fn read_allv_impl(fs: &mut dyn vnfs::VecFs, paths: &[PathBuf]) -> Result<ReadManyResult, VfError> {
+    let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_os_path(p)).collect();
     let mut results: Vec<Option<Vec<u8>>> = vec![None; paths.len()];
     let mut errors: ErrnoMap = HashMap::new();
     let mut remaining: Vec<usize> = (0..paths.len()).collect();
@@ -277,12 +278,13 @@ impl NfsClient {
     fn new(
         host: &str,
         backend: &str,
-        root: Option<String>,
+        root: Option<PathBuf>,
         compound_size_limit: Option<usize>,
     ) -> PyResult<Self> {
         let fs: Box<dyn vnfs::VecFs + Send> = match backend {
             "nfs" => {
-                let mut nfs = NfsVecFs::connect(host).map_err(|e| to_py_err(e, Some(host)))?;
+                let mut nfs =
+                    NfsVecFs::connect(host).map_err(|e| to_py_err(e, Some(Path::new(host))))?;
                 if let Some(limit) = compound_size_limit {
                     nfs.set_max_compound_bytes(limit);
                 }
@@ -323,42 +325,42 @@ impl NfsClient {
     // -- single-op ------------------------------------------------------------------
 
     /// Stat `path` (follows symlinks), returning an attribute dict.
-    fn stat(&self, py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
+    fn stat(&self, py: Python<'_>, path: PathBuf) -> PyResult<Py<PyDict>> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
         let mut a = VfAttrs {
-            file: VfFile::from_path(path),
+            file: VfFile::from_os_path(&path),
             masks: full_mask(),
             ..VfAttrs::default()
         };
         fs.getattrsv(std::slice::from_mut(&mut a))
-            .map_err(|e| to_py_err(e, Some(path)))?;
+            .map_err(|e| to_py_err(e, Some(path.as_path())))?;
         attrs_to_dict(py, &a)
     }
 
     /// lstat `path` (does not follow symlinks).
-    fn lstat(&self, py: Python<'_>, path: &str) -> PyResult<Py<PyDict>> {
+    fn lstat(&self, py: Python<'_>, path: PathBuf) -> PyResult<Py<PyDict>> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
         let mut a = VfAttrs {
-            file: VfFile::from_path(path),
+            file: VfFile::from_os_path(&path),
             masks: full_mask(),
             ..VfAttrs::default()
         };
         fs.lgetattrsv(std::slice::from_mut(&mut a))
-            .map_err(|e| to_py_err(e, Some(path)))?;
+            .map_err(|e| to_py_err(e, Some(path.as_path())))?;
         attrs_to_dict(py, &a)
     }
 
-    fn exists(&self, path: &str) -> PyResult<bool> {
-        Ok(self.exists_many(vec![path.to_string()])?[0])
+    fn exists(&self, path: PathBuf) -> PyResult<bool> {
+        Ok(self.exists_many(vec![path.clone()])?[0])
     }
 
     /// Open a file; returns the backend descriptor (an int).
-    fn open(&self, path: &str, mode: &str) -> PyResult<i64> {
+    fn open(&self, path: PathBuf, mode: &str) -> PyResult<i64> {
         let flags = mode_to_flags(mode)?;
         let mut fs = self.fs.lock().map_err(lock_err)?;
         let f = fs
-            .open(path, flags, 0o644)
-            .map_err(|e| to_py_err(e, Some(path)))?;
+            .open(&path, flags, 0o644)
+            .map_err(|e| to_py_err(e, Some(path.as_path())))?;
         Ok(f.fd().expect("open returns a descriptor") as i64)
     }
 
@@ -445,68 +447,68 @@ impl NfsClient {
         attrs_to_dict(py, &a)
     }
 
-    fn truncate(&self, path: &str, size: u64) -> PyResult<()> {
+    fn truncate(&self, path: PathBuf, size: u64) -> PyResult<()> {
         let a = VfAttrs {
-            file: VfFile::from_path(path),
+            file: VfFile::from_os_path(&path),
             masks: AttrMask::SIZE,
             size,
             ..VfAttrs::default()
         };
         let mut fs = self.fs.lock().map_err(lock_err)?;
         fs.setattrsv(std::slice::from_ref(&a))
-            .map_err(|e| to_py_err(e, Some(path)))
+            .map_err(|e| to_py_err(e, Some(path.as_path())))
     }
 
-    fn chmod(&self, path: &str, mode: u32) -> PyResult<()> {
+    fn chmod(&self, path: PathBuf, mode: u32) -> PyResult<()> {
         let a = VfAttrs {
-            file: VfFile::from_path(path),
+            file: VfFile::from_os_path(&path),
             masks: AttrMask::MODE,
             mode,
             ..VfAttrs::default()
         };
         let mut fs = self.fs.lock().map_err(lock_err)?;
         fs.setattrsv(std::slice::from_ref(&a))
-            .map_err(|e| to_py_err(e, Some(path)))
+            .map_err(|e| to_py_err(e, Some(path.as_path())))
     }
 
-    fn mkdir(&self, path: &str, mode: u32) -> PyResult<()> {
+    fn mkdir(&self, path: PathBuf, mode: u32) -> PyResult<()> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        fs.mkdir(path, mode).map_err(|e| to_py_err(e, Some(path)))
+        fs.mkdir(&path, mode).map_err(|e| to_py_err(e, Some(path.as_path())))
     }
 
     /// Create `path` and all missing ancestors.
-    fn ensure_dir(&self, path: &str, mode: u32) -> PyResult<()> {
+    fn ensure_dir(&self, path: PathBuf, mode: u32) -> PyResult<()> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        fs.ensure_dir(path, mode)
-            .map_err(|e| to_py_err(e, Some(path)))
+        fs.ensure_dir(&path, mode)
+            .map_err(|e| to_py_err(e, Some(path.as_path())))
     }
 
-    fn symlink(&self, target: &str, path: &str) -> PyResult<()> {
+    fn symlink(&self, target: PathBuf, path: PathBuf) -> PyResult<()> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        fs.symlink(target, path)
-            .map_err(|e| to_py_err(e, Some(path)))
+        fs.symlink(&target, &path)
+            .map_err(|e| to_py_err(e, Some(path.as_path())))
     }
 
-    fn readlink(&self, path: &str) -> PyResult<String> {
+    fn readlink(&self, path: PathBuf) -> PyResult<String> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        let b = fs.readlink(path).map_err(|e| to_py_err(e, Some(path)))?;
+        let b = fs.readlink(&path).map_err(|e| to_py_err(e, Some(path.as_path())))?;
         Ok(String::from_utf8_lossy(&b).into_owned())
     }
 
-    fn hardlink(&self, src: &str, dst: &str) -> PyResult<()> {
+    fn hardlink(&self, src: PathBuf, dst: PathBuf) -> PyResult<()> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        fs.hardlinkv(std::slice::from_ref(&src), std::slice::from_ref(&dst))
-            .map_err(|e| to_py_err(e, Some(dst)))
+        fs.hardlinkv(&[src.as_path()], &[dst.as_path()])
+            .map_err(|e| to_py_err(e, Some(dst.as_path())))
     }
 
-    fn getcwd(&self) -> PyResult<String> {
+    fn getcwd(&self, py: Python<'_>) -> PyResult<Py<PyString>> {
         let fs = self.fs.lock().map_err(lock_err)?;
-        Ok(fs.getcwd())
+        Ok(fs.getcwd().as_os_str().into_pyobject(py)?.unbind())
     }
 
-    fn chdir(&self, path: &str) -> PyResult<()> {
+    fn chdir(&self, path: PathBuf) -> PyResult<()> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        fs.chdir(path).map_err(|e| to_py_err(e, Some(path)))
+        fs.chdir(&path).map_err(|e| to_py_err(e, Some(path.as_path())))
     }
 
     // -- batched -------------------------------------------------------------------
@@ -514,7 +516,7 @@ impl NfsClient {
     /// Stat many paths in batches. Returns `(results, errors)` where
     /// `results[i]` is the attribute dict (or None on failure) and `errors`
     /// maps an index to its errno.
-    fn stat_many(&self, py: Python<'_>, paths: Vec<String>) -> PyResult<StatManyResult> {
+    fn stat_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<StatManyResult> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
         let (attrs, errors) = attrs_many_impl(&mut **fs, &paths, full_mask(), true)
             .map_err(|e| to_py_err(e, None))?;
@@ -529,7 +531,7 @@ impl NfsClient {
     }
 
     /// lstat many paths in batches (used by `exists`/`exists_many`).
-    fn lstat_many(&self, py: Python<'_>, paths: Vec<String>) -> PyResult<StatManyResult> {
+    fn lstat_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<StatManyResult> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
         let (attrs, errors) = attrs_many_impl(&mut **fs, &paths, full_mask(), false)
             .map_err(|e| to_py_err(e, None))?;
@@ -545,7 +547,7 @@ impl NfsClient {
 
     /// Whether each path exists (lstat semantics: a dangling symlink exists).
     /// Non-NOENT failures raise.
-    fn exists_many(&self, paths: Vec<String>) -> PyResult<Vec<bool>> {
+    fn exists_many(&self, paths: Vec<PathBuf>) -> PyResult<Vec<bool>> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
         let (attrs, errors) = attrs_many_impl(&mut **fs, &paths, AttrMask::stat(), false)
             .map_err(|e| to_py_err(e, None))?;
@@ -573,7 +575,7 @@ impl NfsClient {
     #[pyo3(signature = (paths, starts, ends=None))]
     fn read_many(
         &self,
-        paths: Vec<String>,
+        paths: Vec<PathBuf>,
         starts: Vec<u64>,
         ends: Option<Vec<Option<u64>>>,
     ) -> PyResult<ReadManyResult> {
@@ -627,7 +629,7 @@ impl NfsClient {
         while !remaining.is_empty() {
             let ops: Vec<ReadOp> = remaining
                 .iter()
-                .map(|&i| ReadOp::at(VfFile::from_path(&paths[i]), starts[i], lengths[i]))
+                .map(|&i| ReadOp::at(VfFile::from_os_path(&paths[i]), starts[i], lengths[i]))
                 .collect();
             match fs.readv(&ops) {
                 Ok(res) => {
@@ -652,7 +654,7 @@ impl NfsClient {
 
     /// Read every file in full (offset 0 to EOF) in batched, no-stat reads.
     /// Returns per-path bytes (None on failure) and an errno map.
-    fn read_all_many(&self, paths: Vec<String>) -> PyResult<ReadManyResult> {
+    fn read_all_many(&self, paths: Vec<PathBuf>) -> PyResult<ReadManyResult> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
         read_allv_impl(&mut **fs, &paths).map_err(|e| to_py_err(e, None))
     }
@@ -663,7 +665,7 @@ impl NfsClient {
     #[pyo3(signature = (paths, datas, truncate=true))]
     fn write_many(
         &self,
-        paths: Vec<String>,
+        paths: Vec<PathBuf>,
         datas: Vec<Vec<u8>>,
         truncate: bool,
     ) -> PyResult<Vec<usize>> {
@@ -674,7 +676,7 @@ impl NfsClient {
             .iter()
             .zip(datas)
             .map(|(p, d)| {
-                let op = WriteOp::at(VfFile::from_path(p), 0, d).with_creation();
+                let op = WriteOp::at(VfFile::from_os_path(&p), 0, d).with_creation();
                 if truncate { op.with_truncate() } else { op }
             })
             .collect();
@@ -684,7 +686,7 @@ impl NfsClient {
     }
 
     /// Truncate many files to `sizes` in one setattrsv batch.
-    fn truncate_many(&self, paths: Vec<String>, sizes: Vec<u64>) -> PyResult<()> {
+    fn truncate_many(&self, paths: Vec<PathBuf>, sizes: Vec<u64>) -> PyResult<()> {
         if paths.len() != sizes.len() {
             return Err(PyValueError::new_err("paths and sizes length must match"));
         }
@@ -692,7 +694,7 @@ impl NfsClient {
             .iter()
             .zip(sizes)
             .map(|(p, s)| VfAttrs {
-                file: VfFile::from_path(p),
+                file: VfFile::from_os_path(&p),
                 masks: AttrMask::SIZE,
                 size: s,
                 ..VfAttrs::default()
@@ -704,11 +706,11 @@ impl NfsClient {
     }
 
     /// Create directories in one mkdirv batch.
-    fn mkdir_many(&self, paths: Vec<String>, mode: u32) -> PyResult<()> {
+    fn mkdir_many(&self, paths: Vec<PathBuf>, mode: u32) -> PyResult<()> {
         let attrs: Vec<VfAttrs> = paths
             .iter()
             .map(|p| VfAttrs {
-                file: VfFile::from_path(p),
+                file: VfFile::from_os_path(&p),
                 masks: AttrMask::MODE,
                 mode,
                 ..VfAttrs::default()
@@ -719,7 +721,7 @@ impl NfsClient {
     }
 
     /// Open many files in one openv batch; returns descriptors.
-    fn open_many(&self, paths: Vec<String>, modes: Vec<String>) -> PyResult<Vec<i64>> {
+    fn open_many(&self, paths: Vec<PathBuf>, modes: Vec<String>) -> PyResult<Vec<i64>> {
         if paths.len() != modes.len() {
             return Err(PyValueError::new_err("paths and modes length must match"));
         }
@@ -728,7 +730,7 @@ impl NfsClient {
             .map(|m| mode_to_flags(m))
             .collect::<PyResult<_>>()?;
         let modes: Vec<u32> = vec![0o644; paths.len()];
-        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
         let mut fs = self.fs.lock().map_err(lock_err)?;
         let files = fs
             .openv(&refs, &flags, &modes)
@@ -747,11 +749,11 @@ impl NfsClient {
     }
 
     /// List one directory; returns entry attribute dicts.
-    fn listdir(&self, py: Python<'_>, path: &str) -> PyResult<Vec<Py<PyDict>>> {
+    fn listdir(&self, py: Python<'_>, path: PathBuf) -> PyResult<Vec<Py<PyDict>>> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
         let entries = fs
-            .listdir(path, full_mask(), 0, false)
-            .map_err(|e| to_py_err(e, Some(path)))?;
+            .listdir(&path, full_mask(), 0, false)
+            .map_err(|e| to_py_err(e, Some(path.as_path())))?;
         entries.iter().map(|e| attrs_to_dict(py, e)).collect()
     }
 
@@ -760,7 +762,7 @@ impl NfsClient {
     fn listdir_many(
         &self,
         py: Python<'_>,
-        paths: Vec<String>,
+        paths: Vec<PathBuf>,
         recursive: bool,
     ) -> PyResult<Vec<Vec<Py<PyDict>>>> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
@@ -768,7 +770,7 @@ impl NfsClient {
         for p in &paths {
             let entries = fs
                 .listdir(p, full_mask(), 0, recursive)
-                .map_err(|e| to_py_err(e, Some(p)))?;
+                .map_err(|e| to_py_err(e, Some(p.as_path())))?;
             out.push(
                 entries
                     .iter()
@@ -785,11 +787,11 @@ impl NfsClient {
     fn walk(
         &self,
         py: Python<'_>,
-        root: &str,
+        root: PathBuf,
         sort: bool,
-    ) -> PyResult<Vec<(String, Vec<Py<PyDict>>)>> {
+    ) -> PyResult<Vec<(Py<PyString>, Vec<Py<PyDict>>)>> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        let mut sort_fn = |_dir: &str, attrs: &mut Vec<VfAttrs>| {
+        let mut sort_fn = |_dir: &Path, attrs: &mut Vec<VfAttrs>| {
             if sort {
                 attrs.sort_by(|a, b| {
                     a.file
@@ -806,39 +808,40 @@ impl NfsClient {
             }
         };
         let tree = fs
-            .walk(root, full_mask(), &mut sort_fn)
-            .map_err(|e| to_py_err(e, Some(root)))?;
+            .walk(&root, full_mask(), &mut sort_fn)
+            .map_err(|e| to_py_err(e, Some(root.as_path())))?;
         let mut out = Vec::with_capacity(tree.len());
         for w in tree {
             let mut entries = Vec::with_capacity(w.entries.len());
             for e in &w.entries {
                 entries.push(attrs_to_dict(py, e)?);
             }
-            out.push((w.path, entries));
+            let dir = w.path.as_os_str().into_pyobject(py)?;
+            out.push((dir.unbind(), entries));
         }
         Ok(out)
     }
 
     /// Remove paths in batches (one removev compound per parent directory).
-    fn remove_many(&self, paths: Vec<String>) -> PyResult<()> {
-        let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_path(p)).collect();
+    fn remove_many(&self, paths: Vec<PathBuf>) -> PyResult<()> {
+        let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_os_path(&p)).collect();
         let mut fs = self.fs.lock().map_err(lock_err)?;
         fs.removev(&files).map_err(|e| map_err_with_path(e, &paths))
     }
 
     /// Rename pairs in one renamev batch.
-    fn rename_many(&self, pairs: Vec<(String, String)>) -> PyResult<()> {
+    fn rename_many(&self, pairs: Vec<(PathBuf, PathBuf)>) -> PyResult<()> {
         let files: Vec<(VfFile, VfFile)> = pairs
             .iter()
-            .map(|(a, b)| (VfFile::from_path(a), VfFile::from_path(b)))
+            .map(|(a, b)| (VfFile::from_os_path(&a), VfFile::from_os_path(&b)))
             .collect();
         let mut fs = self.fs.lock().map_err(lock_err)?;
         fs.renamev(&files).map_err(|e| {
             let idx = e.index();
             let path = pairs
                 .get(idx)
-                .map(|(a, _)| a.as_str())
-                .or_else(|| pairs.first().map(|(a, _)| a.as_str()));
+                .map(|(a, _)| a.as_path())
+                .or_else(|| pairs.first().map(|(a, _)| a.as_path()));
             to_py_err(e, path)
         })
     }
@@ -846,9 +849,9 @@ impl NfsClient {
     /// Copy whole files in batches (no-stat read_allv + truncating writev,
     /// each constant in the number of compounds for one-dir batches).
     /// Returns `(copied_bytes, errors)`.
-    fn copy_many(&self, pairs: Vec<(String, String)>) -> PyResult<CopyManyResult> {
-        let sources: Vec<String> = pairs.iter().map(|(s, _)| s.clone()).collect();
-        let dests: Vec<String> = pairs.iter().map(|(_, d)| d.clone()).collect();
+    fn copy_many(&self, pairs: Vec<(PathBuf, PathBuf)>) -> PyResult<CopyManyResult> {
+        let sources: Vec<PathBuf> = pairs.iter().map(|(s, _)| s.clone()).collect();
+        let dests: Vec<PathBuf> = pairs.iter().map(|(_, d)| d.clone()).collect();
         let n = pairs.len();
         let mut fs = self.fs.lock().map_err(lock_err)?;
 
@@ -869,7 +872,7 @@ impl NfsClient {
                 .iter()
                 .map(|&i| {
                     WriteOp::at(
-                        VfFile::from_path(&dests[i]),
+                        VfFile::from_os_path(&dests[i]),
                         0,
                         data[i].clone().unwrap_or_default(),
                     )
@@ -901,15 +904,15 @@ impl NfsClient {
 
     /// Recursively copy a directory tree (the backend batches per level).
     #[pyo3(signature = (src, dst, symlinks=false))]
-    fn cp_recursive(&self, src: &str, dst: &str, symlinks: bool) -> PyResult<()> {
+    fn cp_recursive(&self, src: PathBuf, dst: PathBuf, symlinks: bool) -> PyResult<()> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        fs.cp_recursive(src, dst, symlinks, false)
-            .map_err(|e| to_py_err(e, Some(src)))
+        fs.cp_recursive(&src, &dst, symlinks, false)
+            .map_err(|e| to_py_err(e, Some(src.as_path())))
     }
 
     /// Remove paths, recursively when requested.
-    fn rm(&self, paths: Vec<String>, recursive: bool) -> PyResult<()> {
-        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    fn rm(&self, paths: Vec<PathBuf>, recursive: bool) -> PyResult<()> {
+        let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
         let mut fs = self.fs.lock().map_err(lock_err)?;
         fs.rm(&refs, recursive)
             .map_err(|e| map_err_with_path(e, &paths))

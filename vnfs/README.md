@@ -31,9 +31,9 @@ fn main() -> vnfs::VfResult<()> {
     let masks = AttrMask::all();
 
     // List a directory's children in one batched round trip.
-    let entries = fs.listdir("/export", masks, 0, false)?;
+    let entries = fs.listdir(std::path::Path::new("/export"), masks, 0, false)?;
     for e in entries {
-        let path = e.file.path.unwrap_or_default();
+        let path = e.file.path().expect("path-backed entry");
         println!("{} (ftype={})", path.display(), e.ftype);
     }
     Ok(())
