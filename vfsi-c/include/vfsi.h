@@ -30,10 +30,28 @@ typedef struct vfsi_attrs {
 
 typedef bool (*vfsi_listdir_cb)(const char *name, const struct vfsi_attrs *attrs, void *userdata);
 
+typedef bool (*vfsi_listdirv_cb)(const char *dir,
+                                 const char *name,
+                                 const struct vfsi_attrs *attrs,
+                                 void *userdata);
+
+typedef bool (*vfsi_read_paths_cb)(const char *path,
+                                   const uint8_t *data,
+                                   uintptr_t len,
+                                   void *userdata);
+
 /**
  * Create a local-directory vfsi backend rooted at `root`.
  */
 int vfsi_dummy_open(const char *root, struct vfsi_fs **out);
+
+/**
+ * Create a local-directory vfsi backend rooted at `root`, treating
+ * `mountpoint` as the kernel-visible root of the same directory. Callers can
+ * pass ordinary kernel paths under `mountpoint`, which are mapped to `/`-rooted
+ * vfsi paths before they reach the backend.
+ */
+int vfsi_dummy_open_mount(const char *root, const char *mountpoint, struct vfsi_fs **out);
 
 /**
  * Connect to an NFSv4.1 server at `host` and open the export root.
@@ -41,8 +59,14 @@ int vfsi_dummy_open(const char *root, struct vfsi_fs **out);
 int vfsi_nfs_open(const char *host, struct vfsi_fs **out);
 
 /**
- * Destroy a filesystem handle returned by [`vfsi_dummy_open`] /
- * [`vfsi_nfs_open`].
+ * Connect to an NFSv4.1 server and treat `mountpoint` (a local kernel mount
+ * path) as the vfsi root. Callers can then pass ordinary kernel paths.
+ */
+int vfsi_nfs_open_mount(const char *host, const char *mountpoint, struct vfsi_fs **out);
+
+/**
+ * Destroy a filesystem handle returned by one of the `vfsi_*_open*`
+ * functions.
  */
 void vfsi_free(struct vfsi_fs *fs);
 
@@ -102,3 +126,25 @@ int vfsi_rename(struct vfsi_fs *fs, const char *oldpath, const char *newpath);
  * stops the listing.
  */
 int vfsi_listdir(struct vfsi_fs *fs, const char *dir, vfsi_listdir_cb cb, void *userdata);
+
+/**
+ * List several directories in one vectorized batch, calling `cb` for each
+ * entry with the directory the entry came from.
+ */
+int vfsi_listdirv(struct vfsi_fs *fs,
+                  const char *const *dirs,
+                  uintptr_t count,
+                  uintptr_t max_entries,
+                  bool recursive,
+                  vfsi_listdirv_cb cb,
+                  void *userdata);
+
+/**
+ * Read the full contents of several files in one vectorized batch, calling
+ * `cb` for each file after its data has been fetched.
+ */
+int vfsi_read_paths(struct vfsi_fs *fs,
+                    const char *const *paths,
+                    uintptr_t count,
+                    vfsi_read_paths_cb cb,
+                    void *userdata);
