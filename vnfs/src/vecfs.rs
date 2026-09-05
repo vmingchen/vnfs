@@ -1232,7 +1232,7 @@ mod tests {
     fn absolute_offset_at_u64_max_minus_one_is_not_cur() {
         let (_root, mut fs) = fs("huge-offset");
         write(&mut fs, "/f", b"abcdefgh");
-        let fd = fs.open("/f", 0, 0).unwrap();
+        let fd = fs.open(Path::new("/f"), 0, 0).unwrap();
         fs.fseek(&fd, 2, SeekFrom::Set).unwrap();
 
         // Previously u64::MAX - 1 collided with the VF_OFFSET_CUR sentinel and
@@ -1254,7 +1254,7 @@ mod tests {
     fn cur_offset_reads_resolve_and_advance() {
         let (_root, mut fs) = fs("cur");
         write(&mut fs, "/f", b"hello world");
-        let fd = fs.open("/f", libc::O_RDWR, 0).unwrap();
+        let fd = fs.open(Path::new("/f"), libc::O_RDWR, 0).unwrap();
         assert_eq!(fs.fseek(&fd, 0, SeekFrom::End).unwrap(), 11);
 
         let w = fs
@@ -1280,7 +1280,7 @@ mod tests {
         let (_root, mut fs) = fs("end");
         write(&mut fs, "/f", b"hello world");
 
-        let fd = fs.open("/f", libc::O_RDWR, 0).unwrap();
+        let fd = fs.open(Path::new("/f"), libc::O_RDWR, 0).unwrap();
         let w = fs
             .writev(&[WriteOp::new(fd.clone(), VfOffset::End, b"!".to_vec())])
             .unwrap();
@@ -1299,7 +1299,7 @@ mod tests {
             .readv(&[ReadOp::new(VfFile::from_path("/f"), VfOffset::End, 100)])
             .unwrap();
         assert!(r[0].eof);
-        assert_eq!(fs.stat("/f").unwrap().size, 12);
+        assert_eq!(fs.stat(Path::new("/f")).unwrap().size, 12);
     }
 
     #[test]
@@ -1350,7 +1350,7 @@ mod tests {
     fn fseek_takes_shared_ref_and_works() {
         let (_root, mut fs) = fs("fseek");
         write(&mut fs, "/f", b"hello world");
-        let fd = fs.open("/f", 0, 0).unwrap();
+        let fd = fs.open(Path::new("/f"), 0, 0).unwrap();
 
         assert_eq!(fs.fseek(&fd, 6, SeekFrom::Set).unwrap(), 6);
         let r = fs
@@ -1374,24 +1374,24 @@ mod tests {
     #[test]
     fn cwd_relative_unlink_targets_cwd() {
         let (_root, mut fs) = fs("cwd-unlink");
-        fs.mkdir("/sub", 0o755).unwrap();
-        fs.chdir("sub").unwrap();
+        fs.mkdir(Path::new("/sub"), 0o755).unwrap();
+        fs.chdir(Path::new("sub")).unwrap();
 
         write(&mut fs, "a", b"x"); // cwd-relative write
-        fs.unlink("a").unwrap();
+        fs.unlink(Path::new("a")).unwrap();
 
         // The file was removed from sub/, not from the root.
-        assert!(!fs.exists("a").unwrap());
-        assert_eq!(fs.lstat("/a").unwrap_err().err_no(), ERR_NOENT);
+        assert!(!fs.exists(Path::new("a")).unwrap());
+        assert_eq!(fs.lstat(Path::new("/a")).unwrap_err().err_no(), ERR_NOENT);
     }
 
     #[test]
     fn renamev_honors_path_base() {
         let (_root, mut fs) = fs("rename-base");
-        fs.mkdir("/sub", 0o755).unwrap();
+        fs.mkdir(Path::new("/sub"), 0o755).unwrap();
         write(&mut fs, "/src", b"1");
         write(&mut fs, "/sub/src2", b"2");
-        fs.chdir("sub").unwrap();
+        fs.chdir(Path::new("sub")).unwrap();
 
         // base Abs with a non-slash path is root-relative even after chdir.
         let abs_src = VfFile::Path {
@@ -1403,8 +1403,8 @@ mod tests {
             path: PathBuf::from("dst"),
         };
         fs.renamev(&[(abs_src, abs_dst)]).unwrap();
-        assert!(!fs.exists("/src").unwrap());
-        assert!(fs.exists("/dst").unwrap());
+        assert!(!fs.exists(Path::new("/src")).unwrap());
+        assert!(fs.exists(Path::new("/dst")).unwrap());
 
         // base Cwd resolves against the cwd.
         let cwd_src = VfFile::Path {
@@ -1416,15 +1416,15 @@ mod tests {
             path: PathBuf::from("dst2"),
         };
         fs.renamev(&[(cwd_src, cwd_dst)]).unwrap();
-        assert!(!fs.exists("/sub/src2").unwrap());
-        assert!(fs.exists("/sub/dst2").unwrap());
+        assert!(!fs.exists(Path::new("/sub/src2")).unwrap());
+        assert!(fs.exists(Path::new("/sub/dst2")).unwrap());
     }
 
     #[test]
     fn vf_path_rejects_descriptors() {
         let (_root, mut fs) = fs("vf-path");
         write(&mut fs, "/f", b"x");
-        let fd = fs.open("/f", 0, 0).unwrap();
+        let fd = fs.open(Path::new("/f"), 0, 0).unwrap();
         assert_eq!(fs.vf_path(&fd).unwrap_err().err_no(), ERR_INVAL);
         fs.close(&fd).unwrap();
     }
@@ -1432,18 +1432,21 @@ mod tests {
     #[test]
     fn vf_file_cwd_and_cwd_path_resolution() {
         let (_root, mut fs) = fs("cwd-variants");
-        fs.mkdir("/sub", 0o755).unwrap();
+        fs.mkdir(Path::new("/sub"), 0o755).unwrap();
         write(&mut fs, "/sub/f", b"x");
 
         // `cwd()` is the cwd itself; `cwd_path` is relative to it.
-        assert_eq!(fs.vf_path(&VfFile::cwd()).unwrap(), "");
+        assert_eq!(fs.vf_path(&VfFile::cwd()).unwrap(), Path::new(""));
         assert_eq!(
             VfFile::cwd_path("f").path(),
             Some(std::path::Path::new("f"))
         );
-        fs.chdir("/sub").unwrap();
-        assert_eq!(fs.vf_path(&VfFile::cwd()).unwrap(), "sub");
-        assert_eq!(fs.vf_path(&VfFile::cwd_path("f")).unwrap(), "sub/f");
+        fs.chdir(Path::new("/sub")).unwrap();
+        assert_eq!(fs.vf_path(&VfFile::cwd()).unwrap(), Path::new("sub"));
+        assert_eq!(
+            fs.vf_path(&VfFile::cwd_path("f")).unwrap(),
+            Path::new("sub/f")
+        );
 
         // The cwd is a stat target but not a file for read/write.
         let mut a = VfAttrs {
@@ -1474,25 +1477,25 @@ mod tests {
             WriteOp::at(VfFile::from_path("/../escape"), 0, b"x".to_vec()).with_creation(),
         ])
         .unwrap();
-        assert!(fs.exists("/escape").unwrap());
+        assert!(fs.exists(Path::new("/escape")).unwrap());
         assert!(!root.0.parent().unwrap().join("escape").exists());
 
         // "/.." and "/../../x" stay under the root.
-        let st = fs.stat("/..").unwrap();
+        let st = fs.stat(Path::new("/..")).unwrap();
         assert_eq!(st.ftype, VfType::Directory);
         fs.writev(&[
             WriteOp::at(VfFile::from_path("/../sub1/../../sub2"), 0, b"y".to_vec()).with_creation(),
         ])
         .unwrap();
-        assert!(fs.exists("/sub2").unwrap());
+        assert!(fs.exists(Path::new("/sub2")).unwrap());
         assert!(!root.0.parent().unwrap().join("sub2").exists());
 
         // A lexical "a/../b" path resolves to b.
         write(&mut fs, "/a", b"");
         fs.renamev(&[(VfFile::from_path("/a"), VfFile::from_path("/x/../b"))])
             .unwrap();
-        assert!(fs.exists("/b").unwrap());
-        assert!(!fs.exists("/x").unwrap());
+        assert!(fs.exists(Path::new("/b")).unwrap());
+        assert!(!fs.exists(Path::new("/x")).unwrap());
     }
 
     #[test]
@@ -1502,13 +1505,15 @@ mod tests {
 
         // An absolute target is chroot-relative: "/target" is the root's
         // "target", so reads through the link work.
-        fs.symlink("/target", "/abs-link").unwrap();
+        fs.symlink(Path::new("/target"), Path::new("/abs-link"))
+            .unwrap();
         assert_eq!(
             fs.read(&VfFile::from_path("/abs-link"), 0, 6).unwrap(),
             b"inside"
         );
         // ".." components in an absolute target are clamped at the root.
-        fs.symlink("/sub/../target", "/dotdot-link").unwrap();
+        fs.symlink(Path::new("/sub/../target"), Path::new("/dotdot-link"))
+            .unwrap();
         assert_eq!(
             fs.read(&VfFile::from_path("/dotdot-link"), 0, 6).unwrap(),
             b"inside"
@@ -1525,7 +1530,8 @@ mod tests {
                 .to_string_lossy()
                 .into_owned(),
         );
-        fs.symlink(outside.to_str().unwrap(), "/evil").unwrap();
+        fs.symlink(outside.to_str().unwrap(), Path::new("/evil"))
+            .unwrap();
         assert_eq!(
             fs.readv(&[ReadOp::at(VfFile::from_path("/evil"), 0, 8)])
                 .unwrap_err()
@@ -1537,8 +1543,9 @@ mod tests {
 
         // Creating through a chroot-relative absolute target lands inside the
         // root.
-        fs.mkdir("/subdir", 0o755).unwrap();
-        fs.symlink("/subdir/created-inside", "/evil3").unwrap();
+        fs.mkdir(Path::new("/subdir"), 0o755).unwrap();
+        fs.symlink(Path::new("/subdir/created-inside"), Path::new("/evil3"))
+            .unwrap();
         fs.writev(&[WriteOp::at(VfFile::from_path("/evil3"), 0, b"x".to_vec()).with_creation()])
             .unwrap();
         assert_eq!(
@@ -1548,14 +1555,18 @@ mod tests {
         );
 
         // The link itself can still be inspected and removed (no-follow).
-        assert_eq!(fs.lstat("/abs-link").unwrap().ftype, VfType::Symlink);
-        fs.readlink("/abs-link").unwrap();
-        fs.unlink("/abs-link").unwrap();
+        assert_eq!(
+            fs.lstat(Path::new("/abs-link")).unwrap().ftype,
+            VfType::Symlink
+        );
+        fs.readlink(Path::new("/abs-link")).unwrap();
+        fs.unlink(Path::new("/abs-link")).unwrap();
 
         // A dangling symlink to an absolute path still cannot touch the
         // outside of the root when creating through it.
         let dangling = root.0.parent().unwrap().join("never-created");
-        fs.symlink(dangling.to_str().unwrap(), "/evil2").unwrap();
+        fs.symlink(dangling.to_str().unwrap(), Path::new("/evil2"))
+            .unwrap();
         assert_eq!(
             fs.writev(
                 &[WriteOp::at(VfFile::from_path("/evil2"), 0, b"x".to_vec()).with_creation()]
@@ -1571,7 +1582,8 @@ mod tests {
 
         // A dangling relative symlink whose target is inside the root is
         // created through (POSIX O_CREAT semantics).
-        fs.symlink("internal-target", "/ok-link").unwrap();
+        fs.symlink(Path::new("internal-target"), Path::new("/ok-link"))
+            .unwrap();
         fs.writev(&[WriteOp::at(VfFile::from_path("/ok-link"), 0, b"z".to_vec()).with_creation()])
             .unwrap();
         assert_eq!(
@@ -1590,7 +1602,7 @@ mod tests {
         fs.writev(&[WriteOp::new(fd.clone(), VfOffset::At(0), b"x".to_vec())])
             .unwrap();
         fs.close(&fd).unwrap();
-        assert!(fs.exists("/rel").unwrap());
+        assert!(fs.exists(Path::new("/rel")).unwrap());
     }
 
     #[test]
@@ -1619,10 +1631,12 @@ mod tests {
         };
         assert!(fd >= 0);
 
-        assert_eq!(fs.stat("/fifo").unwrap().ftype, VfType::Fifo);
-        assert_eq!(fs.lstat("/fifo").unwrap().ftype, VfType::Fifo);
-        assert_eq!(fs.stat("/sock").unwrap().ftype, VfType::Socket);
-        let listed = fs.listdir("/", AttrMask::default(), 0, false).unwrap();
+        assert_eq!(fs.stat(Path::new("/fifo")).unwrap().ftype, VfType::Fifo);
+        assert_eq!(fs.lstat(Path::new("/fifo")).unwrap().ftype, VfType::Fifo);
+        assert_eq!(fs.stat(Path::new("/sock")).unwrap().ftype, VfType::Socket);
+        let listed = fs
+            .listdir(Path::new("/"), AttrMask::default(), 0, false)
+            .unwrap();
         assert!(listed.iter().any(|e| e.ftype == VfType::Fifo));
         assert!(listed.iter().any(|e| e.ftype == VfType::Socket));
 
@@ -1633,7 +1647,7 @@ mod tests {
     fn dummy_descriptor_sees_external_truncation() {
         let (root, mut fs) = fs("ext-trunc");
         write(&mut fs, "/f", b"0123456789");
-        let fd = fs.open("/f", libc::O_RDWR, 0).unwrap();
+        let fd = fs.open(Path::new("/f"), libc::O_RDWR, 0).unwrap();
         let real = root.0.join("f");
         std::fs::OpenOptions::new()
             .write(true)
@@ -1651,25 +1665,25 @@ mod tests {
     #[test]
     fn dummy_cwd_dotdot_stays_in_root() {
         let (root, mut fs) = fs("cwd-dotdot");
-        fs.mkdir("/a", 0o755).unwrap();
-        fs.chdir("/a").unwrap();
+        fs.mkdir(Path::new("/a"), 0o755).unwrap();
+        fs.chdir(Path::new("/a")).unwrap();
 
         fs.writev(&[WriteOp::at(VfFile::from_path("../x"), 0, b"1".to_vec()).with_creation()])
             .unwrap();
         fs.writev(&[WriteOp::at(VfFile::from_path("a/../y"), 0, b"2".to_vec()).with_creation()])
             .unwrap();
-        assert!(fs.exists("/x").unwrap());
+        assert!(fs.exists(Path::new("/x")).unwrap());
         // From cwd /a, "a/../y" resolves to /a/y (the ".." cancels the "a").
-        assert!(fs.exists("/a/y").unwrap());
-        assert!(!fs.exists("/y").unwrap());
+        assert!(fs.exists(Path::new("/a/y")).unwrap());
+        assert!(!fs.exists(Path::new("/y")).unwrap());
         assert!(!root.0.parent().unwrap().join("x").exists());
         assert!(!root.0.parent().unwrap().join("y").exists());
 
         // ".." from the root clamps at the root instead of escaping.
-        fs.chdir("/").unwrap();
+        fs.chdir(Path::new("/")).unwrap();
         fs.writev(&[WriteOp::at(VfFile::from_path("../z"), 0, b"3".to_vec()).with_creation()])
             .unwrap();
-        assert!(fs.exists("/z").unwrap());
+        assert!(fs.exists(Path::new("/z")).unwrap());
         assert!(!root.0.parent().unwrap().join("z").exists());
     }
 
@@ -1713,7 +1727,7 @@ mod tests {
         let (_root, mut fs) = fs("returned");
         write(&mut fs, "/f", b"x");
 
-        let a = fs.stat("/f").unwrap();
+        let a = fs.stat(Path::new("/f")).unwrap();
         assert_eq!(a.returned, AttrMask::stat());
         assert!(a.returned.contains(AttrMask::MODE));
 
@@ -1755,14 +1769,15 @@ mod tests {
         a.masks = AttrMask::MODE;
         a.mode = 0o640;
         fs.setattrsv(std::slice::from_ref(&a)).unwrap();
-        assert_eq!(fs.lstat("/f").unwrap().mode & 0o7777, 0o640);
+        assert_eq!(fs.lstat(Path::new("/f")).unwrap().mode & 0o7777, 0o640);
     }
 
     #[test]
     fn lsetattrsv_does_not_follow_symlinks() {
         let (_root, mut fs) = fs("lsetattr");
         write(&mut fs, "/target", b"x");
-        fs.symlink("/target", "/link").unwrap();
+        fs.symlink(Path::new("/target"), Path::new("/link"))
+            .unwrap();
 
         // No portable lchmod: the dummy backend refuses symlinks instead of
         // silently following them.
@@ -1787,7 +1802,7 @@ mod tests {
             ..VfAttrs::default()
         };
         fs.lsetattrsv(std::slice::from_ref(&a)).unwrap();
-        assert_eq!(fs.lstat("/target").unwrap().mode & 0o7777, 0o600);
+        assert_eq!(fs.lstat(Path::new("/target")).unwrap().mode & 0o7777, 0o600);
     }
 
     // ------------------------------------------------------------------
@@ -1798,11 +1813,15 @@ mod tests {
     fn exists_and_file_type_use_lstat_semantics() {
         let (_root, mut fs) = fs("lstat");
         write(&mut fs, "/f", b"x");
-        fs.symlink("missing-target", "/dangling").unwrap();
+        fs.symlink(Path::new("missing-target"), Path::new("/dangling"))
+            .unwrap();
 
-        assert!(fs.exists("/dangling").unwrap());
-        assert_eq!(fs.file_type("/dangling").unwrap(), VfType::Symlink);
-        assert_eq!(fs.file_type("/f").unwrap(), VfType::Regular);
+        assert!(fs.exists(Path::new("/dangling")).unwrap());
+        assert_eq!(
+            fs.file_type(Path::new("/dangling")).unwrap(),
+            VfType::Symlink
+        );
+        assert_eq!(fs.file_type(Path::new("/f")).unwrap(), VfType::Regular);
     }
 
     // ------------------------------------------------------------------
@@ -1813,34 +1832,40 @@ mod tests {
     fn openv_rejects_mismatched_lengths() {
         let (_root, mut fs) = fs("openv");
         use libc::O_CREAT;
-        let e = fs.openv(&["/a", "/b"], &[O_CREAT], &[0o644]).unwrap_err();
+        let e = fs
+            .openv(&[Path::new("/a"), Path::new("/b")], &[O_CREAT], &[0o644])
+            .unwrap_err();
         assert_eq!((e.index(), e.err_no()), (0, ERR_INVAL));
     }
 
     #[test]
     fn listdir_zero_max_count_is_unlimited() {
         let (_root, mut fs) = fs("listdir");
-        fs.mkdir("/d", 0o755).unwrap();
+        fs.mkdir(Path::new("/d"), 0o755).unwrap();
         write(&mut fs, "/d/a", b"1");
         write(&mut fs, "/d/b", b"2");
 
-        let all = fs.listdir("/d", AttrMask::default(), 0, false).unwrap();
+        let all = fs
+            .listdir(Path::new("/d"), AttrMask::default(), 0, false)
+            .unwrap();
         assert_eq!(all.len(), 2);
-        let one = fs.listdir("/d", AttrMask::default(), 1, false).unwrap();
+        let one = fs
+            .listdir(Path::new("/d"), AttrMask::default(), 1, false)
+            .unwrap();
         assert_eq!(one.len(), 1);
     }
 
     #[test]
     fn walk_works_through_dyn_vecfs() {
         let (_root, mut fs) = fs("walk-dyn");
-        fs.mkdir("/sub", 0o755).unwrap();
+        fs.mkdir(Path::new("/sub"), 0o755).unwrap();
         write(&mut fs, "/sub/a", b"1");
 
         let mut dyn_fs: Box<dyn VecFs> = Box::new(fs);
         let mut visited: Vec<String> = Vec::new();
         let entries = dyn_fs
-            .walk("", AttrMask::stat(), &mut |dir, _| {
-                visited.push(dir.to_string())
+            .walk(Path::new(""), AttrMask::stat(), &mut |dir, _| {
+                visited.push(dir.display().to_string())
             })
             .unwrap();
         assert_eq!(visited.len(), 2); // root + /sub
@@ -1854,20 +1879,26 @@ mod tests {
     fn lcopyv_copies_symlinks_as_symlinks() {
         let (_root, mut fs) = fs("lcopyv");
         write(&mut fs, "/target", b"data");
-        fs.symlink("target", "/link").unwrap();
+        fs.symlink(Path::new("target"), Path::new("/link")).unwrap();
 
         let pair = ExtentPair::new("/link", 0, "/link-copy", 0, None);
         fs.lcopyv(std::slice::from_ref(&pair)).unwrap();
-        assert_eq!(fs.file_type("/link-copy").unwrap(), VfType::Symlink);
         assert_eq!(
-            fs.readlink("/link-copy").unwrap(),
-            fs.readlink("/link").unwrap()
+            fs.file_type(Path::new("/link-copy")).unwrap(),
+            VfType::Symlink
+        );
+        assert_eq!(
+            fs.readlink(Path::new("/link-copy")).unwrap(),
+            fs.readlink(Path::new("/link")).unwrap()
         );
 
         // dupv copies the target's data instead.
         let pair = ExtentPair::new("/link", 0, "/link-dup", 0, None);
         fs.dupv(std::slice::from_ref(&pair)).unwrap();
-        assert_eq!(fs.file_type("/link-dup").unwrap(), VfType::Regular);
+        assert_eq!(
+            fs.file_type(Path::new("/link-dup")).unwrap(),
+            VfType::Regular
+        );
         assert_eq!(
             fs.read(&VfFile::from_path("/link-dup"), 0, 4).unwrap(),
             b"data"

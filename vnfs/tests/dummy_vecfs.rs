@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::path::Path;
 use vnfs::dummy_vecfs::DummyVecFs;
 use vnfs::{VecFs, VfOffset};
 

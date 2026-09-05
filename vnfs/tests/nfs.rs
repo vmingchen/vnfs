@@ -8,6 +8,7 @@
 //! ```
 
 use nfsv41_sys::nfsstat4_NFS4ERR_EXIST;
+use std::path::Path;
 use vnfs::NfsVecFs;
 use vnfs::nfs::*;
 
@@ -38,7 +39,8 @@ fn setup_dir(name: &str) -> String {
     let dir = workdir(name);
     let c = client();
     let mut c = c;
-    c.ensure_dir(&dir, 0o755).expect("ensure_dir workdir");
+    c.ensure_dir(Path::new(&dir), 0o755)
+        .expect("ensure_dir workdir");
     dir
 }
 
@@ -77,9 +79,15 @@ fn open_excl_fails_if_exists() {
     let dir = setup_dir("open_excl");
     let f = format!("{}/exists.txt", dir);
     let mut c = client();
-    let first = c.open(&f, libc::O_CREAT | libc::O_WRONLY, 0o644).unwrap();
+    let first = c
+        .open(Path::new(&f), libc::O_CREAT | libc::O_WRONLY, 0o644)
+        .unwrap();
     c.close(&first).unwrap();
-    let r = c.open(&f, libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY, 0o644);
+    let r = c.open(
+        Path::new(&f),
+        libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY,
+        0o644,
+    );
     // O_EXCL on an existing file must fail with NFS4ERR_EXIST (17), surfaced
     // directly by the structured error (no string parsing).
     match r {
@@ -126,7 +134,7 @@ fn openv_append_writes_at_end() {
     }
     c.closev(&files).expect("closev");
     for p in &paths {
-        assert_eq!(c.stat(p).unwrap().size, 4, "append via openv");
+        assert_eq!(c.stat(Path::new(p)).unwrap().size, 4, "append via openv");
         assert_eq!(c.read(&VfFile::from_path(p), 0, 4).unwrap(), b"abcd");
     }
 }
@@ -140,7 +148,7 @@ fn chdir_getcwd() {
     let dir = setup_dir("chdir");
     let mut c = client();
     assert_eq!(c.getcwd(), "/");
-    c.chdir(&dir).expect("chdir");
+    c.chdir(Path::new(&dir)).expect("chdir");
     assert_eq!(c.getcwd(), dir);
 
     // Relative resolution now happens against the new cwd.
@@ -226,12 +234,12 @@ fn stat_and_lstat() {
     let content = b"1234567890".to_vec();
     let mut c = make_file(&f, &content);
 
-    let st = c.stat(&f).expect("stat");
+    let st = c.stat(Path::new(&f)).expect("stat");
     assert_eq!(st.size, content.len() as u64);
     assert!(st.nlink >= 1);
     assert!(st.fileid != 0);
 
-    let lst = c.lstat(&f).expect("lstat");
+    let lst = c.lstat(Path::new(&f)).expect("lstat");
     assert_eq!(lst.fileid, st.fileid);
 }
 
@@ -242,7 +250,7 @@ fn fstat() {
     let content = b"fstat me".to_vec();
     let mut c = make_file(&f, &content);
 
-    let tf = c.open(&f, libc::O_RDONLY, 0).expect("open");
+    let tf = c.open(Path::new(&f), libc::O_RDONLY, 0).expect("open");
     let st = c.fstat(&tf).expect("fstat");
     assert_eq!(st.size, content.len() as u64);
     c.close(&tf).unwrap();
@@ -253,7 +261,7 @@ fn exists() {
     let dir = setup_dir("exists");
     let f = format!("{}/e.txt", dir);
     let mut c = make_file(&f, b"hi");
-    assert!(c.exists(&f).unwrap());
+    assert!(c.exists(Path::new(&f)).unwrap());
     assert!(!c.exists(&format!("{}/missing.txt", dir)).unwrap());
 }
 
@@ -295,7 +303,7 @@ fn setattrsv_mode() {
         ..VfAttrs::default()
     }])
     .expect("setattrsv");
-    let st = c.stat(&f).expect("stat");
+    let st = c.stat(Path::new(&f)).expect("stat");
     assert_eq!(st.mode & 0o777, 0o600);
 }
 
@@ -312,7 +320,7 @@ fn setattrsv_size_truncate() {
         ..VfAttrs::default()
     }])
     .expect("setattrsv");
-    let st = c.stat(&f).expect("stat");
+    let st = c.stat(Path::new(&f)).expect("stat");
     assert_eq!(st.size, 5);
 }
 
@@ -328,7 +336,7 @@ fn lsetattrsv() {
         ..VfAttrs::default()
     }])
     .expect("lsetattrsv");
-    assert_eq!(c.stat(&f).unwrap().mode & 0o777, 0o640);
+    assert_eq!(c.stat(Path::new(&f)).unwrap().mode & 0o777, 0o640);
 }
 
 // ---------------------------------------------------------------------------
@@ -394,9 +402,9 @@ fn renamev() {
     let mut c = make_file(&f, b"rename me");
     let pairs = [(VfFile::from_path(&f), VfFile::from_path(&g))];
     c.renamev(&pairs).expect("renamev");
-    assert!(!c.exists(&f).unwrap(), "old name gone");
-    assert!(c.exists(&g).unwrap(), "new name present");
-    assert_eq!(c.stat(&g).unwrap().size, 9);
+    assert!(!c.exists(Path::new(&f)).unwrap(), "old name gone");
+    assert!(c.exists(Path::new(&g)).unwrap(), "new name present");
+    assert_eq!(c.stat(Path::new(&g)).unwrap().size, 9);
 }
 
 // ---------------------------------------------------------------------------
@@ -408,9 +416,9 @@ fn unlink_and_exists() {
     let dir = setup_dir("unlink");
     let f = format!("{}/u.txt", dir);
     let mut c = make_file(&f, b"bye");
-    assert!(c.exists(&f).unwrap());
-    c.unlink(&f).expect("unlink");
-    assert!(!c.exists(&f).unwrap());
+    assert!(c.exists(Path::new(&f)).unwrap());
+    c.unlink(Path::new(&f)).expect("unlink");
+    assert!(!c.exists(Path::new(&f)).unwrap());
 }
 
 #[test]
@@ -429,7 +437,7 @@ fn unlinkv() {
     }
     c.unlinkv(&refs).expect("unlinkv");
     for f in &files {
-        assert!(!c.exists(f).unwrap());
+        assert!(!c.exists(Path::new(f)).unwrap());
     }
 }
 
@@ -441,7 +449,7 @@ fn removev() {
     c.writev(&[WriteOp::from_path(&f, VfOffset::At(0), b"r".to_vec()).with_creation()])
         .unwrap();
     c.removev(&[VfFile::from_path(&f)]).expect("removev");
-    assert!(!c.exists(&f).unwrap());
+    assert!(!c.exists(Path::new(&f)).unwrap());
 }
 
 // ---------------------------------------------------------------------------
@@ -460,7 +468,7 @@ fn mkdirv() {
         ..VfAttrs::default()
     }])
     .expect("mkdirv");
-    let st = c.stat(&d).expect("stat dir");
+    let st = c.stat(Path::new(&d)).expect("stat dir");
     assert_eq!(st.ftype, VfType::Directory, "NF4DIR");
     assert_eq!(st.mode & 0o777, 0o750);
 }
@@ -470,8 +478,8 @@ fn mkdir() {
     let dir = setup_dir("mkdir");
     let d = format!("{}/simple", dir);
     let mut c = client();
-    c.mkdir(&d, 0o755).expect("mkdir");
-    assert!(c.exists(&d).unwrap());
+    c.mkdir(Path::new(&d), 0o755).expect("mkdir");
+    assert!(c.exists(Path::new(&d)).unwrap());
 }
 
 // ---------------------------------------------------------------------------
@@ -484,8 +492,8 @@ fn symlink_readlink() {
     let target = format!("{}/real.txt", dir);
     let link = format!("{}/link.txt", dir);
     let mut c = make_file(&target, b"real content");
-    c.symlink(&target, &link).expect("symlink");
-    let got = c.readlink(&link).expect("readlink");
+    c.symlink(Path::new(&target), &link).expect("symlink");
+    let got = c.readlink(Path::new(&link)).expect("readlink");
     assert_eq!(String::from_utf8_lossy(&got), target);
 }
 
@@ -520,8 +528,8 @@ fn intermediate_symlink_components_followed() {
     // Path-based operations (unlink) resolve through the intermediate link.
     let f = format!("{}/dirlink/other", dir);
     write_file(&mut c, &f, b"x");
-    c.unlink(&f).unwrap();
-    assert!(!c.exists(&f).unwrap());
+    c.unlink(Path::new(&f)).unwrap();
+    assert!(!c.exists(Path::new(&f)).unwrap());
 
     // lstat of a path under the link still reports the final object.
     assert_eq!(
@@ -734,7 +742,7 @@ fn setattrsv_path_is_one_compound() {
         compounds
     );
     for p in &paths {
-        assert_eq!(c.stat(p).unwrap().size, 3);
+        assert_eq!(c.stat(Path::new(p)).unwrap().size, 3);
     }
 }
 
@@ -782,7 +790,7 @@ fn removev_path_is_one_compound() {
         compounds
     );
     for p in &paths {
-        assert!(!c.exists(p).unwrap());
+        assert!(!c.exists(Path::new(p)).unwrap());
     }
 }
 
@@ -809,7 +817,7 @@ fn renamev_path_is_one_compound() {
         compounds
     );
     for d in &dsts {
-        assert!(c.exists(d).unwrap());
+        assert!(c.exists(Path::new(d)).unwrap());
     }
 }
 
@@ -827,7 +835,7 @@ fn path_writev_follows_final_symlink() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    c.symlink(&rel, &link).unwrap();
+    c.symlink(Path::new(&rel), &link).unwrap();
     c.writev(&[WriteOp::at(
         VfFile::from_path(&link),
         0,
@@ -932,7 +940,7 @@ fn writev_respects_compound_size_limit() {
     let compounds = vnfs::compound::compound_stats().0;
     assert_eq!(compounds, 4, "payload cap must split into 4 compounds");
     for p in &paths {
-        assert_eq!(c.stat(p).unwrap().size, payload.len() as u64);
+        assert_eq!(c.stat(Path::new(p)).unwrap().size, payload.len() as u64);
     }
 }
 
@@ -960,9 +968,9 @@ fn writev_partial_failure_reports_failing_index() {
         "failure must be attributed to the missing file"
     );
     // The prefix op executed before the failure; the suffix was not reached.
-    assert!(c.exists(&f0).unwrap());
+    assert!(c.exists(Path::new(&f0)).unwrap());
     assert!(!c.exists(&format!("{}/no", dir)).unwrap());
-    assert!(!c.exists(&f2).unwrap());
+    assert!(!c.exists(Path::new(&f2)).unwrap());
 }
 
 #[test]
@@ -981,8 +989,11 @@ fn openv_partial_failure_resumes_from_failing_index() {
     let modes = [0o644; 3];
     let e = c.openv(&refs, &flags, &modes).unwrap_err();
     assert_eq!(e.index(), 1, "resume must fail at the missing parent");
-    assert!(c.exists(&f0).unwrap(), "prefix open created f0");
-    assert!(!c.exists(&f2).unwrap(), "suffix was not attempted");
+    assert!(c.exists(Path::new(&f0)).unwrap(), "prefix open created f0");
+    assert!(
+        !c.exists(Path::new(&f2)).unwrap(),
+        "suffix was not attempted"
+    );
 }
 
 #[test]
@@ -1004,8 +1015,11 @@ fn removev_partial_failure_resumes_from_failing_index() {
         .collect();
     let e = c.removev(&files).unwrap_err();
     assert_eq!(e.index(), 1, "resume must fail at the missing path");
-    assert!(!c.exists(&f0).unwrap(), "prefix was removed");
-    assert!(c.exists(&f2).unwrap(), "suffix was not attempted");
+    assert!(!c.exists(Path::new(&f0)).unwrap(), "prefix was removed");
+    assert!(
+        c.exists(Path::new(&f2)).unwrap(),
+        "suffix was not attempted"
+    );
 }
 
 #[test]
@@ -1067,7 +1081,7 @@ fn large_writev_readv_roundtrip() {
         1,
         "readv must be 1 compound"
     );
-    assert_eq!(c.stat(&p).unwrap().size, data.len() as u64);
+    assert_eq!(c.stat(Path::new(&p)).unwrap().size, data.len() as u64);
 }
 
 #[test]
@@ -1124,7 +1138,7 @@ fn mkdirv_batches_parent_resolution() {
         compounds
     );
     for p in &paths {
-        assert_eq!(c.stat(p).unwrap().mode & 0o777, 0o751);
+        assert_eq!(c.stat(Path::new(p)).unwrap().mode & 0o777, 0o751);
     }
 }
 
@@ -1135,7 +1149,7 @@ fn mkdirv_partial_failure_applies_prefix_modes() {
     let dir = setup_dir("mkdirv_resume");
     let mut c = client();
     let d1 = format!("{}/d1", dir);
-    c.mkdir(&d1, 0o755).unwrap();
+    c.mkdir(Path::new(&d1), 0o755).unwrap();
     let d0 = format!("{}/d0", dir);
     let d2 = format!("{}/d2", dir);
     let attrs: Vec<VfAttrs> = [d0.as_str(), d1.as_str(), d2.as_str()]
@@ -1150,11 +1164,11 @@ fn mkdirv_partial_failure_applies_prefix_modes() {
     let e = c.mkdirv(&attrs).unwrap_err();
     assert_eq!(e.index(), 1, "EEXIST on the pre-created directory");
     assert_eq!(
-        c.stat(&d0).unwrap().mode & 0o777,
+        c.stat(Path::new(&d0)).unwrap().mode & 0o777,
         0o711,
         "prefix mode applied despite the failure"
     );
-    assert!(!c.exists(&d2).unwrap());
+    assert!(!c.exists(Path::new(&d2)).unwrap());
 }
 
 #[test]
@@ -1196,7 +1210,7 @@ fn symlinkv_readlinkv_hardlinkv_batch_resolution() {
         compounds
     );
     for (i, h) in hard.iter().enumerate() {
-        assert_eq!(c.readlink(h).unwrap(), targets[i].as_bytes());
+        assert_eq!(c.readlink(Path::new(h)).unwrap(), targets[i].as_bytes());
     }
 }
 
@@ -1205,7 +1219,9 @@ fn openv_ocreat_preserves_existing_mode() {
     let dir = setup_dir("openv_mode");
     let mut c = client();
     let f = format!("{}/existing.txt", dir);
-    let fd = c.open(&f, libc::O_CREAT | libc::O_RDWR, 0o600).unwrap();
+    let fd = c
+        .open(Path::new(&f), libc::O_CREAT | libc::O_RDWR, 0o600)
+        .unwrap();
     c.close(&fd).unwrap();
 
     let g = format!("{}/new.txt", dir);
@@ -1216,11 +1232,15 @@ fn openv_ocreat_preserves_existing_mode() {
     )
     .unwrap();
     assert_eq!(
-        c.stat(&f).unwrap().mode & 0o7777,
+        c.stat(Path::new(&f)).unwrap().mode & 0o7777,
         0o600,
         "openv O_CREAT must not chmod an existing file"
     );
-    assert_eq!(c.stat(&g).unwrap().mode & 0o7777, 0o640, "new file mode");
+    assert_eq!(
+        c.stat(Path::new(&g)).unwrap().mode & 0o7777,
+        0o640,
+        "new file mode"
+    );
 }
 
 #[test]
@@ -1246,9 +1266,9 @@ fn hardlinkv() {
     let olds = [src.as_str()];
     let news = [dst.as_str()];
     c.hardlinkv(&olds, &news).expect("hardlinkv");
-    assert!(c.exists(&dst).unwrap());
-    let s1 = c.stat(&src).unwrap();
-    let s2 = c.stat(&dst).unwrap();
+    assert!(c.exists(Path::new(&dst)).unwrap());
+    let s1 = c.stat(Path::new(&src)).unwrap();
+    let s2 = c.stat(Path::new(&dst)).unwrap();
     assert_eq!(s1.fileid, s2.fileid, "same inode");
     assert!(s1.nlink >= 2, "nlink bumped to >= 2");
 }
@@ -1262,9 +1282,10 @@ fn ensure_dir() {
     let dir = setup_dir("ensure_dir");
     let nested = format!("{}/a/b/c/d", dir);
     let mut c = client();
-    c.ensure_dir(&nested, 0o755).expect("ensure_dir nested");
+    c.ensure_dir(Path::new(&nested), 0o755)
+        .expect("ensure_dir nested");
     assert!(c.exists(&format!("{}/a", dir)).unwrap());
-    assert!(c.exists(&nested).unwrap());
+    assert!(c.exists(Path::new(&nested)).unwrap());
 }
 
 #[test]
@@ -1282,7 +1303,7 @@ fn rm_recursive_api() {
     }
     assert!(c.exists(&format!("{}/x/deep", dir)).unwrap());
     rm_recursive(&mut c, &dir).expect("rm_recursive");
-    assert!(!c.exists(&dir).unwrap(), "whole tree removed");
+    assert!(!c.exists(Path::new(&dir)).unwrap(), "whole tree removed");
 }
 
 #[test]
@@ -1299,7 +1320,7 @@ fn rm_nonrecursive_keeps_subdirs() {
         r.is_err(),
         "non-empty dir cannot be removed non-recursively"
     );
-    assert!(c.exists(&file).unwrap());
+    assert!(c.exists(Path::new(&file)).unwrap());
 }
 
 // ---------------------------------------------------------------------------
@@ -1312,7 +1333,7 @@ fn write_file(c: &mut NfsVecFs, path: &str, data: &[u8]) {
 }
 
 fn read_all(c: &mut NfsVecFs, path: &str) -> Vec<u8> {
-    let size = c.stat(path).expect("stat").size as usize;
+    let size = c.stat(Path::new(path)).expect("stat").size as usize;
     let r = &c
         .readv(&[ReadOp::from_path(path, VfOffset::At(0), size)])
         .expect("readv")[0];
@@ -1528,7 +1549,7 @@ fn resolve_deep_path_single_compound() {
     let dir = setup_dir("resolve_deep");
     let deep = format!("{}/a/b/c/d/e", dir);
     let mut c = client();
-    c.ensure_dir(&deep, 0o755).unwrap();
+    c.ensure_dir(Path::new(&deep), 0o755).unwrap();
     write_file(&mut c, &format!("{}/file.txt", deep), b"deep");
     assert_eq!(read_all(&mut c, &format!("{}/file.txt", deep)), b"deep");
 }
@@ -1543,7 +1564,10 @@ fn batched_readv_writev_many_files() {
     let mut tfs = Vec::new();
     for i in 0..5u8 {
         let f = format!("{}/f{}.txt", dir, i);
-        tfs.push(c.open(&f, libc::O_CREAT | libc::O_RDWR, 0o644).unwrap());
+        tfs.push(
+            c.open(Path::new(&f), libc::O_CREAT | libc::O_RDWR, 0o644)
+                .unwrap(),
+        );
     }
 
     let writes: Vec<WriteOp> = tfs
@@ -1590,7 +1614,7 @@ fn batched_unlinkv() {
     let refs: Vec<&str> = files.iter().map(|s| s.as_str()).collect();
     c.unlinkv(&refs).expect("batched unlinkv");
     for f in &files {
-        assert!(!c.exists(f).unwrap());
+        assert!(!c.exists(Path::new(f)).unwrap());
     }
 }
 
