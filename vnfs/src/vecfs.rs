@@ -194,53 +194,6 @@ pub type VfRes = VfResult<()>;
 pub type Fd = std::os::fd::RawFd;
 
 // ---------------------------------------------------------------------------
-// Path helpers (backend-agnostic)
-// ---------------------------------------------------------------------------
-
-/// Split `path` into its parent directory path and final component, returning
-/// the errno on failure (there is no operation index at this layer; callers
-/// attach one). Built on [`Path`] so repeated separators are handled.
-#[cfg(test)]
-pub(crate) fn split_path(path: &str) -> Result<(&str, &str), u32> {
-    let trimmed = path.trim_matches('/');
-    if trimmed.is_empty() {
-        return Err(ERR_NOENT);
-    }
-    let p = Path::new(trimmed);
-    let name = p.file_name().and_then(|n| n.to_str()).ok_or(ERR_NOENT)?;
-    let dir = p.parent().and_then(|d| d.to_str()).unwrap_or("");
-    Ok((dir, name))
-}
-
-/// Join a directory path and a name with `/`.
-#[cfg(test)]
-pub(crate) fn join_path(dir: &str, name: &str) -> String {
-    if dir.is_empty() {
-        name.to_string()
-    } else {
-        PathBuf::from(dir).join(name).to_string_lossy().into_owned()
-    }
-}
-
-/// Lexically normalize a root-relative path (no leading `/`): drop `.` and
-/// empty components, apply `..` by popping the last component (clamped at the
-/// root, so a leading `..` is ignored, matching `/..` == `/`).
-#[cfg(test)]
-pub(crate) fn normalize_root_relative(path: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    for comp in path.split('/') {
-        match comp {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            c => parts.push(c),
-        }
-    }
-    parts.join("/")
-}
-
-// ---------------------------------------------------------------------------
 // File references
 // ---------------------------------------------------------------------------
 
@@ -1280,34 +1233,6 @@ mod tests {
     fn write(fs: &mut DummyVecFs, path: &str, data: &[u8]) {
         fs.writev(&[WriteOp::at(VfFile::from_path(path), 0, data.to_vec()).with_creation()])
             .expect("write");
-    }
-
-    // ------------------------------------------------------------------
-    // Path helpers
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn split_path_helpers() {
-        assert_eq!(split_path("/a/b").unwrap(), ("a", "b"));
-        assert_eq!(split_path("a/b/").unwrap(), ("a", "b"));
-        assert_eq!(split_path("a").unwrap(), ("", "a"));
-        assert_eq!(split_path("///a//b").unwrap(), ("a", "b"));
-        assert_eq!(split_path("/"), Err(ERR_NOENT));
-        assert_eq!(split_path(""), Err(ERR_NOENT));
-        assert_eq!(join_path("", "x"), "x");
-        assert_eq!(join_path("a", "x"), "a/x");
-    }
-
-    #[test]
-    fn normalize_root_relative_helper() {
-        assert_eq!(normalize_root_relative(""), "");
-        assert_eq!(normalize_root_relative("a"), "a");
-        assert_eq!(normalize_root_relative("./a"), "a");
-        assert_eq!(normalize_root_relative("a/./b/"), "a/b");
-        assert_eq!(normalize_root_relative("a//b"), "a/b");
-        assert_eq!(normalize_root_relative("a/../b"), "b");
-        assert_eq!(normalize_root_relative("../a"), "a");
-        assert_eq!(normalize_root_relative("../../a/b/../c"), "a/c");
     }
 
     // ------------------------------------------------------------------
