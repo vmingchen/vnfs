@@ -1,0 +1,20 @@
+[package]
+name = "vfsi-c"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "C API for the vectorized filesystem API (vfsi)"
+
+[lib]
+name = "vfsi_c"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+libc = "0.2"
+vnfs = { path = "../vnfs" }
+
+[build-dependencies]
+cbindgen = "0.27"
+
+[package.metadata.docs.rs]
+all-features = true

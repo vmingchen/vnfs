@@ -1,5 +1,5 @@
 [workspace]
-members = ["vnfs", "nfsv41-sys"]
+members = ["vnfs", "nfsv41-sys", "vfsi-c"]
 resolver = "2"
 
 [workspace.dependencies]
