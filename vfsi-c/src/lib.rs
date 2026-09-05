@@ -10,7 +10,7 @@
 use std::ffi::{CStr, CString, OsString};
 use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 
@@ -18,19 +18,28 @@ use vnfs::dummy_vecfs::DummyVecFs;
 use vnfs::nfs::NfsVecFs;
 use vnfs::vecfs::{AttrMask, VfAttrs, VfError, VfFile, ERR_EBADF, ERR_NOENT};
 
+/// ABI version implemented by this library.
+pub const VFSI_ABI_VERSION: u32 = 2;
+
 /// Opaque filesystem handle owned by C.
 pub struct vfsi_fs {
     fs: Mutex<Box<dyn vnfs::VecFs>>,
     files: Mutex<std::collections::HashMap<i32, VfFile>>,
     next_fd: AtomicI32,
-    /// Kernel mountpoint mapped to the vfsi/NFS export root.
+    /// Kernel mountpoint used by application-visible paths.
     mountpoint: PathBuf,
+    /// Backend path corresponding to `mountpoint`.
+    backend_root: PathBuf,
 }
 
 /// Attributes returned by [`vfsi_stat`] and passed to listdir callbacks.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct vfsi_attrs {
+    /// Size of this structure, for forward-compatible extension.
+    pub struct_size: u32,
+    /// ABI version used to populate this structure.
+    pub abi_version: u32,
     pub ftype: u32,
     pub mode: u32,
     pub size: u64,
@@ -50,6 +59,8 @@ pub struct vfsi_attrs {
 impl vfsi_attrs {
     fn from_vf(a: &VfAttrs) -> vfsi_attrs {
         vfsi_attrs {
+            struct_size: std::mem::size_of::<vfsi_attrs>() as u32,
+            abi_version: VFSI_ABI_VERSION,
             ftype: a.ftype.as_nfs(),
             mode: a.mode,
             size: a.size,
@@ -94,6 +105,12 @@ pub type vfsi_read_paths_cb = Option<
     ) -> bool,
 >;
 
+/// Return the ABI version implemented by the loaded library.
+#[no_mangle]
+pub extern "C" fn vfsi_abi_version() -> u32 {
+    VFSI_ABI_VERSION
+}
+
 fn mask() -> AttrMask {
     AttrMask::MODE
         | AttrMask::SIZE
@@ -130,11 +147,25 @@ fn cstr_from_os(bytes: &[u8]) -> Option<CString> {
 
 fn path_for(fs: &vfsi_fs, path: &Path) -> Option<PathBuf> {
     let rel = path.strip_prefix(&fs.mountpoint).ok()?;
-    if rel.as_os_str().is_empty() {
-        Some(PathBuf::from("/"))
-    } else {
-        Some(Path::new("/").join(rel))
+    let mut mapped = fs.backend_root.clone();
+    for component in rel.components() {
+        match component {
+            Component::Normal(part) => mapped.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
     }
+    Some(mapped)
+}
+
+fn make_fs(fs: Box<dyn vnfs::VecFs>, mountpoint: PathBuf, backend_root: PathBuf) -> *mut vfsi_fs {
+    Box::into_raw(Box::new(vfsi_fs {
+        fs: Mutex::new(fs),
+        files: Mutex::new(std::collections::HashMap::new()),
+        next_fd: AtomicI32::new(1),
+        mountpoint,
+        backend_root,
+    }))
 }
 
 fn vpath_for(fs: &vfsi_fs, path: &std::path::Path) -> Result<PathBuf, VfError> {
@@ -155,12 +186,7 @@ pub unsafe extern "C" fn vfsi_dummy_open(root: *const c_char, out: *mut *mut vfs
     }));
     match backend {
         Ok(Ok(fs)) => {
-            *out = Box::into_raw(Box::new(vfsi_fs {
-                fs: Mutex::new(fs),
-                files: Mutex::new(std::collections::HashMap::new()),
-                next_fd: AtomicI32::new(1),
-                mountpoint: PathBuf::from("/"),
-            }));
+            *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
             0
         }
         Ok(Err(e)) => e.raw_os_error().unwrap_or(libc::EIO),
@@ -189,12 +215,7 @@ pub unsafe extern "C" fn vfsi_dummy_open_mount(
     }));
     match backend {
         Ok(Ok(fs)) => {
-            *out = Box::into_raw(Box::new(vfsi_fs {
-                fs: Mutex::new(fs),
-                files: Mutex::new(std::collections::HashMap::new()),
-                next_fd: AtomicI32::new(1),
-                mountpoint,
-            }));
+            *out = make_fs(fs, mountpoint, PathBuf::from("/"));
             0
         }
         Ok(Err(e)) => e.raw_os_error().unwrap_or(libc::EIO),
@@ -219,12 +240,7 @@ pub unsafe extern "C" fn vfsi_nfs_open(host: *const c_char, out: *mut *mut vfsi_
     }));
     match res {
         Ok(Ok(fs)) => {
-            *out = Box::into_raw(Box::new(vfsi_fs {
-                fs: Mutex::new(fs),
-                files: Mutex::new(std::collections::HashMap::new()),
-                next_fd: AtomicI32::new(1),
-                mountpoint: PathBuf::from("/"),
-            }));
+            *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
             0
         }
         Ok(Err(code)) => code,
@@ -240,15 +256,37 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount(
     mountpoint: *const c_char,
     out: *mut *mut vfsi_fs,
 ) -> c_int {
-    if host.is_null() || mountpoint.is_null() || out.is_null() {
+    unsafe { vfsi_nfs_open_mount_export(host, c"/".as_ptr(), mountpoint, out) }
+}
+
+/// Connect to an NFSv4.1 server, mapping a local kernel `mountpoint` to the
+/// server-side `export_root` beneath the NFSv4 pseudo-root.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_nfs_open_mount_export(
+    host: *const c_char,
+    export_root: *const c_char,
+    mountpoint: *const c_char,
+    out: *mut *mut vfsi_fs,
+) -> c_int {
+    if host.is_null() || export_root.is_null() || mountpoint.is_null() || out.is_null() {
         return libc::EINVAL;
     }
     let Ok(host) = unsafe { CStr::from_ptr(host) }.to_str() else {
         return libc::EINVAL;
     };
-    let Some(mountpoint) = cstr_path(mountpoint) else {
+    let (Some(export_root), Some(mountpoint)) = (cstr_path(export_root), cstr_path(mountpoint))
+    else {
         return libc::EINVAL;
     };
+    if !export_root.is_absolute() || !mountpoint.is_absolute() {
+        return libc::EINVAL;
+    }
+    if export_root
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return libc::EINVAL;
+    }
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         NfsVecFs::connect(host)
             .map(|f| Box::new(f) as Box<dyn vnfs::VecFs>)
@@ -256,12 +294,7 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount(
     }));
     match res {
         Ok(Ok(fs)) => {
-            *out = Box::into_raw(Box::new(vfsi_fs {
-                fs: Mutex::new(fs),
-                files: Mutex::new(std::collections::HashMap::new()),
-                next_fd: AtomicI32::new(1),
-                mountpoint,
-            }));
+            *out = make_fs(fs, mountpoint, export_root);
             0
         }
         Ok(Err(code)) => code,
@@ -920,6 +953,28 @@ mod tests {
         assert_eq!(unsafe { vfsi_remove(fs, dir.as_ptr()) }, 0);
 
         unsafe { vfsi_free(fs) };
+    }
+
+    #[test]
+    fn mount_mapping_includes_backend_root_and_rejects_escape() {
+        let root = temp_root();
+        let backend = Box::new(DummyVecFs::new(PathBuf::from(
+            root.to_string_lossy().into_owned(),
+        ))) as Box<dyn vnfs::VecFs>;
+        let raw = make_fs(
+            backend,
+            PathBuf::from("/mnt/repos"),
+            PathBuf::from("/exports/git"),
+        );
+        let fs = unsafe { &*raw };
+
+        assert_eq!(
+            path_for(fs, Path::new("/mnt/repos/project/objects")),
+            Some(PathBuf::from("/exports/git/project/objects"))
+        );
+        assert_eq!(path_for(fs, Path::new("/mnt/repos/../escape")), None);
+
+        unsafe { vfsi_free(raw) };
     }
 
     #[test]

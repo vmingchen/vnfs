@@ -1,7 +1,16 @@
+#ifndef VFSI_H
+#define VFSI_H
+
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+/**
+ * ABI version implemented by this library.
+ */
+#define VFSI_ABI_VERSION 2
 
 /**
  * Opaque filesystem handle owned by C.
@@ -12,6 +21,14 @@ typedef struct vfsi_fs vfsi_fs;
  * Attributes returned by [`vfsi_stat`] and passed to listdir callbacks.
  */
 typedef struct vfsi_attrs {
+  /**
+   * Size of this structure, for forward-compatible extension.
+   */
+  uint32_t struct_size;
+  /**
+   * ABI version used to populate this structure.
+   */
+  uint32_t abi_version;
   uint32_t ftype;
   uint32_t mode;
   uint64_t size;
@@ -35,10 +52,16 @@ typedef bool (*vfsi_listdirv_cb)(const char *dir,
                                  const struct vfsi_attrs *attrs,
                                  void *userdata);
 
-typedef bool (*vfsi_read_paths_cb)(const char *path,
-                                   const uint8_t *data,
-                                   uintptr_t len,
-                                   void *userdata);
+typedef bool (*vfsi_read_paths_cb)(const char *path, const uint8_t *data, size_t len, void *userdata);
+
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
+
+/**
+ * Return the ABI version implemented by the loaded library.
+ */
+uint32_t vfsi_abi_version(void);
 
 /**
  * Create a local-directory vfsi backend rooted at `root`.
@@ -65,6 +88,15 @@ int vfsi_nfs_open(const char *host, struct vfsi_fs **out);
 int vfsi_nfs_open_mount(const char *host, const char *mountpoint, struct vfsi_fs **out);
 
 /**
+ * Connect to an NFSv4.1 server, mapping a local kernel `mountpoint` to the
+ * server-side `export_root` beneath the NFSv4 pseudo-root.
+ */
+int vfsi_nfs_open_mount_export(const char *host,
+                               const char *export_root,
+                               const char *mountpoint,
+                               struct vfsi_fs **out);
+
+/**
  * Destroy a filesystem handle returned by one of the `vfsi_*_open*`
  * functions.
  */
@@ -89,12 +121,7 @@ int vfsi_close(struct vfsi_fs *fs, int fd);
  * Read up to `len` bytes at `offset` into `buf`; writes the actual count to
  * `*got` when non-NULL.
  */
-int vfsi_pread(struct vfsi_fs *fs,
-               int fd,
-               void *buf,
-               uintptr_t len,
-               uint64_t offset,
-               uintptr_t *got);
+int vfsi_pread(struct vfsi_fs *fs, int fd, void *buf, size_t len, uint64_t offset, size_t *got);
 
 /**
  * Write `len` bytes at `offset`; writes the actual count to `*wrote`.
@@ -102,9 +129,9 @@ int vfsi_pread(struct vfsi_fs *fs,
 int vfsi_pwrite(struct vfsi_fs *fs,
                 int fd,
                 const void *buf,
-                uintptr_t len,
+                size_t len,
                 uint64_t offset,
-                uintptr_t *wrote);
+                size_t *wrote);
 
 /**
  * Create a directory (`create_parents != 0` behaves like `mkdir -p`).
@@ -133,8 +160,8 @@ int vfsi_listdir(struct vfsi_fs *fs, const char *dir, vfsi_listdir_cb cb, void *
  */
 int vfsi_listdirv(struct vfsi_fs *fs,
                   const char *const *dirs,
-                  uintptr_t count,
-                  uintptr_t max_entries,
+                  size_t count,
+                  size_t max_entries,
                   bool recursive,
                   vfsi_listdirv_cb cb,
                   void *userdata);
@@ -145,6 +172,12 @@ int vfsi_listdirv(struct vfsi_fs *fs,
  */
 int vfsi_read_paths(struct vfsi_fs *fs,
                     const char *const *paths,
-                    uintptr_t count,
+                    size_t count,
                     vfsi_read_paths_cb cb,
                     void *userdata);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif  // __cplusplus
+
+#endif  /* VFSI_H */

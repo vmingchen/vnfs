@@ -1,6 +1,6 @@
 [package]
 name = "vfsi-c"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "C API for the vectorized filesystem API (vfsi)"
@@ -11,6 +11,7 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 libc = "0.2"
+libntirpc-sys = { workspace = true }
 vnfs = { path = "../vnfs" }
 
 [build-dependencies]

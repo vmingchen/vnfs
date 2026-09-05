@@ -9,7 +9,11 @@ static bool list_one(const char *name, const struct vfsi_attrs *attrs, void *use
 {
     (void)attrs;
     char **out = (char **)userdata;
-    *out = strdup(name);
+    size_t len = strlen(name) + 1;
+    *out = malloc(len);
+    if (*out == NULL)
+        return false;
+    memcpy(*out, name, len);
     return true;
 }
 
@@ -18,6 +22,12 @@ int main(int argc, char **argv)
     if (argc != 2) {
         fprintf(stderr, "usage: smoke <root>\n");
         return 2;
+    }
+
+    if (vfsi_abi_version() != VFSI_ABI_VERSION) {
+        fprintf(stderr, "vfsi ABI mismatch: library=%u header=%u\n",
+                vfsi_abi_version(), VFSI_ABI_VERSION);
+        return 1;
     }
 
     struct vfsi_fs *fs = NULL;
