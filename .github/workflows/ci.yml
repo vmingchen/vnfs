@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+      - run: cargo test -p nfsv41-sys
+      - run: cargo test -p vnfs --lib
+      - run: cargo test -p vnfs --test dummy_vecfs
+      - run: cargo test -p vfsi-c --lib
+      - name: Verify checked-in C header and smoke test
+        run: |
+          cargo build -p vfsi-c
+          generated=$(find target/debug/build/vfsi-c-*/out -name vfsi.h -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+          diff -u vfsi-c/include/vfsi.h "$generated"
+          cc -I vfsi-c/include vfsi-c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
+          LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke /tmp/vfsi-smoke-root
+
+  python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev
+      - name: Build the current native extension before tests
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install maturin fsspec pytest
+          cd python
+          ../.venv/bin/maturin develop
+      - run: .venv/bin/python -m pytest python/tests
+
+  nfs-integration:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        minor-version: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install NFS-Ganesha and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev nfs-ganesha nfs-ganesha-vfs
+      - name: Start local NFSv4 server
+        run: |
+          sudo mkdir -p /srv/vnfs-ci/git /run/ganesha
+          sudo chmod -R 0777 /srv/vnfs-ci
+          cat >/tmp/ganesha.conf <<'EOF'
+          NFS_Core_Param { Protocols = 4; }
+          EXPORT {
+            Export_Id = 77;
+            Path = /srv/vnfs-ci;
+            Pseudo = /;
+            Access_Type = RW;
+            Squash = None;
+            SecType = sys;
+            Protocols = 4;
+            Transports = TCP;
+            FSAL { Name = VFS; }
+          }
+          EOF
+          sudo ganesha.nfsd -F -L /tmp/ganesha.log -f /tmp/ganesha.conf &
+          for attempt in $(seq 1 30); do
+            if timeout 1 bash -c '</dev/tcp/127.0.0.1/2049' 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/ganesha.log
+          exit 1
+      - name: Run NFS integration suite
+        env:
+          VNFS_TEST_MINOR: ${{ matrix.minor-version }}
+        run: cargo test -p vnfs --test nfs -- --test-threads=1
+      - name: Show server log after failure
+        if: failure()
+        run: cat /tmp/ganesha.log

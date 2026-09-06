@@ -23,6 +23,9 @@ pub struct Session {
     pub sessionid: sessionid4,
     pub minorversion: u32,
     slot_seqid: u32,
+    /// Set after an RPC error where it is unknowable whether the server
+    /// consumed the slot sequence. A fresh session is required before reuse.
+    poisoned: bool,
     /// Server-confirmed channel attributes from CREATE_SESSION: the
     /// negotiated maxima for compound request size and operation count.
     pub max_requestsize: usize,
@@ -55,6 +58,7 @@ impl Session {
             // check_slot_seqid() accepts seqid == slot_seqid + 1, so the
             // first SEQUENCE must carry seqid 1.
             slot_seqid: 1,
+            poisoned: false,
             max_requestsize: 4 * 1024 * 1024,
             max_responsesize: 4 * 1024 * 1024,
             max_operations: 256,
@@ -170,17 +174,18 @@ impl Session {
         self.sessionid = ok.csr_sessionid;
         // The server returns its confirmed channel attributes; compounds must
         // stay under these (the client's advertised values are only a
-        // request). Clamp to sane bounds in case a server reports 0.
+        // request). Zero is invalid and must not silently restore a larger
+        // client-side default.
         let fore = &ok.csr_fore_chan_attrs;
-        if fore.ca_maxrequestsize > 0 {
-            self.max_requestsize = fore.ca_maxrequestsize as usize;
+        if fore.ca_maxrequestsize == 0 || fore.ca_maxresponsesize == 0 || fore.ca_maxoperations == 0
+        {
+            return Err(RpcError::transport(
+                "server returned invalid zero-valued fore-channel limits",
+            ));
         }
-        if fore.ca_maxresponsesize > 0 {
-            self.max_responsesize = fore.ca_maxresponsesize as usize;
-        }
-        if fore.ca_maxoperations > 0 {
-            self.max_operations = fore.ca_maxoperations as usize;
-        }
+        self.max_requestsize = fore.ca_maxrequestsize as usize;
+        self.max_responsesize = fore.ca_maxresponsesize as usize;
+        self.max_operations = fore.ca_maxoperations as usize;
         Ok(())
     }
 
@@ -200,6 +205,11 @@ impl Session {
     /// Prepend a SEQUENCE op and send the compound. The slot seqid advances
     /// whenever the server consumed the SEQUENCE (i.e. it returned NFS4_OK).
     pub fn compound(&mut self, c: &mut Compound) -> RpcResult<CompoundRes> {
+        if self.poisoned {
+            return Err(RpcError::transport(
+                "NFS session is unusable after an ambiguous transport failure; reconnect",
+            ));
+        }
         c.args.minorversion = self.minorversion;
         let mut seq: nfs_argop4 = unsafe { std::mem::zeroed() };
         seq.argop = nfs_opnum4_NFS4_OP_SEQUENCE;
@@ -214,11 +224,11 @@ impl Session {
         let res = match c.call(&self.rpc) {
             Ok(res) => res,
             Err(e) => {
-                // The request may or may not have reached the server. Never
-                // reuse the seqid: a later compound with the same seqid and a
-                // different XID is classified as a replay and rejected with
-                // NFS4ERR_RETRY_UNCACHED_REP.
-                self.slot_seqid += 1;
+                // The request may or may not have reached the server. Advancing
+                // guesses wrong when it did not; reusing the sequence with a
+                // new RPC XID guesses wrong when it did. Require reconnect
+                // rather than silently corrupting the slot sequence.
+                self.poisoned = true;
                 return Err(e);
             }
         };

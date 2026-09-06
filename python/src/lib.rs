@@ -274,17 +274,26 @@ impl NfsClient {
     /// the dummy backend's filesystem root (a unique temp directory when
     /// omitted).
     #[new]
-    #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None))]
+    #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None, minor_version=None))]
     fn new(
         host: &str,
         backend: &str,
         root: Option<PathBuf>,
         compound_size_limit: Option<usize>,
+        minor_version: Option<u32>,
     ) -> PyResult<Self> {
         let fs: Box<dyn vnfs::VecFs + Send> = match backend {
             "nfs" => {
-                let mut nfs =
-                    NfsVecFs::connect(host).map_err(|e| to_py_err(e, Some(Path::new(host))))?;
+                if minor_version.is_some_and(|version| !matches!(version, 1 | 2)) {
+                    return Err(PyValueError::new_err(
+                        "minor_version must be 1, 2, or None",
+                    ));
+                }
+                let mut nfs = match minor_version {
+                    Some(version) => NfsVecFs::connect_minor(host, version),
+                    None => NfsVecFs::connect(host),
+                }
+                .map_err(|e| to_py_err(e, Some(Path::new(host))))?;
                 if let Some(limit) = compound_size_limit {
                     nfs.set_max_compound_bytes(limit);
                 }
@@ -320,6 +329,24 @@ impl NfsClient {
             }
         };
         Ok(NfsClient { fs: Mutex::new(fs) })
+    }
+
+    /// Negotiated NFS minor version, or None for the dummy backend.
+    fn minor_version(&self) -> PyResult<Option<u32>> {
+        let fs = self.fs.lock().map_err(lock_err)?;
+        Ok(fs.nfs_minorversion())
+    }
+
+    /// Current backend capability bitset (see CAP_SERVER_COPY).
+    fn capabilities(&self) -> PyResult<u64> {
+        let fs = self.fs.lock().map_err(lock_err)?;
+        Ok(fs.capabilities())
+    }
+
+    /// Whether NFSv4.2 server COPY is currently enabled.
+    fn server_copy_enabled(&self) -> PyResult<bool> {
+        let fs = self.fs.lock().map_err(lock_err)?;
+        Ok(fs.capabilities() & vnfs::vecfs::VF_CAP_SERVER_COPY != 0)
     }
 
     // -- single-op ------------------------------------------------------------------
@@ -948,5 +975,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(compound_stats_py, m)?)?;
     m.add_function(wrap_pyfunction!(rpc_stats_py, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    m.add("CAP_SERVER_COPY", vnfs::vecfs::VF_CAP_SERVER_COPY)?;
     Ok(())
 }

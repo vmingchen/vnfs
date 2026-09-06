@@ -66,6 +66,8 @@ pub struct NfsClient {
     pub max_response_bytes: usize,
     /// Server-confirmed maximum operations per compound (merged builders).
     pub max_ops: usize,
+    server_max_request_bytes: usize,
+    configured_max_request_bytes: Option<usize>,
 }
 
 /// Upper bound for the per-compound payload cap for merged path I/O; the
@@ -203,6 +205,67 @@ pub struct CopyOp {
 /// compound (plus the implicit SEQUENCE) under it.
 const MAX_COMPOUND_OPS: usize = 256;
 
+/// One source of truth for the negotiated operation budget. NFS counts the
+/// mandatory SEQUENCE operation in `ca_maxoperations`, while Compound builders
+/// only hold the operations that follow it.
+#[derive(Clone, Copy, Debug)]
+struct CompoundBudget {
+    max_ops: usize,
+}
+
+impl CompoundBudget {
+    fn new(max_ops: usize) -> Self {
+        Self { max_ops }
+    }
+
+    fn batch_capacity(self, ops_per_item: usize) -> RpcResult<usize> {
+        let capacity = self.max_ops.saturating_sub(1) / ops_per_item;
+        if capacity == 0 {
+            Err(RpcError::op(0, nfsstat4_NFS4ERR_TOO_MANY_OPS))
+        } else {
+            Ok(capacity)
+        }
+    }
+
+    /// Limit used by variable-shape merged builders. `reserve` is soft
+    /// headroom for path walking; when the server advertises a small limit,
+    /// retain enough room for one minimum-shape item without ever exceeding
+    /// the negotiated maximum.
+    fn merged_limit(self, reserve: usize, min_ops_per_item: usize) -> usize {
+        let minimum = 1usize.saturating_add(min_ops_per_item);
+        if self.max_ops < minimum {
+            0
+        } else {
+            self.max_ops
+                .saturating_sub(reserve)
+                .max(minimum)
+                .min(self.max_ops)
+        }
+    }
+
+    fn ensure(self, compound: &Compound) -> RpcResult<()> {
+        if compound.op_count().saturating_add(1) > self.max_ops {
+            Err(RpcError::op(0, nfsstat4_NFS4ERR_TOO_MANY_OPS))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn effective_request_limit(server: usize, configured: Option<usize>) -> usize {
+    configured.map_or(server, |limit| limit.min(server))
+}
+
+fn response_payload_budget(negotiated: usize) -> usize {
+    negotiated.saturating_mul(3).saturating_div(4).max(1)
+}
+
+fn checked_offset(base: u64, delta: usize, op_index: usize) -> RpcResult<u64> {
+    let delta = u64::try_from(delta).map_err(|_| RpcError::op(op_index, nfsstat4_NFS4ERR_INVAL))?;
+    base.checked_add(delta)
+        .ok_or_else(|| RpcError::op(op_index, nfsstat4_NFS4ERR_INVAL))
+}
+
 /// FATTR4 attribute ids requested for every READDIR entry, in wire order.
 /// Keep in sync with the parse order in `nfs.rs::parse_attrs`. Note:
 /// FATTR4_TIME_CREATE is intentionally absent (ganesha omits it, and it maps
@@ -255,7 +318,7 @@ pub struct PathWriteOp {
 pub struct PathReadOp {
     pub file: FileRef,
     pub offset: u64,
-    pub count: u32,
+    pub count: usize,
     pub stateid: Option<stateid4>,
 }
 
@@ -550,42 +613,59 @@ fn first_failed_range(res: &CompoundRes, ranges: &[(usize, usize, usize)]) -> Op
 impl NfsClient {
     /// Connect, run the session handshake, and resolve the export root.
     pub fn connect(host: &str) -> RpcResult<NfsClient> {
-        Self::connect_minor(host, 1)
+        match Self::connect_minor(host, 2) {
+            Ok(client) => Ok(client),
+            Err(error) if error.status == nfsstat4_NFS4ERR_MINOR_VERS_MISMATCH => {
+                Self::connect_minor(host, 1)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn connect_minor(host: &str, minorversion: u32) -> RpcResult<NfsClient> {
         let mut session = Session::connect_minor(host, minorversion)?;
         let root = session_mount_root(&mut session)?;
-        let max_compound_bytes = session
-            .max_requestsize
-            .clamp(64 * 1024, DEFAULT_MAX_COMPOUND_BYTES);
-        let max_response_bytes = session
-            .max_responsesize
-            .clamp(64 * 1024, DEFAULT_MAX_COMPOUND_BYTES);
-        let max_ops = session.max_operations.clamp(1, MAX_COMPOUND_OPS);
+        let configured_max_request_bytes = Some(DEFAULT_MAX_COMPOUND_BYTES);
+        let max_compound_bytes =
+            effective_request_limit(session.max_requestsize, configured_max_request_bytes);
+        let max_response_bytes = session.max_responsesize.min(DEFAULT_MAX_COMPOUND_BYTES);
+        let max_ops = session.max_operations.min(MAX_COMPOUND_OPS);
+        let server_max_request_bytes = session.max_requestsize;
         Ok(NfsClient {
             session,
             root,
             max_compound_bytes,
             max_response_bytes,
             max_ops,
+            server_max_request_bytes,
+            configured_max_request_bytes,
         })
     }
 
-    /// Set the per-compound payload cap for merged path I/O (bytes; 0 =
-    /// unlimited).
+    /// Minor version negotiated for this session.
+    pub fn minorversion(&self) -> u32 {
+        self.session.minorversion
+    }
+
+    /// Set the configured per-compound payload cap. Zero restores the
+    /// negotiated server maximum; callers can never exceed that maximum.
     pub fn set_max_compound_bytes(&mut self, bytes: usize) {
-        self.max_compound_bytes = bytes;
+        self.configured_max_request_bytes = (bytes != 0).then_some(bytes);
+        self.max_compound_bytes = effective_request_limit(
+            self.server_max_request_bytes,
+            self.configured_max_request_bytes,
+        );
     }
 
     /// Per-op data cap: no single READ/WRITE op may carry more than the
     /// server's per-op limit (bounded by the compound cap as well).
     pub fn per_op_bytes(&self) -> usize {
-        if self.max_compound_bytes == 0 {
-            MAX_OP_BYTES
-        } else {
-            self.max_compound_bytes.clamp(4096, MAX_OP_BYTES)
-        }
+        // Leave room for the compound header, SEQUENCE, filehandle, and op
+        // metadata. The final op-count guard cannot protect a byte-size
+        // limit, so a single payload must not fill the entire request.
+        self.max_compound_bytes
+            .min(self.server_max_request_bytes.saturating_sub(1024))
+            .clamp(1, MAX_OP_BYTES)
     }
 
     /// Total READ data budget per compound. Servers validate the summed READ
@@ -593,11 +673,7 @@ impl NfsClient {
     /// commonly reject a compound that fills it exactly, so leave a quarter
     /// of the reply budget as headroom.
     pub fn read_compound_bytes(&self) -> usize {
-        if self.max_response_bytes == 0 {
-            MAX_OP_BYTES * 3
-        } else {
-            (self.max_response_bytes.saturating_mul(3) / 4).max(64 * 1024)
-        }
+        response_payload_budget(self.max_response_bytes)
     }
 
     /// Per-op data cap for READs: a single READ's data travels in the reply,
@@ -606,8 +682,26 @@ impl NfsClient {
         self.per_op_bytes().min(self.read_compound_bytes())
     }
 
+    fn readdir_limits(&self, operations: usize) -> (u32, u32) {
+        let per_operation = (self.read_compound_bytes() / operations.max(1)).max(1);
+        let maxcount = per_operation.min(u32::MAX as usize) as u32;
+        let dircount = (maxcount / 4).max(1);
+        (dircount, maxcount.max(1))
+    }
+
     pub fn root(&self) -> &FileHandle {
         &self.root
+    }
+
+    fn op_budget(&self) -> CompoundBudget {
+        CompoundBudget::new(self.max_ops)
+    }
+
+    /// Send a compound only when its final size, including SEQUENCE, honors
+    /// the server-confirmed `ca_maxoperations` value.
+    fn call_compound(&mut self, compound: &mut Compound) -> RpcResult<CompoundRes> {
+        self.op_budget().ensure(compound)?;
+        self.session.compound(compound)
     }
 
     /// Look up a single component below `dir`.
@@ -617,7 +711,7 @@ impl NfsClient {
         c.putfh(&dir.as_nfs_fh());
         c.lookup(name);
         c.getfh();
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         Ok(FileHandle::from_nfs_fh(res.getfh(3)))
     }
@@ -636,7 +730,7 @@ impl NfsClient {
         c.lookup(name);
         c.getfh();
         c.getattr(&[FATTR4_TYPE]);
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         let fh = FileHandle::from_nfs_fh(res.getfh(3));
         let t = res.getattr_bytes(4);
@@ -656,7 +750,10 @@ impl NfsClient {
         &mut self,
         ops: &[(FileHandle, Vec<u8>)],
     ) -> RpcResult<Vec<Result<(FileHandle, u32), u32>>> {
-        let per_chunk = (MAX_COMPOUND_OPS - 1) / 4;
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let per_chunk = self.op_budget().batch_capacity(4)?;
         let mut out = Vec::with_capacity(ops.len());
         for chunk in ops.chunks(per_chunk) {
             let mut c = Compound::new();
@@ -667,7 +764,7 @@ impl NfsClient {
                 c.getfh();
                 c.getattr(&[FATTR4_TYPE]);
             }
-            let res = self.session.compound(&mut c)?;
+            let res = self.call_compound(&mut c)?;
             for (i, _) in chunk.iter().enumerate() {
                 let st_idx = 2 + 4 * i;
                 if st_idx >= res.nops() {
@@ -704,7 +801,10 @@ impl NfsClient {
         &mut self,
         ops: &[(FileHandle, Vec<u8>)],
     ) -> RpcResult<Vec<Result<FileHandle, u32>>> {
-        let per_chunk = (MAX_COMPOUND_OPS - 1) / 3;
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let per_chunk = self.op_budget().batch_capacity(3)?;
         let mut out = Vec::with_capacity(ops.len());
         for chunk in ops.chunks(per_chunk) {
             let mut c = Compound::new();
@@ -714,7 +814,7 @@ impl NfsClient {
                 c.lookup(name);
                 c.getfh();
             }
-            let res = self.session.compound(&mut c)?;
+            let res = self.call_compound(&mut c)?;
             for (i, _) in chunk.iter().enumerate() {
                 let st_idx = 2 + 3 * i;
                 if st_idx >= res.nops() {
@@ -751,7 +851,7 @@ impl NfsClient {
             return Ok(self.root.clone());
         }
         c.getfh();
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         Ok(FileHandle::from_nfs_fh(res.getfh(2 + ncomps)))
     }
@@ -824,7 +924,7 @@ impl NfsClient {
         for n in names {
             c.remove(n);
         }
-        let res = self.session.compound(&mut c).map_err(|e| {
+        let res = self.call_compound(&mut c).map_err(|e| {
             let idx = map(e.op_index);
             e.with_op_index(idx)
         })?;
@@ -893,7 +993,7 @@ impl NfsClient {
             name,
         );
         c.getfh();
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         let stateid = res.open(2).stateid;
         let fh = res.getfh(3);
@@ -928,7 +1028,10 @@ impl NfsClient {
             let local = op_index.saturating_sub(1) / per_op;
             chunk_start + local.min(chunk_len.saturating_sub(1))
         }
-        let chunk_size = (self.max_ops.saturating_sub(1) / per_op).max(1);
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let chunk_size = self.op_budget().batch_capacity(per_op)?;
         let mut out = Vec::with_capacity(ops.len());
         let mut global = 0usize;
         for chunk in ops.chunks(chunk_size) {
@@ -939,7 +1042,7 @@ impl NfsClient {
                 add(&mut c, op, global);
                 global += 1;
             }
-            let res = self.session.compound(&mut c).map_err(|e| {
+            let res = self.call_compound(&mut c).map_err(|e| {
                 let idx = caller_index(e.op_index, per_op, chunk_start, chunk.len());
                 e.with_op_index(idx)
             })?;
@@ -1170,7 +1273,7 @@ impl NfsClient {
         let per_file = 4;
         // Headroom for a new directory's path resolution inside a compound.
         let reserve = 8;
-        let budget = self.max_ops.saturating_sub(reserve).max(per_file);
+        let budget = self.op_budget().merged_limit(reserve, per_file);
         let per_op = self.per_op_bytes();
 
         let mut global = 0usize;
@@ -1308,7 +1411,7 @@ impl NfsClient {
                             for chunk in op.data[start..end].chunks(per_op) {
                                 c.write(
                                     &SPECIAL_STATEID,
-                                    op.offset + (start + off) as u64,
+                                    checked_offset(op.offset, start + off, global)?,
                                     stable_how4_FILE_SYNC4,
                                     chunk,
                                 );
@@ -1320,7 +1423,7 @@ impl NfsClient {
                             // and emit an empty WRITE for the result.
                             c.write(
                                 &SPECIAL_STATEID,
-                                op.offset + start as u64,
+                                checked_offset(op.offset, start, global)?,
                                 stable_how4_FILE_SYNC4,
                                 &[],
                             );
@@ -1344,7 +1447,7 @@ impl NfsClient {
                             for chunk in op.data[start..end].chunks(per_op) {
                                 c.write(
                                     sid,
-                                    op.offset + (start + off) as u64,
+                                    checked_offset(op.offset, start + off, global)?,
                                     stable_how4_FILE_SYNC4,
                                     chunk,
                                 );
@@ -1352,7 +1455,12 @@ impl NfsClient {
                                 off += chunk.len();
                             }
                         } else {
-                            c.write(sid, op.offset + start as u64, stable_how4_FILE_SYNC4, &[]);
+                            c.write(
+                                sid,
+                                checked_offset(op.offset, start, global)?,
+                                stable_how4_FILE_SYNC4,
+                                &[],
+                            );
                             map.note_ops(1);
                         }
                         fh_at_opened = false;
@@ -1374,13 +1482,18 @@ impl NfsClient {
                 }
             }
 
+            if map.ranges.is_empty() {
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
             if close_in_compound && opened_path.is_some() {
                 c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
                 map.note_ops(1);
             }
+            self.op_budget().ensure(&c)?;
             self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
 
-            let res = self.session.compound(&mut c)?;
+            let res = self.call_compound(&mut c)?;
             // Find the first incomplete/failed range.
             let mut range_failed = None;
             let mut done = 0usize;
@@ -1480,7 +1593,7 @@ impl NfsClient {
         let mut close_failed: Option<u32> = None;
         let per_file = 4;
         let reserve = 8;
-        let budget = self.max_ops.saturating_sub(reserve).max(per_file);
+        let budget = self.op_budget().merged_limit(reserve, per_file);
         let per_op = self.read_per_op_bytes();
 
         let mut global = 0usize;
@@ -1506,7 +1619,7 @@ impl NfsClient {
             while global < n && map.next + per_file <= budget {
                 let op = &ops[global];
                 let start = part_off;
-                let remaining = (op.count as usize).saturating_sub(start);
+                let remaining = op.count.saturating_sub(start);
                 // A single READ op is capped by the server's per-op limit
                 // (and the generated XDR's 1 MiB opaque reply bound), so
                 // large reads become consecutive READ ops. Only as many
@@ -1545,7 +1658,7 @@ impl NfsClient {
                         break;
                     }
                 }
-                let end = (start + take * per_op).min(op.count as usize);
+                let end = (start + take * per_op).min(op.count);
                 if end == start && remaining > 0 {
                     break;
                 }
@@ -1597,7 +1710,7 @@ impl NfsClient {
                             for chunk_len in chunk_lens(start, end, per_op) {
                                 c.read(
                                     &SPECIAL_STATEID,
-                                    op.offset + (start + off) as u64,
+                                    checked_offset(op.offset, start + off, global)?,
                                     chunk_len as u32,
                                 );
                                 map.note_ops(1);
@@ -1606,7 +1719,11 @@ impl NfsClient {
                         } else {
                             // Zero-length read: still OPEN and emit an empty
                             // READ so the result array stays aligned.
-                            c.read(&SPECIAL_STATEID, op.offset + start as u64, 0);
+                            c.read(
+                                &SPECIAL_STATEID,
+                                checked_offset(op.offset, start, global)?,
+                                0,
+                            );
                             map.note_ops(1);
                         }
                         if newly_opened {
@@ -1625,12 +1742,16 @@ impl NfsClient {
                         if end > start {
                             let mut off = 0usize;
                             for chunk_len in chunk_lens(start, end, per_op) {
-                                c.read(sid, op.offset + (start + off) as u64, chunk_len as u32);
+                                c.read(
+                                    sid,
+                                    checked_offset(op.offset, start + off, global)?,
+                                    chunk_len as u32,
+                                );
                                 map.note_ops(1);
                                 off += chunk_len;
                             }
                         } else {
-                            c.read(sid, op.offset + start as u64, 0);
+                            c.read(sid, checked_offset(op.offset, start, global)?, 0);
                             map.note_ops(1);
                         }
                         fh_at_opened = false;
@@ -1638,7 +1759,7 @@ impl NfsClient {
                 }
                 map.end();
                 payload += 128 + (end - start);
-                if end == op.count as usize {
+                if end == op.count {
                     global += 1;
                     part_off = 0;
                 } else {
@@ -1650,13 +1771,18 @@ impl NfsClient {
                 }
             }
 
+            if map.ranges.is_empty() {
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
             if close_in_compound && opened_path.is_some() {
                 c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
                 map.note_ops(1);
             }
+            self.op_budget().ensure(&c)?;
             self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
 
-            let res = self.session.compound(&mut c)?;
+            let res = self.call_compound(&mut c)?;
             let mut range_failed = None;
             let mut done = 0usize;
             for (caller, s, e) in &map.ranges {
@@ -1751,6 +1877,7 @@ impl NfsClient {
         let mut failed: Option<(usize, u32)> = None;
         let per_file = 4; // RESTOREFH + LOOKUP + GETATTR + margin
         let reserve = 16;
+        let budget = self.op_budget().merged_limit(reserve, per_file);
         let mut global = 0usize;
         while global < n {
             let chunk_start = global;
@@ -1759,7 +1886,7 @@ impl NfsClient {
             let mut c = Compound::new();
             c.tag(b"getattrv1");
             let mut payload = 0usize;
-            while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
+            while global < n && map.next + per_file <= budget {
                 let op = &ops[global];
                 let est = 256;
                 if payload > 0
@@ -1794,11 +1921,15 @@ impl NfsClient {
                 cursor.descend();
                 payload += est;
                 global += 1;
-                if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
+                if map.next + per_file > budget && global < n {
                     break;
                 }
             }
-            let res = self.session.compound(&mut c)?;
+            if map.ranges.is_empty() {
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
+            let res = self.call_compound(&mut c)?;
             if let Some((caller, st)) = first_failed_range(&res, &map.ranges) {
                 failed = Some((caller, st));
                 // Keep the prefix results (the caller resumes from here).
@@ -1841,6 +1972,7 @@ impl NfsClient {
         let mut failed: Option<(usize, u32)> = None;
         let per_file = 5; // RESTOREFH + LOOKUP + [GETATTR] + SETATTR + margin
         let reserve = 16;
+        let budget = self.op_budget().merged_limit(reserve, per_file);
         let mut global = 0usize;
         while global < n {
             let chunk_start = global;
@@ -1849,7 +1981,7 @@ impl NfsClient {
             let mut c = Compound::new();
             c.tag(b"setattrv1");
             let mut payload = 0usize;
-            while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
+            while global < n && map.next + per_file <= budget {
                 let op = &ops[global];
                 let est = 256;
                 if payload > 0
@@ -1888,11 +2020,15 @@ impl NfsClient {
                 cursor.descend();
                 payload += est;
                 global += 1;
-                if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
+                if map.next + per_file > budget && global < n {
                     break;
                 }
             }
-            let res = self.session.compound(&mut c)?;
+            if map.ranges.is_empty() {
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
+            let res = self.call_compound(&mut c)?;
             if let Some((caller, st)) = first_failed_range(&res, &map.ranges) {
                 failed = Some((caller, st));
                 // Keep the prefix types (the caller resumes from here).
@@ -1935,6 +2071,7 @@ impl NfsClient {
         let mut failed: Option<(usize, u32)> = None;
         let per_file = 6; // RESTOREFH + OPEN + GETFH + [SETATTR x2] + margin
         let reserve = 16;
+        let budget = self.op_budget().merged_limit(reserve, per_file);
         let mut global = 0usize;
         while global < n {
             let chunk_start = global;
@@ -1945,7 +2082,7 @@ impl NfsClient {
             let mut opens_in_chunk = 0usize;
             let base_seq = self.session.path_owner.seqid;
             let mut payload = 0usize;
-            while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
+            while global < n && map.next + per_file <= budget {
                 let op = &ops[global];
                 let est = 256;
                 if payload > 0
@@ -2001,12 +2138,17 @@ impl NfsClient {
                 cursor.descend();
                 payload += est;
                 global += 1;
-                if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
+                if map.next + per_file > budget && global < n {
                     break;
                 }
             }
+            if map.ranges.is_empty() {
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
+            self.op_budget().ensure(&c)?;
             self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
-            let res = self.session.compound(&mut c)?;
+            let res = self.call_compound(&mut c)?;
             if let Some((caller, st)) = first_failed_range(&res, &map.ranges) {
                 failed = Some((caller, st));
                 // Keep the prefix opens (the caller resumes from here).
@@ -2049,6 +2191,7 @@ impl NfsClient {
         let mut failed: Option<(usize, u32)> = None;
         let per_file = 3; // RESTOREFH + REMOVE + margin
         let reserve = 16;
+        let budget = self.op_budget().merged_limit(reserve, per_file);
         let mut global = 0usize;
         while global < n {
             let chunk_start = global;
@@ -2057,7 +2200,7 @@ impl NfsClient {
             let mut c = Compound::new();
             c.tag(b"removev1");
             let mut payload = 0usize;
-            while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
+            while global < n && map.next + per_file <= budget {
                 let est = 128;
                 if payload > 0
                     && self.max_compound_bytes > 0
@@ -2082,11 +2225,15 @@ impl NfsClient {
                 // is unchanged.
                 payload += est;
                 global += 1;
-                if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
+                if map.next + per_file > budget && global < n {
                     break;
                 }
             }
-            let res = self.session.compound(&mut c)?;
+            if map.ranges.is_empty() {
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
+            let res = self.call_compound(&mut c)?;
             let done = first_failed_range(&res, &map.ranges);
             match done {
                 Some((caller, st)) => {
@@ -2124,6 +2271,7 @@ impl NfsClient {
         let mut failed: Option<(usize, u32)> = None;
         let per_file = 8; // two dir resolutions + RENAME + margin
         let reserve = 16;
+        let budget = self.op_budget().merged_limit(reserve, per_file);
         let mut global = 0usize;
         while global < n {
             let chunk_start = global;
@@ -2132,7 +2280,7 @@ impl NfsClient {
             let mut c = Compound::new();
             c.tag(b"renamev1");
             let mut payload = 0usize;
-            while global < n && map.next + per_file <= MAX_COMPOUND_OPS - reserve {
+            while global < n && map.next + per_file <= budget {
                 let pair = &pairs[global];
                 let est = 256;
                 if payload > 0
@@ -2166,11 +2314,15 @@ impl NfsClient {
                 cursor.descend(); // RENAME moved the current fh
                 payload += est;
                 global += 1;
-                if map.next + per_file > MAX_COMPOUND_OPS - reserve && global < n {
+                if map.next + per_file > budget && global < n {
                     break;
                 }
             }
-            let res = self.session.compound(&mut c)?;
+            if map.ranges.is_empty() {
+                failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
+                break;
+            }
+            let res = self.call_compound(&mut c)?;
             let done = first_failed_range(&res, &map.ranges);
             match done {
                 Some((caller, st)) => {
@@ -2232,7 +2384,7 @@ impl NfsClient {
         c.tag(b"read");
         c.putfh(&fh.as_nfs_fh());
         c.read(stateid, offset, count);
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         let ok = res.read(2);
         let len = ok.data.data_len as usize;
@@ -2258,7 +2410,7 @@ impl NfsClient {
         c.tag(b"write");
         c.putfh(&fh.as_nfs_fh());
         c.write(stateid, offset, stable_how4_FILE_SYNC4, data);
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         let ok = res.write(2);
         Ok((ok.count, ok.committed))
@@ -2317,7 +2469,7 @@ impl NfsClient {
         c.tag(b"close");
         c.putfh(&fh.as_nfs_fh());
         c.close(seqid, stateid);
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         match slot {
             OwnerSlot::User => self.session.open_owner.seqid += 1,
@@ -2341,7 +2493,7 @@ impl NfsClient {
         c.putfh(&dir.as_nfs_fh());
         c.create(name.as_bytes(), ftype, linkdata.map(|s| s.as_bytes()));
         c.getfh();
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         Ok(FileHandle::from_nfs_fh(res.getfh(3)))
     }
@@ -2362,7 +2514,7 @@ impl NfsClient {
         c.tag(b"readlink");
         c.putfh(&fh.as_nfs_fh());
         c.readlink();
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         Ok(res.readlink(2).to_vec())
     }
@@ -2374,7 +2526,7 @@ impl NfsClient {
         c.tag(b"getattr");
         c.putfh(&fh.as_nfs_fh());
         c.getattr(attrs);
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         Ok(res.getattr_bytes(2))
     }
@@ -2390,7 +2542,7 @@ impl NfsClient {
         c.tag(b"setattr");
         c.putfh(&fh.as_nfs_fh());
         c.setattr(mode, size);
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         Ok(())
     }
@@ -2409,8 +2561,9 @@ impl NfsClient {
         c.tag(b"readdir");
         c.putfh(&dir.as_nfs_fh());
         let zeroverf: verifier4 = [0; 8];
-        c.readdir(cookie, &zeroverf, 256 * 1024, 1024 * 1024, attrs);
-        let res = self.session.compound(&mut c)?;
+        let (dircount, maxcount) = self.readdir_limits(1);
+        c.readdir(cookie, &zeroverf, dircount, maxcount, attrs);
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         Ok(Self::collect_readdir(res.readdir(2)).0)
     }
@@ -2465,10 +2618,14 @@ impl NfsClient {
         ops: &[(FileHandle, Vec<u8>)],
         attrs: &[u32],
     ) -> RpcResult<Vec<ChildListing>> {
-        let per_chunk = (MAX_COMPOUND_OPS - 1) / 4;
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let per_chunk = self.op_budget().batch_capacity(4)?;
         let mut out = Vec::with_capacity(ops.len());
         let zeroverf: verifier4 = [0; 8];
         for chunk in ops.chunks(per_chunk) {
+            let (dircount, maxcount) = self.readdir_limits(chunk.len());
             let map = |op_index: usize| {
                 let local = op_index.saturating_sub(1) / 4;
                 chunk.len().saturating_sub(1).min(local)
@@ -2479,9 +2636,9 @@ impl NfsClient {
                 c.putfh(&pfh.as_nfs_fh());
                 c.lookup(name);
                 c.getfh();
-                c.readdir(0, &zeroverf, 256 * 1024, 1024 * 1024, attrs);
+                c.readdir(0, &zeroverf, dircount, maxcount, attrs);
             }
-            let res = self.session.compound(&mut c).map_err(|e| {
+            let res = self.call_compound(&mut c).map_err(|e| {
                 let idx = map(e.op_index);
                 e.with_op_index(idx)
             })?;
@@ -2510,10 +2667,14 @@ impl NfsClient {
         ops: &[(FileHandle, u64)],
         attrs: &[u32],
     ) -> RpcResult<Vec<(Vec<DirEntry>, u64)>> {
-        let per_chunk = (MAX_COMPOUND_OPS - 1) / 2;
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let per_chunk = self.op_budget().batch_capacity(2)?;
         let mut out = Vec::with_capacity(ops.len());
         let zeroverf: verifier4 = [0; 8];
         for chunk in ops.chunks(per_chunk) {
+            let (dircount, maxcount) = self.readdir_limits(chunk.len());
             let map = |op_index: usize| {
                 let local = op_index.saturating_sub(1) / 2;
                 chunk.len().saturating_sub(1).min(local)
@@ -2522,9 +2683,9 @@ impl NfsClient {
             c.tag(b"readdir_pages");
             for (fh, cookie) in chunk {
                 c.putfh(&fh.as_nfs_fh());
-                c.readdir(*cookie, &zeroverf, 256 * 1024, 1024 * 1024, attrs);
+                c.readdir(*cookie, &zeroverf, dircount, maxcount, attrs);
             }
-            let res = self.session.compound(&mut c).map_err(|e| {
+            let res = self.call_compound(&mut c).map_err(|e| {
                 let idx = map(e.op_index);
                 e.with_op_index(idx)
             })?;
@@ -2546,7 +2707,7 @@ impl NfsClient {
         c.tag(b"remove");
         c.putfh(&dir.as_nfs_fh());
         c.remove(name.as_bytes());
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         Ok(())
     }
@@ -2567,7 +2728,7 @@ impl NfsClient {
         c.savefh();
         c.putfh(&dstdir.as_nfs_fh());
         c.rename(oldname.as_bytes(), newname.as_bytes());
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         Ok(())
     }
@@ -2581,7 +2742,7 @@ impl NfsClient {
         c.savefh();
         c.putfh(&dir.as_nfs_fh());
         c.link(newname.as_bytes());
-        let res = self.session.compound(&mut c)?;
+        let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         Ok(())
     }
@@ -2657,5 +2818,56 @@ fn make_open_how(create: OpenCreate, verifier: verifier4) -> openflag4 {
                 },
             },
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negotiated_op_budgets_include_sequence() {
+        assert_eq!(CompoundBudget::new(4).batch_capacity(3).unwrap(), 1);
+        assert!(CompoundBudget::new(4).batch_capacity(4).is_err());
+        assert_eq!(CompoundBudget::new(8).batch_capacity(4).unwrap(), 1);
+        assert_eq!(CompoundBudget::new(32).batch_capacity(4).unwrap(), 7);
+    }
+
+    #[test]
+    fn merged_budgets_never_exceed_server_limit() {
+        for max_ops in [4, 8, 32] {
+            let budget = CompoundBudget::new(max_ops);
+            let limit = budget.merged_limit(16, 3);
+            assert!(limit <= max_ops);
+            if max_ops >= 4 {
+                assert!(limit >= 4);
+            }
+        }
+        assert_eq!(CompoundBudget::new(4).merged_limit(16, 4), 0);
+    }
+
+    #[test]
+    fn negotiated_byte_limits_have_no_sixty_four_kib_floor() {
+        let below_floor = 32 * 1024;
+        assert_eq!(effective_request_limit(below_floor, None), below_floor);
+        assert_eq!(
+            effective_request_limit(below_floor, Some(4 * 1024 * 1024)),
+            below_floor
+        );
+        assert_eq!(response_payload_budget(below_floor), 24 * 1024);
+    }
+
+    #[test]
+    fn zero_configuration_cannot_bypass_negotiated_limit() {
+        let negotiated = 48 * 1024;
+        assert_eq!(effective_request_limit(negotiated, None), negotiated);
+        assert_eq!(
+            effective_request_limit(negotiated, Some(96 * 1024)),
+            negotiated
+        );
+        assert_eq!(
+            effective_request_limit(negotiated, Some(16 * 1024)),
+            16 * 1024
+        );
     }
 }

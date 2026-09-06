@@ -16,10 +16,12 @@ use std::sync::{Mutex, MutexGuard};
 
 use vnfs::dummy_vecfs::DummyVecFs;
 use vnfs::nfs::NfsVecFs;
-use vnfs::vecfs::{AttrMask, VfAttrs, VfError, VfFile, ERR_EBADF, ERR_NOENT};
+use vnfs::vecfs::{AttrMask, ExtentPair, VfAttrs, VfError, VfFile, ERR_EBADF, ERR_NOENT};
 
 /// ABI version implemented by this library.
 pub const VFSI_ABI_VERSION: u32 = 2;
+/// The backend will currently attempt NFSv4.2 server-side COPY.
+pub const VFSI_CAP_SERVER_COPY: u64 = 1 << 0;
 
 macro_rules! ffi_guard {
     ($fallback:expr, $body:block) => {{
@@ -118,6 +120,36 @@ pub type vfsi_read_paths_cb = Option<
 #[no_mangle]
 pub extern "C" fn vfsi_abi_version() -> u32 {
     ffi_guard!(0, { VFSI_ABI_VERSION })
+}
+
+/// Return the negotiated NFS minor version, or zero for a non-NFS/invalid
+/// handle.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_nfs_minorversion(fs: *const vfsi_fs) -> u32 {
+    ffi_guard!(0, {
+        let Some(fs) = fs.as_ref() else {
+            return 0;
+        };
+        fs.fs
+            .lock()
+            .ok()
+            .and_then(|backend| backend.nfs_minorversion())
+            .unwrap_or(0)
+    })
+}
+
+/// Return the current `VFSI_CAP_*` capability bitset.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_capabilities(fs: *const vfsi_fs) -> u64 {
+    ffi_guard!(0, {
+        let Some(fs) = fs.as_ref() else {
+            return 0;
+        };
+        fs.fs
+            .lock()
+            .map(|backend| backend.capabilities())
+            .unwrap_or(0)
+    })
 }
 
 fn mask() -> AttrMask {
@@ -238,6 +270,33 @@ pub unsafe extern "C" fn vfsi_nfs_open(host: *const c_char, out: *mut *mut vfsi_
             return libc::EINVAL;
         };
         match NfsVecFs::connect(host)
+            .map(|f| Box::new(f) as Box<dyn vnfs::VecFs>)
+            .map_err(|e| vf_code(&e))
+        {
+            Ok(fs) => {
+                *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
+                0
+            }
+            Err(code) => code,
+        }
+    })
+}
+
+/// Connect using an explicit supported NFS minor version (1 or 2).
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_nfs_open_minor(
+    host: *const c_char,
+    minorversion: u32,
+    out: *mut *mut vfsi_fs,
+) -> c_int {
+    ffi_guard!(libc::EIO, {
+        if host.is_null() || out.is_null() || !matches!(minorversion, 1 | 2) {
+            return libc::EINVAL;
+        }
+        let Ok(host) = unsafe { CStr::from_ptr(host) }.to_str() else {
+            return libc::EINVAL;
+        };
+        match NfsVecFs::connect_minor(host, minorversion)
             .map(|f| Box::new(f) as Box<dyn vnfs::VecFs>)
             .map_err(|e| vf_code(&e))
         {
@@ -373,9 +432,20 @@ fn open_impl(
 ) -> Result<i32, VfError> {
     let vpath = vpath_for(fs, path)?;
     let file = lock_or_io(&fs.fs)?.open(&vpath, flags, mode)?;
-    let fd = fs.next_fd.fetch_add(1, Ordering::Relaxed);
-    lock_or_io(&fs.files)?.insert(fd, file);
-    Ok(fd)
+    let mut files = lock_or_io(&fs.files)?;
+    for _ in 0..i32::MAX {
+        let fd = fs
+            .next_fd
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.checked_add(1).unwrap_or(1))
+            })
+            .expect("descriptor update always supplies a value");
+        if let std::collections::hash_map::Entry::Vacant(entry) = files.entry(fd) {
+            entry.insert(file);
+            return Ok(fd);
+        }
+    }
+    Err(VfError::failure(0, libc::EMFILE as u32))
 }
 
 /// Open a file and return a vfsi descriptor (`>= 0`), or a negative errno.
@@ -575,6 +645,43 @@ pub unsafe extern "C" fn vfsi_rename(
         match result {
             Ok(()) => 0,
             Err(e) => vf_code(&e),
+        }
+    })
+}
+
+/// Copy one extent. When `to_eof` is true, `length` is ignored and copying
+/// continues to the source EOF. NFSv4.2 COPY is used when available and the
+/// backend falls back to client-side read/write otherwise.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_copy(
+    fs: *mut vfsi_fs,
+    src: *const c_char,
+    src_offset: u64,
+    dst: *const c_char,
+    dst_offset: u64,
+    length: u64,
+    to_eof: bool,
+) -> c_int {
+    ffi_guard!(libc::EIO, {
+        let Some(fs) = fs.as_ref() else {
+            return libc::EINVAL;
+        };
+        let (Some(src), Some(dst)) = (cstr_path(src), cstr_path(dst)) else {
+            return libc::EINVAL;
+        };
+        let (Some(src), Some(dst)) = (path_for(fs, &src), path_for(fs, &dst)) else {
+            return libc::ENOENT;
+        };
+        let pair = ExtentPair::from_os_paths(
+            &src,
+            src_offset,
+            &dst,
+            dst_offset,
+            (!to_eof).then_some(length),
+        );
+        match lock_or_io(&fs.fs).and_then(|mut backend| backend.copyv(&[pair])) {
+            Ok(()) => 0,
+            Err(error) => vf_code(&error),
         }
     })
 }

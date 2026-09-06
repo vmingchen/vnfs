@@ -69,6 +69,12 @@ def test_compound_stats_available(dummy_fs):
     assert stats == (0, 0, 0, 0)
 
 
+def test_dummy_reports_no_nfs_capabilities(dummy_fs):
+    assert dummy_fs._client.minor_version() is None
+    assert dummy_fs._client.capabilities() == 0
+    assert not dummy_fs._client.server_copy_enabled()
+
+
 def test_pipe_missing_parent_raises_by_default(dummy_fs):
     # Aligned with LocalFileSystem(auto_mkdir=False): writing into a missing
     # directory is an error, not an implicit mkdir.

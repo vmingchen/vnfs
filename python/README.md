@@ -32,6 +32,11 @@ fs.pipe({"nfs4:///a.txt": b"hello", "nfs4:///b.txt": b"world"})
 print(fs.cat(["nfs4:///a.txt", "nfs4:///b.txt"]))
 ```
 
+By default the client negotiates NFSv4.2 and falls back to v4.1. Pass
+`minor_version=1` or `minor_version=2` to pin a version. The native client
+exposes `minor_version()`, `capabilities()`, and `server_copy_enabled()` for
+feature inspection.
+
 The round-trip difference is easy to see in that example. A conventional
 per-file NFS client needs roughly three round trips per file per direction
 (resolve/open, the read or write itself, and close), so about six round trips

@@ -25,7 +25,12 @@ fn shared_suite_on_nfs() {
 }
 
 fn client() -> NfsVecFs {
-    NfsVecFs::connect("127.0.0.1").expect("connect to local nfs server")
+    match std::env::var("VNFS_TEST_MINOR").as_deref() {
+        Ok("1") => NfsVecFs::connect_minor("127.0.0.1", 1),
+        Ok("2") => NfsVecFs::connect_minor("127.0.0.1", 2),
+        _ => NfsVecFs::connect("127.0.0.1"),
+    }
+    .expect("connect to local nfs server")
 }
 
 /// Unique working directory for a test, created on demand. Each test gets its
@@ -1502,6 +1507,20 @@ fn copyv_batches_nfs42_server_copies() {
             format!("payload-{i}").into_bytes()
         );
     }
+}
+
+#[test]
+fn copyv_falls_back_on_nfs41() {
+    let dir = setup_dir("copyv41");
+    let src = format!("{}/src", dir);
+    let dst = format!("{}/dst", dir);
+    let mut c = NfsVecFs::connect_minor("127.0.0.1", 1).expect("connect with NFSv4.1");
+    assert_eq!(c.minorversion(), 1);
+    assert!(!c.server_copy_enabled());
+    write_file(&mut c, Path::new(&src), b"client-side-fallback");
+    c.copyv(&[ExtentPair::new(&src, 0, &dst, 0, None)])
+        .expect("v4.1 copyv fallback");
+    assert_eq!(read_all(&mut c, Path::new(&dst)), b"client-side-fallback");
 }
 
 #[test]

@@ -18,6 +18,15 @@ Compounds and Vectorized I/O][fast].
 The [original vNFS client and library][vnfs_client] were implemented in C. This
 crates provides a Rust alternative.
 
+Connections negotiate NFSv4.2 first and fall back to NFSv4.1 when necessary.
+Optional server-side COPY is capability-aware and automatically falls back to
+client-side reads and writes when a server does not implement it.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT License](LICENSE-MIT), at your option.
+
 [fast]: https://www.usenix.org/conference/fast17/technical-sessions/presentation/chen
 [vnfs_client]: https://github.com/sbu-fsl/fsl-tc-client
 [rfcv4]: https://datatracker.ietf.org/doc/html/rfc7530#page-170

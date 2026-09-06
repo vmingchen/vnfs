@@ -32,13 +32,14 @@ struct OpenFile {
     append: bool,
 }
 
-/// An NFSv4.1 client exposing the vectorized [`VecFs`] API.
+/// An NFSv4 client exposing the vectorized [`VecFs`] API.
 pub struct NfsVecFs {
     nfs: NfsClient,
     cwd: PathBuf,
     next_fd: i32,
     /// Canonical open-file state, keyed by the client-assigned descriptor.
     open_files: std::collections::HashMap<i32, OpenFile>,
+    server_copy_enabled: bool,
     /// How path-based bulk I/O is issued: one compound per batch including
     /// CLOSE (Ganesha's special-stateid behavior), one open+I/O compound
     /// plus a separate CLOSE compound (portable), or the old phased path.
@@ -425,23 +426,55 @@ impl NfsVecFs {
 
     /// Connect to the NFS server at `host` and resolve the export root.
     pub fn connect(host: &str) -> VfResult<NfsVecFs> {
-        Self::connect_minor(host, 1)
+        let nfs = NfsClient::connect(host).map_err(|e| VfError::from_rpc(e, 0))?;
+        Ok(Self::from_client(nfs))
     }
 
     /// Connect using an explicit NFS minor version (2 enables server COPY).
     pub fn connect_minor(host: &str, minorversion: u32) -> VfResult<NfsVecFs> {
         let nfs =
             NfsClient::connect_minor(host, minorversion).map_err(|e| VfError::from_rpc(e, 0))?;
-        Ok(NfsVecFs {
+        Ok(Self::from_client(nfs))
+    }
+
+    fn from_client(nfs: NfsClient) -> NfsVecFs {
+        let server_copy_enabled = nfs.minorversion() >= 2;
+        NfsVecFs {
             nfs,
             cwd: PathBuf::new(),
             next_fd: 0,
             open_files: std::collections::HashMap::new(),
+            server_copy_enabled,
             merged_mode: MergedIoMode::Full,
-        })
+        }
+    }
+
+    /// Negotiated NFS minor version for this connection.
+    pub fn minorversion(&self) -> u32 {
+        self.nfs.minorversion()
+    }
+
+    /// Whether this connection will currently attempt NFSv4.2 server COPY.
+    /// The value becomes false if the server rejects COPY at runtime.
+    pub fn server_copy_enabled(&self) -> bool {
+        self.server_copy_enabled
     }
 
     // -- private helpers ----------------------------------------------------
+
+    fn insert_open_file(&mut self, open: OpenFile) -> VfResult<i32> {
+        for _ in 0..i32::MAX {
+            let candidate = self.next_fd.checked_add(1).unwrap_or(1);
+            self.next_fd = candidate;
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                self.open_files.entry(candidate)
+            {
+                entry.insert(open);
+                return Ok(candidate);
+            }
+        }
+        Err(VfError::failure(0, libc::EMFILE as u32))
+    }
 
     /// Resolve a root-relative path to a file handle, following symlinks in
     /// intermediate components (POSIX pathwalk) and, when `follow_final` is
@@ -616,17 +649,13 @@ impl NfsVecFs {
         }
         for (i, o) in outcome.opened.iter().enumerate().take(prefix) {
             let (fh, stateid) = o.clone().expect("completed open");
-            self.next_fd += 1;
-            self.open_files.insert(
-                self.next_fd,
-                OpenFile {
-                    fh,
-                    stateid,
-                    cur_offset: 0,
-                    append: flags[i] & O_APPEND != 0,
-                },
-            );
-            out[i] = Some(VfFile::from_fd(self.next_fd));
+            let fd = self.insert_open_file(OpenFile {
+                fh,
+                stateid,
+                cur_offset: 0,
+                append: flags[i] & O_APPEND != 0,
+            })?;
+            out[i] = Some(VfFile::from_fd(fd));
         }
         Ok(out.into_iter().map(|o| o.expect("opened")).collect())
     }
@@ -743,15 +772,14 @@ impl NfsVecFs {
 
         let mut out = Vec::with_capacity(results.len());
         for (i, (fh, stateid)) in results.into_iter().enumerate() {
-            self.next_fd += 1;
             let open = OpenFile {
                 fh,
                 stateid,
                 cur_offset: 0,
                 append: flags[i] & O_APPEND != 0,
             };
-            self.open_files.insert(self.next_fd, open);
-            out.push(VfFile::from_fd(self.next_fd));
+            let fd = self.insert_open_file(open)?;
+            out.push(VfFile::from_fd(fd));
         }
         Ok(out)
     }
@@ -924,17 +952,13 @@ impl NfsVecFs {
         }
         let mut tmp = vec![None; files.len()];
         for (orig, (fh, stateid)) in subset.iter().zip(results) {
-            self.next_fd += 1;
-            self.open_files.insert(
-                self.next_fd,
-                OpenFile {
-                    fh,
-                    stateid,
-                    cur_offset: 0,
-                    append: false,
-                },
-            );
-            tmp[*orig] = Some(self.next_fd);
+            let fd = self.insert_open_file(OpenFile {
+                fh,
+                stateid,
+                cur_offset: 0,
+                append: false,
+            })?;
+            tmp[*orig] = Some(fd);
         }
         Ok(tmp)
     }
@@ -969,6 +993,10 @@ impl NfsVecFs {
             let off = self
                 .resolve_offset(&op.file, op.offset)
                 .map_err(|e| e.with_index(i))?;
+            let length = u64::try_from(op.length)
+                .map_err(|_| VfError::failure(i, libc::EOVERFLOW as u32))?;
+            off.checked_add(length)
+                .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
             let o = self
                 .open_files
                 .get(&op.file.fd().unwrap())
@@ -981,7 +1009,9 @@ impl NfsVecFs {
                 ops.push(crate::client::ReadOp {
                     fh: o.fh.clone(),
                     stateid: o.stateid,
-                    offset: off + chunk_off,
+                    offset: off
+                        .checked_add(chunk_off)
+                        .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?,
                     count: n as u32,
                 });
                 owner.push(i);
@@ -1018,7 +1048,10 @@ impl NfsVecFs {
                 eof = *e;
                 ci += 1;
             }
-            self.advance_offset(&op.file, off + data.len() as u64);
+            let new_offset = off
+                .checked_add(data.len() as u64)
+                .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+            self.advance_offset(&op.file, new_offset);
             out.push(ReadResult {
                 file: op.file.clone(),
                 offset: off,
@@ -1082,6 +1115,10 @@ impl NfsVecFs {
             let off = self
                 .write_offset(&op.file, op.offset)
                 .map_err(|e| e.with_index(i))?;
+            let length = u64::try_from(op.data.len())
+                .map_err(|_| VfError::failure(i, libc::EOVERFLOW as u32))?;
+            off.checked_add(length)
+                .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
             let o = self
                 .open_files
                 .get(&op.file.fd().unwrap())
@@ -1094,7 +1131,9 @@ impl NfsVecFs {
                 ops.push(crate::client::WriteOp {
                     fh: o.fh.clone(),
                     stateid: o.stateid,
-                    offset: off + chunk_off,
+                    offset: off
+                        .checked_add(chunk_off)
+                        .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?,
                     data: op.data[chunk_off as usize..chunk_off as usize + n].to_vec(),
                 });
                 owner.push(i);
@@ -1130,7 +1169,10 @@ impl NfsVecFs {
                 stable = stable && *committed == stable_how4_FILE_SYNC4;
                 ci += 1;
             }
-            self.advance_offset(&op.file, off + written);
+            let new_offset = off
+                .checked_add(written)
+                .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+            self.advance_offset(&op.file, new_offset);
             out.push(WriteResult {
                 file: op.file.clone(),
                 offset: off,
@@ -1396,9 +1438,15 @@ impl NfsVecFs {
                 Ok((n, _)) => n as u64,
                 Err(e) => break Err(VfError::from_rpc(e, 0)),
             };
-            so += n;
-            doff += n;
-            copied += n;
+            so = so
+                .checked_add(n)
+                .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
+            doff = doff
+                .checked_add(n)
+                .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
+            copied = copied
+                .checked_add(n)
+                .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
         };
         let _ = self.nfs.close_path(&sfh, &ssid);
         let _ = self.nfs.close_path(&dfh, &dsid);
@@ -1456,19 +1504,66 @@ impl NfsVecFs {
                     count: p.length.unwrap_or(0),
                 });
             }
-            let counts = self
-                .nfs
-                .copy_many(&copies)
-                .map_err(VfError::from_rpc_indexed)?;
-            let mut attrs = Vec::with_capacity(pairs.len());
-            for (i, (&n, p)) in counts.iter().zip(pairs).enumerate() {
-                if p.length.is_some_and(|expected| n != expected) {
-                    return Err(VfError::failure(i, nfsstat4_NFS4ERR_IO));
+            let mut totals = vec![0u64; copies.len()];
+            let mut pending: Vec<usize> = (0..copies.len()).collect();
+            while !pending.is_empty() {
+                let active: Vec<crate::client::CopyOp> = pending
+                    .iter()
+                    .map(|&i| crate::client::CopyOp {
+                        src_fh: copies[i].src_fh.clone(),
+                        src_stateid: copies[i].src_stateid,
+                        dst_fh: copies[i].dst_fh.clone(),
+                        dst_stateid: copies[i].dst_stateid,
+                        src_offset: copies[i].src_offset,
+                        dst_offset: copies[i].dst_offset,
+                        count: pairs[i]
+                            .length
+                            .map(|length| length.saturating_sub(totals[i]))
+                            .unwrap_or(0),
+                    })
+                    .collect();
+                let counts = self.nfs.copy_many(&active).map_err(|e| {
+                    let original = pending.get(e.op_index).copied().unwrap_or(0);
+                    VfError::from_rpc_indexed(e.with_op_index(original))
+                })?;
+                let mut next = Vec::new();
+                for (&i, n) in pending.iter().zip(counts) {
+                    totals[i] = totals[i]
+                        .checked_add(n)
+                        .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                    copies[i].src_offset = copies[i]
+                        .src_offset
+                        .checked_add(n)
+                        .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                    copies[i].dst_offset = copies[i]
+                        .dst_offset
+                        .checked_add(n)
+                        .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                    // A zero-byte continuation means EOF. For an explicit
+                    // count this matches dupv's short-at-EOF behavior; for a
+                    // count of zero it confirms that a possibly partial COPY
+                    // has reached EOF.
+                    if n != 0
+                        && pairs[i]
+                            .length
+                            .map(|length| totals[i] < length)
+                            .unwrap_or(true)
+                    {
+                        next.push(i);
+                    }
                 }
+                pending = next;
+            }
+            let mut attrs = Vec::with_capacity(pairs.len());
+            for (i, (&n, p)) in totals.iter().zip(pairs).enumerate() {
+                let size = p
+                    .dst_offset
+                    .checked_add(n)
+                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
                 attrs.push(crate::client::SetattrOp {
                     fh: copies[i].dst_fh.clone(),
                     mode: None,
-                    size: Some(p.dst_offset + n),
+                    size: Some(size),
                 });
             }
             self.nfs
@@ -1911,6 +2006,18 @@ impl NfsVecFs {
 }
 
 impl VecFs for NfsVecFs {
+    fn nfs_minorversion(&self) -> Option<u32> {
+        Some(self.minorversion())
+    }
+
+    fn capabilities(&self) -> u64 {
+        if self.server_copy_enabled() {
+            VF_CAP_SERVER_COPY
+        } else {
+            0
+        }
+    }
+
     fn abs_path(&self, path: &Path) -> PathBuf {
         let root_rel = if path.is_absolute() {
             path.strip_prefix("/").unwrap_or(path).to_path_buf()
@@ -1969,15 +2076,14 @@ impl VecFs for NfsVecFs {
                 .setattr(&fh, None, Some(0))
                 .map_err(|e| VfError::from_rpc(e, 0))?;
         }
-        self.next_fd += 1;
         let open = OpenFile {
             fh,
             stateid,
             cur_offset: 0,
             append: flags & O_APPEND != 0,
         };
-        self.open_files.insert(self.next_fd, open);
-        Ok(VfFile::from_fd(self.next_fd))
+        let fd = self.insert_open_file(open)?;
+        Ok(VfFile::from_fd(fd))
     }
 
     fn openv(&mut self, paths: &[&Path], flags: &[i32], modes: &[u32]) -> VfResult<Vec<VfFile>> {
@@ -2063,6 +2169,10 @@ impl VecFs for NfsVecFs {
                     None => return Err(VfError::failure(i, ERR_INVAL)),
                 },
             };
+            let length =
+                u64::try_from(r.length).map_err(|_| VfError::failure(i, libc::EOVERFLOW as u32))?;
+            off.checked_add(length)
+                .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
             offsets.push(off);
             let file = if r.file.is_descriptor() {
                 let fd = r.file.fd().unwrap();
@@ -2080,7 +2190,7 @@ impl VecFs for NfsVecFs {
             path_ops.push(crate::client::PathReadOp {
                 file,
                 offset: off,
-                count: r.length.min(u32::MAX as usize) as u32,
+                count: r.length,
                 stateid: r
                     .file
                     .fd()
@@ -2095,7 +2205,10 @@ impl VecFs for NfsVecFs {
         // Advance descriptor cursors for Cur-offset reads.
         for (i, r) in reads.iter().enumerate() {
             if r.offset == VfOffset::Cur && r.file.is_descriptor() {
-                let new = out[i].offset + out[i].data.len() as u64;
+                let new = out[i]
+                    .offset
+                    .checked_add(out[i].data.len() as u64)
+                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
                 self.advance_offset(&r.file, new);
             }
         }
@@ -2138,7 +2251,10 @@ impl VecFs for NfsVecFs {
             for (k, &i) in active.iter().enumerate() {
                 let r = &results[k];
                 out[i].extend_from_slice(&r.data);
-                offsets[i] = r.offset + r.data.len() as u64;
+                offsets[i] = r
+                    .offset
+                    .checked_add(r.data.len() as u64)
+                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
                 if !r.eof {
                     next.push(i);
                 }
@@ -2174,6 +2290,10 @@ impl VecFs for NfsVecFs {
                     None => return Err(VfError::failure(i, ERR_INVAL)),
                 },
             };
+            let length = u64::try_from(w.data.len())
+                .map_err(|_| VfError::failure(i, libc::EOVERFLOW as u32))?;
+            off.checked_add(length)
+                .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
             offsets.push(off);
             let file = if w.file.is_descriptor() {
                 let fd = w.file.fd().unwrap();
@@ -2208,7 +2328,10 @@ impl VecFs for NfsVecFs {
         // Advance descriptor cursors for Cur-offset writes.
         for (i, w) in writes.iter().enumerate() {
             if w.offset == VfOffset::Cur && w.file.is_descriptor() {
-                let new = out[i].offset + out[i].written as u64;
+                let new = out[i]
+                    .offset
+                    .checked_add(out[i].written as u64)
+                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
                 self.advance_offset(&w.file, new);
             }
         }
@@ -2226,7 +2349,10 @@ impl VecFs for NfsVecFs {
             .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
         let new = match whence {
             SeekFrom::Set => offset,
-            SeekFrom::Cur => cur as i64 + offset,
+            SeekFrom::Cur => i64::try_from(cur)
+                .ok()
+                .and_then(|cur| cur.checked_add(offset))
+                .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?,
             SeekFrom::End => {
                 let fh = self
                     .open_files
@@ -2234,7 +2360,10 @@ impl VecFs for NfsVecFs {
                     .map(|o| o.fh.clone())
                     .unwrap();
                 let size = self.file_size(&fh)?;
-                size as i64 + offset
+                i64::try_from(size)
+                    .ok()
+                    .and_then(|size| size.checked_add(offset))
+                    .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?
             }
         };
         if new < 0 {
@@ -2747,14 +2876,34 @@ impl VecFs for NfsVecFs {
     }
 
     fn copyv(&mut self, pairs: &[ExtentPair]) -> VfRes {
+        if !self.server_copy_enabled {
+            return self.dupv(pairs);
+        }
         // Keep the number of simultaneously open source/destination states
         // bounded while still amortizing OPEN, COPY, SETATTR, and CLOSE.
         const FILES_PER_COPY_BATCH: usize = 8;
         for (base, batch) in pairs.chunks(FILES_PER_COPY_BATCH).enumerate() {
-            self.copy_extents_server_side(batch).map_err(|e| {
+            if let Err(e) = self.copy_extents_server_side(batch) {
+                if matches!(
+                    e.err_no(),
+                    nfsstat4_NFS4ERR_NOTSUPP
+                        | nfsstat4_NFS4ERR_OP_ILLEGAL
+                        | nfsstat4_NFS4ERR_OFFLOAD_DENIED
+                        | nfsstat4_NFS4ERR_OFFLOAD_NO_REQS
+                        | nfsstat4_NFS4ERR_STALE_STATEID
+                        | nfsstat4_NFS4ERR_OLD_STATEID
+                        | nfsstat4_NFS4ERR_BAD_STATEID
+                ) {
+                    self.server_copy_enabled = false;
+                    let start = base * FILES_PER_COPY_BATCH;
+                    return self.dupv(&pairs[start..]).map_err(|fallback| {
+                        let index = fallback.index();
+                        fallback.with_index(start + index)
+                    });
+                }
                 let index = base * FILES_PER_COPY_BATCH + e.index();
-                e.with_index(index)
-            })?;
+                return Err(e.with_index(index));
+            }
         }
         Ok(())
     }
@@ -2870,13 +3019,15 @@ impl Drop for NfsVecFs {
     /// `tc_deinit()`: close every open file so the client has no state left,
     /// allowing the session teardown to destroy the clientid on the server.
     fn drop(&mut self) {
-        let fds: Vec<i32> = self.open_files.keys().copied().collect();
-        for fd in fds {
-            let open = self.open_files.remove(&fd);
-            if let Some(o) = open {
-                let _ = self.nfs.close(&o.fh, &o.stateid);
-            }
-        }
+        let closes: Vec<crate::client::CloseOp> = self
+            .open_files
+            .drain()
+            .map(|(_, open)| crate::client::CloseOp {
+                fh: open.fh,
+                stateid: open.stateid,
+            })
+            .collect();
+        let _ = self.nfs.close_many(&closes);
     }
 }
 

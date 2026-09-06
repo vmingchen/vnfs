@@ -365,6 +365,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         dummy_root=None,
         auto_mkdir=False,
         compound_size_limit=None,
+        minor_version=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -376,8 +377,12 @@ class Nfs4FileSystem(AbstractFileSystem):
         # Per-compound payload cap (bytes) for merged path I/O; None uses the
         # native default (1 MiB).
         self.compound_size_limit = compound_size_limit
+        # None negotiates the highest supported version; 1 or 2 pins it.
+        self.minor_version = minor_version
         self._root = root.strip("/")
-        self._client = _native.NfsClient(host, backend, dummy_root, compound_size_limit)
+        self._client = _native.NfsClient(
+            host, backend, dummy_root, compound_size_limit, minor_version
+        )
 
     # -- path handling -----------------------------------------------------
 

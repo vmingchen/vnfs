@@ -60,6 +60,12 @@ impl Compound {
         self.ops.insert(0, op);
     }
 
+    /// Number of operations currently in the request (before Session adds
+    /// the mandatory SEQUENCE operation).
+    pub(crate) fn op_count(&self) -> usize {
+        self.ops.len()
+    }
+
     fn keep(&mut self, bytes: &[u8]) -> (*mut c_char, u32) {
         let buf = bytes.to_vec();
         let ptr = buf.as_ptr() as *mut c_char;
@@ -780,7 +786,15 @@ impl CompoundRes {
 // Compound statistics (diagnostics)
 // ---------------------------------------------------------------------------
 
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+thread_local! {
+    /// Reused only when VNFS_STATS requests exact encoded byte counts.
+    static STATS_XDR_BUFFER: std::cell::RefCell<Vec<u8>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
 
 /// Counters for the compounds sent: total count, total operations (including
 /// the implicit SEQUENCE), and total encoded request bytes.
@@ -796,7 +810,10 @@ fn compound_stats_record(args: &COMPOUND4args) {
     COMPOUND_COUNT.fetch_add(1, Ordering::Relaxed);
     COMPOUND_OPS.fetch_add(ops, Ordering::Relaxed);
     COMPOUND_MAX_OPS.fetch_max(ops, Ordering::Relaxed);
-    if std::env::var("VNFS_DUMP").as_deref() == Ok("1") && ops > 100 {
+    static DUMP_ENABLED: OnceLock<bool> = OnceLock::new();
+    let dump_enabled =
+        *DUMP_ENABLED.get_or_init(|| std::env::var("VNFS_DUMP").as_deref() == Ok("1"));
+    if dump_enabled && ops > 100 {
         let mut buf = String::new();
         let n = args.argarray.argarray_val;
         for i in 0..args.argarray.argarray_len as usize {
@@ -809,21 +826,46 @@ fn compound_stats_record(args: &COMPOUND4args) {
         }
         eprintln!("[dump] compound ops={}: {}", ops, buf);
     }
-    // Measure the encoded request size with a scratch encode.
-    let mut xdr: XDR = unsafe { std::mem::zeroed() };
-    let mut buf = vec![0u8; 4 * 1024 * 1024];
-    unsafe {
-        xdrmem_ncreate(
-            &mut xdr,
-            buf.as_mut_ptr() as *mut c_char,
-            buf.len() as u32,
-            xdr_op_XDR_ENCODE,
-        );
-        if xdr_wrap_COMPOUND4args(&mut xdr, args as *const _ as *mut _) {
-            let len = xdr.x_data.offset_from(xdr.x_v.vio_base) as u64;
-            COMPOUND_BYTES.fetch_add(len, Ordering::Relaxed);
-        }
+    // Exact size accounting requires a second XDR encode. Keep that expensive
+    // diagnostic out of the normal I/O path; VNFS_STATS is an opt-in process
+    // setting and must be present before the first compound is sent.
+    static BYTE_STATS_ENABLED: OnceLock<bool> = OnceLock::new();
+    let byte_stats_enabled =
+        *BYTE_STATS_ENABLED.get_or_init(|| std::env::var("VNFS_STATS").as_deref() == Ok("1"));
+    if !byte_stats_enabled {
+        return;
     }
+    STATS_XDR_BUFFER.with(|scratch| {
+        let mut buf = scratch.borrow_mut();
+        if buf.is_empty() {
+            buf.resize(4 * 1024 * 1024, 0);
+        }
+        loop {
+            let mut xdr: XDR = unsafe { std::mem::zeroed() };
+            let encoded = unsafe {
+                xdrmem_ncreate(
+                    &mut xdr,
+                    buf.as_mut_ptr() as *mut c_char,
+                    buf.len() as u32,
+                    xdr_op_XDR_ENCODE,
+                );
+                xdr_wrap_COMPOUND4args(&mut xdr, args as *const _ as *mut _)
+            };
+            if encoded {
+                let len = unsafe { xdr.x_data.offset_from(xdr.x_v.vio_base) as u64 };
+                COMPOUND_BYTES.fetch_add(len, Ordering::Relaxed);
+                break;
+            }
+            // A diagnostic must not grow without bound if malformed input
+            // reaches the encoder. This is well above the configured request
+            // limit and only allocates when byte statistics are enabled.
+            if buf.len() >= 256 * 1024 * 1024 {
+                break;
+            }
+            let new_len = buf.len() * 2;
+            buf.resize(new_len, 0);
+        }
+    });
 }
 
 /// Aggregate compound statistics, resetting the counters.

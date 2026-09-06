@@ -2,7 +2,7 @@
 //! machinery, mirroring the call pattern used by Ganesha's nfs_rpc_callback.c.
 
 use std::os::raw::{c_char, c_int, c_void};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 
 use libntirpc_sys::*;
 
@@ -12,10 +12,13 @@ pub const NFS4_PROGRAM: rpcprog_t = 100003;
 pub const NFS_V4: rpcvers_t = 4;
 pub const NFSPROC4_COMPOUND: rpcproc_t = 1;
 
-static SVC_INITED: AtomicBool = AtomicBool::new(false);
+static SVC_INIT: OnceLock<Result<(), String>> = OnceLock::new();
 
 unsafe extern "C" fn svc_req_alloc(xprt: *mut SVCXPRT, xdrs: *mut XDR) -> *mut svc_req {
     let req = unsafe { libc::calloc(1, std::mem::size_of::<svc_req>()) } as *mut svc_req;
+    if req.is_null() {
+        return std::ptr::null_mut();
+    }
     unsafe {
         (*req).rq_xprt = xprt;
         (*req).rq_xdrs = xdrs;
@@ -30,18 +33,22 @@ unsafe extern "C" fn svc_req_free(req: *mut svc_req, _stat: xprt_stat) {
 /// Initialize the ntirpc service machinery once.  Client replies are processed
 /// by the same epoll/request machinery as server calls, so the request
 /// alloc/free callbacks are required on the client too.
-pub fn svc_init_once() {
-    if SVC_INITED.load(Ordering::SeqCst) {
-        return;
-    }
-    unsafe {
+pub fn svc_init_once() -> RpcResult<()> {
+    let result = SVC_INIT.get_or_init(|| unsafe {
         let mut params: svc_init_params = std::mem::zeroed();
         params.flags = (SVC_INIT_EPOLL | SVC_INIT_NOREG_XPRTS) as u_long;
         params.max_events = 16;
         params.alloc_cb = Some(svc_req_alloc);
         params.free_cb = Some(svc_req_free);
-        svc_init(&mut params);
-        SVC_INITED.store(true, Ordering::SeqCst);
+        if svc_init(&mut params) {
+            Ok(())
+        } else {
+            Err("libntirpc svc_init failed".to_string())
+        }
+    });
+    match result {
+        Ok(()) => Ok(()),
+        Err(message) => Err(RpcError::transport(message.clone())),
     }
 }
 
@@ -56,7 +63,7 @@ unsafe impl Send for RpcClient {}
 impl RpcClient {
     /// Connect to `host` for the NFSv4 program using AUTH_SYS (uid 0).
     pub fn connect(host: &str) -> RpcResult<RpcClient> {
-        svc_init_once();
+        svc_init_once()?;
 
         let host = std::ffi::CString::new(host).map_err(|e| RpcError::transport(e.to_string()))?;
         let nettype = std::ffi::CString::new("tcp").unwrap();
@@ -92,6 +99,16 @@ impl RpcClient {
         }
 
         let auth = unsafe { authunix_ncreate_default() };
+        if auth.is_null() {
+            unsafe {
+                if let Some(destroy) = (*(*clnt).cl_ops).cl_destroy {
+                    destroy(clnt);
+                }
+            }
+            return Err(RpcError::transport(
+                "authunix_ncreate_default returned NULL",
+            ));
+        }
         Ok(RpcClient { clnt, auth })
     }
 
@@ -187,6 +204,12 @@ impl Drop for RpcClient {
             let ops = (*(*self.clnt).cl_ops).cl_destroy;
             if let Some(d) = ops {
                 d(self.clnt);
+            }
+            if !self.auth.is_null()
+                && !(*self.auth).ah_ops.is_null()
+                && let Some(destroy) = (*(*self.auth).ah_ops).ah_destroy
+            {
+                destroy(self.auth);
             }
         }
     }

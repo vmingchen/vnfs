@@ -670,12 +670,27 @@ pub struct VfAttrs {
 // The trait
 // ---------------------------------------------------------------------------
 
+/// Capability bit returned by [`VecFs::capabilities`] when the backend will
+/// currently attempt an NFSv4.2 server-side COPY operation.
+pub const VF_CAP_SERVER_COPY: u64 = 1 << 0;
+
 /// A vectorized filesystem: many small operations coalesced into as few
 /// round trips as the backend supports.
 ///
 /// `VfFile` references files either by descriptor (an open file) or by path
 /// (absolute, or relative to the client's current working directory).
 pub trait VecFs {
+    /// Negotiated NFS minor version, or `None` for non-NFS backends.
+    fn nfs_minorversion(&self) -> Option<u32> {
+        None
+    }
+
+    /// Backend capability bits. Capabilities may change after a server
+    /// rejects an optional operation and the client installs a fallback.
+    fn capabilities(&self) -> u64 {
+        0
+    }
+
     // -- required -----------------------------------------------------------
 
     /// Return the root-relative form of `path` (resolving it against the

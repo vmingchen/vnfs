@@ -36,6 +36,10 @@ int main(int argc, char **argv)
         fprintf(stderr, "dummy_open failed: %d\n", rc);
         return 1;
     }
+    if (vfsi_nfs_minorversion(fs) != 0 || vfsi_capabilities(fs) != 0) {
+        fprintf(stderr, "dummy backend reported NFS capabilities\n");
+        return 1;
+    }
 
     rc = vfsi_mkdir(fs, "/d", 0755, 1);
     if (rc != 0) {
@@ -58,7 +62,13 @@ int main(int argc, char **argv)
     if (rc != 0)
         return 1;
 
-    fd = vfsi_open(fs, "/d/f.bin", O_RDONLY, 0);
+    rc = vfsi_copy(fs, "/d/f.bin", 0, "/d/copied.bin", 0, 0, true);
+    if (rc != 0) {
+        fprintf(stderr, "copy failed: %d\n", rc);
+        return 1;
+    }
+
+    fd = vfsi_open(fs, "/d/copied.bin", O_RDONLY, 0);
     if (fd < 0) {
         fprintf(stderr, "reopen failed: %d\n", fd);
         return 1;
@@ -71,6 +81,8 @@ int main(int argc, char **argv)
         return 1;
     }
     vfsi_close(fs, fd);
+    if (vfsi_remove(fs, "/d/copied.bin") != 0)
+        return 1;
 
     char *seen = NULL;
     rc = vfsi_listdir(fs, "/d", list_one, &seen);

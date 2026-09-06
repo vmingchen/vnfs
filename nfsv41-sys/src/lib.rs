@@ -7,6 +7,9 @@
 #![allow(improper_ctypes_definitions)]
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::ptr_offset_with_cast)]
+// bindgen spells C size_t-compatible parameters as c_ulong on this target;
+// Rust 1.98's new runtime-symbol lint cannot see that ABI equivalence.
+#![allow(suspicious_runtime_symbol_definitions)]
 
 // The codec wrappers in wrapper.c (compiled into this crate's rlib)
 // reference libntirpc.so symbols directly, so any binary that uses this

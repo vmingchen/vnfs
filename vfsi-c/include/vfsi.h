@@ -13,6 +13,11 @@
 #define VFSI_ABI_VERSION 2
 
 /**
+ * The backend will currently attempt NFSv4.2 server-side COPY.
+ */
+#define VFSI_CAP_SERVER_COPY (1 << 0)
+
+/**
  * Opaque filesystem handle owned by C.
  */
 typedef struct vfsi_fs vfsi_fs;
@@ -64,6 +69,17 @@ extern "C" {
 uint32_t vfsi_abi_version(void);
 
 /**
+ * Return the negotiated NFS minor version, or zero for a non-NFS/invalid
+ * handle.
+ */
+uint32_t vfsi_nfs_minorversion(const struct vfsi_fs *fs);
+
+/**
+ * Return the current `VFSI_CAP_*` capability bitset.
+ */
+uint64_t vfsi_capabilities(const struct vfsi_fs *fs);
+
+/**
  * Create a local-directory vfsi backend rooted at `root`.
  */
 int vfsi_dummy_open(const char *root, struct vfsi_fs **out);
@@ -80,6 +96,11 @@ int vfsi_dummy_open_mount(const char *root, const char *mountpoint, struct vfsi_
  * Connect to an NFSv4.1 server at `host` and open the export root.
  */
 int vfsi_nfs_open(const char *host, struct vfsi_fs **out);
+
+/**
+ * Connect using an explicit supported NFS minor version (1 or 2).
+ */
+int vfsi_nfs_open_minor(const char *host, uint32_t minorversion, struct vfsi_fs **out);
 
 /**
  * Connect to an NFSv4.1 server and treat `mountpoint` (a local kernel mount
@@ -147,6 +168,19 @@ int vfsi_remove(struct vfsi_fs *fs, const char *path);
  * Rename `oldpath` to `newpath`.
  */
 int vfsi_rename(struct vfsi_fs *fs, const char *oldpath, const char *newpath);
+
+/**
+ * Copy one extent. When `to_eof` is true, `length` is ignored and copying
+ * continues to the source EOF. NFSv4.2 COPY is used when available and the
+ * backend falls back to client-side read/write otherwise.
+ */
+int vfsi_copy(struct vfsi_fs *fs,
+              const char *src,
+              uint64_t src_offset,
+              const char *dst,
+              uint64_t dst_offset,
+              uint64_t length,
+              bool to_eof);
 
 /**
  * List `dir` and call `cb` for each entry. Returning `false` from `cb`

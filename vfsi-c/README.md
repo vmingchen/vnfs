@@ -26,6 +26,12 @@ vfsi_nfs_open_mount_export("server", "/exports/repos", "/mnt/repos", &fs);
 The older `vfsi_nfs_open_mount()` remains available and maps the local
 mountpoint to the NFSv4 pseudo-root (`/`).
 
+`vfsi_nfs_open()` negotiates NFSv4.2 and falls back to v4.1.
+`vfsi_nfs_open_minor()` pins either minor version. Use
+`vfsi_nfs_minorversion()` and `vfsi_capabilities()` to inspect the resulting
+connection; `vfsi_copy()` uses server COPY when advertised and otherwise
+falls back to client-side copying.
+
 Example C smoke test:
 
 ```sh

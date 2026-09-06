@@ -12,6 +12,7 @@
 // bindgen-generated bitfield helpers trip on.
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::ptr_offset_with_cast)]
+#![allow(suspicious_runtime_symbol_definitions)]
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 pub type rpcblist = rp__list;
