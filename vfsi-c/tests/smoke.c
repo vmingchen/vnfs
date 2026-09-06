@@ -36,8 +36,9 @@ int main(int argc, char **argv)
         fprintf(stderr, "dummy_open failed: %d\n", rc);
         return 1;
     }
-    if (vfsi_nfs_minorversion(fs) != 0 || vfsi_capabilities(fs) != 0) {
-        fprintf(stderr, "dummy backend reported NFS capabilities\n");
+    if (vfsi_nfs_minorversion(fs) != 0 || vfsi_smb_dialect(fs) != 0 ||
+        vfsi_capabilities(fs) != 0) {
+        fprintf(stderr, "dummy backend reported network capabilities\n");
         return 1;
     }
 

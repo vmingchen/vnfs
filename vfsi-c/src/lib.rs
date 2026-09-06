@@ -16,11 +16,12 @@ use std::sync::{Mutex, MutexGuard};
 
 use vnfs::dummy_vecfs::DummyVecFs;
 use vnfs::nfs::NfsVecFs;
+use vnfs::smb::SmbVecFs;
 use vnfs::vecfs::{AttrMask, ExtentPair, VfAttrs, VfError, VfFile, ERR_EBADF, ERR_NOENT};
 
 /// ABI version implemented by this library.
 pub const VFSI_ABI_VERSION: u32 = 2;
-/// The backend will currently attempt NFSv4.2 server-side COPY.
+/// The backend will currently attempt server-side COPY.
 pub const VFSI_CAP_SERVER_COPY: u64 = 1 << 0;
 
 macro_rules! ffi_guard {
@@ -138,6 +139,22 @@ pub unsafe extern "C" fn vfsi_nfs_minorversion(fs: *const vfsi_fs) -> u32 {
     })
 }
 
+/// Return the negotiated SMB dialect revision (`0x0202` through `0x0311`),
+/// or zero for a non-SMB/invalid handle.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_smb_dialect(fs: *const vfsi_fs) -> u16 {
+    ffi_guard!(0, {
+        let Some(fs) = fs.as_ref() else {
+            return 0;
+        };
+        fs.fs
+            .lock()
+            .ok()
+            .and_then(|backend| backend.smb_dialect())
+            .unwrap_or(0)
+    })
+}
+
 /// Return the current `VFSI_CAP_*` capability bitset.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_capabilities(fs: *const vfsi_fs) -> u64 {
@@ -190,6 +207,18 @@ fn cstr_path(path: *const c_char) -> Option<PathBuf> {
 
 fn cstr_from_os(bytes: &[u8]) -> Option<CString> {
     CString::new(bytes).ok()
+}
+
+fn cstr_utf8(value: *const c_char) -> Option<String> {
+    if value.is_null() {
+        return None;
+    }
+    // SAFETY: C callers must pass a NUL-terminated string which remains valid
+    // for the duration of the call.
+    unsafe { CStr::from_ptr(value) }
+        .to_str()
+        .ok()
+        .map(str::to_owned)
 }
 
 fn path_for(fs: &vfsi_fs, path: &Path) -> Option<PathBuf> {
@@ -360,6 +389,98 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount_export(
                 0
             }
             Err(code) => code,
+        }
+    })
+}
+
+/// Connect to an SMB2/3 share. `server` may omit port 445; empty username and
+/// password strings request guest access. Paths are rooted at the share root.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_smb_open(
+    server: *const c_char,
+    share: *const c_char,
+    username: *const c_char,
+    password: *const c_char,
+    domain: *const c_char,
+    out: *mut *mut vfsi_fs,
+) -> c_int {
+    ffi_guard!(libc::EIO, {
+        if out.is_null() {
+            return libc::EINVAL;
+        }
+        let (Some(server), Some(share), Some(username), Some(password), Some(domain)) = (
+            cstr_utf8(server),
+            cstr_utf8(share),
+            cstr_utf8(username),
+            cstr_utf8(password),
+            cstr_utf8(domain),
+        ) else {
+            return libc::EINVAL;
+        };
+        match SmbVecFs::connect(&server, &share, &username, &password, &domain) {
+            Ok(backend) => {
+                *out = make_fs(
+                    Box::new(backend) as Box<dyn vnfs::VecFs>,
+                    PathBuf::from("/"),
+                    PathBuf::from("/"),
+                );
+                0
+            }
+            Err(error) => vf_code(&error),
+        }
+    })
+}
+
+/// Connect to an SMB2/3 share and map a kernel-visible `mountpoint` onto
+/// `share_root` within that share. Both paths must be absolute and may not
+/// contain parent-directory components.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_smb_open_mount(
+    server: *const c_char,
+    share: *const c_char,
+    username: *const c_char,
+    password: *const c_char,
+    domain: *const c_char,
+    share_root: *const c_char,
+    mountpoint: *const c_char,
+    out: *mut *mut vfsi_fs,
+) -> c_int {
+    ffi_guard!(libc::EIO, {
+        if out.is_null() {
+            return libc::EINVAL;
+        }
+        let (Some(server), Some(share), Some(username), Some(password), Some(domain)) = (
+            cstr_utf8(server),
+            cstr_utf8(share),
+            cstr_utf8(username),
+            cstr_utf8(password),
+            cstr_utf8(domain),
+        ) else {
+            return libc::EINVAL;
+        };
+        let (Some(share_root), Some(mountpoint)) = (cstr_path(share_root), cstr_path(mountpoint))
+        else {
+            return libc::EINVAL;
+        };
+        if !share_root.is_absolute()
+            || !mountpoint.is_absolute()
+            || share_root
+                .components()
+                .chain(mountpoint.components())
+                .any(|component| matches!(component, Component::ParentDir))
+        {
+            return libc::EINVAL;
+        }
+        match SmbVecFs::connect(&server, &share, &username, &password, &domain) {
+            Ok(backend) => {
+                *out = make_fs(
+                    Box::new(backend) as Box<dyn vnfs::VecFs>,
+                    mountpoint,
+                    share_root,
+                );
+                0
+            }
+            Err(error) => vf_code(&error),
         }
     })
 }
@@ -650,8 +771,8 @@ pub unsafe extern "C" fn vfsi_rename(
 }
 
 /// Copy one extent. When `to_eof` is true, `length` is ignored and copying
-/// continues to the source EOF. NFSv4.2 COPY is used when available and the
-/// backend falls back to client-side read/write otherwise.
+/// continues to the source EOF. The backend uses NFSv4.2 COPY or SMB
+/// server-side copy when available and falls back to client-side I/O.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_copy(
     fs: *mut vfsi_fs,
@@ -881,6 +1002,39 @@ mod tests {
                 .into_owned(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn smb_constructor_rejects_invalid_arguments_before_connecting() {
+        let mut fs: *mut vfsi_fs = std::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                vfsi_smb_open(
+                    std::ptr::null(),
+                    c"share".as_ptr(),
+                    c"".as_ptr(),
+                    c"".as_ptr(),
+                    c"".as_ptr(),
+                    &mut fs,
+                )
+            },
+            libc::EINVAL
+        );
+        let invalid_utf8 = [0xff_u8, 0];
+        assert_eq!(
+            unsafe {
+                vfsi_smb_open(
+                    invalid_utf8.as_ptr().cast(),
+                    c"share".as_ptr(),
+                    c"".as_ptr(),
+                    c"".as_ptr(),
+                    c"".as_ptr(),
+                    &mut fs,
+                )
+            },
+            libc::EINVAL
+        );
+        assert!(fs.is_null());
     }
 
     #[test]

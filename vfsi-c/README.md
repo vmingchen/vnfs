@@ -32,6 +32,23 @@ mountpoint to the NFSv4 pseudo-root (`/`).
 connection; `vfsi_copy()` uses server COPY when advertised and otherwise
 falls back to client-side copying.
 
+For a Samba or other SMB2/3 share, use:
+
+```c
+vfsi_smb_open("server", "share", "username", "password", "domain", &fs);
+```
+
+The username, password, and domain may be empty strings for guest access.
+`vfsi_smb_dialect()` reports the negotiated dialect (`0x0202` through
+`0x0311`). Small path I/O and metadata operations use related SMB compounds;
+large transfers honor the negotiated read/write limits. `vfsi_copy()` uses
+SMB server-side copy when supported and permanently switches that connection
+to the client-side fallback if the server rejects the operation.
+
+SMB paths must be valid UTF-8. Unix permission modes and symlink/hard-link
+operations require SMB POSIX extensions, which this backend does not yet
+expose; chmod and link operations therefore report `ENOTSUP`.
+
 Example C smoke test:
 
 ```sh

@@ -13,7 +13,7 @@
 #define VFSI_ABI_VERSION 2
 
 /**
- * The backend will currently attempt NFSv4.2 server-side COPY.
+ * The backend will currently attempt server-side COPY.
  */
 #define VFSI_CAP_SERVER_COPY (1 << 0)
 
@@ -75,6 +75,12 @@ uint32_t vfsi_abi_version(void);
 uint32_t vfsi_nfs_minorversion(const struct vfsi_fs *fs);
 
 /**
+ * Return the negotiated SMB dialect revision (`0x0202` through `0x0311`),
+ * or zero for a non-SMB/invalid handle.
+ */
+uint16_t vfsi_smb_dialect(const struct vfsi_fs *fs);
+
+/**
  * Return the current `VFSI_CAP_*` capability bitset.
  */
 uint64_t vfsi_capabilities(const struct vfsi_fs *fs);
@@ -116,6 +122,31 @@ int vfsi_nfs_open_mount_export(const char *host,
                                const char *export_root,
                                const char *mountpoint,
                                struct vfsi_fs **out);
+
+/**
+ * Connect to an SMB2/3 share. `server` may omit port 445; empty username and
+ * password strings request guest access. Paths are rooted at the share root.
+ */
+int vfsi_smb_open(const char *server,
+                  const char *share,
+                  const char *username,
+                  const char *password,
+                  const char *domain,
+                  struct vfsi_fs **out);
+
+/**
+ * Connect to an SMB2/3 share and map a kernel-visible `mountpoint` onto
+ * `share_root` within that share. Both paths must be absolute and may not
+ * contain parent-directory components.
+ */
+int vfsi_smb_open_mount(const char *server,
+                        const char *share,
+                        const char *username,
+                        const char *password,
+                        const char *domain,
+                        const char *share_root,
+                        const char *mountpoint,
+                        struct vfsi_fs **out);
 
 /**
  * Destroy a filesystem handle returned by one of the `vfsi_*_open*`
@@ -171,8 +202,8 @@ int vfsi_rename(struct vfsi_fs *fs, const char *oldpath, const char *newpath);
 
 /**
  * Copy one extent. When `to_eof` is true, `length` is ignored and copying
- * continues to the source EOF. NFSv4.2 COPY is used when available and the
- * backend falls back to client-side read/write otherwise.
+ * continues to the source EOF. The backend uses NFSv4.2 COPY or SMB
+ * server-side copy when available and falls back to client-side I/O.
  */
 int vfsi_copy(struct vfsi_fs *fs,
               const char *src,

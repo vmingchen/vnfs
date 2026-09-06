@@ -22,6 +22,11 @@ Connections negotiate NFSv4.2 first and fall back to NFSv4.1 when necessary.
 Optional server-side COPY is capability-aware and automatically falls back to
 client-side reads and writes when a server does not implement it.
 
+The same [`VecFs`](vnfs/src/vecfs.rs) interface also has an SMB2/3 backend for
+Samba and other modern SMB servers. It negotiates SMB 2.0.2 through SMB 3.1.1,
+uses related SMB compounds for small path operations, honors SMB credit and
+I/O limits, and uses server-side copy with a client-side fallback.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or

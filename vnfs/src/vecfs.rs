@@ -671,7 +671,8 @@ pub struct VfAttrs {
 // ---------------------------------------------------------------------------
 
 /// Capability bit returned by [`VecFs::capabilities`] when the backend will
-/// currently attempt an NFSv4.2 server-side COPY operation.
+/// currently attempt a server-side copy operation (NFSv4.2 COPY or SMB
+/// FSCTL_SRV_COPYCHUNK).
 pub const VF_CAP_SERVER_COPY: u64 = 1 << 0;
 
 /// A vectorized filesystem: many small operations coalesced into as few
@@ -682,6 +683,12 @@ pub const VF_CAP_SERVER_COPY: u64 = 1 << 0;
 pub trait VecFs {
     /// Negotiated NFS minor version, or `None` for non-NFS backends.
     fn nfs_minorversion(&self) -> Option<u32> {
+        None
+    }
+
+    /// Negotiated SMB dialect revision (for example `0x0311` for SMB 3.1.1),
+    /// or `None` for non-SMB backends.
+    fn smb_dialect(&self) -> Option<u16> {
         None
     }
 
