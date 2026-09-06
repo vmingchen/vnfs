@@ -1148,6 +1148,24 @@ fn read_allv_is_no_stat_whole_file_read() {
 }
 
 #[test]
+fn read_allv_many_files_respects_aggregate_reply_budget() {
+    let dir = setup_dir("read_all_many");
+    let mut c = client();
+    let data = vec![b'x'; 16 * 1024];
+    let mut paths = Vec::new();
+    for i in 0..8 {
+        let p = format!("{}/f{}.bin", dir, i);
+        write_file(&mut c, Path::new(&p), &data);
+        paths.push(p);
+    }
+    let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_path(p)).collect();
+    c.set_max_compound_bytes(256 * 1024);
+    let out = c.read_allv(&files).expect("read_allv many files");
+    assert_eq!(out.len(), files.len());
+    assert!(out.iter().all(|contents| contents == &data));
+}
+
+#[test]
 fn mkdirv_batches_parent_resolution() {
     let dir = setup_dir("mkdirv_batch");
     let mut c = client();
@@ -1453,9 +1471,37 @@ fn dupv_copies_extent() {
 
     // ExtentPair length None copies to end-of-file.
     let whole = format!("{}/whole.bin", dir);
-    c.copyv(&[ExtentPair::new(&src, 2, &whole, 0, None)])
+    let mut c42 = NfsVecFs::connect_minor("127.0.0.1", 2).expect("connect with NFSv4.2");
+    c42.copyv(&[ExtentPair::new(&src, 2, &whole, 0, None)])
         .expect("copyv whole file");
-    assert_eq!(read_all(&mut c, Path::new(&whole)), b"cdefghij");
+    assert_eq!(read_all(&mut c42, Path::new(&whole)), b"cdefghij");
+}
+
+#[test]
+fn copyv_batches_nfs42_server_copies() {
+    let dir = setup_dir("copyv42");
+    let mut c = NfsVecFs::connect_minor("127.0.0.1", 2).expect("connect with NFSv4.2");
+    let mut pairs = Vec::new();
+    for i in 0..8 {
+        let src = format!("{}/src{}", dir, i);
+        let dst = format!("{}/dst{}", dir, i);
+        write_file(&mut c, Path::new(&src), format!("payload-{i}").as_bytes());
+        pairs.push(ExtentPair::new(&src, 0, &dst, 0, None));
+    }
+    let _ = vnfs::compound::compound_stats();
+    c.copyv(&pairs).expect("batched NFSv4.2 COPY");
+    let compounds = vnfs::compound::compound_stats().0;
+    assert!(
+        compounds < (pairs.len() * 4) as u64,
+        "copyv did not amortize RPCs: {compounds} compounds"
+    );
+    for i in 0..8 {
+        let dst = format!("{}/dst{}", dir, i);
+        assert_eq!(
+            read_all(&mut c, Path::new(&dst)),
+            format!("payload-{i}").into_bytes()
+        );
+    }
 }
 
 #[test]

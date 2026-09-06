@@ -161,6 +161,7 @@ extern "C" {
 		NFS4ERR_OFFLOAD_DENIED = 10091,
 		NFS4ERR_WRONG_LFS = 10092,
 		NFS4ERR_BADLABEL = 10093,
+		NFS4ERR_OFFLOAD_NO_REQS = 10094,
 
 		/* NFS End-to-end Data Integrity */
 		NFS4ERR_PROT_NOTSUPP = 10200,
@@ -2547,6 +2548,11 @@ extern "C" {
 		};
 	} netloc4;
 
+	typedef struct {
+		bool_t cr_consecutive;
+		bool_t cr_synchronous;
+	} copy_requirements4;
+
 	enum data_content4 {
 		NFS4_CONTENT_DATA = 0,
 		NFS4_CONTENT_APP_DATA_HOLE = 1,
@@ -2691,18 +2697,24 @@ extern "C" {
 		offset4         ca_src_offset;
 		offset4         ca_dst_offset;
 		length4         ca_count;
-		struct {
-			u_int ca_netloc_len;
-			netloc4* ca_netlocs;
-		};
+		bool_t          ca_consecutive;
+		bool_t          ca_synchronous;
+		u_int           ca_source_server_len;
+		netloc4        *ca_source_server_val;
 	};
 	typedef struct COPY4args COPY4args;
+
+	typedef struct {
+		write_response4 cr_response;
+		bool_t cr_consecutive;
+		bool_t cr_synchronous;
+	} COPY4resok;
 
 	struct COPY4res {
 		nfsstat4 cr_status;
 		union {
-			write_response4 cr_resok4;
-			length4         cr_bytes_copied;
+			COPY4resok cr_resok4;
+			copy_requirements4 cr_requirements;
 		} COPY4res_u;
 	};
 	typedef struct COPY4res COPY4res;
@@ -7558,8 +7570,11 @@ extern "C" {
 
 		if (!xdr_count4(xdrs, &objp->wr_ids))
 			return false;
-		if (!xdr_stateid4(xdrs, &objp->wr_callback_id))
+		if (objp->wr_ids > 1)
 			return false;
+		if (objp->wr_ids == 1)
+			if (!xdr_stateid4(xdrs, &objp->wr_callback_id))
+				return false;
 		if (!xdr_length4(xdrs, &objp->wr_count))
 			return false;
 		if (!xdr_stable_how4(xdrs, &objp->wr_committed))
@@ -7959,6 +7974,27 @@ extern "C" {
 		return true;
 	}
 
+	static inline bool xdr_copy_requirements4(XDR *xdrs,
+					       copy_requirements4 *objp)
+	{
+		if (!inline_xdr_bool(xdrs, &objp->cr_consecutive))
+			return false;
+		if (!inline_xdr_bool(xdrs, &objp->cr_synchronous))
+			return false;
+		return true;
+	}
+
+	static inline bool xdr_COPY4resok(XDR *xdrs, COPY4resok *objp)
+	{
+		if (!xdr_write_response4(xdrs, &objp->cr_response))
+			return false;
+		if (!inline_xdr_bool(xdrs, &objp->cr_consecutive))
+			return false;
+		if (!inline_xdr_bool(xdrs, &objp->cr_synchronous))
+			return false;
+		return true;
+	}
+
 	static inline bool xdr_COPY4args(XDR *xdrs, COPY4args *objp)
 	{
 		if (!xdr_stateid4(xdrs, &objp->ca_src_stateid))
@@ -7971,8 +8007,12 @@ extern "C" {
 			return false;
 		if (!xdr_length4(xdrs, &objp->ca_count))
 			return false;
-		if (!xdr_array(xdrs, (char **)&objp->ca_netlocs,
-			       (u_int *)&objp->ca_netloc_len, XDR_ARRAY_MAXLEN,
+		if (!inline_xdr_bool(xdrs, &objp->ca_consecutive))
+			return false;
+		if (!inline_xdr_bool(xdrs, &objp->ca_synchronous))
+			return false;
+		if (!xdr_array(xdrs, (char **)&objp->ca_source_server_val,
+			       (u_int *)&objp->ca_source_server_len, XDR_ARRAY_MAXLEN,
 			       sizeof(netloc4), (xdrproc_t)xdr_netloc4))
 			return false;
 		return true;
@@ -7984,8 +8024,12 @@ extern "C" {
 			return false;
 		switch (objp->cr_status) {
 		case NFS4_OK:
-			if (!xdr_write_response4(xdrs,
-						 &objp->COPY4res_u.cr_resok4))
+			if (!xdr_COPY4resok(xdrs, &objp->COPY4res_u.cr_resok4))
+				return false;
+			break;
+		case NFS4ERR_OFFLOAD_NO_REQS:
+			if (!xdr_copy_requirements4(
+				    xdrs, &objp->COPY4res_u.cr_requirements))
 				return false;
 			break;
 		default:

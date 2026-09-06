@@ -425,7 +425,13 @@ impl NfsVecFs {
 
     /// Connect to the NFS server at `host` and resolve the export root.
     pub fn connect(host: &str) -> VfResult<NfsVecFs> {
-        let nfs = NfsClient::connect(host).map_err(|e| VfError::from_rpc(e, 0))?;
+        Self::connect_minor(host, 1)
+    }
+
+    /// Connect using an explicit NFS minor version (2 enables server COPY).
+    pub fn connect_minor(host: &str, minorversion: u32) -> VfResult<NfsVecFs> {
+        let nfs =
+            NfsClient::connect_minor(host, minorversion).map_err(|e| VfError::from_rpc(e, 0))?;
         Ok(NfsVecFs {
             nfs,
             cwd: PathBuf::new(),
@@ -1404,6 +1410,75 @@ impl NfsVecFs {
         }
         result
     }
+
+    fn copy_extents_server_side(&mut self, pairs: &[ExtentPair]) -> VfRes {
+        let src_files: Vec<VfFile> = pairs
+            .iter()
+            .map(|p| VfFile::from_os_path(&self.abs_path(&p.src_path)))
+            .collect();
+        let dst_files: Vec<VfFile> = pairs
+            .iter()
+            .map(|p| VfFile::from_os_path(&self.abs_path(&p.dst_path)))
+            .collect();
+        let src_refs: Vec<&VfFile> = src_files.iter().collect();
+        let dst_refs: Vec<&VfFile> = dst_files.iter().collect();
+        let no_create = vec![false; pairs.len()];
+        let create = vec![true; pairs.len()];
+        let no_truncate = vec![false; pairs.len()];
+
+        let src_tmp = self.open_path_batch(&src_refs, &no_create, false, &no_truncate)?;
+        let dst_tmp = match self.open_path_batch(&dst_refs, &create, true, &no_truncate) {
+            Ok(tmp) => tmp,
+            Err(e) => {
+                self.close_tmp(&src_tmp);
+                return Err(e);
+            }
+        };
+
+        let result = (|| {
+            let mut copies = Vec::with_capacity(pairs.len());
+            for (i, p) in pairs.iter().enumerate() {
+                let src = self
+                    .open_files
+                    .get(&src_tmp[i].expect("path source was opened"))
+                    .expect("temporary source descriptor");
+                let dst = self
+                    .open_files
+                    .get(&dst_tmp[i].expect("path destination was opened"))
+                    .expect("temporary destination descriptor");
+                copies.push(crate::client::CopyOp {
+                    src_fh: src.fh.clone(),
+                    src_stateid: src.stateid,
+                    dst_fh: dst.fh.clone(),
+                    dst_stateid: dst.stateid,
+                    src_offset: p.src_offset,
+                    dst_offset: p.dst_offset,
+                    count: p.length.unwrap_or(0),
+                });
+            }
+            let counts = self
+                .nfs
+                .copy_many(&copies)
+                .map_err(VfError::from_rpc_indexed)?;
+            let mut attrs = Vec::with_capacity(pairs.len());
+            for (i, (&n, p)) in counts.iter().zip(pairs).enumerate() {
+                if p.length.is_some_and(|expected| n != expected) {
+                    return Err(VfError::failure(i, nfsstat4_NFS4ERR_IO));
+                }
+                attrs.push(crate::client::SetattrOp {
+                    fh: copies[i].dst_fh.clone(),
+                    mode: None,
+                    size: Some(p.dst_offset + n),
+                });
+            }
+            self.nfs
+                .setattr_many(&attrs)
+                .map_err(VfError::from_rpc_indexed)
+        })();
+        self.close_tmp(&src_tmp);
+        self.close_tmp(&dst_tmp);
+        result
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2052,7 +2127,7 @@ impl VecFs for NfsVecFs {
             // whole batch packs into one compound when it fits.
             let window = (compound_budget / active.len())
                 .saturating_sub(128)
-                .clamp(64 * 1024, max_window)
+                .min(max_window)
                 .max(1);
             let reads: Vec<ReadOp> = active
                 .iter()
@@ -2667,6 +2742,19 @@ impl VecFs for NfsVecFs {
                 self.copy_extent(&self.abs_path(&p.src_path), &dst, p)
                     .map_err(|e| e.with_index(i))?;
             }
+        }
+        Ok(())
+    }
+
+    fn copyv(&mut self, pairs: &[ExtentPair]) -> VfRes {
+        // Keep the number of simultaneously open source/destination states
+        // bounded while still amortizing OPEN, COPY, SETATTR, and CLOSE.
+        const FILES_PER_COPY_BATCH: usize = 8;
+        for (base, batch) in pairs.chunks(FILES_PER_COPY_BATCH).enumerate() {
+            self.copy_extents_server_side(batch).map_err(|e| {
+                let index = base * FILES_PER_COPY_BATCH + e.index();
+                e.with_index(index)
+            })?;
         }
         Ok(())
     }

@@ -291,6 +291,32 @@ impl Compound {
         self.push(op);
     }
 
+    /// NFSv4.2 COPY. The saved filehandle is the source and the current
+    /// filehandle is the destination.
+    pub fn copy(
+        &mut self,
+        src_stateid: &stateid4,
+        dst_stateid: &stateid4,
+        src_offset: u64,
+        dst_offset: u64,
+        count: u64,
+    ) {
+        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
+        op.argop = nfs_opnum4_NFS4_OP_COPY;
+        op.nfs_argop4_u.opcopy = COPY4args {
+            ca_src_stateid: *src_stateid,
+            ca_dst_stateid: *dst_stateid,
+            ca_src_offset: src_offset,
+            ca_dst_offset: dst_offset,
+            ca_count: count,
+            ca_consecutive: 1,
+            ca_synchronous: 1,
+            ca_source_server_len: 0,
+            ca_source_server_val: std::ptr::null_mut(),
+        };
+        self.push(op);
+    }
+
     pub fn close(&mut self, seqid: u32, stateid: &stateid4) {
         let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
         op.argop = nfs_opnum4_NFS4_OP_CLOSE;
@@ -624,6 +650,7 @@ impl CompoundRes {
                 nfs_opnum4_NFS4_OP_OPEN => ro.nfs_resop4_u.opopen.status,
                 nfs_opnum4_NFS4_OP_READ => ro.nfs_resop4_u.opread.status,
                 nfs_opnum4_NFS4_OP_WRITE => ro.nfs_resop4_u.opwrite.status,
+                nfs_opnum4_NFS4_OP_COPY => ro.nfs_resop4_u.opcopy.cr_status,
                 nfs_opnum4_NFS4_OP_CLOSE => ro.nfs_resop4_u.opclose.status,
                 nfs_opnum4_NFS4_OP_EXCHANGE_ID => ro.nfs_resop4_u.opexchange_id.eir_status,
                 nfs_opnum4_NFS4_OP_CREATE_SESSION => ro.nfs_resop4_u.opcreate_session.csr_status,
@@ -705,6 +732,12 @@ impl CompoundRes {
     pub fn write(&self, i: usize) -> &WRITE4resok {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_WRITE, "WRITE");
         unsafe { &ro.nfs_resop4_u.opwrite.WRITE4res_u.resok4 }
+    }
+
+    /// The successful NFSv4.2 COPY result at resop `i`.
+    pub fn copy(&self, i: usize) -> &COPY4resok {
+        let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_COPY, "COPY");
+        unsafe { &ro.nfs_resop4_u.opcopy.COPY4res_u.cr_resok4 }
     }
 
     /// The symlink target bytes of the READLINK at resop `i`.

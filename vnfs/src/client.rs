@@ -187,6 +187,18 @@ pub struct CloseOp {
     pub stateid: stateid4,
 }
 
+/// One NFSv4.2 COPY: `[PUTFH src, SAVEFH, PUTFH dst, COPY]`.
+pub struct CopyOp {
+    pub src_fh: FileHandle,
+    pub src_stateid: stateid4,
+    pub dst_fh: FileHandle,
+    pub dst_stateid: stateid4,
+    pub src_offset: u64,
+    pub dst_offset: u64,
+    /// Zero means copy from `src_offset` through EOF.
+    pub count: u64,
+}
+
 /// The server confirmed `ca_maxoperations` from CREATE_SESSION; keep every
 /// compound (plus the implicit SEQUENCE) under it.
 const MAX_COMPOUND_OPS: usize = 256;
@@ -538,7 +550,11 @@ fn first_failed_range(res: &CompoundRes, ranges: &[(usize, usize, usize)]) -> Op
 impl NfsClient {
     /// Connect, run the session handshake, and resolve the export root.
     pub fn connect(host: &str) -> RpcResult<NfsClient> {
-        let mut session = Session::connect(host)?;
+        Self::connect_minor(host, 1)
+    }
+
+    pub fn connect_minor(host: &str, minorversion: u32) -> RpcResult<NfsClient> {
+        let mut session = Session::connect_minor(host, minorversion)?;
         let root = session_mount_root(&mut session)?;
         let max_compound_bytes = session
             .max_requestsize
@@ -912,7 +928,7 @@ impl NfsClient {
             let local = op_index.saturating_sub(1) / per_op;
             chunk_start + local.min(chunk_len.saturating_sub(1))
         }
-        let chunk_size = (MAX_COMPOUND_OPS - 1) / per_op;
+        let chunk_size = (self.max_ops.saturating_sub(1) / per_op).max(1);
         let mut out = Vec::with_capacity(ops.len());
         let mut global = 0usize;
         for chunk in ops.chunks(chunk_size) {
@@ -1426,7 +1442,7 @@ impl NfsClient {
             // to the separate-close form.
             if close_in_compound && range_failed.is_none() && opened_path.is_some() {
                 let last = map.ranges.last().map(|(_, _, e)| *e).unwrap_or(1);
-                if last <= res.nops() && res.op_status(last) != nfsstat4_NFS4_OK {
+                if last < res.nops() && res.op_status(last) != nfsstat4_NFS4_OK {
                     close_failed = Some(res.op_status(last));
                 }
             }
@@ -1702,7 +1718,7 @@ impl NfsClient {
             }
             if close_in_compound && range_failed.is_none() && opened_path.is_some() {
                 let last = map.ranges.last().map(|(_, _, e)| *e).unwrap_or(1);
-                if last <= res.nops() && res.op_status(last) != nfsstat4_NFS4_OK {
+                if last < res.nops() && res.op_status(last) != nfsstat4_NFS4_OK {
                     close_failed = Some(res.op_status(last));
                 }
             }
@@ -2246,6 +2262,35 @@ impl NfsClient {
         self.session.expect_all_ok(&res)?;
         let ok = res.write(2);
         Ok((ok.count, ok.committed))
+    }
+
+    /// Copy bytes entirely on an NFSv4.2 server. The source filehandle is
+    /// saved and the destination is current as required by RFC 7862.
+    pub fn copy(&mut self, op: &CopyOp) -> RpcResult<u64> {
+        Ok(self.copy_many(std::slice::from_ref(op))?[0])
+    }
+
+    /// Issue multiple COPY operations in as few compounds as the negotiated
+    /// operation limit permits.
+    pub fn copy_many(&mut self, ops: &[CopyOp]) -> RpcResult<Vec<u64>> {
+        self.batch_ops(
+            b"copyv",
+            4,
+            ops,
+            |c, op, _| {
+                c.putfh(&op.src_fh.as_nfs_fh());
+                c.savefh();
+                c.putfh(&op.dst_fh.as_nfs_fh());
+                c.copy(
+                    &op.src_stateid,
+                    &op.dst_stateid,
+                    op.src_offset,
+                    op.dst_offset,
+                    op.count,
+                );
+            },
+            |res, i| res.copy(4 + 4 * i).cr_response.wr_count,
+        )
     }
 
     /// CLOSE the open file.

@@ -21,6 +21,7 @@ pub struct Session {
     pub rpc: RpcClient,
     pub clientid: clientid4,
     pub sessionid: sessionid4,
+    pub minorversion: u32,
     slot_seqid: u32,
     /// Server-confirmed channel attributes from CREATE_SESSION: the
     /// negotiated maxima for compound request size and operation count.
@@ -40,11 +41,16 @@ pub struct Session {
 
 impl Session {
     pub fn connect(host: &str) -> RpcResult<Session> {
+        Self::connect_minor(host, 1)
+    }
+
+    pub fn connect_minor(host: &str, minorversion: u32) -> RpcResult<Session> {
         let rpc = RpcClient::connect(host)?;
         let mut s = Session {
             rpc,
             clientid: 0,
             sessionid: [0; 16],
+            minorversion,
             // New sessions are created with slot seqid 0, and the kernel's
             // check_slot_seqid() accepts seqid == slot_seqid + 1, so the
             // first SEQUENCE must carry seqid 1.
@@ -84,6 +90,7 @@ impl Session {
         );
         let owner_id = owner_id.as_bytes();
         let mut c = Compound::new();
+        c.args.minorversion = self.minorversion;
         c.tag(b"exchange_id");
         c.exchange_id(EXCHANGE_ID4args {
             eia_clientowner: client_owner4 {
@@ -140,6 +147,7 @@ impl Session {
             },
         };
         let mut c = Compound::new();
+        c.args.minorversion = self.minorversion;
         c.tag(b"create_session");
         c.create_session(CREATE_SESSION4args {
             csa_clientid: self.clientid,
@@ -192,6 +200,7 @@ impl Session {
     /// Prepend a SEQUENCE op and send the compound. The slot seqid advances
     /// whenever the server consumed the SEQUENCE (i.e. it returned NFS4_OK).
     pub fn compound(&mut self, c: &mut Compound) -> RpcResult<CompoundRes> {
+        c.args.minorversion = self.minorversion;
         let mut seq: nfs_argop4 = unsafe { std::mem::zeroed() };
         seq.argop = nfs_opnum4_NFS4_OP_SEQUENCE;
         seq.nfs_argop4_u.opsequence = SEQUENCE4args {
@@ -213,7 +222,9 @@ impl Session {
                 return Err(e);
             }
         };
-        if res.op_status(0) == nfsstat4_NFS4_OK {
+        // A server may reject an oversized compound before executing
+        // SEQUENCE, returning a valid compound result with no per-op results.
+        if res.nops() > 0 && res.op_status(0) == nfsstat4_NFS4_OK {
             self.slot_seqid += 1;
         }
         Ok(res)
@@ -242,12 +253,14 @@ impl Session {
             return;
         }
         let mut c = Compound::new();
+        c.args.minorversion = self.minorversion;
         c.tag(b"destroy_session");
         c.destroy_session(&self.sessionid);
         if let Ok(res) = c.call(&self.rpc) {
             let _ = res;
         }
         let mut c = Compound::new();
+        c.args.minorversion = self.minorversion;
         c.tag(b"destroy_clientid");
         c.destroy_clientid(self.clientid);
         if let Ok(res) = c.call(&self.rpc) {
