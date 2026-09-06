@@ -908,6 +908,39 @@ mod tests {
             ]
         );
 
+        let sub = CString::new("/v/d1/sub").unwrap();
+        let nested = CString::new("/v/d1/sub/nested.bin").unwrap();
+        assert_eq!(unsafe { vfsi_mkdir(fs, sub.as_ptr(), 0o755, 1) }, 0);
+        let fd = unsafe {
+            vfsi_open(
+                fs,
+                nested.as_ptr(),
+                libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
+                0o644,
+            )
+        };
+        assert!(fd > 0);
+        assert_eq!(unsafe { vfsi_close(fs, fd) }, 0);
+        let one_dir = [d1.as_ptr()];
+        seen.rows.clear();
+        assert_eq!(
+            unsafe {
+                vfsi_listdirv(
+                    fs,
+                    one_dir.as_ptr(),
+                    one_dir.len(),
+                    0,
+                    true,
+                    Some(cb),
+                    &mut seen as *mut _ as *mut c_void,
+                )
+            },
+            0
+        );
+        assert!(seen
+            .rows
+            .contains(&("/v/d1/sub".to_string(), "nested.bin".to_string())));
+
         unsafe { vfsi_free(fs) };
     }
 

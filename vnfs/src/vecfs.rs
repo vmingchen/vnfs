@@ -993,7 +993,15 @@ pub trait VecFs {
                 .listdir(d, masks, max_entries, recursive)
                 .map_err(|e| e.with_index(i))?;
             for e in &entries {
-                if !cb(e, d) {
+                /* A recursive list contains descendants too, so report each
+                 * entry's actual parent rather than attributing every row to the
+                 * original root. Backend overrides follow the same contract. */
+                let entry_dir = if recursive {
+                    e.file.path().and_then(Path::parent).unwrap_or(d)
+                } else {
+                    d
+                };
+                if !cb(e, entry_dir) {
                     return Ok(());
                 }
             }
