@@ -26,6 +26,12 @@ jobs:
       - run: cargo test -p vnfs --lib
       - run: cargo test -p vnfs --test dummy_vecfs
       - run: cargo test -p vfsi-c --lib
+      - name: Verify backend feature combinations
+        run: |
+          cargo check -p vnfs --lib --no-default-features
+          cargo check -p vnfs --lib --no-default-features --features dummy
+          cargo check -p vnfs --lib --no-default-features --features nfs
+          cargo check -p vnfs --lib --no-default-features --features smb
       - name: Verify checked-in C header and smoke test
         run: |
           cargo build -p vfsi-c
@@ -105,6 +111,35 @@ jobs:
 
   smb-integration:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: smb21-guest-no-copy
+            min_protocol: SMB2_10
+            max_protocol: SMB2_10
+            dialect: "0x0210"
+            username: ""
+            password: ""
+            guest_ok: "yes"
+            force_user: nobody
+            rust_features: "smb,dummy"
+            server_copy: "0"
+            reconnect: ""
+            bindings: false
+          - name: smb311-authenticated
+            min_protocol: SMB3_11
+            max_protocol: SMB3_11
+            dialect: "0x0311"
+            username: vfsi-ci
+            password: vfsi-ci-password
+            guest_ok: "no"
+            force_user: vfsi-ci
+            rust_features: "default"
+            server_copy: "1"
+            reconnect: "sudo systemctl restart smbd"
+            bindings: true
+    name: smb-integration (${{ matrix.name }})
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -117,17 +152,28 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev samba smbclient
-      - name: Start a loopback-only guest share
+      - name: Start a loopback-only test share
+        env:
+          SMB_MIN_PROTOCOL: ${{ matrix.min_protocol }}
+          SMB_MAX_PROTOCOL: ${{ matrix.max_protocol }}
+          SMB_GUEST_OK: ${{ matrix.guest_ok }}
+          SMB_FORCE_USER: ${{ matrix.force_user }}
+          SMB_USERNAME: ${{ matrix.username }}
+          SMB_PASSWORD: ${{ matrix.password }}
         run: |
-          sudo install -d -o nobody -g nogroup -m 0777 /var/tmp/vfsi-smb-ci
-          cat >/tmp/vfsi-smb.conf <<'EOF'
+          if [ -n "$SMB_USERNAME" ]; then
+            sudo useradd --system --no-create-home --shell /usr/sbin/nologin "$SMB_USERNAME"
+            printf '%s\n%s\n' "$SMB_PASSWORD" "$SMB_PASSWORD" | sudo smbpasswd -a -s "$SMB_USERNAME"
+          fi
+          sudo install -d -o "$SMB_FORCE_USER" -g nogroup -m 0777 /var/tmp/vfsi-smb-ci
+          cat >/tmp/vfsi-smb.conf <<EOF
           [global]
              server role = standalone server
              workgroup = WORKGROUP
              security = user
              map to guest = Bad User
-             server min protocol = SMB2
-             server max protocol = SMB3
+             server min protocol = $SMB_MIN_PROTOCOL
+             server max protocol = $SMB_MAX_PROTOCOL
              interfaces = lo
              bind interfaces only = yes
              disable netbios = yes
@@ -138,9 +184,8 @@ jobs:
           [vfsi-test]
              path = /var/tmp/vfsi-smb-ci
              read only = no
-             guest ok = yes
-             guest only = yes
-             force user = nobody
+             guest ok = $SMB_GUEST_OK
+             force user = $SMB_FORCE_USER
              create mask = 0666
              directory mask = 0777
           EOF
@@ -148,7 +193,12 @@ jobs:
           sudo testparm -s /etc/samba/smb.conf
           sudo systemctl restart smbd
           for attempt in $(seq 1 30); do
-            if smbclient -N //127.0.0.1/vfsi-test -c ls; then
+            if [ -n "$SMB_USERNAME" ]; then
+              smbclient_args=(-U "$SMB_USERNAME%$SMB_PASSWORD")
+            else
+              smbclient_args=(-N)
+            fi
+            if smbclient "${smbclient_args[@]}" //127.0.0.1/vfsi-test -c ls; then
               exit 0
             fi
             sleep 1
@@ -159,16 +209,30 @@ jobs:
         env:
           VFSI_SMB_SERVER: 127.0.0.1
           VFSI_SMB_SHARE: vfsi-test
-        run: cargo test -p vnfs --test smb -- --test-threads=1
+          VFSI_SMB_USERNAME: ${{ matrix.username }}
+          VFSI_SMB_PASSWORD: ${{ matrix.password }}
+          VFSI_SMB_EXPECT_DIALECT: ${{ matrix.dialect }}
+          VFSI_SMB_EXPECT_SERVER_COPY: ${{ matrix.server_copy }}
+          VFSI_SMB_RESTART_COMMAND: ${{ matrix.reconnect }}
+        run: |
+          if [ "${{ matrix.rust_features }}" = default ]; then
+            cargo test -p vnfs --test smb -- --test-threads=1
+          else
+            cargo test -p vnfs --no-default-features --features "${{ matrix.rust_features }}" --test smb -- --test-threads=1
+          fi
       - name: Run C ABI smoke test against Samba
+        if: matrix.bindings
         run: |
           cargo build -p vfsi-c
           cc -Wall -Wextra -Werror -I vfsi-c/include vfsi-c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
-          LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke --smb 127.0.0.1 vfsi-test
+          LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke --smb 127.0.0.1 vfsi-test '${{ matrix.username }}' '${{ matrix.password }}' ''
       - name: Run Python/fsspec conformance test against Samba
+        if: matrix.bindings
         env:
           VFSI_SMB_SERVER: 127.0.0.1
           VFSI_SMB_SHARE: vfsi-test
+          VFSI_SMB_USERNAME: ${{ matrix.username }}
+          VFSI_SMB_PASSWORD: ${{ matrix.password }}
         run: |
           python -m venv .venv
           .venv/bin/pip install maturin fsspec pytest

@@ -22,6 +22,7 @@ pub fn path_from_bytes(bytes: &[u8]) -> PathBuf {
 }
 
 /// Split a slash-delimited byte path into `(parent, final component)`.
+#[cfg(any(feature = "nfs", test))]
 pub fn split_path_bytes(path: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ()> {
     let trimmed = trim_slashes(path);
     if trimmed.is_empty() {
@@ -43,6 +44,7 @@ pub fn split_path_bytes(path: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ()> {
 }
 
 /// Join a directory path and a component name.
+#[cfg(any(feature = "nfs", test))]
 pub fn join_path_bytes(dir: &[u8], name: &[u8]) -> Vec<u8> {
     if dir.is_empty() {
         return name.to_vec();
@@ -78,6 +80,7 @@ pub fn normalize_bytes(path: &[u8]) -> Vec<u8> {
 }
 
 /// Split a path into non-empty byte components.
+#[cfg(any(feature = "nfs", test))]
 pub fn components_bytes(path: &[u8]) -> Vec<Vec<u8>> {
     trim_slashes(path)
         .split(|&b| b == b'/')
@@ -87,6 +90,7 @@ pub fn components_bytes(path: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// Build a C string from raw bytes; NUL is the only rejected byte.
+#[cfg(any(feature = "dummy", test))]
 pub fn cstring_from_bytes(bytes: &[u8]) -> Option<std::ffi::CString> {
     std::ffi::CString::new(bytes).ok()
 }

@@ -3,6 +3,8 @@
 //! Set `VFSI_SMB_SERVER` and `VFSI_SMB_SHARE` to run against a Samba share.
 //! `VFSI_SMB_USERNAME`, `VFSI_SMB_PASSWORD`, and `VFSI_SMB_DOMAIN` default to
 //! empty strings for guest access.
+//! Set `VFSI_SMB_RESTART_COMMAND` to a command that restarts the configured
+//! server to enable recovery coverage.
 
 use std::path::{Path, PathBuf};
 
@@ -32,8 +34,15 @@ fn samba_round_trip_and_copy() {
         eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
         return;
     };
-    assert!(matches!(fs.smb_dialect(), Some(0x0202..=0x0311)));
-    assert_ne!(fs.capabilities() & VF_CAP_SERVER_COPY, 0);
+    let dialect = fs.smb_dialect().expect("SMB dialect");
+    assert!((0x0202..=0x0311).contains(&dialect));
+    if let Ok(expected) = std::env::var("VFSI_SMB_EXPECT_DIALECT") {
+        let expected = u16::from_str_radix(expected.trim_start_matches("0x"), 16)
+            .expect("hex VFSI_SMB_EXPECT_DIALECT");
+        assert_eq!(dialect, expected);
+    }
+    let expect_copy = std::env::var("VFSI_SMB_EXPECT_SERVER_COPY").as_deref() != Ok("0");
+    assert_eq!(fs.capabilities() & VF_CAP_SERVER_COPY != 0, expect_copy);
     assert_eq!(
         fs.capabilities()
             & (VF_CAP_POSIX_METADATA
@@ -47,6 +56,46 @@ fn samba_round_trip_and_copy() {
     let root = PathBuf::from(format!("/vfsi-smb-test-{}", std::process::id()));
     let _ = fs.rm(&[root.as_path()], true);
     fs.ensure_dir(&root, 0o755).expect("create test directory");
+
+    let batch_dirs = [root.join("batch-a"), root.join("batch-b")];
+    let dir_attrs: Vec<VfAttrs> = batch_dirs
+        .iter()
+        .map(|path| VfAttrs {
+            file: VfFile::from_os_path(path),
+            masks: AttrMask::MODE,
+            mode: 0o755,
+            ..VfAttrs::default()
+        })
+        .collect();
+    fs.mkdirv(&dir_attrs).expect("concurrent mkdirv");
+    let batch_files = [batch_dirs[0].join("one"), batch_dirs[1].join("two")];
+    let batch_refs: Vec<&Path> = batch_files.iter().map(PathBuf::as_path).collect();
+    let opened = fs
+        .openv_simple(&batch_refs, libc::O_CREAT | libc::O_RDWR, 0o644)
+        .expect("concurrent openv");
+    fs.closev(&opened).expect("concurrent closev");
+    let renamed_files = [batch_dirs[0].join("renamed"), batch_dirs[1].join("renamed")];
+    fs.renamev(&[
+        (
+            VfFile::from_os_path(&batch_files[0]),
+            VfFile::from_os_path(&renamed_files[0]),
+        ),
+        (
+            VfFile::from_os_path(&batch_files[1]),
+            VfFile::from_os_path(&renamed_files[1]),
+        ),
+    ])
+    .expect("concurrent renamev");
+    fs.removev(&[
+        VfFile::from_os_path(&renamed_files[0]),
+        VfFile::from_os_path(&renamed_files[1]),
+    ])
+    .expect("concurrent removev files");
+    fs.removev(&[
+        VfFile::from_os_path(&batch_dirs[0]),
+        VfFile::from_os_path(&batch_dirs[1]),
+    ])
+    .expect("concurrent removev directories");
 
     let source = root.join("source.bin");
     let renamed = root.join("renamed.bin");
@@ -122,4 +171,41 @@ fn shared_suite_on_smb() {
     common::run_suite(&mut fs, &base);
     fs.rm(&[Path::new(&base)], true)
         .expect("remove conformance root");
+}
+
+#[test]
+fn path_reads_recover_after_server_restart() {
+    let Some(mut fs) = connect() else {
+        eprintln!("skipping SMB reconnect test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let Ok(restart) = std::env::var("VFSI_SMB_RESTART_COMMAND") else {
+        eprintln!("skipping SMB reconnect test: VFSI_SMB_RESTART_COMMAND not set");
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-reconnect-{}", std::process::id()));
+    let file = root.join("survives.bin");
+    let _ = fs.rm(&[root.as_path()], true);
+    fs.ensure_dir(&root, 0o755).unwrap();
+    fs.writev(&[
+        WriteOp::from_os_path(&file, VfOffset::At(0), b"after restart".to_vec())
+            .with_creation()
+            .with_truncate(),
+    ])
+    .unwrap();
+    assert!(
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(restart)
+            .status()
+            .expect("run Samba restart command")
+            .success()
+    );
+
+    let result = fs
+        .readv(&[vnfs::ReadOp::from_os_path(&file, VfOffset::At(0), 64)])
+        .expect("path read should reconnect and re-establish the share");
+    assert_eq!(result[0].data, b"after restart");
+    assert_eq!(fs.stat(&file).unwrap().size, 13);
+    fs.rm(&[root.as_path()], true).unwrap();
 }

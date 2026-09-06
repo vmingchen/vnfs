@@ -6,7 +6,8 @@
 //! limits, and server-side copies use `FSCTL_SRV_COPYCHUNK` with an automatic
 //! read/write fallback.
 //! Independent small path operations in a vector call are multiplexed on the
-//! authenticated connection; handle operations and same-path writes stay ordered.
+//! authenticated connection; stateful descriptor I/O and dependent mutations
+//! stay ordered.
 //!
 //! SMB paths are Unicode. A `Path` containing non-UTF-8 bytes is rejected with
 //! `EILSEQ`; characters which are illegal in SMB names are reversibly mapped
@@ -111,7 +112,7 @@ impl SmbVecFs {
             cwd: PathBuf::new(),
             next_fd: 0,
             open_files: HashMap::new(),
-            server_copy_enabled: true,
+            server_copy_enabled: cfg!(feature = "server-copy"),
         })
     }
 
@@ -143,6 +144,10 @@ impl SmbVecFs {
 
     fn local_path_string(&self, path: &Path) -> VfResult<String> {
         self.path_string(&self.abs_path(path))
+    }
+
+    fn insert_open_file(&mut self, open: SmbOpen) -> VfResult<Fd> {
+        crate::vecfs::insert_fd(&mut self.next_fd, &mut self.open_files, open)
     }
 
     fn wire_path(&self, path: &str) -> String {
@@ -633,6 +638,28 @@ impl SmbVecFs {
             .map_err(|e| smb_error(e, 0))
     }
 
+    fn read_whole_recovering(&mut self, path: &str) -> VfResult<Vec<u8>> {
+        match self
+            .runtime
+            .block_on(self.client.read_file(&mut self.tree, path))
+        {
+            Ok(data) => Ok(data),
+            Err(error) if error.kind() == SmbErrorKind::TooLarge => self
+                .runtime
+                .block_on(self.client.read_file_pipelined(&mut self.tree, path))
+                .map_err(|error| smb_error(error, 0)),
+            Err(error) if error.kind() == SmbErrorKind::Unsupported => {
+                let info = self.client_stat(path)?;
+                if info.is_directory {
+                    Err(VfError::failure(0, ERR_ISDIR))
+                } else {
+                    Err(smb_error(error, 0))
+                }
+            }
+            Err(error) => Err(smb_error(error, 0)),
+        }
+    }
+
     fn fill_attrs(a: &mut VfAttrs, info: &smb2::client::FileInfo) {
         a.ftype = if info.is_directory {
             VfType::Directory
@@ -739,7 +766,16 @@ impl SmbVecFs {
                 VfOffset::End => self.client_stat(&path)?.size,
                 VfOffset::Cur => return Err(VfError::failure(0, ERR_INVAL)),
             };
-            let data = self.compound_read_path(&path, offset, op.length)?;
+            let data = match self.compound_read_path(&path, offset, op.length) {
+                Ok(data) => data,
+                Err(_) if self.client.is_disconnected() => {
+                    let all = self.read_whole_recovering(&path)?;
+                    let start = usize::try_from(offset).unwrap_or(usize::MAX).min(all.len());
+                    let end = start.saturating_add(op.length).min(all.len());
+                    all[start..end].to_vec()
+                }
+                Err(error) => return Err(error),
+            };
             let eof = op.length > 0 && data.len() < op.length;
             return Ok(ReadResult {
                 file: op.file.clone(),
@@ -961,19 +997,106 @@ impl VecFs for SmbVecFs {
         let path_string = self.path_string(&path)?;
         let (file_id, size) = self.raw_open(&path_string, flags)?;
         let access_mode = flags & libc::O_ACCMODE;
-        self.next_fd = self.next_fd.checked_add(1).unwrap_or(1);
-        self.open_files.insert(
-            self.next_fd,
-            SmbOpen {
+        let fd = self.insert_open_file(SmbOpen {
+            file_id,
+            path,
+            cur_offset: if flags & libc::O_APPEND != 0 { size } else { 0 },
+            append: flags & libc::O_APPEND != 0,
+            readable: access_mode != libc::O_WRONLY,
+            writable: access_mode != libc::O_RDONLY,
+        })?;
+        Ok(VfFile::from_fd(fd))
+    }
+
+    fn openv(&mut self, paths: &[&Path], flags: &[i32], modes: &[u32]) -> VfResult<Vec<VfFile>> {
+        if paths.len() != flags.len() || paths.len() != modes.len() {
+            return Err(VfError::failure(0, ERR_INVAL));
+        }
+        let resolved: Vec<PathBuf> = paths.iter().map(|path| self.abs_path(path)).collect();
+        if paths.len() <= 1 || self.tree.is_dfs || !paths_are_independent(&resolved) {
+            let mut output = Vec::with_capacity(paths.len());
+            for (index, ((path, flags), mode)) in paths.iter().zip(flags).zip(modes).enumerate() {
+                output.push(
+                    self.open(path, *flags, *mode)
+                        .map_err(|error| error.with_index(index))?,
+                );
+            }
+            return Ok(output);
+        }
+
+        let mut requests = Vec::with_capacity(paths.len());
+        for (index, (path, flags)) in resolved.iter().zip(flags).enumerate() {
+            let path_string = self
+                .path_string(path)
+                .map_err(|error| error.with_index(index))?;
+            let request = self
+                .open_request(&path_string, *flags)
+                .map_err(|error| error.with_index(index))?;
+            requests.push(request);
+        }
+        let connection = self.client.connection_mut().clone();
+        let tree_id = self.tree.tree_id;
+        let jobs = requests.into_iter().map(|request| {
+            let connection = connection.clone();
+            async move {
+                let frame = connection
+                    .execute(Command::Create, &request, Some(tree_id))
+                    .await
+                    .map_err(|error| smb_error(error, 0))?;
+                require_status(&frame, Command::Create, 0)?;
+                let response = CreateResponse::unpack(&mut ReadCursor::new(&frame.body))
+                    .map_err(|error| smb_error(error, 0))?;
+                Ok::<_, VfError>((response.file_id, response.end_of_file))
+            }
+        });
+        let results = self.runtime.block_on(join_all(jobs));
+        if let Some((failed, error)) = results
+            .iter()
+            .enumerate()
+            .find_map(|(index, result)| result.as_ref().err().map(|error| (index, error.clone())))
+        {
+            let closes = results
+                .into_iter()
+                .filter_map(Result::ok)
+                .map(|(file_id, _)| {
+                    let connection = connection.clone();
+                    async move { close_on_connection(&connection, tree_id, file_id).await }
+                });
+            self.runtime.block_on(join_all(closes));
+            return Err(error.with_index(failed));
+        }
+
+        let mut output = Vec::with_capacity(paths.len());
+        for (index, (((path, flags), _mode), result)) in resolved
+            .into_iter()
+            .zip(flags)
+            .zip(modes)
+            .zip(results)
+            .enumerate()
+        {
+            let (file_id, size) = result.expect("all concurrent opens checked");
+            let access_mode = *flags & libc::O_ACCMODE;
+            let fd = match self.insert_open_file(SmbOpen {
                 file_id,
                 path,
-                cur_offset: if flags & libc::O_APPEND != 0 { size } else { 0 },
-                append: flags & libc::O_APPEND != 0,
+                cur_offset: if *flags & libc::O_APPEND != 0 {
+                    size
+                } else {
+                    0
+                },
+                append: *flags & libc::O_APPEND != 0,
                 readable: access_mode != libc::O_WRONLY,
                 writable: access_mode != libc::O_RDONLY,
-            },
-        );
-        Ok(VfFile::from_fd(self.next_fd))
+            }) {
+                Ok(fd) => fd,
+                Err(error) => {
+                    let _ = self.raw_close(file_id);
+                    return Err(error.with_index(index));
+                }
+            };
+            output.push(VfFile::from_fd(fd));
+        }
+        Ok(output)
     }
 
     fn close(&mut self, file: &VfFile) -> VfResult<()> {
@@ -983,6 +1106,31 @@ impl VecFs for SmbVecFs {
             .remove(&fd)
             .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
         self.raw_close(open.file_id)
+    }
+
+    fn closev(&mut self, files: &[VfFile]) -> VfRes {
+        let mut file_ids = Vec::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
+            let fd = file
+                .fd()
+                .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+            let open = self
+                .open_files
+                .remove(&fd)
+                .ok_or_else(|| VfError::failure(index, ERR_EBADF))?;
+            file_ids.push(open.file_id);
+        }
+        let connection = self.client.connection_mut().clone();
+        let tree_id = self.tree.tree_id;
+        let jobs = file_ids.into_iter().map(|file_id| {
+            let connection = connection.clone();
+            async move { close_on_connection_result(&connection, tree_id, file_id).await }
+        });
+        let results = self.runtime.block_on(join_all(jobs));
+        for (index, result) in results.into_iter().enumerate() {
+            result.map_err(|error| error.with_index(index))?;
+        }
+        Ok(())
     }
 
     fn chdir(&mut self, path: &Path) -> VfResult<()> {
@@ -1040,6 +1188,16 @@ impl VecFs for SmbVecFs {
                 ));
             }
             let results = self.runtime.block_on(join_all(jobs));
+            if results.iter().any(Result::is_err) && self.client.is_disconnected() {
+                let mut output = Vec::with_capacity(reads.len());
+                for (index, read) in reads.iter().enumerate() {
+                    output.push(
+                        self.read_one(read)
+                            .map_err(|error| error.with_index(index))?,
+                    );
+                }
+                return Ok(output);
+            }
             let mut output = Vec::with_capacity(reads.len());
             for (index, (read, result)) in reads.iter().zip(results).enumerate() {
                 let data = result.map_err(|error| error.with_index(index))?;
@@ -1072,10 +1230,12 @@ impl VecFs for SmbVecFs {
             let connection = self.client.connection_mut().clone();
             let tree = self.tree.clone();
             let mut jobs = Vec::with_capacity(files.len());
+            let mut paths = Vec::with_capacity(files.len());
             for (index, file) in files.iter().enumerate() {
                 let path = self
                     .path_string(&self.file_path(file).map_err(|e| e.with_index(index))?)
                     .map_err(|e| e.with_index(index))?;
+                paths.push(path.clone());
                 jobs.push(concurrent_read_whole(
                     tree.clone(),
                     connection.clone(),
@@ -1083,6 +1243,16 @@ impl VecFs for SmbVecFs {
                 ));
             }
             let results = self.runtime.block_on(join_all(jobs));
+            if results.iter().any(Result::is_err) && self.client.is_disconnected() {
+                let mut output = Vec::with_capacity(paths.len());
+                for (index, path) in paths.iter().enumerate() {
+                    output.push(
+                        self.read_whole_recovering(path)
+                            .map_err(|error| error.with_index(index))?,
+                    );
+                }
+                return Ok(output);
+            }
             return results
                 .into_iter()
                 .enumerate()
@@ -1107,11 +1277,8 @@ impl VecFs for SmbVecFs {
                 let path = self
                     .path_string(&self.file_path(file).map_err(|e| e.with_index(index))?)
                     .map_err(|e| e.with_index(index))?;
-                let tree = self.tree.clone();
-                let connection = self.client.connection_mut().clone();
                 let data = self
-                    .runtime
-                    .block_on(concurrent_read_whole(tree, connection, path))
+                    .read_whole_recovering(&path)
                     .map_err(|error| error.with_index(index))?;
                 output.push(data);
             }
@@ -1237,6 +1404,22 @@ impl VecFs for SmbVecFs {
                 jobs.push(async move { tree.stat(&mut connection, &path).await });
             }
             let results = self.runtime.block_on(join_all(jobs));
+            if results.iter().any(Result::is_err) && self.client.is_disconnected() {
+                for (index, attrs) in attrs.iter_mut().enumerate() {
+                    let path = self
+                        .path_string(
+                            &self
+                                .file_path(&attrs.file)
+                                .map_err(|error| error.with_index(index))?,
+                        )
+                        .map_err(|error| error.with_index(index))?;
+                    let info = self
+                        .client_stat(&path)
+                        .map_err(|error| error.with_index(index))?;
+                    Self::fill_attrs(attrs, &info);
+                }
+                return Ok(());
+            }
             for (index, (attrs, result)) in attrs.iter_mut().zip(results).enumerate() {
                 let info = result.map_err(|error| smb_error(error, index))?;
                 Self::fill_attrs(attrs, &info);
@@ -1335,54 +1518,142 @@ impl VecFs for SmbVecFs {
     }
 
     fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
+        let mut prepared = Vec::with_capacity(pairs.len());
+        let mut dependency_paths = Vec::with_capacity(pairs.len() * 2);
         for (index, (source, destination)) in pairs.iter().enumerate() {
+            let source_path = self.file_path(source).map_err(|e| e.with_index(index))?;
+            let destination_path = self
+                .file_path(destination)
+                .map_err(|e| e.with_index(index))?;
             let source = self
-                .path_string(&self.file_path(source).map_err(|e| e.with_index(index))?)
+                .path_string(&source_path)
                 .map_err(|e| e.with_index(index))?;
             let destination = self
-                .path_string(
-                    &self
-                        .file_path(destination)
-                        .map_err(|e| e.with_index(index))?,
-                )
+                .path_string(&destination_path)
                 .map_err(|e| e.with_index(index))?;
-            self.runtime
-                .block_on(self.client.rename(&mut self.tree, &source, &destination))
-                .map_err(|e| smb_error(e, index))?;
+            dependency_paths.push(source_path);
+            dependency_paths.push(destination_path);
+            prepared.push((source, destination));
+        }
+        if prepared.len() > 1 && !self.tree.is_dfs && paths_are_independent(&dependency_paths) {
+            let connection = self.client.connection_mut().clone();
+            let tree = self.tree.clone();
+            let jobs = prepared.into_iter().map(|(source, destination)| {
+                let tree = tree.clone();
+                let mut connection = connection.clone();
+                async move { tree.rename(&mut connection, &source, &destination).await }
+            });
+            for (index, result) in self
+                .runtime
+                .block_on(join_all(jobs))
+                .into_iter()
+                .enumerate()
+            {
+                result.map_err(|error| smb_error(error, index))?;
+            }
+        } else {
+            for (index, (source, destination)) in prepared.into_iter().enumerate() {
+                self.runtime
+                    .block_on(self.client.rename(&mut self.tree, &source, &destination))
+                    .map_err(|e| smb_error(e, index))?;
+            }
         }
         Ok(())
     }
 
     fn removev(&mut self, files: &[VfFile]) -> VfRes {
+        let mut prepared = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
-            let path = self
-                .path_string(&self.file_path(file).map_err(|e| e.with_index(index))?)
-                .map_err(|e| e.with_index(index))?;
-            let info = self.client_stat(&path).map_err(|e| e.with_index(index))?;
-            let result = if info.is_directory {
-                self.runtime
-                    .block_on(self.client.delete_directory(&mut self.tree, &path))
-            } else {
-                self.runtime
-                    .block_on(self.client.delete_file(&mut self.tree, &path))
-            };
-            result.map_err(|e| smb_error(e, index))?;
+            let path = self.file_path(file).map_err(|e| e.with_index(index))?;
+            let wire = self.path_string(&path).map_err(|e| e.with_index(index))?;
+            prepared.push((path, wire));
+        }
+        let path_list: Vec<PathBuf> = prepared.iter().map(|(path, _)| path.clone()).collect();
+        if prepared.len() > 1 && !self.tree.is_dfs && paths_are_independent(&path_list) {
+            let connection = self.client.connection_mut().clone();
+            let tree = self.tree.clone();
+            let stat_jobs = prepared.iter().map(|(_, path)| {
+                let tree = tree.clone();
+                let mut connection = connection.clone();
+                let path = path.clone();
+                async move { tree.stat(&mut connection, &path).await }
+            });
+            let infos = self.runtime.block_on(join_all(stat_jobs));
+            let mut kinds = Vec::with_capacity(infos.len());
+            for (index, result) in infos.into_iter().enumerate() {
+                kinds.push(
+                    result
+                        .map_err(|error| smb_error(error, index))?
+                        .is_directory,
+                );
+            }
+            let delete_jobs = prepared.into_iter().zip(kinds).map(|((_, path), is_dir)| {
+                let tree = tree.clone();
+                let mut connection = connection.clone();
+                async move {
+                    if is_dir {
+                        tree.delete_directory(&mut connection, &path).await
+                    } else {
+                        tree.delete_file(&mut connection, &path).await
+                    }
+                }
+            });
+            for (index, result) in self
+                .runtime
+                .block_on(join_all(delete_jobs))
+                .into_iter()
+                .enumerate()
+            {
+                result.map_err(|error| smb_error(error, index))?;
+            }
+        } else {
+            for (index, (_, path)) in prepared.into_iter().enumerate() {
+                let info = self.client_stat(&path).map_err(|e| e.with_index(index))?;
+                let result = if info.is_directory {
+                    self.runtime
+                        .block_on(self.client.delete_directory(&mut self.tree, &path))
+                } else {
+                    self.runtime
+                        .block_on(self.client.delete_file(&mut self.tree, &path))
+                };
+                result.map_err(|e| smb_error(e, index))?;
+            }
         }
         Ok(())
     }
 
     fn mkdirv(&mut self, dirs: &[VfAttrs]) -> VfRes {
+        let mut prepared = Vec::with_capacity(dirs.len());
         for (index, attrs) in dirs.iter().enumerate() {
             let path = self
-                .path_string(
-                    &self
-                        .file_path(&attrs.file)
-                        .map_err(|e| e.with_index(index))?,
-                )
+                .file_path(&attrs.file)
                 .map_err(|e| e.with_index(index))?;
-            self.runtime
-                .block_on(self.client.create_directory(&mut self.tree, &path))
-                .map_err(|e| smb_error(e, index))?;
+            let wire = self.path_string(&path).map_err(|e| e.with_index(index))?;
+            prepared.push((path, wire));
+        }
+        let path_list: Vec<PathBuf> = prepared.iter().map(|(path, _)| path.clone()).collect();
+        if prepared.len() > 1 && !self.tree.is_dfs && paths_are_independent(&path_list) {
+            let connection = self.client.connection_mut().clone();
+            let tree = self.tree.clone();
+            let jobs = prepared.into_iter().map(|(_, path)| {
+                let tree = tree.clone();
+                let mut connection = connection.clone();
+                async move { tree.create_directory(&mut connection, &path).await }
+            });
+            for (index, result) in self
+                .runtime
+                .block_on(join_all(jobs))
+                .into_iter()
+                .enumerate()
+            {
+                result.map_err(|error| smb_error(error, index))?;
+            }
+        } else {
+            for (index, (_, path)) in prepared.into_iter().enumerate() {
+                self.runtime
+                    .block_on(self.client.create_directory(&mut self.tree, &path))
+                    .map_err(|e| smb_error(e, index))?;
+            }
         }
         Ok(())
     }
@@ -1559,6 +1830,40 @@ impl VecFs for SmbVecFs {
     }
 }
 
+impl Drop for SmbVecFs {
+    fn drop(&mut self) {
+        let file_ids: Vec<FileId> = self
+            .open_files
+            .drain()
+            .map(|(_, open)| open.file_id)
+            .collect();
+        if !file_ids.is_empty() {
+            let connection = self.client.connection_mut().clone();
+            let tree_id = self.tree.tree_id;
+            let jobs = file_ids.into_iter().map(|file_id| {
+                let connection = connection.clone();
+                async move { close_on_connection(&connection, tree_id, file_id).await }
+            });
+            self.runtime.block_on(join_all(jobs));
+        }
+        let _ = self
+            .runtime
+            .block_on(self.client.disconnect_share(&self.tree));
+    }
+}
+
+fn paths_are_independent(paths: &[PathBuf]) -> bool {
+    for (index, path) in paths.iter().enumerate() {
+        if paths[index + 1..]
+            .iter()
+            .any(|other| path == other || path.starts_with(other) || other.starts_with(path))
+        {
+            return false;
+        }
+    }
+    true
+}
+
 async fn concurrent_read_whole(
     tree: Tree,
     mut connection: Connection,
@@ -1586,10 +1891,20 @@ async fn concurrent_read_whole(
 }
 
 async fn close_on_connection(connection: &Connection, tree_id: TreeId, file_id: FileId) {
+    let _ = close_on_connection_result(connection, tree_id, file_id).await;
+}
+
+async fn close_on_connection_result(
+    connection: &Connection,
+    tree_id: TreeId,
+    file_id: FileId,
+) -> VfRes {
     let request = CloseRequest { flags: 0, file_id };
-    let _ = connection
+    let frame = connection
         .execute(Command::Close, &request, Some(tree_id))
-        .await;
+        .await
+        .map_err(|error| smb_error(error, 0))?;
+    require_status(&frame, Command::Close, 0)
 }
 
 async fn concurrent_compound_read(

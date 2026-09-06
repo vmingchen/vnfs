@@ -1,7 +1,7 @@
-# nfs4fs
+# VFSI fsspec adapter
 
-An `fsspec` filesystem (`nfs4://`) backed by the vectorized
-[`vnfs`](../vnfs) NFSv4.1 client.
+An `fsspec` filesystem (`vfsi://` and the compatible `nfs4://` alias) backed
+by the vectorized [`vnfs`](../vnfs) NFSv4 and SMB2/3 clients.
 
 `vnfs` minimizes network round trips by batching many filesystem operations
 into one NFSv4 compound. Instead of paying a round trip for each
@@ -25,7 +25,7 @@ cd python
 
 ```python
 import fsspec
-import nfs4fs  # registers the "nfs4" protocol
+import vfsi  # protocol-neutral import; registers "vfsi" and "nfs4"
 
 fs = fsspec.filesystem("nfs4", host="127.0.0.1", root="git/some/tree")
 fs.pipe({"nfs4:///a.txt": b"hello", "nfs4:///b.txt": b"world"})

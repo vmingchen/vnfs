@@ -16,6 +16,24 @@ Consumers that load the library dynamically must call `vfsi_abi_version()`
 and require `VFSI_ABI_VERSION` before resolving or invoking the rest of the
 API. Attribute structures also carry their size and ABI version.
 
+ABI v3 retains every ABI-v2 symbol and adds genuinely vectorized `vfsi_openv`,
+`vfsi_closev`, `vfsi_statv`, `vfsi_setattrv`, `vfsi_preadv`, `vfsi_pwritev`,
+`vfsi_mkdirv`, `vfsi_removev`, `vfsi_renamev`, and `vfsi_copyv` calls. They
+return a uniform `vfsi_result`: the overall result's `index` is the completed
+count on success or the failing element on error, `category` is
+protocol-independent, `err_no` retains the backend status, and `message`
+carries transport diagnostics. Callers also provide one `vfsi_result` per
+element. Successful batches mark every element successful. A request rejected
+before submission marks the failing element and leaves the rest not attempted;
+after a submitted concurrent batch fails, non-failing elements are explicitly
+marked indeterminate because they may already have completed.
+
+For large repositories, `vfsi_read_streamv()` reads several paths in bounded
+chunks. `chunk_size` limits each read and `memory_limit` bounds the aggregate
+bytes requested per backend batch. Returning `false` from its callback stops
+successfully, providing cancellation and backpressure without buffering whole
+files. The streaming callback must not reenter the same filesystem handle.
+
 For an NFS mount whose source is `server:/exports/repos` and whose local
 mountpoint is `/mnt/repos`, use:
 
@@ -41,7 +59,9 @@ vfsi_smb_open("server", "share", "username", "password", "domain", &fs);
 The username, password, and domain may be empty strings for guest access.
 `vfsi_smb_dialect()` reports the negotiated dialect (`0x0202` through
 `0x0311`). Small path I/O and metadata operations use related SMB compounds;
-large transfers honor the negotiated read/write limits. `vfsi_copy()` uses
+independent vector elements are multiplexed concurrently while dependent
+mutations remain ordered. Large transfers honor the negotiated read/write
+limits. `vfsi_copy()` uses
 SMB server-side copy when supported and permanently switches that connection
 to the client-side fallback if the server rejects the operation.
 

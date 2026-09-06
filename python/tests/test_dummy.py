@@ -85,6 +85,12 @@ def test_dummy_reports_no_network_capabilities(dummy_fs):
     assert not dummy_fs._client.server_copy_enabled()
 
 
+def test_protocol_neutral_import_alias():
+    from vfsi import Nfs4FileSystem, VfsiFileSystem
+
+    assert issubclass(VfsiFileSystem, Nfs4FileSystem)
+
+
 def test_smb_backend_requires_a_share():
     from nfs4fs import _native
 

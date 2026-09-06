@@ -68,6 +68,10 @@ impl DummyVecFs {
         }
     }
 
+    fn insert_open_file(&mut self, open: DummyOpen) -> VfResult<Fd> {
+        crate::vecfs::insert_fd(&mut self.next_fd, &mut self.open_files, open)
+    }
+
     /// Map a (possibly cwd-relative) path onto the real filesystem.
     /// The result is lexically normalized and cannot escape `root` via `..`.
     fn resolve(&self, path: &Path) -> PathBuf {
@@ -562,17 +566,13 @@ impl VecFs for DummyVecFs {
         if created {
             let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode & 0o7777));
         }
-        self.next_fd += 1;
-        self.open_files.insert(
-            self.next_fd,
-            DummyOpen {
-                file,
-                path: pathname.to_path_buf(),
-                cur_offset: 0,
-                append: flags & libc::O_APPEND != 0,
-            },
-        );
-        Ok(VfFile::from_fd(self.next_fd))
+        let fd = self.insert_open_file(DummyOpen {
+            file,
+            path: pathname.to_path_buf(),
+            cur_offset: 0,
+            append: flags & libc::O_APPEND != 0,
+        })?;
+        Ok(VfFile::from_fd(fd))
     }
 
     fn close(&mut self, tcf: &VfFile) -> VfResult<()> {

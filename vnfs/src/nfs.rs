@@ -438,7 +438,7 @@ impl NfsVecFs {
     }
 
     fn from_client(nfs: NfsClient) -> NfsVecFs {
-        let server_copy_enabled = nfs.minorversion() >= 2;
+        let server_copy_enabled = cfg!(feature = "server-copy") && nfs.minorversion() >= 2;
         NfsVecFs {
             nfs,
             cwd: PathBuf::new(),
@@ -463,17 +463,7 @@ impl NfsVecFs {
     // -- private helpers ----------------------------------------------------
 
     fn insert_open_file(&mut self, open: OpenFile) -> VfResult<i32> {
-        for _ in 0..i32::MAX {
-            let candidate = self.next_fd.checked_add(1).unwrap_or(1);
-            self.next_fd = candidate;
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                self.open_files.entry(candidate)
-            {
-                entry.insert(open);
-                return Ok(candidate);
-            }
-        }
-        Err(VfError::failure(0, libc::EMFILE as u32))
+        crate::vecfs::insert_fd(&mut self.next_fd, &mut self.open_files, open)
     }
 
     /// Resolve a root-relative path to a file handle, following symlinks in

@@ -1,4 +1,4 @@
-# Vectorized NFS client
+# VFSI: vectorized filesystem interfaces
 
 ## Intro
 
@@ -27,6 +27,12 @@ Samba and other modern SMB servers. It negotiates SMB 2.0.2 through SMB 3.1.1,
 uses related SMB compounds for small path operations, honors SMB credit and
 I/O limits, and uses server-side copy with a client-side fallback.
 The Rust, C, and Python/fsspec surfaces all expose this backend.
+
+The `vnfs` crate enables `nfs`, `smb`, `dummy`, and `server-copy` by default.
+Downstream Rust users can disable defaults and select only the backends they
+need; the protocol-neutral `VecFs` types remain available with no backend
+feature enabled. The C ABI v3 adds array operations and bounded streaming I/O
+while retaining all ABI-v2 entry points.
 
 ## License
 

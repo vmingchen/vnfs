@@ -189,9 +189,31 @@ pub type VfResult<T> = Result<T, VfError>;
 /// error of the first failing operation.
 pub type VfRes = VfResult<()>;
 
+/// Callback used by [`VecFs::read_streamv`].
+pub type ReadStreamCallback<'a> = dyn FnMut(usize, u64, &[u8], bool) -> bool + 'a;
+
 /// An open file descriptor (backend-assigned), the Rust spelling of the C
 /// `int` fd.
 pub type Fd = std::os::fd::RawFd;
+
+/// Insert an open object using a positive descriptor, wrapping safely and
+/// skipping live descriptors instead of overwriting them.
+#[cfg(any(feature = "nfs", feature = "smb", feature = "dummy"))]
+pub(crate) fn insert_fd<T>(
+    next_fd: &mut Fd,
+    open_files: &mut std::collections::HashMap<Fd, T>,
+    open: T,
+) -> VfResult<Fd> {
+    for _ in 0..i32::MAX {
+        let candidate = next_fd.checked_add(1).unwrap_or(1);
+        *next_fd = candidate;
+        if let std::collections::hash_map::Entry::Vacant(entry) = open_files.entry(candidate) {
+            entry.insert(open);
+            return Ok(candidate);
+        }
+    }
+    Err(VfError::failure(0, libc::EMFILE as u32))
+}
 
 // ---------------------------------------------------------------------------
 // File references
@@ -883,6 +905,64 @@ pub trait VecFs {
     /// of blocks written for each ADB.
     fn write_adb(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>>;
 
+    /// Read files in bounded chunks while retaining vectorized I/O.
+    ///
+    /// At most `memory_limit` bytes are requested in one batch and no single
+    /// request exceeds `chunk_size`. `cb` receives the original file index,
+    /// absolute offset, data, and EOF state. Returning `false` cancels the
+    /// stream successfully, providing backpressure without buffering whole
+    /// files. The callback runs while `self` is borrowed and must not reenter
+    /// this filesystem instance.
+    fn read_streamv(
+        &mut self,
+        files: &[VfFile],
+        chunk_size: usize,
+        memory_limit: usize,
+        cb: &mut ReadStreamCallback<'_>,
+    ) -> VfRes {
+        use std::collections::VecDeque;
+
+        if chunk_size == 0 || memory_limit == 0 {
+            return Err(VfError::failure(0, ERR_INVAL));
+        }
+        let mut pending: VecDeque<usize> = (0..files.len()).collect();
+        let mut offsets = vec![0u64; files.len()];
+        while !pending.is_empty() {
+            let mut budget = memory_limit;
+            let mut batch_indices = Vec::new();
+            let mut reads = Vec::new();
+            while budget > 0 && !pending.is_empty() {
+                let index = pending.pop_front().expect("pending was non-empty");
+                let length = chunk_size.min(budget);
+                reads.push(ReadOp::at(files[index].clone(), offsets[index], length));
+                batch_indices.push(index);
+                budget -= length;
+            }
+            let results = self.readv(&reads).map_err(|error| {
+                let index = batch_indices
+                    .get(error.index())
+                    .copied()
+                    .unwrap_or_else(|| error.index());
+                error.with_index(index)
+            })?;
+            for (batch_index, result) in results.into_iter().enumerate() {
+                let index = batch_indices[batch_index];
+                let offset = offsets[index];
+                let eof = result.eof || result.data.is_empty();
+                offsets[index] = offset
+                    .checked_add(result.data.len() as u64)
+                    .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
+                if !cb(index, offset, &result.data, eof) {
+                    return Ok(());
+                }
+                if !eof {
+                    pending.push_back(index);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Remove a list of objects, recursively when `recursive`, `tc_rm()`.
     fn rm(&mut self, objs: &[&Path], recursive: bool) -> VfRes;
 
@@ -1286,6 +1366,16 @@ mod tests {
     // ------------------------------------------------------------------
     // VfError
     // ------------------------------------------------------------------
+
+    #[test]
+    fn descriptor_allocator_wraps_and_skips_live_entries() {
+        let mut next = i32::MAX;
+        let mut files = std::collections::HashMap::from([(1, "live")]);
+        let fd = insert_fd(&mut next, &mut files, "new").unwrap();
+        assert_eq!(fd, 2);
+        assert_eq!(files.get(&1), Some(&"live"));
+        assert_eq!(files.get(&2), Some(&"new"));
+    }
 
     #[test]
     fn vf_error_preserves_transport_message() {

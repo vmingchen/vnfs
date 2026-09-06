@@ -10,7 +10,69 @@
 /**
  * ABI version implemented by this library.
  */
-#define VFSI_ABI_VERSION 2
+#define VFSI_ABI_VERSION 3
+
+/**
+ * No error occurred.
+ */
+#define VFSI_ERROR_NONE 0
+
+/**
+ * A filesystem/backend status was returned.
+ */
+#define VFSI_ERROR_FILESYSTEM 1
+
+/**
+ * The transport failed without a filesystem status.
+ */
+#define VFSI_ERROR_TRANSPORT 2
+
+/**
+ * The selected backend does not implement the requested operation.
+ */
+#define VFSI_ERROR_UNSUPPORTED 3
+
+/**
+ * The C request itself was malformed.
+ */
+#define VFSI_ERROR_INVALID_ARGUMENT 4
+
+/**
+ * The operation was not submitted because an earlier request was invalid.
+ */
+#define VFSI_ERROR_NOT_ATTEMPTED 5
+
+/**
+ * The backend batch failed and this element's final state cannot be proven.
+ */
+#define VFSI_ERROR_INDETERMINATE 6
+
+/**
+ * Fixed capacity of [`vfsi_result::message`], including its trailing NUL.
+ */
+#define VFSI_RESULT_MESSAGE_SIZE 160
+
+#define VFSI_ATTR_MODE (1 << 0)
+
+#define VFSI_ATTR_SIZE (1 << 1)
+
+#define VFSI_ATTR_NLINK (1 << 2)
+
+#define VFSI_ATTR_FILEID (1 << 3)
+
+#define VFSI_ATTR_BLOCKS (1 << 4)
+
+#define VFSI_ATTR_UID (1 << 5)
+
+#define VFSI_ATTR_GID (1 << 6)
+
+#define VFSI_ATTR_RDEV (1 << 7)
+
+#define VFSI_ATTR_ATIME (1 << 8)
+
+#define VFSI_ATTR_MTIME (1 << 9)
+
+#define VFSI_ATTR_CTIME (1 << 10)
 
 /**
  * The backend will currently attempt server-side COPY.
@@ -74,6 +136,90 @@ typedef struct vfsi_attrs {
   int64_t ctime_sec;
   uint32_t ctime_nsec;
 } vfsi_attrs;
+
+/**
+ * Uniform ABI-v3 result for scalar and vector operations.
+ *
+ * `index` is the completed count on success and the failing operation index
+ * on error. Vector calls also populate a caller-owned result per element;
+ * after a submitted concurrent batch fails, every non-failing element is
+ * marked indeterminate because it may already have completed. `err_no`
+ * retains the backend status while `category` is portable across protocols.
+ */
+typedef struct vfsi_result {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  size_t index;
+  uint32_t category;
+  uint32_t err_no;
+  char message[VFSI_RESULT_MESSAGE_SIZE];
+} vfsi_result;
+
+typedef struct vfsi_open_op {
+  const char *path;
+  int flags;
+  uint32_t mode;
+  int fd;
+} vfsi_open_op;
+
+typedef struct vfsi_stat_op {
+  const char *path;
+  struct vfsi_attrs attrs;
+} vfsi_stat_op;
+
+typedef struct vfsi_setattr_op {
+  const char *path;
+  uint32_t mask;
+  uint32_t mode;
+  uint64_t size;
+  int64_t atime_sec;
+  uint32_t atime_nsec;
+  int64_t mtime_sec;
+  uint32_t mtime_nsec;
+} vfsi_setattr_op;
+
+typedef struct vfsi_pread_op {
+  int fd;
+  void *buf;
+  size_t len;
+  uint64_t offset;
+  size_t got;
+} vfsi_pread_op;
+
+typedef struct vfsi_pwrite_op {
+  int fd;
+  const void *buf;
+  size_t len;
+  uint64_t offset;
+  size_t wrote;
+} vfsi_pwrite_op;
+
+typedef struct vfsi_mkdir_op {
+  const char *path;
+  uint32_t mode;
+} vfsi_mkdir_op;
+
+typedef struct vfsi_rename_op {
+  const char *oldpath;
+  const char *newpath;
+} vfsi_rename_op;
+
+typedef struct vfsi_copy_op {
+  const char *src;
+  uint64_t src_offset;
+  const char *dst;
+  uint64_t dst_offset;
+  uint64_t length;
+  bool to_eof;
+} vfsi_copy_op;
+
+typedef bool (*vfsi_read_stream_cb)(const char *path,
+                                    size_t index,
+                                    uint64_t offset,
+                                    const uint8_t *data,
+                                    size_t len,
+                                    bool eof,
+                                    void *userdata);
 
 typedef bool (*vfsi_listdir_cb)(const char *name, const struct vfsi_attrs *attrs, void *userdata);
 
@@ -237,6 +383,101 @@ int vfsi_copy(struct vfsi_fs *fs,
               uint64_t dst_offset,
               uint64_t length,
               bool to_eof);
+
+/**
+ * Open `count` files in one backend vector call. ABI-v2 functions remain
+ * available; this and the other `*v` entry points use the uniform ABI-v3
+ * overall and per-element result contract.
+ */
+struct vfsi_result vfsi_openv(struct vfsi_fs *fs,
+                              struct vfsi_open_op *ops,
+                              size_t count,
+                              struct vfsi_result *item_results);
+
+/**
+ * Close a descriptor array in one backend vector call.
+ */
+struct vfsi_result vfsi_closev(struct vfsi_fs *fs,
+                               const int *fds,
+                               size_t count,
+                               struct vfsi_result *item_results);
+
+/**
+ * Stat a path array in one backend vector call.
+ */
+struct vfsi_result vfsi_statv(struct vfsi_fs *fs,
+                              struct vfsi_stat_op *ops,
+                              size_t count,
+                              struct vfsi_result *item_results);
+
+/**
+ * Set selected attributes for a path array in one backend vector call.
+ */
+struct vfsi_result vfsi_setattrv(struct vfsi_fs *fs,
+                                 const struct vfsi_setattr_op *ops,
+                                 size_t count,
+                                 struct vfsi_result *item_results);
+
+/**
+ * Positioned vector read using caller-owned buffers.
+ */
+struct vfsi_result vfsi_preadv(struct vfsi_fs *fs,
+                               struct vfsi_pread_op *ops,
+                               size_t count,
+                               struct vfsi_result *item_results);
+
+/**
+ * Positioned vector write using caller-owned buffers.
+ */
+struct vfsi_result vfsi_pwritev(struct vfsi_fs *fs,
+                                struct vfsi_pwrite_op *ops,
+                                size_t count,
+                                struct vfsi_result *item_results);
+
+/**
+ * Create a directory array in one backend vector call.
+ */
+struct vfsi_result vfsi_mkdirv(struct vfsi_fs *fs,
+                               const struct vfsi_mkdir_op *ops,
+                               size_t count,
+                               struct vfsi_result *item_results);
+
+/**
+ * Remove a path array in one backend vector call.
+ */
+struct vfsi_result vfsi_removev(struct vfsi_fs *fs,
+                                const char *const *paths,
+                                size_t count,
+                                struct vfsi_result *item_results);
+
+/**
+ * Rename a path-pair array in one backend vector call.
+ */
+struct vfsi_result vfsi_renamev(struct vfsi_fs *fs,
+                                const struct vfsi_rename_op *ops,
+                                size_t count,
+                                struct vfsi_result *item_results);
+
+/**
+ * Copy an extent-pair array in one backend vector call.
+ */
+struct vfsi_result vfsi_copyv(struct vfsi_fs *fs,
+                              const struct vfsi_copy_op *ops,
+                              size_t count,
+                              struct vfsi_result *item_results);
+
+/**
+ * Stream several paths in bounded vectorized chunks. Returning `false` from
+ * `cb` cancels successfully. The callback provides backpressure and must not
+ * reenter the same filesystem handle.
+ */
+struct vfsi_result vfsi_read_streamv(struct vfsi_fs *fs,
+                                     const char *const *paths,
+                                     size_t count,
+                                     size_t chunk_size,
+                                     size_t memory_limit,
+                                     vfsi_read_stream_cb cb,
+                                     void *userdata);
 
 /**
  * List `dir` and call `cb` for each entry. Returning `false` from `cb`

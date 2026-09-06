@@ -19,10 +19,10 @@ static bool list_one(const char *name, const struct vfsi_attrs *attrs, void *use
 
 int main(int argc, char **argv)
 {
-    bool smb = argc == 4 && strcmp(argv[1], "--smb") == 0;
+    bool smb = (argc == 4 || argc == 7) && strcmp(argv[1], "--smb") == 0;
     if (argc != 2 && !smb) {
         fprintf(stderr, "usage: smoke <root>\n"
-                        "       smoke --smb <server> <share>\n");
+                        "       smoke --smb <server> <share> [username password domain]\n");
         return 2;
     }
 
@@ -33,7 +33,8 @@ int main(int argc, char **argv)
     }
 
     struct vfsi_fs *fs = NULL;
-    int rc = smb ? vfsi_smb_open(argv[2], argv[3], "", "", "", &fs)
+    int rc = smb ? vfsi_smb_open(argv[2], argv[3], argc == 7 ? argv[4] : "",
+                                 argc == 7 ? argv[5] : "", argc == 7 ? argv[6] : "", &fs)
                  : vfsi_dummy_open(argv[1], &fs);
     if (rc != 0 || fs == NULL) {
         fprintf(stderr, "%s open failed: %d\n", smb ? "SMB" : "dummy", rc);
@@ -53,9 +54,12 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    rc = vfsi_mkdir(fs, "/d", 0755, 1);
-    if (rc != 0) {
-        fprintf(stderr, "mkdir failed: %d\n", rc);
+    struct vfsi_mkdir_op mkdir_op = {.path = "/d", .mode = 0755};
+    struct vfsi_result item_result;
+    struct vfsi_result batch = vfsi_mkdirv(fs, &mkdir_op, 1, &item_result);
+    if (batch.category != VFSI_ERROR_NONE || batch.index != 1) {
+        fprintf(stderr, "vector mkdir failed: category=%u status=%u index=%zu\n",
+                batch.category, batch.err_no, batch.index);
         return 1;
     }
 

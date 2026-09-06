@@ -17,10 +17,40 @@ use std::sync::{Mutex, MutexGuard};
 use vnfs::dummy_vecfs::DummyVecFs;
 use vnfs::nfs::NfsVecFs;
 use vnfs::smb::SmbVecFs;
-use vnfs::vecfs::{AttrMask, ExtentPair, VfAttrs, VfError, VfFile, ERR_EBADF, ERR_NOENT};
+use vnfs::vecfs::{
+    AttrMask, ExtentPair, ReadOp, VfAttrs, VfError, VfFile, WriteOp, ERR_EBADF, ERR_NOENT,
+    VF_ERR_UNSUPPORTED,
+};
 
 /// ABI version implemented by this library.
-pub const VFSI_ABI_VERSION: u32 = 2;
+pub const VFSI_ABI_VERSION: u32 = 3;
+/// No error occurred.
+pub const VFSI_ERROR_NONE: u32 = 0;
+/// A filesystem/backend status was returned.
+pub const VFSI_ERROR_FILESYSTEM: u32 = 1;
+/// The transport failed without a filesystem status.
+pub const VFSI_ERROR_TRANSPORT: u32 = 2;
+/// The selected backend does not implement the requested operation.
+pub const VFSI_ERROR_UNSUPPORTED: u32 = 3;
+/// The C request itself was malformed.
+pub const VFSI_ERROR_INVALID_ARGUMENT: u32 = 4;
+/// The operation was not submitted because an earlier request was invalid.
+pub const VFSI_ERROR_NOT_ATTEMPTED: u32 = 5;
+/// The backend batch failed and this element's final state cannot be proven.
+pub const VFSI_ERROR_INDETERMINATE: u32 = 6;
+/// Fixed capacity of [`vfsi_result::message`], including its trailing NUL.
+pub const VFSI_RESULT_MESSAGE_SIZE: usize = 160;
+pub const VFSI_ATTR_MODE: u32 = 1 << 0;
+pub const VFSI_ATTR_SIZE: u32 = 1 << 1;
+pub const VFSI_ATTR_NLINK: u32 = 1 << 2;
+pub const VFSI_ATTR_FILEID: u32 = 1 << 3;
+pub const VFSI_ATTR_BLOCKS: u32 = 1 << 4;
+pub const VFSI_ATTR_UID: u32 = 1 << 5;
+pub const VFSI_ATTR_GID: u32 = 1 << 6;
+pub const VFSI_ATTR_RDEV: u32 = 1 << 7;
+pub const VFSI_ATTR_ATIME: u32 = 1 << 8;
+pub const VFSI_ATTR_MTIME: u32 = 1 << 9;
+pub const VFSI_ATTR_CTIME: u32 = 1 << 10;
 /// The backend will currently attempt server-side COPY.
 pub const VFSI_CAP_SERVER_COPY: u64 = 1 << 0;
 /// The backend reports and honors Unix metadata such as modes and ownership.
@@ -46,6 +76,14 @@ macro_rules! ffi_guard {
             Ok(value) => value,
             Err(_) => $fallback,
         }
+    }};
+}
+
+macro_rules! fail_batch {
+    ($results:expr, $failure:expr, $submitted:expr) => {{
+        let failure = $failure;
+        fail_results($results, failure, $submitted);
+        return failure;
     }};
 }
 
@@ -84,6 +122,98 @@ pub struct vfsi_attrs {
     pub ctime_nsec: u32,
 }
 
+/// Uniform ABI-v3 result for scalar and vector operations.
+///
+/// `index` is the completed count on success and the failing operation index
+/// on error. Vector calls also populate a caller-owned result per element;
+/// after a submitted concurrent batch fails, every non-failing element is
+/// marked indeterminate because it may already have completed. `err_no`
+/// retains the backend status while `category` is portable across protocols.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct vfsi_result {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub index: usize,
+    pub category: u32,
+    pub err_no: u32,
+    pub message: [c_char; VFSI_RESULT_MESSAGE_SIZE],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct vfsi_open_op {
+    pub path: *const c_char,
+    pub flags: c_int,
+    pub mode: u32,
+    pub fd: c_int,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct vfsi_stat_op {
+    pub path: *const c_char,
+    pub attrs: vfsi_attrs,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct vfsi_setattr_op {
+    pub path: *const c_char,
+    pub mask: u32,
+    pub mode: u32,
+    pub size: u64,
+    pub atime_sec: i64,
+    pub atime_nsec: u32,
+    pub mtime_sec: i64,
+    pub mtime_nsec: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct vfsi_pread_op {
+    pub fd: c_int,
+    pub buf: *mut c_void,
+    pub len: usize,
+    pub offset: u64,
+    pub got: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct vfsi_pwrite_op {
+    pub fd: c_int,
+    pub buf: *const c_void,
+    pub len: usize,
+    pub offset: u64,
+    pub wrote: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct vfsi_mkdir_op {
+    pub path: *const c_char,
+    pub mode: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct vfsi_rename_op {
+    pub oldpath: *const c_char,
+    pub newpath: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct vfsi_copy_op {
+    pub src: *const c_char,
+    pub src_offset: u64,
+    pub dst: *const c_char,
+    pub dst_offset: u64,
+    pub length: u64,
+    pub to_eof: bool,
+}
+
 impl vfsi_attrs {
     fn from_vf(a: &VfAttrs) -> vfsi_attrs {
         vfsi_attrs {
@@ -104,6 +234,112 @@ impl vfsi_attrs {
             ctime_sec: a.ctime_sec,
             ctime_nsec: a.ctime_nsec,
         }
+    }
+}
+
+impl vfsi_result {
+    fn base(index: usize, category: u32, err_no: u32, message: &str) -> Self {
+        let mut result = Self {
+            struct_size: std::mem::size_of::<Self>() as u32,
+            abi_version: VFSI_ABI_VERSION,
+            index,
+            category,
+            err_no,
+            message: [0; VFSI_RESULT_MESSAGE_SIZE],
+        };
+        let bytes = message.as_bytes();
+        let len = bytes.len().min(VFSI_RESULT_MESSAGE_SIZE - 1);
+        for (dst, src) in result.message[..len].iter_mut().zip(&bytes[..len]) {
+            *dst = *src as c_char;
+        }
+        result
+    }
+
+    fn success(completed: usize) -> Self {
+        Self::base(completed, VFSI_ERROR_NONE, 0, "")
+    }
+
+    fn item_success(index: usize) -> Self {
+        Self::base(index, VFSI_ERROR_NONE, 0, "")
+    }
+
+    fn invalid(index: usize, message: &str) -> Self {
+        Self::base(
+            index,
+            VFSI_ERROR_INVALID_ARGUMENT,
+            libc::EINVAL as u32,
+            message,
+        )
+    }
+
+    fn panic() -> Self {
+        Self::base(
+            0,
+            VFSI_ERROR_TRANSPORT,
+            libc::EIO as u32,
+            "panic across FFI",
+        )
+    }
+
+    fn from_error(error: VfError) -> Self {
+        match error {
+            VfError::Op { index, err_no } => Self::base(
+                index,
+                if err_no == VF_ERR_UNSUPPORTED {
+                    VFSI_ERROR_UNSUPPORTED
+                } else {
+                    VFSI_ERROR_FILESYSTEM
+                },
+                err_no,
+                "",
+            ),
+            VfError::Transport { index, message } => Self::base(
+                index.unwrap_or(0),
+                VFSI_ERROR_TRANSPORT,
+                vnfs::VF_ERR_RPC,
+                &message,
+            ),
+            _ => Self::base(0, VFSI_ERROR_TRANSPORT, libc::EIO as u32, "unknown error"),
+        }
+    }
+}
+
+// Keeping the error inline avoids allocating while crossing the C ABI; the
+// fixed-size result is copied directly into the caller's return value.
+#[allow(clippy::result_large_err)]
+unsafe fn result_array<'a>(
+    results: *mut vfsi_result,
+    count: usize,
+) -> Result<&'a mut [vfsi_result], vfsi_result> {
+    if results.is_null() {
+        return Err(vfsi_result::invalid(0, "null result array"));
+    }
+    let results = std::slice::from_raw_parts_mut(results, count);
+    for (index, result) in results.iter_mut().enumerate() {
+        *result = vfsi_result::base(index, VFSI_ERROR_NOT_ATTEMPTED, 0, "not attempted");
+    }
+    Ok(results)
+}
+
+fn complete_results(results: &mut [vfsi_result]) {
+    for (index, result) in results.iter_mut().enumerate() {
+        *result = vfsi_result::item_success(index);
+    }
+}
+
+fn fail_results(results: &mut [vfsi_result], failure: vfsi_result, submitted: bool) {
+    if submitted {
+        for (index, result) in results.iter_mut().enumerate() {
+            *result = vfsi_result::base(
+                index,
+                VFSI_ERROR_INDETERMINATE,
+                0,
+                "batch failed; completion is indeterminate",
+            );
+        }
+    }
+    if let Some(result) = results.get_mut(failure.index) {
+        *result = failure;
     }
 }
 
@@ -129,6 +365,18 @@ pub type vfsi_read_paths_cb = Option<
         path: *const c_char,
         data: *const u8,
         len: usize,
+        userdata: *mut c_void,
+    ) -> bool,
+>;
+
+pub type vfsi_read_stream_cb = Option<
+    unsafe extern "C" fn(
+        path: *const c_char,
+        index: usize,
+        offset: u64,
+        data: *const u8,
+        len: usize,
+        eof: bool,
         userdata: *mut c_void,
     ) -> bool,
 >;
@@ -258,6 +506,26 @@ fn make_fs(fs: Box<dyn vnfs::VecFs>, mountpoint: PathBuf, backend_root: PathBuf)
         mountpoint,
         backend_root,
     }))
+}
+
+fn insert_c_file(
+    fs: &vfsi_fs,
+    files: &mut std::collections::HashMap<i32, VfFile>,
+    file: VfFile,
+) -> Result<i32, VfError> {
+    for _ in 0..i32::MAX {
+        let fd = fs
+            .next_fd
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                Some(value.checked_add(1).unwrap_or(1))
+            })
+            .expect("descriptor update always supplies a value");
+        if let std::collections::hash_map::Entry::Vacant(entry) = files.entry(fd) {
+            entry.insert(file);
+            return Ok(fd);
+        }
+    }
+    Err(VfError::failure(0, libc::EMFILE as u32))
 }
 
 fn vpath_for(fs: &vfsi_fs, path: &std::path::Path) -> Result<PathBuf, VfError> {
@@ -570,19 +838,7 @@ fn open_impl(
     let vpath = vpath_for(fs, path)?;
     let file = lock_or_io(&fs.fs)?.open(&vpath, flags, mode)?;
     let mut files = lock_or_io(&fs.files)?;
-    for _ in 0..i32::MAX {
-        let fd = fs
-            .next_fd
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                Some(value.checked_add(1).unwrap_or(1))
-            })
-            .expect("descriptor update always supplies a value");
-        if let std::collections::hash_map::Entry::Vacant(entry) = files.entry(fd) {
-            entry.insert(file);
-            return Ok(fd);
-        }
-    }
-    Err(VfError::failure(0, libc::EMFILE as u32))
+    insert_c_file(fs, &mut files, file)
 }
 
 /// Open a file and return a vfsi descriptor (`>= 0`), or a negative errno.
@@ -819,6 +1075,776 @@ pub unsafe extern "C" fn vfsi_copy(
         match lock_or_io(&fs.fs).and_then(|mut backend| backend.copyv(&[pair])) {
             Ok(()) => 0,
             Err(error) => vf_code(&error),
+        }
+    })
+}
+
+/// Open `count` files in one backend vector call. ABI-v2 functions remain
+/// available; this and the other `*v` entry points use the uniform ABI-v3
+/// overall and per-element result contract.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_openv(
+    fs: *mut vfsi_fs,
+    ops: *mut vfsi_open_op,
+    count: usize,
+    item_results: *mut vfsi_result,
+) -> vfsi_result {
+    ffi_guard!(vfsi_result::panic(), {
+        let Some(fs) = fs.as_ref() else {
+            return vfsi_result::invalid(0, "null filesystem");
+        };
+        if count == 0 {
+            return vfsi_result::success(0);
+        }
+        let results = match result_array(item_results, count) {
+            Ok(results) => results,
+            Err(error) => return error,
+        };
+        let Some(ops) = ops.as_mut() else {
+            fail_batch!(
+                results,
+                vfsi_result::invalid(0, "null operation array"),
+                false
+            );
+        };
+        let ops = std::slice::from_raw_parts_mut(ops, count);
+        let mut paths = Vec::with_capacity(count);
+        let mut flags = Vec::with_capacity(count);
+        let mut modes = Vec::with_capacity(count);
+        for (index, op) in ops.iter().enumerate() {
+            let Some(path) = cstr_path(op.path) else {
+                fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
+            };
+            match vpath_for(fs, &path) {
+                Ok(path) => paths.push(path),
+                Err(error) => fail_batch!(
+                    results,
+                    vfsi_result::from_error(error.with_index(index)),
+                    false
+                ),
+            }
+            flags.push(op.flags);
+            modes.push(op.mode);
+        }
+        let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        let opened = {
+            let mut backend = match lock_or_io(&fs.fs) {
+                Ok(backend) => backend,
+                Err(error) => fail_batch!(results, vfsi_result::from_error(error), true),
+            };
+            match backend.openv(&refs, &flags, &modes) {
+                Ok(opened) => opened,
+                Err(error) => return vfsi_result::from_error(error),
+            }
+        };
+        let mut registered = Vec::with_capacity(count);
+        let registration = (|| -> Result<(), VfError> {
+            let mut files = lock_or_io(&fs.files)?;
+            for (index, (op, file)) in ops.iter_mut().zip(&opened).enumerate() {
+                let fd = insert_c_file(fs, &mut files, file.clone())
+                    .map_err(|error| error.with_index(index))?;
+                op.fd = fd;
+                registered.push(fd);
+            }
+            Ok(())
+        })();
+        if let Err(error) = registration {
+            if let Ok(mut files) = fs.files.lock() {
+                for fd in registered {
+                    files.remove(&fd);
+                }
+            }
+            if let Ok(mut backend) = fs.fs.lock() {
+                let _ = backend.closev(&opened);
+            }
+            fail_batch!(results, vfsi_result::from_error(error), true);
+        }
+        complete_results(results);
+        vfsi_result::success(count)
+    })
+}
+
+/// Close a descriptor array in one backend vector call.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_closev(
+    fs: *mut vfsi_fs,
+    fds: *const c_int,
+    count: usize,
+    item_results: *mut vfsi_result,
+) -> vfsi_result {
+    ffi_guard!(vfsi_result::panic(), {
+        let Some(fs) = fs.as_ref() else {
+            return vfsi_result::invalid(0, "null filesystem");
+        };
+        if count == 0 {
+            return vfsi_result::success(0);
+        }
+        let results = match result_array(item_results, count) {
+            Ok(results) => results,
+            Err(error) => return error,
+        };
+        if fds.is_null() {
+            fail_batch!(
+                results,
+                vfsi_result::invalid(0, "null descriptor array"),
+                false
+            );
+        }
+        let fds = std::slice::from_raw_parts(fds, count);
+        let files = {
+            let mut table = match lock_or_io(&fs.files) {
+                Ok(table) => table,
+                Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
+            };
+            let mut files = Vec::with_capacity(count);
+            for (index, fd) in fds.iter().enumerate() {
+                let Some(file) = table.get(fd).cloned() else {
+                    fail_batch!(
+                        results,
+                        vfsi_result::from_error(VfError::failure(index, ERR_EBADF)),
+                        false
+                    );
+                };
+                files.push(file);
+            }
+            for fd in fds {
+                table.remove(fd);
+            }
+            files
+        };
+        let mut backend = match lock_or_io(&fs.fs) {
+            Ok(backend) => backend,
+            Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
+        };
+        match backend.closev(&files) {
+            Ok(()) => {
+                complete_results(results);
+                vfsi_result::success(count)
+            }
+            Err(error) => {
+                let failure = vfsi_result::from_error(error);
+                fail_results(results, failure, true);
+                failure
+            }
+        }
+    })
+}
+
+/// Stat a path array in one backend vector call.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_statv(
+    fs: *mut vfsi_fs,
+    ops: *mut vfsi_stat_op,
+    count: usize,
+    item_results: *mut vfsi_result,
+) -> vfsi_result {
+    ffi_guard!(vfsi_result::panic(), {
+        let Some(fs) = fs.as_ref() else {
+            return vfsi_result::invalid(0, "null filesystem");
+        };
+        if count == 0 {
+            return vfsi_result::success(0);
+        }
+        let results = match result_array(item_results, count) {
+            Ok(results) => results,
+            Err(error) => return error,
+        };
+        let Some(ops) = ops.as_mut() else {
+            fail_batch!(
+                results,
+                vfsi_result::invalid(0, "null operation array"),
+                false
+            );
+        };
+        let ops = std::slice::from_raw_parts_mut(ops, count);
+        let mut attrs = Vec::with_capacity(count);
+        for (index, op) in ops.iter().enumerate() {
+            let Some(path) = cstr_path(op.path) else {
+                fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
+            };
+            let path = match vpath_for(fs, &path) {
+                Ok(path) => path,
+                Err(error) => fail_batch!(
+                    results,
+                    vfsi_result::from_error(error.with_index(index)),
+                    false
+                ),
+            };
+            attrs.push(VfAttrs {
+                file: VfFile::from_os_path(&path),
+                masks: mask(),
+                ..VfAttrs::default()
+            });
+        }
+        let mut backend = match lock_or_io(&fs.fs) {
+            Ok(backend) => backend,
+            Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
+        };
+        if let Err(error) = backend.getattrsv(&mut attrs) {
+            fail_batch!(results, vfsi_result::from_error(error), true);
+        }
+        for (op, attrs) in ops.iter_mut().zip(&attrs) {
+            op.attrs = vfsi_attrs::from_vf(attrs);
+        }
+        complete_results(results);
+        vfsi_result::success(count)
+    })
+}
+
+/// Set selected attributes for a path array in one backend vector call.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_setattrv(
+    fs: *mut vfsi_fs,
+    ops: *const vfsi_setattr_op,
+    count: usize,
+    item_results: *mut vfsi_result,
+) -> vfsi_result {
+    ffi_guard!(vfsi_result::panic(), {
+        let Some(fs) = fs.as_ref() else {
+            return vfsi_result::invalid(0, "null filesystem");
+        };
+        if count == 0 {
+            return vfsi_result::success(0);
+        }
+        let results = match result_array(item_results, count) {
+            Ok(results) => results,
+            Err(error) => return error,
+        };
+        if ops.is_null() {
+            fail_batch!(
+                results,
+                vfsi_result::invalid(0, "null operation array"),
+                false
+            );
+        }
+        let ops = std::slice::from_raw_parts(ops, count);
+        let mut attrs = Vec::with_capacity(count);
+        for (index, op) in ops.iter().enumerate() {
+            let Some(path) = cstr_path(op.path) else {
+                fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
+            };
+            let path = match vpath_for(fs, &path) {
+                Ok(path) => path,
+                Err(error) => fail_batch!(
+                    results,
+                    vfsi_result::from_error(error.with_index(index)),
+                    false
+                ),
+            };
+            let Some(masks) = AttrMask::from_bits(op.mask) else {
+                fail_batch!(
+                    results,
+                    vfsi_result::invalid(index, "unknown attribute mask bit"),
+                    false
+                );
+            };
+            attrs.push(VfAttrs {
+                file: VfFile::from_os_path(&path),
+                masks,
+                mode: op.mode,
+                size: op.size,
+                atime_sec: op.atime_sec,
+                atime_nsec: op.atime_nsec,
+                mtime_sec: op.mtime_sec,
+                mtime_nsec: op.mtime_nsec,
+                ..VfAttrs::default()
+            });
+        }
+        let mut backend = match lock_or_io(&fs.fs) {
+            Ok(backend) => backend,
+            Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
+        };
+        match backend.setattrsv(&attrs) {
+            Ok(()) => {
+                complete_results(results);
+                vfsi_result::success(count)
+            }
+            Err(error) => {
+                let failure = vfsi_result::from_error(error);
+                fail_results(results, failure, true);
+                failure
+            }
+        }
+    })
+}
+
+/// Positioned vector read using caller-owned buffers.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_preadv(
+    fs: *mut vfsi_fs,
+    ops: *mut vfsi_pread_op,
+    count: usize,
+    item_results: *mut vfsi_result,
+) -> vfsi_result {
+    ffi_guard!(vfsi_result::panic(), {
+        let Some(fs) = fs.as_ref() else {
+            return vfsi_result::invalid(0, "null filesystem");
+        };
+        if count == 0 {
+            return vfsi_result::success(0);
+        }
+        let item_results = match result_array(item_results, count) {
+            Ok(results) => results,
+            Err(error) => return error,
+        };
+        let Some(ops) = ops.as_mut() else {
+            fail_batch!(
+                item_results,
+                vfsi_result::invalid(0, "null operation array"),
+                false
+            );
+        };
+        let ops = std::slice::from_raw_parts_mut(ops, count);
+        let table = match lock_or_io(&fs.files) {
+            Ok(table) => table,
+            Err(error) => {
+                fail_batch!(item_results, vfsi_result::from_error(error), false)
+            }
+        };
+        let mut reads = Vec::with_capacity(count);
+        for (index, op) in ops.iter().enumerate() {
+            if op.len > 0 && op.buf.is_null() {
+                fail_batch!(
+                    item_results,
+                    vfsi_result::invalid(index, "null read buffer"),
+                    false
+                );
+            }
+            let Some(file) = table.get(&op.fd).cloned() else {
+                fail_batch!(
+                    item_results,
+                    vfsi_result::from_error(VfError::failure(index, ERR_EBADF)),
+                    false
+                );
+            };
+            reads.push(ReadOp::at(file, op.offset, op.len));
+        }
+        drop(table);
+        let mut backend = match lock_or_io(&fs.fs) {
+            Ok(backend) => backend,
+            Err(error) => {
+                fail_batch!(item_results, vfsi_result::from_error(error), false)
+            }
+        };
+        let results = match backend.readv(&reads) {
+            Ok(results) => results,
+            Err(error) => {
+                fail_batch!(item_results, vfsi_result::from_error(error), true)
+            }
+        };
+        for (op, result) in ops.iter_mut().zip(results) {
+            if !result.data.is_empty() {
+                std::ptr::copy_nonoverlapping(
+                    result.data.as_ptr(),
+                    op.buf.cast::<u8>(),
+                    result.data.len(),
+                );
+            }
+            op.got = result.data.len();
+        }
+        complete_results(item_results);
+        vfsi_result::success(count)
+    })
+}
+
+/// Positioned vector write using caller-owned buffers.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_pwritev(
+    fs: *mut vfsi_fs,
+    ops: *mut vfsi_pwrite_op,
+    count: usize,
+    item_results: *mut vfsi_result,
+) -> vfsi_result {
+    ffi_guard!(vfsi_result::panic(), {
+        let Some(fs) = fs.as_ref() else {
+            return vfsi_result::invalid(0, "null filesystem");
+        };
+        if count == 0 {
+            return vfsi_result::success(0);
+        }
+        let item_results = match result_array(item_results, count) {
+            Ok(results) => results,
+            Err(error) => return error,
+        };
+        let Some(ops) = ops.as_mut() else {
+            fail_batch!(
+                item_results,
+                vfsi_result::invalid(0, "null operation array"),
+                false
+            );
+        };
+        let ops = std::slice::from_raw_parts_mut(ops, count);
+        let table = match lock_or_io(&fs.files) {
+            Ok(table) => table,
+            Err(error) => {
+                fail_batch!(item_results, vfsi_result::from_error(error), false)
+            }
+        };
+        let mut writes = Vec::with_capacity(count);
+        for (index, op) in ops.iter().enumerate() {
+            if op.len > 0 && op.buf.is_null() {
+                fail_batch!(
+                    item_results,
+                    vfsi_result::invalid(index, "null write buffer"),
+                    false
+                );
+            }
+            let Some(file) = table.get(&op.fd).cloned() else {
+                fail_batch!(
+                    item_results,
+                    vfsi_result::from_error(VfError::failure(index, ERR_EBADF)),
+                    false
+                );
+            };
+            let data = if op.len == 0 {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(op.buf.cast::<u8>(), op.len).to_vec()
+            };
+            writes.push(WriteOp::at(file, op.offset, data));
+        }
+        drop(table);
+        let mut backend = match lock_or_io(&fs.fs) {
+            Ok(backend) => backend,
+            Err(error) => {
+                fail_batch!(item_results, vfsi_result::from_error(error), false)
+            }
+        };
+        let results = match backend.writev(&writes) {
+            Ok(results) => results,
+            Err(error) => {
+                fail_batch!(item_results, vfsi_result::from_error(error), true)
+            }
+        };
+        for (op, result) in ops.iter_mut().zip(results) {
+            op.wrote = result.written;
+        }
+        complete_results(item_results);
+        vfsi_result::success(count)
+    })
+}
+
+/// Create a directory array in one backend vector call.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_mkdirv(
+    fs: *mut vfsi_fs,
+    ops: *const vfsi_mkdir_op,
+    count: usize,
+    item_results: *mut vfsi_result,
+) -> vfsi_result {
+    ffi_guard!(vfsi_result::panic(), {
+        let Some(fs) = fs.as_ref() else {
+            return vfsi_result::invalid(0, "null filesystem");
+        };
+        if count == 0 {
+            return vfsi_result::success(0);
+        }
+        let results = match result_array(item_results, count) {
+            Ok(results) => results,
+            Err(error) => return error,
+        };
+        if ops.is_null() {
+            fail_batch!(
+                results,
+                vfsi_result::invalid(0, "null operation array"),
+                false
+            );
+        }
+        let ops = std::slice::from_raw_parts(ops, count);
+        let mut dirs = Vec::with_capacity(count);
+        for (index, op) in ops.iter().enumerate() {
+            let Some(path) = cstr_path(op.path) else {
+                fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
+            };
+            let path = match vpath_for(fs, &path) {
+                Ok(path) => path,
+                Err(error) => fail_batch!(
+                    results,
+                    vfsi_result::from_error(error.with_index(index)),
+                    false
+                ),
+            };
+            dirs.push(VfAttrs {
+                file: VfFile::from_os_path(&path),
+                masks: AttrMask::MODE,
+                mode: op.mode,
+                ..VfAttrs::default()
+            });
+        }
+        let mut backend = match lock_or_io(&fs.fs) {
+            Ok(backend) => backend,
+            Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
+        };
+        match backend.mkdirv(&dirs) {
+            Ok(()) => {
+                complete_results(results);
+                vfsi_result::success(count)
+            }
+            Err(error) => {
+                let failure = vfsi_result::from_error(error);
+                fail_results(results, failure, true);
+                failure
+            }
+        }
+    })
+}
+
+/// Remove a path array in one backend vector call.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_removev(
+    fs: *mut vfsi_fs,
+    paths: *const *const c_char,
+    count: usize,
+    item_results: *mut vfsi_result,
+) -> vfsi_result {
+    ffi_guard!(vfsi_result::panic(), {
+        let Some(fs) = fs.as_ref() else {
+            return vfsi_result::invalid(0, "null filesystem");
+        };
+        if count == 0 {
+            return vfsi_result::success(0);
+        }
+        let results = match result_array(item_results, count) {
+            Ok(results) => results,
+            Err(error) => return error,
+        };
+        if paths.is_null() {
+            fail_batch!(results, vfsi_result::invalid(0, "null path array"), false);
+        }
+        let paths = std::slice::from_raw_parts(paths, count);
+        let mut files = Vec::with_capacity(count);
+        for (index, path) in paths.iter().enumerate() {
+            let Some(path) = cstr_path(*path) else {
+                fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
+            };
+            let path = match vpath_for(fs, &path) {
+                Ok(path) => path,
+                Err(error) => fail_batch!(
+                    results,
+                    vfsi_result::from_error(error.with_index(index)),
+                    false
+                ),
+            };
+            files.push(VfFile::from_os_path(&path));
+        }
+        let mut backend = match lock_or_io(&fs.fs) {
+            Ok(backend) => backend,
+            Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
+        };
+        match backend.removev(&files) {
+            Ok(()) => {
+                complete_results(results);
+                vfsi_result::success(count)
+            }
+            Err(error) => {
+                let failure = vfsi_result::from_error(error);
+                fail_results(results, failure, true);
+                failure
+            }
+        }
+    })
+}
+
+/// Rename a path-pair array in one backend vector call.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_renamev(
+    fs: *mut vfsi_fs,
+    ops: *const vfsi_rename_op,
+    count: usize,
+    item_results: *mut vfsi_result,
+) -> vfsi_result {
+    ffi_guard!(vfsi_result::panic(), {
+        let Some(fs) = fs.as_ref() else {
+            return vfsi_result::invalid(0, "null filesystem");
+        };
+        if count == 0 {
+            return vfsi_result::success(0);
+        }
+        let results = match result_array(item_results, count) {
+            Ok(results) => results,
+            Err(error) => return error,
+        };
+        if ops.is_null() {
+            fail_batch!(
+                results,
+                vfsi_result::invalid(0, "null operation array"),
+                false
+            );
+        }
+        let ops = std::slice::from_raw_parts(ops, count);
+        let mut pairs = Vec::with_capacity(count);
+        for (index, op) in ops.iter().enumerate() {
+            let (Some(oldpath), Some(newpath)) = (cstr_path(op.oldpath), cstr_path(op.newpath))
+            else {
+                fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
+            };
+            let (oldpath, newpath) = match (vpath_for(fs, &oldpath), vpath_for(fs, &newpath)) {
+                (Ok(oldpath), Ok(newpath)) => (oldpath, newpath),
+                (Err(error), _) | (_, Err(error)) => {
+                    fail_batch!(
+                        results,
+                        vfsi_result::from_error(error.with_index(index)),
+                        false
+                    );
+                }
+            };
+            pairs.push((
+                VfFile::from_os_path(&oldpath),
+                VfFile::from_os_path(&newpath),
+            ));
+        }
+        let mut backend = match lock_or_io(&fs.fs) {
+            Ok(backend) => backend,
+            Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
+        };
+        match backend.renamev(&pairs) {
+            Ok(()) => {
+                complete_results(results);
+                vfsi_result::success(count)
+            }
+            Err(error) => {
+                let failure = vfsi_result::from_error(error);
+                fail_results(results, failure, true);
+                failure
+            }
+        }
+    })
+}
+
+/// Copy an extent-pair array in one backend vector call.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_copyv(
+    fs: *mut vfsi_fs,
+    ops: *const vfsi_copy_op,
+    count: usize,
+    item_results: *mut vfsi_result,
+) -> vfsi_result {
+    ffi_guard!(vfsi_result::panic(), {
+        let Some(fs) = fs.as_ref() else {
+            return vfsi_result::invalid(0, "null filesystem");
+        };
+        if count == 0 {
+            return vfsi_result::success(0);
+        }
+        let results = match result_array(item_results, count) {
+            Ok(results) => results,
+            Err(error) => return error,
+        };
+        if ops.is_null() {
+            fail_batch!(
+                results,
+                vfsi_result::invalid(0, "null operation array"),
+                false
+            );
+        }
+        let ops = std::slice::from_raw_parts(ops, count);
+        let mut pairs = Vec::with_capacity(count);
+        for (index, op) in ops.iter().enumerate() {
+            let (Some(src), Some(dst)) = (cstr_path(op.src), cstr_path(op.dst)) else {
+                fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
+            };
+            let (Some(src), Some(dst)) = (path_for(fs, &src), path_for(fs, &dst)) else {
+                fail_batch!(
+                    results,
+                    vfsi_result::from_error(VfError::failure(index, ERR_NOENT)),
+                    false
+                );
+            };
+            pairs.push(ExtentPair::from_os_paths(
+                &src,
+                op.src_offset,
+                &dst,
+                op.dst_offset,
+                (!op.to_eof).then_some(op.length),
+            ));
+        }
+        let mut backend = match lock_or_io(&fs.fs) {
+            Ok(backend) => backend,
+            Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
+        };
+        match backend.copyv(&pairs) {
+            Ok(()) => {
+                complete_results(results);
+                vfsi_result::success(count)
+            }
+            Err(error) => {
+                let failure = vfsi_result::from_error(error);
+                fail_results(results, failure, true);
+                failure
+            }
+        }
+    })
+}
+
+/// Stream several paths in bounded vectorized chunks. Returning `false` from
+/// `cb` cancels successfully. The callback provides backpressure and must not
+/// reenter the same filesystem handle.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_read_streamv(
+    fs: *mut vfsi_fs,
+    paths: *const *const c_char,
+    count: usize,
+    chunk_size: usize,
+    memory_limit: usize,
+    cb: vfsi_read_stream_cb,
+    userdata: *mut c_void,
+) -> vfsi_result {
+    ffi_guard!(vfsi_result::panic(), {
+        let Some(fs) = fs.as_ref() else {
+            return vfsi_result::invalid(0, "null filesystem");
+        };
+        let Some(cb) = cb else {
+            return vfsi_result::invalid(0, "null callback");
+        };
+        if chunk_size == 0 || memory_limit == 0 {
+            return vfsi_result::invalid(0, "chunk and memory limits must be non-zero");
+        }
+        if count == 0 {
+            return vfsi_result::success(0);
+        }
+        if paths.is_null() {
+            return vfsi_result::invalid(0, "null path array");
+        }
+        let paths = std::slice::from_raw_parts(paths, count);
+        let mut cpaths = Vec::with_capacity(count);
+        let mut files = Vec::with_capacity(count);
+        for (index, path) in paths.iter().enumerate() {
+            let Some(kernel_path) = cstr_path(*path) else {
+                return vfsi_result::invalid(index, "null path");
+            };
+            let Some(cpath) = cstr_from_os(kernel_path.as_os_str().as_bytes()) else {
+                return vfsi_result::invalid(index, "path contains NUL");
+            };
+            let vpath = match vpath_for(fs, &kernel_path) {
+                Ok(path) => path,
+                Err(error) => return vfsi_result::from_error(error.with_index(index)),
+            };
+            cpaths.push(cpath);
+            files.push(VfFile::from_os_path(&vpath));
+        }
+        let mut backend = match lock_or_io(&fs.fs) {
+            Ok(backend) => backend,
+            Err(error) => return vfsi_result::from_error(error),
+        };
+        let result = backend.read_streamv(
+            &files,
+            chunk_size,
+            memory_limit,
+            &mut |index, offset, data, eof| {
+                cb(
+                    cpaths[index].as_ptr(),
+                    index,
+                    offset,
+                    data.as_ptr(),
+                    data.len(),
+                    eof,
+                    userdata,
+                )
+            },
+        );
+        match result {
+            Ok(()) => vfsi_result::success(count),
+            Err(error) => vfsi_result::from_error(error),
         }
     })
 }
@@ -1437,6 +2463,293 @@ mod tests {
         assert_eq!(seen.rows[0].1, b"first");
         assert_eq!(seen.rows[1].1, b"second-longer");
 
+        unsafe { vfsi_free(fs) };
+    }
+
+    #[test]
+    fn abi_v3_vector_io_and_bounded_streaming() {
+        let root = temp_root();
+        let mut fs: *mut vfsi_fs = std::ptr::null_mut();
+        assert_eq!(unsafe { vfsi_dummy_open(root.as_ptr(), &mut fs) }, 0);
+        let mut item_results = [vfsi_result::panic(); 2];
+        let mut one_result = [vfsi_result::panic(); 1];
+
+        let dir_a = CString::new("/v3-a").unwrap();
+        let dir_b = CString::new("/v3-b").unwrap();
+        let mkdir_ops = [
+            vfsi_mkdir_op {
+                path: dir_a.as_ptr(),
+                mode: 0o755,
+            },
+            vfsi_mkdir_op {
+                path: dir_b.as_ptr(),
+                mode: 0o755,
+            },
+        ];
+        let result = unsafe {
+            vfsi_mkdirv(
+                fs,
+                mkdir_ops.as_ptr(),
+                mkdir_ops.len(),
+                item_results.as_mut_ptr(),
+            )
+        };
+        assert_eq!(result.category, VFSI_ERROR_NONE);
+        assert_eq!(result.index, 2);
+        assert!(item_results
+            .iter()
+            .all(|result| result.category == VFSI_ERROR_NONE));
+
+        let path_a = CString::new("/v3-a/a.bin").unwrap();
+        let path_b = CString::new("/v3-b/b.bin").unwrap();
+        let mut open_ops = [
+            vfsi_open_op {
+                path: path_a.as_ptr(),
+                flags: libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
+                mode: 0o644,
+                fd: -1,
+            },
+            vfsi_open_op {
+                path: path_b.as_ptr(),
+                flags: libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
+                mode: 0o644,
+                fd: -1,
+            },
+        ];
+        let result = unsafe {
+            vfsi_openv(
+                fs,
+                open_ops.as_mut_ptr(),
+                open_ops.len(),
+                item_results.as_mut_ptr(),
+            )
+        };
+        assert_eq!(result.category, VFSI_ERROR_NONE);
+        assert!(open_ops.iter().all(|op| op.fd > 0));
+
+        let data_a = b"abcdef";
+        let data_b = b"1234567";
+        let mut writes = [
+            vfsi_pwrite_op {
+                fd: open_ops[0].fd,
+                buf: data_a.as_ptr().cast(),
+                len: data_a.len(),
+                offset: 0,
+                wrote: 0,
+            },
+            vfsi_pwrite_op {
+                fd: open_ops[1].fd,
+                buf: data_b.as_ptr().cast(),
+                len: data_b.len(),
+                offset: 0,
+                wrote: 0,
+            },
+        ];
+        assert_eq!(
+            unsafe {
+                vfsi_pwritev(
+                    fs,
+                    writes.as_mut_ptr(),
+                    writes.len(),
+                    item_results.as_mut_ptr(),
+                )
+            }
+            .category,
+            VFSI_ERROR_NONE
+        );
+        assert_eq!([writes[0].wrote, writes[1].wrote], [6, 7]);
+
+        let mut buf_a = [0u8; 8];
+        let mut buf_b = [0u8; 8];
+        let mut reads = [
+            vfsi_pread_op {
+                fd: open_ops[0].fd,
+                buf: buf_a.as_mut_ptr().cast(),
+                len: buf_a.len(),
+                offset: 0,
+                got: 0,
+            },
+            vfsi_pread_op {
+                fd: open_ops[1].fd,
+                buf: buf_b.as_mut_ptr().cast(),
+                len: buf_b.len(),
+                offset: 0,
+                got: 0,
+            },
+        ];
+        assert_eq!(
+            unsafe {
+                vfsi_preadv(
+                    fs,
+                    reads.as_mut_ptr(),
+                    reads.len(),
+                    item_results.as_mut_ptr(),
+                )
+            }
+            .category,
+            VFSI_ERROR_NONE
+        );
+        assert_eq!(&buf_a[..reads[0].got], data_a);
+        assert_eq!(&buf_b[..reads[1].got], data_b);
+
+        let fds = [open_ops[0].fd, open_ops[1].fd];
+        assert_eq!(
+            unsafe { vfsi_closev(fs, fds.as_ptr(), fds.len(), item_results.as_mut_ptr(),) }
+                .category,
+            VFSI_ERROR_NONE
+        );
+
+        #[derive(Default)]
+        struct Streamed {
+            files: [Vec<u8>; 2],
+            max_chunk: usize,
+        }
+        unsafe extern "C" fn stream_cb(
+            _: *const c_char,
+            index: usize,
+            _: u64,
+            data: *const u8,
+            len: usize,
+            _: bool,
+            userdata: *mut c_void,
+        ) -> bool {
+            let state = &mut *userdata.cast::<Streamed>();
+            state.max_chunk = state.max_chunk.max(len);
+            state.files[index].extend_from_slice(std::slice::from_raw_parts(data, len));
+            true
+        }
+        let paths = [path_a.as_ptr(), path_b.as_ptr()];
+        let mut streamed = Streamed::default();
+        let result = unsafe {
+            vfsi_read_streamv(
+                fs,
+                paths.as_ptr(),
+                paths.len(),
+                3,
+                4,
+                Some(stream_cb),
+                &mut streamed as *mut _ as *mut c_void,
+            )
+        };
+        assert_eq!(result.category, VFSI_ERROR_NONE);
+        assert!(streamed.max_chunk <= 3);
+        assert_eq!(streamed.files[0], data_a);
+        assert_eq!(streamed.files[1], data_b);
+
+        let mut stats = [
+            vfsi_stat_op {
+                path: path_a.as_ptr(),
+                attrs: unsafe { std::mem::zeroed() },
+            },
+            vfsi_stat_op {
+                path: path_b.as_ptr(),
+                attrs: unsafe { std::mem::zeroed() },
+            },
+        ];
+        assert_eq!(
+            unsafe {
+                vfsi_statv(
+                    fs,
+                    stats.as_mut_ptr(),
+                    stats.len(),
+                    item_results.as_mut_ptr(),
+                )
+            }
+            .category,
+            VFSI_ERROR_NONE
+        );
+        assert_eq!([stats[0].attrs.size, stats[1].attrs.size], [6, 7]);
+
+        let setattr = [vfsi_setattr_op {
+            path: path_a.as_ptr(),
+            mask: VFSI_ATTR_SIZE,
+            mode: 0,
+            size: 2,
+            atime_sec: 0,
+            atime_nsec: 0,
+            mtime_sec: 0,
+            mtime_nsec: 0,
+        }];
+        assert_eq!(
+            unsafe { vfsi_setattrv(fs, setattr.as_ptr(), setattr.len(), one_result.as_mut_ptr(),) }
+                .category,
+            VFSI_ERROR_NONE
+        );
+
+        let renamed_a = CString::new("/v3-a/renamed.bin").unwrap();
+        let renamed_b = CString::new("/v3-b/renamed.bin").unwrap();
+        let renames = [
+            vfsi_rename_op {
+                oldpath: path_a.as_ptr(),
+                newpath: renamed_a.as_ptr(),
+            },
+            vfsi_rename_op {
+                oldpath: path_b.as_ptr(),
+                newpath: renamed_b.as_ptr(),
+            },
+        ];
+        assert_eq!(
+            unsafe {
+                vfsi_renamev(
+                    fs,
+                    renames.as_ptr(),
+                    renames.len(),
+                    item_results.as_mut_ptr(),
+                )
+            }
+            .category,
+            VFSI_ERROR_NONE
+        );
+        let remove_paths = [renamed_a.as_ptr(), renamed_b.as_ptr()];
+        assert_eq!(
+            unsafe {
+                vfsi_removev(
+                    fs,
+                    remove_paths.as_ptr(),
+                    remove_paths.len(),
+                    item_results.as_mut_ptr(),
+                )
+            }
+            .category,
+            VFSI_ERROR_NONE
+        );
+        assert_eq!(
+            unsafe {
+                vfsi_removev(
+                    fs,
+                    [dir_a.as_ptr(), dir_b.as_ptr()].as_ptr(),
+                    2,
+                    item_results.as_mut_ptr(),
+                )
+            }
+            .category,
+            VFSI_ERROR_NONE
+        );
+
+        let missing = CString::new("/missing").unwrap();
+        let root_path = CString::new("/").unwrap();
+        let mut failed_stats = [
+            vfsi_stat_op {
+                path: missing.as_ptr(),
+                attrs: unsafe { std::mem::zeroed() },
+            },
+            vfsi_stat_op {
+                path: root_path.as_ptr(),
+                attrs: unsafe { std::mem::zeroed() },
+            },
+        ];
+        let failed = unsafe {
+            vfsi_statv(
+                fs,
+                failed_stats.as_mut_ptr(),
+                failed_stats.len(),
+                item_results.as_mut_ptr(),
+            )
+        };
+        assert_eq!(failed.index, 0);
+        assert_eq!(failed.category, VFSI_ERROR_FILESYSTEM);
+        assert_eq!(item_results[0].category, VFSI_ERROR_FILESYSTEM);
+        assert_eq!(item_results[1].category, VFSI_ERROR_INDETERMINATE);
         unsafe { vfsi_free(fs) };
     }
 }

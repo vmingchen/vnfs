@@ -3,17 +3,24 @@ name = "vnfs"
 version = "0.0.5"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Vectorized NFS client API in Rust"
+description = "Protocol-neutral vectorized filesystem API for NFS, SMB, and local files"
 readme = "README.md"
 repository = "https://github.com/vmingchen/vnfs"
 documentation = "https://docs.rs/vnfs"
-keywords = ["NFS", "vectorized"]
+keywords = ["NFS", "SMB", "filesystem", "vectorized"]
+
+[features]
+default = ["nfs", "smb", "dummy", "server-copy"]
+nfs = ["dep:libntirpc-sys", "dep:nfsv41-sys"]
+smb = ["dep:futures-util", "dep:smb2", "dep:tokio"]
+dummy = []
+server-copy = []
 
 [dependencies]
 bitflags = "2.6"
-futures-util = "0.3"
+futures-util = { version = "0.3", optional = true }
 libc = { workspace = true }
-libntirpc-sys = { workspace = true }
-nfsv41-sys = { workspace = true }
-smb2 = "0.21.0"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+libntirpc-sys = { workspace = true, optional = true }
+nfsv41-sys = { workspace = true, optional = true }
+smb2 = { version = "0.21.0", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
