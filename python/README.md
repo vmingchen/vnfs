@@ -52,3 +52,23 @@ implementation of the same vectorized API):
 ```python
 fs = fsspec.filesystem("nfs4", backend="dummy", dummy_root="/tmp/scratch")
 ```
+
+The same adapter can connect to an SMB2/3 share:
+
+```python
+fs = fsspec.filesystem(
+    "vfsi",
+    backend="smb",
+    host="samba.example",
+    share="data",
+    username="alice",
+    password="secret",
+    domain="WORKGROUP",
+)
+fs.pipe_file("vfsi:///hello.txt", b"hello over SMB")
+print(hex(fs.smb_dialect()))
+```
+
+Empty credentials request guest access. SMB paths must be valid UTF-8, and
+the current SMB backend does not advertise Unix link or ownership semantics;
+capability-aware fsspec operations use following metadata as a fallback.

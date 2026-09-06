@@ -26,6 +26,7 @@ The same [`VecFs`](vnfs/src/vecfs.rs) interface also has an SMB2/3 backend for
 Samba and other modern SMB servers. It negotiates SMB 2.0.2 through SMB 3.1.1,
 uses related SMB compounds for small path operations, honors SMB credit and
 I/O limits, and uses server-side copy with a client-side fallback.
+The Rust, C, and Python/fsspec surfaces all expose this backend.
 
 ## License
 

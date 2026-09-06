@@ -5,16 +5,19 @@
 //! SMB related compounds. Large transfers use the server's negotiated I/O
 //! limits, and server-side copies use `FSCTL_SRV_COPYCHUNK` with an automatic
 //! read/write fallback.
+//! Independent small path operations in a vector call are multiplexed on the
+//! authenticated connection; handle operations and same-path writes stay ordered.
 //!
 //! SMB paths are Unicode. A `Path` containing non-UTF-8 bytes is rejected with
 //! `EILSEQ`; characters which are illegal in SMB names are reversibly mapped
 //! by the `smb2` crate.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
-use smb2::client::{ClientConfig, CompoundOp, SmbClient, Tree};
+use futures_util::future::join_all;
+use smb2::client::{ClientConfig, CompoundOp, Connection, SmbClient, Tree};
 use smb2::msg::close::CloseRequest;
 use smb2::msg::create::{
     CreateDisposition, CreateRequest, CreateResponse, ImpersonationLevel, ShareAccess,
@@ -26,7 +29,7 @@ use smb2::msg::write::{SMB2_WRITEFLAG_WRITE_THROUGH, WriteRequest, WriteResponse
 use smb2::pack::{FileTime, ReadCursor, Unpack};
 use smb2::types::flags::FileAccessMask;
 use smb2::types::status::NtStatus;
-use smb2::types::{Command, CreditCharge, Dialect, FileId, OplockLevel};
+use smb2::types::{Command, CreditCharge, Dialect, FileId, OplockLevel, TreeId};
 use smb2::{Error as SmbError, ErrorKind as SmbErrorKind};
 use tokio::runtime::{Builder, Runtime};
 
@@ -996,6 +999,62 @@ impl VecFs for SmbVecFs {
     }
 
     fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        let max_read = self
+            .client
+            .params()
+            .map(|params| params.max_read_size as usize)
+            .unwrap_or(65_536);
+        let concurrent = reads.len() > 1
+            && reads.iter().all(|read| {
+                !read.file.is_descriptor()
+                    && !matches!(read.file, VfFile::Saved)
+                    && matches!(read.offset, VfOffset::At(_))
+                    && read.length > 0
+                    && read.length <= max_read
+                    && read.length <= u32::MAX as usize
+            });
+        if concurrent {
+            let connection = self.client.connection_mut().clone();
+            let tree_id = self.tree.tree_id;
+            let mut jobs = Vec::with_capacity(reads.len());
+            for (index, read) in reads.iter().enumerate() {
+                let path = self
+                    .path_string(
+                        &self
+                            .file_path(&read.file)
+                            .map_err(|e| e.with_index(index))?,
+                    )
+                    .map_err(|e| e.with_index(index))?;
+                let create = self
+                    .open_request(&path, libc::O_RDONLY)
+                    .map_err(|e| e.with_index(index))?;
+                let VfOffset::At(offset) = read.offset else {
+                    unreachable!("concurrent read eligibility checked")
+                };
+                jobs.push(concurrent_compound_read(
+                    connection.clone(),
+                    tree_id,
+                    create,
+                    offset,
+                    read.length,
+                ));
+            }
+            let results = self.runtime.block_on(join_all(jobs));
+            let mut output = Vec::with_capacity(reads.len());
+            for (index, (read, result)) in reads.iter().zip(results).enumerate() {
+                let data = result.map_err(|error| error.with_index(index))?;
+                let VfOffset::At(offset) = read.offset else {
+                    unreachable!("concurrent read eligibility checked")
+                };
+                output.push(ReadResult {
+                    file: read.file.clone(),
+                    offset,
+                    eof: data.len() < read.length,
+                    data,
+                });
+            }
+            return Ok(output);
+        }
         let mut output = Vec::with_capacity(reads.len());
         for (index, read) in reads.iter().enumerate() {
             output.push(self.read_one(read).map_err(|e| e.with_index(index))?);
@@ -1004,6 +1063,32 @@ impl VecFs for SmbVecFs {
     }
 
     fn read_allv(&mut self, files: &[VfFile]) -> VfResult<Vec<Vec<u8>>> {
+        if files.len() > 1
+            && !self.tree.is_dfs
+            && files
+                .iter()
+                .all(|file| !file.is_descriptor() && !matches!(file, VfFile::Saved))
+        {
+            let connection = self.client.connection_mut().clone();
+            let tree = self.tree.clone();
+            let mut jobs = Vec::with_capacity(files.len());
+            for (index, file) in files.iter().enumerate() {
+                let path = self
+                    .path_string(&self.file_path(file).map_err(|e| e.with_index(index))?)
+                    .map_err(|e| e.with_index(index))?;
+                jobs.push(concurrent_read_whole(
+                    tree.clone(),
+                    connection.clone(),
+                    path,
+                ));
+            }
+            let results = self.runtime.block_on(join_all(jobs));
+            return results
+                .into_iter()
+                .enumerate()
+                .map(|(index, result)| result.map_err(|error| error.with_index(index)))
+                .collect();
+        }
         let mut output = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
             if file.is_descriptor() {
@@ -1022,10 +1107,12 @@ impl VecFs for SmbVecFs {
                 let path = self
                     .path_string(&self.file_path(file).map_err(|e| e.with_index(index))?)
                     .map_err(|e| e.with_index(index))?;
+                let tree = self.tree.clone();
+                let connection = self.client.connection_mut().clone();
                 let data = self
                     .runtime
-                    .block_on(self.client.read_file(&mut self.tree, &path))
-                    .map_err(|e| smb_error(e, index))?;
+                    .block_on(concurrent_read_whole(tree, connection, path))
+                    .map_err(|error| error.with_index(index))?;
                 output.push(data);
             }
         }
@@ -1033,6 +1120,73 @@ impl VecFs for SmbVecFs {
     }
 
     fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+        let max_write = self
+            .client
+            .params()
+            .map(|params| params.max_write_size as usize)
+            .unwrap_or(65_536);
+        let concurrent = writes.len() > 1
+            && writes.iter().all(|write| {
+                !write.file.is_descriptor()
+                    && !matches!(write.file, VfFile::Saved)
+                    && matches!(write.offset, VfOffset::At(_))
+                    && !write.data.is_empty()
+                    && write.data.len() <= max_write
+                    && write.data.len() <= u32::MAX as usize
+            });
+        if concurrent {
+            let mut prepared = Vec::with_capacity(writes.len());
+            let mut paths = HashSet::with_capacity(writes.len());
+            for (index, write) in writes.iter().enumerate() {
+                let path = self
+                    .path_string(
+                        &self
+                            .file_path(&write.file)
+                            .map_err(|e| e.with_index(index))?,
+                    )
+                    .map_err(|e| e.with_index(index))?;
+                if !paths.insert(path.clone()) {
+                    prepared.clear();
+                    break;
+                }
+                let mut flags = libc::O_WRONLY;
+                if write.creation {
+                    flags |= libc::O_CREAT;
+                }
+                if write.truncate {
+                    flags |= libc::O_TRUNC;
+                }
+                let create = self
+                    .open_request(&path, flags)
+                    .map_err(|e| e.with_index(index))?;
+                let VfOffset::At(offset) = write.offset else {
+                    unreachable!("concurrent write eligibility checked")
+                };
+                prepared.push((create, offset, write.data.clone()));
+            }
+            if prepared.len() == writes.len() {
+                let connection = self.client.connection_mut().clone();
+                let tree_id = self.tree.tree_id;
+                let jobs = prepared.into_iter().map(|(create, offset, data)| {
+                    concurrent_compound_write(connection.clone(), tree_id, create, offset, data)
+                });
+                let results = self.runtime.block_on(join_all(jobs));
+                let mut output = Vec::with_capacity(writes.len());
+                for (index, (write, result)) in writes.iter().zip(results).enumerate() {
+                    let written = result.map_err(|error| error.with_index(index))?;
+                    let VfOffset::At(offset) = write.offset else {
+                        unreachable!("concurrent write eligibility checked")
+                    };
+                    output.push(WriteResult {
+                        file: write.file.clone(),
+                        offset,
+                        written,
+                        stable: true,
+                    });
+                }
+                return Ok(output);
+            }
+        }
         let mut output = Vec::with_capacity(writes.len());
         for (index, write) in writes.iter().enumerate() {
             output.push(self.write_one(write).map_err(|e| e.with_index(index))?);
@@ -1063,6 +1217,32 @@ impl VecFs for SmbVecFs {
     }
 
     fn getattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
+        if attrs.len() > 1
+            && !self.tree.is_dfs
+            && attrs.iter().all(|attrs| !attrs.file.is_descriptor())
+        {
+            let connection = self.client.connection_mut().clone();
+            let tree = self.tree.clone();
+            let mut jobs = Vec::with_capacity(attrs.len());
+            for (index, attrs) in attrs.iter().enumerate() {
+                let path = self
+                    .path_string(
+                        &self
+                            .file_path(&attrs.file)
+                            .map_err(|e| e.with_index(index))?,
+                    )
+                    .map_err(|e| e.with_index(index))?;
+                let tree = tree.clone();
+                let mut connection = connection.clone();
+                jobs.push(async move { tree.stat(&mut connection, &path).await });
+            }
+            let results = self.runtime.block_on(join_all(jobs));
+            for (index, (attrs, result)) in attrs.iter_mut().zip(results).enumerate() {
+                let info = result.map_err(|error| smb_error(error, index))?;
+                Self::fill_attrs(attrs, &info);
+            }
+            return Ok(());
+        }
         for (index, attrs) in attrs.iter_mut().enumerate() {
             let path = self
                 .path_string(
@@ -1078,9 +1258,32 @@ impl VecFs for SmbVecFs {
     }
 
     fn lgetattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
-        // Standard SMB metadata follows reparse points. The smb2 crate does
-        // not yet expose POSIX/reparse-point lstat information.
-        self.getattrsv(attrs)
+        if attrs.is_empty() {
+            Ok(())
+        } else {
+            // Standard SMB metadata follows reparse points. Reporting it as
+            // lstat data would silently violate VecFs's no-follow contract.
+            Err(VfError::unsupported(0))
+        }
+    }
+
+    fn exists(&mut self, path: &Path) -> VfResult<bool> {
+        let path = self.local_path_string(path)?;
+        match self.client_stat(&path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.err_no() == ERR_NOENT => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn file_type(&mut self, path: &Path) -> VfResult<VfType> {
+        let path = self.local_path_string(path)?;
+        let info = self.client_stat(&path)?;
+        Ok(if info.is_directory {
+            VfType::Directory
+        } else {
+            VfType::Regular
+        })
     }
 
     fn setattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
@@ -1113,7 +1316,10 @@ impl VecFs for SmbVecFs {
     }
 
     fn lsetattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
-        self.setattrsv(attrs)
+        match attrs.iter().position(|attrs| !attrs.masks.is_empty()) {
+            Some(index) => Err(VfError::unsupported(index)),
+            None => Ok(()),
+        }
     }
 
     fn listdir(
@@ -1351,6 +1557,189 @@ impl VecFs for SmbVecFs {
         }
         Ok(())
     }
+}
+
+async fn concurrent_read_whole(
+    tree: Tree,
+    mut connection: Connection,
+    path: String,
+) -> VfResult<Vec<u8>> {
+    match tree.read_file(&mut connection, &path).await {
+        Ok(data) => Ok(data),
+        Err(error) if error.kind() == SmbErrorKind::TooLarge => tree
+            .read_file_pipelined(&mut connection, &path)
+            .await
+            .map_err(|error| smb_error(error, 0)),
+        Err(error) if error.kind() == SmbErrorKind::Unsupported => {
+            let info = tree
+                .stat(&mut connection, &path)
+                .await
+                .map_err(|error| smb_error(error, 0))?;
+            if info.is_directory {
+                Err(VfError::failure(0, ERR_ISDIR))
+            } else {
+                Err(smb_error(error, 0))
+            }
+        }
+        Err(error) => Err(smb_error(error, 0)),
+    }
+}
+
+async fn close_on_connection(connection: &Connection, tree_id: TreeId, file_id: FileId) {
+    let request = CloseRequest { flags: 0, file_id };
+    let _ = connection
+        .execute(Command::Close, &request, Some(tree_id))
+        .await;
+}
+
+async fn concurrent_compound_read(
+    connection: Connection,
+    tree_id: TreeId,
+    create: CreateRequest,
+    offset: u64,
+    length: usize,
+) -> VfResult<Vec<u8>> {
+    let read = ReadRequest {
+        padding: 0x50,
+        flags: 0,
+        length: length as u32,
+        offset,
+        file_id: FileId::SENTINEL,
+        minimum_count: 0,
+        channel: SMB2_CHANNEL_NONE,
+        remaining_bytes: 0,
+        read_channel_info: Vec::new(),
+    };
+    let close = CloseRequest {
+        flags: 0,
+        file_id: FileId::SENTINEL,
+    };
+    let operations = [
+        CompoundOp {
+            command: Command::Create,
+            body: &create,
+            tree_id: Some(tree_id),
+            credit_charge: CreditCharge(1),
+        },
+        CompoundOp {
+            command: Command::Read,
+            body: &read,
+            tree_id: Some(tree_id),
+            credit_charge: CreditCharge(credit_charge(length)),
+        },
+        CompoundOp {
+            command: Command::Close,
+            body: &close,
+            tree_id: Some(tree_id),
+            credit_charge: CreditCharge(1),
+        },
+    ];
+    let responses = connection
+        .execute_compound(&operations)
+        .await
+        .map_err(|error| smb_error(error, 0))?;
+    let responses = collect_compound(responses, operations.len())?;
+    require_status(&responses[0], Command::Create, 0)?;
+    let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
+        .map_err(|error| smb_error(error, 0))?
+        .file_id;
+    if responses[1].header.status == NtStatus::END_OF_FILE {
+        if responses[2].header.status != NtStatus::SUCCESS {
+            close_on_connection(&connection, tree_id, opened).await;
+        }
+        return Ok(Vec::new());
+    }
+    if let Err(error) = require_status(&responses[1], Command::Read, 0) {
+        close_on_connection(&connection, tree_id, opened).await;
+        return Err(error);
+    }
+    let response = ReadResponse::unpack(&mut ReadCursor::new(&responses[1].body))
+        .map_err(|error| smb_error(error, 0))?;
+    if responses[2].header.status != NtStatus::SUCCESS {
+        close_on_connection(&connection, tree_id, opened).await;
+    }
+    Ok(response.data)
+}
+
+async fn concurrent_compound_write(
+    connection: Connection,
+    tree_id: TreeId,
+    create: CreateRequest,
+    offset: u64,
+    data: Vec<u8>,
+) -> VfResult<usize> {
+    let write = WriteRequest {
+        data_offset: 0x70,
+        offset,
+        file_id: FileId::SENTINEL,
+        channel: 0,
+        remaining_bytes: 0,
+        write_channel_info_offset: 0,
+        write_channel_info_length: 0,
+        flags: 0,
+        data,
+    };
+    let flush = FlushRequest {
+        file_id: FileId::SENTINEL,
+    };
+    let close = CloseRequest {
+        flags: 0,
+        file_id: FileId::SENTINEL,
+    };
+    let operations = [
+        CompoundOp {
+            command: Command::Create,
+            body: &create,
+            tree_id: Some(tree_id),
+            credit_charge: CreditCharge(1),
+        },
+        CompoundOp {
+            command: Command::Write,
+            body: &write,
+            tree_id: Some(tree_id),
+            credit_charge: CreditCharge(credit_charge(write.data.len())),
+        },
+        CompoundOp {
+            command: Command::Flush,
+            body: &flush,
+            tree_id: Some(tree_id),
+            credit_charge: CreditCharge(1),
+        },
+        CompoundOp {
+            command: Command::Close,
+            body: &close,
+            tree_id: Some(tree_id),
+            credit_charge: CreditCharge(1),
+        },
+    ];
+    let responses = connection
+        .execute_compound(&operations)
+        .await
+        .map_err(|error| smb_error(error, 0))?;
+    let responses = collect_compound(responses, operations.len())?;
+    require_status(&responses[0], Command::Create, 0)?;
+    let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
+        .map_err(|error| smb_error(error, 0))?
+        .file_id;
+    for (position, command) in [Command::Write, Command::Flush].into_iter().enumerate() {
+        if let Err(error) = require_status(&responses[position + 1], command, 0) {
+            close_on_connection(&connection, tree_id, opened).await;
+            return Err(error);
+        }
+    }
+    let response = WriteResponse::unpack(&mut ReadCursor::new(&responses[1].body))
+        .map_err(|error| smb_error(error, 0))?;
+    if response.count as usize > write.data.len() {
+        close_on_connection(&connection, tree_id, opened).await;
+        return Err(VfError::transport(
+            None,
+            "SMB server reported writing more bytes than requested",
+        ));
+    }
+    if responses[3].header.status != NtStatus::SUCCESS {
+        close_on_connection(&connection, tree_id, opened).await;
+    }
+    Ok(response.count as usize)
 }
 
 fn normalize_server(server: &str) -> String {

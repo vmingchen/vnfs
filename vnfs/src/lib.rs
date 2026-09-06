@@ -25,7 +25,8 @@ pub use nfs::NfsVecFs;
 pub use smb::SmbVecFs;
 pub use vecfs::{
     Adb, AttrMask, ERR_ACCES, ERR_EBADF, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT, ERR_NOTDIR,
-    ExtentPair, Fd, ReadOp, ReadResult, SeekFrom, VF_ERR_RPC, VF_ERR_UNSUPPORTED, VecFs, VecFsExt,
-    VfAttrs, VfError, VfFile, VfOffset, VfPathBase, VfRes, VfResult, VfType, WalkEntry, WriteOp,
-    WriteResult,
+    ExtentPair, Fd, ReadOp, ReadResult, SeekFrom, VF_CAP_HARDLINKS, VF_CAP_LSTAT,
+    VF_CAP_NON_UTF8_PATHS, VF_CAP_POSIX_METADATA, VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS,
+    VF_CAP_UNIX_SEMANTICS, VF_ERR_RPC, VF_ERR_UNSUPPORTED, VecFs, VecFsExt, VfAttrs, VfError,
+    VfFile, VfOffset, VfPathBase, VfRes, VfResult, VfType, WalkEntry, WriteOp, WriteResult,
 };

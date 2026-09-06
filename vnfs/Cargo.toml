@@ -11,6 +11,7 @@ keywords = ["NFS", "vectorized"]
 
 [dependencies]
 bitflags = "2.6"
+futures-util = "0.3"
 libc = { workspace = true }
 libntirpc-sys = { workspace = true }
 nfsv41-sys = { workspace = true }

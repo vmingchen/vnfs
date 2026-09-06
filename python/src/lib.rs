@@ -12,7 +12,7 @@ use std::sync::Mutex;
 
 use pyo3::exceptions::{
     PyConnectionError, PyFileExistsError, PyFileNotFoundError, PyIsADirectoryError,
-    PyNotADirectoryError, PyOSError, PyPermissionError, PyValueError,
+    PyNotADirectoryError, PyNotImplementedError, PyOSError, PyPermissionError, PyValueError,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
@@ -20,9 +20,10 @@ use pyo3::types::{PyDict, PyString};
 use vnfs::compound::{compound_stats, rpc_stats};
 use vnfs::dummy_vecfs::DummyVecFs;
 use vnfs::nfs::NfsVecFs;
+use vnfs::smb::SmbVecFs;
 use vnfs::vecfs::{
     AttrMask, ERR_ACCES, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT, ERR_NOTDIR, ReadOp, SeekFrom,
-    VfAttrs, VfError, VfFile, VfOffset, VfType, WriteOp,
+    VF_ERR_UNSUPPORTED, VfAttrs, VfError, VfFile, VfOffset, VfType, WriteOp,
 };
 
 /// errno keyed by the operation index in the caller's request.
@@ -69,6 +70,9 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
                 PyErr::new::<PyIsADirectoryError, _>((21, format!("Is a directory{}", what)))
             }
             ERR_INVAL => PyErr::new::<PyValueError, _>(format!("Invalid argument{}", what)),
+            VF_ERR_UNSUPPORTED => {
+                PyErr::new::<PyNotImplementedError, _>(format!("operation is unsupported{}", what))
+            }
             other => PyErr::new::<PyOSError, _>((other, format!("op failed{}", what))),
         },
         _ => PyErr::new::<PyOSError, _>("unknown vnfs error"),
@@ -269,18 +273,20 @@ struct NfsClient {
 
 #[pymethods]
 impl NfsClient {
-    /// Connect to an NFSv4.1 server at `host` (`backend="nfs"`, default) or
-    /// create a local-directory backend (`backend="dummy"`). `root` selects
-    /// the dummy backend's filesystem root (a unique temp directory when
-    /// omitted).
+    /// Connect to an NFS server (`backend="nfs"`, default), an SMB2/3 share
+    /// (`backend="smb"`), or a local directory (`backend="dummy"`).
     #[new]
-    #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None, minor_version=None))]
+    #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None, minor_version=None, share=None, username="", password="", domain=""))]
     fn new(
         host: &str,
         backend: &str,
         root: Option<PathBuf>,
         compound_size_limit: Option<usize>,
         minor_version: Option<u32>,
+        share: Option<&str>,
+        username: &str,
+        password: &str,
+        domain: &str,
     ) -> PyResult<Self> {
         let fs: Box<dyn vnfs::VecFs + Send> = match backend {
             "nfs" => {
@@ -298,6 +304,20 @@ impl NfsClient {
                     nfs.set_max_compound_bytes(limit);
                 }
                 Box::new(nfs)
+            }
+            "smb" => {
+                if compound_size_limit.is_some() || minor_version.is_some() {
+                    return Err(PyValueError::new_err(
+                        "compound_size_limit and minor_version are NFS-only",
+                    ));
+                }
+                let share = share.filter(|share| !share.is_empty()).ok_or_else(|| {
+                    PyValueError::new_err("share is required for backend=\"smb\"")
+                })?;
+                Box::new(
+                    SmbVecFs::connect(host, share, username, password, domain)
+                        .map_err(|e| to_py_err(e, Some(Path::new(host))))?,
+                )
             }
             "dummy" => {
                 let root_path = match root {
@@ -335,6 +355,12 @@ impl NfsClient {
     fn minor_version(&self) -> PyResult<Option<u32>> {
         let fs = self.fs.lock().map_err(lock_err)?;
         Ok(fs.nfs_minorversion())
+    }
+
+    /// Negotiated SMB dialect revision, or None for non-SMB backends.
+    fn smb_dialect(&self) -> PyResult<Option<u16>> {
+        let fs = self.fs.lock().map_err(lock_err)?;
+        Ok(fs.smb_dialect())
     }
 
     /// Current backend capability bitset (see CAP_SERVER_COPY).
@@ -560,7 +586,8 @@ impl NfsClient {
     /// lstat many paths in batches (used by `exists`/`exists_many`).
     fn lstat_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<StatManyResult> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        let (attrs, errors) = attrs_many_impl(&mut **fs, &paths, full_mask(), false)
+        let follow = fs.capabilities() & vnfs::VF_CAP_LSTAT == 0;
+        let (attrs, errors) = attrs_many_impl(&mut **fs, &paths, full_mask(), follow)
             .map_err(|e| to_py_err(e, None))?;
         let mut out = Vec::with_capacity(attrs.len());
         for a in attrs {
@@ -576,7 +603,8 @@ impl NfsClient {
     /// Non-NOENT failures raise.
     fn exists_many(&self, paths: Vec<PathBuf>) -> PyResult<Vec<bool>> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        let (attrs, errors) = attrs_many_impl(&mut **fs, &paths, AttrMask::stat(), false)
+        let follow = fs.capabilities() & vnfs::VF_CAP_LSTAT == 0;
+        let (attrs, errors) = attrs_many_impl(&mut **fs, &paths, AttrMask::stat(), follow)
             .map_err(|e| to_py_err(e, None))?;
         let mut first_err: Option<VfError> = None;
         let mut out = Vec::with_capacity(paths.len());
@@ -976,5 +1004,11 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(rpc_stats_py, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("CAP_SERVER_COPY", vnfs::vecfs::VF_CAP_SERVER_COPY)?;
+    m.add("CAP_POSIX_METADATA", vnfs::VF_CAP_POSIX_METADATA)?;
+    m.add("CAP_SYMLINKS", vnfs::VF_CAP_SYMLINKS)?;
+    m.add("CAP_HARDLINKS", vnfs::VF_CAP_HARDLINKS)?;
+    m.add("CAP_NON_UTF8_PATHS", vnfs::VF_CAP_NON_UTF8_PATHS)?;
+    m.add("CAP_LSTAT", vnfs::VF_CAP_LSTAT)?;
+    m.add("ERR_UNSUPPORTED", vnfs::VF_ERR_UNSUPPORTED)?;
     Ok(())
 }

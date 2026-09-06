@@ -23,6 +23,22 @@ use vnfs::vecfs::{AttrMask, ExtentPair, VfAttrs, VfError, VfFile, ERR_EBADF, ERR
 pub const VFSI_ABI_VERSION: u32 = 2;
 /// The backend will currently attempt server-side COPY.
 pub const VFSI_CAP_SERVER_COPY: u64 = 1 << 0;
+/// The backend reports and honors Unix metadata such as modes and ownership.
+pub const VFSI_CAP_POSIX_METADATA: u64 = 1 << 1;
+/// The backend supports symbolic links.
+pub const VFSI_CAP_SYMLINKS: u64 = 1 << 2;
+/// The backend supports hard links.
+pub const VFSI_CAP_HARDLINKS: u64 = 1 << 3;
+/// The backend accepts arbitrary non-UTF-8 Unix path bytes.
+pub const VFSI_CAP_NON_UTF8_PATHS: u64 = 1 << 4;
+/// The backend implements no-follow metadata operations.
+pub const VFSI_CAP_LSTAT: u64 = 1 << 5;
+
+const _: () = assert!(VFSI_CAP_POSIX_METADATA == vnfs::VF_CAP_POSIX_METADATA);
+const _: () = assert!(VFSI_CAP_SYMLINKS == vnfs::VF_CAP_SYMLINKS);
+const _: () = assert!(VFSI_CAP_HARDLINKS == vnfs::VF_CAP_HARDLINKS);
+const _: () = assert!(VFSI_CAP_NON_UTF8_PATHS == vnfs::VF_CAP_NON_UTF8_PATHS);
+const _: () = assert!(VFSI_CAP_LSTAT == vnfs::VF_CAP_LSTAT);
 
 macro_rules! ffi_guard {
     ($fallback:expr, $body:block) => {{

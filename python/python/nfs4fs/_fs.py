@@ -1,4 +1,4 @@
-"""fsspec filesystem implementation for the vnfs NFSv4.1 client."""
+"""fsspec filesystem implementation for the vectorized VFSI backends."""
 
 import datetime
 import errno
@@ -13,7 +13,7 @@ from fsspec.callbacks import DEFAULT_CALLBACK
 
 from . import _native
 
-__all__ = ["Nfs4File", "Nfs4FileSystem"]
+__all__ = ["Nfs4File", "Nfs4FileSystem", "VfsiFileSystem"]
 
 
 def _normalize_mode(mode):
@@ -26,6 +26,8 @@ def _normalize_mode(mode):
 
 def _oserror(errno_code, path):
     """Rebuild a Python exception from a native errno (for batched results)."""
+    if errno_code == _native.ERR_UNSUPPORTED:
+        return NotImplementedError(f"operation is unsupported: {path!r}")
     table = {
         2: (FileNotFoundError, "No such file or directory"),
         13: (PermissionError, "Permission denied"),
@@ -338,7 +340,7 @@ class _DeferredWriteFile:
 
 
 class Nfs4FileSystem(AbstractFileSystem):
-    """An fsspec filesystem over the vectorized vnfs NFSv4.1 client.
+    """An fsspec filesystem over a vectorized VFSI backend.
 
     Parameters
     ----------
@@ -347,9 +349,9 @@ class Nfs4FileSystem(AbstractFileSystem):
     root: str
         Export-relative prefix ("chroot") all paths are resolved under, e.g.
         ``"git/vnfs_tests"``.
-    backend: "nfs" or "dummy"
+    backend: "nfs", "smb", or "dummy"
         ``dummy`` uses a local-directory implementation of the same vectorized
-        API (for tests and development without a server).
+        API. ``smb`` connects to the SMB2/3 share named by ``share``.
     dummy_root: str or None
         Filesystem root for the dummy backend (a unique temp dir when None).
     """
@@ -366,6 +368,10 @@ class Nfs4FileSystem(AbstractFileSystem):
         auto_mkdir=False,
         compound_size_limit=None,
         minor_version=None,
+        share=None,
+        username="",
+        password="",
+        domain="",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -379,10 +385,25 @@ class Nfs4FileSystem(AbstractFileSystem):
         self.compound_size_limit = compound_size_limit
         # None negotiates the highest supported version; 1 or 2 pins it.
         self.minor_version = minor_version
+        self.share = share
+        self.username = username
+        self.domain = domain
         self._root = root.strip("/")
         self._client = _native.NfsClient(
-            host, backend, dummy_root, compound_size_limit, minor_version
+            host,
+            backend,
+            dummy_root,
+            compound_size_limit,
+            minor_version,
+            share,
+            username,
+            password,
+            domain,
         )
+
+    def smb_dialect(self):
+        """Return the negotiated SMB dialect revision, or ``None``."""
+        return self._client.smb_dialect()
 
     # -- path handling -----------------------------------------------------
 
@@ -422,8 +443,9 @@ class Nfs4FileSystem(AbstractFileSystem):
         return native
 
     def _fullpath(self, internal):
-        """Internal ('/a/b') -> full fsspec path ('nfs4:///a/b')."""
-        return "nfs4://" + internal
+        """Internal ('/a/b') -> a full path for this registered protocol."""
+        protocol = self.protocol if isinstance(self.protocol, str) else self.protocol[0]
+        return protocol + "://" + internal
 
     # -- batched directory creation ---------------------------------------
 
@@ -1167,7 +1189,7 @@ class Nfs4FileSystem(AbstractFileSystem):
 
     def symlink(self, target, path, **kwargs):
         link = self._native_path(self._strip_protocol(path))
-        if target.startswith(("/", "nfs4://", "nfs4::")):
+        if target.startswith(("/", "nfs4://", "nfs4::", "vfsi://", "vfsi::")):
             # Absolute targets are relative to the filesystem root (chroot
             # semantics, matching LocalFileSystem's OS-absolute targets);
             # map them through the root prefix. Relative targets are stored
@@ -1272,3 +1294,9 @@ class Nfs4FileSystem(AbstractFileSystem):
         if total:
             return sum(sizes.values())
         return sizes
+
+
+class VfsiFileSystem(Nfs4FileSystem):
+    """Protocol-neutral alias for selecting NFS, SMB, or dummy backends."""
+
+    protocol = "vfsi"

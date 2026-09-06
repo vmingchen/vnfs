@@ -48,6 +48,8 @@ to the client-side fallback if the server rejects the operation.
 SMB paths must be valid UTF-8. Unix permission modes and symlink/hard-link
 operations require SMB POSIX extensions, which this backend does not yet
 expose; chmod and link operations therefore report `ENOTSUP`.
+Use `vfsi_capabilities()` and the granular `VFSI_CAP_*` bits to distinguish
+these optional semantics from portable file, directory, and I/O operations.
 
 Example C smoke test:
 

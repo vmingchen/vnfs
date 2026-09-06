@@ -1,5 +1,6 @@
-//! A shared test suite run against any [`VecFs`] implementation, proving both
-//! backends (NFS and the `std::fs` dummy) behave identically.
+//! A capability-aware shared test suite run against every [`VecFs`]
+//! implementation. Portable behavior must match on all backends; optional
+//! Unix semantics are asserted only when advertised.
 
 use std::path::{Path, PathBuf};
 use vnfs::VecFs;
@@ -8,6 +9,10 @@ use vnfs::vecfs::*;
 /// Run a broad set of vectorized-filesystem assertions against `fs`, using
 /// paths under `base` (which must be unique per caller).
 pub fn run_suite(fs: &mut impl VecFs, base: &str) {
+    let capabilities = fs.capabilities();
+    let posix_metadata = capabilities & VF_CAP_POSIX_METADATA != 0;
+    let symlinks = capabilities & VF_CAP_SYMLINKS != 0;
+    let hardlinks = capabilities & VF_CAP_HARDLINKS != 0;
     let dir = format!("{}/suite", base);
     fs.ensure_dir(Path::new(&dir), 0o755).expect("ensure_dir");
     let f = format!("{}/f.txt", dir);
@@ -30,35 +35,41 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // stat / exists / file_type.
     let st = fs.stat(Path::new(&f)).expect("stat");
     assert_eq!(st.size, payload.len() as u64);
-    assert!(st.fileid != 0);
-    assert!(st.nlink >= 1, "nlink");
-    assert_eq!(st.rdev, 0, "rdev of a regular file");
+    if posix_metadata {
+        assert!(st.fileid != 0);
+        assert!(st.nlink >= 1, "nlink");
+        assert_eq!(st.rdev, 0, "rdev of a regular file");
+    }
     // Time attributes are populated (reported in `returned`) on both
     // backends; exact values depend on the filesystem clock semantics.
-    let mut t = VfAttrs {
-        file: VfFile::from_path(&f),
-        masks: AttrMask::ATIME | AttrMask::MTIME | AttrMask::CTIME,
-        ..VfAttrs::default()
-    };
-    fs.getattrsv(std::slice::from_mut(&mut t)).unwrap();
-    assert_eq!(
-        t.returned,
-        AttrMask::ATIME | AttrMask::MTIME | AttrMask::CTIME,
-        "time attributes returned"
-    );
+    if posix_metadata {
+        let mut t = VfAttrs {
+            file: VfFile::from_path(&f),
+            masks: AttrMask::ATIME | AttrMask::MTIME | AttrMask::CTIME,
+            ..VfAttrs::default()
+        };
+        fs.getattrsv(std::slice::from_mut(&mut t)).unwrap();
+        assert_eq!(
+            t.returned,
+            AttrMask::ATIME | AttrMask::MTIME | AttrMask::CTIME,
+            "time attributes returned"
+        );
+    }
     // A 4 KiB file occupies at least one 512-byte block on both backends
     // (tmpfs reports 0 blocks for tiny files).
-    let big = format!("{}/big.bin", dir);
-    fs.writev(&[WriteOp::at(VfFile::from_path(&big), 0, vec![b'x'; 4096]).with_creation()])
-        .unwrap();
-    let mut b = VfAttrs {
-        file: VfFile::from_path(&big),
-        masks: AttrMask::BLOCKS,
-        ..VfAttrs::default()
-    };
-    fs.getattrsv(std::slice::from_mut(&mut b)).unwrap();
-    assert!(b.returned.contains(AttrMask::BLOCKS), "blocks returned");
-    assert!(b.blocks > 0, "blocks in 512-byte units");
+    if posix_metadata {
+        let big = format!("{}/big.bin", dir);
+        fs.writev(&[WriteOp::at(VfFile::from_path(&big), 0, vec![b'x'; 4096]).with_creation()])
+            .unwrap();
+        let mut b = VfAttrs {
+            file: VfFile::from_path(&big),
+            masks: AttrMask::BLOCKS,
+            ..VfAttrs::default()
+        };
+        fs.getattrsv(std::slice::from_mut(&mut b)).unwrap();
+        assert!(b.returned.contains(AttrMask::BLOCKS), "blocks returned");
+        assert!(b.blocks > 0, "blocks in 512-byte units");
+    }
     assert!(fs.exists(Path::new(&f)).unwrap());
     assert_eq!(fs.file_type(Path::new(&f)).unwrap(), VfType::Regular);
 
@@ -76,7 +87,9 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     let sub = format!("{}/sub", dir);
     fs.mkdir(Path::new(&sub), 0o750).expect("mkdir");
     assert_eq!(fs.stat(Path::new(&sub)).unwrap().ftype, VfType::Directory);
-    assert_eq!(fs.stat(Path::new(&sub)).unwrap().mode & 0o777, 0o750);
+    if posix_metadata {
+        assert_eq!(fs.stat(Path::new(&sub)).unwrap().mode & 0o777, 0o750);
+    }
 
     // open / descriptor write / fseek / descriptor read.
     let tf = fs.open(Path::new(&f), libc::O_RDWR, 0).expect("open");
@@ -93,46 +106,50 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     assert_eq!(r.data, b"hello");
     fs.close(&tf).expect("close");
 
-    // symlink / readlink.
-    let link = format!("{}/ln", dir);
-    fs.symlink(Path::new(&f), Path::new(&link))
-        .expect("symlink");
-    assert_eq!(fs.readlink(Path::new(&link)).unwrap(), f.as_bytes());
+    if symlinks {
+        // symlink / readlink.
+        let link = format!("{}/ln", dir);
+        fs.symlink(Path::new(&f), Path::new(&link))
+            .expect("symlink");
+        assert_eq!(fs.readlink(Path::new(&link)).unwrap(), f.as_bytes());
 
-    // stat follows symlinks; lstat does not. (Relative target so both the
-    // NFS and std::fs backends can resolve it.)
-    let sbase = format!("{}/lnstat", dir);
-    let rel = std::path::Path::new(&f)
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    fs.symlink(Path::new(&rel), Path::new(&sbase))
-        .expect("symlink lnstat");
-    assert_eq!(
-        fs.stat(Path::new(&sbase)).unwrap().ftype,
-        VfType::Regular,
-        "stat follows"
-    );
-    assert_eq!(
-        fs.lstat(Path::new(&sbase)).unwrap().ftype,
-        VfType::Symlink,
-        "lstat stays"
-    );
-    assert_eq!(
-        fs.stat(Path::new(&sbase)).unwrap().size,
-        fs.stat(Path::new(&f)).unwrap().size,
-        "stat resolves to the target"
-    );
+        // stat follows symlinks; lstat does not. (Relative target so both the
+        // NFS and std::fs backends can resolve it.)
+        let sbase = format!("{}/lnstat", dir);
+        let rel = std::path::Path::new(&f)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        fs.symlink(Path::new(&rel), Path::new(&sbase))
+            .expect("symlink lnstat");
+        assert_eq!(
+            fs.stat(Path::new(&sbase)).unwrap().ftype,
+            VfType::Regular,
+            "stat follows"
+        );
+        assert_eq!(
+            fs.lstat(Path::new(&sbase)).unwrap().ftype,
+            VfType::Symlink,
+            "lstat stays"
+        );
+        assert_eq!(
+            fs.stat(Path::new(&sbase)).unwrap().size,
+            fs.stat(Path::new(&f)).unwrap().size,
+            "stat resolves to the target"
+        );
+    }
 
     // hardlink.
-    let hard = format!("{}/hard", dir);
-    fs.hardlinkv(&[Path::new(&f)], &[Path::new(&hard)])
-        .expect("hardlinkv");
-    assert_eq!(
-        fs.stat(Path::new(&f)).unwrap().fileid,
-        fs.stat(Path::new(&hard)).unwrap().fileid
-    );
+    if hardlinks {
+        let hard = format!("{}/hard", dir);
+        fs.hardlinkv(&[Path::new(&f)], &[Path::new(&hard)])
+            .expect("hardlinkv");
+        assert_eq!(
+            fs.stat(Path::new(&f)).unwrap().fileid,
+            fs.stat(Path::new(&hard)).unwrap().fileid
+        );
+    }
 
     // rename.
     let renamed = format!("{}/renamed.txt", dir);
@@ -215,11 +232,13 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         .open(Path::new(&mode_f), libc::O_CREAT | libc::O_RDWR, 0o777)
         .unwrap();
     fs.close(&mfd).unwrap();
-    assert_eq!(
-        fs.stat(Path::new(&mode_f)).unwrap().mode & 0o7777,
-        0o600,
-        "O_CREAT must not chmod an existing file"
-    );
+    if posix_metadata {
+        assert_eq!(
+            fs.stat(Path::new(&mode_f)).unwrap().mode & 0o7777,
+            0o600,
+            "O_CREAT must not chmod an existing file"
+        );
+    }
 
     // O_CREAT | O_EXCL fails on an existing file; O_TRUNC empties it.
     assert_eq!(
@@ -328,43 +347,47 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     let mut w = WriteOp::from_path(&srcfile, VfOffset::At(0), b"xyz".to_vec());
     w.creation = true;
     fs.writev(&[w]).unwrap();
-    fs.symlink(
-        Path::new("data.txt"),
-        Path::new(&format!("{}/inner/link", cpsrc)),
-    )
-    .unwrap();
+    if symlinks {
+        fs.symlink(
+            Path::new("data.txt"),
+            Path::new(&format!("{}/inner/link", cpsrc)),
+        )
+        .unwrap();
+    }
     fs.cp_recursive(Path::new(&cpsrc), Path::new(&cpdst), true, false)
         .expect("cp_recursive");
     assert!(
         fs.exists(Path::new(&format!("{}/inner/data.txt", cpdst)))
             .unwrap()
     );
-    assert_eq!(
-        fs.lstat(Path::new(&format!("{}/inner/link", cpdst)))
-            .unwrap()
-            .ftype,
-        VfType::Symlink,
-        "cp_recursive(symlinks=true) recreates the link"
-    );
-    let cpflat = format!("{}/cpflat", dir);
-    fs.cp_recursive(Path::new(&cpsrc), Path::new(&cpflat), false, false)
-        .expect("cp_recursive no symlinks");
-    assert_eq!(
-        fs.lstat(Path::new(&format!("{}/inner/link", cpflat)))
-            .unwrap()
-            .ftype,
-        VfType::Regular,
-        "cp_recursive(symlinks=false) copies through the link"
-    );
-    assert_eq!(
-        fs.read(
-            &VfFile::from_os_path(Path::new(&format!("{}/inner/link", cpflat))),
-            0,
-            3
-        )
-        .unwrap(),
-        b"xyz"
-    );
+    if symlinks {
+        assert_eq!(
+            fs.lstat(Path::new(&format!("{}/inner/link", cpdst)))
+                .unwrap()
+                .ftype,
+            VfType::Symlink,
+            "cp_recursive(symlinks=true) recreates the link"
+        );
+        let cpflat = format!("{}/cpflat", dir);
+        fs.cp_recursive(Path::new(&cpsrc), Path::new(&cpflat), false, false)
+            .expect("cp_recursive no symlinks");
+        assert_eq!(
+            fs.lstat(Path::new(&format!("{}/inner/link", cpflat)))
+                .unwrap()
+                .ftype,
+            VfType::Regular,
+            "cp_recursive(symlinks=false) copies through the link"
+        );
+        assert_eq!(
+            fs.read(
+                &VfFile::from_os_path(Path::new(&format!("{}/inner/link", cpflat))),
+                0,
+                3
+            )
+            .unwrap(),
+            b"xyz"
+        );
+    }
 
     // "." and ".." path components resolve identically in both backends.
     let base_name = std::path::Path::new(&dir)
@@ -420,42 +443,44 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     assert_eq!(fs.read(&VfFile::from_path(&app), 0, 8).unwrap(), b"abcde");
 
     // dupv follows a symlink source and copies the target's data.
-    let dup_link = format!("{}/dup_link", dir);
-    let dup_copy = format!("{}/dup_copy", dir);
-    let dup_target = format!("{}/dup_target", dir);
-    fs.writev(&[
-        WriteOp::at(VfFile::from_path(&dup_target), 0, b"linkdata".to_vec()).with_creation(),
-    ])
-    .unwrap();
-    let rel_name = std::path::Path::new(&dup_target)
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    fs.symlink(Path::new(&rel_name), Path::new(&dup_link))
+    if symlinks {
+        let dup_link = format!("{}/dup_link", dir);
+        let dup_copy = format!("{}/dup_copy", dir);
+        let dup_target = format!("{}/dup_target", dir);
+        fs.writev(&[
+            WriteOp::at(VfFile::from_path(&dup_target), 0, b"linkdata".to_vec()).with_creation(),
+        ])
         .unwrap();
-    fs.dupv(&[ExtentPair::new(&dup_link, 0, &dup_copy, 0, None)])
-        .unwrap();
-    let st = fs.stat(Path::new(&dup_copy)).unwrap();
-    assert_eq!(st.ftype, VfType::Regular, "dupv copies target data");
-    assert_eq!(st.size, 8);
-    assert_eq!(
-        fs.read(&VfFile::from_path(&dup_copy), 0, 8).unwrap(),
-        b"linkdata"
-    );
+        let rel_name = std::path::Path::new(&dup_target)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        fs.symlink(Path::new(&rel_name), Path::new(&dup_link))
+            .unwrap();
+        fs.dupv(&[ExtentPair::new(&dup_link, 0, &dup_copy, 0, None)])
+            .unwrap();
+        let st = fs.stat(Path::new(&dup_copy)).unwrap();
+        assert_eq!(st.ftype, VfType::Regular, "dupv copies target data");
+        assert_eq!(st.size, 8);
+        assert_eq!(
+            fs.read(&VfFile::from_path(&dup_copy), 0, 8).unwrap(),
+            b"linkdata"
+        );
 
-    // lsetattrsv refuses symlinks instead of pretending to set them.
-    let lsa = VfAttrs {
-        file: VfFile::from_path(&dup_link),
-        masks: AttrMask::MODE,
-        mode: 0o600,
-        ..VfAttrs::default()
-    };
-    assert_eq!(
-        fs.lsetattrsv(&[lsa]).unwrap_err().err_no(),
-        VF_ERR_UNSUPPORTED,
-        "lsetattrsv on a symlink"
-    );
+        // lsetattrsv refuses symlinks instead of pretending to set them.
+        let lsa = VfAttrs {
+            file: VfFile::from_path(&dup_link),
+            masks: AttrMask::MODE,
+            mode: 0o600,
+            ..VfAttrs::default()
+        };
+        assert_eq!(
+            fs.lsetattrsv(&[lsa]).unwrap_err().err_no(),
+            VF_ERR_UNSUPPORTED,
+            "lsetattrsv on a symlink"
+        );
+    }
 
     // Closing an already-closed descriptor reports EBADF on both backends.
     assert_eq!(

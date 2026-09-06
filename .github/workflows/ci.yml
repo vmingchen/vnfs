@@ -102,3 +102,79 @@ jobs:
       - name: Show server log after failure
         if: failure()
         run: cat /tmp/ganesha.log
+
+  smb-integration:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Samba and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev samba smbclient
+      - name: Start a loopback-only guest share
+        run: |
+          sudo install -d -o nobody -g nogroup -m 0777 /var/tmp/vfsi-smb-ci
+          cat >/tmp/vfsi-smb.conf <<'EOF'
+          [global]
+             server role = standalone server
+             workgroup = WORKGROUP
+             security = user
+             map to guest = Bad User
+             server min protocol = SMB2
+             server max protocol = SMB3
+             interfaces = lo
+             bind interfaces only = yes
+             disable netbios = yes
+             smb ports = 445
+             logging = file
+             log file = /tmp/smbd.log
+
+          [vfsi-test]
+             path = /var/tmp/vfsi-smb-ci
+             read only = no
+             guest ok = yes
+             guest only = yes
+             force user = nobody
+             create mask = 0666
+             directory mask = 0777
+          EOF
+          sudo install -o root -g root -m 0644 /tmp/vfsi-smb.conf /etc/samba/smb.conf
+          sudo testparm -s /etc/samba/smb.conf
+          sudo systemctl restart smbd
+          for attempt in $(seq 1 30); do
+            if smbclient -N //127.0.0.1/vfsi-test -c ls; then
+              exit 0
+            fi
+            sleep 1
+          done
+          sudo journalctl -u smbd --no-pager
+          exit 1
+      - name: Run SMB conformance and integration tests
+        env:
+          VFSI_SMB_SERVER: 127.0.0.1
+          VFSI_SMB_SHARE: vfsi-test
+        run: cargo test -p vnfs --test smb -- --test-threads=1
+      - name: Run C ABI smoke test against Samba
+        run: |
+          cargo build -p vfsi-c
+          cc -Wall -Wextra -Werror -I vfsi-c/include vfsi-c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
+          LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke --smb 127.0.0.1 vfsi-test
+      - name: Run Python/fsspec conformance test against Samba
+        env:
+          VFSI_SMB_SERVER: 127.0.0.1
+          VFSI_SMB_SHARE: vfsi-test
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install maturin fsspec pytest
+          cd python
+          ../.venv/bin/maturin develop
+          ../.venv/bin/python -m pytest tests/test_smb_integration.py
+      - name: Show Samba log after failure
+        if: failure()
+        run: sudo journalctl -u smbd --no-pager

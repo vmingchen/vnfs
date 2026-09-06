@@ -40,9 +40,15 @@ int main(int argc, char **argv)
         return 1;
     }
     uint16_t dialect = vfsi_smb_dialect(fs);
+    uint64_t capabilities = vfsi_capabilities(fs);
+    uint64_t unix_capabilities = VFSI_CAP_POSIX_METADATA | VFSI_CAP_SYMLINKS |
+                                 VFSI_CAP_HARDLINKS | VFSI_CAP_NON_UTF8_PATHS |
+                                 VFSI_CAP_LSTAT;
     if (vfsi_nfs_minorversion(fs) != 0 ||
-        (smb ? dialect < 0x0202 || dialect > 0x0311
-             : dialect != 0 || vfsi_capabilities(fs) != 0)) {
+        (smb ? dialect < 0x0202 || dialect > 0x0311 ||
+                   (capabilities & unix_capabilities) != 0
+             : dialect != 0 || (capabilities & unix_capabilities) != unix_capabilities ||
+                   (capabilities & VFSI_CAP_SERVER_COPY) != 0)) {
         fprintf(stderr, "backend capability report is inconsistent\n");
         return 1;
     }

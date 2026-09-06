@@ -674,6 +674,24 @@ pub struct VfAttrs {
 /// currently attempt a server-side copy operation (NFSv4.2 COPY or SMB
 /// FSCTL_SRV_COPYCHUNK).
 pub const VF_CAP_SERVER_COPY: u64 = 1 << 0;
+/// The backend reports and honors Unix mode/ownership/link-count metadata.
+pub const VF_CAP_POSIX_METADATA: u64 = 1 << 1;
+/// The backend can create, inspect, and copy symbolic links without following
+/// them.
+pub const VF_CAP_SYMLINKS: u64 = 1 << 2;
+/// The backend can create hard links and report their shared identity.
+pub const VF_CAP_HARDLINKS: u64 = 1 << 3;
+/// The backend accepts paths containing arbitrary non-UTF-8 Unix bytes.
+pub const VF_CAP_NON_UTF8_PATHS: u64 = 1 << 4;
+/// The backend implements no-follow metadata operations (`lstat` semantics).
+pub const VF_CAP_LSTAT: u64 = 1 << 5;
+
+/// Capabilities shared by the complete Unix-like NFS and dummy backends.
+pub const VF_CAP_UNIX_SEMANTICS: u64 = VF_CAP_POSIX_METADATA
+    | VF_CAP_SYMLINKS
+    | VF_CAP_HARDLINKS
+    | VF_CAP_NON_UTF8_PATHS
+    | VF_CAP_LSTAT;
 
 /// A vectorized filesystem: many small operations coalesced into as few
 /// round trips as the backend supports.

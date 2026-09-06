@@ -1,29 +1,27 @@
-"""A correctness suite run against both the dummy and NFS backends."""
+"""A capability-aware correctness suite for every VFSI backend."""
 
 import datetime
 import os as _os
 import posixpath
 
+from nfs4fs import _native
+
 
 def run_correctness_suite(fs):
     """Exercise the fsspec contract against `fs` (either backend)."""
 
+    capabilities = fs._client.capabilities()
+    posix_metadata = capabilities & _native.CAP_POSIX_METADATA != 0
+    symlinks = capabilities & _native.CAP_SYMLINKS != 0
+    hardlinks = capabilities & _native.CAP_HARDLINKS != 0
+    non_utf8_paths = capabilities & _native.CAP_NON_UTF8_PATHS != 0
+
     # -- info / ls ---------------------------------------------------------
     info = fs.info("nfs4:///")
-    for key in (
-        "name",
-        "type",
-        "size",
-        "mode",
-        "uid",
-        "gid",
-        "nlink",
-        "fileid",
-        "created",
-        "modified",
-        "checksum",
-        "islink",
-    ):
+    expected = ["name", "type", "size", "mode", "modified", "islink"]
+    if posix_metadata:
+        expected.extend(["uid", "gid", "nlink", "fileid", "created", "checksum"])
+    for key in expected:
         assert key in info, f"info missing {key}"
     assert info["type"] == "directory"
     assert info["name"].startswith("nfs4://")
@@ -38,14 +36,16 @@ def run_correctness_suite(fs):
 
     # Arbitrary Unix filename bytes round-trip through Python's
     # surrogateescape representation.
-    raw_name = b"n\xffb"
-    name = _os.fsdecode(raw_name)
-    fs.pipe_file(f"nfs4:///dir/{name}", b"bytes")
-    assert fs.cat_file(f"nfs4:///dir/{name}") == b"bytes"
-    assert (
-        _os.fsencode(fs.ls("nfs4:///dir", detail=False)[-1].split("/")[-1]) == raw_name
-    )
-    fs.rm(f"nfs4:///dir/{name}")
+    if non_utf8_paths:
+        raw_name = b"n\xffb"
+        name = _os.fsdecode(raw_name)
+        fs.pipe_file(f"nfs4:///dir/{name}", b"bytes")
+        assert fs.cat_file(f"nfs4:///dir/{name}") == b"bytes"
+        assert (
+            _os.fsencode(fs.ls("nfs4:///dir", detail=False)[-1].split("/")[-1])
+            == raw_name
+        )
+        fs.rm(f"nfs4:///dir/{name}")
 
     plain = fs.ls("nfs4:///dir", detail=False)
     assert plain == ["nfs4:///dir/a.txt", "nfs4:///dir/b.txt"], plain
@@ -206,12 +206,14 @@ def run_correctness_suite(fs):
     # -- recursive rm / cp -------------------------------------------------
     fs.mkdir("nfs4:///tree/inner", create_parents=True)
     fs.pipe_file("nfs4:///tree/inner/data.txt", b"xyz")
-    fs.symlink("data.txt", "nfs4:///tree/inner/link")
+    if symlinks:
+        fs.symlink("data.txt", "nfs4:///tree/inner/link")
     fs.cp("nfs4:///tree", "nfs4:///tree-copy", recursive=True)
     assert fs.cat_file("nfs4:///tree-copy/inner/data.txt") == b"xyz"
     # Default symlinks=False: links are copied through (regular files).
-    assert fs.isfile("nfs4:///tree-copy/inner/link")
-    assert fs.cat_file("nfs4:///tree-copy/inner/link") == b"xyz"
+    if symlinks:
+        assert fs.isfile("nfs4:///tree-copy/inner/link")
+        assert fs.cat_file("nfs4:///tree-copy/inner/link") == b"xyz"
 
     try:
         fs.rm("nfs4:///tree", recursive=False)
@@ -228,16 +230,19 @@ def run_correctness_suite(fs):
 
     # -- links -------------------------------------------------------------
     fs.pipe_file("nfs4:///target.txt", b"linkdata")
-    fs.symlink("target.txt", "nfs4:///rel-link")
-    assert fs.readlink("nfs4:///rel-link") == "target.txt"
-    assert fs.ls("nfs4:///", detail=True)[0]["islink"] in (True, False)
-    fs.hardlink("nfs4:///target.txt", "nfs4:///hard.txt")
-    assert (
-        fs.info("nfs4:///target.txt")["fileid"] == fs.info("nfs4:///hard.txt")["fileid"]
-    )
-    # A dangling symlink still exists (lstat semantics).
-    fs.symlink("no-such-target", "nfs4:///dangling")
-    assert fs.exists("nfs4:///dangling")
+    if symlinks:
+        fs.symlink("target.txt", "nfs4:///rel-link")
+        assert fs.readlink("nfs4:///rel-link") == "target.txt"
+        assert fs.ls("nfs4:///", detail=True)[0]["islink"] in (True, False)
+        # A dangling symlink still exists (lstat semantics).
+        fs.symlink("no-such-target", "nfs4:///dangling")
+        assert fs.exists("nfs4:///dangling")
+    if hardlinks:
+        fs.hardlink("nfs4:///target.txt", "nfs4:///hard.txt")
+        assert (
+            fs.info("nfs4:///target.txt")["fileid"]
+            == fs.info("nfs4:///hard.txt")["fileid"]
+        )
 
     # -- walk / find / glob / du ------------------------------------------
     fs.mkdir("nfs4:///wroot", create_parents=True)
@@ -279,7 +284,8 @@ def run_correctness_suite(fs):
 
     # -- metadata helpers --------------------------------------------------
     assert fs.size("nfs4:///target.txt") == 8
-    assert isinstance(fs.created("nfs4:///target.txt"), datetime.datetime)
+    if posix_metadata:
+        assert isinstance(fs.created("nfs4:///target.txt"), datetime.datetime)
     assert isinstance(fs.modified("nfs4:///target.txt"), datetime.datetime)
     assert isinstance(fs.checksum("nfs4:///target.txt"), int)
     assert isinstance(fs.ukey("nfs4:///target.txt"), str)

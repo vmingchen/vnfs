@@ -6,7 +6,13 @@
 
 use std::path::{Path, PathBuf};
 
-use vnfs::{ExtentPair, SmbVecFs, VecFs, VfFile, VfOffset, WriteOp};
+use vnfs::{
+    AttrMask, ExtentPair, SmbVecFs, VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS,
+    VF_CAP_POSIX_METADATA, VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VF_ERR_UNSUPPORTED, VecFs, VfAttrs,
+    VfFile, VfOffset, WriteOp,
+};
+
+mod common;
 
 fn connect() -> Option<SmbVecFs> {
     let server = std::env::var("VFSI_SMB_SERVER").ok()?;
@@ -27,6 +33,16 @@ fn samba_round_trip_and_copy() {
         return;
     };
     assert!(matches!(fs.smb_dialect(), Some(0x0202..=0x0311)));
+    assert_ne!(fs.capabilities() & VF_CAP_SERVER_COPY, 0);
+    assert_eq!(
+        fs.capabilities()
+            & (VF_CAP_POSIX_METADATA
+                | VF_CAP_SYMLINKS
+                | VF_CAP_HARDLINKS
+                | VF_CAP_NON_UTF8_PATHS
+                | VF_CAP_LSTAT),
+        0
+    );
 
     let root = PathBuf::from(format!("/vfsi-smb-test-{}", std::process::id()));
     let _ = fs.rm(&[root.as_path()], true);
@@ -65,5 +81,45 @@ fn samba_round_trip_and_copy() {
         fs.read_allv(&[VfFile::from_os_path(&copied)]).unwrap()[0],
         b"hello SMB3 smb"
     );
+    assert_eq!(fs.lstat(&copied).unwrap_err().err_no(), VF_ERR_UNSUPPORTED);
+    let no_follow_mode = VfAttrs {
+        file: VfFile::from_os_path(&copied),
+        masks: AttrMask::MODE,
+        mode: 0o600,
+        ..VfAttrs::default()
+    };
+    assert_eq!(
+        fs.lsetattrsv(&[no_follow_mode]).unwrap_err().err_no(),
+        VF_ERR_UNSUPPORTED
+    );
+
+    // Exceed Samba's usual single-request limit so writev chunks the write
+    // and read_allv falls back to the crate's pipelined whole-file reader.
+    let large = root.join("large.bin");
+    let large_data = vec![b'L'; 10 * 1024 * 1024 + 123];
+    fs.writev(&[
+        WriteOp::from_os_path(&large, VfOffset::At(0), large_data.clone())
+            .with_creation()
+            .with_truncate(),
+    ])
+    .expect("large SMB write");
+    assert_eq!(
+        fs.read_allv(&[VfFile::from_os_path(&large)])
+            .expect("large SMB read")[0],
+        large_data
+    );
     fs.rm(&[Path::new(&root)], true).expect("remove test tree");
+}
+
+#[test]
+fn shared_suite_on_smb() {
+    let Some(mut fs) = connect() else {
+        eprintln!("skipping SMB conformance test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let base = format!("/vfsi-smb-conformance-{}", std::process::id());
+    let _ = fs.rm(&[Path::new(&base)], true);
+    common::run_suite(&mut fs, &base);
+    fs.rm(&[Path::new(&base)], true)
+        .expect("remove conformance root");
 }

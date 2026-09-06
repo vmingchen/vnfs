@@ -18,6 +18,31 @@
 #define VFSI_CAP_SERVER_COPY (1 << 0)
 
 /**
+ * The backend reports and honors Unix metadata such as modes and ownership.
+ */
+#define VFSI_CAP_POSIX_METADATA (1 << 1)
+
+/**
+ * The backend supports symbolic links.
+ */
+#define VFSI_CAP_SYMLINKS (1 << 2)
+
+/**
+ * The backend supports hard links.
+ */
+#define VFSI_CAP_HARDLINKS (1 << 3)
+
+/**
+ * The backend accepts arbitrary non-UTF-8 Unix path bytes.
+ */
+#define VFSI_CAP_NON_UTF8_PATHS (1 << 4)
+
+/**
+ * The backend implements no-follow metadata operations.
+ */
+#define VFSI_CAP_LSTAT (1 << 5)
+
+/**
  * Opaque filesystem handle owned by C.
  */
 typedef struct vfsi_fs vfsi_fs;

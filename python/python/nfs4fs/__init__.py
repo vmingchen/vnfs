@@ -1,6 +1,7 @@
-"""fsspec ``nfs4://`` filesystem backed by the vectorized vnfs NFSv4.1 client.
+"""fsspec filesystems backed by the vectorized VFSI clients.
 
-Importing this package registers the ``nfs4`` protocol with fsspec:
+Importing this package registers the compatible ``nfs4`` protocol and the
+protocol-neutral ``vfsi`` alias with fsspec:
 
     import fsspec
     import nfs4fs
@@ -11,9 +12,10 @@ Importing this package registers the ``nfs4`` protocol with fsspec:
 import fsspec
 
 from . import _native
-from ._fs import Nfs4File, Nfs4FileSystem
+from ._fs import Nfs4File, Nfs4FileSystem, VfsiFileSystem
 
-__all__ = ["Nfs4FileSystem", "Nfs4File"]
+__all__ = ["Nfs4FileSystem", "VfsiFileSystem", "Nfs4File"]
 __version__ = _native.__version__
 
 fsspec.register_implementation("nfs4", Nfs4FileSystem)
+fsspec.register_implementation("vfsi", VfsiFileSystem)

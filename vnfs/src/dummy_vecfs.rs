@@ -502,6 +502,10 @@ impl DummyVecFs {
 }
 
 impl VecFs for DummyVecFs {
+    fn capabilities(&self) -> u64 {
+        VF_CAP_UNIX_SEMANTICS
+    }
+
     fn abs_path(&self, path: &Path) -> PathBuf {
         let root_rel = if path.is_absolute() {
             path.strip_prefix("/").unwrap_or(path).to_path_buf()

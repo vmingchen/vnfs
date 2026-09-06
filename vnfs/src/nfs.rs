@@ -2011,11 +2011,12 @@ impl VecFs for NfsVecFs {
     }
 
     fn capabilities(&self) -> u64 {
-        if self.server_copy_enabled() {
-            VF_CAP_SERVER_COPY
-        } else {
-            0
-        }
+        VF_CAP_UNIX_SEMANTICS
+            | if self.server_copy_enabled() {
+                VF_CAP_SERVER_COPY
+            } else {
+                0
+            }
     }
 
     fn abs_path(&self, path: &Path) -> PathBuf {

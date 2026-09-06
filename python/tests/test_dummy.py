@@ -14,6 +14,16 @@ def test_protocol_registered():
     from fsspec.registry import registry
 
     assert "nfs4" in registry
+    assert "vfsi" in registry
+
+
+def test_vfsi_protocol_alias_uses_neutral_urls(tmp_path):
+    fs = fsspec.filesystem(
+        "vfsi", backend="dummy", dummy_root=str(tmp_path / "vfsi-root")
+    )
+    fs.pipe_file("vfsi:///f.txt", b"data")
+    assert fs.cat_file("vfsi:///f.txt") == b"data"
+    assert fs.info("vfsi:///f.txt")["name"] == "vfsi:///f.txt"
 
 
 def test_dummy_root_is_isolated(dummy_fs, tmp_path):
@@ -69,10 +79,17 @@ def test_compound_stats_available(dummy_fs):
     assert stats == (0, 0, 0, 0)
 
 
-def test_dummy_reports_no_nfs_capabilities(dummy_fs):
+def test_dummy_reports_no_network_capabilities(dummy_fs):
     assert dummy_fs._client.minor_version() is None
-    assert dummy_fs._client.capabilities() == 0
+    assert dummy_fs._client.smb_dialect() is None
     assert not dummy_fs._client.server_copy_enabled()
+
+
+def test_smb_backend_requires_a_share():
+    from nfs4fs import _native
+
+    with pytest.raises(ValueError, match="share is required"):
+        _native.NfsClient("127.0.0.1", "smb")
 
 
 def test_pipe_missing_parent_raises_by_default(dummy_fs):
