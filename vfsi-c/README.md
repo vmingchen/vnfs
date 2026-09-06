@@ -58,6 +58,12 @@ cc -I vfsi-c/include vfsi-c/tests/smoke.c \
 /tmp/vfsi_smoke /tmp/vfsi_root
 ```
 
+Run the same smoke test against a guest-accessible SMB share with:
+
+```sh
+/tmp/vfsi_smoke --smb 127.0.0.1 vfsi-test
+```
+
 The dynamic build places its libntirpc runtime libraries in
 `target/<profile>/vfsi-libs` and gives `libvfsi_c.so` an origin-relative
 RUNPATH to that directory. Deploy the shared library together with the

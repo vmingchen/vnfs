@@ -19,8 +19,10 @@ static bool list_one(const char *name, const struct vfsi_attrs *attrs, void *use
 
 int main(int argc, char **argv)
 {
-    if (argc != 2) {
-        fprintf(stderr, "usage: smoke <root>\n");
+    bool smb = argc == 4 && strcmp(argv[1], "--smb") == 0;
+    if (argc != 2 && !smb) {
+        fprintf(stderr, "usage: smoke <root>\n"
+                        "       smoke --smb <server> <share>\n");
         return 2;
     }
 
@@ -31,14 +33,17 @@ int main(int argc, char **argv)
     }
 
     struct vfsi_fs *fs = NULL;
-    int rc = vfsi_dummy_open(argv[1], &fs);
+    int rc = smb ? vfsi_smb_open(argv[2], argv[3], "", "", "", &fs)
+                 : vfsi_dummy_open(argv[1], &fs);
     if (rc != 0 || fs == NULL) {
-        fprintf(stderr, "dummy_open failed: %d\n", rc);
+        fprintf(stderr, "%s open failed: %d\n", smb ? "SMB" : "dummy", rc);
         return 1;
     }
-    if (vfsi_nfs_minorversion(fs) != 0 || vfsi_smb_dialect(fs) != 0 ||
-        vfsi_capabilities(fs) != 0) {
-        fprintf(stderr, "dummy backend reported network capabilities\n");
+    uint16_t dialect = vfsi_smb_dialect(fs);
+    if (vfsi_nfs_minorversion(fs) != 0 ||
+        (smb ? dialect < 0x0202 || dialect > 0x0311
+             : dialect != 0 || vfsi_capabilities(fs) != 0)) {
+        fprintf(stderr, "backend capability report is inconsistent\n");
         return 1;
     }
 
@@ -92,6 +97,8 @@ int main(int argc, char **argv)
         return 1;
     }
     free(seen);
+    if (vfsi_remove(fs, "/d/f.bin") != 0 || vfsi_remove(fs, "/d") != 0)
+        return 1;
     vfsi_free(fs);
     puts("smoke ok");
     return 0;
