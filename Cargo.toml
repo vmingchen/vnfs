@@ -9,3 +9,6 @@ libntirpc-sys = "0.2.1"
 nfsv41-sys = { path = "nfsv41-sys", version = "0.1.3" }
 xdr-codec = "0.4.4"
 xdrgen = "0.4.4"
+
+[patch.crates-io]
+libntirpc-sys = { path = "python/third_party/libntirpc-sys" }

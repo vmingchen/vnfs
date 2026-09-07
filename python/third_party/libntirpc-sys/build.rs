@@ -21,16 +21,25 @@ fn download_and_extract() {
     run(cmd, "");
 }
 
-/// Force a static build of libntirpc. The upstream CMake hardcodes
-/// `add_library(ntirpc SHARED ...)`; replace it so the archive ends up in the
-/// install tree and the Rust extension links statically (no `LD_LIBRARY_PATH`
-/// needed at import time).
-fn force_static() {
+/// Prepare the upstream source for embedding. Force a static build so the
+/// archive ends up in the install tree, and skip upstream's C test programs:
+/// they are unrelated to the bindings and one unconditionally links the
+/// monitoring library even when `USE_MONITORING=Off`.
+fn prepare_source() {
     let src_cmake = LIBNTIRPC_DIR.join("src/CMakeLists.txt");
     let patched = std::fs::read_to_string(&src_cmake)
         .expect("read ntirpc src/CMakeLists.txt")
         .replace("add_library(ntirpc SHARED", "add_library(ntirpc STATIC");
     std::fs::write(&src_cmake, patched).expect("patch ntirpc CMakeLists.txt to STATIC");
+
+    let root_cmake = LIBNTIRPC_DIR.join("CMakeLists.txt");
+    let patched = std::fs::read_to_string(&root_cmake)
+        .expect("read ntirpc CMakeLists.txt")
+        .replace(
+            "add_subdirectory(tests)",
+            "# Tests disabled by libntirpc-sys",
+        );
+    std::fs::write(&root_cmake, patched).expect("disable ntirpc C tests");
 }
 
 fn configure() {
@@ -86,7 +95,7 @@ fn main() {
     }
 
     if !LIBNTIRPC_INSTALL_DIR.exists() {
-        force_static();
+        prepare_source();
         configure();
     }
     make();
