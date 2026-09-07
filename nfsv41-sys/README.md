@@ -30,9 +30,9 @@ crate.
 2. **bindgen**: generates ~15k lines of Rust declarations from
    `src/wrapper.h` into `$OUT_DIR/bindings.rs`, which `src/lib.rs` includes.
 
-The archive's object files reference `libntirpc.so` symbols, so the crate
-re-emits `-lntirpc` (and `-lntirpcmonitoring`) at final link time; binaries
-also need `libntirpc.so` on the dynamic linker path at runtime.
+The archive's object files reference libntirpc symbols, so the crate
+re-emits the vendored static `libntirpc.a` at final link time. Consumers do
+not need libntirpc on the dynamic linker path at runtime.
 
 ## Usage
 

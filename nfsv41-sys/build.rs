@@ -6,12 +6,6 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let src_dir = manifest_dir.join("src");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    // The python/ workspace builds a standalone extension and wants libntirpc
-    // linked statically (see python/third_party/libntirpc-sys/build.rs). Only
-    // that workspace sets VNFS_STATIC_NTIRPC, so the main workspace keeps the
-    // historical dynamic-link flags.
-    let static_ntirpc = env::var("VNFS_STATIC_NTIRPC").as_deref() == Ok("1");
-
     // Include directory provided by libntirpc-sys (via its `links` metadata).
     let ntirpc_inc = env::var("DEP_NTIRPC_INCLUDE")
         .expect("DEP_NTIRPC_INCLUDE not set; libntirpc-sys must be a dependency");
@@ -51,17 +45,15 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=nfsv41");
-    if static_ntirpc {
-        // wrapper.o (embedded in this crate's rlib) references symbols in
-        // libntirpc; resolve them from the static archive.
-        println!("cargo:rustc-link-lib=static=ntirpc");
-    } else {
-        // wrapper.o references symbols in libntirpc.so; re-assert the link so
-        // consumers (including this crate's own tests) get the dynamic
-        // library linked too.
-        println!("cargo:rustc-link-lib=dylib=ntirpc");
-        println!("cargo:rustc-link-lib=dylib=ntirpcmonitoring");
-    }
+    // wrapper.o (embedded in this crate's rlib) references symbols in
+    // libntirpc; re-assert the vendored static archive after libnfsv41.
+    println!("cargo:rustc-link-lib=static=ntirpc");
+    // Native dependencies of the static archive must follow it on the final
+    // link line so one-pass linkers can resolve their symbols.
+    println!("cargo:rustc-link-lib=dylib=gssapi_krb5");
+    println!("cargo:rustc-link-lib=dylib=urcu-bp");
+    println!("cargo:rustc-link-lib=dylib=pthread");
+    println!("cargo:rustc-link-lib=dylib=dl");
     println!("cargo:rerun-if-changed=src/wrapper.c");
     println!("cargo:rerun-if-changed=src/wrapper.h");
     println!("cargo:rerun-if-changed=src/nfsv41.h");
