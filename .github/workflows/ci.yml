@@ -18,7 +18,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
@@ -51,7 +51,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev
       - name: Build the current native extension before tests
         run: |
           python -m venv .venv
@@ -73,7 +73,7 @@ jobs:
       - name: Install NFS-Ganesha and build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev nfs-ganesha nfs-ganesha-vfs
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev nfs-ganesha nfs-ganesha-vfs
       - name: Start local NFSv4 server
         run: |
           sudo mkdir -p /srv/vnfs-ci/git /run/ganesha
@@ -151,7 +151,7 @@ jobs:
       - name: Install Samba and build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev samba smbclient
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev samba smbclient
       - name: Start a loopback-only test share
         env:
           SMB_MIN_PROTOCOL: ${{ matrix.min_protocol }}
