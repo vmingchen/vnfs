@@ -293,7 +293,7 @@ pub fn make_verifier() -> verifier4 {
         .as_nanos() as u64;
     let mut v: verifier4 = [0; 8];
     for (i, b) in v.iter_mut().enumerate() {
-        *b = ((now >> (8 * i)) & 0xff) as u8;
+        *b = ((now >> (8 * i)) & 0xff) as libc::c_char;
     }
     v
 }
