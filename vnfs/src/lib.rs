@@ -30,7 +30,7 @@ pub mod vecfs;
 #[cfg(feature = "dummy")]
 pub use dummy_vecfs::DummyVecFs;
 #[cfg(feature = "nfs")]
-pub use nfs::NfsVecFs;
+pub use nfs::{NfsServerCopyStats, NfsVecFs};
 #[cfg(feature = "smb")]
 pub use smb::SmbVecFs;
 pub use vecfs::{

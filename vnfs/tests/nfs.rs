@@ -1487,20 +1487,36 @@ fn copyv_batches_nfs42_server_copies_or_falls_back() {
     let dir = setup_dir("copyv42");
     let mut c = NfsVecFs::connect_minor("127.0.0.1", 2).expect("connect with NFSv4.2");
     let mut pairs = Vec::new();
-    for i in 0..8 {
+    // More than two internal eight-file batches proves that COPY batching
+    // continues correctly across compound boundaries.
+    for i in 0..17 {
         let src = format!("{}/src{}", dir, i);
         let dst = format!("{}/dst{}", dir, i);
         write_file(&mut c, Path::new(&src), format!("payload-{i}").as_bytes());
         pairs.push(ExtentPair::new(&src, 0, &dst, 0, None));
     }
+    let before = c.server_copy_stats();
     let _ = vnfs::compound::compound_stats();
     c.copyv(&pairs).expect("batched NFSv4.2 COPY");
     let compounds = vnfs::compound::compound_stats().0;
     let server_copy_enabled = c.server_copy_enabled();
+    let copy_stats = c.server_copy_stats();
     if std::env::var_os("VNFS_TEST_REQUIRE_SERVER_COPY").is_some() {
         assert!(
             server_copy_enabled,
             "server rejected NFSv4.2 COPY and forced the client-side fallback"
+        );
+        assert!(
+            copy_stats.requests > before.requests,
+            "no COPY request sent"
+        );
+        assert!(
+            copy_stats.operations - before.operations >= pairs.len() as u64,
+            "server acknowledged too few COPY operations: {copy_stats:?}"
+        );
+        assert_eq!(
+            copy_stats.fallbacks, before.fallbacks,
+            "client-side COPY fallback was used: {copy_stats:?}"
         );
     }
     // Some NFSv4.2 servers negotiate the protocol but reject COPY at runtime.
@@ -1512,13 +1528,121 @@ fn copyv_batches_nfs42_server_copies_or_falls_back() {
             "copyv did not amortize RPCs: {compounds} compounds"
         );
     }
-    for i in 0..8 {
+    for i in 0..17 {
         let dst = format!("{}/dst{}", dir, i);
         assert_eq!(
             read_all(&mut c, Path::new(&dst)),
             format!("payload-{i}").into_bytes()
         );
     }
+}
+
+#[test]
+fn copyv_extent_semantics_and_server_telemetry() {
+    let dir = setup_dir("copyv_extents");
+    let mut c = NfsVecFs::connect_minor("127.0.0.1", 2).expect("connect with NFSv4.2");
+
+    let digits = format!("{dir}/digits");
+    write_file(&mut c, Path::new(&digits), b"0123456789");
+
+    let partial = format!("{dir}/partial");
+    let offset = format!("{dir}/offset");
+    let past_eof = format!("{dir}/past-eof");
+    let through_eof = format!("{dir}/through-eof");
+    let zero = format!("{dir}/zero");
+    for path in [&partial, &offset, &past_eof, &through_eof, &zero] {
+        write_file(&mut c, Path::new(path), b"stale-trailing-data");
+    }
+
+    let sparse = format!("{dir}/sparse");
+    c.writev(&[
+        WriteOp::from_path(&sparse, VfOffset::At(1024 * 1024), b"tail".to_vec())
+            .with_creation()
+            .with_truncate(),
+    ])
+    .expect("create sparse source");
+    let sparse_copy = format!("{dir}/sparse-copy");
+
+    let pairs = [
+        ExtentPair::new(&digits, 2, &partial, 0, Some(4)),
+        ExtentPair::new(&digits, 3, &offset, 4, Some(3)),
+        ExtentPair::new(&digits, 8, &past_eof, 0, Some(20)),
+        ExtentPair::new(&digits, 5, &through_eof, 0, None),
+        ExtentPair::new(&digits, 0, &zero, 0, Some(0)),
+        ExtentPair::new(&sparse, 0, &sparse_copy, 0, None),
+    ];
+    let before = c.server_copy_stats();
+    for (i, pair) in pairs.iter().enumerate() {
+        c.copyv(std::slice::from_ref(pair))
+            .unwrap_or_else(|error| panic!("copy extent variant {i}: {error:?}"));
+        if std::env::var_os("VNFS_TEST_REQUIRE_SERVER_COPY").is_some() {
+            assert!(
+                c.server_copy_enabled(),
+                "copy extent variant {i} used client fallback"
+            );
+        }
+    }
+    let after = c.server_copy_stats();
+
+    assert_eq!(read_all(&mut c, Path::new(&partial)), b"2345");
+    assert_eq!(read_all(&mut c, Path::new(&offset)), b"stal345");
+    assert_eq!(read_all(&mut c, Path::new(&past_eof)), b"89");
+    assert_eq!(read_all(&mut c, Path::new(&through_eof)), b"56789");
+    assert_eq!(read_all(&mut c, Path::new(&zero)), b"");
+    let sparse_data = read_all(&mut c, Path::new(&sparse_copy));
+    assert_eq!(sparse_data.len(), 1024 * 1024 + 4);
+    assert!(sparse_data[..1024 * 1024].iter().all(|byte| *byte == 0));
+    assert_eq!(&sparse_data[1024 * 1024..], b"tail");
+
+    if std::env::var_os("VNFS_TEST_REQUIRE_SERVER_COPY").is_some() {
+        assert!(c.server_copy_enabled());
+        assert!(after.requests > before.requests);
+        assert!(after.operations - before.operations >= 5);
+        assert_eq!(after.fallbacks, before.fallbacks);
+
+        // Ganesha rejects both same-file and overlapping COPY requests. Make
+        // sure those errors are surfaced without corrupting or truncating the
+        // source file.
+        let same = format!("{dir}/same");
+        for (src_offset, dst_offset, length) in [(0, 10, 5), (0, 2, 6)] {
+            write_file(&mut c, Path::new(&same), b"abcdefghij");
+            let error = c
+                .copyv(&[ExtentPair::new(
+                    &same,
+                    src_offset,
+                    &same,
+                    dst_offset,
+                    Some(length),
+                )])
+                .expect_err("same-file server COPY must be rejected");
+            assert!(matches!(error.err_no(), ERR_EXIST | ERR_INVAL));
+            assert_eq!(read_all(&mut c, Path::new(&same)), b"abcdefghij");
+        }
+    }
+}
+
+#[test]
+fn copyv_reports_mid_batch_failure_index() {
+    let dir = setup_dir("copyv_failure");
+    let mut c = client();
+    let src0 = format!("{dir}/src0");
+    let missing = format!("{dir}/missing");
+    let src2 = format!("{dir}/src2");
+    let dst0 = format!("{dir}/dst0");
+    let dst1 = format!("{dir}/dst1");
+    let dst2 = format!("{dir}/dst2");
+    write_file(&mut c, Path::new(&src0), b"zero");
+    write_file(&mut c, Path::new(&src2), b"two");
+    let error = c
+        .copyv(&[
+            ExtentPair::new(&src0, 0, &dst0, 0, None),
+            ExtentPair::new(&missing, 0, &dst1, 0, None),
+            ExtentPair::new(&src2, 0, &dst2, 0, None),
+        ])
+        .expect_err("missing middle source must fail");
+    assert_eq!(error.index(), 1);
+    assert_eq!(error.err_no(), libc::ENOENT as u32);
+    assert!(!c.exists(Path::new(&dst2)).unwrap());
 }
 
 #[test]

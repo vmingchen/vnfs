@@ -32,6 +32,19 @@ struct OpenFile {
     append: bool,
 }
 
+/// Per-connection telemetry for NFSv4.2 server-side COPY.
+///
+/// `requests` counts COPY compounds sent to the server, `operations` counts
+/// COPY operations acknowledged successfully, and `fallbacks` counts runtime
+/// downgrades to the client-side implementation after the server rejected
+/// COPY.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NfsServerCopyStats {
+    pub requests: u64,
+    pub operations: u64,
+    pub fallbacks: u64,
+}
+
 /// An NFSv4 client exposing the vectorized [`VecFs`] API.
 pub struct NfsVecFs {
     nfs: NfsClient,
@@ -40,6 +53,7 @@ pub struct NfsVecFs {
     /// Canonical open-file state, keyed by the client-assigned descriptor.
     open_files: std::collections::HashMap<i32, OpenFile>,
     server_copy_enabled: bool,
+    server_copy_stats: NfsServerCopyStats,
     /// How path-based bulk I/O is issued: one compound per batch including
     /// CLOSE (Ganesha's special-stateid behavior), one open+I/O compound
     /// plus a separate CLOSE compound (portable), or the old phased path.
@@ -445,6 +459,7 @@ impl NfsVecFs {
             next_fd: 0,
             open_files: std::collections::HashMap::new(),
             server_copy_enabled,
+            server_copy_stats: NfsServerCopyStats::default(),
             merged_mode: MergedIoMode::Full,
         }
     }
@@ -458,6 +473,11 @@ impl NfsVecFs {
     /// The value becomes false if the server rejects COPY at runtime.
     pub fn server_copy_enabled(&self) -> bool {
         self.server_copy_enabled
+    }
+
+    /// Return server-side COPY activity for this connection.
+    pub fn server_copy_stats(&self) -> NfsServerCopyStats {
+        self.server_copy_stats
     }
 
     // -- private helpers ----------------------------------------------------
@@ -1474,6 +1494,29 @@ impl NfsVecFs {
         };
 
         let result = (|| {
+            let explicit: Vec<usize> = pairs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, pair)| pair.length.is_some_and(|length| length > 0).then_some(i))
+                .collect();
+            let mut source_attrs: Vec<VfAttrs> = explicit
+                .iter()
+                .map(|&i| VfAttrs {
+                    file: VfFile::from_fd(src_tmp[i].expect("path source was opened")),
+                    masks: AttrMask::SIZE,
+                    ..VfAttrs::default()
+                })
+                .collect();
+            if !source_attrs.is_empty() {
+                self.getattrsv(&mut source_attrs)?;
+            }
+            let mut effective_lengths: Vec<Option<u64>> =
+                pairs.iter().map(|pair| pair.length).collect();
+            for (&i, attrs) in explicit.iter().zip(&source_attrs) {
+                effective_lengths[i] = pairs[i]
+                    .length
+                    .map(|length| length.min(attrs.size.saturating_sub(pairs[i].src_offset)));
+            }
             let mut copies = Vec::with_capacity(pairs.len());
             for (i, p) in pairs.iter().enumerate() {
                 let src = self
@@ -1491,11 +1534,19 @@ impl NfsVecFs {
                     dst_stateid: dst.stateid,
                     src_offset: p.src_offset,
                     dst_offset: p.dst_offset,
-                    count: p.length.unwrap_or(0),
+                    count: effective_lengths[i].unwrap_or(0),
                 });
             }
             let mut totals = vec![0u64; copies.len()];
-            let mut pending: Vec<usize> = (0..copies.len()).collect();
+            // NFSv4.2 uses count=0 to mean "through EOF", while the VFSI API
+            // uses Some(0) for an explicit zero-byte copy. Do not put those
+            // operations on the wire; the SETATTR phase below still applies
+            // the destination-size semantics.
+            let mut pending: Vec<usize> = pairs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, _)| (effective_lengths[i] != Some(0)).then_some(i))
+                .collect();
             while !pending.is_empty() {
                 let active: Vec<crate::client::CopyOp> = pending
                     .iter()
@@ -1506,16 +1557,17 @@ impl NfsVecFs {
                         dst_stateid: copies[i].dst_stateid,
                         src_offset: copies[i].src_offset,
                         dst_offset: copies[i].dst_offset,
-                        count: pairs[i]
-                            .length
+                        count: effective_lengths[i]
                             .map(|length| length.saturating_sub(totals[i]))
                             .unwrap_or(0),
                     })
                     .collect();
+                self.server_copy_stats.requests += 1;
                 let counts = self.nfs.copy_many(&active).map_err(|e| {
                     let original = pending.get(e.op_index).copied().unwrap_or(0);
                     VfError::from_rpc_indexed(e.with_op_index(original))
                 })?;
+                self.server_copy_stats.operations += counts.len() as u64;
                 let mut next = Vec::new();
                 for (&i, n) in pending.iter().zip(counts) {
                     totals[i] = totals[i]
@@ -1534,8 +1586,7 @@ impl NfsVecFs {
                     // count of zero it confirms that a possibly partial COPY
                     // has reached EOF.
                     if n != 0
-                        && pairs[i]
-                            .length
+                        && effective_lengths[i]
                             .map(|length| totals[i] < length)
                             .unwrap_or(true)
                     {
@@ -2882,6 +2933,7 @@ impl VecFs for NfsVecFs {
                         | nfsstat4_NFS4ERR_BAD_STATEID
                 ) {
                     self.server_copy_enabled = false;
+                    self.server_copy_stats.fallbacks += 1;
                     let start = base * FILES_PER_COPY_BATCH;
                     return self.dupv(&pairs[start..]).map_err(|fallback| {
                         let index = fallback.index();

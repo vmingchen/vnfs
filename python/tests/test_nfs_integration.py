@@ -1,5 +1,7 @@
-"""Integration tests against the local NFSv4.1 server, including
+"""Integration tests against the configured NFSv4.1/v4.2 server, including
 round-trip (compound-count) assertions."""
+
+import os
 
 import fsspec
 import pytest
@@ -9,6 +11,20 @@ from .common import run_correctness_suite
 
 def test_correctness_suite_on_nfs(nfs_fs):
     run_correctness_suite(nfs_fs)
+
+
+def test_nfs_identity_and_required_server_copy(nfs_fs):
+    expected_minor = os.environ.get("VFSI_NFS_MINOR")
+    if expected_minor:
+        assert nfs_fs._client.minor_version() == int(expected_minor)
+
+    if os.environ.get("VFSI_NFS_REQUIRE_SERVER_COPY") == "1":
+        nfs_fs.pipe_file("nfs4:///server-copy-source", b"python-server-copy")
+        nfs_fs.cp("nfs4:///server-copy-source", "nfs4:///server-copy-destination")
+        assert (
+            nfs_fs.cat_file("nfs4:///server-copy-destination") == b"python-server-copy"
+        )
+        assert nfs_fs._client.server_copy_enabled(), "Python copy used client fallback"
 
 
 def _measured(fs, fn):

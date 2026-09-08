@@ -70,6 +70,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
       - name: Install NFS-Ganesha and build dependencies
         run: |
           sudo apt-get update
@@ -123,6 +126,22 @@ jobs:
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}
         run: cargo test -p vnfs --test nfs -- --test-threads=1
+      - name: Run C ABI smoke test against NFS
+        run: |
+          cargo build -p vfsi-c
+          cc -Wall -Wextra -Werror -I vfsi-c/include vfsi-c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
+          LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke --nfs 127.0.0.1 '${{ matrix.minor-version }}'
+      - name: Run required Python/fsspec coverage against NFS
+        env:
+          VFSI_NFS_REQUIRED: 1
+          VFSI_NFS_SERVER: 127.0.0.1
+          VFSI_NFS_MINOR: ${{ matrix.minor-version }}
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install maturin fsspec pytest
+          cd python
+          ../.venv/bin/maturin develop
+          ../.venv/bin/python -m pytest tests/test_nfs_integration.py tests/test_fsspec_abstract.py
       - name: Show server log after failure
         if: failure()
         run: cat /tmp/ganesha.log
@@ -133,6 +152,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
       - name: Install native build dependencies
         run: |
           sudo apt-get update
@@ -166,6 +188,25 @@ jobs:
           VNFS_TEST_MINOR: 2
           VNFS_TEST_REQUIRE_SERVER_COPY: 1
         run: cargo test -p vnfs --test nfs -- --test-threads=1
+      - name: Require server-side COPY through the C ABI
+        env:
+          VFSI_REQUIRE_SERVER_COPY: 1
+        run: |
+          cargo build -p vfsi-c
+          cc -Wall -Wextra -Werror -I vfsi-c/include vfsi-c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
+          LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke --nfs 127.0.0.1 2
+      - name: Run required Python/fsspec coverage against patched NFSv4.2
+        env:
+          VFSI_NFS_REQUIRED: 1
+          VFSI_NFS_REQUIRE_SERVER_COPY: 1
+          VFSI_NFS_SERVER: 127.0.0.1
+          VFSI_NFS_MINOR: 2
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install maturin fsspec pytest
+          cd python
+          ../.venv/bin/maturin develop
+          ../.venv/bin/python -m pytest tests/test_nfs_integration.py tests/test_fsspec_abstract.py
       - name: Show patched NFS-Ganesha log after failure
         if: failure()
         run: |
@@ -193,6 +234,7 @@ jobs:
             rust_features: "smb,dummy"
             server_copy: "0"
             reconnect: ""
+            require_reconnect: "0"
             bindings: false
           - name: smb311-authenticated
             min_protocol: SMB3_11
@@ -205,6 +247,7 @@ jobs:
             rust_features: "default"
             server_copy: "1"
             reconnect: "sudo systemctl restart smbd"
+            require_reconnect: "1"
             bindings: true
     name: smb-integration (${{ matrix.name }})
     steps:
@@ -280,6 +323,8 @@ jobs:
           VFSI_SMB_PASSWORD: ${{ matrix.password }}
           VFSI_SMB_EXPECT_DIALECT: ${{ matrix.dialect }}
           VFSI_SMB_EXPECT_SERVER_COPY: ${{ matrix.server_copy }}
+          VFSI_SMB_REQUIRED: 1
+          VFSI_SMB_REQUIRE_RECONNECT: ${{ matrix.require_reconnect }}
           VFSI_SMB_RESTART_COMMAND: ${{ matrix.reconnect }}
         run: |
           if [ "${{ matrix.rust_features }}" = default ]; then
@@ -300,6 +345,7 @@ jobs:
           VFSI_SMB_SHARE: vfsi-test
           VFSI_SMB_USERNAME: ${{ matrix.username }}
           VFSI_SMB_PASSWORD: ${{ matrix.password }}
+          VFSI_SMB_REQUIRED: 1
         run: |
           python -m venv .venv
           .venv/bin/pip install maturin fsspec pytest

@@ -16,9 +16,24 @@ use vnfs::{
 
 mod common;
 
+fn required(name: &str) -> bool {
+    std::env::var(name).as_deref() == Ok("1")
+}
+
 fn connect() -> Option<SmbVecFs> {
-    let server = std::env::var("VFSI_SMB_SERVER").ok()?;
-    let share = std::env::var("VFSI_SMB_SHARE").ok()?;
+    let (server, share) = match (
+        std::env::var("VFSI_SMB_SERVER"),
+        std::env::var("VFSI_SMB_SHARE"),
+    ) {
+        (Ok(server), Ok(share)) => (server, share),
+        _ => {
+            assert!(
+                !required("VFSI_SMB_REQUIRED"),
+                "VFSI_SMB_SERVER and VFSI_SMB_SHARE are required in this integration job"
+            );
+            return None;
+        }
+    };
     let username = std::env::var("VFSI_SMB_USERNAME").unwrap_or_default();
     let password = std::env::var("VFSI_SMB_PASSWORD").unwrap_or_default();
     let domain = std::env::var("VFSI_SMB_DOMAIN").unwrap_or_default();
@@ -180,6 +195,10 @@ fn path_reads_recover_after_server_restart() {
         return;
     };
     let Ok(restart) = std::env::var("VFSI_SMB_RESTART_COMMAND") else {
+        assert!(
+            !required("VFSI_SMB_REQUIRE_RECONNECT"),
+            "VFSI_SMB_RESTART_COMMAND is required in this reconnect job"
+        );
         eprintln!("skipping SMB reconnect test: VFSI_SMB_RESTART_COMMAND not set");
         return;
     };
