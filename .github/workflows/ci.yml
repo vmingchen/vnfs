@@ -11,7 +11,7 @@ jobs:
   rust:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
@@ -43,9 +43,9 @@ jobs:
   python:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install native build dependencies
@@ -68,7 +68,7 @@ jobs:
       matrix:
         minor-version: [1, 2]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Install NFS-Ganesha and build dependencies
         run: |
@@ -76,10 +76,23 @@ jobs:
           sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev nfs-ganesha nfs-ganesha-vfs
       - name: Start local NFSv4 server
         run: |
+          sudo systemctl stop nfs-ganesha.service || true
+          sudo pkill -TERM -x ganesha.nfsd || true
+          for attempt in $(seq 1 30); do
+            if ! pgrep -x ganesha.nfsd >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if pgrep -x ganesha.nfsd >/dev/null; then
+            echo "A pre-existing Ganesha process did not stop"
+            exit 1
+          fi
           sudo mkdir -p /srv/vnfs-ci/git /run/ganesha
           sudo chmod -R 0777 /srv/vnfs-ci
           cat >/tmp/ganesha.conf <<'EOF'
           NFS_Core_Param { Protocols = 4; }
+          NFSV4 { Graceless = true; }
           EXPORT {
             Export_Id = 77;
             Path = /srv/vnfs-ci;
@@ -93,7 +106,12 @@ jobs:
           }
           EOF
           sudo ganesha.nfsd -F -L /tmp/ganesha.log -f /tmp/ganesha.conf &
+          ganesha_pid=$!
           for attempt in $(seq 1 30); do
+            if ! sudo kill -0 "$ganesha_pid" 2>/dev/null; then
+              cat /tmp/ganesha.log
+              exit 1
+            fi
             if timeout 1 bash -c '</dev/tcp/127.0.0.1/2049' 2>/dev/null; then
               exit 0
             fi
@@ -141,11 +159,11 @@ jobs:
             bindings: true
     name: smb-integration (${{ matrix.name }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy,rustfmt
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Install Samba and build dependencies
