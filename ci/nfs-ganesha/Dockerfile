@@ -26,6 +26,7 @@ RUN apt-get update \
         libssl-dev \
         libsystemd-dev \
         liburcu-dev \
+        netbase \
         pkg-config \
         python3 \
         uuid-dev \
