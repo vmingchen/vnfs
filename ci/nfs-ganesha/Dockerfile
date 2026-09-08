@@ -44,7 +44,7 @@ RUN cmake \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr \
         -DUSE_9P=OFF \
-        -DUSE_DBUS=OFF \
+        -DUSE_DBUS=ON \
         -DUSE_FSAL_VFS=ON \
         -DUSE_GSS=OFF \
         -DUSE_MONITORING=ON \
