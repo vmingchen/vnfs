@@ -25,8 +25,8 @@ RUN apt-get update \
         libnfsidmap-dev \
         libssl-dev \
         libsystemd-dev \
+        libtirpc-common \
         liburcu-dev \
-        netbase \
         pkg-config \
         python3 \
         uuid-dev \
