@@ -47,6 +47,7 @@ RUN cmake \
         -DUSE_DBUS=OFF \
         -DUSE_FSAL_VFS=ON \
         -DUSE_GSS=OFF \
+        -DUSE_MONITORING=OFF \
         -DUSE_NFS3=OFF \
     && cmake --build /tmp/ganesha-build --parallel \
     && cmake --install /tmp/ganesha-build \

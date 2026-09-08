@@ -168,10 +168,13 @@ jobs:
         run: cargo test -p vnfs --test nfs -- --test-threads=1
       - name: Show patched NFS-Ganesha log after failure
         if: failure()
-        run: docker logs vnfs-ganesha-copy
+        run: |
+          if docker inspect vnfs-ganesha-copy >/dev/null 2>&1; then
+            docker logs vnfs-ganesha-copy
+          fi
       - name: Stop patched NFS-Ganesha
         if: always()
-        run: docker rm --force vnfs-ganesha-copy
+        run: docker rm --force vnfs-ganesha-copy 2>/dev/null || true
 
   smb-integration:
     runs-on: ubuntu-24.04
