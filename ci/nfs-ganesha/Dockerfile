@@ -50,6 +50,7 @@ RUN cmake \
         -DUSE_GSS=OFF \
         -DUSE_MONITORING=ON \
         -DUSE_NFS3=OFF \
+        -DUSE_RQUOTA=OFF \
     && cmake --build /tmp/ganesha-build --parallel \
     && cmake --install /tmp/ganesha-build \
     && rm -rf /tmp/ganesha-build /usr/src/nfs-ganesha
