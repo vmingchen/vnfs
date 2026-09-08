@@ -1496,10 +1496,17 @@ fn copyv_batches_nfs42_server_copies_or_falls_back() {
     let _ = vnfs::compound::compound_stats();
     c.copyv(&pairs).expect("batched NFSv4.2 COPY");
     let compounds = vnfs::compound::compound_stats().0;
+    let server_copy_enabled = c.server_copy_enabled();
+    if std::env::var_os("VNFS_TEST_REQUIRE_SERVER_COPY").is_some() {
+        assert!(
+            server_copy_enabled,
+            "server rejected NFSv4.2 COPY and forced the client-side fallback"
+        );
+    }
     // Some NFSv4.2 servers negotiate the protocol but reject COPY at runtime.
     // In that case copyv disables server-side copying and transparently
     // retries through dupv; only enforce batching when COPY stayed enabled.
-    if c.server_copy_enabled() {
+    if server_copy_enabled {
         assert!(
             compounds < (pairs.len() * 4) as u64,
             "copyv did not amortize RPCs: {compounds} compounds"

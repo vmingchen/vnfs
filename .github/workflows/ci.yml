@@ -127,6 +127,52 @@ jobs:
         if: failure()
         run: cat /tmp/ganesha.log
 
+  nfs-server-copy-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev
+      - name: Build patched NFS-Ganesha image
+        run: docker build --tag vnfs-ganesha-copy:ci ci/nfs-ganesha
+      - name: Start patched NFSv4.2 server
+        run: |
+          sudo mkdir -p /srv/vnfs-ci/git
+          sudo chmod -R 0777 /srv/vnfs-ci
+          docker run --detach \
+            --name vnfs-ganesha-copy \
+            --privileged \
+            --network host \
+            --mount type=bind,source=/srv/vnfs-ci,target=/export \
+            vnfs-ganesha-copy:ci
+          for attempt in $(seq 1 30); do
+            if [ "$(docker inspect --format '{{.State.Running}}' vnfs-ganesha-copy)" != true ]; then
+              docker logs vnfs-ganesha-copy
+              exit 1
+            fi
+            if timeout 1 bash -c '</dev/tcp/127.0.0.1/2049' 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs vnfs-ganesha-copy
+          exit 1
+      - name: Require batched NFSv4.2 server-side COPY
+        env:
+          VNFS_TEST_MINOR: 2
+          VNFS_TEST_REQUIRE_SERVER_COPY: 1
+        run: cargo test -p vnfs --test nfs -- --test-threads=1
+      - name: Show patched NFS-Ganesha log after failure
+        if: failure()
+        run: docker logs vnfs-ganesha-copy
+      - name: Stop patched NFS-Ganesha
+        if: always()
+        run: docker rm --force vnfs-ganesha-copy
+
   smb-integration:
     runs-on: ubuntu-24.04
     strategy:
