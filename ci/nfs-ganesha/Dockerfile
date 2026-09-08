@@ -29,6 +29,7 @@ RUN apt-get update \
         liburcu-dev \
         pkg-config \
         python3 \
+        rpcbind \
         uuid-dev \
     && rm -rf /var/lib/apt/lists/*
 
@@ -61,4 +62,4 @@ RUN mkdir -p /export /run/ganesha /var/lib/nfs/ganesha /var/log/ganesha
 
 EXPOSE 2049/tcp
 
-ENTRYPOINT ["/usr/bin/ganesha.nfsd", "-F", "-x", "-L", "STDERR", "-f", "/etc/ganesha/ganesha.conf"]
+ENTRYPOINT ["/bin/sh", "-c", "rpcbind -w && exec /usr/bin/ganesha.nfsd -F -x -L STDERR -f /etc/ganesha/ganesha.conf"]
