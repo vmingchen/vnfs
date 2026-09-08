@@ -1483,7 +1483,7 @@ fn dupv_copies_extent() {
 }
 
 #[test]
-fn copyv_batches_nfs42_server_copies() {
+fn copyv_batches_nfs42_server_copies_or_falls_back() {
     let dir = setup_dir("copyv42");
     let mut c = NfsVecFs::connect_minor("127.0.0.1", 2).expect("connect with NFSv4.2");
     let mut pairs = Vec::new();
@@ -1496,10 +1496,15 @@ fn copyv_batches_nfs42_server_copies() {
     let _ = vnfs::compound::compound_stats();
     c.copyv(&pairs).expect("batched NFSv4.2 COPY");
     let compounds = vnfs::compound::compound_stats().0;
-    assert!(
-        compounds < (pairs.len() * 4) as u64,
-        "copyv did not amortize RPCs: {compounds} compounds"
-    );
+    // Some NFSv4.2 servers negotiate the protocol but reject COPY at runtime.
+    // In that case copyv disables server-side copying and transparently
+    // retries through dupv; only enforce batching when COPY stayed enabled.
+    if c.server_copy_enabled() {
+        assert!(
+            compounds < (pairs.len() * 4) as u64,
+            "copyv did not amortize RPCs: {compounds} compounds"
+        );
+    }
     for i in 0..8 {
         let dst = format!("{}/dst{}", dir, i);
         assert_eq!(

@@ -2515,17 +2515,16 @@ impl VecFs for NfsVecFs {
         let ids = request_mask_to_attr_list(&masks);
         let mut collected: std::collections::HashMap<PathBuf, Vec<VfAttrs>> =
             std::collections::HashMap::new();
-        let root_attrs = self.readdir_all(&root_fh, root, &masks)?;
-        let mut root_sorted = root_attrs.clone();
-        sort(root, &mut root_sorted);
-        collected.insert(root.to_path_buf(), root_attrs);
+        let mut root_attrs = self.readdir_all(&root_fh, root, &masks)?;
+        sort(root, &mut root_attrs);
 
         // Frontier of (parent handle, child directory path) to list next.
-        let mut frontier: Vec<(FileHandle, PathBuf)> = root_sorted
+        let mut frontier: Vec<(FileHandle, PathBuf)> = root_attrs
             .iter()
             .filter(|e| e.ftype == VfType::Directory)
             .map(|e| (root_fh.clone(), e.file.path().unwrap().to_path_buf()))
             .collect();
+        collected.insert(root.to_path_buf(), root_attrs);
 
         while !frontier.is_empty() {
             // Resolve + list every frontier directory in batched compounds.
@@ -2580,9 +2579,8 @@ impl VecFs for NfsVecFs {
                 for de in &accumulated[idx] {
                     attrs.push(Self::dir_entry_to_attrs(&path, &masks, &ids, de));
                 }
-                let mut sorted = attrs.clone();
-                sort(&path, &mut sorted);
-                for a in &sorted {
+                sort(&path, &mut attrs);
+                for a in &attrs {
                     if a.ftype == VfType::Directory {
                         next_frontier
                             .push((result.fh.clone(), a.file.path().unwrap().to_path_buf()));
@@ -2599,9 +2597,7 @@ impl VecFs for NfsVecFs {
         let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
             let entries = collected.remove(&dir).unwrap_or_default();
-            let mut sorted = entries.clone();
-            sort(dir.as_path(), &mut sorted);
-            let subs: Vec<PathBuf> = sorted
+            let subs: Vec<PathBuf> = entries
                 .iter()
                 .filter(|e| e.ftype == VfType::Directory)
                 .map(|e| e.file.path().unwrap().to_path_buf())
