@@ -36,7 +36,7 @@ RUN git init /usr/src/nfs-ganesha \
     && git -C /usr/src/nfs-ganesha fetch --depth=1 origin "${GANESHA_REVISION}" \
     && git -C /usr/src/nfs-ganesha checkout --detach FETCH_HEAD \
     && test "$(git -C /usr/src/nfs-ganesha rev-parse HEAD)" = "${GANESHA_REVISION}" \
-    && git -C /usr/src/nfs-ganesha submodule update --init --depth=1 src/libntirpc
+    && git -C /usr/src/nfs-ganesha submodule update --init --recursive --depth=1 src/libntirpc
 
 RUN cmake \
         -S /usr/src/nfs-ganesha/src \
@@ -47,7 +47,7 @@ RUN cmake \
         -DUSE_DBUS=OFF \
         -DUSE_FSAL_VFS=ON \
         -DUSE_GSS=OFF \
-        -DUSE_MONITORING=OFF \
+        -DUSE_MONITORING=ON \
         -DUSE_NFS3=OFF \
     && cmake --build /tmp/ganesha-build --parallel \
     && cmake --install /tmp/ganesha-build \
