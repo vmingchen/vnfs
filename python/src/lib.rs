@@ -36,6 +36,8 @@ type StatManyResult = (Vec<Option<Py<PyDict>>>, ErrnoMap);
 type ReadManyResult = (Vec<Option<Vec<u8>>>, ErrnoMap);
 /// Per-index copied byte counts (None on failure) plus failures.
 type CopyManyResult = (Vec<Option<u64>>, ErrnoMap);
+/// Directory paths and their entries returned to Python by a tree walk.
+type WalkResult = Vec<(Py<PyString>, Vec<Py<PyDict>>)>;
 
 // ---------------------------------------------------------------------------
 // Error mapping
@@ -277,6 +279,7 @@ impl NfsClient {
     /// (`backend="smb"`), or a local directory (`backend="dummy"`).
     #[new]
     #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None, minor_version=None, share=None, username="", password="", domain=""))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         host: &str,
         backend: &str,
@@ -291,9 +294,7 @@ impl NfsClient {
         let fs: Box<dyn vnfs::VecFs + Send> = match backend {
             "nfs" => {
                 if minor_version.is_some_and(|version| !matches!(version, 1 | 2)) {
-                    return Err(PyValueError::new_err(
-                        "minor_version must be 1, 2, or None",
-                    ));
+                    return Err(PyValueError::new_err("minor_version must be 1, 2, or None"));
                 }
                 let mut nfs = match minor_version {
                     Some(version) => NfsVecFs::connect_minor(host, version),
@@ -321,7 +322,7 @@ impl NfsClient {
             }
             "dummy" => {
                 let root_path = match root {
-                    Some(r) => PathBuf::from(r),
+                    Some(r) => r,
                     None => std::env::temp_dir().join(format!(
                         "nfs4fs_dummy_{}_{}",
                         std::process::id(),
@@ -526,7 +527,8 @@ impl NfsClient {
 
     fn mkdir(&self, path: PathBuf, mode: u32) -> PyResult<()> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        fs.mkdir(&path, mode).map_err(|e| to_py_err(e, Some(path.as_path())))
+        fs.mkdir(&path, mode)
+            .map_err(|e| to_py_err(e, Some(path.as_path())))
     }
 
     /// Create `path` and all missing ancestors.
@@ -544,7 +546,9 @@ impl NfsClient {
 
     fn readlink(&self, path: PathBuf) -> PyResult<String> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        let b = fs.readlink(&path).map_err(|e| to_py_err(e, Some(path.as_path())))?;
+        let b = fs
+            .readlink(&path)
+            .map_err(|e| to_py_err(e, Some(path.as_path())))?;
         Ok(String::from_utf8_lossy(&b).into_owned())
     }
 
@@ -561,7 +565,8 @@ impl NfsClient {
 
     fn chdir(&self, path: PathBuf) -> PyResult<()> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
-        fs.chdir(&path).map_err(|e| to_py_err(e, Some(path.as_path())))
+        fs.chdir(&path)
+            .map_err(|e| to_py_err(e, Some(path.as_path())))
     }
 
     // -- batched -------------------------------------------------------------------
@@ -731,7 +736,7 @@ impl NfsClient {
             .iter()
             .zip(datas)
             .map(|(p, d)| {
-                let op = WriteOp::at(VfFile::from_os_path(&p), 0, d).with_creation();
+                let op = WriteOp::at(VfFile::from_os_path(p), 0, d).with_creation();
                 if truncate { op.with_truncate() } else { op }
             })
             .collect();
@@ -749,7 +754,7 @@ impl NfsClient {
             .iter()
             .zip(sizes)
             .map(|(p, s)| VfAttrs {
-                file: VfFile::from_os_path(&p),
+                file: VfFile::from_os_path(p),
                 masks: AttrMask::SIZE,
                 size: s,
                 ..VfAttrs::default()
@@ -765,7 +770,7 @@ impl NfsClient {
         let attrs: Vec<VfAttrs> = paths
             .iter()
             .map(|p| VfAttrs {
-                file: VfFile::from_os_path(&p),
+                file: VfFile::from_os_path(p),
                 masks: AttrMask::MODE,
                 mode,
                 ..VfAttrs::default()
@@ -839,12 +844,7 @@ impl NfsClient {
     /// Walk a tree in one call (the NFS backend lists each level in batched
     /// compounds). Returns `(dir_path, entries)` per directory in pre-order.
     #[pyo3(signature = (root, sort=true))]
-    fn walk(
-        &self,
-        py: Python<'_>,
-        root: PathBuf,
-        sort: bool,
-    ) -> PyResult<Vec<(Py<PyString>, Vec<Py<PyDict>>)>> {
+    fn walk(&self, py: Python<'_>, root: PathBuf, sort: bool) -> PyResult<WalkResult> {
         let mut fs = self.fs.lock().map_err(lock_err)?;
         let mut sort_fn = |_dir: &Path, attrs: &mut Vec<VfAttrs>| {
             if sort {
@@ -879,7 +879,10 @@ impl NfsClient {
 
     /// Remove paths in batches (one removev compound per parent directory).
     fn remove_many(&self, paths: Vec<PathBuf>) -> PyResult<()> {
-        let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_os_path(&p)).collect();
+        let files: Vec<VfFile> = paths
+            .iter()
+            .map(|path| VfFile::from_os_path(path.as_path()))
+            .collect();
         let mut fs = self.fs.lock().map_err(lock_err)?;
         fs.removev(&files).map_err(|e| map_err_with_path(e, &paths))
     }
@@ -888,7 +891,7 @@ impl NfsClient {
     fn rename_many(&self, pairs: Vec<(PathBuf, PathBuf)>) -> PyResult<()> {
         let files: Vec<(VfFile, VfFile)> = pairs
             .iter()
-            .map(|(a, b)| (VfFile::from_os_path(&a), VfFile::from_os_path(&b)))
+            .map(|(a, b)| (VfFile::from_os_path(a), VfFile::from_os_path(b)))
             .collect();
         let mut fs = self.fs.lock().map_err(lock_err)?;
         fs.renamev(&files).map_err(|e| {

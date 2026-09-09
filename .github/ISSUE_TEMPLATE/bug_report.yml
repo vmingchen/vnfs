@@ -1,0 +1,62 @@
+name: Bug report
+description: Report a reproducible VFSI or nfs4fs defect
+title: "bug: "
+labels: [bug]
+body:
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      options:
+        - Python / fsspec
+        - Rust API
+        - C API
+        - NFS backend
+        - SMB backend
+        - Build or packaging
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: VFSI/nfs4fs version or commit, Python/Rust version, and server version
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Client and server operating systems and CPU architectures
+    validations:
+      required: true
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Minimal reproducer
+      description: Include configuration with all credentials and sensitive paths removed.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and logs
+      description: Include the complete error chain when possible.
+    validations:
+      required: true
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed passwords, Kerberos material, private data, and other secrets.
+          required: true
+        - label: This is not a security vulnerability; I will use a private security advisory for those.
+          required: true

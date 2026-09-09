@@ -21,6 +21,10 @@ jobs:
           sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Check the detached Python native crate
+        run: |
+          cargo fmt --manifest-path python/Cargo.toml --check
+          cargo clippy --manifest-path python/Cargo.toml --locked --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
       - run: cargo test -p nfsv41-sys
       - run: cargo test -p vnfs --lib
@@ -42,12 +46,23 @@ jobs:
 
   python:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.9"
+            fsspec: "fsspec==2024.12.0"
+          - python-version: "3.12"
+            fsspec: "fsspec"
+          - python-version: "3.14"
+            fsspec: "fsspec"
+    name: python (${{ matrix.python-version }}, ${{ matrix.fsspec }})
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - name: Install native build dependencies
         run: |
           sudo apt-get update
@@ -56,10 +71,60 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install maturin fsspec pytest
+          .venv/bin/pip install maturin '${{ matrix.fsspec }}' pytest
           cd python
           ../.venv/bin/maturin develop
       - run: .venv/bin/python -m pytest python/tests
+
+  python-package:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev
+      - name: Build and inspect wheel and source distribution
+        run: |
+          python -m pip install --upgrade pip maturin patchelf twine
+          cd python
+          python -m maturin build --release --locked --compatibility pypi --out dist
+          python -m maturin sdist --out dist
+          python -m twine check dist/*
+      - name: Install wheel and test entry-point discovery outside the source tree
+        run: |
+          python -m venv .wheel-venv
+          .wheel-venv/bin/pip install python/dist/*.whl
+          cd /tmp
+          "$GITHUB_WORKSPACE/.wheel-venv/bin/python" - <<'PY'
+          import importlib.metadata
+          import os
+          import pathlib
+          import tempfile
+          import tomllib
+
+          import fsspec
+          import vfsi
+
+          metadata = importlib.metadata.metadata("nfs4fs")
+          pyproject = pathlib.Path(os.environ["GITHUB_WORKSPACE"], "python", "pyproject.toml")
+          expected_version = tomllib.loads(pyproject.read_text())["project"]["version"]
+          assert metadata["Version"] == expected_version
+          assert metadata["Project-URL"]
+          assert vfsi.VfsiFileSystem.protocol == "vfsi"
+          assert fsspec.get_filesystem_class("nfs4").__module__ == "nfs4fs._fs"
+          with tempfile.TemporaryDirectory() as root:
+              fs = fsspec.filesystem("nfs4", backend="dummy", dummy_root=root)
+              fs.pipe_file("/smoke", b"ok")
+              assert fs.cat_file("/smoke") == b"ok"
+          PY
+      - name: Prove the source distribution can build a wheel
+        run: |
+          python -m pip wheel --no-deps --wheel-dir /tmp/nfs4fs-sdist-wheel python/dist/*.tar.gz
 
   nfs-integration:
     runs-on: ubuntu-24.04

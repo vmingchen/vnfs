@@ -1,9 +1,11 @@
 [package]
 name = "nfs4fs-python"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Python bindings for the vectorized vnfs NFSv4.1 client (fsspec nfs4:// filesystem)"
+description = "Python bindings for vectorized VFSI NFSv4 and SMB2/3 clients"
+homepage = "https://github.com/vmingchen/vnfs"
+repository = "https://github.com/vmingchen/vnfs"
 
 [lib]
 name = "_native"

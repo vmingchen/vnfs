@@ -1,5 +1,8 @@
 """Unit tests for nfs4fs on the local-directory (dummy) backend."""
 
+import subprocess
+import sys
+
 import fsspec
 import pytest
 
@@ -15,6 +18,33 @@ def test_protocol_registered():
 
     assert "nfs4" in registry
     assert "vfsi" in registry
+
+
+def test_protocol_discovered_without_explicit_import():
+    """The installed entry point must be enough for normal fsspec discovery."""
+    code = (
+        "import fsspec; "
+        "cls = fsspec.get_filesystem_class('nfs4'); "
+        "assert cls.__module__ == 'nfs4fs._fs'"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_server_can_be_taken_from_url(tmp_path):
+    fs, path = fsspec.core.url_to_fs(
+        "nfs4://nfs.example/data/file.bin",
+        backend="dummy",
+        dummy_root=str(tmp_path / "url-root"),
+    )
+    assert fs.host == "nfs.example"
+    assert path == "/data/file.bin"
+
+
+def test_url_rejects_embedded_credentials_and_query_strings():
+    with pytest.raises(ValueError, match="credentials"):
+        fsspec.core.url_to_fs("nfs4://user:secret@nfs.example/file")
+    with pytest.raises(ValueError, match="query strings"):
+        fsspec.core.url_to_fs("nfs4://nfs.example/file?token=secret")
 
 
 def test_vfsi_protocol_alias_uses_neutral_urls(tmp_path):
@@ -57,8 +87,9 @@ def test_write_open_truncates_eagerly(dummy_fs):
 
 
 def test_error_mapping(dummy_fs):
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(FileNotFoundError) as exc_info:
         dummy_fs.info("nfs4:///no/such/path")
+    assert exc_info.value.filename == "/no/such/path"
     with pytest.raises(FileNotFoundError):
         dummy_fs.cat_file("nfs4:///no/such/path")
     with pytest.raises(FileNotFoundError):
@@ -67,6 +98,44 @@ def test_error_mapping(dummy_fs):
         dummy_fs.open("nfs4:///no/such/path", "rb").read()
     with pytest.raises(IsADirectoryError):
         dummy_fs.cat_file("nfs4:///")
+
+
+def test_connectivity_errors_are_not_reported_as_missing(dummy_fs):
+    class BrokenClient:
+        def exists_many(self, paths):
+            raise ConnectionError("connection lost")
+
+        def stat_many(self, paths):
+            raise ConnectionError("connection lost")
+
+    client = dummy_fs._client
+    dummy_fs._client = BrokenClient()
+    try:
+        with pytest.raises(ConnectionError, match="connection lost"):
+            dummy_fs.exists("nfs4:///file")
+        with pytest.raises(ConnectionError, match="connection lost"):
+            dummy_fs.isfile("nfs4:///file")
+        with pytest.raises(ConnectionError, match="connection lost"):
+            dummy_fs.isdir("nfs4:///file")
+    finally:
+        dummy_fs._client = client
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"backend": "invalid"}, "backend must be"),
+        ({"backend": "nfs", "host": ""}, "host must not be empty"),
+        ({"compound_size_limit": 0}, "positive integer"),
+        ({"minor_version": 0}, "minor_version"),
+        ({"root": "safe/../escape"}, "must not contain"),
+    ],
+)
+def test_constructor_rejects_invalid_configuration(tmp_path, kwargs, message):
+    options = {"backend": "dummy", "dummy_root": str(tmp_path / "invalid")}
+    options.update(kwargs)
+    with pytest.raises(ValueError, match=message):
+        fsspec.filesystem("nfs4", skip_instance_cache=True, **options)
 
 
 def test_compound_stats_available(dummy_fs):

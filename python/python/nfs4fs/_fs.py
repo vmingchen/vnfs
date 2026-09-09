@@ -7,6 +7,7 @@ import io
 import os
 import posixpath
 from glob import has_magic
+from urllib.parse import unquote, urlsplit
 
 from fsspec.spec import AbstractFileSystem
 from fsspec.callbacks import DEFAULT_CALLBACK
@@ -28,15 +29,14 @@ def _oserror(errno_code, path):
     """Rebuild a Python exception from a native errno (for batched results)."""
     if errno_code == _native.ERR_UNSUPPORTED:
         return NotImplementedError(f"operation is unsupported: {path!r}")
-    table = {
-        2: (FileNotFoundError, "No such file or directory"),
-        13: (PermissionError, "Permission denied"),
-        17: (FileExistsError, "File exists"),
-        20: (NotADirectoryError, "Not a directory"),
-        21: (IsADirectoryError, "Is a directory"),
-    }
-    cls, msg = table.get(errno_code, (OSError, f"errno {errno_code}"))
-    return cls(errno_code, f"{msg}: {path!r}")
+    # Constructing OSError with an errno lets Python select the appropriate
+    # subclass (FileNotFoundError, PermissionError, ...), and passing the path
+    # separately preserves the useful ``exception.filename`` attribute.
+    try:
+        message = os.strerror(errno_code)
+    except (OverflowError, ValueError):
+        message = f"errno {errno_code}"
+    return OSError(errno_code, message, path)
 
 
 def _info_dict(full_name, attrs):
@@ -374,6 +374,18 @@ class Nfs4FileSystem(AbstractFileSystem):
         domain="",
         **kwargs,
     ):
+        if backend not in {"nfs", "smb", "dummy"}:
+            raise ValueError("backend must be 'nfs', 'smb', or 'dummy'")
+        if backend != "dummy" and not host:
+            raise ValueError("host must not be empty for network backends")
+        if compound_size_limit is not None and compound_size_limit <= 0:
+            raise ValueError("compound_size_limit must be a positive integer")
+        if minor_version not in (None, 1, 2):
+            raise ValueError("minor_version must be 1, 2, or None")
+        root = "" if root is None else str(root)
+        root_parts = [part for part in root.split("/") if part]
+        if any(part in {".", ".."} for part in root_parts):
+            raise ValueError("root must not contain '.' or '..' components")
         super().__init__(**kwargs)
         self.host = host
         self.backend = backend
@@ -408,12 +420,44 @@ class Nfs4FileSystem(AbstractFileSystem):
     # -- path handling -----------------------------------------------------
 
     @classmethod
+    def _get_kwargs_from_urls(cls, urlpath):
+        """Extract a server from ``nfs4://server/path`` style URLs.
+
+        Credentials remain explicit constructor options so they do not leak
+        through logs, tracebacks, or copied URLs. A port is retained for SMB,
+        whose native backend accepts ``host:port``.
+        """
+        if not isinstance(urlpath, str):
+            return {}
+        parsed = urlsplit(urlpath)
+        protos = (cls.protocol,) if isinstance(cls.protocol, str) else cls.protocol
+        if parsed.scheme not in protos or not parsed.netloc:
+            return {}
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("credentials in VFSI URLs are not supported")
+        if parsed.query or parsed.fragment:
+            raise ValueError("query strings and fragments are not supported")
+        host = parsed.hostname
+        if host is None:
+            return {}
+        if ":" in host:
+            host = f"[{host}]"
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+        return {"host": host}
+
+    @classmethod
     def _strip_protocol(cls, path):
         if isinstance(path, list):
             return [cls._strip_protocol(p) for p in path]
         if not isinstance(path, str):
             path = str(path)
         protos = (cls.protocol,) if isinstance(cls.protocol, str) else cls.protocol
+        parsed = urlsplit(path)
+        if parsed.scheme in protos:
+            if parsed.query or parsed.fragment:
+                raise ValueError("query strings and fragments are not supported")
+            path = unquote(parsed.path)
         for protocol in protos:
             if path.startswith(protocol + "://"):
                 path = path[len(protocol) + 3 :]
@@ -531,19 +575,19 @@ class Nfs4FileSystem(AbstractFileSystem):
         try:
             internal = self._strip_protocol(path)
             return self._client.exists_many([self._native_path(internal)])[0]
-        except Exception:
+        except (FileNotFoundError, NotADirectoryError):
             return False
 
     def isfile(self, path):
         try:
             return self.info(path)["type"] == "file"
-        except Exception:
+        except (FileNotFoundError, NotADirectoryError):
             return False
 
     def isdir(self, path):
         try:
             return self.info(path)["type"] == "directory"
-        except OSError:
+        except (FileNotFoundError, NotADirectoryError):
             return False
 
     def size(self, path):

@@ -3,6 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
 
+// Keep Python wheels and source builds reproducible. Updating ntirpc is an
+// explicit dependency change that must go through CI, rather than whatever
+// happened to be at the tip of its default branch during a user's install.
+const LIBNTIRPC_REVISION: &str = "24a7d5fca4c2e3e3cc8bb94bc301d8c2a40677a8"; // v15.2
+
 static OUT_DIR: LazyLock<PathBuf> = LazyLock::new(|| PathBuf::from(env::var("OUT_DIR").unwrap()));
 static LIBNTIRPC_DIR: LazyLock<PathBuf> = LazyLock::new(|| OUT_DIR.join("ntirpc"));
 static LIBNTIRPC_BUILD_DIR: LazyLock<PathBuf> = LazyLock::new(|| LIBNTIRPC_DIR.join("build"));
@@ -11,14 +16,30 @@ static LIBNTIRPC_INSTALL_DIR: LazyLock<PathBuf> = LazyLock::new(|| LIBNTIRPC_DIR
 fn run<P: AsRef<Path>>(mut cmd: Command, path: P) {
     let dir = OUT_DIR.join(path.as_ref());
     println!("Running {:?} in {:?}", cmd, dir);
-    cmd.current_dir(dir).status().unwrap();
+    let status = cmd
+        .current_dir(dir)
+        .status()
+        .expect("failed to start native dependency build command");
+    assert!(status.success(), "native dependency build command failed");
 }
 
 fn download_and_extract() {
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg("git clone --recursive https://github.com/nfs-ganesha/ntirpc.git");
-    run(cmd, "");
+    let mut clone = Command::new("git");
+    clone.args([
+        "clone",
+        "--no-checkout",
+        "https://github.com/nfs-ganesha/ntirpc.git",
+        "ntirpc",
+    ]);
+    run(clone, "");
+
+    let mut checkout = Command::new("git");
+    checkout.args(["checkout", "--detach", LIBNTIRPC_REVISION]);
+    run(checkout, "ntirpc");
+
+    let mut submodules = Command::new("git");
+    submodules.args(["submodule", "update", "--init", "--recursive"]);
+    run(submodules, "ntirpc");
 }
 
 /// Prepare the upstream source for embedding. Force a static build so the

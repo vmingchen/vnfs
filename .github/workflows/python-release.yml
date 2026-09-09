@@ -1,0 +1,93 @@
+name: nfs4fs release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "nfs4fs-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  wheels:
+    name: wheel (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Set up QEMU
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - name: Build a portable ABI3 wheel
+        uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
+        with:
+          command: build
+          maturin-version: v1.14.1
+          working-directory: python
+          target: ${{ matrix.target }}
+          manylinux: "2_28"
+          before-script-linux: |
+            dnf install -y epel-release
+            /usr/bin/crb enable
+            dnf install -y clang clang-devel cmake make git krb5-devel pkgconf-pkg-config userspace-rcu-devel
+          args: --release --locked --compatibility pypi --out dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: python/dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.14"
+      - run: python -m pip install maturin==1.14.1
+      - run: python -m maturin sdist --manifest-path python/Cargo.toml --out python/dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sdist
+          path: python/dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/nfs4fs-v')
+    needs: [wheels, sdist]
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/nfs4fs/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: "*"
+          path: dist
+          merge-multiple: true
+      - name: Check tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+
+          tag_version = os.environ["RELEASE_TAG"].removeprefix("nfs4fs-v")
+          names = [path.name for path in pathlib.Path("dist").iterdir()]
+          versions = {
+              name.removeprefix("nfs4fs-").removesuffix(".tar.gz").split("-", 1)[0]
+              for name in names
+              if name.startswith("nfs4fs-")
+          }
+          if versions != {tag_version}:
+              raise SystemExit(f"tag version {tag_version!r} != artifacts {versions!r}")
+          PY
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1

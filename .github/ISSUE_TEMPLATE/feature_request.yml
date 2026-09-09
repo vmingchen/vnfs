@@ -1,0 +1,35 @@
+name: Feature request
+description: Propose a focused VFSI capability or integration
+title: "feature: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and use case
+      description: Describe the workload and why existing vector operations are insufficient.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed interface or behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: compatibility
+    attributes:
+      label: Protocol impact
+      options:
+        - Protocol-neutral
+        - NFS only
+        - SMB only
+        - Python / fsspec only
+        - C ABI only
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Performance or compatibility evidence
+      description: If relevant, estimate file count, object sizes, latency, and expected round-trip reduction.
