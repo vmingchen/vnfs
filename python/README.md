@@ -1,8 +1,9 @@
 # nfs4fs
 
-`nfs4fs` is a Linux `fsspec` implementation backed by VFSI's vectorized NFSv4
-and SMB2/3 clients. Bulk `fsspec` operations are translated into protocol-native
-compounds, reducing round trips for workloads with many small files.
+`nfs4fs` is a Linux `fsspec` implementation backed by
+[VFSI](https://github.com/vmingchen/vnfs)'s vectorized NFSv4 and SMB2/3 clients.
+Bulk `fsspec` operations are translated into protocol-native compounds, reducing
+round trips for workloads with many small files.
 
 ## Install
 
