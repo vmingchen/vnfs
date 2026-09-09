@@ -3,6 +3,7 @@
 
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use libntirpc_sys::*;
 
@@ -56,6 +57,7 @@ pub fn svc_init_once() -> RpcResult<()> {
 pub struct RpcClient {
     clnt: *mut CLIENT,
     auth: *mut AUTH,
+    request_timeout: timespec,
 }
 
 unsafe impl Send for RpcClient {}
@@ -63,14 +65,28 @@ unsafe impl Send for RpcClient {}
 impl RpcClient {
     /// Connect to `host` for the NFSv4 program using AUTH_SYS (uid 0).
     pub fn connect(host: &str) -> RpcResult<RpcClient> {
+        Self::connect_with_timeouts(host, Duration::from_secs(10), Duration::from_secs(5))
+    }
+
+    /// Connect with explicit bounds for connection setup and each RPC call.
+    pub fn connect_with_timeouts(
+        host: &str,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> RpcResult<RpcClient> {
         svc_init_once()?;
 
         let host = std::ffi::CString::new(host).map_err(|e| RpcError::transport(e.to_string()))?;
         let nettype = std::ffi::CString::new("tcp").unwrap();
-        let timeout = timeval {
-            tv_sec: 10,
-            tv_usec: 0,
+        let mut timeout = timeval {
+            tv_sec: connect_timeout.as_secs().min(i64::MAX as u64) as _,
+            tv_usec: connect_timeout.subsec_micros() as _,
         };
+        // `timeval` has microsecond precision. Preserve a positive caller
+        // timeout instead of rounding sub-microsecond durations to "no wait".
+        if !connect_timeout.is_zero() && timeout.tv_sec == 0 && timeout.tv_usec == 0 {
+            timeout.tv_usec = 1;
+        }
 
         let clnt = unsafe {
             clnt_ncreate_timed(
@@ -109,7 +125,14 @@ impl RpcClient {
                 "authunix_ncreate_default returned NULL",
             ));
         }
-        Ok(RpcClient { clnt, auth })
+        Ok(RpcClient {
+            clnt,
+            auth,
+            request_timeout: timespec {
+                tv_sec: request_timeout.as_secs().min(i64::MAX as u64) as _,
+                tv_nsec: request_timeout.subsec_nanos() as _,
+            },
+        })
     }
 
     /// Synchronous RPC call: encode `args` with `xargs`, decode the reply with
@@ -155,10 +178,7 @@ impl RpcClient {
                 &mut (*reqp).cc_we.mtx as *mut _ as *mut libc::pthread_mutex_t,
             );
 
-            let timeout = timespec {
-                tv_sec: 5,
-                tv_nsec: 0,
-            };
+            let timeout = self.request_timeout;
             let stat = clnt_req_setup(reqp, timeout);
             if stat != clnt_stat_RPC_SUCCESS {
                 clnt_req_release(reqp);

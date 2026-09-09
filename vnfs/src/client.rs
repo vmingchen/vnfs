@@ -5,6 +5,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::os::raw::c_char;
+use std::time::Duration;
 
 use nfsv41_sys::*;
 
@@ -271,8 +272,9 @@ fn checked_offset(base: u64, delta: usize, op_index: usize) -> RpcResult<u64> {
 /// FATTR4_TIME_CREATE is intentionally absent (ganesha omits it, and it maps
 /// to creation time, not stat's ctime). FATTR4_NAMED_ATTR is the per-object
 /// "has a non-empty named attribute directory" boolean (RFC 5661 s5.8.1.8).
-pub const READDIR_ATTRS: [u32; 13] = [
+pub const READDIR_ATTRS: [u32; 14] = [
     FATTR4_TYPE,
+    FATTR4_CHANGE,
     FATTR4_SIZE,
     FATTR4_NAMED_ATTR,
     FATTR4_FILEID,
@@ -623,7 +625,40 @@ impl NfsClient {
     }
 
     pub fn connect_minor(host: &str, minorversion: u32) -> RpcResult<NfsClient> {
-        let mut session = Session::connect_minor(host, minorversion)?;
+        Self::connect_minor_with_timeouts(
+            host,
+            minorversion,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        )
+    }
+
+    pub fn connect_with_timeouts(
+        host: &str,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> RpcResult<NfsClient> {
+        match Self::connect_minor_with_timeouts(host, 2, connect_timeout, request_timeout) {
+            Ok(client) => Ok(client),
+            Err(error) if error.status == nfsstat4_NFS4ERR_MINOR_VERS_MISMATCH => {
+                Self::connect_minor_with_timeouts(host, 1, connect_timeout, request_timeout)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn connect_minor_with_timeouts(
+        host: &str,
+        minorversion: u32,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> RpcResult<NfsClient> {
+        let mut session = Session::connect_minor_with_timeouts(
+            host,
+            minorversion,
+            connect_timeout,
+            request_timeout,
+        )?;
         let root = session_mount_root(&mut session)?;
         let configured_max_request_bytes = Some(DEFAULT_MAX_COMPOUND_BYTES);
         let max_compound_bytes =

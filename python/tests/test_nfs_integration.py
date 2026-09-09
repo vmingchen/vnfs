@@ -4,7 +4,6 @@ round-trip (compound-count) assertions."""
 import os
 
 import fsspec
-import pytest
 
 from .common import run_correctness_suite
 
@@ -55,10 +54,11 @@ def test_round_trip_bounds(nfs_fs):
     )
     assert pipe_count == 1, pipe_count
 
-    # cat: one merged no-stat read_allv compound.
+    # cat: one metadata compound to enforce the aggregate byte cap, followed
+    # by one merged read_allv compound.
     out, cat_count = _measured(fs, lambda: fs.cat(paths))
     assert len(out) == n
-    assert cat_count == 1, cat_count
+    assert cat_count == 2, cat_count
 
     # cat_ranges: one merged read compound (no stat).
     _, ranges_count = _measured(fs, lambda: fs.cat_ranges(paths, [0] * n, [6] * n))

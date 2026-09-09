@@ -11,18 +11,36 @@ permissions:
 
 jobs:
   wheels:
-    name: wheel (${{ matrix.target }})
+    name: wheel (${{ matrix.target }}, ${{ matrix.wheel-kind }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        include:
+          - target: x86_64-unknown-linux-gnu
+            wheel-kind: abi3
+            extra-args: "-i python3.9"
+            platform: linux/amd64
+            image-arch: x86_64
+            test-python: cp39-cp39
+          - target: aarch64-unknown-linux-gnu
+            wheel-kind: abi3
+            extra-args: "-i python3.9"
+            platform: linux/arm64
+            image-arch: aarch64
+            test-python: cp39-cp39
+          - target: x86_64-unknown-linux-gnu
+            wheel-kind: cp314t
+            extra-args: "-i python3.14t"
+            platform: linux/amd64
+            image-arch: x86_64
+            test-python: cp314-cp314t
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - name: Set up QEMU
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-      - name: Build a portable ABI3 wheel
+      - name: Build the portable wheel
         uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
         with:
           command: build
@@ -34,10 +52,40 @@ jobs:
             dnf install -y epel-release
             /usr/bin/crb enable
             dnf install -y clang clang-devel cmake make git krb5-devel pkgconf-pkg-config userspace-rcu-devel
-          args: --release --locked --compatibility pypi --out dist
+          args: --release --locked --compatibility pypi --out dist ${{ matrix.extra-args }}
+      - name: Test the repaired wheel in its manylinux container
+        env:
+          MANYLINUX_PLATFORM: ${{ matrix.platform }}
+          MANYLINUX_ARCH: ${{ matrix.image-arch }}
+          TEST_PYTHON: ${{ matrix.test-python }}
+        run: |
+          docker run --rm --platform "$MANYLINUX_PLATFORM" \
+            -e TEST_PYTHON \
+            -v "$PWD:/io" \
+            "quay.io/pypa/manylinux_2_28_${MANYLINUX_ARCH}" \
+            /bin/bash -c '
+              set -e
+              py="/opt/python/${TEST_PYTHON}/bin/python"
+              "$py" -m pip install /io/python/dist/*.whl
+              cd /tmp
+              "$py" - <<"PY"
+          import tempfile
+          import fsspec
+          import nfs4fs
+
+          with tempfile.TemporaryDirectory() as root:
+              with fsspec.filesystem(
+                  "nfs4", backend="dummy", dummy_root=root,
+                  skip_instance_cache=True,
+              ) as fs:
+                  fs.pipe_file("/smoke", b"wheel-ok")
+                  assert fs.cat_file("/smoke") == b"wheel-ok"
+          print(nfs4fs.__version__)
+          PY
+            '
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: wheel-${{ matrix.target }}
+          name: wheel-${{ matrix.target }}-${{ matrix.wheel-kind }}
           path: python/dist/*.whl
           if-no-files-found: error
 

@@ -4,13 +4,17 @@ import datetime
 import errno
 import hashlib
 import io
+import math
 import os
 import posixpath
+import tempfile
+import uuid
 from glob import has_magic
 from urllib.parse import unquote, urlsplit
 
-from fsspec.spec import AbstractFileSystem
 from fsspec.callbacks import DEFAULT_CALLBACK
+from fsspec.spec import AbstractFileSystem
+from fsspec.transaction import Transaction
 
 from . import _native
 
@@ -50,8 +54,13 @@ def _info_dict(full_name, attrs):
         "gid": attrs.get("gid"),
         "nlink": attrs.get("nlink"),
         "fileid": attrs.get("fileid"),
+        "change": attrs.get("change"),
         "created": attrs.get("created"),
+        "created_ns": attrs.get("created_ns"),
         "modified": attrs.get("modified"),
+        "modified_ns": attrs.get("modified_ns"),
+        "accessed": attrs.get("accessed"),
+        "accessed_ns": attrs.get("accessed_ns"),
         "checksum": attrs.get("checksum"),
         "islink": attrs.get("islink", False),
     }
@@ -63,6 +72,123 @@ def _depth(path):
     if path == "/":
         return 0
     return path.count("/")
+
+
+def _normalize_range(start, end, size=None):
+    """Normalize fsspec byte-range bounds and reject negative lengths."""
+    start = 0 if start is None else start
+    if start < 0:
+        if size is None:
+            raise ValueError("size is required for a negative start")
+        start = max(0, size + start)
+    if end is not None and end < 0:
+        if size is None:
+            raise ValueError("size is required for a negative end")
+        end = size + end
+    if end is not None and end < start:
+        raise ValueError("read length must be non-negative or -1")
+    return start, end
+
+
+def _bounded_batches(sizes, max_items, max_bytes):
+    """Yield index lists bounded by both item count and aggregate bytes."""
+    batch = []
+    batch_bytes = 0
+    for index, size in enumerate(sizes):
+        size = max(0, int(size or 0))
+        if batch and (len(batch) >= max_items or batch_bytes + size > max_bytes):
+            yield batch
+            batch = []
+            batch_bytes = 0
+        batch.append(index)
+        batch_bytes += size
+    if batch:
+        yield batch
+
+
+class _ResilientClient:
+    """Own a native session with fork detection and safe read reconnects."""
+
+    _IDEMPOTENT = {
+        "minor_version",
+        "smb_dialect",
+        "capabilities",
+        "server_copy_enabled",
+        "stat",
+        "lstat",
+        "exists",
+        "stat_many",
+        "lstat_many",
+        "exists_many",
+        "read_many",
+        "read_all_many",
+        "listdir",
+        "listdir_many",
+        "walk",
+        "readlink",
+        "getcwd",
+    }
+
+    def __init__(self, factory_args, auto_reconnect=True):
+        self._factory_args = factory_args
+        self._auto_reconnect = auto_reconnect
+        self._native = _native.NfsClient(*factory_args)
+        self._pid = os.getpid()
+        self._generation = 0
+
+    @property
+    def generation(self):
+        return self._generation
+
+    @property
+    def closed(self):
+        return self._native is None
+
+    def ensure_ready(self):
+        if self.closed:
+            raise ValueError("filesystem is closed")
+        if self._pid != os.getpid():
+            self.reconnect(after_fork=True)
+
+    def reconnect(self, after_fork=False):
+        old = self._native
+        self._native = _native.NfsClient(*self._factory_args)
+        self._pid = os.getpid()
+        self._generation += 1
+        if old is not None:
+            if after_fork:
+                # Sending CLOSE/DESTROY_SESSION over the inherited connection
+                # would corrupt the parent's live protocol state.
+                old._abandon_after_fork()
+            else:
+                old.shutdown()
+        del old
+
+    def shutdown(self):
+        old = self._native
+        self._native = None
+        self._generation += 1
+        if old is not None:
+            old.shutdown()
+        del old
+
+    def __getattr__(self, name):
+        self.ensure_ready()
+        target = getattr(self._native, name)
+        if not callable(target):
+            return target
+
+        def call(*args, **kwargs):
+            self.ensure_ready()
+            try:
+                return getattr(self._native, name)(*args, **kwargs)
+            except ConnectionError:
+                if not self._auto_reconnect or name not in self._IDEMPOTENT:
+                    raise
+                self.reconnect()
+                return getattr(self._native, name)(*args, **kwargs)
+
+        return call
 
 
 class Nfs4File(io.RawIOBase):
@@ -80,6 +206,8 @@ class Nfs4File(io.RawIOBase):
         # initialization (e.g. an unsupported mode) raises.
         self._closed = False
         self._fd = fd  # None until the first I/O (read modes) or __init__ (w/a)
+        self._fd_generation = fs._client.generation if fd is not None else None
+        self._broken = False
         self.fs = fs
         self.path = fs._strip_protocol(path)
         self.mode = mode
@@ -106,11 +234,36 @@ class Nfs4File(io.RawIOBase):
         }[self._base_mode]
 
     def _ensure_open(self):
+        if self._broken:
+            raise ConnectionError("write handle is unusable after a transport failure")
+        self.fs._client.ensure_ready()
+        if self._fd is not None and self._fd_generation != self.fs._client.generation:
+            self._fd = None
+            self._fd_generation = None
         if self._fd is None:
             self._fd = self.fs._client.open(
                 self.fs._native_path(self.path), self._native_mode()
             )
+            self._fd_generation = self.fs._client.generation
+            if self._base_mode.startswith("a"):
+                attrs = self.fs._client.fstat(self._fd)
+                self._pos = attrs["size"]
+                self._cached_size = attrs["size"]
         return self._fd
+
+    def _pread(self, length):
+        """Retry an absolute-offset read once on a fresh session."""
+        fd = self._ensure_open()
+        try:
+            return self.fs._client.pread(fd, length, self._pos)
+        except ConnectionError:
+            if not self.fs.auto_reconnect:
+                raise
+            self.fs._client.reconnect()
+            self._fd = None
+            self._fd_generation = None
+            fd = self._ensure_open()
+            return self.fs._client.pread(fd, length, self._pos)
 
     def _size(self):
         if self._cached_size is None:
@@ -141,8 +294,7 @@ class Nfs4File(io.RawIOBase):
             raise io.UnsupportedOperation("not readable")
         if len(b) == 0:
             return 0
-        fd = self._ensure_open()
-        data = self.fs._client.pread(fd, min(len(b), self._MAX_READ), self._pos)
+        data = self._pread(min(len(b), self._MAX_READ))
         n = len(data)
         if n:
             b[:n] = data
@@ -171,11 +323,10 @@ class Nfs4File(io.RawIOBase):
             size = max(0, self._size() - self._pos)
             if size == 0:
                 return b""
-        fd = self._ensure_open()
         chunks = []
         remaining = size
         while remaining > 0:
-            chunk = self.fs._client.pread(fd, min(remaining, self._MAX_READ), self._pos)
+            chunk = self._pread(min(remaining, self._MAX_READ))
             if not chunk:
                 break
             chunks.append(chunk)
@@ -191,14 +342,27 @@ class Nfs4File(io.RawIOBase):
         if isinstance(data, str):
             raise TypeError("a bytes-like object is required, not 'str'")
         fd = self._ensure_open()
-        if self._base_mode.startswith("a"):
-            # O_APPEND: the backend appends regardless of the requested offset.
-            n = self.fs._client.write(fd, data)
-        else:
-            n = self.fs._client.pwrite(fd, data, self._pos)
+        try:
+            if self._base_mode.startswith("a"):
+                # O_APPEND: the backend appends regardless of the requested offset.
+                n, new_pos = self.fs._client.write_positioned(fd, data)
+            else:
+                n = self.fs._client.pwrite(fd, data, self._pos)
+                new_pos = self._pos + n
+        except ConnectionError:
+            # A mutation may already have reached the server. Reconnect for
+            # future path operations, but never replay the write implicitly.
+            self._broken = True
+            try:
+                if self.fs.auto_reconnect:
+                    self.fs._client.reconnect()
+            finally:
+                self._fd = None
+                self._fd_generation = None
+            raise
         if self._cached_size is not None:
-            self._cached_size = max(self._cached_size, self._pos + n)
-        self._pos += n
+            self._cached_size = max(self._cached_size, new_pos)
+        self._pos = new_pos
         return n
 
     def seek(self, offset, whence=0):
@@ -240,10 +404,15 @@ class Nfs4File(io.RawIOBase):
             return
         fd = self._fd
         try:
-            if fd is not None:
+            if (
+                fd is not None
+                and self._fd_generation == self.fs._client.generation
+                and not self.fs._client.closed
+            ):
                 self.fs._client.close(fd)
         finally:
             self._fd = None
+            self._fd_generation = None
             self._closed = True
             super().close()
 
@@ -253,22 +422,26 @@ class Nfs4File(io.RawIOBase):
 
 
 class _DeferredWriteFile:
-    """Write-only buffer that lands on the filesystem only at ``commit()``.
-
-    fsspec transaction semantics (see ``Transaction`` and
-    ``test_local.py::test_commit_discard``): a file opened inside a
-    transaction must not exist until the transaction completes; on a normal
-    exit it is committed, on an exception it is discarded.
-    """
+    """Disk-spooled transactional write staged beside its destination."""
 
     def __init__(self, fs, path, mode="wb"):
         self.fs = fs
         self.path = path  # internal path
         self.mode = mode
-        self._buffer = bytearray()
-        self._pos = 0
+        self._spool = tempfile.SpooledTemporaryFile(
+            max_size=fs.transaction_spool_threshold, mode="w+b"
+        )
         self._closed = False
         self._committed = False
+        self._prepared = False
+        parent = posixpath.dirname(path) or "/"
+        name = posixpath.basename(path) or "root"
+        self.temp_path = posixpath.join(
+            parent, f".nfs4fs-txn-{uuid.uuid4().hex}-{name}"
+        )
+        if "a" in mode and fs.exists(path):
+            fs._copy_remote_to_fileobj(path, self._spool)
+            self._spool.seek(0, io.SEEK_END)
 
     def writable(self):
         return True
@@ -284,33 +457,21 @@ class _DeferredWriteFile:
             raise ValueError("I/O operation on closed file")
         if isinstance(data, str):
             raise TypeError("a bytes-like object is required, not 'str'")
-        n = len(data)
-        end = self._pos + n
-        if end > len(self._buffer):
-            self._buffer.extend(b"\0" * (end - len(self._buffer)))
-        self._buffer[self._pos : end] = data
-        self._pos = end
-        return n
+        return self._spool.write(data)
 
     def seek(self, offset, whence=0):
-        if whence == 0:
-            new = offset
-        elif whence == 1:
-            new = self._pos + offset
-        elif whence == 2:
-            new = len(self._buffer) + offset
-        else:
-            raise ValueError(f"invalid whence: {whence}")
-        if new < 0:
-            raise ValueError("negative seek position")
-        self._pos = new
-        return new
+        return self._spool.seek(offset, whence)
 
     def tell(self):
-        return self._pos
+        return self._spool.tell()
+
+    def truncate(self, size=None):
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
+        return self._spool.truncate(size)
 
     def flush(self):
-        return None
+        self._spool.flush()
 
     def __enter__(self):
         return self
@@ -319,24 +480,98 @@ class _DeferredWriteFile:
         self.close()
 
     def close(self):
-        # The buffer is retained: the target is written at commit().
+        # The spool is retained until the transaction prepares or discards it.
         self._closed = True
+
+    def prepare(self):
+        """Upload to a same-directory temporary file without exposing target."""
+        if self._prepared:
+            return
+        if "x" in self.mode and self.fs.exists(self.path):
+            raise FileExistsError(errno.EEXIST, "File exists", self.path)
+        try:
+            self.fs._write_spooled(self.temp_path, self._spool)
+        except Exception:
+            try:
+                self.fs.rm(self.temp_path)
+            except OSError:
+                pass
+            raise
+        self._prepared = True
+
+    def finalize(self):
+        if self._committed:
+            return
+        self.fs._client.rename_many(
+            [(self.fs._native_path(self.temp_path), self.fs._native_path(self.path))]
+        )
+        self._prepared = False
+        self._committed = True
+        self._spool.close()
 
     def commit(self):
         if self._committed:
             return
-        self.fs._write_batch([self.path], [bytes(self._buffer)])
-        self._committed = True
-        self._closed = True
+        self.prepare()
+        self.finalize()
 
     def discard(self):
-        self._buffer.clear()
+        if self._prepared:
+            try:
+                self.fs.rm(self.temp_path)
+            except FileNotFoundError:
+                pass
+            self._prepared = False
+        self._spool.close()
         self._committed = True
         self._closed = True
 
     @property
     def closed(self):
         return self._closed
+
+
+class _VfsiTransaction(Transaction):
+    """Prepare all writes, then expose them with one batched rename."""
+
+    def complete(self, commit=True):
+        files = list(self.files)
+        self.files.clear()
+        try:
+            if not commit:
+                for file in files:
+                    file.discard()
+                return
+            prepared = []
+            try:
+                for file in files:
+                    file.prepare()
+                    prepared.append(file)
+                if prepared:
+                    self.fs._client.rename_many(
+                        [
+                            (
+                                self.fs._native_path(file.temp_path),
+                                self.fs._native_path(file.path),
+                            )
+                            for file in prepared
+                        ]
+                    )
+                for file in prepared:
+                    file._prepared = False
+                    file._committed = True
+                    file._spool.close()
+            except Exception:
+                for file in prepared:
+                    file.discard()
+                for file in files[len(prepared) :]:
+                    file.discard()
+                raise
+        finally:
+            if self.fs is not None:
+                self.fs._intrans = False
+                self.fs._transaction = None
+            self.fs = None
 
 
 class Nfs4FileSystem(AbstractFileSystem):
@@ -358,6 +593,7 @@ class Nfs4FileSystem(AbstractFileSystem):
 
     protocol = "nfs4"
     root_marker = "/"
+    transaction_type = _VfsiTransaction
 
     def __init__(
         self,
@@ -372,6 +608,13 @@ class Nfs4FileSystem(AbstractFileSystem):
         username="",
         password="",
         domain="",
+        batch_size=128,
+        max_batch_bytes=64 * 1024 * 1024,
+        transfer_chunk_size=8 * 1024 * 1024,
+        transaction_spool_threshold=8 * 1024 * 1024,
+        connect_timeout=10.0,
+        request_timeout=5.0,
+        auto_reconnect=True,
         **kwargs,
     ):
         if backend not in {"nfs", "smb", "dummy"}:
@@ -382,6 +625,25 @@ class Nfs4FileSystem(AbstractFileSystem):
             raise ValueError("compound_size_limit must be a positive integer")
         if minor_version not in (None, 1, 2):
             raise ValueError("minor_version must be 1, 2, or None")
+        for name, value in (
+            ("batch_size", batch_size),
+            ("max_batch_bytes", max_batch_bytes),
+            ("transfer_chunk_size", transfer_chunk_size),
+            ("transaction_spool_threshold", transaction_spool_threshold),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        for name, value in (
+            ("connect_timeout", connect_timeout),
+            ("request_timeout", request_timeout),
+        ):
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive number")
         root = "" if root is None else str(root)
         root_parts = [part for part in root.split("/") if part]
         if any(part in {".", ".."} for part in root_parts):
@@ -400,18 +662,51 @@ class Nfs4FileSystem(AbstractFileSystem):
         self.share = share
         self.username = username
         self.domain = domain
+        self.batch_size = batch_size
+        self.max_batch_bytes = max_batch_bytes
+        self.transfer_chunk_size = transfer_chunk_size
+        self.transaction_spool_threshold = transaction_spool_threshold
+        self.connect_timeout = float(connect_timeout)
+        self.request_timeout = float(request_timeout)
+        self.auto_reconnect = bool(auto_reconnect)
         self._root = root.strip("/")
-        self._client = _native.NfsClient(
-            host,
-            backend,
-            dummy_root,
-            compound_size_limit,
-            minor_version,
-            share,
-            username,
-            password,
-            domain,
+        self._client = _ResilientClient(
+            (
+                host,
+                backend,
+                dummy_root,
+                compound_size_limit,
+                minor_version,
+                share,
+                username,
+                password,
+                domain,
+                self.connect_timeout,
+                self.request_timeout,
+            ),
+            auto_reconnect=self.auto_reconnect,
         )
+
+    @property
+    def closed(self):
+        """Whether this filesystem's native session has been released."""
+        return self._client.closed
+
+    def close(self):
+        """Release the native connection and evict this cached instance."""
+        if not self._client.closed:
+            self._client.shutdown()
+        token = getattr(self, "_fs_token_", None)
+        if token is not None:
+            type(self)._cache.pop(token, None)
+
+    def __enter__(self):
+        if self.closed:
+            raise ValueError("filesystem is closed")
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
     def smb_dialect(self):
         """Return the negotiated SMB dialect revision, or ``None``."""
@@ -628,32 +923,64 @@ class Nfs4FileSystem(AbstractFileSystem):
         # the key changes when the file is renamed as well as when its
         # contents change.
         return hashlib.sha256(
-            f"{info.get('name')}:{info.get('fileid')}:{info.get('modified')}:{info.get('size')}".encode()
+            f"{info.get('name')}:{self._version_token(info)}".encode()
         ).hexdigest()
 
+    @staticmethod
+    def _version_token(info):
+        """Best available identity for one version of a filesystem object."""
+        change = info.get("change")
+        if change is not None:
+            return f"change:{change}:fileid:{info.get('fileid')}"
+        return (
+            f"fileid:{info.get('fileid')}:mtime_ns:{info.get('modified_ns')}:"
+            f"ctime_ns:{info.get('created_ns')}:size:{info.get('size')}"
+        )
+
     def checksum(self, path):
-        # A stable, content-sensitive value: unlike the raw fileid, it
-        # changes when the file's contents change (mtime/size).
+        # A stable file-version value. NFS FATTR4_CHANGE is preferred; the
+        # nanosecond metadata fallback covers local/SMB backends.
         info = self.info(path)
-        digest = hashlib.sha256(
-            f"{info.get('fileid')}:{info.get('modified')}:{info.get('size')}".encode()
-        ).hexdigest()
+        digest = hashlib.sha256(self._version_token(info).encode()).hexdigest()
         return int(digest, 16)
 
     # -- bulk read / write -------------------------------------------------
 
     def _cat_batch(self, paths, on_error):
-        """One read_allv batch (no per-file size stats) for internal paths."""
-        native = [self._native_path(p) for p in paths]
+        """Read path groups bounded by both item count and aggregate bytes."""
+        native = [self._native_path(path) for path in paths]
+        stats, stat_errors = self._client.stat_many(native)
         data = [b""] * len(paths)
-        dat, errors = self._client.read_all_many(native)
-        for i, d in enumerate(dat):
-            if d is not None:
-                data[i] = d
+        failures = {
+            index: _oserror(code, paths[index]) for index, code in stat_errors.items()
+        }
+        valid = [index for index in range(len(paths)) if index not in failures]
+        valid_sizes = [stats[index].get("size", 0) for index in valid]
+        for positions in _bounded_batches(
+            valid_sizes, self.batch_size, self.max_batch_bytes
+        ):
+            batch = [valid[position] for position in positions]
+            if len(batch) == 1 and valid_sizes[positions[0]] > self.max_batch_bytes:
+                index = batch[0]
+                try:
+                    data[index] = self._read_one_streamed(paths[index])
+                except OSError as exc:
+                    failures[index] = exc
+                continue
+            dat, batch_errors = self._client.read_all_many(
+                [native[index] for index in batch]
+            )
+            for position, value in enumerate(dat):
+                index = batch[position]
+                if value is not None:
+                    data[index] = value
+            for position, code in batch_errors.items():
+                index = batch[position]
+                failures[index] = _oserror(code, paths[index])
         out = {}
         for i, p in enumerate(paths):
-            if i in errors:
-                exc = _oserror(errors[i], p)
+            if i in failures:
+                exc = failures[i]
                 if on_error == "raise":
                     raise exc
                 if on_error == "return":
@@ -662,6 +989,12 @@ class Nfs4FileSystem(AbstractFileSystem):
             else:
                 out[p] = data[i]
         return out
+
+    def _read_one_streamed(self, path):
+        """Read one result incrementally when it exceeds the batch byte cap."""
+        output = io.BytesIO()
+        self._copy_remote_to_fileobj(path, output)
+        return output.getvalue()
 
     def cat(self, path, recursive=False, on_error="raise", **kwargs):
         if isinstance(path, str):
@@ -680,21 +1013,18 @@ class Nfs4FileSystem(AbstractFileSystem):
 
     def cat_file(self, path, start=None, end=None, **kwargs):
         internal = self._strip_protocol(path)
+        size = None
         if (start is not None and start < 0) or (end is not None and end < 0):
-            # Slice semantics: negative bounds are offsets from the end.
             size = self.size(internal)
-            if start is not None and start < 0:
-                start = max(0, size + start)
-            if end is not None and end < 0:
-                end = size + end
-        if start in (None, 0) and end is None:
+        start, end = _normalize_range(start, end, size)
+        if start == 0 and end is None:
             # Whole file: read_allv skips the size stat entirely.
             data, errors = self._client.read_all_many([self._native_path(internal)])
             if errors:
                 raise _oserror(errors[0], internal)
             return data[0] or b""
         data, errors = self._client.read_many(
-            [self._native_path(internal)], [start if start is not None else 0], [end]
+            [self._native_path(internal)], [start], [end]
         )
         if errors:
             raise _oserror(errors[0], internal)
@@ -716,27 +1046,60 @@ class Nfs4FileSystem(AbstractFileSystem):
         internals = [self._strip_protocol(p) for p in paths]
         native = [self._native_path(p) for p in internals]
         errors = {}
+        sizes = [None] * len(paths)
         if any(
-            (s is not None and s < 0) or (e is not None and e < 0)
+            (s is not None and s < 0) or e is None or e < 0
             for s, e in zip(starts, ends)
         ):
-            # Slice semantics: resolve negative bounds with one size fetch.
+            # Slice semantics and byte-bounded batching both need file sizes.
             stats, stat_errors = self._client.stat_many(native)
             errors.update(stat_errors)
-            sizes = [s["size"] if s is not None else 0 for s in stats]
-            starts = [
-                max(0, s + sizes[i]) if (s is not None and s < 0) else s
-                for i, s in enumerate(starts)
-            ]
-            ends = [
-                sizes[i] + e if (e is not None and e < 0) else e
-                for i, e in enumerate(ends)
-            ]
-        data, read_errors = self._client.read_many(native, starts, ends)
-        errors.update(read_errors)
+            sizes = [s["size"] if s is not None else None for s in stats]
+        normalized = []
+        validation_errors = {}
+        for i, (start, end) in enumerate(zip(starts, ends)):
+            if i in errors:
+                normalized.append((0, 0))
+                continue
+            try:
+                normalized.append(_normalize_range(start, end, sizes[i]))
+            except ValueError as exc:
+                validation_errors[i] = exc
+                normalized.append((0, 0))
+        if validation_errors and on_error != "return":
+            raise validation_errors[min(validation_errors)]
+        valid = [
+            i
+            for i in range(len(paths))
+            if i not in errors and i not in validation_errors
+        ]
+        data = [None] * len(paths)
+        lengths = [
+            max(
+                0,
+                (sizes[i] if normalized[i][1] is None else normalized[i][1])
+                - normalized[i][0],
+            )
+            for i in valid
+        ]
+        for positions in _bounded_batches(
+            lengths, self.batch_size, self.max_batch_bytes
+        ):
+            batch = [valid[position] for position in positions]
+            valid_data, read_errors = self._client.read_many(
+                [native[i] for i in batch],
+                [normalized[i][0] for i in batch],
+                [normalized[i][1] for i in batch],
+            )
+            for j, i in enumerate(batch):
+                data[i] = valid_data[j]
+                if j in read_errors:
+                    errors[i] = read_errors[j]
         out = []
         for i, p in enumerate(internals):
-            if i in errors:
+            if i in validation_errors:
+                out.append(validation_errors[i])
+            elif i in errors:
                 exc = _oserror(errors[i], p)
                 if on_error == "return":
                     out.append(exc)
@@ -749,24 +1112,105 @@ class Nfs4FileSystem(AbstractFileSystem):
     def _write_batch(self, paths, values, mode="overwrite"):
         native = [self._native_path(p) for p in paths]
         if mode == "create":
-            existing = self._client.exists_many(native)
-            for i, e in enumerate(existing):
-                if e:
-                    raise FileExistsError(errno.EEXIST, f"File exists: {paths[i]!r}")
+            for path, value in zip(paths, values):
+                self._write_one_exclusive(path, value)
+            return
+        if mode != "overwrite":
+            raise ValueError("mode must be 'overwrite' or 'create'")
         datas = [v if isinstance(v, bytes) else bytes(v) for v in values]
-        truncate = mode != "create"
+        for batch in _bounded_batches(
+            [len(data) for data in datas], self.batch_size, self.max_batch_bytes
+        ):
+            if len(batch) == 1 and len(datas[batch[0]]) > self.max_batch_bytes:
+                self._write_one_streamed(paths[batch[0]], datas[batch[0]])
+                continue
+            batch_native = [native[i] for i in batch]
+            batch_datas = [datas[i] for i in batch]
+            try:
+                self._client.write_many(batch_native, batch_datas, truncate=True)
+            except FileNotFoundError:
+                if not self.auto_mkdir:
+                    raise
+                parents = {
+                    posixpath.dirname(paths[i])
+                    for i in batch
+                    if posixpath.dirname(paths[i]) != "/"
+                }
+                self._ensure_dirs(list(parents), 0o755)
+                self._client.write_many(batch_native, batch_datas, truncate=True)
+
+    def _write_one_streamed(self, path, value):
+        """Overwrite one in-memory value with bounded native write calls."""
+        internal = self._strip_protocol(path)
+        parent = posixpath.dirname(internal)
+        if self.auto_mkdir and parent not in ("", "/"):
+            self._ensure_dirs([parent], 0o755)
+        view = memoryview(value)
+        with Nfs4File(self, internal, "wb") as remote:
+            for offset in range(0, len(view), self.transfer_chunk_size):
+                remote.write(bytes(view[offset : offset + self.transfer_chunk_size]))
+
+    def _write_one_exclusive(self, path, value):
+        """Atomically create one path with O_EXCL and bounded writes."""
+        internal = self._strip_protocol(path)
+        parent = posixpath.dirname(internal)
+        if self.auto_mkdir and parent not in ("", "/"):
+            self._ensure_dirs([parent], 0o755)
+        fd = self._client.open(self._native_path(internal), "xb")
+        completed = False
+        write_error = None
         try:
-            self._client.write_many(native, datas, truncate=truncate)
-        except FileNotFoundError:
-            if not self.auto_mkdir:
-                raise
-            # Create missing parents once, then retry (only pays round trips
-            # when a parent is absent).
-            parents = {
-                posixpath.dirname(p) for p in paths if posixpath.dirname(p) != "/"
-            }
-            self._ensure_dirs(list(parents), 0o755)
-            self._client.write_many(native, datas, truncate=truncate)
+            view = memoryview(value)
+            offset = 0
+            while offset < len(view):
+                chunk = view[offset : offset + self.transfer_chunk_size]
+                written = self._client.pwrite(fd, bytes(chunk), offset)
+                if written <= 0:
+                    raise OSError(errno.EIO, "short exclusive write", internal)
+                offset += written
+            completed = True
+        except ConnectionError as exc:
+            # The server may have completed the create or the last write.
+            # A compensating remove could delete a later creator's file, so
+            # leave resolution of this ambiguous result to the caller.
+            completed = True
+            write_error = exc
+            raise
+        except BaseException as exc:
+            write_error = exc
+            raise
+        finally:
+            try:
+                self._client.close(fd)
+            except BaseException:
+                # Preserve the mutation error if both the write and CLOSE fail.
+                if write_error is None:
+                    raise
+            finally:
+                if not completed:
+                    try:
+                        self.rm(internal)
+                    except OSError:
+                        pass
+
+    def _write_spooled(self, path, spool):
+        """Stream a seekable local spool to one remote path."""
+        spool.seek(0)
+        with Nfs4File(self, path, "xb") as remote:
+            while True:
+                chunk = spool.read(self.transfer_chunk_size)
+                if not chunk:
+                    break
+                remote.write(chunk)
+
+    def _copy_remote_to_fileobj(self, path, output):
+        """Stream one remote file into a writable local file object."""
+        with self.open(path, "rb") as remote:
+            while True:
+                chunk = remote.read(self.transfer_chunk_size)
+                if not chunk:
+                    break
+                output.write(chunk)
 
     def pipe(self, path, value=None, **kwargs):
         if isinstance(path, str):
@@ -855,25 +1299,54 @@ class Nfs4FileSystem(AbstractFileSystem):
             native_all = [self._native_path(self._strip_protocol(r)) for r in rpaths]
             stats, _stat_errors = self._client.stat_many(native_all)
         pairs = []
-        for i, (r, l) in enumerate(zip(rpaths, lpaths)):
+        for i, (remote_path, local_path) in enumerate(zip(rpaths, lpaths)):
             if stats[i] is not None and stats[i]["type"] == "directory":
-                local.makedirs(l, exist_ok=True)
+                local.makedirs(local_path, exist_ok=True)
                 callback.relative_update(0)
             else:
-                pairs.append((r, l))
+                pairs.append(
+                    (
+                        remote_path,
+                        local_path,
+                        stats[i].get("size") if stats[i] else 0,
+                    )
+                )
         if not pairs:
             return
-        native = [self._native_path(self._strip_protocol(r)) for r, _ in pairs]
-        data, errors = self._client.read_all_many(native)
-        for i, ((r, l), buf) in enumerate(zip(pairs, data)):
-            with callback.branched(r, l) as child:
-                if buf is None:
-                    raise _oserror(errors[i], r)
-                local.makedirs(local._parent(l), exist_ok=True)
-                with open(l, "wb") as out:
-                    child.set_size(len(buf))
-                    out.write(buf)
-                    child.relative_update(len(buf))
+        for batch in _bounded_batches(
+            [size for _, _, size in pairs], self.batch_size, self.max_batch_bytes
+        ):
+            if len(batch) == 1 and pairs[batch[0]][2] > self.max_batch_bytes:
+                remote_path, local_path, size = pairs[batch[0]]
+                with callback.branched(remote_path, local_path) as child:
+                    child.set_size(size)
+                    local.makedirs(local._parent(local_path), exist_ok=True)
+                    with open(local_path, "wb") as out:
+                        with self.open(remote_path, "rb") as remote:
+                            while True:
+                                chunk = remote.read(self.transfer_chunk_size)
+                                if not chunk:
+                                    break
+                                out.write(chunk)
+                                child.relative_update(len(chunk))
+                continue
+            selected = [pairs[i] for i in batch]
+            native = [
+                self._native_path(self._strip_protocol(remote_path))
+                for remote_path, _, _ in selected
+            ]
+            data, errors = self._client.read_all_many(native)
+            for i, ((remote_path, local_path, _), buf) in enumerate(
+                zip(selected, data)
+            ):
+                with callback.branched(remote_path, local_path) as child:
+                    if buf is None:
+                        raise _oserror(errors[i], remote_path)
+                    local.makedirs(local._parent(local_path), exist_ok=True)
+                    with open(local_path, "wb") as out:
+                        child.set_size(len(buf))
+                        out.write(buf)
+                        child.relative_update(len(buf))
 
     def put(
         self,
@@ -931,27 +1404,49 @@ class Nfs4FileSystem(AbstractFileSystem):
         callback.set_size(len(rpaths))
         pairs = []
         remote_dirs = []
-        for l, r in zip(lpaths, rpaths):
-            if os.path.isdir(l):
-                remote_dirs.append(r)
+        for local_path, remote_path in zip(lpaths, rpaths):
+            if os.path.isdir(local_path):
+                remote_dirs.append(remote_path)
                 callback.relative_update(0)
             else:
-                pairs.append((l, r))
+                pairs.append((local_path, remote_path))
         if remote_dirs:
             self._makedirs_batched(remote_dirs, exist_ok=True)
         if not pairs:
             return
-        datas = []
-        for l, _ in pairs:
-            with open(l, "rb") as fh:
-                datas.append(fh.read())
-        remote_paths = [self._strip_protocol(r) for _, r in pairs]
         mode = kwargs.get("mode", "overwrite")
-        self._write_batch(remote_paths, datas, mode=mode)
-        for (l, r), buf in zip(pairs, datas):
-            with callback.branched(l, r) as child:
-                child.set_size(len(buf))
-                child.relative_update(len(buf))
+        sizes = [os.path.getsize(local_path) for local_path, _ in pairs]
+        for batch in _bounded_batches(sizes, self.batch_size, self.max_batch_bytes):
+            if len(batch) == 1 and sizes[batch[0]] > self.max_batch_bytes:
+                i = batch[0]
+                local_path, remote_path = pairs[i]
+                if mode == "create":
+                    remote = self.open(remote_path, "xb")
+                else:
+                    remote = self.open(remote_path, "wb")
+                with callback.branched(local_path, remote_path) as child:
+                    child.set_size(sizes[i])
+                    with remote, open(local_path, "rb") as source:
+                        while True:
+                            chunk = source.read(self.transfer_chunk_size)
+                            if not chunk:
+                                break
+                            remote.write(chunk)
+                            child.relative_update(len(chunk))
+                continue
+            selected = [pairs[i] for i in batch]
+            datas = []
+            for local_path, _ in selected:
+                with open(local_path, "rb") as fh:
+                    datas.append(fh.read())
+            remote_paths = [
+                self._strip_protocol(remote_path) for _, remote_path in selected
+            ]
+            self._write_batch(remote_paths, datas, mode=mode)
+            for (local_path, remote_path), buf in zip(selected, datas):
+                with callback.branched(local_path, remote_path) as child:
+                    child.set_size(len(buf))
+                    child.relative_update(len(buf))
 
     # -- open / file objects ----------------------------------------------
 

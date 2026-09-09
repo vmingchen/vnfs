@@ -4,9 +4,8 @@ import os
 import uuid
 
 import fsspec
-import pytest
-
 import nfs4fs  # noqa: F401  (registers the "nfs4" protocol)
+import pytest
 
 
 def _required(name):
@@ -17,7 +16,8 @@ def _required(name):
 def dummy_fs(tmp_path):
     """A local-directory backend (no NFS server needed)."""
     fs = fsspec.filesystem("nfs4", backend="dummy", dummy_root=str(tmp_path / "root"))
-    return fs
+    yield fs
+    fs.close()
 
 
 def _nfs_config():
@@ -30,7 +30,8 @@ def _nfs_reachable(host, minor_version):
     from nfs4fs import _native
 
     try:
-        _native.NfsClient(host, minor_version=minor_version)
+        client = _native.NfsClient(host, minor_version=minor_version)
+        client.shutdown()
         return True
     except Exception:
         return False
@@ -52,6 +53,7 @@ def nfs_fs():
         fs.rm("nfs4:///", recursive=True)
     except Exception:
         pass
+    fs.close()
 
 
 @pytest.fixture
@@ -82,3 +84,4 @@ def smb_fs():
         fs.rm("nfs4:///", recursive=True)
     except Exception:
         pass
+    fs.close()

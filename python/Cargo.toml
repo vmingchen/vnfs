@@ -17,7 +17,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 libc = "0.2"
-pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39", "abi3t"] }
 vnfs = { path = "../vnfs" }
 # Direct dependency so the static libntirpc archive is also re-asserted at the
 # end of the final link line (see third_party/libntirpc-sys/build.rs).

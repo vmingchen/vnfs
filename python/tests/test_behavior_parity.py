@@ -1,7 +1,7 @@
 """Reproductions for behavior divergences found when comparing the nfs4
 filesystem with LocalFileSystem / the fsspec contract.
 
-Each test runs against both backends (dummy + NFS, when reachable). They are
+Each test runs against all backends (dummy + NFS/SMB, when reachable). They are
 written to fail on the pre-fix behavior and pass after the fixes.
 """
 
@@ -11,22 +11,34 @@ import io
 import pytest
 
 
-@pytest.fixture(params=["dummy", "nfs"])
-def fs(request, dummy_fs, nfs_fs):
-    return dummy_fs if request.param == "dummy" else nfs_fs
+@pytest.fixture(params=["dummy", "nfs", "smb"])
+def fs(request):
+    return request.getfixturevalue(f"{request.param}_fs")
+
+
+def _require_capability(fs, name):
+    from nfs4fs import _native
+
+    if not fs._client.capabilities() & getattr(_native, name):
+        pytest.skip(f"backend does not advertise {name}")
 
 
 def test_checksum_changes_when_contents_change(fs):
     # The contract: if the checksum is the same, the contents are the same.
     fs.pipe_file("nfs4:///f.txt", b"v1")
     before = fs.checksum("nfs4:///f.txt")
-    fs.pipe_file("nfs4:///f.txt", b"v2-longer")
+    before_ukey = fs.ukey("nfs4:///f.txt")
+    # Same-size, immediate replacement catches second-resolution metadata.
+    fs.pipe_file("nfs4:///f.txt", b"v2")
     after = fs.checksum("nfs4:///f.txt")
+    after_ukey = fs.ukey("nfs4:///f.txt")
     assert isinstance(before, int)
     assert before != after
+    assert before_ukey != after_ukey
 
 
 def test_absolute_symlink_targets_resolve_inside_root(fs):
+    _require_capability(fs, "CAP_SYMLINKS")
     # Absolute targets are chroot-relative: they must resolve within the
     # filesystem root, not the export root (NFS) or the OS root (dummy).
     fs.pipe_file("nfs4:///target.txt", b"t")
@@ -38,6 +50,7 @@ def test_absolute_symlink_targets_resolve_inside_root(fs):
 
 
 def test_relative_symlink_target_unchanged(fs):
+    _require_capability(fs, "CAP_SYMLINKS")
     fs.pipe_file("nfs4:///target.txt", b"t")
     fs.symlink("target.txt", "nfs4:///rel-link.txt")
     assert fs.readlink("nfs4:///rel-link.txt") == "target.txt"
@@ -56,6 +69,7 @@ def test_rm_non_recursive_does_not_remove_directories(fs):
 
 
 def test_rm_non_recursive_removes_symlink_to_directory(fs):
+    _require_capability(fs, "CAP_SYMLINKS")
     # os.remove() removes the link itself; lstat-based guarding must not
     # refuse it.
     fs.mkdir("nfs4:///real", create_parents=True)
@@ -119,6 +133,10 @@ def test_cat_file_and_ranges_negative_bounds(fs):
     assert fs.cat_file("nfs4:///f.txt", start=-4, end=-1) == b"678"
     ranges = fs.cat_ranges(["nfs4:///f.txt", "nfs4:///f.txt"], [-3, 0], [-1, 4])
     assert ranges == [b"78", b"0123"]
+    with pytest.raises(ValueError, match="non-negative"):
+        fs.cat_file("nfs4:///f.txt", end=-20)
+    with pytest.raises(ValueError, match="non-negative"):
+        fs.cat_file("nfs4:///f.txt", start=8, end=3)
 
 
 def test_cat_glob_single_match_returns_dict(fs):
@@ -150,6 +168,7 @@ def test_transaction_commits_on_exit(fs):
         assert not fs.exists("nfs4:///tx.txt")
     assert fs._transaction is None
     assert fs.cat_file("nfs4:///tx.txt") == b"tx"
+    assert not any(".nfs4fs-txn-" in path for path in fs.find("nfs4:///"))
 
 
 def test_transaction_discards_on_error(fs):
@@ -160,6 +179,17 @@ def test_transaction_discards_on_error(fs):
             raise RuntimeError("boom")
     assert fs._transaction is None
     assert not fs.exists("nfs4:///tx2.txt")
+    assert not any(".nfs4fs-txn-" in path for path in fs.find("nfs4:///"))
+
+
+def test_append_position_tracks_real_eof(fs):
+    fs.pipe_file("nfs4:///append.txt", b"0123456789")
+    with fs.open("nfs4:///append.txt", "a+b") as fh:
+        assert fh.tell() == 10
+        assert fh.write(b"!") == 1
+        assert fh.tell() == 11
+        fh.seek(0)
+        assert fh.read() == b"0123456789!"
 
 
 def test_created_modified_are_utc_aware(fs):
@@ -167,7 +197,12 @@ def test_created_modified_are_utc_aware(fs):
     fs.pipe_file("nfs4:///f.txt", b"x")
     created = fs.created("nfs4:///f.txt")
     modified = fs.modified("nfs4:///f.txt")
-    assert created.tzinfo is not None and created.utcoffset() == datetime.timedelta(0)
+    # Some SMB servers do not expose creation/change time. Never fabricate it,
+    # but require every timestamp that is exposed to be UTC-aware.
+    if created is not None:
+        assert created.tzinfo is not None
+        assert created.utcoffset() == datetime.timedelta(0)
+    assert modified is not None
     assert modified.tzinfo is not None and modified.utcoffset() == datetime.timedelta(0)
 
 

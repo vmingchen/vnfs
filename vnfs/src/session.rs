@@ -2,6 +2,7 @@
 //! and per-compound SEQUENCE/seqid management.
 
 use std::os::raw::c_char;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use nfsv41_sys::*;
@@ -48,7 +49,21 @@ impl Session {
     }
 
     pub fn connect_minor(host: &str, minorversion: u32) -> RpcResult<Session> {
-        let rpc = RpcClient::connect(host)?;
+        Self::connect_minor_with_timeouts(
+            host,
+            minorversion,
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        )
+    }
+
+    pub fn connect_minor_with_timeouts(
+        host: &str,
+        minorversion: u32,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> RpcResult<Session> {
+        let rpc = RpcClient::connect_with_timeouts(host, connect_timeout, request_timeout)?;
         let mut s = Session {
             rpc,
             clientid: 0,

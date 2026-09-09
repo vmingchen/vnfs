@@ -10,8 +10,9 @@ compounds, reducing round trips for workloads with many small files.
 python -m pip install nfs4fs
 ```
 
-Published wheels use CPython's stable ABI and support CPython 3.9 and newer on
-Linux x86-64 and AArch64. A source build additionally requires Rust, CMake,
+Published wheels use CPython's stable ABI and support standard CPython 3.9 and
+newer on Linux x86-64 and AArch64. A separate CPython 3.14 free-threaded wheel
+is built and tested on x86-64. A source build additionally requires Rust, CMake,
 Clang, Git, Kerberos/GSS development headers, and userspace-RCU development
 headers. The extension statically links libntirpc and bundles non-platform
 shared-library dependencies into release wheels.
@@ -51,6 +52,18 @@ exposed by the Python package.
 ```python
 fs = fsspec.filesystem(
     "nfs4", host="nfs.example", compound_size_limit=256 * 1024
+)
+```
+
+Connection setup and individual NFS RPCs are independently bounded. Defaults
+are 10 seconds and 5 seconds, respectively:
+
+```python
+fs = fsspec.filesystem(
+    "nfs4",
+    host="nfs.example",
+    connect_timeout=5.0,
+    request_timeout=15.0,
 )
 ```
 
@@ -101,10 +114,22 @@ feature inspection and diagnostics.
 - One filesystem instance owns one native session protected by a mutex.
   Operations on that instance are serialized. Use separate instances with
   `skip_instance_cache=True` when independent connections are required.
-- NFS RPC calls have bounded transport timeouts. After an ambiguous NFS
-  transport failure, discard the filesystem instance and create a new one;
-  automatically replaying a mutation could duplicate a completed operation.
-- SMB sessions automatically reconnect where the backend can do so safely.
+- Native calls release the CPython interpreter lock while waiting for storage.
+  The extension also declares free-threaded CPython support; each filesystem's
+  native-session mutex still serializes that instance.
+- On a transport failure, safe idempotent path reads reconnect and retry once
+  by default. Mutations are never replayed automatically because the server may
+  already have completed an ambiguously failed request. Set
+  `auto_reconnect=False` to disable automatic read recovery.
+- A process fork is detected before the next operation and creates a fresh
+  native session in the child without sending protocol teardown over the
+  parent's inherited connection. Do not fork while an operation is in flight
+  or share an already-open `Nfs4File` across a fork. Once application or RPC
+  helper threads exist, use multiprocessing's `spawn` method. Prefer creating
+  filesystem instances after worker processes start.
+- Call `close()` or use `with fsspec.filesystem(...) as fs:` to release the
+  native session deterministically. Closing also removes the instance from
+  fsspec's instance cache.
 - `exists`, `isfile`, and `isdir` return `False` for missing paths but propagate
   authentication and connectivity failures. This prevents outages from being
   mistaken for absent data.
@@ -113,8 +138,19 @@ feature inspection and diagnostics.
 - `root` rejects `.` and `..` components. Use it to keep all paths under an
   export- or share-relative prefix; it is not a substitute for server-side
   authorization.
-- The transaction adapter buffers each pending file in memory until commit.
-  It is intended for small atomic batches, not unbounded streaming writes.
+- Vector batches are bounded by both `batch_size` (128 items) and
+  `max_batch_bytes` (64 MiB). Files larger than that byte threshold stream in
+  `transfer_chunk_size` chunks (8 MiB). Tune these per server and workload;
+  every value must be positive.
+- Transaction writes use a disk-backed spool after
+  `transaction_spool_threshold` (8 MiB), upload to unpredictable temporary
+  names in each destination directory, then expose the batch with a vectorized
+  rename. This prevents partial file contents from becoming visible. Like
+  fsspec transactions generally, a multi-file commit is staged rather than a
+  server-wide atomic transaction: a server failure during the final rename
+  batch can expose a prefix of the batch.
+- `pipe_file(..., mode="create")` and create-mode `put` use an exclusive server
+  create, so concurrent creators cannot silently overwrite one another.
 
 ## Local development
 

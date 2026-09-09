@@ -52,9 +52,17 @@ jobs:
         include:
           - python-version: "3.9"
             fsspec: "fsspec==2024.12.0"
+          - python-version: "3.10"
+            fsspec: "fsspec"
+          - python-version: "3.11"
+            fsspec: "fsspec"
           - python-version: "3.12"
             fsspec: "fsspec"
+          - python-version: "3.13"
+            fsspec: "fsspec"
           - python-version: "3.14"
+            fsspec: "fsspec"
+          - python-version: "3.14t"
             fsspec: "fsspec"
     name: python (${{ matrix.python-version }}, ${{ matrix.fsspec }})
     steps:
@@ -125,6 +133,55 @@ jobs:
       - name: Prove the source distribution can build a wheel
         run: |
           python -m pip wheel --no-deps --wheel-dir /tmp/nfs4fs-sdist-wheel python/dist/*.tar.gz
+      - name: Type-check the installed public API
+        run: |
+          .wheel-venv/bin/pip install black==26.5.1 mypy==2.3.1 ruff==0.16.6
+          .wheel-venv/bin/black --check python/python python/tests
+          .wheel-venv/bin/ruff check python/python python/tests
+          cd /tmp
+          "$GITHUB_WORKSPACE/.wheel-venv/bin/python" -m mypy --strict \
+            "$GITHUB_WORKSPACE/python/tests/typecheck_api.py"
+
+  security:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Audit Rust dependencies
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo audit --file python/Cargo.lock
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) cargo cyclonedx \
+            --manifest-path python/Cargo.toml \
+            --format json \
+            --override-filename nfs4fs-rust-sbom \
+            --spec-version 1.5 \
+            --all-features
+      - name: Audit Python dependencies and create an SBOM
+        run: |
+          python -m venv .security-venv
+          .security-venv/bin/pip install --upgrade pip \
+            pip-audit==2.10.1 cyclonedx-bom==7.3.1
+          .security-venv/bin/pip-audit --strict python
+          python -m venv .runtime-venv
+          .runtime-venv/bin/pip install 'fsspec>=2024.12.0'
+          .security-venv/bin/cyclonedx-py environment .runtime-venv \
+            --pyproject python/pyproject.toml \
+            --mc-type library \
+            --output-reproducible \
+            --output-format JSON \
+            --output-file nfs4fs-python-sbom.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: security-sbom
+          path: |
+            nfs4fs-python-sbom.json
+            python/**/nfs4fs-rust-sbom.json
+          if-no-files-found: error
 
   nfs-integration:
     runs-on: ubuntu-24.04
@@ -206,7 +263,10 @@ jobs:
           .venv/bin/pip install maturin fsspec pytest
           cd python
           ../.venv/bin/maturin develop
-          ../.venv/bin/python -m pytest tests/test_nfs_integration.py tests/test_fsspec_abstract.py
+          ../.venv/bin/python -m pytest \
+            tests/test_nfs_integration.py \
+            tests/test_behavior_parity.py \
+            tests/test_fsspec_abstract.py
       - name: Show server log after failure
         if: failure()
         run: cat /tmp/ganesha.log
@@ -271,7 +331,10 @@ jobs:
           .venv/bin/pip install maturin fsspec pytest
           cd python
           ../.venv/bin/maturin develop
-          ../.venv/bin/python -m pytest tests/test_nfs_integration.py tests/test_fsspec_abstract.py
+          ../.venv/bin/python -m pytest \
+            tests/test_nfs_integration.py \
+            tests/test_behavior_parity.py \
+            tests/test_fsspec_abstract.py
       - name: Show patched NFS-Ganesha log after failure
         if: failure()
         run: |
@@ -416,7 +479,10 @@ jobs:
           .venv/bin/pip install maturin fsspec pytest
           cd python
           ../.venv/bin/maturin develop
-          ../.venv/bin/python -m pytest tests/test_smb_integration.py
+          ../.venv/bin/python -m pytest \
+            tests/test_smb_integration.py \
+            tests/test_behavior_parity.py \
+            tests/test_fsspec_abstract.py
       - name: Show Samba log after failure
         if: failure()
         run: sudo journalctl -u smbd --no-pager

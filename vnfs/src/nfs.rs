@@ -8,6 +8,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use nfsv41_sys::*;
 
@@ -448,6 +449,26 @@ impl NfsVecFs {
     pub fn connect_minor(host: &str, minorversion: u32) -> VfResult<NfsVecFs> {
         let nfs =
             NfsClient::connect_minor(host, minorversion).map_err(|e| VfError::from_rpc(e, 0))?;
+        Ok(Self::from_client(nfs))
+    }
+
+    /// Connect with explicit setup and per-RPC timeouts.
+    pub fn connect_with_timeouts(
+        host: &str,
+        minorversion: Option<u32>,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> VfResult<NfsVecFs> {
+        let nfs = match minorversion {
+            Some(version) => NfsClient::connect_minor_with_timeouts(
+                host,
+                version,
+                connect_timeout,
+                request_timeout,
+            ),
+            None => NfsClient::connect_with_timeouts(host, connect_timeout, request_timeout),
+        }
+        .map_err(|e| VfError::from_rpc(e, 0))?;
         Ok(Self::from_client(nfs))
     }
 
@@ -3078,6 +3099,7 @@ impl Drop for NfsVecFs {
 #[derive(Debug, Clone, Default)]
 struct AttrValues {
     ftype: Option<u32>,
+    change: Option<u64>,
     mode: Option<u32>,
     size: Option<u64>,
     nlink: Option<u32>,
@@ -3094,8 +3116,9 @@ struct AttrValues {
 
 /// The full set of supported FATTR4 ids, in wire (increasing) order. Must
 /// match `crate::client::READDIR_ATTRS`.
-const FULL_ATTR_IDS: [u32; 13] = [
+const FULL_ATTR_IDS: [u32; 14] = [
     FATTR4_TYPE,
+    FATTR4_CHANGE,
     FATTR4_SIZE,
     FATTR4_NAMED_ATTR,
     FATTR4_FILEID,
@@ -3115,6 +3138,7 @@ fn request_mask_to_attr_list(masks: &AttrMask) -> Vec<u32> {
     for id in FULL_ATTR_IDS {
         let wanted = match id {
             FATTR4_TYPE => true, // always fetch type (cheap, aids listdir)
+            FATTR4_CHANGE => masks.contains(AttrMask::CHANGE),
             FATTR4_SIZE => masks.contains(AttrMask::SIZE),
             FATTR4_NAMED_ATTR => masks.contains(AttrMask::NAMED_ATTR),
             FATTR4_FILEID => masks.contains(AttrMask::FILEID),
@@ -3144,6 +3168,9 @@ fn parse_attr_list(ids: &[u32], list: &[u8]) -> VfResult<AttrValues> {
         match *id {
             FATTR4_TYPE => {
                 v.ftype = Some(read_u32(list, &mut off)?);
+            }
+            FATTR4_CHANGE => {
+                v.change = Some(read_u64(list, &mut off)?);
             }
             FATTR4_SIZE => {
                 v.size = Some(read_u64(list, &mut off)?);
@@ -3231,6 +3258,12 @@ fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
     {
         a.fileid = fileid;
         a.returned.insert(AttrMask::FILEID);
+    }
+    if a.masks.contains(AttrMask::CHANGE)
+        && let Some(change) = v.change
+    {
+        a.change = change;
+        a.returned.insert(AttrMask::CHANGE);
     }
     if a.masks.contains(AttrMask::UID)
         && let Some(uid) = v.uid

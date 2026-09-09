@@ -636,6 +636,10 @@ bitflags::bitflags! {
         /// boolean). Costs the server a per-entry xattr enumeration, so only
         /// request it when the caller needs it (e.g. ls long format).
         const NAMED_ATTR = 1 << 11;
+        /// Request the backend's monotonic file change attribute when one is
+        /// available (NFS FATTR4_CHANGE). This is stronger than timestamps for
+        /// cache invalidation because rapid, same-size writes still change it.
+        const CHANGE = 1 << 12;
     }
 }
 
@@ -673,6 +677,10 @@ pub struct VfAttrs {
     pub size: u64,
     pub nlink: u32,
     pub fileid: u64,
+    /// Backend file-version token. NFS supplies FATTR4_CHANGE; other
+    /// backends leave this absent by not setting [`AttrMask::CHANGE`] in
+    /// `returned`.
+    pub change: u64,
     pub uid: u32,
     pub gid: u32,
     pub rdev: u64,

@@ -2,7 +2,6 @@
 
 import datetime
 import os as _os
-import posixpath
 
 from nfs4fs import _native
 
