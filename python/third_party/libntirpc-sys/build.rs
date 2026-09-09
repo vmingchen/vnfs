@@ -75,6 +75,9 @@ fn configure() {
     // NFS client uses it.
     cmd.arg("-DUSE_MONITORING=Off");
     cmd.arg("-DCMAKE_BUILD_TYPE=RelWithDebInfo");
+    // GNUInstallDirs selects `lib64` on some manylinux images, while the Rust
+    // link search below intentionally uses a stable `<prefix>/lib` path.
+    cmd.arg("-DCMAKE_INSTALL_LIBDIR=lib");
     // Objects linked into the Python extension (a shared object) must be
     // position-independent; the static library is compiled without -fPIC by
     // default.
