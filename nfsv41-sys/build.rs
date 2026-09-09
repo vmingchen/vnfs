@@ -17,6 +17,8 @@ fn main() {
     let mut gcc = Command::new("gcc");
     gcc.arg("-c")
         .arg("-O2")
+        // The archive is linked into the Python extension shared object.
+        .arg("-fPIC")
         .arg("-fno-strict-aliasing")
         // Ganesha's codec calls xdr_pointer with `char **` where ntirpc's
         // prototype takes `void **`; GCC 14 turns this constraint violation
