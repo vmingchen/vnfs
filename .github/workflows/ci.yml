@@ -247,7 +247,7 @@ jobs:
       - name: Run NFS integration suite
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}
-        run: cargo test -p vnfs --test nfs -- --test-threads=1
+        run: cargo test -p vnfs --test nfs
       - name: Run C ABI smoke test against NFS
         run: |
           cargo build -p vfsi-c
@@ -312,7 +312,7 @@ jobs:
         env:
           VNFS_TEST_MINOR: 2
           VNFS_TEST_REQUIRE_SERVER_COPY: 1
-        run: cargo test -p vnfs --test nfs -- --test-threads=1
+        run: cargo test -p vnfs --test nfs
       - name: Require server-side COPY through the C ABI
         env:
           VFSI_REQUIRE_SERVER_COPY: 1

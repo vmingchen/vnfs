@@ -794,6 +794,10 @@ thread_local! {
     static STATS_XDR_BUFFER: std::cell::RefCell<Vec<u8>> = const {
         std::cell::RefCell::new(Vec::new())
     };
+    /// Per-thread counters let callers measure one synchronous operation even
+    /// when other threads are issuing compounds concurrently.
+    static THREAD_COMPOUND_STATS: std::cell::Cell<(u64, u64, u64, u64)> =
+        const { std::cell::Cell::new((0, 0, 0, 0)) };
 }
 
 /// Counters for the compounds sent: total count, total operations (including
@@ -810,6 +814,10 @@ fn compound_stats_record(args: &COMPOUND4args) {
     COMPOUND_COUNT.fetch_add(1, Ordering::Relaxed);
     COMPOUND_OPS.fetch_add(ops, Ordering::Relaxed);
     COMPOUND_MAX_OPS.fetch_max(ops, Ordering::Relaxed);
+    THREAD_COMPOUND_STATS.with(|stats| {
+        let (count, total_ops, bytes, max_ops) = stats.get();
+        stats.set((count + 1, total_ops + ops, bytes, max_ops.max(ops)));
+    });
     static DUMP_ENABLED: OnceLock<bool> = OnceLock::new();
     let dump_enabled =
         *DUMP_ENABLED.get_or_init(|| std::env::var("VNFS_DUMP").as_deref() == Ok("1"));
@@ -854,6 +862,10 @@ fn compound_stats_record(args: &COMPOUND4args) {
             if encoded {
                 let len = unsafe { xdr.x_data.offset_from(xdr.x_v.vio_base) as u64 };
                 COMPOUND_BYTES.fetch_add(len, Ordering::Relaxed);
+                THREAD_COMPOUND_STATS.with(|stats| {
+                    let (count, ops, bytes, max_ops) = stats.get();
+                    stats.set((count, ops, bytes + len, max_ops));
+                });
                 break;
             }
             // A diagnostic must not grow without bound if malformed input
@@ -876,6 +888,13 @@ pub fn compound_stats() -> (u64, u64, u64, u64) {
         COMPOUND_BYTES.swap(0, Ordering::Relaxed),
         COMPOUND_MAX_OPS.swap(0, Ordering::Relaxed),
     )
+}
+
+/// Compound statistics for the current thread, resetting only this thread's
+/// counters. This is useful for isolating synchronous measurements while
+/// other threads continue to use independent clients.
+pub fn thread_compound_stats() -> (u64, u64, u64, u64) {
+    THREAD_COMPOUND_STATS.with(|stats| stats.replace((0, 0, 0, 0)))
 }
 
 /// Aggregate RPC round-trip timing, resetting the counters.
