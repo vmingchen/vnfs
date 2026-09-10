@@ -3,7 +3,7 @@
 //!
 //! This mirrors the `tc_api.h` vectorized NFSv4 client surface, but as a
 //! trait so any filesystem can implement it: the NFSv4.1 client
-//! ([`crate::nfs::NfsVecFs`]) and a `std::fs`-backed dummy
+//! (`crate::nfs::NfsVecFs`) and a `std::fs`-backed dummy
 //! ([`crate::dummy_vecfs::DummyVecFs`]). Vector operations take Rust slices.
 //!
 //! # Path and name representation

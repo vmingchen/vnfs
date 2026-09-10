@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "libntirpc-sys"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["Ming Chen <v.mingchen@gmail.com>"]
 build = "build.rs"
 links = "ntirpc"

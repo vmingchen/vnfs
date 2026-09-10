@@ -2,12 +2,13 @@
 //!
 //! - [`vecfs`]: the backend-agnostic vectorized filesystem API ([`VecFs`])
 //!   and its shared types.
-//! - [`nfs`]: the NFSv4.1 implementation ([`NfsVecFs`]).
+//! - `nfs`: the optional NFSv4.1 implementation (`NfsVecFs`).
 //! - [`smb`]: the SMB2/3 implementation ([`SmbVecFs`]) for Samba and other
 //!   modern SMB servers.
 //! - [`dummy_vecfs`]: a `std::fs`-backed implementation ([`DummyVecFs`]) so
 //!   the API also works on non-NFS filesystems.
-//! - [`client`]: low-level NFSv4.1 operations (open/read/write/mkdir/...).
+//! - `client`: optional low-level NFSv4.1 operations
+//!   (open/read/write/mkdir/...).
 
 #[cfg(feature = "nfs")]
 pub mod client;

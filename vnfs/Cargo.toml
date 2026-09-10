@@ -1,6 +1,6 @@
 [package]
 name = "vnfs"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Protocol-neutral vectorized filesystem API for NFS, SMB, and local files"
@@ -8,6 +8,13 @@ readme = "README.md"
 repository = "https://github.com/vmingchen/vnfs"
 documentation = "https://docs.rs/vnfs"
 keywords = ["NFS", "SMB", "filesystem", "vectorized"]
+
+[package.metadata.docs.rs]
+# docs.rs builds crates offline, while the optional NFS FFI dependency builds
+# libntirpc from a pinned upstream source revision. Document the portable Rust
+# backends there; NFS remains part of normal/default builds.
+no-default-features = true
+features = ["smb", "dummy", "server-copy"]
 
 [features]
 default = ["nfs", "smb", "dummy", "server-copy"]
