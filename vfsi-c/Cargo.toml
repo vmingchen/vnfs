@@ -15,7 +15,7 @@ libntirpc-sys = { workspace = true }
 vnfs = { path = "../vnfs" }
 
 [build-dependencies]
-cbindgen = "0.27"
+cbindgen = "0.29"
 
 [package.metadata.docs.rs]
 all-features = true
