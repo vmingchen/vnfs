@@ -5,6 +5,15 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+### Fixed
+
+- NFS vector lookup batches now distinguish the item that failed from the
+  suffix that the server never executed, and safely continue independent
+  read-only suffix items in a new compound.
+- Compound response validation now rejects malformed or truncated replies,
+  adaptively splits batches rejected for server resource limits, and reports
+  lost mutating replies as ambiguous without silently replaying them.
+
 ## [0.2.0] - 2026-09-09
 
 ### Added

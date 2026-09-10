@@ -256,6 +256,7 @@ impl NfsVecFs {
                 }
                 Ok(())
             }
+            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, 0)),
             Err(_) => self.setattrsv_phased(attrs, follow),
         }
     }
@@ -362,6 +363,7 @@ impl NfsVecFs {
                 }
                 Ok(())
             }
+            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, 0)),
             Err(_) => self.getattrsv_phased(attrs, follow),
         }
     }
@@ -1722,6 +1724,7 @@ impl NfsVecFs {
                 self.close_path_opens(&outcome.opened);
                 Ok(self.assemble_reads(reads, offsets, &outcome.data, &outcome.eof))
             }
+            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, 0)),
             Err(_) => self.readv_path_fallback(reads),
         }
     }
@@ -1764,6 +1767,7 @@ impl NfsVecFs {
                 }
                 Ok(self.assemble_reads(reads, offsets, &outcome.data, &outcome.eof))
             }
+            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, 0)),
             Err(_) => self.readv_path_fallback(reads),
         }
     }
@@ -1861,6 +1865,7 @@ impl NfsVecFs {
                 self.close_path_opens(&outcome.opened);
                 Ok(self.assemble_writes(writes, offsets, &outcome.counts, &outcome.committed))
             }
+            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, 0)),
             Err(_) => self.writev_path_fallback(writes),
         }
     }
@@ -1899,6 +1904,7 @@ impl NfsVecFs {
                 }
                 Ok(self.assemble_writes(writes, offsets, &outcome.counts, &outcome.committed))
             }
+            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, 0)),
             Err(_) => self.writev_path_fallback(writes),
         }
     }

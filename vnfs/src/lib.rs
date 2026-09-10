@@ -21,6 +21,8 @@ pub mod error;
 pub mod nfs;
 mod path;
 #[cfg(feature = "nfs")]
+mod planner;
+#[cfg(feature = "nfs")]
 pub mod rpc;
 #[cfg(feature = "nfs")]
 pub mod session;

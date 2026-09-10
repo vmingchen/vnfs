@@ -721,6 +721,43 @@ fn writev_path_openwrite_form_is_two_compounds() {
 }
 
 #[test]
+fn phased_create_batch_continues_after_missing_middle_lookup() {
+    // A failed LOOKUP stops an NFS COMPOUND, so the third item is unexecuted,
+    // not another NOENT. The failure-aware planner must submit that suffix in
+    // a fresh compound or the existing third file is incorrectly opened with
+    // CREATE_GUARDED and the vector fails with NFS4ERR_EXIST.
+    let dir = setup_dir("planner_lookup_suffix");
+    let paths = [
+        format!("{dir}/existing-a"),
+        format!("{dir}/missing-b"),
+        format!("{dir}/existing-c"),
+    ];
+    let mut c = client();
+    write_file(&mut c, Path::new(&paths[0]), b"old-a");
+    write_file(&mut c, Path::new(&paths[2]), b"old-c");
+    c.set_merged_mode("off");
+
+    let payloads = [b"new-a".to_vec(), b"new-b".to_vec(), b"new-c".to_vec()];
+    let writes: Vec<WriteOp> = paths
+        .iter()
+        .zip(&payloads)
+        .map(|(path, data)| WriteOp::at(VfFile::from_path(path), 0, data.clone()).with_creation())
+        .collect();
+    let results = c.writev(&writes).expect("mixed existence create batch");
+    assert_eq!(results.len(), paths.len());
+
+    let reads: Vec<ReadOp> = paths
+        .iter()
+        .zip(&payloads)
+        .map(|(path, data)| ReadOp::at(VfFile::from_path(path), 0, data.len()))
+        .collect();
+    let roundtrip = c.readv(&reads).expect("read mixed existence batch");
+    for (result, expected) in roundtrip.iter().zip(&payloads) {
+        assert_eq!(&result.data, expected);
+    }
+}
+
+#[test]
 fn readv_path_openwrite_form_is_two_compounds() {
     let dir = setup_dir("readv2");
     let mut c = client();

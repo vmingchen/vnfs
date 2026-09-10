@@ -12,6 +12,7 @@ use nfsv41_sys::*;
 use crate::compound::{Compound, CompoundRes};
 use crate::error::{RpcError, RpcResult};
 use crate::path::{components_bytes, split_path_bytes};
+use crate::planner::{ExecutionMap, FailureCause, RecoveryAction, RequestSafety, recovery_action};
 use crate::session::Session;
 
 /// An NFS file handle owned by the client.
@@ -555,61 +556,16 @@ fn chunk_lens(start: usize, end: usize, per: usize) -> Vec<usize> {
         .collect()
 }
 
-/// Maps compound op positions (resarray indices; 0 = SEQUENCE) to the
-/// caller-relative op whose range contains them, so a mid-compound failure
-/// can be attributed to the right caller index.
-#[derive(Default)]
-struct OpMap {
-    /// (caller_index, first_op, end_op_exclusive) per caller op.
-    ranges: Vec<(usize, usize, usize)>,
-    next: usize,
-}
-
-impl OpMap {
-    fn new() -> OpMap {
-        // resarray[0] is the implicit SEQUENCE.
-        OpMap {
-            ranges: Vec::new(),
-            next: 1,
-        }
+fn first_failed_range(res: &CompoundRes, map: &ExecutionMap) -> RpcResult<Option<(usize, u32)>> {
+    let report = map
+        .analyze(res)
+        .map_err(|error| RpcError::transport(format!("malformed NFS COMPOUND reply: {error}")))?;
+    if let Some(status) = report.compound_failure {
+        return Err(RpcError::op(0, status));
     }
-
-    fn begin(&mut self, caller: usize) {
-        self.ranges.push((caller, self.next, self.next));
-    }
-
-    fn end(&mut self) {
-        if let Some(last) = self.ranges.last_mut() {
-            last.2 = self.next;
-        }
-    }
-
-    fn note_ops(&mut self, n: usize) {
-        self.next += n;
-    }
-}
-
-/// The first op range that is incomplete or contains a failing op, as
-/// `(caller_index, nfs_status)`.
-fn first_failed_range(res: &CompoundRes, ranges: &[(usize, usize, usize)]) -> Option<(usize, u32)> {
-    for (caller, s, e) in ranges {
-        let mut bad: Option<u32> = None;
-        let upto = (*e).min(res.nops());
-        for j in *s..upto {
-            let st = res.op_status(j);
-            if st != nfsstat4_NFS4_OK {
-                bad = Some(st);
-                break;
-            }
-        }
-        if bad.is_none() && *e > res.nops() {
-            bad = Some(res.status());
-        }
-        if let Some(st) = bad {
-            return Some((*caller, st));
-        }
-    }
-    None
+    Ok(report
+        .failure
+        .map(|failure| (failure.caller, failure.status)))
 }
 
 impl NfsClient {
@@ -739,6 +695,33 @@ impl NfsClient {
         self.session.compound(compound)
     }
 
+    /// Send a compound while preserving whether a lost response makes the
+    /// operation's outcome ambiguous. Session replay is not yet available,
+    /// so mutating requests are never silently reissued after transport loss.
+    fn call_compound_with_safety(
+        &mut self,
+        compound: &mut Compound,
+        safety: RequestSafety,
+    ) -> RpcResult<CompoundRes> {
+        self.call_compound(compound).map_err(|mut error| {
+            if error.is_transport()
+                && recovery_action(
+                    safety,
+                    FailureCause::Transport {
+                        exact_replay: false,
+                    },
+                    false,
+                ) == RecoveryAction::Ambiguous
+            {
+                error.message = format!(
+                    "ambiguous outcome for mutating compound; request was not retried: {}",
+                    error.message
+                );
+            }
+            error
+        })
+    }
+
     /// Look up a single component below `dir`.
     pub fn lookup(&mut self, dir: &FileHandle, name: &[u8]) -> RpcResult<FileHandle> {
         let mut c = Compound::new();
@@ -788,42 +771,73 @@ impl NfsClient {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
-        let per_chunk = self.op_budget().batch_capacity(4)?;
-        let mut out = Vec::with_capacity(ops.len());
-        for chunk in ops.chunks(per_chunk) {
+        let mut batch_capacity = self.op_budget().batch_capacity(4)?;
+        let mut out: Vec<Option<Result<(FileHandle, u32), u32>>> =
+            (0..ops.len()).map(|_| None).collect();
+        let mut cursor = 0usize;
+        while cursor < ops.len() {
+            let end = (cursor + batch_capacity).min(ops.len());
+            let mut map = ExecutionMap::new();
             let mut c = Compound::new();
             c.tag(b"lookup_typev");
-            for (dir, name) in chunk {
+            for (caller, (dir, name)) in ops[cursor..end].iter().enumerate() {
+                map.begin(cursor + caller);
                 c.putfh(&dir.as_nfs_fh());
                 c.lookup(name);
                 c.getfh();
                 c.getattr(&[FATTR4_TYPE]);
+                map.note_ops(4);
+                map.end();
             }
-            let res = self.call_compound(&mut c)?;
-            for (i, _) in chunk.iter().enumerate() {
-                let st_idx = 2 + 4 * i;
-                if st_idx >= res.nops() {
-                    out.push(Err(res.status()));
+            let res = self.call_compound_with_safety(&mut c, RequestSafety::ReadOnly)?;
+            let report = map.analyze(&res).map_err(|error| {
+                RpcError::transport(format!("malformed lookup_typev COMPOUND reply: {error}"))
+            })?;
+
+            if let Some(status) = report.compound_failure {
+                if status == nfsstat4_NFS4ERR_TOO_MANY_OPS && end - cursor > 1 {
+                    debug_assert_eq!(
+                        recovery_action(RequestSafety::ReadOnly, FailureCause::ResourceLimit, true,),
+                        RecoveryAction::SplitAndRetry
+                    );
+                    batch_capacity = ((end - cursor) / 2).max(1);
                     continue;
                 }
-                if res.op_status(st_idx) == nfsstat4_NFS4_OK
-                    && 3 + 4 * i < res.nops()
-                    && 4 + 4 * i < res.nops()
-                {
-                    let fh = FileHandle::from_nfs_fh(res.getfh(3 + 4 * i));
-                    let t = res.getattr_bytes(4 + 4 * i);
-                    let ftype = if t.len() >= 4 {
-                        u32::from_be_bytes(t[0..4].try_into().unwrap())
-                    } else {
-                        0
-                    };
-                    out.push(Ok((fh, ftype)));
+                return Err(RpcError::op(cursor, status));
+            }
+
+            for caller in report.completed {
+                let (_, start, _) = map.range(caller).expect("reported range must exist");
+                let fh = FileHandle::from_nfs_fh(res.getfh(start + 2));
+                let bytes = res.getattr_bytes(start + 3);
+                let ftype = if bytes.len() >= 4 {
+                    u32::from_be_bytes(bytes[0..4].try_into().unwrap())
                 } else {
-                    out.push(Err(res.op_status(st_idx)));
-                }
+                    0
+                };
+                out[caller] = Some(Ok((fh, ftype)));
+            }
+            if let Some(failure) = report.failure {
+                out[failure.caller] = Some(Err(failure.status));
+                debug_assert_eq!(
+                    recovery_action(RequestSafety::ReadOnly, FailureCause::ItemStatus, true,),
+                    RecoveryAction::ContinueSuffix
+                );
+                cursor = failure.caller + 1;
+            } else {
+                cursor = end;
             }
         }
-        Ok(out)
+        out.into_iter()
+            .enumerate()
+            .map(|(caller, value)| {
+                value.ok_or_else(|| {
+                    RpcError::transport(format!(
+                        "lookup_typev planner omitted caller item {caller}"
+                    ))
+                })
+            })
+            .collect()
     }
 
     /// Tolerantly LOOKUP each `(parent, name)` in as few compounds as
@@ -839,34 +853,53 @@ impl NfsClient {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
-        let per_chunk = self.op_budget().batch_capacity(3)?;
-        let mut out = Vec::with_capacity(ops.len());
-        for chunk in ops.chunks(per_chunk) {
+        let mut batch_capacity = self.op_budget().batch_capacity(3)?;
+        let mut out: Vec<Option<Result<FileHandle, u32>>> = (0..ops.len()).map(|_| None).collect();
+        let mut cursor = 0usize;
+        while cursor < ops.len() {
+            let end = (cursor + batch_capacity).min(ops.len());
+            let mut map = ExecutionMap::new();
             let mut c = Compound::new();
             c.tag(b"lookupv");
-            for (dir, name) in chunk {
+            for (caller, (dir, name)) in ops[cursor..end].iter().enumerate() {
+                map.begin(cursor + caller);
                 c.putfh(&dir.as_nfs_fh());
                 c.lookup(name);
                 c.getfh();
+                map.note_ops(3);
+                map.end();
             }
-            let res = self.call_compound(&mut c)?;
-            for (i, _) in chunk.iter().enumerate() {
-                let st_idx = 2 + 3 * i;
-                if st_idx >= res.nops() {
-                    // The server aborted the compound at an earlier failing
-                    // op and omitted the remaining resops; report the
-                    // compound status for everything from here on.
-                    out.push(Err(res.status()));
+            let res = self.call_compound_with_safety(&mut c, RequestSafety::ReadOnly)?;
+            let report = map.analyze(&res).map_err(|error| {
+                RpcError::transport(format!("malformed lookupv COMPOUND reply: {error}"))
+            })?;
+
+            if let Some(status) = report.compound_failure {
+                if status == nfsstat4_NFS4ERR_TOO_MANY_OPS && end - cursor > 1 {
+                    batch_capacity = ((end - cursor) / 2).max(1);
                     continue;
                 }
-                if res.op_status(st_idx) == nfsstat4_NFS4_OK && 3 + 3 * i < res.nops() {
-                    out.push(Ok(FileHandle::from_nfs_fh(res.getfh(3 + 3 * i))));
-                } else {
-                    out.push(Err(res.op_status(st_idx)));
-                }
+                return Err(RpcError::op(cursor, status));
+            }
+            for caller in report.completed {
+                let (_, start, _) = map.range(caller).expect("reported range must exist");
+                out[caller] = Some(Ok(FileHandle::from_nfs_fh(res.getfh(start + 2))));
+            }
+            if let Some(failure) = report.failure {
+                out[failure.caller] = Some(Err(failure.status));
+                cursor = failure.caller + 1;
+            } else {
+                cursor = end;
             }
         }
-        Ok(out)
+        out.into_iter()
+            .enumerate()
+            .map(|(caller, value)| {
+                value.ok_or_else(|| {
+                    RpcError::transport(format!("lookupv planner omitted caller item {caller}"))
+                })
+            })
+            .collect()
     }
 
     /// Resolve a slash-separated path from the export root in a single
@@ -1318,7 +1351,7 @@ impl NfsClient {
         while global < n {
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
-            let mut map = OpMap::new();
+            let mut map = ExecutionMap::new();
             let mut c = Compound::new();
             c.tag(if close_in_compound {
                 b"writev1"
@@ -1528,30 +1561,14 @@ impl NfsClient {
             self.op_budget().ensure(&c)?;
             self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
 
-            let res = self.call_compound(&mut c)?;
-            // Find the first incomplete/failed range.
-            let mut range_failed = None;
-            let mut done = 0usize;
-            for (caller, s, e) in &map.ranges {
-                let mut bad: Option<(usize, u32)> = None;
-                let upto = (*e).min(res.nops());
-                for j in *s..upto {
-                    let st = res.op_status(j);
-                    if st != nfsstat4_NFS4_OK {
-                        bad = Some((j, st));
-                        break;
-                    }
-                }
-                if bad.is_none() && *e > res.nops() {
-                    bad = Some((res.nops(), res.status()));
-                }
-                if let Some((_, st)) = bad {
-                    range_failed = Some((*caller, st));
-                    done = *caller;
-                    break;
-                }
-                done = *caller + 1;
-            }
+            let res =
+                self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
+            let report = map.analyze(&res).map_err(|error| {
+                RpcError::transport(format!("malformed writev COMPOUND reply: {error}"))
+            })?;
+            let range_failed = report
+                .failure
+                .map(|failure| (failure.caller, failure.status));
             if let Some((caller, st)) = range_failed {
                 failed = Some((caller, st));
                 for i in caller + 1..n {
@@ -1561,7 +1578,7 @@ impl NfsClient {
             }
             // Extract results and opened stateids from the resarray.
             for (caller, s, e) in &map.ranges {
-                if *caller >= done {
+                if !report.completed.contains(caller) {
                     continue;
                 }
                 for j in *s..(*e).min(res.nops()) {
@@ -1588,13 +1605,18 @@ impl NfsClient {
             // The trailing CLOSE (close_in_compound form) sits outside any
             // file range; report a failure there so the caller can fall back
             // to the separate-close form.
-            if close_in_compound && range_failed.is_none() && opened_path.is_some() {
-                let last = map.ranges.last().map(|(_, _, e)| *e).unwrap_or(1);
-                if last < res.nops() && res.op_status(last) != nfsstat4_NFS4_OK {
-                    close_failed = Some(res.op_status(last));
+            if let Some(status) = report.compound_failure {
+                let close_op = map.ranges.last().map(|(_, _, end)| *end);
+                if close_in_compound
+                    && opened_path.is_some()
+                    && report.compound_failure_op == close_op
+                {
+                    close_failed = Some(status);
+                } else {
+                    return Err(RpcError::op(0, status));
                 }
             }
-            if failed.is_some() {
+            if failed.is_some() || close_failed.is_some() {
                 break;
             }
             if chunk_start == global && part_off == 0 {
@@ -1638,7 +1660,7 @@ impl NfsClient {
         while global < n {
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
-            let mut map = OpMap::new();
+            let mut map = ExecutionMap::new();
             let mut c = Compound::new();
             c.tag(if close_in_compound {
                 b"readv1"
@@ -1817,29 +1839,13 @@ impl NfsClient {
             self.op_budget().ensure(&c)?;
             self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
 
-            let res = self.call_compound(&mut c)?;
-            let mut range_failed = None;
-            let mut done = 0usize;
-            for (caller, s, e) in &map.ranges {
-                let mut bad: Option<(usize, u32)> = None;
-                let upto = (*e).min(res.nops());
-                for j in *s..upto {
-                    let st = res.op_status(j);
-                    if st != nfsstat4_NFS4_OK {
-                        bad = Some((j, st));
-                        break;
-                    }
-                }
-                if bad.is_none() && *e > res.nops() {
-                    bad = Some((res.nops(), res.status()));
-                }
-                if let Some((_, st)) = bad {
-                    range_failed = Some((*caller, st));
-                    done = *caller;
-                    break;
-                }
-                done = *caller + 1;
-            }
+            let res = self.call_compound_with_safety(&mut c, RequestSafety::ReadOnly)?;
+            let report = map.analyze(&res).map_err(|error| {
+                RpcError::transport(format!("malformed readv COMPOUND reply: {error}"))
+            })?;
+            let range_failed = report
+                .failure
+                .map(|failure| (failure.caller, failure.status));
             if let Some((caller, st)) = range_failed {
                 failed = Some((caller, st));
                 for i in caller + 1..n {
@@ -1848,7 +1854,7 @@ impl NfsClient {
                 }
             }
             for (caller, s, e) in &map.ranges {
-                if *caller >= done {
+                if !report.completed.contains(caller) {
                     continue;
                 }
                 for j in *s..(*e).min(res.nops()) {
@@ -1877,13 +1883,18 @@ impl NfsClient {
                     }
                 }
             }
-            if close_in_compound && range_failed.is_none() && opened_path.is_some() {
-                let last = map.ranges.last().map(|(_, _, e)| *e).unwrap_or(1);
-                if last < res.nops() && res.op_status(last) != nfsstat4_NFS4_OK {
-                    close_failed = Some(res.op_status(last));
+            if let Some(status) = report.compound_failure {
+                let close_op = map.ranges.last().map(|(_, _, end)| *end);
+                if close_in_compound
+                    && opened_path.is_some()
+                    && report.compound_failure_op == close_op
+                {
+                    close_failed = Some(status);
+                } else {
+                    return Err(RpcError::op(0, status));
                 }
             }
-            if failed.is_some() {
+            if failed.is_some() || close_failed.is_some() {
                 break;
             }
             if chunk_start == global && part_off == 0 {
@@ -1917,7 +1928,7 @@ impl NfsClient {
         while global < n {
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
-            let mut map = OpMap::new();
+            let mut map = ExecutionMap::new();
             let mut c = Compound::new();
             c.tag(b"getattrv1");
             let mut payload = 0usize;
@@ -1964,8 +1975,8 @@ impl NfsClient {
                 failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
                 break;
             }
-            let res = self.call_compound(&mut c)?;
-            if let Some((caller, st)) = first_failed_range(&res, &map.ranges) {
+            let res = self.call_compound_with_safety(&mut c, RequestSafety::IdempotentMutation)?;
+            if let Some((caller, st)) = first_failed_range(&res, &map)? {
                 failed = Some((caller, st));
                 // Keep the prefix results (the caller resumes from here).
                 for (c, s, e) in &map.ranges {
@@ -2012,7 +2023,7 @@ impl NfsClient {
         while global < n {
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
-            let mut map = OpMap::new();
+            let mut map = ExecutionMap::new();
             let mut c = Compound::new();
             c.tag(b"setattrv1");
             let mut payload = 0usize;
@@ -2064,7 +2075,7 @@ impl NfsClient {
                 break;
             }
             let res = self.call_compound(&mut c)?;
-            if let Some((caller, st)) = first_failed_range(&res, &map.ranges) {
+            if let Some((caller, st)) = first_failed_range(&res, &map)? {
                 failed = Some((caller, st));
                 // Keep the prefix types (the caller resumes from here).
                 for (c, s, e) in &map.ranges {
@@ -2111,7 +2122,7 @@ impl NfsClient {
         while global < n {
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
-            let mut map = OpMap::new();
+            let mut map = ExecutionMap::new();
             let mut c = Compound::new();
             c.tag(b"openv1");
             let mut opens_in_chunk = 0usize;
@@ -2183,8 +2194,9 @@ impl NfsClient {
             }
             self.op_budget().ensure(&c)?;
             self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
-            let res = self.call_compound(&mut c)?;
-            if let Some((caller, st)) = first_failed_range(&res, &map.ranges) {
+            let res =
+                self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
+            if let Some((caller, st)) = first_failed_range(&res, &map)? {
                 failed = Some((caller, st));
                 // Keep the prefix opens (the caller resumes from here).
                 for (c, s, e) in &map.ranges {
@@ -2231,7 +2243,7 @@ impl NfsClient {
         while global < n {
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
-            let mut map = OpMap::new();
+            let mut map = ExecutionMap::new();
             let mut c = Compound::new();
             c.tag(b"removev1");
             let mut payload = 0usize;
@@ -2268,8 +2280,9 @@ impl NfsClient {
                 failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
                 break;
             }
-            let res = self.call_compound(&mut c)?;
-            let done = first_failed_range(&res, &map.ranges);
+            let res =
+                self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
+            let done = first_failed_range(&res, &map)?;
             match done {
                 Some((caller, st)) => {
                     failed = Some((caller, st));
@@ -2311,7 +2324,7 @@ impl NfsClient {
         while global < n {
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
-            let mut map = OpMap::new();
+            let mut map = ExecutionMap::new();
             let mut c = Compound::new();
             c.tag(b"renamev1");
             let mut payload = 0usize;
@@ -2357,8 +2370,9 @@ impl NfsClient {
                 failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
                 break;
             }
-            let res = self.call_compound(&mut c)?;
-            let done = first_failed_range(&res, &map.ranges);
+            let res =
+                self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
+            let done = first_failed_range(&res, &map)?;
             match done {
                 Some((caller, st)) => {
                     failed = Some((caller, st));
