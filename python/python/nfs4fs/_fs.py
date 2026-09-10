@@ -12,13 +12,15 @@ import uuid
 from glob import has_magic
 from urllib.parse import unquote, urlsplit
 
-from fsspec.callbacks import DEFAULT_CALLBACK
+from fsspec.callbacks import DEFAULT_CALLBACK, Callback
 from fsspec.spec import AbstractFileSystem
 from fsspec.transaction import Transaction
 
 from . import _native
 
 __all__ = ["Nfs4File", "Nfs4FileSystem", "VfsiFileSystem"]
+
+_MEMORY_PATH = "<memory>"
 
 
 def _normalize_mode(mode):
@@ -104,6 +106,19 @@ def _bounded_batches(sizes, max_items, max_bytes):
         batch_bytes += size
     if batch:
         yield batch
+
+
+def _complete_callback(callback, size):
+    """Mark one byte-oriented callback complete, including empty transfers."""
+    callback.set_size(size)
+    callback.relative_update(size)
+
+
+def _complete_child(callback, path1, path2, size):
+    """Report one completed item and its byte count to a bulk callback."""
+    with callback.branched(path1, path2) as child:
+        _complete_callback(child, size)
+    callback.relative_update()
 
 
 class _ResilientClient:
@@ -946,14 +961,16 @@ class Nfs4FileSystem(AbstractFileSystem):
 
     # -- bulk read / write -------------------------------------------------
 
-    def _cat_batch(self, paths, on_error):
+    def _cat_batch(self, paths, on_error, callback=DEFAULT_CALLBACK):
         """Read path groups bounded by both item count and aggregate bytes."""
+        callback.set_size(len(paths))
         native = [self._native_path(path) for path in paths]
         stats, stat_errors = self._client.stat_many(native)
         data = [b""] * len(paths)
         failures = {
             index: _oserror(code, paths[index]) for index, code in stat_errors.items()
         }
+        reported = set()
         valid = [index for index in range(len(paths)) if index not in failures]
         valid_sizes = [stats[index].get("size", 0) for index in valid]
         for positions in _bounded_batches(
@@ -963,9 +980,15 @@ class Nfs4FileSystem(AbstractFileSystem):
             if len(batch) == 1 and valid_sizes[positions[0]] > self.max_batch_bytes:
                 index = batch[0]
                 try:
-                    data[index] = self._read_one_streamed(paths[index])
+                    with callback.branched(paths[index], _MEMORY_PATH) as child:
+                        child.set_size(valid_sizes[positions[0]])
+                        data[index] = self._read_one_streamed(
+                            paths[index], callback=child
+                        )
                 except OSError as exc:
                     failures[index] = exc
+                callback.relative_update()
+                reported.add(index)
                 continue
             dat, batch_errors = self._client.read_all_many(
                 [native[index] for index in batch]
@@ -979,6 +1002,11 @@ class Nfs4FileSystem(AbstractFileSystem):
                 failures[index] = _oserror(code, paths[index])
         out = {}
         for i, p in enumerate(paths):
+            if i not in reported:
+                if i in failures:
+                    callback.relative_update()
+                else:
+                    _complete_child(callback, p, _MEMORY_PATH, len(data[i]))
             if i in failures:
                 exc = failures[i]
                 if on_error == "raise":
@@ -990,28 +1018,37 @@ class Nfs4FileSystem(AbstractFileSystem):
                 out[p] = data[i]
         return out
 
-    def _read_one_streamed(self, path):
+    def _read_one_streamed(self, path, callback=DEFAULT_CALLBACK):
         """Read one result incrementally when it exceeds the batch byte cap."""
         output = io.BytesIO()
-        self._copy_remote_to_fileobj(path, output)
+        self._copy_remote_to_fileobj(path, output, callback=callback)
         return output.getvalue()
 
-    def cat(self, path, recursive=False, on_error="raise", **kwargs):
+    def cat(
+        self,
+        path,
+        recursive=False,
+        on_error="raise",
+        callback=DEFAULT_CALLBACK,
+        **kwargs,
+    ):
+        callback = Callback.as_callback(callback)
         if isinstance(path, str):
             paths = self.expand_path(path, recursive=recursive, **kwargs)
             if len(paths) == 1 and paths[0] == self._strip_protocol(path):
                 # Single literal path: cat_file semantics (raise on error).
-                return self.cat_file(paths[0], **kwargs)
-            return self._cat_batch(paths, on_error)
+                return self.cat_file(paths[0], callback=callback, **kwargs)
+            return self._cat_batch(paths, on_error, callback=callback)
         paths = [self._strip_protocol(p) for p in path]
         if recursive:
             expanded = []
             for p in paths:
                 expanded.extend(self.find(p, withdirs=False))
             paths = expanded
-        return self._cat_batch(paths, on_error)
+        return self._cat_batch(paths, on_error, callback=callback)
 
-    def cat_file(self, path, start=None, end=None, **kwargs):
+    def cat_file(self, path, start=None, end=None, callback=DEFAULT_CALLBACK, **kwargs):
+        callback = Callback.as_callback(callback)
         internal = self._strip_protocol(path)
         size = None
         if (start is not None and start < 0) or (end is not None and end < 0):
@@ -1022,17 +1059,29 @@ class Nfs4FileSystem(AbstractFileSystem):
             data, errors = self._client.read_all_many([self._native_path(internal)])
             if errors:
                 raise _oserror(errors[0], internal)
-            return data[0] or b""
+            result = data[0] or b""
+            _complete_callback(callback, len(result))
+            return result
         data, errors = self._client.read_many(
             [self._native_path(internal)], [start], [end]
         )
         if errors:
             raise _oserror(errors[0], internal)
-        return data[0]
+        result = data[0] or b""
+        _complete_callback(callback, len(result))
+        return result
 
     def cat_ranges(
-        self, paths, starts, ends, max_gap=None, on_error="return", **kwargs
+        self,
+        paths,
+        starts,
+        ends,
+        max_gap=None,
+        on_error="return",
+        callback=DEFAULT_CALLBACK,
+        **kwargs,
     ):
+        callback = Callback.as_callback(callback)
         if max_gap is not None:
             raise NotImplementedError("max_gap is not supported")
         if not isinstance(paths, list):
@@ -1043,6 +1092,7 @@ class Nfs4FileSystem(AbstractFileSystem):
             ends = [ends] * len(paths)
         if len(starts) != len(paths) or len(ends) != len(paths):
             raise ValueError("starts/ends must match paths")
+        callback.set_size(len(paths))
         internals = [self._strip_protocol(p) for p in paths]
         native = [self._native_path(p) for p in internals]
         errors = {}
@@ -1099,30 +1149,76 @@ class Nfs4FileSystem(AbstractFileSystem):
         for i, p in enumerate(internals):
             if i in validation_errors:
                 out.append(validation_errors[i])
+                callback.relative_update()
             elif i in errors:
                 exc = _oserror(errors[i], p)
                 if on_error == "return":
                     out.append(exc)
+                    callback.relative_update()
                 else:
+                    callback.relative_update()
                     raise exc
             else:
-                out.append(data[i] or b"")
+                result = data[i] or b""
+                out.append(result)
+                _complete_child(callback, p, _MEMORY_PATH, len(result))
         return out
 
-    def _write_batch(self, paths, values, mode="overwrite"):
+    def _write_batch(
+        self,
+        paths,
+        values,
+        mode="overwrite",
+        callback=None,
+        callback_pairs=None,
+    ):
         native = [self._native_path(p) for p in paths]
+        datas = [v if isinstance(v, bytes) else bytes(v) for v in values]
+        is_bulk = callback_pairs is not None
+        if callback is not None:
+            callback.set_size(len(paths) if is_bulk else len(datas[0]))
+
+        def report(index, action=None):
+            size = len(datas[index])
+            if callback is None:
+                if action is not None:
+                    action(None)
+                return
+            if is_bulk:
+                with callback.branched(*callback_pairs[index]) as child:
+                    child.set_size(size)
+                    if action is None:
+                        child.relative_update(size)
+                    else:
+                        action(child)
+                callback.relative_update()
+            elif action is None:
+                callback.relative_update(size)
+            else:
+                action(callback)
+
         if mode == "create":
-            for path, value in zip(paths, values):
-                self._write_one_exclusive(path, value)
+            for index, path in enumerate(paths):
+                report(
+                    index,
+                    lambda child, i=index, p=path: self._write_one_exclusive(
+                        p, datas[i], callback=child
+                    ),
+                )
             return
         if mode != "overwrite":
             raise ValueError("mode must be 'overwrite' or 'create'")
-        datas = [v if isinstance(v, bytes) else bytes(v) for v in values]
         for batch in _bounded_batches(
             [len(data) for data in datas], self.batch_size, self.max_batch_bytes
         ):
             if len(batch) == 1 and len(datas[batch[0]]) > self.max_batch_bytes:
-                self._write_one_streamed(paths[batch[0]], datas[batch[0]])
+                index = batch[0]
+                report(
+                    index,
+                    lambda child, i=index: self._write_one_streamed(
+                        paths[i], datas[i], callback=child
+                    ),
+                )
                 continue
             batch_native = [native[i] for i in batch]
             batch_datas = [datas[i] for i in batch]
@@ -1138,8 +1234,10 @@ class Nfs4FileSystem(AbstractFileSystem):
                 }
                 self._ensure_dirs(list(parents), 0o755)
                 self._client.write_many(batch_native, batch_datas, truncate=True)
+            for index in batch:
+                report(index)
 
-    def _write_one_streamed(self, path, value):
+    def _write_one_streamed(self, path, value, callback=None):
         """Overwrite one in-memory value with bounded native write calls."""
         internal = self._strip_protocol(path)
         parent = posixpath.dirname(internal)
@@ -1148,9 +1246,13 @@ class Nfs4FileSystem(AbstractFileSystem):
         view = memoryview(value)
         with Nfs4File(self, internal, "wb") as remote:
             for offset in range(0, len(view), self.transfer_chunk_size):
-                remote.write(bytes(view[offset : offset + self.transfer_chunk_size]))
+                written = remote.write(
+                    bytes(view[offset : offset + self.transfer_chunk_size])
+                )
+                if callback is not None:
+                    callback.relative_update(written)
 
-    def _write_one_exclusive(self, path, value):
+    def _write_one_exclusive(self, path, value, callback=None):
         """Atomically create one path with O_EXCL and bounded writes."""
         internal = self._strip_protocol(path)
         parent = posixpath.dirname(internal)
@@ -1168,6 +1270,8 @@ class Nfs4FileSystem(AbstractFileSystem):
                 if written <= 0:
                     raise OSError(errno.EIO, "short exclusive write", internal)
                 offset += written
+                if callback is not None:
+                    callback.relative_update(written)
             completed = True
         except ConnectionError as exc:
             # The server may have completed the create or the last write.
@@ -1203,7 +1307,7 @@ class Nfs4FileSystem(AbstractFileSystem):
                     break
                 remote.write(chunk)
 
-    def _copy_remote_to_fileobj(self, path, output):
+    def _copy_remote_to_fileobj(self, path, output, callback=None):
         """Stream one remote file into a writable local file object."""
         with self.open(path, "rb") as remote:
             while True:
@@ -1211,20 +1315,40 @@ class Nfs4FileSystem(AbstractFileSystem):
                 if not chunk:
                     break
                 output.write(chunk)
+                if callback is not None:
+                    callback.relative_update(len(chunk))
 
-    def pipe(self, path, value=None, **kwargs):
+    def pipe(self, path, value=None, callback=DEFAULT_CALLBACK, **kwargs):
+        callback = Callback.as_callback(callback)
         if isinstance(path, str):
-            paths = [self._strip_protocol(path)]
-            values = [value if value is not None else b""]
+            mode = kwargs.pop("mode", "overwrite")
+            return self.pipe_file(
+                path,
+                value if value is not None else b"",
+                mode=mode,
+                callback=callback,
+                **kwargs,
+            )
         elif isinstance(path, dict):
             paths = [self._strip_protocol(k) for k in path]
             values = list(path.values())
         else:
             raise ValueError("path must be str or dict")
-        self._write_batch(paths, values, kwargs.get("mode", "overwrite"))
+        self._write_batch(
+            paths,
+            values,
+            kwargs.get("mode", "overwrite"),
+            callback=callback,
+            callback_pairs=[(_MEMORY_PATH, path) for path in paths],
+        )
 
-    def pipe_file(self, path, value, mode="overwrite", **kwargs):
-        self._write_batch([self._strip_protocol(path)], [value], mode)
+    def pipe_file(
+        self, path, value, mode="overwrite", callback=DEFAULT_CALLBACK, **kwargs
+    ):
+        callback = Callback.as_callback(callback)
+        self._write_batch(
+            [self._strip_protocol(path)], [value], mode, callback=callback
+        )
 
     # -- batched local <-> remote transfer --------------------------------
 
@@ -1239,6 +1363,7 @@ class Nfs4FileSystem(AbstractFileSystem):
     ):
         """Copy remote files to local, fetching every file in one read_allv
         batch instead of one round trip per file."""
+        callback = Callback.as_callback(callback)
         from fsspec.implementations.local import (
             LocalFileSystem,
             make_path_posix,
@@ -1302,7 +1427,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         for i, (remote_path, local_path) in enumerate(zip(rpaths, lpaths)):
             if stats[i] is not None and stats[i]["type"] == "directory":
                 local.makedirs(local_path, exist_ok=True)
-                callback.relative_update(0)
+                callback.relative_update()
             else:
                 pairs.append(
                     (
@@ -1329,6 +1454,7 @@ class Nfs4FileSystem(AbstractFileSystem):
                                     break
                                 out.write(chunk)
                                 child.relative_update(len(chunk))
+                callback.relative_update()
                 continue
             selected = [pairs[i] for i in batch]
             native = [
@@ -1347,6 +1473,7 @@ class Nfs4FileSystem(AbstractFileSystem):
                         child.set_size(len(buf))
                         out.write(buf)
                         child.relative_update(len(buf))
+                callback.relative_update()
 
     def put(
         self,
@@ -1359,6 +1486,7 @@ class Nfs4FileSystem(AbstractFileSystem):
     ):
         """Copy local files to remote, writing every file in one writev batch
         instead of one round trip per file."""
+        callback = Callback.as_callback(callback)
         from fsspec.implementations.local import (
             LocalFileSystem,
             make_path_posix,
@@ -1407,7 +1535,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         for local_path, remote_path in zip(lpaths, rpaths):
             if os.path.isdir(local_path):
                 remote_dirs.append(remote_path)
-                callback.relative_update(0)
+                callback.relative_update()
             else:
                 pairs.append((local_path, remote_path))
         if remote_dirs:
@@ -1433,6 +1561,7 @@ class Nfs4FileSystem(AbstractFileSystem):
                                 break
                             remote.write(chunk)
                             child.relative_update(len(chunk))
+                callback.relative_update()
                 continue
             selected = [pairs[i] for i in batch]
             datas = []
@@ -1447,6 +1576,7 @@ class Nfs4FileSystem(AbstractFileSystem):
                 with callback.branched(local_path, remote_path) as child:
                     child.set_size(len(buf))
                     child.relative_update(len(buf))
+                callback.relative_update()
 
     # -- open / file objects ----------------------------------------------
 
@@ -1593,7 +1723,7 @@ class Nfs4FileSystem(AbstractFileSystem):
             [(self._native_path(a), self._native_path(b)) for a, b in pairs]
         )
 
-    def _copy_recursive(self, src, dst, symlinks=False):
+    def _copy_recursive(self, src, dst, symlinks=False, callback=DEFAULT_CALLBACK):
         """Copy a directory tree with batched walk/mkdir/copy calls."""
         native_src = self._native_path(src)
         src = src.rstrip("/") or "/"
@@ -1619,37 +1749,48 @@ class Nfs4FileSystem(AbstractFileSystem):
                 else:
                     pairs.append((child_int, dest))
 
+        callback.set_size(len(pairs) + len(symlink_pairs))
         self._ensure_dirs(list(dest_dirs), 0o755)
-        if pairs:
-            native_pairs = [
-                (self._native_path(a), self._native_path(b)) for a, b in pairs
-            ]
-            _, errors = self._client.copy_many(native_pairs)
-            if errors:
-                i = min(errors)
-                raise _oserror(errors[i], pairs[i][0])
+        self._copy_pairs(
+            pairs,
+            "raise",
+            callback=callback,
+            callback_is_parent=True,
+            set_callback_size=False,
+        )
         for s, d in symlink_pairs:
             target = self.readlink(s)
             self.symlink(target, d)
+            _complete_child(callback, s, d, 0)
 
-    def cp_file(self, path1, path2, **kwargs):
+    def cp_file(self, path1, path2, callback=DEFAULT_CALLBACK, **kwargs):
         """Copy a single file (or create a directory) between two paths."""
+        callback = Callback.as_callback(callback)
         src = self._strip_protocol(path1)
         dst = self._strip_protocol(path2)
         info = self.info(src)
         if info["type"] == "directory":
             self._ensure_dirs([dst], 0o755)
+            _complete_callback(callback, 0)
             return
         if info["type"] != "file":
             raise FileNotFoundError(src)
         parent = self._parent(dst)
         if self.auto_mkdir and parent not in ("", "/"):
             self._ensure_dirs([parent], 0o755)
-        self._copy_pairs([(src, dst)], "raise")
+        self._copy_pairs([(src, dst)], "raise", callback=callback)
 
     def copy(
-        self, path1, path2, recursive=False, maxdepth=None, on_error=None, **kwargs
+        self,
+        path1,
+        path2,
+        recursive=False,
+        maxdepth=None,
+        on_error=None,
+        callback=DEFAULT_CALLBACK,
+        **kwargs,
     ):
+        callback = Callback.as_callback(callback)
         if on_error is None:
             on_error = "ignore" if recursive else "raise"
         if isinstance(path1, list) and isinstance(path2, list):
@@ -1659,7 +1800,9 @@ class Nfs4FileSystem(AbstractFileSystem):
                 (self._strip_protocol(a), self._strip_protocol(b))
                 for a, b in zip(path1, path2)
             ]
-            self._copy_pairs(pairs, on_error)
+            self._copy_pairs(
+                pairs, on_error, callback=callback, callback_is_parent=True
+            )
             return
         # Batched tree copy for the plain "directory -> new name" case.
         if (
@@ -1682,27 +1825,91 @@ class Nfs4FileSystem(AbstractFileSystem):
                 if errors[i] != errno.ENOENT:
                     raise _oserror(errors[i], (src, dst)[i])
             if src_is_dir and not dst_is_dir:
-                self._copy_recursive(src, dst, kwargs.get("symlinks", False))
+                self._copy_recursive(
+                    src,
+                    dst,
+                    kwargs.get("symlinks", False),
+                    callback=callback,
+                )
                 return
-        # Everything else (globs, trailing-slash semantics, maxdepth, missing
-        # parents) follows the base implementation, which resolves paths via
-        # expand_path/other_paths and calls cp_file per pair.
-        return super().copy(
-            path1,
-            path2,
-            recursive=recursive,
-            maxdepth=maxdepth,
-            on_error=on_error,
-            **kwargs,
+        # Resolve globs and trailing-slash/maxdepth cases like fsspec's base
+        # implementation, then retain vectorized stat/copy operations and a
+        # single parent callback for the complete transfer.
+        from fsspec.implementations.local import trailing_sep
+        from fsspec.utils import other_paths
+
+        source_is_str = isinstance(path1, str)
+        paths1 = self.expand_path(
+            path1, recursive=recursive, maxdepth=maxdepth, **kwargs
         )
+        if source_is_str and (not recursive or maxdepth is not None):
+            paths1 = [p for p in paths1 if not (trailing_sep(p) or self.isdir(p))]
+            if not paths1:
+                callback.set_size(0)
+                return
+        source_is_file = len(paths1) == 1
+        dest_is_dir = isinstance(path2, str) and (
+            trailing_sep(path2) or self.isdir(path2)
+        )
+        exists = source_is_str and (
+            (has_magic(path1) and source_is_file)
+            or (not has_magic(path1) and dest_is_dir and not trailing_sep(path1))
+        )
+        paths2 = other_paths(paths1, path2, exists=exists, flatten=not source_is_str)
+        pairs = [
+            (self._strip_protocol(a), self._strip_protocol(b))
+            for a, b in zip(paths1, paths2)
+        ]
+        callback.set_size(len(pairs))
+        stats, errors = self._client.stat_many(
+            [self._native_path(src) for src, _ in pairs]
+        )
+        file_pairs = []
+        dir_pairs = []
+        first_error = None
+        for i, ((src, dst), stat) in enumerate(zip(pairs, stats)):
+            if i in errors:
+                callback.relative_update()
+                if on_error == "raise" and first_error is None:
+                    first_error = _oserror(errors[i], src)
+            elif stat is not None and stat["type"] == "directory":
+                dir_pairs.append((src, dst))
+            elif stat is not None and stat["type"] == "file":
+                file_pairs.append((src, dst))
+            else:
+                callback.relative_update()
+                if first_error is None:
+                    first_error = FileNotFoundError(src)
+        if dir_pairs:
+            self._ensure_dirs([dst for _, dst in dir_pairs], 0o755)
+            for src, dst in dir_pairs:
+                _complete_child(callback, src, dst, 0)
+        self._copy_pairs(
+            file_pairs,
+            on_error,
+            callback=callback,
+            callback_is_parent=True,
+            set_callback_size=False,
+        )
+        if first_error is not None:
+            raise first_error
 
     cp = copy
 
-    def _copy_pairs(self, pairs, on_error):
+    def _copy_pairs(
+        self,
+        pairs,
+        on_error,
+        callback=None,
+        callback_is_parent=False,
+        set_callback_size=True,
+    ):
+        if callback is not None and set_callback_size and callback_is_parent:
+            callback.set_size(len(pairs))
         if not pairs:
             return
         native_pairs = [(self._native_path(a), self._native_path(b)) for a, b in pairs]
-        _, errors = self._client.copy_many(native_pairs)
+        copied, errors = self._client.copy_many(native_pairs)
         if errors and all(err == 2 for err in errors.values()):
             if self.auto_mkdir:
                 # Missing destination parents: create them once, then retry.
@@ -1713,7 +1920,17 @@ class Nfs4FileSystem(AbstractFileSystem):
                     if parent not in ("", "/")
                 ]
                 self._ensure_dirs(internal_parents, 0o755)
-                _, errors = self._client.copy_many(native_pairs)
+                copied, errors = self._client.copy_many(native_pairs)
+        if callback is not None:
+            for i, (src, dst) in enumerate(pairs):
+                if i in errors or copied[i] is None:
+                    if callback_is_parent:
+                        callback.relative_update()
+                    continue
+                if callback_is_parent:
+                    _complete_child(callback, src, dst, copied[i])
+                else:
+                    _complete_callback(callback, copied[i])
         if errors:
             i = min(errors)
             exc = _oserror(errors[i], pairs[i][0])

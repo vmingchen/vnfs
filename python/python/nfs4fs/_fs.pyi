@@ -101,6 +101,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         path: Union[Path, Sequence[Path]],
         recursive: bool = False,
         on_error: str = "raise",
+        callback: Any = ...,
         **kwargs: Any,
     ) -> Union[bytes, dict[str, Union[bytes, BaseException]]]: ...
     def cat_file(
@@ -108,6 +109,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         path: Path,
         start: Optional[int] = None,
         end: Optional[int] = None,
+        callback: Any = ...,
         **kwargs: Any,
     ) -> bytes: ...
     def cat_ranges(
@@ -117,12 +119,14 @@ class Nfs4FileSystem(AbstractFileSystem):
         ends: Union[Optional[int], Sequence[Optional[int]]],
         max_gap: Optional[int] = None,
         on_error: str = "return",
+        callback: Any = ...,
         **kwargs: Any,
     ) -> list[Union[bytes, BaseException]]: ...
     def pipe(
         self,
         path: Union[Path, Mapping[Path, BytesLike]],
         value: Optional[BytesLike] = None,
+        callback: Any = ...,
         **kwargs: Any,
     ) -> None: ...
     def pipe_file(
@@ -130,6 +134,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         path: Path,
         value: BytesLike,
         mode: str = "overwrite",
+        callback: Any = ...,
         **kwargs: Any,
     ) -> None: ...
     def get(
@@ -178,7 +183,9 @@ class Nfs4FileSystem(AbstractFileSystem):
         maxdepth: Optional[int] = None,
         **kwargs: Any,
     ) -> None: ...
-    def cp_file(self, path1: Path, path2: Path, **kwargs: Any) -> None: ...
+    def cp_file(
+        self, path1: Path, path2: Path, callback: Any = ..., **kwargs: Any
+    ) -> None: ...
     def copy(
         self,
         path1: Union[Path, Sequence[Path]],
@@ -186,6 +193,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         recursive: bool = False,
         maxdepth: Optional[int] = None,
         on_error: Optional[str] = None,
+        callback: Any = ...,
         **kwargs: Any,
     ) -> None: ...
     def cp(self, *args: Any, **kwargs: Any) -> None: ...

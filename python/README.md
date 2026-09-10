@@ -110,6 +110,12 @@ The largest benefit comes from giving `fsspec` multiple paths at once:
 `compound_stats()`, and `rpc_stats()` are available on the native client for
 feature inspection and diagnostics.
 
+All data-transfer entry points accept fsspec's `callback=` argument. Bulk
+operations (`cat`, `cat_ranges`, `pipe`, `get`, `put`, and `copy`) report item
+progress on the parent callback and byte progress on a branched callback for
+each file. Single-file operations report bytes directly, and oversized
+streaming transfers update after every chunk.
+
 ## Production notes
 
 - One filesystem instance owns one native session protected by a mutex.

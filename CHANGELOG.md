@@ -5,6 +5,12 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+### Added
+
+- Complete fsspec progress callbacks for vectorized reads, writes, local
+  transfers, and server-side copies, including per-file byte progress and
+  parent completion tracking.
+
 ### Fixed
 
 - NFS vector lookup batches now distinguish the item that failed from the
