@@ -1,6 +1,6 @@
 [package]
 name = "vnfs"
-version = "0.0.6"
+version = "0.0.7"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Protocol-neutral vectorized filesystem API for NFS, SMB, and local files"
