@@ -232,7 +232,12 @@ def run_correctness_suite(fs):
     if symlinks:
         fs.symlink("target.txt", "nfs4:///rel-link")
         assert fs.readlink("nfs4:///rel-link") == "target.txt"
-        assert fs.ls("nfs4:///", detail=True)[0]["islink"] in (True, False)
+        rel_link = next(
+            entry
+            for entry in fs.ls("nfs4:///", detail=True)
+            if entry["name"].endswith("/rel-link")
+        )
+        assert rel_link["islink"] is True
         # A dangling symlink still exists (lstat semantics).
         fs.symlink("no-such-target", "nfs4:///dangling")
         assert fs.exists("nfs4:///dangling")

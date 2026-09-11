@@ -426,8 +426,8 @@ def test_bulk_namespace_invalidation_scans_dircache_at_most_once(cached_fs):
     assert CountingPath.prefix_checks <= 32
 
 
-@pytest.mark.parametrize("fs_fixture", ["dummy_fs", "nfs_fs", "smb_fs"])
-def test_listing_cache_smoke_on_every_backend(request, fs_fixture):
+@pytest.mark.parametrize("fs_fixture", ["nfs_fs", "smb_fs"])
+def test_listing_cache_smoke_on_network_backends(request, fs_fixture):
     fs = request.getfixturevalue(fs_fixture)
     fs.dircache.use_listings_cache = True
     calls = _count_calls(fs._client, "listdir")

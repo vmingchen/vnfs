@@ -36,8 +36,9 @@ def test_server_can_be_taken_from_url(tmp_path):
         backend="dummy",
         dummy_root=str(tmp_path / "url-root"),
     )
-    assert fs.host == "nfs.example"
-    assert path == "/data/file.bin"
+    with fs:
+        assert fs.host == "nfs.example"
+        assert path == "/data/file.bin"
 
 
 def test_url_rejects_embedded_credentials_and_query_strings():
@@ -48,12 +49,12 @@ def test_url_rejects_embedded_credentials_and_query_strings():
 
 
 def test_vfsi_protocol_alias_uses_neutral_urls(tmp_path):
-    fs = fsspec.filesystem(
+    with fsspec.filesystem(
         "vfsi", backend="dummy", dummy_root=str(tmp_path / "vfsi-root")
-    )
-    fs.pipe_file("vfsi:///f.txt", b"data")
-    assert fs.cat_file("vfsi:///f.txt") == b"data"
-    assert fs.info("vfsi:///f.txt")["name"] == "vfsi:///f.txt"
+    ) as fs:
+        fs.pipe_file("vfsi:///f.txt", b"data")
+        assert fs.cat_file("vfsi:///f.txt") == b"data"
+        assert fs.info("vfsi:///f.txt")["name"] == "vfsi:///f.txt"
 
 
 def test_dummy_root_is_isolated(dummy_fs, tmp_path):
@@ -177,12 +178,12 @@ def test_pipe_missing_parent_raises_by_default(dummy_fs):
 
 
 def test_pipe_auto_mkdir_creates_parents(tmp_path):
-    fs = fsspec.filesystem(
+    with fsspec.filesystem(
         "nfs4", backend="dummy", dummy_root=str(tmp_path / "root"), auto_mkdir=True
-    )
-    fs.pipe({"nfs4:///a/deep/dir/a.txt": b"x"})
-    assert fs.cat_file("nfs4:///a/deep/dir/a.txt") == b"x"
-    assert fs.isdir("nfs4:///a/deep/dir")
+    ) as fs:
+        fs.pipe({"nfs4:///a/deep/dir/a.txt": b"x"})
+        assert fs.cat_file("nfs4:///a/deep/dir/a.txt") == b"x"
+        assert fs.isdir("nfs4:///a/deep/dir")
 
 
 def test_pipe_existing_target_and_parent(dummy_fs):

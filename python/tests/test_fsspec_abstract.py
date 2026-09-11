@@ -19,22 +19,7 @@ from fsspec.tests.abstract.open import AbstractOpenTests
 from fsspec.tests.abstract.pipe import AbstractPipeTests
 from fsspec.tests.abstract.put import AbstractPutTests
 
-
-def _nfs_config():
-    host = os.environ.get("VFSI_NFS_SERVER", "127.0.0.1")
-    value = os.environ.get("VFSI_NFS_MINOR")
-    return host, int(value) if value else None
-
-
-def _nfs_reachable(host, minor_version):
-    from nfs4fs import _native
-
-    try:
-        client = _native.NfsClient(host, minor_version=minor_version)
-        client.shutdown()
-        return True
-    except Exception:
-        return False
+from ._servers import nfs_config, nfs_reachable
 
 
 class Nfs4AbstractFixtures(AbstractFixtures):
@@ -75,11 +60,11 @@ class Nfs4AbstractFixtures(AbstractFixtures):
                 pass
             fs.close()
             return
-        host, minor_version = _nfs_config()
-        if not _nfs_reachable(host, minor_version):
+        host, minor_version = nfs_config()
+        if not nfs_reachable(host, minor_version):
             if os.environ.get("VFSI_NFS_REQUIRED") == "1":
                 pytest.fail(f"required NFS server {host!r} is not reachable")
-            pytest.skip("local NFSv4.1 server (127.0.0.1) is not reachable")
+            pytest.skip(f"NFS server {host!r} is not reachable")
         nfs_root = f"git/nfs4fs_abstract_{os.getpid()}_{uuid.uuid4().hex[:8]}"
         fs = fsspec.filesystem(
             "nfs4",

@@ -7,6 +7,8 @@ import fsspec
 import nfs4fs  # noqa: F401  (registers the "nfs4" protocol)
 import pytest
 
+from ._servers import nfs_config, nfs_reachable
+
 
 def _required(name):
     return os.environ.get(name) == "1"
@@ -20,31 +22,14 @@ def dummy_fs(tmp_path):
     fs.close()
 
 
-def _nfs_config():
-    host = os.environ.get("VFSI_NFS_SERVER", "127.0.0.1")
-    value = os.environ.get("VFSI_NFS_MINOR")
-    return host, int(value) if value else None
-
-
-def _nfs_reachable(host, minor_version):
-    from nfs4fs import _native
-
-    try:
-        client = _native.NfsClient(host, minor_version=minor_version)
-        client.shutdown()
-        return True
-    except Exception:
-        return False
-
-
 @pytest.fixture
 def nfs_fs():
     """An NFS-backed filesystem under the ubuntu-writable /export/git area."""
-    host, minor_version = _nfs_config()
-    if not _nfs_reachable(host, minor_version):
+    host, minor_version = nfs_config()
+    if not nfs_reachable(host, minor_version):
         if _required("VFSI_NFS_REQUIRED"):
             pytest.fail(f"required NFS server {host!r} is not reachable")
-        pytest.skip("local NFSv4.1 server (127.0.0.1) is not reachable")
+        pytest.skip(f"NFS server {host!r} is not reachable")
     root = f"git/nfs4fs_it_{os.getpid()}_{uuid.uuid4().hex[:8]}"
     fs = fsspec.filesystem("nfs4", host=host, root=root, minor_version=minor_version)
     fs.mkdir("nfs4:///", create_parents=True)

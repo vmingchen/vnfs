@@ -66,16 +66,20 @@ def test_round_trip_bounds(nfs_fs):
 
     # OpenFiles: one merged openv compound on enter, one closev on exit.
     open_files = fsspec.open_files(
-        "nfs4:///rt/of_*.txt", mode="wb", num=n, host=fs.host, root=fs._root
+        "nfs4:///rt/of_*.txt",
+        mode="wb",
+        num=n,
+        host=fs.host,
+        root=fs._root,
+        minor_version=fs.minor_version,
     )
     fs._client.compound_stats()
-    files = open_files.__enter__()
-    open_count = fs._client.compound_stats()[0]
-    assert open_count == 1, open_count
-    for f in files:
-        f.write(b"x" * 16)
-    fs._client.compound_stats()
-    open_files.__exit__(None, None, None)
+    with open_files as files:
+        open_count = fs._client.compound_stats()[0]
+        assert open_count == 1, open_count
+        for f in files:
+            f.write(b"x" * 16)
+        fs._client.compound_stats()
     commit_count = fs._client.compound_stats()[0]
     assert commit_count == 1, commit_count
 
@@ -147,15 +151,17 @@ def test_open_files_reads_are_batched(nfs_fs):
     paths = [_unique(nfs_fs, f"ofr/{i}.txt") for i in range(10)]
     fs.pipe({p: b"hello" for p in paths})
     open_files = fsspec.open_files(
-        "nfs4:///ofr/*.txt", mode="rb", host=fs.host, root=fs._root
+        "nfs4:///ofr/*.txt",
+        mode="rb",
+        host=fs.host,
+        root=fs._root,
+        minor_version=fs.minor_version,
     )
     fs._client.compound_stats()
-    files = open_files.__enter__()
-    enter_count = fs._client.compound_stats()[0]
-    assert enter_count < 8, enter_count
-    contents = [f.read() for f in files]
-    for f in files:
-        f.close()
+    with open_files as files:
+        enter_count = fs._client.compound_stats()[0]
+        assert enter_count < 8, enter_count
+        contents = [f.read() for f in files]
     assert contents == [b"hello"] * 10
 
 
@@ -163,24 +169,25 @@ def test_compound_size_limit_is_configurable(nfs_fs):
     """fsspec.filesystem('nfs4', compound_size_limit=...) controls the
     per-compound payload cap: a small cap splits one pipe into several
     compounds, and the data still round-trips."""
-    fs = fsspec.filesystem(
+    with fsspec.filesystem(
         "nfs4",
-        host="127.0.0.1",
+        host=nfs_fs.host,
         root=nfs_fs._root + "_limit",
+        minor_version=nfs_fs.minor_version,
         compound_size_limit=64 * 1024,
-    )
-    fs.mkdir("nfs4:///", create_parents=True)
-    try:
-        paths = [f"nfs4:///f{i}.txt" for i in range(4)]
-        data = b"x" * 64 * 1024
-        fs._client.compound_stats()
-        fs.pipe({p: data for p in paths})
-        count = fs._client.compound_stats()[0]
-        # 64 KiB writes under a 64 KiB cap: one write compound per file,
-        # with the truncate fused into each write compound (no separate
-        # truncate round trip).
-        assert count >= 4 and count <= 6, count
-        for p in paths:
-            assert fs.cat_file(p) == data
-    finally:
-        fs.rm("nfs4:///", recursive=True)
+    ) as fs:
+        fs.mkdir("nfs4:///", create_parents=True)
+        try:
+            paths = [f"nfs4:///f{i}.txt" for i in range(4)]
+            data = b"x" * 64 * 1024
+            fs._client.compound_stats()
+            fs.pipe({p: data for p in paths})
+            count = fs._client.compound_stats()[0]
+            # 64 KiB writes under a 64 KiB cap: one write compound per file,
+            # with the truncate fused into each write compound (no separate
+            # truncate round trip).
+            assert count >= 4 and count <= 6, count
+            for p in paths:
+                assert fs.cat_file(p) == data
+        finally:
+            fs.rm("nfs4:///", recursive=True)

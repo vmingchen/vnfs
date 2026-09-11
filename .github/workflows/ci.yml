@@ -273,7 +273,9 @@ jobs:
           ../.venv/bin/python -m pytest \
             tests/test_nfs_integration.py \
             tests/test_behavior_parity.py \
-            tests/test_fsspec_abstract.py
+            tests/test_fsspec_abstract.py \
+            tests/test_callbacks.py::test_callback_smoke_on_network_backends \
+            tests/test_listing_cache.py::test_listing_cache_smoke_on_network_backends
       - name: Show server log after failure
         if: failure()
         run: cat /tmp/ganesha.log
@@ -341,7 +343,9 @@ jobs:
           ../.venv/bin/python -m pytest \
             tests/test_nfs_integration.py \
             tests/test_behavior_parity.py \
-            tests/test_fsspec_abstract.py
+            tests/test_fsspec_abstract.py \
+            tests/test_callbacks.py::test_callback_smoke_on_network_backends \
+            tests/test_listing_cache.py::test_listing_cache_smoke_on_network_backends
       - name: Show patched NFS-Ganesha log after failure
         if: failure()
         run: |
@@ -489,7 +493,9 @@ jobs:
           ../.venv/bin/python -m pytest \
             tests/test_smb_integration.py \
             tests/test_behavior_parity.py \
-            tests/test_fsspec_abstract.py
+            tests/test_fsspec_abstract.py \
+            tests/test_callbacks.py::test_callback_smoke_on_network_backends \
+            tests/test_listing_cache.py::test_listing_cache_smoke_on_network_backends
       - name: Show Samba log after failure
         if: failure()
         run: sudo journalctl -u smbd --no-pager
