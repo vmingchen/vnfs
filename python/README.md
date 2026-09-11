@@ -116,6 +116,35 @@ progress on the parent callback and byte progress on a branched callback for
 each file. Single-file operations report bytes directly, and oversized
 streaming transfers update after every chunk.
 
+## Directory listing cache
+
+Directory listing caching is disabled by default so that NFS and SMB
+namespaces modified by other clients remain immediately visible. Enable a
+bounded-staleness cache with the standard fsspec options:
+
+```python
+fs = fsspec.filesystem(
+    "nfs4",
+    host="nfs.example",
+    root="exports/project",
+    use_listings_cache=True,
+    listings_expiry_time=1.0,
+    max_paths=1024,
+)
+```
+
+`listings_expiry_time` is the TTL in seconds and `max_paths` bounds the number
+of directory paths tracked by fsspec's `DirCache`; it does not bound the number
+of entries inside one directory. `ls(..., refresh=True)` bypasses the cached
+listing. Native vectorized walks populate the cache for the complete subtree,
+so repeated `walk`, `find`, `glob`, and `du` operations can reuse it without
+turning a miss into one request per directory.
+
+nfs4fs invalidates affected listings after its own writes and namespace
+mutations, including uncertain failures. Changes made by another client become
+visible when the TTL expires or when the caller requests a refresh. Use
+`use_listings_cache=False` when any period of staleness is unacceptable.
+
 ## Production notes
 
 - One filesystem instance owns one native session protected by a mutex.

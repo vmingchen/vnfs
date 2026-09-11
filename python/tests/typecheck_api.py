@@ -15,6 +15,9 @@ def use_api(root: Path) -> None:
         transfer_chunk_size=512,
         connect_timeout=2.0,
         request_timeout=3.0,
+        use_listings_cache=True,
+        listings_expiry_time=1.0,
+        max_paths=16,
     )
     fs.pipe_file("/file", b"data")
     info: dict[str, object] = fs.info("/file")
@@ -24,4 +27,6 @@ def use_api(root: Path) -> None:
     handle: Nfs4File = fs.open("/file", "rb")
     assert handle.read() == data
     handle.close()
+    fs.ls("/", refresh=True)
+    fs.invalidate_cache("/")
     fs.close()

@@ -8,6 +8,7 @@ import math
 import os
 import posixpath
 import tempfile
+import threading
 import uuid
 from glob import has_magic
 from urllib.parse import unquote, urlsplit
@@ -232,6 +233,11 @@ class Nfs4File(io.RawIOBase):
         self._readable = self._base_mode in ("r", "r+", "w+", "a+", "x+")
         self._writable = self._base_mode in ("r+", "w", "w+", "a", "a+", "x", "x+")
         if fd is None and self._base_mode in ("w", "w+", "a", "a+", "x", "x+"):
+            # These modes can create a directory entry, and ``w`` can also
+            # truncate it. Invalidate before the native mutation so ambiguous
+            # failures cannot leave stale contents or directory metadata.
+            self.fs._invalidate_namespace([self.path])
+        if fd is None and self._base_mode in ("w", "w+", "a", "a+", "x", "x+"):
             self._ensure_open()
 
     # -- internals ---------------------------------------------------------
@@ -356,6 +362,7 @@ class Nfs4File(io.RawIOBase):
             raise io.UnsupportedOperation("not writable")
         if isinstance(data, str):
             raise TypeError("a bytes-like object is required, not 'str'")
+        self.fs._invalidate_parent_listing(self.path)
         fd = self._ensure_open()
         try:
             if self._base_mode.startswith("a"):
@@ -406,6 +413,7 @@ class Nfs4File(io.RawIOBase):
             raise io.UnsupportedOperation("not writable")
         if size is None:
             size = self._pos
+        self.fs._invalidate_parent_listing(self.path)
         self.fs._client.truncate(self.fs._native_path(self.path), size)
         self._cached_size = size
         return size
@@ -552,6 +560,7 @@ class _VfsiTransaction(Transaction):
     def complete(self, commit=True):
         files = list(self.files)
         self.files.clear()
+        fs = self.fs
         try:
             if not commit:
                 for file in files:
@@ -563,6 +572,7 @@ class _VfsiTransaction(Transaction):
                     file.prepare()
                     prepared.append(file)
                 if prepared:
+                    fs._invalidate_namespace(file.path for file in prepared)
                     self.fs._client.rename_many(
                         [
                             (
@@ -583,9 +593,15 @@ class _VfsiTransaction(Transaction):
                     file.discard()
                 raise
         finally:
-            if self.fs is not None:
-                self.fs._intrans = False
-                self.fs._transaction = None
+            if fs is not None:
+                fs._intrans = False
+                fs._transaction = None
+                # This custom transaction bypasses AbstractFileSystem's normal
+                # end_transaction path, so flush its deferred invalidations.
+                invalidated = list(fs._invalidated_caches_in_transaction)
+                fs._invalidated_caches_in_transaction.clear()
+                for path in invalidated:
+                    fs.invalidate_cache(path)
             self.fs = None
 
 
@@ -604,6 +620,13 @@ class Nfs4FileSystem(AbstractFileSystem):
         API. ``smb`` connects to the SMB2/3 share named by ``share``.
     dummy_root: str or None
         Filesystem root for the dummy backend (a unique temp dir when None).
+    use_listings_cache: bool
+        Cache directory listings when true. Disabled by default because NFS
+        and SMB namespaces are commonly modified by other clients.
+    listings_expiry_time: float or None
+        Number of seconds a cached listing remains valid.
+    max_paths: int or None
+        Maximum number of directory paths retained by fsspec's ``DirCache``.
     """
 
     protocol = "nfs4"
@@ -630,6 +653,9 @@ class Nfs4FileSystem(AbstractFileSystem):
         connect_timeout=10.0,
         request_timeout=5.0,
         auto_reconnect=True,
+        use_listings_cache=False,
+        listings_expiry_time=None,
+        max_paths=None,
         **kwargs,
     ):
         if backend not in {"nfs", "smb", "dummy"}:
@@ -663,7 +689,12 @@ class Nfs4FileSystem(AbstractFileSystem):
         root_parts = [part for part in root.split("/") if part]
         if any(part in {".", ".."} for part in root_parts):
             raise ValueError("root must not contain '.' or '..' components")
-        super().__init__(**kwargs)
+        super().__init__(
+            use_listings_cache=use_listings_cache,
+            listings_expiry_time=listings_expiry_time,
+            max_paths=max_paths,
+            **kwargs,
+        )
         self.host = host
         self.backend = backend
         # Like LocalFileSystem: write-mode operations create missing parent
@@ -701,6 +732,9 @@ class Nfs4FileSystem(AbstractFileSystem):
             ),
             auto_reconnect=self.auto_reconnect,
         )
+        self._dircache_lock = threading.RLock()
+        self._dircache_generation = self._client.generation
+        self._dircache_epoch = 0
 
     @property
     def closed(self):
@@ -709,6 +743,9 @@ class Nfs4FileSystem(AbstractFileSystem):
 
     def close(self):
         """Release the native connection and evict this cached instance."""
+        with self._dircache_lock:
+            self._dircache_epoch += 1
+            self.dircache.clear()
         if not self._client.closed:
             self._client.shutdown()
         token = getattr(self, "_fs_token_", None)
@@ -801,6 +838,150 @@ class Nfs4FileSystem(AbstractFileSystem):
         protocol = self.protocol if isinstance(self.protocol, str) else self.protocol[0]
         return protocol + "://" + internal
 
+    # -- directory listing cache -----------------------------------------
+
+    def _sync_dircache_generation(self):
+        """Reject closed clients and discard cache state after reconnects."""
+        self._client.ensure_ready()
+        generation = self._client.generation
+        with self._dircache_lock:
+            if generation != self._dircache_generation:
+                self._dircache_epoch += 1
+                self.dircache.clear()
+                self._dircache_generation = generation
+
+    def _dircache_epoch_snapshot(self):
+        """Return an epoch that a native listing must match before caching."""
+        self._sync_dircache_generation()
+        with self._dircache_lock:
+            return self._dircache_epoch
+
+    @staticmethod
+    def _copy_listing(infos):
+        """Keep callers from mutating dictionaries retained in ``DirCache``."""
+        return [dict(info) for info in infos]
+
+    def _cached_listing(self, internal):
+        self._sync_dircache_generation()
+        with self._dircache_lock:
+            try:
+                infos = self.dircache[internal]
+            except KeyError:
+                return None
+            return self._copy_listing(infos)
+
+    def _store_listing(self, internal, infos, fill_epoch):
+        # A native operation may have reconnected transparently. Clear cache
+        # entries from the old session before retaining its fresh result.
+        self._sync_dircache_generation()
+        stored = self._copy_listing(infos)
+        with self._dircache_lock:
+            if fill_epoch != self._dircache_epoch:
+                return False
+            self.dircache[internal] = stored
+            return True
+
+    def _evict_dircache(self, subtrees=(), exact=()):
+        """Evict many cache keys atomically with one generation bump/scan."""
+        subtrees = set(subtrees)
+        exact = set(exact)
+        with self._dircache_lock:
+            self._dircache_epoch += 1
+            if "/" in subtrees:
+                self.dircache.clear()
+                return
+            if not subtrees:
+                for key in exact:
+                    self.dircache.pop(key, None)
+                return
+            for key in list(self.dircache):
+                candidate = key
+                in_subtree = False
+                while candidate != "/":
+                    if candidate in subtrees:
+                        in_subtree = True
+                        break
+                    candidate = posixpath.dirname(candidate.rstrip("/")) or "/"
+                if key in exact or in_subtree:
+                    self.dircache.pop(key, None)
+
+    def invalidate_cache(self, path=None):
+        """Discard a cached listing and all cached descendants.
+
+        This follows fsspec's public contract for ``path`` while still calling
+        the base method so invalidations are replayed after transactions.
+        """
+        internal = None if path is None else self._strip_protocol(path)
+        self._evict_dircache(subtrees={"/" if internal is None else internal})
+        super().invalidate_cache(internal)
+
+    def _invalidate_parent_listing(self, path):
+        """Discard only the listing containing ``path``."""
+        internal = self._strip_protocol(path)
+        parent = posixpath.dirname(internal.rstrip("/")) or "/"
+        self._evict_dircache(exact={parent})
+        # Preserve fsspec's deferred transaction invalidation behavior. Its
+        # public invalidation is broader when replayed, which is conservative.
+        super().invalidate_cache(parent)
+
+    def _invalidate_namespace(self, paths):
+        """Invalidate object subtrees, parents, and cached parent metadata."""
+        internals = {self._strip_protocol(path) for path in paths}
+        if not internals:
+            return
+        parents = {
+            posixpath.dirname(internal.rstrip("/")) or "/" for internal in internals
+        }
+        # A namespace mutation changes the containing directory's own mtime,
+        # change attribute, and sometimes nlink. Those attributes are cached
+        # in the listing one level above the containing directory.
+        parent_containers = {
+            posixpath.dirname(parent.rstrip("/")) or "/" for parent in parents
+        }
+        self._evict_dircache(subtrees=internals, exact=parents | parent_containers)
+        for internal in internals | parents | parent_containers:
+            super().invalidate_cache(internal)
+
+    def _infos_from_native_entries(self, entries):
+        infos = [
+            _info_dict(self._fullpath(self._internalize(entry["name"])), entry)
+            for entry in entries
+        ]
+        infos.sort(key=lambda info: info["name"])
+        return infos
+
+    def _cached_walk_tree(self, root, maxdepth):
+        """Return a complete cached subtree, or ``None`` on any cache miss."""
+        limit = None if maxdepth is None else _depth(root) + maxdepth
+        tree = []
+        pending = [root]
+        while pending:
+            directory = pending.pop()
+            infos = self._cached_listing(directory)
+            if infos is None:
+                return None
+            tree.append((directory, infos))
+            children = []
+            for info in infos:
+                if info["type"] != "directory":
+                    continue
+                child = self._strip_protocol(info["name"])
+                if limit is None or _depth(child) <= limit:
+                    children.append(child)
+            pending.extend(reversed(children))
+        return tree
+
+    def _native_walk_tree(self, internal, fill_epoch):
+        native_tree = self._client.walk(self._native_path(internal), sort=True)
+        self._sync_dircache_generation()
+        tree = []
+        for native_dir, entries in native_tree:
+            directory = self._internalize(native_dir)
+            infos = self._infos_from_native_entries(entries)
+            self._store_listing(directory, infos, fill_epoch)
+            tree.append((directory, infos))
+        return tree
+
     # -- batched directory creation ---------------------------------------
 
     def _ensure_dirs(self, paths, mode=0o755):
@@ -821,6 +1002,12 @@ class Nfs4FileSystem(AbstractFileSystem):
         by_depth = {}
         for p in missing:
             by_depth.setdefault(p.count("/"), []).append(p)
+        internal_missing = [
+            internal
+            for native in missing
+            if self._native_path(internal := self._internalize(native)) == native
+        ]
+        self._invalidate_namespace(internal_missing)
         for depth in sorted(by_depth):
             self._client.mkdir_many(by_depth[depth], mode)
 
@@ -865,20 +1052,27 @@ class Nfs4FileSystem(AbstractFileSystem):
             raise _oserror(errors[0], internal)
         return _info_dict(self._fullpath(internal), stats[0])
 
-    def ls(self, path, detail=True, **kwargs):
+    def ls(self, path, detail=True, refresh=False, **kwargs):
         internal = self._strip_protocol(path)
+        if not refresh:
+            cached = self._cached_listing(internal)
+            if cached is not None:
+                if detail:
+                    return cached
+                return [info["name"] for info in cached]
+        else:
+            self._evict_dircache(exact={internal})
+        fill_epoch = self._dircache_epoch_snapshot()
         try:
             entries = self._client.listdir(self._native_path(internal))
         except NotADirectoryError:
             # The path is a file (or symlink to one): report it directly.
             info = self.info(internal, **kwargs)
             return [info] if detail else [info["name"]]
-        infos = [
-            _info_dict(self._fullpath(self._internalize(e["name"])), e) for e in entries
-        ]
-        infos.sort(key=lambda d: d["name"])
+        infos = self._infos_from_native_entries(entries)
+        self._store_listing(internal, infos, fill_epoch)
         if detail:
-            return infos
+            return self._copy_listing(infos)
         return [d["name"] for d in infos]
 
     def exists(self, path, **kwargs):
@@ -1172,6 +1366,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         callback=None,
         callback_pairs=None,
     ):
+        self._invalidate_namespace(paths)
         native = [self._native_path(p) for p in paths]
         datas = [v if isinstance(v, bytes) else bytes(v) for v in values]
         is_bulk = callback_pairs is not None
@@ -1608,6 +1803,12 @@ class Nfs4FileSystem(AbstractFileSystem):
                 posixpath.dirname(p) for p in paths if posixpath.dirname(p) != "/"
             }
             self._ensure_dirs(list(parents), 0o755)
+        mutating_paths = [
+            path
+            for path, mode in zip(paths, modes)
+            if _normalize_mode(mode) in ("w", "w+", "a", "a+", "x", "x+")
+        ]
+        self._invalidate_namespace(mutating_paths)
         fds = self._client.open_many([self._native_path(p) for p in paths], modes)
         files = [Nfs4File(self, p, m, fd=fd) for p, m, fd in zip(paths, modes, fds)]
         # Read-mode OpenFiles contexts do not call commit_many on exit;
@@ -1636,19 +1837,23 @@ class Nfs4FileSystem(AbstractFileSystem):
         if create_parents:
             self._ensure_dirs([internal], mode)
         else:
+            self._invalidate_namespace([internal])
             self._client.mkdir(self._native_path(internal), mode)
 
     def makedirs(self, path, exist_ok=False):
         self._makedirs_batched([path], exist_ok)
 
     def rmdir(self, path):
-        self._client.remove_many([self._native_path(self._strip_protocol(path))])
+        internal = self._strip_protocol(path)
+        self._invalidate_namespace([internal])
+        self._client.remove_many([self._native_path(internal)])
 
     def rm(self, path, recursive=False, maxdepth=None):
         if isinstance(path, str):
             paths = [self._strip_protocol(path)]
         else:
             paths = [self._strip_protocol(p) for p in path]
+        self._invalidate_namespace(paths)
         if recursive:
             self._rm_recursive(paths)
         else:
@@ -1719,6 +1924,7 @@ class Nfs4FileSystem(AbstractFileSystem):
                 # directory moves the source inside it.
                 dst = posixpath.join(dst, posixpath.basename(src))
             pairs = [(src, dst)]
+        self._invalidate_namespace([path for pair in pairs for path in pair])
         self._client.rename_many(
             [(self._native_path(a), self._native_path(b)) for a, b in pairs]
         )
@@ -1908,6 +2114,7 @@ class Nfs4FileSystem(AbstractFileSystem):
             callback.set_size(len(pairs))
         if not pairs:
             return
+        self._invalidate_namespace([dst for _, dst in pairs])
         native_pairs = [(self._native_path(a), self._native_path(b)) for a, b in pairs]
         copied, errors = self._client.copy_many(native_pairs)
         if errors and all(err == 2 for err in errors.values()):
@@ -1944,6 +2151,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         self._write_batch([internal], [b""])
 
     def symlink(self, target, path, **kwargs):
+        self._invalidate_namespace([path])
         link = self._native_path(self._strip_protocol(path))
         if target.startswith(("/", "nfs4://", "nfs4::", "vfsi://", "vfsi::")):
             # Absolute targets are relative to the filesystem root (chroot
@@ -1957,6 +2165,8 @@ class Nfs4FileSystem(AbstractFileSystem):
         return self._client.readlink(self._native_path(self._strip_protocol(path)))
 
     def hardlink(self, src, dst):
+        self._invalidate_namespace([dst])
+        self._invalidate_parent_listing(src)
         self._client.hardlink(
             self._native_path(self._strip_protocol(src)),
             self._native_path(self._strip_protocol(dst)),
@@ -1968,30 +2178,36 @@ class Nfs4FileSystem(AbstractFileSystem):
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
         detail = kwargs.pop("detail", False)
+        refresh = kwargs.pop("refresh", False)
         internal = self._strip_protocol(path)
-        try:
-            tree = self._client.walk(self._native_path(internal), sort=True)
-        except (FileNotFoundError, OSError) as e:
-            if self.isfile(internal):
-                info = self.info(internal)
-                files = {"": info} if detail else [""]
-                yield internal, [], files
+        tree = None if refresh else self._cached_walk_tree(internal, maxdepth)
+        if tree is None:
+            # A native miss refreshes the complete subtree in one vectorized
+            # walk and removes cached descendants no longer present remotely.
+            self.invalidate_cache(internal)
+            fill_epoch = self._dircache_epoch_snapshot()
+            try:
+                tree = self._native_walk_tree(internal, fill_epoch)
+            except (FileNotFoundError, OSError) as e:
+                if self.isfile(internal):
+                    info = self.info(internal)
+                    files = {"": info} if detail else [""]
+                    yield internal, [], files
+                    return
+                if on_error == "raise":
+                    raise
+                if callable(on_error):
+                    on_error(e)
                 return
-            if on_error == "raise":
-                raise
-            if callable(on_error):
-                on_error(e)
-            return
         by_dir = {}
-        for dir_path, entries in tree:
+        for directory, infos in tree:
             dirs = {}
             files = {}
-            for e in entries:
-                entry_internal = self._internalize(e["name"])
+            for info in infos:
+                entry_internal = self._strip_protocol(info["name"])
                 name = posixpath.basename(entry_internal.rstrip("/"))
-                info = _info_dict(self._fullpath(entry_internal), e)
-                (dirs if e["type"] == "directory" else files)[name] = info
-            by_dir[self._internalize(dir_path)] = (dirs, files)
+                (dirs if info["type"] == "directory" else files)[name] = dict(info)
+            by_dir[directory] = (dirs, files)
         root_depth = _depth(internal)
         order = [
             d for d in by_dir if maxdepth is None or _depth(d) <= root_depth + maxdepth
@@ -2007,22 +2223,21 @@ class Nfs4FileSystem(AbstractFileSystem):
 
     def find(self, path, maxdepth=None, withdirs=False, detail=False, **kwargs):
         internal = self._strip_protocol(path)
+        root_depth = _depth(internal)
         out = {}
         if withdirs and internal != "" and self.isdir(internal):
             out[internal] = self.info(internal)
-        try:
-            tree = self._client.walk(self._native_path(internal), sort=True)
-        except (FileNotFoundError, OSError):
-            tree = []
-        root_depth = _depth(internal)
-        for dir_path, entries in tree:
-            for e in entries:
-                full = self._internalize(e["name"])
+        for _, dirs, files in self.walk(
+            internal, maxdepth=maxdepth, detail=True, **kwargs
+        ):
+            entries = list(files.values())
+            if withdirs:
+                entries.extend(dirs.values() if isinstance(dirs, dict) else [])
+            for info in entries:
+                full = self._strip_protocol(info["name"])
                 if maxdepth is not None and _depth(full) > root_depth + maxdepth:
                     continue
-                if e["type"] == "directory" and not withdirs:
-                    continue
-                out[full] = _info_dict(self._fullpath(full), e)
+                out[full] = dict(info)
         if not out and self.isfile(internal):
             out[internal] = self.info(internal) if withdirs else {}
         names = sorted(out)

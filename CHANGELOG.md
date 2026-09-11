@@ -10,6 +10,8 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 - Complete fsspec progress callbacks for vectorized reads, writes, local
   transfers, and server-side copies, including per-file byte progress and
   parent completion tracking.
+- Opt-in fsspec directory-listing caching with TTL and LRU limits, forced
+  refreshes, cache-aware vectorized traversal, and mutation-safe invalidation.
 
 ### Fixed
 
