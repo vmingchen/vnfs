@@ -42,8 +42,8 @@ nfs4 = "nfs4fs:Nfs4FileSystem"
 vfsi = "nfs4fs:VfsiFileSystem"
 
 [project.optional-dependencies]
-test = ["pytest"]
-dev = ["black", "build", "mypy", "pytest", "ruff", "twine"]
+test = ["hypothesis>=6.100", "pytest"]
+dev = ["black", "build", "hypothesis>=6.100", "mypy", "pytest", "ruff", "twine"]
 
 [tool.mypy]
 python_version = "3.9"

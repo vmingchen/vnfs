@@ -79,7 +79,7 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install maturin '${{ matrix.fsspec }}' pytest
+          .venv/bin/pip install hypothesis maturin '${{ matrix.fsspec }}' pytest
           cd python
           ../.venv/bin/maturin develop
       - run: .venv/bin/python -m pytest python/tests

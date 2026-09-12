@@ -15,6 +15,8 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 - Per-open fsspec read buffering with every registered cache type, bounded
   cross-file prefetch for vectorized `OpenFiles` reads, and opt-in buffered
   write/append waves with disk-spooled memory limits.
+- A shrinkable Hypothesis state-machine suite that differentially checks
+  randomized nfs4fs operation histories against fsspec's local implementation.
 
 ### Fixed
 

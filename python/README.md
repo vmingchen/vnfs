@@ -267,7 +267,7 @@ On Ubuntu/Debian:
 sudo apt-get install clang libclang-dev cmake pkg-config \
   libkrb5-dev libgssglue-dev liburcu-dev
 python -m venv .venv
-.venv/bin/pip install maturin fsspec pytest
+.venv/bin/pip install hypothesis maturin fsspec pytest
 cd python
 ../.venv/bin/maturin develop
 ../.venv/bin/python -m pytest tests
@@ -276,3 +276,14 @@ cd python
 Tests use the local dummy backend unless NFS/SMB integration variables are
 provided. CI runs the same suite against NFSv4.1, NFSv4.2, patched server-side
 COPY, SMB 2.1 guest access, and authenticated SMB 3.1.1.
+
+The default suite includes a deterministic Hypothesis state machine that runs
+randomized filesystem histories against both nfs4fs's dummy backend and
+fsspec's `LocalFileSystem` oracle. It compares public results, exception
+classes, directory trees, and file contents after every step. Increase its
+budget for a longer local fuzz run:
+
+```sh
+NFS4FS_FUZZ_EXAMPLES=1000 NFS4FS_FUZZ_STEPS=100 \
+  ../.venv/bin/python -m pytest tests/test_fuzz_parity.py
+```
