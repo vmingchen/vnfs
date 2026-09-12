@@ -20,6 +20,9 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ### Fixed
 
+- nfs4fs now matches `LocalFileSystem` for direct-open path validation,
+  existing-directory `mkdir`, timestamp-preserving `touch`, non-recursive
+  directory removal errors, negative seeks, and the `read(-1)` range boundary.
 - Per-open and persistent fsspec block caches now honor whole-file reads,
   exclusive block boundaries, and clean cache generations after source UID or
   expiry invalidation, preventing sparse zero-fill, mixed generations, stale

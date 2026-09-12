@@ -113,6 +113,7 @@ def test_known_parts_cache_type(dummy_fs, monkeypatch):
 def test_whole_file_read_keeps_no_open_fast_path(dummy_fs):
     dummy_fs.pipe_file("/whole", b"whole file")
     with dummy_fs.open("/whole", "rb") as file:
+        # Direct open preflights metadata, but does not create a descriptor.
         assert file.read() == b"whole file"
         assert file._fd is None
 
@@ -821,6 +822,13 @@ def test_per_open_blockcache_whole_read_populates_cache(tmp_path):
             (root / "cached").write_bytes(b"WXYZ1234")
             file.seek(0)
             assert file.read() == b"abcdefgh"
+
+
+def test_per_open_blockcache_clamps_read_beyond_eof(dummy_fs):
+    dummy_fs.pipe_file("/short", b"x")
+    with dummy_fs.open("/short", "rb", block_size=8, cache_type="blockcache") as file:
+        assert file.read(16) == b"x"
+        assert file.tell() == 1
 
 
 def test_persistent_blockcache_does_not_mark_sparse_tail_complete(tmp_path):

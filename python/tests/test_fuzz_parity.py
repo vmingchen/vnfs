@@ -99,11 +99,6 @@ class LocalOracleStateMachine(RuleBasedStateMachine):
 
     @rule(directory=st.sampled_from(_DIRS), create_parents=st.booleans())
     def mkdir(self, directory, create_parents):
-        # nfs4fs currently treats mkdir(existing, create_parents=True) as the
-        # idempotent root/bootstrap operation used by its integration fixtures.
-        # Existing-directory semantics are covered by the makedirs rule.
-        if self.local.exists(self._path("local", directory)):
-            return
         self._compare(
             f"mkdir({directory!r}, create_parents={create_parents!r})",
             lambda: self.local.mkdir(
@@ -156,10 +151,6 @@ class LocalOracleStateMachine(RuleBasedStateMachine):
 
     @rule(path=st.sampled_from(_FILES), truncate=st.booleans())
     def touch(self, path, truncate):
-        # VFSI currently has no timestamp-only mutation, so nfs4fs documents
-        # touch(existing, truncate=False) as unsupported.
-        if not truncate and self.local.exists(self._path("local", path)):
-            return
         self._compare(
             f"touch({path!r}, truncate={truncate!r})",
             lambda: self.local.touch(self._path("local", path), truncate=truncate),
@@ -169,12 +160,6 @@ class LocalOracleStateMachine(RuleBasedStateMachine):
 
     @rule(path=st.sampled_from(_FILES + _DIRS), recursive=st.booleans())
     def remove(self, path, recursive):
-        # LocalFileSystem reports ValueError for rm(non-empty directory,
-        # recursive=False), while nfs4fs intentionally follows os.remove and
-        # reports IsADirectoryError. Directory removal itself is fuzzed via
-        # recursive rm; non-recursive rm remains covered for files.
-        if not recursive and self.local.isdir(self._path("local", path)):
-            return
         self._compare(
             f"rm({path!r}, recursive={recursive!r})",
             lambda: self.local.rm(self._path("local", path), recursive=recursive),
@@ -218,20 +203,6 @@ class LocalOracleStateMachine(RuleBasedStateMachine):
         end=st.one_of(st.none(), st.integers(-80, 80)),
     )
     def cat_range(self, path, start, end):
-        if not self.local.isfile(self._path("local", path)):
-            return
-        size = self.local.size(self._path("local", path))
-        normalized_start = 0 if start is None else start
-        if normalized_start < 0:
-            normalized_start = max(0, size + normalized_start)
-        normalized_end = end
-        if normalized_end is not None and normalized_end < 0:
-            normalized_end = size + normalized_end
-        # LocalFileSystem can turn an invalid negative read length into an
-        # unbounded read. nfs4fs intentionally validates this fsspec range
-        # contract, so use local as the oracle only for valid slice bounds.
-        if normalized_end is not None and normalized_end < normalized_start:
-            return
         self._compare(
             f"cat_file({path!r}, start={start!r}, end={end!r})",
             lambda: self.local.cat_file(
@@ -243,11 +214,9 @@ class LocalOracleStateMachine(RuleBasedStateMachine):
     @rule(
         path=st.sampled_from(_FILES + _DIRS),
         reads=st.lists(
-            # A zero-byte read does not force nfs4fs's deliberately lazy read
-            # descriptor open, unlike LocalFileSystem's eager OS open.
             st.tuples(
-                st.integers(0, 80),
-                st.one_of(st.just(-1), st.integers(1, 40)),
+                st.integers(-80, 80),
+                st.integers(-1, 40),
             ),
             min_size=1,
             max_size=8,
@@ -255,12 +224,6 @@ class LocalOracleStateMachine(RuleBasedStateMachine):
         cache_type=st.sampled_from(("none", "readahead", "bytes", "blockcache")),
     )
     def buffered_reads(self, path, reads, cache_type):
-        # LocalFileSystem opens eagerly while nfs4fs defers read OPEN so that
-        # OpenFiles can batch descriptors. Missing paths are compared through
-        # cat_file; handle behavior is compared only once a file exists.
-        if not self.local.isfile(self._path("local", path)):
-            return
-
         def read(fs, backend):
             kwargs = (
                 {"cache_type": cache_type, "block_size": 8} if backend == "nfs" else {}

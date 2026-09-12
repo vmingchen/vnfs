@@ -44,6 +44,7 @@ use crate::vecfs::{
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
 const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
+const FILE_BASIC_INFORMATION: u8 = 4;
 const FILE_END_OF_FILE_INFORMATION: u8 = 20;
 
 #[derive(Debug, Clone)]
@@ -622,6 +623,99 @@ impl SmbVecFs {
             ))
             .map_err(|e| smb_error(e, 0))?;
         require_status(&frame, Command::SetInfo, 0)
+    }
+
+    fn filetime_value(seconds: i64, nanoseconds: u32, index: usize) -> VfResult<u64> {
+        if nanoseconds >= 1_000_000_000 {
+            return Err(VfError::failure(index, ERR_INVAL));
+        }
+        const WINDOWS_EPOCH_SECONDS: i128 = 11_644_473_600;
+        let ticks = (i128::from(seconds) + WINDOWS_EPOCH_SECONDS)
+            .checked_mul(10_000_000)
+            .and_then(|value| value.checked_add(i128::from(nanoseconds / 100)))
+            .filter(|value| (0..=i128::from(u64::MAX)).contains(value))
+            .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+        Ok(ticks as u64)
+    }
+
+    fn set_times_handle(
+        &mut self,
+        file_id: FileId,
+        atime: Option<(i64, u32)>,
+        mtime: Option<(i64, u32)>,
+        index: usize,
+    ) -> VfResult<()> {
+        let access = match atime {
+            Some((seconds, nanoseconds)) => Self::filetime_value(seconds, nanoseconds, index)?,
+            None => 0,
+        };
+        let modified = match mtime {
+            Some((seconds, nanoseconds)) => Self::filetime_value(seconds, nanoseconds, index)?,
+            None => 0,
+        };
+        let mut buffer = Vec::with_capacity(40);
+        buffer.extend_from_slice(&0u64.to_le_bytes()); // creation: unchanged
+        buffer.extend_from_slice(&access.to_le_bytes());
+        buffer.extend_from_slice(&modified.to_le_bytes());
+        buffer.extend_from_slice(&0u64.to_le_bytes()); // change: unchanged
+        buffer.extend_from_slice(&0u32.to_le_bytes()); // attributes: unchanged
+        buffer.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        let request = SetInfoRequest {
+            info_type: InfoType::File,
+            file_info_class: FILE_BASIC_INFORMATION,
+            additional_information: 0,
+            file_id,
+            buffer,
+        };
+        let tree_id = self.tree.tree_id;
+        let frame = self
+            .runtime
+            .block_on(self.client.connection_mut().execute(
+                Command::SetInfo,
+                &request,
+                Some(tree_id),
+            ))
+            .map_err(|e| smb_error(e, index))?;
+        require_status(&frame, Command::SetInfo, index)
+    }
+
+    fn set_times_path(
+        &mut self,
+        path: &Path,
+        atime: Option<(i64, u32)>,
+        mtime: Option<(i64, u32)>,
+        index: usize,
+    ) -> VfResult<()> {
+        let path = self.local_path_string(path)?;
+        let is_directory = self.client_stat(&path)?.is_directory;
+        let flags = if is_directory {
+            libc::O_RDONLY | libc::O_DIRECTORY
+        } else {
+            libc::O_RDONLY
+        };
+        let mut request = self.open_request(&path, flags)?;
+        request.desired_access = FileAccessMask::new(
+            FileAccessMask::FILE_READ_ATTRIBUTES
+                | FileAccessMask::FILE_WRITE_ATTRIBUTES
+                | FileAccessMask::SYNCHRONIZE,
+        );
+        let tree_id = self.tree.tree_id;
+        let frame = self
+            .runtime
+            .block_on(self.client.connection_mut().execute(
+                Command::Create,
+                &request,
+                Some(tree_id),
+            ))
+            .map_err(|e| smb_error(e, index))?;
+        require_status(&frame, Command::Create, index)?;
+        let response = CreateResponse::unpack(&mut ReadCursor::new(&frame.body))
+            .map_err(|e| smb_error(e, index))?;
+        let result = self.set_times_handle(response.file_id, atime, mtime, index);
+        let close = self
+            .raw_close(response.file_id)
+            .map_err(|e| e.with_index(index));
+        result.and(close)
     }
 
     fn set_size_path(&mut self, path: &Path, size: u64) -> VfResult<()> {
@@ -1471,7 +1565,8 @@ impl VecFs for SmbVecFs {
 
     fn setattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
         for (index, attrs) in attrs.iter().enumerate() {
-            if !attrs.masks.difference(AttrMask::SIZE).is_empty() {
+            let settable = AttrMask::SIZE | AttrMask::ATIME | AttrMask::MTIME;
+            if !attrs.masks.difference(settable).is_empty() {
                 return Err(VfError::unsupported(index));
             }
             if attrs.masks.contains(AttrMask::SIZE) {
@@ -1491,6 +1586,32 @@ impl VecFs for SmbVecFs {
                             .map_err(|e| e.with_index(index))?;
                         self.set_size_path(&path, attrs.size)
                             .map_err(|e| e.with_index(index))?;
+                    }
+                }
+            }
+            if attrs.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
+                let atime = attrs
+                    .masks
+                    .contains(AttrMask::ATIME)
+                    .then_some((attrs.atime_sec, attrs.atime_nsec));
+                let mtime = attrs
+                    .masks
+                    .contains(AttrMask::MTIME)
+                    .then_some((attrs.mtime_sec, attrs.mtime_nsec));
+                match attrs.file {
+                    VfFile::Descriptor(fd) => {
+                        let id = self
+                            .open_files
+                            .get(&fd)
+                            .ok_or_else(|| VfError::failure(index, ERR_EBADF))?
+                            .file_id;
+                        self.set_times_handle(id, atime, mtime, index)?;
+                    }
+                    _ => {
+                        let path = self
+                            .file_path(&attrs.file)
+                            .map_err(|e| e.with_index(index))?;
+                        self.set_times_path(&path, atime, mtime, index)?;
                     }
                 }
             }

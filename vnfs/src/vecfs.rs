@@ -1949,8 +1949,7 @@ mod tests {
 
         let mut a = VfAttrs {
             file: VfFile::from_path("/f"),
-            masks: AttrMask::MTIME,
-            mtime_sec: 1,
+            masks: AttrMask::BLOCKS,
             ..VfAttrs::default()
         };
         assert_eq!(
@@ -1958,7 +1957,7 @@ mod tests {
             VF_ERR_UNSUPPORTED
         );
 
-        a.masks = AttrMask::MODE | AttrMask::MTIME;
+        a.masks = AttrMask::MODE | AttrMask::BLOCKS;
         assert_eq!(
             fs.setattrsv(std::slice::from_ref(&a)).unwrap_err().err_no(),
             VF_ERR_UNSUPPORTED
@@ -1969,6 +1968,39 @@ mod tests {
         a.mode = 0o640;
         fs.setattrsv(std::slice::from_ref(&a)).unwrap();
         assert_eq!(fs.lstat(Path::new("/f")).unwrap().mode & 0o7777, 0o640);
+    }
+
+    #[test]
+    fn setattrsv_updates_access_and_modify_times() {
+        let (_root, mut fs) = fs("setattr-times");
+        write(&mut fs, "/f", b"contents");
+
+        let update = VfAttrs {
+            file: VfFile::from_path("/f"),
+            masks: AttrMask::ATIME | AttrMask::MTIME,
+            atime_sec: 1_700_000_001,
+            atime_nsec: 123_456_789,
+            mtime_sec: 1_700_000_002,
+            mtime_nsec: 987_654_321,
+            ..VfAttrs::default()
+        };
+        fs.setattrsv(std::slice::from_ref(&update)).unwrap();
+
+        let mut actual = VfAttrs {
+            file: VfFile::from_path("/f"),
+            masks: AttrMask::ATIME | AttrMask::MTIME | AttrMask::SIZE,
+            ..VfAttrs::default()
+        };
+        fs.getattrsv(std::slice::from_mut(&mut actual)).unwrap();
+        assert_eq!(
+            (actual.atime_sec, actual.atime_nsec),
+            (1_700_000_001, 123_456_789)
+        );
+        assert_eq!(
+            (actual.mtime_sec, actual.mtime_nsec),
+            (1_700_000_002, 987_654_321)
+        );
+        assert_eq!(actual.size, 8);
     }
 
     #[test]

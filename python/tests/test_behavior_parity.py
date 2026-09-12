@@ -7,6 +7,7 @@ written to fail on the pre-fix behavior and pass after the fixes.
 
 import datetime
 import io
+import time
 
 import pytest
 
@@ -59,7 +60,7 @@ def test_relative_symlink_target_unchanged(fs):
 
 def test_rm_non_recursive_does_not_remove_directories(fs):
     fs.mkdir("nfs4:///d", create_parents=True)
-    with pytest.raises(IsADirectoryError):
+    with pytest.raises(ValueError, match="recursive=True"):
         fs.rm("nfs4:///d")
     assert fs.isdir("nfs4:///d")
     # Files are still removable without recursion.
@@ -225,3 +226,60 @@ def test_large_file_bulk_operations(fs):
     ranges = fs.cat_ranges(["nfs4:///big.bin"], [1024 * 1024 - 10], [1024 * 1024 + 10])
     assert ranges[0] == big[1024 * 1024 - 10 : 1024 * 1024 + 10]
     assert fs.du("nfs4:///big.bin") == len(big)
+
+
+def test_mkdir_existing_with_parents_raises_like_local(fs):
+    fs.mkdir("nfs4:///existing", create_parents=True)
+    with pytest.raises(FileExistsError):
+        fs.mkdir("nfs4:///existing", create_parents=True)
+
+
+def test_touch_without_truncate_updates_timestamp_and_preserves_data(fs):
+    path = "nfs4:///touch.txt"
+    fs.pipe_file(path, b"preserve me")
+    before = fs.ukey(path)
+    # Ensure even filesystems with relatively coarse timestamp storage receive
+    # a distinguishable value. NFS change attributes need no delay, but SMB
+    # and the dummy backend derive ukey from timestamps.
+    time.sleep(0.02)
+    fs.touch(path, truncate=False)
+    assert fs.cat_file(path) == b"preserve me"
+    assert fs.ukey(path) != before
+
+
+@pytest.mark.parametrize("cache_type", ["none", "readahead", "blockcache"])
+def test_direct_read_open_validates_path_like_local(fs, cache_type):
+    with pytest.raises(FileNotFoundError):
+        fs.open("nfs4:///missing", "rb", cache_type=cache_type)
+
+    fs.mkdir("nfs4:///directory", create_parents=True)
+    with pytest.raises(IsADirectoryError):
+        fs.open("nfs4:///directory", "rb", cache_type=cache_type)
+
+    with pytest.raises(FileNotFoundError):
+        fs.open("nfs4:///missing-update", "r+b")
+
+
+@pytest.mark.parametrize("cache_type", ["none", "readahead", "blockcache"])
+def test_negative_absolute_seek_raises_oserror_like_local(fs, cache_type):
+    fs.pipe_file("nfs4:///seek.bin", b"data")
+    with fs.open("nfs4:///seek.bin", "rb", cache_type=cache_type) as handle:
+        with pytest.raises(OSError):
+            handle.seek(-1)
+
+
+def test_minus_one_effective_range_length_matches_local(fs):
+    fs.pipe_file("nfs4:///empty", b"")
+    fs.pipe_file("nfs4:///range", b"0123456789")
+
+    assert fs.cat_file("nfs4:///empty", end=-1) == b""
+    assert fs.cat_file("nfs4:///range", start=8, end=7) == b"89"
+    assert fs.cat_ranges(["nfs4:///empty", "nfs4:///range"], [0, 8], [-1, 7]) == [
+        b"",
+        b"89",
+    ]
+
+    with pytest.raises(FileNotFoundError):
+        fs.cat_file("nfs4:///missing-range", start=1, end=0)
+    missing = fs.cat_ranges(["nfs4:///missing-range"], [1], [0])
+    assert len(missing) == 1 and isinstance(missing[0], FileNotFoundError)

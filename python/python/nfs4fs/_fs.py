@@ -90,7 +90,12 @@ def _normalize_range(start, end, size=None):
         if size is None:
             raise ValueError("size is required for a negative end")
         end = size + end
-    if end is not None and end < start:
+    if end is not None and end == start - 1:
+        # LocalFileSystem passes this through to read(-1), which means read to
+        # EOF. Preserve that established fsspec behavior for differential
+        # compatibility even though it differs from ordinary slice notation.
+        end = None
+    elif end is not None and end < start:
         raise ValueError("read length must be non-negative or -1")
     return start, end
 
@@ -293,7 +298,10 @@ class _RawNfs4File(io.RawIOBase):
 
     def _size(self):
         if self._cached_size is None:
-            self._cached_size = self.fs.size(self.path)
+            if self._fd is not None:
+                self._cached_size = self.fs._client.fstat(self._ensure_open())["size"]
+            else:
+                self._cached_size = self.fs.size(self.path)
         return self._cached_size
 
     # -- io.RawIOBase ------------------------------------------------------
@@ -405,7 +413,7 @@ class _RawNfs4File(io.RawIOBase):
         else:
             raise ValueError(f"invalid whence: {whence}")
         if new < 0:
-            raise ValueError("negative seek position")
+            raise OSError(errno.EINVAL, "Invalid argument")
         self._pos = new
         return new
 
@@ -652,6 +660,11 @@ class Nfs4File(AbstractBufferedFile):
             self.size if size is None or size < 0 else min(self.loc + size, self.size)
         )
         try:
+            if size is not None and size >= 0:
+                # fsspec before 2025 did not clamp oversized reads before
+                # BlockCache calculated its inclusive end block. Clamp here
+                # so it cannot request a block beyond the cache's nblocks.
+                size = min(size, max(0, self.size - self.loc))
             return super().read(size)
         finally:
             self._requested_read_end = None
@@ -703,9 +716,20 @@ class Nfs4File(AbstractBufferedFile):
         return written
 
     def seek(self, offset, whence=0):
+        requested = int(offset)
+        if whence == 0:
+            position = requested
+        elif whence == 1:
+            position = self.tell() + requested
+        elif whence == 2:
+            position = self.size + requested
+        else:
+            position = 0
+        if whence in (0, 1, 2) and position < 0:
+            raise OSError(errno.EINVAL, "Invalid argument")
         if not self._has_read_cache() and not self._buffered_write:
-            return self._raw.seek(offset, whence)
-        return super().seek(offset, whence)
+            return self._raw.seek(requested, whence)
+        return super().seek(requested, whence)
 
     def tell(self):
         if not self._has_read_cache() and not self._buffered_write:
@@ -1984,7 +2008,15 @@ class Nfs4FileSystem(AbstractFileSystem):
         size = None
         if (start is not None and start < 0) or (end is not None and end < 0):
             size = self.size(internal)
-        start, end = _normalize_range(start, end, size)
+        try:
+            start, end = _normalize_range(start, end, size)
+        except ValueError:
+            # LocalFileSystem opens before validating the read length, so a
+            # missing path or directory takes precedence over a bad range.
+            info = self.info(internal)
+            if info["type"] == "directory":
+                raise IsADirectoryError(errno.EISDIR, "Is a directory", internal)
+            raise
         if start == 0 and end is None:
             # Whole file: read_allv skips the size stat entirely.
             data, errors = self._client.read_all_many([self._native_path(internal)])
@@ -2029,7 +2061,10 @@ class Nfs4FileSystem(AbstractFileSystem):
         errors = {}
         sizes = [None] * len(paths)
         if any(
-            (s is not None and s < 0) or e is None or e < 0
+            (s is not None and s < 0)
+            or e is None
+            or e < 0
+            or e == (0 if s is None else s) - 1
             for s, e in zip(starts, ends)
         ):
             # Slice semantics and byte-bounded batching both need file sizes.
@@ -2045,7 +2080,16 @@ class Nfs4FileSystem(AbstractFileSystem):
             try:
                 normalized.append(_normalize_range(start, end, sizes[i]))
             except ValueError as exc:
-                validation_errors[i] = exc
+                try:
+                    info = self.info(internals[i])
+                    if info["type"] == "directory":
+                        raise IsADirectoryError(
+                            errno.EISDIR, "Is a directory", internals[i]
+                        )
+                except (OSError, ValueError) as path_error:
+                    validation_errors[i] = path_error
+                else:
+                    validation_errors[i] = exc
                 normalized.append((0, 0))
         if validation_errors and on_error != "return":
             raise validation_errors[min(validation_errors)]
@@ -2532,6 +2576,13 @@ class Nfs4FileSystem(AbstractFileSystem):
             parent = self._parent(path)
             if parent not in ("", "/"):
                 self._ensure_dirs([parent], 0o755)
+        base_mode = _normalize_mode(mode)
+        if base_mode in ("r", "r+"):
+            attrs = self._client.stat(self._native_path(internal))
+            if attrs["type"] == "directory":
+                raise IsADirectoryError(errno.EISDIR, "Is a directory", internal)
+            if size is None:
+                size = attrs["size"]
         return Nfs4File(
             self,
             internal,
@@ -2677,6 +2728,8 @@ class Nfs4FileSystem(AbstractFileSystem):
         internal = self._strip_protocol(path)
         mode = (kwargs.get("mode", 0o755) or 0o755) & 0o7777
         if create_parents:
+            if self.exists(internal):
+                raise FileExistsError(errno.EEXIST, "File exists", internal)
             self._ensure_dirs([internal], mode)
         else:
             self._invalidate_namespace([internal])
@@ -2711,9 +2764,7 @@ class Nfs4FileSystem(AbstractFileSystem):
             )
             for i, s in enumerate(stats):
                 if s is not None and s["type"] == "directory":
-                    raise IsADirectoryError(
-                        errno.EISDIR, f"Is a directory: {paths[i]!r}"
-                    )
+                    raise ValueError("Cannot delete directory, set recursive=True")
             self._client.remove_many([self._native_path(p) for p in paths])
 
     def _rm_recursive(self, paths):
@@ -2993,7 +3044,9 @@ class Nfs4FileSystem(AbstractFileSystem):
     def touch(self, path, truncate=True, **kwargs):
         internal = self._strip_protocol(path)
         if not truncate and self.exists(internal):
-            raise NotImplementedError("timestamp updates are not supported")
+            self._invalidate_namespace([internal])
+            self._client.touch(self._native_path(internal))
+            return
         self._write_batch([internal], [b""])
 
     def symlink(self, target, path, **kwargs):

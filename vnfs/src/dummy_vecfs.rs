@@ -9,10 +9,11 @@
 //! normalized path itself.
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
+use std::fs::{File, FileTimes, OpenOptions};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, UNIX_EPOCH};
 
 use crate::path::{cstring_from_bytes, normalize_bytes, path_bytes, path_from_bytes};
 use crate::vecfs::*;
@@ -36,6 +37,25 @@ pub struct DummyVecFs {
 }
 
 impl DummyVecFs {
+    fn system_time(
+        seconds: i64,
+        nanoseconds: u32,
+        index: usize,
+    ) -> VfResult<std::time::SystemTime> {
+        if nanoseconds >= 1_000_000_000 {
+            return Err(VfError::failure(index, ERR_INVAL));
+        }
+        let seconds_only = if seconds >= 0 {
+            UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))
+        } else {
+            UNIX_EPOCH.checked_sub(Duration::from_secs(seconds.unsigned_abs()))
+        }
+        .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+        seconds_only
+            .checked_add(Duration::from_nanos(u64::from(nanoseconds)))
+            .ok_or_else(|| VfError::failure(index, ERR_INVAL))
+    }
+
     fn getattrsv_impl(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
         for (i, a) in attrs.iter_mut().enumerate() {
             let lexical = self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?;
@@ -289,6 +309,18 @@ impl DummyVecFs {
                 .open(&p)
                 .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             f.set_len(a.size)
+                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+        }
+        if a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
+            let file = File::open(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            let mut times = FileTimes::new();
+            if a.masks.contains(AttrMask::ATIME) {
+                times = times.set_accessed(Self::system_time(a.atime_sec, a.atime_nsec, i)?);
+            }
+            if a.masks.contains(AttrMask::MTIME) {
+                times = times.set_modified(Self::system_time(a.mtime_sec, a.mtime_nsec, i)?);
+            }
+            file.set_times(times)
                 .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
         }
         Ok(())
@@ -656,7 +688,10 @@ impl VecFs for DummyVecFs {
     }
 
     fn setattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
-        const SETTABLE: AttrMask = AttrMask::MODE.union(AttrMask::SIZE);
+        const SETTABLE: AttrMask = AttrMask::MODE
+            .union(AttrMask::SIZE)
+            .union(AttrMask::ATIME)
+            .union(AttrMask::MTIME);
         for (i, a) in attrs.iter().enumerate() {
             if !a.masks.difference(SETTABLE).is_empty() {
                 return Err(VfError::unsupported(i));
@@ -667,7 +702,10 @@ impl VecFs for DummyVecFs {
     }
 
     fn lsetattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
-        const SETTABLE: AttrMask = AttrMask::MODE.union(AttrMask::SIZE);
+        const SETTABLE: AttrMask = AttrMask::MODE
+            .union(AttrMask::SIZE)
+            .union(AttrMask::ATIME)
+            .union(AttrMask::MTIME);
         for (i, a) in attrs.iter().enumerate() {
             if !a.masks.difference(SETTABLE).is_empty() {
                 return Err(VfError::unsupported(i));

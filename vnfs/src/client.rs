@@ -147,6 +147,8 @@ pub struct SetattrOp {
     pub fh: FileHandle,
     pub mode: Option<u32>,
     pub size: Option<u64>,
+    pub atime: Option<(i64, u32)>,
+    pub mtime: Option<(i64, u32)>,
 }
 
 /// One READLINK of a batched compound, `[PUTFH, READLINK]`.
@@ -365,6 +367,8 @@ pub struct PathSetattrOp {
     pub file: FileRef,
     pub mode: Option<u32>,
     pub size: Option<u64>,
+    pub atime: Option<(i64, u32)>,
+    pub mtime: Option<(i64, u32)>,
     /// Request the object's own type (needed for symlink handling).
     pub check_type: bool,
 }
@@ -1163,7 +1167,16 @@ impl NfsClient {
             ops,
             |c, op, _| {
                 c.putfh(&op.fh.as_nfs_fh());
-                c.setattr(op.mode, op.size);
+                c.setattr_values(
+                    op.mode,
+                    op.size,
+                    op.atime,
+                    op.mtime,
+                    &stateid4 {
+                        seqid: 0,
+                        other: [0; 12],
+                    },
+                );
             },
             |_, _| (),
         )?;
@@ -2060,7 +2073,16 @@ impl NfsClient {
                     c.getattr(&[FATTR4_TYPE]);
                     map.note_ops(1);
                 }
-                c.setattr(op.mode, op.size);
+                c.setattr_values(
+                    op.mode,
+                    op.size,
+                    op.atime,
+                    op.mtime,
+                    &stateid4 {
+                        seqid: 0,
+                        other: [0; 12],
+                    },
+                );
                 map.note_ops(1);
                 map.end();
                 cursor.descend();
@@ -2591,6 +2613,33 @@ impl NfsClient {
         c.tag(b"setattr");
         c.putfh(&fh.as_nfs_fh());
         c.setattr(mode, size);
+        let res = self.call_compound(&mut c)?;
+        self.session.expect_all_ok(&res)?;
+        Ok(())
+    }
+
+    /// SETATTR mode, size, and/or access/modify timestamps on `fh`.
+    pub fn setattr_values(
+        &mut self,
+        fh: &FileHandle,
+        mode: Option<u32>,
+        size: Option<u64>,
+        atime: Option<(i64, u32)>,
+        mtime: Option<(i64, u32)>,
+    ) -> RpcResult<()> {
+        let mut c = Compound::new();
+        c.tag(b"setattr-values");
+        c.putfh(&fh.as_nfs_fh());
+        c.setattr_values(
+            mode,
+            size,
+            atime,
+            mtime,
+            &stateid4 {
+                seqid: 0,
+                other: [0; 12],
+            },
+        );
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
         Ok(())

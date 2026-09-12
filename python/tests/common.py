@@ -123,15 +123,12 @@ def run_correctness_suite(fs):
         f.write(b"XX")
     assert fs.cat_file("nfs4:///f.bin") == b"XX23456789!"
 
-    # Reading a directory raises IsADirectoryError (lazy open on first I/O).
-    f = fs.open("nfs4:///dir", "rb")
+    # Like LocalFileSystem, a direct open validates the path immediately.
     try:
-        f.read()
-        raise AssertionError("reading a directory must raise")
+        fs.open("nfs4:///dir", "rb")
+        raise AssertionError("opening a directory for reading must raise")
     except IsADirectoryError:
         pass
-    finally:
-        f.close()
 
     # close is idempotent.
     f = fs.open("nfs4:///dir/a.txt", "rb")
@@ -217,7 +214,7 @@ def run_correctness_suite(fs):
     try:
         fs.rm("nfs4:///tree", recursive=False)
         raise AssertionError("non-recursive rm of a dir must raise")
-    except OSError:
+    except ValueError:
         pass
     fs.rm("nfs4:///tree", recursive=True)
     assert not fs.exists("nfs4:///tree")

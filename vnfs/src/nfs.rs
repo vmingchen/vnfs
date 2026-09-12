@@ -188,7 +188,10 @@ impl NfsVecFs {
     /// refuse for lsetattrsv or to follow for setattrsv) are handled
     /// per-file via the phased path.
     fn setattrsv_impl(&mut self, attrs: &[VfAttrs], follow: bool) -> VfRes {
-        const SETTABLE: AttrMask = AttrMask::MODE.union(AttrMask::SIZE);
+        const SETTABLE: AttrMask = AttrMask::MODE
+            .union(AttrMask::SIZE)
+            .union(AttrMask::ATIME)
+            .union(AttrMask::MTIME);
         if attrs.is_empty() {
             return Ok(());
         }
@@ -223,10 +226,20 @@ impl NfsVecFs {
             } else {
                 None
             };
+            let atime = a
+                .masks
+                .contains(AttrMask::ATIME)
+                .then_some((a.atime_sec, a.atime_nsec));
+            let mtime = a
+                .masks
+                .contains(AttrMask::MTIME)
+                .then_some((a.mtime_sec, a.mtime_nsec));
             ops.push(crate::client::PathSetattrOp {
                 file,
                 mode,
                 size,
+                atime,
+                mtime,
                 check_type: true,
             });
         }
@@ -269,7 +282,10 @@ impl NfsVecFs {
 
     /// The legacy phased setattrsv (resolve_many_tcfile + setattr_many).
     fn setattrsv_phased(&mut self, attrs: &[VfAttrs], follow: bool) -> VfRes {
-        const SETTABLE: AttrMask = AttrMask::MODE.union(AttrMask::SIZE);
+        const SETTABLE: AttrMask = AttrMask::MODE
+            .union(AttrMask::SIZE)
+            .union(AttrMask::ATIME)
+            .union(AttrMask::MTIME);
         for (i, a) in attrs.iter().enumerate() {
             let unsupported = a.masks.difference(SETTABLE);
             if !unsupported.is_empty() {
@@ -300,7 +316,21 @@ impl NfsVecFs {
             } else {
                 None
             };
-            ops.push(crate::client::SetattrOp { fh, mode, size });
+            let atime = a
+                .masks
+                .contains(AttrMask::ATIME)
+                .then_some((a.atime_sec, a.atime_nsec));
+            let mtime = a
+                .masks
+                .contains(AttrMask::MTIME)
+                .then_some((a.mtime_sec, a.mtime_nsec));
+            ops.push(crate::client::SetattrOp {
+                fh,
+                mode,
+                size,
+                atime,
+                mtime,
+            });
         }
         self.nfs
             .setattr_many(&ops)
@@ -442,8 +472,16 @@ impl NfsVecFs {
         } else {
             None
         };
+        let atime = a
+            .masks
+            .contains(AttrMask::ATIME)
+            .then_some((a.atime_sec, a.atime_nsec));
+        let mtime = a
+            .masks
+            .contains(AttrMask::MTIME)
+            .then_some((a.mtime_sec, a.mtime_nsec));
         self.nfs
-            .setattr(&fh, mode, size)
+            .setattr_values(&fh, mode, size, atime, mtime)
             .map_err(|e| VfError::from_rpc(e, index))
     }
 
@@ -793,6 +831,8 @@ impl NfsVecFs {
                     fh: fh.clone(),
                     mode: Some(modes[i] & 0o7777),
                     size: None,
+                    atime: None,
+                    mtime: None,
                 });
             }
             if entries[i].5 {
@@ -800,6 +840,8 @@ impl NfsVecFs {
                     fh: fh.clone(),
                     mode: None,
                     size: Some(0),
+                    atime: None,
+                    mtime: None,
                 });
             }
         }
@@ -977,6 +1019,8 @@ impl NfsVecFs {
                     fh: fh.clone(),
                     mode: None,
                     size: Some(0),
+                    atime: None,
+                    mtime: None,
                 });
             }
         }
@@ -1665,6 +1709,8 @@ impl NfsVecFs {
                     fh: copies[i].dst_fh.clone(),
                     mode: None,
                     size: Some(size),
+                    atime: None,
+                    mtime: None,
                 });
             }
             self.nfs
@@ -2082,6 +2128,8 @@ impl NfsVecFs {
                     fh: fh.clone(),
                     mode: Some(dirs[indices[k]].mode & 0o7777),
                     size: None,
+                    atime: None,
+                    mtime: None,
                 }),
                 Err(status) => return Err(VfError::failure(indices[k], *status)),
             }

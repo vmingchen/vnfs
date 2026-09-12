@@ -64,12 +64,13 @@ def test_dummy_root_is_isolated(dummy_fs, tmp_path):
     assert not (tmp_path / "only-here.txt").exists()
 
 
-def test_lazy_read_open_does_not_open_until_io(dummy_fs):
+def test_direct_read_open_validates_but_defers_descriptor(dummy_fs):
     dummy_fs.pipe_file("nfs4:///f.txt", b"data")
     f = dummy_fs.open("nfs4:///f.txt", "rb")
-    assert f._fd is None  # lazy
-    # Whole-file reads are served by the batched no-stat read_allv path and
-    # never need a descriptor (or a size stat).
+    # Direct open performs a metadata/type preflight for LocalFileSystem error
+    # parity, but the actual descriptor remains lazy. Whole-file reads still
+    # use read_allv and do not need OPEN/CLOSE.
+    assert f._fd is None
     assert f.read() == b"data"
     assert f._fd is None
     assert f.seek(1) == 1

@@ -443,15 +443,43 @@ impl Compound {
         size: Option<u64>,
         stateid: &stateid4,
     ) {
+        self.setattr_values(mode, size, None, None, stateid);
+    }
+
+    /// SETATTR mode, size, and/or access/modify timestamps. Timestamp tuples
+    /// are `(seconds_since_unix_epoch, nanoseconds)` and use
+    /// SET_TO_CLIENT_TIME4.
+    pub fn setattr_values(
+        &mut self,
+        mode: Option<u32>,
+        size: Option<u64>,
+        atime: Option<(i64, u32)>,
+        mtime: Option<(i64, u32)>,
+        stateid: &stateid4,
+    ) {
         let mut map = [0u32; 3];
         let mut vals: Vec<u8> = Vec::new();
+        // Attribute values must be encoded in ascending attribute-number
+        // order, matching the bitmap rather than the caller's field order.
+        if let Some(s) = size {
+            map[0] |= 1 << (FATTR4_SIZE % 32);
+            vals.extend_from_slice(&s.to_be_bytes());
+        }
         if let Some(m) = mode {
             map[1] |= 1 << (FATTR4_MODE % 32);
             vals.extend_from_slice(&m.to_be_bytes());
         }
-        if let Some(s) = size {
-            map[0] |= 1 << (FATTR4_SIZE % 32);
-            vals.extend_from_slice(&s.to_be_bytes());
+        if let Some((seconds, nanoseconds)) = atime {
+            map[1] |= 1 << (FATTR4_TIME_ACCESS_SET % 32);
+            vals.extend_from_slice(&time_how4_SET_TO_CLIENT_TIME4.to_be_bytes());
+            vals.extend_from_slice(&seconds.to_be_bytes());
+            vals.extend_from_slice(&nanoseconds.to_be_bytes());
+        }
+        if let Some((seconds, nanoseconds)) = mtime {
+            map[1] |= 1 << (FATTR4_TIME_MODIFY_SET % 32);
+            vals.extend_from_slice(&time_how4_SET_TO_CLIENT_TIME4.to_be_bytes());
+            vals.extend_from_slice(&seconds.to_be_bytes());
+            vals.extend_from_slice(&nanoseconds.to_be_bytes());
         }
         let mut bitmap_len = 0;
         for (i, &w) in map.iter().enumerate() {

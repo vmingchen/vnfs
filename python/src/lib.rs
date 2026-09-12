@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pyo3::exceptions::{
     PyConnectionError, PyFileExistsError, PyFileNotFoundError, PyIsADirectoryError,
@@ -767,6 +767,25 @@ impl NfsClient {
             file: VfFile::from_os_path(&path),
             masks: AttrMask::SIZE,
             size,
+            ..VfAttrs::default()
+        };
+        self.with_fs(py, move |fs| {
+            fs.setattrsv(std::slice::from_ref(&a))
+                .map_err(|e| to_py_err(e, Some(path.as_path())))
+        })
+    }
+
+    fn touch(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| PyOSError::new_err("system clock is before the Unix epoch"))?;
+        let a = VfAttrs {
+            file: VfFile::from_os_path(&path),
+            masks: AttrMask::ATIME | AttrMask::MTIME,
+            atime_sec: now.as_secs().min(i64::MAX as u64) as i64,
+            atime_nsec: now.subsec_nanos(),
+            mtime_sec: now.as_secs().min(i64::MAX as u64) as i64,
+            mtime_nsec: now.subsec_nanos(),
             ..VfAttrs::default()
         };
         self.with_fs(py, move |fs| {
