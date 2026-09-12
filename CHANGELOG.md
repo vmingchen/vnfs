@@ -17,6 +17,9 @@ This project follows [Semantic Versioning](https://semver.org/) for the
   write/append waves with disk-spooled memory limits.
 - A shrinkable Hypothesis state-machine suite that differentially checks
   randomized nfs4fs operation histories against fsspec's local implementation.
+- A cache-composition state machine covering listing expiry and invalidation,
+  persistent block-cache generations and eviction, long-lived readers,
+  `readinto`, and vectorized `OpenFiles` reads against the local oracle.
 
 ### Fixed
 
@@ -30,7 +33,10 @@ This project follows [Semantic Versioning](https://semver.org/) for the
   now also remain active for vectorized `OpenFiles` reads instead of being
   bypassed by fsspec's wrapper traversal. Same-client writes, renames, deletes,
   and recursive subtree mutations invalidate future persistent-cache opens
-  while preserving already-open handle semantics.
+  while preserving already-open handle semantics. Persistent scalar and group
+  reopens now reuse generation block sizes, explicit eviction cannot resurrect
+  deleted metadata, and open cached handles retain descriptor semantics across
+  unlink while ordinary reads remain lazy.
 - `rm_file()` now dispatches through nfs4fs's single-file removal path.
 - NFS vector lookup batches now distinguish the item that failed from the
   suffix that the server never executed, and safely continue independent

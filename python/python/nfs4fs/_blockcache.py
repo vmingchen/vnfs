@@ -52,7 +52,7 @@ class _Nfs4MMapCache(MMapCache):
             for group in groups
         ]
         multi_fetcher = getattr(self, "multi_fetcher", None)
-        if multi_fetcher is not None:
+        if multi_fetcher is not None and len(ranges) > 1:
             fetched = list(multi_fetcher(ranges))
             if len(fetched) != len(ranges):
                 raise OSError(errno.EIO, "block cache returned the wrong range count")
@@ -139,15 +139,56 @@ def _reset_stale_generation(cache_fs, path):
 
 def _mark_compatible_cache(cache_fs, path, file):
     cache = getattr(file, "cache", None)
+    if isinstance(cache, MMapCache):
+        # LocalFileSystem establishes its descriptor during open(), so an
+        # already-open cache handle remains usable after rename or unlink.
+        # Nfs4File normally opens lazily for vectorized whole-file fast paths;
+        # persistent blockcache handles need the local descriptor lifetime.
+        raw = getattr(file, "_raw", None)
+        if raw is not None:
+            raw._ensure_open()
     if isinstance(cache, MMapCache) and not isinstance(cache, _Nfs4MMapCache):
         cache.__class__ = _Nfs4MMapCache
         block_count = (cache.size + cache.blocksize - 1) // cache.blocksize
         cache.blocks.intersection_update(range(block_count))
 
     detail = cache_fs._metadata.cached_files[-1].get(path)
-    if detail is not None and detail.get(_CACHE_FORMAT_KEY) != _CACHE_FORMAT:
-        detail[_CACHE_FORMAT_KEY] = _CACHE_FORMAT
-        _save_writable_metadata(cache_fs)
+    if detail is not None:
+        changed = False
+        if detail.get(_CACHE_FORMAT_KEY) != _CACHE_FORMAT:
+            detail[_CACHE_FORMAT_KEY] = _CACHE_FORMAT
+            changed = True
+        # fsspec 2024.12 does not add size to scalar blockcache metadata.
+        # Persist it so compatibility checks do not discard a valid partial
+        # generation, its block size, or its populated block set on reopen.
+        if detail.get("size") != file.size:
+            detail["size"] = file.size
+            changed = True
+        if changed:
+            _save_writable_metadata(cache_fs)
+
+
+def _reuse_generation_blocksize(cache_fs, path, args, kwargs):
+    """Keep a partial generation's block size across scalar reopens.
+
+    LocalFileSystem ignores a later ``block_size`` request because its opener
+    retains the same native block size. Mirror that public behavior while
+    preserving fsspec's requirement that a partial persistent-cache
+    generation has exactly one block size.
+    """
+    raw = cache_fs._metadata.check_file(path, None)
+    if not raw:
+        return args, kwargs
+    blocksize = raw[0].get("blocksize")
+    if blocksize is None:
+        return args, kwargs
+    args = list(args)
+    kwargs = dict(kwargs)
+    if len(args) >= 2:
+        args[1] = blocksize
+    else:
+        kwargs["block_size"] = blocksize
+    return tuple(args), kwargs
 
 
 def _cache_lock(cache_fs):
@@ -185,6 +226,30 @@ def _invalidate_registered_paths(cache_fs, paths, subtrees=False):
                 changed = True
         if changed:
             _save_writable_metadata(cache_fs)
+
+
+def _pop_writable_cache_file(cache_fs, path):
+    """Remove one writable generation without fsspec's merge-on-save."""
+    normalized = _cache_path(cache_fs, path)
+    with _cache_lock(cache_fs):
+        cache_fs._check_cache()
+        writable = cache_fs._metadata.cached_files[-1]
+        detail = writable.pop(normalized, None)
+        if detail is None:
+            if cache_fs._metadata.check_file(normalized, None):
+                raise PermissionError(
+                    "Can only delete cached file in last, writable cache location"
+                )
+            return
+        filename = _backing_path(cache_fs, detail)
+        # CacheMetadata.save() merges entries from the previous on-disk file,
+        # which resurrects a deletion. Replace the writable generation first.
+        _save_writable_metadata(cache_fs)
+        try:
+            os.remove(filename)
+        except FileNotFoundError:
+            pass
+        cache_fs._cache_size = None
 
 
 def _register_cache(cache_fs):
@@ -359,13 +424,28 @@ def _open_many_with_cache(cache_fs, open_files, target_type):
     remote_files = []
     try:
         if remote_indices:
-            remote_open_files = [open_files[index] for index in remote_indices]
-            remote_files = cache_fs.fs.open_many(
-                remote_open_files,
-                cache_type="none",
-                sizes=[records[index]["detail"]["size"] for index in remote_indices],
-            )
-            for index, file in zip(remote_indices, remote_files):
+            # Nfs4FileSystem.open_many() has one block size per vector call.
+            # Reuse each partial generation's established size and retain one
+            # batched OPEN for every compatible cohort.
+            cohorts = {}
+            for index in remote_indices:
+                blocksize = records[index]["detail"].get("blocksize")
+                if blocksize is None:
+                    blocksize = cache_fs.fs.block_size
+                cohorts.setdefault(blocksize, []).append(index)
+            indexed_files = {}
+            for blocksize, indices in cohorts.items():
+                opened = cache_fs.fs.open_many(
+                    [open_files[index] for index in indices],
+                    block_size=blocksize,
+                    cache_type="none",
+                    sizes=[records[index]["detail"]["size"] for index in indices],
+                )
+                remote_files.extend(opened)
+                indexed_files.update(zip(indices, opened))
+
+            for index in remote_indices:
+                file = indexed_files[index]
                 detail = records[index]["detail"]
                 old_blocksize = detail.get("blocksize")
                 if old_blocksize is not None and old_blocksize != file.blocksize:
@@ -415,6 +495,7 @@ def install_fsspec_blockcache_compat(target_type):
     original_init = CachingFileSystem.__init__
     original_open = CachingFileSystem._open
     original_close_and_update = CachingFileSystem.close_and_update
+    original_pop_from_cache = CachingFileSystem.pop_from_cache
 
     def init_with_compat(cache_fs, *args, **kwargs):
         original_init(cache_fs, *args, **kwargs)
@@ -433,6 +514,9 @@ def install_fsspec_blockcache_compat(target_type):
         with _cache_lock(cache_fs):
             normalized = _cache_path(cache_fs, path)
             _reset_stale_generation(cache_fs, normalized)
+            args, kwargs = _reuse_generation_blocksize(
+                cache_fs, normalized, args, kwargs
+            )
             file = original_open(cache_fs, path, *args, **kwargs)
             _mark_compatible_cache(cache_fs, normalized, file)
             return file
@@ -449,9 +533,15 @@ def install_fsspec_blockcache_compat(target_type):
         with _cache_lock(cache_fs):
             return _open_many_with_cache(cache_fs, open_files, target_type)
 
+    def pop_from_cache_with_compat(cache_fs, path):
+        if not isinstance(getattr(cache_fs, "fs", None), target_type):
+            return original_pop_from_cache(cache_fs, path)
+        return _pop_writable_cache_file(cache_fs, path)
+
     CachingFileSystem.__init__ = init_with_compat
     CachingFileSystem._open = open_with_compat
     CachingFileSystem.close_and_update = close_and_update_with_compat
     CachingFileSystem.open_many = open_many_with_compat
     CachingFileSystem.commit_many = _delegate_commit_many
+    CachingFileSystem.pop_from_cache = pop_from_cache_with_compat
     setattr(CachingFileSystem, _PATCH_MARKER, True)

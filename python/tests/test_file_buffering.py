@@ -859,6 +859,168 @@ def test_persistent_blockcache_does_not_mark_sparse_tail_complete(tmp_path):
         target.close()
 
 
+def test_persistent_blockcache_reuses_established_block_size_like_local(tmp_path):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "block-size-remote"),
+        skip_instance_cache=True,
+    )
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "block-size-cache"),
+        cache_check=0,
+        check_files=True,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    try:
+        with cached.open("/cached", "wb") as file:
+            file.write(b"abcdefgh")
+        with cached.open("/cached", "rb", block_size=1) as file:
+            assert file.read(0) == b""
+        # LocalFileSystem's blockcache keeps using the generation's
+        # established block size when a later open requests another value.
+        with cached.open("/cached", "rb", block_size=2) as file:
+            assert file.read() == b"abcdefgh"
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
+def test_open_persistent_cache_handle_survives_unlink_like_local(tmp_path):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "unlinked-remote"),
+        skip_instance_cache=True,
+    )
+    target.pipe_file("/cached", b"abcdefgh")
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "unlinked-cache"),
+        cache_check=0,
+        check_files=True,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    file = cached.open("/cached", "rb", block_size=4)
+    try:
+        # Persistent scalar caching is the narrow case where eager OPEN is
+        # required to preserve LocalFileSystem's descriptor lifetime. Direct
+        # nfs4fs reads remain lazy and open_many() uses its vector operation.
+        assert file._raw._fd is not None
+        cached.rm("/cached")
+        assert file.read() == b"abcdefgh"
+    finally:
+        file.close()
+        cached.clear_cache()
+        target.close()
+
+
+def test_persistent_cache_eviction_discards_partial_generation(tmp_path):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "eviction-remote"),
+        skip_instance_cache=True,
+    )
+    target.pipe_file("/cached", b"abcdefgh")
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "eviction-cache"),
+        cache_check=0,
+        check_files=True,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    try:
+        with cached.open("/cached", "rb", block_size=1) as file:
+            assert file.read(1) == b"a"
+        cached.pop_from_cache("/cached")
+
+        with cached.open("/cached", "rb", block_size=4) as file:
+            assert file.read() == b"abcdefgh"
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
+def test_persistent_open_files_reuses_scalar_generation_block_size(tmp_path):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "group-block-size-remote"),
+        block_size=8,
+        skip_instance_cache=True,
+    )
+    target.pipe_file("/cached", b"abcdefgh")
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "group-block-size-cache"),
+        cache_check=0,
+        check_files=True,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    try:
+        with cached.open("/cached", "rb", block_size=1) as file:
+            assert file.read(0) == b""
+            established_block_size = file.blocksize
+
+        with _open_files(cached, ["/cached"], "rb") as files:
+            assert files[0].blocksize == established_block_size
+            assert files[0].read() == b"abcdefgh"
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
+def test_persistent_open_files_batches_by_required_block_size(tmp_path, monkeypatch):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "block-cohort-remote"),
+        block_size=8,
+        skip_instance_cache=True,
+    )
+    paths = [f"/cached-{index}" for index in range(4)]
+    target.pipe({path: b"abcdefgh" for path in paths})
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "block-cohort-cache"),
+        cache_check=0,
+        check_files=True,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    try:
+        established = []
+        for index, path in enumerate(paths):
+            with cached.open(path, "rb", block_size=1 + index // 2) as file:
+                assert file.read(0) == b""
+                established.append(file.blocksize)
+
+        calls = _record_calls(monkeypatch, target, "open_many")
+        with _open_files(cached, paths, "rb") as files:
+            assert [file.read(1) for file in files] == [b"a"] * len(paths)
+
+        expected = {}
+        for block_size in established:
+            expected[block_size] = expected.get(block_size, 0) + 1
+        assert [(len(args[0]), kwargs["block_size"]) for args, kwargs in calls] == [
+            (count, block_size) for block_size, count in expected.items()
+        ]
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
 @pytest.mark.parametrize(
     "replacement",
     [b"WXYZ1234", b"WXYZ01234567", b"xy"],
