@@ -12,7 +12,7 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 libc = "0.2"
 libntirpc-sys = { workspace = true }
-vnfs = { path = "../vnfs" }
+vnfs = { path = "../vnfs", version = "0.0.9", features = ["smb"] }
 
 [build-dependencies]
 cbindgen = "0.27"

@@ -36,6 +36,13 @@ jobs:
           cargo check -p vnfs --lib --no-default-features --features dummy
           cargo check -p vnfs --lib --no-default-features --features nfs
           cargo check -p vnfs --lib --no-default-features --features smb
+      - name: Verify SMB dependencies are opt-in
+        run: |
+          if cargo tree -p vnfs --edges normal --prefix none | \
+              grep -Eq '^(smb2|tokio|futures-util) '; then
+            echo "SMB dependencies unexpectedly enabled by default" >&2
+            exit 1
+          fi
       - name: Verify checked-in C header and smoke test
         run: |
           cargo build -p vfsi-c

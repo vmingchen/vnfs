@@ -18,15 +18,18 @@ The crate is backend-agnostic through the [`VecFs`] trait:
 - [`NfsVecFs`] — an NFSv4.1 implementation on top of [libntirpc], batching
   many operations (lookups, readdirs, getattrs, opens, reads, ...) into few
   large compounds.
+- [`SmbVecFs`] — an SMB2/3 implementation for Samba and other modern SMB
+  servers.
 - [`DummyVecFs`] — a `std::fs`-backed implementation so the same API also
   works on non-NFS filesystems (and is handy for tests).
 
-All backends are enabled by default. The SMB backend uses the async [`smb2`]
-client internally, so its synchronous `VecFs` facade owns a [Tokio] runtime.
-Tokio is optional and is not part of an NFS-only build:
+NFS and the dummy backend are enabled by default. The SMB backend is opt-in
+because it uses the async [`smb2`] client internally, so its synchronous
+`VecFs` facade owns a [Tokio] runtime. Enable it explicitly with the `smb`
+feature:
 
 ```toml
-vnfs = { version = "0.0.7", default-features = false, features = ["nfs", "server-copy"] }
+vnfs = { version = "0.0.9", features = ["smb"] }
 ```
 
 ## Example
@@ -86,4 +89,5 @@ at your option.
 [Tokio]: https://tokio.rs/
 [`VecFs`]: https://docs.rs/vnfs/latest/vnfs/trait.VecFs.html
 [`NfsVecFs`]: https://docs.rs/vnfs/latest/vnfs/struct.NfsVecFs.html
+[`SmbVecFs`]: https://docs.rs/vnfs/latest/vnfs/struct.SmbVecFs.html
 [`DummyVecFs`]: https://docs.rs/vnfs/latest/vnfs/struct.DummyVecFs.html

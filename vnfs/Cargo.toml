@@ -1,6 +1,6 @@
 [package]
 name = "vnfs"
-version = "0.0.8"
+version = "0.0.9"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Protocol-neutral vectorized filesystem API for NFS, SMB, and local files"
@@ -17,7 +17,7 @@ no-default-features = true
 features = ["smb", "dummy", "server-copy"]
 
 [features]
-default = ["nfs", "smb", "dummy", "server-copy"]
+default = ["nfs", "dummy", "server-copy"]
 nfs = ["dep:libntirpc-sys", "dep:nfsv41-sys"]
 smb = ["dep:futures-util", "dep:smb2", "dep:tokio"]
 dummy = []
