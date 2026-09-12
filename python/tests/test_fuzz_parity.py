@@ -346,11 +346,15 @@ class LocalCacheOracleStateMachine(RuleBasedStateMachine):
 
     def teardown(self):
         if self._open_handles is not None:
-            for handle in self._open_handles:
-                try:
-                    handle.close()
-                except Exception:
-                    pass
+            local_handle, nfs_handle = self._open_handles
+            try:
+                self._close_local_cached(local_handle)
+            except Exception:
+                pass
+            try:
+                nfs_handle.close()
+            except Exception:
+                pass
             self._open_handles = None
         for cache in (self.local_cached, self.nfs_cached):
             try:
@@ -398,11 +402,17 @@ class LocalCacheOracleStateMachine(RuleBasedStateMachine):
         success so the oracle models I/O semantics instead of requiring
         nfs4fs to reproduce an fsspec implementation bug.
         """
+        mapped = getattr(getattr(handle, "cache", None), "cache", None)
         try:
-            handle.close()
-        except AttributeError as error:
-            if "property 'closed'" not in str(error) or not handle.closed:
-                raise
+            try:
+                handle.close()
+            except AttributeError as error:
+                if "property 'closed'" not in str(error) or not handle.closed:
+                    raise
+        finally:
+            close = getattr(mapped, "close", None)
+            if callable(close):
+                close()
 
     def _snapshot(self, backend):
         fs = self.local_external if backend == "local" else self.nfs_external
@@ -497,7 +507,10 @@ class LocalCacheOracleStateMachine(RuleBasedStateMachine):
                 position = handle.seek(offset, whence)
                 return position, handle.read(length)
             finally:
-                handle.close()
+                if backend == "local":
+                    self._close_local_cached(handle)
+                else:
+                    handle.close()
 
         self._compare(
             f"blockcache.read({path!r}, {offset!r}, {length!r}, {whence!r})",
@@ -515,12 +528,16 @@ class LocalCacheOracleStateMachine(RuleBasedStateMachine):
     def persistent_cached_readinto(self, path, offset, buffer_size, whence, block_size):
         def readinto(fs, backend):
             target = bytearray(buffer_size)
-            with fs.open(
-                self._path(backend, path), "rb", block_size=block_size
-            ) as handle:
+            handle = fs.open(self._path(backend, path), "rb", block_size=block_size)
+            try:
                 position = handle.seek(offset, whence)
                 count = handle.readinto(target)
                 return position, count, bytes(target)
+            finally:
+                if backend == "local":
+                    self._close_local_cached(handle)
+                else:
+                    handle.close()
 
         self._compare(
             f"blockcache.readinto({path!r}, {offset!r}, {buffer_size!r}, {whence!r})",

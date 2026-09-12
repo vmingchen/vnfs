@@ -922,22 +922,29 @@ class _BufferGroup:
             prefetched = self._ranges.pop(key, None)
             if prefetched is not None:
                 return prefetched
-            # Some fsspec caches ask their fetcher for read-ahead beyond the
-            # bytes the caller currently needs. A single speculative block is
-            # still useful in that case: return it when it covers the actual
-            # read, and let the selected cache own those bytes from here on.
+            # Persistent mmap fills must cover the fetcher's complete range
+            # because they mark whole blocks present. Other fsspec caches may
+            # safely consume a speculative prefix that covers the caller's
+            # requested bytes and fetch more on a later miss.
             required_end = current._requested_read_end
-            if required_end is not None:
-                for cached_key, value in list(self._ranges.items()):
-                    identity, cached_start, cached_end = cached_key
-                    if (
-                        identity == id(current)
-                        and cached_start <= start
-                        and cached_end >= required_end
-                    ):
-                        del self._ranges[cached_key]
-                        offset = start - cached_start
-                        return value[offset:]
+            coverage_end = (
+                end
+                if getattr(getattr(current, "cache", None), "name", None) == "mmap"
+                or required_end is None
+                else required_end
+            )
+            for cached_key, value in list(self._ranges.items()):
+                identity, cached_start, cached_end = cached_key
+                if (
+                    identity == id(current)
+                    and cached_start <= start
+                    and cached_end >= coverage_end
+                ):
+                    del self._ranges[cached_key]
+                    offset = start - cached_start
+                    if coverage_end == end:
+                        return value[offset : offset + end - start]
+                    return value[offset:]
 
             files = []
             offsets = []

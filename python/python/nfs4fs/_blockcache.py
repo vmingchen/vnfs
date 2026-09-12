@@ -161,11 +161,40 @@ def _mark_compatible_cache(cache_fs, path, file):
         # fsspec 2024.12 does not add size to scalar blockcache metadata.
         # Persist it so compatibility checks do not discard a valid partial
         # generation, its block size, or its populated block set on reopen.
-        if detail.get("size") != file.size:
-            detail["size"] = file.size
+        file_size = getattr(file, "size", None)
+        if file_size is not None and detail.get("size") != file_size:
+            detail["size"] = file_size
+            changed = True
+        if isinstance(cache, MMapCache) and detail.get("blocksize") != file.blocksize:
+            detail["blocksize"] = file.blocksize
             changed = True
         if changed:
             _save_writable_metadata(cache_fs)
+
+
+def _close_and_update_complete_blocks(cache_fs, file, close):
+    """Persist a partial generation using inclusive final-block accounting."""
+    if file.closed:
+        return
+    path = cache_fs._strip_protocol(file.path)
+    detail = cache_fs._metadata.cached_files[-1][path]
+    cache = getattr(file, "cache", None)
+    blocks = getattr(cache, "blocks", detail["blocks"])
+    detail["blocks"] = blocks
+    if blocks is not True:
+        block_count = (file.size + file.blocksize - 1) // file.blocksize
+        if all(block in blocks for block in range(block_count)):
+            detail["blocks"] = True
+    try:
+        # Preserve nfs4fs's size, format, and block-size metadata instead of
+        # fsspec's narrower merge-on-save fields.
+        _save_writable_metadata(cache_fs)
+    except (NameError, OSError):
+        # Match fsspec's close behavior during interpreter shutdown and when
+        # best-effort metadata persistence is unavailable.
+        pass
+    close()
+    file.closed = True
 
 
 def _reuse_generation_blocksize(cache_fs, path, args, kwargs):
@@ -192,18 +221,24 @@ def _reuse_generation_blocksize(cache_fs, path, args, kwargs):
 
 
 def _cache_lock(cache_fs):
-    attributes = object.__getattribute__(cache_fs, "__dict__")
-    lock = attributes.get("_nfs4fs_cache_lock")
-    if lock is None:
-        lock = threading.RLock()
-        attributes["_nfs4fs_cache_lock"] = lock
-    return lock
+    fs_attributes = object.__getattribute__(cache_fs.fs, "__dict__")
+    registry_lock = fs_attributes.get("_nfs4fs_cache_locks_lock")
+    if registry_lock is None:
+        registry_lock = threading.RLock()
+        fs_attributes["_nfs4fs_cache_locks_lock"] = registry_lock
+    key = tuple(os.path.realpath(storage) for storage in cache_fs.storage)
+    with registry_lock:
+        locks = fs_attributes.setdefault("_nfs4fs_cache_locks", {})
+        return locks.setdefault(key, threading.RLock())
 
 
 def _invalidate_registered_paths(cache_fs, paths, subtrees=False):
     """Invalidate future opens without disrupting already-open mmap handles."""
     with _cache_lock(cache_fs):
-        cache_fs._check_cache()
+        # Multiple CachingFileSystem wrappers may share one writable storage
+        # directory. cache_check=0 intentionally disables fsspec's automatic
+        # reload, so refresh here before replacing shared generation metadata.
+        cache_fs.load_cache()
         writable = cache_fs._metadata.cached_files[-1]
 
         def affected(candidate):
@@ -468,7 +503,10 @@ def _open_many_with_cache(cache_fs, open_files, target_type):
                 )
                 results[index] = file
 
-        cache_fs.save_cache()
+        # CacheMetadata.save() merges only blocks, time, and uid from an
+        # existing record. Replace the writable record so the block size just
+        # established by vectorized open survives the first save.
+        _save_writable_metadata(cache_fs)
         for open_file, file in zip(open_files, results):
             open_file.fobjects = [file]
         return results
@@ -525,7 +563,7 @@ def install_fsspec_blockcache_compat(target_type):
         if not isinstance(getattr(cache_fs, "fs", None), target_type):
             return original_close_and_update(cache_fs, file, close)
         with _cache_lock(cache_fs):
-            return original_close_and_update(cache_fs, file, close)
+            return _close_and_update_complete_blocks(cache_fs, file, close)
 
     def open_many_with_compat(cache_fs, open_files):
         if not isinstance(getattr(cache_fs, "fs", None), target_type):

@@ -889,6 +889,38 @@ def test_persistent_blockcache_reuses_established_block_size_like_local(tmp_path
         target.close()
 
 
+def test_complete_persistent_generation_reopens_like_local(tmp_path):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "complete-reopen-remote"),
+        skip_instance_cache=True,
+    )
+    target.pipe_file("/cached", b"abcdefgh")
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "complete-reopen-cache"),
+        cache_check=0,
+        check_files=True,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    try:
+        with cached.open("/cached", "rb", block_size=8) as file:
+            assert file.read(1) == b"a"
+        assert cached._metadata.cached_files[-1]["/cached"]["blocks"] is True
+
+        # A complete hit is an ordinary local BufferedReader, which has no
+        # fsspec ``size`` attribute and needs no compatibility conversion.
+        with cached.open("/cached", "rb", block_size=1) as file:
+            assert file.read(0) == b""
+            assert file.read() == b"abcdefgh"
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
 def test_open_persistent_cache_handle_survives_unlink_like_local(tmp_path):
     target = fsspec.filesystem(
         "nfs4",
@@ -975,6 +1007,198 @@ def test_persistent_open_files_reuses_scalar_generation_block_size(tmp_path):
         with _open_files(cached, ["/cached"], "rb") as files:
             assert files[0].blocksize == established_block_size
             assert files[0].read() == b"abcdefgh"
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
+def test_persistent_open_files_does_not_complete_sibling_from_short_speculation(
+    tmp_path,
+):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "short-speculation-remote"),
+        block_size=8,
+        skip_instance_cache=True,
+    )
+    expected = b"\0" * 16 + b"\1"
+    target.pipe_file("/primer", b"abcdefgh")
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "short-speculation-cache"),
+        cache_check=0,
+        check_files=True,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    with cached.open("/cached", "wb") as file:
+        assert file.write(expected) == len(expected)
+    live = cached.open("/primer", "rb", block_size=1)
+    try:
+        with _open_files(cached, ["/primer", "/cached"], "rb") as files:
+            for file in files:
+                file.seek(7)
+            assert [file.read(2) for file in files] == [b"h", b"\0\0"]
+
+        with cached.open("/cached", "rb", block_size=16) as file:
+            assert file.read(0) == b""
+        with cached.open("/cached", "rb", block_size=1) as file:
+            assert file.read() == expected
+    finally:
+        live.close()
+        cached.clear_cache()
+        target.close()
+
+
+def test_persistent_open_files_rejects_short_speculative_cache_fill(tmp_path):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "short-fill-remote"),
+        block_size=8,
+        skip_instance_cache=True,
+    )
+    target.makedirs("/d0")
+    target.pipe({"/a": b"abcdefgh", "/d0/a": b"0123456789"})
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "short-fill-cache"),
+        cache_check=0,
+        check_files=True,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    with cached.open("/d0/b", "wb") as file:
+        assert file.write(b"\0") == 1
+    live = cached.open("/a", "rb", block_size=1)
+    try:
+        with _open_files(cached, ["/d0/b", "/a", "/d0/a"], "rb") as files:
+            assert [file.read(1) for file in files] == [b"\0", b"a", b"0"]
+    finally:
+        live.close()
+        cached.clear_cache()
+        target.close()
+
+
+def test_persistent_cache_copy_then_partial_read_does_not_reuse_sparse_hole(tmp_path):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "copy-partial-remote"),
+        block_size=8,
+        skip_instance_cache=True,
+    )
+    target.makedirs("/d0")
+    target.pipe({"/a": b"abcdefgh", "/d0/a": b"0123456789"})
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "copy-partial-cache"),
+        cache_check=0,
+        check_files=True,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    try:
+        with cached.open("/d0/a", "rb", block_size=1) as file:
+            assert file.read(0) == b""
+        cached.cp_file("/a", "/d0/a")
+        with cached.open("/d0/a", "rb", block_size=1) as file:
+            assert file.read(1) == b"a"
+        with cached.open("/d0/a", "rb", block_size=2) as file:
+            assert file.read() == b"abcdefgh"
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
+def test_reconstructed_cache_reopens_overwritten_zero_length_generation(tmp_path):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "zero-generation-remote"),
+        block_size=8,
+        skip_instance_cache=True,
+    )
+    target.makedirs("/d0/sub")
+    target.makedirs("/d1")
+    target.pipe({"/a": b"abcdefgh", "/d0/a": b"0123456789"})
+    storage = str(tmp_path / "zero-generation-cache")
+    wrappers = []
+
+    def reconstruct():
+        wrapper = fsspec.filesystem(
+            "blockcache",
+            fs=target,
+            cache_storage=storage,
+            cache_check=0,
+            check_files=True,
+            expiry_time=0,
+            skip_instance_cache=True,
+        )
+        wrappers.append(wrapper)
+        return wrapper
+
+    cached = reconstruct()
+    try:
+        cached.rm("/a")
+        cached = reconstruct()
+        with pytest.raises(OSError):
+            cached.open("/d0", "rb", block_size=1)
+        with cached.open("/a", "wb") as file:
+            assert file.write(b"") == 0
+        for _ in range(12):
+            cached = reconstruct()
+        with cached.open("/b", "wb") as file:
+            assert file.write(b"") == 0
+        with _open_files(cached, ["/a", "/b"], "rb") as files:
+            assert [file.read(0) for file in files] == [b"", b""]
+        with cached.open("/a", "rb", block_size=1) as file:
+            assert file.read(0) == b""
+        with pytest.raises(ValueError, match="recursive=True"):
+            cached.rm("/d0", recursive=False)
+        cached = reconstruct()
+        with cached.open("/b", "wb") as file:
+            assert file.write(b"\0") == 1
+        with cached.open("/b", "rb", block_size=1) as file:
+            assert file.read(0) == b""
+            assert file.read() == b"\0"
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
+def test_zero_length_cached_read_does_not_cache_mmap_sentinel(tmp_path):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "zero-read-remote"),
+        block_size=8,
+        skip_instance_cache=True,
+    )
+    target.pipe_file("/a", b"abcdefgh")
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "zero-read-cache"),
+        cache_check=0,
+        check_files=True,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    try:
+        target.pipe_file("/a", b"")
+        with cached.open("/a", "rb", block_size=1) as file:
+            assert file.read(0) == b""
+        with cached.open("/a", "wb") as file:
+            assert file.write(b"\0") == 1
+        with cached.open("/a", "rb", block_size=1) as file:
+            assert file.read(0) == b""
+        with cached.open("/a", "rb", block_size=1) as file:
+            assert file.read(1) == b"\0"
     finally:
         cached.clear_cache()
         target.close()
