@@ -9,7 +9,7 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: pip
-    directory: "/python"
+    directory: "/adapters/nfs4fs"
     schedule:
       interval: weekly
     groups:
@@ -17,7 +17,7 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: cargo
-    directory: "/python"
+    directory: "/adapters/nfs4fs"
     schedule:
       interval: weekly
     groups:

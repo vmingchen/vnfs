@@ -1,14 +1,29 @@
 [workspace]
-members = ["vnfs", "nfsv41-sys", "vfsi-c"]
+members = [
+    "crates/vnfs",
+    "crates/vfsi-core",
+    "crates/vfsi-sync",
+    "crates/vfsi-nfs",
+    "crates/vfsi-smb",
+    "crates/vfsi-local",
+    "crates/nfsv41-sys",
+    "bindings/c",
+    "third-party/libntirpc-sys",
+]
 resolver = "2"
 
 [workspace.dependencies]
 clap = { version = "4.5.17", features = ["derive"] }
 libc = "0.2"
 libntirpc-sys = "0.2.2"
-nfsv41-sys = { path = "nfsv41-sys", version = "0.1.4" }
+nfsv41-sys = { path = "crates/nfsv41-sys", version = "0.1.4" }
 xdr-codec = "0.4.4"
 xdrgen = "0.4.4"
+vfsi-core = { path = "crates/vfsi-core", version = "0.1.0" }
+vfsi-local = { path = "crates/vfsi-local", version = "0.1.0" }
+vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.1.0" }
+vfsi-smb = { path = "crates/vfsi-smb", version = "0.1.0" }
+vfsi-sync = { path = "crates/vfsi-sync", version = "0.1.0" }
 
 [patch.crates-io]
-libntirpc-sys = { path = "python/third_party/libntirpc-sys" }
+libntirpc-sys = { path = "third-party/libntirpc-sys" }

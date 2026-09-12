@@ -5,6 +5,20 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+### Changed
+
+- Reorganized the platform by architectural boundary: shared types and sync
+  interfaces now live in `vfsi-core` and `vfsi-sync`; NFS, SMB, and local
+  implementations live in dedicated backend crates; `vnfs` remains the
+  backwards-compatible published facade; and the C and Python packages now
+  live under `bindings/` and `adapters/`.
+- Added a versioned ecosystem registry, pinned Git and rsync compatibility
+  checks, and an approval-gated, fast-forward-only workflow for promoting
+  canonical releases to the future `vfsi/vfsi` public mirror.
+- Documented the VFSI umbrella identity, `sfsi`/`vfsi`/`afsi`/`tfsi` API
+  facets, repository classes, application-port naming, dependency direction,
+  and release policy.
+
 ## [0.3.0] - 2026-09-12
 
 ### Added

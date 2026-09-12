@@ -1,0 +1,82 @@
+name: Promote VFSI mirror
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: Full canonical commit SHA to promote
+        required: true
+        type: string
+      tags:
+        description: Optional comma-separated release tags to promote
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: vfsi-mirror-promotion
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-24.04
+    environment: vfsi-publish
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Validate canonical commit and CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTE_COMMIT: ${{ inputs.commit }}
+        run: |
+          case "$PROMOTE_COMMIT" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            *) echo "commit must be a full lowercase Git SHA" >&2; exit 1 ;;
+          esac
+          git fetch origin main --tags
+          git cat-file -e "$PROMOTE_COMMIT^{commit}"
+          git merge-base --is-ancestor "$PROMOTE_COMMIT" origin/main
+          success=$(gh run list \
+            --workflow CI \
+            --commit "$PROMOTE_COMMIT" \
+            --status completed \
+            --json conclusion \
+            --jq 'any(.[]; .conclusion == "success")')
+          test "$success" = true
+      - name: Promote approved commit and tags
+        env:
+          PROMOTE_COMMIT: ${{ inputs.commit }}
+          PROMOTE_TAGS: ${{ inputs.tags }}
+          VFSI_MIRROR_TOKEN: ${{ secrets.VFSI_MIRROR_TOKEN }}
+        run: |
+          git remote add vfsi \
+            "https://x-access-token:${VFSI_MIRROR_TOKEN}@github.com/vfsi/vfsi.git"
+          if git ls-remote --exit-code --heads vfsi main >/dev/null 2>&1; then
+            git fetch vfsi main --tags
+            git merge-base --is-ancestor vfsi/main "$PROMOTE_COMMIT"
+          else
+            # Permit the first promotion into a newly created, empty mirror.
+            git fetch vfsi --tags
+          fi
+
+          refs=("$PROMOTE_COMMIT:refs/heads/main")
+          IFS=',' read -ra requested_tags <<<"$PROMOTE_TAGS"
+          for raw_tag in "${requested_tags[@]}"; do
+            tag=$(printf '%s' "$raw_tag" | xargs)
+            test -z "$tag" && continue
+            case "$tag" in
+              vnfs-v*|nfs4fs-v*|nfsv41-sys-v*|vfsi-c-v*|\
+              vfsi-core-v*|vfsi-sync-v*|vfsi-nfs-v*|vfsi-smb-v*|vfsi-local-v*) ;;
+              *) echo "unsupported release tag: $tag" >&2; exit 1 ;;
+            esac
+            git rev-parse --verify "refs/tags/$tag"
+            tag_commit=$(git rev-list -n 1 "refs/tags/$tag")
+            git merge-base --is-ancestor "$tag_commit" "$PROMOTE_COMMIT"
+            refs+=("refs/tags/$tag:refs/tags/$tag")
+          done
+
+          git push --atomic vfsi "${refs[@]}"

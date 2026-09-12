@@ -23,13 +23,15 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Check the detached Python native crate
         run: |
-          cargo fmt --manifest-path python/Cargo.toml --check
-          cargo clippy --manifest-path python/Cargo.toml --locked --all-targets -- -D warnings
+          cargo fmt --manifest-path adapters/nfs4fs/Cargo.toml --check
+          cargo clippy --manifest-path adapters/nfs4fs/Cargo.toml --locked --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
       - run: cargo test -p nfsv41-sys
       - run: cargo test -p vnfs --lib
       - run: cargo test -p vnfs --test dummy_vecfs
       - run: cargo test -p vfsi-c --lib
+      - name: Validate project organization registry
+        run: python ci/check-ecosystem.py
       - name: Verify backend feature combinations
         run: |
           cargo check -p vnfs --lib --no-default-features
@@ -47,8 +49,8 @@ jobs:
         run: |
           cargo build -p vfsi-c
           generated=$(find target/debug/build/vfsi-c-*/out -name vfsi.h -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
-          diff -u vfsi-c/include/vfsi.h "$generated"
-          cc -I vfsi-c/include vfsi-c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
+          diff -u bindings/c/include/vfsi.h "$generated"
+          cc -I bindings/c/include bindings/c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
           LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke /tmp/vfsi-smoke-root
 
   python:
@@ -87,9 +89,9 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install hypothesis maturin '${{ matrix.fsspec }}' pytest
-          cd python
-          ../.venv/bin/maturin develop
-      - run: .venv/bin/python -m pytest python/tests
+          cd adapters/nfs4fs
+          ../../.venv/bin/maturin develop
+      - run: .venv/bin/python -m pytest adapters/nfs4fs/tests
 
   python-package:
     runs-on: ubuntu-24.04
@@ -106,14 +108,14 @@ jobs:
       - name: Build and inspect wheel and source distribution
         run: |
           python -m pip install --upgrade pip maturin patchelf twine
-          cd python
+          cd adapters/nfs4fs
           python -m maturin build --release --locked --compatibility pypi --out dist
           python -m maturin sdist --out dist
           python -m twine check dist/*
       - name: Install wheel and test entry-point discovery outside the source tree
         run: |
           python -m venv .wheel-venv
-          .wheel-venv/bin/pip install python/dist/*.whl
+          .wheel-venv/bin/pip install adapters/nfs4fs/dist/*.whl
           cd /tmp
           "$GITHUB_WORKSPACE/.wheel-venv/bin/python" - <<'PY'
           import importlib.metadata
@@ -126,7 +128,9 @@ jobs:
           import vfsi
 
           metadata = importlib.metadata.metadata("nfs4fs")
-          pyproject = pathlib.Path(os.environ["GITHUB_WORKSPACE"], "python", "pyproject.toml")
+          pyproject = pathlib.Path(
+              os.environ["GITHUB_WORKSPACE"], "adapters", "nfs4fs", "pyproject.toml"
+          )
           expected_version = tomllib.loads(pyproject.read_text())["project"]["version"]
           assert metadata["Version"] == expected_version
           assert metadata["Project-URL"]
@@ -139,15 +143,15 @@ jobs:
           PY
       - name: Prove the source distribution can build a wheel
         run: |
-          python -m pip wheel --no-deps --wheel-dir /tmp/nfs4fs-sdist-wheel python/dist/*.tar.gz
+          python -m pip wheel --no-deps --wheel-dir /tmp/nfs4fs-sdist-wheel adapters/nfs4fs/dist/*.tar.gz
       - name: Type-check the installed public API
         run: |
           .wheel-venv/bin/pip install black==26.5.1 mypy==2.3.1 ruff==0.16.6
-          .wheel-venv/bin/black --check python/python python/tests
-          .wheel-venv/bin/ruff check python/python python/tests
+          .wheel-venv/bin/black --check adapters/nfs4fs/python adapters/nfs4fs/tests
+          .wheel-venv/bin/ruff check adapters/nfs4fs/python adapters/nfs4fs/tests
           cd /tmp
           "$GITHUB_WORKSPACE/.wheel-venv/bin/python" -m mypy --strict \
-            "$GITHUB_WORKSPACE/python/tests/typecheck_api.py"
+            "$GITHUB_WORKSPACE/adapters/nfs4fs/tests/typecheck_api.py"
 
   security:
     runs-on: ubuntu-24.04
@@ -161,9 +165,9 @@ jobs:
         run: |
           cargo install cargo-audit --version 0.22.2 --locked
           cargo install cargo-cyclonedx --version 0.5.9 --locked
-          cargo audit --file python/Cargo.lock
+          cargo audit --file adapters/nfs4fs/Cargo.lock
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) cargo cyclonedx \
-            --manifest-path python/Cargo.toml \
+            --manifest-path adapters/nfs4fs/Cargo.toml \
             --format json \
             --override-filename nfs4fs-rust-sbom \
             --spec-version 1.5 \
@@ -173,11 +177,11 @@ jobs:
           python -m venv .security-venv
           .security-venv/bin/pip install --upgrade pip \
             pip-audit==2.10.1 cyclonedx-bom==7.3.1
-          .security-venv/bin/pip-audit --strict python
+          .security-venv/bin/pip-audit --strict adapters/nfs4fs
           python -m venv .runtime-venv
           .runtime-venv/bin/pip install 'fsspec>=2024.12.0'
           .security-venv/bin/cyclonedx-py environment .runtime-venv \
-            --pyproject python/pyproject.toml \
+            --pyproject adapters/nfs4fs/pyproject.toml \
             --mc-type library \
             --output-reproducible \
             --output-format JSON \
@@ -187,7 +191,7 @@ jobs:
           name: security-sbom
           path: |
             nfs4fs-python-sbom.json
-            python/**/nfs4fs-rust-sbom.json
+            adapters/nfs4fs/**/nfs4fs-rust-sbom.json
           if-no-files-found: error
 
   nfs-integration:
@@ -265,7 +269,7 @@ jobs:
       - name: Run C ABI smoke test against NFS
         run: |
           cargo build -p vfsi-c
-          cc -Wall -Wextra -Werror -I vfsi-c/include vfsi-c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
+          cc -Wall -Wextra -Werror -I bindings/c/include bindings/c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
           LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke --nfs 127.0.0.1 '${{ matrix.minor-version }}'
       - name: Run required Python/fsspec coverage against NFS
         env:
@@ -275,9 +279,9 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install maturin fsspec pytest
-          cd python
-          ../.venv/bin/maturin develop
-          ../.venv/bin/python -m pytest \
+          cd adapters/nfs4fs
+          ../../.venv/bin/maturin develop
+          ../../.venv/bin/python -m pytest \
             tests/test_nfs_integration.py \
             tests/test_behavior_parity.py \
             tests/test_fsspec_abstract.py \
@@ -335,7 +339,7 @@ jobs:
           VFSI_REQUIRE_SERVER_COPY: 1
         run: |
           cargo build -p vfsi-c
-          cc -Wall -Wextra -Werror -I vfsi-c/include vfsi-c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
+          cc -Wall -Wextra -Werror -I bindings/c/include bindings/c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
           LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke --nfs 127.0.0.1 2
       - name: Run required Python/fsspec coverage against patched NFSv4.2
         env:
@@ -346,9 +350,9 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install maturin fsspec pytest
-          cd python
-          ../.venv/bin/maturin develop
-          ../.venv/bin/python -m pytest \
+          cd adapters/nfs4fs
+          ../../.venv/bin/maturin develop
+          ../../.venv/bin/python -m pytest \
             tests/test_nfs_integration.py \
             tests/test_behavior_parity.py \
             tests/test_fsspec_abstract.py \
@@ -484,7 +488,7 @@ jobs:
         if: matrix.bindings
         run: |
           cargo build -p vfsi-c
-          cc -Wall -Wextra -Werror -I vfsi-c/include vfsi-c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
+          cc -Wall -Wextra -Werror -I bindings/c/include bindings/c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
           LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke --smb 127.0.0.1 vfsi-test '${{ matrix.username }}' '${{ matrix.password }}' ''
       - name: Run Python/fsspec conformance test against Samba
         if: matrix.bindings
@@ -497,9 +501,9 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install maturin fsspec pytest
-          cd python
-          ../.venv/bin/maturin develop
-          ../.venv/bin/python -m pytest \
+          cd adapters/nfs4fs
+          ../../.venv/bin/maturin develop
+          ../../.venv/bin/python -m pytest \
             tests/test_smb_integration.py \
             tests/test_behavior_parity.py \
             tests/test_fsspec_abstract.py \

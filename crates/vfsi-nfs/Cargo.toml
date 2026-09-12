@@ -1,0 +1,22 @@
+[package]
+name = "vfsi-nfs"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "NFSv4 backend for VFSI"
+repository = "https://github.com/vmingchen/vnfs"
+
+[features]
+default = ["ffi"]
+ffi = ["dep:libc", "dep:libntirpc-sys", "dep:nfsv41-sys"]
+server-copy = ["ffi"]
+
+[dependencies]
+libc = { workspace = true, optional = true }
+libntirpc-sys = { workspace = true, optional = true }
+nfsv41-sys = { workspace = true, optional = true }
+vfsi-core = { workspace = true }
+vfsi-sync = { workspace = true }
+
+[package.metadata.docs.rs]
+no-default-features = true

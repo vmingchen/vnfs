@@ -1,0 +1,12 @@
+[package]
+name = "vfsi-local"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Local filesystem backend for VFSI"
+repository = "https://github.com/vmingchen/vnfs"
+
+[dependencies]
+libc = { workspace = true }
+vfsi-core = { workspace = true }
+vfsi-sync = { workspace = true }

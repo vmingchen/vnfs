@@ -1,0 +1,60 @@
+name: Port compatibility
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ports:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        id: [git, rsync]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake build-essential clang cmake gawk \
+            libacl1-dev libclang-dev libgssglue-dev libkrb5-dev \
+            liburcu-dev pkg-config python3-cmarkgfm
+      - name: Validate registry
+        run: python ci/check-ecosystem.py
+      - name: Build VFSI C ABI
+        run: cargo build -p vfsi-c
+      - name: Resolve pinned component
+        id: component
+        env:
+          COMPONENT_ID: ${{ matrix.id }}
+        run: |
+          python - <<'PY' >>"$GITHUB_OUTPUT"
+          import os
+          import tomllib
+
+          with open("ecosystem/ports.toml", "rb") as stream:
+              registry = tomllib.load(stream)
+          component = next(
+              item for item in registry["component"]
+              if item["id"] == os.environ["COMPONENT_ID"]
+          )
+          print(f"repository={component['repository']}")
+          print(f"revision={component['revision']}")
+          print(f"test={component['compatibility_test']}")
+          PY
+      - name: Run compatibility test
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/debug
+        run: |
+          "${{ steps.component.outputs.test }}" \
+            "${{ steps.component.outputs.repository }}" \
+            "${{ steps.component.outputs.revision }}"

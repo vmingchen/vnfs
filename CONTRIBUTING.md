@@ -14,9 +14,15 @@ For code changes:
    include an `fsspec` contract test when applicable; protocol behavior should
    include NFS or Samba integration coverage.
 3. Run `cargo fmt --all --check`, Clippy with warnings denied, the Rust unit
-   tests, and `python -m pytest python/tests`.
+   tests, and `python -m pytest adapters/nfs4fs/tests`.
 4. Keep commits focused and explain round-trip, compatibility, and retry or
    idempotency implications in the pull request.
+
+The boundaries between platform crates, backends, adapters, application ports,
+and infrastructure are defined in
+[docs/PROJECT_ORGANIZATION.md](docs/PROJECT_ORGANIZATION.md). Application-port
+changes belong in the corresponding `vfsi/port-*` repository; this repository
+records only the revisions covered by compatibility CI.
 
 The full CI suite requires Linux native build dependencies and starts local
 NFS-Ganesha and Samba servers. A pull request may rely on GitHub Actions for

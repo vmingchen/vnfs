@@ -1,0 +1,69 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "nfs4fs"
+version = "0.3.0"
+description = "fsspec filesystem backed by vectorized VFSI clients for NFS, SMB, and local files"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
+authors = [{ name = "Ming Chen", email = "v.mingchen@gmail.com" }]
+keywords = ["fsspec", "nfs", "nfs4", "smb", "filesystem", "vectorized-io"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Rust",
+  "Typing :: Typed",
+]
+dependencies = ["fsspec>=2024.12.0"]
+
+[project.urls]
+Homepage = "https://github.com/vmingchen/vnfs"
+Documentation = "https://github.com/vmingchen/vnfs/tree/main/adapters/nfs4fs"
+Repository = "https://github.com/vmingchen/vnfs"
+Issues = "https://github.com/vmingchen/vnfs/issues"
+Changelog = "https://github.com/vmingchen/vnfs/blob/main/CHANGELOG.md"
+
+[project.entry-points."fsspec.specs"]
+nfs4 = "nfs4fs:Nfs4FileSystem"
+vfsi = "nfs4fs:VfsiFileSystem"
+
+[project.optional-dependencies]
+test = ["hypothesis>=6.100", "pytest"]
+dev = ["black", "build", "hypothesis>=6.100", "mypy", "pytest", "ruff", "twine"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+warn_unused_configs = true
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+
+[tool.ruff]
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.maturin]
+module-name = "nfs4fs._native"
+python-source = "python"
+python-packages = ["nfs4fs", "vfsi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

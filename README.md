@@ -12,9 +12,10 @@ without mounting a filesystem or rewriting their data path in C.
 
 The repository provides:
 
-- a Rust `VecFs` API with NFSv4.1, NFSv4.2, SMB2/3, and local test backends;
-- the [`nfs4fs`](python/) Python package for `fsspec` applications;
-- a versioned [C ABI](vfsi-c/) with a checked-in header;
+- composable scalar (`sfsi`) and vectorized (`vfsi`) Rust API facets;
+- NFSv4.1, NFSv4.2, optional SMB2/3, and local backends;
+- the [`nfs4fs`](adapters/nfs4fs/) Python package for `fsspec` applications;
+- a versioned [C ABI](bindings/c/) with a checked-in header;
 - integration tests against NFS-Ganesha, a patched NFSv4.2 COPY server, and
   Samba dialects from SMB 2.1 through SMB 3.1.1.
 
@@ -50,15 +51,29 @@ with fsspec.open("nfs4://nfs.example/exports/data/a.txt", "rb") as file:
     print(file.read())
 ```
 
-See the [nfs4fs guide](python/) for NFS and SMB configuration, bulk operations,
+See the [nfs4fs guide](adapters/nfs4fs/) for NFS and SMB configuration, bulk operations,
 failure behavior, source-build dependencies, and current limitations.
+
+## Project organization
+
+The platform is organized as a modular monorepo: shared contracts, synchronous
+interfaces, protocol backends, bindings, and adapters are separate workspace
+packages while the published `vnfs` crate preserves its existing API. Modified
+third-party applications live in independent VFSI organization repositories
+and are registered at pinned revisions rather than vendored or added as
+submodules.
+
+See [VFSI project organization](docs/PROJECT_ORGANIZATION.md) for the source
+tree, repository ownership, API facets, port naming, maturity, compatibility,
+and mirror-promotion policies.
 
 ## Rust
 
-The `vnfs` crate enables the NFS, SMB, dummy, and server-copy features by
-default. Downstream users can disable defaults and select only the backends
-they need. Connections negotiate NFSv4.2 and fall back to NFSv4.1. Server-side
-COPY is capability-aware and falls back to client-side I/O when unavailable.
+The `vnfs` crate enables the NFS, dummy, and server-copy features by default.
+SMB is opt-in. Downstream users can disable defaults and select only the
+backends they need. Connections negotiate NFSv4.2 and fall back to NFSv4.1.
+Server-side COPY is capability-aware and falls back to client-side I/O when
+unavailable.
 
 The SMB backend negotiates SMB 2.0.2 through SMB 3.1.1, observes server credit
 and I/O limits, reconnects transport sessions, and uses server-side copy when
@@ -68,7 +83,7 @@ the server advertises it.
 
 VFSI and `nfs4fs` are beta software. The core behavior is covered by Rust,
 Python, upstream `fsspec` contract, C ABI, NFS, and Samba integration tests, but
-operators should read the [production notes](python/#production-notes) before
+operators should read the [production notes](adapters/nfs4fs/#production-notes) before
 deploying it for critical data. In particular, NFS authentication is currently
 AUTH_SYS, the API is synchronous, and Linux is the only packaged platform.
 
