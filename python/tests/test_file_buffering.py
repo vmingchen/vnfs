@@ -1009,6 +1009,14 @@ def test_file_buffering_smoke_on_network_backends(request, fs_fixture, tmp_path)
             persistent_read_compounds = fs._client.compound_stats()[0]
             if fs.backend == "nfs":
                 assert persistent_read_compounds == 1, persistent_read_compounds
+
+        fs.pipe_file(read_paths[0], b"same-client-replacement")
+        with persistent.open(read_paths[0], "rb") as file:
+            assert file.read() == b"same-client-replacement"
+
+        persistent.rm(read_paths[1])
+        with pytest.raises(FileNotFoundError):
+            persistent.open(read_paths[1], "rb").read()
     finally:
         persistent.clear_cache()
 

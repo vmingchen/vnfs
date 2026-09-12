@@ -10,6 +10,7 @@ import posixpath
 import tempfile
 import threading
 import uuid
+import weakref
 from glob import has_magic
 from urllib.parse import unquote, urlsplit
 
@@ -366,6 +367,7 @@ class _RawNfs4File(io.RawIOBase):
             raise io.UnsupportedOperation("not writable")
         if isinstance(data, str):
             raise TypeError("a bytes-like object is required, not 'str'")
+        self.fs._invalidate_persistent_caches([self.path])
         self.fs._invalidate_parent_listing(self.path)
         fd = self._ensure_open()
         try:
@@ -417,6 +419,7 @@ class _RawNfs4File(io.RawIOBase):
             raise io.UnsupportedOperation("not writable")
         if size is None:
             size = self._pos
+        self.fs._invalidate_persistent_caches([self.path])
         self.fs._invalidate_parent_listing(self.path)
         self.fs._client.truncate(self.fs._native_path(self.path), size)
         self._cached_size = size
@@ -1415,6 +1418,8 @@ class Nfs4FileSystem(AbstractFileSystem):
         self._dircache_lock = threading.RLock()
         self._dircache_generation = self._client.generation
         self._dircache_epoch = 0
+        self._persistent_cache_lock = threading.RLock()
+        self._persistent_cache_refs = []
 
     @property
     def closed(self):
@@ -1585,6 +1590,40 @@ class Nfs4FileSystem(AbstractFileSystem):
                 if key in exact or in_subtree:
                     self.dircache.pop(key, None)
 
+    def _register_persistent_cache(self, cache_fs, invalidator):
+        """Register a cache wrapper for same-client mutation notifications."""
+        with self._persistent_cache_lock:
+            retained = []
+            found = False
+            for cache_ref, callback in self._persistent_cache_refs:
+                cache = cache_ref()
+                if cache is None:
+                    continue
+                retained.append((cache_ref, callback))
+                if cache is cache_fs:
+                    found = True
+            if not found:
+                retained.append((weakref.ref(cache_fs), invalidator))
+            self._persistent_cache_refs = retained
+
+    def _invalidate_persistent_caches(self, paths, subtrees=False):
+        """Make registered persistent data generations stale before mutation."""
+        internals = {self._strip_protocol(path) for path in paths}
+        if not internals:
+            return
+        with self._persistent_cache_lock:
+            retained = []
+            caches = []
+            for cache_ref, invalidator in self._persistent_cache_refs:
+                cache = cache_ref()
+                if cache is None:
+                    continue
+                retained.append((cache_ref, invalidator))
+                caches.append((cache, invalidator))
+            self._persistent_cache_refs = retained
+        for cache, invalidator in caches:
+            invalidator(cache, internals, subtrees=subtrees)
+
     def invalidate_cache(self, path=None):
         """Discard a cached listing and all cached descendants.
 
@@ -1609,6 +1648,7 @@ class Nfs4FileSystem(AbstractFileSystem):
         internals = {self._strip_protocol(path) for path in paths}
         if not internals:
             return
+        self._invalidate_persistent_caches(internals, subtrees=True)
         parents = {
             posixpath.dirname(internal.rstrip("/")) or "/" for internal in internals
         }

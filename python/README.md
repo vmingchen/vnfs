@@ -162,8 +162,13 @@ For NFS this identity uses `FATTR4_CHANGE` and the file ID; SMB and dummy
 backends use file ID, nanosecond timestamps, and size. Validation happens at
 open, not on every read. With fsspec's default `check_files=False`, persistent
 entries are reused without source validation until `expiry_time`, so that mode
-is appropriate only for immutable or versioned paths. `cache_check` controls
-how often local cache metadata is reloaded and does not validate the server.
+is appropriate only when external clients use immutable or versioned paths.
+Mutations made through the same nfs4fs target invalidate registered persistent
+block-cache generations automatically, including renamed or recursively
+deleted subtrees. Already-open handles retain their per-handle cached blocks.
+`cache_check` controls how often local cache metadata is reloaded and does not
+validate the server. `invalidate_cache()` controls directory listings; use
+`pop_from_cache()` to evict persistent file data explicitly.
 
 Files opened together with `fsspec.open_files()` share a coordinator. A cache
 miss reads the same aligned range from a bounded group of sibling descriptors

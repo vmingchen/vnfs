@@ -7,6 +7,7 @@ equivalent generation and mmap-boundary fixes.
 
 import errno
 import os
+import threading
 import time
 
 from fsspec.caching import MMapCache
@@ -16,6 +17,7 @@ from fsspec.implementations.cached import CachingFileSystem
 _CACHE_FORMAT_KEY = "nfs4fs_blockcache_format"
 _CACHE_FORMAT = 1
 _PATCH_MARKER = "_nfs4fs_blockcache_compat"
+_INVALID_CACHE_FORMAT = -1
 
 
 class _Nfs4MMapCache(MMapCache):
@@ -146,6 +148,47 @@ def _mark_compatible_cache(cache_fs, path, file):
     if detail is not None and detail.get(_CACHE_FORMAT_KEY) != _CACHE_FORMAT:
         detail[_CACHE_FORMAT_KEY] = _CACHE_FORMAT
         _save_writable_metadata(cache_fs)
+
+
+def _cache_lock(cache_fs):
+    attributes = object.__getattribute__(cache_fs, "__dict__")
+    lock = attributes.get("_nfs4fs_cache_lock")
+    if lock is None:
+        lock = threading.RLock()
+        attributes["_nfs4fs_cache_lock"] = lock
+    return lock
+
+
+def _invalidate_registered_paths(cache_fs, paths, subtrees=False):
+    """Invalidate future opens without disrupting already-open mmap handles."""
+    with _cache_lock(cache_fs):
+        cache_fs._check_cache()
+        writable = cache_fs._metadata.cached_files[-1]
+
+        def affected(candidate):
+            for path in paths:
+                if candidate == path:
+                    return True
+                if subtrees and (
+                    path == "/" or candidate.startswith(path.rstrip("/") + "/")
+                ):
+                    return True
+            return False
+
+        changed = False
+        for path, detail in writable.items():
+            if (
+                affected(path)
+                and detail.get(_CACHE_FORMAT_KEY) != _INVALID_CACHE_FORMAT
+            ):
+                detail[_CACHE_FORMAT_KEY] = _INVALID_CACHE_FORMAT
+                changed = True
+        if changed:
+            _save_writable_metadata(cache_fs)
+
+
+def _register_cache(cache_fs):
+    cache_fs.fs._register_persistent_cache(cache_fs, _invalidate_registered_paths)
 
 
 def _enter_individually(open_files):
@@ -294,6 +337,7 @@ def _prepare_cache_records(cache_fs, paths):
 def _open_many_with_cache(cache_fs, open_files, target_type):
     if not isinstance(getattr(cache_fs, "fs", None), target_type):
         return _delegate_open_many(cache_fs, open_files)
+    _register_cache(cache_fs)
     if not all(_is_plain_read(open_file) for open_file in open_files):
         if all("r" in open_file.mode for open_file in open_files):
             return _enter_individually(open_files)
@@ -368,20 +412,46 @@ def install_fsspec_blockcache_compat(target_type):
     """Install nfs4fs-only fixes around fsspec's persistent block cache."""
     if getattr(CachingFileSystem, _PATCH_MARKER, False):
         return
+    original_init = CachingFileSystem.__init__
     original_open = CachingFileSystem._open
+    original_close_and_update = CachingFileSystem.close_and_update
+
+    def init_with_compat(cache_fs, *args, **kwargs):
+        original_init(cache_fs, *args, **kwargs)
+        if type(cache_fs) is CachingFileSystem and isinstance(
+            getattr(cache_fs, "fs", None), target_type
+        ):
+            _register_cache(cache_fs)
 
     def open_with_compat(cache_fs, path, *args, **kwargs):
         if not isinstance(getattr(cache_fs, "fs", None), target_type):
             return original_open(cache_fs, path, *args, **kwargs)
-        normalized = _cache_path(cache_fs, path)
-        _reset_stale_generation(cache_fs, normalized)
-        file = original_open(cache_fs, path, *args, **kwargs)
-        _mark_compatible_cache(cache_fs, normalized, file)
-        return file
+        _register_cache(cache_fs)
+        mode = kwargs.get("mode", args[0] if args else "rb")
+        if mode.replace("t", "").replace("b", "") != "r":
+            return original_open(cache_fs, path, *args, **kwargs)
+        with _cache_lock(cache_fs):
+            normalized = _cache_path(cache_fs, path)
+            _reset_stale_generation(cache_fs, normalized)
+            file = original_open(cache_fs, path, *args, **kwargs)
+            _mark_compatible_cache(cache_fs, normalized, file)
+            return file
 
+    def close_and_update_with_compat(cache_fs, file, close):
+        if not isinstance(getattr(cache_fs, "fs", None), target_type):
+            return original_close_and_update(cache_fs, file, close)
+        with _cache_lock(cache_fs):
+            return original_close_and_update(cache_fs, file, close)
+
+    def open_many_with_compat(cache_fs, open_files):
+        if not isinstance(getattr(cache_fs, "fs", None), target_type):
+            return _delegate_open_many(cache_fs, open_files)
+        with _cache_lock(cache_fs):
+            return _open_many_with_cache(cache_fs, open_files, target_type)
+
+    CachingFileSystem.__init__ = init_with_compat
     CachingFileSystem._open = open_with_compat
-    CachingFileSystem.open_many = lambda cache_fs, open_files: _open_many_with_cache(
-        cache_fs, open_files, target_type
-    )
+    CachingFileSystem.close_and_update = close_and_update_with_compat
+    CachingFileSystem.open_many = open_many_with_compat
     CachingFileSystem.commit_many = _delegate_commit_many
     setattr(CachingFileSystem, _PATCH_MARKER, True)
