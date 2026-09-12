@@ -191,7 +191,7 @@ def test_none_callback_is_accepted_for_all_transfer_entry_points(dummy_fs, tmp_p
     assert target.read_bytes() == b"data"
 
 
-@pytest.mark.parametrize("fs_fixture", ["nfs_fs", "smb_fs"])
+@pytest.mark.parametrize("fs_fixture", ["nfs_fs"])
 def test_callback_smoke_on_network_backends(request, fs_fixture, tmp_path):
     fs = request.getfixturevalue(fs_fixture)
     fs.mkdir("/callback")

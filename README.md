@@ -14,7 +14,9 @@ The repository provides:
 
 - composable scalar (`sfsi`) and vectorized (`vfsi`) Rust API facets;
 - NFSv4.1, NFSv4.2, optional SMB2/3, and local backends;
-- the [`nfs4fs`](adapters/nfs4fs/) Python package for `fsspec` applications;
+- the [`nfs4fs`](adapters/nfs4fs/) NFS fsspec package, the low-level Python
+  [`vsmb`](adapters/vsmb/) client, and the [`vsmbfs`](adapters/vsmbfs/) fsspec
+  adapter for SMB;
 - a versioned [C ABI](bindings/c/) with a checked-in header;
 - integration tests against NFS-Ganesha, a patched NFSv4.2 COPY server, and
   Samba dialects from SMB 2.1 through SMB 3.1.1.
@@ -51,8 +53,17 @@ with fsspec.open("nfs4://nfs.example/exports/data/a.txt", "rb") as file:
     print(file.read())
 ```
 
-See the [nfs4fs guide](adapters/nfs4fs/) for NFS and SMB configuration, bulk operations,
-failure behavior, source-build dependencies, and current limitations.
+For SMB, install `vsmb` for the low-level vector API or `vsmbfs` for fsspec:
+
+```python
+import fsspec
+
+fs = fsspec.filesystem("vsmbfs", host="samba.example", share="data")
+print(fs.ls("/"))
+```
+
+See the [nfs4fs guide](adapters/nfs4fs/) and [vsmbfs guide](adapters/vsmbfs/)
+for protocol-specific configuration.
 
 ## Project organization
 
@@ -81,11 +92,10 @@ the server advertises it.
 
 ## Project status
 
-VFSI and `nfs4fs` are beta software. The core behavior is covered by Rust,
-Python, upstream `fsspec` contract, C ABI, NFS, and Samba integration tests, but
-operators should read the [production notes](adapters/nfs4fs/#production-notes) before
-deploying it for critical data. In particular, NFS authentication is currently
-AUTH_SYS, the API is synchronous, and Linux is the only packaged platform.
+VFSI and its Python packages are beta software. The core behavior is covered
+by Rust, Python, upstream `fsspec` contract, C ABI, NFS, and Samba integration
+tests. In particular, NFS authentication is currently AUTH_SYS, the API is
+synchronous, and Linux is the only native-package platform.
 
 Issues and focused pull requests are welcome. Start with
 [CONTRIBUTING.md](CONTRIBUTING.md); security reports follow

@@ -1,3 +1,11 @@
 /target
+**/target/
+**/__pycache__/
+**/*.egg-info/
+**/build/
+**/dist/
+*.pyc
+*.so
 Cargo.lock
 !adapters/nfs4fs/Cargo.lock
+!adapters/vsmb/Cargo.lock

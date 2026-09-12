@@ -191,11 +191,9 @@ def test_protocol_neutral_import_alias():
     assert issubclass(VfsiFileSystem, Nfs4FileSystem)
 
 
-def test_smb_backend_requires_a_share():
-    from nfs4fs import _native
-
-    with pytest.raises(ValueError, match="share is required"):
-        _native.NfsClient("127.0.0.1", "smb")
+def test_nfs4fs_rejects_smb_backend():
+    with pytest.raises(ValueError, match="backend must be one of"):
+        fsspec.filesystem("nfs4", backend="smb", share="data")
 
 
 def test_pipe_missing_parent_raises_by_default(dummy_fs):

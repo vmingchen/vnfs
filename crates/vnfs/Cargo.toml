@@ -29,5 +29,5 @@ nfsv41-sys = { workspace = true, optional = true }
 vfsi-core = { workspace = true }
 vfsi-local = { workspace = true, optional = true }
 vfsi-nfs = { workspace = true, optional = true }
-vfsi-smb = { workspace = true, optional = true }
 vfsi-sync = { workspace = true }
+vfsi-smb = { workspace = true, optional = true }

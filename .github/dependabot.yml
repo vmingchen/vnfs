@@ -24,6 +24,26 @@ updates:
       python-native-dependencies:
         patterns: ["*"]
 
+  - package-ecosystem: pip
+    directory: "/adapters/vfsi-fsspec"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: "/adapters/vsmb"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: "/adapters/vsmb"
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: pip
+    directory: "/adapters/vsmbfs"
+    schedule:
+      interval: weekly
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

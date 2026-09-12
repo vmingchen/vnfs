@@ -39,34 +39,3 @@ def nfs_fs():
     except Exception:
         pass
     fs.close()
-
-
-@pytest.fixture
-def smb_fs():
-    """An SMB-backed filesystem when a test share is configured."""
-    server = os.environ.get("VFSI_SMB_SERVER")
-    share = os.environ.get("VFSI_SMB_SHARE")
-    if not server or not share:
-        if _required("VFSI_SMB_REQUIRED"):
-            pytest.fail(
-                "VFSI_SMB_SERVER and VFSI_SMB_SHARE are required in this integration job"
-            )
-        pytest.skip("VFSI_SMB_SERVER and VFSI_SMB_SHARE are not configured")
-    root = f"vfsi-python-it-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-    fs = fsspec.filesystem(
-        "nfs4",
-        host=server,
-        backend="smb",
-        share=share,
-        username=os.environ.get("VFSI_SMB_USERNAME", ""),
-        password=os.environ.get("VFSI_SMB_PASSWORD", ""),
-        domain=os.environ.get("VFSI_SMB_DOMAIN", ""),
-        root=root,
-    )
-    fs.mkdir("nfs4:///", create_parents=True)
-    yield fs
-    try:
-        fs.rm("nfs4:///", recursive=True)
-    except Exception:
-        pass
-    fs.close()

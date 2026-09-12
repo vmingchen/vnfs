@@ -7,6 +7,10 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ### Changed
 
+- Split Python SMB support into `vsmb`, a low-level vectorized client with no
+  fsspec dependency, and `vsmbfs`, the fsspec adapter. `nfs4fs` is now NFS-only
+  and shares its backend-neutral fsspec engine through `vfsi-fsspec`. The Rust
+  SMB backend retains the `vfsi-smb` crate name.
 - Reorganized the platform by architectural boundary: shared types and sync
   interfaces now live in `vfsi-core` and `vfsi-sync`; NFS, SMB, and local
   implementations live in dedicated backend crates; `vnfs` remains the

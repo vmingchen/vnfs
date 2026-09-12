@@ -1,0 +1,80 @@
+name: Pure Python package release
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Package to build without publishing
+        required: true
+        type: choice
+        options:
+          - vfsi-fsspec
+          - vsmbfs
+  push:
+    tags:
+      - "vfsi-fsspec-v*"
+      - "vsmbfs-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    outputs:
+      package: ${{ steps.package.outputs.name }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - id: package
+        env:
+          DISPATCH_PACKAGE: ${{ inputs.package }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            package=${RELEASE_TAG%-v*}
+          else
+            package=$DISPATCH_PACKAGE
+          fi
+          case "$package" in
+            vfsi-fsspec|vsmbfs) ;;
+            *) echo "unsupported package: $package" >&2; exit 1 ;;
+          esac
+          echo "name=$package" >>"$GITHUB_OUTPUT"
+      - name: Check tag and build distributions
+        env:
+          PACKAGE: ${{ steps.package.outputs.name }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python -m pip install --upgrade build twine
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            expected=${RELEASE_TAG#${PACKAGE}-v}
+            actual=$(python -c \
+              'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("adapters/'"$PACKAGE"'/pyproject.toml").read_text())["project"]["version"])')
+            test "$actual" = "$expected"
+          fi
+          python -m build --outdir "adapters/$PACKAGE/dist" "adapters/$PACKAGE"
+          python -m twine check "adapters/$PACKAGE/dist"/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}-dist
+          path: adapters/${{ steps.package.outputs.name }}/dist/*
+          if-no-files-found: error
+
+  publish:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/${{ needs.build.outputs.package }}/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: ${{ needs.build.outputs.package }}-dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

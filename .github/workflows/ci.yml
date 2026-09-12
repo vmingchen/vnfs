@@ -25,6 +25,8 @@ jobs:
         run: |
           cargo fmt --manifest-path adapters/nfs4fs/Cargo.toml --check
           cargo clippy --manifest-path adapters/nfs4fs/Cargo.toml --locked --all-targets -- -D warnings
+          cargo fmt --manifest-path adapters/vsmb/Cargo.toml --check
+          cargo clippy --manifest-path adapters/vsmb/Cargo.toml --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
       - run: cargo test -p nfsv41-sys
       - run: cargo test -p vnfs --lib
@@ -89,6 +91,7 @@ jobs:
           python -m venv .venv
           .venv/bin/pip install --upgrade pip
           .venv/bin/pip install hypothesis maturin '${{ matrix.fsspec }}' pytest
+          .venv/bin/pip install -e adapters/vfsi-fsspec
           cd adapters/nfs4fs
           ../../.venv/bin/maturin develop
       - run: .venv/bin/python -m pytest adapters/nfs4fs/tests
@@ -107,15 +110,24 @@ jobs:
           sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev
       - name: Build and inspect wheel and source distribution
         run: |
-          python -m pip install --upgrade pip maturin patchelf twine
+          python -m pip install --upgrade pip build maturin patchelf twine
+          python -m build --outdir adapters/vfsi-fsspec/dist adapters/vfsi-fsspec
+          python -m build --outdir adapters/vsmbfs/dist adapters/vsmbfs
+          python -m maturin build --manifest-path adapters/vsmb/Cargo.toml \
+            --release --locked --compatibility pypi --out adapters/vsmb/dist
+          python -m maturin sdist --manifest-path adapters/vsmb/Cargo.toml \
+            --out adapters/vsmb/dist
           cd adapters/nfs4fs
           python -m maturin build --release --locked --compatibility pypi --out dist
           python -m maturin sdist --out dist
-          python -m twine check dist/*
+          python -m twine check \
+            dist/* ../vfsi-fsspec/dist/* ../vsmb/dist/* ../vsmbfs/dist/*
       - name: Install wheel and test entry-point discovery outside the source tree
         run: |
           python -m venv .wheel-venv
-          .wheel-venv/bin/pip install adapters/nfs4fs/dist/*.whl
+          .wheel-venv/bin/pip install \
+            adapters/vfsi-fsspec/dist/*.whl adapters/nfs4fs/dist/*.whl \
+            adapters/vsmb/dist/*.whl adapters/vsmbfs/dist/*.whl
           cd /tmp
           "$GITHUB_WORKSPACE/.wheel-venv/bin/python" - <<'PY'
           import importlib.metadata
@@ -126,6 +138,8 @@ jobs:
 
           import fsspec
           import vfsi
+          import vsmb
+          import vsmbfs
 
           metadata = importlib.metadata.metadata("nfs4fs")
           pyproject = pathlib.Path(
@@ -136,6 +150,11 @@ jobs:
           assert metadata["Project-URL"]
           assert vfsi.VfsiFileSystem.protocol == "vfsi"
           assert fsspec.get_filesystem_class("nfs4").__module__ == "nfs4fs._fs"
+          assert fsspec.get_filesystem_class("vsmbfs") is vsmbfs.VsmbFileSystem
+          assert not any(
+              requirement.lower().startswith("fsspec")
+              for requirement in (importlib.metadata.requires("vsmb") or [])
+          )
           with tempfile.TemporaryDirectory() as root:
               fs = fsspec.filesystem("nfs4", backend="dummy", dummy_root=root)
               fs.pipe_file("/smoke", b"ok")
@@ -143,15 +162,27 @@ jobs:
           PY
       - name: Prove the source distribution can build a wheel
         run: |
-          python -m pip wheel --no-deps --wheel-dir /tmp/nfs4fs-sdist-wheel adapters/nfs4fs/dist/*.tar.gz
+          python -m pip wheel --no-deps --wheel-dir /tmp/python-sdist-wheels \
+            adapters/vfsi-fsspec/dist/*.tar.gz adapters/nfs4fs/dist/*.tar.gz \
+            adapters/vsmb/dist/*.tar.gz adapters/vsmbfs/dist/*.tar.gz
       - name: Type-check the installed public API
         run: |
           .wheel-venv/bin/pip install black==26.5.1 mypy==2.3.1 ruff==0.16.6
-          .wheel-venv/bin/black --check adapters/nfs4fs/python adapters/nfs4fs/tests
-          .wheel-venv/bin/ruff check adapters/nfs4fs/python adapters/nfs4fs/tests
+          .wheel-venv/bin/black --check \
+            adapters/vfsi-fsspec/python adapters/nfs4fs/python adapters/nfs4fs/tests \
+            adapters/vsmb/python adapters/vsmb/tests \
+            adapters/vsmbfs/python adapters/vsmbfs/tests
+          .wheel-venv/bin/ruff check --config adapters/nfs4fs/pyproject.toml \
+            adapters/vfsi-fsspec/python adapters/nfs4fs/python adapters/nfs4fs/tests \
+            adapters/vsmb/python adapters/vsmb/tests \
+            adapters/vsmbfs/python adapters/vsmbfs/tests
           cd /tmp
           "$GITHUB_WORKSPACE/.wheel-venv/bin/python" -m mypy --strict \
             "$GITHUB_WORKSPACE/adapters/nfs4fs/tests/typecheck_api.py"
+          "$GITHUB_WORKSPACE/.wheel-venv/bin/python" -m mypy --strict \
+            "$GITHUB_WORKSPACE/adapters/vsmb/tests/typecheck_api.py"
+          "$GITHUB_WORKSPACE/.wheel-venv/bin/python" -m mypy --strict \
+            "$GITHUB_WORKSPACE/adapters/vsmbfs/tests/typecheck_api.py"
 
   security:
     runs-on: ubuntu-24.04
@@ -177,7 +208,7 @@ jobs:
           python -m venv .security-venv
           .security-venv/bin/pip install --upgrade pip \
             pip-audit==2.10.1 cyclonedx-bom==7.3.1
-          .security-venv/bin/pip-audit --strict adapters/nfs4fs
+          .security-venv/bin/pip-audit --strict --no-deps adapters/nfs4fs
           python -m venv .runtime-venv
           .runtime-venv/bin/pip install 'fsspec>=2024.12.0'
           .security-venv/bin/cyclonedx-py environment .runtime-venv \
@@ -279,6 +310,7 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install maturin fsspec pytest
+          .venv/bin/pip install -e adapters/vfsi-fsspec
           cd adapters/nfs4fs
           ../../.venv/bin/maturin develop
           ../../.venv/bin/python -m pytest \
@@ -350,6 +382,7 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install maturin fsspec pytest
+          .venv/bin/pip install -e adapters/vfsi-fsspec
           cd adapters/nfs4fs
           ../../.venv/bin/maturin develop
           ../../.venv/bin/python -m pytest \
@@ -501,15 +534,12 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/pip install maturin fsspec pytest
-          cd adapters/nfs4fs
+          .venv/bin/pip install -e adapters/vfsi-fsspec
+          cd adapters/vsmb
           ../../.venv/bin/maturin develop
-          ../../.venv/bin/python -m pytest \
-            tests/test_smb_integration.py \
-            tests/test_behavior_parity.py \
-            tests/test_fsspec_abstract.py \
-            tests/test_callbacks.py::test_callback_smoke_on_network_backends \
-            tests/test_listing_cache.py::test_listing_cache_smoke_on_network_backends \
-            tests/test_file_buffering.py::test_file_buffering_smoke_on_network_backends
+          cd ../..
+          .venv/bin/pip install --no-deps -e adapters/vsmbfs
+          .venv/bin/python -m pytest adapters/vsmb/tests adapters/vsmbfs/tests
       - name: Show Samba log after failure
         if: failure()
         run: sudo journalctl -u smbd --no-pager

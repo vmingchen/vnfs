@@ -1344,7 +1344,7 @@ def test_open_files_vectorizes_eager_all_cache(tmp_path, monkeypatch):
         assert len(vector_reads) == 1
 
 
-@pytest.mark.parametrize("fs_fixture", ["nfs_fs", "smb_fs"])
+@pytest.mark.parametrize("fs_fixture", ["nfs_fs"])
 def test_persistent_blockcache_refreshes_network_generation(
     request, fs_fixture, tmp_path
 ):
@@ -1370,7 +1370,7 @@ def test_persistent_blockcache_refreshes_network_generation(
         cached.clear_cache()
 
 
-@pytest.mark.parametrize("fs_fixture", ["nfs_fs", "smb_fs"])
+@pytest.mark.parametrize("fs_fixture", ["nfs_fs"])
 def test_file_buffering_smoke_on_network_backends(request, fs_fixture, tmp_path):
     fs = request.getfixturevalue(fs_fixture)
     fs.mkdir("/buffer-smoke", create_parents=True)

@@ -3,7 +3,7 @@ name = "vfsi-smb"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "SMB2 and SMB3 backend for VFSI"
+description = "Vectorized SMB2 and SMB3 filesystem client"
 repository = "https://github.com/vmingchen/vnfs"
 
 [features]

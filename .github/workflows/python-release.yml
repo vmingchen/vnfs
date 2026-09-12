@@ -70,7 +70,7 @@ jobs:
             /bin/bash -c '
               set -e
               py="/opt/python/${TEST_PYTHON}/bin/python"
-              "$py" -m pip install /io/adapters/nfs4fs/dist/*.whl
+              "$py" -m pip install /io/adapters/vfsi-fsspec /io/adapters/nfs4fs/dist/*.whl
               cd /tmp
               "$py" - <<"PY"
           import tempfile

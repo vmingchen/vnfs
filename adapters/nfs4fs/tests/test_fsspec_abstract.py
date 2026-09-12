@@ -2,7 +2,7 @@
 
 These are the same generic contract tests fsspec uses for its own
 implementations (open/pipe/copy/get/put), run against both the local-directory
-(dummy) backend and, when configured, live NFS and SMB backends.
+(dummy) backend and, when configured, live NFS.
 """
 
 import os
@@ -23,7 +23,7 @@ from ._servers import nfs_config, nfs_reachable
 
 
 class Nfs4AbstractFixtures(AbstractFixtures):
-    @pytest.fixture(params=["dummy", "nfs", "smb"])
+    @pytest.fixture(params=["dummy", "nfs"])
     def fs(self, request):
         if request.param == "dummy":
             with tempfile.TemporaryDirectory(prefix="nfs4fs_abstract_") as root:
@@ -32,33 +32,6 @@ class Nfs4AbstractFixtures(AbstractFixtures):
                 )
                 yield fs
                 fs.close()
-            return
-        if request.param == "smb":
-            server = os.environ.get("VFSI_SMB_SERVER")
-            share = os.environ.get("VFSI_SMB_SHARE")
-            if not server or not share:
-                if os.environ.get("VFSI_SMB_REQUIRED") == "1":
-                    pytest.fail("required SMB server/share is not configured")
-                pytest.skip("SMB integration server is not configured")
-            smb_root = f"nfs4fs-abstract-{os.getpid()}-{uuid.uuid4().hex[:8]}"
-            fs = fsspec.filesystem(
-                "nfs4",
-                backend="smb",
-                host=server,
-                share=share,
-                username=os.environ.get("VFSI_SMB_USERNAME", ""),
-                password=os.environ.get("VFSI_SMB_PASSWORD", ""),
-                domain=os.environ.get("VFSI_SMB_DOMAIN", ""),
-                root=smb_root,
-                auto_mkdir=True,
-            )
-            fs.mkdir("nfs4:///", create_parents=True)
-            yield fs
-            try:
-                fs.rm("nfs4:///", recursive=True)
-            except Exception:
-                pass
-            fs.close()
             return
         host, minor_version = nfs_config()
         if not nfs_reachable(host, minor_version):

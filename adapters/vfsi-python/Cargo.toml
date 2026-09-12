@@ -1,0 +1,25 @@
+[package]
+name = "vfsi-python-native"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Shared native bindings for VFSI fsspec adapters"
+repository = "https://github.com/vmingchen/vnfs"
+publish = false
+
+[workspace]
+
+[features]
+default = []
+nfs = ["dep:vfsi-nfs"]
+smb = ["dep:vfsi-smb"]
+dummy = ["dep:vfsi-local"]
+
+[dependencies]
+libc = "0.2"
+pyo3 = { version = "0.29", features = ["abi3-py39", "abi3t"] }
+vfsi-core = { path = "../../crates/vfsi-core" }
+vfsi-local = { path = "../../crates/vfsi-local", optional = true }
+vfsi-nfs = { path = "../../crates/vfsi-nfs", optional = true }
+vfsi-sync = { path = "../../crates/vfsi-sync" }
+vfsi-smb = { path = "../../crates/vfsi-smb", optional = true }

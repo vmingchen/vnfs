@@ -1,6 +1,6 @@
 """Integration coverage for the Python/fsspec SMB backend."""
 
-from nfs4fs import _native
+from vsmb import _native
 
 from .common import run_correctness_suite
 

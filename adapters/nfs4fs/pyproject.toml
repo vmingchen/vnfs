@@ -5,13 +5,13 @@ build-backend = "maturin"
 [project]
 name = "nfs4fs"
 version = "0.3.0"
-description = "fsspec filesystem backed by vectorized VFSI clients for NFS, SMB, and local files"
+description = "fsspec filesystem backed by the vectorized VFSI NFSv4 client"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT OR Apache-2.0"
 license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
 authors = [{ name = "Ming Chen", email = "v.mingchen@gmail.com" }]
-keywords = ["fsspec", "nfs", "nfs4", "smb", "filesystem", "vectorized-io"]
+keywords = ["fsspec", "nfs", "nfs4", "filesystem", "vectorized-io"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
@@ -28,7 +28,7 @@ classifiers = [
   "Programming Language :: Rust",
   "Typing :: Typed",
 ]
-dependencies = ["fsspec>=2024.12.0"]
+dependencies = ["fsspec>=2024.12.0", "vfsi-fsspec>=0.1,<0.2"]
 
 [project.urls]
 Homepage = "https://github.com/vmingchen/vnfs"

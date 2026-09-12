@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import fsspec
 import nfs4fs._fs as fs_module
 import pytest
+import vfsi_fsspec._fs as engine_module
 
 
 def _dummy(tmp_path, **kwargs):
@@ -199,7 +200,7 @@ def test_pid_change_rebuilds_session_before_use(tmp_path, monkeypatch):
     fs = _dummy(tmp_path / "fork")
     starting_generation = fs._client.generation
     parent_pid = os.getpid()
-    monkeypatch.setattr(fs_module.os, "getpid", lambda: parent_pid + 1)
+    monkeypatch.setattr(engine_module.os, "getpid", lambda: parent_pid + 1)
     assert not fs.exists("/missing")
     assert fs._client.generation == starting_generation + 1
     fs.close()

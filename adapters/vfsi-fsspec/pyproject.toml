@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vfsi-fsspec"
+version = "0.1.0"
+description = "Shared fsspec engine for vectorized filesystem backends"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
+authors = [{ name = "Ming Chen", email = "v.mingchen@gmail.com" }]
+dependencies = ["fsspec>=2024.12.0"]
+
+[project.urls]
+Homepage = "https://github.com/vmingchen/vnfs"
+Repository = "https://github.com/vmingchen/vnfs"
+Issues = "https://github.com/vmingchen/vnfs/issues"
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+
+[tool.ruff]
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.setuptools.package-data]
+vfsi_fsspec = ["py.typed", "*.pyi"]

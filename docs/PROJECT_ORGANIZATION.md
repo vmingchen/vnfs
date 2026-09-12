@@ -18,7 +18,9 @@ remain stable:
 
 - `vnfs` is the published Rust compatibility facade;
 - `vfsi-c` is the versioned C ABI;
-- `nfs4fs` is the Python distribution and fsspec adapter;
+- `nfs4fs` is the NFS Python distribution and fsspec adapter;
+- `vsmb` is the low-level vectorized SMB Python distribution;
+- `vsmbfs` is the fsspec adapter layered on `vsmb`;
 - `nfsv41-sys` is the low-level NFS protocol binding package.
 
 `https://github.com/vmingchen/vnfs` is the canonical platform repository. It
@@ -71,7 +73,11 @@ crates/
 bindings/
   c/                    vfsi-c package and checked-in public header
 adapters/
-  nfs4fs/               PyO3 extension, Python package, and fsspec adapter
+  vfsi-python/          private shared PyO3 binding implementation
+  vfsi-fsspec/          backend-neutral fsspec engine
+  nfs4fs/               NFS native extension and fsspec facade
+  vsmb/                 low-level vectorized SMB Python client
+  vsmbfs/               fsspec facade over vsmb
 protocols/
   nfsv4/                protocol source material
 third-party/
@@ -89,7 +95,10 @@ vfsi-core
     -> vfsi-sync
         -> vfsi-nfs / vfsi-smb / vfsi-local
             -> vnfs facade
-                -> vfsi-c / nfs4fs
+                -> vfsi-c
+            -> vfsi-python -> nfs4fs / vsmb
+            -> vfsi-fsspec -> nfs4fs / vsmbfs
+            -> vsmb -> vsmbfs
 ```
 
 Shared crates must not depend on a backend. Backends may implement optimized
@@ -149,7 +158,10 @@ from the canonical repository. Package tags are namespace-qualified, such as
 `vnfs-v0.0.9` and `nfs4fs-v0.3.0`.
 
 Workspace crates are released in dependency order: `vfsi-core`, `vfsi-sync`,
-the selected `vfsi-*` backends, `vnfs`, and finally `vfsi-c` and `nfs4fs`.
+the selected `vfsi-*` backends, `vnfs`, and then `vfsi-c`. Python packages are
+released in dependency order: `vfsi-fsspec`, `nfs4fs` and `vsmb`, then
+`vsmbfs`. The private `vfsi-python-native` crate is source-linked into native
+Python distributions and is not published independently.
 The facade must never be published with a dependency version that is not
 already available from crates.io. The NFS implementation uses an `ffi` feature;
 docs.rs disables that feature because its offline builder cannot fetch and

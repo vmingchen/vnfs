@@ -1,7 +1,7 @@
 """Reproductions for behavior divergences found when comparing the nfs4
 filesystem with LocalFileSystem / the fsspec contract.
 
-Each test runs against all backends (dummy + NFS/SMB, when reachable). They are
+Each test runs against the dummy and NFS backends (when reachable). They are
 written to fail on the pre-fix behavior and pass after the fixes.
 """
 
@@ -12,7 +12,7 @@ import time
 import pytest
 
 
-@pytest.fixture(params=["dummy", "nfs", "smb"])
+@pytest.fixture(params=["dummy", "nfs"])
 def fs(request):
     return request.getfixturevalue(f"{request.param}_fs")
 
@@ -198,8 +198,8 @@ def test_created_modified_are_utc_aware(fs):
     fs.pipe_file("nfs4:///f.txt", b"x")
     created = fs.created("nfs4:///f.txt")
     modified = fs.modified("nfs4:///f.txt")
-    # Some SMB servers do not expose creation/change time. Never fabricate it,
-    # but require every timestamp that is exposed to be UTC-aware.
+    # Never fabricate an unavailable creation time, but require every
+    # timestamp that is exposed to be UTC-aware.
     if created is not None:
         assert created.tzinfo is not None
         assert created.utcoffset() == datetime.timedelta(0)
@@ -239,8 +239,8 @@ def test_touch_without_truncate_updates_timestamp_and_preserves_data(fs):
     fs.pipe_file(path, b"preserve me")
     before = fs.ukey(path)
     # Ensure even filesystems with relatively coarse timestamp storage receive
-    # a distinguishable value. NFS change attributes need no delay, but SMB
-    # and the dummy backend derive ukey from timestamps.
+    # a distinguishable value. NFS change attributes need no delay, but the
+    # dummy backend derives ukey from timestamps.
     time.sleep(0.02)
     fs.touch(path, truncate=False)
     assert fs.cat_file(path) == b"preserve me"

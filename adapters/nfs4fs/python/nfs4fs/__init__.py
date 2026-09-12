@@ -1,4 +1,4 @@
-"""fsspec filesystems backed by the vectorized VFSI clients.
+"""fsspec filesystem backed by the vectorized VFSI NFS client.
 
 Importing this package registers the compatible ``nfs4`` protocol and the
 protocol-neutral ``vfsi`` alias with fsspec:

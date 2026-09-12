@@ -1,9 +1,9 @@
 # nfs4fs
 
 `nfs4fs` is a Linux `fsspec` implementation backed by
-[VFSI](https://github.com/vmingchen/vnfs)'s vectorized NFSv4 and SMB2/3 clients.
-Bulk `fsspec` operations are translated into protocol-native compounds, reducing
-round trips for workloads with many small files.
+[VFSI](https://github.com/vmingchen/vnfs)'s vectorized NFSv4 client. Bulk
+`fsspec` operations are translated into NFS compounds, reducing round trips
+for workloads with many small files.
 
 ## Install
 
@@ -68,33 +68,6 @@ fs = fsspec.filesystem(
 )
 ```
 
-## SMB2/3
-
-Use the protocol-neutral `vfsi` name and select the SMB backend explicitly:
-
-```python
-fs = fsspec.filesystem(
-    "vfsi",
-    backend="smb",
-    host="samba.example",
-    share="data",
-    username="alice",
-    password="secret",
-    domain="WORKGROUP",
-    root="team-a",
-)
-fs.pipe_file("/hello.txt", b"hello over SMB")
-print(hex(fs.smb_dialect()))
-```
-
-Empty credentials request guest access. SMB paths must be valid UTF-8. The SMB
-backend does not advertise Unix link or ownership semantics; capability-aware
-operations use following metadata where possible.
-
-Do not embed credentials in URLs. Supply them as storage options or through
-the normal `fsspec` configuration mechanisms, and avoid logging serialized
-filesystem objects containing secrets.
-
 ## Operations that vectorize
 
 The largest benefit comes from giving `fsspec` multiple paths at once:
@@ -103,10 +76,10 @@ The largest benefit comes from giving `fsspec` multiple paths at once:
 - `pipe` and `put` batch writes;
 - recursive `get`, `put`, `cp`, `rm`, and tree walks use vector metadata and
   mutation operations;
-- `cp_file`/`copy` use NFSv4.2 or SMB server-side copy when available, with a
+- `cp_file`/`copy` use NFSv4.2 server-side copy when available, with a
   client-side fallback.
 
-`minor_version()`, `capabilities()`, `server_copy_enabled()`, `smb_dialect()`,
+`minor_version()`, `capabilities()`, `server_copy_enabled()`,
 `compound_stats()`, and `rpc_stats()` are available on the native client for
 feature inspection and diagnostics.
 
@@ -158,8 +131,8 @@ cached = fsspec.filesystem(
 
 With `check_files=True`, each open compares the saved source identity with
 nfs4fs's `ukey()` and starts a fresh local cache generation when it changes.
-For NFS this identity uses `FATTR4_CHANGE` and the file ID; SMB and dummy
-backends use file ID, nanosecond timestamps, and size. Validation happens at
+For NFS this identity uses `FATTR4_CHANGE` and the file ID; the dummy backend
+uses file ID, nanosecond timestamps, and size. Validation happens at
 open, not on every read. With fsspec's default `check_files=False`, persistent
 entries are reused without source validation until `expiry_time`, so that mode
 is appropriate only when external clients use immutable or versioned paths.
@@ -189,8 +162,8 @@ existing disk-spooled commit behavior.
 
 ## Directory listing cache
 
-Directory listing caching is disabled by default so that NFS and SMB
-namespaces modified by other clients remain immediately visible. Enable a
+Directory listing caching is disabled by default so that NFS namespaces
+modified by other clients remain immediately visible. Enable a
 bounded-staleness cache with the standard fsspec options:
 
 ```python
@@ -243,7 +216,7 @@ visible when the TTL expires or when the caller requests a refresh. Use
 - `auto_mkdir` is `False` by default. Enable it only when write operations are
   allowed to create missing parents.
 - `root` rejects `.` and `..` components. Use it to keep all paths under an
-  export- or share-relative prefix; it is not a substitute for server-side
+  export-relative prefix; it is not a substitute for server-side
   authorization.
 - Vector batches are bounded by both `batch_size` (128 items) and
   `max_batch_bytes` (64 MiB). Files larger than that byte threshold stream in
@@ -273,9 +246,9 @@ cd adapters/nfs4fs
 ../../.venv/bin/python -m pytest tests
 ```
 
-Tests use the local dummy backend unless NFS/SMB integration variables are
-provided. CI runs the same suite against NFSv4.1, NFSv4.2, patched server-side
-COPY, SMB 2.1 guest access, and authenticated SMB 3.1.1.
+Tests use the local dummy backend unless NFS integration variables are
+provided. CI runs the same suite against NFSv4.1, NFSv4.2, and patched
+server-side COPY. Samba coverage lives with the `vsmbfs` adapter.
 
 The default suite includes a deterministic Hypothesis state machine that runs
 randomized filesystem histories against both nfs4fs's dummy backend and

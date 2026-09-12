@@ -1,0 +1,54 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "vsmb"
+version = "0.1.0"
+description = "Low-level vectorized SMB2/3 client for Python"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
+authors = [{ name = "Ming Chen", email = "v.mingchen@gmail.com" }]
+keywords = ["smb", "smb2", "smb3", "filesystem", "vectorized-io"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Intended Audience :: System Administrators",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Rust",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/vmingchen/vnfs"
+Documentation = "https://github.com/vmingchen/vnfs/tree/main/adapters/vsmb"
+Repository = "https://github.com/vmingchen/vnfs"
+Issues = "https://github.com/vmingchen/vnfs/issues"
+Changelog = "https://github.com/vmingchen/vnfs/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+test = ["pytest"]
+dev = ["black", "maturin", "mypy", "pytest", "ruff", "twine"]
+
+[tool.maturin]
+module-name = "vsmb._native"
+python-source = "python"
+python-packages = ["vsmb"]
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+
+[tool.ruff]
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
