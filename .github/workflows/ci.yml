@@ -476,7 +476,7 @@ jobs:
           VFSI_SMB_RESTART_COMMAND: ${{ matrix.reconnect }}
         run: |
           if [ "${{ matrix.rust_features }}" = default ]; then
-            cargo test -p vnfs --test smb -- --test-threads=1
+            cargo test -p vnfs --features smb --test smb -- --test-threads=1
           else
             cargo test -p vnfs --no-default-features --features "${{ matrix.rust_features }}" --test smb -- --test-threads=1
           fi
