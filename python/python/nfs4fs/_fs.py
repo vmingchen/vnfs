@@ -13,8 +13,9 @@ import uuid
 from glob import has_magic
 from urllib.parse import unquote, urlsplit
 
+from fsspec.caching import caches
 from fsspec.callbacks import DEFAULT_CALLBACK, Callback
-from fsspec.spec import AbstractFileSystem
+from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 from fsspec.transaction import Transaction
 
 from . import _native
@@ -207,7 +208,7 @@ class _ResilientClient:
         return call
 
 
-class Nfs4File(io.RawIOBase):
+class _RawNfs4File(io.RawIOBase):
     """A binary file object backed by an open vnfs descriptor.
 
     The descriptor is opened lazily (first I/O) for read modes so bulk paths
@@ -272,11 +273,11 @@ class Nfs4File(io.RawIOBase):
                 self._cached_size = attrs["size"]
         return self._fd
 
-    def _pread(self, length):
+    def _pread_at(self, offset, length):
         """Retry an absolute-offset read once on a fresh session."""
         fd = self._ensure_open()
         try:
-            return self.fs._client.pread(fd, length, self._pos)
+            return self.fs._client.pread(fd, length, offset)
         except ConnectionError:
             if not self.fs.auto_reconnect:
                 raise
@@ -284,7 +285,10 @@ class Nfs4File(io.RawIOBase):
             self._fd = None
             self._fd_generation = None
             fd = self._ensure_open()
-            return self.fs._client.pread(fd, length, self._pos)
+            return self.fs._client.pread(fd, length, offset)
+
+    def _pread(self, length):
+        return self._pread_at(self._pos, length)
 
     def _size(self):
         if self._cached_size is None:
@@ -442,6 +446,654 @@ class Nfs4File(io.RawIOBase):
     @property
     def size(self):
         return self._size()
+
+
+class Nfs4File(AbstractBufferedFile):
+    """fsspec-compatible buffered facade over a native VFSI descriptor.
+
+    Standard read modes use fsspec's cache implementations. Writes remain
+    write-through unless explicitly opted into buffering, while update modes
+    containing ``+`` always retain the raw descriptor semantics.
+    """
+
+    DEFAULT_BLOCK_SIZE = 1 << 20
+
+    def __init__(
+        self,
+        fs,
+        path,
+        mode="rb",
+        fd=None,
+        block_size=None,
+        cache_type="readahead",
+        cache_options=None,
+        write_buffering=False,
+        size=None,
+        defer_cache=False,
+    ):
+        self._raw = _RawNfs4File(fs, path, mode, fd=fd)
+        self._base_mode = _normalize_mode(mode)
+        self._buffered_read = self._base_mode == "r" and cache_type not in (
+            None,
+            "none",
+        )
+        self._buffered_write = self._base_mode in ("w", "a", "x") and bool(
+            write_buffering
+        )
+        self._using_buffer = self._buffered_read or self._buffered_write
+        self._buffer_group = None
+        self._write_spool = None
+        self._spool_read_offset = 0
+        self._write_failed = False
+        self._buffer_size = size
+        self._requested_read_end = None
+        self.cache_type = cache_type
+        self._cache_options = dict(cache_options or {})
+        self._deferred_cache_type = (
+            cache_type if defer_cache and self._buffered_read else None
+        )
+        effective_block_size = block_size or self.DEFAULT_BLOCK_SIZE
+
+        if self._using_buffer:
+            super().__init__(
+                fs,
+                self._raw.path,
+                mode=self._raw._native_mode(),
+                block_size=effective_block_size,
+                cache_type=(
+                    "none" if self._deferred_cache_type is not None else cache_type
+                ),
+                cache_options=(
+                    {} if self._deferred_cache_type is not None else self._cache_options
+                ),
+                size=size,
+            )
+            if self._buffered_write and self._base_mode == "a":
+                append_size = self._raw.tell() if size is None else size
+                self._raw._pos = append_size
+                self._raw._cached_size = append_size
+                self._buffer_size = append_size
+                self.loc = append_size
+        else:
+            io.IOBase.__init__(self)
+            self.fs = fs
+            self.path = self._raw.path
+            self.mode = mode
+            self.blocksize = effective_block_size
+            self.loc = self._raw.tell()
+            self._closed = False
+
+    @property
+    def _fd(self):
+        return self._raw._fd
+
+    @_fd.setter
+    def _fd(self, value):
+        self._raw._fd = value
+
+    @property
+    def _fd_generation(self):
+        return self._raw._fd_generation
+
+    @_fd_generation.setter
+    def _fd_generation(self, value):
+        self._raw._fd_generation = value
+
+    @property
+    def size(self):
+        if self._buffer_size is not None:
+            return self._buffer_size
+        return self._raw.size
+
+    @size.setter
+    def size(self, value):
+        self._buffer_size = value
+
+    def _attach_group(self, group):
+        self._buffer_group = group
+        if self._deferred_cache_type is not None:
+            cache_type = self._deferred_cache_type
+            self._deferred_cache_type = None
+            self.cache = caches[cache_type](
+                self.blocksize,
+                self._fetch_range,
+                self.size,
+                **self._cache_options,
+            )
+        if self._buffered_write:
+            threshold = max(
+                1,
+                min(
+                    self.blocksize,
+                    self.fs.max_batch_bytes // max(1, len(group.files)),
+                ),
+            )
+            self._write_spool = tempfile.SpooledTemporaryFile(
+                max_size=threshold, mode="w+b"
+            )
+            self._group_write_limit = threshold
+
+    def _has_read_cache(self):
+        return self._buffered_read or (
+            self._base_mode == "r" and getattr(self, "cache", None) is not None
+        )
+
+    def _cache_is_pristine(self):
+        if not self._buffered_read or self.cache_type in ("all", "parts"):
+            return False
+        cache = getattr(self, "cache", None)
+        return cache is not None and not any(
+            getattr(cache, field, 0)
+            for field in ("hit_count", "miss_count", "total_requested_bytes")
+        )
+
+    def _fetch_range(self, start, end):
+        if self._buffer_group is not None and self.fs.vectorized_buffering:
+            return self._buffer_group.fetch(self, start, end)
+        return self._raw._pread_at(start, max(0, end - start))
+
+    def _initiate_upload(self):
+        # Creation/truncation and append positioning happen when the raw
+        # descriptor is opened, preserving POSIX open-time errors.
+        return None
+
+    def _upload_chunk(self, final=False):
+        data = self.buffer.getvalue()
+        offset = 0
+        try:
+            while offset < len(data):
+                written = self._raw.write(data[offset:])
+                if written <= 0:
+                    raise OSError(errno.EIO, "short buffered write", self.path)
+                offset += written
+        except ConnectionError:
+            self._write_failed = True
+            raise
+        return True
+
+    def _stage_buffer(self):
+        if self.buffer.tell() == 0:
+            return
+        if self._write_spool is None:
+            raise RuntimeError("grouped writer has no staging spool")
+        self._write_spool.seek(0, io.SEEK_END)
+        self._write_spool.write(self.buffer.getvalue())
+        self.buffer = io.BytesIO()
+        if self._buffer_group is not None:
+            self._buffer_group.enforce_memory_limit()
+
+    def read(self, size=-1):
+        if not self._has_read_cache():
+            return self._raw.read(size)
+        if (
+            self._buffered_read
+            and (size is None or size < 0)
+            and self.loc == 0
+            and self._cache_is_pristine()
+        ):
+            if self.closed:
+                raise ValueError("I/O operation on closed file")
+            if self._buffer_group is not None and self.fs.vectorized_buffering:
+                data = self._buffer_group.read_all(self)
+            else:
+                data, errors = self.fs._client.read_all_many(
+                    [self.fs._native_path(self.path)]
+                )
+                if errors:
+                    raise _oserror(errors[0], self.path)
+                data = data[0] or b""
+            self.loc = len(data)
+            return data
+        self._requested_read_end = (
+            self.size if size is None or size < 0 else min(self.loc + size, self.size)
+        )
+        try:
+            return super().read(size)
+        finally:
+            self._requested_read_end = None
+
+    def readinto(self, b):
+        if not self._has_read_cache():
+            return self._raw.readinto(b)
+        return super().readinto(b)
+
+    def write(self, data):
+        if not self._using_buffer:
+            return self._raw.write(data)
+        if not self._buffered_write:
+            return super().write(data)
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        if isinstance(data, str):
+            raise TypeError("a bytes-like object is required, not 'str'")
+        if self._write_failed:
+            raise ConnectionError("buffered writer is unusable after a failed flush")
+        if self._buffer_group is None:
+            written = self.buffer.write(data)
+            self.loc += written
+            complete = self.buffer.tell() // self.blocksize * self.blocksize
+            if complete:
+                payload = self.buffer.getvalue()
+                self.buffer = io.BytesIO(payload[:complete])
+                if self.offset is None:
+                    self.offset = 0
+                    self._initiate_upload()
+                if self._upload_chunk(final=False) is not False:
+                    self.offset += complete
+                    self.buffer = io.BytesIO(payload[complete:])
+                    self.buffer.seek(0, io.SEEK_END)
+            return written
+        view = memoryview(data).cast("B")
+        written = 0
+        while written < len(view):
+            room = self._group_write_limit - self.buffer.tell()
+            if room <= 0:
+                self._stage_buffer()
+                room = self._group_write_limit
+            chunk = min(room, len(view) - written)
+            self.buffer.write(view[written : written + chunk])
+            written += chunk
+            if self.buffer.tell() >= self._group_write_limit:
+                self._stage_buffer()
+        self.loc += written
+        return written
+
+    def seek(self, offset, whence=0):
+        if not self._has_read_cache() and not self._buffered_write:
+            return self._raw.seek(offset, whence)
+        return super().seek(offset, whence)
+
+    def tell(self):
+        if not self._has_read_cache() and not self._buffered_write:
+            return self._raw.tell()
+        return super().tell()
+
+    def truncate(self, size=None):
+        if not self._using_buffer:
+            return self._raw.truncate(size)
+        if self._buffered_write:
+            self.flush()
+            if size is None:
+                size = self.tell()
+            return self._raw.truncate(size)
+        raise io.UnsupportedOperation("not writable")
+
+    def flush(self, force=False):
+        if not self._using_buffer:
+            return self._raw.flush()
+        if self._buffered_read:
+            return None
+        if self._write_failed:
+            raise ConnectionError("buffered writer is unusable after a failed flush")
+        if self._buffer_group is None:
+            if force:
+                return super().flush(force=True)
+            if self.buffer.tell() == 0:
+                return None
+            if self.offset is None:
+                self.offset = 0
+                self._initiate_upload()
+            buffered = self.buffer.seek(0, io.SEEK_END)
+            if self._upload_chunk(final=False) is not False:
+                self.offset += buffered
+                self.buffer = io.BytesIO()
+            return None
+        if force:
+            if self.forced:
+                return None
+            self.forced = True
+        self._stage_buffer()
+        self._buffer_group.flush_files([self])
+        return None
+
+    def readable(self):
+        if not self._has_read_cache() and not self._buffered_write:
+            return self._raw.readable()
+        return super().readable()
+
+    def writable(self):
+        if not self._using_buffer:
+            return self._raw.writable()
+        return super().writable()
+
+    def seekable(self):
+        if not self._has_read_cache() and not self._buffered_write:
+            return self._raw.seekable()
+        return super().seekable()
+
+    def close(self):
+        if self.closed:
+            return
+        group = self._buffer_group
+        if group is not None:
+            try:
+                if self._buffered_write:
+                    self.flush(force=True)
+                elif self._buffered_read:
+                    cache = getattr(self, "cache", None)
+                    close = getattr(cache, "close", None)
+                    if callable(close):
+                        close()
+                    self.cache = None
+            finally:
+                self._closed = True
+                group.request_close(self)
+            return
+        try:
+            if self._using_buffer or self._has_read_cache():
+                super().close()
+            else:
+                self._closed = True
+        finally:
+            self._raw.close()
+
+    @property
+    def closed(self):
+        return getattr(self, "_closed", True)
+
+    @closed.setter
+    def closed(self, value):
+        self._closed = value
+
+    def _finish_group_close(self):
+        self._raw._fd = None
+        self._raw._fd_generation = None
+        self._raw._closed = True
+        self._closed = True
+        if self._write_spool is not None:
+            self._write_spool.close()
+            self._write_spool = None
+
+
+class _BufferGroup:
+    """Coordinate cache misses and buffered flushes across OpenFiles."""
+
+    def __init__(self, fs, files):
+        self.fs = fs
+        self.files = list(files)
+        self._lock = threading.RLock()
+        self._ranges = {}
+        self._whole_files = {}
+        self._close_requested = set()
+        self._group_closed = False
+        for file in self.files:
+            file._attach_group(self)
+
+    def _active_readers(self, current):
+        compatible = [
+            file
+            for file in self.files
+            if not file.closed
+            and file._buffered_read
+            and file.cache_type == current.cache_type
+            and file.blocksize == current.blocksize
+        ]
+        return [current] + [file for file in compatible if file is not current]
+
+    def _has_speculative_data(self, file):
+        identity = id(file)
+        return identity in self._whole_files or any(
+            key[0] == identity for key in self._ranges
+        )
+
+    def in_memory_bytes(self):
+        with self._lock:
+            total = 0
+            for file in self.files:
+                buffer = getattr(file, "buffer", None)
+                if buffer is not None:
+                    total += buffer.tell()
+                spool = file._write_spool
+                if spool is not None and not spool._rolled:
+                    position = spool.tell()
+                    total += spool.seek(0, io.SEEK_END)
+                    spool.seek(position)
+            return total
+
+    def enforce_memory_limit(self):
+        with self._lock:
+            if self.in_memory_bytes() < self.fs.max_batch_bytes:
+                return
+            for file in self.files:
+                spool = file._write_spool
+                if spool is not None and not spool._rolled:
+                    position = spool.tell()
+                    size = spool.seek(0, io.SEEK_END)
+                    spool.seek(position)
+                    if size:
+                        spool.rollover()
+
+    def _reopen_readers(self):
+        active = [file for file in self.files if not file.closed and file.readable()]
+        if not active:
+            return
+        self.fs._client.reconnect()
+        fds = self.fs._client.open_many(
+            [self.fs._native_path(file.path) for file in active],
+            [file._raw._native_mode() for file in active],
+        )
+        for file, fd in zip(active, fds):
+            file._raw._fd = fd
+            file._raw._fd_generation = self.fs._client.generation
+
+    def _pread_many(self, files, offsets, lengths):
+        fds = [file._raw._ensure_open() for file in files]
+        try:
+            return self.fs._client.pread_many(fds, offsets, lengths)
+        except ConnectionError:
+            if not self.fs.auto_reconnect:
+                raise
+            self._reopen_readers()
+            fds = [file._raw._ensure_open() for file in files]
+            return self.fs._client.pread_many(fds, offsets, lengths)
+
+    def fetch(self, current, start, end):
+        with self._lock:
+            key = (id(current), start, end)
+            prefetched = self._ranges.pop(key, None)
+            if prefetched is not None:
+                return prefetched
+            # Some fsspec caches ask their fetcher for read-ahead beyond the
+            # bytes the caller currently needs. A single speculative block is
+            # still useful in that case: return it when it covers the actual
+            # read, and let the selected cache own those bytes from here on.
+            required_end = current._requested_read_end
+            if required_end is not None:
+                for cached_key, value in list(self._ranges.items()):
+                    identity, cached_start, cached_end = cached_key
+                    if (
+                        identity == id(current)
+                        and cached_start <= start
+                        and cached_end >= required_end
+                    ):
+                        del self._ranges[cached_key]
+                        offset = start - cached_start
+                        return value[offset:]
+
+            files = []
+            offsets = []
+            lengths = []
+            total = 0
+            for file in self._active_readers(current):
+                if file is not current and end - start > 2 * current.blocksize:
+                    continue
+                if file is not current and self._has_speculative_data(file):
+                    continue
+                if file is not current and file.loc > start:
+                    continue
+                if len(files) >= self.fs.batch_size or start >= file.size:
+                    continue
+                request_end = min(end, file.size)
+                if file is not current:
+                    request_end = min(request_end, start + file.blocksize)
+                length = request_end - start
+                if length <= 0:
+                    continue
+                if files and total + length > self.fs.max_batch_bytes:
+                    continue
+                files.append(file)
+                offsets.append(start)
+                lengths.append(length)
+                total += length
+
+            data, errors = self._pread_many(files, offsets, lengths)
+            current_data = None
+            for index, (file, length, value) in enumerate(zip(files, lengths, data)):
+                if index in errors:
+                    if file is current:
+                        raise _oserror(errors[index], current.path)
+                    continue
+                value = value or b""
+                if file is current:
+                    current_data = value
+                else:
+                    self._ranges[(id(file), start, start + length)] = value
+            if current_data is None:
+                raise OSError(errno.EIO, "buffered read returned no data", current.path)
+            return current_data
+
+    def read_all(self, current):
+        with self._lock:
+            prefetched = self._whole_files.pop(id(current), None)
+            if prefetched is not None:
+                return prefetched
+            # A whole-file read supersedes a speculative prefix left for this
+            # handle. Drop it instead of retaining stale group memory.
+            identity = id(current)
+            for key in [key for key in self._ranges if key[0] == identity]:
+                del self._ranges[key]
+            files = []
+            lengths = []
+            total = 0
+            for file in self._active_readers(current):
+                if file is not current and self._has_speculative_data(file):
+                    continue
+                length = (
+                    file.size if file is current else min(file.size, file.blocksize)
+                )
+                if len(files) >= self.fs.batch_size:
+                    continue
+                if files and total + length > self.fs.max_batch_bytes:
+                    continue
+                files.append(file)
+                lengths.append(length)
+                total += length
+            data, errors = self._pread_many(files, [0] * len(files), lengths)
+            current_data = None
+            for index, (file, value) in enumerate(zip(files, data)):
+                if index in errors:
+                    if file is current:
+                        raise _oserror(errors[index], current.path)
+                    continue
+                value = value or b""
+                if file is current:
+                    current_data = value
+                elif len(value) == file.size:
+                    self._whole_files[id(file)] = value
+                else:
+                    self._ranges[(id(file), 0, len(value))] = value
+            if current_data is None:
+                raise OSError(errno.EIO, "buffered read returned no data", current.path)
+            return current_data
+
+    def flush_files(self, files):
+        pending = [
+            file
+            for file in files
+            if file._write_spool is not None
+            and file._spool_read_offset < file._write_spool.seek(0, io.SEEK_END)
+        ]
+        while pending:
+            wave = []
+            datas = []
+            total = 0
+            for file in pending:
+                file._write_spool.seek(file._spool_read_offset)
+                data = file._write_spool.read(
+                    min(file.blocksize, self.fs.max_batch_bytes)
+                )
+                if not data:
+                    continue
+                if wave and (
+                    len(wave) >= self.fs.batch_size
+                    or total + len(data) > self.fs.max_batch_bytes
+                ):
+                    continue
+                wave.append(file)
+                datas.append(data)
+                total += len(data)
+            if not wave:
+                break
+            try:
+                fds = [file._raw._ensure_open() for file in wave]
+                if wave[0]._base_mode == "a":
+                    results = self.fs._client.append_many(fds, datas)
+                    for file, data, (written, position) in zip(wave, datas, results):
+                        if written != len(data):
+                            raise OSError(errno.EIO, "short buffered append", file.path)
+                        file._raw._pos = position
+                        file._raw._cached_size = position
+                        file._spool_read_offset += written
+                else:
+                    offsets = [file._raw._pos for file in wave]
+                    results = self.fs._client.pwrite_many(fds, offsets, datas)
+                    for file, data, written in zip(wave, datas, results):
+                        if written != len(data):
+                            raise OSError(errno.EIO, "short buffered write", file.path)
+                        file._raw._pos += written
+                        if file._raw._cached_size is not None:
+                            file._raw._cached_size = max(
+                                file._raw._cached_size, file._raw._pos
+                            )
+                        file._spool_read_offset += written
+                for file in wave:
+                    self.fs._invalidate_parent_listing(file.path)
+            except BaseException as error:
+                index = getattr(error, "index", None)
+                if isinstance(index, int) and 0 <= index < len(wave):
+                    try:
+                        error.filename = wave[index].path
+                    except (AttributeError, TypeError):
+                        pass
+                for file in wave:
+                    self.fs._invalidate_parent_listing(file.path)
+                    file._write_failed = True
+                    file._raw._broken = True
+                raise
+            pending = [
+                file
+                for file in pending
+                if file._spool_read_offset < file._write_spool.seek(0, io.SEEK_END)
+            ]
+
+    def request_close(self, file):
+        with self._lock:
+            if self._group_closed:
+                return
+            self._close_requested.add(id(file))
+            if len(self._close_requested) != len(self.files):
+                return
+            self.close_all()
+
+    def close_all(self):
+        with self._lock:
+            if self._group_closed:
+                return
+            self._group_closed = True
+            fds = [
+                member._raw._fd
+                for member in self.files
+                if member._raw._fd is not None
+                and member._raw._fd_generation == self.fs._client.generation
+            ]
+            try:
+                if fds and not self.fs._client.closed:
+                    self.fs._client.close_many(fds)
+            finally:
+                for member in self.files:
+                    member._finish_group_close()
+                self._ranges.clear()
+                self._whole_files.clear()
 
 
 class _DeferredWriteFile:
@@ -620,6 +1272,16 @@ class Nfs4FileSystem(AbstractFileSystem):
         API. ``smb`` connects to the SMB2/3 share named by ``share``.
     dummy_root: str or None
         Filesystem root for the dummy backend (a unique temp dir when None).
+    block_size: int
+        Default byte size for per-open read and opt-in write buffers.
+    cache_type: str or None
+        A cache registered by fsspec. ``"none"`` disables read buffering.
+    cache_options: dict or None
+        Default keyword arguments for the selected fsspec cache.
+    write_buffering: bool
+        Delay standard-mode writes until flush or close. Disabled by default.
+    vectorized_buffering: bool
+        Fan buffered OpenFiles reads and writes into bounded VFSI vectors.
     use_listings_cache: bool
         Cache directory listings when true. Disabled by default because NFS
         and SMB namespaces are commonly modified by other clients.
@@ -650,6 +1312,11 @@ class Nfs4FileSystem(AbstractFileSystem):
         max_batch_bytes=64 * 1024 * 1024,
         transfer_chunk_size=8 * 1024 * 1024,
         transaction_spool_threshold=8 * 1024 * 1024,
+        block_size=1 * 1024 * 1024,
+        cache_type="readahead",
+        cache_options=None,
+        write_buffering=False,
+        vectorized_buffering=True,
         connect_timeout=10.0,
         request_timeout=5.0,
         auto_reconnect=True,
@@ -671,9 +1338,15 @@ class Nfs4FileSystem(AbstractFileSystem):
             ("max_batch_bytes", max_batch_bytes),
             ("transfer_chunk_size", transfer_chunk_size),
             ("transaction_spool_threshold", transaction_spool_threshold),
+            ("block_size", block_size),
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if cache_type not in caches:
+            choices = sorted(str(name) for name in caches if name is not None)
+            raise ValueError(f"cache_type must be one of {choices}")
+        if cache_options is not None and not isinstance(cache_options, dict):
+            raise TypeError("cache_options must be a dict or None")
         for name, value in (
             ("connect_timeout", connect_timeout),
             ("request_timeout", request_timeout),
@@ -712,6 +1385,11 @@ class Nfs4FileSystem(AbstractFileSystem):
         self.max_batch_bytes = max_batch_bytes
         self.transfer_chunk_size = transfer_chunk_size
         self.transaction_spool_threshold = transaction_spool_threshold
+        self.block_size = block_size
+        self.cache_type = cache_type
+        self.cache_options = dict(cache_options or {})
+        self.write_buffering = bool(write_buffering)
+        self.vectorized_buffering = bool(vectorized_buffering)
         self.connect_timeout = float(connect_timeout)
         self.request_timeout = float(request_timeout)
         self.auto_reconnect = bool(auto_reconnect)
@@ -1504,7 +2182,7 @@ class Nfs4FileSystem(AbstractFileSystem):
 
     def _copy_remote_to_fileobj(self, path, output, callback=None):
         """Stream one remote file into a writable local file object."""
-        with self.open(path, "rb") as remote:
+        with self.open(path, "rb", cache_type="none") as remote:
             while True:
                 chunk = remote.read(self.transfer_chunk_size)
                 if not chunk:
@@ -1642,7 +2320,7 @@ class Nfs4FileSystem(AbstractFileSystem):
                     child.set_size(size)
                     local.makedirs(local._parent(local_path), exist_ok=True)
                     with open(local_path, "wb") as out:
-                        with self.open(remote_path, "rb") as remote:
+                        with self.open(remote_path, "rb", cache_type="none") as remote:
                             while True:
                                 chunk = remote.read(self.transfer_chunk_size)
                                 if not chunk:
@@ -1781,7 +2459,10 @@ class Nfs4FileSystem(AbstractFileSystem):
         mode="rb",
         block_size=None,
         autocommit=True,
+        cache_type=None,
         cache_options=None,
+        write_buffering=None,
+        size=None,
         **kwargs,
     ):
         internal = self._strip_protocol(path)
@@ -1792,7 +2473,22 @@ class Nfs4FileSystem(AbstractFileSystem):
             parent = self._parent(path)
             if parent not in ("", "/"):
                 self._ensure_dirs([parent], 0o755)
-        return Nfs4File(self, internal, mode)
+        return Nfs4File(
+            self,
+            internal,
+            mode,
+            block_size=self.block_size if block_size is None else block_size,
+            cache_type=self.cache_type if cache_type is None else cache_type,
+            cache_options=(
+                self.cache_options if cache_options is None else cache_options
+            ),
+            write_buffering=(
+                self.write_buffering
+                if write_buffering is None
+                else bool(write_buffering)
+            ),
+            size=size,
+        )
 
     def open_many(self, open_files):
         """Open a list of ``OpenFile`` objects in one openv batch."""
@@ -1810,7 +2506,49 @@ class Nfs4FileSystem(AbstractFileSystem):
         ]
         self._invalidate_namespace(mutating_paths)
         fds = self._client.open_many([self._native_path(p) for p in paths], modes)
-        files = [Nfs4File(self, p, m, fd=fd) for p, m, fd in zip(paths, modes, fds)]
+        files = []
+        try:
+            sizes = [None] * len(fds)
+            metadata_indices = [
+                index
+                for index, mode in enumerate(modes)
+                if (
+                    _normalize_mode(mode) == "r"
+                    and self.cache_type not in (None, "none")
+                )
+                or (_normalize_mode(mode) == "a" and self.write_buffering)
+            ]
+            if metadata_indices:
+                attrs = self._client.fstat_many(
+                    [fds[index] for index in metadata_indices]
+                )
+                for index, attr in zip(metadata_indices, attrs):
+                    sizes[index] = attr["size"]
+            files = [
+                Nfs4File(
+                    self,
+                    path,
+                    mode,
+                    fd=fd,
+                    block_size=self.block_size,
+                    cache_type=self.cache_type,
+                    cache_options=self.cache_options,
+                    write_buffering=self.write_buffering,
+                    size=size,
+                    defer_cache=True,
+                )
+                for path, mode, fd, size in zip(paths, modes, fds, sizes)
+            ]
+            _BufferGroup(self, files)
+        except BaseException:
+            try:
+                if fds and not self._client.closed:
+                    self._client.close_many(fds)
+            except BaseException:
+                pass
+            for file in files:
+                file._finish_group_close()
+            raise
         # Read-mode OpenFiles contexts do not call commit_many on exit;
         # register the opened files on their OpenFile objects so
         # OpenFile.__exit__ closes them (matching per-file opens on other
@@ -1822,6 +2560,24 @@ class Nfs4FileSystem(AbstractFileSystem):
 
     def commit_many(self, open_files):
         """Flush and close a list of files in one closev batch."""
+        group = open_files[0]._buffer_group if open_files else None
+        if group is not None:
+            error = None
+            try:
+                buffered = [file for file in open_files if file._buffered_write]
+                for file in buffered:
+                    file._stage_buffer()
+                group.flush_files(buffered)
+            except BaseException as exc:
+                error = exc
+            try:
+                group.close_all()
+            except BaseException:
+                if error is None:
+                    raise
+            if error is not None:
+                raise error
+            return
         fds = [f._fd for f in open_files if not f.closed and f._fd is not None]
         if fds:
             self._client.close_many(fds)

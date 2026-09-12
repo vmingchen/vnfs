@@ -116,6 +116,46 @@ progress on the parent callback and byte progress on a branched callback for
 each file. Single-file operations report bytes directly, and oversized
 streaming transfers update after every chunk.
 
+## File buffering
+
+Read handles use fsspec's standard per-open caches by default. The default
+1 MiB block size matches the VFSI range-I/O path and can be changed per
+filesystem or per direct `fs.open()` call:
+
+```python
+fs = fsspec.filesystem(
+    "nfs4",
+    host="nfs.example",
+    block_size=256 * 1024,
+    cache_type="readahead",
+)
+
+with fs.open("/large.parquet", "rb", cache_type="blockcache") as file:
+    header = file.read(4096)
+    file.seek(-8192, 2)
+    footer = file.read()
+```
+
+All cache types registered by fsspec are accepted. Use `cache_type="none"`
+for unbuffered reads, especially when another client can modify an already
+open file. Buffered data belongs to one open handle and is discarded on close;
+it provides a snapshot-like view for that handle and is not a persistent
+client cache.
+
+Files opened together with `fsspec.open_files()` share a coordinator. A cache
+miss reads the same aligned range from a bounded group of sibling descriptors
+through one VFSI vector operation. A requested whole-file read keeps its fast
+path, but speculative siblings are capped to one block (which may contain a
+whole small file). Set `vectorized_buffering=False` to disable this adaptive
+fan-out.
+
+Writes remain write-through by default. Set `write_buffering=True` to delay
+small writes until `flush()` or `close()`; an `open_files()` write group drains
+one block from each file per vector operation. Explicit `flush()` always sends
+that file's staged data to the server. Update modes containing `+` retain the
+unbuffered seekable implementation, and fsspec transactions retain their
+existing disk-spooled commit behavior.
+
 ## Directory listing cache
 
 Directory listing caching is disabled by default so that NFS and SMB

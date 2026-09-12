@@ -75,6 +75,12 @@ enum MergedIoMode {
     Off,
 }
 
+fn remap_descriptor_chunk_error(error: VfError, start: usize, owners: &[usize]) -> VfError {
+    let chunk_index = start.saturating_add(error.index());
+    let index = owners.get(chunk_index).copied().unwrap_or(chunk_index);
+    error.with_index(index)
+}
+
 impl NfsVecFs {
     /// Force a particular merged-compound mode (diagnostics/tests): "full"
     /// (default, one compound incl. CLOSE), "openwrite" (open+I/O compound +
@@ -1057,17 +1063,33 @@ impl NfsVecFs {
             offsets.push(off);
         }
         // The server validates the summed READ counts of a compound against
-        // ca_maxresponsesize, so split the chunk list into reply-sized
-        // sub-batches even though each op is already per-op capped.
-        let chunks_per_compound = if self.nfs.max_response_bytes > 0 {
-            (self.nfs.read_compound_bytes().saturating_sub(128) / per).max(1)
+        // ca_maxresponsesize. Pack by each chunk's actual count so many small
+        // descriptor reads share a compound instead of being pessimistically
+        // charged the maximum per-op size.
+        let byte_limit = if self.nfs.max_response_bytes > 0 {
+            self.nfs.read_compound_bytes().saturating_sub(128)
         } else {
             usize::MAX
         };
         let mut results = Vec::with_capacity(ops.len());
-        for sub in ops.chunks(chunks_per_compound) {
-            let r = self.nfs.readv(sub).map_err(VfError::from_rpc_indexed)?;
+        let mut start = 0;
+        while start < ops.len() {
+            let mut end = start;
+            let mut bytes = 0usize;
+            while end < ops.len() {
+                let next = ops[end].count as usize;
+                if end > start && bytes.saturating_add(next) > byte_limit {
+                    break;
+                }
+                bytes = bytes.saturating_add(next);
+                end += 1;
+            }
+            let r = self.nfs.readv(&ops[start..end]).map_err(|error| {
+                let error = VfError::from_rpc_indexed(error);
+                remap_descriptor_chunk_error(error, start, &owner)
+            })?;
             results.extend(r);
+            start = end;
         }
         let mut out = Vec::with_capacity(reads.len());
         let mut ci = 0usize;
@@ -1178,17 +1200,32 @@ impl NfsVecFs {
             }
             offsets.push(off);
         }
-        // Keep each compound's request under ca_maxrequestsize: the op-count
-        // batching alone would pack hundreds of MiB of WRITEs together.
-        let chunks_per_compound = if self.nfs.max_compound_bytes > 0 {
-            (self.nfs.max_compound_bytes.saturating_sub(128) / per).max(1)
+        // Keep each compound's request under ca_maxrequestsize. Pack by the
+        // actual chunk lengths so small writes retain vectorization.
+        let byte_limit = if self.nfs.max_compound_bytes > 0 {
+            self.nfs.max_compound_bytes.saturating_sub(128)
         } else {
             usize::MAX
         };
         let mut results = Vec::with_capacity(ops.len());
-        for sub in ops.chunks(chunks_per_compound) {
-            let r = self.nfs.writev(sub).map_err(VfError::from_rpc_indexed)?;
+        let mut start = 0;
+        while start < ops.len() {
+            let mut end = start;
+            let mut bytes = 0usize;
+            while end < ops.len() {
+                let next = ops[end].data.len();
+                if end > start && bytes.saturating_add(next) > byte_limit {
+                    break;
+                }
+                bytes = bytes.saturating_add(next);
+                end += 1;
+            }
+            let r = self.nfs.writev(&ops[start..end]).map_err(|error| {
+                let error = VfError::from_rpc_indexed(error);
+                remap_descriptor_chunk_error(error, start, &owner)
+            })?;
             results.extend(r);
+            start = end;
         }
         let mut out = Vec::with_capacity(writes.len());
         let mut ci = 0usize;
@@ -3418,4 +3455,18 @@ fn read_str(buf: &[u8], off: &mut usize) -> VfResult<Vec<u8>> {
     let s = buf[*off..*off + len].to_vec();
     *off += (len + 3) & !3;
     Ok(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_chunk_errors_report_the_original_vector_owner() {
+        // The first caller was split into two wire chunks; chunk 1 still
+        // belongs to caller 0, rather than caller 1.
+        let owners = [0, 0, 1];
+        let error = remap_descriptor_chunk_error(VfError::failure(1, ERR_EBADF), 0, &owners);
+        assert_eq!(error.index(), 0);
+    }
 }

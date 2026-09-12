@@ -1,16 +1,15 @@
 """Public typing surface for the VFSI fsspec adapter."""
 
 import datetime
-import io
 from os import PathLike
 from typing import Any, BinaryIO, Callable, Iterator, Mapping, Optional, Sequence, Union
 
-from fsspec.spec import AbstractFileSystem
+from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 
 Path = Union[str, PathLike[str]]
 BytesLike = Union[bytes, bytearray, memoryview]
 
-class Nfs4File(io.RawIOBase):
+class Nfs4File(AbstractBufferedFile):
     fs: Nfs4FileSystem
     path: str
     mode: str
@@ -20,6 +19,11 @@ class Nfs4File(io.RawIOBase):
         path: Path,
         mode: str = "rb",
         fd: Optional[int] = None,
+        block_size: Optional[int] = None,
+        cache_type: Optional[str] = "readahead",
+        cache_options: Optional[dict[str, Any]] = None,
+        write_buffering: bool = False,
+        size: Optional[int] = None,
     ) -> None: ...
     @property
     def closed(self) -> bool: ...
@@ -52,6 +56,11 @@ class Nfs4FileSystem(AbstractFileSystem):
     max_batch_bytes: int
     transfer_chunk_size: int
     transaction_spool_threshold: int
+    block_size: int
+    cache_type: Optional[str]
+    cache_options: dict[str, Any]
+    write_buffering: bool
+    vectorized_buffering: bool
     connect_timeout: float
     request_timeout: float
     auto_reconnect: bool
@@ -72,6 +81,11 @@ class Nfs4FileSystem(AbstractFileSystem):
         max_batch_bytes: int = 67_108_864,
         transfer_chunk_size: int = 8_388_608,
         transaction_spool_threshold: int = 8_388_608,
+        block_size: int = 1_048_576,
+        cache_type: Optional[str] = "readahead",
+        cache_options: Optional[dict[str, Any]] = None,
+        write_buffering: bool = False,
+        vectorized_buffering: bool = True,
         connect_timeout: float = 10.0,
         request_timeout: float = 5.0,
         auto_reconnect: bool = True,

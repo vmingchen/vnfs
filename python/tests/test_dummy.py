@@ -128,7 +128,9 @@ def test_connectivity_errors_are_not_reported_as_missing(dummy_fs):
         ({"backend": "invalid"}, "backend must be"),
         ({"backend": "nfs", "host": ""}, "host must not be empty"),
         ({"compound_size_limit": 0}, "positive integer"),
+        ({"block_size": 0}, "positive integer"),
         ({"minor_version": 0}, "minor_version"),
+        ({"cache_type": "invalid"}, "cache_type"),
         ({"root": "safe/../escape"}, "must not contain"),
     ],
 )
@@ -137,6 +139,17 @@ def test_constructor_rejects_invalid_configuration(tmp_path, kwargs, message):
     options.update(kwargs)
     with pytest.raises(ValueError, match=message):
         fsspec.filesystem("nfs4", skip_instance_cache=True, **options)
+
+
+def test_constructor_rejects_non_mapping_cache_options(tmp_path):
+    with pytest.raises(TypeError, match="cache_options"):
+        fsspec.filesystem(
+            "nfs4",
+            backend="dummy",
+            dummy_root=str(tmp_path / "invalid-cache-options"),
+            cache_options=[],
+            skip_instance_cache=True,
+        )
 
 
 def test_compound_stats_available(dummy_fs):

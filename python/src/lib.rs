@@ -50,10 +50,11 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> PyErr {
 
 /// Map a `VfError` onto the Python exception class that matches its errno.
 fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
+    let index = e.index_opt();
     let what = path
         .map(|p| format!(": '{}'", p.display()))
         .unwrap_or_default();
-    match e {
+    let error = match e {
         VfError::Transport { message, .. } => {
             PyErr::new::<PyConnectionError, _>(format!("{}{}", message, what))
         }
@@ -79,7 +80,13 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
             other => PyErr::new::<PyOSError, _>((other, format!("op failed{}", what))),
         },
         _ => PyErr::new::<PyOSError, _>("unknown vnfs error"),
+    };
+    if let Some(index) = index {
+        Python::attach(|py| {
+            let _ = error.value(py).setattr("index", index);
+        });
     }
+    error
 }
 
 /// Attach the failing operation's path to an error from a batched call.
@@ -620,6 +627,139 @@ impl NfsClient {
             Ok(a)
         })?;
         attrs_to_dict(py, &a)
+    }
+
+    /// Fetch attributes for open descriptors in one vector operation.
+    fn fstat_many(&self, py: Python<'_>, fds: Vec<i64>) -> PyResult<Vec<Py<PyDict>>> {
+        let mut attrs: Vec<VfAttrs> = fds
+            .into_iter()
+            .map(|fd| VfAttrs {
+                file: VfFile::from_fd(fd as i32),
+                masks: full_mask(),
+                ..VfAttrs::default()
+            })
+            .collect();
+        let attrs = self.with_fs(py, move |fs| {
+            fs.getattrsv(&mut attrs).map_err(|e| to_py_err(e, None))?;
+            Ok(attrs)
+        })?;
+        attrs.iter().map(|attrs| attrs_to_dict(py, attrs)).collect()
+    }
+
+    /// Read absolute ranges from open descriptors in a vector operation.
+    /// Semantic failures are returned per index so healthy reads can still
+    /// share compounds; transport failures fail the whole call.
+    fn pread_many(
+        &self,
+        py: Python<'_>,
+        fds: Vec<i64>,
+        offsets: Vec<u64>,
+        lengths: Vec<usize>,
+    ) -> PyResult<ReadManyResult> {
+        if fds.len() != offsets.len() || fds.len() != lengths.len() {
+            return Err(PyValueError::new_err(
+                "fds, offsets, and lengths must have equal lengths",
+            ));
+        }
+        self.with_fs(py, move |fs| {
+            let mut results: Vec<Option<Vec<u8>>> = vec![None; fds.len()];
+            let mut errors = HashMap::new();
+            let mut remaining: Vec<usize> = (0..fds.len()).collect();
+            while !remaining.is_empty() {
+                let ops: Vec<ReadOp> = remaining
+                    .iter()
+                    .map(|&index| {
+                        ReadOp::new(
+                            VfFile::from_fd(fds[index] as i32),
+                            VfOffset::At(offsets[index]),
+                            lengths[index],
+                        )
+                    })
+                    .collect();
+                match fs.readv(&ops) {
+                    Ok(reads) => {
+                        for (&index, read) in remaining.iter().zip(reads) {
+                            results[index] = Some(read.data);
+                        }
+                        break;
+                    }
+                    Err(error) => {
+                        if error.is_transport() {
+                            return Err(to_py_err(error, None));
+                        }
+                        let Some(batch_index) = error.index_opt() else {
+                            return Err(to_py_err(error, None));
+                        };
+                        if batch_index >= remaining.len() {
+                            return Err(to_py_err(error, None));
+                        }
+                        let original_index = remaining.remove(batch_index);
+                        errors.insert(original_index, error.err_no());
+                    }
+                }
+            }
+            Ok((results, errors))
+        })
+    }
+
+    /// Write absolute ranges to open descriptors in one vector operation.
+    fn pwrite_many(
+        &self,
+        py: Python<'_>,
+        fds: Vec<i64>,
+        offsets: Vec<u64>,
+        datas: Vec<Vec<u8>>,
+    ) -> PyResult<Vec<usize>> {
+        if fds.len() != offsets.len() || fds.len() != datas.len() {
+            return Err(PyValueError::new_err(
+                "fds, offsets, and datas must have equal lengths",
+            ));
+        }
+        let ops: Vec<WriteOp> = fds
+            .into_iter()
+            .zip(offsets)
+            .zip(datas)
+            .map(|((fd, offset), data)| {
+                WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::At(offset), data)
+            })
+            .collect();
+        self.with_fs(py, move |fs| {
+            let writes = fs.writev(&ops).map_err(|e| to_py_err(e, None))?;
+            Ok(writes.into_iter().map(|write| write.written).collect())
+        })
+    }
+
+    /// Append to open O_APPEND descriptors in one vector operation, returning
+    /// each byte count and resulting position.
+    fn append_many(
+        &self,
+        py: Python<'_>,
+        fds: Vec<i64>,
+        datas: Vec<Vec<u8>>,
+    ) -> PyResult<Vec<(usize, u64)>> {
+        if fds.len() != datas.len() {
+            return Err(PyValueError::new_err(
+                "fds and datas must have equal lengths",
+            ));
+        }
+        let ops: Vec<WriteOp> = fds
+            .into_iter()
+            .zip(datas)
+            .map(|(fd, data)| WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, data))
+            .collect();
+        self.with_fs(py, move |fs| {
+            let writes = fs.writev(&ops).map_err(|e| to_py_err(e, None))?;
+            writes
+                .into_iter()
+                .map(|write| {
+                    let position = write
+                        .offset
+                        .checked_add(write.written as u64)
+                        .ok_or_else(|| PyOSError::new_err("file position overflow"))?;
+                    Ok((write.written, position))
+                })
+                .collect()
+        })
     }
 
     fn truncate(&self, py: Python<'_>, path: PathBuf, size: u64) -> PyResult<()> {

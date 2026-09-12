@@ -12,6 +12,9 @@ This project follows [Semantic Versioning](https://semver.org/) for the
   parent completion tracking.
 - Opt-in fsspec directory-listing caching with TTL and LRU limits, forced
   refreshes, cache-aware vectorized traversal, and mutation-safe invalidation.
+- Per-open fsspec read buffering with every registered cache type, bounded
+  cross-file prefetch for vectorized `OpenFiles` reads, and opt-in buffered
+  write/append waves with disk-spooled memory limits.
 
 ### Fixed
 
