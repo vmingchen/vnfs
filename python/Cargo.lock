@@ -451,7 +451,7 @@ dependencies = [
 
 [[package]]
 name = "nfs4fs-python"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "libntirpc-sys",
@@ -904,7 +904,7 @@ dependencies = [
 
 [[package]]
 name = "vnfs"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "bitflags",
  "futures-util",

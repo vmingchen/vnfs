@@ -5,6 +5,8 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## [0.3.0] - 2026-09-12
+
 ### Added
 
 - Complete fsspec progress callbacks for vectorized reads, writes, local
@@ -80,6 +82,7 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 - Initial `nfs4fs` release with a vectorized NFSv4.1 backend.
 
-[Unreleased]: https://github.com/vmingchen/vnfs/compare/nfs4fs-v0.2.0...HEAD
+[Unreleased]: https://github.com/vmingchen/vnfs/compare/nfs4fs-v0.3.0...HEAD
+[0.3.0]: https://pypi.org/project/nfs4fs/0.3.0/
 [0.2.0]: https://pypi.org/project/nfs4fs/0.2.0/
 [0.1.0]: https://pypi.org/project/nfs4fs/0.1.0/

@@ -1,6 +1,6 @@
 [package]
 name = "nfs4fs-python"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Python bindings for vectorized VFSI NFSv4 and SMB2/3 clients"
