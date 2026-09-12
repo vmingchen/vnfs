@@ -630,6 +630,292 @@ def test_blockcache_wrapper_accepts_nfs4fs(tmp_path, monkeypatch):
         cached.clear_cache()
 
 
+def test_persistent_blockcache_open_files_populates_in_one_vector_wave(
+    tmp_path, monkeypatch
+):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "open-files-remote"),
+        block_size=4,
+        skip_instance_cache=True,
+    )
+    paths = [f"/cached-{index}" for index in range(4)]
+    target.pipe({path: bytes([65 + index]) * 8 for index, path in enumerate(paths)})
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "open-files-cache"),
+        cache_check=0,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    opens = _record_calls(monkeypatch, target._client, "open_many")
+    reads = _record_calls(monkeypatch, target._client, "pread_many")
+    closes = _record_calls(monkeypatch, target._client, "close_many")
+    try:
+        with _open_files(cached, paths, "rb") as files:
+            assert [file.read(2) for file in files] == [
+                bytes([65 + index]) * 2 for index in range(4)
+            ]
+            assert all(type(file.cache).__name__ == "_Nfs4MMapCache" for file in files)
+
+        assert [len(call[0][0]) for call in opens] == [len(paths)]
+        assert [len(call[0][0]) for call in reads] == [len(paths)]
+        assert [len(call[0][0]) for call in closes] == [len(paths)]
+        writable = cached._metadata.cached_files[-1]
+        assert set(writable) == set(paths)
+        assert all(writable[path]["blocks"] == {0} for path in paths)
+        assert all(
+            (tmp_path / "open-files-cache" / writable[path]["fn"]).exists()
+            for path in paths
+        )
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
+def test_persistent_blockcache_open_files_complete_hits_stay_local(
+    tmp_path, monkeypatch
+):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "complete-remote"),
+        block_size=4,
+        skip_instance_cache=True,
+    )
+    paths = [f"/complete-{index}" for index in range(3)]
+    expected = {path: bytes([97 + index]) * 4 for index, path in enumerate(paths)}
+    target.pipe(expected)
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "complete-cache"),
+        cache_check=0,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    try:
+        with _open_files(cached, paths, "rb") as files:
+            assert [file.read() for file in files] == [expected[path] for path in paths]
+
+        opens = _record_calls(monkeypatch, target._client, "open_many")
+        reads = _record_calls(monkeypatch, target._client, "pread_many")
+        with _open_files(cached, paths, "rb") as files:
+            assert [file.read() for file in files] == [expected[path] for path in paths]
+        assert opens == []
+        assert reads == []
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
+def test_persistent_blockcache_open_files_batch_validates_new_generations(
+    tmp_path, monkeypatch
+):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "validation-remote"),
+        block_size=4,
+        skip_instance_cache=True,
+    )
+    paths = [f"/validated-{index}" for index in range(3)]
+    original = {path: bytes([65 + index]) * 8 for index, path in enumerate(paths)}
+    replacement = {path: bytes([97 + index]) * 8 for index, path in enumerate(paths)}
+    target.pipe(original)
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "validation-cache"),
+        cache_check=0,
+        check_files=True,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    try:
+        with _open_files(cached, paths, "rb") as files:
+            assert [file.read(2) for file in files] == [
+                original[path][:2] for path in paths
+            ]
+        target.pipe(replacement)
+
+        stats = _record_calls(monkeypatch, target._client, "stat_many")
+        reads = _record_calls(monkeypatch, target._client, "pread_many")
+        with _open_files(cached, paths, "rb") as files:
+            assert [file.read(2) for file in files] == [
+                replacement[path][:2] for path in paths
+            ]
+
+        assert [len(call[0][0]) for call in stats] == [len(paths)]
+        assert [len(call[0][0]) for call in reads] == [len(paths)]
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
+def test_persistent_blockcache_open_files_writes_still_delegate(tmp_path):
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "writes-remote"),
+        skip_instance_cache=True,
+    )
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "writes-cache"),
+        skip_instance_cache=True,
+    )
+    paths = ["/write-a", "/write-b"]
+    try:
+        with _open_files(cached, paths, "wb") as files:
+            files[0].write(b"alpha")
+            files[1].write(b"beta")
+        assert target.cat(paths) == {"/write-a": b"alpha", "/write-b": b"beta"}
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
+def test_blockcache_open_files_patch_preserves_non_nfs_delegation(
+    tmp_path, monkeypatch
+):
+    target = fsspec.filesystem("memory", skip_instance_cache=True)
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "other-target-cache"),
+        skip_instance_cache=True,
+    )
+    opened = [object(), object()]
+    committed = []
+    monkeypatch.setattr(target, "open_many", lambda open_files: opened, raising=False)
+    monkeypatch.setattr(
+        target,
+        "commit_many",
+        lambda files: committed.append(files),
+        raising=False,
+    )
+
+    assert cached.open_many(["first", "second"]) is opened
+    cached.commit_many(opened)
+    assert committed == [opened]
+
+
+def test_per_open_blockcache_whole_read_populates_cache(tmp_path):
+    root = tmp_path / "per-open-blockcache"
+    with fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(root),
+        skip_instance_cache=True,
+    ) as fs:
+        fs.pipe_file("/cached", b"abcdefgh")
+        with fs.open("/cached", "rb", block_size=4, cache_type="blockcache") as file:
+            assert file.read() == b"abcdefgh"
+            # Older supported fsspec releases also retain an empty boundary
+            # block, but a whole read must populate at least the real blocks.
+            assert file.cache.cache_info().currsize >= 2
+            (root / "cached").write_bytes(b"WXYZ1234")
+            file.seek(0)
+            assert file.read() == b"abcdefgh"
+
+
+def test_persistent_blockcache_does_not_mark_sparse_tail_complete(tmp_path):
+    remote_root = tempfile.mkdtemp(dir=tmp_path)
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=remote_root,
+        skip_instance_cache=True,
+    )
+    target.pipe_file("/cached", b"abcdefgh")
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "persistent-tail"),
+        cache_check=0,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    try:
+        with cached.open("/cached", "rb", block_size=4) as file:
+            file.seek(4)
+            assert file.read(4) == b"efgh"
+        with cached.open("/cached", "rb", block_size=4) as file:
+            assert file.read() == b"abcdefgh"
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [b"WXYZ1234", b"WXYZ01234567", b"xy"],
+    ids=["same-size", "growth", "shrink"],
+)
+def test_persistent_blockcache_check_files_starts_a_new_generation(
+    tmp_path, replacement
+):
+    remote_root = tempfile.mkdtemp(dir=tmp_path)
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=remote_root,
+        skip_instance_cache=True,
+    )
+    target.pipe_file("/cached", b"abcdefgh")
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "persistent-generation"),
+        cache_check=0,
+        check_files=True,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    try:
+        with cached.open("/cached", "rb", block_size=4) as file:
+            assert file.read(2) == b"ab"
+        target.pipe_file("/cached", replacement)
+        with cached.open("/cached", "rb", block_size=4) as file:
+            assert file.read() == replacement
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
+def test_persistent_blockcache_expiry_starts_a_new_generation(tmp_path):
+    remote_root = tempfile.mkdtemp(dir=tmp_path)
+    target = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=remote_root,
+        skip_instance_cache=True,
+    )
+    target.pipe_file("/cached", b"abcdefgh")
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=target,
+        cache_storage=str(tmp_path / "persistent-expiry"),
+        cache_check=0,
+        expiry_time=1,
+        skip_instance_cache=True,
+    )
+    try:
+        with cached.open("/cached", "rb", block_size=4) as file:
+            assert file.read(2) == b"ab"
+        target.pipe_file("/cached", b"WXYZ1234")
+        cached._metadata.cached_files[-1]["/cached"]["time"] = 0
+        with cached.open("/cached", "rb", block_size=4) as file:
+            assert file.read() == b"WXYZ1234"
+    finally:
+        cached.clear_cache()
+        target.close()
+
+
 def test_whole_read_honors_eager_all_cache(tmp_path):
     root = tmp_path / "all-cache"
     with fsspec.filesystem(
@@ -665,7 +951,33 @@ def test_open_files_vectorizes_eager_all_cache(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("fs_fixture", ["nfs_fs", "smb_fs"])
-def test_file_buffering_smoke_on_network_backends(request, fs_fixture):
+def test_persistent_blockcache_refreshes_network_generation(
+    request, fs_fixture, tmp_path
+):
+    fs = request.getfixturevalue(fs_fixture)
+    path = "/persistent-blockcache-generation"
+    fs.pipe_file(path, b"abcdefgh")
+    cached = fsspec.filesystem(
+        "blockcache",
+        fs=fs,
+        cache_storage=str(tmp_path / fs_fixture),
+        cache_check=0,
+        check_files=True,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    try:
+        with cached.open(path, "rb", block_size=4) as file:
+            assert file.read(2) == b"ab"
+        fs.pipe_file(path, b"WXYZ1234")
+        with cached.open(path, "rb", block_size=4) as file:
+            assert file.read() == b"WXYZ1234"
+    finally:
+        cached.clear_cache()
+
+
+@pytest.mark.parametrize("fs_fixture", ["nfs_fs", "smb_fs"])
+def test_file_buffering_smoke_on_network_backends(request, fs_fixture, tmp_path):
     fs = request.getfixturevalue(fs_fixture)
     fs.mkdir("/buffer-smoke", create_parents=True)
     read_paths = [f"/buffer-smoke/read-{index}" for index in range(4)]
@@ -679,6 +991,26 @@ def test_file_buffering_smoke_on_network_backends(request, fs_fixture):
         read_compounds = fs._client.compound_stats()[0]
         if fs.backend == "nfs":
             assert read_compounds == 1, read_compounds
+
+    persistent = fsspec.filesystem(
+        "blockcache",
+        fs=fs,
+        cache_storage=str(tmp_path / f"persistent-{fs_fixture}"),
+        cache_check=0,
+        expiry_time=0,
+        skip_instance_cache=True,
+    )
+    try:
+        with _open_files(persistent, read_paths, "rb") as files:
+            fs._client.compound_stats()
+            assert [file.read(4) for file in files] == [
+                bytes([65 + index]) * 4 for index in range(4)
+            ]
+            persistent_read_compounds = fs._client.compound_stats()[0]
+            if fs.backend == "nfs":
+                assert persistent_read_compounds == 1, persistent_read_compounds
+    finally:
+        persistent.clear_cache()
 
     old_write_buffering = fs.write_buffering
     old_block_size = fs.block_size

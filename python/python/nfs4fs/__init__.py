@@ -12,6 +12,7 @@ protocol-neutral ``vfsi`` alias with fsspec:
 import fsspec
 
 from . import _native
+from ._blockcache import install_fsspec_blockcache_compat
 from ._fs import Nfs4File, Nfs4FileSystem, VfsiFileSystem
 
 __all__ = ["Nfs4FileSystem", "VfsiFileSystem", "Nfs4File"]
@@ -19,3 +20,4 @@ __version__ = _native.__version__
 
 fsspec.register_implementation("nfs4", Nfs4FileSystem)
 fsspec.register_implementation("vfsi", VfsiFileSystem)
+install_fsspec_blockcache_compat(Nfs4FileSystem)

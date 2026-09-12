@@ -138,16 +138,42 @@ with fs.open("/large.parquet", "rb", cache_type="blockcache") as file:
 
 All cache types registered by fsspec are accepted. Use `cache_type="none"`
 for unbuffered reads, especially when another client can modify an already
-open file. Buffered data belongs to one open handle and is discarded on close;
-it provides a snapshot-like view for that handle and is not a persistent
-client cache.
+open file. Buffered data belongs to one open handle and is discarded on close.
+Blocks already fetched by that handle remain cached, but fsspec does not
+revalidate the source while the handle is open, so uncached blocks may reflect
+a concurrent writer. This is a per-open cache, not a persistent client cache.
+
+fsspec also provides a persistent sparse-file wrapper under the same
+`blockcache` name:
+
+```python
+cached = fsspec.filesystem(
+    "blockcache",
+    target_protocol="nfs4",
+    target_options={"host": "nfs.example"},
+    cache_storage="/var/tmp/nfs4fs-cache",
+    check_files=True,
+)
+```
+
+With `check_files=True`, each open compares the saved source identity with
+nfs4fs's `ukey()` and starts a fresh local cache generation when it changes.
+For NFS this identity uses `FATTR4_CHANGE` and the file ID; SMB and dummy
+backends use file ID, nanosecond timestamps, and size. Validation happens at
+open, not on every read. With fsspec's default `check_files=False`, persistent
+entries are reused without source validation until `expiry_time`, so that mode
+is appropriate only for immutable or versioned paths. `cache_check` controls
+how often local cache metadata is reloaded and does not validate the server.
 
 Files opened together with `fsspec.open_files()` share a coordinator. A cache
 miss reads the same aligned range from a bounded group of sibling descriptors
 through one VFSI vector operation. A requested whole-file read keeps its fast
-path, but speculative siblings are capped to one block (which may contain a
-whole small file). Set `vectorized_buffering=False` to disable this adaptive
-fan-out.
+path for the default read-ahead cache; `cache_type="blockcache"` fills its
+bounded LRU block-by-block. Speculative siblings are capped to one block (which
+may contain a whole small file). Set `vectorized_buffering=False` to disable
+this adaptive fan-out. The persistent `blockcache` wrapper participates in the
+same coordinator: it validates source identities in a metadata batch, serves
+complete hits locally, and fills sparse misses with vector reads.
 
 Writes remain write-through by default. Set `write_buffering=True` to delay
 small writes until `flush()` or `close()`; an `open_files()` write group drains

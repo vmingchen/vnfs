@@ -87,6 +87,22 @@ def test_write_open_truncates_eagerly(dummy_fs):
     f.close()
 
 
+def test_rm_file_removes_one_file_without_recursive_dispatch(dummy_fs, monkeypatch):
+    dummy_fs.pipe_file("/rm-file", b"data")
+    removals = []
+    original = dummy_fs._client.remove_many
+
+    def recording(paths):
+        removals.append(paths)
+        return original(paths)
+
+    monkeypatch.setattr(dummy_fs._client, "remove_many", recording)
+    dummy_fs.rm_file("/rm-file")
+
+    assert not dummy_fs.exists("/rm-file")
+    assert removals == [["/rm-file"]]
+
+
 def test_error_mapping(dummy_fs):
     with pytest.raises(FileNotFoundError) as exc_info:
         dummy_fs.info("nfs4:///no/such/path")

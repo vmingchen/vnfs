@@ -18,6 +18,13 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ### Fixed
 
+- Per-open and persistent fsspec block caches now honor whole-file reads,
+  exclusive block boundaries, and clean cache generations after source UID or
+  expiry invalidation, preventing sparse zero-fill, mixed generations, stale
+  shrink reads, and mmap failures after file growth. Persistent cache entries
+  now also remain active for vectorized `OpenFiles` reads instead of being
+  bypassed by fsspec's wrapper traversal.
+- `rm_file()` now dispatches through nfs4fs's single-file removal path.
 - NFS vector lookup batches now distinguish the item that failed from the
   suffix that the server never executed, and safely continue independent
   read-only suffix items in a new compound.

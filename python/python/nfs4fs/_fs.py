@@ -627,6 +627,7 @@ class Nfs4File(AbstractBufferedFile):
             return self._raw.read(size)
         if (
             self._buffered_read
+            and self.cache_type != "blockcache"
             and (size is None or size < 0)
             and self.loc == 0
             and self._cache_is_pristine()
@@ -769,7 +770,7 @@ class Nfs4File(AbstractBufferedFile):
             try:
                 if self._buffered_write:
                     self.flush(force=True)
-                elif self._buffered_read:
+                elif self._has_read_cache():
                     cache = getattr(self, "cache", None)
                     close = getattr(cache, "close", None)
                     if callable(close):
@@ -820,12 +821,13 @@ class _BufferGroup:
             file._attach_group(self)
 
     def _active_readers(self, current):
+        current_cache = getattr(current, "cache", None)
         compatible = [
             file
             for file in self.files
             if not file.closed
-            and file._buffered_read
-            and file.cache_type == current.cache_type
+            and file._has_read_cache()
+            and type(getattr(file, "cache", None)) is type(current_cache)
             and file.blocksize == current.blocksize
         ]
         return [current] + [file for file in compatible if file is not current]
@@ -1730,6 +1732,20 @@ class Nfs4FileSystem(AbstractFileSystem):
             raise _oserror(errors[0], internal)
         return _info_dict(self._fullpath(internal), stats[0])
 
+    def _info_many(self, paths):
+        """Return metadata for several paths in one vector operation."""
+        internals = [self._strip_protocol(path) for path in paths]
+        stats, errors = self._client.stat_many(
+            [self._native_path(path) for path in internals]
+        )
+        if errors:
+            index = min(errors)
+            raise _oserror(errors[index], internals[index])
+        return [
+            _info_dict(self._fullpath(path), stat)
+            for path, stat in zip(internals, stats)
+        ]
+
     def ls(self, path, detail=True, refresh=False, **kwargs):
         internal = self._strip_protocol(path)
         if not refresh:
@@ -1805,12 +1821,15 @@ class Nfs4FileSystem(AbstractFileSystem):
         )
 
     def ukey(self, path):
-        info = self.info(path)
+        return self._ukey_from_info(self.info(path))
+
+    @classmethod
+    def _ukey_from_info(cls, info):
         # Like LocalFileSystem (a hash of `info`, which includes the name),
         # the key changes when the file is renamed as well as when its
         # contents change.
         return hashlib.sha256(
-            f"{info.get('name')}:{self._version_token(info)}".encode()
+            f"{info.get('name')}:{cls._version_token(info)}".encode()
         ).hexdigest()
 
     @staticmethod
@@ -2490,10 +2509,27 @@ class Nfs4FileSystem(AbstractFileSystem):
             size=size,
         )
 
-    def open_many(self, open_files):
+    def open_many(
+        self,
+        open_files,
+        *,
+        block_size=None,
+        cache_type=None,
+        cache_options=None,
+        write_buffering=None,
+        sizes=None,
+    ):
         """Open a list of ``OpenFile`` objects in one openv batch."""
         paths = [self._strip_protocol(f.path) for f in open_files]
         modes = [f.mode for f in open_files]
+        effective_block_size = self.block_size if block_size is None else block_size
+        effective_cache_type = self.cache_type if cache_type is None else cache_type
+        effective_cache_options = (
+            self.cache_options if cache_options is None else cache_options
+        )
+        effective_write_buffering = (
+            self.write_buffering if write_buffering is None else bool(write_buffering)
+        )
         if self.auto_mkdir and any(any(c in m for c in "wax") for m in modes):
             parents = {
                 posixpath.dirname(p) for p in paths if posixpath.dirname(p) != "/"
@@ -2508,36 +2544,46 @@ class Nfs4FileSystem(AbstractFileSystem):
         fds = self._client.open_many([self._native_path(p) for p in paths], modes)
         files = []
         try:
-            sizes = [None] * len(fds)
+            if sizes is None:
+                discovered_sizes = [None] * len(fds)
+            else:
+                discovered_sizes = list(sizes)
+                if len(discovered_sizes) != len(fds):
+                    raise ValueError("sizes must have one entry per open file")
             metadata_indices = [
                 index
                 for index, mode in enumerate(modes)
                 if (
                     _normalize_mode(mode) == "r"
-                    and self.cache_type not in (None, "none")
+                    and effective_cache_type not in (None, "none")
+                    and discovered_sizes[index] is None
                 )
-                or (_normalize_mode(mode) == "a" and self.write_buffering)
+                or (
+                    _normalize_mode(mode) == "a"
+                    and effective_write_buffering
+                    and discovered_sizes[index] is None
+                )
             ]
             if metadata_indices:
                 attrs = self._client.fstat_many(
                     [fds[index] for index in metadata_indices]
                 )
                 for index, attr in zip(metadata_indices, attrs):
-                    sizes[index] = attr["size"]
+                    discovered_sizes[index] = attr["size"]
             files = [
                 Nfs4File(
                     self,
                     path,
                     mode,
                     fd=fd,
-                    block_size=self.block_size,
-                    cache_type=self.cache_type,
-                    cache_options=self.cache_options,
-                    write_buffering=self.write_buffering,
+                    block_size=effective_block_size,
+                    cache_type=effective_cache_type,
+                    cache_options=effective_cache_options,
+                    write_buffering=effective_write_buffering,
                     size=size,
                     defer_cache=True,
                 )
-                for path, mode, fd, size in zip(paths, modes, fds, sizes)
+                for path, mode, fd, size in zip(paths, modes, fds, discovered_sizes)
             ]
             _BufferGroup(self, files)
         except BaseException:
@@ -2603,6 +2649,10 @@ class Nfs4FileSystem(AbstractFileSystem):
         internal = self._strip_protocol(path)
         self._invalidate_namespace([internal])
         self._client.remove_many([self._native_path(internal)])
+
+    def rm_file(self, path):
+        """Remove one non-directory path using the native vector primitive."""
+        self.rm(path, recursive=False)
 
     def rm(self, path, recursive=False, maxdepth=None):
         if isinstance(path, str):
