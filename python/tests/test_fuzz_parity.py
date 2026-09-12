@@ -398,16 +398,17 @@ class LocalCacheOracleStateMachine(RuleBasedStateMachine):
 
         fsspec 2026.7.0 completes its cache metadata update and closes the
         underlying LocalFileOpener, then tries to assign to its read-only
-        ``closed`` property. Treat that specific upstream post-close error as
-        success so the oracle models I/O semantics instead of requiring
+        ``closed`` property. The AttributeError text differs across supported
+        Python versions, so use the authoritative closed state instead of its
+        message. Treat that upstream post-close error as success instead of
         nfs4fs to reproduce an fsspec implementation bug.
         """
         mapped = getattr(getattr(handle, "cache", None), "cache", None)
         try:
             try:
                 handle.close()
-            except AttributeError as error:
-                if "property 'closed'" not in str(error) or not handle.closed:
+            except AttributeError:
+                if not handle.closed:
                     raise
         finally:
             close = getattr(mapped, "close", None)
