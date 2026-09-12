@@ -11,7 +11,7 @@ publish = false
 
 [features]
 default = []
-nfs = ["dep:vfsi-nfs"]
+nfs = ["dep:vfsi-nfs", "vfsi-nfs/server-copy"]
 smb = ["dep:vfsi-smb"]
 dummy = ["dep:vfsi-local"]
 
