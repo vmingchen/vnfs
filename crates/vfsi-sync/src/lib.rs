@@ -27,3 +27,7 @@ pub mod vfsi {
     pub use crate::{VecFs, VecFsExt, rm_recursive};
     pub use vfsi_core::*;
 }
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support;

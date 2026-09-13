@@ -31,4 +31,4 @@ vfsi-nfs = { workspace = true, optional = true }
 vfsi-sync = { workspace = true }
 
 [dev-dependencies]
-vfsi-test-support = { workspace = true }
+vfsi-sync = { workspace = true, features = ["test-support"] }

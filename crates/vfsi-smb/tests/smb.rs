@@ -15,7 +15,7 @@ use vfsi_sync::{
     VfFile, VfOffset, WriteOp,
 };
 
-use vfsi_test_support as common;
+use vfsi_sync::test_support as common;
 
 fn required(name: &str) -> bool {
     std::env::var(name).as_deref() == Ok("1")

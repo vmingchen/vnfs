@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 use vnfs::NfsVecFs;
 use vnfs::nfs::*;
 
-use vfsi_test_support as common;
+use vfsi_sync::test_support as common;
 
 #[test]
 fn shared_suite_on_nfs() {

@@ -20,4 +20,4 @@ vfsi-core = { workspace = true }
 vfsi-sync = { workspace = true }
 
 [dev-dependencies]
-vfsi-test-support = { workspace = true }
+vfsi-sync = { workspace = true, features = ["test-support"] }

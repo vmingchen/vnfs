@@ -8,7 +8,6 @@ members = [
     "crates/vfsi-local",
     "crates/nfsv41-sys",
     "bindings/c",
-    "testing/vfsi-test-support",
     "third-party/libntirpc-sys",
 ]
 resolver = "2"
@@ -24,8 +23,7 @@ vfsi-core = { path = "crates/vfsi-core", version = "0.1.0" }
 vfsi-local = { path = "crates/vfsi-local", version = "0.1.0" }
 vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.1.0" }
 vfsi-smb = { path = "crates/vfsi-smb", version = "0.1.0" }
-vfsi-sync = { path = "crates/vfsi-sync", version = "0.1.0" }
-vfsi-test-support = { path = "testing/vfsi-test-support", version = "0.1.0" }
+vfsi-sync = { path = "crates/vfsi-sync", version = "0.1.1" }
 
 [patch.crates-io]
 libntirpc-sys = { path = "third-party/libntirpc-sys" }

@@ -20,7 +20,6 @@ RUST_PACKAGES = (
     "adapters/nfs4fs/Cargo.toml",
     "adapters/vfsi-python/Cargo.toml",
     "adapters/vsmb/Cargo.toml",
-    "testing/vfsi-test-support/Cargo.toml",
 )
 
 PYTHON_PACKAGES = (

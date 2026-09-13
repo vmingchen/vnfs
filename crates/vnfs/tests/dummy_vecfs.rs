@@ -2,7 +2,7 @@
 //! the suite runs against a temporary directory, proving the `VecFs` API
 //! works on non-NFS filesystems too.
 
-use vfsi_test_support as common;
+use vfsi_sync::test_support as common;
 
 use std::path::Path;
 use vnfs::dummy_vecfs::DummyVecFs;

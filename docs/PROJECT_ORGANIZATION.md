@@ -87,8 +87,6 @@ ecosystem/
   ports.toml            registered and tested external repositories
 docs/                   architecture and compatibility policy
 ci/                     integration servers and ecosystem tests
-testing/
-  vfsi-test-support/    private shared backend contract assertions
 ```
 
 The dependency direction is deliberately one-way:
@@ -108,6 +106,9 @@ vector operations and report optional capabilities. The `vnfs` facade is
 NFS-focused and preserves historical NFS imports; Rust SMB consumers depend on
 `vfsi-smb` directly. Cross-protocol bindings such as `vfsi-c` compose backend
 crates directly instead of routing them through `vnfs`.
+Shared backend contract assertions live behind `vfsi-sync`'s non-default
+`test-support` feature so published backends can reuse them without depending
+on an unpublished helper crate.
 
 Every first-party public package uses `vfsi` as a registry discovery keyword.
 Protocol-specific keywords remain on their owning packages: for example,
