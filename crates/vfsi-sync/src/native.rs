@@ -19,17 +19,90 @@ pub trait FileSystem {
     fn set_attributes(&mut self, update: SetAttributes) -> VfResult<()>;
 }
 
+/// Path metadata operations independent of open descriptors.
+pub trait MetadataFileSystem: FileSystem {
+    fn metadata_path(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Metadata>;
+    fn set_metadata_path(
+        &mut self,
+        path: &std::path::Path,
+        update: MetadataUpdate,
+        follow: bool,
+    ) -> VfResult<()>;
+}
+
+/// Directory creation and enumeration.
+pub trait DirectoryFileSystem: FileSystem {
+    fn create_dir_one(&mut self, path: &std::path::Path, mode: u32) -> VfResult<()>;
+    fn read_dir_one(&mut self, path: &std::path::Path) -> VfResult<Vec<DirEntry>>;
+}
+
+/// Namespace mutations shared by files and directories.
+pub trait NamespaceFileSystem: FileSystem {
+    fn remove_one(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()>;
+    fn rename_one(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()>;
+}
+
+/// Symbolic and hard-link operations.
+pub trait LinkFileSystem: FileSystem {
+    fn symlink_one(&mut self, target: &std::path::Path, link: &std::path::Path) -> VfResult<()>;
+    fn hard_link_one(&mut self, source: &std::path::Path, link: &std::path::Path) -> VfResult<()>;
+    fn read_link_one(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf>;
+}
+
+/// File-copy operations. Backends may accelerate this server-side.
+pub trait CopyFileSystem: FileSystem {
+    fn copy_one(&mut self, source: &std::path::Path, destination: &std::path::Path)
+    -> VfResult<()>;
+}
+
+/// Complete scalar filesystem surface used by ordinary native applications.
+pub trait NativeFileSystem:
+    FileSystem
+    + MetadataFileSystem
+    + DirectoryFileSystem
+    + NamespaceFileSystem
+    + LinkFileSystem
+    + CopyFileSystem
+{
+}
+
+impl<T> NativeFileSystem for T where
+    T: FileSystem
+        + MetadataFileSystem
+        + DirectoryFileSystem
+        + NamespaceFileSystem
+        + LinkFileSystem
+        + CopyFileSystem
+        + ?Sized
+{
+}
+
 /// Optimized ordered vectors. This is deliberately separate from the scalar
 /// contract so a backend can implement scalar semantics without pretending
 /// to support native batching.
 pub trait VectorFileSystem: FileSystem {
     fn open_many(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>>;
+    fn open_many_outcomes(&mut self, requests: &[OpenRequest]) -> BatchOutcome<VfFile>;
+    fn close_many(&mut self, files: &[VfFile]) -> VfResult<()>;
     fn read_many(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>>;
     fn write_many(&mut self, requests: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>>;
     fn read_many_outcomes(&mut self, requests: &[ReadOp]) -> BatchOutcome<ReadResult>;
-    fn write_many_outcomes(&mut self, requests: &[WriteOp]) -> BatchOutcome<WriteResult>;
+    fn write_many_outcomes(&mut self, requests: &[WriteOpRef<'_>]) -> BatchOutcome<WriteResult>;
     fn remove_many(&mut self, files: &[VfFile]) -> BatchOutcome<()>;
     fn rename_many(&mut self, pairs: &[(VfFile, VfFile)]) -> BatchOutcome<()>;
+}
+
+fn metadata_mask() -> AttrMask {
+    AttrMask::MODE
+        | AttrMask::SIZE
+        | AttrMask::NLINK
+        | AttrMask::FILEID
+        | AttrMask::UID
+        | AttrMask::GID
+        | AttrMask::ATIME
+        | AttrMask::MTIME
+        | AttrMask::CTIME
+        | AttrMask::CHANGE
 }
 
 impl<T: VecFs + ?Sized> FileSystem for T {
@@ -115,6 +188,140 @@ impl<T: VecFs + ?Sized> FileSystem for T {
     }
 }
 
+impl<T: VecFs + ?Sized> MetadataFileSystem for T {
+    fn metadata_path(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Metadata> {
+        let mut attributes = VfAttrs {
+            file: VfFile::from_os_path(path),
+            masks: metadata_mask(),
+            ..VfAttrs::default()
+        };
+        let result = if follow {
+            self.getattrsv(std::slice::from_mut(&mut attributes))
+        } else {
+            self.lgetattrsv(std::slice::from_mut(&mut attributes))
+        };
+        result
+            .map_err(|error| error.with_context("metadata", path))
+            .map(|()| attributes.into())
+    }
+
+    fn set_metadata_path(
+        &mut self,
+        path: &std::path::Path,
+        update: MetadataUpdate,
+        follow: bool,
+    ) -> VfResult<()> {
+        let mut attributes = SetAttributes::new(VfFile::from_os_path(path));
+        attributes.follow_symlinks = follow;
+        attributes.mode = update.permissions.map(Permissions::mode);
+        attributes.size = update.len;
+        attributes.atime = update.accessed.map(system_time_parts).transpose()?;
+        attributes.mtime = update.modified.map(system_time_parts).transpose()?;
+        self.set_attributes(attributes)
+            .map_err(|error| error.with_context("set_metadata", path))
+    }
+}
+
+fn system_time_parts(time: std::time::SystemTime) -> VfResult<(i64, u32)> {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => Ok((
+            i64::try_from(duration.as_secs())
+                .map_err(|_| VfError::client(0, libc::EOVERFLOW as u32))?,
+            duration.subsec_nanos(),
+        )),
+        Err(error) => {
+            let duration = error.duration();
+            let seconds = i64::try_from(duration.as_secs())
+                .map_err(|_| VfError::client(0, libc::EOVERFLOW as u32))?;
+            if duration.subsec_nanos() == 0 {
+                Ok((-seconds, 0))
+            } else {
+                let seconds = seconds
+                    .checked_add(1)
+                    .ok_or_else(|| VfError::client(0, libc::EOVERFLOW as u32))?;
+                Ok((-seconds, 1_000_000_000 - duration.subsec_nanos()))
+            }
+        }
+    }
+}
+
+impl<T: VecFs + ?Sized> DirectoryFileSystem for T {
+    fn create_dir_one(&mut self, path: &std::path::Path, mode: u32) -> VfResult<()> {
+        self.mkdir(path, mode)
+            .map_err(|error| error.with_context("create_dir", path))
+    }
+
+    fn read_dir_one(&mut self, path: &std::path::Path) -> VfResult<Vec<DirEntry>> {
+        let entries = self
+            .listdir(path, metadata_mask(), 0, false)
+            .map_err(|error| error.with_context("read_dir", path))?;
+        entries
+            .into_iter()
+            .enumerate()
+            .map(|(index, attributes)| {
+                let entry_path = attributes
+                    .file
+                    .path()
+                    .map(std::path::Path::to_path_buf)
+                    .ok_or_else(|| VfError::client(index, ERR_IO).with_context("read_dir", path))?;
+                Ok(DirEntry::new(entry_path, attributes.into()))
+            })
+            .collect()
+    }
+}
+
+impl<T: VecFs + ?Sized> NamespaceFileSystem for T {
+    fn remove_one(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()> {
+        self.rm(&[path], recursive)
+            .map_err(|error| error.with_context("remove", path))
+    }
+
+    fn rename_one(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()> {
+        self.renamev(&[(VfFile::from_os_path(from), VfFile::from_os_path(to))])
+            .map_err(|error| error.with_context("rename", from))
+    }
+}
+
+impl<T: VecFs + ?Sized> LinkFileSystem for T {
+    fn symlink_one(&mut self, target: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
+        self.symlink(target, link)
+            .map_err(|error| error.with_context("symlink", link))
+    }
+
+    fn hard_link_one(&mut self, source: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
+        self.hardlinkv(&[source], &[link])
+            .map_err(|error| error.with_context("hard_link", link))
+    }
+
+    fn read_link_one(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf> {
+        self.readlink(path)
+            .map(bytes_to_path)
+            .map_err(|error| error.with_context("read_link", path))
+    }
+}
+
+#[cfg(unix)]
+fn bytes_to_path(bytes: Vec<u8>) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    std::ffi::OsString::from_vec(bytes).into()
+}
+
+#[cfg(not(unix))]
+fn bytes_to_path(bytes: Vec<u8>) -> std::path::PathBuf {
+    String::from_utf8_lossy(&bytes).into_owned().into()
+}
+
+impl<T: VecFs + ?Sized> CopyFileSystem for T {
+    fn copy_one(
+        &mut self,
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> VfResult<()> {
+        self.copyv(&[ExtentPair::from_os_paths(source, 0, destination, 0, None)])
+            .map_err(|error| error.with_context("copy", source))
+    }
+}
+
 impl<T: VecFs + ?Sized> VectorFileSystem for T {
     fn open_many(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>> {
         let paths: Vec<&std::path::Path> = requests
@@ -129,6 +336,34 @@ impl<T: VecFs + ?Sized> VectorFileSystem for T {
         self.openv(&paths, &flags, &modes)
     }
 
+    fn open_many_outcomes(&mut self, requests: &[OpenRequest]) -> BatchOutcome<VfFile> {
+        // A legacy fail-fast `openv` cannot return the successfully opened
+        // prefix, which would make RAII cleanup impossible. Execute this
+        // exact-outcome variant one-by-one until backends gain a native
+        // vector reply that retains every prefix handle. The ordinary
+        // `open_many` path remains fully vectorized.
+        let mut outcomes = Vec::with_capacity(requests.len());
+        let mut stopped = false;
+        for (index, request) in requests.iter().enumerate() {
+            if stopped {
+                outcomes.push(OpOutcome::NotAttempted);
+                continue;
+            }
+            match FileSystem::open_one(self, request) {
+                Ok(file) => outcomes.push(OpOutcome::Success(file)),
+                Err(error) => {
+                    outcomes.push(OpOutcome::Failed(error.with_index(index)));
+                    stopped = true;
+                }
+            }
+        }
+        BatchOutcome::new(outcomes)
+    }
+
+    fn close_many(&mut self, files: &[VfFile]) -> VfResult<()> {
+        self.closev(files)
+    }
+
     fn read_many(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         self.readv(requests)
     }
@@ -141,8 +376,9 @@ impl<T: VecFs + ?Sized> VectorFileSystem for T {
         self.readv_outcomes(requests)
     }
 
-    fn write_many_outcomes(&mut self, requests: &[WriteOp]) -> BatchOutcome<WriteResult> {
-        self.writev_outcomes(requests)
+    fn write_many_outcomes(&mut self, requests: &[WriteOpRef<'_>]) -> BatchOutcome<WriteResult> {
+        let len = requests.len();
+        BatchOutcome::from_fail_fast_values(len, self.writev_borrowed(requests))
     }
 
     fn remove_many(&mut self, files: &[VfFile]) -> BatchOutcome<()> {

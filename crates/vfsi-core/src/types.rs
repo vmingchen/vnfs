@@ -26,6 +26,7 @@ pub const VF_ERR_UNSUPPORTED: u32 = 0xFFFF_FFFE;
 /// Generic errno-style error codes (they coincide with the NFS4ERR codes for
 /// the same conditions, which the NFS backend reports).
 pub const ERR_NOENT: u32 = 2;
+pub const ERR_IO: u32 = 5;
 pub const ERR_EBADF: u32 = 9;
 pub const ERR_EXIST: u32 = 17;
 pub const ERR_NOTDIR: u32 = 20;
@@ -438,6 +439,18 @@ impl<T> BatchOutcome<T> {
         &self.operations
     }
 
+    pub fn iter(&self) -> std::slice::Iter<'_, OpOutcome<T>> {
+        self.operations.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.operations.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.operations.is_empty()
+    }
+
     pub fn into_operations(self) -> Vec<OpOutcome<T>> {
         self.operations
     }
@@ -446,6 +459,58 @@ impl<T> BatchOutcome<T> {
         self.operations
             .iter()
             .all(|outcome| matches!(outcome, OpOutcome::Success(_)))
+    }
+
+    /// Transform successful values without disturbing per-operation failure
+    /// or completion state.
+    pub fn map<U>(self, mut transform: impl FnMut(T) -> U) -> BatchOutcome<U> {
+        self.map_with_index(|_, value| transform(value))
+    }
+
+    /// Transform successful values with their original request indices.
+    pub fn map_with_index<U>(self, mut transform: impl FnMut(usize, T) -> U) -> BatchOutcome<U> {
+        BatchOutcome::new(
+            self.operations
+                .into_iter()
+                .enumerate()
+                .map(|(index, outcome)| match outcome {
+                    OpOutcome::Success(value) => OpOutcome::Success(transform(index, value)),
+                    OpOutcome::Completed => OpOutcome::Completed,
+                    OpOutcome::Failed(error) => OpOutcome::Failed(error),
+                    OpOutcome::NotAttempted => OpOutcome::NotAttempted,
+                    OpOutcome::Indeterminate(error) => OpOutcome::Indeterminate(error),
+                })
+                .collect(),
+        )
+    }
+
+    /// Enrich errors while preserving every outcome and request index.
+    pub fn map_errors(mut self, mut transform: impl FnMut(usize, VfError) -> VfError) -> Self {
+        for (index, outcome) in self.operations.iter_mut().enumerate() {
+            match outcome {
+                OpOutcome::Failed(error) | OpOutcome::Indeterminate(error) => {
+                    *error = transform(index, error.clone());
+                }
+                _ => {}
+            }
+        }
+        self
+    }
+
+    pub fn first_error(&self) -> Option<&VfError> {
+        self.operations.iter().find_map(|outcome| match outcome {
+            OpOutcome::Failed(error) | OpOutcome::Indeterminate(error) => Some(error),
+            _ => None,
+        })
+    }
+
+    pub fn indeterminate_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.operations
+            .iter()
+            .enumerate()
+            .filter_map(|(index, outcome)| {
+                matches!(outcome, OpOutcome::Indeterminate(_)).then_some(index)
+            })
     }
 
     /// Convert to the historical fail-fast shape, returning the first error.
@@ -467,6 +532,30 @@ impl<T> BatchOutcome<T> {
             }
         }
         Ok(values)
+    }
+
+    /// Consume a completely successful batch. This is the ergonomic alias
+    /// for compatibility-oriented [`into_fail_fast`](Self::into_fail_fast).
+    pub fn into_values(self) -> VfResult<Vec<T>> {
+        self.into_fail_fast()
+    }
+}
+
+impl<T> IntoIterator for BatchOutcome<T> {
+    type Item = OpOutcome<T>;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.operations.into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a BatchOutcome<T> {
+    type Item = &'a OpOutcome<T>;
+    type IntoIter = std::slice::Iter<'a, OpOutcome<T>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.operations.iter()
     }
 }
 
@@ -1191,6 +1280,215 @@ pub struct VfAttrs {
     /// FATTR4_NAMED_ATTR: TRUE iff the object has a non-empty named
     /// attribute directory (i.e. at least one `user.*` xattr).
     pub has_named_attr: bool,
+}
+
+/// Rust-native permission bits, independent of protocol wire attributes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Permissions {
+    mode: u32,
+}
+
+impl Permissions {
+    pub fn from_mode(mode: u32) -> Self {
+        Self {
+            mode: mode & 0o7777,
+        }
+    }
+
+    pub fn mode(self) -> u32 {
+        self.mode
+    }
+
+    pub fn readonly(self) -> bool {
+        self.mode & 0o222 == 0
+    }
+}
+
+/// Idiomatic metadata returned by the Rust-native path API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Metadata {
+    file_type: VfType,
+    len: u64,
+    permissions: Permissions,
+    modified: Option<std::time::SystemTime>,
+    accessed: Option<std::time::SystemTime>,
+    changed: Option<std::time::SystemTime>,
+    nlink: Option<u32>,
+    file_id: Option<u64>,
+    change_id: Option<u64>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+}
+
+impl Metadata {
+    pub fn file_type(&self) -> VfType {
+        self.file_type
+    }
+
+    pub fn is_file(&self) -> bool {
+        self.file_type == VfType::Regular
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.file_type == VfType::Directory
+    }
+
+    pub fn is_symlink(&self) -> bool {
+        self.file_type == VfType::Symlink
+    }
+
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn permissions(&self) -> Permissions {
+        self.permissions
+    }
+
+    pub fn modified(&self) -> Option<std::time::SystemTime> {
+        self.modified
+    }
+
+    pub fn accessed(&self) -> Option<std::time::SystemTime> {
+        self.accessed
+    }
+
+    /// POSIX status-change time; this is not a creation timestamp.
+    pub fn changed(&self) -> Option<std::time::SystemTime> {
+        self.changed
+    }
+
+    pub fn nlink(&self) -> Option<u32> {
+        self.nlink
+    }
+
+    pub fn file_id(&self) -> Option<u64> {
+        self.file_id
+    }
+
+    pub fn change_id(&self) -> Option<u64> {
+        self.change_id
+    }
+
+    pub fn uid(&self) -> Option<u32> {
+        self.uid
+    }
+
+    pub fn gid(&self) -> Option<u32> {
+        self.gid
+    }
+}
+
+/// Rust-native metadata changes used by [`MetadataFileSystem`](https://docs.rs/vfsi-sync).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MetadataUpdate {
+    pub permissions: Option<Permissions>,
+    pub len: Option<u64>,
+    pub accessed: Option<std::time::SystemTime>,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+impl MetadataUpdate {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn permissions(mut self, permissions: Permissions) -> Self {
+        self.permissions = Some(permissions);
+        self
+    }
+
+    pub fn len(mut self, len: u64) -> Self {
+        self.len = Some(len);
+        self
+    }
+
+    pub fn accessed(mut self, accessed: std::time::SystemTime) -> Self {
+        self.accessed = Some(accessed);
+        self
+    }
+
+    pub fn modified(mut self, modified: std::time::SystemTime) -> Self {
+        self.modified = Some(modified);
+        self
+    }
+}
+
+fn system_time(seconds: i64, nanos: u32) -> Option<std::time::SystemTime> {
+    if seconds < 0 {
+        std::time::UNIX_EPOCH
+            .checked_sub(std::time::Duration::from_secs(seconds.unsigned_abs()))?
+            .checked_add(std::time::Duration::from_nanos(u64::from(nanos)))
+    } else {
+        std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(seconds as u64, nanos))
+    }
+}
+
+impl From<VfAttrs> for Metadata {
+    fn from(attributes: VfAttrs) -> Self {
+        let returned = attributes.returned;
+        Self {
+            file_type: attributes.ftype,
+            len: attributes.size,
+            permissions: Permissions::from_mode(attributes.mode),
+            modified: returned
+                .contains(AttrMask::MTIME)
+                .then(|| system_time(attributes.mtime_sec, attributes.mtime_nsec))
+                .flatten(),
+            accessed: returned
+                .contains(AttrMask::ATIME)
+                .then(|| system_time(attributes.atime_sec, attributes.atime_nsec))
+                .flatten(),
+            changed: returned
+                .contains(AttrMask::CTIME)
+                .then(|| system_time(attributes.ctime_sec, attributes.ctime_nsec))
+                .flatten(),
+            nlink: returned
+                .contains(AttrMask::NLINK)
+                .then_some(attributes.nlink),
+            file_id: returned
+                .contains(AttrMask::FILEID)
+                .then_some(attributes.fileid),
+            change_id: returned
+                .contains(AttrMask::CHANGE)
+                .then_some(attributes.change),
+            uid: returned.contains(AttrMask::UID).then_some(attributes.uid),
+            gid: returned.contains(AttrMask::GID).then_some(attributes.gid),
+        }
+    }
+}
+
+/// One native directory entry with its already-fetched metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntry {
+    path: PathBuf,
+    metadata: Metadata,
+}
+
+impl DirEntry {
+    pub fn new(path: PathBuf, metadata: Metadata) -> Self {
+        Self { path, metadata }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn file_name(&self) -> Option<&std::ffi::OsStr> {
+        self.path.file_name()
+    }
+
+    pub fn file_type(&self) -> VfType {
+        self.metadata.file_type()
+    }
+
+    pub fn metadata(&self) -> &Metadata {
+        &self.metadata
+    }
 }
 
 /// Typed metadata lookup request. Returned fields are still represented by

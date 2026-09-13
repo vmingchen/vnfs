@@ -18,13 +18,19 @@ pub use traits::{VecFs, VecFsExt, rm_recursive};
 mod io;
 pub use io::{VfFileHandle, VfOpenOptions};
 mod client;
-pub use client::{FsClient, FsFile, FsRead, FsReadInto, FsWrite};
+pub use client::{FsClient, FsFile, FsRead, FsReadInto, FsWrite, OpenOptions, SetMetadata};
 mod native;
-pub use native::{FileSystem, VectorFileSystem};
+pub use native::{
+    CopyFileSystem, DirectoryFileSystem, FileSystem, LinkFileSystem, MetadataFileSystem,
+    NamespaceFileSystem, NativeFileSystem, VectorFileSystem,
+};
 
 /// Scalar/singular view of the synchronous interface.
 pub mod sfsi {
-    pub use crate::{FileSystem, FsClient, FsFile, VecFs, VecFsExt};
+    pub use crate::{
+        CopyFileSystem, DirectoryFileSystem, FileSystem, FsClient, FsFile, LinkFileSystem,
+        MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions, VecFs, VecFsExt,
+    };
     pub use vfsi_core::{Fd, VfAttrs, VfError, VfFile, VfOffset, VfResult, VfType};
 }
 

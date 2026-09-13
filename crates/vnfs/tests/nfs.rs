@@ -101,6 +101,52 @@ fn builder_observer_receives_lifecycle_events() {
     assert_eq!(*observer.0.lock().unwrap(), ["connected", "shutdown"]);
 }
 
+#[test]
+fn rust_native_client_workflow_on_nfs() {
+    let dir = setup_dir("rust_native_client");
+    let builder = vnfs::Nfs::builder("127.0.0.1").minor_version(
+        match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => Some(1),
+            Ok("2") => Some(2),
+            _ => None,
+        },
+    );
+    let client = builder.connect().unwrap();
+    let nested = format!("{dir}/nested");
+    client.create_dir_all(&nested).unwrap();
+    let paths = [format!("{nested}/one"), format!("{nested}/two")];
+    let files = client
+        .open_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open_many(&paths)
+        .unwrap();
+    client
+        .write_many_outcomes(&[
+            files[0].write_request_at(0, b"one"),
+            files[1].write_request_at(0, b"two"),
+        ])
+        .unwrap()
+        .into_values()
+        .unwrap();
+    let values = client
+        .read_many_outcomes(&[
+            files[0].read_request_at(0, 3),
+            files[1].read_request_at(0, 3),
+        ])
+        .unwrap()
+        .into_values()
+        .unwrap();
+    assert_eq!(values[0].data, b"one");
+    assert_eq!(values[1].data, b"two");
+    assert_eq!(client.metadata(&paths[0]).unwrap().len(), 3);
+    assert_eq!(client.read_dir(&nested).unwrap().len(), 2);
+    client.close_many(files).unwrap();
+    client.remove_dir_all(&dir).unwrap();
+}
+
 fn client() -> NfsVecFs {
     match std::env::var("VNFS_TEST_MINOR").as_deref() {
         Ok("1") => NfsVecFs::connect_minor("127.0.0.1", 1),

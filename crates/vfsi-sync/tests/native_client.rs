@@ -12,6 +12,7 @@ struct ScalarOnly {
     open: bool,
     oversized_read: bool,
     oversized_write_count: bool,
+    read_failure: bool,
 }
 
 impl FileSystem for ScalarOnly {
@@ -36,6 +37,9 @@ impl FileSystem for ScalarOnly {
     }
 
     fn read_one(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
+        if self.read_failure {
+            return Err(VfError::failure(0, libc::EACCES as u32));
+        }
         if self.oversized_read {
             return Ok(ReadResult {
                 file: request.file.clone(),
@@ -116,7 +120,7 @@ impl FileSystem for ScalarOnly {
 fn owned_client_accepts_a_scalar_only_backend() {
     let client = FsClient::new(ScalarOnly::default());
     let mut file = client
-        .open(OpenRequest::new(
+        .open_with(OpenRequest::new(
             "/file",
             OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE,
         ))
@@ -136,18 +140,47 @@ fn owned_file_rejects_backend_results_that_violate_io_contracts() {
         ..ScalarOnly::default()
     });
     let mut file = client
-        .open(OpenRequest::new("/file", OpenFlags::READ))
+        .open_with(OpenRequest::new("/file", OpenFlags::READ))
         .unwrap();
-    let error = file.read(&mut [0; 4]).unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    let error = file.read_native(&mut [0; 4]).unwrap_err();
+    assert_eq!(error.err_no(), vfsi_sync::ERR_IO);
+    assert_eq!(error.operation(), Some("read"));
+    assert_eq!(error.path(), Some(std::path::Path::new("/file")));
 
     let client = FsClient::new(ScalarOnly {
         oversized_write_count: true,
         ..ScalarOnly::default()
     });
     let mut file = client
-        .open(OpenRequest::new("/file", OpenFlags::WRITE))
+        .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
         .unwrap();
-    let error = file.write(b"data").unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    let error = file.write_native(b"data").unwrap_err();
+    assert_eq!(error.err_no(), vfsi_sync::ERR_IO);
+    assert_eq!(error.operation(), Some("write"));
+    assert_eq!(error.path(), Some(std::path::Path::new("/file")));
+}
+
+#[test]
+fn native_file_errors_retain_operation_and_path_context() {
+    let client = FsClient::new(ScalarOnly {
+        read_failure: true,
+        ..ScalarOnly::default()
+    });
+    let file = client.open("/important").unwrap();
+    let error = file.read_at(&mut [0; 1], 0).unwrap_err();
+    assert_eq!(error.err_no(), libc::EACCES as u32);
+    assert_eq!(error.operation(), Some("read"));
+    assert_eq!(error.path(), Some(std::path::Path::new("/important")));
+}
+
+#[test]
+fn convenience_string_errors_retain_operation_and_path_context() {
+    let client = FsClient::new(ScalarOnly {
+        data: vec![0xff],
+        ..ScalarOnly::default()
+    });
+    let error = client.read_to_string("/not-utf8").unwrap_err();
+    assert_eq!(error.err_no(), vfsi_sync::ERR_INVAL);
+    assert_eq!(error.operation(), Some("read_to_string"));
+    assert_eq!(error.path(), Some(std::path::Path::new("/not-utf8")));
 }

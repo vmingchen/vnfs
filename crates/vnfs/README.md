@@ -57,7 +57,7 @@ the recommended baseline.
 ```rust,no_run
 use vnfs::{NfsAuthentication, NfsConnectOptions, NfsVecFs, RpcsecGssProtection};
 
-fn main() -> vnfs::VfResult<()> {
+fn main() -> vnfs::Result<()> {
     let fs = NfsVecFs::connect_with_options(
         "nfs.example.com",
         NfsConnectOptions {
@@ -92,29 +92,34 @@ each phase:
 ```rust,no_run
 use vnfs::prelude::*;
 
-fn main() -> std::io::Result<()> {
-    let backend = NfsVecFs::builder("nfs.example.com")
+fn main() -> vnfs::Result<()> {
+    let client = Nfs::builder("nfs.example.com")
         .root("/export/application")
-        .connect()
-        .map_err(std::io::Error::from)?;
-    let client = FsClient::new(backend);
-    let flags = OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
-    let files = client.open_many(&[
-        OpenRequest::new("/file-1", flags),
-        OpenRequest::new("/file-2", flags),
-    ])?;
+        .connect()?;
+    let files = client
+        .open_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open_many(&["/file-1", "/file-2"])?;
 
-    client.write_many(&[
-        files[0].write_at(0, b"hello"),
-        files[1].write_at(0, b"world"),
-    ])?;
+    client
+        .write_many_outcomes(&[
+            files[0].write_request_at(0, b"hello"),
+            files[1].write_request_at(0, b"world"),
+        ])?
+        .into_values()?;
 
-    let contents = client.read_many(&[
-        files[0].read_at(0, 5),
-        files[1].read_at(0, 5),
-    ])?;
+    let contents = client
+        .read_many_outcomes(&[
+            files[0].read_request_at(0, 5),
+            files[1].read_request_at(0, 5),
+        ])?
+        .into_values()?;
     assert_eq!(contents[0].data, b"hello");
     assert_eq!(contents[1].data, b"world");
+    client.close_many(files)?;
     Ok(())
 }
 ```
@@ -133,29 +138,29 @@ where network latency dominates transfer time.
 
 ## Idiomatic scalar I/O
 
-`FsClient` is cheaply cloneable and its owned `FsFile` handles can coexist or
+`NfsClient` is cheaply cloneable and its owned `NfsFile` handles can coexist or
 move to worker threads. A handle implements `Read`, `Write`, and `Seek` and
 closes its remote descriptor on drop. Call `close()` explicitly when a close
 error must be observed, and `sync_data()`/`sync_all()` when durability errors
 must be observed before close.
 
 ```rust,no_run
-use std::io::{Read, Seek, SeekFrom};
-use vnfs::{FsClient, NfsVecFs, OpenFlags, OpenRequest};
+use vnfs::prelude::*;
 
-fn main() -> std::io::Result<()> {
-    let fs = NfsVecFs::builder("nfs.example.com")
-        .connect()
-        .map_err(std::io::Error::from)?;
-    let client = FsClient::new(fs);
-    let mut file = client.open(OpenRequest::new("/file-1", OpenFlags::READ))?;
-    file.seek(SeekFrom::Start(0))?;
-    let mut contents = Vec::new();
-    file.read_to_end(&mut contents)?;
+fn main() -> vnfs::VfResult<()> {
+    let client = Nfs::connect("nfs.example.com")?;
+    let file = client.open("/file-1")?;
+    let mut contents = vec![0; client.metadata("/file-1")?.len() as usize];
+    file.read_at(&mut contents, 0)?;
     file.close()?;
     Ok(())
 }
 ```
+
+The native methods return structured `VfError` values with protocol domain,
+path, operation, vector index, and retry information. The standard `Read`,
+`Write`, and `Seek` implementations remain available when integration with
+generic `std::io` code is more important than retaining that detail.
 
 One backend connection serializes access to its stateful NFS session, while
 `FsClient::read_many` and `write_many` preserve useful compound batching.

@@ -3,7 +3,10 @@
 The Rust-native VFSI API is intentionally separated from the historical
 POSIX/C compatibility surface.
 
-- `FileSystem` is the scalar contract.
+- `FileSystem` is the descriptor I/O contract. `MetadataFileSystem`,
+  `DirectoryFileSystem`, `NamespaceFileSystem`, `LinkFileSystem`, and
+  `CopyFileSystem` add focused capabilities; `NativeFileSystem` is their
+  convenient aggregate bound.
 - `VectorFileSystem` adds optimized ordered batches.
 - `FsClient` owns and shares a backend; `FsFile` owns a remote handle without
   borrowing the entire client.
@@ -35,6 +38,15 @@ The native owned-file API never exposes its backend descriptor. Vector
 requests made through `FsClient` verify that every file belongs to that same
 client, preventing accidental cross-session descriptor use.
 
+Application code should connect through `Nfs::builder`, which directly
+returns the concrete `NfsClient` alias. `NfsVecFs` and `NfsClientBuilder`
+remain available for embedding and compatibility. `NfsClient::open_options`
+mirrors `std::fs::OpenOptions`; direct `read_at` and `write_at` perform
+positional I/O, while explicitly named `read_request_at` and
+`write_request_at` values compose vector calls. `close_many` consumes a group
+of handles and closes them with the vector backend rather than serializing
+one close per dropped handle.
+
 ## Durability and failure rules
 
 `flush`, `sync_data`, and `sync_all` call the backend durability operation.
@@ -46,6 +58,9 @@ attempted. A lost transport response makes dispatched mutations
 `Indeterminate`; they are not replayed. `VfError` exposes its status domain,
 optional operation/path context, completion certainty, and retry class without
 requiring string parsing.
+
+Native client and file methods retain `VfError`. Only the standard-library
+`Read`, `Write`, and `Seek` adapters translate failures to `std::io::Error`.
 
 The asynchronous facet is deliberately deferred to a separate future crate;
 the synchronous core does not depend on Tokio.

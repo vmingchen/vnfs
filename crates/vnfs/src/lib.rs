@@ -3,6 +3,12 @@
 //! The published `vnfs` package retains its historical paths while the
 //! implementation is split into interface and backend workspace crates.
 
+/// Application-facing result type for the Rust-native API.
+pub type Result<T> = vfsi_core::VfResult<T>;
+
+/// Application-facing error type for the Rust-native API.
+pub type Error = vfsi_core::VfError;
+
 /// Shared low-level error compatibility path.
 pub mod error {
     pub use vfsi_core::{RpcError, RpcResult, STATUS_TRANSPORT};
@@ -40,18 +46,24 @@ pub mod legacy {
 
 /// Common Rust-native imports without protocol or FFI internals.
 pub mod prelude {
-    pub use vfsi_core::{
-        BatchOutcome, Capabilities, MetadataQuery, OpOutcome, OpenFlags, OpenRequest, ReadOp,
-        ReadResult, SetAttributes, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
-    };
     #[cfg(feature = "nfs")]
-    pub use vfsi_nfs::{NfsClientBuilder, NfsEvent, NfsExtensions, NfsObserver, NfsVecFs};
+    pub use crate::{Nfs, NfsBuilder, NfsClient, NfsFile};
+    pub use vfsi_core::{
+        BatchOutcome, Capabilities, DirEntry, Metadata, OpOutcome, OpenFlags, OpenRequest,
+        Permissions, ReadResult, VfError, VfResult, WriteResult,
+    };
     pub use vfsi_sync::{
-        FileSystem, FsClient, FsFile, FsRead, FsReadInto, FsWrite, VectorFileSystem,
+        CopyFileSystem, DirectoryFileSystem, FileSystem, FsClient, FsFile, LinkFileSystem,
+        MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions, SetMetadata,
+        VectorFileSystem,
     };
 }
 
 pub use vfsi_core::*;
+#[cfg(feature = "nfs")]
+mod native_nfs;
+#[cfg(feature = "nfs")]
+pub use native_nfs::{Nfs, NfsBuilder, NfsClient, NfsFile};
 #[cfg(feature = "dummy")]
 pub use vfsi_local::DummyVecFs;
 #[cfg(all(feature = "nfs", feature = "rpcsec-gss"))]
@@ -62,6 +74,7 @@ pub use vfsi_nfs::{
     NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
 };
 pub use vfsi_sync::{
-    FileSystem, FsClient, FsFile, FsRead, FsReadInto, FsWrite, VecFs, VecFsExt, VectorFileSystem,
-    VfFileHandle, VfOpenOptions, rm_recursive,
+    CopyFileSystem, DirectoryFileSystem, FileSystem, FsClient, FsFile, FsRead, FsReadInto, FsWrite,
+    LinkFileSystem, MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions,
+    SetMetadata, VecFs, VecFsExt, VectorFileSystem, VfFileHandle, VfOpenOptions, rm_recursive,
 };

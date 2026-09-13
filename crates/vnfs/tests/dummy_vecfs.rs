@@ -191,14 +191,19 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
 
     let client = FsClient::new(dummy());
     let flags = OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
-    let mut first = client.open(OpenRequest::new("/first", flags)).unwrap();
-    let mut second = client.open(OpenRequest::new("/second", flags)).unwrap();
+    let mut first = client.open_with(OpenRequest::new("/first", flags)).unwrap();
+    let mut second = client
+        .open_with(OpenRequest::new("/second", flags))
+        .unwrap();
 
     client
-        .write_many(&[first.write_at(0, b"one"), second.write_at(0, b"two")])
+        .write_many(&[
+            first.write_request_at(0, b"one"),
+            second.write_request_at(0, b"two"),
+        ])
         .unwrap();
     let read_results = client
-        .read_many(&[first.read_at(0, 3), second.read_at(0, 3)])
+        .read_many(&[first.read_request_at(0, 3), second.read_request_at(0, 3)])
         .unwrap();
     assert_eq!(read_results[0].data, b"one");
     assert_eq!(read_results[1].data, b"two");
@@ -206,8 +211,8 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
     let mut two_buffer = [0; 3];
     let lengths = client
         .read_many_into(&mut [
-            first.read_at_into(0, &mut one_buffer),
-            second.read_at_into(0, &mut two_buffer),
+            first.read_request_at_into(0, &mut one_buffer),
+            second.read_request_at_into(0, &mut two_buffer),
         ])
         .unwrap();
     assert_eq!(lengths, [3, 3]);
@@ -216,10 +221,10 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
     let other_client = FsClient::new(dummy());
     assert_eq!(
         other_client
-            .read_many(&[first.read_at(0, 1)])
+            .read_many(&[first.read_request_at(0, 1)])
             .unwrap_err()
-            .kind(),
-        std::io::ErrorKind::InvalidInput
+            .err_no(),
+        vnfs::ERR_INVAL
     );
     first.flush().unwrap();
     second.flush().unwrap();
@@ -233,6 +238,146 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
 
     first.close().unwrap();
     second.close().unwrap();
+}
+
+#[test]
+fn native_client_covers_idiomatic_file_and_namespace_workflows() {
+    use vnfs::{FsClient, VfType};
+
+    let client = FsClient::new(dummy());
+    client.create_dir_all("/tree/nested").unwrap();
+    client.create_dir_all("/../../root-clamped").unwrap();
+    assert!(client.metadata("/root-clamped").unwrap().is_dir());
+    client.remove_dir("/root-clamped").unwrap();
+    client.write("/tree/nested/file", b"hello").unwrap();
+    assert_eq!(client.read_to_string("/tree/nested/file").unwrap(), "hello");
+
+    let metadata = client.metadata("/tree/nested/file").unwrap();
+    assert!(metadata.is_file());
+    assert_eq!(metadata.len(), 5);
+    assert!(!metadata.permissions().readonly());
+
+    let entries = client.read_dir("/tree/nested").unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].file_name().unwrap(), "file");
+    assert_eq!(entries[0].file_type(), VfType::Regular);
+
+    let file = client
+        .open_options()
+        .read(true)
+        .write(true)
+        .open("/tree/nested/file")
+        .unwrap();
+    assert_eq!(file.write_at(b"a", 1).unwrap(), 1);
+    let mut bytes = [0; 5];
+    assert_eq!(file.read_at(&mut bytes, 0).unwrap(), 5);
+    assert_eq!(&bytes, b"hallo");
+    assert_eq!(file.metadata().unwrap().len(), 5);
+    file.set_len(4).unwrap();
+    file.set_permissions(vnfs::Permissions::from_mode(0o600))
+        .unwrap();
+    let metadata = file.metadata().unwrap();
+    assert_eq!(metadata.len(), 4);
+    assert_eq!(metadata.permissions().mode(), 0o600);
+    file.close().unwrap();
+    client
+        .set_metadata("/tree/nested/file")
+        .permissions(vnfs::Permissions::from_mode(0o400))
+        .len(4)
+        .apply()
+        .unwrap();
+    let metadata = client.metadata("/tree/nested/file").unwrap();
+    assert_eq!(metadata.len(), 4);
+    assert_eq!(metadata.permissions().mode(), 0o400);
+
+    client
+        .rename("/tree/nested/file", "/tree/nested/renamed")
+        .unwrap();
+    client
+        .copy("/tree/nested/renamed", "/tree/nested/copied")
+        .unwrap();
+    assert_eq!(client.read("/tree/nested/copied").unwrap(), b"hall");
+    client.symlink("renamed", "/tree/nested/symlink").unwrap();
+    assert_eq!(
+        client.read_link("/tree/nested/symlink").unwrap(),
+        Path::new("renamed")
+    );
+    assert!(
+        client
+            .symlink_metadata("/tree/nested/symlink")
+            .unwrap()
+            .is_symlink()
+    );
+    client
+        .hard_link("/tree/nested/renamed", "/tree/nested/hardlink")
+        .unwrap();
+    assert_eq!(client.read("/tree/nested/hardlink").unwrap(), b"hall");
+    assert_eq!(
+        client
+            .remove_dir("/tree/nested/hardlink")
+            .unwrap_err()
+            .err_no(),
+        vnfs::ERR_NOTDIR
+    );
+    assert_eq!(
+        client.remove_file("/tree/nested").unwrap_err().err_no(),
+        vnfs::ERR_ISDIR
+    );
+    client.remove_dir_all("/tree").unwrap();
+}
+
+#[test]
+fn native_open_options_and_batch_outcomes_are_composable() {
+    use vnfs::{FsClient, OpOutcome};
+
+    let client = FsClient::new(dummy());
+    let files = client
+        .open_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o640)
+        .open_many(&["/one", "/two"])
+        .unwrap();
+
+    let writes = client
+        .write_many_outcomes(&[
+            files[0].write_request_at(0, b"one"),
+            files[1].write_request_at(0, b"two"),
+        ])
+        .unwrap();
+    assert!(writes.is_complete_success());
+    assert!(writes.first_error().is_none());
+    assert!(writes.indeterminate_indices().next().is_none());
+    assert_eq!(writes.into_values().unwrap().len(), 2);
+
+    let reads = client
+        .read_many_outcomes(&[
+            files[0].read_request_at(0, 3),
+            files[1].read_request_at(0, 3),
+        ])
+        .unwrap();
+    let values = reads.into_values().unwrap();
+    assert_eq!(values[0].data, b"one");
+    assert_eq!(values[1].data, b"two");
+    client.close_many(files).unwrap();
+
+    let invalid = client
+        .open_options()
+        .open_many_outcomes(&["/invalid"])
+        .unwrap();
+    assert!(matches!(invalid.operations(), [OpOutcome::Failed(_)]));
+
+    client.write("/present", b"ok").unwrap();
+    let partial = client
+        .open_options()
+        .read(true)
+        .open_many_outcomes(&["/present", "/missing", "/later"])
+        .unwrap();
+    assert!(matches!(partial.operations()[0], OpOutcome::Success(_)));
+    assert!(matches!(partial.operations()[1], OpOutcome::Failed(_)));
+    assert!(matches!(partial.operations()[2], OpOutcome::NotAttempted));
 }
 
 #[test]

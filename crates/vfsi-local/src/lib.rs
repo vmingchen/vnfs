@@ -301,16 +301,18 @@ impl DummyVecFs {
         let p = self
             .real_path(&self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?)
             .map_err(|e| e.with_index(i))?;
-        if a.masks.contains(AttrMask::MODE) {
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(a.mode & 0o7777))
-                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-        }
         if a.masks.contains(AttrMask::SIZE) {
             let f = OpenOptions::new()
                 .write(true)
                 .open(&p)
                 .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             f.set_len(a.size)
+                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+        }
+        // Apply permissions last so a combined truncate+chmod cannot revoke
+        // the write access needed by its own size update.
+        if a.masks.contains(AttrMask::MODE) {
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(a.mode & 0o7777))
                 .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
         }
         if a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {

@@ -54,8 +54,9 @@ The interface names describe composable facets, not separate products:
 Cardinality, execution, and atomicity are different dimensions. Async and
 transactional work must reuse the same operation and result types as the sync
 interfaces instead of duplicating a complete filesystem API. The current
-`FileSystem` is the Rust-native scalar contract and `VectorFileSystem` adds
-native batching. `VecFs` remains the backend/C compatibility contract during
+`NativeFileSystem` is the aggregate Rust-native scalar contract, composed
+from focused descriptor, metadata, directory, namespace, link, and copy
+traits; `VectorFileSystem` adds native batching. `VecFs` remains the backend/C compatibility contract during
 migration. See [RUST_API.md](RUST_API.md) for ownership, typed requests,
 failure outcomes, protocol-extension, and compatibility boundaries. Async and
 transactional crates should be added only when their contracts and

@@ -46,6 +46,47 @@ fn connect() -> Option<SmbVecFs> {
 }
 
 #[test]
+fn rust_native_file_workflow_on_smb() {
+    let Some(fs) = connect() else {
+        eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let client = vfsi_sync::FsClient::new(fs);
+    let root = PathBuf::from(format!("/vfsi-smb-native-{}", std::process::id()));
+    let _ = client.remove_dir_all(&root);
+    client.create_dir(&root).unwrap();
+    let paths = [root.join("one"), root.join("two")];
+    let files = client
+        .open_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open_many(&paths)
+        .unwrap();
+    client
+        .write_many_outcomes(&[
+            files[0].write_request_at(0, b"one"),
+            files[1].write_request_at(0, b"two"),
+        ])
+        .unwrap()
+        .into_values()
+        .unwrap();
+    let values = client
+        .read_many_outcomes(&[
+            files[0].read_request_at(0, 3),
+            files[1].read_request_at(0, 3),
+        ])
+        .unwrap()
+        .into_values()
+        .unwrap();
+    assert_eq!(values[0].data, b"one");
+    assert_eq!(values[1].data, b"two");
+    client.close_many(files).unwrap();
+    client.remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn samba_round_trip_and_copy() {
     let Some(mut fs) = connect() else {
         eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");

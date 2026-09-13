@@ -1,121 +1,43 @@
-use std::process;
+//! Rust-native scalar and vector NFS workflow.
 
-use nfsv41_sys::OPEN4_SHARE_ACCESS_BOTH;
-use vnfs::error::RpcError;
-use vnfs::legacy::client::{NfsClient, OpenCreate};
+use std::error::Error;
 
-fn main() {
-    let host = "127.0.0.1";
+use vnfs::prelude::*;
 
-    println!("connecting to {} ...", host);
-    let mut client = match NfsClient::connect(host) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("connect failed: {}", e);
-            process::exit(1);
-        }
-    };
-    println!("connected; root fh {} bytes", client.root().len());
+fn main() -> Result<(), Box<dyn Error>> {
+    let host = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "127.0.0.1".to_owned());
+    let client = Nfs::connect(host)?;
+    let root = format!("/vnfs-demo-{}", std::process::id());
+    let _ = client.remove_dir_all(&root);
+    client.create_dir_all(&root)?;
 
-    match read_hello(&mut client) {
-        Ok(()) => println!("READ hello.txt: OK"),
-        Err(e) => eprintln!("READ hello.txt failed: {}", e),
-    }
+    let paths = [format!("{root}/file-1"), format!("{root}/file-2")];
+    let files = client
+        .open_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open_many(&paths)?;
 
-    match write_read_back(&mut client) {
-        Ok(()) => println!("WRITE/READ roundtrip: OK"),
-        Err(e) => eprintln!("WRITE/READ roundtrip failed: {}", e),
-    }
+    client
+        .write_many_outcomes(&[
+            files[0].write_request_at(0, b"hello"),
+            files[1].write_request_at(0, b"world"),
+        ])?
+        .into_values()?;
+    let contents = client
+        .read_many_outcomes(&[
+            files[0].read_request_at(0, 5),
+            files[1].read_request_at(0, 5),
+        ])?
+        .into_values()?;
 
-    match mkdir_symlink(&mut client) {
-        Ok(()) => println!("MKDIR/SYMLINK test: OK"),
-        Err(e) => eprintln!("MKDIR/SYMLINK test failed: {}", e),
-    }
-}
-
-/// Create a directory and a symlink inside it via NFSv4 CREATE compounds,
-/// then read the symlink target back. Verify from the kernel mount point
-/// (/mnt/nfs) afterwards.
-fn mkdir_symlink(client: &mut NfsClient) -> Result<(), RpcError> {
-    let pid = std::process::id();
-    let dir_name = format!("vnfs_dir_{}", pid);
-    let link_name = format!("vnfs_link_{}", pid);
-    let target = format!("/export/dir1/{}.target", pid);
-
-    let dir = client.mkdir(&client.root().clone(), &dir_name)?;
-    println!("mkdir {}: OK", dir_name);
-
-    let link = client.symlink(&dir, &link_name, &target)?;
-    println!("symlink {} -> {}: OK", link_name, target);
-
-    let got = client.readlink(&link)?;
-    let got = String::from_utf8_lossy(&got);
-    println!("readlink {}: {}", link_name, got);
-    if got != target {
-        return Err(RpcError::transport(format!(
-            "readlink mismatch: got {:?}, want {:?}",
-            got, target
-        )));
-    }
-    Ok(())
-}
-
-fn read_hello(client: &mut NfsClient) -> Result<(), RpcError> {
-    let dir = client.root().clone();
-    let (fh, stateid) = client.open(
-        &dir,
-        b"hello.txt",
-        OPEN4_SHARE_ACCESS_BOTH,
-        OpenCreate::NoCreate,
-    )?;
-
-    // Read in a few chunks until EOF.
-    let mut offset = 0u64;
-    let mut content = Vec::new();
-    loop {
-        let (chunk, eof) = client.read(&fh, &stateid, offset, 4096)?;
-        if chunk.is_empty() || eof {
-            break;
-        }
-        offset += chunk.len() as u64;
-        content.extend_from_slice(&chunk);
-    }
-    println!(
-        "hello.txt content ({} bytes): {:?}",
-        content.len(),
-        String::from_utf8_lossy(&content)
-    );
-    client.close(&fh, &stateid)?;
-    Ok(())
-}
-
-fn write_read_back(client: &mut NfsClient) -> Result<(), RpcError> {
-    let name = format!("vnfs_scratch_{}.txt", std::process::id());
-    let dir = client.resolve(b"")?;
-
-    let (fh, stateid) = client.open(
-        &dir,
-        name.as_bytes(),
-        OPEN4_SHARE_ACCESS_BOTH,
-        OpenCreate::Guarded,
-    )?;
-    println!("created {}", name);
-
-    let data = b"hello from the rust vnfs client!\n0123456789\n";
-    let (n, committed) = client.write(&fh, &stateid, 0, data)?;
-    println!("wrote {} bytes, committed {}", n, committed);
-    assert_eq!(n as usize, data.len());
-
-    let (read_back, _eof) = client.read(&fh, &stateid, 0, data.len() as u32)?;
-    println!(
-        "read back {} bytes: {:?}",
-        read_back.len(),
-        String::from_utf8_lossy(&read_back)
-    );
-    if read_back != data {
-        return Err(RpcError::transport("data mismatch after write/read"));
-    }
-
-    client.close(&fh, &stateid)?;
+    println!("{}", String::from_utf8_lossy(&contents[0].data));
+    println!("{}", String::from_utf8_lossy(&contents[1].data));
+    drop(files);
+    client.remove_dir_all(root)?;
     Ok(())
 }
