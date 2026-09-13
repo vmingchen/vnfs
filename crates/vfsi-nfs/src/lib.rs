@@ -32,4 +32,4 @@ pub mod vecfs {
 }
 
 #[cfg(feature = "ffi")]
-pub use nfs::{NfsServerCopyStats, NfsVecFs};
+pub use nfs::{NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs};

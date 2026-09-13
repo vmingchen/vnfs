@@ -1,7 +1,9 @@
 //! Minimal synchronous NFSv4 RPC layer over libntirpc's CLIENT / clnt_req
 //! machinery, mirroring the call pattern used by Ganesha's nfs_rpc_callback.c.
 
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::c_void;
+#[cfg(not(libntirpc_legacy_free_cb))]
+use std::os::raw::{c_char, c_int};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -206,6 +208,7 @@ impl RpcClient {
     }
 }
 
+#[cfg(not(libntirpc_legacy_free_cb))]
 unsafe extern "C" fn req_free_cb(
     cc: *mut clnt_req,
     _size: usize,
@@ -213,6 +216,13 @@ unsafe extern "C" fn req_free_cb(
     _line: c_int,
     _func: *const c_char,
 ) {
+    unsafe {
+        drop(Box::from_raw(cc));
+    }
+}
+
+#[cfg(libntirpc_legacy_free_cb)]
+unsafe extern "C" fn req_free_cb(cc: *mut clnt_req, _size: usize) {
     unsafe {
         drop(Box::from_raw(cc));
     }

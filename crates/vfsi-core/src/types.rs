@@ -51,6 +51,8 @@ pub const NF4FIFO: u32 = 7;
 /// Either a filesystem status failure attributable to a specific operation
 /// index, or a transport / client-side failure (where the index is
 /// best-effort: backends report 0 when the failure cannot be attributed).
+/// An indexed failure does not roll back an already-completed prefix, and a
+/// transport failure can make the outcome of an in-flight mutation ambiguous.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VfError {
@@ -176,6 +178,21 @@ impl std::fmt::Display for VfError {
 }
 
 impl std::error::Error for VfError {}
+
+impl From<VfError> for std::io::Error {
+    fn from(error: VfError) -> Self {
+        let kind = match error.err_no() {
+            ERR_NOENT => std::io::ErrorKind::NotFound,
+            ERR_EXIST => std::io::ErrorKind::AlreadyExists,
+            ERR_ACCES => std::io::ErrorKind::PermissionDenied,
+            ERR_NOTDIR => std::io::ErrorKind::NotADirectory,
+            ERR_ISDIR => std::io::ErrorKind::IsADirectory,
+            ERR_INVAL | ERR_EBADF => std::io::ErrorKind::InvalidInput,
+            _ => std::io::ErrorKind::Other,
+        };
+        std::io::Error::new(kind, error)
+    }
+}
 
 pub type VfResult<T> = Result<T, VfError>;
 /// Result of a compound-style operation: `()` on success, or the index and

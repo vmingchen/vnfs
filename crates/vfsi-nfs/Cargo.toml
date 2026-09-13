@@ -2,6 +2,8 @@
 name = "vfsi-nfs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+build = "build.rs"
 license = "MIT OR Apache-2.0"
 description = "NFSv4 backend for VFSI"
 repository = "https://github.com/vmingchen/vnfs"
@@ -23,4 +25,4 @@ vfsi-sync = { workspace = true }
 vfsi-sync = { workspace = true, features = ["test-support"] }
 
 [package.metadata.docs.rs]
-no-default-features = true
+all-features = true

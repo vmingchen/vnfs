@@ -9,7 +9,7 @@ description = "fsspec filesystem backed by the vectorized VFSI NFSv4 client"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT OR Apache-2.0"
-license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
+license-files = ["LICENSE-APACHE", "LICENSE-MIT", "LICENSE-libntirpc"]
 authors = [{ name = "Ming Chen", email = "v.mingchen@gmail.com" }]
 keywords = ["vfsi", "fsspec", "nfs", "nfs4", "filesystem", "vectorized-io"]
 classifiers = [

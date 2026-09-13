@@ -7,6 +7,19 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ### Changed
 
+- Made native Rust builds use the system `libntirpc` instead of cloning and
+  compiling Git sources from `build.rs`; documented Linux, Rust 1.88, native
+  package, authentication, and synchronous-API requirements. Wheel builds use
+  a checksum-pinned source archive in the explicit release job and retain the
+  upstream binary-redistribution notice.
+- Added an idiomatic RAII file handle implementing `Read`, `Write`, and `Seek`,
+  plus guidance for combining per-worker NFS sessions with vector batches.
+- Added bounded automatic recovery for side-effect-free NFS operations after
+  transport/session failures. Live path-backed descriptors are reopened in a
+  vector with their numeric identities and offsets preserved; mutations are
+  never replayed after an ambiguous failure.
+- Documented ordered COMPOUND partial-success behavior and the recovery limits
+  applications must account for.
 - Added reproducible cold- and warm-cache small-file benchmarks for the Rust
   `vnfs` API and Python `nfs4fs` adapter, comparing vectorized operations with
   scalar access through a kernel NFS mount under simulated network latency.

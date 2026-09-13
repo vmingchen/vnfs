@@ -26,7 +26,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             autoconf automake build-essential clang cmake gawk \
-            libacl1-dev libclang-dev libgssglue-dev libkrb5-dev \
+            libacl1-dev libclang-dev libgssglue-dev libkrb5-dev libntirpc-dev \
             liburcu-dev pkg-config python3-cmarkgfm
       - name: Validate registry
         run: python ci/check-ecosystem.py

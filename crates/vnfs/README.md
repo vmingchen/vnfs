@@ -1,6 +1,16 @@
 # vnfs
 
-A vectorized [NFSv4.1][rfcv4_1] client library written in Rust.
+A vectorized NFSv4.1/4.2 client library written in Rust.
+
+> **Production status:** `vnfs` is beta, synchronous, and currently supports
+> Linux with NFSv4.1/4.2 over TCP and AUTH_SYS authentication. It is a good fit
+> for controlled environments where vectorized small-file performance matters;
+> assess the authentication, server-compatibility, and recovery constraints
+> below before adopting it for production.
+
+AUTH_SYS carries the calling process's numeric UID/GID without cryptographic
+peer identity, integrity, or privacy. Use it only on a trusted network with
+server export policy that treats those credentials appropriately.
 
 NFSv4 supports *COMPOUND* requests: one RPC can carry an ordered sequence of
 file operations. A conventional POSIX-style loop hides that capability behind
@@ -68,6 +78,77 @@ The same model applies to `openv`, `writev`, `getattrsv`, `listdirv`,
 for metadata-heavy workloads and for many small, independent I/O operations,
 where network latency dominates transfer time.
 
+## Idiomatic scalar I/O
+
+The vector API is the performance-oriented interface. Code that needs a
+single-file `std::io` adapter can use `VfOpenOptions`; its handle implements
+`Read`, `Write`, and `Seek`, and closes the remote descriptor on drop. Call
+`close()` explicitly when a close error must be observed.
+
+```rust,no_run
+use std::io::{Read, Seek, SeekFrom};
+use vnfs::{NfsVecFs, VfOpenOptions};
+
+fn main() -> std::io::Result<()> {
+    let mut fs = NfsVecFs::connect("nfs.example.com")?;
+    let mut file = VfOpenOptions::new().read(true).open(&mut fs, "/file-1")?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut contents = Vec::new();
+    file.read_to_end(&mut contents)?;
+    file.close()?;
+    Ok(())
+}
+```
+
+The handle borrows its `VecFs`, preventing accidental concurrent mutation of
+one stateful NFS session. For concurrency, create a bounded worker pool and
+construct one `NfsVecFs` inside each worker. Send each worker a *batch* of
+independent operations and use `readv`, `writev`, or the other vector methods
+within the worker. Do not put one client behind a global mutex: that serializes
+RPCs and loses both pool parallelism and useful batching. Async applications
+should run these synchronous workers with their runtime's blocking-task API.
+
+## Failure and recovery semantics
+
+An NFS COMPOUND is ordered but **not transactional**. If operation `i` fails,
+the server stops processing that compound: the prefix before `i` may already
+have succeeded and the suffix was not executed. `VfError::index()` identifies
+the failing input when the server provides enough information. Callers must
+make mutation batches idempotent or reconcile their state after an error.
+
+Lost replies to create, write, rename, copy, remove, and other mutations are
+reported as ambiguous and are never replayed automatically; replay could
+duplicate an append or repeat another side effect. Side-effect-free reads and
+metadata queries reconnect after transport, expired-client, stale-state, or
+dead-session failures, reopen all live path-backed descriptors in one vector,
+preserve their descriptor numbers and offsets, and retry once. Reconnect
+attempts use a bounded exponential backoff configurable with
+`NfsRecoveryPolicy`; automatic recovery can be disabled with
+`set_auto_reconnect(false)`.
+
+Recovery cannot reopen an unlinked or renamed file by its old path, and it
+cannot restore a descriptor whose permissions or identity changed while the
+server was unavailable. Streaming callback APIs are not replayed because a
+callback may already have observed a prefix. Treat an error from those APIs as
+partial progress and restart at an application-defined checkpoint.
+
+## Platform and build requirements
+
+The supported native target is Linux. The minimum supported Rust version is
+1.88. Normal builds use the system `libntirpc` (4.3 or newer) and do not clone
+or download native source from `build.rs`. On Ubuntu 24.04 or newer, install:
+
+```console
+sudo apt-get install clang libclang-dev pkg-config libntirpc-dev \
+  libkrb5-dev libgssglue-dev liburcu-dev
+```
+
+After Cargo dependencies have been fetched, the native build can run without
+network access. docs.rs uses checked-in FFI declarations and does not require
+the native development packages. NFS servers must expose an NFSv4 pseudo-root
+reachable by the supplied host name. There is currently no RPCSEC_GSS/Kerberos,
+TLS, callback/delegation, or asynchronous API.
+
 ## Small-file benchmark
 
 The repository includes a [Rust benchmark driver][benchmark] that compares
@@ -122,8 +203,6 @@ Licensed under either of
 at your option.
 
 [fast]: https://www.usenix.org/conference/fast17/technical-sessions/presentation/chen
-[rfcv4_1]: https://datatracker.ietf.org/doc/html/rfc5661
-[libntirpc]: https://github.com/nfs-ganesha/ntirpc
 [benchmark]: https://github.com/vmingchen/vnfs/blob/main/crates/vnfs/examples/small_files_benchmark.rs
 [`VecFs`]: https://docs.rs/vnfs/latest/vnfs/trait.VecFs.html
 [`NfsVecFs`]: https://docs.rs/vnfs/latest/vnfs/struct.NfsVecFs.html

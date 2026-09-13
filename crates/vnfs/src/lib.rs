@@ -35,5 +35,5 @@ pub use vfsi_core::*;
 #[cfg(feature = "dummy")]
 pub use vfsi_local::DummyVecFs;
 #[cfg(feature = "nfs")]
-pub use vfsi_nfs::{NfsServerCopyStats, NfsVecFs};
-pub use vfsi_sync::{VecFs, VecFsExt, rm_recursive};
+pub use vfsi_nfs::{NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs};
+pub use vfsi_sync::{VecFs, VecFsExt, VfFileHandle, VfOpenOptions, rm_recursive};

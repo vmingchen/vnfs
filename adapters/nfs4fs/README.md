@@ -13,10 +13,10 @@ python -m pip install nfs4fs
 
 Published wheels use CPython's stable ABI and support standard CPython 3.9 and
 newer on Linux x86-64 and AArch64. A separate CPython 3.14 free-threaded wheel
-is built and tested on x86-64. A source build additionally requires Rust, CMake,
-Clang, Git, Kerberos/GSS development headers, and userspace-RCU development
-headers. The extension statically links libntirpc and bundles non-platform
-shared-library dependencies into release wheels.
+is built and tested on x86-64. A source build additionally requires Rust,
+Clang, `pkg-config`, libntirpc 4.3 or newer, Kerberos/GSS development headers,
+and userspace-RCU development headers. Release wheels bundle their
+non-platform shared-library dependencies.
 
 The package installs `fsspec.specs` entry points for both `nfs4` and `vfsi`, so
 normal use does not require `import nfs4fs` before calling `fsspec`.
@@ -283,7 +283,7 @@ visible when the TTL expires or when the caller requests a refresh. Use
 On Ubuntu/Debian:
 
 ```sh
-sudo apt-get install clang libclang-dev cmake pkg-config \
+sudo apt-get install clang libclang-dev pkg-config libntirpc-dev \
   libkrb5-dev libgssglue-dev liburcu-dev
 python -m venv .venv
 .venv/bin/pip install hypothesis maturin fsspec pytest

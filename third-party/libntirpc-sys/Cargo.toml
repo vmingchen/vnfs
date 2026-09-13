@@ -11,6 +11,7 @@
 
 [package]
 edition = "2024"
+rust-version = "1.88"
 name = "libntirpc-sys"
 version = "0.2.2"
 authors = ["Ming Chen <v.mingchen@gmail.com>"]
@@ -52,3 +53,6 @@ version = "0.2"
 [build-dependencies.bindgen]
 # bindgen 0.73.1 and 0.73.2 mix syn 3 with prettyplease/syn 2 and fail to compile.
 version = "=0.73.0"
+
+[build-dependencies.pkg-config]
+version = "0.3"

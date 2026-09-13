@@ -3,7 +3,7 @@
 Low-level bindings for the [libntirpc](https://github.com/nfs-ganesha/ntirpc)
 library.
 
-Some documentation for the libary can be found in the Linux man pages
+Some documentation for the library can be found in the Linux man pages
 [rpc(3)](https://linux.die.net/man/3/rpc) and
 [xdr(3)](https://linux.die.net/man/3/xdr). However, the doc has some
 inconsistency with the library, so we should use the doc as a reference not as a
@@ -14,14 +14,15 @@ Its implementation is adapted from the
 
 ## Dependencies
 
-The build script clones and compiles [libntirpc](https://github.com/nfs-ganesha/ntirpc)
-from source, which requires the following tools and libraries:
+Normal builds discover the administrator-provided `libntirpc` 4.3 or newer
+through `pkg-config` and generate Rust declarations from its installed
+headers. The build script does not access the network or download native
+source. The currently supported native target is Linux.
 
 | Dependency | Package (Ubuntu) | Purpose |
 | --- | --- | --- |
-| cmake | `cmake` | configure and build libntirpc |
-| make | `make` | build libntirpc |
-| git | `git` | clone libntirpc (with submodules) |
+| libntirpc | `libntirpc-dev` | RPC implementation and headers (4.3+) |
+| pkg-config | `pkg-config` | locate the installed library and headers |
 | clang | `clang` | provide the headers used by bindgen to generate bindings |
 | liburcu | `liburcu-dev` | userspace RCU library used by libntirpc |
 | libkrb5 | `libkrb5-dev` | RPCSEC_GSS support, required by libntirpc (GSS is on by default) |
@@ -29,8 +30,12 @@ from source, which requires the following tools and libraries:
 Install them on Ubuntu with:
 
 ```sh
-sudo apt install cmake make git clang liburcu-dev libkrb5-dev
+sudo apt install clang libclang-dev pkg-config libntirpc-dev liburcu-dev libkrb5-dev
 ```
+
+docs.rs uses checked-in declarations and therefore does not require native
+packages. Those declarations are only a documentation input; normal builds
+always bind to the locally installed headers.
 
 ## Examples
 

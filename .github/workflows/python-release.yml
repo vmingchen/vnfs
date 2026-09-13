@@ -55,7 +55,24 @@ jobs:
           before-script-linux: |
             dnf install -y epel-release
             /usr/bin/crb enable
-            dnf install -y clang clang-devel cmake make git krb5-devel pkgconf-pkg-config userspace-rcu-devel
+            dnf install -y clang clang-devel cmake curl krb5-devel make pkgconf-pkg-config userspace-rcu-devel
+            ntirpc_revision=24a7d5fca4c2e3e3cc8bb94bc301d8c2a40677a8
+            curl --fail --location --silent --show-error \
+              --output /tmp/ntirpc.tar.gz \
+              "https://github.com/nfs-ganesha/ntirpc/archive/${ntirpc_revision}.tar.gz"
+            echo "819beb7dad10fc0c76032847c23c54212877d0fe37af666e8ef60ddc02471046  /tmp/ntirpc.tar.gz" | sha256sum --check
+            tar -xzf /tmp/ntirpc.tar.gz -C /tmp
+            cmake \
+              -S "/tmp/ntirpc-${ntirpc_revision}" \
+              -B /tmp/ntirpc-build \
+              -DUSE_LTTNG=OFF \
+              -DUSE_MONITORING=OFF \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_INSTALL_PREFIX=/usr/local \
+              -DCMAKE_INSTALL_LIBDIR=lib
+            cmake --build /tmp/ntirpc-build --target ntirpc --parallel
+            cmake --install /tmp/ntirpc-build
+            ldconfig
           args: --release --locked --compatibility pypi --out dist ${{ matrix.extra-args }}
       - name: Test the repaired wheel in its manylinux container
         env:

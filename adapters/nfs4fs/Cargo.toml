@@ -21,9 +21,11 @@ crate-type = ["cdylib"]
 libc = "0.2"
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39", "abi3t"] }
 vfsi-python-native = { path = "../vfsi-python", features = ["nfs", "dummy"] }
-# Direct dependency so the static libntirpc archive is also re-asserted at the
-# end of the final link line (see ../../third-party/libntirpc-sys/build.rs).
+# Keep the patched system-library binding in maturin source distributions;
+# the same crate is also reached transitively through `vfsi-nfs`.
 libntirpc-sys = { path = "../../third-party/libntirpc-sys" }
 
 [patch.crates-io]
+# The detached Python workspace must use the same offline/system-library
+# binding implementation as the Rust workspace.
 libntirpc-sys = { path = "../../third-party/libntirpc-sys" }

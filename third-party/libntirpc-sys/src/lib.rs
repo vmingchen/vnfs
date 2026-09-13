@@ -1,6 +1,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
+#![allow(unknown_lints)]
 #![allow(clippy::missing_safety_doc)]
 // The generated bindings (bindings.rs) contain variadic-argument helpers and
 // bitfield accessors that trip these lints; they are never called from this

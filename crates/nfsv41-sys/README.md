@@ -30,9 +30,11 @@ crate.
 2. **bindgen**: generates ~15k lines of Rust declarations from
    `src/wrapper.h` into `$OUT_DIR/bindings.rs`, which `src/lib.rs` includes.
 
-The archive's object files reference libntirpc symbols, so the crate
-re-emits the vendored static `libntirpc.a` at final link time. Consumers do
-not need libntirpc on the dynamic linker path at runtime.
+The archive's object files reference libntirpc symbols, so the crate links the
+system `libntirpc` selected by `pkg-config`. Consumers therefore need the
+matching shared library at runtime. No Git checkout or native-source download
+occurs during a Cargo build. docs.rs uses checked-in declarations and skips
+native compilation so the public API can be rendered without system packages.
 
 ## Usage
 

@@ -183,7 +183,7 @@ fn chdir_getcwd() {
     let mut c = client();
     assert_eq!(c.getcwd(), Path::new("/"));
     c.chdir(Path::new(&dir)).expect("chdir");
-    assert_eq!(c.getcwd(), dir);
+    assert_eq!(c.getcwd(), Path::new(&dir));
 
     // Relative resolution now happens against the new cwd.
     c.mkdir(Path::new("rel"), 0o755).expect("mkdir relative");

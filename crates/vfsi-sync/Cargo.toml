@@ -2,6 +2,7 @@
 name = "vfsi-sync"
 version = "0.1.1"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "Synchronous scalar and vectorized filesystem interfaces for VFSI"
 repository = "https://github.com/vmingchen/vnfs"

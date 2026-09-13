@@ -15,6 +15,8 @@ pub mod path {
 
 mod traits;
 pub use traits::{VecFs, VecFsExt, rm_recursive};
+mod io;
+pub use io::{VfFileHandle, VfOpenOptions};
 
 /// Scalar/singular view of the synchronous interface.
 pub mod sfsi {

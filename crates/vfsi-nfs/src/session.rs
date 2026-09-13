@@ -44,6 +44,14 @@ pub struct Session {
 }
 
 impl Session {
+    /// Forget server-side teardown after a transport/session failure.
+    ///
+    /// The caller has already replaced this unusable session. Sending
+    /// DESTROY_SESSION or DESTROY_CLIENTID here would only add timeout delays.
+    pub(crate) fn abandon(&mut self) {
+        self.clientid = 0;
+    }
+
     pub fn connect(host: &str) -> RpcResult<Session> {
         Self::connect_minor(host, 1)
     }

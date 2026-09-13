@@ -185,10 +185,12 @@ fn measure_local_read(paths: &[PathBuf], payload: &[u8]) -> Result<f64> {
     Ok(milliseconds)
 }
 
+// `usize::is_multiple_of` is newer than the crate's Rust 1.88 MSRV.
+#[allow(clippy::manual_is_multiple_of)]
 fn median(mut values: Vec<f64>) -> f64 {
     values.sort_by(f64::total_cmp);
     let middle = values.len() / 2;
-    if values.len().is_multiple_of(2) {
+    if values.len() % 2 == 0 {
         (values[middle - 1] + values[middle]) / 2.0
     } else {
         values[middle]

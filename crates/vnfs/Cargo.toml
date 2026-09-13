@@ -2,6 +2,7 @@
 name = "vnfs"
 version = "0.0.11"
 edition = "2024"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "Vectorized NFSv4 client and compatibility facade for VFSI"
 readme = "README.md"
@@ -10,11 +11,7 @@ documentation = "https://docs.rs/vnfs"
 keywords = ["nfs", "nfs4", "filesystem", "vectorized", "vfsi"]
 
 [package.metadata.docs.rs]
-# docs.rs builds crates offline, while the optional NFS FFI dependency builds
-# libntirpc from a pinned upstream source revision. Document the portable Rust
-# backends there; NFS remains part of normal/default builds.
-no-default-features = true
-features = ["dummy", "server-copy"]
+all-features = true
 
 [features]
 default = ["nfs", "dummy", "server-copy"]

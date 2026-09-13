@@ -573,6 +573,10 @@ fn first_failed_range(res: &CompoundRes, map: &ExecutionMap) -> RpcResult<Option
 }
 
 impl NfsClient {
+    pub(crate) fn abandon(&mut self) {
+        self.session.abandon();
+    }
+
     /// Connect, run the session handshake, and resolve the export root.
     pub fn connect(host: &str) -> RpcResult<NfsClient> {
         match Self::connect_minor(host, 2) {

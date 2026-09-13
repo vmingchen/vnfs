@@ -131,3 +131,55 @@ fn path_extension_accepts_strings() {
     fs.unlink_path("dangling").unwrap();
     fs.rm_recursive_path("/x").unwrap();
 }
+
+#[test]
+fn standard_io_handle_is_raii_and_seekable() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use vnfs::VfOpenOptions;
+
+    let mut fs = dummy();
+    let descriptor;
+    {
+        let mut options = VfOpenOptions::new();
+        options.read(true).write(true).create(true).truncate(true);
+        let mut file = options.open(&mut fs, "/standard-io").unwrap();
+        descriptor = file.descriptor().clone();
+        file.write_all(b"abcdef").unwrap();
+        file.seek(SeekFrom::Start(2)).unwrap();
+        let mut out = [0; 3];
+        file.read_exact(&mut out).unwrap();
+        assert_eq!(&out, b"cde");
+    }
+    assert_eq!(
+        fs.close(&descriptor).unwrap_err().err_no(),
+        libc::EBADF as u32
+    );
+}
+
+#[test]
+fn standard_open_options_validate_access_modes() {
+    use vnfs::VfOpenOptions;
+
+    let mut fs = dummy();
+    assert_eq!(
+        VfOpenOptions::new()
+            .open(&mut fs, "/invalid")
+            .err()
+            .unwrap()
+            .kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    let mut options = VfOpenOptions::new();
+    options.read(true).truncate(true);
+    assert_eq!(
+        options.open(&mut fs, "/invalid").err().unwrap().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+
+    let mut options = VfOpenOptions::new();
+    options.read(true);
+    assert_eq!(
+        options.open(&mut fs, "/missing").err().unwrap().kind(),
+        std::io::ErrorKind::NotFound
+    );
+}

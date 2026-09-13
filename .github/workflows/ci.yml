@@ -18,7 +18,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Check the detached Python native crate
@@ -28,6 +28,12 @@ jobs:
           cargo fmt --manifest-path adapters/vsmb/Cargo.toml --check
           cargo clippy --manifest-path adapters/vsmb/Cargo.toml --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+      - name: Verify docs.rs exposes the NFS client API
+        run: |
+          DOCS_RS=1 RUSTDOCFLAGS="-D warnings" \
+            cargo doc -p vnfs -p vfsi-nfs --all-features --no-deps
+          test -f target/doc/vnfs/struct.NfsVecFs.html
+          test -f target/doc/vfsi_nfs/struct.NfsVecFs.html
       - name: Run every published Rust package's local tests
         run: |
           cargo test -p vfsi-core
@@ -40,37 +46,11 @@ jobs:
           cargo test -p vnfs --test dummy_vecfs
           cargo test -p vnfs --test public_api
           cargo test -p vfsi-c --lib
-      - name: Verify every published Rust package from its crate archive
+      - name: Verify every published Rust package from coordinated crate archives
         run: |
-          while read -r package manifest; do
-            version=$(python -c \
-              'import pathlib,sys,tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["package"]["version"])' \
-              "$manifest")
-            cargo package --locked -p "$package"
-            archive_manifest="target/package/$package-$version/Cargo.toml"
-            if [ "$package" = vnfs ]; then
-              # The NFS integration target requires the server jobs below.
-              # Still compile and execute every server-independent test from
-              # the exact crate archive here.
-              cargo test --locked --manifest-path "$archive_manifest" --lib
-              cargo test --locked --manifest-path "$archive_manifest" \
-                --test dummy_vecfs
-              cargo test --locked --manifest-path "$archive_manifest" \
-                --test public_api
-            else
-              cargo test --locked --manifest-path "$archive_manifest"
-            fi
-            if [ "$package" = vfsi-c ]; then
-              archive="target/package/$package-$version"
-              cargo build --locked --manifest-path "$archive/Cargo.toml"
-              cc -Wall -Wextra -Werror \
-                -I "$archive/include" "$archive/tests/smoke.c" \
-                -L "$archive/target/debug" -lvfsi_c \
-                -o /tmp/vfsi-packaged-c-smoke
-              LD_LIBRARY_PATH="$archive/target/debug" \
-                /tmp/vfsi-packaged-c-smoke /tmp/vfsi-packaged-c-root
-            fi
-          done <<'PACKAGES'
+          package_list=$(mktemp)
+          cat >"$package_list" <<'PACKAGES'
+          libntirpc-sys third-party/libntirpc-sys/Cargo.toml
           vfsi-core crates/vfsi-core/Cargo.toml
           vfsi-sync crates/vfsi-sync/Cargo.toml
           vfsi-local crates/vfsi-local/Cargo.toml
@@ -80,6 +60,49 @@ jobs:
           vnfs crates/vnfs/Cargo.toml
           vfsi-c bindings/c/Cargo.toml
           PACKAGES
+
+          patches=()
+          while read -r package manifest; do
+            version=$(python -c \
+              'import pathlib,sys,tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["package"]["version"])' \
+              "$manifest")
+            cargo package --locked --no-verify -p "$package"
+            patches+=(--config \
+              "patch.crates-io.$package.path=\"$GITHUB_WORKSPACE/target/package/$package-$version\"")
+          done <"$package_list"
+
+          # Compile each exact package archive against the exact archives of
+          # its workspace peers. This catches missing packaged files and
+          # cross-package API changes before dependent versions reach crates.io.
+          while read -r package manifest; do
+            version=$(python -c \
+              'import pathlib,sys,tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["package"]["version"])' \
+              "$manifest")
+            archive_manifest="target/package/$package-$version/Cargo.toml"
+            cargo "${patches[@]}" update --offline --manifest-path "$archive_manifest"
+            if [ "$package" = vnfs ]; then
+              # The NFS integration target requires the server jobs below.
+              # Still compile and execute every server-independent test from
+              # the exact crate archive here.
+              cargo "${patches[@]}" test --locked --offline --manifest-path "$archive_manifest" --lib
+              cargo "${patches[@]}" test --locked --offline --manifest-path "$archive_manifest" \
+                --test dummy_vecfs
+              cargo "${patches[@]}" test --locked --offline --manifest-path "$archive_manifest" \
+                --test public_api
+            else
+              cargo "${patches[@]}" test --locked --offline --manifest-path "$archive_manifest"
+            fi
+            if [ "$package" = vfsi-c ]; then
+              archive="target/package/$package-$version"
+              cargo "${patches[@]}" build --locked --offline --manifest-path "$archive/Cargo.toml"
+              cc -Wall -Wextra -Werror \
+                -I "$archive/include" "$archive/tests/smoke.c" \
+                -L "$archive/target/debug" -lvfsi_c \
+                -o /tmp/vfsi-packaged-c-smoke
+              LD_LIBRARY_PATH="$archive/target/debug" \
+                /tmp/vfsi-packaged-c-smoke /tmp/vfsi-packaged-c-root
+            fi
+          done <"$package_list"
       - name: Validate project organization registry
         run: |
           python ci/check-ecosystem.py
@@ -93,6 +116,10 @@ jobs:
           cargo check -p vnfs --lib --no-default-features
           cargo check -p vnfs --lib --no-default-features --features dummy
           cargo check -p vnfs --lib --no-default-features --features nfs
+      - name: Verify the documented Rust 1.88 MSRV
+        run: |
+          rustup toolchain install 1.88.0 --profile minimal
+          cargo +1.88.0 check -p vnfs --all-targets --all-features
       - name: Verify vnfs has no SMB dependency
         run: |
           if cargo tree -p vnfs --edges normal --prefix none | \
@@ -138,7 +165,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
       - name: Build the current native extension before tests
         run: |
           python -m venv .venv
@@ -170,7 +197,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
       - name: Build and inspect wheel and source distribution
         run: |
           python -m pip install --upgrade pip build maturin patchelf twine
@@ -359,7 +386,7 @@ jobs:
       - name: Install NFS-Ganesha and build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev nfs-ganesha nfs-ganesha-vfs
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev nfs-ganesha nfs-ganesha-vfs
       - name: Start local NFSv4 server
         run: |
           sudo systemctl stop nfs-ganesha.service || true
@@ -422,6 +449,51 @@ jobs:
           VFSI_NFS_SERVER: 127.0.0.1
           VFSI_NFS_MINOR: ${{ matrix.minor-version }}
         run: cargo test -p vfsi-nfs --features server-copy --test nfs -- --test-threads=1
+      - name: Recover read-only work across an NFS server restart
+        env:
+          VNFS_TEST_MINOR: ${{ matrix.minor-version }}
+        run: |
+          control_dir=$(mktemp -d)
+          VNFS_RECOVERY_CONTROL_DIR="$control_dir" \
+            cargo test -p vnfs --test nfs_recovery -- --nocapture --test-threads=1 &
+          test_pid=$!
+          trap 'touch "$control_dir/continue"; kill "$test_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 120); do
+            if [ -e "$control_dir/ready" ]; then
+              break
+            fi
+            if ! kill -0 "$test_pid" 2>/dev/null; then
+              wait "$test_pid"
+            fi
+            sleep 0.25
+          done
+          test -e "$control_dir/ready"
+
+          sudo pkill -TERM -x ganesha.nfsd
+          for attempt in $(seq 1 30); do
+            if ! pgrep -x ganesha.nfsd >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          ! pgrep -x ganesha.nfsd >/dev/null
+
+          sudo ganesha.nfsd -F -L /tmp/ganesha-restart.log -f /tmp/ganesha.conf &
+          ganesha_pid=$!
+          for attempt in $(seq 1 30); do
+            if ! sudo kill -0 "$ganesha_pid" 2>/dev/null; then
+              cat /tmp/ganesha-restart.log
+              exit 1
+            fi
+            if timeout 1 bash -c '</dev/tcp/127.0.0.1/2049' 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          timeout 1 bash -c '</dev/tcp/127.0.0.1/2049'
+          touch "$control_dir/continue"
+          wait "$test_pid"
+          trap - EXIT
       - name: Run C ABI smoke test against NFS
         run: |
           cargo build -p vfsi-c
@@ -447,7 +519,9 @@ jobs:
             tests/test_file_buffering.py::test_file_buffering_smoke_on_network_backends
       - name: Show server log after failure
         if: failure()
-        run: cat /tmp/ganesha.log
+        run: |
+          cat /tmp/ganesha.log
+          test ! -e /tmp/ganesha-restart.log || cat /tmp/ganesha-restart.log
 
   nfs-server-copy-integration:
     runs-on: ubuntu-24.04
@@ -461,7 +535,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
       - name: Build patched NFS-Ganesha image
         run: docker build --tag vnfs-ganesha-copy:ci ci/nfs-ganesha
       - name: Start patched NFSv4.2 server
@@ -577,7 +651,7 @@ jobs:
       - name: Install Samba and build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev libgssglue-dev liburcu-dev samba smbclient
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev samba smbclient
       - name: Start a loopback-only test share
         env:
           SMB_MIN_PROTOCOL: ${{ matrix.min_protocol }}

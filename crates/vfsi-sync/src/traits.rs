@@ -5,6 +5,15 @@ use super::*;
 ///
 /// `VfFile` references files either by descriptor (an open file) or by path
 /// (absolute, or relative to the client's current working directory).
+///
+/// # Partial success
+///
+/// Vector calls are ordered batches, not transactions. On an indexed error,
+/// operations before the failing index may already have completed and later
+/// operations may not have been attempted. In particular, a transport error
+/// after a mutating request was sent can leave its outcome unknown. Backends
+/// must not silently replay such mutations; callers that retry must first
+/// reconcile state or use application-level idempotency.
 pub trait VecFs {
     /// Negotiated NFS minor version, or `None` for non-NFS backends.
     fn nfs_minorversion(&self) -> Option<u32> {

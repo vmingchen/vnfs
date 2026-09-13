@@ -17,8 +17,6 @@ use crate::path::{
     components_bytes, join_path_bytes, normalize_bytes, path_bytes, path_from_bytes,
     split_path_bytes,
 };
-use crate::vecfs::*;
-
 // Re-export the shared types/trait so `use vnfs::nfs::*` works.
 pub use crate::vecfs::*;
 
@@ -31,6 +29,54 @@ struct OpenFile {
     stateid: stateid4,
     cur_offset: u64,
     append: bool,
+    /// Root-relative absolute path and non-destructive reopen flags. Internal
+    /// temporary descriptors deliberately have no reopen recipe.
+    reopen: Option<ReopenFile>,
+}
+
+#[derive(Debug, Clone)]
+struct ReopenFile {
+    path: PathBuf,
+    flags: i32,
+    mode: u32,
+}
+
+#[derive(Debug, Clone)]
+struct ConnectionConfig {
+    host: String,
+    minorversion: Option<u32>,
+    connect_timeout: Duration,
+    request_timeout: Duration,
+}
+
+/// Bounded recovery policy for side-effect-free operations.
+///
+/// A transport/session failure reconnects once at the operation layer. Each
+/// reconnect may make several attempts so a restarting server can leave its
+/// grace period. Mutating operations are never replayed automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NfsRecoveryPolicy {
+    /// Hard cap on connection/session creation attempts, including the first.
+    pub reconnect_attempts: usize,
+    /// Delay after the first unsuccessful reconnect.
+    pub initial_backoff: Duration,
+    /// Maximum delay between attempts.
+    pub max_backoff: Duration,
+    /// Total retry window. One attempt is still made when this is zero.
+    pub max_elapsed: Duration,
+}
+
+impl Default for NfsRecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            // The elapsed-time cap is the primary bound. The attempt cap
+            // prevents a tight loop when failures return immediately.
+            reconnect_attempts: 128,
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(1),
+            max_elapsed: Duration::from_secs(120),
+        }
+    }
 }
 
 /// Per-connection telemetry for NFSv4.2 server-side COPY.
@@ -49,6 +95,10 @@ pub struct NfsServerCopyStats {
 /// An NFSv4 client exposing the vectorized [`VecFs`] API.
 pub struct NfsVecFs {
     nfs: NfsClient,
+    connection: ConnectionConfig,
+    recovery_policy: NfsRecoveryPolicy,
+    auto_reconnect: bool,
+    recovery_in_progress: bool,
     cwd: PathBuf,
     next_fd: i32,
     /// Canonical open-file state, keyed by the client-assigned descriptor.
@@ -59,6 +109,7 @@ pub struct NfsVecFs {
     /// CLOSE (Ganesha's special-stateid behavior), one open+I/O compound
     /// plus a separate CLOSE compound (portable), or the old phased path.
     merged_mode: MergedIoMode,
+    configured_max_compound_bytes: usize,
 }
 
 /// Which merged-compound strategy the NFS backend uses for path-based bulk
@@ -81,6 +132,10 @@ fn remap_descriptor_chunk_error(error: VfError, start: usize, owners: &[usize]) 
     error.with_index(index)
 }
 
+fn non_destructive_reopen_flags(flags: i32) -> i32 {
+    flags & !(libc::O_CREAT | libc::O_EXCL | libc::O_TRUNC)
+}
+
 impl NfsVecFs {
     /// Force a particular merged-compound mode (diagnostics/tests): "full"
     /// (default, one compound incl. CLOSE), "openwrite" (open+I/O compound +
@@ -97,7 +152,18 @@ impl NfsVecFs {
     /// Set the per-compound payload cap for merged path I/O (bytes; 0 =
     /// unlimited).
     pub fn set_max_compound_bytes(&mut self, bytes: usize) {
+        self.configured_max_compound_bytes = bytes;
         self.nfs.set_max_compound_bytes(bytes);
+    }
+
+    /// Configure bounded automatic recovery for side-effect-free operations.
+    pub fn set_recovery_policy(&mut self, policy: NfsRecoveryPolicy) {
+        self.recovery_policy = policy;
+    }
+
+    /// Enable or disable automatic recovery of side-effect-free operations.
+    pub fn set_auto_reconnect(&mut self, enabled: bool) {
+        self.auto_reconnect = enabled;
     }
 
     /// Resolve `files` to file handles in as few compounds as possible: each
@@ -487,15 +553,17 @@ impl NfsVecFs {
 
     /// Connect to the NFS server at `host` and resolve the export root.
     pub fn connect(host: &str) -> VfResult<NfsVecFs> {
-        let nfs = NfsClient::connect(host).map_err(|e| VfError::from_rpc(e, 0))?;
-        Ok(Self::from_client(nfs))
+        Self::connect_with_timeouts(host, None, Duration::from_secs(10), Duration::from_secs(5))
     }
 
     /// Connect using an explicit NFS minor version (2 enables server COPY).
     pub fn connect_minor(host: &str, minorversion: u32) -> VfResult<NfsVecFs> {
-        let nfs =
-            NfsClient::connect_minor(host, minorversion).map_err(|e| VfError::from_rpc(e, 0))?;
-        Ok(Self::from_client(nfs))
+        Self::connect_with_timeouts(
+            host,
+            Some(minorversion),
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+        )
     }
 
     /// Connect with explicit setup and per-RPC timeouts.
@@ -505,29 +573,172 @@ impl NfsVecFs {
         connect_timeout: Duration,
         request_timeout: Duration,
     ) -> VfResult<NfsVecFs> {
-        let nfs = match minorversion {
-            Some(version) => NfsClient::connect_minor_with_timeouts(
-                host,
-                version,
-                connect_timeout,
-                request_timeout,
-            ),
-            None => NfsClient::connect_with_timeouts(host, connect_timeout, request_timeout),
-        }
-        .map_err(|e| VfError::from_rpc(e, 0))?;
-        Ok(Self::from_client(nfs))
+        let connection = ConnectionConfig {
+            host: host.to_owned(),
+            minorversion,
+            connect_timeout,
+            request_timeout,
+        };
+        let nfs = Self::connect_client(&connection)?;
+        Ok(Self::from_client(nfs, connection))
     }
 
-    fn from_client(nfs: NfsClient) -> NfsVecFs {
+    fn connect_client(connection: &ConnectionConfig) -> VfResult<NfsClient> {
+        match connection.minorversion {
+            Some(version) => NfsClient::connect_minor_with_timeouts(
+                &connection.host,
+                version,
+                connection.connect_timeout,
+                connection.request_timeout,
+            ),
+            None => NfsClient::connect_with_timeouts(
+                &connection.host,
+                connection.connect_timeout,
+                connection.request_timeout,
+            ),
+        }
+        .map_err(|e| VfError::from_rpc(e, 0))
+    }
+
+    fn from_client(nfs: NfsClient, connection: ConnectionConfig) -> NfsVecFs {
         let server_copy_enabled = cfg!(feature = "server-copy") && nfs.minorversion() >= 2;
         NfsVecFs {
             nfs,
+            connection,
+            recovery_policy: NfsRecoveryPolicy::default(),
+            auto_reconnect: true,
+            recovery_in_progress: false,
             cwd: PathBuf::new(),
             next_fd: 0,
             open_files: std::collections::HashMap::new(),
             server_copy_enabled,
             server_copy_stats: NfsServerCopyStats::default(),
             merged_mode: MergedIoMode::Full,
+            configured_max_compound_bytes: 0,
+        }
+    }
+
+    fn needs_recovery(error: &VfError) -> bool {
+        error.is_transport()
+            || matches!(
+                error.err_no(),
+                nfsstat4_NFS4ERR_EXPIRED
+                    | nfsstat4_NFS4ERR_GRACE
+                    | nfsstat4_NFS4ERR_STALE_CLIENTID
+                    | nfsstat4_NFS4ERR_STALE_STATEID
+                    | nfsstat4_NFS4ERR_BAD_STATEID
+                    | nfsstat4_NFS4ERR_BADSESSION
+                    | nfsstat4_NFS4ERR_DEADSESSION
+            )
+    }
+
+    fn reconnect_once(&mut self) -> VfResult<()> {
+        let snapshots: Vec<(i32, ReopenFile, u64)> = self
+            .open_files
+            .iter()
+            .map(|(&fd, open)| {
+                open.reopen
+                    .clone()
+                    .map(|reopen| (fd, reopen, open.cur_offset))
+                    .ok_or_else(|| {
+                        VfError::transport(
+                            None,
+                            "cannot recover while an internal temporary descriptor is live",
+                        )
+                    })
+            })
+            .collect::<VfResult<_>>()?;
+        let nfs = Self::connect_client(&self.connection)?;
+        let mut replacement = Self::from_client(nfs, self.connection.clone());
+        replacement.recovery_policy = self.recovery_policy;
+        replacement.auto_reconnect = self.auto_reconnect;
+        replacement.cwd = self.cwd.clone();
+        replacement.next_fd = self.next_fd;
+        replacement.merged_mode = self.merged_mode;
+        replacement.server_copy_stats = self.server_copy_stats;
+        replacement.configured_max_compound_bytes = self.configured_max_compound_bytes;
+        if self.configured_max_compound_bytes != 0 {
+            replacement
+                .nfs
+                .set_max_compound_bytes(self.configured_max_compound_bytes);
+        }
+
+        if !snapshots.is_empty() {
+            let paths: Vec<&Path> = snapshots
+                .iter()
+                .map(|(_, open, _)| open.path.as_path())
+                .collect();
+            let flags: Vec<i32> = snapshots.iter().map(|(_, open, _)| open.flags).collect();
+            let modes: Vec<u32> = snapshots.iter().map(|(_, open, _)| open.mode).collect();
+            let reopened = replacement.openv(&paths, &flags, &modes)?;
+            let mut restored = std::collections::HashMap::with_capacity(reopened.len());
+            for ((old_fd, _, offset), file) in snapshots.iter().zip(reopened) {
+                let new_fd = file.fd().expect("openv returns descriptors");
+                let mut open = replacement
+                    .open_files
+                    .remove(&new_fd)
+                    .expect("openv registered descriptor");
+                open.cur_offset = *offset;
+                restored.insert(*old_fd, open);
+            }
+            replacement.open_files = restored;
+        }
+
+        std::mem::swap(self, &mut replacement);
+        // `replacement` now owns the dead session and its obsolete open
+        // state. Do not turn successful recovery into several close/destroy
+        // RPC timeouts while it is dropped.
+        replacement.open_files.clear();
+        replacement.nfs.abandon();
+        Ok(())
+    }
+
+    /// Establish a fresh session and reopen all live path-backed descriptors.
+    /// Descriptor numbers and current offsets are preserved. Reopen never
+    /// repeats create, exclusive-create, or truncate side effects.
+    pub fn reconnect(&mut self) -> VfResult<()> {
+        let attempts = self.recovery_policy.reconnect_attempts.max(1);
+        let mut backoff = self.recovery_policy.initial_backoff;
+        let started = std::time::Instant::now();
+        let mut last = None;
+        for attempt in 0..attempts {
+            match self.reconnect_once() {
+                Ok(()) => return Ok(()),
+                Err(error) => last = Some(error),
+            }
+            let elapsed = started.elapsed();
+            if attempt + 1 >= attempts || elapsed >= self.recovery_policy.max_elapsed {
+                break;
+            }
+            if !backoff.is_zero() {
+                let remaining = self.recovery_policy.max_elapsed.saturating_sub(elapsed);
+                std::thread::sleep(backoff.min(self.recovery_policy.max_backoff).min(remaining));
+                backoff = backoff
+                    .checked_mul(2)
+                    .unwrap_or(self.recovery_policy.max_backoff)
+                    .min(self.recovery_policy.max_backoff);
+            }
+        }
+        Err(last.unwrap_or_else(|| VfError::transport(None, "NFS reconnect failed")))
+    }
+
+    fn read_with_recovery<T>(
+        &mut self,
+        mut operation: impl FnMut(&mut Self) -> VfResult<T>,
+    ) -> VfResult<T> {
+        debug_assert!(!self.recovery_in_progress);
+        self.recovery_in_progress = true;
+        let first = operation(self);
+        self.recovery_in_progress = false;
+        match first {
+            Err(error) if self.auto_reconnect && Self::needs_recovery(&error) => {
+                self.reconnect()?;
+                self.recovery_in_progress = true;
+                let retry = operation(self);
+                self.recovery_in_progress = false;
+                retry
+            }
+            result => result,
         }
     }
 
@@ -731,6 +942,11 @@ impl NfsVecFs {
                 stateid,
                 cur_offset: 0,
                 append: flags[i] & O_APPEND != 0,
+                reopen: Some(ReopenFile {
+                    path: Path::new("/").join(self.abs_path(paths[i])),
+                    flags: non_destructive_reopen_flags(flags[i]),
+                    mode: modes[i],
+                }),
             })?;
             out[i] = Some(VfFile::from_fd(fd));
         }
@@ -858,6 +1074,11 @@ impl NfsVecFs {
                 stateid,
                 cur_offset: 0,
                 append: flags[i] & O_APPEND != 0,
+                reopen: Some(ReopenFile {
+                    path: Path::new("/").join(self.abs_path(paths[i])),
+                    flags: non_destructive_reopen_flags(flags[i]),
+                    mode: modes[i],
+                }),
             };
             let fd = self.insert_open_file(open)?;
             out.push(VfFile::from_fd(fd));
@@ -1041,6 +1262,7 @@ impl NfsVecFs {
                 stateid,
                 cur_offset: 0,
                 append: false,
+                reopen: None,
             })?;
             tmp[*orig] = Some(fd);
         }
@@ -2238,6 +2460,11 @@ impl VecFs for NfsVecFs {
             stateid,
             cur_offset: 0,
             append: flags & O_APPEND != 0,
+            reopen: Some(ReopenFile {
+                path: Path::new("/").join(&full),
+                flags: non_destructive_reopen_flags(flags),
+                mode,
+            }),
         };
         let fd = self.insert_open_file(open)?;
         Ok(VfFile::from_fd(fd))
@@ -2299,6 +2526,9 @@ impl VecFs for NfsVecFs {
     }
 
     fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        if !self.recovery_in_progress {
+            return self.read_with_recovery(|client| client.readv(reads));
+        }
         if reads.is_empty() {
             return Ok(Vec::new());
         }
@@ -2374,6 +2604,9 @@ impl VecFs for NfsVecFs {
     }
 
     fn read_allv(&mut self, files: &[VfFile]) -> VfResult<Vec<Vec<u8>>> {
+        if !self.recovery_in_progress {
+            return self.read_with_recovery(|client| client.read_allv(files));
+        }
         // Read until EOF in per-op chunks, batching every active file into
         // each compound so round trips scale with file size, not file count.
         // No size stat is needed: READ's EOF flag terminates each file.
@@ -2498,6 +2731,9 @@ impl VecFs for NfsVecFs {
     }
 
     fn fseek(&mut self, tcf: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
+        if !self.recovery_in_progress {
+            return self.read_with_recovery(|client| client.fseek(tcf, offset, whence));
+        }
         if !tcf.is_descriptor() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
@@ -2535,10 +2771,16 @@ impl VecFs for NfsVecFs {
     }
 
     fn getattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
+        if !self.recovery_in_progress {
+            return self.read_with_recovery(|client| client.getattrsv(attrs));
+        }
         self.getattrsv_impl(attrs, true)
     }
 
     fn lgetattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
+        if !self.recovery_in_progress {
+            return self.read_with_recovery(|client| client.lgetattrsv(attrs));
+        }
         self.getattrsv_impl(attrs, false)
     }
 
@@ -2557,6 +2799,10 @@ impl VecFs for NfsVecFs {
         max_count: usize,
         recursive: bool,
     ) -> VfResult<Vec<VfAttrs>> {
+        if !self.recovery_in_progress {
+            return self
+                .read_with_recovery(|client| client.listdir(dir, masks, max_count, recursive));
+        }
         let mut out = Vec::new();
         self.listdir_rec(dir, masks, max_count, recursive, &mut out)?;
         Ok(out)
@@ -2926,6 +3172,9 @@ impl VecFs for NfsVecFs {
     }
 
     fn readlinkv(&mut self, paths: &[&Path]) -> VfResult<Vec<Vec<u8>>> {
+        if !self.recovery_in_progress {
+            return self.read_with_recovery(|client| client.readlinkv(paths));
+        }
         if paths.is_empty() {
             return Ok(Vec::new());
         }
@@ -3522,5 +3771,42 @@ mod tests {
         let owners = [0, 0, 1];
         let error = remap_descriptor_chunk_error(VfError::failure(1, ERR_EBADF), 0, &owners);
         assert_eq!(error.index(), 0);
+    }
+
+    #[test]
+    fn recovery_only_retries_transport_and_recoverable_session_statuses() {
+        assert!(NfsVecFs::needs_recovery(&VfError::transport(None, "reset")));
+        for status in [
+            nfsstat4_NFS4ERR_EXPIRED,
+            nfsstat4_NFS4ERR_GRACE,
+            nfsstat4_NFS4ERR_STALE_CLIENTID,
+            nfsstat4_NFS4ERR_STALE_STATEID,
+            nfsstat4_NFS4ERR_BAD_STATEID,
+            nfsstat4_NFS4ERR_BADSESSION,
+            nfsstat4_NFS4ERR_DEADSESSION,
+        ] {
+            assert!(NfsVecFs::needs_recovery(&VfError::failure(0, status)));
+        }
+        assert!(!NfsVecFs::needs_recovery(&VfError::failure(
+            0,
+            nfsstat4_NFS4ERR_NOENT,
+        )));
+    }
+
+    #[test]
+    fn recovery_reopen_flags_cannot_repeat_creation_or_truncation() {
+        let original = libc::O_RDWR | libc::O_APPEND | libc::O_CREAT | libc::O_EXCL | libc::O_TRUNC;
+        let reopened = non_destructive_reopen_flags(original);
+        assert_eq!(reopened & (libc::O_CREAT | libc::O_EXCL | libc::O_TRUNC), 0);
+        assert_ne!(reopened & libc::O_APPEND, 0);
+        assert_eq!(reopened & libc::O_ACCMODE, libc::O_RDWR);
+    }
+
+    #[test]
+    fn default_recovery_window_can_span_a_conventional_server_grace_period() {
+        let policy = NfsRecoveryPolicy::default();
+        assert!(policy.reconnect_attempts > 1);
+        assert!(policy.max_elapsed >= Duration::from_secs(90));
+        assert!(policy.initial_backoff <= policy.max_backoff);
     }
 }

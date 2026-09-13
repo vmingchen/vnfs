@@ -1,6 +1,7 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
+#![allow(unknown_lints)]
 #![allow(clippy::missing_safety_doc)]
 #![allow(unnecessary_transmutes)]
 #![allow(improper_ctypes)]

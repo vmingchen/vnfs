@@ -6,6 +6,15 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let src_dir = manifest_dir.join("src");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    if env::var_os("DOCS_RS").is_some() {
+        std::fs::copy(
+            src_dir.join("bindings-docs.rs"),
+            out_dir.join("bindings.rs"),
+        )
+        .expect("copy pregenerated docs.rs bindings");
+        println!("cargo:rerun-if-changed=src/bindings-docs.rs");
+        return;
+    }
     // Include directory provided by libntirpc-sys (via its `links` metadata).
     let ntirpc_inc = env::var("DEP_NTIRPC_INCLUDE")
         .expect("DEP_NTIRPC_INCLUDE not set; libntirpc-sys must be a dependency");
@@ -47,11 +56,9 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=nfsv41");
-    // wrapper.o (embedded in this crate's rlib) references symbols in
-    // libntirpc; re-assert the vendored static archive after libnfsv41.
-    println!("cargo:rustc-link-lib=static=ntirpc");
-    // Native dependencies of the static archive must follow it on the final
-    // link line so one-pass linkers can resolve their symbols.
+    // wrapper.o references symbols in the administrator-provided system
+    // libntirpc selected by libntirpc-sys.
+    println!("cargo:rustc-link-lib=dylib=ntirpc");
     println!("cargo:rustc-link-lib=dylib=gssapi_krb5");
     println!("cargo:rustc-link-lib=dylib=urcu-bp");
     println!("cargo:rustc-link-lib=dylib=pthread");

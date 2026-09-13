@@ -98,7 +98,11 @@ server-side copy when the server advertises it.
 VFSI and its Python packages are beta software. The core behavior is covered
 by Rust, Python, upstream `fsspec` contract, C ABI, NFS, and Samba integration
 tests. In particular, NFS authentication is currently AUTH_SYS, the API is
-synchronous, and Linux is the only native-package platform.
+synchronous, and Linux is the only native-package platform. Read-only NFS
+operations recover automatically from transport and session failures with
+bounded reconnect/reopen attempts; mutations are not replayed when a lost
+reply makes their outcome ambiguous. See the [`vnfs` production notes and
+failure semantics](crates/vnfs/README.md#failure-and-recovery-semantics).
 
 Issues and focused pull requests are welcome. Start with
 [CONTRIBUTING.md](CONTRIBUTING.md); security reports follow
