@@ -18,7 +18,7 @@ vnfs = { path = "../../crates/vnfs", version = "0.0.10" }
 vfsi-smb = { workspace = true, features = ["server-copy"] }
 
 [build-dependencies]
-cbindgen = "0.27"
+cbindgen = "0.29"
 
 [package.metadata.docs.rs]
 all-features = true
