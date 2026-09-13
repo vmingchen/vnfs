@@ -3,8 +3,9 @@ name = "vfsi-python-native"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Shared native bindings for VFSI fsspec adapters"
+description = "Shared native Python bindings for VFSI backends"
 repository = "https://github.com/vmingchen/vnfs"
+keywords = ["python", "filesystem", "fsspec", "vfsi"]
 publish = false
 
 [workspace]

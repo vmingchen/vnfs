@@ -16,7 +16,8 @@ for every combination of API, protocol, and language.
 The project uses **VFSI** as its public umbrella name. Existing package names
 remain stable:
 
-- `vnfs` is the published Rust compatibility facade;
+- `vnfs` is the published NFS-focused Rust compatibility facade;
+- `vfsi-smb` is the standalone Rust SMB backend;
 - `vfsi-c` is the versioned C ABI;
 - `nfs4fs` is the NFS Python distribution and fsspec adapter;
 - `vsmb` is the low-level vectorized SMB Python distribution;
@@ -63,7 +64,7 @@ The canonical repository is organized by architectural responsibility:
 
 ```text
 crates/
-  vnfs/                 published compatibility facade
+  vnfs/                 published NFS-focused compatibility facade
   vfsi-core/            shared operations, types, errors, paths, capabilities
   vfsi-sync/            scalar and vectorized synchronous interfaces
   vfsi-nfs/             NFSv4.1 and NFSv4.2 backend
@@ -86,25 +87,33 @@ ecosystem/
   ports.toml            registered and tested external repositories
 docs/                   architecture and compatibility policy
 ci/                     integration servers and ecosystem tests
+testing/
+  vfsi-test-support/    private shared backend contract assertions
 ```
 
 The dependency direction is deliberately one-way:
 
 ```text
-vfsi-core
-    -> vfsi-sync
-        -> vfsi-nfs / vfsi-smb / vfsi-local
-            -> vnfs facade
-                -> vfsi-c
-            -> vfsi-python -> nfs4fs / vsmb
-            -> vfsi-fsspec -> nfs4fs / vsmbfs
-            -> vsmb -> vsmbfs
+vfsi-core -> vfsi-sync -> vfsi-nfs -> vnfs
+                       -> vfsi-smb
+                       -> vfsi-local
+
+vnfs + vfsi-smb -------------------> vfsi-c
+vfsi-python + vfsi-fsspec ---------> nfs4fs / vsmb / vsmbfs
+vsmb + vfsi-fsspec ----------------> vsmbfs
 ```
 
 Shared crates must not depend on a backend. Backends may implement optimized
-vector operations and report optional capabilities. The `vnfs` facade selects
-backends with Cargo features and preserves historical imports. SMB remains
-optional and is not enabled by default.
+vector operations and report optional capabilities. The `vnfs` facade is
+NFS-focused and preserves historical NFS imports; Rust SMB consumers depend on
+`vfsi-smb` directly. Cross-protocol bindings such as `vfsi-c` compose backend
+crates directly instead of routing them through `vnfs`.
+
+Every first-party public package uses `vfsi` as a registry discovery keyword.
+Protocol-specific keywords remain on their owning packages: for example,
+`nfs` belongs on `vnfs`, `vfsi-nfs`, and `nfs4fs`, while `smb` belongs on
+`vfsi-smb`, `vsmb`, and `vsmbfs`. Third-party packages keep their upstream
+metadata.
 
 io_uring belongs in the local backend because it is an execution mechanism,
 not a network filesystem protocol. Cloud object-store support belongs in
@@ -155,7 +164,7 @@ the registered ports pass or explicitly move to a new declared ABI.
 
 Rust crates, the C ABI, and Python distributions are built and published only
 from the canonical repository. Package tags are namespace-qualified, such as
-`vnfs-v0.0.9` and `nfs4fs-v0.3.0`.
+`vnfs-v0.0.10` and `nfs4fs-v0.3.1`.
 
 Workspace crates are released in dependency order: `vfsi-core`, `vfsi-sync`,
 the selected `vfsi-*` backends, `vnfs`, and then `vfsi-c`. Python packages are

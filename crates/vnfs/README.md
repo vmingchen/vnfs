@@ -11,25 +11,19 @@ as a Rust crate. The NFS backend packs each vector into compounds up to the
 server's negotiated operation and message-size limits, then returns results in
 input order.
 
-## Backends
+## Package boundary
 
-The crate is backend-agnostic through the [`VecFs`] trait:
+The `vnfs` crate is the NFS-focused Rust compatibility package in the wider
+VFSI project. It provides [`NfsVecFs`], the shared [`VecFs`] interfaces and
+types, and [`DummyVecFs`] for local testing. New protocol backends are
+published as separate `vfsi-*` crates so each backend has an independent
+dependency and release boundary.
 
-- [`NfsVecFs`] — an NFSv4.1 implementation on top of [libntirpc], batching
-  many operations (lookups, readdirs, getattrs, opens, reads, ...) into few
-  large compounds.
-- [`SmbVecFs`] — an SMB2/3 implementation for Samba and other modern SMB
-  servers.
-- [`DummyVecFs`] — a `std::fs`-backed implementation so the same API also
-  works on non-NFS filesystems (and is handy for tests).
-
-NFS and the dummy backend are enabled by default. The SMB backend is opt-in
-because it uses the async [`smb2`] client internally, so its synchronous
-`VecFs` facade owns a [Tokio] runtime. Enable it explicitly with the `smb`
-feature:
+NFS, the dummy backend, and NFSv4.2 server-side COPY are enabled by default.
+Applications that only need interface types can disable default features:
 
 ```toml
-vnfs = { version = "0.0.9", features = ["smb"] }
+vnfs = { version = "0.0.10", default-features = false }
 ```
 
 ## Example
@@ -85,9 +79,6 @@ at your option.
 [fast]: https://www.usenix.org/conference/fast17/technical-sessions/presentation/chen
 [rfcv4_1]: https://datatracker.ietf.org/doc/html/rfc5661
 [libntirpc]: https://github.com/nfs-ganesha/ntirpc
-[`smb2`]: https://crates.io/crates/smb2
-[Tokio]: https://tokio.rs/
 [`VecFs`]: https://docs.rs/vnfs/latest/vnfs/trait.VecFs.html
 [`NfsVecFs`]: https://docs.rs/vnfs/latest/vnfs/struct.NfsVecFs.html
-[`SmbVecFs`]: https://docs.rs/vnfs/latest/vnfs/struct.SmbVecFs.html
 [`DummyVecFs`]: https://docs.rs/vnfs/latest/vnfs/struct.DummyVecFs.html

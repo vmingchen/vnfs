@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "NFSv4 backend for VFSI"
 repository = "https://github.com/vmingchen/vnfs"
+keywords = ["nfs", "nfs4", "filesystem", "vectorized", "vfsi"]
 
 [features]
 default = ["ffi"]

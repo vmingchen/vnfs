@@ -28,11 +28,6 @@ pub mod dummy_vecfs {
     pub use vfsi_local::DummyVecFs;
 }
 
-#[cfg(feature = "smb")]
-pub mod smb {
-    pub use vfsi_smb::*;
-}
-
 #[cfg(feature = "nfs")]
 pub use vfsi_nfs::{client, compound, nfs, rpc, session};
 
@@ -41,6 +36,4 @@ pub use vfsi_core::*;
 pub use vfsi_local::DummyVecFs;
 #[cfg(feature = "nfs")]
 pub use vfsi_nfs::{NfsServerCopyStats, NfsVecFs};
-#[cfg(feature = "smb")]
-pub use vfsi_smb::SmbVecFs;
 pub use vfsi_sync::{VecFs, VecFsExt, rm_recursive};

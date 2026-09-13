@@ -133,7 +133,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "nfs4fs-python"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
  "libntirpc-sys",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "nfsv41-sys"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bindgen",
  "libntirpc-sys",

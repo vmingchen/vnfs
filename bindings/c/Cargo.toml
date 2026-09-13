@@ -3,7 +3,8 @@ name = "vfsi-c"
 version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "C API for the vectorized filesystem API (vfsi)"
+description = "C API for VFSI vectorized filesystem interfaces"
+keywords = ["filesystem", "vectorized", "ffi", "vfsi"]
 
 [lib]
 name = "vfsi_c"
@@ -12,7 +13,8 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 libc = "0.2"
 libntirpc-sys = { workspace = true }
-vnfs = { path = "../../crates/vnfs", version = "0.0.9", features = ["smb"] }
+vnfs = { path = "../../crates/vnfs", version = "0.0.10" }
+vfsi-smb = { workspace = true, features = ["server-copy"] }
 
 [build-dependencies]
 cbindgen = "0.27"

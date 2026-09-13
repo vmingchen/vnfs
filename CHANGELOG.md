@@ -7,6 +7,13 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ### Changed
 
+- Made `vnfs` an NFS-focused package by moving Rust SMB ownership and
+  integration coverage to `vfsi-smb`; cross-protocol bindings now compose the
+  backend crates directly. Package descriptions and registry keywords reflect
+  these boundaries.
+- Added the `vfsi` discovery keyword to every first-party Rust and Python
+  package. The published `vnfs`, `nfs4fs`, and `nfsv41-sys` packages receive
+  metadata-release version bumps.
 - Split Python SMB support into `vsmb`, a low-level vectorized client with no
   fsspec dependency, and `vsmbfs`, the fsspec adapter. `nfs4fs` is now NFS-only
   and shares its backend-neutral fsspec engine through `vfsi-fsspec`. The Rust

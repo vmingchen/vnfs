@@ -1,10 +1,12 @@
+#![doc = "Shared backend contract assertions for VFSI integration tests."]
+
 //! A capability-aware shared test suite run against every [`VecFs`]
 //! implementation. Portable behavior must match on all backends; optional
 //! Unix semantics are asserted only when advertised.
 
 use std::path::{Path, PathBuf};
-use vnfs::VecFs;
-use vnfs::vecfs::*;
+use vfsi_sync::VecFs;
+use vfsi_sync::*;
 
 /// Run a broad set of vectorized-filesystem assertions against `fs`, using
 /// paths under `base` (which must be unique per caller).

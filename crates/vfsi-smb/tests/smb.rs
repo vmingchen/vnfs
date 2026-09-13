@@ -8,13 +8,14 @@
 
 use std::path::{Path, PathBuf};
 
-use vnfs::{
-    AttrMask, ExtentPair, SmbVecFs, VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS,
+use vfsi_smb::SmbVecFs;
+use vfsi_sync::{
+    AttrMask, ExtentPair, ReadOp, VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS,
     VF_CAP_POSIX_METADATA, VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VF_ERR_UNSUPPORTED, VecFs, VfAttrs,
     VfFile, VfOffset, WriteOp,
 };
 
-mod common;
+use vfsi_test_support as common;
 
 fn required(name: &str) -> bool {
     std::env::var(name).as_deref() == Ok("1")
@@ -123,7 +124,7 @@ fn samba_round_trip_and_copy() {
     fs.close(&file).unwrap();
 
     let path_read = fs
-        .readv(&[vnfs::ReadOp::from_os_path(&source, VfOffset::At(0), 64)])
+        .readv(&[ReadOp::from_os_path(&source, VfOffset::At(0), 64)])
         .unwrap();
     assert_eq!(path_read[0].data, b"hello over smb");
 
@@ -222,7 +223,7 @@ fn path_reads_recover_after_server_restart() {
     );
 
     let result = fs
-        .readv(&[vnfs::ReadOp::from_os_path(&file, VfOffset::At(0), 64)])
+        .readv(&[ReadOp::from_os_path(&file, VfOffset::At(0), 64)])
         .expect("path read should reconnect and re-establish the share");
     assert_eq!(result[0].data, b"after restart");
     assert_eq!(fs.stat(&file).unwrap().size, 13);

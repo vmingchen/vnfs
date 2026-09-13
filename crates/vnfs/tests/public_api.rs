@@ -56,9 +56,3 @@ fn legacy_nfs_constructor_signatures_remain_available() {
     let _: fn(&str) -> VfResult<vnfs::NfsVecFs> = vnfs::NfsVecFs::connect;
     let _: fn(&str, u32) -> VfResult<vnfs::NfsVecFs> = vnfs::NfsVecFs::connect_minor;
 }
-
-#[cfg(feature = "smb")]
-#[test]
-fn legacy_smb_constructor_signature_remains_available() {
-    let _: fn(&str, &str, &str, &str, &str) -> VfResult<vnfs::SmbVecFs> = vnfs::SmbVecFs::connect;
-}

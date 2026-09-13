@@ -69,7 +69,8 @@ for protocol-specific configuration.
 
 The platform is organized as a modular monorepo: shared contracts, synchronous
 interfaces, protocol backends, bindings, and adapters are separate workspace
-packages while the published `vnfs` crate preserves its existing API. Modified
+packages while the published `vnfs` crate preserves the NFS-facing API.
+Modified
 third-party applications live in independent VFSI organization repositories
 and are registered at pinned revisions rather than vendored or added as
 submodules.
@@ -80,15 +81,16 @@ and mirror-promotion policies.
 
 ## Rust
 
-The `vnfs` crate enables the NFS, dummy, and server-copy features by default.
-SMB is opt-in. Downstream users can disable defaults and select only the
-backends they need. Connections negotiate NFSv4.2 and fall back to NFSv4.1.
-Server-side COPY is capability-aware and falls back to client-side I/O when
-unavailable.
+Use `vnfs` for the NFS-focused compatibility crate, `vfsi-core` and
+`vfsi-sync` for backend-neutral interfaces, and the protocol crates
+`vfsi-nfs`, `vfsi-smb`, and `vfsi-local` when selecting backends directly.
+This keeps protocol dependencies out of packages that do not use them.
 
-The SMB backend negotiates SMB 2.0.2 through SMB 3.1.1, observes server credit
-and I/O limits, reconnects transport sessions, and uses server-side copy when
-the server advertises it.
+NFS connections negotiate NFSv4.2 and fall back to NFSv4.1. Server-side COPY
+is capability-aware and falls back to client-side I/O when unavailable. The
+separate `vfsi-smb` backend negotiates SMB 2.0.2 through SMB 3.1.1, observes
+server credit and I/O limits, reconnects transport sessions, and uses
+server-side copy when the server advertises it.
 
 ## Project status
 

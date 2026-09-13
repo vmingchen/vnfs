@@ -33,18 +33,19 @@ jobs:
       - run: cargo test -p vnfs --test dummy_vecfs
       - run: cargo test -p vfsi-c --lib
       - name: Validate project organization registry
-        run: python ci/check-ecosystem.py
-      - name: Verify backend feature combinations
+        run: |
+          python ci/check-ecosystem.py
+          python ci/check-package-metadata.py
+      - name: Verify vnfs feature combinations
         run: |
           cargo check -p vnfs --lib --no-default-features
           cargo check -p vnfs --lib --no-default-features --features dummy
           cargo check -p vnfs --lib --no-default-features --features nfs
-          cargo check -p vnfs --lib --no-default-features --features smb
-      - name: Verify SMB dependencies are opt-in
+      - name: Verify vnfs has no SMB dependency
         run: |
           if cargo tree -p vnfs --edges normal --prefix none | \
-              grep -Eq '^(smb2|tokio|futures-util) '; then
-            echo "SMB dependencies unexpectedly enabled by default" >&2
+              grep -Eq '^(vfsi-smb|smb2|tokio|futures-util) '; then
+            echo "SMB dependencies must live in the vfsi-smb package" >&2
             exit 1
           fi
       - name: Verify checked-in C header and smoke test
@@ -417,7 +418,7 @@ jobs:
             password: ""
             guest_ok: "yes"
             force_user: nobody
-            rust_features: "smb,dummy"
+            rust_features: ""
             server_copy: "0"
             reconnect: ""
             require_reconnect: "0"
@@ -430,7 +431,7 @@ jobs:
             password: vfsi-ci-password
             guest_ok: "no"
             force_user: vfsi-ci
-            rust_features: "default"
+            rust_features: "server-copy"
             server_copy: "1"
             reconnect: "sudo systemctl restart smbd"
             require_reconnect: "1"
@@ -513,10 +514,10 @@ jobs:
           VFSI_SMB_REQUIRE_RECONNECT: ${{ matrix.require_reconnect }}
           VFSI_SMB_RESTART_COMMAND: ${{ matrix.reconnect }}
         run: |
-          if [ "${{ matrix.rust_features }}" = default ]; then
-            cargo test -p vnfs --features smb --test smb -- --test-threads=1
+          if [ -n "${{ matrix.rust_features }}" ]; then
+            cargo test -p vfsi-smb --features "${{ matrix.rust_features }}" --test smb -- --test-threads=1
           else
-            cargo test -p vnfs --no-default-features --features "${{ matrix.rust_features }}" --test smb -- --test-threads=1
+            cargo test -p vfsi-smb --test smb -- --test-threads=1
           fi
       - name: Run C ABI smoke test against Samba
         if: matrix.bindings

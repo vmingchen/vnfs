@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Shared types, errors, paths, and capabilities for VFSI"
 repository = "https://github.com/vmingchen/vnfs"
+keywords = ["filesystem", "vectorized", "vfsi"]
 
 [dependencies]
 bitflags = "2.6"

@@ -6,6 +6,7 @@ license = "MIT OR Apache-2.0"
 description = "Python bindings for the vectorized VFSI SMB2/3 client"
 homepage = "https://github.com/vmingchen/vnfs"
 repository = "https://github.com/vmingchen/vnfs"
+keywords = ["python", "smb", "filesystem", "vfsi"]
 
 [lib]
 name = "_native"

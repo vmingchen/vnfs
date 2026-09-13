@@ -5,6 +5,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Synchronous scalar and vectorized filesystem interfaces for VFSI"
 repository = "https://github.com/vmingchen/vnfs"
+keywords = ["filesystem", "vectorized", "batch", "vfsi"]
 
 [dependencies]
 libc = { workspace = true }

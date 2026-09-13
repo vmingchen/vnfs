@@ -14,9 +14,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
+use vfsi_smb::SmbVecFs;
 use vnfs::dummy_vecfs::DummyVecFs;
 use vnfs::nfs::NfsVecFs;
-use vnfs::smb::SmbVecFs;
 use vnfs::vecfs::{
     AttrMask, ExtentPair, ReadOp, VfAttrs, VfError, VfFile, WriteOp, ERR_EBADF, ERR_NOENT,
     VF_ERR_UNSUPPORTED,

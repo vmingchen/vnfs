@@ -3,8 +3,9 @@ name = "vfsi-smb"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Vectorized SMB2 and SMB3 filesystem client"
+description = "SMB2/3 backend for VFSI vectorized filesystem interfaces"
 repository = "https://github.com/vmingchen/vnfs"
+keywords = ["smb", "smb2", "smb3", "filesystem", "vfsi"]
 
 [features]
 default = []
@@ -17,3 +18,6 @@ smb2 = "0.21.0"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 vfsi-core = { workspace = true }
 vfsi-sync = { workspace = true }
+
+[dev-dependencies]
+vfsi-test-support = { workspace = true }

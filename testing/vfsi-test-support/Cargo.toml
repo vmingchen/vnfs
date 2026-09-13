@@ -1,13 +1,13 @@
 [package]
-name = "vfsi-local"
+name = "vfsi-test-support"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Local filesystem backend for VFSI"
+description = "Shared contract assertions for VFSI backend integration tests"
 repository = "https://github.com/vmingchen/vnfs"
-keywords = ["filesystem", "vectorized", "local", "vfsi"]
+keywords = ["filesystem", "testing", "vectorized", "vfsi"]
+publish = false
 
 [dependencies]
 libc = { workspace = true }
-vfsi-core = { workspace = true }
 vfsi-sync = { workspace = true }
