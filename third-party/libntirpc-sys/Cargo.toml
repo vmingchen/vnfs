@@ -50,4 +50,5 @@ path = "examples/hello_server.rs"
 version = "0.2"
 
 [build-dependencies.bindgen]
-version = "0.73"
+# bindgen 0.73.1 and 0.73.2 mix syn 3 with prettyplease/syn 2 and fail to compile.
+version = "=0.73.0"
