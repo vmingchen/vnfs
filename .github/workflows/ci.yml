@@ -33,7 +33,7 @@ jobs:
           DOCS_RS=1 RUSTDOCFLAGS="-D warnings" \
             cargo doc -p vnfs -p vfsi-nfs --all-features --no-deps
           test -f target/doc/vnfs/struct.NfsVecFs.html
-          test -f target/doc/vfsi_nfs/struct.NfsVecFs.html
+          test -f target/doc/vfsi_nfs/nfs/struct.NfsVecFs.html
       - name: Run every published Rust package's local tests
         run: |
           cargo test -p vfsi-core
