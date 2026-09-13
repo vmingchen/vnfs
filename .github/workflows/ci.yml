@@ -70,6 +70,7 @@ jobs:
             version=$(python -c \
               'import pathlib,sys,tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["package"]["version"])' \
               "$manifest")
+            tar -xzf "target/package/$package-$version.crate" -C target/package
             patches+=(--config \
               "patch.crates-io.$package.path=\"$GITHUB_WORKSPACE/target/package/$package-$version\"")
           done <"$package_list"
