@@ -47,8 +47,19 @@ jobs:
               'import pathlib,sys,tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["package"]["version"])' \
               "$manifest")
             cargo package --locked -p "$package"
-            cargo test --locked \
-              --manifest-path "target/package/$package-$version/Cargo.toml"
+            archive_manifest="target/package/$package-$version/Cargo.toml"
+            if [ "$package" = vnfs ]; then
+              # The NFS integration target requires the server jobs below.
+              # Still compile and execute every server-independent test from
+              # the exact crate archive here.
+              cargo test --locked --manifest-path "$archive_manifest" --lib
+              cargo test --locked --manifest-path "$archive_manifest" \
+                --test dummy_vecfs
+              cargo test --locked --manifest-path "$archive_manifest" \
+                --test public_api
+            else
+              cargo test --locked --manifest-path "$archive_manifest"
+            fi
             if [ "$package" = vfsi-c ]; then
               archive="target/package/$package-$version"
               cargo build --locked --manifest-path "$archive/Cargo.toml"
