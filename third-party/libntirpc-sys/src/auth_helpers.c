@@ -1,4 +1,5 @@
 #include <rpc/auth.h>
+#include <rpc/svc.h>
 
 #ifdef VFSI_RPCSEC_GSS
 #include <rpc/auth_gss.h>
@@ -61,6 +62,30 @@ struct vfsi_patched_ops {
     svc_req_fun_t original_decode;
 };
 
+#ifndef VFSI_LIBNTIRPC_HAS_CLIENT_XPRT
+/* Older releases do not export clnt_vc_get_client_xprt(). CLIENT is the first
+ * member of their private cx_data and the duplex record immediately follows.
+ */
+struct vfsi_client_prefix {
+    CLIENT client;
+    struct vfsi_rpc_dplx_prefix *record;
+};
+#endif
+
+static SVCXPRT *vfsi_client_xprt(CLIENT *client)
+{
+#ifdef VFSI_LIBNTIRPC_HAS_CLIENT_XPRT
+    return clnt_vc_get_client_xprt(client);
+#else
+    struct vfsi_client_prefix *prefix =
+        (struct vfsi_client_prefix *)client;
+
+    if (prefix == NULL || prefix->record == NULL)
+        return NULL;
+    return &prefix->record->xprt;
+#endif
+}
+
 static enum xprt_stat vfsi_decode_with_reply_verifier(struct svc_req *request)
 {
     SVCXPRT *xprt = request->rq_xprt;
@@ -97,7 +122,7 @@ static enum xprt_stat vfsi_decode_with_reply_verifier(struct svc_req *request)
 
 bool vfsi_libntirpc_install_reply_verifier_fix(CLIENT *client)
 {
-    SVCXPRT *xprt = clnt_vc_get_client_xprt(client);
+    SVCXPRT *xprt = vfsi_client_xprt(client);
     struct vfsi_patched_ops *patched;
 
     if (xprt == NULL || xprt->xp_ops == NULL || xprt->xp_ops->xp_decode == NULL)
@@ -118,7 +143,7 @@ bool vfsi_libntirpc_install_reply_verifier_fix(CLIENT *client)
 
 void vfsi_libntirpc_uninstall_reply_verifier_fix(CLIENT *client)
 {
-    SVCXPRT *xprt = clnt_vc_get_client_xprt(client);
+    SVCXPRT *xprt = vfsi_client_xprt(client);
     struct vfsi_patched_ops *patched;
 
     if (xprt == NULL || xprt->xp_ops == NULL ||
@@ -169,6 +194,11 @@ static void install_zeroing_allocator(void)
 void vfsi_libntirpc_auth_destroy(AUTH *auth)
 {
     auth_destroy(auth);
+}
+
+void vfsi_libntirpc_set_process_cb(SVCXPRT *xprt, svc_req_fun_t callback)
+{
+    xprt->xp_dispatch.process_cb = callback;
 }
 
 #ifdef VFSI_RPCSEC_GSS

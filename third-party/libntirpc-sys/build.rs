@@ -52,15 +52,18 @@ fn main() {
         .arg("-c")
         .arg("-O2")
         .arg("-fPIC")
+        // Supported Linux libntirpc packages build SVCXPRT with IPv6. The
+        // define is not propagated through pkg-config but is part of the ABI.
+        .arg("-D_GNU_SOURCE=1")
+        .arg("-DINET6=1")
         .arg(format!("-I{}", include.display()));
     if env::var_os("CARGO_FEATURE_RPCSEC_GSS").is_some() {
         helper_compile.arg("-DVFSI_RPCSEC_GSS=1");
+        if major >= 6 {
+            helper_compile.arg("-DVFSI_LIBNTIRPC_HAS_CLIENT_XPRT=1");
+        }
         if major >= 9 {
             helper_compile.arg("-DVFSI_LIBNTIRPC_HAS_RDMA_EXPIRES=1");
-        } else {
-            // Ubuntu's 6.x ABI reserves the NFS-RDMA transport flag in SVCXPRT
-            // even though the optional RDMA implementation is not linked.
-            helper_compile.arg("-D_USE_NFS_RDMA=1");
         }
     }
     let status = helper_compile

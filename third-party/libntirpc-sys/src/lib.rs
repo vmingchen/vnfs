@@ -22,6 +22,9 @@ pub type rpcblist = rp__list;
 unsafe extern "C" {
     /// Release an AUTH reference using libntirpc's `auth_destroy` macro.
     pub fn vfsi_libntirpc_auth_destroy(auth: *mut AUTH);
+    /// Set a server transport's process callback without exposing bindgen's
+    /// version-dependent representation of the anonymous dispatch union.
+    pub fn vfsi_libntirpc_set_process_cb(xprt: *mut SVCXPRT, callback: svc_req_fun_t);
     #[cfg(feature = "rpcsec-gss")]
     pub fn vfsi_libntirpc_authgss_ncreate_default(
         client: *mut CLIENT,

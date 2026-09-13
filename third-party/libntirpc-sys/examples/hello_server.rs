@@ -90,7 +90,7 @@ unsafe extern "C" fn hello_process(req: *mut svc_req) -> xprt_stat {
 /// handler for that transport and process the buffered datagram.
 unsafe extern "C" fn udp_rendezvous(xprt: *mut SVCXPRT) -> xprt_stat {
     unsafe {
-        (*xprt).xp_dispatch.__bindgen_anon_1.process_cb = Some(hello_process);
+        vfsi_libntirpc_set_process_cb(xprt, Some(hello_process));
         let recv = (*(*xprt).xp_ops).xp_recv;
         match recv {
             Some(f) => f(xprt),
