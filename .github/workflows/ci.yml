@@ -98,6 +98,11 @@ jobs:
             fi
             if [ "$package" = vfsi-c ]; then
               archive="target/package/$package-$version"
+              # vfsi-c's cbindgen build script invokes cargo metadata without
+              # inheriting command-line patches, which normalizes Cargo.lock
+              # while the test command is running. Reapply the coordinated
+              # archive patches before the separate cdylib smoke build.
+              cargo "${patches[@]}" update --offline --manifest-path "$archive/Cargo.toml"
               cargo "${patches[@]}" build --locked --offline --manifest-path "$archive/Cargo.toml"
               cc -Wall -Wextra -Werror \
                 -I "$archive/include" "$archive/tests/smoke.c" \
