@@ -7,6 +7,8 @@
 #![allow(improper_ctypes_definitions)]
 #![allow(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::ptr_offset_with_cast)]
+// bindgen 0.73 emits arithmetic div_ceil equivalents in generated bitfield helpers.
+#![allow(clippy::manual_div_ceil)]
 // bindgen spells C size_t-compatible parameters as c_ulong on this target;
 // Rust 1.98's new runtime-symbol lint cannot see that ABI equivalence.
 #![allow(suspicious_runtime_symbol_definitions)]
