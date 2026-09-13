@@ -38,7 +38,7 @@ jobs:
           cd /tmp
           /tmp/vfsi-fsspec-release/bin/python -m pytest \
             "$GITHUB_WORKSPACE/adapters/vfsi-fsspec/tests"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vfsi-fsspec-dist
           path: adapters/vfsi-fsspec/dist/*
