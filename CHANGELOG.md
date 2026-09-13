@@ -7,6 +7,11 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ### Changed
 
+- Added opt-in Kerberos RPCSEC_GSS support to the Rust NFS client behind the
+  non-default `rpcsec-gss` feature. Connection options select `krb5` or
+  `krb5i`, use the process credential cache without accepting passwords,
+  and preserve authentication across automatic reconnects; AUTH_SYS remains
+  the compatible default.
 - Made native Rust builds use the system `libntirpc` instead of cloning and
   compiling Git sources from `build.rs`; documented Linux, Rust 1.88, native
   package, authentication, and synchronous-API requirements. Wheel builds use

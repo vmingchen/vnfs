@@ -31,5 +31,9 @@ pub mod vecfs {
     pub use vfsi_sync::*;
 }
 
+#[cfg(all(feature = "ffi", feature = "rpcsec-gss"))]
+pub use nfs::RpcsecGssProtection;
 #[cfg(feature = "ffi")]
-pub use nfs::{NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs};
+pub use nfs::{
+    NfsAuthentication, NfsConnectOptions, NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
+};

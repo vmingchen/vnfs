@@ -1,5 +1,6 @@
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
 
 fn write_docs_bindings(out_dir: &std::path::Path) {
     std::fs::copy("src/bindings-docs.rs", out_dir.join("bindings.rs"))
@@ -42,6 +43,43 @@ fn main() {
         .first()
         .expect("libntirpc pkg-config metadata has no include directory");
 
+    // auth_destroy is a reference-counting macro/static-inline API, not an
+    // exported symbol. Compile a stable callable shim so Rust never bypasses
+    // libntirpc's ownership protocol by invoking ah_destroy directly.
+    let helper_object = out_dir.join("auth_helpers.o");
+    let mut helper_compile = Command::new("gcc");
+    helper_compile
+        .arg("-c")
+        .arg("-O2")
+        .arg("-fPIC")
+        .arg(format!("-I{}", include.display()));
+    if env::var_os("CARGO_FEATURE_RPCSEC_GSS").is_some() {
+        helper_compile.arg("-DVFSI_RPCSEC_GSS=1");
+        if major >= 9 {
+            helper_compile.arg("-DVFSI_LIBNTIRPC_HAS_RDMA_EXPIRES=1");
+        } else {
+            // Ubuntu's 6.x ABI reserves the NFS-RDMA transport flag in SVCXPRT
+            // even though the optional RDMA implementation is not linked.
+            helper_compile.arg("-D_USE_NFS_RDMA=1");
+        }
+    }
+    let status = helper_compile
+        .arg("src/auth_helpers.c")
+        .arg("-o")
+        .arg(&helper_object)
+        .status()
+        .expect("run gcc for libntirpc auth helper");
+    assert!(status.success(), "gcc failed to compile auth_helpers.c");
+    let status = Command::new("ar")
+        .arg("rcs")
+        .arg(out_dir.join("libntirpc_helpers.a"))
+        .arg(&helper_object)
+        .status()
+        .expect("run ar for libntirpc auth helper");
+    assert!(status.success(), "ar failed to archive auth_helpers.o");
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static=ntirpc_helpers");
+
     bindgen::Builder::default()
         .header("src/wrapper.h")
         .clang_arg(format!("-I{}", include.display()))
@@ -62,4 +100,5 @@ fn main() {
     println!("cargo:include={}", include.display());
     println!("cargo:include2=/usr/include");
     println!("cargo:rerun-if-changed=src/wrapper.h");
+    println!("cargo:rerun-if-changed=src/auth_helpers.c");
 }

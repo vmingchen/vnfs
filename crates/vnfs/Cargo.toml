@@ -18,6 +18,7 @@ default = ["nfs", "dummy", "server-copy"]
 nfs = ["dep:nfsv41-sys", "dep:vfsi-nfs"]
 dummy = ["dep:vfsi-local"]
 server-copy = ["vfsi-nfs?/server-copy"]
+rpcsec-gss = ["nfs", "vfsi-nfs/rpcsec-gss"]
 
 [dependencies]
 libc = { workspace = true }

@@ -13,6 +13,7 @@ keywords = ["nfs", "nfs4", "filesystem", "vectorized", "vfsi"]
 default = ["ffi"]
 ffi = ["dep:libc", "dep:libntirpc-sys", "dep:nfsv41-sys"]
 server-copy = ["ffi"]
+rpcsec-gss = ["ffi", "libntirpc-sys/rpcsec-gss"]
 
 [dependencies]
 libc = { workspace = true, optional = true }

@@ -18,6 +18,9 @@ use crate::path::{
     split_path_bytes,
 };
 // Re-export the shared types/trait so `use vnfs::nfs::*` works.
+pub use crate::rpc::NfsAuthentication;
+#[cfg(feature = "rpcsec-gss")]
+pub use crate::rpc::RpcsecGssProtection;
 pub use crate::vecfs::*;
 
 /// An open file on the NFS server: resolved handle, open stateid, the current
@@ -47,6 +50,31 @@ struct ConnectionConfig {
     minorversion: Option<u32>,
     connect_timeout: Duration,
     request_timeout: Duration,
+    authentication: NfsAuthentication,
+}
+
+/// Options for establishing an NFSv4 connection.
+///
+/// The default uses automatic NFSv4.2-to-v4.1 negotiation, ten seconds for
+/// setup, five seconds per RPC, and AUTH_SYS. Enable the `rpcsec-gss` Cargo
+/// feature and select [`NfsAuthentication::RpcsecGss`] to opt into Kerberos.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NfsConnectOptions {
+    pub minorversion: Option<u32>,
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+    pub authentication: NfsAuthentication,
+}
+
+impl Default for NfsConnectOptions {
+    fn default() -> Self {
+        Self {
+            minorversion: None,
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(5),
+            authentication: NfsAuthentication::AuthSys,
+        }
+    }
 }
 
 /// Bounded recovery policy for side-effect-free operations.
@@ -573,11 +601,25 @@ impl NfsVecFs {
         connect_timeout: Duration,
         request_timeout: Duration,
     ) -> VfResult<NfsVecFs> {
+        Self::connect_with_options(
+            host,
+            NfsConnectOptions {
+                minorversion,
+                connect_timeout,
+                request_timeout,
+                ..NfsConnectOptions::default()
+            },
+        )
+    }
+
+    /// Connect using explicit protocol, timeout, and authentication options.
+    pub fn connect_with_options(host: &str, options: NfsConnectOptions) -> VfResult<NfsVecFs> {
         let connection = ConnectionConfig {
             host: host.to_owned(),
-            minorversion,
-            connect_timeout,
-            request_timeout,
+            minorversion: options.minorversion,
+            connect_timeout: options.connect_timeout,
+            request_timeout: options.request_timeout,
+            authentication: options.authentication,
         };
         let nfs = Self::connect_client(&connection)?;
         Ok(Self::from_client(nfs, connection))
@@ -585,16 +627,18 @@ impl NfsVecFs {
 
     fn connect_client(connection: &ConnectionConfig) -> VfResult<NfsClient> {
         match connection.minorversion {
-            Some(version) => NfsClient::connect_minor_with_timeouts(
+            Some(version) => NfsClient::connect_minor_with_authentication(
                 &connection.host,
                 version,
                 connection.connect_timeout,
                 connection.request_timeout,
+                &connection.authentication,
             ),
-            None => NfsClient::connect_with_timeouts(
+            None => NfsClient::connect_with_authentication(
                 &connection.host,
                 connection.connect_timeout,
                 connection.request_timeout,
+                &connection.authentication,
             ),
         }
         .map_err(|e| VfError::from_rpc(e, 0))
@@ -3808,5 +3852,14 @@ mod tests {
         assert!(policy.reconnect_attempts > 1);
         assert!(policy.max_elapsed >= Duration::from_secs(90));
         assert!(policy.initial_backoff <= policy.max_backoff);
+    }
+
+    #[test]
+    fn connection_options_preserve_auth_sys_as_the_compatible_default() {
+        let options = NfsConnectOptions::default();
+        assert_eq!(options.minorversion, None);
+        assert_eq!(options.connect_timeout, Duration::from_secs(10));
+        assert_eq!(options.request_timeout, Duration::from_secs(5));
+        assert_eq!(options.authentication, NfsAuthentication::AuthSys);
     }
 }

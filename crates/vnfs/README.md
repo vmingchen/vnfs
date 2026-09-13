@@ -3,14 +3,16 @@
 A vectorized NFSv4.1/4.2 client library written in Rust.
 
 > **Production status:** `vnfs` is beta, synchronous, and currently supports
-> Linux with NFSv4.1/4.2 over TCP and AUTH_SYS authentication. It is a good fit
+> Linux with NFSv4.1/4.2 over TCP, AUTH_SYS by default, and optional Kerberos
+> RPCSEC_GSS authentication. It is a good fit
 > for controlled environments where vectorized small-file performance matters;
 > assess the authentication, server-compatibility, and recovery constraints
 > below before adopting it for production.
 
 AUTH_SYS carries the calling process's numeric UID/GID without cryptographic
 peer identity, integrity, or privacy. Use it only on a trusted network with
-server export policy that treats those credentials appropriately.
+server export policy that treats those credentials appropriately. For
+untrusted networks, enable the opt-in `rpcsec-gss` feature described below.
 
 NFSv4 supports *COMPOUND* requests: one RPC can carry an ordered sequence of
 file operations. A conventional POSIX-style loop hides that capability behind
@@ -30,11 +32,54 @@ published as separate `vfsi-*` crates so each backend has an independent
 dependency and release boundary.
 
 NFS, the dummy backend, and NFSv4.2 server-side COPY are enabled by default.
+RPCSEC_GSS is intentionally not enabled by default.
 Applications that only need interface types can disable default features:
 
 ```toml
 vnfs = { version = "0.0.11", default-features = false }
 ```
+
+## Secure authentication (optional)
+
+Enable Kerberos-backed RPCSEC_GSS explicitly:
+
+```toml
+vnfs = { version = "0.0.11", features = ["rpcsec-gss"] }
+```
+
+The client uses the process's default GSS credential cache (normally populated
+with `kinit`) and does not accept or retain passwords. Integrity protection is
+the recommended baseline.
+
+```rust,no_run
+use vnfs::{NfsAuthentication, NfsConnectOptions, NfsVecFs, RpcsecGssProtection};
+
+fn main() -> vnfs::VfResult<()> {
+    let fs = NfsVecFs::connect_with_options(
+        "nfs.example.com",
+        NfsConnectOptions {
+            authentication: NfsAuthentication::RpcsecGss {
+                // None derives the GSS host-based name nfs@nfs.example.com.
+                service_principal: None,
+                protection: RpcsecGssProtection::Integrity,
+            },
+            ..NfsConnectOptions::default()
+        },
+    )?;
+    drop(fs);
+    Ok(())
+}
+```
+
+`Authentication` and `Integrity` correspond to server export security flavors
+`krb5` and `krb5i`. The server must enable the
+matching flavor and possess a service key for the selected principal. An
+explicit host-based service name can be supplied when DNS canonicalization or
+the export's service identity differs from `nfs@<host>`. Automatic reconnects
+reuse the same authentication configuration and obtain fresh credentials from
+the current process cache. RPCSEC_GSS privacy (`krb5p`) is not exposed yet
+because the supported libntirpc 6.x client cannot reliably encode privacy
+payloads; the API does not silently downgrade it to a weaker mode.
 
 ## Example
 
@@ -146,8 +191,10 @@ sudo apt-get install clang libclang-dev pkg-config libntirpc-dev \
 After Cargo dependencies have been fetched, the native build can run without
 network access. docs.rs uses checked-in FFI declarations and does not require
 the native development packages. NFS servers must expose an NFSv4 pseudo-root
-reachable by the supplied host name. There is currently no RPCSEC_GSS/Kerberos,
-TLS, callback/delegation, or asynchronous API.
+reachable by the supplied host name. Kerberos RPCSEC_GSS requires the opt-in
+Cargo feature, a valid default credential cache, and matching server
+configuration. There is currently no RPC-over-TLS, callback/delegation, or
+asynchronous API.
 
 ## Small-file benchmark
 

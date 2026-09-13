@@ -34,6 +34,10 @@ pub use vfsi_nfs::{client, compound, nfs, rpc, session};
 pub use vfsi_core::*;
 #[cfg(feature = "dummy")]
 pub use vfsi_local::DummyVecFs;
+#[cfg(all(feature = "nfs", feature = "rpcsec-gss"))]
+pub use vfsi_nfs::RpcsecGssProtection;
 #[cfg(feature = "nfs")]
-pub use vfsi_nfs::{NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs};
+pub use vfsi_nfs::{
+    NfsAuthentication, NfsConnectOptions, NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
+};
 pub use vfsi_sync::{VecFs, VecFsExt, VfFileHandle, VfOpenOptions, rm_recursive};

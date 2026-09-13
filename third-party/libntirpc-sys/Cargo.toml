@@ -33,6 +33,10 @@ keywords = [
 license = "BSD-3-Clause"
 repository = "https://github.com/vmingchen/libntirpc-sys"
 
+[features]
+default = []
+rpcsec-gss = []
+
 [lib]
 name = "libntirpc_sys"
 path = "src/lib.rs"

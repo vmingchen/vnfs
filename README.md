@@ -87,8 +87,10 @@ Use `vnfs` for the NFS-focused compatibility crate, `vfsi-core` and
 `vfsi-nfs`, `vfsi-smb`, and `vfsi-local` when selecting backends directly.
 This keeps protocol dependencies out of packages that do not use them.
 
-NFS connections negotiate NFSv4.2 and fall back to NFSv4.1. Server-side COPY
-is capability-aware and falls back to client-side I/O when unavailable. The
+NFS connections negotiate NFSv4.2 and fall back to NFSv4.1. Rust clients use
+AUTH_SYS by default and can opt into Kerberos RPCSEC_GSS (`krb5` or `krb5i`)
+with the `rpcsec-gss` feature. Server-side COPY is capability-aware
+and falls back to client-side I/O when unavailable. The
 separate `vfsi-smb` backend negotiates SMB 2.0.2 through SMB 3.1.1, observes
 server credit and I/O limits, reconnects transport sessions, and uses
 server-side copy when the server advertises it.
@@ -97,8 +99,9 @@ server-side copy when the server advertises it.
 
 VFSI and its Python packages are beta software. The core behavior is covered
 by Rust, Python, upstream `fsspec` contract, C ABI, NFS, and Samba integration
-tests. In particular, NFS authentication is currently AUTH_SYS, the API is
-synchronous, and Linux is the only native-package platform. Read-only NFS
+tests. AUTH_SYS remains the default; production Rust clients can opt into
+Kerberos RPCSEC_GSS, while the Python adapter does not yet expose that option.
+The API is synchronous, and Linux is the only native-package platform. Read-only NFS
 operations recover automatically from transport and session failures with
 bounded reconnect/reopen attempts; mutations are not replayed when a lost
 reply makes their outcome ambiguous. See the [`vnfs` production notes and

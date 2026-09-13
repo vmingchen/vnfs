@@ -9,7 +9,7 @@ use nfsv41_sys::*;
 
 use crate::compound::{Compound, CompoundRes};
 use crate::error::{RpcError, RpcResult};
-use crate::rpc::RpcClient;
+use crate::rpc::{NfsAuthentication, RpcClient};
 
 /// An OPEN owner. seqid is incremented by the server after each OPEN.
 pub struct OpenOwner {
@@ -71,7 +71,29 @@ impl Session {
         connect_timeout: Duration,
         request_timeout: Duration,
     ) -> RpcResult<Session> {
-        let rpc = RpcClient::connect_with_timeouts(host, connect_timeout, request_timeout)?;
+        Self::connect_minor_with_authentication(
+            host,
+            minorversion,
+            connect_timeout,
+            request_timeout,
+            &NfsAuthentication::AuthSys,
+        )
+    }
+
+    /// Connect using explicit timeouts and authentication.
+    pub fn connect_minor_with_authentication(
+        host: &str,
+        minorversion: u32,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+        authentication: &NfsAuthentication,
+    ) -> RpcResult<Session> {
+        let rpc = RpcClient::connect_with_authentication(
+            host,
+            connect_timeout,
+            request_timeout,
+            authentication,
+        )?;
         let mut s = Session {
             rpc,
             clientid: 0,

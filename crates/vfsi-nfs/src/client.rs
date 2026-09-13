@@ -602,10 +602,37 @@ impl NfsClient {
         connect_timeout: Duration,
         request_timeout: Duration,
     ) -> RpcResult<NfsClient> {
-        match Self::connect_minor_with_timeouts(host, 2, connect_timeout, request_timeout) {
+        Self::connect_with_authentication(
+            host,
+            connect_timeout,
+            request_timeout,
+            &crate::rpc::NfsAuthentication::AuthSys,
+        )
+    }
+
+    /// Connect and negotiate a minor version using explicit authentication.
+    pub fn connect_with_authentication(
+        host: &str,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+        authentication: &crate::rpc::NfsAuthentication,
+    ) -> RpcResult<NfsClient> {
+        match Self::connect_minor_with_authentication(
+            host,
+            2,
+            connect_timeout,
+            request_timeout,
+            authentication,
+        ) {
             Ok(client) => Ok(client),
             Err(error) if error.status == nfsstat4_NFS4ERR_MINOR_VERS_MISMATCH => {
-                Self::connect_minor_with_timeouts(host, 1, connect_timeout, request_timeout)
+                Self::connect_minor_with_authentication(
+                    host,
+                    1,
+                    connect_timeout,
+                    request_timeout,
+                    authentication,
+                )
             }
             Err(error) => Err(error),
         }
@@ -617,11 +644,29 @@ impl NfsClient {
         connect_timeout: Duration,
         request_timeout: Duration,
     ) -> RpcResult<NfsClient> {
-        let mut session = Session::connect_minor_with_timeouts(
+        Self::connect_minor_with_authentication(
             host,
             minorversion,
             connect_timeout,
             request_timeout,
+            &crate::rpc::NfsAuthentication::AuthSys,
+        )
+    }
+
+    /// Connect with an explicit minor version, timeouts, and authentication.
+    pub fn connect_minor_with_authentication(
+        host: &str,
+        minorversion: u32,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+        authentication: &crate::rpc::NfsAuthentication,
+    ) -> RpcResult<NfsClient> {
+        let mut session = Session::connect_minor_with_authentication(
+            host,
+            minorversion,
+            connect_timeout,
+            request_timeout,
+            authentication,
         )?;
         let root = session_mount_root(&mut session)?;
         let configured_max_request_bytes = Some(DEFAULT_MAX_COMPOUND_BYTES);

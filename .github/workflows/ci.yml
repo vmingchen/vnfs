@@ -39,7 +39,7 @@ jobs:
           cargo test -p vfsi-core
           cargo test -p vfsi-sync
           cargo test -p vfsi-local
-          cargo test -p vfsi-nfs --lib
+          cargo test -p vfsi-nfs --lib --all-features
           cargo test -p vfsi-smb --lib
           cargo test -p nfsv41-sys
           cargo test -p vnfs --lib
@@ -111,6 +111,8 @@ jobs:
         run: |
           cargo check -p vfsi-nfs --no-default-features
           cargo check -p vfsi-nfs --all-features
+          cargo check -p vnfs --no-default-features --features nfs
+          cargo check -p vnfs --no-default-features --features nfs,rpcsec-gss
           cargo check -p vfsi-smb --no-default-features
           cargo check -p vfsi-smb --all-features
           cargo check -p vnfs --lib --no-default-features
@@ -522,6 +524,24 @@ jobs:
         run: |
           cat /tmp/ganesha.log
           test ! -e /tmp/ganesha-restart.log || cat /tmp/ganesha-restart.log
+
+  nfs-gss-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Kerberos, NFS-Ganesha, and build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config \
+            libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev \
+            krb5-admin-server krb5-kdc krb5-user \
+            nfs-ganesha nfs-ganesha-vfs rpcbind
+      - name: Exercise supported RPCSEC_GSS levels against a private test realm
+        run: ci/run-nfs-gss-integration.sh
 
   nfs-server-copy-integration:
     runs-on: ubuntu-24.04
