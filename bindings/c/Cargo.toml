@@ -4,6 +4,7 @@ version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "C API for VFSI vectorized filesystem interfaces"
+repository = "https://github.com/vmingchen/vnfs"
 keywords = ["filesystem", "vectorized", "ffi", "vfsi"]
 
 [lib]
