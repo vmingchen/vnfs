@@ -1,10 +1,10 @@
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG GANESHA_REPOSITORY=https://github.com/vfsi/nfs-ganesha.git
+ARG GANESHA_REPOSITORY=https://github.com/vfsi/vfsi-infra-nfs-ganesha.git
 ARG GANESHA_REVISION=ec1993746f815f32396f0de36cc7614658a33173
 
-LABEL org.opencontainers.image.source="https://github.com/vfsi/nfs-ganesha"
+LABEL org.opencontainers.image.source="https://github.com/vfsi/vfsi-infra-nfs-ganesha"
 LABEL org.opencontainers.image.revision="${GANESHA_REVISION}"
 LABEL org.opencontainers.image.description="Pinned NFS-Ganesha build for vnfs server-side COPY integration tests"
 

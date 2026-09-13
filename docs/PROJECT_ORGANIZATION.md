@@ -123,17 +123,17 @@ requires it.
 
 ## Repository classes
 
-| Planned repository | Class | Purpose |
+| Repository | Class | Purpose |
 | --- | --- | --- |
 | `vmingchen/vnfs` | platform | Canonical development and releases |
 | `vfsi/vfsi` | mirror | Approved public snapshots of the platform |
 | `vfsi/.github` | organization | Project catalog and contribution routing |
-| `vfsi/port-git` | application port | Git loose-object traversal using VFSI |
-| `vfsi/port-rsync` | application port | rsync sender-side scans using VFSI |
-| `vfsi/infra-nfs-ganesha` | infrastructure | Pinned server used by integration tests |
+| `vfsi/vfsi-port-git` | application port | Git loose-object traversal using VFSI |
+| `vfsi/vfsi-port-rsync` | application port | rsync sender-side scans using VFSI |
+| `vfsi/vfsi-infra-nfs-ganesha` | infrastructure | Pinned server used by integration tests |
 
-Application-port repository names use the `port-` prefix. Infrastructure
-forks use the `infra-` prefix and must not be presented as application ports.
+Application-port repository names use the `vfsi-port-` prefix. Infrastructure
+forks use the `vfsi-infra-` prefix and must not be presented as application ports.
 Repository descriptions and READMEs must identify the upstream project, the
 integration branch, supported VFSI ABI, build instructions, tested revision,
 and maturity.
@@ -151,10 +151,11 @@ platform mirror.
 
 ## Registration and compatibility
 
-`ecosystem/ports.toml` records both the current and planned repository names
-during migration. Every entry pins a full revision, upstream base, integration
-branch, maturity, required ABI, and compatibility-test entry point. Platform
-CI must never build an unpinned external branch.
+`ecosystem/ports.toml` records each canonical repository name. An entry may
+temporarily include a planned repository or branch name during an active
+migration. Every entry pins a full revision, upstream base, integration branch,
+maturity, required ABI, and compatibility-test entry point. Platform CI must
+never build an unpinned external branch.
 
 Fast platform CI validates the registry and public API compatibility. Scheduled
 and manually dispatched ecosystem CI reconstructs each registered revision and

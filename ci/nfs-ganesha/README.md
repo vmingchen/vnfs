@@ -1,6 +1,6 @@
 # Patched NFS-Ganesha CI image
 
-This image pins the patched `vfsi/nfs-ganesha` source used to validate
+This image pins the patched `vfsi/vfsi-infra-nfs-ganesha` source used to validate
 successful NFSv4.2 server-side `COPY`. It intentionally builds only the
 NFSv4 server and VFS FSAL needed by the integration suite.
 

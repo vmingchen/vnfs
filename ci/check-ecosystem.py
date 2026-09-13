@@ -13,6 +13,10 @@ REGISTRY = ROOT / "ecosystem" / "ports.toml"
 SHA = re.compile(r"[0-9a-f]{40}")
 ALLOWED_KINDS = {"application-port", "test-infrastructure"}
 ALLOWED_MATURITY = {"experimental", "validated", "maintained"}
+REPOSITORY_PREFIXES = {
+    "application-port": "https://github.com/vfsi/vfsi-port-",
+    "test-infrastructure": "https://github.com/vfsi/vfsi-infra-",
+}
 
 
 def main() -> None:
@@ -33,7 +37,8 @@ def main() -> None:
             raise SystemExit(f"duplicate component id: {identifier}")
         seen.add(identifier)
 
-        if component.get("kind") not in ALLOWED_KINDS:
+        kind = component.get("kind")
+        if kind not in ALLOWED_KINDS:
             raise SystemExit(f"{identifier}: invalid kind")
         if component.get("maturity") not in ALLOWED_MATURITY:
             raise SystemExit(f"{identifier}: invalid maturity")
@@ -43,10 +48,27 @@ def main() -> None:
             if not isinstance(value, str) or SHA.fullmatch(value) is None:
                 raise SystemExit(f"{identifier}: {field} must be a full Git SHA")
 
-        for field in ("repository", "planned_repository", "upstream"):
+        for field in ("repository", "upstream"):
             value = component.get(field, "")
             if not isinstance(value, str) or not value.startswith("https://github.com/"):
                 raise SystemExit(f"{identifier}: {field} must be a GitHub HTTPS URL")
+
+        repository = component["repository"]
+        if not repository.startswith(REPOSITORY_PREFIXES[kind]):
+            raise SystemExit(
+                f"{identifier}: {kind} repository must use the "
+                f"{REPOSITORY_PREFIXES[kind]} prefix"
+            )
+
+        planned_repository = component.get("planned_repository")
+        if planned_repository is not None:
+            if not isinstance(planned_repository, str) or not planned_repository.startswith(
+                REPOSITORY_PREFIXES[kind]
+            ):
+                raise SystemExit(
+                    f"{identifier}: planned_repository must use the "
+                    f"{REPOSITORY_PREFIXES[kind]} prefix"
+                )
 
         test_path = ROOT / component.get("compatibility_test", "")
         if not test_path.is_file():
