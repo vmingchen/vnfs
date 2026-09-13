@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
@@ -38,7 +38,7 @@ jobs:
           cd /tmp
           /tmp/vfsi-fsspec-release/bin/python -m pytest \
             "$GITHUB_WORKSPACE/adapters/vfsi-fsspec/tests"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: vfsi-fsspec-dist
           path: adapters/vfsi-fsspec/dist/*

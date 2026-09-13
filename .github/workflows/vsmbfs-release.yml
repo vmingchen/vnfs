@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
@@ -38,7 +38,7 @@ jobs:
           cd /tmp
           /tmp/vsmbfs-release/bin/python -m pytest \
             "$GITHUB_WORKSPACE/adapters/vsmbfs/tests/test_package.py"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: vsmbfs-dist
           path: adapters/vsmbfs/dist/*
