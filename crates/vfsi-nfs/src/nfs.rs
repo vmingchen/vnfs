@@ -57,7 +57,7 @@ struct ConnectionConfig {
 ///
 /// The default uses automatic NFSv4.2-to-v4.1 negotiation, ten seconds for
 /// setup, five seconds per RPC, and AUTH_SYS. Enable the `rpcsec-gss` Cargo
-/// feature and select [`NfsAuthentication::RpcsecGss`] to opt into Kerberos.
+/// feature and select `NfsAuthentication::RpcsecGss` to opt into Kerberos.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NfsConnectOptions {
     pub minorversion: Option<u32>,
