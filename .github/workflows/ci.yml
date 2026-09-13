@@ -61,12 +61,15 @@ jobs:
           vfsi-c bindings/c/Cargo.toml
           PACKAGES
 
+          # Package the workspace as a unit so unpublished feature additions
+          # in one member are available to dependent member manifests.
+          cargo package --workspace --locked --no-verify
+
           patches=()
           while read -r package manifest; do
             version=$(python -c \
               'import pathlib,sys,tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["package"]["version"])' \
               "$manifest")
-            cargo package --locked --no-verify -p "$package"
             patches+=(--config \
               "patch.crates-io.$package.path=\"$GITHUB_WORKSPACE/target/package/$package-$version\"")
           done <"$package_list"
