@@ -58,7 +58,13 @@ pub const NF4FIFO: u32 = 7;
 pub enum VfError {
     /// A filesystem status failure; `err_no` is errno-style or an NFS4ERR
     /// code, mirroring the C `tc_res` struct.
-    Op { index: usize, err_no: u32 },
+    Op {
+        index: usize,
+        err_no: u32,
+        domain: ErrorDomain,
+        operation: Option<&'static str>,
+        path: Option<PathBuf>,
+    },
     /// A transport / client-side failure with a human-readable message; there
     /// is no filesystem status ([`err_no`](VfError::err_no) reports
     /// [`VF_ERR_RPC`]). `index` is `None` when the failure cannot be
@@ -66,12 +72,51 @@ pub enum VfError {
     Transport {
         index: Option<usize>,
         message: String,
+        operation: Option<&'static str>,
+        path: Option<PathBuf>,
     },
+}
+
+/// Namespace in which a status code is meaningful.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErrorDomain {
+    Filesystem,
+    Nfs,
+    Smb,
+    Transport,
+    Client,
+}
+
+/// Typed protocol/filesystem status. Transport failures have no status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StatusCode {
+    Errno(u32),
+    Nfs(u32),
+    Smb(u32),
+    Client(u32),
 }
 
 impl VfError {
     pub fn failure(index: usize, err_no: u32) -> VfError {
-        VfError::Op { index, err_no }
+        VfError::Op {
+            index,
+            err_no,
+            domain: ErrorDomain::Filesystem,
+            operation: None,
+            path: None,
+        }
+    }
+
+    pub fn client(index: usize, code: u32) -> VfError {
+        VfError::Op {
+            index,
+            err_no: code,
+            domain: ErrorDomain::Client,
+            operation: None,
+            path: None,
+        }
     }
 
     /// A transport / client-side failure. `index` is best-effort; pass `None`
@@ -80,6 +125,8 @@ impl VfError {
         VfError::Transport {
             index: index.into(),
             message: message.into(),
+            operation: None,
+            path: None,
         }
     }
 
@@ -129,11 +176,16 @@ impl VfError {
             VfError::Transport {
                 index: index.into(),
                 message: e.message,
+                operation: None,
+                path: None,
             }
         } else {
             VfError::Op {
                 index: index.into().unwrap_or(0),
                 err_no: e.status,
+                domain: ErrorDomain::Nfs,
+                operation: None,
+                path: None,
             }
         }
     }
@@ -150,11 +202,91 @@ impl VfError {
     /// Re-attribute this error to a different operation index.
     pub fn with_index(self, index: usize) -> VfError {
         match self {
-            VfError::Op { err_no, .. } => VfError::Op { index, err_no },
-            VfError::Transport { message, .. } => VfError::Transport {
+            VfError::Op {
+                err_no,
+                domain,
+                operation,
+                path,
+                ..
+            } => VfError::Op {
+                index,
+                err_no,
+                domain,
+                operation,
+                path,
+            },
+            VfError::Transport {
+                message,
+                operation,
+                path,
+                ..
+            } => VfError::Transport {
                 index: Some(index),
                 message,
+                operation,
+                path,
             },
+        }
+    }
+
+    /// Attach operation and path context without string parsing.
+    pub fn with_context(mut self, operation: &'static str, path: impl Into<PathBuf>) -> Self {
+        match &mut self {
+            VfError::Op {
+                operation: op,
+                path: p,
+                ..
+            }
+            | VfError::Transport {
+                operation: op,
+                path: p,
+                ..
+            } => {
+                *op = Some(operation);
+                *p = Some(path.into());
+            }
+        }
+        self
+    }
+
+    pub fn domain(&self) -> ErrorDomain {
+        match self {
+            VfError::Op { domain, .. } => *domain,
+            VfError::Transport { .. } => ErrorDomain::Transport,
+        }
+    }
+
+    pub fn status(&self) -> Option<StatusCode> {
+        match self {
+            VfError::Op {
+                err_no,
+                domain: ErrorDomain::Nfs,
+                ..
+            } => Some(StatusCode::Nfs(*err_no)),
+            VfError::Op {
+                err_no,
+                domain: ErrorDomain::Smb,
+                ..
+            } => Some(StatusCode::Smb(*err_no)),
+            VfError::Op {
+                err_no,
+                domain: ErrorDomain::Client,
+                ..
+            } => Some(StatusCode::Client(*err_no)),
+            VfError::Op { err_no, .. } => Some(StatusCode::Errno(*err_no)),
+            VfError::Transport { .. } => None,
+        }
+    }
+
+    pub fn operation(&self) -> Option<&'static str> {
+        match self {
+            VfError::Op { operation, .. } | VfError::Transport { operation, .. } => *operation,
+        }
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            VfError::Op { path, .. } | VfError::Transport { path, .. } => path.as_deref(),
         }
     }
 }
@@ -162,14 +294,41 @@ impl VfError {
 impl std::fmt::Display for VfError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            VfError::Op { index, err_no } => write!(f, "op {} failed: {}", index, err_no),
+            VfError::Op {
+                index,
+                err_no,
+                operation,
+                path,
+                ..
+            } => {
+                write!(f, "op {}", index)?;
+                if let Some(operation) = operation {
+                    write!(f, " ({operation})")?;
+                }
+                if let Some(path) = path {
+                    write!(f, " for {}", path.display())?;
+                }
+                write!(f, " failed: {}", err_no)
+            }
             VfError::Transport {
                 index: Some(index),
                 message,
-            } => write!(f, "op {} transport error: {}", index, message),
+                operation,
+                path,
+            } => {
+                write!(f, "op {index}")?;
+                if let Some(operation) = operation {
+                    write!(f, " ({operation})")?;
+                }
+                if let Some(path) = path {
+                    write!(f, " for {}", path.display())?;
+                }
+                write!(f, " transport error: {message}")
+            }
             VfError::Transport {
                 index: None,
                 message,
+                ..
             } => {
                 write!(f, "transport error: {}", message)
             }
@@ -199,12 +358,318 @@ pub type VfResult<T> = Result<T, VfError>;
 /// error of the first failing operation.
 pub type VfRes = VfResult<()>;
 
+/// Whether the caller can know if a failed operation changed remote state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OutcomeCertainty {
+    /// The operation completed and its result is known.
+    Known,
+    /// The server rejected the operation before it took effect.
+    KnownNotApplied,
+    /// A transport failure happened after dispatch, so reconciliation is
+    /// required before retrying a mutation.
+    Indeterminate,
+}
+
+/// Whether retrying an operation is safe without first reconciling state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RetryClass {
+    Safe,
+    ReconcileFirst,
+    Never,
+}
+
+impl VfError {
+    /// Completion certainty derived from the class of failure.
+    pub fn certainty(&self) -> OutcomeCertainty {
+        if self.is_transport() {
+            OutcomeCertainty::Indeterminate
+        } else {
+            OutcomeCertainty::KnownNotApplied
+        }
+    }
+
+    /// Conservative retry guidance. Transport failures may have crossed the
+    /// server boundary and therefore require reconciliation for mutations.
+    pub fn retry_class(&self) -> RetryClass {
+        if self.is_transport() {
+            RetryClass::ReconcileFirst
+        } else if self.err_no() == VF_ERR_UNSUPPORTED {
+            RetryClass::Never
+        } else {
+            RetryClass::Safe
+        }
+    }
+}
+
+/// Per-operation state returned by the outcome-aware vector API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OpOutcome<T> {
+    Success(T),
+    /// The operation is known to have completed, but a legacy fail-fast
+    /// backend discarded its returned value after a later operation failed.
+    Completed,
+    Failed(VfError),
+    /// The backend stopped before dispatching this operation.
+    NotAttempted,
+    /// The request may have reached the server, but no authoritative result
+    /// was received. Mutating operations must not be blindly replayed.
+    Indeterminate(VfError),
+}
+
+/// Complete, index-preserving result of an ordered vector request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchOutcome<T> {
+    operations: Vec<OpOutcome<T>>,
+}
+
+impl<T> BatchOutcome<T> {
+    pub fn new(operations: Vec<OpOutcome<T>>) -> Self {
+        Self { operations }
+    }
+
+    pub fn all_success(values: Vec<T>) -> Self {
+        Self::new(values.into_iter().map(OpOutcome::Success).collect())
+    }
+
+    pub fn operations(&self) -> &[OpOutcome<T>] {
+        &self.operations
+    }
+
+    pub fn into_operations(self) -> Vec<OpOutcome<T>> {
+        self.operations
+    }
+
+    pub fn is_complete_success(&self) -> bool {
+        self.operations
+            .iter()
+            .all(|outcome| matches!(outcome, OpOutcome::Success(_)))
+    }
+
+    /// Convert to the historical fail-fast shape, returning the first error.
+    pub fn into_fail_fast(self) -> VfResult<Vec<T>> {
+        let mut values = Vec::with_capacity(self.operations.len());
+        for outcome in self.operations {
+            match outcome {
+                OpOutcome::Success(value) => values.push(value),
+                OpOutcome::Completed => {
+                    return Err(VfError::transport(
+                        None,
+                        "completed operation result was not retained",
+                    ));
+                }
+                OpOutcome::Failed(error) | OpOutcome::Indeterminate(error) => return Err(error),
+                OpOutcome::NotAttempted => {
+                    return Err(VfError::transport(None, "operation was not attempted"));
+                }
+            }
+        }
+        Ok(values)
+    }
+}
+
+impl<T> BatchOutcome<T> {
+    /// Adapt a legacy ordered vector result without inventing lost values.
+    pub fn from_fail_fast_values(len: usize, result: VfResult<Vec<T>>) -> Self {
+        match result {
+            Ok(values) if values.len() == len => Self::all_success(values),
+            Ok(_) => Self::new(
+                (0..len)
+                    .map(|_| {
+                        OpOutcome::Indeterminate(VfError::transport(
+                            None,
+                            "backend returned the wrong result count",
+                        ))
+                    })
+                    .collect(),
+            ),
+            Err(error) if error.is_transport() => {
+                let known_prefix = error.index_opt().unwrap_or(0).min(len);
+                Self::new(
+                    (0..len)
+                        .map(|index| {
+                            if index < known_prefix {
+                                OpOutcome::Completed
+                            } else {
+                                OpOutcome::Indeterminate(error.clone())
+                            }
+                        })
+                        .collect(),
+                )
+            }
+            Err(error) => {
+                let failed = error.index_opt().unwrap_or(len);
+                if failed >= len {
+                    return Self::new(
+                        (0..len)
+                            .map(|_| OpOutcome::Indeterminate(error.clone()))
+                            .collect(),
+                    );
+                }
+                Self::new(
+                    (0..len)
+                        .map(|index| {
+                            if index < failed {
+                                OpOutcome::Completed
+                            } else if index == failed {
+                                OpOutcome::Failed(error.clone())
+                            } else {
+                                OpOutcome::NotAttempted
+                            }
+                        })
+                        .collect(),
+                )
+            }
+        }
+    }
+}
+
+impl BatchOutcome<()> {
+    /// Preserve the known prefix of an ordered, fail-fast mutation. A
+    /// protocol status proves the prefix completed and the failing operation
+    /// did not; a transport failure makes every dispatched outcome
+    /// indeterminate.
+    pub fn from_fail_fast(len: usize, result: VfRes) -> Self {
+        match result {
+            Ok(()) => Self::all_success((0..len).map(|_| ()).collect()),
+            Err(error) if error.is_transport() => {
+                let known_prefix = error.index_opt().unwrap_or(0).min(len);
+                Self::new(
+                    (0..len)
+                        .map(|index| {
+                            if index < known_prefix {
+                                OpOutcome::Success(())
+                            } else {
+                                OpOutcome::Indeterminate(error.clone())
+                            }
+                        })
+                        .collect(),
+                )
+            }
+            Err(error) => {
+                let failed = error.index_opt().unwrap_or(len);
+                if failed >= len {
+                    return Self::new(
+                        (0..len)
+                            .map(|_| OpOutcome::Indeterminate(error.clone()))
+                            .collect(),
+                    );
+                }
+                Self::new(
+                    (0..len)
+                        .map(|index| {
+                            if index < failed {
+                                OpOutcome::Success(())
+                            } else if index == failed {
+                                OpOutcome::Failed(error.clone())
+                            } else {
+                                OpOutcome::NotAttempted
+                            }
+                        })
+                        .collect(),
+                )
+            }
+        }
+    }
+}
+
 /// Callback used by vectorized streaming reads.
 pub type ReadStreamCallback<'a> = dyn FnMut(usize, u64, &[u8], bool) -> bool + 'a;
 
 /// An open file descriptor (backend-assigned), the Rust spelling of the C
 /// `int` fd.
 pub type Fd = std::os::fd::RawFd;
+
+/// Opaque identifier for a backend-owned open file.
+///
+/// New APIs use this instead of exposing `RawFd`, which could be confused
+/// with a process file descriptor. The legacy compatibility API continues to
+/// use [`Fd`] until its next breaking release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HandleId(Fd);
+
+impl HandleId {
+    #[doc(hidden)]
+    pub fn from_legacy(fd: Fd) -> Self {
+        Self(fd)
+    }
+
+    #[doc(hidden)]
+    pub fn as_legacy(self) -> Fd {
+        self.0
+    }
+}
+
+bitflags::bitflags! {
+    /// Typed file-open behavior for the Rust-native API.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+    pub struct OpenFlags: u32 {
+        const READ = 1 << 0;
+        const WRITE = 1 << 1;
+        const APPEND = 1 << 2;
+        const TRUNCATE = 1 << 3;
+        const CREATE = 1 << 4;
+        const CREATE_NEW = 1 << 5;
+    }
+}
+
+impl OpenFlags {
+    /// Translate the typed flags for compatibility backends.
+    pub fn to_libc(self) -> VfResult<i32> {
+        let writable = self.intersects(Self::WRITE | Self::APPEND);
+        let mut raw = match (self.contains(Self::READ), writable) {
+            (true, true) => libc::O_RDWR,
+            (true, false) => libc::O_RDONLY,
+            (false, true) => libc::O_WRONLY,
+            (false, false) => return Err(VfError::failure(0, ERR_INVAL)),
+        };
+        if self.contains(Self::TRUNCATE) && !writable {
+            return Err(VfError::failure(0, ERR_INVAL));
+        }
+        if self.intersects(Self::CREATE | Self::CREATE_NEW) && !writable {
+            return Err(VfError::failure(0, ERR_INVAL));
+        }
+        if self.contains(Self::APPEND) {
+            raw |= libc::O_APPEND;
+        }
+        if self.contains(Self::TRUNCATE) {
+            raw |= libc::O_TRUNC;
+        }
+        if self.intersects(Self::CREATE | Self::CREATE_NEW) {
+            raw |= libc::O_CREAT;
+        }
+        if self.contains(Self::CREATE_NEW) {
+            raw |= libc::O_EXCL;
+        }
+        Ok(raw)
+    }
+}
+
+/// One complete open request. This replaces three error-prone parallel
+/// slices of paths, flags, and modes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenRequest {
+    pub path: PathBuf,
+    pub flags: OpenFlags,
+    pub mode: u32,
+}
+
+impl OpenRequest {
+    pub fn new(path: impl Into<PathBuf>, flags: OpenFlags) -> Self {
+        Self {
+            path: path.into(),
+            flags,
+            mode: 0o666,
+        }
+    }
+
+    pub fn mode(mut self, mode: u32) -> Self {
+        self.mode = mode;
+        self
+    }
+}
 
 /// Insert an open object using a positive descriptor, wrapping safely and
 /// skipping live descriptors instead of overwriting them.
@@ -481,6 +946,29 @@ pub struct WriteOp {
     pub truncate: bool,
 }
 
+/// Borrowed write request for callers that should not have to allocate an
+/// owned `Vec<u8>` merely to submit a vector operation.
+#[derive(Debug, Clone, Copy)]
+pub struct WriteOpRef<'a> {
+    pub file: &'a VfFile,
+    pub offset: VfOffset,
+    pub data: &'a [u8],
+    pub creation: bool,
+    pub truncate: bool,
+}
+
+impl<'a> WriteOpRef<'a> {
+    pub fn new(file: &'a VfFile, offset: VfOffset, data: &'a [u8]) -> Self {
+        Self {
+            file,
+            offset,
+            data,
+            creation: false,
+            truncate: false,
+        }
+    }
+}
+
 impl WriteOp {
     pub fn new(file: VfFile, offset: VfOffset, data: Vec<u8>) -> WriteOp {
         WriteOp {
@@ -705,6 +1193,86 @@ pub struct VfAttrs {
     pub has_named_attr: bool,
 }
 
+/// Typed metadata lookup request. Returned fields are still represented by
+/// [`VfAttrs`] during the compatibility transition, but request and mutation
+/// masks are no longer conflated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataQuery {
+    pub file: VfFile,
+    pub attributes: AttrMask,
+    pub follow_symlinks: bool,
+}
+
+impl MetadataQuery {
+    pub fn new(file: VfFile, attributes: AttrMask) -> Self {
+        Self {
+            file,
+            attributes,
+            follow_symlinks: true,
+        }
+    }
+
+    pub fn no_follow(mut self) -> Self {
+        self.follow_symlinks = false;
+        self
+    }
+}
+
+/// Valid-by-construction metadata mutation request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetAttributes {
+    pub file: VfFile,
+    pub mode: Option<u32>,
+    pub size: Option<u64>,
+    pub atime: Option<(i64, u32)>,
+    pub mtime: Option<(i64, u32)>,
+    pub follow_symlinks: bool,
+}
+
+impl SetAttributes {
+    pub fn new(file: VfFile) -> Self {
+        Self {
+            file,
+            mode: None,
+            size: None,
+            atime: None,
+            mtime: None,
+            follow_symlinks: true,
+        }
+    }
+
+    pub fn no_follow(mut self) -> Self {
+        self.follow_symlinks = false;
+        self
+    }
+
+    pub fn into_legacy(self) -> VfAttrs {
+        let mut attrs = VfAttrs {
+            file: self.file,
+            ..VfAttrs::default()
+        };
+        if let Some(mode) = self.mode {
+            attrs.masks |= AttrMask::MODE;
+            attrs.mode = mode;
+        }
+        if let Some(size) = self.size {
+            attrs.masks |= AttrMask::SIZE;
+            attrs.size = size;
+        }
+        if let Some((sec, nsec)) = self.atime {
+            attrs.masks |= AttrMask::ATIME;
+            attrs.atime_sec = sec;
+            attrs.atime_nsec = nsec;
+        }
+        if let Some((sec, nsec)) = self.mtime {
+            attrs.masks |= AttrMask::MTIME;
+            attrs.mtime_sec = sec;
+            attrs.mtime_nsec = nsec;
+        }
+        attrs
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The trait
 // ---------------------------------------------------------------------------
@@ -731,3 +1299,18 @@ pub const VF_CAP_UNIX_SEMANTICS: u64 = VF_CAP_POSIX_METADATA
     | VF_CAP_HARDLINKS
     | VF_CAP_NON_UTF8_PATHS
     | VF_CAP_LSTAT;
+
+bitflags::bitflags! {
+    /// Typed backend capabilities. Unlike the legacy integer constants, this
+    /// rejects accidental mixing with unrelated bit fields.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+    pub struct Capabilities: u64 {
+        const SERVER_COPY = VF_CAP_SERVER_COPY;
+        const POSIX_METADATA = VF_CAP_POSIX_METADATA;
+        const SYMLINKS = VF_CAP_SYMLINKS;
+        const HARDLINKS = VF_CAP_HARDLINKS;
+        const NON_UTF8_PATHS = VF_CAP_NON_UTF8_PATHS;
+        const LSTAT = VF_CAP_LSTAT;
+        const UNIX_SEMANTICS = VF_CAP_UNIX_SEMANTICS;
+    }
+}

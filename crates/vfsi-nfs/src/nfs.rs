@@ -8,6 +8,7 @@
 #![allow(non_upper_case_globals)]
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use nfsv41_sys::*;
@@ -17,7 +18,8 @@ use crate::path::{
     components_bytes, join_path_bytes, normalize_bytes, path_bytes, path_from_bytes,
     split_path_bytes,
 };
-// Re-export the shared types/trait so `use vnfs::nfs::*` works.
+use crate::session::make_verifier;
+// Re-export the shared types/trait so `use vnfs::legacy::nfs::*` works.
 pub use crate::rpc::NfsAuthentication;
 #[cfg(feature = "rpcsec-gss")]
 pub use crate::rpc::RpcsecGssProtection;
@@ -47,10 +49,15 @@ struct ReopenFile {
 #[derive(Debug, Clone)]
 struct ConnectionConfig {
     host: String,
+    root: PathBuf,
     minorversion: Option<u32>,
     connect_timeout: Duration,
     request_timeout: Duration,
     authentication: NfsAuthentication,
+    client_owner: Option<Vec<u8>>,
+    /// Stable for the lifetime of this client, including reconnects. A
+    /// changed verifier tells an NFS server that the client rebooted.
+    client_verifier: verifier4,
 }
 
 /// Options for establishing an NFSv4 connection.
@@ -60,21 +67,169 @@ struct ConnectionConfig {
 /// feature and select `NfsAuthentication::RpcsecGss` to opt into Kerberos.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NfsConnectOptions {
+    /// Root of the application-visible namespace within the NFS pseudo-root.
+    pub root: PathBuf,
     pub minorversion: Option<u32>,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     pub authentication: NfsAuthentication,
+    /// Stable NFS client-owner identity. Must be unique among simultaneously
+    /// active clients using the same server and credential.
+    pub client_owner: Option<Vec<u8>>,
+    pub recovery_policy: NfsRecoveryPolicy,
+    pub auto_reconnect: bool,
+    /// Client-side compound payload cap; zero uses the negotiated server cap.
+    pub max_compound_bytes: usize,
 }
 
 impl Default for NfsConnectOptions {
     fn default() -> Self {
         Self {
+            root: PathBuf::from("/"),
             minorversion: None,
             connect_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(5),
             authentication: NfsAuthentication::AuthSys,
+            client_owner: None,
+            recovery_policy: NfsRecoveryPolicy::default(),
+            auto_reconnect: true,
+            max_compound_bytes: 0,
         }
     }
+}
+
+/// Builder for a completely configured NFS client.
+#[derive(Clone)]
+pub struct NfsClientBuilder {
+    host: String,
+    options: NfsConnectOptions,
+    observer: Option<Arc<dyn NfsObserver>>,
+    require_secure_authentication: bool,
+}
+
+impl std::fmt::Debug for NfsClientBuilder {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NfsClientBuilder")
+            .field("host", &self.host)
+            .field("options", &self.options)
+            .field("observer", &self.observer.as_ref().map(|_| "configured"))
+            .field(
+                "require_secure_authentication",
+                &self.require_secure_authentication,
+            )
+            .finish()
+    }
+}
+
+impl NfsClientBuilder {
+    pub fn new(host: impl Into<String>) -> Self {
+        Self {
+            host: host.into(),
+            options: NfsConnectOptions::default(),
+            observer: None,
+            require_secure_authentication: false,
+        }
+    }
+
+    pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.options.root = root.into();
+        self
+    }
+
+    pub fn minor_version(mut self, version: Option<u32>) -> Self {
+        self.options.minorversion = version;
+        self
+    }
+
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.options.connect_timeout = timeout;
+        self
+    }
+
+    pub fn request_timeout(mut self, timeout: Duration) -> Self {
+        self.options.request_timeout = timeout;
+        self
+    }
+
+    pub fn authentication(mut self, authentication: NfsAuthentication) -> Self {
+        self.options.authentication = authentication;
+        self
+    }
+
+    pub fn client_owner(mut self, owner: impl Into<Vec<u8>>) -> Self {
+        self.options.client_owner = Some(owner.into());
+        self
+    }
+
+    pub fn recovery_policy(mut self, policy: NfsRecoveryPolicy) -> Self {
+        self.options.recovery_policy = policy;
+        self
+    }
+
+    pub fn auto_reconnect(mut self, enabled: bool) -> Self {
+        self.options.auto_reconnect = enabled;
+        self
+    }
+
+    pub fn max_compound_bytes(mut self, bytes: usize) -> Self {
+        self.options.max_compound_bytes = bytes;
+        self
+    }
+
+    pub fn observer(mut self, observer: Arc<dyn NfsObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    /// Refuse to connect with AUTH_SYS. This is a fail-closed guard for
+    /// deployments which require cryptographic peer authentication.
+    pub fn require_secure_authentication(mut self, required: bool) -> Self {
+        self.require_secure_authentication = required;
+        self
+    }
+
+    pub fn connect(self) -> VfResult<NfsVecFs> {
+        if self.require_secure_authentication
+            && matches!(&self.options.authentication, NfsAuthentication::AuthSys)
+        {
+            return Err(
+                VfError::client(0, ERR_ACCES).with_context("connect", Path::new(&self.host))
+            );
+        }
+        if self
+            .options
+            .client_owner
+            .as_ref()
+            .is_some_and(|owner| owner.is_empty() || owner.len() > 1024)
+        {
+            return Err(
+                VfError::client(0, ERR_INVAL).with_context("connect", Path::new(&self.host))
+            );
+        }
+        let mut filesystem = NfsVecFs::connect_with_options(&self.host, self.options)?;
+        filesystem.observer = self.observer;
+        filesystem.notify(NfsEvent::Connected {
+            minor_version: filesystem.minorversion(),
+        });
+        Ok(filesystem)
+    }
+}
+
+/// Operational lifecycle events emitted outside the transport hot path.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum NfsEvent {
+    Connected { minor_version: u32 },
+    ReconnectStarted,
+    ReconnectSucceeded,
+    ReconnectFailed { error: VfError },
+    Shutdown { result: Result<(), VfError> },
+}
+
+/// Observer hook which does not impose a logging or metrics framework.
+pub trait NfsObserver: Send + Sync + 'static {
+    fn on_event(&self, event: &NfsEvent);
 }
 
 /// Bounded recovery policy for side-effect-free operations.
@@ -138,6 +293,7 @@ pub struct NfsVecFs {
     /// plus a separate CLOSE compound (portable), or the old phased path.
     merged_mode: MergedIoMode,
     configured_max_compound_bytes: usize,
+    observer: Option<Arc<dyn NfsObserver>>,
 }
 
 /// Which merged-compound strategy the NFS backend uses for path-based bulk
@@ -165,6 +321,52 @@ fn non_destructive_reopen_flags(flags: i32) -> i32 {
 }
 
 impl NfsVecFs {
+    pub fn builder(host: impl Into<String>) -> NfsClientBuilder {
+        NfsClientBuilder::new(host)
+    }
+
+    /// Close all descriptors and explicitly tear down NFS session state.
+    /// `Drop` remains a best-effort fallback when this result is not needed.
+    pub fn shutdown(mut self) -> VfResult<()> {
+        let observer = self.observer.clone();
+        let closes: Vec<crate::client::CloseOp> = self
+            .open_files
+            .drain()
+            .map(|(_, open)| crate::client::CloseOp {
+                fh: open.fh,
+                stateid: open.stateid,
+            })
+            .collect();
+        let close_result = self
+            .nfs
+            .close_many(&closes)
+            .map_err(VfError::from_rpc_indexed);
+        let shutdown_result = self
+            .nfs
+            .shutdown()
+            .map_err(|error| VfError::from_rpc(error, None));
+        let result = close_result.and(shutdown_result);
+        if let Some(observer) = observer {
+            observer.on_event(&NfsEvent::Shutdown {
+                result: result.clone(),
+            });
+        }
+        result
+    }
+
+    fn notify(&self, event: NfsEvent) {
+        if let Some(observer) = &self.observer {
+            observer.on_event(&event);
+        }
+    }
+
+    fn visible_path(&self, server_path: &Path) -> PathBuf {
+        Path::new("/").join(
+            server_path
+                .strip_prefix(&self.connection.root)
+                .unwrap_or(server_path),
+        )
+    }
     /// Force a particular merged-compound mode (diagnostics/tests): "full"
     /// (default, one compound incl. CLOSE), "openwrite" (open+I/O compound +
     /// separate close), or "off" (legacy phased path).
@@ -614,31 +816,53 @@ impl NfsVecFs {
 
     /// Connect using explicit protocol, timeout, and authentication options.
     pub fn connect_with_options(host: &str, options: NfsConnectOptions) -> VfResult<NfsVecFs> {
+        let root = path_from_bytes(&normalize_bytes(path_bytes(&options.root)));
         let connection = ConnectionConfig {
             host: host.to_owned(),
+            root,
             minorversion: options.minorversion,
             connect_timeout: options.connect_timeout,
             request_timeout: options.request_timeout,
             authentication: options.authentication,
+            client_owner: options.client_owner,
+            client_verifier: make_verifier(),
         };
         let nfs = Self::connect_client(&connection)?;
-        Ok(Self::from_client(nfs, connection))
+        let mut filesystem = Self::from_client(nfs, connection);
+        filesystem.recovery_policy = options.recovery_policy;
+        filesystem.auto_reconnect = options.auto_reconnect;
+        if options.max_compound_bytes != 0 {
+            filesystem.set_max_compound_bytes(options.max_compound_bytes);
+        }
+        // The protocol handshake already resolved the pseudo-root. Only a
+        // configured sub-root needs an eager lookup and type check.
+        if !filesystem.connection.root.as_os_str().is_empty() {
+            let root_attrs = filesystem.stat(Path::new("/"))?;
+            if root_attrs.ftype != VfType::Directory {
+                return Err(VfError::failure(0, ERR_NOTDIR));
+            }
+        }
+        Ok(filesystem)
     }
 
     fn connect_client(connection: &ConnectionConfig) -> VfResult<NfsClient> {
         match connection.minorversion {
-            Some(version) => NfsClient::connect_minor_with_authentication(
+            Some(version) => NfsClient::connect_minor_with_identity(
                 &connection.host,
                 version,
                 connection.connect_timeout,
                 connection.request_timeout,
                 &connection.authentication,
+                connection.client_owner.as_deref(),
+                Some(connection.client_verifier),
             ),
-            None => NfsClient::connect_with_authentication(
+            None => NfsClient::connect_with_identity(
                 &connection.host,
                 connection.connect_timeout,
                 connection.request_timeout,
                 &connection.authentication,
+                connection.client_owner.as_deref(),
+                Some(connection.client_verifier),
             ),
         }
         .map_err(|e| VfError::from_rpc(e, 0))
@@ -646,19 +870,21 @@ impl NfsVecFs {
 
     fn from_client(nfs: NfsClient, connection: ConnectionConfig) -> NfsVecFs {
         let server_copy_enabled = cfg!(feature = "server-copy") && nfs.minorversion() >= 2;
+        let cwd = connection.root.clone();
         NfsVecFs {
             nfs,
             connection,
             recovery_policy: NfsRecoveryPolicy::default(),
             auto_reconnect: true,
             recovery_in_progress: false,
-            cwd: PathBuf::new(),
+            cwd,
             next_fd: 0,
             open_files: std::collections::HashMap::new(),
             server_copy_enabled,
             server_copy_stats: NfsServerCopyStats::default(),
             merged_mode: MergedIoMode::Full,
             configured_max_compound_bytes: 0,
+            observer: None,
         }
     }
 
@@ -700,6 +926,7 @@ impl NfsVecFs {
         replacement.next_fd = self.next_fd;
         replacement.merged_mode = self.merged_mode;
         replacement.server_copy_stats = self.server_copy_stats;
+        replacement.observer = self.observer.clone();
         replacement.configured_max_compound_bytes = self.configured_max_compound_bytes;
         if self.configured_max_compound_bytes != 0 {
             replacement
@@ -741,13 +968,17 @@ impl NfsVecFs {
     /// Descriptor numbers and current offsets are preserved. Reopen never
     /// repeats create, exclusive-create, or truncate side effects.
     pub fn reconnect(&mut self) -> VfResult<()> {
+        self.notify(NfsEvent::ReconnectStarted);
         let attempts = self.recovery_policy.reconnect_attempts.max(1);
         let mut backoff = self.recovery_policy.initial_backoff;
         let started = std::time::Instant::now();
         let mut last = None;
         for attempt in 0..attempts {
             match self.reconnect_once() {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    self.notify(NfsEvent::ReconnectSucceeded);
+                    return Ok(());
+                }
                 Err(error) => last = Some(error),
             }
             let elapsed = started.elapsed();
@@ -763,7 +994,11 @@ impl NfsVecFs {
                     .min(self.recovery_policy.max_backoff);
             }
         }
-        Err(last.unwrap_or_else(|| VfError::transport(None, "NFS reconnect failed")))
+        let error = last.unwrap_or_else(|| VfError::transport(None, "NFS reconnect failed"));
+        self.notify(NfsEvent::ReconnectFailed {
+            error: error.clone(),
+        });
+        Err(error)
     }
 
     fn read_with_recovery<T>(
@@ -840,7 +1075,7 @@ impl NfsVecFs {
                         .nfs
                         .readlink(&fh)
                         .map_err(|e| VfError::from_rpc(e, 0))?;
-                    path = Self::resolve_target(&path, &target);
+                    path = self.resolve_target(&path, &target);
                     hops += 1;
                 }
                 Err(e) if e.status == nfsstat4_NFS4ERR_SYMLINK => {
@@ -872,7 +1107,7 @@ impl NfsVecFs {
                                 }
                                 rest.extend_from_slice(r);
                             }
-                            let base = Self::resolve_target(&full_comp, &target);
+                            let base = self.resolve_target(&full_comp, &target);
                             path = if rest.is_empty() {
                                 base
                             } else {
@@ -987,7 +1222,7 @@ impl NfsVecFs {
                 cur_offset: 0,
                 append: flags[i] & O_APPEND != 0,
                 reopen: Some(ReopenFile {
-                    path: Path::new("/").join(self.abs_path(paths[i])),
+                    path: self.visible_path(&self.abs_path(paths[i])),
                     flags: non_destructive_reopen_flags(flags[i]),
                     mode: modes[i],
                 }),
@@ -1119,7 +1354,7 @@ impl NfsVecFs {
                 cur_offset: 0,
                 append: flags[i] & O_APPEND != 0,
                 reopen: Some(ReopenFile {
-                    path: Path::new("/").join(self.abs_path(paths[i])),
+                    path: self.visible_path(&self.abs_path(paths[i])),
                     flags: non_destructive_reopen_flags(flags[i]),
                     mode: modes[i],
                 }),
@@ -1597,26 +1832,37 @@ impl NfsVecFs {
 
     /// Resolve a symlink target against the link's parent directory (POSIX
     /// semantics), returning a normalized root-relative path. Absolute
-    /// targets resolve from the export root.
-    fn resolve_target(link_path: &[u8], target: &[u8]) -> Vec<u8> {
-        if target.first() == Some(&b'/') {
+    /// targets resolve from the configured application namespace root.
+    fn resolve_target(&self, link_path: &[u8], target: &[u8]) -> Vec<u8> {
+        let namespace_root = path_bytes(&self.connection.root);
+        let link_relative = link_path
+            .strip_prefix(namespace_root)
+            .map(|path| path.strip_prefix(b"/").unwrap_or(path))
+            .unwrap_or(link_path);
+        let relative = if target.first() == Some(&b'/') {
             normalize_bytes(&target[1..])
         } else {
             let mut combined = Vec::new();
-            if let Some(idx) = link_path.iter().rposition(|&b| b == b'/') {
-                combined.extend_from_slice(&link_path[..=idx]);
+            if let Some(idx) = link_relative.iter().rposition(|&b| b == b'/') {
+                combined.extend_from_slice(&link_relative[..=idx]);
             };
             combined.extend_from_slice(target);
             normalize_bytes(&combined)
-        }
+        };
+        path_bytes(&self.connection.root.join(path_from_bytes(&relative))).to_vec()
     }
 
     fn follow_target_path(&mut self, root_rel: &Path) -> VfResult<PathBuf> {
         let mut current = normalize_bytes(path_bytes(root_rel));
         let mut hops = 0usize;
         loop {
+            let namespace_root = path_bytes(&self.connection.root);
+            let visible = current
+                .strip_prefix(namespace_root)
+                .map(|path| path.strip_prefix(b"/").unwrap_or(path))
+                .unwrap_or(&current);
             let mut abs = b"/".to_vec();
-            abs.extend_from_slice(&current);
+            abs.extend_from_slice(visible);
             let abs_path = path_from_bytes(&abs);
             let st = match self.lstat(&abs_path) {
                 Ok(s) => s,
@@ -1630,7 +1876,7 @@ impl NfsVecFs {
                 return Err(VfError::failure(0, nfsstat4_NFS4ERR_IO)); // symlink loop
             }
             let target = self.readlink(&abs_path)?;
-            current = Self::resolve_target(&current, &target);
+            current = self.resolve_target(&current, &target);
             hops += 1;
         }
     }
@@ -2374,7 +2620,7 @@ impl NfsVecFs {
                     Ok(p) => p,
                     Err(e) => return Err(e.with_index(i)),
                 };
-                paths.push(Path::new("/").join(&path));
+                paths.push(self.visible_path(&path));
                 indices.push(i);
             }
         }
@@ -2442,12 +2688,19 @@ impl VecFs for NfsVecFs {
     }
 
     fn abs_path(&self, path: &Path) -> PathBuf {
-        let root_rel = if path.is_absolute() {
+        let namespace_relative = if path.is_absolute() {
             path.strip_prefix("/").unwrap_or(path).to_path_buf()
         } else {
-            self.cwd.join(path)
+            self.cwd
+                .strip_prefix(&self.connection.root)
+                .unwrap_or(Path::new(""))
+                .join(path)
         };
-        path_from_bytes(&normalize_bytes(path_bytes(&root_rel)))
+        self.connection
+            .root
+            .join(path_from_bytes(&normalize_bytes(path_bytes(
+                &namespace_relative,
+            ))))
     }
 
     fn open_by_path(
@@ -2459,8 +2712,8 @@ impl VecFs for NfsVecFs {
     ) -> VfResult<VfFile> {
         use libc::{O_APPEND, O_CREAT, O_EXCL, O_TRUNC};
         let full = match base {
-            VfPathBase::Abs => pathname.strip_prefix("/").unwrap_or(pathname).to_path_buf(),
-            VfPathBase::Cwd => self.cwd.join(pathname),
+            VfPathBase::Abs => self.abs_path(&Path::new("/").join(pathname)),
+            VfPathBase::Cwd => self.abs_path(pathname),
         };
         let full = path_from_bytes(&normalize_bytes(path_bytes(&full)));
         // Follow a final symlink chain so O_CREAT creates the target
@@ -2505,7 +2758,7 @@ impl VecFs for NfsVecFs {
             cur_offset: 0,
             append: flags & O_APPEND != 0,
             reopen: Some(ReopenFile {
-                path: Path::new("/").join(&full),
+                path: self.visible_path(&full),
                 flags: non_destructive_reopen_flags(flags),
                 mode,
             }),
@@ -2537,6 +2790,17 @@ impl VecFs for NfsVecFs {
             .map_err(|e| VfError::from_rpc(e, 0))
     }
 
+    fn sync_data(&mut self, tcf: &VfFile) -> VfResult<()> {
+        let fd = tcf.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        if self.open_files.contains_key(&fd) {
+            // All writes request NFS FILE_SYNC4 stability. Validate the
+            // descriptor so flush cannot incorrectly succeed after close.
+            Ok(())
+        } else {
+            Err(VfError::failure(0, ERR_EBADF))
+        }
+    }
+
     fn closev(&mut self, files: &[VfFile]) -> VfRes {
         let mut ops = Vec::with_capacity(files.len());
         for (i, f) in files.iter().enumerate() {
@@ -2566,7 +2830,11 @@ impl VecFs for NfsVecFs {
     }
 
     fn getcwd(&self) -> PathBuf {
-        Path::new("/").join(&self.cwd)
+        Path::new("/").join(
+            self.cwd
+                .strip_prefix(&self.connection.root)
+                .unwrap_or(&self.cwd),
+        )
     }
 
     fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
@@ -3145,7 +3413,7 @@ impl VecFs for NfsVecFs {
             let path = self.vf_path(&a.file).map_err(|e| e.with_index(i))?;
             let (dir, name) =
                 split_path_bytes(path_bytes(&path)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
-            parents.push(Path::new("/").join(path_from_bytes(&dir)));
+            parents.push(self.visible_path(&path_from_bytes(&dir)));
             names.push(name);
         }
         let files: Vec<VfFile> = parents.iter().map(|p| VfFile::from_os_path(p)).collect();
@@ -3189,7 +3457,7 @@ impl VecFs for NfsVecFs {
             let full = self.abs_path(new);
             let (dir, name) =
                 split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
-            parents.push(Path::new("/").join(path_from_bytes(&dir)));
+            parents.push(self.visible_path(&path_from_bytes(&dir)));
             names.push(name);
         }
         let files: Vec<VfFile> = parents.iter().map(|p| VfFile::from_os_path(p)).collect();
@@ -3257,7 +3525,7 @@ impl VecFs for NfsVecFs {
             let full = self.abs_path(new);
             let (dir, name) =
                 split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
-            parents.push(Path::new("/").join(path_from_bytes(&dir)));
+            parents.push(self.visible_path(&path_from_bytes(&dir)));
             names.push(name);
         }
         let files: Vec<VfFile> = parents.iter().map(|p| VfFile::from_os_path(p)).collect();
@@ -3861,5 +4129,61 @@ mod tests {
         assert_eq!(options.connect_timeout, Duration::from_secs(10));
         assert_eq!(options.request_timeout, Duration::from_secs(5));
         assert_eq!(options.authentication, NfsAuthentication::AuthSys);
+        assert_eq!(options.root, Path::new("/"));
+        assert!(options.auto_reconnect);
+        assert_eq!(options.max_compound_bytes, 0);
+    }
+
+    #[test]
+    fn builder_collects_connection_and_runtime_configuration() {
+        let policy = NfsRecoveryPolicy {
+            reconnect_attempts: 3,
+            ..NfsRecoveryPolicy::default()
+        };
+        let builder = NfsClientBuilder::new("server:2049")
+            .root("/export/app")
+            .minor_version(Some(1))
+            .client_owner(b"production-client-17".to_vec())
+            .request_timeout(Duration::from_secs(7))
+            .recovery_policy(policy)
+            .auto_reconnect(false)
+            .max_compound_bytes(64 * 1024);
+        assert_eq!(builder.host, "server:2049");
+        assert_eq!(builder.options.root, Path::new("/export/app"));
+        assert_eq!(builder.options.minorversion, Some(1));
+        assert_eq!(
+            builder.options.client_owner.as_deref(),
+            Some(b"production-client-17".as_slice())
+        );
+        assert_eq!(builder.options.request_timeout, Duration::from_secs(7));
+        assert_eq!(builder.options.recovery_policy, policy);
+        assert!(!builder.options.auto_reconnect);
+        assert_eq!(builder.options.max_compound_bytes, 64 * 1024);
+    }
+
+    #[test]
+    fn secure_authentication_requirement_fails_closed_before_network_io() {
+        let error = NfsClientBuilder::new("unreachable.invalid")
+            .require_secure_authentication(true)
+            .connect()
+            .err()
+            .expect("AUTH_SYS must be rejected");
+        assert_eq!(error.domain(), ErrorDomain::Client);
+        assert_eq!(error.err_no(), ERR_ACCES);
+        assert_eq!(error.operation(), Some("connect"));
+    }
+
+    #[test]
+    fn invalid_client_owner_fails_before_network_io() {
+        for owner in [Vec::new(), vec![b'x'; 1025]] {
+            let error = NfsClientBuilder::new("unreachable.invalid")
+                .client_owner(owner)
+                .connect()
+                .err()
+                .expect("invalid client owner must be rejected");
+            assert_eq!(error.domain(), ErrorDomain::Client);
+            assert_eq!(error.err_no(), ERR_INVAL);
+            assert_eq!(error.operation(), Some("connect"));
+        }
     }
 }

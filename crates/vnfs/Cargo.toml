@@ -14,7 +14,7 @@ keywords = ["nfs", "nfs4", "filesystem", "vectorized", "vfsi"]
 all-features = true
 
 [features]
-default = ["nfs", "dummy", "server-copy"]
+default = ["nfs", "server-copy"]
 nfs = ["dep:nfsv41-sys", "dep:vfsi-nfs"]
 dummy = ["dep:vfsi-local"]
 server-copy = ["vfsi-nfs?/server-copy"]
@@ -30,3 +30,7 @@ vfsi-sync = { workspace = true }
 
 [dev-dependencies]
 vfsi-sync = { workspace = true, features = ["test-support"] }
+
+[[test]]
+name = "dummy_vecfs"
+required-features = ["dummy"]

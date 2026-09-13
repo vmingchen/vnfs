@@ -621,6 +621,26 @@ impl VecFs for DummyVecFs {
             .ok_or_else(|| VfError::failure(0, ERR_EBADF))
     }
 
+    fn sync_data(&mut self, tcf: &VfFile) -> VfResult<()> {
+        let fd = tcf.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        self.open_files
+            .get(&fd)
+            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?
+            .file
+            .sync_data()
+            .map_err(|error| VfError::failure(0, Self::errno(&error)))
+    }
+
+    fn sync_all(&mut self, tcf: &VfFile) -> VfResult<()> {
+        let fd = tcf.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        self.open_files
+            .get(&fd)
+            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?
+            .file
+            .sync_all()
+            .map_err(|error| VfError::failure(0, Self::errno(&error)))
+    }
+
     fn chdir(&mut self, path: &Path) -> VfResult<()> {
         let p = self.real_path(&self.resolve(path))?;
         if !p.is_dir() {

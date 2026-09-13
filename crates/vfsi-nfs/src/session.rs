@@ -41,6 +41,7 @@ pub struct Session {
     /// operations, so closing an internal open never revokes a stateid the
     /// caller still holds (kernel nfsd reuses one stateid per owner+file).
     pub path_owner: OpenOwner,
+    client_owner: Option<Vec<u8>>,
 }
 
 impl Session {
@@ -88,6 +89,26 @@ impl Session {
         request_timeout: Duration,
         authentication: &NfsAuthentication,
     ) -> RpcResult<Session> {
+        Self::connect_minor_with_identity(
+            host,
+            minorversion,
+            connect_timeout,
+            request_timeout,
+            authentication,
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn connect_minor_with_identity(
+        host: &str,
+        minorversion: u32,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+        authentication: &NfsAuthentication,
+        client_owner: Option<&[u8]>,
+        client_verifier: Option<verifier4>,
+    ) -> RpcResult<Session> {
         let rpc = RpcClient::connect_with_authentication(
             host,
             connect_timeout,
@@ -117,27 +138,33 @@ impl Session {
                 seqid: 0,
                 verifier: make_verifier(),
             },
+            client_owner: client_owner.map(<[u8]>::to_vec),
         };
-        s.exchange_id()?;
+        s.exchange_id(client_verifier)?;
         s.create_session()?;
         s.reclaim_complete()?;
         Ok(s)
     }
 
-    fn exchange_id(&mut self) -> RpcResult<()> {
-        let verifier = make_verifier();
+    fn exchange_id(&mut self, client_verifier: Option<verifier4>) -> RpcResult<()> {
+        let verifier = client_verifier.unwrap_or_else(make_verifier);
         // A unique owner id per connection so concurrent clients (parallel
         // tests, multiple processes) don't collide on the server's client
         // table and replace each other's confirmed clients mid-flight.
-        let owner_id = format!(
-            "vnfs-client-{}-{:x}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-        let owner_id = owner_id.as_bytes();
+        let generated;
+        let owner_id = if let Some(owner) = &self.client_owner {
+            owner.as_slice()
+        } else {
+            generated = format!(
+                "vnfs-client-{}-{:x}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            );
+            generated.as_bytes()
+        };
         let mut c = Compound::new();
         c.args.minorversion = self.minorversion;
         c.tag(b"exchange_id");
@@ -300,27 +327,38 @@ impl Session {
         Ok(())
     }
 
-    /// Tear down the session and clientid on the server so a later run with a
-    /// different credential doesn't trip NFS4ERR_CLID_INUSE (RFC 5661 case 3).
-    /// Best-effort: never fails the caller.
-    fn destroy(&mut self) {
+    /// Tear down the session and clientid, reporting the first failure.
+    pub(crate) fn shutdown(&mut self) -> RpcResult<()> {
         if self.clientid == 0 {
-            return;
+            return Ok(());
         }
+        let mut first_error = None;
         let mut c = Compound::new();
         c.args.minorversion = self.minorversion;
         c.tag(b"destroy_session");
         c.destroy_session(&self.sessionid);
-        if let Ok(res) = c.call(&self.rpc) {
-            let _ = res;
+        match c.call(&self.rpc) {
+            Ok(res) if res.status() == nfsstat4_NFS4_OK => {}
+            Ok(res) => first_error = Some(RpcError::op(0, res.status())),
+            Err(error) => first_error = Some(error),
         }
         let mut c = Compound::new();
         c.args.minorversion = self.minorversion;
         c.tag(b"destroy_clientid");
         c.destroy_clientid(self.clientid);
-        if let Ok(res) = c.call(&self.rpc) {
-            let _ = res;
+        match c.call(&self.rpc) {
+            Ok(res) if res.status() == nfsstat4_NFS4_OK => {}
+            Ok(res) if first_error.is_none() => first_error = Some(RpcError::op(0, res.status())),
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            _ => {}
         }
+        self.clientid = 0;
+        first_error.map_or(Ok(()), Err)
+    }
+
+    /// Best-effort teardown used by `Drop`.
+    fn destroy(&mut self) {
+        let _ = self.shutdown();
     }
 }
 

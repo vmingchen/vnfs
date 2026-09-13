@@ -9,12 +9,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use vnfs::{NfsVecFs, ReadOp, SeekFrom, VecFs, VfFile, VfOffset, WriteOp};
 
 fn client() -> NfsVecFs {
-    match std::env::var("VNFS_TEST_MINOR").as_deref() {
-        Ok("1") => NfsVecFs::connect_minor("127.0.0.1", 1),
-        Ok("2") => NfsVecFs::connect_minor("127.0.0.1", 2),
-        _ => NfsVecFs::connect("127.0.0.1"),
-    }
-    .expect("connect to local NFS server")
+    let minor = match std::env::var("VNFS_TEST_MINOR").as_deref() {
+        Ok("1") => Some(1),
+        Ok("2") => Some(2),
+        _ => None,
+    };
+    NfsVecFs::builder("127.0.0.1")
+        .minor_version(minor)
+        .client_owner(format!("vnfs-recovery-test-{}", std::process::id()))
+        .connect()
+        .expect("connect to local NFS server")
 }
 
 fn wait_for(path: &Path) {

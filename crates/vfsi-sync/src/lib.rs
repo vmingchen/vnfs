@@ -17,16 +17,20 @@ mod traits;
 pub use traits::{VecFs, VecFsExt, rm_recursive};
 mod io;
 pub use io::{VfFileHandle, VfOpenOptions};
+mod client;
+pub use client::{FsClient, FsFile, FsRead, FsReadInto, FsWrite};
+mod native;
+pub use native::{FileSystem, VectorFileSystem};
 
 /// Scalar/singular view of the synchronous interface.
 pub mod sfsi {
-    pub use crate::{VecFs, VecFsExt};
+    pub use crate::{FileSystem, FsClient, FsFile, VecFs, VecFsExt};
     pub use vfsi_core::{Fd, VfAttrs, VfError, VfFile, VfOffset, VfResult, VfType};
 }
 
 /// Vectorized view of the synchronous interface.
 pub mod vfsi {
-    pub use crate::{VecFs, VecFsExt, rm_recursive};
+    pub use crate::{VecFs, VecFsExt, VectorFileSystem, rm_recursive};
     pub use vfsi_core::*;
 }
 

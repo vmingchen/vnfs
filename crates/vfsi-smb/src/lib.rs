@@ -81,6 +81,21 @@ pub struct SmbVecFs {
     server_copy_enabled: bool,
 }
 
+/// SMB-only negotiated state, kept out of protocol-neutral VFSI traits.
+pub trait SmbExtensions {
+    fn smb_dialect_revision(&self) -> u16;
+    fn server_copy_enabled(&self) -> bool;
+}
+
+impl SmbExtensions for SmbVecFs {
+    fn smb_dialect_revision(&self) -> u16 {
+        self.dialect() as u16
+    }
+    fn server_copy_enabled(&self) -> bool {
+        self.server_copy_enabled
+    }
+}
+
 impl SmbVecFs {
     /// Connect to an SMB share using NTLM credentials (or guest access when
     /// `username` and `password` are empty).
@@ -1215,6 +1230,16 @@ impl VecFs for SmbVecFs {
         self.raw_close(open.file_id)
     }
 
+    fn sync_data(&mut self, file: &VfFile) -> VfResult<()> {
+        let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        let file_id = self
+            .open_files
+            .get(&fd)
+            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?
+            .file_id;
+        self.raw_flush(file_id)
+    }
+
     fn closev(&mut self, files: &[VfFile]) -> VfRes {
         let mut file_ids = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
@@ -2273,6 +2298,8 @@ fn smb_error(error: SmbError, index: usize) -> VfError {
         None => VfError::Transport {
             index: Some(index),
             message: error.to_string(),
+            operation: None,
+            path: None,
         },
     }
 }

@@ -13,6 +13,8 @@ AUTH_SYS carries the calling process's numeric UID/GID without cryptographic
 peer identity, integrity, or privacy. Use it only on a trusted network with
 server export policy that treats those credentials appropriately. For
 untrusted networks, enable the opt-in `rpcsec-gss` feature described below.
+Production builders can also set `require_secure_authentication(true)` to
+fail closed instead of accidentally connecting with AUTH_SYS.
 
 NFSv4 supports *COMPOUND* requests: one RPC can carry an ordered sequence of
 file operations. A conventional POSIX-style loop hides that capability behind
@@ -31,8 +33,9 @@ types, and [`DummyVecFs`] for local testing. New protocol backends are
 published as separate `vfsi-*` crates so each backend has an independent
 dependency and release boundary.
 
-NFS, the dummy backend, and NFSv4.2 server-side COPY are enabled by default.
-RPCSEC_GSS is intentionally not enabled by default.
+NFS and NFSv4.2 server-side COPY are enabled by default. The dummy backend is
+an opt-in test/development feature, and RPCSEC_GSS is intentionally not
+enabled by default.
 Applications that only need interface types can disable default features:
 
 ```toml
@@ -81,42 +84,47 @@ the current process cache. RPCSEC_GSS privacy (`krb5p`) is not exposed yet
 because the supported libntirpc 6.x client cannot reliably encode privacy
 payloads; the API does not silently downgrade it to a weaker mode.
 
-## Example
+## Rust-native example
 
 Write two independent files, then read them back, using one vector call for
 each phase:
 
 ```rust,no_run
-use vnfs::{NfsVecFs, ReadOp, VecFs, VfOffset, WriteOp};
+use vnfs::prelude::*;
 
-fn main() -> vnfs::VfResult<()> {
-    let mut fs = NfsVecFs::connect("nfs.example.com")?;
-
-    fs.writev(&[
-        WriteOp::from_path("/file-1", VfOffset::At(0), b"hello".to_vec())
-            .with_creation()
-            .with_truncate(),
-        WriteOp::from_path("/file-2", VfOffset::At(0), b"world".to_vec())
-            .with_creation()
-            .with_truncate(),
+fn main() -> std::io::Result<()> {
+    let backend = NfsVecFs::builder("nfs.example.com")
+        .root("/export/application")
+        .connect()
+        .map_err(std::io::Error::from)?;
+    let client = FsClient::new(backend);
+    let flags = OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
+    let files = client.open_many(&[
+        OpenRequest::new("/file-1", flags),
+        OpenRequest::new("/file-2", flags),
     ])?;
 
-    let files = fs.readv(&[
-        ReadOp::from_path("/file-1", VfOffset::At(0), 5),
-        ReadOp::from_path("/file-2", VfOffset::At(0), 5),
+    client.write_many(&[
+        files[0].write_at(0, b"hello"),
+        files[1].write_at(0, b"world"),
     ])?;
-    assert_eq!(files[0].data, b"hello");
-    assert_eq!(files[1].data, b"world");
+
+    let contents = client.read_many(&[
+        files[0].read_at(0, 5),
+        files[1].read_at(0, 5),
+    ])?;
+    assert_eq!(contents[0].data, b"hello");
+    assert_eq!(contents[1].data, b"world");
     Ok(())
 }
 ```
 
-For these two small files, `writev` puts both create/write chains into one
-NFSv4 COMPOUND and therefore one network round trip. The known-length `readv`
-does the same for both lookup/open/read chains. A scalar POSIX-style loop hides
-this opportunity and pays latency for each file operation. Larger vectors are
-packed into as few compounds as the server's negotiated operation, request,
-and response-size limits allow; oversized vectors are split automatically.
+For these two small files, `open_many`, `write_many`, and `read_many` each put
+both independent operations into one NFSv4 COMPOUND and therefore one network
+round trip per phase. A scalar POSIX-style loop hides this opportunity and pays
+latency for each file operation. Larger vectors are packed into as few
+compounds as the server's negotiated operation, request, and response-size
+limits allow; oversized vectors are split automatically.
 
 The same model applies to `openv`, `writev`, `getattrsv`, `listdirv`,
 `renamev`, `removev`, and the other vector methods. This is especially useful
@@ -125,18 +133,22 @@ where network latency dominates transfer time.
 
 ## Idiomatic scalar I/O
 
-The vector API is the performance-oriented interface. Code that needs a
-single-file `std::io` adapter can use `VfOpenOptions`; its handle implements
-`Read`, `Write`, and `Seek`, and closes the remote descriptor on drop. Call
-`close()` explicitly when a close error must be observed.
+`FsClient` is cheaply cloneable and its owned `FsFile` handles can coexist or
+move to worker threads. A handle implements `Read`, `Write`, and `Seek` and
+closes its remote descriptor on drop. Call `close()` explicitly when a close
+error must be observed, and `sync_data()`/`sync_all()` when durability errors
+must be observed before close.
 
 ```rust,no_run
 use std::io::{Read, Seek, SeekFrom};
-use vnfs::{NfsVecFs, VfOpenOptions};
+use vnfs::{FsClient, NfsVecFs, OpenFlags, OpenRequest};
 
 fn main() -> std::io::Result<()> {
-    let mut fs = NfsVecFs::connect("nfs.example.com")?;
-    let mut file = VfOpenOptions::new().read(true).open(&mut fs, "/file-1")?;
+    let fs = NfsVecFs::builder("nfs.example.com")
+        .connect()
+        .map_err(std::io::Error::from)?;
+    let client = FsClient::new(fs);
+    let mut file = client.open(OpenRequest::new("/file-1", OpenFlags::READ))?;
     file.seek(SeekFrom::Start(0))?;
     let mut contents = Vec::new();
     file.read_to_end(&mut contents)?;
@@ -145,21 +157,25 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-The handle borrows its `VecFs`, preventing accidental concurrent mutation of
-one stateful NFS session. For concurrency, create a bounded worker pool and
-construct one `NfsVecFs` inside each worker. Send each worker a *batch* of
-independent operations and use `readv`, `writev`, or the other vector methods
-within the worker. Do not put one client behind a global mutex: that serializes
-RPCs and loses both pool parallelism and useful batching. Async applications
-should run these synchronous workers with their runtime's blocking-task API.
+One backend connection serializes access to its stateful NFS session, while
+`FsClient::read_many` and `write_many` preserve useful compound batching.
+Create a bounded pool of clients when parallel network requests are required;
+use one vector cohort per worker. Async applications should run these
+synchronous workers with their runtime's blocking-task API.
 
 ## Failure and recovery semantics
 
 An NFS COMPOUND is ordered but **not transactional**. If operation `i` fails,
 the server stops processing that compound: the prefix before `i` may already
-have succeeded and the suffix was not executed. `VfError::index()` identifies
-the failing input when the server provides enough information. Callers must
-make mutation batches idempotent or reconcile their state after an error.
+have succeeded and the suffix was not executed. The outcome-aware vector
+methods return `BatchOutcome<T>` with `Success`, `Completed`, `Failed`,
+`NotAttempted`, and `Indeterminate` states. `Completed` means a compatibility
+decoder proved success but did not retain the returned value. Reconcile an
+`Indeterminate` mutation before retrying it. The fail-fast methods remain in
+`VecFs` for compatibility.
+
+Low-level compound, RPC, and session construction is isolated under
+`vnfs::legacy`; it is not part of the recommended application API.
 
 Lost replies to create, write, rename, copy, remove, and other mutations are
 reported as ambiguous and are never replayed automatically; replay could

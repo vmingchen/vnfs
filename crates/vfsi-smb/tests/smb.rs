@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
+use vfsi_smb::SmbExtensions;
 use vfsi_smb::SmbVecFs;
 use vfsi_sync::{
     AttrMask, ExtentPair, ReadOp, VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS,
@@ -50,7 +51,7 @@ fn samba_round_trip_and_copy() {
         eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
         return;
     };
-    let dialect = fs.smb_dialect().expect("SMB dialect");
+    let dialect = fs.smb_dialect_revision();
     assert!((0x0202..=0x0311).contains(&dialect));
     if let Ok(expected) = std::env::var("VFSI_SMB_EXPECT_DIALECT") {
         let expected = u16::from_str_radix(expected.trim_start_matches("0x"), 16)

@@ -189,9 +189,8 @@ impl<F: VecFs + ?Sized> Write for VfFileHandle<'_, F> {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        // VFSI writes are synchronous. The NFS backend requests FILE_SYNC4,
-        // so successful writes have already reached stable server storage.
-        Ok(())
+        let file = self.file.as_ref().expect("open handle");
+        self.filesystem.sync_data(file).map_err(io_error)
     }
 }
 

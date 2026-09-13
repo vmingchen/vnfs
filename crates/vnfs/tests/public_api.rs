@@ -38,6 +38,10 @@ fn legacy_crate_root_exports_remain_available() {
         WriteOp,
         WriteResult,
     )>();
+    let _: fn(&mut dyn VecFs) = accepts_vecfs;
+    let _ = accepts_vecfs_ext::<dyn VecFs>;
+    let _: fn(&mut dyn vnfs::sfsi::VecFs) = accepts_sfsi;
+    let _: fn(&mut dyn vnfs::vfsi::VecFs) = accepts_vfsi;
 
     #[cfg(feature = "dummy")]
     {
@@ -47,6 +51,37 @@ fn legacy_crate_root_exports_remain_available() {
         accepts_vecfs_ext(&mut fs);
         accepts_sfsi(&mut fs);
         accepts_vfsi(&mut fs);
+    }
+}
+
+#[test]
+fn rust_native_api_is_curated_and_typed() {
+    use vnfs::{
+        BatchOutcome, Capabilities, FileSystem, FsClient, MetadataQuery, OpOutcome, OpenFlags,
+        OpenRequest, SetAttributes, VectorFileSystem, WriteOpRef,
+    };
+    let _ = std::mem::size_of::<(
+        Capabilities,
+        OpenFlags,
+        OpenRequest,
+        MetadataQuery,
+        SetAttributes,
+        BatchOutcome<()>,
+        OpOutcome<()>,
+        WriteOpRef<'static>,
+        FsClient<()>,
+    )>();
+    fn accepts_native_scalar<T: FileSystem + ?Sized>(_: &mut T) {}
+    fn accepts_native_vector<T: VectorFileSystem + ?Sized>(_: &mut T) {}
+    let _ = accepts_native_scalar::<dyn FileSystem>;
+    let _ = accepts_native_vector::<dyn VectorFileSystem>;
+    #[cfg(feature = "dummy")]
+    {
+        let root = std::env::temp_dir().join("vnfs-native-public-api-test");
+        let mut fs = vnfs::DummyVecFs::new(root);
+        accepts_native_scalar(&mut fs);
+        accepts_native_vector(&mut fs);
+        let _client = FsClient::new(fs);
     }
 }
 

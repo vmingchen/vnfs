@@ -18,6 +18,7 @@ fn options(protection: RpcsecGssProtection) -> NfsConnectOptions {
             ),
             protection,
         },
+        ..NfsConnectOptions::default()
     }
 }
 

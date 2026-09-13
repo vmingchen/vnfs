@@ -16,7 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use vfsi_smb::SmbVecFs;
 use vnfs::dummy_vecfs::DummyVecFs;
-use vnfs::nfs::NfsVecFs;
+use vnfs::legacy::nfs::NfsVecFs;
 use vnfs::vecfs::{
     AttrMask, ExtentPair, ReadOp, VfAttrs, VfError, VfFile, WriteOp, ERR_EBADF, ERR_NOENT,
     VF_ERR_UNSUPPORTED,
@@ -283,7 +283,7 @@ impl vfsi_result {
 
     fn from_error(error: VfError) -> Self {
         match error {
-            VfError::Op { index, err_no } => Self::base(
+            VfError::Op { index, err_no, .. } => Self::base(
                 index,
                 if err_no == VF_ERR_UNSUPPORTED {
                     VFSI_ERROR_UNSUPPORTED
@@ -293,7 +293,7 @@ impl vfsi_result {
                 err_no,
                 "",
             ),
-            VfError::Transport { index, message } => Self::base(
+            VfError::Transport { index, message, .. } => Self::base(
                 index.unwrap_or(0),
                 VFSI_ERROR_TRANSPORT,
                 vnfs::VF_ERR_RPC,
@@ -389,6 +389,7 @@ pub extern "C" fn vfsi_abi_version() -> u32 {
 
 /// Return the negotiated NFS minor version, or zero for a non-NFS/invalid
 /// handle.
+#[allow(deprecated)]
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_nfs_minorversion(fs: *const vfsi_fs) -> u32 {
     ffi_guard!(0, {
@@ -405,6 +406,7 @@ pub unsafe extern "C" fn vfsi_nfs_minorversion(fs: *const vfsi_fs) -> u32 {
 
 /// Return the negotiated SMB dialect revision (`0x0202` through `0x0311`),
 /// or zero for a non-SMB/invalid handle.
+#[allow(deprecated)]
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_smb_dialect(fs: *const vfsi_fs) -> u16 {
     ffi_guard!(0, {
@@ -776,7 +778,7 @@ pub unsafe extern "C" fn vfsi_free(fs: *mut vfsi_fs) {
     ffi_guard!((), {
         if !fs.is_null() {
             if std::env::var("VNFS_STATS").as_deref() == Ok("1") {
-                let (n, ops, bytes, max) = vnfs::compound::compound_stats();
+                let (n, ops, bytes, max) = vnfs::legacy::compound::compound_stats();
                 if n > 0 {
                     eprintln!(
                     "[vfsi] compounds={} avg_ops={:.2} max_ops={} avg_bytes={:.0} total_bytes={}",
@@ -787,7 +789,7 @@ pub unsafe extern "C" fn vfsi_free(fs: *mut vfsi_fs) {
                     bytes
                 );
                 }
-                let (calls, us) = vnfs::compound::rpc_stats();
+                let (calls, us) = vnfs::legacy::compound::rpc_stats();
                 if calls > 0 {
                     eprintln!(
                         "[vfsi] rpc_calls={} avg_rpc_ms={:.2} total_rpc_ms={:.1}",

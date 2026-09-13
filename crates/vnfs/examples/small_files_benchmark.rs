@@ -131,14 +131,14 @@ fn read_ops(paths: &[String], length: usize) -> Vec<ReadOp> {
 }
 
 fn measure_vnfs_write(client: &mut NfsVecFs, operations: &[WriteOp]) -> Result<Sample> {
-    vnfs::compound::thread_compound_stats();
-    vnfs::compound::rpc_stats();
+    vnfs::legacy::compound::thread_compound_stats();
+    vnfs::legacy::compound::rpc_stats();
     let (milliseconds, result) = elapsed(|| client.writev(operations));
     result?;
     Ok(Sample {
         milliseconds,
-        compounds: vnfs::compound::thread_compound_stats().0,
-        rpcs: vnfs::compound::rpc_stats().0,
+        compounds: vnfs::legacy::compound::thread_compound_stats().0,
+        rpcs: vnfs::legacy::compound::rpc_stats().0,
     })
 }
 
@@ -158,8 +158,8 @@ fn measure_vnfs_read(
     operations: &[ReadOp],
     payload: &[u8],
 ) -> Result<Sample> {
-    vnfs::compound::thread_compound_stats();
-    vnfs::compound::rpc_stats();
+    vnfs::legacy::compound::thread_compound_stats();
+    vnfs::legacy::compound::rpc_stats();
     let (milliseconds, result) = elapsed(|| client.readv(operations));
     let results = result?;
     if results.len() != operations.len() || results.iter().any(|item| item.data != payload) {
@@ -167,8 +167,8 @@ fn measure_vnfs_read(
     }
     Ok(Sample {
         milliseconds,
-        compounds: vnfs::compound::thread_compound_stats().0,
-        rpcs: vnfs::compound::rpc_stats().0,
+        compounds: vnfs::legacy::compound::thread_compound_stats().0,
+        rpcs: vnfs::legacy::compound::rpc_stats().0,
     })
 }
 
@@ -226,9 +226,9 @@ fn run(args: &Args, run_name: &str, direct_run: &Path, mount_run: &Path) -> Resu
         ),
     ];
     let probe_ops = write_ops(&probe_paths, b"probe");
-    vnfs::compound::thread_compound_stats();
+    vnfs::legacy::compound::thread_compound_stats();
     client.writev(&probe_ops)?;
-    let probe_compounds = vnfs::compound::thread_compound_stats().0;
+    let probe_compounds = vnfs::legacy::compound::thread_compound_stats().0;
 
     for round in 0..args.rounds {
         let suffix = if args.reuse_paths {

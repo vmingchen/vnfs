@@ -1,8 +1,8 @@
 use std::process;
 
 use nfsv41_sys::OPEN4_SHARE_ACCESS_BOTH;
-use vnfs::client::{NfsClient, OpenCreate};
 use vnfs::error::RpcError;
+use vnfs::legacy::client::{NfsClient, OpenCreate};
 
 fn main() {
     let host = "127.0.0.1";

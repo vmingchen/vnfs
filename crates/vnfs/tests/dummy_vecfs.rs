@@ -183,3 +183,127 @@ fn standard_open_options_validate_access_modes() {
         std::io::ErrorKind::NotFound
     );
 }
+
+#[test]
+fn owned_client_supports_multiple_live_files_and_typed_requests() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    use vnfs::{FsClient, OpenFlags, OpenRequest};
+
+    let client = FsClient::new(dummy());
+    let flags = OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
+    let mut first = client.open(OpenRequest::new("/first", flags)).unwrap();
+    let mut second = client.open(OpenRequest::new("/second", flags)).unwrap();
+
+    client
+        .write_many(&[first.write_at(0, b"one"), second.write_at(0, b"two")])
+        .unwrap();
+    let read_results = client
+        .read_many(&[first.read_at(0, 3), second.read_at(0, 3)])
+        .unwrap();
+    assert_eq!(read_results[0].data, b"one");
+    assert_eq!(read_results[1].data, b"two");
+    let mut one_buffer = [0; 3];
+    let mut two_buffer = [0; 3];
+    let lengths = client
+        .read_many_into(&mut [
+            first.read_at_into(0, &mut one_buffer),
+            second.read_at_into(0, &mut two_buffer),
+        ])
+        .unwrap();
+    assert_eq!(lengths, [3, 3]);
+    assert_eq!(&one_buffer, b"one");
+    assert_eq!(&two_buffer, b"two");
+    let other_client = FsClient::new(dummy());
+    assert_eq!(
+        other_client
+            .read_many(&[first.read_at(0, 1)])
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    first.flush().unwrap();
+    second.flush().unwrap();
+    first.seek(SeekFrom::Start(0)).unwrap();
+    second.seek(SeekFrom::Start(0)).unwrap();
+    let mut one = String::new();
+    let mut two = String::new();
+    first.read_to_string(&mut one).unwrap();
+    second.read_to_string(&mut two).unwrap();
+    assert_eq!((one.as_str(), two.as_str()), ("one", "two"));
+
+    first.close().unwrap();
+    second.close().unwrap();
+}
+
+#[test]
+fn outcome_api_preserves_known_prefix_and_unattempted_suffix() {
+    use vnfs::{AttrMask, OpOutcome, VfAttrs, VfFile};
+
+    let mut fs = dummy();
+    fs.writev(&[
+        vnfs::WriteOp::from_path("/first", VfOffset::At(0), Vec::new()).with_creation(),
+        vnfs::WriteOp::from_path("/third", VfOffset::At(0), Vec::new()).with_creation(),
+    ])
+    .unwrap();
+    let outcome = fs.removev_outcomes(&[
+        VfFile::from_path("/first"),
+        VfFile::from_path("/missing"),
+        VfFile::from_path("/third"),
+    ]);
+    assert!(matches!(outcome.operations()[0], OpOutcome::Success(())));
+    assert!(matches!(outcome.operations()[1], OpOutcome::Failed(_)));
+    assert!(matches!(outcome.operations()[2], OpOutcome::NotAttempted));
+    assert!(fs.exists_path("/third").unwrap());
+
+    let mut attrs = [
+        VfAttrs {
+            file: VfFile::from_path("/third"),
+            masks: AttrMask::SIZE,
+            ..VfAttrs::default()
+        },
+        VfAttrs {
+            file: VfFile::from_path("/missing"),
+            masks: AttrMask::SIZE,
+            ..VfAttrs::default()
+        },
+        VfAttrs {
+            file: VfFile::from_path("/third"),
+            masks: AttrMask::SIZE,
+            ..VfAttrs::default()
+        },
+    ];
+    let outcome = fs.getattrsv_outcomes(&mut attrs);
+    assert!(matches!(outcome.operations()[0], OpOutcome::Success(_)));
+    assert!(matches!(outcome.operations()[1], OpOutcome::Failed(_)));
+    assert!(matches!(outcome.operations()[2], OpOutcome::NotAttempted));
+}
+
+#[test]
+fn native_scalar_contract_separates_metadata_query_from_update() {
+    use vnfs::{
+        AttrMask, FileSystem, MetadataQuery, OpenFlags, OpenRequest, SetAttributes, VfFile,
+    };
+
+    let mut fs = dummy();
+    let file = FileSystem::open_one(
+        &mut fs,
+        &OpenRequest::new("/metadata", OpenFlags::WRITE | OpenFlags::CREATE),
+    )
+    .unwrap();
+    FileSystem::close_one(&mut fs, &file).unwrap();
+
+    let attrs = FileSystem::metadata(
+        &mut fs,
+        MetadataQuery::new(
+            VfFile::from_path("/metadata"),
+            AttrMask::MODE | AttrMask::SIZE,
+        ),
+    )
+    .unwrap();
+    assert!(attrs.returned.contains(AttrMask::MODE | AttrMask::SIZE));
+
+    let mut update = SetAttributes::new(VfFile::from_path("/metadata"));
+    update.mode = Some(0o640);
+    FileSystem::set_attributes(&mut fs, update).unwrap();
+    assert_eq!(fs.stat_path("/metadata").unwrap().mode & 0o777, 0o640);
+}

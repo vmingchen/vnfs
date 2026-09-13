@@ -28,8 +28,28 @@ pub mod dummy_vecfs {
     pub use vfsi_local::DummyVecFs;
 }
 
-#[cfg(feature = "nfs")]
-pub use vfsi_nfs::{client, compound, nfs, rpc, session};
+/// Compatibility and protocol-construction APIs. New applications should use
+/// the curated crate root or [`prelude`] instead.
+pub mod legacy {
+    pub use vfsi_core::*;
+    pub use vfsi_sync::{VecFs, VecFsExt, VfFileHandle, VfOpenOptions, rm_recursive};
+
+    #[cfg(feature = "nfs")]
+    pub use vfsi_nfs::{client, compound, nfs, rpc, session};
+}
+
+/// Common Rust-native imports without protocol or FFI internals.
+pub mod prelude {
+    pub use vfsi_core::{
+        BatchOutcome, Capabilities, MetadataQuery, OpOutcome, OpenFlags, OpenRequest, ReadOp,
+        ReadResult, SetAttributes, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
+    };
+    #[cfg(feature = "nfs")]
+    pub use vfsi_nfs::{NfsClientBuilder, NfsEvent, NfsExtensions, NfsObserver, NfsVecFs};
+    pub use vfsi_sync::{
+        FileSystem, FsClient, FsFile, FsRead, FsReadInto, FsWrite, VectorFileSystem,
+    };
+}
 
 pub use vfsi_core::*;
 #[cfg(feature = "dummy")]
@@ -38,6 +58,10 @@ pub use vfsi_local::DummyVecFs;
 pub use vfsi_nfs::RpcsecGssProtection;
 #[cfg(feature = "nfs")]
 pub use vfsi_nfs::{
-    NfsAuthentication, NfsConnectOptions, NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
+    NfsAuthentication, NfsClientBuilder, NfsConnectOptions, NfsEvent, NfsExtensions, NfsObserver,
+    NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
 };
-pub use vfsi_sync::{VecFs, VecFsExt, VfFileHandle, VfOpenOptions, rm_recursive};
+pub use vfsi_sync::{
+    FileSystem, FsClient, FsFile, FsRead, FsReadInto, FsWrite, VecFs, VecFsExt, VectorFileSystem,
+    VfFileHandle, VfOpenOptions, rm_recursive,
+};

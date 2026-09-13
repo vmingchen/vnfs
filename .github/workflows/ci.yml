@@ -43,7 +43,7 @@ jobs:
           cargo test -p vfsi-smb --lib
           cargo test -p nfsv41-sys
           cargo test -p vnfs --lib
-          cargo test -p vnfs --test dummy_vecfs
+          cargo test -p vnfs --features dummy --test dummy_vecfs
           cargo test -p vnfs --test public_api
           cargo test -p vfsi-c --lib
       - name: Verify every published Rust package from coordinated crate archives
@@ -90,7 +90,7 @@ jobs:
               # the exact crate archive here.
               cargo "${patches[@]}" test --locked --offline --manifest-path "$archive_manifest" --lib
               cargo "${patches[@]}" test --locked --offline --manifest-path "$archive_manifest" \
-                --test dummy_vecfs
+                --features dummy --test dummy_vecfs
               cargo "${patches[@]}" test --locked --offline --manifest-path "$archive_manifest" \
                 --test public_api
             else
@@ -136,6 +136,10 @@ jobs:
           if cargo tree -p vnfs --edges normal --prefix none | \
               grep -Eq '^(vfsi-smb|smb2|tokio|futures-util) '; then
             echo "SMB dependencies must live in the vfsi-smb package" >&2
+            exit 1
+          fi
+          if cargo tree -p vnfs --edges normal --prefix none | grep -Eq '^vfsi-local '; then
+            echo "the local test backend must remain opt-in" >&2
             exit 1
           fi
       - name: Verify checked-in C header and smoke test
