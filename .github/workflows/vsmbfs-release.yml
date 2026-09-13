@@ -38,7 +38,7 @@ jobs:
           cd /tmp
           /tmp/vsmbfs-release/bin/python -m pytest \
             "$GITHUB_WORKSPACE/adapters/vsmbfs/tests/test_package.py"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: vsmbfs-dist
           path: adapters/vsmbfs/dist/*

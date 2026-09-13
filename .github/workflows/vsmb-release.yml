@@ -64,7 +64,7 @@ jobs:
               cd /tmp
               "$py" -m pytest /io/adapters/vsmb/tests/test_client.py
             '
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.target }}-${{ matrix.wheel-kind }}
           path: adapters/vsmb/dist/*.whl
@@ -81,7 +81,7 @@ jobs:
       - run: python -m pip install maturin==1.14.1 twine
       - run: python -m maturin sdist --manifest-path adapters/vsmb/Cargo.toml --out adapters/vsmb/dist
       - run: python -m twine check adapters/vsmb/dist/*
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: adapters/vsmb/dist/*.tar.gz
