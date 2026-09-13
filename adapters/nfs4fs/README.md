@@ -35,12 +35,18 @@ fs = fsspec.filesystem(
     auto_mkdir=False,
 )
 
-fs.pipe({"/part-0": b"hello", "/part-1": b"world"})
-parts = fs.cat(["/part-0", "/part-1"])
+fs.pipe({"/file-1": b"hello", "/file-2": b"world"})
+files = fs.cat(["/file-1", "/file-2"])
 
-with fsspec.open("nfs4://nfs.example/exports/project/part-0", "rb") as file:
+with fsspec.open("nfs4://nfs.example/exports/project/file-1", "rb") as file:
     print(file.read())
 ```
+
+The `pipe()` call gives both writes to VFSI at once. For these two small files,
+it encodes both independent write chains in one NFSv4 COMPOUND and completes
+them in one network round trip. The following `cat()` also preserves the batch;
+it currently uses one compound for bounded size discovery and one for the
+reads.
 
 The client negotiates NFSv4.2 and falls back to NFSv4.1. Set
 `minor_version=1` or `minor_version=2` to require a specific version. The
@@ -82,6 +88,46 @@ The largest benefit comes from giving `fsspec` multiple paths at once:
 `minor_version()`, `capabilities()`, `server_copy_enabled()`,
 `compound_stats()`, and `rpc_stats()` are available on the native client for
 feature inspection and diagnostics.
+
+## Small-file benchmark
+
+A local benchmark compared nfs4fs directly with vanilla fsspec
+`LocalFileSystem` accessing the same export through a Linux kernel NFS mount.
+The server was NFS-Ganesha V15.3 over NFSv4.2 on an AArch64 Ubuntu VM, using
+nfs4fs 0.3.1 and fsspec 2026.7.0. Linux `netem` added 500 microseconds to each
+loopback traversal, approximately 1 ms of network round-trip delay; ping
+averaged 1.43 ms including VM scheduling overhead. Each result is the median
+of 30 cold-path trials over 20 files of 4 KiB, with connection setup excluded,
+fresh paths used for every trial, and client execution order alternated.
+
+| Operation | nfs4fs | Kernel NFS + `LocalFileSystem` | Speedup | nfs4fs RPCs |
+| --- | ---: | ---: | ---: | ---: |
+| `pipe` 20 files | 38.80 ms | 151.31 ms | 3.90x | 1 |
+| `cat` 20 files | 4.16 ms | 83.19 ms | 20.01x | 2 |
+
+The same benchmark was repeated after an untimed warm-up, reusing the exact
+same files for every measured trial. Ping averaged 1.35 ms during this run:
+
+| Warm operation | nfs4fs | Kernel NFS + `LocalFileSystem` | Speedup | nfs4fs RPCs |
+| --- | ---: | ---: | ---: | ---: |
+| `pipe` 20 files | 38.03 ms | 143.30 ms | 3.77x | 1 |
+| `cat` 20 files | 3.65 ms | 51.94 ms | 14.25x | 2 |
+
+The kernel's metadata and page caches reduced its repeated-read time, but a
+normal NFSv4 open and close still involves server state. `LocalFileSystem`
+opens the files serially, so those latency-bearing operations remain serial as
+well. nfs4fs does not retain file data across separate `cat()` calls; its warm
+improvement comes from server-side caches while it continues to batch the
+remote operations. Repeated writes changed little because both clients still
+have to send the new contents to the server.
+
+The benchmark measures a latency-bound small-file workload, not sequential
+bandwidth, and results will vary with the server, client, mount options, and
+compound limits. The exact driver is
+[`benchmarks/small_files.py`](https://github.com/vmingchen/vnfs/blob/main/adapters/nfs4fs/benchmarks/small_files.py);
+it verifies returned data and reports VFSI's compound and RPC counters so
+batching regressions are visible alongside timing changes. Pass
+`--reuse-paths` to reproduce the warm-cache variant.
 
 All data-transfer entry points accept fsspec's `callback=` argument. Bulk
 operations (`cat`, `cat_ranges`, `pipe`, `get`, `put`, and `copy`) report item

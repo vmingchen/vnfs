@@ -1,6 +1,6 @@
 [package]
 name = "vnfs"
-version = "0.0.10"
+version = "0.0.11"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Vectorized NFSv4 client and compatibility facade for VFSI"

@@ -7,6 +7,9 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ### Changed
 
+- Added reproducible cold- and warm-cache small-file benchmarks for the Rust
+  `vnfs` API and Python `nfs4fs` adapter, comparing vectorized operations with
+  scalar access through a kernel NFS mount under simulated network latency.
 - Made `vnfs` an NFS-focused package by moving Rust SMB ownership and
   integration coverage to `vfsi-smb`; cross-protocol bindings now compose the
   backend crates directly. Package descriptions and registry keywords reflect

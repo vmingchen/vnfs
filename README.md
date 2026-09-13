@@ -1,6 +1,7 @@
 # VFSI: vectorized filesystem interfaces
 
 [![CI](https://github.com/vmingchen/vnfs/actions/workflows/ci.yml/badge.svg)](https://github.com/vmingchen/vnfs/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/vnfs.svg)](https://crates.io/crates/vnfs)
 [![PyPI](https://img.shields.io/pypi/v/nfs4fs.svg)](https://pypi.org/project/nfs4fs/)
 [![Python](https://img.shields.io/pypi/pyversions/nfs4fs.svg)](https://pypi.org/project/nfs4fs/)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
