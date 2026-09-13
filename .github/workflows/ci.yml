@@ -28,16 +28,57 @@ jobs:
           cargo fmt --manifest-path adapters/vsmb/Cargo.toml --check
           cargo clippy --manifest-path adapters/vsmb/Cargo.toml --all-targets -- -D warnings
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-      - run: cargo test -p nfsv41-sys
-      - run: cargo test -p vnfs --lib
-      - run: cargo test -p vnfs --test dummy_vecfs
-      - run: cargo test -p vfsi-c --lib
+      - name: Run every published Rust package's local tests
+        run: |
+          cargo test -p vfsi-core
+          cargo test -p vfsi-sync
+          cargo test -p vfsi-local
+          cargo test -p vfsi-nfs --lib
+          cargo test -p vfsi-smb --lib
+          cargo test -p nfsv41-sys
+          cargo test -p vnfs --lib
+          cargo test -p vnfs --test dummy_vecfs
+          cargo test -p vnfs --test public_api
+          cargo test -p vfsi-c --lib
+      - name: Verify every published Rust package from its crate archive
+        run: |
+          while read -r package manifest; do
+            version=$(python -c \
+              'import pathlib,sys,tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["package"]["version"])' \
+              "$manifest")
+            cargo package --locked -p "$package"
+            cargo test --locked \
+              --manifest-path "target/package/$package-$version/Cargo.toml"
+            if [ "$package" = vfsi-c ]; then
+              archive="target/package/$package-$version"
+              cargo build --locked --manifest-path "$archive/Cargo.toml"
+              cc -Wall -Wextra -Werror \
+                -I "$archive/include" "$archive/tests/smoke.c" \
+                -L "$archive/target/debug" -lvfsi_c \
+                -o /tmp/vfsi-packaged-c-smoke
+              LD_LIBRARY_PATH="$archive/target/debug" \
+                /tmp/vfsi-packaged-c-smoke /tmp/vfsi-packaged-c-root
+            fi
+          done <<'PACKAGES'
+          vfsi-core crates/vfsi-core/Cargo.toml
+          vfsi-sync crates/vfsi-sync/Cargo.toml
+          vfsi-local crates/vfsi-local/Cargo.toml
+          vfsi-nfs crates/vfsi-nfs/Cargo.toml
+          vfsi-smb crates/vfsi-smb/Cargo.toml
+          nfsv41-sys crates/nfsv41-sys/Cargo.toml
+          vnfs crates/vnfs/Cargo.toml
+          vfsi-c bindings/c/Cargo.toml
+          PACKAGES
       - name: Validate project organization registry
         run: |
           python ci/check-ecosystem.py
           python ci/check-package-metadata.py
-      - name: Verify vnfs feature combinations
+      - name: Verify public Rust feature combinations
         run: |
+          cargo check -p vfsi-nfs --no-default-features
+          cargo check -p vfsi-nfs --all-features
+          cargo check -p vfsi-smb --no-default-features
+          cargo check -p vfsi-smb --all-features
           cargo check -p vnfs --lib --no-default-features
           cargo check -p vnfs --lib --no-default-features --features dummy
           cargo check -p vnfs --lib --no-default-features --features nfs
@@ -95,7 +136,17 @@ jobs:
           .venv/bin/pip install -e adapters/vfsi-fsspec
           cd adapters/nfs4fs
           ../../.venv/bin/maturin develop
-      - run: .venv/bin/python -m pytest adapters/nfs4fs/tests
+      - name: Test vfsi-fsspec and nfs4fs independently
+        run: |
+          .venv/bin/python -m pytest adapters/vfsi-fsspec/tests
+          .venv/bin/python -m pytest adapters/nfs4fs/tests
+      - name: Build and test the standalone SMB Python packages
+        run: |
+          .venv/bin/maturin develop --manifest-path adapters/vsmb/Cargo.toml
+          .venv/bin/python -m pip install --no-deps -e adapters/vsmbfs
+          .venv/bin/python -m pytest \
+            adapters/vsmb/tests/test_client.py \
+            adapters/vsmbfs/tests/test_package.py
 
   python-package:
     runs-on: ubuntu-24.04
@@ -125,12 +176,28 @@ jobs:
             dist/* ../vfsi-fsspec/dist/* ../vsmb/dist/* ../vsmbfs/dist/*
       - name: Install wheel and test entry-point discovery outside the source tree
         run: |
-          python -m venv .wheel-venv
-          .wheel-venv/bin/pip install \
-            adapters/vfsi-fsspec/dist/*.whl adapters/nfs4fs/dist/*.whl \
-            adapters/vsmb/dist/*.whl adapters/vsmbfs/dist/*.whl
+          python -m venv .wheel-vfsi-fsspec
+          .wheel-vfsi-fsspec/bin/pip install adapters/vfsi-fsspec/dist/*.whl
+          python -m venv .wheel-nfs4fs
+          .wheel-nfs4fs/bin/pip install \
+            adapters/vfsi-fsspec/dist/*.whl adapters/nfs4fs/dist/*.whl
+          python -m venv .wheel-vsmb
+          .wheel-vsmb/bin/pip install adapters/vsmb/dist/*.whl
+          python -m venv .wheel-vsmbfs
+          .wheel-vsmbfs/bin/pip install \
+            adapters/vfsi-fsspec/dist/*.whl adapters/vsmb/dist/*.whl \
+            adapters/vsmbfs/dist/*.whl
+          for environment in \
+            .wheel-vfsi-fsspec .wheel-nfs4fs .wheel-vsmb .wheel-vsmbfs; do
+            "$environment/bin/python" -m pip check
+          done
           cd /tmp
-          "$GITHUB_WORKSPACE/.wheel-venv/bin/python" - <<'PY'
+          "$GITHUB_WORKSPACE/.wheel-vfsi-fsspec/bin/python" - <<'PY'
+          import vfsi_fsspec
+
+          assert vfsi_fsspec.VfsiFileSystem.protocol == "vfsi"
+          PY
+          "$GITHUB_WORKSPACE/.wheel-nfs4fs/bin/python" - <<'PY'
           import importlib.metadata
           import os
           import pathlib
@@ -139,8 +206,6 @@ jobs:
 
           import fsspec
           import vfsi
-          import vsmb
-          import vsmbfs
 
           metadata = importlib.metadata.metadata("nfs4fs")
           pyproject = pathlib.Path(
@@ -151,38 +216,79 @@ jobs:
           assert metadata["Project-URL"]
           assert vfsi.VfsiFileSystem.protocol == "vfsi"
           assert fsspec.get_filesystem_class("nfs4").__module__ == "nfs4fs._fs"
-          assert fsspec.get_filesystem_class("vsmbfs") is vsmbfs.VsmbFileSystem
-          assert not any(
-              requirement.lower().startswith("fsspec")
-              for requirement in (importlib.metadata.requires("vsmb") or [])
-          )
           with tempfile.TemporaryDirectory() as root:
               fs = fsspec.filesystem("nfs4", backend="dummy", dummy_root=root)
               fs.pipe_file("/smoke", b"ok")
               assert fs.cat_file("/smoke") == b"ok"
+          PY
+          "$GITHUB_WORKSPACE/.wheel-vsmb/bin/python" - <<'PY'
+          import importlib.metadata
+          import vsmb
+
+          assert vsmb.SmbClient
+          assert not any(
+              requirement.lower().startswith("fsspec")
+              for requirement in (importlib.metadata.requires("vsmb") or [])
+          )
+          PY
+          "$GITHUB_WORKSPACE/.wheel-vsmbfs/bin/python" - <<'PY'
+          import fsspec
+          import vsmbfs
+
+          assert fsspec.get_filesystem_class("vsmbfs") is vsmbfs.VsmbFileSystem
           PY
       - name: Prove the source distribution can build a wheel
         run: |
           python -m pip wheel --no-deps --wheel-dir /tmp/python-sdist-wheels \
             adapters/vfsi-fsspec/dist/*.tar.gz adapters/nfs4fs/dist/*.tar.gz \
             adapters/vsmb/dist/*.tar.gz adapters/vsmbfs/dist/*.tar.gz
+          python -m venv .sdist-venv
+          .sdist-venv/bin/pip install /tmp/python-sdist-wheels/*.whl
+          .sdist-venv/bin/python -m pip check
+          cd /tmp
+          "$GITHUB_WORKSPACE/.sdist-venv/bin/python" - <<'PY'
+          import tempfile
+
+          import fsspec
+          import nfs4fs
+          import vfsi_fsspec
+          import vsmb
+          import vsmbfs
+
+          assert vfsi_fsspec.VfsiFileSystem
+          assert vsmb.SmbClient
+          assert fsspec.get_filesystem_class("vsmbfs") is vsmbfs.VsmbFileSystem
+          with tempfile.TemporaryDirectory() as root:
+              fs = fsspec.filesystem("nfs4", backend="dummy", dummy_root=root)
+              fs.pipe_file("/sdist-smoke", b"ok")
+              assert fs.cat_file("/sdist-smoke") == b"ok"
+              fs.close()
+          PY
       - name: Type-check the installed public API
         run: |
-          .wheel-venv/bin/pip install black==26.5.1 mypy==2.3.1 ruff==0.16.6
-          .wheel-venv/bin/black --check \
-            adapters/vfsi-fsspec/python adapters/nfs4fs/python adapters/nfs4fs/tests \
+          python -m venv .typecheck-venv
+          .typecheck-venv/bin/pip install \
+            adapters/vfsi-fsspec/dist/*.whl adapters/nfs4fs/dist/*.whl \
+            adapters/vsmb/dist/*.whl adapters/vsmbfs/dist/*.whl \
+            black==26.5.1 mypy==2.3.1 ruff==0.16.6
+          .typecheck-venv/bin/black --check \
+            adapters/vfsi-fsspec/python adapters/vfsi-fsspec/tests \
+            adapters/nfs4fs/python adapters/nfs4fs/tests \
             adapters/vsmb/python adapters/vsmb/tests \
             adapters/vsmbfs/python adapters/vsmbfs/tests
-          .wheel-venv/bin/ruff check --config adapters/nfs4fs/pyproject.toml \
-            adapters/vfsi-fsspec/python adapters/nfs4fs/python adapters/nfs4fs/tests \
+          .typecheck-venv/bin/ruff check --config adapters/nfs4fs/pyproject.toml \
+            adapters/vfsi-fsspec/python adapters/vfsi-fsspec/tests \
+            adapters/nfs4fs/python adapters/nfs4fs/tests \
             adapters/vsmb/python adapters/vsmb/tests \
             adapters/vsmbfs/python adapters/vsmbfs/tests
           cd /tmp
-          "$GITHUB_WORKSPACE/.wheel-venv/bin/python" -m mypy --strict \
+          "$GITHUB_WORKSPACE/.typecheck-venv/bin/python" -m mypy --strict \
+            "$GITHUB_WORKSPACE/adapters/vfsi-fsspec/tests/typecheck_api.py"
+          "$GITHUB_WORKSPACE/.typecheck-venv/bin/python" -m mypy --strict \
             "$GITHUB_WORKSPACE/adapters/nfs4fs/tests/typecheck_api.py"
-          "$GITHUB_WORKSPACE/.wheel-venv/bin/python" -m mypy --strict \
+          "$GITHUB_WORKSPACE/.typecheck-venv/bin/python" -m mypy --strict \
             "$GITHUB_WORKSPACE/adapters/vsmb/tests/typecheck_api.py"
-          "$GITHUB_WORKSPACE/.wheel-venv/bin/python" -m mypy --strict \
+          "$GITHUB_WORKSPACE/.typecheck-venv/bin/python" -m mypy --strict \
             "$GITHUB_WORKSPACE/adapters/vsmbfs/tests/typecheck_api.py"
 
   security:
@@ -299,6 +405,12 @@ jobs:
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}
         run: cargo test -p vnfs --test nfs
+      - name: Run vfsi-nfs directly against NFS
+        env:
+          VFSI_NFS_REQUIRED: 1
+          VFSI_NFS_SERVER: 127.0.0.1
+          VFSI_NFS_MINOR: ${{ matrix.minor-version }}
+        run: cargo test -p vfsi-nfs --features server-copy --test nfs -- --test-threads=1
       - name: Run C ABI smoke test against NFS
         run: |
           cargo build -p vfsi-c
@@ -368,6 +480,12 @@ jobs:
           VNFS_TEST_MINOR: 2
           VNFS_TEST_REQUIRE_SERVER_COPY: 1
         run: cargo test -p vnfs --test nfs
+      - name: Run vfsi-nfs directly against patched NFSv4.2
+        env:
+          VFSI_NFS_REQUIRED: 1
+          VFSI_NFS_SERVER: 127.0.0.1
+          VFSI_NFS_MINOR: 2
+        run: cargo test -p vfsi-nfs --features server-copy --test nfs -- --test-threads=1
       - name: Require server-side COPY through the C ABI
         env:
           VFSI_REQUIRE_SERVER_COPY: 1

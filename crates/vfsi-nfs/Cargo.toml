@@ -19,5 +19,8 @@ nfsv41-sys = { workspace = true, optional = true }
 vfsi-core = { workspace = true }
 vfsi-sync = { workspace = true }
 
+[dev-dependencies]
+vfsi-sync = { workspace = true, features = ["test-support"] }
+
 [package.metadata.docs.rs]
 no-default-features = true

@@ -20,12 +20,21 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             wheel-kind: abi3
             extra-args: "-i python3.9"
+            platform: linux/amd64
+            image-arch: x86_64
+            test-python: cp39-cp39
           - target: aarch64-unknown-linux-gnu
             wheel-kind: abi3
             extra-args: "-i python3.9"
+            platform: linux/arm64
+            image-arch: aarch64
+            test-python: cp39-cp39
           - target: x86_64-unknown-linux-gnu
             wheel-kind: cp314t
             extra-args: "-i python3.14t"
+            platform: linux/amd64
+            image-arch: x86_64
+            test-python: cp314-cp314t
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-qemu-action@v4
@@ -38,6 +47,23 @@ jobs:
           target: ${{ matrix.target }}
           manylinux: "2_28"
           args: --release --locked --compatibility pypi --out dist ${{ matrix.extra-args }}
+      - name: Test the wheel in its manylinux container
+        env:
+          MANYLINUX_PLATFORM: ${{ matrix.platform }}
+          MANYLINUX_ARCH: ${{ matrix.image-arch }}
+          TEST_PYTHON: ${{ matrix.test-python }}
+        run: |
+          docker run --rm --platform "$MANYLINUX_PLATFORM" \
+            -e TEST_PYTHON \
+            -v "$PWD:/io" \
+            "quay.io/pypa/manylinux_2_28_${MANYLINUX_ARCH}" \
+            /bin/bash -c '
+              set -e
+              py="/opt/python/${TEST_PYTHON}/bin/python"
+              "$py" -m pip install pytest /io/adapters/vsmb/dist/*.whl
+              cd /tmp
+              "$py" -m pytest /io/adapters/vsmb/tests/test_client.py
+            '
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.target }}-${{ matrix.wheel-kind }}

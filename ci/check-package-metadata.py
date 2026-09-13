@@ -8,7 +8,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 
-RUST_PACKAGES = (
+PUBLIC_RUST_PACKAGES = (
     "crates/vnfs/Cargo.toml",
     "crates/nfsv41-sys/Cargo.toml",
     "crates/vfsi-core/Cargo.toml",
@@ -17,6 +17,9 @@ RUST_PACKAGES = (
     "crates/vfsi-smb/Cargo.toml",
     "crates/vfsi-local/Cargo.toml",
     "bindings/c/Cargo.toml",
+)
+
+PRIVATE_RUST_PACKAGES = (
     "adapters/nfs4fs/Cargo.toml",
     "adapters/vfsi-python/Cargo.toml",
     "adapters/vsmb/Cargo.toml",
@@ -37,11 +40,21 @@ def load(relative_path: str) -> dict:
 
 def main() -> int:
     errors: list[str] = []
-    for relative_path in RUST_PACKAGES:
+    for relative_path in PUBLIC_RUST_PACKAGES + PRIVATE_RUST_PACKAGES:
         package = load(relative_path)["package"]
         keywords = {keyword.lower() for keyword in package.get("keywords", [])}
         if "vfsi" not in keywords:
             errors.append(f"{relative_path}: [package].keywords must include 'vfsi'")
+
+    for relative_path in PUBLIC_RUST_PACKAGES:
+        package = load(relative_path)["package"]
+        if package.get("publish") is False:
+            errors.append(f"{relative_path}: public Rust package must be publishable")
+
+    for relative_path in PRIVATE_RUST_PACKAGES:
+        package = load(relative_path)["package"]
+        if package.get("publish") is not False:
+            errors.append(f"{relative_path}: native build crate must set publish = false")
 
     for relative_path in PYTHON_PACKAGES:
         project = load(relative_path)["project"]

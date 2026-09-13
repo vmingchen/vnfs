@@ -1,6 +1,7 @@
 [package]
 name = "vsmb-python"
 version = "0.1.0"
+publish = false
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Python bindings for the vectorized VFSI SMB2/3 client"

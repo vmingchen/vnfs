@@ -171,8 +171,14 @@ from the canonical repository. Package tags are namespace-qualified, such as
 Workspace crates are released in dependency order: `vfsi-core`, `vfsi-sync`,
 the selected `vfsi-*` backends, `vnfs`, and then `vfsi-c`. Python packages are
 released in dependency order: `vfsi-fsspec`, `nfs4fs` and `vsmb`, then
-`vsmbfs`. The private `vfsi-python-native` crate is source-linked into native
-Python distributions and is not published independently.
+`vsmbfs`. The `nfs4fs-python`, `vsmb-python`, and `vfsi-python-native` Cargo
+packages are private build crates source-linked into native Python
+distributions; they are not published independently on crates.io.
+CI packages and tests every public Rust crate from its generated crate archive.
+It builds every Python distribution, installs each one in an isolated virtual
+environment with only its declared dependency closure, and runs package-level
+smoke, typing, and supported-version checks before release workflows may
+publish the artifacts.
 The facade must never be published with a dependency version that is not
 already available from crates.io. The NFS implementation uses an `ffi` feature;
 docs.rs disables that feature because its offline builder cannot fetch and

@@ -30,6 +30,14 @@ jobs:
           fi
           python -m build --outdir adapters/vsmbfs/dist adapters/vsmbfs
           python -m twine check adapters/vsmbfs/dist/*
+      - name: Test the installed wheel outside the source tree
+        run: |
+          python -m venv /tmp/vsmbfs-release
+          /tmp/vsmbfs-release/bin/pip install \
+            pytest adapters/vsmbfs/dist/*.whl
+          cd /tmp
+          /tmp/vsmbfs-release/bin/python -m pytest \
+            "$GITHUB_WORKSPACE/adapters/vsmbfs/tests/test_package.py"
       - uses: actions/upload-artifact@v4
         with:
           name: vsmbfs-dist
