@@ -170,7 +170,7 @@ the registered ports pass or explicitly move to a new declared ABI.
 
 Rust crates, the C ABI, and Python distributions are built and published only
 from the canonical repository. Package tags are namespace-qualified, such as
-`vnfs-v0.0.10` and `nfs4fs-v0.3.1`.
+`vnfs-v0.0.10` and `nfs4fs-v0.3.2`.
 
 Workspace crates are released in dependency order: `vfsi-core`, `vfsi-sync`,
 the selected `vfsi-*` backends, `vnfs`, and then `vfsi-c`. Python packages are

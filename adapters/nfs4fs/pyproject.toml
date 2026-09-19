@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "nfs4fs"
-version = "0.3.1"
+version = "0.3.2"
 description = "fsspec filesystem backed by the vectorized VFSI NFSv4 client"
 readme = "README.md"
 requires-python = ">=3.9"
