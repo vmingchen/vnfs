@@ -21,9 +21,9 @@ xdr-codec = "0.4.4"
 xdrgen = "0.4.4"
 vfsi-core = { path = "crates/vfsi-core", version = "0.1.0" }
 vfsi-local = { path = "crates/vfsi-local", version = "0.1.0" }
-vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.1.0" }
-vfsi-smb = { path = "crates/vfsi-smb", version = "0.1.0" }
-vfsi-sync = { path = "crates/vfsi-sync", version = "0.1.1" }
+vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.1.1" }
+vfsi-smb = { path = "crates/vfsi-smb", version = "0.1.1" }
+vfsi-sync = { path = "crates/vfsi-sync", version = "0.1.2" }
 
 [patch.crates-io]
 libntirpc-sys = { path = "third-party/libntirpc-sys" }

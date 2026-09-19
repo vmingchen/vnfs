@@ -39,7 +39,7 @@ enabled by default.
 Applications that only need interface types can disable default features:
 
 ```toml
-vnfs = { version = "0.0.11", default-features = false }
+vnfs = { version = "0.0.12", default-features = false }
 ```
 
 ## Secure authentication (optional)
@@ -47,7 +47,7 @@ vnfs = { version = "0.0.11", default-features = false }
 Enable Kerberos-backed RPCSEC_GSS explicitly:
 
 ```toml
-vnfs = { version = "0.0.11", features = ["rpcsec-gss"] }
+vnfs = { version = "0.0.12", features = ["rpcsec-gss"] }
 ```
 
 The client uses the process's default GSS credential cache (normally populated
