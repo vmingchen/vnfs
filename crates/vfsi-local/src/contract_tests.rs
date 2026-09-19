@@ -113,7 +113,7 @@ mod tests {
         // (pread beyond i64::MAX) or return an empty read, but never data
         // from the current position.
         match fs.readv(&[ReadOp::new(fd.clone(), VfOffset::At(u64::MAX - 1), 8)]) {
-            Err(e) => assert_eq!(e.err_no(), ERR_INVAL),
+            Err(e) => assert!([ERR_INVAL, libc::EOVERFLOW as u32].contains(&e.err_no())),
             Ok(r) => {
                 assert!(r[0].data.is_empty());
                 assert!(r[0].eof);
@@ -237,6 +237,32 @@ mod tests {
             ERR_INVAL
         );
         fs.close(&fd).unwrap();
+    }
+
+    #[test]
+    fn offset_overflow_is_reported_without_io_or_cursor_wraparound() {
+        let (_root, mut fs) = fs("offset-overflow");
+        write(&mut fs, "/f", b"x");
+        let fd = fs.open(Path::new("/f"), libc::O_RDWR, 0).unwrap();
+
+        let error = fs
+            .writev(&[WriteOp::at(fd.clone(), u64::MAX, b"xx".to_vec())])
+            .unwrap_err();
+        assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+
+        fs.fseek(&fd, i64::MAX, SeekFrom::Set).unwrap();
+        let error = fs.fseek(&fd, 1, SeekFrom::Cur).unwrap_err();
+        assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+        fs.close(&fd).unwrap();
+    }
+
+    #[test]
+    fn adb_layout_overflow_fails_before_creating_the_file() {
+        let (_root, mut fs) = fs("adb-overflow");
+        let pattern = Adb::blocknum_only("/overflow", u64::MAX, 2, 2, 0, 0);
+        let error = fs.write_adb(&[pattern]).unwrap_err();
+        assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+        assert!(!fs.exists(Path::new("/overflow")).unwrap());
     }
 
     // ------------------------------------------------------------------
@@ -462,6 +488,77 @@ mod tests {
                 .unwrap(),
             b"z"
         );
+    }
+
+    #[test]
+    fn no_follow_operations_reject_symlinked_parent_escape() {
+        let (root, mut fs) = fs("sandbox-parent-link");
+        let outside = TempRoot::new("sandbox-outside");
+        std::fs::create_dir_all(&outside.0).unwrap();
+        std::fs::write(outside.0.join("victim"), b"outside").unwrap();
+        std::os::unix::fs::symlink("victim", outside.0.join("link")).unwrap();
+        std::os::unix::fs::symlink(&outside.0, root.0.join("pivot")).unwrap();
+
+        for error in [
+            fs.removev(&[VfFile::from_path("/pivot/victim")])
+                .unwrap_err(),
+            fs.renamev(&[(
+                VfFile::from_path("/pivot/victim"),
+                VfFile::from_path("/renamed"),
+            )])
+            .unwrap_err(),
+            fs.listdir(Path::new("/pivot"), AttrMask::stat(), 0, false)
+                .unwrap_err(),
+            fs.readlinkv(&[Path::new("/pivot/link")]).unwrap_err(),
+            fs.hardlinkv(&[Path::new("/pivot/victim")], &[Path::new("/hard")])
+                .unwrap_err(),
+            fs.lstat(Path::new("/pivot/victim")).unwrap_err(),
+        ] {
+            assert!([ERR_ACCES, ERR_NOENT].contains(&error.err_no()));
+        }
+        assert_eq!(std::fs::read(outside.0.join("victim")).unwrap(), b"outside");
+        assert!(!root.0.join("renamed").exists());
+        assert!(!root.0.join("hard").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn anchored_no_follow_path_survives_parent_replacement() {
+        let (root, fs) = fs("sandbox-parent-race");
+        let outside = TempRoot::new("sandbox-race-outside");
+        std::fs::create_dir_all(root.0.join("inside")).unwrap();
+        std::fs::create_dir_all(&outside.0).unwrap();
+        std::fs::write(root.0.join("inside/victim"), b"inside").unwrap();
+        std::fs::write(outside.0.join("victim"), b"outside").unwrap();
+
+        let anchored = fs.no_follow_path(&root.0.join("inside/victim")).unwrap();
+        std::fs::rename(root.0.join("inside"), root.0.join("moved")).unwrap();
+        std::os::unix::fs::symlink(&outside.0, root.0.join("inside")).unwrap();
+
+        std::fs::remove_file(&anchored).unwrap();
+        assert!(!root.0.join("moved/victim").exists());
+        assert_eq!(std::fs::read(outside.0.join("victim")).unwrap(), b"outside");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn anchored_create_cannot_be_redirected_after_resolution() {
+        let (root, fs) = fs("sandbox-create-race");
+        let outside = TempRoot::new("sandbox-create-outside");
+        std::fs::create_dir_all(root.0.join("inside")).unwrap();
+        std::fs::create_dir_all(&outside.0).unwrap();
+        std::fs::write(outside.0.join("new"), b"outside").unwrap();
+
+        let anchored = fs.real_path(&root.0.join("inside/new")).unwrap();
+        std::fs::rename(root.0.join("inside"), root.0.join("moved")).unwrap();
+        std::os::unix::fs::symlink(&outside.0, root.0.join("inside")).unwrap();
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        DummyVecFs::protect_create_open(&anchored, &mut options);
+        options.open(&anchored).unwrap();
+
+        assert!(root.0.join("moved/new").exists());
+        assert_eq!(std::fs::read(outside.0.join("new")).unwrap(), b"outside");
     }
 
     #[test]

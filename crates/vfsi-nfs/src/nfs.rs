@@ -289,6 +289,8 @@ pub struct NfsVecFs {
     next_fd: i32,
     /// Canonical open-file state, keyed by the client-assigned descriptor.
     open_files: std::collections::HashMap<i32, OpenFile>,
+    /// Handles no longer visible to callers whose CLOSE was not confirmed.
+    deferred_descriptor_closes: Vec<OpenFile>,
     server_copy_enabled: bool,
     server_copy_stats: NfsServerCopyStats,
     /// How path-based bulk I/O is issued: one compound per batch including
@@ -323,8 +325,70 @@ fn remap_descriptor_chunk_error(error: VfError, start: usize, owners: &[usize]) 
     })
 }
 
+fn remap_active_error(error: VfError, active: &[usize]) -> VfError {
+    match error
+        .index_opt()
+        .and_then(|index| active.get(index))
+        .copied()
+    {
+        Some(original) => error.with_index(original),
+        None => error,
+    }
+}
+
+fn merge_read_allv_round(
+    active: &[usize],
+    results: &[ReadResult],
+    out: &mut [Vec<u8>],
+    offsets: &mut [u64],
+) -> VfResult<Vec<usize>> {
+    if results.len() != active.len() {
+        return Err(VfError::transport(
+            None,
+            format!(
+                "NFS readv returned {} results for {} active files",
+                results.len(),
+                active.len()
+            ),
+        ));
+    }
+    let mut next = Vec::with_capacity(active.len());
+    for (result, &original) in results.iter().zip(active) {
+        if result.data.is_empty() && !result.eof {
+            return Err(VfError::transport(
+                original,
+                "NFS READ made no progress without reporting EOF",
+            ));
+        }
+        out[original].extend_from_slice(&result.data);
+        offsets[original] = result
+            .offset
+            .checked_add(result.data.len() as u64)
+            .ok_or_else(|| VfError::failure(original, libc::EOVERFLOW as u32))?;
+        if !result.eof {
+            next.push(original);
+        }
+    }
+    Ok(next)
+}
+
 fn non_destructive_reopen_flags(flags: i32) -> i32 {
     flags & !(libc::O_CREAT | libc::O_EXCL | libc::O_TRUNC)
+}
+
+fn adb_block_base(pattern: &Adb, block: usize, index: usize) -> VfResult<u64> {
+    let relative = (block as u64)
+        .checked_mul(pattern.adb_block_size)
+        .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
+    pattern
+        .adb_offset
+        .checked_add(relative)
+        .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))
+}
+
+fn adb_field_offset(base: u64, relative: u64, index: usize) -> VfResult<u64> {
+    base.checked_add(relative)
+        .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))
 }
 
 impl NfsVecFs {
@@ -343,6 +407,12 @@ impl NfsVecFs {
     #[doc(hidden)]
     pub fn test_open_handle_count(&self) -> usize {
         self.open_files.len()
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[doc(hidden)]
+    pub fn test_deferred_descriptor_close_count(&self) -> usize {
+        self.deferred_descriptor_closes.len()
     }
 
     #[cfg(feature = "test-faults")]
@@ -371,7 +441,9 @@ impl NfsVecFs {
         let closes: Vec<crate::client::CloseOp> = self
             .open_files
             .drain()
-            .map(|(_, open)| crate::client::CloseOp {
+            .map(|(_, open)| open)
+            .chain(self.deferred_descriptor_closes.drain(..))
+            .map(|open| crate::client::CloseOp {
                 fh: open.fh,
                 stateid: open.stateid,
             })
@@ -917,6 +989,7 @@ impl NfsVecFs {
             cwd,
             next_fd: 0,
             open_files: std::collections::HashMap::new(),
+            deferred_descriptor_closes: Vec::new(),
             server_copy_enabled,
             server_copy_stats: NfsServerCopyStats::default(),
             merged_mode: MergedIoMode::Full,
@@ -1087,6 +1160,33 @@ impl NfsVecFs {
 
     fn insert_open_file(&mut self, open: OpenFile) -> VfResult<i32> {
         crate::vecfs::insert_fd(&mut self.next_fd, &mut self.open_files, open)
+    }
+
+    fn drain_deferred_descriptor_closes(&mut self) -> VfResult<()> {
+        if self.deferred_descriptor_closes.is_empty() {
+            return Ok(());
+        }
+        let pending = std::mem::take(&mut self.deferred_descriptor_closes);
+        let operations: Vec<crate::client::CloseOp> = pending
+            .iter()
+            .map(|open| crate::client::CloseOp {
+                fh: open.fh.clone(),
+                stateid: open.stateid,
+            })
+            .collect();
+        match self.nfs.close_many(&operations) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let first_unconfirmed = if error.is_transport() {
+                    0
+                } else {
+                    error.op_index.min(pending.len())
+                };
+                self.deferred_descriptor_closes
+                    .extend(pending.into_iter().skip(first_unconfirmed));
+                Err(VfError::from_rpc(error, None))
+            }
+        }
     }
 
     /// Resolve a root-relative path to a file handle, following symlinks in
@@ -1564,7 +1664,9 @@ impl NfsVecFs {
                 if remaining == 0 {
                     break;
                 }
-                chunk_off += n as u64;
+                chunk_off = chunk_off
+                    .checked_add(n as u64)
+                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
             }
             offsets.push(off);
         }
@@ -1703,7 +1805,9 @@ impl NfsVecFs {
                 if remaining == 0 {
                     break;
                 }
-                chunk_off += n as u64;
+                chunk_off = chunk_off
+                    .checked_add(n as u64)
+                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
             }
             offsets.push(off);
         }
@@ -1759,7 +1863,9 @@ impl NfsVecFs {
             let mut stable = true;
             while ci < owner.len() && owner[ci] == i {
                 let (n, committed) = &results[ci];
-                written += *n as u64;
+                written = written
+                    .checked_add(*n as u64)
+                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
                 stable = stable && *committed == stable_how4_FILE_SYNC4;
                 ci += 1;
             }
@@ -1897,7 +2003,7 @@ impl NfsVecFs {
                     ..VfAttrs::default()
                 };
                 // Attributes come back inline from READDIR for the requested ids.
-                let vals = parse_attr_list(&ids, &e.attrs).unwrap_or_default();
+                let vals = parse_attr_list(&ids, &e.attrs)?;
                 apply_attrs(&mut a, &vals);
                 let is_dir = a.ftype == VfType::Directory;
                 out.push(a);
@@ -1948,10 +2054,9 @@ impl NfsVecFs {
                 break;
             }
         }
-        Ok(all
-            .iter()
+        all.iter()
             .map(|de| Self::dir_entry_to_attrs(dir_path, masks, &ids, de))
-            .collect())
+            .collect()
     }
 
     /// Convert a raw READDIR entry into a `VfAttrs` with a full path. `ids`
@@ -1962,16 +2067,16 @@ impl NfsVecFs {
         masks: &AttrMask,
         ids: &[u32],
         de: &crate::client::DirEntry,
-    ) -> VfAttrs {
+    ) -> VfResult<VfAttrs> {
         let path = parent_path.join(path_from_bytes(&de.name));
         let mut a = VfAttrs {
             file: VfFile::from_os_path(&path),
             masks: *masks,
             ..VfAttrs::default()
         };
-        let vals = parse_attr_list(ids, &de.attrs).unwrap_or_default();
+        let vals = parse_attr_list(ids, &de.attrs)?;
         apply_attrs(&mut a, &vals);
-        a
+        Ok(a)
     }
 
     fn copy_extent(
@@ -2775,6 +2880,7 @@ impl VecFs for NfsVecFs {
         if paths.len() != flags.len() || paths.len() != modes.len() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
+        self.drain_deferred_descriptor_closes()?;
         if paths.is_empty() {
             return Ok(ManyResults::all_success(Vec::new()));
         }
@@ -2794,16 +2900,21 @@ impl VecFs for NfsVecFs {
         let fd = tcf.fd().unwrap();
         let open = self
             .open_files
-            .get(&fd)
-            .cloned()
+            .remove(&fd)
             .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
         #[cfg(feature = "test-faults")]
-        self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })?;
-        self.nfs
-            .close(&open.fh, &open.stateid)
-            .map_err(|e| VfError::from_rpc(e, 0))?;
-        self.open_files.remove(&fd);
-        Ok(())
+        if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })
+        {
+            self.deferred_descriptor_closes.push(open);
+            return Err(error);
+        }
+        match self.nfs.close(&open.fh, &open.stateid) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.deferred_descriptor_closes.push(open);
+                Err(VfError::from_rpc(error, 0))
+            }
+        }
     }
 
     fn sync_data(&mut self, tcf: &VfFile) -> VfResult<()> {
@@ -2999,20 +3110,10 @@ impl VecFs for NfsVecFs {
                 .iter()
                 .map(|&i| ReadOp::at(files[i].clone(), offsets[i], window))
                 .collect();
-            let results = self.readv(&reads)?;
-            let mut next = Vec::with_capacity(active.len());
-            for (k, &i) in active.iter().enumerate() {
-                let r = &results[k];
-                out[i].extend_from_slice(&r.data);
-                offsets[i] = r
-                    .offset
-                    .checked_add(r.data.len() as u64)
-                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
-                if !r.eof {
-                    next.push(i);
-                }
-            }
-            active = next;
+            let results = self
+                .readv(&reads)
+                .map_err(|error| remap_active_error(error, &active))?;
+            active = merge_read_allv_round(&active, &results, &mut out, &mut offsets)?;
         }
         Ok(out)
     }
@@ -3188,6 +3289,7 @@ impl VecFs for NfsVecFs {
         let ids = request_mask_to_attr_list(&masks);
         let mut counted = 0usize;
         let mut level_paths: Vec<PathBuf> = dirs.iter().map(|d| d.to_path_buf()).collect();
+        let mut level_owners: Vec<usize> = (0..dirs.len()).collect();
         loop {
             if level_paths.is_empty() {
                 return Ok(());
@@ -3199,22 +3301,26 @@ impl VecFs for NfsVecFs {
                 .collect();
             let refs: Vec<&VfFile> = files.iter().collect();
             let resolved = self.resolve_many_tcfile(&refs, true)?;
-            let mut level: Vec<(FileHandle, PathBuf)> = Vec::with_capacity(level_paths.len());
+            let mut level: Vec<(FileHandle, PathBuf, usize)> =
+                Vec::with_capacity(level_paths.len());
             for (i, r) in resolved.iter().enumerate() {
+                let owner = level_owners[i];
                 match r {
                     Ok((fh, ftype)) if *ftype == nfs_ftype4_NF4DIR => {
-                        level.push((fh.clone(), level_paths[i].clone()));
+                        level.push((fh.clone(), level_paths[i].clone(), owner));
                     }
-                    Ok((_, _)) => return Err(VfError::failure(i, nfsstat4_NFS4ERR_NOTDIR)),
-                    Err(status) => return Err(VfError::nfs(i, *status)),
+                    Ok((_, _)) => {
+                        return Err(VfError::failure(owner, nfsstat4_NFS4ERR_NOTDIR));
+                    }
+                    Err(status) => return Err(VfError::nfs(owner, *status)),
                 }
             }
             // First pages for all directories in one compound.
-            let ops: Vec<(FileHandle, u64)> = level.iter().map(|(fh, _)| (fh.clone(), 0)).collect();
-            let results = self
-                .nfs
-                .readdir_pages(&ops, &ids)
-                .map_err(|e| VfError::from_rpc(e, None))?;
+            let ops: Vec<(FileHandle, u64)> =
+                level.iter().map(|(fh, _, _)| (fh.clone(), 0)).collect();
+            let results = self.nfs.readdir_pages(&ops, &ids).map_err(|error| {
+                remap_active_error(VfError::from_rpc_indexed(error), &level_owners)
+            })?;
             let mut accumulated: Vec<Vec<crate::client::DirEntry>> =
                 results.iter().map(|r| r.0.clone()).collect();
             let mut pending: Vec<(usize, FileHandle, u64)> = results
@@ -3229,10 +3335,11 @@ impl VecFs for NfsVecFs {
                     .iter()
                     .map(|(_, fh, cookie)| (fh.clone(), *cookie))
                     .collect();
-                let cont = self
-                    .nfs
-                    .readdir_pages(&cont_ops, &ids)
-                    .map_err(|e| VfError::from_rpc(e, None))?;
+                let pending_owners: Vec<usize> =
+                    pending.iter().map(|(idx, _, _)| level[*idx].2).collect();
+                let cont = self.nfs.readdir_pages(&cont_ops, &ids).map_err(|error| {
+                    remap_active_error(VfError::from_rpc_indexed(error), &pending_owners)
+                })?;
                 let mut next_pending = Vec::new();
                 for ((idx, fh, _), (entries, cookie)) in pending.iter().zip(cont) {
                     accumulated[*idx].extend(entries);
@@ -3244,8 +3351,10 @@ impl VecFs for NfsVecFs {
             }
             // Emit entries and collect subdirectories for the next level.
             let mut next_level: Vec<PathBuf> = Vec::new();
+            let mut next_owners: Vec<usize> = Vec::new();
             for (idx, entries) in accumulated.iter().enumerate() {
                 let dir = &level[idx].1;
+                let owner = level[idx].2;
                 for e in entries {
                     if max_entries != 0 && counted >= max_entries {
                         return Ok(());
@@ -3256,10 +3365,12 @@ impl VecFs for NfsVecFs {
                         masks,
                         ..VfAttrs::default()
                     };
-                    let vals = parse_attr_list(&ids, &e.attrs).unwrap_or_default();
+                    let vals =
+                        parse_attr_list(&ids, &e.attrs).map_err(|error| error.with_index(owner))?;
                     apply_attrs(&mut a, &vals);
                     if recursive && a.ftype == VfType::Directory {
                         next_level.push(path);
+                        next_owners.push(owner);
                     }
                     if !cb(&a, dir) {
                         return Ok(());
@@ -3271,6 +3382,7 @@ impl VecFs for NfsVecFs {
                 return Ok(());
             }
             level_paths = next_level;
+            level_owners = next_owners;
         }
     }
 
@@ -3354,7 +3466,7 @@ impl VecFs for NfsVecFs {
                 let path = frontier[idx].1.clone();
                 let mut attrs = Vec::with_capacity(accumulated[idx].len());
                 for de in &accumulated[idx] {
-                    attrs.push(Self::dir_entry_to_attrs(&path, &masks, &ids, de));
+                    attrs.push(Self::dir_entry_to_attrs(&path, &masks, &ids, de)?);
                 }
                 sort(&path, &mut attrs);
                 for a in &attrs {
@@ -3673,6 +3785,35 @@ impl VecFs for NfsVecFs {
     fn write_adb(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
         for (i, p) in patterns.iter().enumerate() {
+            // Validate the entire layout before creating/opening a file so an
+            // overflow cannot strand server-side open state.
+            let mut layout = Vec::with_capacity(p.adb_block_count);
+            let pattern_len = u64::try_from(p.adb_pattern_data.len())
+                .map_err(|_| VfError::failure(i, libc::EOVERFLOW as u32))?;
+            for b in 0..p.adb_block_count {
+                let base = adb_block_base(p, b, i)?;
+                let block_number = p
+                    .adb_block_num
+                    .checked_add(b as u64)
+                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
+                let number_offset = p
+                    .adb_reloff_blocknum
+                    .map(|relative| {
+                        let offset = adb_field_offset(base, relative, i)?;
+                        adb_field_offset(offset, 8, i)?;
+                        Ok(offset)
+                    })
+                    .transpose()?;
+                let pattern_offset = p
+                    .adb_reloff_pattern
+                    .map(|relative| {
+                        let offset = adb_field_offset(base, relative, i)?;
+                        adb_field_offset(offset, pattern_len, i)?;
+                        Ok(offset)
+                    })
+                    .transpose()?;
+                layout.push((block_number, number_offset, pattern_offset));
+            }
             let full = self.abs_path(&p.path);
             let (dir, name) = match split_path_bytes(path_bytes(&full)) {
                 Ok(x) => x,
@@ -3697,20 +3838,17 @@ impl VecFs for NfsVecFs {
             };
             let mut written = 0usize;
             let mut failed: Option<VfError> = None;
-            for b in 0..p.adb_block_count {
-                let base = p.adb_offset.saturating_add(b as u64 * p.adb_block_size);
-                if let Some(reloff) = p.adb_reloff_blocknum {
-                    let adbn = (p.adb_block_num + b as u64).to_be_bytes();
-                    if let Err(e) = self.nfs.write(&fh, &sid, base + reloff, &adbn) {
+            for (block_number, number_offset, pattern_offset) in layout {
+                if let Some(offset) = number_offset {
+                    let adbn = block_number.to_be_bytes();
+                    if let Err(e) = self.nfs.write(&fh, &sid, offset, &adbn) {
                         failed = Some(VfError::from_rpc(e, i));
                         break;
                     }
                 }
-                if let Some(reloff) = p.adb_reloff_pattern
+                if let Some(offset) = pattern_offset
                     && !p.adb_pattern_data.is_empty()
-                    && let Err(e) = self
-                        .nfs
-                        .write(&fh, &sid, base + reloff, &p.adb_pattern_data)
+                    && let Err(e) = self.nfs.write(&fh, &sid, offset, &p.adb_pattern_data)
                 {
                     failed = Some(VfError::from_rpc(e, i));
                     break;
@@ -3784,7 +3922,9 @@ impl Drop for NfsVecFs {
         let closes: Vec<crate::client::CloseOp> = self
             .open_files
             .drain()
-            .map(|(_, open)| crate::client::CloseOp {
+            .map(|(_, open)| open)
+            .chain(self.deferred_descriptor_closes.drain(..))
+            .map(|open| crate::client::CloseOp {
                 fh: open.fh,
                 stateid: open.stateid,
             })
@@ -4077,42 +4217,46 @@ fn parse_gid(s: &[u8]) -> Option<u32> {
 }
 
 fn read_u32(buf: &[u8], off: &mut usize) -> VfResult<u32> {
-    if *off + 4 > buf.len() {
-        return Err(VfError::failure(0, VF_ERR_RPC));
-    }
-    let v = u32::from_be_bytes(buf[*off..*off + 4].try_into().unwrap());
-    *off += 4;
+    let end = off.checked_add(4).ok_or_else(attr_decode_error)?;
+    let bytes = buf.get(*off..end).ok_or_else(attr_decode_error)?;
+    let v = u32::from_be_bytes(bytes.try_into().expect("four-byte slice"));
+    *off = end;
     Ok(v)
 }
 
 fn read_u64(buf: &[u8], off: &mut usize) -> VfResult<u64> {
-    if *off + 8 > buf.len() {
-        return Err(VfError::failure(0, VF_ERR_RPC));
-    }
-    let v = u64::from_be_bytes(buf[*off..*off + 8].try_into().unwrap());
-    *off += 8;
+    let end = off.checked_add(8).ok_or_else(attr_decode_error)?;
+    let bytes = buf.get(*off..end).ok_or_else(attr_decode_error)?;
+    let v = u64::from_be_bytes(bytes.try_into().expect("eight-byte slice"));
+    *off = end;
     Ok(v)
+}
+
+fn attr_decode_error() -> VfError {
+    VfError::transport(0, "malformed NFS attribute list")
 }
 
 /// Read an XDR `nfstime4`: `int64 seconds; uint32 nseconds` (12 bytes).
 fn read_nfstime(buf: &[u8], off: &mut usize) -> VfResult<(i64, u32)> {
-    if *off + 12 > buf.len() {
-        return Err(VfError::failure(0, VF_ERR_RPC));
-    }
-    let secs = i64::from_be_bytes(buf[*off..*off + 8].try_into().unwrap());
-    let nsec = u32::from_be_bytes(buf[*off + 8..*off + 12].try_into().unwrap());
-    *off += 12;
+    let end = off.checked_add(12).ok_or_else(attr_decode_error)?;
+    let bytes = buf.get(*off..end).ok_or_else(attr_decode_error)?;
+    let secs = i64::from_be_bytes(bytes[..8].try_into().expect("eight-byte slice"));
+    let nsec = u32::from_be_bytes(bytes[8..].try_into().expect("four-byte slice"));
+    *off = end;
     Ok((secs, nsec))
 }
 
 /// Read an XDR `utf8string`: length + padded bytes.
 fn read_str(buf: &[u8], off: &mut usize) -> VfResult<Vec<u8>> {
     let len = read_u32(buf, off)? as usize;
-    if *off + len > buf.len() {
-        return Err(VfError::failure(0, VF_ERR_RPC));
+    let padded = len.checked_add(3).ok_or_else(attr_decode_error)? & !3;
+    let end = off.checked_add(padded).ok_or_else(attr_decode_error)?;
+    let data_end = off.checked_add(len).ok_or_else(attr_decode_error)?;
+    if end > buf.len() {
+        return Err(attr_decode_error());
     }
-    let s = buf[*off..*off + len].to_vec();
-    *off += (len + 3) & !3;
+    let s = buf[*off..data_end].to_vec();
+    *off = end;
     Ok(s)
 }
 
@@ -4127,6 +4271,75 @@ mod tests {
         let owners = [0, 0, 1];
         let error = remap_descriptor_chunk_error(VfError::failure(1, ERR_EBADF), 0, &owners);
         assert_eq!(error.index_opt(), Some(0));
+    }
+
+    #[test]
+    fn read_all_round_remaps_failures_and_rejects_zero_progress() {
+        let active = [2, 5];
+        let remapped = remap_active_error(VfError::failure(0, ERR_IO), &active);
+        assert_eq!(remapped.index_opt(), Some(2));
+        let remapped = remap_active_error(VfError::failure(1, ERR_IO), &active);
+        assert_eq!(remapped.index_opt(), Some(5));
+
+        let mut out = vec![Vec::new(); 6];
+        let mut offsets = vec![0; 6];
+        let stalled = [ReadResult {
+            file: VfFile::from_path("/f"),
+            offset: 7,
+            data: Vec::new(),
+            eof: false,
+        }];
+        let error = merge_read_allv_round(&[5], &stalled, &mut out, &mut offsets).unwrap_err();
+        assert!(error.is_transport());
+        assert_eq!(error.index_opt(), Some(5));
+    }
+
+    #[test]
+    fn read_all_round_preserves_original_positions_after_cohort_shrinks() {
+        let mut out = vec![Vec::new(); 3];
+        let mut offsets = vec![0; 3];
+        let results = [
+            ReadResult {
+                file: VfFile::from_path("/one"),
+                offset: 0,
+                data: b"a".to_vec(),
+                eof: true,
+            },
+            ReadResult {
+                file: VfFile::from_path("/two"),
+                offset: 4,
+                data: b"bc".to_vec(),
+                eof: false,
+            },
+        ];
+        let next = merge_read_allv_round(&[1, 2], &results, &mut out, &mut offsets).unwrap();
+        assert_eq!(next, [2]);
+        assert_eq!(out[1], b"a");
+        assert_eq!(out[2], b"bc");
+        assert_eq!(offsets[2], 6);
+    }
+
+    #[test]
+    fn malformed_readdir_attributes_are_transport_errors() {
+        let error = parse_attr_list(&[FATTR4_SIZE], &[0, 0, 0]).unwrap_err();
+        assert!(error.is_transport());
+
+        // XDR strings occupy a four-byte-aligned field. A payload without
+        // its required padding must not be accepted at the end of an attrlist.
+        let mut unpadded = 1u32.to_be_bytes().to_vec();
+        unpadded.push(b'x');
+        let error = parse_attr_list(&[FATTR4_OWNER], &unpadded).unwrap_err();
+        assert!(error.is_transport());
+    }
+
+    #[test]
+    fn adb_offset_overflow_preserves_request_index() {
+        let pattern = Adb::blocknum_only("/overflow", u64::MAX, 2, 2, 0, 0);
+        let error = adb_block_base(&pattern, 1, 4).unwrap_err();
+        assert_eq!(error.index_opt(), Some(4));
+        assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+        let error = adb_field_offset(u64::MAX, 1, 5).unwrap_err();
+        assert_eq!(error.index_opt(), Some(5));
     }
 
     #[test]

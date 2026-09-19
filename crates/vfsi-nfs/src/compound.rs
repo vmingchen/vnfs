@@ -8,7 +8,7 @@ use std::os::raw::{c_char, c_void};
 
 use nfsv41_sys::*;
 
-use crate::error::RpcResult;
+use crate::error::{RpcError, RpcResult};
 use crate::rpc::{NFSPROC4_COMPOUND, RpcClient};
 
 unsafe extern "C" fn wrap_compound4args(xdrs: *mut libntirpc_sys::XDR, objp: *mut c_void) -> bool {
@@ -633,6 +633,7 @@ impl Compound {
         RPC_TIME_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         RPC_CALLS.fetch_add(1, Ordering::Relaxed);
         compound_stats_record(&self.args);
+        validate_response_ops(&self.ops, &res)?;
         Ok(CompoundRes { res })
     }
 
@@ -644,16 +645,154 @@ impl Compound {
 
 /// A decoded COMPOUND4res; frees its XDR-allocated storage on drop.
 pub struct CompoundRes {
-    pub res: COMPOUND4res,
+    res: COMPOUND4res,
 }
+
+/// `xdr_free_null_stream` is process-global C state. libtirpc's generated
+/// free routines accept a mutable stream pointer, so serialize access even
+/// though the null stream is normally only inspected for `XDR_FREE`.
+static XDR_FREE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 impl Drop for CompoundRes {
     fn drop(&mut self) {
-        // The XDR-free idiom requires a reference to the shared null stream.
-        #[allow(static_mut_refs)]
-        unsafe {
-            xdr_wrap_COMPOUND4res(&mut xdr_free_null_stream, &mut self.res)
+        let _guard = XDR_FREE_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        unsafe { xdr_wrap_COMPOUND4res(&raw mut xdr_free_null_stream, &mut self.res) };
+    }
+}
+
+/// Validate all server-controlled structure needed by the typed response
+/// accessors before a `CompoundRes` becomes observable. NFS may return a
+/// prefix when an operation fails, but every returned opcode must correspond
+/// to the request at the same position.
+fn validate_response_ops(request: &[nfs_argop4], res: &COMPOUND4res) -> RpcResult<()> {
+    let count = res.resarray.resarray_len as usize;
+    if count > request.len() {
+        return Err(RpcError::transport(format!(
+            "malformed NFS COMPOUND reply: returned {count} operations for {} requests",
+            request.len()
+        )));
+    }
+    if count != 0 && res.resarray.resarray_val.is_null() {
+        return Err(RpcError::transport(
+            "malformed NFS COMPOUND reply: non-empty operation array has a null pointer",
+        ));
+    }
+    if res.status == nfsstat4_NFS4_OK && count != request.len() {
+        return Err(RpcError::transport(format!(
+            "malformed NFS COMPOUND reply: successful reply returned {count} operations for {} requests",
+            request.len()
+        )));
+    }
+    for (index, expected) in request.iter().enumerate().take(count) {
+        let actual = unsafe { &*res.resarray.resarray_val.add(index) };
+        if actual.resop != expected.argop {
+            return Err(RpcError::transport(format!(
+                "malformed NFS COMPOUND reply: operation {index} is {}, expected {}",
+                actual.resop, expected.argop
+            )));
+        }
+        let status = response_op_status(actual);
+        if status == u32::MAX {
+            return Err(RpcError::transport(format!(
+                "malformed NFS COMPOUND reply: operation {index} has unsupported opcode {}",
+                actual.resop
+            )));
+        }
+        let is_last = index + 1 == count;
+        let expected_status = if is_last {
+            res.status
+        } else {
+            nfsstat4_NFS4_OK
         };
+        if status != expected_status {
+            return Err(RpcError::transport(format!(
+                "malformed NFS COMPOUND reply: operation {index} status {status} does not match compound status {}",
+                res.status
+            )));
+        }
+        let null_payload = unsafe {
+            match actual.resop {
+                nfs_opnum4_NFS4_OP_GETFH => {
+                    let result = actual.nfs_resop4_u.opgetfh;
+                    result.status == nfsstat4_NFS4_OK
+                        && result.GETFH4res_u.resok4.object.nfs_fh4_len != 0
+                        && result.GETFH4res_u.resok4.object.nfs_fh4_val.is_null()
+                }
+                nfs_opnum4_NFS4_OP_READ => {
+                    let result = actual.nfs_resop4_u.opread;
+                    result.status == nfsstat4_NFS4_OK
+                        && result.READ4res_u.resok4.data.data_len != 0
+                        && result.READ4res_u.resok4.data.data_val.is_null()
+                }
+                nfs_opnum4_NFS4_OP_READLINK => {
+                    let result = actual.nfs_resop4_u.opreadlink;
+                    result.status == nfsstat4_NFS4_OK
+                        && result.READLINK4res_u.resok4.link.utf8string_len != 0
+                        && result.READLINK4res_u.resok4.link.utf8string_val.is_null()
+                }
+                nfs_opnum4_NFS4_OP_GETATTR => {
+                    let result = actual.nfs_resop4_u.opgetattr;
+                    result.status == nfsstat4_NFS4_OK
+                        && result
+                            .GETATTR4res_u
+                            .resok4
+                            .obj_attributes
+                            .attr_vals
+                            .attrlist4_len
+                            != 0
+                        && result
+                            .GETATTR4res_u
+                            .resok4
+                            .obj_attributes
+                            .attr_vals
+                            .attrlist4_val
+                            .is_null()
+                }
+                _ => false,
+            }
+        };
+        if null_payload {
+            return Err(RpcError::transport(format!(
+                "malformed NFS COMPOUND reply: operation {index} has a null payload pointer"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn response_op_status(ro: &nfs_resop4) -> u32 {
+    unsafe {
+        match ro.resop {
+            nfs_opnum4_NFS4_OP_PUTFH => ro.nfs_resop4_u.opputfh.status,
+            nfs_opnum4_NFS4_OP_PUTROOTFH => ro.nfs_resop4_u.opputrootfh.status,
+            nfs_opnum4_NFS4_OP_GETFH => ro.nfs_resop4_u.opgetfh.status,
+            nfs_opnum4_NFS4_OP_LOOKUP => ro.nfs_resop4_u.oplookup.status,
+            nfs_opnum4_NFS4_OP_SEQUENCE => ro.nfs_resop4_u.opsequence.sr_status,
+            nfs_opnum4_NFS4_OP_OPEN => ro.nfs_resop4_u.opopen.status,
+            nfs_opnum4_NFS4_OP_READ => ro.nfs_resop4_u.opread.status,
+            nfs_opnum4_NFS4_OP_WRITE => ro.nfs_resop4_u.opwrite.status,
+            nfs_opnum4_NFS4_OP_COPY => ro.nfs_resop4_u.opcopy.cr_status,
+            nfs_opnum4_NFS4_OP_CLOSE => ro.nfs_resop4_u.opclose.status,
+            nfs_opnum4_NFS4_OP_EXCHANGE_ID => ro.nfs_resop4_u.opexchange_id.eir_status,
+            nfs_opnum4_NFS4_OP_CREATE_SESSION => ro.nfs_resop4_u.opcreate_session.csr_status,
+            nfs_opnum4_NFS4_OP_RECLAIM_COMPLETE => ro.nfs_resop4_u.opreclaim_complete.rcr_status,
+            nfs_opnum4_NFS4_OP_CREATE => ro.nfs_resop4_u.opcreate.status,
+            nfs_opnum4_NFS4_OP_READLINK => ro.nfs_resop4_u.opreadlink.status,
+            nfs_opnum4_NFS4_OP_GETATTR => ro.nfs_resop4_u.opgetattr.status,
+            nfs_opnum4_NFS4_OP_SETATTR => ro.nfs_resop4_u.opsetattr.status,
+            nfs_opnum4_NFS4_OP_READDIR => ro.nfs_resop4_u.opreaddir.status,
+            nfs_opnum4_NFS4_OP_REMOVE => ro.nfs_resop4_u.opremove.status,
+            nfs_opnum4_NFS4_OP_RENAME => ro.nfs_resop4_u.oprename.status,
+            nfs_opnum4_NFS4_OP_LINK => ro.nfs_resop4_u.oplink.status,
+            nfs_opnum4_NFS4_OP_SAVEFH => ro.nfs_resop4_u.opsavefh.status,
+            nfs_opnum4_NFS4_OP_RESTOREFH => ro.nfs_resop4_u.oprestorefh.status,
+            nfs_opnum4_NFS4_OP_LOOKUPP => ro.nfs_resop4_u.oplookupp.status,
+            nfs_opnum4_NFS4_OP_DESTROY_SESSION => ro.nfs_resop4_u.opdestroy_session.dsr_status,
+            nfs_opnum4_NFS4_OP_DESTROY_CLIENTID => ro.nfs_resop4_u.opdestroy_clientid.dcr_status,
+            _ => u32::MAX,
+        }
     }
 }
 
@@ -673,42 +812,7 @@ impl CompoundRes {
 
     /// Per-op status for the given resop index.
     pub fn op_status(&self, i: usize) -> u32 {
-        let ro = self.resop(i);
-        unsafe {
-            match ro.resop {
-                nfs_opnum4_NFS4_OP_PUTFH => ro.nfs_resop4_u.opputfh.status,
-                nfs_opnum4_NFS4_OP_PUTROOTFH => ro.nfs_resop4_u.opputrootfh.status,
-                nfs_opnum4_NFS4_OP_GETFH => ro.nfs_resop4_u.opgetfh.status,
-                nfs_opnum4_NFS4_OP_LOOKUP => ro.nfs_resop4_u.oplookup.status,
-                nfs_opnum4_NFS4_OP_SEQUENCE => ro.nfs_resop4_u.opsequence.sr_status,
-                nfs_opnum4_NFS4_OP_OPEN => ro.nfs_resop4_u.opopen.status,
-                nfs_opnum4_NFS4_OP_READ => ro.nfs_resop4_u.opread.status,
-                nfs_opnum4_NFS4_OP_WRITE => ro.nfs_resop4_u.opwrite.status,
-                nfs_opnum4_NFS4_OP_COPY => ro.nfs_resop4_u.opcopy.cr_status,
-                nfs_opnum4_NFS4_OP_CLOSE => ro.nfs_resop4_u.opclose.status,
-                nfs_opnum4_NFS4_OP_EXCHANGE_ID => ro.nfs_resop4_u.opexchange_id.eir_status,
-                nfs_opnum4_NFS4_OP_CREATE_SESSION => ro.nfs_resop4_u.opcreate_session.csr_status,
-                nfs_opnum4_NFS4_OP_RECLAIM_COMPLETE => {
-                    ro.nfs_resop4_u.opreclaim_complete.rcr_status
-                }
-                nfs_opnum4_NFS4_OP_CREATE => ro.nfs_resop4_u.opcreate.status,
-                nfs_opnum4_NFS4_OP_READLINK => ro.nfs_resop4_u.opreadlink.status,
-                nfs_opnum4_NFS4_OP_GETATTR => ro.nfs_resop4_u.opgetattr.status,
-                nfs_opnum4_NFS4_OP_SETATTR => ro.nfs_resop4_u.opsetattr.status,
-                nfs_opnum4_NFS4_OP_READDIR => ro.nfs_resop4_u.opreaddir.status,
-                nfs_opnum4_NFS4_OP_REMOVE => ro.nfs_resop4_u.opremove.status,
-                nfs_opnum4_NFS4_OP_RENAME => ro.nfs_resop4_u.oprename.status,
-                nfs_opnum4_NFS4_OP_LINK => ro.nfs_resop4_u.oplink.status,
-                nfs_opnum4_NFS4_OP_SAVEFH => ro.nfs_resop4_u.opsavefh.status,
-                nfs_opnum4_NFS4_OP_RESTOREFH => ro.nfs_resop4_u.oprestorefh.status,
-                nfs_opnum4_NFS4_OP_LOOKUPP => ro.nfs_resop4_u.oplookupp.status,
-                nfs_opnum4_NFS4_OP_DESTROY_SESSION => ro.nfs_resop4_u.opdestroy_session.dsr_status,
-                nfs_opnum4_NFS4_OP_DESTROY_CLIENTID => {
-                    ro.nfs_resop4_u.opdestroy_clientid.dcr_status
-                }
-                _ => u32::MAX,
-            }
-        }
+        response_op_status(self.resop(i))
     }
 
     pub fn op(&self, i: usize) -> &nfs_resop4 {
@@ -826,6 +930,149 @@ thread_local! {
     /// when other threads are issuing compounds concurrently.
     static THREAD_COMPOUND_STATS: std::cell::Cell<(u64, u64, u64, u64)> =
         const { std::cell::Cell::new((0, 0, 0, 0)) };
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod response_validation_tests {
+    use super::*;
+
+    fn arg(op: nfs_opnum4) -> nfs_argop4 {
+        let mut value: nfs_argop4 = unsafe { std::mem::zeroed() };
+        value.argop = op;
+        value
+    }
+
+    fn reply(status: nfsstat4, ops: &mut [nfs_resop4]) -> COMPOUND4res {
+        COMPOUND4res {
+            status,
+            tag: utf8string {
+                utf8string_len: 0,
+                utf8string_val: std::ptr::null_mut(),
+            },
+            resarray: COMPOUND4res__bindgen_ty_1 {
+                resarray_len: ops.len() as u32,
+                resarray_val: ops.as_mut_ptr(),
+            },
+        }
+    }
+
+    fn res(op: nfs_opnum4) -> nfs_resop4 {
+        let mut value: nfs_resop4 = unsafe { std::mem::zeroed() };
+        value.resop = op;
+        value
+    }
+
+    #[test]
+    fn rejects_successful_short_reply_before_typed_access() {
+        let request = [
+            arg(nfs_opnum4_NFS4_OP_PUTROOTFH),
+            arg(nfs_opnum4_NFS4_OP_GETFH),
+        ];
+        let mut ops = [res(nfs_opnum4_NFS4_OP_PUTROOTFH)];
+        let error =
+            validate_response_ops(&request, &reply(nfsstat4_NFS4_OK, &mut ops)).unwrap_err();
+        assert!(error.is_transport());
+        assert!(
+            error
+                .message
+                .contains("successful reply returned 1 operations")
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_opcode_and_null_nonempty_array() {
+        let request = [arg(nfs_opnum4_NFS4_OP_GETFH)];
+        let mut ops = [res(nfs_opnum4_NFS4_OP_READ)];
+        let error =
+            validate_response_ops(&request, &reply(nfsstat4_NFS4_OK, &mut ops)).unwrap_err();
+        assert!(error.message.contains("expected"));
+
+        let malformed = COMPOUND4res {
+            status: nfsstat4_NFS4ERR_IO,
+            tag: utf8string {
+                utf8string_len: 0,
+                utf8string_val: std::ptr::null_mut(),
+            },
+            resarray: COMPOUND4res__bindgen_ty_1 {
+                resarray_len: 1,
+                resarray_val: std::ptr::null_mut(),
+            },
+        };
+        assert!(
+            validate_response_ops(&request, &malformed)
+                .unwrap_err()
+                .is_transport()
+        );
+    }
+
+    #[test]
+    fn rejects_null_success_payload_before_slice_construction() {
+        let request = [arg(nfs_opnum4_NFS4_OP_GETFH)];
+        let mut operation = res(nfs_opnum4_NFS4_OP_GETFH);
+        operation.nfs_resop4_u.opgetfh.status = nfsstat4_NFS4_OK;
+        operation
+            .nfs_resop4_u
+            .opgetfh
+            .GETFH4res_u
+            .resok4
+            .object
+            .nfs_fh4_len = 1;
+        operation
+            .nfs_resop4_u
+            .opgetfh
+            .GETFH4res_u
+            .resok4
+            .object
+            .nfs_fh4_val = std::ptr::null_mut();
+        let mut operations = [operation];
+        let error =
+            validate_response_ops(&request, &reply(nfsstat4_NFS4_OK, &mut operations)).unwrap_err();
+        assert!(error.is_transport());
+        assert!(error.message.contains("null payload pointer"));
+    }
+
+    #[test]
+    fn rejects_operation_status_that_disagrees_with_compound_status() {
+        let request = [arg(nfs_opnum4_NFS4_OP_GETFH)];
+        let mut operation = res(nfs_opnum4_NFS4_OP_GETFH);
+        operation.nfs_resop4_u.opgetfh.status = nfsstat4_NFS4ERR_IO;
+        let error = validate_response_ops(
+            &request,
+            &reply(nfsstat4_NFS4_OK, std::slice::from_mut(&mut operation)),
+        )
+        .unwrap_err();
+        assert!(error.is_transport());
+        assert!(error.message.contains("does not match compound status"));
+    }
+
+    #[test]
+    fn accepts_matching_failure_prefix() {
+        let request = [
+            arg(nfs_opnum4_NFS4_OP_PUTROOTFH),
+            arg(nfs_opnum4_NFS4_OP_GETFH),
+        ];
+        let mut ops = [res(nfs_opnum4_NFS4_OP_PUTROOTFH)];
+        ops[0].nfs_resop4_u.opputrootfh.status = nfsstat4_NFS4ERR_IO;
+        assert!(validate_response_ops(&request, &reply(nfsstat4_NFS4ERR_IO, &mut ops)).is_ok());
+    }
+
+    #[test]
+    fn empty_responses_can_be_freed_concurrently() {
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for _ in 0..100 {
+                        let res: COMPOUND4res = unsafe { std::mem::zeroed() };
+                        drop(CompoundRes { res });
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
 }
 
 /// Counters for the compounds sent: total count, total operations (including

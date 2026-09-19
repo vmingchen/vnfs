@@ -10,8 +10,11 @@ fn transport_failure_is_ambiguous_and_requires_reconciliation() {
     assert_eq!(error.index_opt(), None);
     assert_eq!(error.domain(), ErrorDomain::Transport);
     assert_eq!(error.status(), None);
-    assert_eq!(error.certainty(), OutcomeCertainty::Indeterminate);
-    assert_eq!(error.retry_class(), RetryClass::ReconcileFirst);
+    assert_eq!(
+        error.failed_item_certainty(),
+        OutcomeCertainty::Indeterminate
+    );
+    assert_eq!(error.failed_item_retry_class(), RetryClass::ReconcileFirst);
     assert_eq!(error.operation(), Some("rename"));
     assert_eq!(error.path(), Some(Path::new("/target")));
 }

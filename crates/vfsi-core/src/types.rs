@@ -417,8 +417,12 @@ pub enum RetryClass {
 }
 
 impl VfError {
-    /// Completion certainty derived from the class of failure.
-    pub fn certainty(&self) -> OutcomeCertainty {
+    /// Completion certainty for the *failed item* in a vector operation.
+    ///
+    /// This deliberately says nothing about earlier items in the same
+    /// vector: VFSI is ordered but non-transactional, so a successful prefix
+    /// may already have changed filesystem state.
+    pub fn failed_item_certainty(&self) -> OutcomeCertainty {
         if self.is_transport() {
             OutcomeCertainty::Indeterminate
         } else {
@@ -426,9 +430,9 @@ impl VfError {
         }
     }
 
-    /// Conservative retry guidance. Transport failures may have crossed the
-    /// server boundary and therefore require reconciliation for mutations.
-    pub fn retry_class(&self) -> RetryClass {
+    /// Retry guidance for the *failed item*, not for the entire vector call.
+    /// Retrying a whole mutation vector can repeat its completed prefix.
+    pub fn failed_item_retry_class(&self) -> RetryClass {
         if self.is_transport() {
             RetryClass::ReconcileFirst
         } else if self.err_no() == VF_ERR_UNSUPPORTED {
@@ -436,6 +440,24 @@ impl VfError {
         } else {
             RetryClass::Safe
         }
+    }
+
+    /// Deprecated ambiguous spelling; use [`Self::failed_item_certainty`].
+    #[deprecated(
+        since = "0.2.0",
+        note = "this describes only the failed item; use failed_item_certainty"
+    )]
+    pub fn certainty(&self) -> OutcomeCertainty {
+        self.failed_item_certainty()
+    }
+
+    /// Deprecated ambiguous spelling; use [`Self::failed_item_retry_class`].
+    #[deprecated(
+        since = "0.2.0",
+        note = "this describes only the failed item; use failed_item_retry_class"
+    )]
+    pub fn retry_class(&self) -> RetryClass {
+        self.failed_item_retry_class()
     }
 }
 

@@ -62,6 +62,11 @@ const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
 const FILE_BASIC_INFORMATION: u8 = 4;
 const FILE_END_OF_FILE_INFORMATION: u8 = 20;
 
+fn checked_offset(base: u64, delta: u64, index: usize) -> VfResult<u64> {
+    base.checked_add(delta)
+        .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))
+}
+
 #[derive(Debug, Clone)]
 struct SmbOpen {
     file_id: FileId,
@@ -83,6 +88,7 @@ pub struct SmbVecFs {
     cwd: PathBuf,
     next_fd: Fd,
     open_files: HashMap<Fd, SmbOpen>,
+    deferred_closes: Vec<FileId>,
     server_copy_enabled: bool,
     #[cfg(feature = "test-faults")]
     fault_injector: Option<Arc<dyn FaultInjector>>,
@@ -145,6 +151,7 @@ impl SmbVecFs {
             cwd: PathBuf::new(),
             next_fd: 0,
             open_files: HashMap::new(),
+            deferred_closes: Vec::new(),
             server_copy_enabled: cfg!(feature = "server-copy"),
             #[cfg(feature = "test-faults")]
             fault_injector: None,
@@ -161,6 +168,12 @@ impl SmbVecFs {
     #[doc(hidden)]
     pub fn test_open_handle_count(&self) -> usize {
         self.open_files.len()
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[doc(hidden)]
+    pub fn test_deferred_close_count(&self) -> usize {
+        self.deferred_closes.len()
     }
 
     #[cfg(feature = "test-faults")]
@@ -202,6 +215,17 @@ impl SmbVecFs {
 
     fn insert_open_file(&mut self, open: SmbOpen) -> VfResult<Fd> {
         crate::vecfs::insert_fd(&mut self.next_fd, &mut self.open_files, open)
+    }
+
+    fn drain_deferred_closes(&mut self) -> VfResult<()> {
+        let pending = std::mem::take(&mut self.deferred_closes);
+        for (index, file_id) in pending.iter().copied().enumerate() {
+            if let Err(error) = self.raw_close(file_id) {
+                self.deferred_closes.extend(pending.into_iter().skip(index));
+                return Err(error);
+            }
+        }
+        Ok(())
     }
 
     fn wire_path(&self, path: &str) -> String {
@@ -318,6 +342,9 @@ impl SmbVecFs {
         if length == 0 {
             return Ok(Vec::new());
         }
+        let length_u64 =
+            u64::try_from(length).map_err(|_| VfError::failure(0, libc::EOVERFLOW as u32))?;
+        checked_offset(offset, length_u64, 0)?;
         let max_read = self
             .client
             .params()
@@ -357,7 +384,7 @@ impl SmbVecFs {
                 .map_err(|e| smb_error(e, 0))?;
             let got = response.data.len();
             data.extend_from_slice(&response.data);
-            position = position.saturating_add(got as u64);
+            position = checked_offset(position, got as u64, 0)?;
             if got < chunk as usize {
                 break;
             }
@@ -379,6 +406,9 @@ impl SmbVecFs {
         if data.is_empty() {
             return Ok(0);
         }
+        let length =
+            u64::try_from(data.len()).map_err(|_| VfError::failure(0, libc::EOVERFLOW as u32))?;
+        checked_offset(offset, length, 0)?;
         let max_write = self
             .client
             .params()
@@ -394,7 +424,7 @@ impl SmbVecFs {
             let chunk = &data[written..end];
             let request = WriteRequest {
                 data_offset: 0x70,
-                offset: offset.saturating_add(written as u64),
+                offset: checked_offset(offset, written as u64, 0)?,
                 file_id,
                 channel: 0,
                 remaining_bytes: (data.len() - end).min(u32::MAX as usize) as u32,
@@ -428,7 +458,9 @@ impl SmbVecFs {
                     "SMB server reported writing more bytes than requested",
                 ));
             }
-            written = written.saturating_add(count);
+            written = written
+                .checked_add(count)
+                .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
             progress(written);
             #[cfg(feature = "test-faults")]
             self.inject_open_fault(OpenFaultPoint::AfterWriteChunk { chunk: chunk_index })?;
@@ -973,19 +1005,19 @@ impl SmbVecFs {
         let result = size.and_then(|size| {
             let offset = self.resolve_offset(descriptor, op.offset, size)?;
             let data = self.raw_read(file_id, offset, op.length)?;
-            let eof = !data.is_empty() && offset.saturating_add(data.len() as u64) >= size
-                || op.length > 0 && data.len() < op.length;
-            Ok((offset, data, eof))
+            let end = checked_offset(offset, data.len() as u64, 0)?;
+            let eof = !data.is_empty() && end >= size || op.length > 0 && data.len() < op.length;
+            Ok((offset, data, eof, end))
         });
         let close_result = temporary.then(|| self.raw_close(file_id));
-        let (offset, data, eof) = result?;
+        let (offset, data, eof, end) = result?;
         if let Some(close) = close_result {
             close?;
         }
         if let Some(fd) = descriptor
             && let Some(open) = self.open_files.get_mut(&fd)
         {
-            open.cur_offset = offset.saturating_add(data.len() as u64);
+            open.cur_offset = end;
         }
         Ok(ReadResult {
             file: op.file.clone(),
@@ -1055,7 +1087,7 @@ impl SmbVecFs {
             if let Some(fd) = descriptor
                 && let Some(open) = self.open_files.get_mut(&fd)
             {
-                open.cur_offset = offset.saturating_add(confirmed as u64);
+                open.cur_offset = checked_offset(offset, confirmed as u64, 0)?;
             }
             let written = write_result?;
             self.raw_flush(file_id)?;
@@ -1102,14 +1134,16 @@ impl SmbVecFs {
         let result = (|| {
             while copied < length {
                 let wanted = (length - copied).min(1 << 20) as usize;
-                let data = self.raw_read(src_id, pair.src_offset + copied, wanted)?;
+                let src_offset = checked_offset(pair.src_offset, copied, 0)?;
+                let data = self.raw_read(src_id, src_offset, wanted)?;
                 if data.is_empty() {
                     break;
                 }
-                self.raw_write(dst_id, pair.dst_offset + copied, &data)?;
-                copied += data.len() as u64;
+                let dst_offset = checked_offset(pair.dst_offset, copied, 0)?;
+                self.raw_write(dst_id, dst_offset, &data)?;
+                copied = checked_offset(copied, data.len() as u64, 0)?;
             }
-            self.set_size_handle(dst_id, pair.dst_offset.saturating_add(copied))?;
+            self.set_size_handle(dst_id, checked_offset(pair.dst_offset, copied, 0)?)?;
             self.raw_flush(dst_id)
         })();
         let _ = self.raw_close(dst_id);
@@ -1201,6 +1235,7 @@ impl VecFs for SmbVecFs {
         if paths.len() != flags.len() || paths.len() != modes.len() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
+        self.drain_deferred_closes()?;
         let resolved: Vec<PathBuf> = paths.iter().map(|path| self.abs_path(path)).collect();
         if paths.len() <= 1 || self.tree.is_dfs || !paths_are_independent(&resolved) {
             let mut results = Vec::with_capacity(paths.len());
@@ -1317,14 +1352,22 @@ impl VecFs for SmbVecFs {
         let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
         let open = self
             .open_files
-            .get(&fd)
+            .remove(&fd)
             .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
         let file_id = open.file_id;
         #[cfg(feature = "test-faults")]
-        self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })?;
-        self.raw_close(file_id)?;
-        self.open_files.remove(&fd);
-        Ok(())
+        if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })
+        {
+            self.deferred_closes.push(file_id);
+            return Err(error);
+        }
+        match self.raw_close(file_id) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.deferred_closes.push(file_id);
+                Err(error)
+            }
+        }
     }
 
     fn sync_data(&mut self, file: &VfFile) -> VfResult<()> {
@@ -2010,7 +2053,10 @@ impl VecFs for SmbVecFs {
                 ));
             match result {
                 Ok(copied) => self
-                    .set_size_path(&pair.dst_path, pair.dst_offset.saturating_add(copied))
+                    .set_size_path(
+                        &pair.dst_path,
+                        checked_offset(pair.dst_offset, copied, index)?,
+                    )
                     .map_err(|e| e.with_index(index))?,
                 Err(error) if error.kind() == SmbErrorKind::Unsupported => {
                     self.server_copy_enabled = false;
@@ -2027,29 +2073,48 @@ impl VecFs for SmbVecFs {
     fn write_adb(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
         for (index, pattern) in patterns.iter().enumerate() {
+            let mut layout = Vec::with_capacity(pattern.adb_block_count);
+            let pattern_len = u64::try_from(pattern.adb_pattern_data.len())
+                .map_err(|_| VfError::failure(index, libc::EOVERFLOW as u32))?;
+            for block in 0..pattern.adb_block_count {
+                let relative = (block as u64)
+                    .checked_mul(pattern.adb_block_size)
+                    .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
+                let base = checked_offset(pattern.adb_offset, relative, index)?;
+                let block_number = pattern
+                    .adb_block_num
+                    .checked_add(block as u64)
+                    .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
+                let number_offset = pattern
+                    .adb_reloff_blocknum
+                    .map(|relative| {
+                        let offset = checked_offset(base, relative, index)?;
+                        checked_offset(offset, 8, index)?;
+                        Ok(offset)
+                    })
+                    .transpose()?;
+                let pattern_offset = pattern
+                    .adb_reloff_pattern
+                    .map(|relative| {
+                        let offset = checked_offset(base, relative, index)?;
+                        checked_offset(offset, pattern_len, index)?;
+                        Ok(offset)
+                    })
+                    .transpose()?;
+                layout.push((block_number, number_offset, pattern_offset));
+            }
             let file = self
                 .open(&pattern.path, libc::O_WRONLY | libc::O_CREAT, 0o666)
                 .map_err(|e| e.with_index(index))?;
             let result = (|| {
-                for block in 0..pattern.adb_block_count {
-                    let base = pattern
-                        .adb_offset
-                        .saturating_add(block as u64 * pattern.adb_block_size);
-                    if let Some(relative) = pattern.adb_reloff_blocknum {
-                        self.write(
-                            &file,
-                            base.saturating_add(relative),
-                            &(pattern.adb_block_num + block as u64).to_be_bytes(),
-                        )?;
+                for (block_number, number_offset, pattern_offset) in layout {
+                    if let Some(offset) = number_offset {
+                        self.write(&file, offset, &block_number.to_be_bytes())?;
                     }
-                    if let Some(relative) = pattern.adb_reloff_pattern
+                    if let Some(offset) = pattern_offset
                         && !pattern.adb_pattern_data.is_empty()
                     {
-                        self.write(
-                            &file,
-                            base.saturating_add(relative),
-                            &pattern.adb_pattern_data,
-                        )?;
+                        self.write(&file, offset, &pattern.adb_pattern_data)?;
                     }
                 }
                 Ok::<_, VfError>(pattern.adb_block_count)
@@ -2114,6 +2179,7 @@ impl Drop for SmbVecFs {
             .open_files
             .drain()
             .map(|(_, open)| open.file_id)
+            .chain(self.deferred_closes.drain(..))
             .collect();
         if !file_ids.is_empty() {
             let connection = self.client.connection_mut().clone();
@@ -2463,6 +2529,13 @@ mod tests {
         assert_eq!(credit_charge(1), 1);
         assert_eq!(credit_charge(65_536), 1);
         assert_eq!(credit_charge(65_537), 2);
+    }
+
+    #[test]
+    fn checked_offsets_preserve_request_index_on_overflow() {
+        let error = checked_offset(u64::MAX, 1, 7).unwrap_err();
+        assert_eq!(error.index_opt(), Some(7));
+        assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
     }
 
     #[test]

@@ -7,9 +7,15 @@
 //! and refuse targets outside the root (`ERR_ACCES`). Operations that never
 //! follow symlinks (unlink, readlink, lstat, listing) operate on the
 //! normalized path itself.
+//!
+//! On Linux, containment is enforced with `openat2(RESOLVE_IN_ROOT)` and
+//! held directory descriptors, closing symlink-swap races as well as lexical
+//! escapes. This requires Linux 5.6 or newer and a mounted `/proc` filesystem.
 
 use std::collections::HashMap;
 use std::fs::{File, FileTimes, OpenOptions};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
@@ -31,11 +37,40 @@ struct DummyOpen {
     append: bool,
 }
 
+/// A path whose parent directory is held open, preventing a concurrent
+/// symlink rename from redirecting a no-follow operation after validation.
+struct AnchoredPath {
+    path: PathBuf,
+    #[allow(dead_code)]
+    anchor: Option<File>,
+    /// A missing final component must be opened with O_NOFOLLOW so it cannot
+    /// be swapped for an escaping symlink after its parent was anchored.
+    nofollow_on_open: bool,
+}
+
+impl AsRef<Path> for AnchoredPath {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl std::ops::Deref for AnchoredPath {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// A local-filesystem [`VecFs`]. `"/"` is the `root` directory.
 pub struct DummyVecFs {
     root: PathBuf,
-    /// Canonical form of `root`, used for containment checks.
+    /// Canonical form of `root`, used for containment checks on platforms
+    /// without Linux's dirfd-relative `openat2` resolution.
+    #[cfg(not(target_os = "linux"))]
     root_canon: PathBuf,
+    #[cfg(target_os = "linux")]
+    root_dir: File,
     cwd: PathBuf,
     next_fd: i32,
     open_files: HashMap<i32, DummyOpen>,
@@ -66,18 +101,16 @@ impl DummyVecFs {
     fn getattrsv_impl(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
         for (i, a) in attrs.iter_mut().enumerate() {
             let lexical = self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?;
-            let p = if follow {
-                self.real_path(&lexical).map_err(|e| e.with_index(i))?
+            if follow {
+                let p = self.real_path(&lexical).map_err(|e| e.with_index(i))?;
+                let md = std::fs::metadata(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+                self.fill_attrs(a, &p, &md);
             } else {
-                lexical
-            };
-            let md = if follow {
-                std::fs::metadata(&p)
-            } else {
-                std::fs::symlink_metadata(&p)
+                let p = self.no_follow_path(&lexical).map_err(|e| e.with_index(i))?;
+                let md = std::fs::symlink_metadata(&p)
+                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+                self.fill_attrs(a, &p, &md);
             }
-            .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-            self.fill_attrs(a, &p, &md);
         }
         Ok(())
     }
@@ -86,9 +119,14 @@ impl DummyVecFs {
     pub fn new(root: PathBuf) -> DummyVecFs {
         std::fs::create_dir_all(&root).expect("create dummy root");
         let root_canon = std::fs::canonicalize(&root).expect("canonicalize dummy root");
+        #[cfg(target_os = "linux")]
+        let root_dir = File::open(&root_canon).expect("open dummy root");
         DummyVecFs {
-            root,
+            root: root_canon.clone(),
+            #[cfg(not(target_os = "linux"))]
             root_canon,
+            #[cfg(target_os = "linux")]
+            root_dir,
             cwd: PathBuf::new(),
             next_fd: 0,
             open_files: HashMap::new(),
@@ -137,21 +175,118 @@ impl DummyVecFs {
     /// objects and verifying the parent for paths that do not exist yet.
     /// Dangling symlinks are resolved one level at a time so an external
     /// target is refused even when it does not exist.
-    fn real_path(&self, p: &Path) -> VfResult<PathBuf> {
+    fn real_path(&self, p: &Path) -> VfResult<AnchoredPath> {
         self.real_path_depth(p, 0)
     }
 
-    fn real_path_depth(&self, p: &Path, depth: usize) -> VfResult<PathBuf> {
+    /// Resolve every parent component while deliberately leaving the final
+    /// component untouched. This is used by lstat/unlink/readlink/rename so a
+    /// final symlink is operated on, while a symlink in a parent directory
+    /// can never redirect the operation outside the configured root.
+    fn no_follow_path(&self, p: &Path) -> VfResult<AnchoredPath> {
+        #[cfg(target_os = "linux")]
+        {
+            self.no_follow_path_linux(p)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            if p == self.root {
+                return Ok(AnchoredPath {
+                    path: self.root_canon.clone(),
+                    anchor: None,
+                    nofollow_on_open: false,
+                });
+            }
+            let parent = p.parent().unwrap_or(&self.root);
+            let canonical = std::fs::canonicalize(parent)
+                .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+            if !canonical.starts_with(&self.root_canon) {
+                return Err(VfError::failure(0, ERR_ACCES));
+            }
+            Ok(AnchoredPath {
+                path: canonical.join(p.file_name().unwrap_or_default()),
+                anchor: None,
+                nofollow_on_open: true,
+            })
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn no_follow_path_linux(&self, p: &Path) -> VfResult<AnchoredPath> {
+        #[repr(C)]
+        struct OpenHow {
+            flags: u64,
+            mode: u64,
+            resolve: u64,
+        }
+
+        const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+        const RESOLVE_IN_ROOT: u64 = 0x10;
+
+        let relative = p
+            .strip_prefix(&self.root)
+            .map_err(|_| VfError::failure(0, ERR_ACCES))?;
+        let parent = relative.parent().unwrap_or(Path::new(""));
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
+        let name = relative.file_name();
+        let c_parent =
+            cstring_from_bytes(path_bytes(parent)).ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        let how = OpenHow {
+            flags: (libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) as u64,
+            mode: 0,
+            resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
+        };
+        let fd = unsafe {
+            libc::syscall(
+                libc::SYS_openat2,
+                self.root_dir.as_raw_fd(),
+                c_parent.as_ptr(),
+                &how as *const OpenHow,
+                std::mem::size_of::<OpenHow>(),
+            ) as i32
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            let errno = match error.raw_os_error() {
+                Some(code) if code == libc::EXDEV || code == libc::ELOOP => ERR_ACCES,
+                _ => Self::errno(&error),
+            };
+            return Err(VfError::failure(0, errno));
+        }
+        let anchor = unsafe { File::from_raw_fd(fd) };
+        let mut path = PathBuf::from(format!("/proc/self/fd/{fd}"));
+        if let Some(name) = name {
+            path.push(name);
+        } else {
+            // Force normal path traversal through the procfs descriptor;
+            // symlink_metadata on the bare fd entry would describe procfs's
+            // magic link rather than the directory it anchors.
+            path.push(".");
+        }
+        Ok(AnchoredPath {
+            path,
+            anchor: Some(anchor),
+            nofollow_on_open: true,
+        })
+    }
+
+    fn real_path_depth(&self, p: &Path, depth: usize) -> VfResult<AnchoredPath> {
         if depth > 40 {
             return Err(VfError::failure(0, ERR_ACCES)); // symlink loop / too deep
         }
-        // Resolve symlinks manually (before canonicalize, which would follow
-        // an OS-absolute target outside the root): an absolute target is
-        // chroot-relative, matching the NFS backend.
-        if let Ok(md) = std::fs::symlink_metadata(p)
+        // Resolve the final symlink manually so absolute targets retain the
+        // backend's chroot-relative semantics. The parent is held open while
+        // it is inspected and read, eliminating parent-component swap races.
+        let no_follow = self.no_follow_path(p)?;
+        if let Ok(md) = std::fs::symlink_metadata(&no_follow)
             && md.file_type().is_symlink()
         {
-            let target = std::fs::read_link(p).map_err(|e| VfError::failure(0, Self::errno(&e)))?;
+            let target =
+                std::fs::read_link(&no_follow).map_err(|e| VfError::failure(0, Self::errno(&e)))?;
             let target_path = if target.is_absolute() {
                 // Chroot semantics, matching the NFS backend: an absolute
                 // target resolves inside the root (leading "/" is the root,
@@ -164,24 +299,92 @@ impl DummyVecFs {
             };
             return self.real_path_depth(&target_path, depth + 1);
         }
-        if let Ok(c) = std::fs::canonicalize(p) {
-            if c.starts_with(&self.root_canon) {
-                return Ok(c);
+
+        #[cfg(target_os = "linux")]
+        {
+            #[repr(C)]
+            struct OpenHow {
+                flags: u64,
+                mode: u64,
+                resolve: u64,
             }
-            return Err(VfError::failure(0, ERR_ACCES));
+            const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+            const RESOLVE_IN_ROOT: u64 = 0x10;
+
+            let relative = p
+                .strip_prefix(&self.root)
+                .map_err(|_| VfError::failure(0, ERR_ACCES))?;
+            let relative = if relative.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                relative
+            };
+            let c_path = cstring_from_bytes(path_bytes(relative))
+                .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+            let how = OpenHow {
+                flags: (libc::O_PATH | libc::O_CLOEXEC) as u64,
+                mode: 0,
+                resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
+            };
+            let fd = unsafe {
+                libc::syscall(
+                    libc::SYS_openat2,
+                    self.root_dir.as_raw_fd(),
+                    c_path.as_ptr(),
+                    &how as *const OpenHow,
+                    std::mem::size_of::<OpenHow>(),
+                ) as i32
+            };
+            if fd >= 0 {
+                return Ok(AnchoredPath {
+                    path: PathBuf::from(format!("/proc/self/fd/{fd}")),
+                    anchor: Some(unsafe { File::from_raw_fd(fd) }),
+                    nofollow_on_open: false,
+                });
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound {
+                // `no_follow` keeps the verified parent alive. Callers that
+                // create the leaf add O_NOFOLLOW before opening it.
+                return Ok(no_follow);
+            }
+            let errno = match error.raw_os_error() {
+                Some(code) if code == libc::EXDEV || code == libc::ELOOP => ERR_ACCES,
+                _ => Self::errno(&error),
+            };
+            Err(VfError::failure(0, errno))
         }
-        // Does not exist yet: the parent must be inside the root.
-        let parent = p.parent().unwrap_or(Path::new(""));
-        let canon_parent =
-            std::fs::canonicalize(parent).map_err(|e| VfError::failure(0, Self::errno(&e)))?;
-        if !canon_parent.starts_with(&self.root_canon) {
-            return Err(VfError::failure(0, ERR_ACCES));
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            if let Ok(c) = std::fs::canonicalize(p) {
+                if c.starts_with(&self.root_canon) {
+                    return Ok(AnchoredPath {
+                        path: c,
+                        anchor: None,
+                        nofollow_on_open: false,
+                    });
+                }
+                return Err(VfError::failure(0, ERR_ACCES));
+            }
+            Ok(no_follow)
         }
-        Ok(canon_parent.join(p.file_name().unwrap_or_default()))
+    }
+
+    fn protect_create_open(path: &AnchoredPath, options: &mut OpenOptions) {
+        #[cfg(target_os = "linux")]
+        if path.nofollow_on_open {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
+        }
     }
 
     fn errno(e: &std::io::Error) -> u32 {
         e.raw_os_error().map(|n| n as u32).unwrap_or(VF_ERR_RPC)
+    }
+
+    fn overflow(index: usize) -> VfError {
+        VfError::failure(index, libc::EOVERFLOW as u32)
     }
 
     /// Build `OpenOptions` from fcntl-style flags.
@@ -245,15 +448,21 @@ impl DummyVecFs {
         }
     }
 
-    /// Whether the object has at least one extended attribute (llistxattr).
-    fn has_xattr(path: &Path) -> bool {
-        let Some(cpath) = cstring_from_bytes(path_bytes(path)) else {
+    /// Whether the anchored object has at least one extended attribute.
+    fn has_xattr(path: &AnchoredPath) -> bool {
+        let Some(cpath) = cstring_from_bytes(path_bytes(path.as_ref())) else {
             return false;
         };
-        unsafe { libc::llistxattr(cpath.as_ptr(), std::ptr::null_mut(), 0) > 0 }
+        unsafe {
+            if path.nofollow_on_open {
+                libc::llistxattr(cpath.as_ptr(), std::ptr::null_mut(), 0) > 0
+            } else {
+                libc::listxattr(cpath.as_ptr(), std::ptr::null_mut(), 0) > 0
+            }
+        }
     }
 
-    fn fill_attrs(&self, a: &mut VfAttrs, path: &Path, md: &std::fs::Metadata) {
+    fn fill_attrs(&self, a: &mut VfAttrs, path: &AnchoredPath, md: &std::fs::Metadata) {
         let ft = md.file_type();
         a.ftype = if ft.is_dir() {
             VfType::Directory
@@ -330,8 +539,10 @@ impl DummyVecFs {
             .real_path(&self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?)
             .map_err(|e| e.with_index(i))?;
         if a.masks.contains(AttrMask::SIZE) {
-            let f = OpenOptions::new()
-                .write(true)
+            let mut options = OpenOptions::new();
+            options.write(true);
+            Self::protect_create_open(&p, &mut options);
+            let f = options
                 .open(&p)
                 .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             f.set_len(a.size)
@@ -344,7 +555,12 @@ impl DummyVecFs {
                 .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
         }
         if a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
-            let file = File::open(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            let mut options = OpenOptions::new();
+            options.read(true);
+            Self::protect_create_open(&p, &mut options);
+            let file = options
+                .open(&p)
+                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             let mut times = FileTimes::new();
             if a.masks.contains(AttrMask::ATIME) {
                 times = times.set_accessed(Self::system_time(a.atime_sec, a.atime_nsec, i)?);
@@ -379,8 +595,10 @@ impl DummyVecFs {
             }
             VfFile::Path { .. } | VfFile::Cwd | VfFile::CwdPath(_) => {
                 let p = self.real_path(&self.tcfile_path(&op.file)?)?;
-                let f = OpenOptions::new()
-                    .read(true)
+                let mut options = OpenOptions::new();
+                options.read(true);
+                Self::protect_create_open(&p, &mut options);
+                let f = options
                     .open(&p)
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 let len = f
@@ -395,13 +613,17 @@ impl DummyVecFs {
             }
             _ => return Err(VfError::unsupported(0)),
         };
+        let requested = u64::try_from(op.length).map_err(|_| Self::overflow(0))?;
+        off.checked_add(requested)
+            .ok_or_else(|| Self::overflow(0))?;
         let mut buf = vec![0u8; op.length];
         let n = file
             .read_at(&mut buf, off)
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         buf.truncate(n);
         if descriptor {
-            self.advance_offset(&op.file, off + n as u64);
+            let next = off.checked_add(n as u64).ok_or_else(|| Self::overflow(0))?;
+            self.advance_offset(&op.file, next);
         }
         Ok(ReadResult {
             file: op.file.clone(),
@@ -446,6 +668,7 @@ impl DummyVecFs {
                 if op.truncate {
                     opts.truncate(true);
                 }
+                Self::protect_create_open(&p, &mut opts);
                 let f = opts
                     .open(&p)
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
@@ -461,10 +684,16 @@ impl DummyVecFs {
             }
             _ => return Err(VfError::unsupported(0)),
         };
+        let requested = u64::try_from(op.data.len()).map_err(|_| Self::overflow(0))?;
+        off.checked_add(requested)
+            .ok_or_else(|| Self::overflow(0))?;
         file.write_all_at(&op.data, off)
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         if descriptor {
-            self.advance_offset(&op.file, off + op.data.len() as u64);
+            let next = off
+                .checked_add(op.data.len() as u64)
+                .ok_or_else(|| Self::overflow(0))?;
+            self.advance_offset(&op.file, next);
         }
         Ok(WriteResult {
             file: op.file.clone(),
@@ -486,7 +715,12 @@ impl DummyVecFs {
         if reached_limit(out) {
             return Ok(());
         }
-        let p = self.resolve(dir);
+        let p = self.no_follow_path(&self.resolve(dir))?;
+        let dir_metadata = std::fs::symlink_metadata(&p)
+            .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+        if dir_metadata.file_type().is_symlink() {
+            return Err(VfError::failure(0, ERR_ACCES));
+        }
         let rd = std::fs::read_dir(&p).map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         for entry in rd {
             let entry = entry.map_err(|e| VfError::failure(0, Self::errno(&e)))?;
@@ -500,10 +734,9 @@ impl DummyVecFs {
                 masks,
                 ..VfAttrs::default()
             };
-            let md = entry
-                .metadata()
+            let md = std::fs::symlink_metadata(entry.path())
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
-            let real = self.resolve(&path);
+            let real = self.no_follow_path(&self.resolve(&path))?;
             self.fill_attrs(&mut a, &real, &md);
             let is_dir = a.ftype == VfType::Directory;
             out.push(a);
@@ -517,14 +750,16 @@ impl DummyVecFs {
     fn copy_extent(&mut self, p: &ExtentPair) -> VfResult<()> {
         let sp = self.real_path(&self.resolve(&p.src_path))?;
         let dp = self.real_path(&self.resolve(&p.dst_path))?;
-        let src = OpenOptions::new()
-            .read(true)
+        let mut src_options = OpenOptions::new();
+        src_options.read(true);
+        Self::protect_create_open(&sp, &mut src_options);
+        let src = src_options
             .open(&sp)
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
-        let dst = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
+        let mut dst_options = OpenOptions::new();
+        dst_options.write(true).create(true).truncate(false);
+        Self::protect_create_open(&dp, &mut dst_options);
+        let dst = dst_options
             .open(&dp)
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         let mut so = p.src_offset;
@@ -548,9 +783,13 @@ impl DummyVecFs {
             buf.truncate(n);
             dst.write_all_at(&buf, doff)
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
-            so += n as u64;
-            doff += n as u64;
-            copied += n as u64;
+            so = so.checked_add(n as u64).ok_or_else(|| Self::overflow(0))?;
+            doff = doff
+                .checked_add(n as u64)
+                .ok_or_else(|| Self::overflow(0))?;
+            copied = copied
+                .checked_add(n as u64)
+                .ok_or_else(|| Self::overflow(0))?;
         }
         // Truncate any stale tail beyond what was copied (cp semantics).
         dst.set_len(doff)
@@ -658,6 +897,7 @@ impl VecFs for DummyVecFs {
         let file = if flags & O_CREAT != 0 {
             let mut opts = Self::open_options(flags);
             opts.create_new(true);
+            Self::protect_create_open(&p, &mut opts);
             match opts.open(&p) {
                 Ok(f) => {
                     created = true;
@@ -667,21 +907,25 @@ impl VecFs for DummyVecFs {
                     if flags & libc::O_EXCL == 0
                         && e.kind() == std::io::ErrorKind::AlreadyExists =>
                 {
-                    Self::open_options(flags)
+                    let mut fallback = Self::open_options(flags);
+                    Self::protect_create_open(&p, &mut fallback);
+                    fallback
                         .open(&p)
                         .map_err(|e| VfError::failure(0, Self::errno(&e)))?
                 }
                 Err(e) => return Err(VfError::failure(0, Self::errno(&e))),
             }
         } else {
-            Self::open_options(flags)
+            let mut options = Self::open_options(flags);
+            Self::protect_create_open(&p, &mut options);
+            options
                 .open(&p)
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?
         };
         if created {
             #[cfg(feature = "test-faults")]
             self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index: 0 })?;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode & 0o7777))
+            file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         }
         let fd = self.insert_open_file(DummyOpen {
@@ -761,9 +1005,9 @@ impl VecFs for DummyVecFs {
             .get(&tcf.fd().unwrap())
             .map(|o| o.cur_offset)
             .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-        let new = match whence {
-            SeekFrom::Set => offset,
-            SeekFrom::Cur => cur as i64 + offset,
+        let base = match whence {
+            SeekFrom::Set => 0i128,
+            SeekFrom::Cur => i128::from(cur),
             SeekFrom::End => {
                 let o = self
                     .open_files
@@ -774,16 +1018,20 @@ impl VecFs for DummyVecFs {
                     .metadata()
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?
                     .len();
-                len as i64 + offset
+                i128::from(len)
             }
             _ => return Err(VfError::failure(0, ERR_INVAL)),
         };
+        let new = base
+            .checked_add(i128::from(offset))
+            .ok_or_else(|| Self::overflow(0))?;
         if new < 0 {
             return Err(VfError::failure(0, ERR_INVAL));
         }
-        let new = new as u64;
+        let new = u64::try_from(new).map_err(|_| Self::overflow(0))?;
+        let reported = i64::try_from(new).map_err(|_| Self::overflow(0))?;
         self.advance_offset(tcf, new);
-        Ok(new as i64)
+        Ok(reported)
     }
 
     fn getattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
@@ -817,7 +1065,9 @@ impl VecFs for DummyVecFs {
             if !a.masks.difference(SETTABLE).is_empty() {
                 return Err(VfError::unsupported(i));
             }
-            let p = self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?;
+            let p = self
+                .no_follow_path(&self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?)
+                .map_err(|e| e.with_index(i))?;
             let md =
                 std::fs::symlink_metadata(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             if md.file_type().is_symlink() {
@@ -844,12 +1094,14 @@ impl VecFs for DummyVecFs {
     fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
         for (i, (src, dst)) in pairs.iter().enumerate() {
             let sp = self.vf_path(src).map_err(|e| e.with_index(i))?;
+            let sp = self
+                .no_follow_path(&self.root.join(sp))
+                .map_err(|e| e.with_index(i))?;
             let dp = self.vf_path(dst).map_err(|e| e.with_index(i))?;
             let dp = self
-                .real_path(&self.root.join(dp))
+                .no_follow_path(&self.root.join(dp))
                 .map_err(|e| e.with_index(i))?;
-            std::fs::rename(self.root.join(sp), dp)
-                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            std::fs::rename(sp, dp).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
         }
         Ok(())
     }
@@ -857,8 +1109,12 @@ impl VecFs for DummyVecFs {
     fn removev(&mut self, files: &[VfFile]) -> VfRes {
         for (i, f) in files.iter().enumerate() {
             let p = self
-                .root
-                .join(self.vf_path(f).map_err(|e| e.with_index(i))?);
+                .no_follow_path(
+                    &self
+                        .root
+                        .join(self.vf_path(f).map_err(|e| e.with_index(i))?),
+                )
+                .map_err(|e| e.with_index(i))?;
             let md =
                 std::fs::symlink_metadata(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             if md.is_dir() && !md.file_type().is_symlink() {
@@ -873,7 +1129,7 @@ impl VecFs for DummyVecFs {
     fn mkdirv(&mut self, dirs: &[VfAttrs]) -> VfRes {
         for (i, a) in dirs.iter().enumerate() {
             let p = self
-                .real_path(
+                .no_follow_path(
                     &self
                         .root
                         .join(self.vf_path(&a.file).map_err(|e| e.with_index(i))?),
@@ -896,7 +1152,7 @@ impl VecFs for DummyVecFs {
         }
         for (i, (old, new)) in oldpaths.iter().zip(newpaths).enumerate() {
             let new = self
-                .real_path(&self.resolve(new))
+                .no_follow_path(&self.resolve(new))
                 .map_err(|e| e.with_index(i))?;
             symlink(old, new).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
         }
@@ -906,8 +1162,11 @@ impl VecFs for DummyVecFs {
     fn readlinkv(&mut self, paths: &[&Path]) -> VfResult<Vec<Vec<u8>>> {
         let mut out = Vec::with_capacity(paths.len());
         for (i, p) in paths.iter().enumerate() {
-            let target = std::fs::read_link(self.resolve(p))
-                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            let path = self
+                .no_follow_path(&self.resolve(p))
+                .map_err(|e| e.with_index(i))?;
+            let target =
+                std::fs::read_link(path).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             out.push(path_bytes(&target).to_vec());
         }
         Ok(out)
@@ -919,10 +1178,12 @@ impl VecFs for DummyVecFs {
         }
         for (i, (old, new)) in oldpaths.iter().zip(newpaths).enumerate() {
             let new = self
-                .real_path(&self.resolve(new))
+                .no_follow_path(&self.resolve(new))
                 .map_err(|e| e.with_index(i))?;
-            std::fs::hard_link(self.resolve(old), new)
-                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            let old = self
+                .no_follow_path(&self.resolve(old))
+                .map_err(|e| e.with_index(i))?;
+            std::fs::hard_link(old, new).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
         }
         Ok(())
     }
@@ -936,14 +1197,16 @@ impl VecFs for DummyVecFs {
 
     fn lcopyv(&mut self, pairs: &[ExtentPair]) -> VfRes {
         for (i, p) in pairs.iter().enumerate() {
-            let sp = self.resolve(&p.src_path);
+            let sp = self
+                .no_follow_path(&self.resolve(&p.src_path))
+                .map_err(|e| e.with_index(i))?;
             let md =
                 std::fs::symlink_metadata(&sp).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             if md.file_type().is_symlink() {
                 let target =
                     std::fs::read_link(&sp).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
                 let dst = self
-                    .real_path(&self.resolve(&p.dst_path))
+                    .no_follow_path(&self.resolve(&p.dst_path))
                     .map_err(|e| e.with_index(i))?;
                 symlink(&target, dst).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             } else {
@@ -956,27 +1219,61 @@ impl VecFs for DummyVecFs {
     fn write_adb(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
         for (i, p) in patterns.iter().enumerate() {
+            let pattern_len =
+                u64::try_from(p.adb_pattern_data.len()).map_err(|_| Self::overflow(i))?;
+            let mut layout = Vec::with_capacity(p.adb_block_count);
+            for b in 0..p.adb_block_count {
+                let relative = (b as u64)
+                    .checked_mul(p.adb_block_size)
+                    .ok_or_else(|| Self::overflow(i))?;
+                let base = p
+                    .adb_offset
+                    .checked_add(relative)
+                    .ok_or_else(|| Self::overflow(i))?;
+                let block_number = p
+                    .adb_block_num
+                    .checked_add(b as u64)
+                    .ok_or_else(|| Self::overflow(i))?;
+                let number_offset = p
+                    .adb_reloff_blocknum
+                    .map(|field| {
+                        let offset = base.checked_add(field).ok_or_else(|| Self::overflow(i))?;
+                        offset.checked_add(8).ok_or_else(|| Self::overflow(i))?;
+                        Ok(offset)
+                    })
+                    .transpose()?;
+                let pattern_offset = p
+                    .adb_reloff_pattern
+                    .map(|field| {
+                        let offset = base.checked_add(field).ok_or_else(|| Self::overflow(i))?;
+                        offset
+                            .checked_add(pattern_len)
+                            .ok_or_else(|| Self::overflow(i))?;
+                        Ok(offset)
+                    })
+                    .transpose()?;
+                layout.push((block_number, number_offset, pattern_offset));
+            }
             let path = self
                 .real_path(&self.resolve(&p.path))
                 .map_err(|e| e.with_index(i))?;
-            let file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
+            let mut options = OpenOptions::new();
+            options.write(true).create(true).truncate(false);
+            Self::protect_create_open(&path, &mut options);
+            let file = options
                 .open(&path)
                 .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             let mut written = 0usize;
-            for b in 0..p.adb_block_count {
-                let base = p.adb_offset.saturating_add(b as u64 * p.adb_block_size);
-                if let Some(reloff) = p.adb_reloff_blocknum {
-                    let adbn = (p.adb_block_num + b as u64).to_be_bytes();
-                    file.write_all_at(&adbn, base + reloff)
+            for (block_number, number_offset, pattern_offset) in layout {
+                if let Some(offset) = number_offset {
+                    let adbn = block_number.to_be_bytes();
+                    file.write_all_at(&adbn, offset)
                         .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
                 }
-                if let Some(reloff) = p.adb_reloff_pattern
+                if let Some(offset) = pattern_offset
                     && !p.adb_pattern_data.is_empty()
                 {
-                    file.write_all_at(&p.adb_pattern_data, base + reloff)
+                    file.write_all_at(&p.adb_pattern_data, offset)
                         .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
                 }
                 written += 1;
