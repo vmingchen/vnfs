@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::{fs, os::unix::fs::PermissionsExt};
 
 use vfsi_smb::SmbExtensions;
-use vfsi_smb::SmbVecFs;
+use vfsi_smb::{SmbConnectOptions, SmbVecFs};
 use vfsi_sync::{
     AttrMask, ExtentPair, ReadOp, VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS,
     VF_CAP_POSIX_METADATA, VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VF_ERR_UNSUPPORTED, VecFs, VfAttrs,
@@ -52,6 +52,29 @@ fn connect() -> Option<SmbVecFs> {
         SmbVecFs::connect(&server, &share, &username, &password, &domain)
             .expect("connect to configured SMB test share"),
     )
+}
+
+#[test]
+fn configurable_deadlines_connect_to_samba() {
+    let (server, share) = match (
+        std::env::var("VFSI_SMB_SERVER"),
+        std::env::var("VFSI_SMB_SHARE"),
+    ) {
+        (Ok(server), Ok(share)) => (server, share),
+        _ => return,
+    };
+    let username = std::env::var("VFSI_SMB_USERNAME").unwrap_or_default();
+    let password = std::env::var("VFSI_SMB_PASSWORD").unwrap_or_default();
+    let domain = std::env::var("VFSI_SMB_DOMAIN").unwrap_or_default();
+    let options = SmbConnectOptions {
+        connect_timeout: std::time::Duration::from_secs(5),
+        request_timeout: std::time::Duration::from_secs(5),
+        ..SmbConnectOptions::default()
+    };
+    SmbVecFs::connect_with_options(&server, &share, &username, &password, &domain, options)
+        .expect("connect with explicit SMB deadlines")
+        .shutdown()
+        .expect("disconnect SMB deadline test client");
 }
 
 #[cfg(feature = "test-faults")]

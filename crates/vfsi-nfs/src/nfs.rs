@@ -336,6 +336,32 @@ fn remap_active_error(error: VfError, active: &[usize]) -> VfError {
     }
 }
 
+fn bounded_read_allv_batch(
+    active: &[usize],
+    remaining: usize,
+    compound_budget: usize,
+    max_window: usize,
+) -> (Vec<usize>, usize) {
+    let cohort_len = if remaining == 0 {
+        1
+    } else {
+        active.len().min(remaining)
+    };
+    let cohort = active[..cohort_len].to_vec();
+    if remaining == 0 {
+        // Once the payload budget is exhausted, probe one file at a time so
+        // exact-limit EOF remains distinguishable from an oversized file
+        // without allocating another cohort-sized response.
+        return (cohort, 1);
+    }
+    let protocol_window = (compound_budget / cohort_len)
+        .saturating_sub(128)
+        .min(max_window)
+        .max(1);
+    let allocation_window = (remaining / cohort_len).max(1);
+    (cohort, protocol_window.min(allocation_window))
+}
+
 fn merge_read_allv_round(
     active: &[usize],
     results: &[ReadResult],
@@ -2054,52 +2080,6 @@ impl NfsVecFs {
         Ok(())
     }
 
-    /// Read every page of directory `fh`, returning its entries as `VfAttrs`.
-    fn readdir_all(
-        &mut self,
-        fh: &FileHandle,
-        dir_path: &Path,
-        masks: &AttrMask,
-    ) -> VfResult<Vec<VfAttrs>> {
-        let ids = request_mask_to_attr_list(masks);
-        let mut all: Vec<crate::client::DirEntry> = Vec::new();
-        let mut cookie = 0u64;
-        loop {
-            let page = self
-                .nfs
-                .readdir(fh, cookie, &ids)
-                .map_err(|e| VfError::from_rpc(e, 0))?;
-            cookie = page.last().map(|d| d.cookie).unwrap_or(0);
-            all.extend(page);
-            if cookie == 0 {
-                break;
-            }
-        }
-        all.iter()
-            .map(|de| Self::dir_entry_to_attrs(dir_path, masks, &ids, de))
-            .collect()
-    }
-
-    /// Convert a raw READDIR entry into a `VfAttrs` with a full path. `ids`
-    /// must be the attribute list that was requested for the READDIR (in the
-    /// same order), so the reply values can be decoded positionally.
-    fn dir_entry_to_attrs(
-        parent_path: &Path,
-        masks: &AttrMask,
-        ids: &[u32],
-        de: &crate::client::DirEntry,
-    ) -> VfResult<VfAttrs> {
-        let path = parent_path.join(path_from_bytes(&de.name));
-        let mut a = VfAttrs {
-            file: VfFile::from_os_path(&path),
-            masks: *masks,
-            ..VfAttrs::default()
-        };
-        let vals = parse_attr_list(ids, &de.attrs)?;
-        apply_attrs(&mut a, &vals);
-        Ok(a)
-    }
-
     fn copy_extent(
         &mut self,
         src_root_rel: &Path,
@@ -3126,27 +3106,27 @@ impl VecFs for NfsVecFs {
         let mut total = 0usize;
         let mut active: Vec<usize> = (0..files.len()).collect();
         while !active.is_empty() {
-            // Reserve each active file's ~128-byte per-op overhead so the
-            // whole batch packs into one compound when it fits.
-            let window = (compound_budget / active.len())
-                .saturating_sub(128)
-                .min(max_window)
-                .max(1);
-            let reads: Vec<ReadOp> = active
+            let remaining = options.total_byte_limit().saturating_sub(total);
+            let (batch_active, window) =
+                bounded_read_allv_batch(&active, remaining, compound_budget, max_window);
+            let reads: Vec<ReadOp> = batch_active
                 .iter()
                 .map(|&i| ReadOp::at(files[i].clone(), offsets[i], window))
                 .collect();
             let results = self
                 .readv(&reads)
-                .map_err(|error| remap_active_error(error, &active))?;
-            active = merge_read_allv_round(
-                &active,
+                .map_err(|error| remap_active_error(error, &batch_active))?;
+            let mut next = merge_read_allv_round(
+                &batch_active,
                 &results,
                 &mut out,
                 &mut offsets,
                 &mut total,
                 options.total_byte_limit(),
             )?;
+            let mut untouched = active.split_off(batch_active.len());
+            untouched.append(&mut next);
+            active = untouched;
         }
         Ok(out)
     }
@@ -3419,110 +3399,83 @@ impl VecFs for NfsVecFs {
         }
     }
 
-    /// Recursively enumerate `root`, returning directories in ls -R
-    /// pre-order (a worklist: each directory is followed by its sorted
-    /// subdirectories, then their subtrees). Listing is batched per level in
-    /// compounds of up to `MAX_COMPOUND_OPS` operations
-    /// (`[PUTFH parent, LOOKUP child, GETFH, READDIR]` per directory), with
-    /// large directories' remaining READDIR pages drained in batched
-    /// continuation compounds. `sort` orders each directory's entries (and
-    /// hence the subdirectory visit order) exactly as the caller would.
-    fn walk(
+    fn walk_with_options(
         &mut self,
         root: &Path,
         masks: AttrMask,
+        options: WalkOptions,
         sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<WalkEntry>> {
-        let root_fh = self.resolve_path(&self.abs_path(root), true)?;
-        let ids = request_mask_to_attr_list(&masks);
+        // Keep the level-batched NFS implementation, but stream each decoded
+        // entry into a bounded accumulator instead of retaining every raw
+        // READDIR page for the whole level.
         let mut collected: std::collections::HashMap<PathBuf, Vec<VfAttrs>> =
             std::collections::HashMap::new();
-        let mut root_attrs = self.readdir_all(&root_fh, root, &masks)?;
-        sort(root, &mut root_attrs);
-
-        // Frontier of (parent handle, child directory path) to list next.
-        let mut frontier: Vec<(FileHandle, PathBuf)> = root_attrs
-            .iter()
-            .filter(|e| e.ftype == VfType::Directory)
-            .map(|e| (root_fh.clone(), e.file.path().unwrap().to_path_buf()))
-            .collect();
-        collected.insert(root.to_path_buf(), root_attrs);
-
-        while !frontier.is_empty() {
-            // Resolve + list every frontier directory in batched compounds.
-            let ops: Vec<(FileHandle, Vec<u8>)> = frontier
-                .iter()
-                .map(|(fh, p)| {
-                    (
-                        fh.clone(),
-                        p.file_name()
-                            .map(|n| path_bytes(Path::new(n)).to_vec())
-                            .unwrap_or_default(),
-                    )
-                })
-                .collect();
-            let results = self
-                .nfs
-                .readdir_children(&ops, &ids)
-                .map_err(VfError::from_rpc_indexed)?;
-
-            // Drain remaining READDIR pages, batched across all directories.
-            let mut accumulated: Vec<Vec<crate::client::DirEntry>> =
-                results.iter().map(|r| r.entries.clone()).collect();
-            let mut pending: Vec<(usize, FileHandle, u64)> = results
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| r.cookie != 0)
-                .map(|(i, r)| (i, r.fh.clone(), r.cookie))
-                .collect();
-            while !pending.is_empty() {
-                let ops: Vec<(FileHandle, u64)> =
-                    pending.iter().map(|(_, fh, c)| (fh.clone(), *c)).collect();
-                let cont = self
-                    .nfs
-                    .readdir_pages(&ops, &ids)
-                    .map_err(VfError::from_rpc_indexed)?;
-                let mut next_pending = Vec::new();
-                for ((idx, _, _), (entries, cookie)) in pending.iter().zip(cont) {
-                    accumulated[*idx].extend(entries);
-                    if cookie != 0 {
-                        next_pending.push((*idx, results[*idx].fh.clone(), cookie));
-                    }
-                }
-                pending = next_pending;
+        collected.insert(root.to_path_buf(), Vec::new());
+        let mut entry_count = 0usize;
+        let mut path_bytes = 0usize;
+        let mut limit_error = None;
+        let max_entries = options.entry_limit().saturating_add(1);
+        self.listdirv(&[root], masks, max_entries, true, &mut |entry, dir| {
+            if entry_count >= options.entry_limit() {
+                limit_error = Some(
+                    VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", dir),
+                );
+                return false;
             }
-
-            // Record each directory's entries and seed the next level.
-            let mut next_frontier: Vec<(FileHandle, PathBuf)> = Vec::new();
-            for idx in 0..results.len() {
-                let result = &results[idx];
-                let path = frontier[idx].1.clone();
-                let mut attrs = Vec::with_capacity(accumulated[idx].len());
-                for de in &accumulated[idx] {
-                    attrs.push(Self::dir_entry_to_attrs(&path, &masks, &ids, de)?);
-                }
-                sort(&path, &mut attrs);
-                for a in &attrs {
-                    if a.ftype == VfType::Directory {
-                        next_frontier
-                            .push((result.fh.clone(), a.file.path().unwrap().to_path_buf()));
-                    }
-                }
-                collected.insert(path, attrs);
+            let Some(path) = entry.file.path() else {
+                limit_error =
+                    Some(VfError::client(entry_count, ERR_INVAL).with_context("walk", dir));
+                return false;
+            };
+            let Some(next_path_bytes) = path_bytes.checked_add(path.as_os_str().len()) else {
+                limit_error = Some(
+                    VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", dir),
+                );
+                return false;
+            };
+            if next_path_bytes > options.path_byte_limit() {
+                limit_error = Some(
+                    VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", dir),
+                );
+                return false;
             }
-            frontier = next_frontier;
+            if entry.ftype == VfType::Directory {
+                let depth = path
+                    .strip_prefix(root)
+                    .map(|relative| relative.components().count())
+                    .unwrap_or(usize::MAX);
+                if depth > options.depth_limit() {
+                    limit_error = Some(
+                        VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", dir),
+                    );
+                    return false;
+                }
+            }
+            collected
+                .entry(dir.to_path_buf())
+                .or_default()
+                .push(entry.clone());
+            path_bytes = next_path_bytes;
+            entry_count += 1;
+            true
+        })?;
+        if let Some(error) = limit_error {
+            return Err(error);
         }
 
-        // Emit in ls -R pre-order: a directory, then each of its subdirectories
-        // (in sorted order) and their subtrees.
+        for (dir, entries) in &mut collected {
+            sort(dir.as_path(), entries);
+        }
+
         let mut out = Vec::with_capacity(collected.len());
-        let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
+        let mut stack = vec![root.to_path_buf()];
         while let Some(dir) = stack.pop() {
             let entries = collected.remove(&dir).unwrap_or_default();
             let subs: Vec<PathBuf> = entries
                 .iter()
                 .filter(|e| e.ftype == VfType::Directory)
-                .map(|e| e.file.path().unwrap().to_path_buf())
+                .filter_map(|e| e.file.path().map(Path::to_path_buf))
                 .collect();
             for s in subs.into_iter().rev() {
                 stack.push(s);
@@ -4325,6 +4278,18 @@ mod tests {
         assert_eq!(out[1], b"a");
         assert_eq!(out[2], b"bc");
         assert_eq!(offsets[2], 6);
+    }
+
+    #[test]
+    fn read_all_batches_never_request_beyond_the_remaining_allocation_budget() {
+        let active = [0, 1, 2, 3];
+        let (cohort, window) = bounded_read_allv_batch(&active, 3, 1 << 20, 1 << 20);
+        assert_eq!(cohort, [0, 1, 2]);
+        assert!(cohort.len() * window <= 3);
+
+        let (cohort, window) = bounded_read_allv_batch(&active, 0, 1 << 20, 1 << 20);
+        assert_eq!(cohort, [0]);
+        assert_eq!(window, 1);
     }
 
     #[test]

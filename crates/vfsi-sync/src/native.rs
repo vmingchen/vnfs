@@ -34,7 +34,11 @@ pub trait MetadataFileSystem: FileSystem {
 /// Directory creation and enumeration.
 pub trait DirectoryFileSystem: FileSystem {
     fn create_dir_one(&mut self, path: &std::path::Path, mode: u32) -> VfResult<()>;
-    fn read_dir_one(&mut self, path: &std::path::Path) -> VfResult<Vec<DirEntry>>;
+    fn read_dir_one(
+        &mut self,
+        path: &std::path::Path,
+        options: ReadDirOptions,
+    ) -> VfResult<Vec<DirEntry>>;
 }
 
 /// Namespace mutations shared by files and directories.
@@ -263,10 +267,20 @@ impl<T: VecFs + ?Sized> DirectoryFileSystem for T {
             .map_err(|error| error.with_context("create_dir", path))
     }
 
-    fn read_dir_one(&mut self, path: &std::path::Path) -> VfResult<Vec<DirEntry>> {
+    fn read_dir_one(
+        &mut self,
+        path: &std::path::Path,
+        options: ReadDirOptions,
+    ) -> VfResult<Vec<DirEntry>> {
+        let requested = options.entry_limit().saturating_add(1);
         let entries = self
-            .listdir(path, metadata_mask(), 0, false)
+            .listdir(path, metadata_mask(), requested, false)
             .map_err(|error| error.with_context("read_dir", path))?;
+        if entries.len() > options.entry_limit() {
+            return Err(VfError::failure(options.entry_limit(), libc::EFBIG as u32)
+                .with_context("read_dir", path));
+        }
+        let mut path_bytes = 0usize;
         entries
             .into_iter()
             .enumerate()
@@ -276,6 +290,16 @@ impl<T: VecFs + ?Sized> DirectoryFileSystem for T {
                     .path()
                     .map(std::path::Path::to_path_buf)
                     .ok_or_else(|| VfError::client(index, ERR_IO).with_context("read_dir", path))?;
+                path_bytes = path_bytes
+                    .checked_add(entry_path.as_os_str().len())
+                    .ok_or_else(|| {
+                        VfError::failure(index, libc::EFBIG as u32).with_context("read_dir", path)
+                    })?;
+                if path_bytes > options.path_byte_limit() {
+                    return Err(
+                        VfError::failure(index, libc::EFBIG as u32).with_context("read_dir", path)
+                    );
+                }
                 Ok(DirEntry::new(entry_path, attributes.into()))
             })
             .collect()

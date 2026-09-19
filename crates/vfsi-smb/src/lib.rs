@@ -64,6 +64,28 @@ const FILE_BASIC_INFORMATION: u8 = 4;
 const FILE_INTERNAL_INFORMATION: u8 = 6;
 const FILE_END_OF_FILE_INFORMATION: u8 = 20;
 
+/// Connection and per-request deadlines for [`SmbVecFs`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SmbConnectOptions {
+    pub connect_timeout: Duration,
+    pub request_timeout: Duration,
+    pub auto_reconnect: bool,
+    pub compression: bool,
+    pub dfs_enabled: bool,
+}
+
+impl Default for SmbConnectOptions {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(10),
+            request_timeout: Duration::from_secs(30),
+            auto_reconnect: true,
+            compression: true,
+            dfs_enabled: true,
+        }
+    }
+}
+
 fn checked_offset(base: u64, delta: u64, index: usize) -> VfResult<u64> {
     base.checked_add(delta)
         .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))
@@ -124,7 +146,29 @@ impl SmbVecFs {
         password: &str,
         domain: &str,
     ) -> VfResult<Self> {
+        Self::connect_with_options(
+            server,
+            share,
+            username,
+            password,
+            domain,
+            SmbConnectOptions::default(),
+        )
+    }
+
+    /// Connect with explicit setup and per-request deadlines.
+    pub fn connect_with_options(
+        server: &str,
+        share: &str,
+        username: &str,
+        password: &str,
+        domain: &str,
+        options: SmbConnectOptions,
+    ) -> VfResult<Self> {
         if server.is_empty() || share.is_empty() {
+            return Err(VfError::failure(0, ERR_INVAL));
+        }
+        if options.connect_timeout.is_zero() || options.request_timeout.is_zero() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
         let runtime = Builder::new_multi_thread()
@@ -133,21 +177,43 @@ impl SmbVecFs {
             .map_err(|e| VfError::transport(None, format!("create SMB runtime: {e}")))?;
         let config = ClientConfig {
             addr: normalize_server(server),
-            timeout: Duration::from_secs(30),
+            timeout: options.connect_timeout,
             username: username.to_owned(),
             password: password.to_owned(),
             domain: domain.to_owned(),
-            auto_reconnect: true,
-            compression: true,
-            dfs_enabled: true,
+            auto_reconnect: options.auto_reconnect,
+            compression: options.compression,
+            dfs_enabled: options.dfs_enabled,
             dfs_target_overrides: HashMap::new(),
         };
-        let (client, tree) = runtime
-            .block_on(async {
-                let mut client = SmbClient::connect(config).await?;
-                let tree = client.connect_share(share).await?;
-                Ok::<_, SmbError>((client, tree))
-            })
+        // `smb2` performs TCP connect, negotiate, and session setup in one
+        // future. Give TCP its full connect budget plus one request budget for
+        // the protocol handshake; ordinary requests use request_timeout alone.
+        let setup_timeout = options
+            .connect_timeout
+            .saturating_add(options.request_timeout);
+        let mut client = runtime
+            .block_on(tokio::time::timeout(
+                setup_timeout,
+                SmbClient::connect(config),
+            ))
+            .map_err(|_| VfError::transport(None, "SMB session setup timed out"))?
+            .map_err(|e| smb_error(e, 0))?;
+        client
+            .connection_mut()
+            .set_response_timeout(Some(options.request_timeout));
+        client
+            .connection_mut()
+            .set_send_timeout(Some(options.request_timeout));
+        client
+            .connection_mut()
+            .set_credit_wait_timeout(options.request_timeout);
+        let tree = runtime
+            .block_on(tokio::time::timeout(
+                options.request_timeout,
+                client.connect_share(share),
+            ))
+            .map_err(|_| VfError::transport(None, "SMB share connection timed out"))?
             .map_err(|e| smb_error(e, 0))?;
         Ok(Self {
             runtime,
@@ -2580,6 +2646,30 @@ mod tests {
         assert_eq!(normalize_server("samba.example:1445"), "samba.example:1445");
         assert_eq!(normalize_server("[::1]"), "[::1]:445");
         assert_eq!(normalize_server("[::1]:445"), "[::1]:445");
+    }
+
+    #[test]
+    fn connection_deadlines_are_configurable_and_nonzero() {
+        let defaults = SmbConnectOptions::default();
+        assert_eq!(defaults.connect_timeout, Duration::from_secs(10));
+        assert_eq!(defaults.request_timeout, Duration::from_secs(30));
+
+        for options in [
+            SmbConnectOptions {
+                connect_timeout: Duration::ZERO,
+                ..defaults
+            },
+            SmbConnectOptions {
+                request_timeout: Duration::ZERO,
+                ..defaults
+            },
+        ] {
+            let error =
+                SmbVecFs::connect_with_options("unused.invalid", "share", "", "", "", options)
+                    .err()
+                    .expect("zero timeout must fail before network I/O");
+            assert_eq!(error.err_no(), ERR_INVAL);
+        }
     }
 
     #[test]

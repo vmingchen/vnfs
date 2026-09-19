@@ -704,6 +704,52 @@ fn listdir_recursive() {
     assert!(joined.iter().any(|p| p.ends_with("top.txt")));
 }
 
+#[test]
+fn bounded_walk_limits_nfs_accumulation() {
+    use vnfs::WalkOptions;
+
+    let dir = setup_dir("bounded_walk");
+    let mut c = client();
+    c.ensure_dir(Path::new(&format!("{}/d1/d2", dir)), 0o755)
+        .unwrap();
+    let one = format!("{}/one", dir);
+    c.writev(&[WriteOp::from_path(&one, VfOffset::At(0), Vec::new()).with_creation()])
+        .unwrap();
+
+    let error = c
+        .walk_with_options(
+            Path::new(&dir),
+            AttrMask::stat(),
+            WalkOptions::new().max_entries(1),
+            &mut |_, _| {},
+        )
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+
+    let error = c
+        .walk_with_options(
+            Path::new(&dir),
+            AttrMask::stat(),
+            WalkOptions::new().max_depth(0),
+            &mut |_, _| {},
+        )
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+
+    let walked = c
+        .walk_with_options(
+            Path::new(&dir),
+            AttrMask::stat(),
+            WalkOptions::new()
+                .max_entries(16)
+                .max_path_bytes(4096)
+                .max_depth(4),
+            &mut |_, entries| entries.sort_by(|a, b| a.file.path().cmp(&b.file.path())),
+        )
+        .unwrap();
+    assert_eq!(walked.len(), 3);
+}
+
 // ---------------------------------------------------------------------------
 // rename
 // ---------------------------------------------------------------------------

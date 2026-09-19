@@ -55,8 +55,8 @@ pub mod prelude {
     pub use vfsi_sync::{
         CopyFileSystem, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES,
         DirectoryFileSystem, FileSystem, FsClient, FsFile, LinkFileSystem, MetadataFileSystem,
-        NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadAllOptions, SetMetadata,
-        VectorFileSystem,
+        NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadAllOptions, ReadDirOptions,
+        SetMetadata, VectorFileSystem, WalkOptions,
     };
 }
 
@@ -75,8 +75,10 @@ pub use vfsi_nfs::{
     NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
 };
 pub use vfsi_sync::{
-    CopyFileSystem, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DirectoryFileSystem,
-    FileSystem, FsClient, FsFile, FsRead, FsReadInto, FsWrite, LinkFileSystem, MetadataFileSystem,
-    NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadAllOptions, SetMetadata, VecFs,
-    VecFsExt, VectorFileSystem, VfFileHandle, VfOpenOptions, rm_recursive,
+    CopyFileSystem, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
+    DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_WALK_MAX_DEPTH,
+    DirectoryFileSystem, FileSystem, FsClient, FsFile, FsRead, FsReadInto, FsWrite, LinkFileSystem,
+    MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadAllOptions,
+    ReadDirOptions, SetMetadata, VecFs, VecFsExt, VectorFileSystem, VfFileHandle, VfOpenOptions,
+    WalkOptions, rm_recursive,
 };

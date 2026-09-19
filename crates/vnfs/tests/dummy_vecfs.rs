@@ -611,3 +611,49 @@ fn native_scalar_contract_separates_metadata_query_from_update() {
     FileSystem::set_attributes(&mut fs, update).unwrap();
     assert_eq!(fs.stat_path("/metadata").unwrap().mode & 0o777, 0o640);
 }
+
+#[test]
+fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
+    use vnfs::{AttrMask, FsClient, ReadDirOptions, WalkOptions, WriteOp};
+
+    let mut fs = dummy();
+    fs.ensure_dir(Path::new("/tree/sub"), 0o755).unwrap();
+    fs.writev(&[
+        WriteOp::from_path("/tree/one", VfOffset::At(0), Vec::new()).with_creation(),
+        WriteOp::from_path("/tree/two", VfOffset::At(0), Vec::new()).with_creation(),
+    ])
+    .unwrap();
+
+    let error = fs
+        .walk_with_options(
+            Path::new("/tree"),
+            AttrMask::stat(),
+            WalkOptions::new().max_entries(2),
+            &mut |_, _| {},
+        )
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+
+    let error = fs
+        .walk_with_options(
+            Path::new("/tree"),
+            AttrMask::stat(),
+            WalkOptions::new().max_depth(0),
+            &mut |_, _| {},
+        )
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+
+    let client = FsClient::new(fs);
+    let error = client
+        .read_dir_with_options("/tree", ReadDirOptions::new().max_entries(1))
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+
+    let error = client
+        .read_dir_with_options("/tree", ReadDirOptions::new().max_path_bytes(1))
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+
+    assert_eq!(client.read_dir("/tree").unwrap().len(), 3);
+}

@@ -10,8 +10,8 @@ use crate::traits::{validate_read_results, validate_write_results};
 use crate::{
     AttrMask, Capabilities, CopyFileSystem, DEFAULT_READ_MAX_BYTES, DirEntry, DirectoryFileSystem,
     FileSystem, LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
-    NamespaceFileSystem, OpenFlags, OpenRequest, Permissions, ReadOp, ReadResult, SetAttributes,
-    VectorFileSystem, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
+    NamespaceFileSystem, OpenFlags, OpenRequest, Permissions, ReadDirOptions, ReadOp, ReadResult,
+    SetAttributes, VectorFileSystem, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
 };
 
 fn io_error(error: VfError) -> io::Error {
@@ -188,7 +188,16 @@ impl<F: DirectoryFileSystem> FsClient<F> {
     }
 
     pub fn read_dir(&self, path: impl AsRef<Path>) -> VfResult<Vec<DirEntry>> {
-        self.lock()?.read_dir_one(path.as_ref())
+        self.read_dir_with_options(path, ReadDirOptions::default())
+    }
+
+    /// Read one directory with explicit entry and path-storage limits.
+    pub fn read_dir_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: ReadDirOptions,
+    ) -> VfResult<Vec<DirEntry>> {
+        self.lock()?.read_dir_one(path.as_ref(), options)
     }
 }
 

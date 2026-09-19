@@ -7,6 +7,120 @@ pub const DEFAULT_READ_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Default aggregate payload limit for [`VecFs::read_allv`].
 pub const DEFAULT_READ_ALLV_MAX_TOTAL_BYTES: usize = DEFAULT_READ_MAX_BYTES;
 
+/// Default maximum number of entries returned by allocating directory APIs.
+pub const DEFAULT_DIRECTORY_MAX_ENTRIES: usize = 100_000;
+
+/// Default combined path-storage budget for allocating directory APIs.
+pub const DEFAULT_DIRECTORY_MAX_PATH_BYTES: usize = 16 * 1024 * 1024;
+
+/// Default recursion depth for [`VecFs::walk`].
+pub const DEFAULT_WALK_MAX_DEPTH: usize = 128;
+
+/// Resource limits for one allocating directory listing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadDirOptions {
+    max_entries: usize,
+    max_path_bytes: usize,
+}
+
+impl ReadDirOptions {
+    pub const fn new() -> Self {
+        Self {
+            max_entries: DEFAULT_DIRECTORY_MAX_ENTRIES,
+            max_path_bytes: DEFAULT_DIRECTORY_MAX_PATH_BYTES,
+        }
+    }
+
+    /// Explicitly opt out of the default allocation limits.
+    pub const fn unlimited() -> Self {
+        Self {
+            max_entries: usize::MAX,
+            max_path_bytes: usize::MAX,
+        }
+    }
+
+    pub const fn max_entries(mut self, entries: usize) -> Self {
+        self.max_entries = entries;
+        self
+    }
+
+    pub const fn max_path_bytes(mut self, bytes: usize) -> Self {
+        self.max_path_bytes = bytes;
+        self
+    }
+
+    pub const fn entry_limit(self) -> usize {
+        self.max_entries
+    }
+
+    pub const fn path_byte_limit(self) -> usize {
+        self.max_path_bytes
+    }
+}
+
+impl Default for ReadDirOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Resource limits for an allocating recursive directory walk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WalkOptions {
+    directory: ReadDirOptions,
+    max_depth: usize,
+}
+
+impl WalkOptions {
+    pub const fn new() -> Self {
+        Self {
+            directory: ReadDirOptions::new(),
+            max_depth: DEFAULT_WALK_MAX_DEPTH,
+        }
+    }
+
+    /// Explicitly opt out of the default allocation and recursion limits.
+    pub const fn unlimited() -> Self {
+        Self {
+            directory: ReadDirOptions::unlimited(),
+            max_depth: usize::MAX,
+        }
+    }
+
+    pub const fn max_entries(mut self, entries: usize) -> Self {
+        self.directory = self.directory.max_entries(entries);
+        self
+    }
+
+    pub const fn max_path_bytes(mut self, bytes: usize) -> Self {
+        self.directory = self.directory.max_path_bytes(bytes);
+        self
+    }
+
+    pub const fn max_depth(mut self, depth: usize) -> Self {
+        self.max_depth = depth;
+        self
+    }
+
+    pub const fn entry_limit(self) -> usize {
+        self.directory.entry_limit()
+    }
+
+    pub const fn path_byte_limit(self) -> usize {
+        self.directory.path_byte_limit()
+    }
+
+    pub const fn depth_limit(self) -> usize {
+        self.max_depth
+    }
+}
+
+impl Default for WalkOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Resource limits for reading multiple complete files into memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadAllOptions {
@@ -46,6 +160,17 @@ fn contract_error(
         index,
         format!("{operation} backend contract violation: {detail}"),
     )
+}
+
+fn take_single_result<T>(operation: &str, mut results: Vec<T>) -> VfResult<T> {
+    if results.len() != 1 {
+        return Err(contract_error(
+            operation,
+            None,
+            format!("returned {} results for one request", results.len()),
+        ));
+    }
+    Ok(results.pop().expect("validated one result"))
 }
 
 pub(crate) fn validate_read_results(
@@ -352,21 +477,57 @@ pub trait VecFs {
         masks: AttrMask,
         sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<WalkEntry>> {
+        self.walk_with_options(root, masks, WalkOptions::default(), sort)
+    }
+
+    /// Recursively enumerate `root` with explicit allocation and depth limits.
+    fn walk_with_options(
+        &mut self,
+        root: &Path,
+        masks: AttrMask,
+        options: WalkOptions,
+        sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
+    ) -> VfResult<Vec<WalkEntry>> {
         // Explicit stack (pre-order, subdirectories visited in the order the
         // sort callback produced) so deep trees cannot overflow the call
         // stack.
         let mut out = Vec::new();
-        let mut stack = vec![root.to_path_buf()];
-        while let Some(dir) = stack.pop() {
-            let mut entries = self.listdir(&dir, masks, 0, false)?;
+        let mut stack = vec![(root.to_path_buf(), 0usize)];
+        let mut entry_count = 0usize;
+        let mut path_bytes = 0usize;
+        while let Some((dir, depth)) = stack.pop() {
+            let remaining = options.entry_limit().saturating_sub(entry_count);
+            let request_count = remaining.saturating_add(1);
+            let mut entries = self.listdir(&dir, masks, request_count, false)?;
+            if entries.len() > remaining {
+                return Err(
+                    VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
+                );
+            }
+            for entry in &entries {
+                let bytes = entry.file.path().map_or(0, |path| path.as_os_str().len());
+                path_bytes = path_bytes.checked_add(bytes).ok_or_else(|| {
+                    VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
+                })?;
+                if path_bytes > options.path_byte_limit() {
+                    return Err(VfError::failure(entry_count, libc::EFBIG as u32)
+                        .with_context("walk", &dir));
+                }
+                entry_count += 1;
+            }
             sort(dir.as_path(), &mut entries);
             let subdirs: Vec<PathBuf> = entries
                 .iter()
                 .filter(|e| e.ftype == VfType::Directory)
                 .filter_map(|e| e.file.path().map(|p| p.to_path_buf()))
                 .collect();
+            if !subdirs.is_empty() && depth >= options.depth_limit() {
+                return Err(
+                    VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
+                );
+            }
             for s in subdirs.into_iter().rev() {
-                stack.push(s);
+                stack.push((s, depth + 1));
             }
             out.push(WalkEntry { path: dir, entries });
         }
@@ -712,8 +873,7 @@ pub trait VecFs {
 
     /// Read a symlink target, `tc_readlink()`.
     fn readlink(&mut self, path: &Path) -> VfResult<Vec<u8>> {
-        let v = self.readlinkv(std::slice::from_ref(&path))?;
-        Ok(v.into_iter().next().expect("one result"))
+        take_single_result("readlink", self.readlinkv(std::slice::from_ref(&path))?)
     }
 
     /// `tc_ldupv()`: same read/write extent copy as
@@ -950,5 +1110,12 @@ mod contract_tests {
         ] {
             assert!(validate_write_results("test", &[request], &[malformed]).is_err());
         }
+    }
+
+    #[test]
+    fn scalar_result_cardinality_is_checked_without_panicking() {
+        assert!(take_single_result::<u8>("readlink", Vec::new()).is_err());
+        assert!(take_single_result("readlink", vec![1u8, 2]).is_err());
+        assert_eq!(take_single_result("readlink", vec![7u8]).unwrap(), 7);
     }
 }

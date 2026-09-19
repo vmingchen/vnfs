@@ -79,3 +79,15 @@ are bounded by that caller-supplied length. Reads into caller-owned buffers are
 bounded by the buffer. Applications processing larger or untrusted files
 should stream through `FsFile`, `Read`, `read_streamv`, or repeated positional
 reads instead of raising a whole-file allocation limit without bound.
+
+Allocating directory APIs are bounded for the same reason. `FsClient::read_dir`
+uses finite entry and combined-path-byte defaults; `read_dir_with_options` and
+`ReadDirOptions` select tighter limits or explicitly opt into unlimited
+collection. Recursive `VecFs::walk` additionally has a default depth limit and
+accepts `WalkOptions`. The callback-based `listdirv` remains the preferred API
+when an application can consume entries incrementally.
+
+The SMB backend exposes `SmbConnectOptions` through
+`SmbVecFs::connect_with_options`. Connect setup and ordinary requests have
+separate deadlines; the request deadline is also applied to sends, response
+waiting, and SMB credit acquisition.

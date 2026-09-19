@@ -15,8 +15,9 @@ pub mod path {
 
 mod traits;
 pub use traits::{
-    DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, ReadAllOptions, VecFs, VecFsExt,
-    rm_recursive,
+    DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
+    DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_WALK_MAX_DEPTH,
+    ReadAllOptions, ReadDirOptions, VecFs, VecFsExt, WalkOptions, rm_recursive,
 };
 mod io;
 pub use io::{VfFileHandle, VfOpenOptions};
@@ -32,7 +33,8 @@ pub use native::{
 pub mod sfsi {
     pub use crate::{
         CopyFileSystem, DirectoryFileSystem, FileSystem, FsClient, FsFile, LinkFileSystem,
-        MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions, VecFs, VecFsExt,
+        MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadDirOptions,
+        VecFs, VecFsExt, WalkOptions,
     };
     pub use vfsi_core::{Fd, VfAttrs, VfError, VfFile, VfOffset, VfResult, VfType};
 }
@@ -40,8 +42,10 @@ pub mod sfsi {
 /// Vectorized view of the synchronous interface.
 pub mod vfsi {
     pub use crate::{
-        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, ReadAllOptions, VecFs, VecFsExt,
-        VectorFileSystem, rm_recursive,
+        DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
+        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_WALK_MAX_DEPTH,
+        ReadAllOptions, ReadDirOptions, VecFs, VecFsExt, VectorFileSystem, WalkOptions,
+        rm_recursive,
     };
     pub use vfsi_core::*;
 }
