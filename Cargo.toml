@@ -19,8 +19,8 @@ libntirpc-sys = "0.2.2"
 nfsv41-sys = { path = "crates/nfsv41-sys", version = "0.1.5" }
 xdr-codec = "0.4.4"
 xdrgen = "0.4.4"
-vfsi-core = { path = "crates/vfsi-core", version = "0.1.0" }
-vfsi-local = { path = "crates/vfsi-local", version = "0.1.0" }
+vfsi-core = { path = "crates/vfsi-core", version = "0.1.1" }
+vfsi-local = { path = "crates/vfsi-local", version = "0.1.1" }
 vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.1.1" }
 vfsi-smb = { path = "crates/vfsi-smb", version = "0.1.1" }
 vfsi-sync = { path = "crates/vfsi-sync", version = "0.1.2" }
