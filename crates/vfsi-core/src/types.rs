@@ -120,6 +120,28 @@ impl VfError {
         }
     }
 
+    /// A status returned by an NFS server.
+    pub fn nfs(index: usize, status: u32) -> VfError {
+        VfError::Op {
+            index,
+            err_no: status,
+            domain: ErrorDomain::Nfs,
+            operation: None,
+            path: None,
+        }
+    }
+
+    /// A status returned by an SMB server.
+    pub fn smb(index: usize, status: u32) -> VfError {
+        VfError::Op {
+            index,
+            err_no: status,
+            domain: ErrorDomain::Smb,
+            operation: None,
+            path: None,
+        }
+    }
+
     /// A transport / client-side failure. `index` is best-effort; pass `None`
     /// when the failure cannot be attributed to a specific operation.
     pub fn transport(index: impl Into<Option<usize>>, message: impl Into<String>) -> VfError {

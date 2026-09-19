@@ -559,7 +559,9 @@ impl DummyVecFs {
     }
 
     fn rm_one(&mut self, path: &Path, recursive: bool) -> VfResult<()> {
-        let ft = self.file_type(path).unwrap_or(VfType::Regular);
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: 0 })?;
+        let ft = self.file_type(path)?;
         if ft == VfType::Directory && recursive {
             let entries = self.listdir(path, AttrMask::default(), usize::MAX, false)?;
             for e in entries {
@@ -677,7 +679,10 @@ impl VecFs for DummyVecFs {
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?
         };
         if created {
-            let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode & 0o7777));
+            #[cfg(feature = "test-faults")]
+            self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index: 0 })?;
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode & 0o7777))
+                .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         }
         let fd = self.insert_open_file(DummyOpen {
             file,
@@ -876,8 +881,10 @@ impl VecFs for DummyVecFs {
                 .map_err(|e| e.with_index(i))?;
             std::fs::create_dir(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             if a.masks.contains(AttrMask::MODE) {
-                let _ =
-                    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(a.mode & 0o7777));
+                #[cfg(feature = "test-faults")]
+                self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index: i })?;
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(a.mode & 0o7777))
+                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             }
         }
         Ok(())

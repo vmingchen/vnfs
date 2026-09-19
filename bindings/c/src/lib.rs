@@ -40,6 +40,7 @@ pub const VFSI_ERROR_NOT_ATTEMPTED: u32 = 5;
 pub const VFSI_ERROR_INDETERMINATE: u32 = 6;
 /// Fixed capacity of [`vfsi_result::message`], including its trailing NUL.
 pub const VFSI_RESULT_MESSAGE_SIZE: usize = 160;
+const C_INDEX_UNKNOWN: usize = usize::MAX;
 pub const VFSI_ATTR_MODE: u32 = 1 << 0;
 pub const VFSI_ATTR_SIZE: u32 = 1 << 1;
 pub const VFSI_ATTR_NLINK: u32 = 1 << 2;
@@ -124,8 +125,9 @@ pub struct vfsi_attrs {
 
 /// Uniform ABI-v3 result for scalar and vector operations.
 ///
-/// `index` is the completed count on success and the failing operation index
-/// on error. Vector calls also populate a caller-owned result per element;
+/// `index` is the completed count on success, the failing operation index on
+/// an attributable error, or `VFSI_INDEX_UNKNOWN`. Vector calls also populate
+/// a caller-owned result per element;
 /// after a submitted concurrent batch fails, every non-failing element is
 /// marked indeterminate because it may already have completed. `err_no`
 /// retains the backend status while `category` is portable across protocols.
@@ -294,7 +296,7 @@ impl vfsi_result {
                 "",
             ),
             VfError::Transport { index, message, .. } => Self::base(
-                index.unwrap_or(0),
+                index.unwrap_or(C_INDEX_UNKNOWN),
                 VFSI_ERROR_TRANSPORT,
                 vnfs::VF_ERR_RPC,
                 &message,
@@ -338,8 +340,18 @@ fn fail_results(results: &mut [vfsi_result], failure: vfsi_result, submitted: bo
             );
         }
     }
-    if let Some(result) = results.get_mut(failure.index) {
-        *result = failure;
+    if failure.index != C_INDEX_UNKNOWN {
+        if let Some(result) = results.get_mut(failure.index) {
+            *result = failure;
+        }
+    }
+}
+
+fn confirmed_close_prefix(error: &VfError, count: usize) -> usize {
+    if error.is_transport() {
+        0
+    } else {
+        error.index_opt().unwrap_or(0).min(count)
     }
 }
 
@@ -1194,7 +1206,7 @@ pub unsafe extern "C" fn vfsi_closev(
         }
         let fds = std::slice::from_raw_parts(fds, count);
         let files = {
-            let mut table = match lock_or_io(&fs.files) {
+            let table = match lock_or_io(&fs.files) {
                 Ok(table) => table,
                 Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
             };
@@ -1209,9 +1221,6 @@ pub unsafe extern "C" fn vfsi_closev(
                 };
                 files.push(file);
             }
-            for fd in fds {
-                table.remove(fd);
-            }
             files
         };
         let mut backend = match lock_or_io(&fs.fs) {
@@ -1220,10 +1229,23 @@ pub unsafe extern "C" fn vfsi_closev(
         };
         match backend.closev(&files) {
             Ok(()) => {
+                if let Ok(mut table) = fs.files.lock() {
+                    for fd in fds {
+                        table.remove(fd);
+                    }
+                }
                 complete_results(results);
                 vfsi_result::success(count)
             }
             Err(error) => {
+                let closed_prefix = confirmed_close_prefix(&error, fds.len());
+                if closed_prefix > 0 {
+                    if let Ok(mut table) = fs.files.lock() {
+                        for fd in fds.iter().take(closed_prefix) {
+                            table.remove(fd);
+                        }
+                    }
+                }
                 let failure = vfsi_result::from_error(error);
                 fail_results(results, failure, true);
                 failure
@@ -2046,6 +2068,29 @@ mod tests {
                 .into_owned(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn unknown_transport_index_remains_unknown_for_c_callers() {
+        let failure = vfsi_result::from_error(VfError::transport(None, "lost reply"));
+        assert_eq!(failure.index, C_INDEX_UNKNOWN);
+        let mut items = [vfsi_result::panic(), vfsi_result::panic()];
+        fail_results(&mut items, failure, true);
+        assert!(items
+            .iter()
+            .all(|item| item.category == VFSI_ERROR_INDETERMINATE));
+    }
+
+    #[test]
+    fn close_failure_only_releases_a_confirmed_semantic_prefix() {
+        assert_eq!(
+            confirmed_close_prefix(&VfError::failure(2, libc::EIO as u32), 4),
+            2
+        );
+        assert_eq!(
+            confirmed_close_prefix(&VfError::transport(None, "lost reply"), 4),
+            0
+        );
     }
 
     #[test]

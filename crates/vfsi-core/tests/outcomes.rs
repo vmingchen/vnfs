@@ -54,3 +54,14 @@ fn metadata_converts_fractional_pre_epoch_timestamps() {
         Some(std::time::UNIX_EPOCH - std::time::Duration::from_millis(500))
     );
 }
+
+#[test]
+fn protocol_status_constructors_preserve_their_domains() {
+    let nfs = VfError::nfs(4, 10_001);
+    assert_eq!(nfs.index_opt(), Some(4));
+    assert_eq!(nfs.status(), Some(StatusCode::Nfs(10_001)));
+
+    let smb = VfError::smb(2, 0xC000_0054);
+    assert_eq!(smb.index_opt(), Some(2));
+    assert_eq!(smb.status(), Some(StatusCode::Smb(0xC000_0054)));
+}

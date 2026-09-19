@@ -482,6 +482,56 @@ fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
     assert_eq!(fs.test_open_handle_count(), 0);
 }
 
+#[cfg(feature = "test-faults")]
+#[test]
+fn recursive_remove_propagates_type_lookup_failure_without_unlinking() {
+    let mut fs = dummy();
+    fs.writev(&[
+        vnfs::WriteOp::from_path("/kept", VfOffset::At(0), b"data".to_vec()).with_creation(),
+    ])
+    .unwrap();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeRemoveType { index: 0 },
+        vnfs::VfError::transport(None, "injected type lookup failure"),
+    ));
+    fs.set_fault_injector(script.clone());
+    let error = fs.rm(&[Path::new("/kept")], true).unwrap_err();
+    assert!(error.is_transport());
+    assert!(script.is_consumed());
+    assert!(fs.exists_path("/kept").unwrap());
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn create_mode_failure_is_reported_instead_of_ignored() {
+    let mut fs = dummy();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeSetPermissions { index: 0 },
+        vnfs::VfError::failure(0, libc::EPERM as u32),
+    ));
+    fs.set_fault_injector(script.clone());
+    let error = fs
+        .open(Path::new("/created"), libc::O_CREAT | libc::O_RDWR, 0o600)
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EPERM as u32);
+    assert!(script.is_consumed());
+    assert_eq!(fs.test_open_handle_count(), 0);
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn mkdir_mode_failure_is_reported_instead_of_ignored() {
+    let mut fs = dummy();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeSetPermissions { index: 0 },
+        vnfs::VfError::failure(0, libc::EPERM as u32),
+    ));
+    fs.set_fault_injector(script.clone());
+    let error = fs.mkdir(Path::new("/created-dir"), 0o700).unwrap_err();
+    assert_eq!(error.err_no(), libc::EPERM as u32);
+    assert!(script.is_consumed());
+}
+
 #[test]
 fn strict_vectors_report_failure_index_without_rollback() {
     use vnfs::VfFile;

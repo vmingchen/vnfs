@@ -339,10 +339,7 @@ impl<T: VecFs + ?Sized> VectorFileSystem for T {
             .iter()
             .map(|request| request.path.as_path())
             .collect();
-        let flags: Vec<i32> = requests
-            .iter()
-            .map(|request| request.flags.to_libc())
-            .collect::<VfResult<_>>()?;
+        let flags = translate_open_flags(requests)?;
         let modes: Vec<u32> = requests.iter().map(|request| request.mode).collect();
         VecFs::openv(self, &paths, &flags, &modes)
     }
@@ -357,5 +354,33 @@ impl<T: VecFs + ?Sized> VectorFileSystem for T {
 
     fn write_many(&mut self, requests: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
         self.writev_borrowed(requests)
+    }
+}
+
+fn translate_open_flags(requests: &[OpenRequest]) -> VfResult<Vec<i32>> {
+    requests
+        .iter()
+        .enumerate()
+        .map(|(index, request)| {
+            request
+                .flags
+                .to_libc()
+                .map_err(|error| error.with_index(index))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_open_flags_retain_their_request_index() {
+        let error = translate_open_flags(&[
+            OpenRequest::new("/valid", OpenFlags::READ),
+            OpenRequest::new("/invalid", OpenFlags::empty()),
+        ])
+        .unwrap_err();
+        assert_eq!(error.index_opt(), Some(1));
     }
 }

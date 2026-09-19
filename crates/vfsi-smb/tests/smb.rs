@@ -123,6 +123,134 @@ fn smb_openv_injected_registration_failure_closes_all_successes() {
     fs.rm(&[root.as_path()], true).unwrap();
 }
 
+#[cfg(feature = "test-faults")]
+#[test]
+fn smb_closev_failure_keeps_handles_available_for_cleanup() {
+    let Some(mut fs) = connect() else {
+        eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-closev-fault-{}", std::process::id()));
+    let _ = fs.rm(&[root.as_path()], true);
+    fs.mkdir(root.as_path(), 0o755).unwrap();
+    let paths = [root.join("f0"), root.join("f1")];
+    let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    let files = VecFs::openv(
+        &mut fs,
+        &refs,
+        &[libc::O_CREAT | libc::O_RDWR; 2],
+        &[0o644; 2],
+    )
+    .unwrap();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeCloseDispatch { index: 0 },
+        VfError::transport(None, "injected close failure"),
+    ));
+    fs.set_fault_injector(script.clone());
+    assert!(fs.closev(&files).unwrap_err().is_transport());
+    assert_eq!(fs.test_open_handle_count(), 2);
+    assert!(script.is_consumed());
+    fs.closev(&files).unwrap();
+    fs.rm(&[root.as_path()], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn smb_closev_removes_successes_on_both_sides_of_a_failure() {
+    let Some(mut fs) = connect() else {
+        eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-close-results-{}", std::process::id()));
+    let _ = fs.rm(&[root.as_path()], true);
+    fs.mkdir(root.as_path(), 0o755).unwrap();
+    let paths = [root.join("f0"), root.join("f1"), root.join("f2")];
+    let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    let files = VecFs::openv(
+        &mut fs,
+        &refs,
+        &[libc::O_CREAT | libc::O_RDWR; 3],
+        &[0o644; 3],
+    )
+    .unwrap();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeCloseItem { index: 1 },
+        VfError::failure(1, libc::EIO as u32),
+    ));
+    fs.set_fault_injector(script.clone());
+    let error = fs.closev(&files).unwrap_err();
+    assert_eq!(error.index_opt(), Some(1));
+    assert!(script.is_consumed());
+    assert_eq!(fs.test_open_handle_count(), 1);
+    fs.close(&files[1]).unwrap();
+    assert_eq!(fs.test_open_handle_count(), 0);
+    fs.rm(&[root.as_path()], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn smb_scalar_open_registration_failure_closes_remote_open() {
+    let Some(mut fs) = connect() else {
+        eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let root = PathBuf::from(format!(
+        "/vfsi-smb-scalar-open-fault-{}",
+        std::process::id()
+    ));
+    let _ = fs.rm(&[root.as_path()], true);
+    fs.mkdir(root.as_path(), 0o755).unwrap();
+    let path = root.join("file");
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeRegister { index: 0 },
+        VfError::transport(None, "injected scalar registration failure"),
+    ));
+    fs.set_fault_injector(script.clone());
+    assert!(
+        fs.open(path.as_path(), libc::O_CREAT | libc::O_RDWR, 0o600)
+            .unwrap_err()
+            .is_transport()
+    );
+    assert!(script.is_consumed());
+    assert_eq!(fs.test_open_handle_count(), 0);
+    fs.rm(&[root.as_path()], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn smb_confirmed_write_advances_descriptor_when_flush_path_fails() {
+    let Some(mut fs) = connect() else {
+        eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-partial-write-{}", std::process::id()));
+    let _ = fs.rm(&[root.as_path()], true);
+    fs.mkdir(root.as_path(), 0o755).unwrap();
+    let path = root.join("file");
+    let file = fs
+        .open(path.as_path(), libc::O_CREAT | libc::O_RDWR, 0o600)
+        .unwrap();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::AfterWriteChunk { chunk: 0 },
+        VfError::transport(None, "injected failure after confirmed write"),
+    ));
+    fs.set_fault_injector(script.clone());
+    assert!(
+        fs.writev(&[WriteOp::new(file.clone(), VfOffset::Cur, b"a".to_vec(),)])
+            .unwrap_err()
+            .is_transport()
+    );
+    assert!(script.is_consumed());
+    fs.writev(&[WriteOp::new(file.clone(), VfOffset::Cur, b"b".to_vec())])
+        .unwrap();
+    let read = fs
+        .readv(&[ReadOp::new(file.clone(), VfOffset::At(0), 2)])
+        .unwrap();
+    assert_eq!(read[0].data, b"ab");
+    fs.close(&file).unwrap();
+    fs.rm(&[root.as_path()], true).unwrap();
+}
+
 #[test]
 fn samba_round_trip_and_copy() {
     let Some(mut fs) = connect() else {

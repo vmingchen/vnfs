@@ -335,6 +335,7 @@ impl NfsVecFs {
     #[cfg(feature = "test-faults")]
     #[doc(hidden)]
     pub fn set_fault_injector(&mut self, injector: Arc<dyn FaultInjector>) {
+        self.nfs.set_fault_injector(injector.clone());
         self.fault_injector = Some(injector);
     }
 
@@ -342,6 +343,18 @@ impl NfsVecFs {
     #[doc(hidden)]
     pub fn test_open_handle_count(&self) -> usize {
         self.open_files.len()
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[doc(hidden)]
+    pub fn test_confirmed_path_closes(&self) -> usize {
+        self.nfs.confirmed_path_closes()
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[doc(hidden)]
+    pub fn test_deferred_path_close_count(&self) -> usize {
+        self.nfs.deferred_path_close_count()
     }
 
     #[cfg(feature = "test-faults")]
@@ -619,7 +632,7 @@ impl NfsVecFs {
         for (i, a) in attrs.iter().enumerate() {
             let (fh, ftype) = match &resolved[i] {
                 Ok(x) => x.clone(),
-                Err(status) => return Err(VfError::failure(i, *status)),
+                Err(status) => return Err(VfError::nfs(i, *status)),
             };
             if !follow && ftype == nfs_ftype4_NF4LNK {
                 // NFSv4 has no non-following mode/size setter for symlinks;
@@ -736,7 +749,7 @@ impl NfsVecFs {
                 Ok((fh, _)) => fh.clone(),
                 Err(status) => {
                     if first_failure.is_none() {
-                        first_failure = Some(VfError::failure(i, *status));
+                        first_failure = Some(VfError::nfs(i, *status));
                     }
                     ids_list.push(Vec::new());
                     continue;
@@ -956,6 +969,9 @@ impl NfsVecFs {
         #[cfg(feature = "test-faults")]
         {
             replacement.fault_injector = self.fault_injector.clone();
+            if let Some(injector) = &replacement.fault_injector {
+                replacement.nfs.set_fault_injector(injector.clone());
+            }
         }
         replacement.configured_max_compound_bytes = self.configured_max_compound_bytes;
         if self.configured_max_compound_bytes != 0 {
@@ -1439,7 +1455,7 @@ impl NfsVecFs {
                     ));
                     subset.push(*orig);
                 }
-                Err(status) => return Err(VfError::failure(*orig, status)),
+                Err(status) => return Err(VfError::nfs(*orig, status)),
             }
         }
         if opens.is_empty() {
@@ -1700,6 +1716,8 @@ impl NfsVecFs {
         };
         let mut results = Vec::with_capacity(ops.len());
         let mut start = 0;
+        #[cfg(feature = "test-faults")]
+        let mut chunk_index = 0usize;
         while start < ops.len() {
             let mut end = start;
             let mut bytes = 0usize;
@@ -1715,8 +1733,23 @@ impl NfsVecFs {
                 let error = VfError::from_rpc_indexed(error);
                 remap_descriptor_chunk_error(error, start, &owner)
             })?;
+            for (local_index, (written, _)) in r.iter().enumerate() {
+                let wire_index = start + local_index;
+                let request_index = owner[wire_index];
+                let new_offset = ops[wire_index]
+                    .offset
+                    .checked_add(*written as u64)
+                    .ok_or_else(|| VfError::failure(request_index, libc::EOVERFLOW as u32))?;
+                self.advance_offset(&writes[request_index].file, new_offset);
+            }
             results.extend(r);
+            #[cfg(feature = "test-faults")]
+            self.inject_open_fault(OpenFaultPoint::AfterWriteChunk { chunk: chunk_index })?;
             start = end;
+            #[cfg(feature = "test-faults")]
+            {
+                chunk_index += 1;
+            }
         }
         let mut out = Vec::with_capacity(writes.len());
         let mut ci = 0usize;
@@ -1881,7 +1914,9 @@ impl NfsVecFs {
     }
 
     fn rm_one(&mut self, path: &Path, recursive: bool) -> VfResult<()> {
-        let ft = self.file_type(path).unwrap_or(VfType::Regular);
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: 0 })?;
+        let ft = self.file_type(path)?;
         if ft == VfType::Directory && recursive {
             let entries = self.listdir(path, AttrMask::default(), usize::MAX, false)?;
             for e in entries {
@@ -1986,7 +2021,10 @@ impl NfsVecFs {
                     crate::client::OpenCreate::Guarded,
                 )
                 .map_err(|e| VfError::from_rpc(e, 0))?,
-            Err(e) => return Err(e),
+            Err(e) => {
+                let _ = self.nfs.close_path(&sfh, &ssid);
+                return Err(e);
+            }
         };
 
         let mut so = p.src_offset;
@@ -2021,15 +2059,23 @@ impl NfsVecFs {
                 .checked_add(n)
                 .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
         };
-        let _ = self.nfs.close_path(&sfh, &ssid);
-        let _ = self.nfs.close_path(&dfh, &dsid);
-        if result.is_ok() {
+        let result = if result.is_ok() {
             // Truncate any stale tail beyond what was copied (cp semantics).
             self.nfs
                 .setattr(&dfh, None, Some(doff))
-                .map_err(|e| VfError::from_rpc(e, 0))?;
-        }
-        result
+                .map_err(|e| VfError::from_rpc(e, 0))
+        } else {
+            result
+        };
+        let source_close = self
+            .nfs
+            .close_path(&sfh, &ssid)
+            .map_err(|e| VfError::from_rpc(e, 0));
+        let destination_close = self
+            .nfs
+            .close_path(&dfh, &dsid)
+            .map_err(|e| VfError::from_rpc(e, 0));
+        result.and(source_close).and(destination_close)
     }
 
     fn copy_extents_server_side(&mut self, pairs: &[ExtentPair]) -> VfRes {
@@ -2585,7 +2631,7 @@ impl NfsVecFs {
                     atime: None,
                     mtime: None,
                 }),
-                Err(status) => return Err(VfError::failure(indices[k], *status)),
+                Err(status) => return Err(VfError::nfs(indices[k], *status)),
             }
         }
         if !setattrs.is_empty() {
@@ -2681,18 +2727,27 @@ impl VecFs for NfsVecFs {
         // Open with NoCreate when the file already exists (kernel nfsd
         // rejects CREATE_GUARDED on existing files with NFS4ERR_EXIST).
         let (fh, stateid) = self.open_impl(&path_from_bytes(&dir), &name, access, created, excl)?;
-        if created {
-            self.nfs
-                .setattr(&fh, Some(mode & 0o7777), None)
-                .map_err(|e| VfError::from_rpc(e, 0))?;
-        }
-        if flags & O_TRUNC != 0 {
-            self.nfs
-                .setattr(&fh, None, Some(0))
-                .map_err(|e| VfError::from_rpc(e, 0))?;
+        let setup = (|| {
+            if created {
+                self.nfs
+                    .setattr(&fh, Some(mode & 0o7777), None)
+                    .map_err(|e| VfError::from_rpc(e, 0))?;
+            }
+            if flags & O_TRUNC != 0 {
+                self.nfs
+                    .setattr(&fh, None, Some(0))
+                    .map_err(|e| VfError::from_rpc(e, 0))?;
+            }
+            #[cfg(feature = "test-faults")]
+            self.inject_open_fault(OpenFaultPoint::BeforeRegister { index: 0 })?;
+            Ok(())
+        })();
+        if let Err(error) = setup {
+            let _ = self.nfs.close_path(&fh, &stateid);
+            return Err(error);
         }
         let open = OpenFile {
-            fh,
+            fh: fh.clone(),
             stateid,
             cur_offset: 0,
             append: flags & O_APPEND != 0,
@@ -2702,8 +2757,13 @@ impl VecFs for NfsVecFs {
                 mode,
             }),
         };
-        let fd = self.insert_open_file(open)?;
-        Ok(VfFile::from_fd(fd))
+        match self.insert_open_file(open) {
+            Ok(fd) => Ok(VfFile::from_fd(fd)),
+            Err(error) => {
+                let _ = self.nfs.close_path(&fh, &stateid);
+                Err(error)
+            }
+        }
     }
 
     fn open_many(
@@ -2731,13 +2791,19 @@ impl VecFs for NfsVecFs {
         if !tcf.is_descriptor() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
+        let fd = tcf.fd().unwrap();
         let open = self
             .open_files
-            .remove(&tcf.fd().unwrap())
+            .get(&fd)
+            .cloned()
             .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })?;
         self.nfs
             .close(&open.fh, &open.stateid)
-            .map_err(|e| VfError::from_rpc(e, 0))
+            .map_err(|e| VfError::from_rpc(e, 0))?;
+        self.open_files.remove(&fd);
+        Ok(())
     }
 
     fn sync_data(&mut self, tcf: &VfFile) -> VfResult<()> {
@@ -2753,6 +2819,7 @@ impl VecFs for NfsVecFs {
 
     fn closev(&mut self, files: &[VfFile]) -> VfRes {
         let mut ops = Vec::with_capacity(files.len());
+        let mut fds = Vec::with_capacity(files.len());
         for (i, f) in files.iter().enumerate() {
             if !f.is_descriptor() {
                 return Err(VfError::failure(i, nfsstat4_NFS4ERR_INVAL));
@@ -2760,14 +2827,47 @@ impl VecFs for NfsVecFs {
             let fd = f.fd().unwrap();
             let open = self
                 .open_files
-                .remove(&fd)
+                .get(&fd)
+                .cloned()
                 .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
+            fds.push(fd);
             ops.push(crate::client::CloseOp {
                 fh: open.fh,
                 stateid: open.stateid,
             });
         }
-        self.nfs.close_many(&ops).map_err(VfError::from_rpc_indexed)
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })?;
+        #[cfg(feature = "test-faults")]
+        for index in 0..ops.len() {
+            if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeCloseItem { index }) {
+                if index > 0 {
+                    self.nfs
+                        .close_many(&ops[..index])
+                        .map_err(VfError::from_rpc_indexed)?;
+                    for fd in fds.iter().take(index) {
+                        self.open_files.remove(fd);
+                    }
+                }
+                return Err(error.with_index(index));
+            }
+        }
+        match self.nfs.close_many(&ops) {
+            Ok(()) => {
+                for fd in fds {
+                    self.open_files.remove(&fd);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if !error.is_transport() {
+                    for fd in fds.iter().take(error.op_index) {
+                        self.open_files.remove(fd);
+                    }
+                }
+                Err(VfError::from_rpc_indexed(error))
+            }
+        }
     }
 
     fn chdir(&mut self, path: &Path) -> VfResult<()> {
@@ -3106,7 +3206,7 @@ impl VecFs for NfsVecFs {
                         level.push((fh.clone(), level_paths[i].clone()));
                     }
                     Ok((_, _)) => return Err(VfError::failure(i, nfsstat4_NFS4ERR_NOTDIR)),
-                    Err(status) => return Err(VfError::failure(i, *status)),
+                    Err(status) => return Err(VfError::nfs(i, *status)),
                 }
             }
             // First pages for all directories in one compound.
@@ -3377,7 +3477,7 @@ impl VecFs for NfsVecFs {
                     });
                 }
                 Ok((_, _)) => return Err(VfError::failure(i, nfsstat4_NFS4ERR_NOTDIR)),
-                Err(status) => return Err(VfError::failure(i, *status)),
+                Err(status) => return Err(VfError::nfs(i, *status)),
             }
         }
         if let Err(e) = self.nfs.create_many(&creates) {
@@ -3421,7 +3521,7 @@ impl VecFs for NfsVecFs {
                     })
                 }
                 Ok((_, _)) => return Err(VfError::failure(i, nfsstat4_NFS4ERR_NOTDIR)),
-                Err(status) => return Err(VfError::failure(i, *status)),
+                Err(status) => return Err(VfError::nfs(i, *status)),
             }
         }
         self.nfs
@@ -3445,7 +3545,7 @@ impl VecFs for NfsVecFs {
         for (i, r) in resolved.iter().enumerate() {
             match r {
                 Ok((fh, _)) => ops.push(crate::client::ReadlinkOp { fh: fh.clone() }),
-                Err(status) => return Err(VfError::failure(i, *status)),
+                Err(status) => return Err(VfError::nfs(i, *status)),
             }
         }
         self.nfs
@@ -3496,8 +3596,8 @@ impl VecFs for NfsVecFs {
                 (Ok((_, _)), Ok((_, _))) => {
                     return Err(VfError::failure(i, nfsstat4_NFS4ERR_NOTDIR));
                 }
-                (Err(status), _) => return Err(VfError::failure(i, *status)),
-                (_, Err(status)) => return Err(VfError::failure(i, *status)),
+                (Err(status), _) => return Err(VfError::nfs(i, *status)),
+                (_, Err(status)) => return Err(VfError::nfs(i, *status)),
             }
         }
         self.nfs.link_many(&ops).map_err(VfError::from_rpc_indexed)

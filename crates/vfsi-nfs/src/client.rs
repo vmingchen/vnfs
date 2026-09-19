@@ -5,6 +5,8 @@
 #![allow(non_upper_case_globals)]
 
 use std::os::raw::c_char;
+#[cfg(feature = "test-faults")]
+use std::sync::Arc;
 use std::time::Duration;
 
 use nfsv41_sys::*;
@@ -14,6 +16,8 @@ use crate::error::{RpcError, RpcResult};
 use crate::path::{components_bytes, split_path_bytes};
 use crate::planner::{ExecutionMap, FailureCause, RecoveryAction, RequestSafety, recovery_action};
 use crate::session::Session;
+#[cfg(feature = "test-faults")]
+use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
 /// An NFS file handle owned by the client.
 #[derive(Clone, Debug)]
@@ -70,6 +74,11 @@ pub struct NfsClient {
     pub max_ops: usize,
     server_max_request_bytes: usize,
     configured_max_request_bytes: Option<usize>,
+    deferred_path_closes: Vec<CloseOp>,
+    #[cfg(feature = "test-faults")]
+    fault_injector: Option<Arc<dyn FaultInjector>>,
+    #[cfg(feature = "test-faults")]
+    confirmed_path_closes: usize,
 }
 
 /// Upper bound for the per-compound payload cap for merged path I/O; the
@@ -573,6 +582,51 @@ fn first_failed_range(res: &CompoundRes, map: &ExecutionMap) -> RpcResult<Option
 }
 
 impl NfsClient {
+    #[cfg(feature = "test-faults")]
+    pub fn set_fault_injector(&mut self, injector: Arc<dyn FaultInjector>) {
+        self.fault_injector = Some(injector);
+    }
+
+    #[cfg(feature = "test-faults")]
+    pub fn confirmed_path_closes(&self) -> usize {
+        self.confirmed_path_closes
+    }
+
+    #[cfg(feature = "test-faults")]
+    pub fn deferred_path_close_count(&self) -> usize {
+        self.deferred_path_closes.len()
+    }
+
+    fn close_path_or_defer(&mut self, closes: Vec<CloseOp>) {
+        if closes.is_empty() {
+            return;
+        }
+        if self.close_many_path(&closes).is_err() {
+            self.deferred_path_closes.extend(closes);
+        }
+    }
+
+    fn drain_deferred_path_closes(&mut self) -> RpcResult<()> {
+        let mut remaining = std::mem::take(&mut self.deferred_path_closes);
+        while !remaining.is_empty() {
+            let close = remaining.remove(0);
+            match self.close_path(&close.fh, &close.stateid) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.status,
+                        nfsstat4_NFS4ERR_BAD_STATEID | nfsstat4_NFS4ERR_OLD_STATEID
+                    ) => {}
+                Err(error) => {
+                    self.deferred_path_closes.push(close);
+                    self.deferred_path_closes.extend(remaining);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn abandon(&mut self) {
         self.session.abandon();
     }
@@ -731,6 +785,11 @@ impl NfsClient {
             max_ops,
             server_max_request_bytes,
             configured_max_request_bytes,
+            deferred_path_closes: Vec::new(),
+            #[cfg(feature = "test-faults")]
+            fault_injector: None,
+            #[cfg(feature = "test-faults")]
+            confirmed_path_closes: 0,
         })
     }
 
@@ -1417,7 +1476,18 @@ impl NfsClient {
 
     /// Like [`close_many`](Self::close_many) but using the path-op open owner.
     pub fn close_many_path(&mut self, ops: &[CloseOp]) -> RpcResult<()> {
-        self.close_many_slot(ops, OwnerSlot::Path)
+        #[cfg(feature = "test-faults")]
+        if let Some(injector) = &self.fault_injector
+            && let Err(error) = injector.check(&OpenFaultPoint::BeforePathCloseBatch)
+        {
+            return Err(RpcError::transport(error.to_string()));
+        }
+        self.close_many_slot(ops, OwnerSlot::Path)?;
+        #[cfg(feature = "test-faults")]
+        {
+            self.confirmed_path_closes += ops.len();
+        }
+        Ok(())
     }
 
     /// Batched path-based WRITEs in one compound per chunk:
@@ -2231,6 +2301,7 @@ impl NfsClient {
     /// Batched path-based OPENs in one compound per chunk, returning the
     /// opened (filehandle, stateid) pairs (the caller keeps them open).
     pub fn openv_path_compound(&mut self, ops: &[PathOpenOp]) -> RpcResult<PathOpenOutcome> {
+        self.drain_deferred_path_closes()?;
         let n = ops.len();
         let mut opened: Vec<Option<(FileHandle, stateid4)>> = vec![None; n];
         let mut failed: Option<(usize, u32)> = None;
@@ -2238,6 +2309,8 @@ impl NfsClient {
         let reserve = 16;
         let budget = self.op_budget().merged_limit(reserve, per_file);
         let mut global = 0usize;
+        #[cfg(feature = "test-faults")]
+        let mut chunk_index = 0usize;
         while global < n {
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
@@ -2312,9 +2385,34 @@ impl NfsClient {
                 break;
             }
             self.op_budget().ensure(&c)?;
+            #[cfg(feature = "test-faults")]
+            if let Some(injector) = self.fault_injector.clone()
+                && let Err(error) =
+                    injector.check(&OpenFaultPoint::BeforeOpenChunk { chunk: chunk_index })
+            {
+                let closes: Vec<CloseOp> = opened
+                    .iter_mut()
+                    .filter_map(Option::take)
+                    .map(|(fh, stateid)| CloseOp { fh, stateid })
+                    .collect();
+                self.close_path_or_defer(closes);
+                return Err(RpcError::transport(error.to_string()));
+            }
             self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
-            let res =
-                self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
+            let res = match self
+                .call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    let closes: Vec<CloseOp> = opened
+                        .iter_mut()
+                        .filter_map(Option::take)
+                        .map(|(fh, stateid)| CloseOp { fh, stateid })
+                        .collect();
+                    self.close_path_or_defer(closes);
+                    return Err(error);
+                }
+            };
             if let Some((caller, st)) = first_failed_range(&res, &map)? {
                 failed = Some((caller, st));
                 // Keep the prefix opens (the caller resumes from here).
@@ -2344,6 +2442,10 @@ impl NfsClient {
             if chunk_start == global {
                 failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
                 break;
+            }
+            #[cfg(feature = "test-faults")]
+            {
+                chunk_index += 1;
             }
         }
         Ok(PathOpenOutcome { opened, failed })
@@ -2620,7 +2722,18 @@ impl NfsClient {
 
     /// Like [`close`](Self::close) but using the path-op open owner.
     pub fn close_path(&mut self, fh: &FileHandle, stateid: &stateid4) -> RpcResult<()> {
-        self.close_slot(fh, stateid, OwnerSlot::Path)
+        #[cfg(feature = "test-faults")]
+        if let Some(injector) = &self.fault_injector
+            && let Err(error) = injector.check(&OpenFaultPoint::BeforePathClose)
+        {
+            return Err(RpcError::transport(error.to_string()));
+        }
+        self.close_slot(fh, stateid, OwnerSlot::Path)?;
+        #[cfg(feature = "test-faults")]
+        {
+            self.confirmed_path_closes += 1;
+        }
+        Ok(())
     }
 
     fn close_slot(

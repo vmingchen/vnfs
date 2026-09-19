@@ -366,6 +366,16 @@ impl SmbVecFs {
     }
 
     fn raw_write(&mut self, file_id: FileId, offset: u64, data: &[u8]) -> VfResult<usize> {
+        self.raw_write_progress(file_id, offset, data, |_| {})
+    }
+
+    fn raw_write_progress(
+        &mut self,
+        file_id: FileId,
+        offset: u64,
+        data: &[u8],
+        mut progress: impl FnMut(usize),
+    ) -> VfResult<usize> {
         if data.is_empty() {
             return Ok(0);
         }
@@ -377,6 +387,8 @@ impl SmbVecFs {
             .max(1);
         let tree_id = self.tree.tree_id;
         let mut written = 0usize;
+        #[cfg(feature = "test-faults")]
+        let mut chunk_index = 0usize;
         while written < data.len() {
             let end = (written + max_write).min(data.len());
             let chunk = &data[written..end];
@@ -417,6 +429,13 @@ impl SmbVecFs {
                 ));
             }
             written = written.saturating_add(count);
+            progress(written);
+            #[cfg(feature = "test-faults")]
+            self.inject_open_fault(OpenFaultPoint::AfterWriteChunk { chunk: chunk_index })?;
+            #[cfg(feature = "test-faults")]
+            {
+                chunk_index += 1;
+            }
         }
         Ok(written)
     }
@@ -1022,26 +1041,30 @@ impl SmbVecFs {
                 (id, true, None, false)
             }
         };
-        let size = self.query_size(file_id);
-        let result = size.and_then(|size| {
+        let result = (|| {
+            let size = self.query_size(file_id)?;
             let offset = if append {
                 size
             } else {
                 self.resolve_offset(descriptor, op.offset, size)?
             };
-            let written = self.raw_write(file_id, offset, &op.data)?;
+            let mut confirmed = 0usize;
+            let write_result = self.raw_write_progress(file_id, offset, &op.data, |written| {
+                confirmed = written;
+            });
+            if let Some(fd) = descriptor
+                && let Some(open) = self.open_files.get_mut(&fd)
+            {
+                open.cur_offset = offset.saturating_add(confirmed as u64);
+            }
+            let written = write_result?;
             self.raw_flush(file_id)?;
             Ok((offset, written))
-        });
+        })();
         let close_result = temporary.then(|| self.raw_close(file_id));
         let (offset, written) = result?;
         if let Some(close) = close_result {
             close?;
-        }
-        if let Some(fd) = descriptor
-            && let Some(open) = self.open_files.get_mut(&fd)
-        {
-            open.cur_offset = offset.saturating_add(written as u64);
         }
         Ok(WriteResult {
             file: op.file.clone(),
@@ -1146,16 +1169,27 @@ impl VecFs for SmbVecFs {
         };
         let path_string = self.path_string(&path)?;
         let (file_id, size) = self.raw_open(&path_string, flags)?;
+        #[cfg(feature = "test-faults")]
+        if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeRegister { index: 0 }) {
+            let _ = self.raw_close(file_id);
+            return Err(error);
+        }
         let access_mode = flags & libc::O_ACCMODE;
-        let fd = self.insert_open_file(SmbOpen {
+        let open = SmbOpen {
             file_id,
             path,
             cur_offset: if flags & libc::O_APPEND != 0 { size } else { 0 },
             append: flags & libc::O_APPEND != 0,
             readable: access_mode != libc::O_WRONLY,
             writable: access_mode != libc::O_RDONLY,
-        })?;
-        Ok(VfFile::from_fd(fd))
+        };
+        match self.insert_open_file(open) {
+            Ok(fd) => Ok(VfFile::from_fd(fd)),
+            Err(error) => {
+                let _ = self.raw_close(file_id);
+                Err(error)
+            }
+        }
     }
 
     fn open_many(
@@ -1283,9 +1317,14 @@ impl VecFs for SmbVecFs {
         let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
         let open = self
             .open_files
-            .remove(&fd)
+            .get(&fd)
             .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-        self.raw_close(open.file_id)
+        let file_id = open.file_id;
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })?;
+        self.raw_close(file_id)?;
+        self.open_files.remove(&fd);
+        Ok(())
     }
 
     fn sync_data(&mut self, file: &VfFile) -> VfResult<()> {
@@ -1300,27 +1339,49 @@ impl VecFs for SmbVecFs {
 
     fn closev(&mut self, files: &[VfFile]) -> VfRes {
         let mut file_ids = Vec::with_capacity(files.len());
+        let mut fds = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
             let fd = file
                 .fd()
                 .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
             let open = self
                 .open_files
-                .remove(&fd)
+                .get(&fd)
                 .ok_or_else(|| VfError::failure(index, ERR_EBADF))?;
+            fds.push(fd);
             file_ids.push(open.file_id);
         }
         let connection = self.client.connection_mut().clone();
         let tree_id = self.tree.tree_id;
-        let jobs = file_ids.into_iter().map(|file_id| {
+        let jobs = file_ids.into_iter().enumerate().map(|(index, file_id)| {
             let connection = connection.clone();
-            async move { close_on_connection_result(&connection, tree_id, file_id).await }
+            #[cfg(not(feature = "test-faults"))]
+            let _ = index;
+            #[cfg(feature = "test-faults")]
+            let injector = self.fault_injector.clone();
+            async move {
+                #[cfg(feature = "test-faults")]
+                if let Some(injector) = injector {
+                    injector.check(&OpenFaultPoint::BeforeCloseItem { index })?;
+                }
+                close_on_connection_result(&connection, tree_id, file_id).await
+            }
         });
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })?;
         let results = self.runtime.block_on(join_all(jobs));
+        let mut first_error = None;
         for (index, result) in results.into_iter().enumerate() {
-            result.map_err(|error| error.with_index(index))?;
+            let result = result.map_err(|error| error.with_index(index));
+            match result {
+                Ok(()) => {
+                    self.open_files.remove(&fds[index]);
+                }
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     fn chdir(&mut self, path: &Path) -> VfResult<()> {
@@ -2330,6 +2391,7 @@ fn collect_compound(
 }
 
 fn smb_error(error: SmbError, index: usize) -> VfError {
+    let status = error.status();
     let errno = match error.kind() {
         SmbErrorKind::NotFound => Some(ERR_NOENT),
         SmbErrorKind::AlreadyExists => Some(ERR_EXIST),
@@ -2352,11 +2414,14 @@ fn smb_error(error: SmbError, index: usize) -> VfError {
     };
     match errno {
         Some(err_no) => VfError::failure(index, err_no),
-        None => VfError::Transport {
-            index: Some(index),
-            message: error.to_string(),
-            operation: None,
-            path: None,
+        None => match status {
+            Some(status) => VfError::smb(index, status.0),
+            None => VfError::Transport {
+                index: Some(index),
+                message: error.to_string(),
+                operation: None,
+                path: None,
+            },
         },
     }
 }
@@ -2406,5 +2471,23 @@ mod tests {
         assert_eq!(error.index_opt(), Some(3));
         assert_eq!(error.err_no(), crate::vecfs::VF_ERR_RPC);
         assert!(error.to_string().contains("Disconnected"));
+    }
+
+    #[test]
+    fn unmapped_server_status_is_not_a_transport_failure() {
+        let status = NtStatus(0xDEAD_BEEF);
+        let error = smb_error(
+            SmbError::Protocol {
+                status,
+                command: Command::Write,
+            },
+            2,
+        );
+        assert!(!error.is_transport());
+        assert_eq!(error.index_opt(), Some(2));
+        assert_eq!(
+            error.status(),
+            Some(crate::vecfs::StatusCode::Smb(status.0))
+        );
     }
 }

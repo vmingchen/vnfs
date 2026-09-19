@@ -3,3 +3,4 @@ include_guard = "VFSI_H"
 cpp_compat = true
 usize_is_size_t = true
 documentation = true
+after_includes = "#define VFSI_INDEX_UNKNOWN SIZE_MAX"

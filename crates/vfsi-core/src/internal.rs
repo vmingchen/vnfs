@@ -152,6 +152,14 @@ pub mod faults {
         BeforeRegister { index: usize },
         AfterRegister { index: usize },
         BeforeCleanup { index: usize },
+        BeforeCloseDispatch { index: usize },
+        AfterWriteChunk { chunk: usize },
+        BeforeSetPermissions { index: usize },
+        BeforeRemoveType { index: usize },
+        BeforeOpenChunk { chunk: usize },
+        BeforeCloseItem { index: usize },
+        BeforePathClose,
+        BeforePathCloseBatch,
     }
 
     pub trait FaultInjector: Send + Sync {

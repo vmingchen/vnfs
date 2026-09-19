@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
+#define VFSI_INDEX_UNKNOWN SIZE_MAX
 
 /**
  * ABI version implemented by this library.
@@ -140,8 +141,9 @@ typedef struct vfsi_attrs {
 /**
  * Uniform ABI-v3 result for scalar and vector operations.
  *
- * `index` is the completed count on success and the failing operation index
- * on error. Vector calls also populate a caller-owned result per element;
+ * `index` is the completed count on success, the failing operation index on
+ * an attributable error, or `VFSI_INDEX_UNKNOWN`. Vector calls also populate
+ * a caller-owned result per element;
  * after a submitted concurrent batch fails, every non-failing element is
  * marked indeterminate because it may already have completed. `err_no`
  * retains the backend status while `category` is portable across protocols.

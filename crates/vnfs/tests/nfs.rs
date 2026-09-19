@@ -1404,6 +1404,143 @@ fn openv_injected_registration_failure_closes_every_confirmed_handle() {
 
 #[cfg(feature = "test-faults")]
 #[test]
+fn closev_failure_keeps_handles_available_for_cleanup() {
+    let dir = setup_dir("closev_fault_retains_handles");
+    let mut client = client();
+    let paths = [format!("{dir}/f0"), format!("{dir}/f1")];
+    let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
+    let files = VecFs::openv(
+        &mut client,
+        &refs,
+        &[libc::O_CREAT | libc::O_RDWR; 2],
+        &[0o644; 2],
+    )
+    .unwrap();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeCloseDispatch { index: 0 },
+        VfError::transport(None, "injected close failure"),
+    ));
+    client.set_fault_injector(script.clone());
+    let error = client.closev(&files).unwrap_err();
+    assert!(error.is_transport());
+    assert_eq!(client.test_open_handle_count(), 2);
+    assert!(script.is_consumed());
+    client.closev(&files).unwrap();
+    assert_eq!(client.test_open_handle_count(), 0);
+    client.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn closev_semantic_failure_removes_only_confirmed_prefix() {
+    let dir = setup_dir("closev_semantic_prefix");
+    let mut client = client();
+    let paths = [
+        format!("{dir}/f0"),
+        format!("{dir}/f1"),
+        format!("{dir}/f2"),
+    ];
+    let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
+    let files = VecFs::openv(
+        &mut client,
+        &refs,
+        &[libc::O_CREAT | libc::O_RDWR; 3],
+        &[0o644; 3],
+    )
+    .unwrap();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeCloseItem { index: 1 },
+        VfError::nfs(1, nfsv41_sys::nfsstat4_NFS4ERR_IO),
+    ));
+    client.set_fault_injector(script.clone());
+    let error = client.closev(&files).unwrap_err();
+    assert_eq!(error.index_opt(), Some(1));
+    assert!(script.is_consumed());
+    assert_eq!(client.test_open_handle_count(), 2);
+    client.closev(&files[1..]).unwrap();
+    assert_eq!(client.test_open_handle_count(), 0);
+    client.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn scalar_open_registration_failure_closes_remote_open() {
+    let dir = setup_dir("scalar_open_fault_cleanup");
+    let mut client = client();
+    let path = format!("{dir}/file");
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeRegister { index: 0 },
+        VfError::transport(None, "injected scalar registration failure"),
+    ));
+    client.set_fault_injector(script.clone());
+    let error = client
+        .open(Path::new(&path), libc::O_CREAT | libc::O_RDWR, 0o600)
+        .unwrap_err();
+    assert!(error.is_transport());
+    assert!(script.is_consumed());
+    assert_eq!(client.test_open_handle_count(), 0);
+    assert_eq!(client.test_confirmed_path_closes(), 1);
+    client.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn confirmed_write_chunk_advances_descriptor_after_later_failure() {
+    let dir = setup_dir("partial_write_cursor");
+    let mut client = client();
+    client.set_max_compound_bytes(4096);
+    let path = format!("{dir}/file");
+    let file = client
+        .open(Path::new(&path), libc::O_CREAT | libc::O_RDWR, 0o600)
+        .unwrap();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::AfterWriteChunk { chunk: 0 },
+        VfError::transport(None, "injected failure after confirmed write"),
+    ));
+    client.set_fault_injector(script.clone());
+    let error = client
+        .writev(&[WriteOp::new(file.clone(), VfOffset::Cur, vec![b'a'; 8192])])
+        .unwrap_err();
+    assert!(error.is_transport());
+    assert!(script.is_consumed());
+    client
+        .writev(&[WriteOp::new(file.clone(), VfOffset::Cur, vec![b'b'])])
+        .unwrap();
+    let read = client
+        .readv(&[ReadOp::new(file.clone(), VfOffset::At(4096), 1)])
+        .unwrap();
+    assert_eq!(read[0].data, b"b");
+    client.close(&file).unwrap();
+    client.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn recursive_remove_propagates_type_lookup_transport_failure() {
+    let dir = setup_dir("remove_type_fault");
+    let mut client = client();
+    let path = format!("{dir}/kept");
+    client
+        .writev(&[WriteOp::from_path(&path, VfOffset::At(0), b"data".to_vec()).with_creation()])
+        .unwrap();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeRemoveType { index: 0 },
+        VfError::transport(None, "injected type lookup failure"),
+    ));
+    client.set_fault_injector(script.clone());
+    assert!(
+        client
+            .rm(&[Path::new(&path)], true)
+            .unwrap_err()
+            .is_transport()
+    );
+    assert!(script.is_consumed());
+    assert!(client.exists(Path::new(&path)).unwrap());
+    client.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
 fn openv_injected_post_reply_transport_failure_has_no_fabricated_index() {
     let dir = setup_dir("openv_fault_reply");
     let mut client = client();
@@ -1437,6 +1574,83 @@ fn openv_injected_post_reply_transport_failure_has_no_fabricated_index() {
         script.remaining()
     );
     assert_eq!(client.test_open_handle_count(), 0);
+    client.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn openv_later_chunk_failure_closes_confirmed_earlier_opens() {
+    let dir = setup_dir("openv_later_chunk_cleanup");
+    let mut client = client();
+    client.set_max_compound_bytes(4096);
+    let paths: Vec<String> = (0..32).map(|index| format!("{dir}/f{index}")).collect();
+    let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeOpenChunk { chunk: 1 },
+        VfError::transport(None, "injected failure before second open compound"),
+    ));
+    client.set_fault_injector(script.clone());
+    let error = VecFs::openv(
+        &mut client,
+        &refs,
+        &vec![libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; paths.len()],
+        &vec![0o600; paths.len()],
+    )
+    .unwrap_err();
+    assert!(error.is_transport(), "unexpected error: {error:?}");
+    assert_eq!(error.index_opt(), None);
+    assert!(script.is_consumed());
+    assert!(
+        client.test_confirmed_path_closes() > 0,
+        "confirmed opens from the first compound were not closed"
+    );
+    assert_eq!(client.test_open_handle_count(), 0);
+    client.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn failed_open_cleanup_is_retained_and_retried_before_the_next_openv() {
+    let dir = setup_dir("openv_deferred_cleanup");
+    let mut client = client();
+    client.set_max_compound_bytes(4096);
+    let paths: Vec<String> = (0..32).map(|index| format!("{dir}/f{index}")).collect();
+    let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
+    let script = Arc::new(FaultScript::new([
+        (
+            OpenFaultPoint::BeforeOpenChunk { chunk: 1 },
+            VfError::transport(None, "injected second-compound failure"),
+        ),
+        (
+            OpenFaultPoint::BeforePathCloseBatch,
+            VfError::transport(None, "injected cleanup failure"),
+        ),
+    ]));
+    client.set_fault_injector(script.clone());
+    assert!(
+        VecFs::openv(
+            &mut client,
+            &refs,
+            &vec![libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; paths.len()],
+            &vec![0o600; paths.len()],
+        )
+        .unwrap_err()
+        .is_transport()
+    );
+    assert!(script.is_consumed());
+    assert!(client.test_deferred_path_close_count() > 0);
+
+    let next_path = format!("{dir}/next");
+    let next = VecFs::openv(
+        &mut client,
+        &[Path::new(&next_path)],
+        &[libc::O_CREAT | libc::O_RDWR],
+        &[0o600],
+    )
+    .unwrap();
+    assert_eq!(client.test_deferred_path_close_count(), 0);
+    assert!(client.test_confirmed_path_closes() > 0);
+    client.closev(&next).unwrap();
     client.rm(&[Path::new(&dir)], true).unwrap();
 }
 
@@ -2116,6 +2330,52 @@ fn copyv_falls_back_on_nfs41() {
     c.copyv(&[ExtentPair::new(&src, 0, &dst, 0, None)])
         .expect("v4.1 copyv fallback");
     assert_eq!(read_all(&mut c, Path::new(&dst)), b"client-side-fallback");
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn client_side_copy_closes_source_when_destination_open_fails() {
+    let dir = setup_dir("copy_destination_open_failure");
+    let src = format!("{dir}/src");
+    // The destination parent resolves, but opening the directory itself for
+    // write fails after the source OPEN has succeeded.
+    let dst = dir.clone();
+    let mut client = NfsVecFs::connect_minor("127.0.0.1", 1).unwrap();
+    write_file(&mut client, Path::new(&src), b"source");
+    let before = client.test_confirmed_path_closes();
+    let error = client
+        .copyv(&[ExtentPair::new(&src, 0, &dst, 0, None)])
+        .unwrap_err();
+    assert!(!error.is_transport());
+    assert_eq!(client.test_confirmed_path_closes(), before + 1);
+    client.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn client_side_copy_surfaces_close_failure_and_continues_cleanup() {
+    let dir = setup_dir("copy_close_failure");
+    let src = format!("{dir}/src");
+    let dst = format!("{dir}/dst");
+    let mut client = NfsVecFs::connect_minor("127.0.0.1", 1).unwrap();
+    write_file(&mut client, Path::new(&src), b"source");
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforePathClose,
+        VfError::transport(None, "injected source close failure"),
+    ));
+    client.set_fault_injector(script.clone());
+    let before = client.test_confirmed_path_closes();
+    let error = client
+        .copyv(&[ExtentPair::new(&src, 0, &dst, 0, None)])
+        .unwrap_err();
+    assert!(error.is_transport());
+    assert!(script.is_consumed());
+    assert_eq!(
+        client.test_confirmed_path_closes(),
+        before + 1,
+        "destination cleanup must still run after source CLOSE fails"
+    );
+    client.rm(&[Path::new(&dir)], true).unwrap();
 }
 
 #[test]
