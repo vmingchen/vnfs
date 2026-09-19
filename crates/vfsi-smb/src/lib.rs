@@ -192,11 +192,13 @@ impl SmbVecFs {
         let setup_timeout = options
             .connect_timeout
             .saturating_add(options.request_timeout);
+        // Construct the timeout while the runtime is entered. Creating a
+        // Tokio timer before `Runtime::block_on` panics because no reactor is
+        // active yet.
         let mut client = runtime
-            .block_on(tokio::time::timeout(
-                setup_timeout,
-                SmbClient::connect(config),
-            ))
+            .block_on(async {
+                tokio::time::timeout(setup_timeout, SmbClient::connect(config)).await
+            })
             .map_err(|_| VfError::transport(None, "SMB session setup timed out"))?
             .map_err(|e| smb_error(e, 0))?;
         client
@@ -209,10 +211,9 @@ impl SmbVecFs {
             .connection_mut()
             .set_credit_wait_timeout(options.request_timeout);
         let tree = runtime
-            .block_on(tokio::time::timeout(
-                options.request_timeout,
-                client.connect_share(share),
-            ))
+            .block_on(async {
+                tokio::time::timeout(options.request_timeout, client.connect_share(share)).await
+            })
             .map_err(|_| VfError::transport(None, "SMB share connection timed out"))?
             .map_err(|e| smb_error(e, 0))?;
         Ok(Self {
