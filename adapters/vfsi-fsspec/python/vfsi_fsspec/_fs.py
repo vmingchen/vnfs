@@ -72,9 +72,7 @@ def _info_dict(full_name, attrs):
     # even when an NFSv4 principal cannot be mapped safely to a local NSS id.
     # `None` is more accurate than dropping the keys or stripping an arbitrary
     # remote identity domain and potentially reporting the wrong local user.
-    return {
-        k: v for k, v in info.items() if v is not None or k in {"uid", "gid"}
-    }
+    return {k: v for k, v in info.items() if v is not None or k in {"uid", "gid"}}
 
 
 def _depth(path):
