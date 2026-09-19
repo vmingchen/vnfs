@@ -33,6 +33,33 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // read, the std::fs backend only for short reads. Either way no more data
     // is available, so only the data itself is asserted here.
 
+    // Whole-file vectors are bounded by one aggregate caller-selected limit.
+    let whole_a = format!("{}/whole-a", dir);
+    let whole_b = format!("{}/whole-b", dir);
+    fs.writev(&[
+        WriteOp::at(VfFile::from_path(&whole_a), 0, b"abc".to_vec()).with_creation(),
+        WriteOp::at(VfFile::from_path(&whole_b), 0, b"def".to_vec()).with_creation(),
+    ])
+    .unwrap();
+    let whole_files = [VfFile::from_path(&whole_a), VfFile::from_path(&whole_b)];
+    assert_eq!(
+        fs.read_allv_with_options(&whole_files, ReadAllOptions::new().max_total_bytes(6))
+            .unwrap(),
+        [b"abc".to_vec(), b"def".to_vec()]
+    );
+    let error = fs
+        .read_allv_with_options(&whole_files, ReadAllOptions::new().max_total_bytes(5))
+        .unwrap_err();
+    assert_eq!(
+        (error.index_opt(), error.err_no()),
+        (Some(1), libc::EFBIG as u32)
+    );
+    assert_eq!(
+        ReadAllOptions::default().total_byte_limit(),
+        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES
+    );
+    assert_eq!(DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, 16 * 1024 * 1024);
+
     // stat / exists / file_type.
     let st = fs.stat(Path::new(&f)).expect("stat");
     assert_eq!(st.size, payload.len() as u64);

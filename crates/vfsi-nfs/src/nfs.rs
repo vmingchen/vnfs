@@ -341,6 +341,8 @@ fn merge_read_allv_round(
     results: &[ReadResult],
     out: &mut [Vec<u8>],
     offsets: &mut [u64],
+    total: &mut usize,
+    max_total_bytes: usize,
 ) -> VfResult<Vec<usize>> {
     if results.len() != active.len() {
         return Err(VfError::transport(
@@ -360,6 +362,10 @@ fn merge_read_allv_round(
                 "NFS READ made no progress without reporting EOF",
             ));
         }
+        *total = total
+            .checked_add(result.data.len())
+            .filter(|size| *size <= max_total_bytes)
+            .ok_or_else(|| VfError::failure(original, libc::EFBIG as u32))?;
         out[original].extend_from_slice(&result.data);
         offsets[original] = result
             .offset
@@ -3091,9 +3097,13 @@ impl VecFs for NfsVecFs {
         Ok(out)
     }
 
-    fn read_allv(&mut self, files: &[VfFile]) -> VfResult<Vec<Vec<u8>>> {
+    fn read_allv_with_options(
+        &mut self,
+        files: &[VfFile],
+        options: ReadAllOptions,
+    ) -> VfResult<Vec<Vec<u8>>> {
         if !self.recovery_in_progress {
-            return self.read_with_recovery(|client| client.read_allv(files));
+            return self.read_with_recovery(|client| client.read_allv_with_options(files, options));
         }
         // Read until EOF in per-op chunks, batching every active file into
         // each compound so round trips scale with file size, not file count.
@@ -3113,6 +3123,7 @@ impl VecFs for NfsVecFs {
         let max_window = per * (compound_budget / per).max(1);
         let mut out: Vec<Vec<u8>> = files.iter().map(|_| Vec::new()).collect();
         let mut offsets = vec![0u64; files.len()];
+        let mut total = 0usize;
         let mut active: Vec<usize> = (0..files.len()).collect();
         while !active.is_empty() {
             // Reserve each active file's ~128-byte per-op overhead so the
@@ -3128,7 +3139,14 @@ impl VecFs for NfsVecFs {
             let results = self
                 .readv(&reads)
                 .map_err(|error| remap_active_error(error, &active))?;
-            active = merge_read_allv_round(&active, &results, &mut out, &mut offsets)?;
+            active = merge_read_allv_round(
+                &active,
+                &results,
+                &mut out,
+                &mut offsets,
+                &mut total,
+                options.total_byte_limit(),
+            )?;
         }
         Ok(out)
     }
@@ -4269,7 +4287,9 @@ mod tests {
             data: Vec::new(),
             eof: false,
         }];
-        let error = merge_read_allv_round(&[5], &stalled, &mut out, &mut offsets).unwrap_err();
+        let error =
+            merge_read_allv_round(&[5], &stalled, &mut out, &mut offsets, &mut 0, usize::MAX)
+                .unwrap_err();
         assert!(error.is_transport());
         assert_eq!(error.index_opt(), Some(5));
     }
@@ -4292,7 +4312,15 @@ mod tests {
                 eof: false,
             },
         ];
-        let next = merge_read_allv_round(&[1, 2], &results, &mut out, &mut offsets).unwrap();
+        let next = merge_read_allv_round(
+            &[1, 2],
+            &results,
+            &mut out,
+            &mut offsets,
+            &mut 0,
+            usize::MAX,
+        )
+        .unwrap();
         assert_eq!(next, [2]);
         assert_eq!(out[1], b"a");
         assert_eq!(out[2], b"bc");

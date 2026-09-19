@@ -14,7 +14,10 @@ pub mod path {
 }
 
 mod traits;
-pub use traits::{VecFs, VecFsExt, rm_recursive};
+pub use traits::{
+    DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, ReadAllOptions, VecFs, VecFsExt,
+    rm_recursive,
+};
 mod io;
 pub use io::{VfFileHandle, VfOpenOptions};
 mod client;
@@ -36,7 +39,10 @@ pub mod sfsi {
 
 /// Vectorized view of the synchronous interface.
 pub mod vfsi {
-    pub use crate::{VecFs, VecFsExt, VectorFileSystem, rm_recursive};
+    pub use crate::{
+        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, ReadAllOptions, VecFs, VecFsExt,
+        VectorFileSystem, rm_recursive,
+    };
     pub use vfsi_core::*;
 }
 

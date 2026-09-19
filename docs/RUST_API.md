@@ -65,3 +65,17 @@ Native client and file methods retain `VfError`. Only the standard-library
 
 The asynchronous facet is deliberately deferred to a separate future crate;
 the synchronous core does not depend on Tokio.
+
+## Resource-bounded reads
+
+An API that discovers the amount of data itself and returns an owned buffer
+must impose a finite default allocation limit and expose an explicit override.
+`FsClient::read`, `FsClient::read_to_string`, and `VecFs::read_allv` therefore
+default to `DEFAULT_READ_MAX_BYTES` (16 MiB). Callers may select another bound
+with `read_with_limit`, `read_to_string_with_limit`, or `ReadAllOptions`.
+
+Reads whose size is explicit in the request (`readv`, `read_at`, and `pread`)
+are bounded by that caller-supplied length. Reads into caller-owned buffers are
+bounded by the buffer. Applications processing larger or untrusted files
+should stream through `FsFile`, `Read`, `read_streamv`, or repeated positional
+reads instead of raising a whole-file allocation limit without bound.

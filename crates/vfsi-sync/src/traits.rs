@@ -1,6 +1,156 @@
 use super::*;
 use vfsi_core::internal::ManyResults;
 
+/// Default payload limit for APIs that allocate and return complete contents.
+pub const DEFAULT_READ_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// Default aggregate payload limit for [`VecFs::read_allv`].
+pub const DEFAULT_READ_ALLV_MAX_TOTAL_BYTES: usize = DEFAULT_READ_MAX_BYTES;
+
+/// Resource limits for reading multiple complete files into memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadAllOptions {
+    max_total_bytes: usize,
+}
+
+impl ReadAllOptions {
+    pub const fn new() -> Self {
+        Self {
+            max_total_bytes: DEFAULT_READ_ALLV_MAX_TOTAL_BYTES,
+        }
+    }
+
+    /// Set the maximum combined size of all returned buffers.
+    pub const fn max_total_bytes(mut self, bytes: usize) -> Self {
+        self.max_total_bytes = bytes;
+        self
+    }
+
+    pub const fn total_byte_limit(self) -> usize {
+        self.max_total_bytes
+    }
+}
+
+impl Default for ReadAllOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn contract_error(
+    operation: &str,
+    index: Option<usize>,
+    detail: impl std::fmt::Display,
+) -> VfError {
+    VfError::transport(
+        index,
+        format!("{operation} backend contract violation: {detail}"),
+    )
+}
+
+pub(crate) fn validate_read_results(
+    operation: &str,
+    requests: &[ReadOp],
+    results: &[ReadResult],
+) -> VfResult<()> {
+    if results.len() != requests.len() {
+        return Err(contract_error(
+            operation,
+            None,
+            format!(
+                "returned {} results for {} requests",
+                results.len(),
+                requests.len()
+            ),
+        ));
+    }
+    for (index, (request, result)) in requests.iter().zip(results).enumerate() {
+        if result.file != request.file {
+            return Err(contract_error(
+                operation,
+                Some(index),
+                "result file does not match request",
+            ));
+        }
+        if result.data.len() > request.length {
+            return Err(contract_error(
+                operation,
+                Some(index),
+                format!(
+                    "returned {} bytes for a {}-byte read",
+                    result.data.len(),
+                    request.length
+                ),
+            ));
+        }
+        if let VfOffset::At(expected) = request.offset
+            && result.offset != expected
+        {
+            return Err(contract_error(
+                operation,
+                Some(index),
+                format!("result offset {} does not match {expected}", result.offset),
+            ));
+        }
+        if request.length != 0 && result.data.is_empty() && !result.eof {
+            return Err(contract_error(
+                operation,
+                Some(index),
+                "read made no progress without reporting EOF",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_write_results(
+    operation: &str,
+    requests: &[WriteOpRef<'_>],
+    results: &[WriteResult],
+) -> VfResult<()> {
+    if results.len() != requests.len() {
+        return Err(contract_error(
+            operation,
+            None,
+            format!(
+                "returned {} results for {} requests",
+                results.len(),
+                requests.len()
+            ),
+        ));
+    }
+    for (index, (request, result)) in requests.iter().zip(results).enumerate() {
+        if result.file != *request.file {
+            return Err(contract_error(
+                operation,
+                Some(index),
+                "result file does not match request",
+            ));
+        }
+        if result.written > request.data.len() {
+            return Err(contract_error(
+                operation,
+                Some(index),
+                format!(
+                    "reported {} bytes written for a {}-byte write",
+                    result.written,
+                    request.data.len()
+                ),
+            ));
+        }
+        if let VfOffset::At(expected) = request.offset
+            && result.offset != expected
+        {
+            return Err(contract_error(
+                operation,
+                Some(index),
+                format!("result offset {} does not match {expected}", result.offset),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// A vectorized filesystem: many small operations coalesced into as few
 /// round trips as the backend supports.
 ///
@@ -83,25 +233,45 @@ pub trait VecFs {
     fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>>;
 
     /// Read each file in full from offset 0, `tc_read_allv()`. Returns one
-    /// byte buffer per request in input order.
-    ///
-    /// The default implementation stats each file and reads it with
-    /// [`readv`](Self::readv); a backend may override it to read until EOF
-    /// without a separate size round trip.
+    /// byte buffer per request in input order. The combined result is limited
+    /// to [`DEFAULT_READ_ALLV_MAX_TOTAL_BYTES`].
     fn read_allv(&mut self, files: &[VfFile]) -> VfResult<Vec<Vec<u8>>> {
-        let mut out = Vec::with_capacity(files.len());
-        for (i, f) in files.iter().enumerate() {
-            let mut a = VfAttrs {
-                file: f.clone(),
-                masks: AttrMask::SIZE,
-                ..VfAttrs::default()
-            };
-            self.getattrsv(std::slice::from_mut(&mut a))
-                .map_err(|e| e.with_index(i))?;
-            let mut r = self
-                .readv(&[ReadOp::new(f.clone(), VfOffset::At(0), a.size as usize)])
-                .map_err(|e| e.with_index(i))?;
-            out.push(r.pop().expect("readv returns one result per op").data);
+        self.read_allv_with_options(files, ReadAllOptions::default())
+    }
+
+    /// Read complete files with a caller-selected aggregate memory limit.
+    fn read_allv_with_options(
+        &mut self,
+        files: &[VfFile],
+        options: ReadAllOptions,
+    ) -> VfResult<Vec<Vec<u8>>> {
+        let mut out: Vec<Vec<u8>> = files.iter().map(|_| Vec::new()).collect();
+        let mut total = 0usize;
+        let mut limit_error = None;
+        let stream_budget = options
+            .total_byte_limit()
+            .clamp(1, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES);
+        let chunk_size = stream_budget.min(1024 * 1024);
+        self.read_streamv(
+            files,
+            chunk_size,
+            stream_budget,
+            &mut |index, _, data, _| {
+                let Some(next_total) = total.checked_add(data.len()) else {
+                    limit_error = Some(index);
+                    return false;
+                };
+                if next_total > options.total_byte_limit() {
+                    limit_error = Some(index);
+                    return false;
+                }
+                out[index].extend_from_slice(data);
+                total = next_total;
+                true
+            },
+        )?;
+        if let Some(index) = limit_error {
+            return Err(VfError::failure(index, libc::EFBIG as u32));
         }
         Ok(out)
     }
@@ -275,10 +445,18 @@ pub trait VecFs {
                         .map_or(error.clone(), |index| error.with_index(index))
                 })
             })?;
+            validate_read_results("read_streamv", &reads, &results).map_err(|error| {
+                error.index_opt().map_or(error.clone(), |local_index| {
+                    batch_indices
+                        .get(local_index)
+                        .copied()
+                        .map_or(error.clone(), |index| error.with_index(index))
+                })
+            })?;
             for (batch_index, result) in results.into_iter().enumerate() {
                 let index = batch_indices[batch_index];
                 let offset = offsets[index];
-                let eof = result.eof || result.data.is_empty();
+                let eof = result.eof;
                 offsets[index] = offset
                     .checked_add(result.data.len() as u64)
                     .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
@@ -337,14 +515,25 @@ pub trait VecFs {
 
     /// Read from a single file at an absolute offset, `tc_read()`.
     fn read(&mut self, file: &VfFile, offset: u64, length: usize) -> VfResult<Vec<u8>> {
-        let r = self.readv(&[ReadOp::at(file.clone(), offset, length)])?;
-        Ok(r.into_iter().next().expect("one result").data)
+        let requests = [ReadOp::at(file.clone(), offset, length)];
+        let mut results = self.readv(&requests)?;
+        validate_read_results("read", &requests, &results)?;
+        Ok(results.pop().expect("validated one result").data)
     }
 
     /// Write to a single file at an absolute offset, `tc_write()`.
     fn write(&mut self, file: &VfFile, offset: u64, data: &[u8]) -> VfResult<usize> {
-        let w = self.writev(&[WriteOp::at(file.clone(), offset, data.to_vec())])?;
-        Ok(w.into_iter().next().expect("one result").written)
+        let owned = WriteOp::at(file.clone(), offset, data.to_vec());
+        let requests = [WriteOpRef {
+            file: &owned.file,
+            offset: owned.offset,
+            data: &owned.data,
+            creation: owned.creation,
+            truncate: owned.truncate,
+        }];
+        let mut results = self.writev(std::slice::from_ref(&owned))?;
+        validate_write_results("write", &requests, &results)?;
+        Ok(results.pop().expect("validated one result").written)
     }
 
     /// Backend implementation seam for ordered opens.
@@ -679,4 +868,87 @@ impl<T: VecFs + ?Sized> VecFsExt for T {}
 /// `tc_rm_recursive()`.
 pub fn rm_recursive(fs: &mut impl VecFs, dir: &Path) -> VfRes {
     fs.rm(&[dir], true)
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    fn request() -> ReadOp {
+        ReadOp::at(VfFile::from_path("/file"), 0, 1)
+    }
+
+    fn result() -> ReadResult {
+        ReadResult {
+            file: VfFile::from_path("/file"),
+            offset: 0,
+            data: vec![1],
+            eof: true,
+        }
+    }
+
+    #[test]
+    fn read_result_cardinality_is_checked_before_indexing() {
+        let requests = [request(), request()];
+        assert!(validate_read_results("test", &requests, &[result()]).is_err());
+        assert!(validate_read_results("test", &requests[..1], &[result(), result()]).is_err());
+    }
+
+    #[test]
+    fn read_result_identity_offset_progress_and_size_are_checked() {
+        let request = request();
+        for malformed in [
+            ReadResult {
+                file: VfFile::from_path("/other"),
+                ..result()
+            },
+            ReadResult {
+                offset: 1,
+                ..result()
+            },
+            ReadResult {
+                data: vec![1, 2],
+                ..result()
+            },
+            ReadResult {
+                data: Vec::new(),
+                eof: false,
+                ..result()
+            },
+        ] {
+            assert!(
+                validate_read_results("test", std::slice::from_ref(&request), &[malformed])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn write_result_identity_offset_size_and_cardinality_are_checked() {
+        let file = VfFile::from_path("/file");
+        let request = WriteOpRef::new(&file, VfOffset::At(0), b"x");
+        let valid = WriteResult {
+            file: file.clone(),
+            offset: 0,
+            written: 1,
+            stable: true,
+        };
+        assert!(validate_write_results("test", &[request], &[]).is_err());
+        for malformed in [
+            WriteResult {
+                file: VfFile::from_path("/other"),
+                ..valid.clone()
+            },
+            WriteResult {
+                offset: 1,
+                ..valid.clone()
+            },
+            WriteResult {
+                written: 2,
+                ..valid.clone()
+            },
+        ] {
+            assert!(validate_write_results("test", &[request], &[malformed]).is_err());
+        }
+    }
 }

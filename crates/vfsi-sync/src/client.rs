@@ -3,12 +3,13 @@
 use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom as IoSeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use crate::traits::{validate_read_results, validate_write_results};
 use crate::{
-    AttrMask, Capabilities, CopyFileSystem, DirEntry, DirectoryFileSystem, FileSystem,
-    LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
+    AttrMask, Capabilities, CopyFileSystem, DEFAULT_READ_MAX_BYTES, DirEntry, DirectoryFileSystem,
+    FileSystem, LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
     NamespaceFileSystem, OpenFlags, OpenRequest, Permissions, ReadOp, ReadResult, SetAttributes,
     VectorFileSystem, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
 };
@@ -54,14 +55,8 @@ impl<F> FsClient<F> {
         }
     }
 
-    pub fn lock(&self) -> VfResult<MutexGuard<'_, F>> {
+    fn lock(&self) -> VfResult<std::sync::MutexGuard<'_, F>> {
         self.inner.lock().map_err(|_| poisoned())
-    }
-
-    /// Run an advanced backend operation without producing a nested result.
-    pub fn with_backend<R>(&self, operation: impl FnOnce(&mut F) -> VfResult<R>) -> VfResult<R> {
-        let mut filesystem = self.lock()?;
-        operation(&mut filesystem)
     }
 
     pub fn into_inner(self) -> Result<F, Self> {
@@ -102,23 +97,50 @@ impl<F: FileSystem> FsClient<F> {
     }
 
     pub fn read(&self, path: impl AsRef<Path>) -> VfResult<Vec<u8>> {
+        self.read_with_limit(path, DEFAULT_READ_MAX_BYTES)
+    }
+
+    /// Read one complete file while limiting the returned allocation.
+    ///
+    /// Use [`FsFile::read_native`] or [`std::io::Read`] to stream files that
+    /// should not be held in one allocation.
+    pub fn read_with_limit(&self, path: impl AsRef<Path>, max_bytes: usize) -> VfResult<Vec<u8>> {
+        let path = path.as_ref();
         let mut file = self.open(path)?;
         let mut output = Vec::new();
         let mut chunk = vec![0; 64 * 1024];
         loop {
-            let read = file.read_native(&mut chunk)?;
-            output.extend_from_slice(&chunk[..read]);
+            let remaining = max_bytes.saturating_sub(output.len());
+            let request = if remaining == 0 {
+                1
+            } else {
+                remaining.min(chunk.len())
+            };
+            let read = file.read_native(&mut chunk[..request])?;
             if read == 0 {
                 break;
             }
+            if read > remaining {
+                return Err(VfError::failure(0, libc::EFBIG as u32).with_context("read", path));
+            }
+            output.extend_from_slice(&chunk[..read]);
         }
         file.close()?;
         Ok(output)
     }
 
     pub fn read_to_string(&self, path: impl AsRef<Path>) -> VfResult<String> {
+        self.read_to_string_with_limit(path, DEFAULT_READ_MAX_BYTES)
+    }
+
+    /// Read one complete UTF-8 file with a caller-selected allocation limit.
+    pub fn read_to_string_with_limit(
+        &self,
+        path: impl AsRef<Path>,
+        max_bytes: usize,
+    ) -> VfResult<String> {
         let path = path.as_ref();
-        String::from_utf8(self.read(path)?)
+        String::from_utf8(self.read_with_limit(path, max_bytes)?)
             .map_err(|_| VfError::client(0, crate::ERR_INVAL).with_context("read_to_string", path))
     }
 
@@ -337,6 +359,14 @@ impl<F: VectorFileSystem> FsClient<F> {
         if results.len() != requests.len() {
             return Err(wrong_result_count("readv", requests.len(), results.len()));
         }
+        validate_read_results("readv", &reads, &results).map_err(|error| {
+            error
+                .index_opt()
+                .and_then(|index| requests.get(index))
+                .map_or(error.clone(), |request| {
+                    error.with_context("readv", request.file.path())
+                })
+        })?;
         Ok(results)
     }
 
@@ -371,13 +401,14 @@ impl<F: VectorFileSystem> FsClient<F> {
                     error.with_context("readv_into", request.file.path())
                 })
         })?;
-        if results.len() != requests.len() {
-            return Err(wrong_result_count(
-                "readv_into",
-                requests.len(),
-                results.len(),
-            ));
-        }
+        validate_read_results("readv_into", &reads, &results).map_err(|error| {
+            error
+                .index_opt()
+                .and_then(|index| requests.get(index))
+                .map_or(error.clone(), |request| {
+                    error.with_context("readv_into", request.file.path())
+                })
+        })?;
         let mut lengths = Vec::with_capacity(results.len());
         for (index, (request, result)) in requests.iter_mut().zip(results).enumerate() {
             if result.data.len() > request.buffer.len() {
@@ -403,6 +434,14 @@ impl<F: VectorFileSystem> FsClient<F> {
         if results.len() != requests.len() {
             return Err(wrong_result_count("writev", requests.len(), results.len()));
         }
+        validate_write_results("writev", &writes, &results).map_err(|error| {
+            error
+                .index_opt()
+                .and_then(|index| requests.get(index))
+                .map_or(error.clone(), |request| {
+                    error.with_context("writev", request.file.path())
+                })
+        })?;
         Ok(results)
     }
 
@@ -743,12 +782,14 @@ impl<F: FileSystem> FsFile<F> {
     }
 
     pub fn close(mut self) -> VfResult<()> {
-        let file = self.file.take().expect("open file");
+        let file = self.file.as_ref().expect("open file");
         self.inner
             .lock()
             .map_err(|_| poisoned())?
-            .close_one(&file)
-            .map_err(|error| error.with_context("close", &self.path))
+            .close_one(file)
+            .map_err(|error| error.with_context("close", &self.path))?;
+        self.file = None;
+        Ok(())
     }
 
     /// Seek while retaining [`VfError`] protocol and path information.

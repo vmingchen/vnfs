@@ -892,28 +892,6 @@ impl SmbVecFs {
             .map_err(|e| smb_error(e, 0))
     }
 
-    fn read_whole_recovering(&mut self, path: &str) -> VfResult<Vec<u8>> {
-        match self
-            .runtime
-            .block_on(self.client.read_file(&mut self.tree, path))
-        {
-            Ok(data) => Ok(data),
-            Err(error) if error.kind() == SmbErrorKind::TooLarge => self
-                .runtime
-                .block_on(self.client.read_file_pipelined(&mut self.tree, path))
-                .map_err(|error| smb_error(error, 0)),
-            Err(error) if error.kind() == SmbErrorKind::Unsupported => {
-                let info = self.client_stat(path)?;
-                if info.is_directory {
-                    Err(VfError::failure(0, ERR_ISDIR))
-                } else {
-                    Err(smb_error(error, 0))
-                }
-            }
-            Err(error) => Err(smb_error(error, 0)),
-        }
-    }
-
     fn fill_attrs(a: &mut VfAttrs, info: &smb2::client::FileInfo) {
         a.ftype = if info.is_directory {
             VfType::Directory
@@ -1030,10 +1008,13 @@ impl SmbVecFs {
             let data = match self.compound_read_path(&path, offset, op.length) {
                 Ok(data) => data,
                 Err(_) if self.client.is_disconnected() => {
-                    let all = self.read_whole_recovering(&path)?;
-                    let start = usize::try_from(offset).unwrap_or(usize::MAX).min(all.len());
-                    let end = start.saturating_add(op.length).min(all.len());
-                    all[start..end].to_vec()
+                    // Let the high-level stat operation recover the SMB
+                    // session/tree, then retry only the requested range.
+                    // Reading the complete file here made a tiny range read
+                    // capable of allocating an unbounded remote-controlled
+                    // amount of memory after reconnect.
+                    self.client_stat(&path)?;
+                    self.compound_read_path(&path, offset, op.length)?
                 }
                 Err(error) => return Err(error),
             };
@@ -1578,72 +1559,6 @@ impl VecFs for SmbVecFs {
         let mut output = Vec::with_capacity(reads.len());
         for (index, read) in reads.iter().enumerate() {
             output.push(self.read_one(read).map_err(|e| e.with_index(index))?);
-        }
-        Ok(output)
-    }
-
-    fn read_allv(&mut self, files: &[VfFile]) -> VfResult<Vec<Vec<u8>>> {
-        if files.len() > 1
-            && !self.tree.is_dfs
-            && files
-                .iter()
-                .all(|file| !file.is_descriptor() && !matches!(file, VfFile::Saved))
-        {
-            let connection = self.client.connection_mut().clone();
-            let tree = self.tree.clone();
-            let mut jobs = Vec::with_capacity(files.len());
-            let mut paths = Vec::with_capacity(files.len());
-            for (index, file) in files.iter().enumerate() {
-                let path = self
-                    .path_string(&self.file_path(file).map_err(|e| e.with_index(index))?)
-                    .map_err(|e| e.with_index(index))?;
-                paths.push(path.clone());
-                jobs.push(concurrent_read_whole(
-                    tree.clone(),
-                    connection.clone(),
-                    path,
-                ));
-            }
-            let results = self.runtime.block_on(join_all(jobs));
-            if results.iter().any(Result::is_err) && self.client.is_disconnected() {
-                let mut output = Vec::with_capacity(paths.len());
-                for (index, path) in paths.iter().enumerate() {
-                    output.push(
-                        self.read_whole_recovering(path)
-                            .map_err(|error| error.with_index(index))?,
-                    );
-                }
-                return Ok(output);
-            }
-            return results
-                .into_iter()
-                .enumerate()
-                .map(|(index, result)| result.map_err(|error| error.with_index(index)))
-                .collect();
-        }
-        let mut output = Vec::with_capacity(files.len());
-        for (index, file) in files.iter().enumerate() {
-            if file.is_descriptor() {
-                let fd = file.fd().expect("descriptor checked");
-                let id = self
-                    .open_files
-                    .get(&fd)
-                    .ok_or_else(|| VfError::failure(index, ERR_EBADF))?
-                    .file_id;
-                let size = self.query_size(id).map_err(|e| e.with_index(index))?;
-                output.push(
-                    self.raw_read(id, 0, usize::try_from(size).unwrap_or(usize::MAX))
-                        .map_err(|e| e.with_index(index))?,
-                );
-            } else {
-                let path = self
-                    .path_string(&self.file_path(file).map_err(|e| e.with_index(index))?)
-                    .map_err(|e| e.with_index(index))?;
-                let data = self
-                    .read_whole_recovering(&path)
-                    .map_err(|error| error.with_index(index))?;
-                output.push(data);
-            }
         }
         Ok(output)
     }
@@ -2348,32 +2263,6 @@ async fn concurrent_file_identity(
         .try_into()
         .expect("eight-byte slice");
     Ok(u64::from_le_bytes(bytes))
-}
-
-async fn concurrent_read_whole(
-    tree: Tree,
-    mut connection: Connection,
-    path: String,
-) -> VfResult<Vec<u8>> {
-    match tree.read_file(&mut connection, &path).await {
-        Ok(data) => Ok(data),
-        Err(error) if error.kind() == SmbErrorKind::TooLarge => tree
-            .read_file_pipelined(&mut connection, &path)
-            .await
-            .map_err(|error| smb_error(error, 0)),
-        Err(error) if error.kind() == SmbErrorKind::Unsupported => {
-            let info = tree
-                .stat(&mut connection, &path)
-                .await
-                .map_err(|error| smb_error(error, 0))?;
-            if info.is_directory {
-                Err(VfError::failure(0, ERR_ISDIR))
-            } else {
-                Err(smb_error(error, 0))
-            }
-        }
-        Err(error) => Err(smb_error(error, 0)),
-    }
 }
 
 async fn close_on_connection(connection: &Connection, tree_id: TreeId, file_id: FileId) {

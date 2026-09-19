@@ -1,6 +1,7 @@
 use std::io::{self, Read, Seek, SeekFrom as IoSeekFrom, Write};
 use std::path::Path;
 
+use crate::traits::{validate_read_results, validate_write_results};
 use crate::{ReadOp, SeekFrom, VecFs, VfFile, VfOffset, WriteOp};
 
 fn io_error(error: crate::VfError) -> io::Error {
@@ -154,8 +155,10 @@ impl<F: VecFs + ?Sized> VfFileHandle<'_, F> {
     }
 
     pub fn close(mut self) -> io::Result<()> {
-        let file = self.file.take().expect("open handle has a descriptor");
-        self.filesystem.close(&file).map_err(io_error)
+        let file = self.file.as_ref().expect("open handle has a descriptor");
+        self.filesystem.close(file).map_err(io_error)?;
+        self.file = None;
+        Ok(())
     }
 }
 
@@ -165,11 +168,10 @@ impl<F: VecFs + ?Sized> Read for VfFileHandle<'_, F> {
             return Ok(0);
         }
         let file = self.file.as_ref().expect("open handle").clone();
-        let mut results = self
-            .filesystem
-            .readv(&[ReadOp::new(file, VfOffset::Cur, buffer.len())])
-            .map_err(io_error)?;
-        let result = results.pop().expect("one read result");
+        let requests = [ReadOp::new(file, VfOffset::Cur, buffer.len())];
+        let mut results = self.filesystem.readv(&requests).map_err(io_error)?;
+        validate_read_results("Read::read", &requests, &results).map_err(io_error)?;
+        let result = results.pop().expect("validated one read result");
         buffer[..result.data.len()].copy_from_slice(&result.data);
         Ok(result.data.len())
     }
@@ -181,11 +183,20 @@ impl<F: VecFs + ?Sized> Write for VfFileHandle<'_, F> {
             return Ok(0);
         }
         let file = self.file.as_ref().expect("open handle").clone();
+        let owned = WriteOp::new(file, VfOffset::Cur, buffer.to_vec());
+        let requests = [crate::WriteOpRef {
+            file: &owned.file,
+            offset: owned.offset,
+            data: &owned.data,
+            creation: owned.creation,
+            truncate: owned.truncate,
+        }];
         let mut results = self
             .filesystem
-            .writev(&[WriteOp::new(file, VfOffset::Cur, buffer.to_vec())])
+            .writev(std::slice::from_ref(&owned))
             .map_err(io_error)?;
-        Ok(results.pop().expect("one write result").written)
+        validate_write_results("Write::write", &requests, &results).map_err(io_error)?;
+        Ok(results.pop().expect("validated one write result").written)
     }
 
     fn flush(&mut self) -> io::Result<()> {

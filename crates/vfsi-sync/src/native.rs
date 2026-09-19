@@ -3,6 +3,7 @@
 //! [`VecFs`] remains the compatibility/backend implementation trait. New
 //! applications should bound generic code by these smaller interfaces.
 
+use crate::traits::{validate_read_results, validate_write_results};
 use crate::*;
 
 /// Core synchronous scalar filesystem operations.
@@ -141,15 +142,15 @@ impl<T: VecFs + ?Sized> FileSystem for T {
     }
 
     fn read_one(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
-        self.readv(std::slice::from_ref(request))?
-            .pop()
-            .ok_or_else(|| VfError::transport(None, "backend returned no read result"))
+        let mut results = self.readv(std::slice::from_ref(request))?;
+        validate_read_results("read_one", std::slice::from_ref(request), &results)?;
+        Ok(results.pop().expect("validated one result"))
     }
 
     fn write_one(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult> {
-        self.writev_borrowed(std::slice::from_ref(&request))?
-            .pop()
-            .ok_or_else(|| VfError::transport(None, "backend returned no write result"))
+        let mut results = self.writev_borrowed(std::slice::from_ref(&request))?;
+        validate_write_results("write_one", std::slice::from_ref(&request), &results)?;
+        Ok(results.pop().expect("validated one result"))
     }
 
     fn seek_one(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {

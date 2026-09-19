@@ -53,8 +53,9 @@ pub mod prelude {
         VfResult, WriteResult,
     };
     pub use vfsi_sync::{
-        CopyFileSystem, DirectoryFileSystem, FileSystem, FsClient, FsFile, LinkFileSystem,
-        MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions, SetMetadata,
+        CopyFileSystem, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES,
+        DirectoryFileSystem, FileSystem, FsClient, FsFile, LinkFileSystem, MetadataFileSystem,
+        NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadAllOptions, SetMetadata,
         VectorFileSystem,
     };
 }
@@ -74,7 +75,8 @@ pub use vfsi_nfs::{
     NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
 };
 pub use vfsi_sync::{
-    CopyFileSystem, DirectoryFileSystem, FileSystem, FsClient, FsFile, FsRead, FsReadInto, FsWrite,
-    LinkFileSystem, MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions,
-    SetMetadata, VecFs, VecFsExt, VectorFileSystem, VfFileHandle, VfOpenOptions, rm_recursive,
+    CopyFileSystem, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DirectoryFileSystem,
+    FileSystem, FsClient, FsFile, FsRead, FsReadInto, FsWrite, LinkFileSystem, MetadataFileSystem,
+    NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadAllOptions, SetMetadata, VecFs,
+    VecFsExt, VectorFileSystem, VfFileHandle, VfOpenOptions, rm_recursive,
 };

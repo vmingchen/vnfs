@@ -58,6 +58,34 @@ fn dummy_write_read_roundtrip() {
 }
 
 #[test]
+fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
+    use vnfs::{
+        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, FsClient, VecFs, VfFile,
+        VfOffset, WriteOp,
+    };
+
+    let mut fs = dummy();
+    let path = VfFile::from_path("/too-large");
+    fs.writev(&[WriteOp::new(
+        path.clone(),
+        VfOffset::At(0),
+        vec![0; DEFAULT_READ_ALLV_MAX_TOTAL_BYTES + 1],
+    )
+    .with_creation()])
+        .unwrap();
+
+    let error = fs.read_allv(&[path]).unwrap_err();
+    assert_eq!(error.index_opt(), Some(0));
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+
+    assert_eq!(DEFAULT_READ_MAX_BYTES, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES);
+    let client = FsClient::new(fs);
+    let error = client.read("/too-large").unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.operation(), Some("read"));
+}
+
+#[test]
 fn dummy_errors_on_missing_file() {
     use vnfs::{ReadOp, VecFs, VfOffset};
 
