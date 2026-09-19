@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "libntirpc-sys"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bindgen",
  "pkg-config",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "nfsv41-sys"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "bindgen",
  "libntirpc-sys",
@@ -324,7 +324,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "vfsi-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bitflags",
  "libc",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-local"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "vfsi-core",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-nfs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "libntirpc-sys",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-sync"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "libc",
  "vfsi-core",

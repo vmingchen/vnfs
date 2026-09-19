@@ -41,7 +41,7 @@ jobs:
             -p vfsi-nfs --lib --all-features
       - name: Smoke-test NFS libFuzzer targets
         run: |
-          cargo install cargo-fuzz --version 0.13.1 --locked
+          cargo install cargo-fuzz --version 0.13.2 --locked
           cargo fuzz run nfs_compound_response -- -runs=5000
           cargo fuzz run nfs_attribute_list -- -runs=5000
 
