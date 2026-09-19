@@ -1,4 +1,5 @@
 use super::*;
+use vfsi_core::internal::ManyResults;
 
 /// A vectorized filesystem: many small operations coalesced into as few
 /// round trips as the backend supports.
@@ -81,15 +82,6 @@ pub trait VecFs {
     /// request, or fails at the first failing operation.
     fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>>;
 
-    /// Outcome-preserving read vector. A compatibility backend may report a
-    /// known-completed prefix without values if its fail-fast decoder did not
-    /// retain successful replies preceding an error.
-    fn readv_outcomes(&mut self, reads: &[ReadOp]) -> BatchOutcome<ReadResult> {
-        let len = reads.len();
-        let result = self.readv(reads);
-        BatchOutcome::from_fail_fast_values(len, result)
-    }
-
     /// Read each file in full from offset 0, `tc_read_allv()`. Returns one
     /// byte buffer per request in input order.
     ///
@@ -114,24 +106,9 @@ pub trait VecFs {
         Ok(out)
     }
 
-    /// Outcome-preserving whole-file reads.
-    fn read_allv_outcomes(&mut self, files: &[VfFile]) -> BatchOutcome<Vec<u8>> {
-        let len = files.len();
-        let result = self.read_allv(files);
-        BatchOutcome::from_fail_fast_values(len, result)
-    }
-
     /// Write to one or more files, `tc_writev()`. Returns one result per
     /// request, or fails at the first failing operation.
     fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>>;
-
-    /// Outcome-preserving write vector. Transport failures are represented as
-    /// indeterminate and are never replayed by this adapter.
-    fn writev_outcomes(&mut self, writes: &[WriteOp]) -> BatchOutcome<WriteResult> {
-        let len = writes.len();
-        let result = self.writev(writes);
-        BatchOutcome::from_fail_fast_values(len, result)
-    }
 
     /// Allocation-free input facade. Compatibility backends may copy before
     /// dispatch; native backends should override this method to retain the
@@ -161,67 +138,9 @@ pub trait VecFs {
     /// symlinks to the target.
     fn getattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes;
 
-    fn getattrsv_outcomes(&mut self, attrs: &mut [VfAttrs]) -> BatchOutcome<VfAttrs> {
-        let len = attrs.len();
-        let result = self.getattrsv(attrs);
-        match result {
-            Ok(()) => BatchOutcome::all_success(attrs.to_vec()),
-            Err(error) if error.is_transport() => BatchOutcome::new(
-                (0..len)
-                    .map(|_| OpOutcome::Indeterminate(error.clone()))
-                    .collect(),
-            ),
-            Err(error) => {
-                let failed = error.index_opt().unwrap_or(0).min(len);
-                BatchOutcome::new(
-                    (0..len)
-                        .map(|index| {
-                            if index < failed {
-                                OpOutcome::Success(attrs[index].clone())
-                            } else if index == failed {
-                                OpOutcome::Failed(error.clone())
-                            } else {
-                                OpOutcome::NotAttempted
-                            }
-                        })
-                        .collect(),
-                )
-            }
-        }
-    }
-
     /// Like [`getattrsv`](Self::getattrsv) but does not follow symlinks:
     /// attributes are for the symlink itself, `tc_lgetattrsv()`.
     fn lgetattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes;
-
-    fn lgetattrsv_outcomes(&mut self, attrs: &mut [VfAttrs]) -> BatchOutcome<VfAttrs> {
-        let len = attrs.len();
-        let result = self.lgetattrsv(attrs);
-        match result {
-            Ok(()) => BatchOutcome::all_success(attrs.to_vec()),
-            Err(error) if error.is_transport() => BatchOutcome::new(
-                (0..len)
-                    .map(|_| OpOutcome::Indeterminate(error.clone()))
-                    .collect(),
-            ),
-            Err(error) => {
-                let failed = error.index_opt().unwrap_or(0).min(len);
-                BatchOutcome::new(
-                    (0..len)
-                        .map(|index| {
-                            if index < failed {
-                                OpOutcome::Success(attrs[index].clone())
-                            } else if index == failed {
-                                OpOutcome::Failed(error.clone())
-                            } else {
-                                OpOutcome::NotAttempted
-                            }
-                        })
-                        .collect(),
-                )
-            }
-        }
-    }
 
     /// Set attributes on an array of files, `tc_setattrsv()`. Only
     /// [`AttrMask::MODE`], [`AttrMask::SIZE`], [`AttrMask::ATIME`], and
@@ -230,21 +149,11 @@ pub trait VecFs {
     /// mask is a no-op. Follows symlinks to the target.
     fn setattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes;
 
-    fn setattrsv_outcomes(&mut self, attrs: &[VfAttrs]) -> BatchOutcome<()> {
-        let len = attrs.len();
-        BatchOutcome::from_fail_fast(len, self.setattrsv(attrs))
-    }
-
     /// Like [`setattrsv`](Self::setattrsv) but does not follow symlinks:
     /// attributes are set on the symlink itself, `tc_lsetattrsv()`. Backends
     /// without a non-following setter (e.g. no `lchmod` on Linux) must fail
     /// with [`VF_ERR_UNSUPPORTED`] for symlinks rather than silently follow.
     fn lsetattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes;
-
-    fn lsetattrsv_outcomes(&mut self, attrs: &[VfAttrs]) -> BatchOutcome<()> {
-        let len = attrs.len();
-        BatchOutcome::from_fail_fast(len, self.lsetattrsv(attrs))
-    }
 
     /// List a directory, `tc_listdir()`. Returns entry paths and attributes.
     ///
@@ -297,83 +206,33 @@ pub trait VecFs {
     /// Rename a list of file pairs, `tc_renamev()`.
     fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes;
 
-    /// Outcome-preserving form of [`renamev`](Self::renamev).
-    fn renamev_outcomes(&mut self, pairs: &[(VfFile, VfFile)]) -> BatchOutcome<()> {
-        let len = pairs.len();
-        BatchOutcome::from_fail_fast(len, self.renamev(pairs))
-    }
-
     /// Remove a list of files (or empty directories), `tc_removev()`.
     fn removev(&mut self, files: &[VfFile]) -> VfRes;
-
-    /// Outcome-preserving form of [`removev`](Self::removev).
-    fn removev_outcomes(&mut self, files: &[VfFile]) -> BatchOutcome<()> {
-        let len = files.len();
-        BatchOutcome::from_fail_fast(len, self.removev(files))
-    }
 
     /// Create one or more directories, `tc_mkdirv()`.
     fn mkdirv(&mut self, dirs: &[VfAttrs]) -> VfRes;
 
-    /// Outcome-preserving form of [`mkdirv`](Self::mkdirv).
-    fn mkdirv_outcomes(&mut self, dirs: &[VfAttrs]) -> BatchOutcome<()> {
-        let len = dirs.len();
-        BatchOutcome::from_fail_fast(len, self.mkdirv(dirs))
-    }
-
     /// Create a list of symlinks, `tc_symlinkv()`.
     fn symlinkv(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes;
-
-    fn symlinkv_outcomes(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> BatchOutcome<()> {
-        let len = oldpaths.len().max(newpaths.len());
-        BatchOutcome::from_fail_fast(len, self.symlinkv(oldpaths, newpaths))
-    }
 
     /// Read symlink targets, `tc_readlinkv()`.
     fn readlinkv(&mut self, paths: &[&Path]) -> VfResult<Vec<Vec<u8>>>;
 
-    fn readlinkv_outcomes(&mut self, paths: &[&Path]) -> BatchOutcome<Vec<u8>> {
-        let len = paths.len();
-        let result = self.readlinkv(paths);
-        BatchOutcome::from_fail_fast_values(len, result)
-    }
-
     /// Create hard links, `tc_hardlinkv()`.
     fn hardlinkv(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes;
-
-    fn hardlinkv_outcomes(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> BatchOutcome<()> {
-        let len = oldpaths.len().max(newpaths.len());
-        BatchOutcome::from_fail_fast(len, self.hardlinkv(oldpaths, newpaths))
-    }
 
     /// Copy extents by reading and writing, `tc_dupv()`. Follows symlinks
     /// (copies the target's contents).
     fn dupv(&mut self, pairs: &[ExtentPair]) -> VfRes;
-
-    fn dupv_outcomes(&mut self, pairs: &[ExtentPair]) -> BatchOutcome<()> {
-        let len = pairs.len();
-        BatchOutcome::from_fail_fast(len, self.dupv(pairs))
-    }
 
     /// Copy extents without following symlinks, `tc_lcopyv()`: symlinks are
     /// recreated as symlinks with the same target; other objects are copied
     /// by data (like [`dupv`](Self::dupv)).
     fn lcopyv(&mut self, pairs: &[ExtentPair]) -> VfRes;
 
-    fn lcopyv_outcomes(&mut self, pairs: &[ExtentPair]) -> BatchOutcome<()> {
-        let len = pairs.len();
-        BatchOutcome::from_fail_fast(len, self.lcopyv(pairs))
-    }
-
     /// Write Application Data Blocks, `tc_write_adb()`. Returns the number
     /// of blocks written for each ADB.
     fn write_adb(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>>;
-
-    fn write_adb_outcomes(&mut self, patterns: &[Adb]) -> BatchOutcome<usize> {
-        let len = patterns.len();
-        let result = self.write_adb(patterns);
-        BatchOutcome::from_fail_fast_values(len, result)
-    }
 
     /// Read files in bounded chunks while retaining vectorized I/O.
     ///
@@ -409,11 +268,12 @@ pub trait VecFs {
                 budget -= length;
             }
             let results = self.readv(&reads).map_err(|error| {
-                let index = batch_indices
-                    .get(error.index())
-                    .copied()
-                    .unwrap_or_else(|| error.index());
-                error.with_index(index)
+                error.index_opt().map_or(error.clone(), |local_index| {
+                    batch_indices
+                        .get(local_index)
+                        .copied()
+                        .map_or(error.clone(), |index| error.with_index(index))
+                })
             })?;
             for (batch_index, result) in results.into_iter().enumerate() {
                 let index = batch_indices[batch_index];
@@ -435,11 +295,6 @@ pub trait VecFs {
 
     /// Remove a list of objects, recursively when `recursive`, `tc_rm()`.
     fn rm(&mut self, objs: &[&Path], recursive: bool) -> VfRes;
-
-    fn rm_outcomes(&mut self, objs: &[&Path], recursive: bool) -> BatchOutcome<()> {
-        let len = objs.len();
-        BatchOutcome::from_fail_fast(len, self.rm(objs, recursive))
-    }
 
     /// Recursively copy a directory tree, `tc_cp_recursive()`.
     fn cp_recursive(
@@ -492,29 +347,51 @@ pub trait VecFs {
         Ok(w.into_iter().next().expect("one result").written)
     }
 
-    /// Open several files at once, each with its own flags and mode,
-    /// `tc_openv()`. `flags`, `modes`, and `paths` must have equal lengths;
-    /// a mismatch fails with [`ERR_INVAL`] at index 0.
-    fn openv(&mut self, paths: &[&Path], flags: &[i32], modes: &[u32]) -> VfResult<Vec<VfFile>> {
-        if paths.len() != flags.len() || paths.len() != modes.len() {
-            return Err(VfError::failure(0, ERR_INVAL));
-        }
-        let mut out = Vec::with_capacity(paths.len());
-        for (i, ((p, flag), mode)) in paths.iter().zip(flags).zip(modes).enumerate() {
-            out.push(self.open(p, *flag, *mode).map_err(|e| e.with_index(i))?);
-        }
-        Ok(out)
-    }
-
-    fn openv_outcomes(
+    /// Backend implementation seam for ordered opens.
+    ///
+    /// This is not an application-facing partial-outcome API. Entry `n`
+    /// corresponds to request `n`; an ordered backend may stop after adding
+    /// the first semantic failure.
+    #[doc(hidden)]
+    fn open_many(
         &mut self,
         paths: &[&Path],
         flags: &[i32],
         modes: &[u32],
-    ) -> BatchOutcome<VfFile> {
-        let len = paths.len().max(flags.len()).max(modes.len());
-        let result = self.openv(paths, flags, modes);
-        BatchOutcome::from_fail_fast_values(len, result)
+    ) -> VfResult<ManyResults<VfFile>> {
+        if paths.len() != flags.len() || paths.len() != modes.len() {
+            return Err(VfError::failure(0, ERR_INVAL));
+        }
+        let mut results = Vec::with_capacity(paths.len());
+        for ((path, flag), mode) in paths.iter().zip(flags).zip(modes) {
+            match self.open(path, *flag, *mode) {
+                Ok(file) => results.push(Ok(file)),
+                Err(error) => {
+                    results.push(Err(error));
+                    break;
+                }
+            }
+        }
+        Ok(ManyResults::new(paths.len(), results))
+    }
+
+    /// Test seam invoked immediately before a successful handle is cleaned
+    /// after a strict `openv` failure.
+    #[doc(hidden)]
+    fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
+        Ok(())
+    }
+
+    /// Open several files at once, each with its own flags and mode,
+    /// `tc_openv()`. `flags`, `modes`, and `paths` must have equal lengths;
+    /// a mismatch fails with [`ERR_INVAL`] at index 0.
+    fn openv(&mut self, paths: &[&Path], flags: &[i32], modes: &[u32]) -> VfResult<Vec<VfFile>> {
+        let results = self.open_many(paths, flags, modes)?;
+        results.try_collect_with_cleanup(paths.len(), |index, file| {
+            let injected = self.before_open_cleanup(index, file);
+            let closed = self.close(file);
+            injected.and(closed)
+        })
     }
 
     /// Open several files at once with a shared flags and mode,
@@ -531,11 +408,6 @@ pub trait VecFs {
             self.close(f).map_err(|e| e.with_index(i))?;
         }
         Ok(())
-    }
-
-    fn closev_outcomes(&mut self, files: &[VfFile]) -> BatchOutcome<()> {
-        let len = files.len();
-        BatchOutcome::from_fail_fast(len, self.closev(files))
     }
 
     /// Stat a path, `tc_stat()`. Follows symlinks to the target.
@@ -630,11 +502,6 @@ pub trait VecFs {
         self.removev(&files)
     }
 
-    fn unlinkv_outcomes(&mut self, pathnames: &[&Path]) -> BatchOutcome<()> {
-        let files: Vec<VfFile> = pathnames.iter().map(|p| VfFile::from_os_path(p)).collect();
-        self.removev_outcomes(&files)
-    }
-
     /// Create a directory, `tc_mkdir()`.
     fn mkdir(&mut self, path: &Path, mode: u32) -> VfResult<()> {
         let a = VfAttrs {
@@ -667,22 +534,12 @@ pub trait VecFs {
         self.dupv(pairs)
     }
 
-    fn ldupv_outcomes(&mut self, pairs: &[ExtentPair]) -> BatchOutcome<()> {
-        let len = pairs.len();
-        BatchOutcome::from_fail_fast(len, self.ldupv(pairs))
-    }
-
     /// `tc_copyv()`: server-side copy where the backend supports it. The
     /// default implementation performs a client-side read/write copy via
     /// [`dupv`](Self::dupv); backends with a server-side COPY should
     /// override.
     fn copyv(&mut self, pairs: &[ExtentPair]) -> VfRes {
         self.dupv(pairs)
-    }
-
-    fn copyv_outcomes(&mut self, pairs: &[ExtentPair]) -> BatchOutcome<()> {
-        let len = pairs.len();
-        BatchOutcome::from_fail_fast(len, self.copyv(pairs))
     }
 
     /// Create a directory and all its ancestors, `tc_ensure_dir()`. Uses

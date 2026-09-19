@@ -12,6 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nfsv41_sys::*;
+use vfsi_core::internal::ManyResults;
+#[cfg(feature = "test-faults")]
+use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
 use crate::client::{FileHandle, NfsClient, OpenCreate};
 use crate::path::{
@@ -294,6 +297,8 @@ pub struct NfsVecFs {
     merged_mode: MergedIoMode,
     configured_max_compound_bytes: usize,
     observer: Option<Arc<dyn NfsObserver>>,
+    #[cfg(feature = "test-faults")]
+    fault_injector: Option<Arc<dyn FaultInjector>>,
 }
 
 /// Which merged-compound strategy the NFS backend uses for path-based bulk
@@ -311,9 +316,11 @@ enum MergedIoMode {
 }
 
 fn remap_descriptor_chunk_error(error: VfError, start: usize, owners: &[usize]) -> VfError {
-    let chunk_index = start.saturating_add(error.index());
-    let index = owners.get(chunk_index).copied().unwrap_or(chunk_index);
-    error.with_index(index)
+    error.index_opt().map_or(error.clone(), |local_index| {
+        let chunk_index = start.saturating_add(local_index);
+        let index = owners.get(chunk_index).copied().unwrap_or(chunk_index);
+        error.with_index(index)
+    })
 }
 
 fn non_destructive_reopen_flags(flags: i32) -> i32 {
@@ -323,6 +330,25 @@ fn non_destructive_reopen_flags(flags: i32) -> i32 {
 impl NfsVecFs {
     pub fn builder(host: impl Into<String>) -> NfsClientBuilder {
         NfsClientBuilder::new(host)
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[doc(hidden)]
+    pub fn set_fault_injector(&mut self, injector: Arc<dyn FaultInjector>) {
+        self.fault_injector = Some(injector);
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[doc(hidden)]
+    pub fn test_open_handle_count(&self) -> usize {
+        self.open_files.len()
+    }
+
+    #[cfg(feature = "test-faults")]
+    fn inject_open_fault(&self, point: OpenFaultPoint) -> VfResult<()> {
+        self.fault_injector
+            .as_ref()
+            .map_or(Ok(()), |injector| injector.check(&point))
     }
 
     /// Close all descriptors and explicitly tear down NFS session state.
@@ -458,7 +484,7 @@ impl NfsVecFs {
             let results = self
                 .nfs
                 .lookup_getattr_many(&ops)
-                .map_err(|e| VfError::from_rpc(e, 0))?;
+                .map_err(|e| VfError::from_rpc(e, None))?;
             for ((i, _), r) in entries.iter().zip(results) {
                 match r {
                     Ok((fh, ftype)) => {
@@ -554,8 +580,7 @@ impl NfsVecFs {
                         }
                     }
                     if let Err(e) = self.setattrsv_phased(&attrs[i..], follow) {
-                        let rel = e.index();
-                        return Err(e.with_index(i + rel));
+                        return Err(e.map_index(|rel| i + rel));
                     }
                     return Ok(());
                 }
@@ -571,7 +596,7 @@ impl NfsVecFs {
                 }
                 Ok(())
             }
-            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, 0)),
+            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, None)),
             Err(_) => self.setattrsv_phased(attrs, follow),
         }
     }
@@ -676,8 +701,7 @@ impl NfsVecFs {
                     }
                     attrs[..i].clone_from_slice(&prefix_attrs);
                     if let Err(e) = self.getattrsv_phased(&mut attrs[i..], follow) {
-                        let rel = e.index();
-                        return Err(e.with_index(i + rel));
+                        return Err(e.map_index(|rel| i + rel));
                     }
                     return Ok(());
                 }
@@ -695,7 +719,7 @@ impl NfsVecFs {
                 }
                 Ok(())
             }
-            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, 0)),
+            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, None)),
             Err(_) => self.getattrsv_phased(attrs, follow),
         }
     }
@@ -885,6 +909,8 @@ impl NfsVecFs {
             merged_mode: MergedIoMode::Full,
             configured_max_compound_bytes: 0,
             observer: None,
+            #[cfg(feature = "test-faults")]
+            fault_injector: None,
         }
     }
 
@@ -927,6 +953,10 @@ impl NfsVecFs {
         replacement.merged_mode = self.merged_mode;
         replacement.server_copy_stats = self.server_copy_stats;
         replacement.observer = self.observer.clone();
+        #[cfg(feature = "test-faults")]
+        {
+            replacement.fault_injector = self.fault_injector.clone();
+        }
         replacement.configured_max_compound_bytes = self.configured_max_compound_bytes;
         if self.configured_max_compound_bytes != 0 {
             replacement
@@ -941,7 +971,7 @@ impl NfsVecFs {
                 .collect();
             let flags: Vec<i32> = snapshots.iter().map(|(_, open, _)| open.flags).collect();
             let modes: Vec<u32> = snapshots.iter().map(|(_, open, _)| open.mode).collect();
-            let reopened = replacement.openv(&paths, &flags, &modes)?;
+            let reopened = VecFs::openv(&mut replacement, &paths, &flags, &modes)?;
             let mut restored = std::collections::HashMap::with_capacity(reopened.len());
             for ((old_fd, _, offset), file) in snapshots.iter().zip(reopened) {
                 let new_fd = file.fd().expect("openv returns descriptors");
@@ -1172,7 +1202,7 @@ impl NfsVecFs {
         paths: &[&Path],
         flags: &[i32],
         modes: &[u32],
-    ) -> VfResult<Vec<VfFile>> {
+    ) -> VfResult<ManyResults<VfFile>> {
         use libc::{O_APPEND, O_CREAT, O_EXCL, O_TRUNC};
         let mut ops = Vec::with_capacity(paths.len());
         for (i, p) in paths.iter().enumerate() {
@@ -1193,176 +1223,96 @@ impl NfsVecFs {
                 truncate: flags[i] & O_TRUNC != 0,
             });
         }
-        let outcome = self
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeDispatch { chunk: 0 })?;
+        let mut outcome = self
             .nfs
             .openv_path_compound(&ops)
-            .map_err(|e| VfError::from_rpc(e, 0))?;
-        let mut out: Vec<Option<VfFile>> = vec![None; paths.len()];
-        let mut prefix = paths.len();
-        if let Some((i, _st)) = outcome.failed {
-            // Prefix [0..i) opened; resume [i..] via the phased path. If the
-            // suffix fails, the prefix opens are abandoned to session
-            // teardown (same as a whole-batch fallback would).
-            prefix = i;
-            let suffix = self
-                .openv_phased(&paths[i..], &flags[i..], &modes[i..])
-                .map_err(|e| {
-                    let rel = e.index();
-                    e.with_index(i + rel)
-                })?;
-            for (k, fd) in suffix.into_iter().enumerate() {
-                out[i + k] = Some(fd);
-            }
-        }
-        for (i, o) in outcome.opened.iter().enumerate().take(prefix) {
-            let (fh, stateid) = o.clone().expect("completed open");
-            let fd = self.insert_open_file(OpenFile {
-                fh,
-                stateid,
-                cur_offset: 0,
-                append: flags[i] & O_APPEND != 0,
-                reopen: Some(ReopenFile {
-                    path: self.visible_path(&self.abs_path(paths[i])),
-                    flags: non_destructive_reopen_flags(flags[i]),
-                    mode: modes[i],
-                }),
-            })?;
-            out[i] = Some(VfFile::from_fd(fd));
-        }
-        Ok(out.into_iter().map(|o| o.expect("opened")).collect())
-    }
-
-    /// The legacy phased openv (batched existence probe + OPENs + SETATTRs).
-    fn openv_phased(
-        &mut self,
-        paths: &[&Path],
-        flags: &[i32],
-        modes: &[u32],
-    ) -> VfResult<Vec<VfFile>> {
-        use libc::{O_APPEND, O_CREAT, O_EXCL, O_TRUNC};
-        // Batched existence probe for O_CREAT-without-O_EXCL entries, so the
-        // mode is only applied to files this call actually creates.
-        let mut dir_cache: std::collections::HashMap<Vec<u8>, FileHandle> =
-            std::collections::HashMap::new();
-        let mut probe: Vec<(usize, FileHandle, Vec<u8>)> = Vec::new();
-        let mut entries: Vec<(usize, FileHandle, Vec<u8>, u32, bool, bool)> = Vec::new();
-        for (i, p) in paths.iter().enumerate() {
-            let full = self.abs_path(p);
-            let (dir, name) =
-                split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
-            let dirfh = match dir_cache.get(&dir) {
-                Some(fh) => fh.clone(),
-                None => {
-                    let fh = self
-                        .resolve_path(&path_from_bytes(&dir), true)
-                        .map_err(|e| e.with_index(i))?;
-                    dir_cache.insert(dir.clone(), fh.clone());
-                    fh
-                }
-            };
-            let access = Self::flags_to_access(flags[i]);
-            let create = flags[i] & O_CREAT != 0;
-            let excl = flags[i] & O_EXCL != 0;
-            if create && !excl {
-                probe.push((i, dirfh.clone(), name.clone()));
-            }
-            entries.push((i, dirfh, name, access, excl, flags[i] & O_TRUNC != 0));
-        }
-
-        let mut created = vec![false; paths.len()];
-        if !probe.is_empty() {
-            let lookup: Vec<(FileHandle, Vec<u8>)> = probe
-                .iter()
-                .map(|(_, dir, name)| (dir.clone(), name.clone()))
+            .map_err(|e| VfError::from_rpc(e, None))?;
+        #[cfg(feature = "test-faults")]
+        if let Err(error) = self.inject_open_fault(OpenFaultPoint::AfterReply { chunk: 0 }) {
+            let closes: Vec<crate::client::CloseOp> = outcome
+                .opened
+                .iter_mut()
+                .filter_map(Option::take)
+                .map(|(fh, stateid)| crate::client::CloseOp { fh, stateid })
                 .collect();
-            let results = self
-                .nfs
-                .lookup_many(&lookup)
-                .map_err(|e| VfError::from_rpc(e, 0))?;
-            for ((orig, _, _), r) in probe.iter().zip(results) {
-                match r {
-                    Ok(_) => {}
-                    Err(status) if status == nfsstat4_NFS4ERR_NOENT => created[*orig] = true,
-                    Err(status) => return Err(VfError::failure(*orig, status)),
+            if !closes.is_empty() {
+                let _ = self.nfs.close_many_path(&closes);
+            }
+            return Err(error);
+        }
+        let failed = outcome.failed;
+        let mut results = Vec::with_capacity(paths.len());
+        for index in 0..paths.len() {
+            let Some((fh, stateid)) = outcome.opened[index].take() else {
+                if let Some((failed_index, status)) = failed {
+                    debug_assert_eq!(index, failed_index);
+                    results.push(Err(VfError::from_rpc(
+                        RpcError::op(index, status),
+                        Some(index),
+                    )));
+                }
+                break;
+            };
+            #[cfg(feature = "test-faults")]
+            if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeRegister { index }) {
+                let mut closes = vec![crate::client::CloseOp { fh, stateid }];
+                closes.extend(outcome.opened[index + 1..].iter_mut().filter_map(|opened| {
+                    opened
+                        .take()
+                        .map(|(fh, stateid)| crate::client::CloseOp { fh, stateid })
+                }));
+                let _ = self.nfs.close_many_path(&closes);
+                results.push(Err(error));
+                break;
+            }
+            let open = OpenFile {
+                fh: fh.clone(),
+                stateid,
+                cur_offset: 0,
+                append: flags[index] & O_APPEND != 0,
+                reopen: Some(ReopenFile {
+                    path: self.visible_path(&self.abs_path(paths[index])),
+                    flags: non_destructive_reopen_flags(flags[index]),
+                    mode: modes[index],
+                }),
+            };
+            match self.insert_open_file(open) {
+                Ok(fd) => {
+                    let file = VfFile::from_fd(fd);
+                    #[cfg(feature = "test-faults")]
+                    if let Err(error) =
+                        self.inject_open_fault(OpenFaultPoint::AfterRegister { index })
+                    {
+                        let _ = self.close(&file);
+                        let closes: Vec<crate::client::CloseOp> = outcome.opened[index + 1..]
+                            .iter_mut()
+                            .filter_map(Option::take)
+                            .map(|(fh, stateid)| crate::client::CloseOp { fh, stateid })
+                            .collect();
+                        if !closes.is_empty() {
+                            let _ = self.nfs.close_many_path(&closes);
+                        }
+                        results.push(Err(error));
+                        break;
+                    }
+                    results.push(Ok(file));
+                }
+                Err(error) => {
+                    let mut closes = vec![crate::client::CloseOp { fh, stateid }];
+                    closes.extend(outcome.opened[index + 1..].iter_mut().filter_map(|opened| {
+                        opened
+                            .take()
+                            .map(|(fh, stateid)| crate::client::CloseOp { fh, stateid })
+                    }));
+                    let _ = self.nfs.close_many_path(&closes);
+                    results.push(Err(error));
+                    break;
                 }
             }
         }
-        for (i, _, _, _, excl, _) in &entries {
-            if *excl {
-                created[*i] = true;
-            }
-        }
-
-        let opens: Vec<crate::client::OpenOp> = entries
-            .iter()
-            .map(|(i, dir, name, access, excl, _)| crate::client::OpenOp {
-                dir: dir.clone(),
-                name: name.clone(),
-                access: *access,
-                // Create only when the file is (believed) absent: kernel nfsd
-                // rejects CREATE_GUARDED on existing files with EXIST.
-                create: if created[*i] {
-                    if *excl {
-                        OpenCreate::Exclusive
-                    } else {
-                        OpenCreate::Guarded
-                    }
-                } else {
-                    OpenCreate::NoCreate
-                },
-            })
-            .collect();
-
-        let results = self
-            .nfs
-            .open_many(&opens)
-            .map_err(VfError::from_rpc_indexed)?;
-
-        // Apply per-file mode / O_TRUNC with a single SETATTR compound.
-        let mut setattr_ops = Vec::new();
-        for (i, (fh, _)) in results.iter().enumerate() {
-            if created[i] {
-                setattr_ops.push(crate::client::SetattrOp {
-                    fh: fh.clone(),
-                    mode: Some(modes[i] & 0o7777),
-                    size: None,
-                    atime: None,
-                    mtime: None,
-                });
-            }
-            if entries[i].5 {
-                setattr_ops.push(crate::client::SetattrOp {
-                    fh: fh.clone(),
-                    mode: None,
-                    size: Some(0),
-                    atime: None,
-                    mtime: None,
-                });
-            }
-        }
-        if !setattr_ops.is_empty() {
-            self.nfs
-                .setattr_many(&setattr_ops)
-                .map_err(VfError::from_rpc_indexed)?;
-        }
-
-        let mut out = Vec::with_capacity(results.len());
-        for (i, (fh, stateid)) in results.into_iter().enumerate() {
-            let open = OpenFile {
-                fh,
-                stateid,
-                cur_offset: 0,
-                append: flags[i] & O_APPEND != 0,
-                reopen: Some(ReopenFile {
-                    path: self.visible_path(&self.abs_path(paths[i])),
-                    flags: non_destructive_reopen_flags(flags[i]),
-                    mode: modes[i],
-                }),
-            };
-            let fd = self.insert_open_file(open)?;
-            out.push(VfFile::from_fd(fd));
-        }
-        Ok(out)
+        Ok(ManyResults::new(paths.len(), results))
     }
 
     /// Open every path-based file in `files` in one batched OPEN compound,
@@ -1419,7 +1369,7 @@ impl NfsVecFs {
         let results = self
             .nfs
             .lookup_getattr_many(&probe)
-            .map_err(|e| VfError::from_rpc(e, 0))?;
+            .map_err(|e| VfError::from_rpc(e, None))?;
         let access = if for_write {
             OPEN4_SHARE_ACCESS_BOTH
         } else {
@@ -1507,10 +1457,7 @@ impl NfsVecFs {
         let results = self.nfs.open_many_path(&open_ops).map_err(|e| {
             let e = VfError::from_rpc_indexed(e);
             // open_many's index is relative to the path-only subset.
-            match subset.get(e.index()) {
-                Some(orig) => e.with_index(*orig),
-                None => e,
-            }
+            e.map_index(|relative| subset.get(relative).copied().unwrap_or(relative))
         })?;
         // Apply O_TRUNC semantics in this phased fallback.
         let mut setattr_ops = Vec::new();
@@ -1528,10 +1475,7 @@ impl NfsVecFs {
         if !setattr_ops.is_empty() {
             self.nfs.setattr_many(&setattr_ops).map_err(|e| {
                 let e = VfError::from_rpc_indexed(e);
-                match subset.get(e.index()) {
-                    Some(orig) => e.with_index(*orig),
-                    None => e,
-                }
+                e.map_index(|relative| subset.get(relative).copied().unwrap_or(relative))
             })?;
         }
         let mut tmp = vec![None; files.len()];
@@ -2314,15 +2258,14 @@ impl NfsVecFs {
                             return Ok(out);
                         }
                         Err(e) => {
-                            let rel = e.index();
-                            return Err(e.with_index(i + rel));
+                            return Err(e.map_index(|rel| i + rel));
                         }
                     }
                 }
                 self.close_path_opens(&outcome.opened);
                 Ok(self.assemble_reads(reads, offsets, &outcome.data, &outcome.eof))
             }
-            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, 0)),
+            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, None)),
             Err(_) => self.readv_path_fallback(reads),
         }
     }
@@ -2354,8 +2297,7 @@ impl NfsVecFs {
                             return Ok(out);
                         }
                         Err(e) => {
-                            let rel = e.index();
-                            return Err(e.with_index(i + rel));
+                            return Err(e.map_index(|rel| i + rel));
                         }
                     }
                 }
@@ -2365,7 +2307,7 @@ impl NfsVecFs {
                 }
                 Ok(self.assemble_reads(reads, offsets, &outcome.data, &outcome.eof))
             }
-            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, 0)),
+            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, None)),
             Err(_) => self.readv_path_fallback(reads),
         }
     }
@@ -2455,15 +2397,14 @@ impl NfsVecFs {
                             return Ok(out);
                         }
                         Err(e) => {
-                            let rel = e.index();
-                            return Err(e.with_index(i + rel));
+                            return Err(e.map_index(|rel| i + rel));
                         }
                     }
                 }
                 self.close_path_opens(&outcome.opened);
                 Ok(self.assemble_writes(writes, offsets, &outcome.counts, &outcome.committed))
             }
-            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, 0)),
+            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, None)),
             Err(_) => self.writev_path_fallback(writes),
         }
     }
@@ -2491,8 +2432,7 @@ impl NfsVecFs {
                             return Ok(out);
                         }
                         Err(e) => {
-                            let rel = e.index();
-                            return Err(e.with_index(i + rel));
+                            return Err(e.map_index(|rel| i + rel));
                         }
                     }
                 }
@@ -2502,7 +2442,7 @@ impl NfsVecFs {
                 }
                 Ok(self.assemble_writes(writes, offsets, &outcome.counts, &outcome.committed))
             }
-            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, 0)),
+            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, None)),
             Err(_) => self.writev_path_fallback(writes),
         }
     }
@@ -2632,8 +2572,7 @@ impl NfsVecFs {
         let resolved = match self.resolve_many_tcfile(&refs, true) {
             Ok(r) => r,
             Err(e) => {
-                let rel = e.index();
-                return Err(e.with_index(indices.get(rel).copied().unwrap_or(0)));
+                return Err(e.map_index(|rel| indices.get(rel).copied().unwrap_or(rel)));
             }
         };
         let mut setattrs = Vec::with_capacity(dirs.len());
@@ -2767,14 +2706,25 @@ impl VecFs for NfsVecFs {
         Ok(VfFile::from_fd(fd))
     }
 
-    fn openv(&mut self, paths: &[&Path], flags: &[i32], modes: &[u32]) -> VfResult<Vec<VfFile>> {
+    fn open_many(
+        &mut self,
+        paths: &[&Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> VfResult<ManyResults<VfFile>> {
         if paths.len() != flags.len() || paths.len() != modes.len() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
         if paths.is_empty() {
-            return Ok(Vec::new());
+            return Ok(ManyResults::all_success(Vec::new()));
         }
         self.openv_merged(paths, flags, modes)
+    }
+
+    fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeCleanup { index: _index })?;
+        Ok(())
     }
 
     fn close(&mut self, tcf: &VfFile) -> VfResult<()> {
@@ -3164,7 +3114,7 @@ impl VecFs for NfsVecFs {
             let results = self
                 .nfs
                 .readdir_pages(&ops, &ids)
-                .map_err(|e| VfError::from_rpc(e, 0))?;
+                .map_err(|e| VfError::from_rpc(e, None))?;
             let mut accumulated: Vec<Vec<crate::client::DirEntry>> =
                 results.iter().map(|r| r.0.clone()).collect();
             let mut pending: Vec<(usize, FileHandle, u64)> = results
@@ -3182,7 +3132,7 @@ impl VecFs for NfsVecFs {
                 let cont = self
                     .nfs
                     .readdir_pages(&cont_ops, &ids)
-                    .map_err(|e| VfError::from_rpc(e, 0))?;
+                    .map_err(|e| VfError::from_rpc(e, None))?;
                 let mut next_pending = Vec::new();
                 for ((idx, fh, _), (entries, cookie)) in pending.iter().zip(cont) {
                     accumulated[*idx].extend(entries);
@@ -3359,16 +3309,14 @@ impl VecFs for NfsVecFs {
         let outcome = self
             .nfs
             .renamev_path_compound(&prs)
-            .map_err(|e| VfError::from_rpc(e, 0))?;
+            .map_err(|e| VfError::from_rpc(e, None))?;
         match outcome.failed {
             Some((i, _st)) => {
                 // Prefix [0..i) renamed; retry [i..] via the phased path,
                 // re-attributing its error to the original index.
                 let suffix = &pairs[i..];
-                self.renamev_phased(suffix).map_err(|e| {
-                    let rel = e.index();
-                    e.with_index(i + rel)
-                })
+                self.renamev_phased(suffix)
+                    .map_err(|e| e.map_index(|rel| i + rel))
             }
             None => Ok(()),
         }
@@ -3388,15 +3336,13 @@ impl VecFs for NfsVecFs {
         let outcome = self
             .nfs
             .removev_path_compound(&paths)
-            .map_err(|e| VfError::from_rpc(e, 0))?;
+            .map_err(|e| VfError::from_rpc(e, None))?;
         match outcome.failed {
             Some((i, _st)) => {
                 // Prefix [0..i) removed; retry [i..] via the phased path.
                 let suffix = &files[i..];
-                self.removev_phased(suffix).map_err(|e| {
-                    let rel = e.index();
-                    e.with_index(i + rel)
-                })
+                self.removev_phased(suffix)
+                    .map_err(|e| e.map_index(|rel| i + rel))
             }
             None => Ok(()),
         }
@@ -3614,13 +3560,11 @@ impl VecFs for NfsVecFs {
                     self.server_copy_enabled = false;
                     self.server_copy_stats.fallbacks += 1;
                     let start = base * FILES_PER_COPY_BATCH;
-                    return self.dupv(&pairs[start..]).map_err(|fallback| {
-                        let index = fallback.index();
-                        fallback.with_index(start + index)
-                    });
+                    return self
+                        .dupv(&pairs[start..])
+                        .map_err(|fallback| fallback.map_index(|index| start + index));
                 }
-                let index = base * FILES_PER_COPY_BATCH + e.index();
-                return Err(e.with_index(index));
+                return Err(e.map_index(|index| base * FILES_PER_COPY_BATCH + index));
             }
         }
         Ok(())
@@ -4082,7 +4026,7 @@ mod tests {
         // belongs to caller 0, rather than caller 1.
         let owners = [0, 0, 1];
         let error = remap_descriptor_chunk_error(VfError::failure(1, ERR_EBADF), 0, &owners);
-        assert_eq!(error.index(), 0);
+        assert_eq!(error.index_opt(), Some(0));
     }
 
     #[test]

@@ -23,6 +23,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Check the detached Python native crate
         run: |
+          cargo fmt --manifest-path adapters/vfsi-python/Cargo.toml --check
+          cargo clippy --manifest-path adapters/vfsi-python/Cargo.toml --all-features --all-targets -- -D warnings
           cargo fmt --manifest-path adapters/nfs4fs/Cargo.toml --check
           cargo clippy --manifest-path adapters/nfs4fs/Cargo.toml --locked --all-targets -- -D warnings
           cargo fmt --manifest-path adapters/vsmb/Cargo.toml --check
@@ -457,7 +459,7 @@ jobs:
       - name: Run NFS integration suite
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}
-        run: cargo test -p vnfs --test nfs
+        run: cargo test -p vnfs --features test-faults --test nfs
       - name: Run vfsi-nfs directly against NFS
         env:
           VFSI_NFS_REQUIRED: 1
@@ -597,7 +599,7 @@ jobs:
         env:
           VNFS_TEST_MINOR: 2
           VNFS_TEST_REQUIRE_SERVER_COPY: 1
-        run: cargo test -p vnfs --test nfs
+        run: cargo test -p vnfs --features test-faults --test nfs
       - name: Run vfsi-nfs directly against patched NFSv4.2
         env:
           VFSI_NFS_REQUIRED: 1
@@ -750,11 +752,11 @@ jobs:
           VFSI_SMB_REQUIRE_RECONNECT: ${{ matrix.require_reconnect }}
           VFSI_SMB_RESTART_COMMAND: ${{ matrix.reconnect }}
         run: |
+          rust_features="test-faults"
           if [ -n "${{ matrix.rust_features }}" ]; then
-            cargo test -p vfsi-smb --features "${{ matrix.rust_features }}" --test smb -- --test-threads=1
-          else
-            cargo test -p vfsi-smb --test smb -- --test-threads=1
+            rust_features="$rust_features,${{ matrix.rust_features }}"
           fi
+          cargo test -p vfsi-smb --features "$rust_features" --test smb -- --test-threads=1
       - name: Run C ABI smoke test against Samba
         if: matrix.bindings
         run: |

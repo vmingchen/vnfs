@@ -8,6 +8,13 @@ description = "Shared types, errors, paths, and capabilities for VFSI"
 repository = "https://github.com/vmingchen/vnfs"
 keywords = ["filesystem", "vectorized", "vfsi"]
 
+[features]
+default = []
+test-faults = []
+
 [dependencies]
 bitflags = "2.6"
 libc = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"

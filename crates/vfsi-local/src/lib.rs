@@ -13,8 +13,13 @@ use std::fs::{File, FileTimes, OpenOptions};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "test-faults")]
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
+use vfsi_core::internal::ManyResults;
+#[cfg(feature = "test-faults")]
+use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 use vfsi_core::path::{cstring_from_bytes, normalize_bytes, path_bytes, path_from_bytes};
 use vfsi_sync::*;
 
@@ -34,6 +39,8 @@ pub struct DummyVecFs {
     cwd: PathBuf,
     next_fd: i32,
     open_files: HashMap<i32, DummyOpen>,
+    #[cfg(feature = "test-faults")]
+    fault_injector: Option<Arc<dyn FaultInjector>>,
 }
 
 impl DummyVecFs {
@@ -85,7 +92,28 @@ impl DummyVecFs {
             cwd: PathBuf::new(),
             next_fd: 0,
             open_files: HashMap::new(),
+            #[cfg(feature = "test-faults")]
+            fault_injector: None,
         }
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[doc(hidden)]
+    pub fn set_fault_injector(&mut self, injector: Arc<dyn FaultInjector>) {
+        self.fault_injector = Some(injector);
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[doc(hidden)]
+    pub fn test_open_handle_count(&self) -> usize {
+        self.open_files.len()
+    }
+
+    #[cfg(feature = "test-faults")]
+    fn inject_open_fault(&self, point: OpenFaultPoint) -> VfResult<()> {
+        self.fault_injector
+            .as_ref()
+            .map_or(Ok(()), |injector| injector.check(&point))
     }
 
     fn insert_open_file(&mut self, open: DummyOpen) -> VfResult<Fd> {
@@ -555,6 +583,53 @@ impl VecFs for DummyVecFs {
             self.cwd.join(path)
         };
         path_from_bytes(&normalize_bytes(path_bytes(&root_rel)))
+    }
+
+    fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeCleanup { index: _index })?;
+        Ok(())
+    }
+
+    fn open_many(
+        &mut self,
+        paths: &[&Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> VfResult<ManyResults<VfFile>> {
+        if paths.len() != flags.len() || paths.len() != modes.len() {
+            return Err(VfError::failure(0, ERR_INVAL));
+        }
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeDispatch { chunk: 0 })?;
+        let mut results = Vec::with_capacity(paths.len());
+        for ((path, flags), mode) in paths.iter().zip(flags).zip(modes) {
+            #[cfg(feature = "test-faults")]
+            let index = results.len();
+            #[cfg(feature = "test-faults")]
+            if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeRegister { index }) {
+                results.push(Err(error));
+                break;
+            }
+            match self.open(path, *flags, *mode) {
+                Ok(file) => {
+                    #[cfg(feature = "test-faults")]
+                    if let Err(error) =
+                        self.inject_open_fault(OpenFaultPoint::AfterRegister { index })
+                    {
+                        let _ = self.close(&file);
+                        results.push(Err(error));
+                        break;
+                    }
+                    results.push(Ok(file));
+                }
+                Err(error) => {
+                    results.push(Err(error));
+                    break;
+                }
+            }
+        }
+        Ok(ManyResults::new(paths.len(), results))
     }
 
     fn open_by_path(

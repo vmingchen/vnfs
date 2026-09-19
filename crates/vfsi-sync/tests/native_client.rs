@@ -2,7 +2,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 use vfsi_sync::{
     Capabilities, FileSystem, FsClient, MetadataQuery, OpenFlags, OpenRequest, ReadOp, ReadResult,
-    SetAttributes, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
+    SetAttributes, VectorFileSystem, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
 };
 
 #[derive(Default)]
@@ -13,6 +13,44 @@ struct ScalarOnly {
     oversized_read: bool,
     oversized_write_count: bool,
     read_failure: bool,
+    transport_failure: bool,
+    vector_result_limit: Option<usize>,
+}
+
+impl VectorFileSystem for ScalarOnly {
+    fn open_many(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>> {
+        if self.transport_failure {
+            return Err(VfError::transport(None, "reply lost"));
+        }
+        requests
+            .iter()
+            .take(self.vector_result_limit.unwrap_or(usize::MAX))
+            .map(|request| self.open_one(request))
+            .collect()
+    }
+
+    fn close_many(&mut self, files: &[VfFile]) -> VfResult<()> {
+        for file in files {
+            self.close_one(file)?;
+        }
+        Ok(())
+    }
+
+    fn read_many(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        requests
+            .iter()
+            .take(self.vector_result_limit.unwrap_or(usize::MAX))
+            .map(|request| self.read_one(request))
+            .collect()
+    }
+
+    fn write_many(&mut self, requests: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
+        requests
+            .iter()
+            .take(self.vector_result_limit.unwrap_or(usize::MAX))
+            .map(|request| self.write_one(*request))
+            .collect()
+    }
 }
 
 impl FileSystem for ScalarOnly {
@@ -183,4 +221,76 @@ fn convenience_string_errors_retain_operation_and_path_context() {
     assert_eq!(error.err_no(), vfsi_sync::ERR_INVAL);
     assert_eq!(error.operation(), Some("read_to_string"));
     assert_eq!(error.path(), Some(std::path::Path::new("/not-utf8")));
+}
+
+#[test]
+fn vector_transport_failure_does_not_invent_request_zero_context() {
+    let client = FsClient::new(ScalarOnly {
+        transport_failure: true,
+        ..ScalarOnly::default()
+    });
+    let error = client
+        .openv(&[
+            OpenRequest::new("/first", OpenFlags::READ),
+            OpenRequest::new("/second", OpenFlags::READ),
+        ])
+        .unwrap_err();
+    assert!(error.is_transport());
+    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.path(), None);
+}
+
+#[test]
+fn openv_rejects_wrong_result_count_and_cleans_returned_handles() {
+    let client = FsClient::new(ScalarOnly {
+        vector_result_limit: Some(1),
+        ..ScalarOnly::default()
+    });
+    let error = client
+        .openv(&[
+            OpenRequest::new("/first", OpenFlags::READ),
+            OpenRequest::new("/second", OpenFlags::READ),
+        ])
+        .unwrap_err();
+    assert!(error.is_transport());
+    assert_eq!(error.index_opt(), None);
+    assert!(error.to_string().contains("1 results for 2 requests"));
+    assert!(!client.into_inner().unwrap().open);
+}
+
+#[test]
+fn readv_and_writev_reject_wrong_result_counts() {
+    let client = FsClient::new(ScalarOnly::default());
+    let files = client
+        .openv(&[
+            OpenRequest::new("/first", OpenFlags::READ | OpenFlags::WRITE),
+            OpenRequest::new("/second", OpenFlags::READ | OpenFlags::WRITE),
+        ])
+        .unwrap();
+    client
+        .with_backend(|backend| {
+            backend.vector_result_limit = Some(1);
+            Ok(())
+        })
+        .unwrap();
+
+    let read_error = client
+        .readv(&[
+            files[0].read_request_at(0, 1),
+            files[1].read_request_at(0, 1),
+        ])
+        .unwrap_err();
+    assert!(read_error.is_transport());
+    assert_eq!(read_error.index_opt(), None);
+
+    let write_error = client
+        .writev(&[
+            files[0].write_request_at(0, b"a"),
+            files[1].write_request_at(0, b"b"),
+        ])
+        .unwrap_err();
+    assert!(write_error.is_transport());
+    assert_eq!(write_error.index_opt(), None);
+
+    client.closev(files).unwrap();
 }

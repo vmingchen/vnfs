@@ -13,8 +13,9 @@ POSIX/C compatibility surface.
 - `NfsExtensions` and `SmbExtensions` contain protocol-only negotiated state.
 - `OpenRequest`, `MetadataQuery`, and `SetAttributes` replace raw flags and
   overloaded metadata masks.
-- `BatchOutcome` preserves completed, failed, unexecuted, and ambiguous
-  operations. A transport failure is never presented as an ordinary status.
+- Public `*v` methods return all values or one indexed `VfError`. They do not
+  promise rollback; a transport failure is never presented as an ordinary
+  filesystem status.
 - `Capabilities` is a typed bitset. Integer `VF_CAP_*` constants remain for
   source and C ABI compatibility.
 - `NfsClientBuilder` configures namespace root, protocol version, timeouts,
@@ -43,7 +44,7 @@ returns the concrete `NfsClient` alias. `NfsVecFs` and `NfsClientBuilder`
 remain available for embedding and compatibility. `NfsClient::open_options`
 mirrors `std::fs::OpenOptions`; direct `read_at` and `write_at` perform
 positional I/O, while explicitly named `read_request_at` and
-`write_request_at` values compose vector calls. `close_many` consumes a group
+`write_request_at` values compose vector calls. `closev` consumes a group
 of handles and closes them with the vector backend rather than serializing
 one close per dropped handle.
 
@@ -54,9 +55,9 @@ NFS requests `FILE_SYNC4`; SMB issues `FLUSH`; the local backend calls the
 corresponding `std::fs::File` method.
 
 Semantic compound errors prove that a prefix completed and the suffix was not
-attempted. A lost transport response makes dispatched mutations
-`Indeterminate`; they are not replayed. `VfError` exposes its status domain,
-optional operation/path context, completion certainty, and retry class without
+attempted. A lost transport response leaves dispatched mutations indeterminate;
+they are not replayed. `VfError` exposes its status domain, optional request
+index and operation/path context, completion certainty, and retry class without
 requiring string parsing.
 
 Native client and file methods retain `VfError`. Only the standard-library

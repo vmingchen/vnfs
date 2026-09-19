@@ -64,7 +64,7 @@ mod tests {
     fn vf_error_preserves_transport_message() {
         let e = VfError::from_rpc(RpcError::transport("connection refused"), 3);
         assert!(e.is_transport());
-        assert_eq!(e.index(), 3);
+        assert_eq!(e.index_opt(), Some(3));
         assert_eq!(e.index_opt(), Some(3));
         assert_eq!(e.err_no(), VF_ERR_RPC);
         assert!(e.to_string().contains("connection refused"));
@@ -73,13 +73,12 @@ mod tests {
         let e = VfError::from_rpc(RpcError::transport("server gone"), None);
         assert!(e.is_transport());
         assert_eq!(e.index_opt(), None);
-        assert_eq!(e.index(), 0);
         assert!(!e.to_string().contains("op "));
 
         // Server status errors stay Op errors with the caller-supplied index.
         let e = VfError::from_rpc(RpcError::op(4, ERR_NOENT), 1);
         assert!(!e.is_transport());
-        assert_eq!(e.index(), 1);
+        assert_eq!(e.index_opt(), Some(1));
         assert_eq!(e.index_opt(), Some(1));
         assert_eq!(e.err_no(), ERR_NOENT);
     }
@@ -87,10 +86,13 @@ mod tests {
     #[test]
     fn vf_error_indexed_and_remap() {
         let e = VfError::from_rpc_indexed(RpcError::op(4, ERR_EXIST));
-        assert_eq!((e.index(), e.err_no()), (4, ERR_EXIST));
+        assert_eq!((e.index_opt(), e.err_no()), (Some(4), ERR_EXIST));
         assert_eq!(e.index_opt(), Some(4));
-        assert_eq!(e.with_index(9).index(), 9);
-        assert_eq!(VfError::transport(2, "boom").with_index(5).index(), 5);
+        assert_eq!(e.with_index(9).index_opt(), Some(9));
+        assert_eq!(
+            VfError::transport(2, "boom").with_index(5).index_opt(),
+            Some(5)
+        );
         assert_eq!(VfError::transport(None, "boom").index_opt(), None);
     }
 
@@ -738,10 +740,14 @@ mod tests {
     fn openv_rejects_mismatched_lengths() {
         let (_root, mut fs) = fs("openv");
         use libc::O_CREAT;
-        let e = fs
-            .openv(&[Path::new("/a"), Path::new("/b")], &[O_CREAT], &[0o644])
-            .unwrap_err();
-        assert_eq!((e.index(), e.err_no()), (0, ERR_INVAL));
+        let e = VecFs::openv(
+            &mut fs,
+            &[Path::new("/a"), Path::new("/b")],
+            &[O_CREAT],
+            &[0o644],
+        )
+        .unwrap_err();
+        assert_eq!((e.index_opt(), e.err_no()), (Some(0), ERR_INVAL));
     }
 
     #[test]

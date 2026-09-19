@@ -57,10 +57,10 @@ fn legacy_crate_root_exports_remain_available() {
 #[test]
 fn rust_native_api_is_curated_and_typed() {
     use vnfs::{
-        BatchOutcome, Capabilities, CopyFileSystem, DirEntry, DirectoryFileSystem, FileSystem,
-        FsClient, LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, NamespaceFileSystem,
-        NativeFileSystem, OpOutcome, OpenFlags, OpenOptions, OpenRequest, Permissions,
-        SetAttributes, VectorFileSystem, WriteOpRef,
+        Capabilities, CopyFileSystem, DirEntry, DirectoryFileSystem, FileSystem, FsClient,
+        LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, NamespaceFileSystem,
+        NativeFileSystem, OpenFlags, OpenOptions, OpenRequest, Permissions, SetAttributes,
+        VectorFileSystem, WriteOpRef,
     };
     let _ = std::mem::size_of::<(
         Capabilities,
@@ -68,8 +68,6 @@ fn rust_native_api_is_curated_and_typed() {
         OpenRequest,
         MetadataQuery,
         SetAttributes,
-        BatchOutcome<()>,
-        OpOutcome<()>,
         WriteOpRef<'static>,
         FsClient<()>,
         Metadata,

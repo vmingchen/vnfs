@@ -102,29 +102,27 @@ fn main() -> vnfs::Result<()> {
         .write(true)
         .create(true)
         .truncate(true)
-        .open_many(&["/file-1", "/file-2"])?;
+        .openv(&["/file-1", "/file-2"])?;
 
     client
-        .write_many_outcomes(&[
+        .writev(&[
             files[0].write_request_at(0, b"hello"),
             files[1].write_request_at(0, b"world"),
-        ])?
-        .into_values()?;
+        ])?;
 
     let contents = client
-        .read_many_outcomes(&[
+        .readv(&[
             files[0].read_request_at(0, 5),
             files[1].read_request_at(0, 5),
-        ])?
-        .into_values()?;
+        ])?;
     assert_eq!(contents[0].data, b"hello");
     assert_eq!(contents[1].data, b"world");
-    client.close_many(files)?;
+    client.closev(files)?;
     Ok(())
 }
 ```
 
-For these two small files, `open_many`, `write_many`, and `read_many` each put
+For these two small files, `openv`, `writev`, and `readv` each put
 both independent operations into one NFSv4 COMPOUND and therefore one network
 round trip per phase. A scalar POSIX-style loop hides this opportunity and pays
 latency for each file operation. Larger vectors are packed into as few
@@ -163,7 +161,7 @@ path, operation, vector index, and retry information. The standard `Read`,
 generic `std::io` code is more important than retaining that detail.
 
 One backend connection serializes access to its stateful NFS session, while
-`FsClient::read_many` and `write_many` preserve useful compound batching.
+`FsClient::readv` and `writev` preserve useful compound batching.
 Create a bounded pool of clients when parallel network requests are required;
 use one vector cohort per worker. Async applications should run these
 synchronous workers with their runtime's blocking-task API.
@@ -172,12 +170,10 @@ synchronous workers with their runtime's blocking-task API.
 
 An NFS COMPOUND is ordered but **not transactional**. If operation `i` fails,
 the server stops processing that compound: the prefix before `i` may already
-have succeeded and the suffix was not executed. The outcome-aware vector
-methods return `BatchOutcome<T>` with `Success`, `Completed`, `Failed`,
-`NotAttempted`, and `Indeterminate` states. `Completed` means a compatibility
-decoder proved success but did not retain the returned value. Reconcile an
-`Indeterminate` mutation before retrying it. The fail-fast methods remain in
-`VecFs` for compatibility.
+have succeeded and the suffix was not executed. Public vector methods return
+all values on success or one indexed `VfError` on failure; they never promise
+rollback. A transport failure may have an unknown index and ambiguous effects,
+which callers must reconcile before retrying a mutation.
 
 Low-level compound, RPC, and session construction is isolated under
 `vnfs::legacy`; it is not part of the recommended application API.

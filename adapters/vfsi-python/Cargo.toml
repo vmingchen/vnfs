@@ -24,3 +24,8 @@ vfsi-local = { path = "../../crates/vfsi-local", optional = true }
 vfsi-nfs = { path = "../../crates/vfsi-nfs", optional = true }
 vfsi-sync = { path = "../../crates/vfsi-sync" }
 vfsi-smb = { path = "../../crates/vfsi-smb", optional = true }
+
+[patch.crates-io]
+# This detached workspace must use the same libntirpc compatibility shim as
+# the root Rust workspace when its optional NFS backend is enabled directly.
+libntirpc-sys = { path = "../../third-party/libntirpc-sys" }

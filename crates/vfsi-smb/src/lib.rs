@@ -25,6 +25,8 @@ mod vecfs {
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "test-faults")]
+use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
 use futures_util::future::join_all;
@@ -43,6 +45,9 @@ use smb2::types::status::NtStatus;
 use smb2::types::{Command, CreditCharge, Dialect, FileId, OplockLevel, TreeId};
 use smb2::{Error as SmbError, ErrorKind as SmbErrorKind};
 use tokio::runtime::{Builder, Runtime};
+use vfsi_core::internal::ManyResults;
+#[cfg(feature = "test-faults")]
+use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
 use crate::path::{normalize_bytes, path_bytes, path_from_bytes};
 use crate::vecfs::{
@@ -79,6 +84,8 @@ pub struct SmbVecFs {
     next_fd: Fd,
     open_files: HashMap<Fd, SmbOpen>,
     server_copy_enabled: bool,
+    #[cfg(feature = "test-faults")]
+    fault_injector: Option<Arc<dyn FaultInjector>>,
 }
 
 /// SMB-only negotiated state, kept out of protocol-neutral VFSI traits.
@@ -139,7 +146,28 @@ impl SmbVecFs {
             next_fd: 0,
             open_files: HashMap::new(),
             server_copy_enabled: cfg!(feature = "server-copy"),
+            #[cfg(feature = "test-faults")]
+            fault_injector: None,
         })
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[doc(hidden)]
+    pub fn set_fault_injector(&mut self, injector: Arc<dyn FaultInjector>) {
+        self.fault_injector = Some(injector);
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[doc(hidden)]
+    pub fn test_open_handle_count(&self) -> usize {
+        self.open_files.len()
+    }
+
+    #[cfg(feature = "test-faults")]
+    fn inject_open_fault(&self, point: OpenFaultPoint) -> VfResult<()> {
+        self.fault_injector
+            .as_ref()
+            .map_or(Ok(()), |injector| injector.check(&point))
     }
 
     /// The dialect negotiated with the server.
@@ -1130,20 +1158,28 @@ impl VecFs for SmbVecFs {
         Ok(VfFile::from_fd(fd))
     }
 
-    fn openv(&mut self, paths: &[&Path], flags: &[i32], modes: &[u32]) -> VfResult<Vec<VfFile>> {
+    fn open_many(
+        &mut self,
+        paths: &[&Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> VfResult<ManyResults<VfFile>> {
         if paths.len() != flags.len() || paths.len() != modes.len() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
         let resolved: Vec<PathBuf> = paths.iter().map(|path| self.abs_path(path)).collect();
         if paths.len() <= 1 || self.tree.is_dfs || !paths_are_independent(&resolved) {
-            let mut output = Vec::with_capacity(paths.len());
-            for (index, ((path, flags), mode)) in paths.iter().zip(flags).zip(modes).enumerate() {
-                output.push(
-                    self.open(path, *flags, *mode)
-                        .map_err(|error| error.with_index(index))?,
-                );
+            let mut results = Vec::with_capacity(paths.len());
+            for ((path, flags), mode) in paths.iter().zip(flags).zip(modes) {
+                match self.open(path, *flags, *mode) {
+                    Ok(file) => results.push(Ok(file)),
+                    Err(error) => {
+                        results.push(Err(error));
+                        break;
+                    }
+                }
             }
-            return Ok(output);
+            return Ok(ManyResults::new(paths.len(), results));
         }
 
         let mut requests = Vec::with_capacity(paths.len());
@@ -1158,6 +1194,8 @@ impl VecFs for SmbVecFs {
         }
         let connection = self.client.connection_mut().clone();
         let tree_id = self.tree.tree_id;
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeDispatch { chunk: 0 })?;
         let jobs = requests.into_iter().map(|request| {
             let connection = connection.clone();
             async move {
@@ -1172,31 +1210,37 @@ impl VecFs for SmbVecFs {
             }
         });
         let results = self.runtime.block_on(join_all(jobs));
-        if let Some((failed, error)) = results
-            .iter()
-            .enumerate()
-            .find_map(|(index, result)| result.as_ref().err().map(|error| (index, error.clone())))
-        {
-            let closes = results
-                .into_iter()
-                .filter_map(Result::ok)
-                .map(|(file_id, _)| {
+        #[cfg(feature = "test-faults")]
+        if let Err(error) = self.inject_open_fault(OpenFaultPoint::AfterReply { chunk: 0 }) {
+            let closes = results.iter().filter_map(|result| {
+                result.as_ref().ok().map(|(file_id, _)| {
                     let connection = connection.clone();
+                    let file_id = *file_id;
                     async move { close_on_connection(&connection, tree_id, file_id).await }
-                });
+                })
+            });
             self.runtime.block_on(join_all(closes));
-            return Err(error.with_index(failed));
+            return Err(error);
         }
-
         let mut output = Vec::with_capacity(paths.len());
-        for (index, (((path, flags), _mode), result)) in resolved
-            .into_iter()
-            .zip(flags)
-            .zip(modes)
-            .zip(results)
-            .enumerate()
+        for (((path, flags), _mode), result) in
+            resolved.into_iter().zip(flags).zip(modes).zip(results)
         {
-            let (file_id, size) = result.expect("all concurrent opens checked");
+            #[cfg(feature = "test-faults")]
+            let index = output.len();
+            let (file_id, size) = match result {
+                Ok(value) => value,
+                Err(error) => {
+                    output.push(Err(error));
+                    continue;
+                }
+            };
+            #[cfg(feature = "test-faults")]
+            if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeRegister { index }) {
+                let _ = self.raw_close(file_id);
+                output.push(Err(error));
+                continue;
+            }
             let access_mode = *flags & libc::O_ACCMODE;
             let fd = match self.insert_open_file(SmbOpen {
                 file_id,
@@ -1213,12 +1257,26 @@ impl VecFs for SmbVecFs {
                 Ok(fd) => fd,
                 Err(error) => {
                     let _ = self.raw_close(file_id);
-                    return Err(error.with_index(index));
+                    output.push(Err(error));
+                    continue;
                 }
             };
-            output.push(VfFile::from_fd(fd));
+            let file = VfFile::from_fd(fd);
+            #[cfg(feature = "test-faults")]
+            if let Err(error) = self.inject_open_fault(OpenFaultPoint::AfterRegister { index }) {
+                let _ = self.close(&file);
+                output.push(Err(error));
+                continue;
+            }
+            output.push(Ok(file));
         }
-        Ok(output)
+        Ok(ManyResults::new(paths.len(), output))
+    }
+
+    fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeCleanup { index: _index })?;
+        Ok(())
     }
 
     fn close(&mut self, file: &VfFile) -> VfResult<()> {
@@ -1895,10 +1953,9 @@ impl VecFs for SmbVecFs {
                     .map_err(|e| e.with_index(index))?,
                 Err(error) if error.kind() == SmbErrorKind::Unsupported => {
                     self.server_copy_enabled = false;
-                    return self.dupv(&pairs[index..]).map_err(|e| {
-                        let relative = e.index();
-                        e.with_index(index + relative)
-                    });
+                    return self
+                        .dupv(&pairs[index..])
+                        .map_err(|e| e.map_index(|relative| index + relative));
                 }
                 Err(error) => return Err(smb_error(error, index)),
             }
@@ -2346,7 +2403,7 @@ mod tests {
     #[test]
     fn smb_transport_failures_preserve_the_message() {
         let error = smb_error(SmbError::Disconnected, 3);
-        assert_eq!(error.index(), 3);
+        assert_eq!(error.index_opt(), Some(3));
         assert_eq!(error.err_no(), crate::vecfs::VF_ERR_RPC);
         assert!(error.to_string().contains("Disconnected"));
     }

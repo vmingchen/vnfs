@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::SystemTime;
 
 use crate::{
-    AttrMask, BatchOutcome, Capabilities, CopyFileSystem, DirEntry, DirectoryFileSystem,
-    FileSystem, LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
+    AttrMask, Capabilities, CopyFileSystem, DirEntry, DirectoryFileSystem, FileSystem,
+    LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
     NamespaceFileSystem, OpenFlags, OpenRequest, Permissions, ReadOp, ReadResult, SetAttributes,
     VectorFileSystem, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
 };
@@ -19,6 +19,13 @@ fn io_error(error: VfError) -> io::Error {
 
 fn poisoned() -> VfError {
     VfError::client(0, crate::ERR_IO)
+}
+
+fn wrong_result_count(operation: &str, expected: usize, actual: usize) -> VfError {
+    VfError::transport(
+        None,
+        format!("{operation} backend returned {actual} results for {expected} requests"),
+    )
 }
 
 /// Cloneable owner of one synchronous backend connection.
@@ -259,14 +266,29 @@ impl<F: CopyFileSystem> FsClient<F> {
 }
 
 impl<F: VectorFileSystem> FsClient<F> {
-    pub fn open_many(&self, requests: &[OpenRequest]) -> VfResult<Vec<FsFile<F>>> {
-        let files = self.lock()?.open_many(requests).map_err(|error| {
-            requests
-                .get(error.index())
+    /// Open an ordered vector of files.
+    ///
+    /// Success returns one RAII handle per request. Failure returns no
+    /// handles; VFSI does not promise transactional rollback of other
+    /// filesystem effects such as file creation.
+    pub fn openv(&self, requests: &[OpenRequest]) -> VfResult<Vec<FsFile<F>>> {
+        let mut filesystem = self.lock()?;
+        let files = filesystem.open_many(requests).map_err(|error| {
+            error
+                .index_opt()
+                .and_then(|index| requests.get(index))
                 .map_or(error.clone(), |request| {
-                    error.with_context("open_many", &request.path)
+                    error.with_context("openv", &request.path)
                 })
         })?;
+        if files.len() != requests.len() {
+            let error = wrong_result_count("openv", requests.len(), files.len());
+            for file in &files {
+                let _ = filesystem.close_one(file);
+            }
+            return Err(error);
+        }
+        drop(filesystem);
         Ok(files
             .into_iter()
             .zip(requests)
@@ -278,39 +300,23 @@ impl<F: VectorFileSystem> FsClient<F> {
             .collect())
     }
 
-    pub fn open_many_outcomes(
-        &self,
-        requests: &[OpenRequest],
-    ) -> VfResult<BatchOutcome<FsFile<F>>> {
-        let outcomes = self
-            .lock()?
-            .open_many_outcomes(requests)
-            .map_errors(|index, error| {
-                requests.get(index).map_or(error.clone(), |request| {
-                    error.with_context("open_many", &request.path)
-                })
-            });
-        Ok(outcomes.map_with_index(|index, file| FsFile {
-            inner: Arc::clone(&self.inner),
-            file: Some(file),
-            path: requests[index].path.clone(),
-        }))
-    }
-
     /// Close a group of files through one vector operation.
     ///
     /// On failure, each handle remains armed for best-effort cleanup on drop;
     /// explicitly closed prefix handles may consequently receive a harmless
     /// second close attempt.
-    pub fn close_many(&self, mut files: Vec<FsFile<F>>) -> VfResult<()> {
+    pub fn closev(&self, mut files: Vec<FsFile<F>>) -> VfResult<()> {
         for (index, file) in files.iter().enumerate() {
             self.validate_owner(file, index)?;
         }
         let descriptors: Vec<VfFile> = files.iter().map(|file| file.raw().clone()).collect();
         self.lock()?.close_many(&descriptors).map_err(|error| {
-            files.get(error.index()).map_or(error.clone(), |file| {
-                error.with_context("close_many", file.path())
-            })
+            error
+                .index_opt()
+                .and_then(|index| files.get(index))
+                .map_or(error.clone(), |file| {
+                    error.with_context("closev", file.path())
+                })
         })?;
         for file in &mut files {
             file.file = None;
@@ -318,29 +324,20 @@ impl<F: VectorFileSystem> FsClient<F> {
         Ok(())
     }
 
-    pub fn read_many(&self, requests: &[FsRead<'_, F>]) -> VfResult<Vec<ReadResult>> {
+    pub fn readv(&self, requests: &[FsRead<'_, F>]) -> VfResult<Vec<ReadResult>> {
         let reads = self.read_ops(requests)?;
-        self.lock()?.read_many(&reads).map_err(|error| {
-            let index = error.index().min(requests.len().saturating_sub(1));
-            requests.get(index).map_or(error.clone(), |request| {
-                error.with_context("read_many", request.file.path())
-            })
-        })
-    }
-
-    pub fn read_many_outcomes(
-        &self,
-        requests: &[FsRead<'_, F>],
-    ) -> VfResult<BatchOutcome<ReadResult>> {
-        let reads = self.read_ops(requests)?;
-        Ok(self
-            .lock()?
-            .read_many_outcomes(&reads)
-            .map_errors(|index, error| {
-                requests.get(index).map_or(error.clone(), |request| {
-                    error.with_context("read_many", request.file.path())
+        let results = self.lock()?.read_many(&reads).map_err(|error| {
+            error
+                .index_opt()
+                .and_then(|index| requests.get(index))
+                .map_or(error.clone(), |request| {
+                    error.with_context("readv", request.file.path())
                 })
-            }))
+        })?;
+        if results.len() != requests.len() {
+            return Err(wrong_result_count("readv", requests.len(), results.len()));
+        }
+        Ok(results)
     }
 
     fn read_ops(&self, requests: &[FsRead<'_, F>]) -> VfResult<Vec<ReadOp>> {
@@ -356,7 +353,7 @@ impl<F: VectorFileSystem> FsClient<F> {
         Ok(reads)
     }
 
-    pub fn read_many_into(&self, requests: &mut [FsReadInto<'_, F>]) -> VfResult<Vec<usize>> {
+    pub fn readv_into(&self, requests: &mut [FsReadInto<'_, F>]) -> VfResult<Vec<usize>> {
         let mut reads = Vec::with_capacity(requests.len());
         for (index, request) in requests.iter().enumerate() {
             self.validate_owner(request.file, index)?;
@@ -367,21 +364,25 @@ impl<F: VectorFileSystem> FsClient<F> {
             ));
         }
         let results = self.lock()?.read_many(&reads).map_err(|error| {
-            requests
-                .get(error.index())
+            error
+                .index_opt()
+                .and_then(|index| requests.get(index))
                 .map_or(error.clone(), |request| {
-                    error.with_context("read_many_into", request.file.path())
+                    error.with_context("readv_into", request.file.path())
                 })
         })?;
         if results.len() != requests.len() {
-            return Err(VfError::client(0, crate::ERR_IO)
-                .with_context("read_many_into", Path::new("<batch>")));
+            return Err(wrong_result_count(
+                "readv_into",
+                requests.len(),
+                results.len(),
+            ));
         }
         let mut lengths = Vec::with_capacity(results.len());
         for (index, (request, result)) in requests.iter_mut().zip(results).enumerate() {
             if result.data.len() > request.buffer.len() {
                 return Err(VfError::client(index, crate::ERR_IO)
-                    .with_context("read_many_into", request.file.path()));
+                    .with_context("readv_into", request.file.path()));
             }
             request.buffer[..result.data.len()].copy_from_slice(&result.data);
             lengths.push(result.data.len());
@@ -389,29 +390,20 @@ impl<F: VectorFileSystem> FsClient<F> {
         Ok(lengths)
     }
 
-    pub fn write_many(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<WriteResult>> {
+    pub fn writev(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<WriteResult>> {
         let writes = self.write_ops(requests)?;
-        self.lock()?.write_many(&writes).map_err(|error| {
-            let index = error.index().min(requests.len().saturating_sub(1));
-            requests.get(index).map_or(error.clone(), |request| {
-                error.with_context("write_many", request.file.path())
-            })
-        })
-    }
-
-    pub fn write_many_outcomes(
-        &self,
-        requests: &[FsWrite<'_, F>],
-    ) -> VfResult<BatchOutcome<WriteResult>> {
-        let writes = self.write_ops(requests)?;
-        Ok(self
-            .lock()?
-            .write_many_outcomes(&writes)
-            .map_errors(|index, error| {
-                requests.get(index).map_or(error.clone(), |request| {
-                    error.with_context("write_many", request.file.path())
+        let results = self.lock()?.write_many(&writes).map_err(|error| {
+            error
+                .index_opt()
+                .and_then(|index| requests.get(index))
+                .map_or(error.clone(), |request| {
+                    error.with_context("writev", request.file.path())
                 })
-            }))
+        })?;
+        if results.len() != requests.len() {
+            return Err(wrong_result_count("writev", requests.len(), results.len()));
+        }
+        Ok(results)
     }
 
     fn write_ops<'a>(&self, requests: &'a [FsWrite<'a, F>]) -> VfResult<Vec<WriteOpRef<'a>>> {
@@ -514,23 +506,12 @@ impl<'a, F: FileSystem> OpenOptions<'a, F> {
 }
 
 impl<F: VectorFileSystem> OpenOptions<'_, F> {
-    pub fn open_many<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<FsFile<F>>> {
+    pub fn openv<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<FsFile<F>>> {
         let requests: Vec<OpenRequest> = paths
             .iter()
             .map(|path| OpenRequest::new(path.as_ref(), self.flags).mode(self.mode))
             .collect();
-        self.client.open_many(&requests)
-    }
-
-    pub fn open_many_outcomes<P: AsRef<Path>>(
-        &self,
-        paths: &[P],
-    ) -> VfResult<BatchOutcome<FsFile<F>>> {
-        let requests: Vec<OpenRequest> = paths
-            .iter()
-            .map(|path| OpenRequest::new(path.as_ref(), self.flags).mode(self.mode))
-            .collect();
-        self.client.open_many_outcomes(&requests)
+        self.client.openv(&requests)
     }
 }
 
@@ -802,14 +783,14 @@ impl<F: FileSystem> Seek for FsFile<F> {
     }
 }
 
-/// Typed read request for [`FsClient::read_many`].
+/// Typed read request for [`FsClient::readv`].
 pub struct FsRead<'a, F: FileSystem> {
     file: &'a FsFile<F>,
     offset: VfOffset,
     length: usize,
 }
 
-/// Typed borrowed write request for [`FsClient::write_many`].
+/// Typed borrowed write request for [`FsClient::writev`].
 pub struct FsWrite<'a, F: FileSystem> {
     file: &'a FsFile<F>,
     offset: VfOffset,

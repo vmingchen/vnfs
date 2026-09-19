@@ -10,6 +10,7 @@ keywords = ["smb", "smb2", "smb3", "filesystem", "vfsi"]
 [features]
 default = []
 server-copy = []
+test-faults = ["vfsi-core/test-faults", "vfsi-sync/test-faults"]
 
 [dependencies]
 futures-util = "0.3"

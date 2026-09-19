@@ -14,7 +14,148 @@ use std::sync::OnceLock;
 use vnfs::NfsVecFs;
 use vnfs::legacy::nfs::*;
 
+#[cfg(feature = "test-faults")]
+use std::io::{self, Read, Write};
+#[cfg(feature = "test-faults")]
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+#[cfg(feature = "test-faults")]
+use std::sync::{
+    Arc, Condvar, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+#[cfg(feature = "test-faults")]
+use std::thread::JoinHandle;
+#[cfg(feature = "test-faults")]
+use std::time::Duration;
+#[cfg(feature = "test-faults")]
+use vnfs::internal::faults::{FaultScript, OpenFaultPoint};
+
 use vfsi_sync::test_support as common;
+
+/// Test-only ONC-RPC record proxy. It forwards complete TCP records until
+/// armed, then consumes and drops exactly one server reply before closing the
+/// connection. That models a reply lost after the server executed a request.
+#[cfg(feature = "test-faults")]
+struct DropReplyProxy {
+    address: SocketAddr,
+    armed: Arc<AtomicBool>,
+    dropped: Arc<(Mutex<bool>, Condvar)>,
+    stop: Arc<AtomicBool>,
+    accept_thread: Option<JoinHandle<()>>,
+}
+
+#[cfg(feature = "test-faults")]
+impl DropReplyProxy {
+    fn start(target: SocketAddr) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind NFS fault proxy");
+        let address = listener.local_addr().expect("proxy local address");
+        let armed = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new((Mutex::new(false), Condvar::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let accept_armed = Arc::clone(&armed);
+        let accept_dropped = Arc::clone(&dropped);
+        let accept_stop = Arc::clone(&stop);
+        let accept_thread = std::thread::spawn(move || {
+            while let Ok((client, _)) = listener.accept() {
+                if accept_stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let server = TcpStream::connect(target).expect("connect proxy to NFS");
+                client.set_nodelay(true).ok();
+                server.set_nodelay(true).ok();
+                let request_client = client.try_clone().expect("clone proxy client");
+                let request_server = server.try_clone().expect("clone proxy server");
+                std::thread::spawn(move || {
+                    let mut source = request_client;
+                    let mut destination = request_server;
+                    let _ = io::copy(&mut source, &mut destination);
+                });
+                let armed = Arc::clone(&accept_armed);
+                let dropped = Arc::clone(&accept_dropped);
+                std::thread::spawn(move || forward_rpc_replies(server, client, &armed, &dropped));
+            }
+        });
+        Self {
+            address,
+            armed,
+            dropped,
+            stop,
+            accept_thread: Some(accept_thread),
+        }
+    }
+
+    fn endpoint(&self) -> String {
+        self.address.to_string()
+    }
+
+    fn arm(&self) {
+        assert!(!self.armed.swap(true, Ordering::SeqCst));
+    }
+
+    fn wait_for_drop(&self) {
+        let (state, changed) = &*self.dropped;
+        let state = state.lock().expect("reply-loss state poisoned");
+        let (state, timeout) = changed
+            .wait_timeout_while(state, Duration::from_secs(5), |dropped| !*dropped)
+            .expect("reply-loss state poisoned");
+        assert!(*state && !timeout.timed_out(), "proxy did not drop a reply");
+    }
+}
+
+#[cfg(feature = "test-faults")]
+impl Drop for DropReplyProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(self.address);
+        if let Some(thread) = self.accept_thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(feature = "test-faults")]
+fn forward_rpc_replies(
+    mut server: TcpStream,
+    mut client: TcpStream,
+    armed: &AtomicBool,
+    dropped: &(Mutex<bool>, Condvar),
+) {
+    loop {
+        let mut header = [0u8; 4];
+        if server.read_exact(&mut header).is_err() {
+            return;
+        }
+        let discard = armed.swap(false, Ordering::SeqCst);
+        loop {
+            let marker = u32::from_be_bytes(header);
+            let final_fragment = marker & 0x8000_0000 != 0;
+            let length = (marker & 0x7fff_ffff) as usize;
+            let mut fragment = vec![0; length];
+            if server.read_exact(&mut fragment).is_err() {
+                return;
+            }
+            if !discard
+                && (client.write_all(&header).is_err() || client.write_all(&fragment).is_err())
+            {
+                return;
+            }
+            if final_fragment {
+                break;
+            }
+            if server.read_exact(&mut header).is_err() {
+                return;
+            }
+        }
+        if discard {
+            let (state, changed) = dropped;
+            *state.lock().expect("reply-loss state poisoned") = true;
+            changed.notify_all();
+            let _ = server.shutdown(Shutdown::Both);
+            let _ = client.shutdown(Shutdown::Both);
+            return;
+        }
+    }
+}
 
 #[test]
 fn shared_suite_on_nfs() {
@@ -121,29 +262,25 @@ fn rust_native_client_workflow_on_nfs() {
         .write(true)
         .create(true)
         .truncate(true)
-        .open_many(&paths)
+        .openv(&paths)
         .unwrap();
     client
-        .write_many_outcomes(&[
+        .writev(&[
             files[0].write_request_at(0, b"one"),
             files[1].write_request_at(0, b"two"),
         ])
-        .unwrap()
-        .into_values()
         .unwrap();
     let values = client
-        .read_many_outcomes(&[
+        .readv(&[
             files[0].read_request_at(0, 3),
             files[1].read_request_at(0, 3),
         ])
-        .unwrap()
-        .into_values()
         .unwrap();
     assert_eq!(values[0].data, b"one");
     assert_eq!(values[1].data, b"two");
     assert_eq!(client.metadata(&paths[0]).unwrap().len(), 3);
     assert_eq!(client.read_dir(&nested).unwrap().len(), 2);
-    client.close_many(files).unwrap();
+    client.closev(files).unwrap();
     client.remove_dir_all(&dir).unwrap();
 }
 
@@ -975,9 +1112,13 @@ fn openv_closev_path_is_one_compound_each() {
     let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
     let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
     let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
-    let files = c
-        .openv(&refs, &[libc::O_CREAT | libc::O_RDWR; 5], &[0o644; 5])
-        .unwrap();
+    let files = VecFs::openv(
+        &mut c,
+        &refs,
+        &[libc::O_CREAT | libc::O_RDWR; 5],
+        &[0o644; 5],
+    )
+    .unwrap();
     let compounds = vnfs::legacy::compound::thread_compound_stats().0;
     assert_eq!(
         compounds, 1,
@@ -1186,8 +1327,8 @@ fn writev_partial_failure_reports_failing_index() {
         ])
         .unwrap_err();
     assert_eq!(
-        e.index(),
-        1,
+        e.index_opt(),
+        Some(1),
         "failure must be attributed to the missing file"
     );
     // The prefix op executed before the failure; the suffix was not reached.
@@ -1210,13 +1351,135 @@ fn openv_partial_failure_resumes_from_failing_index() {
     let refs = [Path::new(&f0), Path::new(&bad), Path::new(&f2)];
     let flags = [libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 3];
     let modes = [0o644; 3];
-    let e = c.openv(&refs, &flags, &modes).unwrap_err();
-    assert_eq!(e.index(), 1, "resume must fail at the missing parent");
+    let e = VecFs::openv(&mut c, &refs, &flags, &modes).unwrap_err();
+    assert_eq!(
+        e.index_opt(),
+        Some(1),
+        "resume must fail at the missing parent"
+    );
+    assert_eq!(
+        e.status(),
+        Some(StatusCode::Nfs(e.err_no())),
+        "the raw NFS status must retain its protocol domain"
+    );
     assert!(c.exists(Path::new(&f0)).unwrap(), "prefix open created f0");
     assert!(
         !c.exists(Path::new(&f2)).unwrap(),
         "suffix was not attempted"
     );
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn openv_injected_registration_failure_closes_every_confirmed_handle() {
+    let dir = setup_dir("openv_fault_register");
+    let mut client = client();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeRegister { index: 1 },
+        VfError::transport(None, "injected registration failure"),
+    ));
+    client.set_fault_injector(script.clone());
+    let paths = [
+        format!("{dir}/f0"),
+        format!("{dir}/f1"),
+        format!("{dir}/f2"),
+    ];
+    let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
+    let error = VecFs::openv(
+        &mut client,
+        &refs,
+        &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 3],
+        &[0o644; 3],
+    )
+    .unwrap_err();
+    assert_eq!(error.index_opt(), Some(1));
+    assert!(
+        script.is_consumed(),
+        "unused faults: {:?}",
+        script.remaining()
+    );
+    assert_eq!(client.test_open_handle_count(), 0);
+    client.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn openv_injected_post_reply_transport_failure_has_no_fabricated_index() {
+    let dir = setup_dir("openv_fault_reply");
+    let mut client = client();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::AfterReply { chunk: 0 },
+        VfError::transport(None, "injected lost reply"),
+    ));
+    client.set_fault_injector(script.clone());
+    let paths = [format!("{dir}/f0"), format!("{dir}/f1")];
+    let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
+    let error = VecFs::openv(
+        &mut client,
+        &refs,
+        &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
+        &[0o644; 2],
+    )
+    .unwrap_err();
+    assert!(error.is_transport());
+    assert_eq!(error.index_opt(), None);
+    assert!(
+        client.exists(Path::new(&paths[0])).unwrap(),
+        "the completed mutating open must not be replayed"
+    );
+    assert!(
+        client.exists(Path::new(&paths[1])).unwrap(),
+        "the completed mutating open must not be replayed"
+    );
+    assert!(
+        script.is_consumed(),
+        "unused faults: {:?}",
+        script.remaining()
+    );
+    assert_eq!(client.test_open_handle_count(), 0);
+    client.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn openv_does_not_replay_exclusive_create_after_real_reply_loss() {
+    let dir = setup_dir("openv_proxy_reply_loss");
+    let proxy = DropReplyProxy::start("127.0.0.1:2049".parse().unwrap());
+    let endpoint = proxy.endpoint();
+    let mut proxied = NfsVecFs::connect_with_options(
+        &endpoint,
+        NfsConnectOptions {
+            minorversion: match std::env::var("VNFS_TEST_MINOR").as_deref() {
+                Ok("1") => Some(1),
+                Ok("2") => Some(2),
+                _ => None,
+            },
+            request_timeout: Duration::from_millis(500),
+            auto_reconnect: false,
+            ..NfsConnectOptions::default()
+        },
+    )
+    .expect("connect through NFS reply-loss proxy");
+    let paths = [format!("{dir}/f0"), format!("{dir}/f1")];
+    let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
+
+    proxy.arm();
+    let error = VecFs::openv(
+        &mut proxied,
+        &refs,
+        &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
+        &[0o644; 2],
+    )
+    .unwrap_err();
+    proxy.wait_for_drop();
+
+    assert!(error.is_transport(), "unexpected replay result: {error}");
+    assert_eq!(error.index_opt(), None);
+    assert_eq!(proxied.test_open_handle_count(), 0);
+    let mut admin = client();
+    assert!(admin.exists(Path::new(&paths[0])).unwrap());
+    assert!(admin.exists(Path::new(&paths[1])).unwrap());
+    admin.rm(&[Path::new(&dir)], true).unwrap();
 }
 
 #[test]
@@ -1237,7 +1500,11 @@ fn removev_partial_failure_resumes_from_failing_index() {
         .map(|p| VfFile::from_path(p))
         .collect();
     let e = c.removev(&files).unwrap_err();
-    assert_eq!(e.index(), 1, "resume must fail at the missing path");
+    assert_eq!(
+        e.index_opt(),
+        Some(1),
+        "resume must fail at the missing path"
+    );
     assert!(!c.exists(Path::new(&f0)).unwrap(), "prefix was removed");
     assert!(
         c.exists(Path::new(&f2)).unwrap(),
@@ -1404,7 +1671,11 @@ fn mkdirv_partial_failure_applies_prefix_modes() {
         })
         .collect();
     let e = c.mkdirv(&attrs).unwrap_err();
-    assert_eq!(e.index(), 1, "EEXIST on the pre-created directory");
+    assert_eq!(
+        e.index_opt(),
+        Some(1),
+        "EEXIST on the pre-created directory"
+    );
     assert_eq!(
         c.stat(Path::new(&d0)).unwrap().mode & 0o777,
         0o711,
@@ -1467,7 +1738,8 @@ fn openv_ocreat_preserves_existing_mode() {
     c.close(&fd).unwrap();
 
     let g = format!("{}/new.txt", dir);
-    c.openv(
+    VecFs::openv(
+        &mut c,
         &[Path::new(&f), Path::new(&g)],
         &[libc::O_CREAT | libc::O_RDWR, libc::O_CREAT | libc::O_RDWR],
         &[0o777, 0o640],
@@ -1597,7 +1869,7 @@ fn openv_per_file_flags_and_modes() {
     let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
     let flags = [libc::O_CREAT | libc::O_RDWR, libc::O_CREAT | libc::O_RDONLY];
     let modes = [0o600, 0o640];
-    let files = c.openv(&refs, &flags, &modes).expect("openv");
+    let files = VecFs::openv(&mut c, &refs, &flags, &modes).expect("openv");
     assert_eq!(files.len(), 2);
     assert_eq!(c.stat(Path::new(&paths[0])).unwrap().mode & 0o777, 0o600);
     assert_eq!(c.stat(Path::new(&paths[1])).unwrap().mode & 0o777, 0o640);
@@ -1827,7 +2099,7 @@ fn copyv_reports_mid_batch_failure_index() {
             ExtentPair::new(&src2, 0, &dst2, 0, None),
         ])
         .expect_err("missing middle source must fail");
-    assert_eq!(error.index(), 1);
+    assert_eq!(error.index_opt(), Some(1));
     assert_eq!(error.err_no(), libc::ENOENT as u32);
     assert!(!c.exists(Path::new(&dst2)).unwrap());
 }

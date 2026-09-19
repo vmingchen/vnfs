@@ -1,6 +1,8 @@
 //! Minimal synchronous NFSv4 RPC layer over libntirpc's CLIENT / clnt_req
 //! machinery, mirroring the call pattern used by Ganesha's nfs_rpc_callback.c.
 
+use std::net::{TcpStream, ToSocketAddrs};
+use std::os::fd::{AsRawFd, IntoRawFd};
 use std::os::raw::c_void;
 #[cfg(not(libntirpc_legacy_free_cb))]
 use std::os::raw::{c_char, c_int};
@@ -113,6 +115,107 @@ pub fn svc_init_once() -> RpcResult<()> {
     }
 }
 
+fn has_explicit_port(host: &str) -> bool {
+    if let Some(rest) = host.strip_prefix('[') {
+        return rest
+            .split_once("]:")
+            .is_some_and(|(_, port)| port.parse::<u16>().is_ok());
+    }
+    host.matches(':').count() == 1
+        && host
+            .rsplit_once(':')
+            .is_some_and(|(name, port)| !name.is_empty() && port.parse::<u16>().is_ok())
+}
+
+#[cfg(feature = "rpcsec-gss")]
+fn default_service_principal(endpoint: &str) -> String {
+    let host = if let Some(rest) = endpoint.strip_prefix('[') {
+        rest.split_once("]:")
+            .map_or(endpoint, |(address, _)| address)
+    } else if has_explicit_port(endpoint) {
+        endpoint.rsplit_once(':').map_or(endpoint, |(host, _)| host)
+    } else {
+        endpoint
+    };
+    format!("nfs@{host}")
+}
+
+/// Create a libntirpc client over an explicitly addressed TCP stream.
+/// `clnt_ncreate_timed` performs RPC service discovery and treats `host:port`
+/// as a malformed hostname, so explicit endpoints use the lower-level
+/// connected-transport constructor.
+fn connect_explicit_endpoint(
+    endpoint: &str,
+    connect_timeout: Duration,
+) -> Option<RpcResult<*mut CLIENT>> {
+    if !has_explicit_port(endpoint) {
+        return None;
+    }
+    let addresses = match endpoint.to_socket_addrs() {
+        Ok(addresses) => addresses,
+        Err(error) => return Some(Err(RpcError::transport(error.to_string()))),
+    };
+    let mut last_error = None;
+    for address in addresses {
+        let stream = match TcpStream::connect_timeout(&address, connect_timeout) {
+            Ok(stream) => stream,
+            Err(error) => {
+                last_error = Some(error.to_string());
+                continue;
+            }
+        };
+        let fd = stream.as_raw_fd();
+        let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut storage_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        if unsafe {
+            libc::getpeername(
+                fd,
+                (&mut storage as *mut libc::sockaddr_storage).cast(),
+                &mut storage_len,
+            )
+        } != 0
+        {
+            last_error = Some(std::io::Error::last_os_error().to_string());
+            continue;
+        }
+        let remote = netbuf {
+            maxlen: storage_len,
+            len: storage_len,
+            buf: (&mut storage as *mut libc::sockaddr_storage).cast(),
+        };
+        let clnt = unsafe {
+            clnt_vc_ncreatef(
+                fd,
+                &remote,
+                NFS4_PROGRAM,
+                NFS_V4,
+                0,
+                0,
+                CLNT_CREATE_FLAG_NONE,
+            )
+        };
+        if clnt.is_null() {
+            last_error = Some("clnt_vc_ncreatef returned NULL".to_string());
+            continue;
+        }
+        let closes_fd = unsafe {
+            (*(*clnt).cl_ops)
+                .cl_control
+                .is_some_and(|control| control(clnt, CLSET_FD_CLOSE, std::ptr::null_mut()))
+        };
+        if !closes_fd {
+            unsafe { destroy_client(clnt) };
+            last_error = Some("failed to transfer TCP stream ownership to libntirpc".to_string());
+            continue;
+        }
+        let _ = stream.into_raw_fd();
+        return Some(Ok(clnt));
+    }
+    Some(Err(RpcError::transport(last_error.unwrap_or_else(|| {
+        format!("no addresses resolved for {endpoint}")
+    }))))
+}
+
 /// A connected RPC client on a single TCP transport.
 pub struct RpcClient {
     clnt: *mut CLIENT,
@@ -166,14 +269,17 @@ impl RpcClient {
             timeout.tv_usec = 1;
         }
 
-        let clnt = unsafe {
-            clnt_ncreate_timed(
-                host_c.as_ptr(),
-                NFS4_PROGRAM,
-                NFS_V4,
-                nettype.as_ptr(),
-                &timeout,
-            )
+        let clnt = match connect_explicit_endpoint(host, connect_timeout) {
+            Some(result) => result?,
+            None => unsafe {
+                clnt_ncreate_timed(
+                    host_c.as_ptr(),
+                    NFS4_PROGRAM,
+                    NFS_V4,
+                    nettype.as_ptr(),
+                    &timeout,
+                )
+            },
         };
         if clnt.is_null() {
             return Err(RpcError::transport("clnt_ncreate_timed returned NULL"));
@@ -210,7 +316,7 @@ impl RpcClient {
 
                 let principal = service_principal
                     .clone()
-                    .unwrap_or_else(|| format!("nfs@{host}"));
+                    .unwrap_or_else(|| default_service_principal(host));
                 let principal = std::ffi::CString::new(principal).map_err(|error| {
                     unsafe {
                         vfsi_libntirpc_uninstall_reply_verifier_fix(clnt);
@@ -411,6 +517,31 @@ mod tests {
     #[test]
     fn authentication_defaults_to_auth_sys() {
         assert_eq!(NfsAuthentication::default(), NfsAuthentication::AuthSys);
+    }
+
+    #[test]
+    fn explicit_port_detection_requires_a_numeric_port() {
+        assert!(has_explicit_port("server.example.com:2049"));
+        assert!(has_explicit_port("127.0.0.1:32049"));
+        assert!(has_explicit_port("[::1]:2049"));
+        assert!(!has_explicit_port("server.example.com"));
+        assert!(!has_explicit_port("127.0.0.1"));
+        assert!(!has_explicit_port("::1"));
+        assert!(!has_explicit_port("server.example.com:nfs"));
+    }
+
+    #[cfg(feature = "rpcsec-gss")]
+    #[test]
+    fn default_gss_principal_excludes_an_explicit_port() {
+        assert_eq!(
+            default_service_principal("server.example.com:2049"),
+            "nfs@server.example.com"
+        );
+        assert_eq!(default_service_principal("[::1]:2049"), "nfs@::1");
+        assert_eq!(
+            default_service_principal("server.example.com"),
+            "nfs@server.example.com"
+        );
     }
 
     #[cfg(feature = "rpcsec-gss")]

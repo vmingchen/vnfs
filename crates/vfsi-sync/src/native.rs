@@ -81,15 +81,26 @@ impl<T> NativeFileSystem for T where
 /// contract so a backend can implement scalar semantics without pretending
 /// to support native batching.
 pub trait VectorFileSystem: FileSystem {
+    /// Backend adapter used by [`FsClient::openv`](crate::FsClient::openv).
+    ///
+    /// Success must return exactly one handle per request, in request order.
+    /// On failure, the implementation must release every handle it confirmed
+    /// open before returning; the strict application API cannot receive a
+    /// partial handle vector and perform that cleanup itself.
+    #[doc(hidden)]
     fn open_many(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>>;
-    fn open_many_outcomes(&mut self, requests: &[OpenRequest]) -> BatchOutcome<VfFile>;
+
+    /// Close each handle in request order and attribute failures accordingly.
+    #[doc(hidden)]
     fn close_many(&mut self, files: &[VfFile]) -> VfResult<()>;
+
+    /// Return exactly one result per request, in request order.
+    #[doc(hidden)]
     fn read_many(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>>;
+
+    /// Return exactly one result per request, in request order.
+    #[doc(hidden)]
     fn write_many(&mut self, requests: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>>;
-    fn read_many_outcomes(&mut self, requests: &[ReadOp]) -> BatchOutcome<ReadResult>;
-    fn write_many_outcomes(&mut self, requests: &[WriteOpRef<'_>]) -> BatchOutcome<WriteResult>;
-    fn remove_many(&mut self, files: &[VfFile]) -> BatchOutcome<()>;
-    fn rename_many(&mut self, pairs: &[(VfFile, VfFile)]) -> BatchOutcome<()>;
 }
 
 fn metadata_mask() -> AttrMask {
@@ -333,31 +344,7 @@ impl<T: VecFs + ?Sized> VectorFileSystem for T {
             .map(|request| request.flags.to_libc())
             .collect::<VfResult<_>>()?;
         let modes: Vec<u32> = requests.iter().map(|request| request.mode).collect();
-        self.openv(&paths, &flags, &modes)
-    }
-
-    fn open_many_outcomes(&mut self, requests: &[OpenRequest]) -> BatchOutcome<VfFile> {
-        // A legacy fail-fast `openv` cannot return the successfully opened
-        // prefix, which would make RAII cleanup impossible. Execute this
-        // exact-outcome variant one-by-one until backends gain a native
-        // vector reply that retains every prefix handle. The ordinary
-        // `open_many` path remains fully vectorized.
-        let mut outcomes = Vec::with_capacity(requests.len());
-        let mut stopped = false;
-        for (index, request) in requests.iter().enumerate() {
-            if stopped {
-                outcomes.push(OpOutcome::NotAttempted);
-                continue;
-            }
-            match FileSystem::open_one(self, request) {
-                Ok(file) => outcomes.push(OpOutcome::Success(file)),
-                Err(error) => {
-                    outcomes.push(OpOutcome::Failed(error.with_index(index)));
-                    stopped = true;
-                }
-            }
-        }
-        BatchOutcome::new(outcomes)
+        VecFs::openv(self, &paths, &flags, &modes)
     }
 
     fn close_many(&mut self, files: &[VfFile]) -> VfResult<()> {
@@ -370,22 +357,5 @@ impl<T: VecFs + ?Sized> VectorFileSystem for T {
 
     fn write_many(&mut self, requests: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
         self.writev_borrowed(requests)
-    }
-
-    fn read_many_outcomes(&mut self, requests: &[ReadOp]) -> BatchOutcome<ReadResult> {
-        self.readv_outcomes(requests)
-    }
-
-    fn write_many_outcomes(&mut self, requests: &[WriteOpRef<'_>]) -> BatchOutcome<WriteResult> {
-        let len = requests.len();
-        BatchOutcome::from_fail_fast_values(len, self.writev_borrowed(requests))
-    }
-
-    fn remove_many(&mut self, files: &[VfFile]) -> BatchOutcome<()> {
-        self.removev_outcomes(files)
-    }
-
-    fn rename_many(&mut self, pairs: &[(VfFile, VfFile)]) -> BatchOutcome<()> {
-        self.renamev_outcomes(pairs)
     }
 }

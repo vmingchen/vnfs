@@ -29,9 +29,9 @@ use vfsi_local::DummyVecFs;
 use vfsi_nfs::NfsVecFs;
 #[cfg(feature = "nfs")]
 use vfsi_nfs::compound::{compound_stats, rpc_stats};
-use vfsi_sync::VecFs;
 #[cfg(feature = "smb")]
 use vfsi_smb::SmbVecFs;
+use vfsi_sync::VecFs;
 
 #[cfg(not(feature = "nfs"))]
 fn compound_stats() -> (u64, u64, u64, u64) {
@@ -107,8 +107,11 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
 
 /// Attach the failing operation's path to an error from a batched call.
 fn map_err_with_path(e: VfError, paths: &[PathBuf]) -> PyErr {
-    let idx = e.index();
-    to_py_err(e, paths.get(idx).map(PathBuf::as_path))
+    let path = e
+        .index_opt()
+        .and_then(|index| paths.get(index))
+        .map(PathBuf::as_path);
+    to_py_err(e, path)
 }
 
 // ---------------------------------------------------------------------------
@@ -477,11 +480,15 @@ impl NfsClient {
     }
 
     /// Negotiated NFS minor version, or None for the dummy backend.
+    // The erased multi-protocol VecFs object cannot use a concrete backend's
+    // extension trait; this compatibility query is intentional at this seam.
+    #[allow(deprecated)]
     fn minor_version(&self, py: Python<'_>) -> PyResult<Option<u32>> {
         self.with_fs(py, |fs| Ok(fs.nfs_minorversion()))
     }
 
     /// Negotiated SMB dialect revision, or None for non-SMB backends.
+    #[allow(deprecated)]
     fn smb_dialect(&self, py: Python<'_>) -> PyResult<Option<u16>> {
         self.with_fs(py, |fs| Ok(fs.smb_dialect()))
     }
@@ -1235,11 +1242,10 @@ impl NfsClient {
             .collect();
         self.with_fs(py, move |fs| {
             fs.renamev(&files).map_err(|e| {
-                let idx = e.index();
-                let path = pairs
-                    .get(idx)
-                    .map(|(a, _)| a.as_path())
-                    .or_else(|| pairs.first().map(|(a, _)| a.as_path()));
+                let path = e
+                    .index_opt()
+                    .and_then(|index| pairs.get(index))
+                    .map(|(source, _)| source.as_path());
                 to_py_err(e, path)
             })
         })

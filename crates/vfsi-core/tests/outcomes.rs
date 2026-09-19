@@ -1,18 +1,8 @@
 use std::path::Path;
 
 use vfsi_core::{
-    AttrMask, BatchOutcome, ErrorDomain, Metadata, OpOutcome, OutcomeCertainty, RetryClass,
-    StatusCode, VfAttrs, VfError,
+    AttrMask, ErrorDomain, Metadata, OutcomeCertainty, RetryClass, StatusCode, VfAttrs, VfError,
 };
-
-#[test]
-fn semantic_batch_failure_retains_prefix_and_suffix_state() {
-    let outcome = BatchOutcome::from_fail_fast(4, Err(VfError::failure(2, libc::ENOENT as u32)));
-    assert!(matches!(outcome.operations()[0], OpOutcome::Success(())));
-    assert!(matches!(outcome.operations()[1], OpOutcome::Success(())));
-    assert!(matches!(outcome.operations()[2], OpOutcome::Failed(_)));
-    assert!(matches!(outcome.operations()[3], OpOutcome::NotAttempted));
-}
 
 #[test]
 fn transport_failure_is_ambiguous_and_requires_reconciliation() {
@@ -27,20 +17,19 @@ fn transport_failure_is_ambiguous_and_requires_reconciliation() {
 }
 
 #[test]
-fn indexed_transport_failure_keeps_a_proven_completed_prefix() {
-    let outcome = BatchOutcome::from_fail_fast(
-        3,
-        Err(VfError::transport(Some(1), "later compound lost its reply")),
-    );
-    assert!(matches!(outcome.operations()[0], OpOutcome::Success(())));
-    assert!(matches!(
-        outcome.operations()[1],
-        OpOutcome::Indeterminate(_)
-    ));
-    assert!(matches!(
-        outcome.operations()[2],
-        OpOutcome::Indeterminate(_)
-    ));
+fn rpc_transport_placeholder_is_not_exposed_as_request_zero() {
+    let error = VfError::from_rpc_indexed(vfsi_core::RpcError::transport("connection reset"));
+    assert!(error.is_transport());
+    assert_eq!(error.index_opt(), None);
+}
+
+#[test]
+fn index_mapping_preserves_unknown_transport_location() {
+    let unknown = VfError::transport(None, "connection reset").map_index(|index| index + 10);
+    assert_eq!(unknown.index_opt(), None);
+
+    let known = VfError::failure(2, libc::ENOENT as u32).map_index(|index| index + 10);
+    assert_eq!(known.index_opt(), Some(12));
 }
 
 #[test]
@@ -49,19 +38,6 @@ fn nfs_status_is_not_conflated_with_errno() {
     assert_eq!(error.domain(), ErrorDomain::Nfs);
     assert_eq!(error.status(), Some(StatusCode::Nfs(10044)));
     assert_eq!(error.index_opt(), Some(7));
-}
-
-#[test]
-fn batch_helpers_preserve_indices_and_errors() {
-    let outcome = BatchOutcome::new(vec![
-        OpOutcome::Success(2),
-        OpOutcome::Indeterminate(VfError::transport(Some(1), "lost")),
-    ])
-    .map_with_index(|index, value| index + value)
-    .map_errors(|index, error| error.with_index(index).with_context("write", "/file"));
-    assert_eq!(outcome.len(), 2);
-    assert_eq!(outcome.indeterminate_indices().collect::<Vec<_>>(), [1]);
-    assert_eq!(outcome.first_error().unwrap().operation(), Some("write"));
 }
 
 #[test]

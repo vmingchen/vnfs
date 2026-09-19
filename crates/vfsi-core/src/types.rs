@@ -50,8 +50,8 @@ pub const NF4FIFO: u32 = 7;
 /// The failure of one operation in a vectorized call.
 ///
 /// Either a filesystem status failure attributable to a specific operation
-/// index, or a transport / client-side failure (where the index is
-/// best-effort: backends report 0 when the failure cannot be attributed).
+/// index, or a transport / client-side failure (where the index is optional
+/// because some failures cannot be attributed to one request).
 /// An indexed failure does not roll back an already-completed prefix, and a
 /// transport failure can make the outcome of an in-flight mutation ambiguous.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +137,7 @@ impl VfError {
 
     /// The operation index this error refers to (best-effort for transport
     /// failures; 0 when unknown).
+    #[deprecated(note = "use index_opt(); an unknown transport location is not request zero")]
     pub fn index(&self) -> usize {
         match self {
             VfError::Op { index, .. } => *index,
@@ -192,10 +193,13 @@ impl VfError {
     }
 
     /// Like [`from_rpc`](VfError::from_rpc), but trusts `e.op_index` as the
-    /// caller-relative operation index. The batched client helpers translate
-    /// compound positions to caller indices before returning, so batched
-    /// backend calls can use this directly.
+    /// caller-relative operation index for a server status. Transport errors
+    /// keep an unknown index because [`RpcError`] uses zero only as a wire/API
+    /// placeholder in that case.
     pub fn from_rpc_indexed(e: RpcError) -> VfError {
+        if e.is_transport() {
+            return VfError::from_rpc(e, None);
+        }
         let idx = e.op_index;
         VfError::from_rpc(e, Some(idx))
     }
@@ -227,6 +231,15 @@ impl VfError {
                 operation,
                 path,
             },
+        }
+    }
+
+    /// Transform a known request index while preserving an unattributable
+    /// transport failure as `None`.
+    pub fn map_index(self, map: impl FnOnce(usize) -> usize) -> VfError {
+        match self.index_opt() {
+            Some(index) => self.with_index(map(index)),
+            None => self,
         }
     }
 
@@ -400,266 +413,6 @@ impl VfError {
             RetryClass::Never
         } else {
             RetryClass::Safe
-        }
-    }
-}
-
-/// Per-operation state returned by the outcome-aware vector API.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum OpOutcome<T> {
-    Success(T),
-    /// The operation is known to have completed, but a legacy fail-fast
-    /// backend discarded its returned value after a later operation failed.
-    Completed,
-    Failed(VfError),
-    /// The backend stopped before dispatching this operation.
-    NotAttempted,
-    /// The request may have reached the server, but no authoritative result
-    /// was received. Mutating operations must not be blindly replayed.
-    Indeterminate(VfError),
-}
-
-/// Complete, index-preserving result of an ordered vector request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BatchOutcome<T> {
-    operations: Vec<OpOutcome<T>>,
-}
-
-impl<T> BatchOutcome<T> {
-    pub fn new(operations: Vec<OpOutcome<T>>) -> Self {
-        Self { operations }
-    }
-
-    pub fn all_success(values: Vec<T>) -> Self {
-        Self::new(values.into_iter().map(OpOutcome::Success).collect())
-    }
-
-    pub fn operations(&self) -> &[OpOutcome<T>] {
-        &self.operations
-    }
-
-    pub fn iter(&self) -> std::slice::Iter<'_, OpOutcome<T>> {
-        self.operations.iter()
-    }
-
-    pub fn len(&self) -> usize {
-        self.operations.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.operations.is_empty()
-    }
-
-    pub fn into_operations(self) -> Vec<OpOutcome<T>> {
-        self.operations
-    }
-
-    pub fn is_complete_success(&self) -> bool {
-        self.operations
-            .iter()
-            .all(|outcome| matches!(outcome, OpOutcome::Success(_)))
-    }
-
-    /// Transform successful values without disturbing per-operation failure
-    /// or completion state.
-    pub fn map<U>(self, mut transform: impl FnMut(T) -> U) -> BatchOutcome<U> {
-        self.map_with_index(|_, value| transform(value))
-    }
-
-    /// Transform successful values with their original request indices.
-    pub fn map_with_index<U>(self, mut transform: impl FnMut(usize, T) -> U) -> BatchOutcome<U> {
-        BatchOutcome::new(
-            self.operations
-                .into_iter()
-                .enumerate()
-                .map(|(index, outcome)| match outcome {
-                    OpOutcome::Success(value) => OpOutcome::Success(transform(index, value)),
-                    OpOutcome::Completed => OpOutcome::Completed,
-                    OpOutcome::Failed(error) => OpOutcome::Failed(error),
-                    OpOutcome::NotAttempted => OpOutcome::NotAttempted,
-                    OpOutcome::Indeterminate(error) => OpOutcome::Indeterminate(error),
-                })
-                .collect(),
-        )
-    }
-
-    /// Enrich errors while preserving every outcome and request index.
-    pub fn map_errors(mut self, mut transform: impl FnMut(usize, VfError) -> VfError) -> Self {
-        for (index, outcome) in self.operations.iter_mut().enumerate() {
-            match outcome {
-                OpOutcome::Failed(error) | OpOutcome::Indeterminate(error) => {
-                    *error = transform(index, error.clone());
-                }
-                _ => {}
-            }
-        }
-        self
-    }
-
-    pub fn first_error(&self) -> Option<&VfError> {
-        self.operations.iter().find_map(|outcome| match outcome {
-            OpOutcome::Failed(error) | OpOutcome::Indeterminate(error) => Some(error),
-            _ => None,
-        })
-    }
-
-    pub fn indeterminate_indices(&self) -> impl Iterator<Item = usize> + '_ {
-        self.operations
-            .iter()
-            .enumerate()
-            .filter_map(|(index, outcome)| {
-                matches!(outcome, OpOutcome::Indeterminate(_)).then_some(index)
-            })
-    }
-
-    /// Convert to the historical fail-fast shape, returning the first error.
-    pub fn into_fail_fast(self) -> VfResult<Vec<T>> {
-        let mut values = Vec::with_capacity(self.operations.len());
-        for outcome in self.operations {
-            match outcome {
-                OpOutcome::Success(value) => values.push(value),
-                OpOutcome::Completed => {
-                    return Err(VfError::transport(
-                        None,
-                        "completed operation result was not retained",
-                    ));
-                }
-                OpOutcome::Failed(error) | OpOutcome::Indeterminate(error) => return Err(error),
-                OpOutcome::NotAttempted => {
-                    return Err(VfError::transport(None, "operation was not attempted"));
-                }
-            }
-        }
-        Ok(values)
-    }
-
-    /// Consume a completely successful batch. This is the ergonomic alias
-    /// for compatibility-oriented [`into_fail_fast`](Self::into_fail_fast).
-    pub fn into_values(self) -> VfResult<Vec<T>> {
-        self.into_fail_fast()
-    }
-}
-
-impl<T> IntoIterator for BatchOutcome<T> {
-    type Item = OpOutcome<T>;
-    type IntoIter = std::vec::IntoIter<Self::Item>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.operations.into_iter()
-    }
-}
-
-impl<'a, T> IntoIterator for &'a BatchOutcome<T> {
-    type Item = &'a OpOutcome<T>;
-    type IntoIter = std::slice::Iter<'a, OpOutcome<T>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.operations.iter()
-    }
-}
-
-impl<T> BatchOutcome<T> {
-    /// Adapt a legacy ordered vector result without inventing lost values.
-    pub fn from_fail_fast_values(len: usize, result: VfResult<Vec<T>>) -> Self {
-        match result {
-            Ok(values) if values.len() == len => Self::all_success(values),
-            Ok(_) => Self::new(
-                (0..len)
-                    .map(|_| {
-                        OpOutcome::Indeterminate(VfError::transport(
-                            None,
-                            "backend returned the wrong result count",
-                        ))
-                    })
-                    .collect(),
-            ),
-            Err(error) if error.is_transport() => {
-                let known_prefix = error.index_opt().unwrap_or(0).min(len);
-                Self::new(
-                    (0..len)
-                        .map(|index| {
-                            if index < known_prefix {
-                                OpOutcome::Completed
-                            } else {
-                                OpOutcome::Indeterminate(error.clone())
-                            }
-                        })
-                        .collect(),
-                )
-            }
-            Err(error) => {
-                let failed = error.index_opt().unwrap_or(len);
-                if failed >= len {
-                    return Self::new(
-                        (0..len)
-                            .map(|_| OpOutcome::Indeterminate(error.clone()))
-                            .collect(),
-                    );
-                }
-                Self::new(
-                    (0..len)
-                        .map(|index| {
-                            if index < failed {
-                                OpOutcome::Completed
-                            } else if index == failed {
-                                OpOutcome::Failed(error.clone())
-                            } else {
-                                OpOutcome::NotAttempted
-                            }
-                        })
-                        .collect(),
-                )
-            }
-        }
-    }
-}
-
-impl BatchOutcome<()> {
-    /// Preserve the known prefix of an ordered, fail-fast mutation. A
-    /// protocol status proves the prefix completed and the failing operation
-    /// did not; a transport failure makes every dispatched outcome
-    /// indeterminate.
-    pub fn from_fail_fast(len: usize, result: VfRes) -> Self {
-        match result {
-            Ok(()) => Self::all_success((0..len).map(|_| ()).collect()),
-            Err(error) if error.is_transport() => {
-                let known_prefix = error.index_opt().unwrap_or(0).min(len);
-                Self::new(
-                    (0..len)
-                        .map(|index| {
-                            if index < known_prefix {
-                                OpOutcome::Success(())
-                            } else {
-                                OpOutcome::Indeterminate(error.clone())
-                            }
-                        })
-                        .collect(),
-                )
-            }
-            Err(error) => {
-                let failed = error.index_opt().unwrap_or(len);
-                if failed >= len {
-                    return Self::new(
-                        (0..len)
-                            .map(|_| OpOutcome::Indeterminate(error.clone()))
-                            .collect(),
-                    );
-                }
-                Self::new(
-                    (0..len)
-                        .map(|index| {
-                            if index < failed {
-                                OpOutcome::Success(())
-                            } else if index == failed {
-                                OpOutcome::Failed(error.clone())
-                            } else {
-                                OpOutcome::NotAttempted
-                            }
-                        })
-                        .collect(),
-                )
-            }
         }
     }
 }

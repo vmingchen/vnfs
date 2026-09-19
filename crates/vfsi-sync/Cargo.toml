@@ -11,6 +11,7 @@ keywords = ["filesystem", "vectorized", "batch", "vfsi"]
 [features]
 default = []
 test-support = []
+test-faults = ["vfsi-core/test-faults"]
 
 [dependencies]
 libc = { workspace = true }

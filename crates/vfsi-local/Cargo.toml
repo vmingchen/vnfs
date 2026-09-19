@@ -8,6 +8,10 @@ description = "Local filesystem backend for VFSI"
 repository = "https://github.com/vmingchen/vnfs"
 keywords = ["filesystem", "vectorized", "local", "vfsi"]
 
+[features]
+default = []
+test-faults = ["vfsi-core/test-faults", "vfsi-sync/test-faults"]
+
 [dependencies]
 libc = { workspace = true }
 vfsi-core = { workspace = true }

@@ -2,6 +2,8 @@
 //! the VFSI workspace.
 
 mod error;
+#[doc(hidden)]
+pub mod internal;
 pub mod path;
 mod types;
 

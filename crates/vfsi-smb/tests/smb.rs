@@ -18,6 +18,13 @@ use vfsi_sync::{
 
 use vfsi_sync::test_support as common;
 
+#[cfg(feature = "test-faults")]
+use std::sync::Arc;
+#[cfg(feature = "test-faults")]
+use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+#[cfg(feature = "test-faults")]
+use vfsi_sync::VfError;
+
 fn required(name: &str) -> bool {
     std::env::var(name).as_deref() == Ok("1")
 }
@@ -62,28 +69,58 @@ fn rust_native_file_workflow_on_smb() {
         .write(true)
         .create(true)
         .truncate(true)
-        .open_many(&paths)
+        .openv(&paths)
         .unwrap();
     client
-        .write_many_outcomes(&[
+        .writev(&[
             files[0].write_request_at(0, b"one"),
             files[1].write_request_at(0, b"two"),
         ])
-        .unwrap()
-        .into_values()
         .unwrap();
     let values = client
-        .read_many_outcomes(&[
+        .readv(&[
             files[0].read_request_at(0, 3),
             files[1].read_request_at(0, 3),
         ])
-        .unwrap()
-        .into_values()
         .unwrap();
     assert_eq!(values[0].data, b"one");
     assert_eq!(values[1].data, b"two");
-    client.close_many(files).unwrap();
+    client.closev(files).unwrap();
     client.remove_dir_all(&root).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn smb_openv_injected_registration_failure_closes_all_successes() {
+    let Some(mut fs) = connect() else {
+        eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-openv-fault-{}", std::process::id()));
+    let _ = fs.rm(&[root.as_path()], true);
+    fs.mkdir(root.as_path(), 0o755).unwrap();
+    let paths = [root.join("f0"), root.join("f1"), root.join("f2")];
+    let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeRegister { index: 1 },
+        VfError::transport(None, "injected registration failure"),
+    ));
+    fs.set_fault_injector(script.clone());
+    let error = VecFs::openv(
+        &mut fs,
+        &refs,
+        &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 3],
+        &[0o644; 3],
+    )
+    .unwrap_err();
+    assert_eq!(error.index_opt(), Some(1));
+    assert!(
+        script.is_consumed(),
+        "unused faults: {:?}",
+        script.remaining()
+    );
+    assert_eq!(fs.test_open_handle_count(), 0);
+    fs.rm(&[root.as_path()], true).unwrap();
 }
 
 #[test]

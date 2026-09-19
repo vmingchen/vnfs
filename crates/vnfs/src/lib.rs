@@ -49,8 +49,8 @@ pub mod prelude {
     #[cfg(feature = "nfs")]
     pub use crate::{Nfs, NfsBuilder, NfsClient, NfsFile};
     pub use vfsi_core::{
-        BatchOutcome, Capabilities, DirEntry, Metadata, OpOutcome, OpenFlags, OpenRequest,
-        Permissions, ReadResult, VfError, VfResult, WriteResult,
+        Capabilities, DirEntry, Metadata, OpenFlags, OpenRequest, Permissions, ReadResult, VfError,
+        VfResult, WriteResult,
     };
     pub use vfsi_sync::{
         CopyFileSystem, DirectoryFileSystem, FileSystem, FsClient, FsFile, LinkFileSystem,

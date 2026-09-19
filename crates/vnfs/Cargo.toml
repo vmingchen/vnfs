@@ -19,6 +19,12 @@ nfs = ["dep:nfsv41-sys", "dep:vfsi-nfs"]
 dummy = ["dep:vfsi-local"]
 server-copy = ["vfsi-nfs?/server-copy"]
 rpcsec-gss = ["nfs", "vfsi-nfs/rpcsec-gss"]
+test-faults = [
+    "vfsi-core/test-faults",
+    "vfsi-sync/test-faults",
+    "vfsi-nfs?/test-faults",
+    "vfsi-local?/test-faults",
+]
 
 [dependencies]
 libc = { workspace = true }

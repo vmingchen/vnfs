@@ -8,6 +8,11 @@ use std::path::Path;
 use vnfs::dummy_vecfs::DummyVecFs;
 use vnfs::{VecFs, VecFsExt, VfOffset};
 
+#[cfg(feature = "test-faults")]
+use std::sync::Arc;
+#[cfg(feature = "test-faults")]
+use vnfs::internal::faults::{FaultScript, OpenFaultPoint};
+
 /// A `DummyVecFs` rooted at a fresh unique temp directory.
 fn dummy() -> DummyVecFs {
     let root = std::env::temp_dir().join(format!(
@@ -61,7 +66,7 @@ fn dummy_errors_on_missing_file() {
     let res = fs.readv(&[ReadOp::from_path("/data/missing", VfOffset::At(0), 8)]);
     match res {
         Err(e) => {
-            assert_eq!(e.index(), 0);
+            assert_eq!(e.index_opt(), Some(0));
             assert_eq!(e.err_no(), 2, "ENOENT");
         }
         Ok(_) => panic!("readv of missing file must fail"),
@@ -197,20 +202,20 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
         .unwrap();
 
     client
-        .write_many(&[
+        .writev(&[
             first.write_request_at(0, b"one"),
             second.write_request_at(0, b"two"),
         ])
         .unwrap();
     let read_results = client
-        .read_many(&[first.read_request_at(0, 3), second.read_request_at(0, 3)])
+        .readv(&[first.read_request_at(0, 3), second.read_request_at(0, 3)])
         .unwrap();
     assert_eq!(read_results[0].data, b"one");
     assert_eq!(read_results[1].data, b"two");
     let mut one_buffer = [0; 3];
     let mut two_buffer = [0; 3];
     let lengths = client
-        .read_many_into(&mut [
+        .readv_into(&mut [
             first.read_request_at_into(0, &mut one_buffer),
             second.read_request_at_into(0, &mut two_buffer),
         ])
@@ -221,7 +226,7 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
     let other_client = FsClient::new(dummy());
     assert_eq!(
         other_client
-            .read_many(&[first.read_request_at(0, 1)])
+            .readv(&[first.read_request_at(0, 1)])
             .unwrap_err()
             .err_no(),
         vnfs::ERR_INVAL
@@ -327,8 +332,8 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
 }
 
 #[test]
-fn native_open_options_and_batch_outcomes_are_composable() {
-    use vnfs::{FsClient, OpOutcome};
+fn native_vector_operations_are_composable() {
+    use vnfs::FsClient;
 
     let client = FsClient::new(dummy());
     let files = client
@@ -338,51 +343,148 @@ fn native_open_options_and_batch_outcomes_are_composable() {
         .create(true)
         .truncate(true)
         .mode(0o640)
-        .open_many(&["/one", "/two"])
+        .openv(&["/one", "/two"])
         .unwrap();
 
     let writes = client
-        .write_many_outcomes(&[
+        .writev(&[
             files[0].write_request_at(0, b"one"),
             files[1].write_request_at(0, b"two"),
         ])
         .unwrap();
-    assert!(writes.is_complete_success());
-    assert!(writes.first_error().is_none());
-    assert!(writes.indeterminate_indices().next().is_none());
-    assert_eq!(writes.into_values().unwrap().len(), 2);
+    assert_eq!(writes.len(), 2);
 
     let reads = client
-        .read_many_outcomes(&[
+        .readv(&[
             files[0].read_request_at(0, 3),
             files[1].read_request_at(0, 3),
         ])
         .unwrap();
-    let values = reads.into_values().unwrap();
+    let values = reads;
     assert_eq!(values[0].data, b"one");
     assert_eq!(values[1].data, b"two");
-    client.close_many(files).unwrap();
-
-    let invalid = client
-        .open_options()
-        .open_many_outcomes(&["/invalid"])
-        .unwrap();
-    assert!(matches!(invalid.operations(), [OpOutcome::Failed(_)]));
+    client.closev(files).unwrap();
 
     client.write("/present", b"ok").unwrap();
-    let partial = client
+    let error = client
         .open_options()
         .read(true)
-        .open_many_outcomes(&["/present", "/missing", "/later"])
-        .unwrap();
-    assert!(matches!(partial.operations()[0], OpOutcome::Success(_)));
-    assert!(matches!(partial.operations()[1], OpOutcome::Failed(_)));
-    assert!(matches!(partial.operations()[2], OpOutcome::NotAttempted));
+        .openv(&["/present", "/missing", "/later"])
+        .unwrap_err();
+    assert_eq!(error.index_opt(), Some(1));
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn openv_fault_before_dispatch_has_no_effects_or_handles() {
+    let mut fs = dummy();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeDispatch { chunk: 0 },
+        vnfs::VfError::transport(None, "injected pre-dispatch failure"),
+    ));
+    fs.set_fault_injector(script.clone());
+    let error = VecFs::openv(
+        &mut fs,
+        &[Path::new("/f0"), Path::new("/f1")],
+        &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
+        &[0o644; 2],
+    )
+    .unwrap_err();
+    assert!(error.is_transport());
+    assert_eq!(error.index_opt(), None);
+    assert!(
+        script.is_consumed(),
+        "unused faults: {:?}",
+        script.remaining()
+    );
+    assert_eq!(fs.test_open_handle_count(), 0);
+    assert!(!fs.exists_path("/f0").unwrap());
+    assert!(!fs.exists_path("/f1").unwrap());
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn openv_fault_injection_closes_the_successful_prefix() {
+    let mut fs = dummy();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeRegister { index: 2 },
+        vnfs::VfError::transport(None, "injected registration failure"),
+    ));
+    fs.set_fault_injector(script.clone());
+    let error = VecFs::openv(
+        &mut fs,
+        &[Path::new("/f0"), Path::new("/f1"), Path::new("/f2")],
+        &[libc::O_CREAT | libc::O_RDWR; 3],
+        &[0o644; 3],
+    )
+    .unwrap_err();
+    assert_eq!(error.index_opt(), Some(2));
+    assert!(
+        script.is_consumed(),
+        "unused faults: {:?}",
+        script.remaining()
+    );
+    assert_eq!(fs.test_open_handle_count(), 0);
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn openv_fault_after_registration_closes_the_injected_handle() {
+    let mut fs = dummy();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::AfterRegister { index: 1 },
+        vnfs::VfError::transport(None, "injected post-registration failure"),
+    ));
+    fs.set_fault_injector(script.clone());
+    let error = VecFs::openv(
+        &mut fs,
+        &[Path::new("/f0"), Path::new("/f1"), Path::new("/f2")],
+        &[libc::O_CREAT | libc::O_RDWR; 3],
+        &[0o644; 3],
+    )
+    .unwrap_err();
+    assert_eq!(error.index_opt(), Some(1));
+    assert!(
+        script.is_consumed(),
+        "unused faults: {:?}",
+        script.remaining()
+    );
+    assert_eq!(fs.test_open_handle_count(), 0);
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
+    let mut fs = dummy();
+    fs.writev(&[
+        vnfs::WriteOp::from_path("/exists", VfOffset::At(0), b"existing".to_vec()).with_creation(),
+    ])
+    .unwrap();
+    let script = Arc::new(FaultScript::one(
+        OpenFaultPoint::BeforeCleanup { index: 0 },
+        vnfs::VfError::transport(None, "injected cleanup failure"),
+    ));
+    fs.set_fault_injector(script.clone());
+    let error = VecFs::openv(
+        &mut fs,
+        &[Path::new("/created"), Path::new("/exists")],
+        &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
+        &[0o644; 2],
+    )
+    .unwrap_err();
+    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.err_no(), libc::EEXIST as u32);
+    assert!(
+        script.is_consumed(),
+        "unused faults: {:?}",
+        script.remaining()
+    );
+    assert_eq!(fs.test_open_handle_count(), 0);
 }
 
 #[test]
-fn outcome_api_preserves_known_prefix_and_unattempted_suffix() {
-    use vnfs::{AttrMask, OpOutcome, VfAttrs, VfFile};
+fn strict_vectors_report_failure_index_without_rollback() {
+    use vnfs::VfFile;
 
     let mut fs = dummy();
     fs.writev(&[
@@ -390,37 +492,16 @@ fn outcome_api_preserves_known_prefix_and_unattempted_suffix() {
         vnfs::WriteOp::from_path("/third", VfOffset::At(0), Vec::new()).with_creation(),
     ])
     .unwrap();
-    let outcome = fs.removev_outcomes(&[
-        VfFile::from_path("/first"),
-        VfFile::from_path("/missing"),
-        VfFile::from_path("/third"),
-    ]);
-    assert!(matches!(outcome.operations()[0], OpOutcome::Success(())));
-    assert!(matches!(outcome.operations()[1], OpOutcome::Failed(_)));
-    assert!(matches!(outcome.operations()[2], OpOutcome::NotAttempted));
+    let error = fs
+        .removev(&[
+            VfFile::from_path("/first"),
+            VfFile::from_path("/missing"),
+            VfFile::from_path("/third"),
+        ])
+        .unwrap_err();
+    assert_eq!(error.index_opt(), Some(1));
+    assert!(!fs.exists_path("/first").unwrap());
     assert!(fs.exists_path("/third").unwrap());
-
-    let mut attrs = [
-        VfAttrs {
-            file: VfFile::from_path("/third"),
-            masks: AttrMask::SIZE,
-            ..VfAttrs::default()
-        },
-        VfAttrs {
-            file: VfFile::from_path("/missing"),
-            masks: AttrMask::SIZE,
-            ..VfAttrs::default()
-        },
-        VfAttrs {
-            file: VfFile::from_path("/third"),
-            masks: AttrMask::SIZE,
-            ..VfAttrs::default()
-        },
-    ];
-    let outcome = fs.getattrsv_outcomes(&mut attrs);
-    assert!(matches!(outcome.operations()[0], OpOutcome::Success(_)));
-    assert!(matches!(outcome.operations()[1], OpOutcome::Failed(_)));
-    assert!(matches!(outcome.operations()[2], OpOutcome::NotAttempted));
 }
 
 #[test]

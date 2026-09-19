@@ -20,20 +20,16 @@ fn main() -> Result<(), Box<dyn Error>> {
         .write(true)
         .create(true)
         .truncate(true)
-        .open_many(&paths)?;
+        .openv(&paths)?;
 
-    client
-        .write_many_outcomes(&[
-            files[0].write_request_at(0, b"hello"),
-            files[1].write_request_at(0, b"world"),
-        ])?
-        .into_values()?;
-    let contents = client
-        .read_many_outcomes(&[
-            files[0].read_request_at(0, 5),
-            files[1].read_request_at(0, 5),
-        ])?
-        .into_values()?;
+    client.writev(&[
+        files[0].write_request_at(0, b"hello"),
+        files[1].write_request_at(0, b"world"),
+    ])?;
+    let contents = client.readv(&[
+        files[0].read_request_at(0, 5),
+        files[1].read_request_at(0, 5),
+    ])?;
 
     println!("{}", String::from_utf8_lossy(&contents[0].data));
     println!("{}", String::from_utf8_lossy(&contents[1].data));
