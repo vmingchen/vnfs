@@ -105,3 +105,14 @@ def test_vector_reads_use_the_backend_batch_contract():
         [1, 0],
         [4, 2],
     ) in client.calls
+
+
+def test_info_preserves_unavailable_posix_identity_fields():
+    fs = _MemoryFileSystem(backend="memory", root="")
+    try:
+        info = fs.info("/alpha")
+    finally:
+        fs.close()
+
+    assert "uid" in info and info["uid"] is None
+    assert "gid" in info and info["gid"] is None

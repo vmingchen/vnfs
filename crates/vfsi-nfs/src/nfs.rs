@@ -362,6 +362,57 @@ fn bounded_read_allv_batch(
     (cohort, protocol_window.min(allocation_window))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn append_bounded_walk_page(
+    root: &Path,
+    dir: &Path,
+    masks: AttrMask,
+    ids: &[u32],
+    page: &[crate::client::DirEntry],
+    options: WalkOptions,
+    entry_count: &mut usize,
+    path_bytes: &mut usize,
+    out: &mut Vec<VfAttrs>,
+) -> VfResult<()> {
+    for entry in page {
+        if *entry_count >= options.entry_limit() {
+            return Err(
+                VfError::failure(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
+            );
+        }
+        let path = dir.join(path_from_bytes(&entry.name));
+        let next_path_bytes = path_bytes
+            .checked_add(path.as_os_str().len())
+            .filter(|bytes| *bytes <= options.path_byte_limit())
+            .ok_or_else(|| {
+                VfError::failure(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
+            })?;
+        let mut attrs = VfAttrs {
+            file: VfFile::from_os_path(&path),
+            masks,
+            ..VfAttrs::default()
+        };
+        let values = parse_attr_list(ids, &entry.attrs)
+            .map_err(|error| error.with_index(*entry_count).with_context("walk", dir))?;
+        apply_attrs(&mut attrs, &values);
+        if attrs.ftype == VfType::Directory {
+            let depth = path
+                .strip_prefix(root)
+                .map(|relative| relative.components().count())
+                .unwrap_or(usize::MAX);
+            if depth > options.depth_limit() {
+                return Err(
+                    VfError::failure(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
+                );
+            }
+        }
+        out.push(attrs);
+        *path_bytes = next_path_bytes;
+        *entry_count += 1;
+    }
+    Ok(())
+}
+
 fn merge_read_allv_round(
     active: &[usize],
     results: &[ReadResult],
@@ -3406,66 +3457,134 @@ impl VecFs for NfsVecFs {
         options: WalkOptions,
         sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<WalkEntry>> {
-        // Keep the level-batched NFS implementation, but stream each decoded
-        // entry into a bounded accumulator instead of retaining every raw
-        // READDIR page for the whole level.
+        let root_fh = self.resolve_path(&self.abs_path(root), true)?;
+        let ids = request_mask_to_attr_list(&masks);
         let mut collected: std::collections::HashMap<PathBuf, Vec<VfAttrs>> =
             std::collections::HashMap::new();
-        collected.insert(root.to_path_buf(), Vec::new());
         let mut entry_count = 0usize;
-        let mut path_bytes = 0usize;
-        let mut limit_error = None;
-        let max_entries = options.entry_limit().saturating_add(1);
-        self.listdirv(&[root], masks, max_entries, true, &mut |entry, dir| {
-            if entry_count >= options.entry_limit() {
-                limit_error = Some(
-                    VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", dir),
-                );
-                return false;
+        let mut stored_path_bytes = 0usize;
+
+        // Resolve the root once, then decode each bounded READDIR response
+        // directly into the caller-visible accumulator. Raw continuation
+        // pages are never retained after they are decoded.
+        let mut root_attrs = Vec::new();
+        let mut cookie = 0u64;
+        loop {
+            let page = self
+                .nfs
+                .readdir(&root_fh, cookie, &ids)
+                .map_err(|error| VfError::from_rpc(error, 0))?;
+            append_bounded_walk_page(
+                root,
+                root,
+                masks,
+                &ids,
+                &page,
+                options,
+                &mut entry_count,
+                &mut stored_path_bytes,
+                &mut root_attrs,
+            )?;
+            cookie = page.last().map(|entry| entry.cookie).unwrap_or(0);
+            if cookie == 0 {
+                break;
             }
-            let Some(path) = entry.file.path() else {
-                limit_error =
-                    Some(VfError::client(entry_count, ERR_INVAL).with_context("walk", dir));
-                return false;
-            };
-            let Some(next_path_bytes) = path_bytes.checked_add(path.as_os_str().len()) else {
-                limit_error = Some(
-                    VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", dir),
-                );
-                return false;
-            };
-            if next_path_bytes > options.path_byte_limit() {
-                limit_error = Some(
-                    VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", dir),
-                );
-                return false;
-            }
-            if entry.ftype == VfType::Directory {
-                let depth = path
-                    .strip_prefix(root)
-                    .map(|relative| relative.components().count())
-                    .unwrap_or(usize::MAX);
-                if depth > options.depth_limit() {
-                    limit_error = Some(
-                        VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", dir),
-                    );
-                    return false;
+        }
+        sort(root, &mut root_attrs);
+
+        // Preserve the parent filehandle so resolving and reading each child
+        // directory can share one compound instead of re-walking full paths.
+        let mut frontier: Vec<(FileHandle, PathBuf)> = root_attrs
+            .iter()
+            .filter(|entry| entry.ftype == VfType::Directory)
+            .filter_map(|entry| {
+                entry
+                    .file
+                    .path()
+                    .map(|path| (root_fh.clone(), path.to_path_buf()))
+            })
+            .collect();
+        collected.insert(root.to_path_buf(), root_attrs);
+
+        while !frontier.is_empty() {
+            let operations: Vec<(FileHandle, Vec<u8>)> = frontier
+                .iter()
+                .map(|(parent, path)| {
+                    (
+                        parent.clone(),
+                        path.file_name()
+                            .map(|name| path_bytes(Path::new(name)).to_vec())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect();
+            let results = self
+                .nfs
+                .readdir_children(&operations, &ids)
+                .map_err(VfError::from_rpc_indexed)?;
+            let mut level_attrs: Vec<Vec<VfAttrs>> =
+                (0..results.len()).map(|_| Vec::new()).collect();
+            let mut pending = Vec::new();
+            for (index, result) in results.iter().enumerate() {
+                append_bounded_walk_page(
+                    root,
+                    &frontier[index].1,
+                    masks,
+                    &ids,
+                    &result.entries,
+                    options,
+                    &mut entry_count,
+                    &mut stored_path_bytes,
+                    &mut level_attrs[index],
+                )?;
+                if result.cookie != 0 {
+                    pending.push((index, result.fh.clone(), result.cookie));
                 }
             }
-            collected
-                .entry(dir.to_path_buf())
-                .or_default()
-                .push(entry.clone());
-            path_bytes = next_path_bytes;
-            entry_count += 1;
-            true
-        })?;
-        if let Some(error) = limit_error {
-            return Err(error);
-        }
 
-        for (dir, entries) in &mut collected {
-            sort(dir.as_path(), entries);
+            while !pending.is_empty() {
+                let operations: Vec<(FileHandle, u64)> = pending
+                    .iter()
+                    .map(|(_, handle, cookie)| (handle.clone(), *cookie))
+                    .collect();
+                let pages = self
+                    .nfs
+                    .readdir_pages(&operations, &ids)
+                    .map_err(VfError::from_rpc_indexed)?;
+                let mut next_pending = Vec::new();
+                for ((index, handle, _), (page, cookie)) in pending.iter().zip(pages) {
+                    append_bounded_walk_page(
+                        root,
+                        &frontier[*index].1,
+                        masks,
+                        &ids,
+                        &page,
+                        options,
+                        &mut entry_count,
+                        &mut stored_path_bytes,
+                        &mut level_attrs[*index],
+                    )?;
+                    if cookie != 0 {
+                        next_pending.push((*index, handle.clone(), cookie));
+                    }
+                }
+                pending = next_pending;
+            }
+
+            let mut next_frontier = Vec::new();
+            for (index, mut entries) in level_attrs.into_iter().enumerate() {
+                let directory = frontier[index].1.clone();
+                sort(&directory, &mut entries);
+                for entry in &entries {
+                    if entry.ftype == VfType::Directory
+                        && let Some(path) = entry.file.path()
+                    {
+                        next_frontier.push((results[index].fh.clone(), path.to_path_buf()));
+                    }
+                }
+                collected.insert(directory, entries);
+            }
+            frontier = next_frontier;
         }
 
         let mut out = Vec::with_capacity(collected.len());
@@ -4290,6 +4409,59 @@ mod tests {
         let (cohort, window) = bounded_read_allv_batch(&active, 0, 1 << 20, 1 << 20);
         assert_eq!(cohort, [0]);
         assert_eq!(window, 1);
+    }
+
+    #[test]
+    fn walk_page_decoder_stops_at_entry_and_path_budgets() {
+        let page = [
+            crate::client::DirEntry {
+                name: b"one".to_vec(),
+                cookie: 1,
+                attrs: Vec::new(),
+            },
+            crate::client::DirEntry {
+                name: b"two".to_vec(),
+                cookie: 0,
+                attrs: Vec::new(),
+            },
+        ];
+        let mut count = 0;
+        let mut bytes = 0;
+        let mut output = Vec::new();
+        let error = append_bounded_walk_page(
+            Path::new("/root"),
+            Path::new("/root"),
+            AttrMask::empty(),
+            &[],
+            &page,
+            WalkOptions::new().max_entries(1),
+            &mut count,
+            &mut bytes,
+            &mut output,
+        )
+        .unwrap_err();
+        assert_eq!(error.err_no(), libc::EFBIG as u32);
+        assert_eq!(count, 1);
+        assert_eq!(output.len(), 1);
+
+        count = 0;
+        bytes = 0;
+        output.clear();
+        let error = append_bounded_walk_page(
+            Path::new("/root"),
+            Path::new("/root"),
+            AttrMask::empty(),
+            &[],
+            &page[..1],
+            WalkOptions::new().max_path_bytes(1),
+            &mut count,
+            &mut bytes,
+            &mut output,
+        )
+        .unwrap_err();
+        assert_eq!(error.err_no(), libc::EFBIG as u32);
+        assert_eq!(count, 0);
+        assert!(output.is_empty());
     }
 
     #[test]
