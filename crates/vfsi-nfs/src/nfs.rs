@@ -1977,60 +1977,75 @@ impl NfsVecFs {
         out: &mut Vec<VfAttrs>,
     ) -> VfRes {
         let reached_limit = |out: &Vec<VfAttrs>| max_count != 0 && out.len() >= max_count;
-        if reached_limit(out) {
-            return Ok(());
-        }
-        // A directory argument may itself be a symlink to a directory.
-        let dirfh = self.resolve_path(&self.abs_path(dir), true)?;
         let ids = request_mask_to_attr_list(&masks);
-        let mut cookie = 0u64;
-        loop {
-            let entries = self
-                .nfs
-                .readdir(&dirfh, cookie, &ids)
-                .map_err(|e| VfError::from_rpc(e, 0))?;
-            if entries.is_empty() {
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            if reached_limit(out) {
                 break;
             }
-            for e in &entries {
-                if reached_limit(out) {
-                    return Ok(());
+            // A directory argument may itself be a symlink to a directory.
+            let dirfh = self.resolve_path(&self.abs_path(&current), true)?;
+            let mut children = Vec::new();
+            let mut cookie = 0u64;
+            loop {
+                let entries = self
+                    .nfs
+                    .readdir(&dirfh, cookie, &ids)
+                    .map_err(|e| VfError::from_rpc(e, 0))?;
+                if entries.is_empty() {
+                    break;
                 }
-                let path = dir.join(path_from_bytes(&e.name));
-                let mut a = VfAttrs {
-                    file: VfFile::from_os_path(&path),
-                    masks,
-                    ..VfAttrs::default()
-                };
-                // Attributes come back inline from READDIR for the requested ids.
-                let vals = parse_attr_list(&ids, &e.attrs)?;
-                apply_attrs(&mut a, &vals);
-                let is_dir = a.ftype == VfType::Directory;
-                out.push(a);
-                if recursive && is_dir {
-                    self.listdir_rec(&path, masks, max_count, recursive, out)?;
+                for entry in &entries {
+                    if reached_limit(out) {
+                        return Ok(());
+                    }
+                    let path = current.join(path_from_bytes(&entry.name));
+                    let mut attrs = VfAttrs {
+                        file: VfFile::from_os_path(&path),
+                        masks,
+                        ..VfAttrs::default()
+                    };
+                    let values = parse_attr_list(&ids, &entry.attrs)?;
+                    apply_attrs(&mut attrs, &values);
+                    if recursive && attrs.ftype == VfType::Directory {
+                        children.push(path);
+                    }
+                    out.push(attrs);
+                }
+                cookie = entries.last().expect("non-empty READDIR page").cookie;
+                if cookie == 0 {
+                    break;
                 }
             }
-            cookie = entries.last().unwrap().cookie;
-            if cookie == 0 {
-                break;
+            for child in children.into_iter().rev() {
+                pending.push(child);
             }
         }
         Ok(())
     }
 
     fn rm_one(&mut self, path: &Path, recursive: bool) -> VfResult<()> {
-        #[cfg(feature = "test-faults")]
-        self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: 0 })?;
-        let ft = self.file_type(path)?;
-        if ft == VfType::Directory && recursive {
-            let entries = self.listdir(path, AttrMask::default(), usize::MAX, false)?;
-            for e in entries {
-                let p = e.file.path().unwrap().to_path_buf();
-                self.rm_one(&p, true)?;
+        let mut pending = vec![(path.to_path_buf(), false)];
+        while let Some((current, visited)) = pending.pop() {
+            #[cfg(feature = "test-faults")]
+            self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: 0 })?;
+            let file_type = self.file_type(&current)?;
+            if file_type == VfType::Directory && recursive && !visited {
+                pending.push((current.clone(), true));
+                let entries = self.listdir(&current, AttrMask::default(), usize::MAX, false)?;
+                for entry in entries.into_iter().rev() {
+                    let child = entry
+                        .file
+                        .path()
+                        .ok_or_else(|| VfError::failure(0, ERR_INVAL))?
+                        .to_path_buf();
+                    pending.push((child, false));
+                }
+            } else {
+                self.unlink(&current)?;
             }
         }
-        self.unlink(path)
+        Ok(())
     }
 
     /// Read every page of directory `fh`, returning its entries as `VfAttrs`.
@@ -3882,33 +3897,44 @@ impl VecFs for NfsVecFs {
             self.ensure_dir(dst, 0o755).map_err(|e| e.with_index(0))?;
         }
         let masks = AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID;
-        let entries = self.listdir(src_dir, masks, 0, false)?;
-        for e in entries {
-            let name = e
-                .file
-                .path()
-                .and_then(|p| p.file_name())
-                .map(|f| path_bytes(Path::new(f)).to_vec())
-                .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_INVAL))?;
-            let src_child = src_dir.join(path_from_bytes(&name));
-            let dst_child = dst.join(path_from_bytes(&name));
-            if e.ftype == VfType::Directory {
-                self.cp_recursive(&src_child, &dst_child, symlinks, false)?;
-            } else if e.ftype == VfType::Symlink && symlinks {
-                let target = self.readlink(&src_child).map_err(|e| e.with_index(0))?;
-                let target_path = path_from_bytes(&target);
-                self.symlink(&target_path, &dst_child)
-                    .map_err(|e| e.with_index(0))?;
-            } else {
-                let pair = ExtentPair::from_os_paths(&src_child, 0, &dst_child, 0, None);
-                let src = self
-                    .follow_target_path(&self.abs_path(&src_child))
-                    .map_err(|e| e.with_index(0))?;
-                let dst = self
-                    .follow_target_path(&self.abs_path(&dst_child))
-                    .map_err(|e| e.with_index(0))?;
-                self.copy_extent(&src, &dst, &pair)
-                    .map_err(|e| e.with_index(0))?;
+        let mut pending = vec![(src_dir.to_path_buf(), dst.to_path_buf())];
+        while let Some((source, destination)) = pending.pop() {
+            let entries = self.listdir(&source, masks, 0, false)?;
+            let mut directories = Vec::new();
+            for entry in entries {
+                let name = entry
+                    .file
+                    .path()
+                    .and_then(|path| path.file_name())
+                    .map(|name| path_bytes(Path::new(name)).to_vec())
+                    .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_INVAL))?;
+                let source_child = source.join(path_from_bytes(&name));
+                let destination_child = destination.join(path_from_bytes(&name));
+                if entry.ftype == VfType::Directory {
+                    self.ensure_dir(&destination_child, 0o755)
+                        .map_err(|error| error.with_index(0))?;
+                    directories.push((source_child, destination_child));
+                } else if entry.ftype == VfType::Symlink && symlinks {
+                    let target = self
+                        .readlink(&source_child)
+                        .map_err(|error| error.with_index(0))?;
+                    self.symlink(&path_from_bytes(&target), &destination_child)
+                        .map_err(|error| error.with_index(0))?;
+                } else {
+                    let pair =
+                        ExtentPair::from_os_paths(&source_child, 0, &destination_child, 0, None);
+                    let source_target = self
+                        .follow_target_path(&self.abs_path(&source_child))
+                        .map_err(|error| error.with_index(0))?;
+                    let destination_target = self
+                        .follow_target_path(&self.abs_path(&destination_child))
+                        .map_err(|error| error.with_index(0))?;
+                    self.copy_extent(&source_target, &destination_target, &pair)
+                        .map_err(|error| error.with_index(0))?;
+                }
+            }
+            for directory in directories.into_iter().rev() {
+                pending.push(directory);
             }
         }
         Ok(())
@@ -4030,10 +4056,10 @@ fn parse_attr_list(ids: &[u32], list: &[u8]) -> VfResult<AttrValues> {
                 v.nlink = Some(read_u32(list, &mut off)?);
             }
             FATTR4_OWNER => {
-                v.uid = parse_uid(&read_str(list, &mut off)?);
+                v.uid = crate::identity::name_to_id(&read_str(list, &mut off)?, false);
             }
             FATTR4_OWNER_GROUP => {
-                v.gid = parse_gid(&read_str(list, &mut off)?);
+                v.gid = crate::identity::name_to_id(&read_str(list, &mut off)?, true);
             }
             FATTR4_RAWDEV => {
                 let major = read_u32(list, &mut off)?;
@@ -4055,7 +4081,15 @@ fn parse_attr_list(ids: &[u32], list: &[u8]) -> VfResult<AttrValues> {
             _ => unreachable!(),
         }
     }
+    if off != list.len() {
+        return Err(attr_decode_error());
+    }
     Ok(v)
+}
+
+#[cfg(feature = "fuzzing")]
+pub(crate) fn validate_attr_list(ids: &[u32], list: &[u8]) -> VfResult<()> {
+    parse_attr_list(ids, list).map(|_| ())
 }
 
 /// `S_IFMT` type bits for an NFSv4 file type code.
@@ -4160,60 +4194,6 @@ fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
         a.has_named_attr = has;
         a.returned.insert(AttrMask::NAMED_ATTR);
     }
-}
-
-/// Resolve an NFS owner/group string ("1000" or "name@domain") to a numeric id.
-fn name_to_id(s: &[u8], is_group: bool) -> Option<u32> {
-    use std::cell::RefCell;
-    use std::collections::HashMap;
-    thread_local! {
-        static CACHE: RefCell<HashMap<(String, bool), Option<u32>>> = RefCell::new(HashMap::new());
-    }
-    let key = (String::from_utf8_lossy(s).into_owned(), is_group);
-    CACHE.with(|c| {
-        let mut cache = c.borrow_mut();
-        if let Some(v) = cache.get(&key) {
-            return *v;
-        }
-        let v = name_to_id_uncached(&key.0, is_group);
-        cache.insert(key, v);
-        v
-    })
-}
-
-fn name_to_id_uncached(t: &str, is_group: bool) -> Option<u32> {
-    let t = t.trim();
-    if let Ok(v) = t.parse::<u32>() {
-        return Some(v);
-    }
-    // Strip an "@domain" suffix and reverse-look-up the name.
-    let base = t.split('@').next().unwrap_or(t);
-    let cname = std::ffi::CString::new(base).ok()?;
-    unsafe {
-        if is_group {
-            let gr = libc::getgrnam(cname.as_ptr());
-            if gr.is_null() {
-                None
-            } else {
-                Some((*gr).gr_gid)
-            }
-        } else {
-            let pw = libc::getpwnam(cname.as_ptr());
-            if pw.is_null() {
-                None
-            } else {
-                Some((*pw).pw_uid)
-            }
-        }
-    }
-}
-
-fn parse_uid(s: &[u8]) -> Option<u32> {
-    name_to_id(s, false)
-}
-
-fn parse_gid(s: &[u8]) -> Option<u32> {
-    name_to_id(s, true)
 }
 
 fn read_u32(buf: &[u8], off: &mut usize) -> VfResult<u32> {
@@ -4329,6 +4309,11 @@ mod tests {
         let mut unpadded = 1u32.to_be_bytes().to_vec();
         unpadded.push(b'x');
         let error = parse_attr_list(&[FATTR4_OWNER], &unpadded).unwrap_err();
+        assert!(error.is_transport());
+
+        let mut trailing = 7u64.to_be_bytes().to_vec();
+        trailing.push(0);
+        let error = parse_attr_list(&[FATTR4_SIZE], &trailing).unwrap_err();
         assert!(error.is_transport());
     }
 

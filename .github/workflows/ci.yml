@@ -8,6 +8,43 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  nfs-adversarial:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+      - name: AddressSanitizer NFS parser and response tests
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          CARGO_TARGET_DIR: target/asan
+          RUSTFLAGS: -Zsanitizer=address
+          RUSTDOCFLAGS: -Zsanitizer=address
+        run: |
+          cargo test -Zbuild-std --target x86_64-unknown-linux-gnu \
+            -p vfsi-nfs --lib --all-features
+      - name: UndefinedBehaviorSanitizer native NFS/XDR boundary
+        env:
+          CARGO_TARGET_DIR: target/ubsan
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          CFLAGS_x86_64_unknown_linux_gnu: -fsanitize=undefined -fno-sanitize-recover=all
+          RUSTFLAGS: -C linker=clang -C link-arg=-fsanitize=undefined
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          cargo test --target x86_64-unknown-linux-gnu \
+            -p vfsi-nfs --lib --all-features
+      - name: Smoke-test NFS libFuzzer targets
+        run: |
+          cargo install cargo-fuzz --version 0.13.1 --locked
+          cargo fuzz run nfs_compound_response -- -runs=5000
+          cargo fuzz run nfs_attribute_list -- -runs=5000
+
   rust:
     runs-on: ubuntu-24.04
     steps:
@@ -751,6 +788,7 @@ jobs:
           VFSI_SMB_REQUIRED: 1
           VFSI_SMB_REQUIRE_RECONNECT: ${{ matrix.require_reconnect }}
           VFSI_SMB_RESTART_COMMAND: ${{ matrix.reconnect }}
+          VFSI_SMB_LOCAL_ROOT: /var/tmp/vfsi-smb-ci
         run: |
           rust_features="test-faults"
           if [ -n "${{ matrix.rust_features }}" ]; then

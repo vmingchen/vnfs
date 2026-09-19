@@ -556,7 +556,10 @@ pub unsafe extern "C" fn vfsi_dummy_open(root: *const c_char, out: *mut *mut vfs
         let Some(root) = cstr_path(root) else {
             return libc::EINVAL;
         };
-        let fs = Box::new(DummyVecFs::new(root)) as Box<dyn vnfs::VecFs>;
+        let fs = match DummyVecFs::try_new(root) {
+            Ok(fs) => Box::new(fs) as Box<dyn vnfs::VecFs>,
+            Err(error) => return error.err_no() as c_int,
+        };
         *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
         0
     })
@@ -579,7 +582,10 @@ pub unsafe extern "C" fn vfsi_dummy_open_mount(
         let (Some(root), Some(mountpoint)) = (cstr_path(root), cstr_path(mountpoint)) else {
             return libc::EINVAL;
         };
-        let fs = Box::new(DummyVecFs::new(root)) as Box<dyn vnfs::VecFs>;
+        let fs = match DummyVecFs::try_new(root) {
+            Ok(fs) => Box::new(fs) as Box<dyn vnfs::VecFs>,
+            Err(error) => return error.err_no() as c_int,
+        };
         *out = make_fs(fs, mountpoint, PathBuf::from("/"));
         0
     })
@@ -2124,6 +2130,25 @@ mod tests {
             libc::EINVAL
         );
         assert!(fs.is_null());
+    }
+
+    #[test]
+    fn dummy_constructor_reports_root_setup_errors() {
+        let directory =
+            std::env::temp_dir().join(format!("vfsi-c-invalid-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).unwrap();
+        let file = directory.join("not-a-directory");
+        std::fs::write(&file, b"x").unwrap();
+        let file = CString::new(file.as_os_str().as_bytes()).unwrap();
+        let mut filesystem: *mut vfsi_fs = std::ptr::null_mut();
+        let result = unsafe { vfsi_dummy_open(file.as_ptr(), &mut filesystem) };
+        assert!(matches!(
+            result,
+            value if value == libc::EEXIST || value == libc::ENOTDIR
+        ));
+        assert!(filesystem.is_null());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

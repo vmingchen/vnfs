@@ -1,0 +1,32 @@
+[package]
+name = "vnfs-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+vfsi-nfs = { path = "../crates/vfsi-nfs", features = ["fuzzing"] }
+
+[[bin]]
+name = "nfs_compound_response"
+path = "fuzz_targets/nfs_compound_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nfs_attribute_list"
+path = "fuzz_targets/nfs_attribute_list.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
+
+[patch.crates-io]
+libntirpc-sys = { path = "../third-party/libntirpc-sys" }

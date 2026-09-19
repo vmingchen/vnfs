@@ -666,7 +666,7 @@ impl Drop for CompoundRes {
 /// accessors before a `CompoundRes` becomes observable. NFS may return a
 /// prefix when an operation fails, but every returned opcode must correspond
 /// to the request at the same position.
-fn validate_response_ops(request: &[nfs_argop4], res: &COMPOUND4res) -> RpcResult<()> {
+pub(crate) fn validate_response_ops(request: &[nfs_argop4], res: &COMPOUND4res) -> RpcResult<()> {
     let count = res.resarray.resarray_len as usize;
     if count > request.len() {
         return Err(RpcError::transport(format!(
@@ -1058,12 +1058,30 @@ mod response_validation_tests {
     }
 
     #[test]
-    fn empty_responses_can_be_freed_concurrently() {
+    fn decoded_responses_can_be_freed_concurrently() {
         let threads: Vec<_> = (0..8)
             .map(|_| {
                 std::thread::spawn(|| {
                     for _ in 0..100 {
-                        let res: COMPOUND4res = unsafe { std::mem::zeroed() };
+                        let operation = unsafe {
+                            libc::calloc(1, std::mem::size_of::<nfs_resop4>()).cast::<nfs_resop4>()
+                        };
+                        assert!(!operation.is_null());
+                        unsafe {
+                            (*operation).resop = nfs_opnum4_NFS4_OP_PUTROOTFH;
+                            (*operation).nfs_resop4_u.opputrootfh.status = nfsstat4_NFS4_OK;
+                        }
+                        let res = COMPOUND4res {
+                            status: nfsstat4_NFS4_OK,
+                            tag: utf8string {
+                                utf8string_len: 0,
+                                utf8string_val: std::ptr::null_mut(),
+                            },
+                            resarray: COMPOUND4res__bindgen_ty_1 {
+                                resarray_len: 1,
+                                resarray_val: operation,
+                            },
+                        };
                         drop(CompoundRes { res });
                     }
                 })

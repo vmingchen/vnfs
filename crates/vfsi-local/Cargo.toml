@@ -16,3 +16,6 @@ test-faults = ["vfsi-core/test-faults", "vfsi-sync/test-faults"]
 libc = { workspace = true }
 vfsi-core = { workspace = true }
 vfsi-sync = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"

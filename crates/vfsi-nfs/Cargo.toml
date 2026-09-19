@@ -15,6 +15,7 @@ ffi = ["dep:libc", "dep:libntirpc-sys", "dep:nfsv41-sys"]
 server-copy = ["ffi"]
 rpcsec-gss = ["ffi", "libntirpc-sys/rpcsec-gss"]
 test-faults = ["vfsi-core/test-faults", "vfsi-sync/test-faults"]
+fuzzing = ["ffi"]
 
 [dependencies]
 libc = { workspace = true, optional = true }
@@ -24,6 +25,7 @@ vfsi-core = { workspace = true }
 vfsi-sync = { workspace = true }
 
 [dev-dependencies]
+proptest = "1"
 vfsi-sync = { workspace = true, features = ["test-support"] }
 
 [package.metadata.docs.rs]

@@ -29,6 +29,11 @@ use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 use vfsi_core::path::{cstring_from_bytes, normalize_bytes, path_bytes, path_from_bytes};
 use vfsi_sync::*;
 
+fn checked_offset(base: u64, delta: u64, index: usize) -> VfResult<u64> {
+    base.checked_add(delta)
+        .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))
+}
+
 /// Open state for a descriptor on the local filesystem.
 struct DummyOpen {
     file: File,
@@ -116,12 +121,22 @@ impl DummyVecFs {
     }
 
     /// Create a client rooted at `root` (created if missing).
+    ///
+    /// This compatibility constructor panics if the root cannot be prepared.
+    /// New applications should prefer [`Self::try_new`].
     pub fn new(root: PathBuf) -> DummyVecFs {
-        std::fs::create_dir_all(&root).expect("create dummy root");
-        let root_canon = std::fs::canonicalize(&root).expect("canonicalize dummy root");
+        Self::try_new(root).expect("prepare dummy root")
+    }
+
+    /// Fallibly create a client rooted at `root` (created if missing).
+    pub fn try_new(root: PathBuf) -> VfResult<DummyVecFs> {
+        std::fs::create_dir_all(&root).map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+        let root_canon = std::fs::canonicalize(&root)
+            .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
         #[cfg(target_os = "linux")]
-        let root_dir = File::open(&root_canon).expect("open dummy root");
-        DummyVecFs {
+        let root_dir =
+            File::open(&root_canon).map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+        Ok(DummyVecFs {
             root: root_canon.clone(),
             #[cfg(not(target_os = "linux"))]
             root_canon,
@@ -132,7 +147,7 @@ impl DummyVecFs {
             open_files: HashMap::new(),
             #[cfg(feature = "test-faults")]
             fault_injector: None,
-        }
+        })
     }
 
     #[cfg(feature = "test-faults")]
@@ -614,15 +629,14 @@ impl DummyVecFs {
             _ => return Err(VfError::unsupported(0)),
         };
         let requested = u64::try_from(op.length).map_err(|_| Self::overflow(0))?;
-        off.checked_add(requested)
-            .ok_or_else(|| Self::overflow(0))?;
+        checked_offset(off, requested, 0)?;
         let mut buf = vec![0u8; op.length];
         let n = file
             .read_at(&mut buf, off)
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         buf.truncate(n);
         if descriptor {
-            let next = off.checked_add(n as u64).ok_or_else(|| Self::overflow(0))?;
+            let next = checked_offset(off, n as u64, 0)?;
             self.advance_offset(&op.file, next);
         }
         Ok(ReadResult {
@@ -685,14 +699,11 @@ impl DummyVecFs {
             _ => return Err(VfError::unsupported(0)),
         };
         let requested = u64::try_from(op.data.len()).map_err(|_| Self::overflow(0))?;
-        off.checked_add(requested)
-            .ok_or_else(|| Self::overflow(0))?;
+        checked_offset(off, requested, 0)?;
         file.write_all_at(&op.data, off)
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         if descriptor {
-            let next = off
-                .checked_add(op.data.len() as u64)
-                .ok_or_else(|| Self::overflow(0))?;
+            let next = checked_offset(off, op.data.len() as u64, 0)?;
             self.advance_offset(&op.file, next);
         }
         Ok(WriteResult {
@@ -712,36 +723,42 @@ impl DummyVecFs {
         out: &mut Vec<VfAttrs>,
     ) -> VfRes {
         let reached_limit = |out: &Vec<VfAttrs>| max_count != 0 && out.len() >= max_count;
-        if reached_limit(out) {
-            return Ok(());
-        }
-        let p = self.no_follow_path(&self.resolve(dir))?;
-        let dir_metadata = std::fs::symlink_metadata(&p)
-            .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
-        if dir_metadata.file_type().is_symlink() {
-            return Err(VfError::failure(0, ERR_ACCES));
-        }
-        let rd = std::fs::read_dir(&p).map_err(|e| VfError::failure(0, Self::errno(&e)))?;
-        for entry in rd {
-            let entry = entry.map_err(|e| VfError::failure(0, Self::errno(&e)))?;
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(current) = pending.pop() {
             if reached_limit(out) {
                 break;
             }
-            let name = entry.file_name().as_bytes().to_vec();
-            let path = dir.join(path_from_bytes(&name));
-            let mut a = VfAttrs {
-                file: VfFile::from_os_path(&path),
-                masks,
-                ..VfAttrs::default()
-            };
-            let md = std::fs::symlink_metadata(entry.path())
-                .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
-            let real = self.no_follow_path(&self.resolve(&path))?;
-            self.fill_attrs(&mut a, &real, &md);
-            let is_dir = a.ftype == VfType::Directory;
-            out.push(a);
-            if recursive && is_dir {
-                self.listdir_rec(&path, masks, max_count, recursive, out)?;
+            let p = self.no_follow_path(&self.resolve(&current))?;
+            let dir_metadata = std::fs::symlink_metadata(&p)
+                .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+            if dir_metadata.file_type().is_symlink() {
+                return Err(VfError::failure(0, ERR_ACCES));
+            }
+            let rd = std::fs::read_dir(&p).map_err(|e| VfError::failure(0, Self::errno(&e)))?;
+            let mut children = Vec::new();
+            for entry in rd {
+                let entry = entry.map_err(|e| VfError::failure(0, Self::errno(&e)))?;
+                if reached_limit(out) {
+                    break;
+                }
+                let name = entry.file_name().as_bytes().to_vec();
+                let path = current.join(path_from_bytes(&name));
+                let mut attrs = VfAttrs {
+                    file: VfFile::from_os_path(&path),
+                    masks,
+                    ..VfAttrs::default()
+                };
+                let metadata = std::fs::symlink_metadata(entry.path())
+                    .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
+                let real = self.no_follow_path(&self.resolve(&path))?;
+                self.fill_attrs(&mut attrs, &real, &metadata);
+                if recursive && attrs.ftype == VfType::Directory {
+                    children.push(path);
+                }
+                out.push(attrs);
+            }
+            for child in children.into_iter().rev() {
+                pending.push(child);
             }
         }
         Ok(())
@@ -798,17 +815,27 @@ impl DummyVecFs {
     }
 
     fn rm_one(&mut self, path: &Path, recursive: bool) -> VfResult<()> {
-        #[cfg(feature = "test-faults")]
-        self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: 0 })?;
-        let ft = self.file_type(path)?;
-        if ft == VfType::Directory && recursive {
-            let entries = self.listdir(path, AttrMask::default(), usize::MAX, false)?;
-            for e in entries {
-                let p = e.file.path().unwrap().to_path_buf();
-                self.rm_one(&p, true)?;
+        let mut pending = vec![(path.to_path_buf(), false)];
+        while let Some((current, visited)) = pending.pop() {
+            #[cfg(feature = "test-faults")]
+            self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: 0 })?;
+            let file_type = self.file_type(&current)?;
+            if file_type == VfType::Directory && recursive && !visited {
+                pending.push((current.clone(), true));
+                let entries = self.listdir(&current, AttrMask::default(), usize::MAX, false)?;
+                for entry in entries.into_iter().rev() {
+                    let child = entry
+                        .file
+                        .path()
+                        .ok_or_else(|| VfError::failure(0, ERR_INVAL))?
+                        .to_path_buf();
+                    pending.push((child, false));
+                }
+            } else {
+                self.unlink(&current)?;
             }
         }
-        self.unlink(path)
+        Ok(())
     }
 }
 
@@ -1301,27 +1328,38 @@ impl VecFs for DummyVecFs {
             self.ensure_dir(dst, 0o755).map_err(|e| e.with_index(0))?;
         }
         let masks = AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID;
-        let entries = self.listdir(src_dir, masks, 0, false)?;
-        for e in entries {
-            let name = e
-                .file
-                .path()
-                .and_then(|p| p.file_name())
-                .map(|f| f.as_bytes().to_vec())
-                .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
-            let src_child = src_dir.join(path_from_bytes(&name));
-            let dst_child = dst.join(path_from_bytes(&name));
-            if e.ftype == VfType::Directory {
-                self.cp_recursive(&src_child, &dst_child, symlinks, false)?;
-            } else if e.ftype == VfType::Symlink && symlinks {
-                let target = self.readlink(&src_child).map_err(|e| e.with_index(0))?;
-                let target_path = path_from_bytes(&target);
-                self.symlink(&target_path, &dst_child)
-                    .map_err(|e| e.with_index(0))?;
-            } else {
-                let pair = ExtentPair::from_os_paths(&src_child, 0, &dst_child, 0, None);
-                self.dupv(std::slice::from_ref(&pair))
-                    .map_err(|e| e.with_index(0))?;
+        let mut pending = vec![(src_dir.to_path_buf(), dst.to_path_buf())];
+        while let Some((source, destination)) = pending.pop() {
+            let entries = self.listdir(&source, masks, 0, false)?;
+            let mut directories = Vec::new();
+            for entry in entries {
+                let name = entry
+                    .file
+                    .path()
+                    .and_then(|path| path.file_name())
+                    .map(|name| name.as_bytes().to_vec())
+                    .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+                let source_child = source.join(path_from_bytes(&name));
+                let destination_child = destination.join(path_from_bytes(&name));
+                if entry.ftype == VfType::Directory {
+                    self.ensure_dir(&destination_child, 0o755)
+                        .map_err(|error| error.with_index(0))?;
+                    directories.push((source_child, destination_child));
+                } else if entry.ftype == VfType::Symlink && symlinks {
+                    let target = self
+                        .readlink(&source_child)
+                        .map_err(|error| error.with_index(0))?;
+                    self.symlink(&path_from_bytes(&target), &destination_child)
+                        .map_err(|error| error.with_index(0))?;
+                } else {
+                    let pair =
+                        ExtentPair::from_os_paths(&source_child, 0, &destination_child, 0, None);
+                    self.dupv(std::slice::from_ref(&pair))
+                        .map_err(|error| error.with_index(0))?;
+                }
+            }
+            for directory in directories.into_iter().rev() {
+                pending.push(directory);
             }
         }
         Ok(())

@@ -7,6 +7,8 @@
 //! server to enable recovery coverage.
 
 use std::path::{Path, PathBuf};
+#[cfg(feature = "test-faults")]
+use std::{fs, os::unix::fs::PermissionsExt};
 
 use vfsi_smb::SmbExtensions;
 use vfsi_smb::SmbVecFs;
@@ -50,6 +52,74 @@ fn connect() -> Option<SmbVecFs> {
         SmbVecFs::connect(&server, &share, &username, &password, &domain)
             .expect("connect to configured SMB test share"),
     )
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn concurrent_write_preflight_detects_hard_link_aliases() {
+    let Some(mut client) = connect() else {
+        eprintln!("skipping SMB alias test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let Ok(local_root) = std::env::var("VFSI_SMB_LOCAL_ROOT") else {
+        eprintln!("skipping SMB alias test: VFSI_SMB_LOCAL_ROOT not set");
+        return;
+    };
+    let name = format!("vfsi-smb-alias-{}", std::process::id());
+    let local_dir = Path::new(&local_root).join(&name);
+    let _ = fs::remove_dir_all(&local_dir);
+    fs::create_dir(&local_dir).unwrap();
+    fs::set_permissions(&local_dir, fs::Permissions::from_mode(0o777)).unwrap();
+    let local_first = local_dir.join("first");
+    let local_alias = local_dir.join("alias");
+    fs::write(&local_first, b"0000").unwrap();
+    fs::set_permissions(&local_first, fs::Permissions::from_mode(0o666)).unwrap();
+    fs::hard_link(&local_first, &local_alias).unwrap();
+
+    let first = PathBuf::from(format!("/{name}/first"));
+    let alias = PathBuf::from(format!("/{name}/alias"));
+    client
+        .writev(&[
+            WriteOp::from_os_path(&first, VfOffset::At(0), b"1111".to_vec()),
+            WriteOp::from_os_path(&alias, VfOffset::At(0), b"2222".to_vec()),
+        ])
+        .unwrap();
+    assert!(!client.test_last_writev_was_concurrent());
+    assert_eq!(
+        client.read_allv(&[VfFile::from_os_path(&first)]).unwrap()[0],
+        b"2222"
+    );
+    client.shutdown().unwrap();
+    fs::remove_dir_all(local_dir).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn concurrent_write_preflight_keeps_distinct_files_vectorized() {
+    let Some(mut client) = connect() else {
+        eprintln!("skipping SMB identity test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-identities-{}", std::process::id()));
+    let _ = client.rm(&[root.as_path()], true);
+    client.mkdir(&root, 0o755).unwrap();
+    let first = root.join("first");
+    let second = root.join("second");
+    client
+        .writev(&[
+            WriteOp::from_os_path(&first, VfOffset::At(0), b"0000".to_vec()).with_creation(),
+            WriteOp::from_os_path(&second, VfOffset::At(0), b"0000".to_vec()).with_creation(),
+        ])
+        .unwrap();
+    client
+        .writev(&[
+            WriteOp::from_os_path(&first, VfOffset::At(0), b"1111".to_vec()),
+            WriteOp::from_os_path(&second, VfOffset::At(0), b"2222".to_vec()),
+        ])
+        .unwrap();
+    assert!(client.test_last_writev_was_concurrent());
+    client.rm(&[root.as_path()], true).unwrap();
+    client.shutdown().unwrap();
 }
 
 #[test]

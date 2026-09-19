@@ -36,6 +36,7 @@ use smb2::msg::create::{
     CreateDisposition, CreateRequest, CreateResponse, ImpersonationLevel, ShareAccess,
 };
 use smb2::msg::flush::FlushRequest;
+use smb2::msg::query_info::{QueryInfoRequest, QueryInfoResponse};
 use smb2::msg::read::{ReadRequest, ReadResponse, SMB2_CHANNEL_NONE};
 use smb2::msg::set_info::{InfoType, SetInfoRequest};
 use smb2::msg::write::{SMB2_WRITEFLAG_WRITE_THROUGH, WriteRequest, WriteResponse};
@@ -60,6 +61,7 @@ const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
 const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
 const FILE_BASIC_INFORMATION: u8 = 4;
+const FILE_INTERNAL_INFORMATION: u8 = 6;
 const FILE_END_OF_FILE_INFORMATION: u8 = 20;
 
 fn checked_offset(base: u64, delta: u64, index: usize) -> VfResult<u64> {
@@ -90,8 +92,11 @@ pub struct SmbVecFs {
     open_files: HashMap<Fd, SmbOpen>,
     deferred_closes: Vec<FileId>,
     server_copy_enabled: bool,
+    disconnected: bool,
     #[cfg(feature = "test-faults")]
     fault_injector: Option<Arc<dyn FaultInjector>>,
+    #[cfg(feature = "test-faults")]
+    last_writev_was_concurrent: bool,
 }
 
 /// SMB-only negotiated state, kept out of protocol-neutral VFSI traits.
@@ -153,9 +158,54 @@ impl SmbVecFs {
             open_files: HashMap::new(),
             deferred_closes: Vec::new(),
             server_copy_enabled: cfg!(feature = "server-copy"),
+            disconnected: false,
             #[cfg(feature = "test-faults")]
             fault_injector: None,
+            #[cfg(feature = "test-faults")]
+            last_writev_was_concurrent: false,
         })
+    }
+
+    /// Close every open handle and disconnect the share, reporting failures.
+    ///
+    /// `Drop` performs the same cleanup on a best-effort basis when callers do
+    /// not need the result.
+    pub fn shutdown(mut self) -> VfResult<()> {
+        self.shutdown_inner()
+    }
+
+    fn shutdown_inner(&mut self) -> VfResult<()> {
+        if self.disconnected {
+            return Ok(());
+        }
+        let file_ids: Vec<FileId> = self
+            .open_files
+            .drain()
+            .map(|(_, open)| open.file_id)
+            .chain(self.deferred_closes.drain(..))
+            .collect();
+        let close_result = if file_ids.is_empty() {
+            Ok(())
+        } else {
+            let connection = self.client.connection_mut().clone();
+            let tree_id = self.tree.tree_id;
+            let jobs = file_ids.into_iter().map(|file_id| {
+                let connection = connection.clone();
+                async move { close_on_connection_result(&connection, tree_id, file_id).await }
+            });
+            self.runtime
+                .block_on(join_all(jobs))
+                .into_iter()
+                .enumerate()
+                .find_map(|(index, result)| result.err().map(|error| error.with_index(index)))
+                .map_or(Ok(()), Err)
+        };
+        let disconnect_result = self
+            .runtime
+            .block_on(self.client.disconnect_share(&self.tree))
+            .map_err(|error| smb_error(error, 0));
+        self.disconnected = true;
+        close_result.and(disconnect_result)
     }
 
     #[cfg(feature = "test-faults")]
@@ -174,6 +224,12 @@ impl SmbVecFs {
     #[doc(hidden)]
     pub fn test_deferred_close_count(&self) -> usize {
         self.deferred_closes.len()
+    }
+
+    #[cfg(feature = "test-faults")]
+    #[doc(hidden)]
+    pub fn test_last_writev_was_concurrent(&self) -> bool {
+        self.last_writev_was_concurrent
     }
 
     #[cfg(feature = "test-faults")]
@@ -898,56 +954,62 @@ impl SmbVecFs {
         recursive: bool,
         output: &mut Vec<VfAttrs>,
     ) -> VfResult<()> {
-        let resolved = self.abs_path(dir);
-        let path = self.path_string(&resolved)?;
-        let entries = self
-            .runtime
-            .block_on(self.client.list_directory(&mut self.tree, &path))
-            .map_err(|e| smb_error(e, 0))?;
-        let mut taken = 0usize;
-        for entry in entries {
-            if matches!(entry.name.as_str(), "." | "..") {
-                continue;
-            }
-            if max_count != 0 && taken >= max_count {
+        let mut pending = vec![self.abs_path(dir)];
+        while let Some(current) = pending.pop() {
+            if max_count != 0 && output.len() >= max_count {
                 break;
             }
-            let child = resolved.join(&entry.name);
-            let mut attrs = VfAttrs {
-                file: VfFile::Path {
-                    base: VfPathBase::Abs,
-                    path: Path::new("/").join(&child),
-                },
-                masks,
-                ftype: if entry.is_directory {
-                    VfType::Directory
-                } else {
-                    VfType::Regular
-                },
-                ..VfAttrs::default()
-            };
-            attrs.returned = AttrMask::empty();
-            if masks.contains(AttrMask::MODE) {
-                attrs.mode = if entry.is_directory {
-                    libc::S_IFDIR | 0o777
-                } else {
-                    libc::S_IFREG | 0o666
+            let path = self.path_string(&current)?;
+            let entries = self
+                .runtime
+                .block_on(self.client.list_directory(&mut self.tree, &path))
+                .map_err(|error| smb_error(error, 0))?;
+            let mut children = Vec::new();
+            for entry in entries {
+                if matches!(entry.name.as_str(), "." | "..") {
+                    continue;
+                }
+                if max_count != 0 && output.len() >= max_count {
+                    break;
+                }
+                let child = current.join(&entry.name);
+                let mut attrs = VfAttrs {
+                    file: VfFile::Path {
+                        base: VfPathBase::Abs,
+                        path: Path::new("/").join(&child),
+                    },
+                    masks,
+                    ftype: if entry.is_directory {
+                        VfType::Directory
+                    } else {
+                        VfType::Regular
+                    },
+                    ..VfAttrs::default()
                 };
-                attrs.returned.insert(AttrMask::MODE);
+                attrs.returned = AttrMask::empty();
+                if masks.contains(AttrMask::MODE) {
+                    attrs.mode = if entry.is_directory {
+                        libc::S_IFDIR | 0o777
+                    } else {
+                        libc::S_IFREG | 0o666
+                    };
+                    attrs.returned.insert(AttrMask::MODE);
+                }
+                if masks.contains(AttrMask::SIZE) {
+                    attrs.size = entry.size;
+                    attrs.returned.insert(AttrMask::SIZE);
+                }
+                if masks.contains(AttrMask::MTIME) {
+                    (attrs.mtime_sec, attrs.mtime_nsec) = filetime_parts(entry.modified);
+                    attrs.returned.insert(AttrMask::MTIME);
+                }
+                if recursive && entry.is_directory {
+                    children.push(child);
+                }
+                output.push(attrs);
             }
-            if masks.contains(AttrMask::SIZE) {
-                attrs.size = entry.size;
-                attrs.returned.insert(AttrMask::SIZE);
-            }
-            if masks.contains(AttrMask::MTIME) {
-                (attrs.mtime_sec, attrs.mtime_nsec) = filetime_parts(entry.modified);
-                attrs.returned.insert(AttrMask::MTIME);
-            }
-            let descend = recursive && entry.is_directory;
-            output.push(attrs);
-            taken += 1;
-            if descend {
-                self.listdir_rec(&child, masks, max_count, true, output)?;
+            for child in children.into_iter().rev() {
+                pending.push(child);
             }
         }
         Ok(())
@@ -1152,19 +1214,25 @@ impl SmbVecFs {
     }
 
     fn rm_one(&mut self, path: &Path, recursive: bool) -> VfResult<()> {
-        let attrs = self.stat(path)?;
-        if attrs.ftype == VfType::Directory && recursive {
-            let entries = self.listdir(path, AttrMask::empty(), 0, false)?;
-            for entry in entries {
-                let child = entry
-                    .file
-                    .path()
-                    .ok_or_else(|| VfError::failure(0, ERR_INVAL))?
-                    .to_path_buf();
-                self.rm_one(&child, true)?;
+        let mut pending = vec![(path.to_path_buf(), false)];
+        while let Some((current, visited)) = pending.pop() {
+            let attrs = self.stat(&current)?;
+            if attrs.ftype == VfType::Directory && recursive && !visited {
+                pending.push((current.clone(), true));
+                let entries = self.listdir(&current, AttrMask::empty(), 0, false)?;
+                for entry in entries.into_iter().rev() {
+                    let child = entry
+                        .file
+                        .path()
+                        .ok_or_else(|| VfError::failure(0, ERR_INVAL))?
+                        .to_path_buf();
+                    pending.push((child, false));
+                }
+            } else {
+                self.removev(&[VfFile::from_os_path(&current)])?;
             }
         }
-        self.removev(&[VfFile::from_os_path(path)])
+        Ok(())
     }
 }
 
@@ -1581,6 +1649,10 @@ impl VecFs for SmbVecFs {
     }
 
     fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+        #[cfg(feature = "test-faults")]
+        {
+            self.last_writev_was_concurrent = false;
+        }
         let max_write = self
             .client
             .params()
@@ -1591,13 +1663,14 @@ impl VecFs for SmbVecFs {
                 !write.file.is_descriptor()
                     && !matches!(write.file, VfFile::Saved)
                     && matches!(write.offset, VfOffset::At(_))
+                    && !write.creation
+                    && !write.truncate
                     && !write.data.is_empty()
                     && write.data.len() <= max_write
                     && write.data.len() <= u32::MAX as usize
             });
         if concurrent {
             let mut prepared = Vec::with_capacity(writes.len());
-            let mut paths = HashSet::with_capacity(writes.len());
             for (index, write) in writes.iter().enumerate() {
                 let path = self
                     .path_string(
@@ -1606,29 +1679,37 @@ impl VecFs for SmbVecFs {
                             .map_err(|e| e.with_index(index))?,
                     )
                     .map_err(|e| e.with_index(index))?;
-                if !paths.insert(path.clone()) {
-                    prepared.clear();
-                    break;
-                }
-                let mut flags = libc::O_WRONLY;
-                if write.creation {
-                    flags |= libc::O_CREAT;
-                }
-                if write.truncate {
-                    flags |= libc::O_TRUNC;
-                }
                 let create = self
-                    .open_request(&path, flags)
+                    .open_request(&path, libc::O_WRONLY)
                     .map_err(|e| e.with_index(index))?;
+                let mut identity_create = self
+                    .open_request(&path, libc::O_RDONLY)
+                    .map_err(|e| e.with_index(index))?;
+                identity_create.desired_access = FileAccessMask::new(
+                    FileAccessMask::FILE_READ_ATTRIBUTES | FileAccessMask::SYNCHRONIZE,
+                );
                 let VfOffset::At(offset) = write.offset else {
                     unreachable!("concurrent write eligibility checked")
                 };
-                prepared.push((create, offset, write.data.clone()));
+                prepared.push((create, identity_create, offset, write.data.clone()));
             }
-            if prepared.len() == writes.len() {
-                let connection = self.client.connection_mut().clone();
-                let tree_id = self.tree.tree_id;
-                let jobs = prepared.into_iter().map(|(create, offset, data)| {
+            let connection = self.client.connection_mut().clone();
+            let tree_id = self.tree.tree_id;
+            let identity_jobs = prepared.iter().map(|(_, create, _, _)| {
+                concurrent_file_identity(connection.clone(), tree_id, create.clone())
+            });
+            let identities = self.runtime.block_on(join_all(identity_jobs));
+            let identities: Option<Vec<u64>> =
+                identities.into_iter().collect::<Result<_, _>>().ok();
+            if identities
+                .as_deref()
+                .is_some_and(identities_are_independent)
+            {
+                #[cfg(feature = "test-faults")]
+                {
+                    self.last_writev_was_concurrent = true;
+                }
+                let jobs = prepared.into_iter().map(|(create, _, offset, data)| {
                     concurrent_compound_write(connection.clone(), tree_id, create, offset, data)
                 });
                 let results = self.runtime.block_on(join_all(jobs));
@@ -2144,29 +2225,34 @@ impl VecFs for SmbVecFs {
         if !self.exists(destination)? {
             self.ensure_dir(destination, 0o755)?;
         }
-        let entries = self.listdir(source, AttrMask::MODE | AttrMask::SIZE, 0, false)?;
-        for entry in entries {
-            let name = entry
-                .file
-                .path()
-                .and_then(Path::file_name)
-                .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
-            let source_child = source.join(name);
-            let destination_child = destination.join(name);
-            if entry.ftype == VfType::Directory {
-                self.cp_recursive(
-                    &source_child,
-                    &destination_child,
-                    false,
-                    use_server_side_copy,
-                )?;
-            } else {
-                let pair = ExtentPair::from_os_paths(&source_child, 0, &destination_child, 0, None);
-                if use_server_side_copy {
-                    self.copyv(&[pair])?;
+        let masks = AttrMask::MODE | AttrMask::SIZE;
+        let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
+        while let Some((source_dir, destination_dir)) = pending.pop() {
+            let entries = self.listdir(&source_dir, masks, 0, false)?;
+            let mut directories = Vec::new();
+            for entry in entries {
+                let name = entry
+                    .file
+                    .path()
+                    .and_then(Path::file_name)
+                    .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+                let source_child = source_dir.join(name);
+                let destination_child = destination_dir.join(name);
+                if entry.ftype == VfType::Directory {
+                    self.ensure_dir(&destination_child, 0o755)?;
+                    directories.push((source_child, destination_child));
                 } else {
-                    self.dupv(&[pair])?;
+                    let pair =
+                        ExtentPair::from_os_paths(&source_child, 0, &destination_child, 0, None);
+                    if use_server_side_copy {
+                        self.copyv(&[pair])?;
+                    } else {
+                        self.dupv(&[pair])?;
+                    }
                 }
+            }
+            for directory in directories.into_iter().rev() {
+                pending.push(directory);
             }
         }
         Ok(())
@@ -2175,24 +2261,7 @@ impl VecFs for SmbVecFs {
 
 impl Drop for SmbVecFs {
     fn drop(&mut self) {
-        let file_ids: Vec<FileId> = self
-            .open_files
-            .drain()
-            .map(|(_, open)| open.file_id)
-            .chain(self.deferred_closes.drain(..))
-            .collect();
-        if !file_ids.is_empty() {
-            let connection = self.client.connection_mut().clone();
-            let tree_id = self.tree.tree_id;
-            let jobs = file_ids.into_iter().map(|file_id| {
-                let connection = connection.clone();
-                async move { close_on_connection(&connection, tree_id, file_id).await }
-            });
-            self.runtime.block_on(join_all(jobs));
-        }
-        let _ = self
-            .runtime
-            .block_on(self.client.disconnect_share(&self.tree));
+        let _ = self.shutdown_inner();
     }
 }
 
@@ -2206,6 +2275,79 @@ fn paths_are_independent(paths: &[PathBuf]) -> bool {
         }
     }
     true
+}
+
+fn identities_are_independent(identities: &[u64]) -> bool {
+    let mut unique = HashSet::with_capacity(identities.len());
+    identities.iter().all(|identity| unique.insert(*identity))
+}
+
+/// Return the server's stable file index for an existing path without
+/// changing it. Hard links and paths reached through reparse aliases report
+/// the same index, allowing `writev` to avoid racing writes to one object.
+async fn concurrent_file_identity(
+    connection: Connection,
+    tree_id: TreeId,
+    create: CreateRequest,
+) -> VfResult<u64> {
+    let query = QueryInfoRequest {
+        info_type: InfoType::File,
+        file_info_class: FILE_INTERNAL_INFORMATION,
+        output_buffer_length: 8,
+        additional_information: 0,
+        flags: 0,
+        file_id: FileId::SENTINEL,
+        input_buffer: Vec::new(),
+    };
+    let close = CloseRequest {
+        flags: 0,
+        file_id: FileId::SENTINEL,
+    };
+    let operations = [
+        CompoundOp {
+            command: Command::Create,
+            body: &create,
+            tree_id: Some(tree_id),
+            credit_charge: CreditCharge(1),
+        },
+        CompoundOp {
+            command: Command::QueryInfo,
+            body: &query,
+            tree_id: Some(tree_id),
+            credit_charge: CreditCharge(1),
+        },
+        CompoundOp {
+            command: Command::Close,
+            body: &close,
+            tree_id: Some(tree_id),
+            credit_charge: CreditCharge(1),
+        },
+    ];
+    let responses = connection
+        .execute_compound(&operations)
+        .await
+        .map_err(|error| smb_error(error, 0))?;
+    let responses = collect_compound(responses, operations.len())?;
+    require_status(&responses[0], Command::Create, 0)?;
+    let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
+        .map_err(|error| smb_error(error, 0))?
+        .file_id;
+    if let Err(error) = require_status(&responses[1], Command::QueryInfo, 0) {
+        close_on_connection(&connection, tree_id, opened).await;
+        return Err(error);
+    }
+    let response = QueryInfoResponse::unpack(&mut ReadCursor::new(&responses[1].body))
+        .map_err(|error| smb_error(error, 0))?;
+    if responses[2].header.status != NtStatus::SUCCESS {
+        close_on_connection(&connection, tree_id, opened).await;
+    }
+    let bytes: [u8; 8] = response
+        .output_buffer
+        .get(..8)
+        .ok_or_else(|| VfError::transport(None, "short SMB FileInternalInformation response"))?
+        .try_into()
+        .expect("eight-byte slice");
+    Ok(u64::from_le_bytes(bytes))
 }
 
 async fn concurrent_read_whole(
@@ -2513,7 +2655,35 @@ fn filetime_parts(time: FileTime) -> (i64, u32) {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    fn offset_boundary() -> impl Strategy<Value = u64> {
+        prop_oneof![
+            0u64..=2048,
+            (i64::MAX as u64 - 1024)..=(i64::MAX as u64 + 1024),
+            (u64::MAX - 2048)..=u64::MAX,
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn checked_offsets_match_u64_arithmetic_at_signed_and_unsigned_boundaries(
+            base in offset_boundary(),
+            delta in 0u64..=4096,
+            index in 0usize..32,
+        ) {
+            match (base.checked_add(delta), checked_offset(base, delta, index)) {
+                (Some(expected), Ok(actual)) => prop_assert_eq!(actual, expected),
+                (None, Err(error)) => {
+                    prop_assert_eq!(error.index_opt(), Some(index));
+                    prop_assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+                }
+                (expected, actual) => prop_assert!(false, "expected {expected:?}, got {actual:?}"),
+            }
+        }
+    }
 
     #[test]
     fn server_address_defaults_to_port_445() {
@@ -2536,6 +2706,12 @@ mod tests {
         let error = checked_offset(u64::MAX, 1, 7).unwrap_err();
         assert_eq!(error.index_opt(), Some(7));
         assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+    }
+
+    #[test]
+    fn concurrent_writes_require_distinct_server_file_identities() {
+        assert!(identities_are_independent(&[10, 20, 30]));
+        assert!(!identities_are_independent(&[10, 20, 10]));
     }
 
     #[test]

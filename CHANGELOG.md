@@ -7,6 +7,17 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ### Changed
 
+- Added NFS COMPOUND-response and attribute-list fuzz targets, randomized
+  offset-boundary checks for every backend, and CI coverage under Rust ASan
+  plus UBSan-instrumented native NFS/XDR shims. Existing fault-injection tests
+  cover stalled reads, malformed operation results, cleanup failures,
+  post-prefix failures, and local-backend symlink swaps.
+- Hardened backend lifecycle and deep-tree behavior: local clients now offer
+  fallible construction, SMB clients offer fallible shutdown, and local, NFS,
+  and SMB recursive listing/copy/removal use iterative traversal. NFS identity
+  lookup is reentrant, bounded, and preserves qualified identity domains; SMB
+  concurrent writes verify server file identities to serialize hard-link and
+  reparse aliases without disabling vectorization for independent files.
 - Added opt-in Kerberos RPCSEC_GSS support to the Rust NFS client behind the
   non-default `rpcsec-gss` feature. Connection options select `krb5` or
   `krb5i`, use the process credential cache without accepting passwords,

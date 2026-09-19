@@ -4,7 +4,36 @@ use vfsi_sync::*;
 
 #[cfg(test)]
 mod tests {
+    use crate::checked_offset;
+
     use super::*;
+    use proptest::prelude::*;
+
+    fn offset_boundary() -> impl Strategy<Value = u64> {
+        prop_oneof![
+            0u64..=2048,
+            (i64::MAX as u64 - 1024)..=(i64::MAX as u64 + 1024),
+            (u64::MAX - 2048)..=u64::MAX,
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn checked_offsets_match_u64_arithmetic_at_signed_and_unsigned_boundaries(
+            base in offset_boundary(),
+            delta in 0u64..=4096,
+            index in 0usize..32,
+        ) {
+            match (base.checked_add(delta), checked_offset(base, delta, index)) {
+                (Some(expected), Ok(actual)) => prop_assert_eq!(actual, expected),
+                (None, Err(error)) => {
+                    prop_assert_eq!(error.index_opt(), Some(index));
+                    prop_assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+                }
+                (expected, actual) => prop_assert!(false, "expected {expected:?}, got {actual:?}"),
+            }
+        }
+    }
     use crate::DummyVecFs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use vfsi_core::RpcError;
@@ -39,6 +68,19 @@ mod tests {
         let root = TempRoot::new(tag);
         let fs = DummyVecFs::new(root.0.clone());
         (root, fs)
+    }
+
+    #[test]
+    fn try_new_reports_setup_errors_instead_of_panicking() {
+        let root = TempRoot::new("try-new-error");
+        std::fs::create_dir(&root.0).unwrap();
+        let not_a_directory = root.0.join("file");
+        std::fs::write(&not_a_directory, b"not a directory").unwrap();
+        let error = DummyVecFs::try_new(not_a_directory).err().unwrap();
+        assert!(matches!(
+            error.err_no(),
+            value if value == libc::EEXIST as u32 || value == libc::ENOTDIR as u32
+        ));
     }
 
     fn write(fs: &mut DummyVecFs, path: &str, data: &[u8]) {
@@ -912,5 +954,41 @@ mod tests {
             fs.read(&VfFile::from_path("/link-dup"), 0, 4).unwrap(),
             b"data"
         );
+    }
+
+    #[test]
+    fn deep_recursive_operations_use_bounded_call_stack() {
+        const DEPTH: usize = 384;
+        let (_root, mut fs) = fs("deep-iterative");
+        fs.mkdir(Path::new("/source"), 0o755).unwrap();
+        let mut directory = PathBuf::from("/source");
+        for _ in 0..DEPTH {
+            directory.push("d");
+            fs.mkdir(&directory, 0o755).unwrap();
+        }
+        let leaf = directory.join("leaf");
+        fs.writev(&[
+            WriteOp::from_os_path(&leaf, VfOffset::At(0), b"deep".to_vec()).with_creation(),
+        ])
+        .unwrap();
+
+        let listed = fs
+            .listdir(Path::new("/source"), AttrMask::MODE, 0, true)
+            .unwrap();
+        assert_eq!(listed.len(), DEPTH + 1);
+        fs.cp_recursive(Path::new("/source"), Path::new("/copy"), false, false)
+            .unwrap();
+        let copied_leaf = Path::new("/copy").join(
+            leaf.strip_prefix("/source")
+                .expect("leaf remains below source"),
+        );
+        assert_eq!(
+            fs.read(&VfFile::from_os_path(&copied_leaf), 0, 4).unwrap(),
+            b"deep"
+        );
+        fs.rm(&[Path::new("/source"), Path::new("/copy")], true)
+            .unwrap();
+        assert!(!fs.exists(Path::new("/source")).unwrap());
+        assert!(!fs.exists(Path::new("/copy")).unwrap());
     }
 }

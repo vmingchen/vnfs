@@ -3131,7 +3131,35 @@ fn make_open_how(create: OpenCreate, verifier: verifier4) -> openflag4 {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
+
+    fn offset_boundary() -> impl Strategy<Value = u64> {
+        prop_oneof![
+            0u64..=2048,
+            (i64::MAX as u64 - 1024)..=(i64::MAX as u64 + 1024),
+            (u64::MAX - 2048)..=u64::MAX,
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn checked_offsets_match_u64_arithmetic_at_signed_and_unsigned_boundaries(
+            base in offset_boundary(),
+            delta in 0usize..=4096,
+            index in 0usize..32,
+        ) {
+            match (base.checked_add(delta as u64), checked_offset(base, delta, index)) {
+                (Some(expected), Ok(actual)) => prop_assert_eq!(actual, expected),
+                (None, Err(error)) => {
+                    prop_assert_eq!(error.op_index, index);
+                    prop_assert_eq!(error.status, nfsstat4_NFS4ERR_INVAL);
+                }
+                (expected, actual) => prop_assert!(false, "expected {expected:?}, got {actual:?}"),
+            }
+        }
+    }
 
     #[test]
     fn negotiated_op_budgets_include_sequence() {

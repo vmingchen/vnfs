@@ -5,6 +5,8 @@ pub mod client;
 #[cfg(feature = "ffi")]
 pub mod compound;
 #[cfg(feature = "ffi")]
+mod identity;
+#[cfg(feature = "ffi")]
 pub mod nfs;
 #[cfg(feature = "ffi")]
 mod planner;
@@ -12,6 +14,11 @@ mod planner;
 pub mod rpc;
 #[cfg(feature = "ffi")]
 pub mod session;
+
+/// Stable entry points used by the out-of-tree libFuzzer targets.
+#[doc(hidden)]
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 
 #[doc(hidden)]
 #[cfg(feature = "ffi")]

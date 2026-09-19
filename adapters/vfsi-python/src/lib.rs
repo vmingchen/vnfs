@@ -442,7 +442,10 @@ impl NfsClient {
                     }
                     std::fs::create_dir_all(&root_path)
                         .map_err(|e| PyOSError::new_err(format!("create dummy root: {}", e)))?;
-                    Box::new(DummyVecFs::new(root_path)) as Box<dyn VecFs + Send>
+                    Box::new(
+                        DummyVecFs::try_new(root_path)
+                            .map_err(|error| PyOSError::new_err(error.to_string()))?,
+                    ) as Box<dyn VecFs + Send>
                 }
                 other => {
                     return Err(PyValueError::new_err(format!(
