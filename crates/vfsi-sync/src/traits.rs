@@ -69,6 +69,7 @@ impl Default for ReadDirOptions {
 pub struct WalkOptions {
     directory: ReadDirOptions,
     max_depth: usize,
+    truncate_at_max_depth: bool,
 }
 
 impl WalkOptions {
@@ -76,6 +77,7 @@ impl WalkOptions {
         Self {
             directory: ReadDirOptions::new(),
             max_depth: DEFAULT_WALK_MAX_DEPTH,
+            truncate_at_max_depth: false,
         }
     }
 
@@ -84,6 +86,7 @@ impl WalkOptions {
         Self {
             directory: ReadDirOptions::unlimited(),
             max_depth: usize::MAX,
+            truncate_at_max_depth: false,
         }
     }
 
@@ -102,6 +105,13 @@ impl WalkOptions {
         self
     }
 
+    /// Stop descending at `max_depth` instead of treating a deeper subtree
+    /// as a safety-limit violation. Intended for caller-requested shallow walks.
+    pub const fn truncate_at_max_depth(mut self, truncate: bool) -> Self {
+        self.truncate_at_max_depth = truncate;
+        self
+    }
+
     pub const fn entry_limit(self) -> usize {
         self.directory.entry_limit()
     }
@@ -112,6 +122,10 @@ impl WalkOptions {
 
     pub const fn depth_limit(self) -> usize {
         self.max_depth
+    }
+
+    pub const fn truncates_at_depth_limit(self) -> bool {
+        self.truncate_at_max_depth
     }
 }
 
@@ -521,13 +535,18 @@ pub trait VecFs {
                 .filter(|e| e.ftype == VfType::Directory)
                 .filter_map(|e| e.file.path().map(|p| p.to_path_buf()))
                 .collect();
-            if !subdirs.is_empty() && depth >= options.depth_limit() {
+            if !subdirs.is_empty()
+                && depth >= options.depth_limit()
+                && !options.truncates_at_depth_limit()
+            {
                 return Err(
                     VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
                 );
             }
-            for s in subdirs.into_iter().rev() {
-                stack.push((s, depth + 1));
+            if depth < options.depth_limit() {
+                for s in subdirs.into_iter().rev() {
+                    stack.push((s, depth + 1));
+                }
             }
             out.push(WalkEntry { path: dir, entries });
         }

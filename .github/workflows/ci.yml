@@ -571,6 +571,44 @@ jobs:
             tests/test_callbacks.py::test_callback_smoke_on_network_backends \
             tests/test_listing_cache.py::test_listing_cache_smoke_on_network_backends \
             tests/test_file_buffering.py::test_file_buffering_smoke_on_network_backends
+      - name: Recover a Python reader across an NFS server restart
+        env:
+          VFSI_NFS_REQUIRED: 1
+          VFSI_NFS_SERVER: 127.0.0.1
+          VFSI_NFS_MINOR: ${{ matrix.minor-version }}
+        run: |
+          control_dir=$(mktemp -d)
+          NFS4FS_RECOVERY_CONTROL_DIR="$control_dir" \
+            .venv/bin/python -m pytest -q \
+            adapters/nfs4fs/tests/test_nfs_integration.py::test_python_reader_recovers_across_server_restart &
+          test_pid=$!
+          trap 'touch "$control_dir/continue"; kill "$test_pid" 2>/dev/null || true' EXIT
+          for attempt in $(seq 1 120); do
+            test -e "$control_dir/ready" && break
+            if ! kill -0 "$test_pid" 2>/dev/null; then wait "$test_pid"; fi
+            sleep 0.25
+          done
+          test -e "$control_dir/ready"
+          sudo pkill -TERM -x ganesha.nfsd
+          for attempt in $(seq 1 30); do
+            pgrep -x ganesha.nfsd >/dev/null || break
+            sleep 1
+          done
+          ! pgrep -x ganesha.nfsd >/dev/null
+          sudo ganesha.nfsd -F -L /tmp/ganesha-python-restart.log -f /tmp/ganesha.conf &
+          ganesha_pid=$!
+          for attempt in $(seq 1 30); do
+            if ! sudo kill -0 "$ganesha_pid" 2>/dev/null; then
+              cat /tmp/ganesha-python-restart.log
+              exit 1
+            fi
+            timeout 1 bash -c '</dev/tcp/127.0.0.1/2049' 2>/dev/null && break
+            sleep 1
+          done
+          timeout 1 bash -c '</dev/tcp/127.0.0.1/2049'
+          touch "$control_dir/continue"
+          wait "$test_pid"
+          trap - EXIT
       - name: Show server log after failure
         if: failure()
         run: |

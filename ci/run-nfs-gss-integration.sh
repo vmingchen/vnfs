@@ -100,3 +100,28 @@ VNFS_GSS_SERVICE=nfs@localhost. \
 KRB5_TRACE="$state_dir/client-krb5.trace" \
 MALLOC_PERTURB_=165 \
 cargo test -p vnfs --test nfs_gss --features rpcsec-gss -- --test-threads=1
+
+python3 -m venv "$state_dir/python"
+"$state_dir/python/bin/pip" install -q maturin 'fsspec>=2024.12.0,<2027.0.0'
+"$state_dir/python/bin/pip" install -q -e adapters/vfsi-fsspec
+(
+    cd adapters/nfs4fs
+    "$state_dir/python/bin/maturin" develop -q
+)
+"$state_dir/python/bin/python" - <<'PY'
+import fsspec
+
+for authentication in ("krb5", "krb5i"):
+    fs = fsspec.filesystem(
+        "nfs4",
+        host="127.0.0.1",
+        authentication=authentication,
+        service_principal="nfs@localhost.",
+        require_secure_authentication=True,
+        skip_instance_cache=True,
+    )
+    path = f"/python-{authentication}"
+    fs.pipe_file(path, authentication.encode())
+    assert fs.cat_file(path) == authentication.encode()
+    fs.close()
+PY

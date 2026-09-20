@@ -65,6 +65,38 @@ def test_read_all_limit_is_exposed_and_survives_reconnect(tmp_path):
     fs.close()
 
 
+def test_read_limit_covers_raw_buffered_range_and_aggregate_apis(tmp_path):
+    fs = _dummy(tmp_path / "all-read-limits", read_all_max_total_bytes=4)
+    fs.pipe({"/first": b"123456", "/second": b"abc"})
+
+    with fs.open("/first", "rb", cache_type="none") as file:
+        file.seek(1)
+        with pytest.raises(OSError) as exc_info:
+            file.read()
+        assert exc_info.value.errno == errno.EFBIG
+
+    with fs.open("/first", "rb", cache_type="blockcache", block_size=2) as file:
+        with pytest.raises(OSError) as exc_info:
+            file.read(5)
+        assert exc_info.value.errno == errno.EFBIG
+
+    with fs.open("/first", "rb", cache_type="readahead", block_size=8) as file:
+        with pytest.raises(OSError) as exc_info:
+            file.read(1)
+        assert exc_info.value.errno == errno.EFBIG
+
+    with pytest.raises(OSError) as exc_info:
+        fs.cat_file("/first", 0, 5)
+    assert exc_info.value.errno == errno.EFBIG
+    with pytest.raises(OSError) as exc_info:
+        fs.cat(["/first", "/second"])
+    assert exc_info.value.errno == errno.EFBIG
+    with pytest.raises(OSError) as exc_info:
+        fs.cat_ranges(["/first", "/second"], [0, 0], [3, 3])
+    assert exc_info.value.errno == errno.EFBIG
+    fs.close()
+
+
 def test_directory_entry_and_path_byte_limits_are_exposed(tmp_path):
     entry_limited = _dummy(tmp_path / "entry-limit", directory_max_entries=2)
     entry_limited.pipe({"/a": b"", "/b": b"", "/c": b""})
@@ -93,6 +125,66 @@ def test_walk_depth_limit_is_exposed(tmp_path):
         fs.find("/")
     assert exc_info.value.errno == errno.EFBIG
     fs.close()
+
+
+def test_per_call_maxdepth_stops_native_traversal_before_materialization(
+    tmp_path, monkeypatch
+):
+    fs = _dummy(tmp_path / "shallow-walk", walk_max_depth=128)
+    fs.makedirs("/one/two/three", exist_ok=True)
+    fs.pipe_file("/one/two/three/file", b"data")
+    calls = []
+    original = fs._client.walk
+
+    def recording_walk(root, sort=True, max_depth=None):
+        calls.append(max_depth)
+        return original(root, sort=sort, max_depth=max_depth)
+
+    monkeypatch.setattr(fs._client, "walk", recording_walk)
+    walked = list(fs.walk("/", maxdepth=1))
+    assert [directory for directory, _, _ in walked] == ["/", "/one"]
+    assert calls == [1]
+    fs.close()
+
+
+def test_failed_close_retains_descriptor_for_retry(tmp_path, monkeypatch):
+    fs = _dummy(tmp_path / "close-retry")
+    fs.pipe_file("/file", b"data")
+    file = fs.open("/file", "rb", cache_type="none")
+    assert file.read(1) == b"d"
+    descriptor = file._fd
+    original = fs._client.close
+    attempts = 0
+
+    def fail_once(fd):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("injected close failure")
+        return original(fd)
+
+    monkeypatch.setattr(fs._client, "close", fail_once)
+    with pytest.raises(ConnectionError, match="injected close failure"):
+        file.close()
+    assert not file.closed
+    assert file._fd == descriptor
+    file.close()
+    assert file.closed
+    assert attempts == 2
+    fs.close()
+
+
+def test_secure_authentication_configuration_fails_closed_without_network(tmp_path):
+    with pytest.raises(ValueError, match="requires authentication"):
+        fs_module.Nfs4FileSystem(
+            host="unused",
+            require_secure_authentication=True,
+            skip_instance_cache=True,
+        )
+    with pytest.raises(ValueError, match="NFS-only"):
+        _dummy(tmp_path / "secure", authentication="krb5i")
+    with pytest.raises(ValueError, match="authentication"):
+        _dummy(tmp_path / "secure", authentication="unknown")
 
 
 def test_bulk_writes_are_bounded_by_items_and_bytes(tmp_path):
@@ -199,6 +291,29 @@ def test_large_put_and_get_stream_in_bounded_chunks(tmp_path):
     fs.get("/large.bin", str(target))
     assert reads and max(reads) <= 257
     assert target.read_bytes() == payload
+    fs.close()
+
+
+def test_streaming_get_uses_read_limit_as_its_chunk_budget(tmp_path):
+    fs = _dummy(
+        tmp_path / "stream-read-limit",
+        read_all_max_total_bytes=4,
+        transfer_chunk_size=64,
+    )
+    payload = b"streamed-payload"
+    fs.pipe_file("/large", payload)
+    target = tmp_path / "streamed.bin"
+    requests = []
+    original = fs._client.pread
+
+    def recording_pread(fd, length, offset):
+        requests.append(length)
+        return original(fd, length, offset)
+
+    fs._client.pread = recording_pread
+    fs.get("/large", str(target))
+    assert target.read_bytes() == payload
+    assert requests and max(requests) <= 4
     fs.close()
 
 
@@ -411,3 +526,62 @@ def test_blocking_native_call_releases_the_gil(tmp_path):
         writer.wait(timeout=2)
         fs.close()
     assert counter[0] > 100
+
+
+def test_connection_pool_overlaps_independent_native_operations():
+    barrier = threading.Barrier(2)
+
+    class BlockingNative:
+        def __init__(self, *args):
+            pass
+
+        def stat_many(self, paths):
+            barrier.wait(timeout=2)
+            return ([{"size": 0}], {})
+
+        def shutdown(self):
+            pass
+
+    native_module = type("NativeModule", (), {"NfsClient": BlockingNative})
+    pool = engine_module._ClientPool(native_module, (), size=2)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(pool.stat_many, [f"/file-{i}"]) for i in range(2)]
+        assert [future.result(timeout=3) for future in futures] == [
+            ([{"size": 0}], {}),
+            ([{"size": 0}], {}),
+        ]
+    pool.shutdown()
+
+
+def test_connection_pool_pins_descriptors_while_overlapping_reads():
+    barrier = threading.Barrier(2)
+    created = []
+
+    class BlockingNative:
+        def __init__(self, *args):
+            self.identity = len(created)
+            created.append(self)
+
+        def open(self, path, mode):
+            return 100 + self.identity
+
+        def pread(self, fd, length, offset):
+            assert fd == 100 + self.identity
+            barrier.wait(timeout=2)
+            return bytes([self.identity])
+
+        def close(self, fd):
+            assert fd == 100 + self.identity
+
+        def shutdown(self):
+            pass
+
+    native_module = type("NativeModule", (), {"NfsClient": BlockingNative})
+    pool = engine_module._ClientPool(native_module, (), size=2)
+    descriptors = [pool.open(f"/file-{i}", "rb") for i in range(2)]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(pool.pread, fd, 1, 0) for fd in descriptors]
+        assert {future.result(timeout=3) for future in futures} == {b"\x00", b"\x01"}
+    for fd in descriptors:
+        pool.close(fd)
+    pool.shutdown()

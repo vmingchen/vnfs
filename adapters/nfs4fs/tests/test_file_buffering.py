@@ -1,5 +1,6 @@
 """File-buffering and vectorized OpenFiles coverage."""
 
+import errno
 import io
 import tempfile
 import threading
@@ -37,6 +38,23 @@ def test_default_read_buffer_reuses_remote_range(dummy_fs, monkeypatch):
         assert len(calls) == 1
         assert calls[0][0][0] == 0
         assert calls[0][0][1] >= 8
+
+
+def test_group_whole_file_read_obeys_allocation_limit(tmp_path):
+    with fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "group-read-limit"),
+        read_all_max_total_bytes=4,
+        block_size=2,
+        skip_instance_cache=True,
+    ) as fs:
+        paths = ["/first", "/second"]
+        fs.pipe({path: b"123456" for path in paths})
+        with _open_files(fs, paths, "rb") as files:
+            with pytest.raises(OSError) as error:
+                files[0].read()
+            assert error.value.errno == errno.EFBIG
 
 
 def test_buffered_readinto_overlap_alignment_and_close(dummy_fs, monkeypatch):
@@ -427,6 +445,62 @@ def test_open_many_closes_descriptors_when_size_discovery_fails(dummy_fs, monkey
             pass
     assert len(closes) == 1
     assert len(closes[0][0][0]) == 2
+
+
+def test_group_close_failure_keeps_descriptors_armed_for_retry(dummy_fs, monkeypatch):
+    paths = ["/close-retry-a", "/close-retry-b"]
+    dummy_fs.pipe({path: b"data" for path in paths})
+    opened = _open_files(dummy_fs, paths, "rb").__enter__()
+    descriptors = [file._fd for file in opened]
+    original = dummy_fs._client.close_many
+    attempts = 0
+
+    def fail_once(fds):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionError("injected grouped close failure")
+        return original(fds)
+
+    monkeypatch.setattr(dummy_fs._client, "close_many", fail_once)
+    opened[0].close()
+    assert opened[0].closed
+    with pytest.raises(ConnectionError, match="injected grouped close failure"):
+        opened[1].close()
+    assert not opened[1].closed
+    assert [file._fd for file in opened] == descriptors
+    opened[1].close()
+    assert all(file.closed for file in opened)
+    assert attempts == 2
+
+
+def test_group_close_failure_retries_only_uncompleted_suffix(dummy_fs, monkeypatch):
+    paths = ["/close-prefix-a", "/close-prefix-b", "/close-prefix-c"]
+    dummy_fs.pipe({path: b"data" for path in paths})
+    opened = _open_files(dummy_fs, paths, "rb").__enter__()
+    original = dummy_fs._client.close_many
+    calls = []
+
+    def fail_after_prefix(fds):
+        calls.append(list(fds))
+        if len(calls) == 1:
+            original(fds[:1])
+            error = OSError("injected indexed close failure")
+            error.index = 1
+            raise error
+        return original(fds)
+
+    monkeypatch.setattr(dummy_fs._client, "close_many", fail_after_prefix)
+    opened[0].close()
+    opened[1].close()
+    with pytest.raises(OSError, match="indexed close failure"):
+        opened[2].close()
+    assert opened[0]._fd is None
+    assert opened[1]._fd is not None
+    opened[2].close()
+    assert len(calls[0]) == 3
+    assert len(calls[1]) == 2
+    assert all(file.closed for file in opened)
 
 
 def test_open_files_flushes_writes_in_vector_waves(tmp_path, monkeypatch):

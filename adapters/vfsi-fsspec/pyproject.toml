@@ -12,7 +12,7 @@ license = "MIT OR Apache-2.0"
 license-files = ["LICENSE-APACHE", "LICENSE-MIT"]
 authors = [{ name = "Ming Chen", email = "v.mingchen@gmail.com" }]
 keywords = ["vfsi", "fsspec", "filesystem", "vectorized-io"]
-dependencies = ["fsspec>=2024.12.0"]
+dependencies = ["fsspec>=2024.12.0,<2027.0.0"]
 
 [project.urls]
 Homepage = "https://github.com/vmingchen/vnfs"

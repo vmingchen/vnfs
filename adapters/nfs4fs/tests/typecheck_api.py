@@ -18,6 +18,11 @@ def use_api(root: Path) -> None:
         use_listings_cache=True,
         listings_expiry_time=1.0,
         max_paths=16,
+        read_all_max_total_bytes=4096,
+        directory_max_entries=100,
+        directory_max_path_bytes=4096,
+        walk_max_depth=8,
+        connection_pool_size=2,
     )
     fs.pipe_file("/file", b"data")
     info: dict[str, object] = fs.info("/file")
@@ -30,3 +35,10 @@ def use_api(root: Path) -> None:
     fs.ls("/", refresh=True)
     fs.invalidate_cache("/")
     fs.close()
+    secure: Nfs4FileSystem = Nfs4FileSystem(
+        host="nfs.example",
+        authentication="krb5i",
+        service_principal="nfs@nfs.example",
+        require_secure_authentication=True,
+    )
+    secure.close()

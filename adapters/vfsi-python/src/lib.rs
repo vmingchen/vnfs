@@ -18,17 +18,19 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 
 use vfsi_core::{
-    AttrMask, ERR_ACCES, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT, ERR_NOTDIR, ReadOp, SeekFrom,
-    VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS, VF_CAP_POSIX_METADATA,
-    VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VF_ERR_UNSUPPORTED, VfAttrs, VfError, VfFile, VfOffset,
-    VfType, WriteOp,
+    AttrMask, ERR_ACCES, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT, ERR_NOTDIR, ReadOp,
+    ReadResult, SeekFrom, VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS,
+    VF_CAP_POSIX_METADATA, VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VF_ERR_UNSUPPORTED, VfAttrs,
+    VfError, VfFile, VfOffset, VfType, WriteOp, WriteResult,
 };
 #[cfg(feature = "dummy")]
 use vfsi_local::DummyVecFs;
-#[cfg(feature = "nfs")]
-use vfsi_nfs::NfsVecFs;
+#[cfg(feature = "nfs-rpcsec-gss")]
+use vfsi_nfs::RpcsecGssProtection;
 #[cfg(feature = "nfs")]
 use vfsi_nfs::compound::{compound_stats, rpc_stats};
+#[cfg(feature = "nfs")]
+use vfsi_nfs::{NfsAuthentication, NfsClientBuilder};
 #[cfg(feature = "smb")]
 use vfsi_smb::SmbVecFs;
 use vfsi_sync::{ReadAllOptions, VecFs, WalkOptions};
@@ -112,6 +114,128 @@ fn map_err_with_path(e: VfError, paths: &[PathBuf]) -> PyErr {
         .and_then(|index| paths.get(index))
         .map(PathBuf::as_path);
     to_py_err(e, path)
+}
+
+fn contract_error(operation: &str, detail: impl std::fmt::Display) -> PyErr {
+    PyOSError::new_err(format!("{operation}: backend contract violation: {detail}"))
+}
+
+fn one_read_result(operation: &str, op: &ReadOp, results: Vec<ReadResult>) -> PyResult<ReadResult> {
+    let mut results = validate_read_results(operation, std::slice::from_ref(op), results)?;
+    results
+        .pop()
+        .ok_or_else(|| contract_error(operation, "result disappeared after validation"))
+}
+
+fn validate_read_results(
+    operation: &str,
+    ops: &[ReadOp],
+    results: Vec<ReadResult>,
+) -> PyResult<Vec<ReadResult>> {
+    if results.len() != ops.len() {
+        return Err(contract_error(
+            operation,
+            format!(
+                "expected {} results, received {}",
+                ops.len(),
+                results.len()
+            ),
+        ));
+    }
+    for (index, (op, result)) in ops.iter().zip(&results).enumerate() {
+        if result.file != op.file {
+            return Err(contract_error(
+                operation,
+                format!("result {index} file does not match request"),
+            ));
+        }
+        if let VfOffset::At(offset) = op.offset
+            && result.offset != offset
+        {
+            return Err(contract_error(
+                operation,
+                format!(
+                    "result {index} offset {} does not match request {offset}",
+                    result.offset
+                ),
+            ));
+        }
+        if result.data.len() > op.length {
+            return Err(contract_error(
+                operation,
+                format!(
+                    "result {index} returned {} bytes for a {}-byte request",
+                    result.data.len(),
+                    op.length
+                ),
+            ));
+        }
+    }
+    Ok(results)
+}
+
+fn one_write_result(
+    operation: &str,
+    op: &WriteOp,
+    results: Vec<WriteResult>,
+) -> PyResult<WriteResult> {
+    let mut results = validate_write_results(operation, std::slice::from_ref(op), results)?;
+    results
+        .pop()
+        .ok_or_else(|| contract_error(operation, "result disappeared after validation"))
+}
+
+fn validate_write_results(
+    operation: &str,
+    ops: &[WriteOp],
+    results: Vec<WriteResult>,
+) -> PyResult<Vec<WriteResult>> {
+    if results.len() != ops.len() {
+        return Err(contract_error(
+            operation,
+            format!(
+                "expected {} results, received {}",
+                ops.len(),
+                results.len()
+            ),
+        ));
+    }
+    for (index, (op, result)) in ops.iter().zip(&results).enumerate() {
+        if result.file != op.file {
+            return Err(contract_error(
+                operation,
+                format!("result {index} file does not match request"),
+            ));
+        }
+        if let VfOffset::At(offset) = op.offset
+            && result.offset != offset
+        {
+            return Err(contract_error(
+                operation,
+                format!(
+                    "result {index} offset {} does not match request {offset}",
+                    result.offset
+                ),
+            ));
+        }
+        if result.written > op.data.len() {
+            return Err(contract_error(
+                operation,
+                format!(
+                    "result {index} reported {} bytes for a {}-byte request",
+                    result.written,
+                    op.data.len()
+                ),
+            ));
+        }
+    }
+    Ok(results)
+}
+
+fn descriptor(operation: &str, file: &VfFile) -> PyResult<i64> {
+    file.fd()
+        .map(i64::from)
+        .ok_or_else(|| contract_error(operation, "backend did not return a descriptor"))
 }
 
 // ---------------------------------------------------------------------------
@@ -385,7 +509,7 @@ impl NfsClient {
     /// Connect to an NFS server (`backend="nfs"`, default), an SMB2/3 share
     /// (`backend="smb"`), or a local directory (`backend="dummy"`).
     #[new]
-    #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None, minor_version=None, share=None, username="", password="", domain="", connect_timeout=10.0, request_timeout=5.0, read_all_max_total_bytes=16777216, directory_max_entries=100000, directory_max_path_bytes=16777216, walk_max_depth=128))]
+    #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None, minor_version=None, share=None, username="", password="", domain="", connect_timeout=10.0, request_timeout=5.0, read_all_max_total_bytes=16777216, directory_max_entries=100000, directory_max_path_bytes=16777216, walk_max_depth=128, authentication="auth_sys", service_principal=None, require_secure_authentication=false))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -404,6 +528,9 @@ impl NfsClient {
         directory_max_entries: usize,
         directory_max_path_bytes: usize,
         walk_max_depth: usize,
+        authentication: &str,
+        service_principal: Option<String>,
+        require_secure_authentication: bool,
     ) -> PyResult<Self> {
         let connect_timeout = Duration::try_from_secs_f64(connect_timeout)
             .map_err(|_| PyValueError::new_err("connect_timeout must be finite and positive"))?;
@@ -422,6 +549,9 @@ impl NfsClient {
             username,
             password,
             domain,
+            authentication,
+            &service_principal,
+            require_secure_authentication,
         );
         let fs: Box<dyn VecFs + Send> = py.detach(|| {
             Ok(match backend {
@@ -430,16 +560,42 @@ impl NfsClient {
                     if minor_version.is_some_and(|version| !matches!(version, 1 | 2)) {
                         return Err(PyValueError::new_err("minor_version must be 1, 2, or None"));
                     }
-                    let mut nfs = NfsVecFs::connect_with_timeouts(
-                        host,
-                        minor_version,
-                        connect_timeout,
-                        request_timeout,
-                    )
-                    .map_err(|e| to_py_err(e, Some(Path::new(host))))?;
+                    let nfs_authentication = match authentication {
+                        "auth_sys" => NfsAuthentication::AuthSys,
+                        #[cfg(feature = "nfs-rpcsec-gss")]
+                        "krb5" => NfsAuthentication::RpcsecGss {
+                            service_principal: service_principal.clone(),
+                            protection: RpcsecGssProtection::Authentication,
+                        },
+                        #[cfg(feature = "nfs-rpcsec-gss")]
+                        "krb5i" => NfsAuthentication::RpcsecGss {
+                            service_principal: service_principal.clone(),
+                            protection: RpcsecGssProtection::Integrity,
+                        },
+                        #[cfg(not(feature = "nfs-rpcsec-gss"))]
+                        "krb5" | "krb5i" => {
+                            return Err(PyNotImplementedError::new_err(
+                                "this extension was built without RPCSEC_GSS support",
+                            ));
+                        }
+                        other => {
+                            return Err(PyValueError::new_err(format!(
+                                "authentication must be 'auth_sys', 'krb5', or 'krb5i', got {other:?}"
+                            )));
+                        }
+                    };
+                    let mut builder = NfsClientBuilder::new(host)
+                        .minor_version(minor_version)
+                        .connect_timeout(connect_timeout)
+                        .request_timeout(request_timeout)
+                        .authentication(nfs_authentication)
+                        .require_secure_authentication(require_secure_authentication);
                     if let Some(limit) = compound_size_limit {
-                        nfs.set_max_compound_bytes(limit);
+                        builder = builder.max_compound_bytes(limit);
                     }
+                    let nfs = builder
+                        .connect()
+                        .map_err(|e| to_py_err(e, Some(Path::new(host))))?;
                     Box::new(nfs) as Box<dyn VecFs + Send>
                 }
                 #[cfg(feature = "smb")]
@@ -589,7 +745,7 @@ impl NfsClient {
             let f = fs
                 .open(&path, flags, 0o644)
                 .map_err(|e| to_py_err(e, Some(path.as_path())))?;
-            Ok(f.fd().expect("open returns a descriptor") as i64)
+            descriptor("open", &f)
         })
     }
 
@@ -603,28 +759,22 @@ impl NfsClient {
     /// Read `length` bytes at the descriptor's current position (advances it).
     fn read(&self, py: Python<'_>, fd: i64, length: usize) -> PyResult<Vec<u8>> {
         self.with_fs(py, move |fs| {
+            let op = ReadOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, length);
             let r = fs
-                .readv(&[ReadOp::new(
-                    VfFile::from_fd(fd as i32),
-                    VfOffset::Cur,
-                    length,
-                )])
+                .readv(std::slice::from_ref(&op))
                 .map_err(|e| to_py_err(e, None))?;
-            Ok(r.into_iter().next().expect("one result").data)
+            Ok(one_read_result("read", &op, r)?.data)
         })
     }
 
     /// Write `data` at the descriptor's current position (advances it).
     fn write(&self, py: Python<'_>, fd: i64, data: Vec<u8>) -> PyResult<usize> {
         self.with_fs(py, move |fs| {
+            let op = WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, data);
             let w = fs
-                .writev(&[WriteOp::new(
-                    VfFile::from_fd(fd as i32),
-                    VfOffset::Cur,
-                    data,
-                )])
+                .writev(std::slice::from_ref(&op))
                 .map_err(|e| to_py_err(e, None))?;
-            Ok(w.into_iter().next().expect("one result").written)
+            Ok(one_write_result("write", &op, w)?.written)
         })
     }
 
@@ -633,16 +783,11 @@ impl NfsClient {
     /// reports the actual EOF offset selected atomically for this write.
     fn write_positioned(&self, py: Python<'_>, fd: i64, data: Vec<u8>) -> PyResult<(usize, u64)> {
         self.with_fs(py, move |fs| {
+            let op = WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, data);
             let w = fs
-                .writev(&[WriteOp::new(
-                    VfFile::from_fd(fd as i32),
-                    VfOffset::Cur,
-                    data,
-                )])
-                .map_err(|e| to_py_err(e, None))?
-                .into_iter()
-                .next()
-                .expect("one result");
+                .writev(std::slice::from_ref(&op))
+                .map_err(|e| to_py_err(e, None))?;
+            let w = one_write_result("write_positioned", &op, w)?;
             let position = w
                 .offset
                 .checked_add(w.written as u64)
@@ -654,28 +799,22 @@ impl NfsClient {
     /// Read `length` bytes at an absolute offset (does not move the position).
     fn pread(&self, py: Python<'_>, fd: i64, length: usize, offset: u64) -> PyResult<Vec<u8>> {
         self.with_fs(py, move |fs| {
+            let op = ReadOp::new(VfFile::from_fd(fd as i32), VfOffset::At(offset), length);
             let r = fs
-                .readv(&[ReadOp::new(
-                    VfFile::from_fd(fd as i32),
-                    VfOffset::At(offset),
-                    length,
-                )])
+                .readv(std::slice::from_ref(&op))
                 .map_err(|e| to_py_err(e, None))?;
-            Ok(r.into_iter().next().expect("one result").data)
+            Ok(one_read_result("pread", &op, r)?.data)
         })
     }
 
     /// Write `data` at an absolute offset.
     fn pwrite(&self, py: Python<'_>, fd: i64, data: Vec<u8>, offset: u64) -> PyResult<usize> {
         self.with_fs(py, move |fs| {
+            let op = WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::At(offset), data);
             let w = fs
-                .writev(&[WriteOp::new(
-                    VfFile::from_fd(fd as i32),
-                    VfOffset::At(offset),
-                    data,
-                )])
+                .writev(std::slice::from_ref(&op))
                 .map_err(|e| to_py_err(e, None))?;
-            Ok(w.into_iter().next().expect("one result").written)
+            Ok(one_write_result("pwrite", &op, w)?.written)
         })
     }
 
@@ -756,6 +895,7 @@ impl NfsClient {
                     .collect();
                 match fs.readv(&ops) {
                     Ok(reads) => {
+                        let reads = validate_read_results("pread_many", &ops, reads)?;
                         for (&index, read) in remaining.iter().zip(reads) {
                             results[index] = Some(read.data);
                         }
@@ -803,6 +943,7 @@ impl NfsClient {
             .collect();
         self.with_fs(py, move |fs| {
             let writes = fs.writev(&ops).map_err(|e| to_py_err(e, None))?;
+            let writes = validate_write_results("pwrite_many", &ops, writes)?;
             Ok(writes.into_iter().map(|write| write.written).collect())
         })
     }
@@ -827,6 +968,7 @@ impl NfsClient {
             .collect();
         self.with_fs(py, move |fs| {
             let writes = fs.writev(&ops).map_err(|e| to_py_err(e, None))?;
+            let writes = validate_write_results("append_many", &ops, writes)?;
             writes
                 .into_iter()
                 .map(|write| {
@@ -1044,7 +1186,9 @@ impl NfsClient {
             } else {
                 for (i, end) in ends.iter().enumerate() {
                     lengths[i] = end
-                        .expect("all ends present")
+                        .ok_or_else(|| {
+                            contract_error("read_many", "missing range end after validation")
+                        })?
                         .saturating_sub(starts[i])
                         .min(usize::MAX as u64) as usize;
                 }
@@ -1061,6 +1205,7 @@ impl NfsClient {
                     .collect();
                 match fs.readv(&ops) {
                     Ok(res) => {
+                        let res = validate_read_results("read_many", &ops, res)?;
                         for (&i, r) in remaining.iter().zip(res) {
                             results[i] = Some(r.data);
                         }
@@ -1116,6 +1261,7 @@ impl NfsClient {
             .collect();
         self.with_fs(py, move |fs| {
             let res = fs.writev(&ops).map_err(|e| map_err_with_path(e, &paths))?;
+            let res = validate_write_results("write_many", &ops, res)?;
             Ok(res.into_iter().map(|r| r.written).collect())
         })
     }
@@ -1177,10 +1323,20 @@ impl NfsClient {
             let files = fs
                 .openv(&refs, &flags, &modes)
                 .map_err(|e| map_err_with_path(e, &paths))?;
-            Ok(files
+            if files.len() != paths.len() {
+                return Err(contract_error(
+                    "open_many",
+                    format!(
+                        "expected {} results, received {}",
+                        paths.len(),
+                        files.len()
+                    ),
+                ));
+            }
+            files
                 .into_iter()
-                .map(|f| f.fd().expect("openv returns descriptors") as i64)
-                .collect())
+                .map(|file| descriptor("open_many", &file))
+                .collect::<PyResult<Vec<_>>>()
         })
     }
 
@@ -1262,12 +1418,23 @@ impl NfsClient {
 
     /// Walk a tree in one call (the NFS backend lists each level in batched
     /// compounds). Returns `(dir_path, entries)` per directory in pre-order.
-    #[pyo3(signature = (root, sort=true))]
-    fn walk(&self, py: Python<'_>, root: PathBuf, sort: bool) -> PyResult<WalkResult> {
+    #[pyo3(signature = (root, sort=true, max_depth=None))]
+    fn walk(
+        &self,
+        py: Python<'_>,
+        root: PathBuf,
+        sort: bool,
+        max_depth: Option<usize>,
+    ) -> PyResult<WalkResult> {
         let options = WalkOptions::new()
             .max_entries(self.directory_max_entries)
             .max_path_bytes(self.directory_max_path_bytes)
-            .max_depth(self.walk_max_depth);
+            .max_depth(
+                max_depth
+                    .unwrap_or(self.walk_max_depth)
+                    .min(self.walk_max_depth),
+            )
+            .truncate_at_max_depth(max_depth.is_some_and(|depth| depth <= self.walk_max_depth));
         let tree = self.with_fs(py, move |fs| {
             let mut sort_fn = |_dir: &Path, attrs: &mut Vec<VfAttrs>| {
                 if sort {
@@ -1368,6 +1535,7 @@ impl NfsClient {
                     .collect();
                 match fs.writev(&ops) {
                     Ok(res) => {
+                        let res = validate_write_results("copy_many", &ops, res)?;
                         for (&i, r) in remaining.iter().zip(res) {
                             copied[i] = Some(r.written as u64);
                         }
@@ -1453,4 +1621,95 @@ pub fn register(m: &Bound<'_, PyModule>, version: &str) -> PyResult<()> {
     m.add("CAP_LSTAT", VF_CAP_LSTAT)?;
     m.add("ERR_UNSUPPORTED", VF_ERR_UNSUPPORTED)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scalar_read_result_contract_is_validated() {
+        let op = ReadOp::at(VfFile::from_fd(7), 11, 3);
+        assert!(one_read_result("pread", &op, Vec::new()).is_err());
+        assert!(
+            one_read_result(
+                "pread",
+                &op,
+                vec![ReadResult {
+                    file: VfFile::from_fd(8),
+                    offset: 11,
+                    data: vec![1],
+                    eof: false,
+                }],
+            )
+            .is_err()
+        );
+
+        let second = ReadOp::at(VfFile::from_fd(8), 0, 1);
+        let swapped = vec![
+            ReadResult {
+                file: second.file.clone(),
+                offset: 0,
+                data: vec![2],
+                eof: false,
+            },
+            ReadResult {
+                file: op.file.clone(),
+                offset: 11,
+                data: vec![1],
+                eof: false,
+            },
+        ];
+        assert!(validate_read_results("read_many", &[op.clone(), second], swapped).is_err());
+        assert!(
+            one_read_result(
+                "pread",
+                &op,
+                vec![ReadResult {
+                    file: VfFile::from_fd(7),
+                    offset: 12,
+                    data: vec![1],
+                    eof: false,
+                }],
+            )
+            .is_err()
+        );
+        assert!(
+            one_read_result(
+                "pread",
+                &op,
+                vec![ReadResult {
+                    file: VfFile::from_fd(7),
+                    offset: 11,
+                    data: vec![1; 4],
+                    eof: false,
+                }],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn scalar_write_result_contract_is_validated() {
+        let op = WriteOp::at(VfFile::from_fd(7), 11, vec![1, 2, 3]);
+        assert!(one_write_result("pwrite", &op, Vec::new()).is_err());
+        assert!(
+            one_write_result(
+                "pwrite",
+                &op,
+                vec![WriteResult {
+                    file: VfFile::from_fd(7),
+                    offset: 11,
+                    written: 4,
+                    stable: true,
+                }],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn path_result_cannot_cross_the_descriptor_boundary() {
+        assert!(descriptor("open", &VfFile::from_path("/not-a-descriptor")).is_err());
+    }
 }

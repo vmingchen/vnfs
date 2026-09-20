@@ -132,6 +132,15 @@ def _complete_child(callback, path1, path2, size):
     callback.relative_update()
 
 
+def _allocation_error(path, requested, limit):
+    """Return the uniform error used when a bytes-returning API exceeds its budget."""
+    return OSError(
+        errno.EFBIG,
+        f"read would allocate {requested} bytes, exceeding the {limit}-byte limit",
+        path,
+    )
+
+
 class _ResilientClient:
     """Own a native session with fork detection and safe read reconnects."""
 
@@ -216,6 +225,205 @@ class _ResilientClient:
                 return getattr(self._native, name)(*args, **kwargs)
 
         return call
+
+
+class _ClientPool:
+    """Bounded pool of independent native sessions with virtual descriptors.
+
+    Path operations are distributed across sessions, while a virtual file
+    descriptor is always routed back to the session that opened it. This
+    avoids the native client's per-session mutex becoming a filesystem-wide
+    serialization point without sacrificing vector operations within a batch.
+    """
+
+    _FD_METHODS = frozenset(
+        {
+            "close",
+            "read",
+            "write",
+            "write_positioned",
+            "pread",
+            "pwrite",
+            "fseek",
+            "fstat",
+        }
+    )
+    _FD_MANY_METHODS = frozenset(
+        {"fstat_many", "pread_many", "pwrite_many", "append_many", "close_many"}
+    )
+
+    def __init__(self, native_module, factory_args, size=1, auto_reconnect=True):
+        self._clients = [
+            _ResilientClient(native_module, factory_args, auto_reconnect=False)
+            for _ in range(size)
+        ]
+        self._auto_reconnect = auto_reconnect
+        self._lock = threading.RLock()
+        self._next_client = 0
+        # Keep ordinary invalid descriptors such as -1 invalid at the public
+        # seam. Virtual handles occupy a remote, monotonically decreasing range.
+        self._next_fd = -(1 << 62)
+        self._fds = {}
+        self._generation = 0
+        self._pid = os.getpid()
+        self._cwd = "/"
+
+    @property
+    def generation(self):
+        return self._generation
+
+    @property
+    def closed(self):
+        return not self._clients
+
+    def _choose(self):
+        with self._lock:
+            if not self._clients:
+                raise ValueError("filesystem is closed")
+            index = self._next_client % len(self._clients)
+            self._next_client += 1
+            return index, self._clients[index]
+
+    def _register(self, owner, native_fd):
+        with self._lock:
+            token = self._next_fd
+            self._next_fd -= 1
+            self._fds[token] = (owner, native_fd)
+            return token
+
+    def _resolve(self, token):
+        with self._lock:
+            try:
+                owner, native_fd = self._fds[token]
+                return owner, native_fd, self._clients[owner]
+            except (KeyError, IndexError):
+                raise OSError(errno.EBADF, "Bad file descriptor") from None
+
+    def ensure_ready(self):
+        if self.closed:
+            raise ValueError("filesystem is closed")
+        if self._pid != os.getpid():
+            self.reconnect(after_fork=True)
+
+    def reconnect(self, after_fork=False):
+        with self._lock:
+            clients = list(self._clients)
+            self._fds.clear()
+            self._generation += 1
+            self._pid = os.getpid()
+        for client in clients:
+            client.reconnect(after_fork=after_fork)
+            if self._cwd != "/":
+                client.chdir(self._cwd)
+
+    def shutdown(self):
+        with self._lock:
+            clients, self._clients = self._clients, []
+            self._fds.clear()
+            self._generation += 1
+        error = None
+        for client in clients:
+            try:
+                client.shutdown()
+            except BaseException as exc:
+                error = error or exc
+        if error is not None:
+            raise error
+
+    def open(self, path, mode):
+        self.ensure_ready()
+        owner, client = self._choose()
+        return self._register(owner, client.open(path, mode))
+
+    def open_many(self, paths, modes):
+        self.ensure_ready()
+        owner, client = self._choose()
+        return [self._register(owner, fd) for fd in client.open_many(paths, modes)]
+
+    def chdir(self, path):
+        """Keep the session-local working directory identical across the pool."""
+        self.ensure_ready()
+        try:
+            for client in self._clients:
+                client.chdir(path)
+        except BaseException:
+            # Rebuild every session rather than leave a partially changed pool.
+            self._cwd = "/"
+            self.reconnect()
+            raise
+        self._cwd = path
+
+    def getcwd(self):
+        self.ensure_ready()
+        return self._clients[0].getcwd()
+
+    def __getattr__(self, name):
+        if name in self._FD_METHODS:
+
+            def fd_call(token, *args, **kwargs):
+                self.ensure_ready()
+                _, native_fd, client = self._resolve(token)
+                result = getattr(client, name)(native_fd, *args, **kwargs)
+                if name == "close":
+                    with self._lock:
+                        self._fds.pop(token, None)
+                return result
+
+            return fd_call
+
+        if name in self._FD_MANY_METHODS:
+
+            def fd_many_call(tokens, *args, **kwargs):
+                self.ensure_ready()
+                resolved = []
+                for index, token in enumerate(tokens):
+                    try:
+                        resolved.append(self._resolve(token))
+                    except OSError as error:
+                        error.index = index
+                        raise
+                owners = {owner for owner, _, _ in resolved}
+                if len(owners) > 1:
+                    raise ValueError("descriptor vector spans multiple native sessions")
+                if not resolved:
+                    _, client = self._choose()
+                    native_fds = []
+                else:
+                    client = resolved[0][2]
+                    native_fds = [native_fd for _, native_fd, _ in resolved]
+                try:
+                    result = getattr(client, name)(native_fds, *args, **kwargs)
+                except BaseException as error:
+                    if name == "close_many":
+                        completed = getattr(error, "index", 0)
+                        if isinstance(completed, int) and 0 <= completed <= len(tokens):
+                            with self._lock:
+                                for token in tokens[:completed]:
+                                    self._fds.pop(token, None)
+                    raise
+                if name == "close_many":
+                    with self._lock:
+                        for token in tokens:
+                            self._fds.pop(token, None)
+                return result
+
+            return fd_many_call
+
+        def path_call(*args, **kwargs):
+            self.ensure_ready()
+            _, client = self._choose()
+            try:
+                return getattr(client, name)(*args, **kwargs)
+            except ConnectionError:
+                if not self._auto_reconnect or name not in _ResilientClient._IDEMPOTENT:
+                    raise
+                # Rebuild the complete pool. Any descriptors on a failed
+                # session are no longer trustworthy and must be lazily reopened.
+                self.reconnect()
+                _, retry_client = self._choose()
+                return getattr(retry_client, name)(*args, **kwargs)
+
+        return path_call
 
 
 class _RawVfsiFile(io.RawIOBase):
@@ -332,7 +540,9 @@ class _RawVfsiFile(io.RawIOBase):
             raise io.UnsupportedOperation("not readable")
         if len(b) == 0:
             return 0
-        data = self._pread(min(len(b), self._MAX_READ))
+        length = min(len(b), self._MAX_READ)
+        self.fs._check_read_allocation(length, self.path)
+        data = self._pread(length)
         n = len(data)
         if n:
             b[:n] = data
@@ -361,6 +571,7 @@ class _RawVfsiFile(io.RawIOBase):
             size = max(0, self._size() - self._pos)
             if size == 0:
                 return b""
+        self.fs._check_read_allocation(size, self.path)
         chunks = []
         remaining = size
         while remaining > 0:
@@ -445,18 +656,18 @@ class _RawVfsiFile(io.RawIOBase):
         if self._closed:
             return
         fd = self._fd
-        try:
-            if (
-                fd is not None
-                and self._fd_generation == self.fs._client.generation
-                and not self.fs._client.closed
-            ):
-                self.fs._client.close(fd)
-        finally:
-            self._fd = None
-            self._fd_generation = None
-            self._closed = True
-            super().close()
+        if (
+            fd is not None
+            and self._fd_generation == self.fs._client.generation
+            and not self.fs._client.closed
+        ):
+            # Retain ownership when CLOSE fails so callers (and __del__) can
+            # retry cleanup instead of silently leaking server-side open state.
+            self.fs._client.close(fd)
+        self._fd = None
+        self._fd_generation = None
+        self._closed = True
+        super().close()
 
     @property
     def size(self):
@@ -603,6 +814,7 @@ class VfsiFile(AbstractBufferedFile):
         )
 
     def _fetch_range(self, start, end):
+        self.fs._check_read_allocation(max(0, end - start), self.path)
         if self._buffer_group is not None and self.fs.vectorized_buffering:
             return self._buffer_group.fetch(self, start, end)
         return self._raw._pread_at(start, max(0, end - start))
@@ -660,9 +872,11 @@ class VfsiFile(AbstractBufferedFile):
                 data = data[0] or b""
             self.loc = len(data)
             return data
-        self._requested_read_end = (
+        requested_end = (
             self.size if size is None or size < 0 else min(self.loc + size, self.size)
         )
+        self.fs._check_read_allocation(max(0, requested_end - self.loc), self.path)
+        self._requested_read_end = requested_end
         try:
             if size is not None and size >= 0:
                 # fsspec before 2025 did not clamp oversized reads before
@@ -795,29 +1009,40 @@ class VfsiFile(AbstractBufferedFile):
 
     def close(self):
         if self.closed:
-            return
-        group = self._buffer_group
-        if group is not None:
-            try:
-                if self._buffered_write:
-                    self.flush(force=True)
-                elif self._has_read_cache():
-                    cache = getattr(self, "cache", None)
-                    close = getattr(cache, "close", None)
-                    if callable(close):
-                        close()
-                    self.cache = None
-            finally:
-                self._closed = True
+            group = self._buffer_group
+            if group is not None and not group._group_closed:
                 group.request_close(self)
             return
-        try:
-            if self._using_buffer or self._has_read_cache():
-                super().close()
-            else:
-                self._closed = True
-        finally:
+        if self._write_failed and self._raw._fd is None:
+            # An ambiguous direct write already invalidated its descriptor, so
+            # there is no cleanup ownership left to retain. Make close final
+            # while still surfacing the original unusable-writer state.
             self._raw.close()
+            self._closed = True
+            raise ConnectionError("buffered writer is unusable after a failed flush")
+        group = self._buffer_group
+        if group is not None:
+            if self._buffered_write:
+                self.flush(force=True)
+            elif self._has_read_cache():
+                cache = getattr(self, "cache", None)
+                close = getattr(cache, "close", None)
+                if callable(close):
+                    close()
+                self.cache = None
+            group.request_close(self)
+            self._closed = True
+            return
+        if self._buffered_write:
+            self.flush(force=True)
+        elif self._has_read_cache():
+            cache = getattr(self, "cache", None)
+            close = getattr(cache, "close", None)
+            if callable(close):
+                close()
+            self.cache = None
+        self._raw.close()
+        self._closed = True
 
     @property
     def closed(self):
@@ -969,7 +1194,10 @@ class _BufferGroup:
                 length = request_end - start
                 if length <= 0:
                     continue
-                if files and total + length > self.fs.max_batch_bytes:
+                allocation_budget = min(
+                    self.fs.max_batch_bytes, self.fs.read_all_max_total_bytes
+                )
+                if files and total + length > allocation_budget:
                     continue
                 files.append(file)
                 offsets.append(start)
@@ -994,6 +1222,7 @@ class _BufferGroup:
 
     def read_all(self, current):
         with self._lock:
+            self.fs._check_read_allocation(current.size, current.path)
             prefetched = self._whole_files.pop(id(current), None)
             if prefetched is not None:
                 return prefetched
@@ -1013,7 +1242,10 @@ class _BufferGroup:
                 )
                 if len(files) >= self.fs.batch_size:
                     continue
-                if files and total + length > self.fs.max_batch_bytes:
+                allocation_budget = min(
+                    self.fs.max_batch_bytes, self.fs.read_all_max_total_bytes
+                )
+                if files and total + length > allocation_budget:
                     continue
                 files.append(file)
                 lengths.append(length)
@@ -1119,21 +1351,29 @@ class _BufferGroup:
         with self._lock:
             if self._group_closed:
                 return
-            self._group_closed = True
-            fds = [
-                member._raw._fd
+            members = [
+                member
                 for member in self.files
                 if member._raw._fd is not None
                 and member._raw._fd_generation == self.fs._client.generation
             ]
-            try:
-                if fds and not self.fs._client.closed:
+            fds = [member._raw._fd for member in members]
+            if fds and not self.fs._client.closed:
+                # Do not disarm members until the entire vector CLOSE has
+                # succeeded. A failed close remains explicitly retryable.
+                try:
                     self.fs._client.close_many(fds)
-            finally:
-                for member in self.files:
-                    member._finish_group_close()
-                self._ranges.clear()
-                self._whole_files.clear()
+                except BaseException as error:
+                    completed = getattr(error, "index", 0)
+                    if isinstance(completed, int) and 0 <= completed <= len(members):
+                        for member in members[:completed]:
+                            member._finish_group_close()
+                    raise
+            self._group_closed = True
+            for member in self.files:
+                member._finish_group_close()
+            self._ranges.clear()
+            self._whole_files.clear()
 
 
 class _DeferredWriteFile:
@@ -1337,6 +1577,8 @@ class VfsiFileSystem(AbstractFileSystem):
         Maximum aggregate path bytes materialized by a listing or tree walk.
     walk_max_depth: int
         Maximum recursive depth materialized by a native tree walk.
+    connection_pool_size: int
+        Independent native sessions used to overlap operations from threads.
     """
 
     protocol = "vfsi"
@@ -1377,6 +1619,10 @@ class VfsiFileSystem(AbstractFileSystem):
         directory_max_entries=100_000,
         directory_max_path_bytes=16 * 1024 * 1024,
         walk_max_depth=128,
+        authentication="auth_sys",
+        service_principal=None,
+        require_secure_authentication=False,
+        connection_pool_size=1,
         **kwargs,
     ):
         if backend not in self._supported_backends:
@@ -1394,12 +1640,27 @@ class VfsiFileSystem(AbstractFileSystem):
             raise ValueError("compound_size_limit must be a positive integer")
         if minor_version not in (None, 1, 2):
             raise ValueError("minor_version must be 1, 2, or None")
+        if authentication not in ("auth_sys", "krb5", "krb5i"):
+            raise ValueError("authentication must be 'auth_sys', 'krb5', or 'krb5i'")
+        if backend != "nfs" and (
+            authentication != "auth_sys"
+            or service_principal is not None
+            or require_secure_authentication
+        ):
+            raise ValueError("secure authentication options are NFS-only")
+        if service_principal is not None and not isinstance(service_principal, str):
+            raise TypeError("service_principal must be a string or None")
+        if require_secure_authentication and authentication == "auth_sys":
+            raise ValueError(
+                "require_secure_authentication requires authentication='krb5' or 'krb5i'"
+            )
         for name, value in (
             ("batch_size", batch_size),
             ("max_batch_bytes", max_batch_bytes),
             ("transfer_chunk_size", transfer_chunk_size),
             ("transaction_spool_threshold", transaction_spool_threshold),
             ("block_size", block_size),
+            ("connection_pool_size", connection_pool_size),
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
@@ -1450,6 +1711,10 @@ class VfsiFileSystem(AbstractFileSystem):
         self.share = share
         self.username = username
         self.domain = domain
+        self.authentication = authentication
+        self.service_principal = service_principal
+        self.require_secure_authentication = bool(require_secure_authentication)
+        self.connection_pool_size = connection_pool_size
         self.batch_size = batch_size
         self.max_batch_bytes = max_batch_bytes
         self.transfer_chunk_size = transfer_chunk_size
@@ -1467,7 +1732,7 @@ class VfsiFileSystem(AbstractFileSystem):
         self.directory_max_path_bytes = directory_max_path_bytes
         self.walk_max_depth = walk_max_depth
         self._root = root.strip("/")
-        self._client = _ResilientClient(
+        self._client = _ClientPool(
             native_module,
             (
                 host,
@@ -1485,7 +1750,11 @@ class VfsiFileSystem(AbstractFileSystem):
                 self.directory_max_entries,
                 self.directory_max_path_bytes,
                 self.walk_max_depth,
+                self.authentication,
+                self.service_principal,
+                self.require_secure_authentication,
             ),
+            size=self.connection_pool_size,
             auto_reconnect=self.auto_reconnect,
         )
         self._dircache_lock = threading.RLock()
@@ -1493,6 +1762,16 @@ class VfsiFileSystem(AbstractFileSystem):
         self._dircache_epoch = 0
         self._persistent_cache_lock = threading.RLock()
         self._persistent_cache_refs = []
+
+    def _check_read_allocation(self, requested, path=None):
+        """Bound every public operation that returns newly allocated bytes."""
+        requested = max(0, int(requested))
+        if requested > self.read_all_max_total_bytes:
+            raise _allocation_error(path, requested, self.read_all_max_total_bytes)
+
+    def _stream_read_size(self):
+        """Bound one streaming buffer without imposing an aggregate file cap."""
+        return max(1, min(self.transfer_chunk_size, self.read_all_max_total_bytes))
 
     @property
     def closed(self):
@@ -1764,8 +2043,15 @@ class VfsiFileSystem(AbstractFileSystem):
             pending.extend(reversed(children))
         return tree
 
-    def _native_walk_tree(self, internal, fill_epoch):
-        native_tree = self._client.walk(self._native_path(internal), sort=True)
+    def _native_walk_tree(self, internal, fill_epoch, maxdepth=None):
+        if maxdepth is None:
+            native_tree = self._client.walk(self._native_path(internal), sort=True)
+        else:
+            native_tree = self._client.walk(
+                self._native_path(internal),
+                sort=True,
+                max_depth=min(self.walk_max_depth, maxdepth),
+            )
         self._sync_dircache_generation()
         tree = []
         for native_dir, entries in native_tree:
@@ -1977,6 +2263,7 @@ class VfsiFileSystem(AbstractFileSystem):
         reported = set()
         valid = [index for index in range(len(paths)) if index not in failures]
         valid_sizes = [stats[index].get("size", 0) for index in valid]
+        self._check_read_allocation(sum(valid_sizes), paths[0] if paths else None)
         for positions in _bounded_batches(
             valid_sizes, self.batch_size, self.max_batch_bytes
         ):
@@ -2023,7 +2310,7 @@ class VfsiFileSystem(AbstractFileSystem):
         return out
 
     def _read_one_streamed(self, path, callback=DEFAULT_CALLBACK):
-        """Read one result incrementally when it exceeds the batch byte cap."""
+        """Read one result incrementally within the public allocation cap."""
         output = io.BytesIO()
         self._copy_remote_to_fileobj(path, output, callback=callback)
         return output.getvalue()
@@ -2074,6 +2361,12 @@ class VfsiFileSystem(AbstractFileSystem):
             result = data[0] or b""
             _complete_callback(callback, len(result))
             return result
+        if end is None:
+            size = self.size(internal) if size is None else size
+            requested = max(0, size - start)
+        else:
+            requested = max(0, end - start)
+        self._check_read_allocation(requested, internal)
         data, errors = self._client.read_many(
             [self._native_path(internal)], [start], [end]
         )
@@ -2156,6 +2449,9 @@ class VfsiFileSystem(AbstractFileSystem):
             )
             for i in valid
         ]
+        self._check_read_allocation(
+            sum(lengths), internals[valid[0]] if valid else None
+        )
         for positions in _bounded_batches(
             lengths, self.batch_size, self.max_batch_bytes
         ):
@@ -2336,7 +2632,7 @@ class VfsiFileSystem(AbstractFileSystem):
         """Stream one remote file into a writable local file object."""
         with self.open(path, "rb", cache_type="none") as remote:
             while True:
-                chunk = remote.read(self.transfer_chunk_size)
+                chunk = remote.read(self._stream_read_size())
                 if not chunk:
                     break
                 output.write(chunk)
@@ -2463,10 +2759,11 @@ class VfsiFileSystem(AbstractFileSystem):
                 )
         if not pairs:
             return
+        read_batch_bytes = min(self.max_batch_bytes, self.read_all_max_total_bytes)
         for batch in _bounded_batches(
-            [size for _, _, size in pairs], self.batch_size, self.max_batch_bytes
+            [size for _, _, size in pairs], self.batch_size, read_batch_bytes
         ):
-            if len(batch) == 1 and pairs[batch[0]][2] > self.max_batch_bytes:
+            if len(batch) == 1 and pairs[batch[0]][2] > read_batch_bytes:
                 remote_path, local_path, size = pairs[batch[0]]
                 with callback.branched(remote_path, local_path) as child:
                     child.set_size(size)
@@ -2474,7 +2771,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     with open(local_path, "wb") as out:
                         with self.open(remote_path, "rb", cache_type="none") as remote:
                             while True:
-                                chunk = remote.read(self.transfer_chunk_size)
+                                chunk = remote.read(self._stream_read_size())
                                 if not chunk:
                                     break
                                 out.write(chunk)
@@ -3144,7 +3441,7 @@ class VfsiFileSystem(AbstractFileSystem):
             self.invalidate_cache(internal)
             fill_epoch = self._dircache_epoch_snapshot()
             try:
-                tree = self._native_walk_tree(internal, fill_epoch)
+                tree = self._native_walk_tree(internal, fill_epoch, maxdepth=maxdepth)
             except (FileNotFoundError, OSError) as e:
                 # Resource-limit failures mean the materialized result would
                 # be incomplete. Never turn them into an apparently empty

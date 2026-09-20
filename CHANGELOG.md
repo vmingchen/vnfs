@@ -7,6 +7,14 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ### Changed
 
+- Hardened nfs4fs for production use: every bytes-returning read now obeys a
+  configurable allocation budget, shallow walks stop before traversing deeper
+  namespaces, failed CLOSE operations retain retryable ownership, optional
+  session pools remove filesystem-wide thread serialization, and the native
+  seam rejects malformed backend result cardinality, identity, offsets, and
+  lengths without panicking. Python now exposes optional `krb5`/`krb5i`
+  RPCSEC_GSS with fail-closed configuration; CI covers Python recovery across
+  a live Ganesha restart and both supported Kerberos protection levels.
 - Added NFS COMPOUND-response and attribute-list fuzz targets, randomized
   offset-boundary checks for every backend, and CI coverage under Rust ASan
   plus UBSan-instrumented native NFS/XDR shims. Existing fault-injection tests

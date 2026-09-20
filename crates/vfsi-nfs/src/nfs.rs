@@ -400,7 +400,7 @@ fn append_bounded_walk_page(
                 .strip_prefix(root)
                 .map(|relative| relative.components().count())
                 .unwrap_or(usize::MAX);
-            if depth > options.depth_limit() {
+            if depth > options.depth_limit() && !options.truncates_at_depth_limit() {
                 return Err(
                     VfError::failure(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
                 );
@@ -3578,6 +3578,11 @@ impl VecFs for NfsVecFs {
                 for entry in &entries {
                     if entry.ftype == VfType::Directory
                         && let Some(path) = entry.file.path()
+                        && path
+                            .strip_prefix(root)
+                            .map(|relative| relative.components().count())
+                            .unwrap_or(usize::MAX)
+                            <= options.depth_limit()
                     {
                         next_frontier.push((results[index].fh.clone(), path.to_path_buf()));
                     }

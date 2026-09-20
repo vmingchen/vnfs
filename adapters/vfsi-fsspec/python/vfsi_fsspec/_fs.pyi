@@ -52,6 +52,10 @@ class VfsiFileSystem(AbstractFileSystem):
     share: Optional[str]
     username: str
     domain: str
+    authentication: str
+    service_principal: Optional[str]
+    require_secure_authentication: bool
+    connection_pool_size: int
     batch_size: int
     max_batch_bytes: int
     transfer_chunk_size: int
@@ -100,6 +104,10 @@ class VfsiFileSystem(AbstractFileSystem):
         directory_max_entries: int = 100_000,
         directory_max_path_bytes: int = 16_777_216,
         walk_max_depth: int = 128,
+        authentication: str = "auth_sys",
+        service_principal: Optional[str] = None,
+        require_secure_authentication: bool = False,
+        connection_pool_size: int = 1,
         **kwargs: Any,
     ) -> None: ...
     @property

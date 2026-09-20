@@ -2,6 +2,7 @@
 round-trip (compound-count) assertions."""
 
 import os
+import time
 
 import fsspec
 
@@ -24,6 +25,26 @@ def test_nfs_identity_and_required_server_copy(nfs_fs):
             nfs_fs.cat_file("nfs4:///server-copy-destination") == b"python-server-copy"
         )
         assert nfs_fs._client.server_copy_enabled(), "Python copy used client fallback"
+
+
+def test_python_reader_recovers_across_server_restart(nfs_fs):
+    control = os.environ.get("NFS4FS_RECOVERY_CONTROL_DIR")
+    if not control:
+        import pytest
+
+        pytest.skip("requires an externally coordinated NFS server restart")
+    nfs_fs.pipe_file("nfs4:///python-recovery", b"recovered-through-python")
+    reader = nfs_fs.open("nfs4:///python-recovery", "rb", cache_type="none")
+    assert reader.read(1) == b"r"
+    open(os.path.join(control, "ready"), "wb").close()
+    deadline = time.monotonic() + 60
+    while not os.path.exists(os.path.join(control, "continue")):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("timed out waiting for the NFS restart coordinator")
+        time.sleep(0.1)
+    reader.seek(0)
+    assert reader.read() == b"recovered-through-python"
+    reader.close()
 
 
 def _measured(fs, fn):

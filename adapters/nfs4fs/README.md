@@ -49,9 +49,12 @@ it currently uses one compound for bounded size discovery and one for the
 reads.
 
 The client negotiates NFSv4.2 and falls back to NFSv4.1. Set
-`minor_version=1` or `minor_version=2` to require a specific version. The
-current NFS transport uses TCP and AUTH_SYS. Kerberos flavors are not yet
-exposed by the Python package.
+`minor_version=1` or `minor_version=2` to require a specific version. AUTH_SYS
+remains the default. For Kerberos-backed RPCSEC_GSS, obtain a ticket in the
+process credential cache and select `authentication="krb5"` or
+`authentication="krb5i"`; the latter integrity-protects RPC payloads. Set
+`require_secure_authentication=True` to fail closed if AUTH_SYS was selected.
+An optional `service_principal` overrides the default `nfs@<host>` principal.
 
 `compound_size_limit` caps the payload merged into one compound. The default is
 1 MiB; lower it when a server has a smaller request limit:
@@ -268,8 +271,14 @@ visible when the TTL expires or when the caller requests a refresh. Use
   `max_batch_bytes` (64 MiB). Files larger than that byte threshold stream in
   `transfer_chunk_size` chunks (8 MiB). Tune these per server and workload;
   every value must be positive.
+- One native session preserves maximum batching by default. For thread-pool
+  workloads, set `connection_pool_size` above one; independent path operations
+  are distributed across sessions while every open descriptor remains pinned
+  to its owning session. Each additional session consumes one server client
+  identity and connection, so size the pool deliberately.
 - APIs that materialize complete remote results have independent safety
-  limits. `read_all_max_total_bytes` bounds one whole-file vector read (16
+  limits. `read_all_max_total_bytes` bounds every bytes-returning read,
+  including whole-file reads, buffered `read(-1)`, `cat`, and `cat_ranges` (16
   MiB); `directory_max_entries` (100,000), `directory_max_path_bytes` (16
   MiB), and `walk_max_depth` (128) bound listings and recursive walks. These
   limits are configurable per filesystem instance and survive reconnects.
