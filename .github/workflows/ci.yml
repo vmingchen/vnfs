@@ -73,18 +73,8 @@ jobs:
             cargo doc -p vnfs -p vfsi-nfs --all-features --no-deps
           test -f target/doc/vnfs/struct.NfsVecFs.html
           test -f target/doc/vfsi_nfs/nfs/struct.NfsVecFs.html
-      - name: Run every published Rust package's local tests
-        run: |
-          cargo test -p vfsi-core
-          cargo test -p vfsi-sync
-          cargo test -p vfsi-local
-          cargo test -p vfsi-nfs --lib --all-features
-          cargo test -p vfsi-smb --lib
-          cargo test -p nfsv41-sys
-          cargo test -p vnfs --lib
-          cargo test -p vnfs --features dummy --test dummy_vecfs
-          cargo test -p vnfs --test public_api
-          cargo test -p vfsi-c --lib
+      - name: Run the repository Rust test suite
+        run: ./scripts/test-rust.sh
       - name: Verify every published Rust package from coordinated crate archives
         run: |
           package_list=$(mktemp)
