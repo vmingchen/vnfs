@@ -102,11 +102,12 @@ MALLOC_PERTURB_=165 \
 cargo test -p vnfs --test nfs_gss --features rpcsec-gss -- --test-threads=1
 
 python3 -m venv "$state_dir/python"
-"$state_dir/python/bin/pip" install -q maturin 'fsspec>=2024.12.0,<2027.0.0'
+"$state_dir/python/bin/pip" install -q 'maturin==1.14.1' \
+    'fsspec>=2024.12.0,<2027.0.0'
 "$state_dir/python/bin/pip" install -q -e adapters/vfsi-fsspec
 (
     cd adapters/nfs4fs
-    "$state_dir/python/bin/maturin" develop -q
+    VIRTUAL_ENV="$state_dir/python" "$state_dir/python/bin/maturin" develop -q
 )
 "$state_dir/python/bin/python" - <<'PY'
 import fsspec
