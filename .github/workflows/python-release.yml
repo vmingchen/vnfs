@@ -44,6 +44,8 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
       - name: Build the portable wheel
+        env:
+          RUSTFLAGS: "-L native=/usr/local/lib"
         uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
         with:
           command: build
@@ -68,7 +70,7 @@ jobs:
               -DUSE_LTTNG=OFF \
               -DUSE_MONITORING=OFF \
               -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_INSTALL_PREFIX=/usr \
+              -DCMAKE_INSTALL_PREFIX=/usr/local \
               -DCMAKE_INSTALL_LIBDIR=lib
             cmake --build /tmp/ntirpc-build --target ntirpc --parallel
             cmake --install /tmp/ntirpc-build
