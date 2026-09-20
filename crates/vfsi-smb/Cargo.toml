@@ -15,7 +15,7 @@ test-faults = ["vfsi-core/test-faults", "vfsi-sync/test-faults"]
 [dependencies]
 futures-util = "0.3"
 libc = { workspace = true }
-smb2 = "0.21.0"
+smb2 = "0.22.0"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 vfsi-core = { workspace = true }
 vfsi-sync = { workspace = true }
