@@ -92,10 +92,10 @@ if sudo grep -Eq "No export entries found|Failed to load FSAL|Errors processing 
 fi
 
 cd "$repo_root"
-VNFS_GSS_INTEGRATION=1 \
-VNFS_GSS_HOST=127.0.0.1 \
 # The trailing dot makes the host name absolute. Without it, some CI runners
 # append their cloud search domain before requesting the service ticket.
+VNFS_GSS_INTEGRATION=1 \
+VNFS_GSS_HOST=127.0.0.1 \
 VNFS_GSS_SERVICE=nfs@localhost. \
 KRB5_TRACE="$state_dir/client-krb5.trace" \
 MALLOC_PERTURB_=165 \

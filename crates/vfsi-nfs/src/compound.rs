@@ -815,6 +815,16 @@ impl CompoundRes {
         response_op_status(self.resop(i))
     }
 
+    /// Return a per-op status without panicking when a server rejects the
+    /// compound before producing the requested result. NFS permits an empty
+    /// result array for errors such as `NFS4ERR_MINOR_VERS_MISMATCH`.
+    pub(crate) fn try_op_status(&self, i: usize) -> RpcResult<u32> {
+        if i >= self.nops() {
+            return Err(RpcError::op(self.nops().saturating_sub(1), self.status()));
+        }
+        Ok(self.op_status(i))
+    }
+
     pub fn op(&self, i: usize) -> &nfs_resop4 {
         self.resop(i)
     }
@@ -1055,6 +1065,26 @@ mod response_validation_tests {
         let mut ops = [res(nfs_opnum4_NFS4_OP_PUTROOTFH)];
         ops[0].nfs_resop4_u.opputrootfh.status = nfsstat4_NFS4ERR_IO;
         assert!(validate_response_ops(&request, &reply(nfsstat4_NFS4ERR_IO, &mut ops)).is_ok());
+    }
+
+    #[test]
+    fn checked_status_preserves_a_zero_op_compound_failure() {
+        let response = CompoundRes {
+            res: COMPOUND4res {
+                status: nfsstat4_NFS4ERR_MINOR_VERS_MISMATCH,
+                tag: utf8string {
+                    utf8string_len: 0,
+                    utf8string_val: std::ptr::null_mut(),
+                },
+                resarray: COMPOUND4res__bindgen_ty_1 {
+                    resarray_len: 0,
+                    resarray_val: std::ptr::null_mut(),
+                },
+            },
+        };
+        let error = response.try_op_status(0).unwrap_err();
+        assert_eq!(error.op_index, 0);
+        assert_eq!(error.status, nfsstat4_NFS4ERR_MINOR_VERS_MISMATCH);
     }
 
     #[test]

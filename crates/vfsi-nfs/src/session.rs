@@ -189,7 +189,7 @@ impl Session {
             },
         });
         let res = c.call(&self.rpc)?;
-        let st = res.op_status(0);
+        let st = res.try_op_status(0)?;
         if st != nfsstat4_NFS4_OK {
             return Err(RpcError::op(0, st));
         }
@@ -238,7 +238,7 @@ impl Session {
             },
         });
         let res = c.call(&self.rpc)?;
-        let st = res.op_status(0);
+        let st = res.try_op_status(0)?;
         if st != nfsstat4_NFS4_OK {
             return Err(RpcError::op(0, st));
         }
@@ -267,7 +267,7 @@ impl Session {
         c.reclaim_complete();
         // RECLAIM_COMPLETE requires a session: it must follow a SEQUENCE op.
         let res = self.compound(&mut c)?;
-        let st = res.op_status(1);
+        let st = res.try_op_status(1)?;
         if st != nfsstat4_NFS4_OK {
             return Err(RpcError::op(1, st));
         }
