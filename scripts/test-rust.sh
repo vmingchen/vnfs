@@ -20,6 +20,6 @@ cargo test -p vfsi-c --lib
 # Python extension crates are intentionally detached Cargo workspaces so their
 # maturin distributions retain independent lockfiles. Test them explicitly so
 # a successful root-workspace run cannot accidentally omit their Rust code.
-cargo test --manifest-path adapters/vfsi-python/Cargo.toml --all-features
+cargo test --manifest-path adapters/vfsi-python/Cargo.toml --locked --all-features
 cargo test --manifest-path adapters/nfs4fs/Cargo.toml --locked
 cargo test --manifest-path adapters/vsmb/Cargo.toml --locked

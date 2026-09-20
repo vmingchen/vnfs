@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -12,9 +15,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
         with:
+          toolchain: nightly
           components: rust-src
       - name: Install native build dependencies
         run: |
@@ -48,8 +52,8 @@ jobs:
   rust:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy,rustfmt
       - name: Install native build dependencies
@@ -201,9 +205,9 @@ jobs:
             fsspec: "fsspec"
     name: python (${{ matrix.python-version }}, ${{ matrix.fsspec }})
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install native build dependencies
@@ -233,9 +237,9 @@ jobs:
   python-package:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.14"
       - name: Install native build dependencies
@@ -256,6 +260,8 @@ jobs:
           python -m maturin sdist --out dist
           python -m twine check \
             dist/* ../vfsi-fsspec/dist/* ../vsmb/dist/* ../vsmbfs/dist/*
+      - name: Verify the nfs4fs wheel bundles the native NFS libraries
+        run: python3 ci/check-wheel-bundling.py adapters/nfs4fs/dist/*.whl
       - name: Install wheel and test entry-point discovery outside the source tree
         run: |
           python -m venv .wheel-vfsi-fsspec
@@ -376,29 +382,73 @@ jobs:
   security:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - name: Audit Rust dependencies
+      - name: Audit Rust dependencies and enforce the dependency policy
         run: |
           cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
           cargo install cargo-cyclonedx --version 0.5.9 --locked
-          cargo audit --file adapters/nfs4fs/Cargo.lock
+          for manifest in \
+            Cargo.toml \
+            adapters/nfs4fs/Cargo.toml \
+            adapters/vsmb/Cargo.toml \
+            adapters/vfsi-python/Cargo.toml \
+            fuzz/Cargo.toml; do
+            if [ "$manifest" = "Cargo.toml" ]; then
+              lock=Cargo.lock
+            else
+              lock="$(dirname "$manifest")/Cargo.lock"
+            fi
+            echo "::group::cargo audit $lock"
+            cargo audit --file "$lock"
+            echo "::endgroup::"
+            echo "::group::cargo deny $manifest"
+            cargo deny --manifest-path "$manifest" --config deny.toml check
+            echo "::endgroup::"
+          done
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) cargo cyclonedx \
             --manifest-path adapters/nfs4fs/Cargo.toml \
             --format json \
             --override-filename nfs4fs-rust-sbom \
             --spec-version 1.5 \
             --all-features
-      - name: Audit Python dependencies and create an SBOM
+      - name: Audit every Python package's runtime dependencies
         run: |
           python -m venv .security-venv
           .security-venv/bin/pip install --upgrade pip \
             pip-audit==2.10.1 cyclonedx-bom==7.3.1
-          .security-venv/bin/pip-audit --strict \
-            --requirement adapters/nfs4fs/requirements-audit.txt
+          python - <<'PY'
+          import pathlib
+          import tomllib
+
+          local = {"nfs4fs", "vfsi-fsspec", "vsmb", "vsmbfs"}
+          out = pathlib.Path("/tmp/python-audit")
+          out.mkdir(exist_ok=True)
+          for package in sorted(local):
+              manifest = pathlib.Path("adapters", package, "pyproject.toml")
+              if not manifest.exists():
+                  continue
+              project = tomllib.loads(manifest.read_text())["project"]
+              external = []
+              for requirement in project.get("dependencies", []):
+                  name = requirement.split(";", 1)[0].strip()
+                  for separator in "><=!~ ":
+                      name = name.split(separator, 1)[0]
+                  if name.lower() not in local:
+                      external.append(requirement)
+              (out / f"{package}.txt").write_text("\n".join(external) + "\n")
+          PY
+          for requirements in /tmp/python-audit/*.txt; do
+            echo "::group::pip-audit $requirements"
+            .security-venv/bin/pip-audit --strict --requirement "$requirements"
+            echo "::endgroup::"
+          done
+      - name: Create a Python SBOM for the nfs4fs runtime
+        run: |
           python -m venv .runtime-venv
           .runtime-venv/bin/pip install 'fsspec>=2024.12.0'
           .security-venv/bin/cyclonedx-py environment .runtime-venv \
@@ -407,7 +457,7 @@ jobs:
             --output-reproducible \
             --output-format JSON \
             --output-file nfs4fs-python-sbom.json
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: security-sbom
           path: |
@@ -422,9 +472,9 @@ jobs:
       matrix:
         minor-version: [1, 2]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install NFS-Ganesha and build dependencies
@@ -609,8 +659,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Install Kerberos, NFS-Ganesha, and build dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -627,9 +677,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install native build dependencies
@@ -741,11 +791,11 @@ jobs:
             bindings: true
     name: smb-integration (${{ matrix.name }})
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy,rustfmt
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install Samba and build dependencies

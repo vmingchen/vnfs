@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "=0.4.13"
-vfsi-nfs = { path = "../crates/vfsi-nfs", features = ["fuzzing"] }
+vfsi-nfs = { path = "../crates/vfsi-nfs", version = "0.1.1", features = ["fuzzing"] }
 
 [[bin]]
 name = "nfs_compound_response"

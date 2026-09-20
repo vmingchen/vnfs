@@ -17,4 +17,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39", "abi3t"] }
-vfsi-python-native = { path = "../vfsi-python", features = ["smb"] }
+vfsi-python-native = { path = "../vfsi-python", version = "0.1.0", features = ["smb"] }

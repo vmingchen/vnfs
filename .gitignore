@@ -6,6 +6,12 @@
 **/dist/
 *.pyc
 *.so
+# Commit lockfiles for every workspace (including the detached Python and fuzz
+# workspaces) so dependency versions are reproducible and auditable. The
+# leading slash keeps the root exception anchored to the repository root.
 Cargo.lock
 !adapters/nfs4fs/Cargo.lock
 !adapters/vsmb/Cargo.lock
+!adapters/vfsi-python/Cargo.lock
+!fuzz/Cargo.lock
+!/Cargo.lock

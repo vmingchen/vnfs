@@ -1,0 +1,47 @@
+# cargo-deny policy for the VFSI workspace and its detached Python/fuzz
+# workspaces. Run from a workspace root with `cargo deny check` (or pass
+# `--manifest-path`); CI passes this file explicitly with `--config`.
+
+[graph]
+all-features = false
+no-default-features = false
+
+[advisories]
+# Vulnerabilities and yanked versions are denied by default. Add temporary
+# ignores here with a reason and an expiry date when a fix is pending.
+ignore = []
+
+[licenses]
+# Only permissive, OSI-approved licenses are accepted. MPL-2.0 is allowed for
+# build-only tooling (cbindgen); it is not distributed in the wheels.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "NCSA",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# Workspace crates are first-party and dual licensed; do not require them to
+# appear in the allow list above.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

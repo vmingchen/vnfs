@@ -10,6 +10,19 @@ permissions:
   contents: read
 
 jobs:
+  verify:
+    name: Verify CI passed
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Require a successful CI run for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/verify-ci-run.sh CI "${{ github.sha }}"
+
   wheels:
     name: wheel (${{ matrix.target }}, ${{ matrix.wheel-kind }})
     runs-on: ubuntu-24.04
@@ -106,6 +119,8 @@ jobs:
           print(nfs4fs.__version__)
           PY
             '
+      - name: Verify the wheel bundles the native NFS libraries
+        run: python3 ci/check-wheel-bundling.py adapters/nfs4fs/dist/*.whl
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: wheel-${{ matrix.target }}-${{ matrix.wheel-kind }}
@@ -128,21 +143,68 @@ jobs:
           path: adapters/nfs4fs/dist/*.tar.gz
           if-no-files-found: error
 
+  sbom:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Generate Rust and Python CycloneDX SBOMs
+        run: |
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          python -m venv .sbom-venv
+          .sbom-venv/bin/pip install cyclonedx-bom==7.3.1
+          python -m venv .sbom-runtime
+          .sbom-runtime/bin/pip install 'fsspec>=2024.12.0'
+          mkdir -p sbom
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) cargo cyclonedx \
+            --manifest-path adapters/nfs4fs/Cargo.toml \
+            --format json \
+            --override-filename nfs4fs-rust-sbom \
+            --spec-version 1.5 \
+            --all-features
+          cp adapters/nfs4fs/nfs4fs-rust-sbom.json sbom/
+          .sbom-venv/bin/cyclonedx-py environment .sbom-runtime \
+            --pyproject adapters/nfs4fs/pyproject.toml \
+            --mc-type library \
+            --output-reproducible \
+            --output-format JSON \
+            --output-file sbom/nfs4fs-python.cdx.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nfs4fs-sbom
+          path: sbom/*.json
+          if-no-files-found: error
+
   publish:
     if: startsWith(github.ref, 'refs/tags/nfs4fs-v')
-    needs: [wheels, sdist]
+    needs: [verify, wheels, sdist, sbom]
     runs-on: ubuntu-24.04
     environment:
       name: pypi
       url: https://pypi.org/project/nfs4fs/
     permissions:
+      contents: write
       id-token: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: "*"
+          pattern: "wheel-*"
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: sdist
+          path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nfs4fs-sbom
+          path: sbom
       - name: Check tag matches package version
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -162,3 +224,9 @@ jobs:
               raise SystemExit(f"tag version {tag_version!r} != artifacts {versions!r}")
           PY
       - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          attestations: true
+      - name: Attach the SBOM to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ci/attach-release-assets.sh sbom/*.json

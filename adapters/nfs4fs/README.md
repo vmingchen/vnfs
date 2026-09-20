@@ -13,10 +13,19 @@ python -m pip install nfs4fs
 
 Published wheels use CPython's stable ABI and support standard CPython 3.9 and
 newer on Linux x86-64 and AArch64. A separate CPython 3.14 free-threaded wheel
-is built and tested on x86-64. A source build additionally requires Rust,
-Clang, `pkg-config`, libntirpc 4.3 or newer, Kerberos/GSS development headers,
-and userspace-RCU development headers. Release wheels bundle their
-non-platform shared-library dependencies.
+is built and tested on x86-64.
+
+A source build additionally requires Rust, Clang, `pkg-config`, libntirpc 4.3
+or newer, Kerberos/GSS development headers, and userspace-RCU development
+headers. Source and editable builds link the administrator-provided system
+`libntirpc` dynamically, so that shared library must be present at runtime.
+
+Release wheels are self-contained. They are built against a checksum-pinned
+libntirpc source revision, and `auditwheel` copies `libntirpc` plus its
+Kerberos (`libgssapi_krb5`/`libkrb5`) and userspace-RCU (`liburcu`)
+dependencies into the wheel's `.libs/` directory, rewriting RPATH so the
+package imports without a system `libntirpc`. CI fails a release whose wheel
+does not bundle those libraries.
 
 The package installs `fsspec.specs` entry points for both `nfs4` and `vfsi`, so
 normal use does not require `import nfs4fs` before calling `fsspec`.
