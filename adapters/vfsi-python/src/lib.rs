@@ -31,7 +31,7 @@ use vfsi_nfs::NfsVecFs;
 use vfsi_nfs::compound::{compound_stats, rpc_stats};
 #[cfg(feature = "smb")]
 use vfsi_smb::SmbVecFs;
-use vfsi_sync::VecFs;
+use vfsi_sync::{ReadAllOptions, VecFs, WalkOptions};
 
 #[cfg(not(feature = "nfs"))]
 fn compound_stats() -> (u64, u64, u64, u64) {
@@ -270,14 +270,21 @@ fn attrs_many_impl(
 
 /// Read every file in full (offset 0 to EOF) in batched, no-stat reads.
 /// Returns per-path bytes (None on failure) and an errno map.
-fn read_allv_impl(fs: &mut dyn VecFs, paths: &[PathBuf]) -> Result<ReadManyResult, VfError> {
+fn read_allv_impl(
+    fs: &mut dyn VecFs,
+    paths: &[PathBuf],
+    max_total_bytes: usize,
+) -> Result<ReadManyResult, VfError> {
     let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_os_path(p)).collect();
     let mut results: Vec<Option<Vec<u8>>> = vec![None; paths.len()];
     let mut errors: ErrnoMap = HashMap::new();
     let mut remaining: Vec<usize> = (0..paths.len()).collect();
     while !remaining.is_empty() {
         let subset: Vec<VfFile> = remaining.iter().map(|&i| files[i].clone()).collect();
-        match fs.read_allv(&subset) {
+        match fs.read_allv_with_options(
+            &subset,
+            ReadAllOptions::new().max_total_bytes(max_total_bytes),
+        ) {
             Ok(bufs) => {
                 for (&i, buf) in remaining.iter().zip(bufs) {
                     results[i] = Some(buf);
@@ -298,6 +305,27 @@ fn read_allv_impl(fs: &mut dyn VecFs, paths: &[PathBuf]) -> Result<ReadManyResul
         }
     }
     Ok((results, errors))
+}
+
+fn validate_directory_results(
+    entries: &[VfAttrs],
+    max_entries: usize,
+    max_path_bytes: usize,
+) -> Result<(), VfError> {
+    if entries.len() > max_entries {
+        return Err(VfError::failure(max_entries, libc::EFBIG as u32));
+    }
+    let mut path_bytes = 0usize;
+    for (index, entry) in entries.iter().enumerate() {
+        let bytes = entry.file.path().map_or(0, |path| path.as_os_str().len());
+        path_bytes = path_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| VfError::failure(index, libc::EFBIG as u32))?;
+        if path_bytes > max_path_bytes {
+            return Err(VfError::failure(index, libc::EFBIG as u32));
+        }
+    }
+    Ok(())
 }
 
 fn mode_to_flags(mode: &str) -> PyResult<i32> {
@@ -327,6 +355,10 @@ fn mode_to_flags(mode: &str) -> PyResult<i32> {
 #[pyclass]
 struct NfsClient {
     fs: Mutex<Option<Box<dyn VecFs + Send>>>,
+    read_all_max_total_bytes: usize,
+    directory_max_entries: usize,
+    directory_max_path_bytes: usize,
+    walk_max_depth: usize,
 }
 
 impl NfsClient {
@@ -353,7 +385,7 @@ impl NfsClient {
     /// Connect to an NFS server (`backend="nfs"`, default), an SMB2/3 share
     /// (`backend="smb"`), or a local directory (`backend="dummy"`).
     #[new]
-    #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None, minor_version=None, share=None, username="", password="", domain="", connect_timeout=10.0, request_timeout=5.0))]
+    #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None, minor_version=None, share=None, username="", password="", domain="", connect_timeout=10.0, request_timeout=5.0, read_all_max_total_bytes=16777216, directory_max_entries=100000, directory_max_path_bytes=16777216, walk_max_depth=128))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -368,6 +400,10 @@ impl NfsClient {
         domain: &str,
         connect_timeout: f64,
         request_timeout: f64,
+        read_all_max_total_bytes: usize,
+        directory_max_entries: usize,
+        directory_max_path_bytes: usize,
+        walk_max_depth: usize,
     ) -> PyResult<Self> {
         let connect_timeout = Duration::try_from_secs_f64(connect_timeout)
             .map_err(|_| PyValueError::new_err("connect_timeout must be finite and positive"))?;
@@ -457,6 +493,10 @@ impl NfsClient {
         })?;
         Ok(NfsClient {
             fs: Mutex::new(Some(fs)),
+            read_all_max_total_bytes,
+            directory_max_entries,
+            directory_max_path_bytes,
+            walk_max_depth,
         })
     }
 
@@ -1046,8 +1086,9 @@ impl NfsClient {
     /// Read every file in full (offset 0 to EOF) in batched, no-stat reads.
     /// Returns per-path bytes (None on failure) and an errno map.
     fn read_all_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<ReadManyResult> {
+        let max_total_bytes = self.read_all_max_total_bytes;
         self.with_fs(py, move |fs| {
-            read_allv_impl(fs, &paths).map_err(|e| to_py_err(e, None))
+            read_allv_impl(fs, &paths, max_total_bytes).map_err(|e| to_py_err(e, None))
         })
     }
 
@@ -1153,9 +1194,15 @@ impl NfsClient {
 
     /// List one directory; returns entry attribute dicts.
     fn listdir(&self, py: Python<'_>, path: PathBuf) -> PyResult<Vec<Py<PyDict>>> {
+        let max_entries = self.directory_max_entries;
+        let max_path_bytes = self.directory_max_path_bytes;
         let entries = self.with_fs(py, move |fs| {
-            fs.listdir(&path, full_mask(), 0, false)
-                .map_err(|e| to_py_err(e, Some(path.as_path())))
+            let entries = fs
+                .listdir(&path, full_mask(), max_entries.saturating_add(1), false)
+                .map_err(|e| to_py_err(e, Some(path.as_path())))?;
+            validate_directory_results(&entries, max_entries, max_path_bytes)
+                .map_err(|e| to_py_err(e, Some(path.as_path())))?;
+            Ok(entries)
         })?;
         entries.iter().map(|e| attrs_to_dict(py, e)).collect()
     }
@@ -1168,13 +1215,36 @@ impl NfsClient {
         paths: Vec<PathBuf>,
         recursive: bool,
     ) -> PyResult<Vec<Vec<Py<PyDict>>>> {
+        let max_entries = self.directory_max_entries;
+        let max_path_bytes = self.directory_max_path_bytes;
+        let max_depth = self.walk_max_depth;
         let groups = self.with_fs(py, move |fs| {
             let mut groups = Vec::with_capacity(paths.len());
             for p in &paths {
-                groups.push(
-                    fs.listdir(p, full_mask(), 0, recursive)
-                        .map_err(|e| to_py_err(e, Some(p.as_path())))?,
-                );
+                let entries = if recursive {
+                    let mut no_sort = |_dir: &Path, _attrs: &mut Vec<VfAttrs>| {};
+                    fs.walk_with_options(
+                        p,
+                        full_mask(),
+                        WalkOptions::new()
+                            .max_entries(max_entries)
+                            .max_path_bytes(max_path_bytes)
+                            .max_depth(max_depth),
+                        &mut no_sort,
+                    )
+                    .map_err(|e| to_py_err(e, Some(p.as_path())))?
+                    .into_iter()
+                    .flat_map(|entry| entry.entries)
+                    .collect()
+                } else {
+                    let entries = fs
+                        .listdir(p, full_mask(), max_entries.saturating_add(1), false)
+                        .map_err(|e| to_py_err(e, Some(p.as_path())))?;
+                    validate_directory_results(&entries, max_entries, max_path_bytes)
+                        .map_err(|e| to_py_err(e, Some(p.as_path())))?;
+                    entries
+                };
+                groups.push(entries);
             }
             Ok(groups)
         })?;
@@ -1194,6 +1264,10 @@ impl NfsClient {
     /// compounds). Returns `(dir_path, entries)` per directory in pre-order.
     #[pyo3(signature = (root, sort=true))]
     fn walk(&self, py: Python<'_>, root: PathBuf, sort: bool) -> PyResult<WalkResult> {
+        let options = WalkOptions::new()
+            .max_entries(self.directory_max_entries)
+            .max_path_bytes(self.directory_max_path_bytes)
+            .max_depth(self.walk_max_depth);
         let tree = self.with_fs(py, move |fs| {
             let mut sort_fn = |_dir: &Path, attrs: &mut Vec<VfAttrs>| {
                 if sort {
@@ -1211,7 +1285,7 @@ impl NfsClient {
                     });
                 }
             };
-            fs.walk(&root, full_mask(), &mut sort_fn)
+            fs.walk_with_options(&root, full_mask(), options, &mut sort_fn)
                 .map_err(|e| to_py_err(e, Some(root.as_path())))
         })?;
         let mut out = Vec::with_capacity(tree.len());
@@ -1265,13 +1339,14 @@ impl NfsClient {
         let sources: Vec<PathBuf> = pairs.iter().map(|(s, _)| s.clone()).collect();
         let dests: Vec<PathBuf> = pairs.iter().map(|(_, d)| d.clone()).collect();
         let n = pairs.len();
+        let max_total_bytes = self.read_all_max_total_bytes;
         self.with_fs(py, move |fs| {
             let mut copied: Vec<Option<u64>> = vec![None; n];
             let mut errors: HashMap<usize, u32> = HashMap::new();
 
             // 1+2. Read whole files (no separate size-stat round trip).
             let (mut data, read_errors) =
-                read_allv_impl(fs, &sources).map_err(|e| to_py_err(e, None))?;
+                read_allv_impl(fs, &sources, max_total_bytes).map_err(|e| to_py_err(e, None))?;
             errors.extend(read_errors.iter().map(|(&k, &v)| (k, v)));
 
             // 3. writes. The in-compound O_TRUNC truncates each destination to

@@ -268,6 +268,11 @@ visible when the TTL expires or when the caller requests a refresh. Use
   `max_batch_bytes` (64 MiB). Files larger than that byte threshold stream in
   `transfer_chunk_size` chunks (8 MiB). Tune these per server and workload;
   every value must be positive.
+- APIs that materialize complete remote results have independent safety
+  limits. `read_all_max_total_bytes` bounds one whole-file vector read (16
+  MiB); `directory_max_entries` (100,000), `directory_max_path_bytes` (16
+  MiB), and `walk_max_depth` (128) bound listings and recursive walks. These
+  limits are configurable per filesystem instance and survive reconnects.
 - Transaction writes use a disk-backed spool after
   `transaction_spool_threshold` (8 MiB), upload to unpredictable temporary
   names in each destination directory, then expose the batch with a vectorized

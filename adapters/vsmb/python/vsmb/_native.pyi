@@ -25,6 +25,10 @@ class NfsClient:
         domain: str = "",
         connect_timeout: float = 10.0,
         request_timeout: float = 5.0,
+        read_all_max_total_bytes: int = 16_777_216,
+        directory_max_entries: int = 100_000,
+        directory_max_path_bytes: int = 16_777_216,
+        walk_max_depth: int = 128,
     ) -> None: ...
     def minor_version(self) -> Optional[int]: ...
     def smb_dialect(self) -> Optional[int]: ...

@@ -1329,6 +1329,14 @@ class VfsiFileSystem(AbstractFileSystem):
         Number of seconds a cached listing remains valid.
     max_paths: int or None
         Maximum number of directory paths retained by fsspec's ``DirCache``.
+    read_all_max_total_bytes: int
+        Maximum aggregate bytes returned by one whole-file vector read.
+    directory_max_entries: int
+        Maximum entries materialized by one directory listing or tree walk.
+    directory_max_path_bytes: int
+        Maximum aggregate path bytes materialized by a listing or tree walk.
+    walk_max_depth: int
+        Maximum recursive depth materialized by a native tree walk.
     """
 
     protocol = "vfsi"
@@ -1365,6 +1373,10 @@ class VfsiFileSystem(AbstractFileSystem):
         use_listings_cache=False,
         listings_expiry_time=None,
         max_paths=None,
+        read_all_max_total_bytes=16 * 1024 * 1024,
+        directory_max_entries=100_000,
+        directory_max_path_bytes=16 * 1024 * 1024,
+        walk_max_depth=128,
         **kwargs,
     ):
         if backend not in self._supported_backends:
@@ -1391,6 +1403,14 @@ class VfsiFileSystem(AbstractFileSystem):
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        for name, value in (
+            ("read_all_max_total_bytes", read_all_max_total_bytes),
+            ("directory_max_entries", directory_max_entries),
+            ("directory_max_path_bytes", directory_max_path_bytes),
+            ("walk_max_depth", walk_max_depth),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
         if cache_type not in caches:
             choices = sorted(str(name) for name in caches if name is not None)
             raise ValueError(f"cache_type must be one of {choices}")
@@ -1442,6 +1462,10 @@ class VfsiFileSystem(AbstractFileSystem):
         self.connect_timeout = float(connect_timeout)
         self.request_timeout = float(request_timeout)
         self.auto_reconnect = bool(auto_reconnect)
+        self.read_all_max_total_bytes = read_all_max_total_bytes
+        self.directory_max_entries = directory_max_entries
+        self.directory_max_path_bytes = directory_max_path_bytes
+        self.walk_max_depth = walk_max_depth
         self._root = root.strip("/")
         self._client = _ResilientClient(
             native_module,
@@ -1457,6 +1481,10 @@ class VfsiFileSystem(AbstractFileSystem):
                 domain,
                 self.connect_timeout,
                 self.request_timeout,
+                self.read_all_max_total_bytes,
+                self.directory_max_entries,
+                self.directory_max_path_bytes,
+                self.walk_max_depth,
             ),
             auto_reconnect=self.auto_reconnect,
         )
@@ -3118,6 +3146,11 @@ class VfsiFileSystem(AbstractFileSystem):
             try:
                 tree = self._native_walk_tree(internal, fill_epoch)
             except (FileNotFoundError, OSError) as e:
+                # Resource-limit failures mean the materialized result would
+                # be incomplete. Never turn them into an apparently empty
+                # tree, even when ordinary traversal errors are omitted.
+                if getattr(e, "errno", None) == errno.EFBIG:
+                    raise
                 if self.isfile(internal):
                     info = self.info(internal)
                     files = {"": info} if detail else [""]

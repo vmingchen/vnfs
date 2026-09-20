@@ -1,5 +1,6 @@
 """Resource, recovery, lifecycle, and concurrency regression tests."""
 
+import errno
 import math
 import os
 import subprocess
@@ -30,6 +31,68 @@ def test_timeout_configuration_rejects_non_positive_or_non_finite(
 ):
     with pytest.raises(ValueError, match=name):
         _dummy(tmp_path / "invalid", **{name: value})
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "read_all_max_total_bytes",
+        "directory_max_entries",
+        "directory_max_path_bytes",
+        "walk_max_depth",
+    ],
+)
+@pytest.mark.parametrize("value", [-1, 1.5, True])
+def test_allocation_limit_configuration_rejects_invalid_values(tmp_path, name, value):
+    with pytest.raises(ValueError, match=name):
+        _dummy(tmp_path / "invalid-limit", **{name: value})
+
+
+def test_read_all_limit_is_exposed_and_survives_reconnect(tmp_path):
+    fs = _dummy(tmp_path / "read-limit", read_all_max_total_bytes=4)
+    assert fs.read_all_max_total_bytes == 4
+    fs.pipe({"/small": b"1234", "/large": b"12345"})
+
+    assert fs.cat_file("/small") == b"1234"
+    with pytest.raises(OSError) as exc_info:
+        fs.cat_file("/large")
+    assert exc_info.value.errno == errno.EFBIG
+
+    fs._client.reconnect()
+    with pytest.raises(OSError) as exc_info:
+        fs.cat_file("/large")
+    assert exc_info.value.errno == errno.EFBIG
+    fs.close()
+
+
+def test_directory_entry_and_path_byte_limits_are_exposed(tmp_path):
+    entry_limited = _dummy(tmp_path / "entry-limit", directory_max_entries=2)
+    entry_limited.pipe({"/a": b"", "/b": b"", "/c": b""})
+    with pytest.raises(OSError) as exc_info:
+        entry_limited.ls("/")
+    assert exc_info.value.errno == errno.EFBIG
+    entry_limited.close()
+
+    path_limited = _dummy(tmp_path / "path-limit", directory_max_path_bytes=2)
+    path_limited.pipe_file("/long-name", b"")
+    with pytest.raises(OSError) as exc_info:
+        path_limited.ls("/")
+    assert exc_info.value.errno == errno.EFBIG
+    path_limited.close()
+
+
+def test_walk_depth_limit_is_exposed(tmp_path):
+    fs = _dummy(tmp_path / "walk-limit", walk_max_depth=1)
+    fs.makedirs("/one/two", exist_ok=True)
+    fs.pipe_file("/one/two/file", b"data")
+
+    with pytest.raises(OSError) as exc_info:
+        list(fs.walk("/"))
+    assert exc_info.value.errno == errno.EFBIG
+    with pytest.raises(OSError) as exc_info:
+        fs.find("/")
+    assert exc_info.value.errno == errno.EFBIG
+    fs.close()
 
 
 def test_bulk_writes_are_bounded_by_items_and_bytes(tmp_path):

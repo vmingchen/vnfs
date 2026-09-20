@@ -64,6 +64,10 @@ class VfsiFileSystem(AbstractFileSystem):
     connect_timeout: float
     request_timeout: float
     auto_reconnect: bool
+    read_all_max_total_bytes: int
+    directory_max_entries: int
+    directory_max_path_bytes: int
+    walk_max_depth: int
     def __init__(
         self,
         host: str = "127.0.0.1",
@@ -92,6 +96,10 @@ class VfsiFileSystem(AbstractFileSystem):
         use_listings_cache: bool = False,
         listings_expiry_time: Optional[float] = None,
         max_paths: Optional[int] = None,
+        read_all_max_total_bytes: int = 16_777_216,
+        directory_max_entries: int = 100_000,
+        directory_max_path_bytes: int = 16_777_216,
+        walk_max_depth: int = 128,
         **kwargs: Any,
     ) -> None: ...
     @property
