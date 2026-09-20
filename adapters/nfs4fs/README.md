@@ -85,8 +85,10 @@ The largest benefit comes from giving `fsspec` multiple paths at once:
 - `pipe` and `put` batch writes;
 - recursive `get`, `put`, `cp`, `rm`, and tree walks use vector metadata and
   mutation operations;
-- `cp_file`/`copy` use NFSv4.2 server-side copy when available, with a
-  client-side fallback.
+- `cp_file`/`copy` retain the low-round-trip vector path for bounded small-file
+  batches. Files beyond the read allocation budget use NFSv4.2 server-side
+  copy when available, in bounded 16 MiB extents, with a streaming client-side
+  fallback.
 
 `minor_version()`, `capabilities()`, `server_copy_enabled()`,
 `compound_stats()`, and `rpc_stats()` are available on the native client for

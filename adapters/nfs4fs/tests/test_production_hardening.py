@@ -3,6 +3,7 @@
 import errno
 import math
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -185,6 +186,44 @@ def test_secure_authentication_configuration_fails_closed_without_network(tmp_pa
         _dummy(tmp_path / "secure", authentication="krb5i")
     with pytest.raises(ValueError, match="authentication"):
         _dummy(tmp_path / "secure", authentication="unknown")
+    with pytest.raises(ValueError, match="service_principal requires"):
+        fs_module.Nfs4FileSystem(
+            host="unused",
+            service_principal="nfs@server.example",
+            skip_instance_cache=True,
+        )
+
+
+def test_copy_larger_than_read_limit_uses_bounded_extents(tmp_path):
+    fs = _dummy(tmp_path / "chunked-copy", read_all_max_total_bytes=4)
+    payload = b"a" * (16 * 1024 * 1024) + b"tail"
+    fs.pipe_file("/source", payload)
+    fs.pipe_file("/destination", b"stale-data-that-must-be-truncated")
+
+    fs.cp_file("/source", "/destination")
+
+    assert fs.size("/destination") == len(payload)
+    assert fs.cat_file("/destination", 0, 4) == b"aaaa"
+    assert fs.cat_file("/destination", len(payload) - 4) == b"tail"
+    fs.close()
+
+
+@pytest.mark.parametrize("destination", ["/source", "/alias"])
+def test_chunked_copy_rejects_same_file_and_preserves_contents(tmp_path, destination):
+    root = tmp_path / "same-file-copy"
+    fs = _dummy(root, read_all_max_total_bytes=4)
+    payload = b"a" * (16 * 1024 * 1024) + b"tail"
+    fs.pipe_file("/source", payload)
+    if destination == "/alias":
+        os.link(root / "source", root / "alias")
+
+    with pytest.raises(shutil.SameFileError):
+        fs.cp_file("/source", destination)
+
+    assert fs.size("/source") == len(payload)
+    assert fs.cat_file("/source", 0, 4) == b"aaaa"
+    assert fs.cat_file("/source", len(payload) - 4) == b"tail"
+    fs.close()
 
 
 def test_bulk_writes_are_bounded_by_items_and_bytes(tmp_path):
@@ -585,3 +624,139 @@ def test_connection_pool_pins_descriptors_while_overlapping_reads():
     for fd in descriptors:
         pool.close(fd)
     pool.shutdown()
+
+
+def test_reconnect_of_one_pool_session_preserves_other_session_descriptors():
+    created = []
+
+    class FailingPathNative:
+        def __init__(self, *args):
+            self.identity = len(created)
+            self.fail_stat = self.identity == 1
+            self.shutdown_calls = 0
+            self.writes = []
+            created.append(self)
+
+        def open(self, path, mode):
+            return 100 + self.identity
+
+        def stat_many(self, paths):
+            if self.fail_stat:
+                self.fail_stat = False
+                raise ConnectionError("injected path failure")
+            return ([{"size": 0}], {})
+
+        def pwrite(self, fd, data, offset):
+            self.writes.append((fd, bytes(data), offset))
+            return len(data)
+
+        def close(self, fd):
+            pass
+
+        def shutdown(self):
+            self.shutdown_calls += 1
+
+    native_module = type("NativeModule", (), {"NfsClient": FailingPathNative})
+    pool = engine_module._ClientPool(native_module, (), size=2)
+    descriptor = pool.open("/writer", "wb")
+
+    assert pool.stat_many(["/path-op"]) == ([{"size": 0}], {})
+    assert pool.descriptor_valid(descriptor)
+    assert pool.pwrite(descriptor, b"safe", 0) == 4
+    assert created[0].shutdown_calls == 0
+    assert created[1].shutdown_calls == 1
+    pool.close(descriptor)
+    pool.shutdown()
+
+
+def test_reconnect_waits_for_inflight_native_operation():
+    entered = threading.Event()
+    release = threading.Event()
+    shutdown_called = threading.Event()
+
+    class BlockingNative:
+        def __init__(self, *args):
+            self.identity = 0
+
+        def stat_many(self, paths):
+            entered.set()
+            assert release.wait(timeout=3)
+            return ([{"size": 0}], {})
+
+        def shutdown(self):
+            shutdown_called.set()
+
+    native_module = type("NativeModule", (), {"NfsClient": BlockingNative})
+    pool = engine_module._ClientPool(native_module, (), size=1)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        operation = executor.submit(pool.stat_many, ["/file"])
+        assert entered.wait(timeout=2)
+        reconnect = executor.submit(pool.reconnect)
+        assert not shutdown_called.wait(timeout=0.1)
+        release.set()
+        assert operation.result(timeout=3) == ([{"size": 0}], {})
+        reconnect.result(timeout=3)
+    assert shutdown_called.is_set()
+    pool.shutdown()
+
+
+def test_concurrent_post_fork_recovery_rebuilds_each_session_once(monkeypatch):
+    first_replacement_started = threading.Event()
+    second_replacement_started = threading.Event()
+    release_replacement = threading.Event()
+    created = []
+    created_lock = threading.Lock()
+
+    class BlockingReconnectNative:
+        def __init__(self, *args):
+            with created_lock:
+                self.identity = len(created)
+                created.append(self)
+            self.abandon_calls = 0
+            if self.identity == 1:
+                first_replacement_started.set()
+                assert release_replacement.wait(timeout=3)
+            elif self.identity > 1:
+                second_replacement_started.set()
+                assert release_replacement.wait(timeout=3)
+
+        def _abandon_after_fork(self):
+            self.abandon_calls += 1
+
+        def shutdown(self):
+            pass
+
+    native_module = type("NativeModule", (), {"NfsClient": BlockingReconnectNative})
+    pool = engine_module._ClientPool(native_module, (), size=1)
+    parent_pid = os.getpid()
+    monkeypatch.setattr(engine_module.os, "getpid", lambda: parent_pid + 1)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(pool.ensure_ready)
+            assert first_replacement_started.wait(timeout=2)
+            second = executor.submit(pool.ensure_ready)
+            raced = second_replacement_started.wait(timeout=0.2)
+            release_replacement.set()
+            first.result(timeout=3)
+            second.result(timeout=3)
+
+        assert not raced, "post-fork recovery created clients concurrently"
+        assert len(created) == 2
+        assert created[0].abandon_calls == 1
+    finally:
+        release_replacement.set()
+        pool.shutdown()
+
+
+def test_writable_handle_is_never_reopened_after_reconnect(tmp_path):
+    fs = _dummy(tmp_path / "writer-reconnect", connection_pool_size=2)
+    writer = fs.open("/writer", "wb", cache_type="none")
+    assert writer.write(b"abc") == 3
+
+    fs._client.reconnect()
+    with pytest.raises(ConnectionError, match="session reconnects"):
+        writer.write(b"def")
+    writer.close()
+
+    assert fs.cat_file("/writer") == b"abc"
+    fs.close()

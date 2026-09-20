@@ -7,10 +7,12 @@ import io
 import math
 import os
 import posixpath
+import shutil
 import tempfile
 import threading
 import uuid
 import weakref
+from contextlib import ExitStack
 from glob import has_magic
 from urllib.parse import unquote, urlsplit
 
@@ -22,6 +24,7 @@ from fsspec.transaction import Transaction
 __all__ = ["VfsiFile", "VfsiFileSystem"]
 
 _MEMORY_PATH = "<memory>"
+_ERR_SAME_FILE = 0xFFFF_FFFD
 _ERR_UNSUPPORTED = 0xFFFF_FFFE
 
 
@@ -259,14 +262,34 @@ class _ClientPool:
         ]
         self._auto_reconnect = auto_reconnect
         self._lock = threading.RLock()
+        # This lock must remain stable while reconnect replaces the per-client
+        # locks inherited from a multithreaded parent after fork.
+        self._reconnect_lock = threading.RLock()
+        self._client_locks = [threading.RLock() for _ in self._clients]
         self._next_client = 0
         # Keep ordinary invalid descriptors such as -1 invalid at the public
         # seam. Virtual handles occupy a remote, monotonically decreasing range.
         self._next_fd = -(1 << 62)
         self._fds = {}
+        self._deferred_close = set()
         self._generation = 0
         self._pid = os.getpid()
         self._cwd = "/"
+        if hasattr(os, "register_at_fork"):
+            pool_ref = weakref.ref(self)
+
+            def reset_pool_locks():
+                pool = pool_ref()
+                if pool is not None:
+                    pool._reset_locks_after_fork()
+
+            os.register_at_fork(after_in_child=reset_pool_locks)
+
+    def _reset_locks_after_fork(self):
+        """Discard locks that may be owned by threads absent in the child."""
+        self._lock = threading.RLock()
+        self._reconnect_lock = threading.RLock()
+        self._client_locks = [threading.RLock() for _ in self._clients]
 
     @property
     def generation(self):
@@ -299,32 +322,132 @@ class _ClientPool:
             except (KeyError, IndexError):
                 raise OSError(errno.EBADF, "Bad file descriptor") from None
 
+    def descriptor_valid(self, token):
+        """Return whether a virtual descriptor still belongs to a live session."""
+        with self._lock:
+            return token in self._fds
+
+    def defer_close_many(self, tokens):
+        """Retain cleanup ownership when setup fails and CLOSE is unavailable."""
+        with self._lock:
+            self._deferred_close.update(token for token in tokens if token in self._fds)
+
+    def _discard_tokens(self, tokens):
+        with self._lock:
+            for token in tokens:
+                self._fds.pop(token, None)
+                self._deferred_close.discard(token)
+
+    def _retry_deferred_closes(self):
+        """Best-effort retry descriptors orphaned by a failed setup cleanup."""
+        with self._lock:
+            by_owner = {}
+            for token in tuple(self._deferred_close):
+                mapping = self._fds.get(token)
+                if mapping is not None:
+                    by_owner.setdefault(mapping[0], []).append(token)
+                else:
+                    self._deferred_close.discard(token)
+        for owner, tokens in by_owner.items():
+            with self._client_locks[owner]:
+                with self._lock:
+                    live = [
+                        (token, self._fds[token][1])
+                        for token in tokens
+                        if token in self._fds and self._fds[token][0] == owner
+                    ]
+                    client = self._clients[owner]
+                if not live:
+                    continue
+                try:
+                    client.close_many([native_fd for _, native_fd in live])
+                except ConnectionError:
+                    if self._auto_reconnect:
+                        try:
+                            self._reconnect_client(owner)
+                        except BaseException:
+                            pass
+                except BaseException as error:
+                    completed = getattr(error, "index", 0)
+                    if isinstance(completed, int) and 0 <= completed <= len(live):
+                        self._discard_tokens([token for token, _ in live[:completed]])
+                else:
+                    self._discard_tokens([token for token, _ in live])
+
     def ensure_ready(self):
         if self.closed:
             raise ValueError("filesystem is closed")
-        if self._pid != os.getpid():
-            self.reconnect(after_fork=True)
+        current_pid = os.getpid()
+        if self._pid != current_pid:
+            with self._reconnect_lock:
+                # Another child thread may have completed recovery while this
+                # thread waited. Only one thread may rebuild inherited sessions.
+                if self._pid != current_pid:
+                    self._reconnect_all(after_fork=True)
+
+    def _reconnect_client(self, owner, after_fork=False):
+        """Replace one failed session without disrupting healthy pool members."""
+        with self._client_locks[owner]:
+            with self._lock:
+                if owner >= len(self._clients):
+                    raise ValueError("filesystem is closed")
+                client = self._clients[owner]
+                cwd = self._cwd
+                previous_generation = client.generation
+            try:
+                client.reconnect(after_fork=after_fork)
+                if cwd != "/":
+                    client.chdir(cwd)
+            finally:
+                # reconnect() installs the replacement before retiring the old
+                # session. Even if retirement fails, old descriptors can never
+                # be sent to the replacement connection.
+                if client.generation != previous_generation:
+                    with self._lock:
+                        stale = [
+                            token
+                            for token, (token_owner, _) in self._fds.items()
+                            if token_owner == owner
+                        ]
+                        self._discard_tokens(stale)
+                        self._generation += 1
+
+    def reconnect_descriptor(self, token):
+        """Reconnect only the session that owns token."""
+        owner, _, _ = self._resolve(token)
+        self._reconnect_client(owner)
+
+    def _reconnect_all(self, after_fork=False):
+        with self._lock:
+            owners = list(range(len(self._clients)))
+            if after_fork:
+                # Locks may have been held by threads that did not survive fork.
+                self._client_locks = [threading.RLock() for _ in self._clients]
+        error = None
+        for owner in owners:
+            try:
+                self._reconnect_client(owner, after_fork=after_fork)
+            except BaseException as exc:
+                error = error or exc
+        if error is not None:
+            raise error
+        self._pid = os.getpid()
 
     def reconnect(self, after_fork=False):
-        with self._lock:
-            clients = list(self._clients)
-            self._fds.clear()
-            self._generation += 1
-            self._pid = os.getpid()
-        for client in clients:
-            client.reconnect(after_fork=after_fork)
-            if self._cwd != "/":
-                client.chdir(self._cwd)
+        with self._reconnect_lock:
+            self._reconnect_all(after_fork=after_fork)
 
     def shutdown(self):
         with self._lock:
             clients, self._clients = self._clients, []
             self._fds.clear()
+            self._deferred_close.clear()
             self._generation += 1
         error = None
-        for client in clients:
+        for owner, client in enumerate(clients):
             try:
-                client.shutdown()
+                with self._client_locks[owner]:
+                    client.shutdown()
             except BaseException as exc:
                 error = error or exc
         if error is not None:
@@ -332,41 +455,50 @@ class _ClientPool:
 
     def open(self, path, mode):
         self.ensure_ready()
+        self._retry_deferred_closes()
         owner, client = self._choose()
-        return self._register(owner, client.open(path, mode))
+        with self._client_locks[owner]:
+            return self._register(owner, client.open(path, mode))
 
     def open_many(self, paths, modes):
         self.ensure_ready()
+        self._retry_deferred_closes()
         owner, client = self._choose()
-        return [self._register(owner, fd) for fd in client.open_many(paths, modes)]
+        with self._client_locks[owner]:
+            return [self._register(owner, fd) for fd in client.open_many(paths, modes)]
 
     def chdir(self, path):
         """Keep the session-local working directory identical across the pool."""
         self.ensure_ready()
         try:
-            for client in self._clients:
-                client.chdir(path)
+            with ExitStack() as stack:
+                for lock in self._client_locks:
+                    stack.enter_context(lock)
+                for client in self._clients:
+                    client.chdir(path)
+                self._cwd = path
         except BaseException:
             # Rebuild every session rather than leave a partially changed pool.
             self._cwd = "/"
             self.reconnect()
             raise
-        self._cwd = path
 
     def getcwd(self):
         self.ensure_ready()
-        return self._clients[0].getcwd()
+        with self._client_locks[0]:
+            return self._clients[0].getcwd()
 
     def __getattr__(self, name):
         if name in self._FD_METHODS:
 
             def fd_call(token, *args, **kwargs):
                 self.ensure_ready()
-                _, native_fd, client = self._resolve(token)
-                result = getattr(client, name)(native_fd, *args, **kwargs)
+                owner, _, _ = self._resolve(token)
+                with self._client_locks[owner]:
+                    _, native_fd, client = self._resolve(token)
+                    result = getattr(client, name)(native_fd, *args, **kwargs)
                 if name == "close":
-                    with self._lock:
-                        self._fds.pop(token, None)
+                    self._discard_tokens([token])
                 return result
 
             return fd_call
@@ -386,42 +518,46 @@ class _ClientPool:
                 if len(owners) > 1:
                     raise ValueError("descriptor vector spans multiple native sessions")
                 if not resolved:
-                    _, client = self._choose()
+                    owner, client = self._choose()
                     native_fds = []
                 else:
-                    client = resolved[0][2]
-                    native_fds = [native_fd for _, native_fd, _ in resolved]
-                try:
-                    result = getattr(client, name)(native_fds, *args, **kwargs)
-                except BaseException as error:
-                    if name == "close_many":
-                        completed = getattr(error, "index", 0)
-                        if isinstance(completed, int) and 0 <= completed <= len(tokens):
-                            with self._lock:
-                                for token in tokens[:completed]:
-                                    self._fds.pop(token, None)
-                    raise
+                    owner = resolved[0][0]
+                with self._client_locks[owner]:
+                    if resolved:
+                        resolved = [self._resolve(token) for token in tokens]
+                        client = resolved[0][2]
+                        native_fds = [native_fd for _, native_fd, _ in resolved]
+                    try:
+                        result = getattr(client, name)(native_fds, *args, **kwargs)
+                    except BaseException as error:
+                        if name == "close_many":
+                            completed = getattr(error, "index", 0)
+                            if isinstance(completed, int) and 0 <= completed <= len(
+                                tokens
+                            ):
+                                self._discard_tokens(tokens[:completed])
+                        raise
                 if name == "close_many":
-                    with self._lock:
-                        for token in tokens:
-                            self._fds.pop(token, None)
+                    self._discard_tokens(tokens)
                 return result
 
             return fd_many_call
 
         def path_call(*args, **kwargs):
             self.ensure_ready()
-            _, client = self._choose()
-            try:
-                return getattr(client, name)(*args, **kwargs)
-            except ConnectionError:
-                if not self._auto_reconnect or name not in _ResilientClient._IDEMPOTENT:
-                    raise
-                # Rebuild the complete pool. Any descriptors on a failed
-                # session are no longer trustworthy and must be lazily reopened.
-                self.reconnect()
-                _, retry_client = self._choose()
-                return getattr(retry_client, name)(*args, **kwargs)
+            self._retry_deferred_closes()
+            owner, client = self._choose()
+            with self._client_locks[owner]:
+                try:
+                    return getattr(client, name)(*args, **kwargs)
+                except ConnectionError:
+                    if (
+                        not self._auto_reconnect
+                        or name not in _ResilientClient._IDEMPOTENT
+                    ):
+                        raise
+                    self._reconnect_client(owner)
+                    return getattr(client, name)(*args, **kwargs)
 
         return path_call
 
@@ -477,9 +613,14 @@ class _RawVfsiFile(io.RawIOBase):
         if self._broken:
             raise ConnectionError("write handle is unusable after a transport failure")
         self.fs._client.ensure_ready()
-        if self._fd is not None and self._fd_generation != self.fs._client.generation:
+        if self._fd is not None and not self.fs._client.descriptor_valid(self._fd):
             self._fd = None
             self._fd_generation = None
+            if self._writable:
+                self._broken = True
+                raise ConnectionError(
+                    "write handle is unusable after its native session reconnects"
+                )
         if self._fd is None:
             self._fd = self.fs._client.open(
                 self.fs._native_path(self.path), self._native_mode()
@@ -496,10 +637,15 @@ class _RawVfsiFile(io.RawIOBase):
         fd = self._ensure_open()
         try:
             return self.fs._client.pread(fd, length, offset)
-        except ConnectionError:
+        except (ConnectionError, OSError) as error:
+            stale = not self.fs._client.descriptor_valid(fd)
+            if isinstance(error, OSError) and not isinstance(error, ConnectionError):
+                if error.errno != errno.EBADF or not stale:
+                    raise
             if not self.fs.auto_reconnect:
                 raise
-            self.fs._client.reconnect()
+            if not stale:
+                self.fs._client.reconnect_descriptor(fd)
             self._fd = None
             self._fd_generation = None
             fd = self._ensure_open()
@@ -605,8 +751,11 @@ class _RawVfsiFile(io.RawIOBase):
             # future path operations, but never replay the write implicitly.
             self._broken = True
             try:
-                if self.fs.auto_reconnect:
-                    self.fs._client.reconnect()
+                if self.fs.auto_reconnect and self.fs._client.descriptor_valid(fd):
+                    self.fs._client.reconnect_descriptor(fd)
+            except BaseException:
+                # Preserve the ambiguous mutation error; reconnect is cleanup.
+                pass
             finally:
                 self._fd = None
                 self._fd_generation = None
@@ -658,7 +807,7 @@ class _RawVfsiFile(io.RawIOBase):
         fd = self._fd
         if (
             fd is not None
-            and self._fd_generation == self.fs._client.generation
+            and self.fs._client.descriptor_valid(fd)
             and not self.fs._client.closed
         ):
             # Retain ownership when CLOSE fails so callers (and __del__) can
@@ -1125,7 +1274,11 @@ class _BufferGroup:
         active = [file for file in self.files if not file.closed and file.readable()]
         if not active:
             return
-        self.fs._client.reconnect()
+        descriptor = next(
+            (file._raw._fd for file in active if file._raw._fd is not None), None
+        )
+        if descriptor is not None and self.fs._client.descriptor_valid(descriptor):
+            self.fs._client.reconnect_descriptor(descriptor)
         fds = self.fs._client.open_many(
             [self.fs._native_path(file.path) for file in active],
             [file._raw._native_mode() for file in active],
@@ -1355,7 +1508,7 @@ class _BufferGroup:
                 member
                 for member in self.files
                 if member._raw._fd is not None
-                and member._raw._fd_generation == self.fs._client.generation
+                and self.fs._client.descriptor_valid(member._raw._fd)
             ]
             fds = [member._raw._fd for member in members]
             if fds and not self.fs._client.closed:
@@ -1650,6 +1803,10 @@ class VfsiFileSystem(AbstractFileSystem):
             raise ValueError("secure authentication options are NFS-only")
         if service_principal is not None and not isinstance(service_principal, str):
             raise TypeError("service_principal must be a string or None")
+        if service_principal is not None and authentication == "auth_sys":
+            raise ValueError(
+                "service_principal requires authentication='krb5' or 'krb5i'"
+            )
         if require_secure_authentication and authentication == "auth_sys":
             raise ValueError(
                 "require_secure_authentication requires authentication='krb5' or 'krb5i'"
@@ -3023,14 +3180,18 @@ class VfsiFileSystem(AbstractFileSystem):
                 for path, mode, fd, size in zip(paths, modes, fds, discovered_sizes)
             ]
             _BufferGroup(self, files)
-        except BaseException:
+        except BaseException as setup_error:
+            cleanup_error = None
             try:
                 if fds and not self._client.closed:
                     self._client.close_many(fds)
-            except BaseException:
-                pass
+            except BaseException as error:
+                cleanup_error = error
+                self._client.defer_close_many(fds)
             for file in files:
                 file._finish_group_close()
+            if cleanup_error is not None:
+                raise setup_error from cleanup_error
             raise
         # Read-mode OpenFiles contexts do not call commit_many on exit;
         # register the opened files on their OpenFile objects so
@@ -3383,7 +3544,11 @@ class VfsiFileSystem(AbstractFileSystem):
                     _complete_callback(callback, copied[i])
         if errors:
             i = min(errors)
-            exc = _oserror(errors[i], pairs[i][0])
+            if errors[i] == _ERR_SAME_FILE:
+                src, dst = pairs[i]
+                exc = shutil.SameFileError(f"{src!r} and {dst!r} are the same file")
+            else:
+                exc = _oserror(errors[i], pairs[i][0])
             if on_error == "raise":
                 raise exc
 

@@ -447,6 +447,35 @@ def test_open_many_closes_descriptors_when_size_discovery_fails(dummy_fs, monkey
     assert len(closes[0][0][0]) == 2
 
 
+def test_open_many_retains_cleanup_ownership_when_close_also_fails(
+    dummy_fs, monkeypatch
+):
+    paths = ["/cleanup-a", "/cleanup-b"]
+    dummy_fs.pipe({path: b"data" for path in paths})
+    original_close = dummy_fs._client.close_many
+
+    def fail_fstat(*args, **kwargs):
+        raise OSError("injected setup failure")
+
+    def fail_close(*args, **kwargs):
+        raise ConnectionError("injected cleanup failure")
+
+    monkeypatch.setattr(dummy_fs._client, "fstat_many", fail_fstat)
+    monkeypatch.setattr(dummy_fs._client, "close_many", fail_close)
+    with pytest.raises(OSError, match="injected setup failure") as exc_info:
+        with _open_files(dummy_fs, paths, "rb"):
+            pass
+    assert isinstance(exc_info.value.__cause__, ConnectionError)
+    deferred = set(dummy_fs._client._deferred_close)
+    assert len(deferred) == 2
+    assert deferred <= set(dummy_fs._client._fds)
+
+    monkeypatch.setattr(dummy_fs._client, "close_many", original_close)
+    assert dummy_fs.exists("/cleanup-a")
+    assert not dummy_fs._client._deferred_close
+    assert deferred.isdisjoint(dummy_fs._client._fds)
+
+
 def test_group_close_failure_keeps_descriptors_armed_for_retry(dummy_fs, monkeypatch):
     paths = ["/close-retry-a", "/close-retry-b"]
     dummy_fs.pipe({path: b"data" for path in paths})

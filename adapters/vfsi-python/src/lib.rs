@@ -18,8 +18,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 
 use vfsi_core::{
-    AttrMask, ERR_ACCES, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT, ERR_NOTDIR, ReadOp,
-    ReadResult, SeekFrom, VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS,
+    AttrMask, ERR_ACCES, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT, ERR_NOTDIR, ExtentPair,
+    ReadOp, ReadResult, SeekFrom, VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS,
     VF_CAP_POSIX_METADATA, VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VF_ERR_UNSUPPORTED, VfAttrs,
     VfError, VfFile, VfOffset, VfType, WriteOp, WriteResult,
 };
@@ -55,6 +55,7 @@ type StatManyResult = (Vec<Option<Py<PyDict>>>, ErrnoMap);
 type ReadManyResult = (Vec<Option<Vec<u8>>>, ErrnoMap);
 /// Per-index copied byte counts (None on failure) plus failures.
 type CopyManyResult = (Vec<Option<u64>>, ErrnoMap);
+const ERR_SAME_FILE: u32 = u32::MAX - 2;
 /// Directory paths and their entries returned to Python by a tree walk.
 type WalkResult = Vec<(Py<PyString>, Vec<Py<PyDict>>)>;
 
@@ -135,11 +136,7 @@ fn validate_read_results(
     if results.len() != ops.len() {
         return Err(contract_error(
             operation,
-            format!(
-                "expected {} results, received {}",
-                ops.len(),
-                results.len()
-            ),
+            format!("expected {} results, received {}", ops.len(), results.len()),
         ));
     }
     for (index, (op, result)) in ops.iter().zip(&results).enumerate() {
@@ -193,11 +190,7 @@ fn validate_write_results(
     if results.len() != ops.len() {
         return Err(contract_error(
             operation,
-            format!(
-                "expected {} results, received {}",
-                ops.len(),
-                results.len()
-            ),
+            format!("expected {} results, received {}", ops.len(), results.len()),
         ));
     }
     for (index, (op, result)) in ops.iter().zip(&results).enumerate() {
@@ -377,6 +370,9 @@ fn attrs_many_impl(
                 break;
             }
             Err(e) => {
+                if e.is_transport() {
+                    return Err(e);
+                }
                 let Some(bi) = e.index_opt() else {
                     return Err(e);
                 };
@@ -416,6 +412,9 @@ fn read_allv_impl(
                 break;
             }
             Err(e) => {
+                if e.is_transport() {
+                    return Err(e);
+                }
                 let Some(bi) = e.index_opt() else {
                     return Err(e);
                 };
@@ -429,6 +428,12 @@ fn read_allv_impl(
         }
     }
     Ok((results, errors))
+}
+
+const COPY_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+
+fn copy_fast_path_budget(configured_limit: usize) -> usize {
+    configured_limit.min(COPY_CHUNK_SIZE)
 }
 
 fn validate_directory_results(
@@ -1326,11 +1331,7 @@ impl NfsClient {
             if files.len() != paths.len() {
                 return Err(contract_error(
                     "open_many",
-                    format!(
-                        "expected {} results, received {}",
-                        paths.len(),
-                        files.len()
-                    ),
+                    format!("expected {} results, received {}", paths.len(), files.len()),
                 ));
             }
             files
@@ -1495,8 +1496,8 @@ impl NfsClient {
         })
     }
 
-    /// Copy whole files in batches (no-stat read_allv + truncating writev,
-    /// each constant in the number of compounds for one-dir batches).
+    /// Copy whole files through copyv in bounded 16 MiB extents. NFSv4.2 and
+    /// SMB use server-side copy; other backends use copyv's streaming fallback.
     /// Returns `(copied_bytes, errors)`.
     fn copy_many(
         &self,
@@ -1509,49 +1510,198 @@ impl NfsClient {
         let max_total_bytes = self.read_all_max_total_bytes;
         self.with_fs(py, move |fs| {
             let mut copied: Vec<Option<u64>> = vec![None; n];
-            let mut errors: HashMap<usize, u32> = HashMap::new();
+            let mut errors = HashMap::new();
 
-            // 1+2. Read whole files (no separate size-stat round trip).
+            // Preserve the low-round-trip path for small-file batches. Only
+            // requests rejected by the allocation budget move to extent copy.
             let (mut data, read_errors) =
-                read_allv_impl(fs, &sources, max_total_bytes).map_err(|e| to_py_err(e, None))?;
-            errors.extend(read_errors.iter().map(|(&k, &v)| (k, v)));
+                read_allv_impl(fs, &sources, copy_fast_path_budget(max_total_bytes))
+                    .map_err(|e| to_py_err(e, None))?;
+            let mut oversized = Vec::new();
+            for (index, err_no) in read_errors {
+                if err_no == libc::EFBIG as u32 {
+                    oversized.push(index);
+                } else {
+                    errors.insert(index, err_no);
+                }
+            }
+            // copy_file-style APIs must reject source and destination aliases.
+            // Remove exact path aliases before either the small write or the
+            // extent-copy path can truncate their shared inode.
+            for index in 0..n {
+                if sources[index] == dests[index] {
+                    data[index] = None;
+                    oversized.retain(|&candidate| candidate != index);
+                    errors.insert(index, ERR_SAME_FILE);
+                }
+            }
 
-            // 3. writes. The in-compound O_TRUNC truncates each destination to
-            // zero; writing the whole source at offset zero then leaves exactly
-            // the source size (no separate truncate compound is needed).
-            let mut remaining: Vec<usize> = (0..n).filter(|&i| data[i].is_some()).collect();
-            while !remaining.is_empty() {
-                let ops: Vec<WriteOp> = remaining
+            let mut write_remaining: Vec<usize> =
+                (0..n).filter(|&index| data[index].is_some()).collect();
+            while !write_remaining.is_empty() {
+                let ops: Vec<WriteOp> = write_remaining
                     .iter()
-                    .map(|&i| {
+                    .map(|&index| {
                         WriteOp::at(
-                            VfFile::from_os_path(&dests[i]),
+                            VfFile::from_os_path(&dests[index]),
                             0,
-                            data[i].clone().unwrap_or_default(),
+                            data[index].clone().unwrap_or_default(),
                         )
                         .with_creation()
                         .with_truncate()
                     })
                     .collect();
                 match fs.writev(&ops) {
-                    Ok(res) => {
-                        let res = validate_write_results("copy_many", &ops, res)?;
-                        for (&i, r) in remaining.iter().zip(res) {
-                            copied[i] = Some(r.written as u64);
+                    Ok(results) => {
+                        let results = validate_write_results("copy_many", &ops, results)?;
+                        for (&index, result) in write_remaining.iter().zip(results) {
+                            copied[index] = Some(result.written as u64);
                         }
                         break;
                     }
+                    Err(error) => {
+                        if error.is_transport() {
+                            return Err(to_py_err(error, None));
+                        }
+                        let Some(batch_index) = error.index_opt() else {
+                            return Err(to_py_err(error, None));
+                        };
+                        if batch_index >= write_remaining.len() {
+                            return Err(to_py_err(error, None));
+                        }
+                        let original_index = write_remaining[batch_index];
+                        errors.insert(original_index, error.err_no());
+                        data[original_index] = None;
+                        write_remaining.remove(batch_index);
+                    }
+                }
+            }
+
+            if oversized.is_empty() {
+                return Ok((copied, errors));
+            }
+            let oversized_sources: Vec<PathBuf> = oversized
+                .iter()
+                .map(|&index| sources[index].clone())
+                .collect();
+            let identity_mask = AttrMask::SIZE | AttrMask::NLINK | AttrMask::FILEID;
+            let (attrs, stat_errors) = attrs_many_impl(fs, &oversized_sources, identity_mask, true)
+                .map_err(|e| to_py_err(e, None))?;
+            for (subset_index, err_no) in stat_errors {
+                errors.insert(oversized[subset_index], err_no);
+            }
+            let mut sizes = vec![None; n];
+            let mut identity_candidates = Vec::new();
+            let mut source_fileids = HashMap::new();
+            for (&index, attrs) in oversized.iter().zip(attrs) {
+                if let Some(attrs) = attrs {
+                    sizes[index] = Some(attrs.size);
+                    if attrs.returned.contains(AttrMask::NLINK | AttrMask::FILEID)
+                        && attrs.nlink > 1
+                    {
+                        identity_candidates.push(index);
+                        source_fileids.insert(index, attrs.fileid);
+                    }
+                }
+            }
+
+            // A different pathname can still name the source inode. Limit the
+            // extra destination stat to multiply-linked oversized sources, the
+            // only files that enter the destructive extent-copy path here.
+            if !identity_candidates.is_empty() {
+                let candidate_dests: Vec<PathBuf> = identity_candidates
+                    .iter()
+                    .map(|&index| dests[index].clone())
+                    .collect();
+                let (dest_attrs, dest_errors) =
+                    attrs_many_impl(fs, &candidate_dests, AttrMask::FILEID, true)
+                        .map_err(|e| to_py_err(e, None))?;
+                for (subset_index, err_no) in dest_errors {
+                    if err_no != libc::ENOENT as u32 {
+                        let index = identity_candidates[subset_index];
+                        sizes[index] = None;
+                        errors.insert(index, err_no);
+                    }
+                }
+                for (&index, attrs) in identity_candidates.iter().zip(dest_attrs) {
+                    if attrs.is_some_and(|attrs| {
+                        attrs.returned.contains(AttrMask::FILEID)
+                            && source_fileids.get(&index) == Some(&attrs.fileid)
+                    }) {
+                        sizes[index] = None;
+                        errors.insert(index, ERR_SAME_FILE);
+                    }
+                }
+            }
+            let mut offsets = vec![0u64; n];
+            let mut remaining: Vec<usize> = oversized
+                .into_iter()
+                .filter(|&index| sizes[index].is_some())
+                .collect();
+            while !remaining.is_empty() {
+                let chunks: Vec<u64> = remaining
+                    .iter()
+                    .map(|&index| {
+                        sizes[index]
+                            .unwrap_or(0)
+                            .saturating_sub(offsets[index])
+                            .min(COPY_CHUNK_SIZE as u64)
+                    })
+                    .collect();
+                let ops: Vec<ExtentPair> = remaining
+                    .iter()
+                    .zip(&chunks)
+                    .map(|(&index, &length)| {
+                        ExtentPair::from_os_paths(
+                            &sources[index],
+                            offsets[index],
+                            &dests[index],
+                            offsets[index],
+                            Some(length),
+                        )
+                    })
+                    .collect();
+                match fs.copyv(&ops) {
+                    Ok(()) => {
+                        let mut next = Vec::new();
+                        for (&index, &length) in remaining.iter().zip(&chunks) {
+                            offsets[index] = offsets[index].saturating_add(length);
+                            if offsets[index] >= sizes[index].unwrap_or(0) {
+                                copied[index] = sizes[index];
+                            } else {
+                                next.push(index);
+                            }
+                        }
+                        remaining = next;
+                    }
                     Err(e) => {
+                        if e.is_transport() {
+                            return Err(to_py_err(e, None));
+                        }
                         let Some(bi) = e.index_opt() else {
                             return Err(to_py_err(e, None));
                         };
                         if bi >= remaining.len() {
                             return Err(to_py_err(e, None));
                         }
-                        let orig = remaining[bi];
-                        errors.insert(orig, e.err_no());
-                        data[orig] = None;
-                        remaining.remove(bi);
+                        let failed = remaining[bi];
+                        errors.insert(failed, e.err_no());
+                        let mut next = Vec::new();
+                        for (batch_index, (&index, &length)) in
+                            remaining.iter().zip(&chunks).enumerate()
+                        {
+                            if batch_index < bi {
+                                offsets[index] = offsets[index].saturating_add(length);
+                                if offsets[index] >= sizes[index].unwrap_or(0) {
+                                    copied[index] = sizes[index];
+                                } else {
+                                    next.push(index);
+                                }
+                            } else if batch_index > bi {
+                                next.push(index);
+                            }
+                        }
+                        remaining = next;
                     }
                 }
             }
@@ -1626,6 +1776,12 @@ pub fn register(m: &Bound<'_, PyModule>, version: &str) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_fast_path_is_capped_at_extent_size() {
+        assert_eq!(copy_fast_path_budget(4 * 1024 * 1024), 4 * 1024 * 1024);
+        assert_eq!(copy_fast_path_budget(32 * 1024 * 1024), COPY_CHUNK_SIZE);
+    }
 
     #[test]
     fn scalar_read_result_contract_is_validated() {

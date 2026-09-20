@@ -7,6 +7,13 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ### Changed
 
+- Made nfs4fs reconnects session-scoped and lifecycle-safe: healthy pooled
+  sessions remain usable, writable handles are never destructively reopened,
+  and failed setup cleanup retains retryable descriptor ownership. Whole-file
+  copies keep the vectorized small-file fast path while files beyond the read
+  allocation budget use server-side or fallback `copyv` in 16 MiB extents.
+  The shared `vfsi-fsspec` engine is versioned independently so protocol
+  adapters cannot resolve to an older implementation at install time.
 - Hardened nfs4fs for production use: every bytes-returning read now obeys a
   configurable allocation budget, shallow walks stop before traversing deeper
   namespaces, failed CLOSE operations retain retryable ownership, optional

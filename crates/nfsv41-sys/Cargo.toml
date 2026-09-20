@@ -14,5 +14,4 @@ links = "nfsv41"
 libntirpc-sys = { workspace = true }
 
 [build-dependencies]
-# bindgen 0.73.1 and 0.73.2 mix syn 3 with prettyplease/syn 2 and fail to compile.
-bindgen = "=0.73.0"
+bindgen = "=0.73.2"

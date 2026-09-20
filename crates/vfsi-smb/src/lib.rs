@@ -185,6 +185,7 @@ impl SmbVecFs {
             compression: options.compression,
             dfs_enabled: options.dfs_enabled,
             dfs_target_overrides: HashMap::new(),
+            connect_options: None,
         };
         // `smb2` performs TCP connect, negotiate, and session setup in one
         // future. Give TCP its full connect budget plus one request budget for

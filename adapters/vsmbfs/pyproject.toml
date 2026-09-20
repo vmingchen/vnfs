@@ -21,7 +21,7 @@ classifiers = [
 ]
 dependencies = [
   "fsspec>=2024.12.0",
-  "vfsi-fsspec>=0.1,<0.2",
+  "vfsi-fsspec>=0.1.2,<0.2",
   "vsmb>=0.1,<0.2",
 ]
 

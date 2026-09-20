@@ -19,12 +19,15 @@ def test_nfs_identity_and_required_server_copy(nfs_fs):
         assert nfs_fs._client.minor_version() == int(expected_minor)
 
     if os.environ.get("VFSI_NFS_REQUIRE_SERVER_COPY") == "1":
-        nfs_fs.pipe_file("nfs4:///server-copy-source", b"python-server-copy")
+        payload = b"s" * (16 * 1024 * 1024) + b"copy-tail"
+        nfs_fs.pipe_file("nfs4:///server-copy-source", payload)
         nfs_fs.cp("nfs4:///server-copy-source", "nfs4:///server-copy-destination")
+        assert nfs_fs.size("nfs4:///server-copy-destination") == len(payload)
         assert (
-            nfs_fs.cat_file("nfs4:///server-copy-destination") == b"python-server-copy"
+            nfs_fs.cat_file("nfs4:///server-copy-destination", len(payload) - 9)
+            == b"copy-tail"
         )
-        assert nfs_fs._client.server_copy_enabled(), "Python copy used client fallback"
+        assert nfs_fs._client.server_copy_enabled(), "server COPY was disabled"
 
 
 def test_python_reader_recovers_across_server_restart(nfs_fs):
