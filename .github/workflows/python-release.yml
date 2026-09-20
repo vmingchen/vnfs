@@ -68,7 +68,7 @@ jobs:
               -DUSE_LTTNG=OFF \
               -DUSE_MONITORING=OFF \
               -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_INSTALL_PREFIX=/usr/local \
+              -DCMAKE_INSTALL_PREFIX=/usr \
               -DCMAKE_INSTALL_LIBDIR=lib
             cmake --build /tmp/ntirpc-build --target ntirpc --parallel
             cmake --install /tmp/ntirpc-build
