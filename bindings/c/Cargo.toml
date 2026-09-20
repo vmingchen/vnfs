@@ -14,7 +14,7 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 libc = "0.2"
 libntirpc-sys = { workspace = true }
-vnfs = { path = "../../crates/vnfs", version = ">=0.0.10, <0.0.13", features = ["dummy"] }
+vnfs = { path = "../../crates/vnfs", version = ">=0.0.10, <0.0.14", features = ["dummy"] }
 vfsi-smb = { workspace = true, features = ["server-copy"] }
 
 [build-dependencies]
