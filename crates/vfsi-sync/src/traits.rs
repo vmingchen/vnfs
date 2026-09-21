@@ -333,9 +333,12 @@ pub trait VecFs {
 
     /// Return the root-relative form of `path` (resolving it against the
     /// client's current working directory if it is relative), without a
-    /// leading `/`. [`getcwd`](Self::getcwd) is the display form (with a
-    /// leading `/`); [`vf_path`](Self::vf_path) resolves a [`VfFile`] the same
-    /// way while honoring its [`VfPathBase`].
+    /// leading `/`. "Root" is the backend's application namespace root (the
+    /// export root for NFS, the configured root for the local backend), not a
+    /// server or host path; for NFS the export prefix is deliberately absent.
+    /// [`getcwd`](Self::getcwd) is the display form (with a leading `/`);
+    /// [`vf_path`](Self::vf_path) resolves a [`VfFile`] the same way while
+    /// honoring its [`VfPathBase`].
     fn abs_path(&self, path: &Path) -> PathBuf;
 
     /// Open a file by path, similar to `tc_open_by_path(2)`. `base` is

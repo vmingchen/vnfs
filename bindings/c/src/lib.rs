@@ -295,6 +295,16 @@ impl vfsi_result {
                 err_no,
                 "",
             ),
+            VfError::OpUnattributed { err_no, .. } => Self::base(
+                C_INDEX_UNKNOWN,
+                if err_no == VF_ERR_UNSUPPORTED {
+                    VFSI_ERROR_UNSUPPORTED
+                } else {
+                    VFSI_ERROR_FILESYSTEM
+                },
+                err_no,
+                "",
+            ),
             VfError::Transport { index, message, .. } => Self::base(
                 index.unwrap_or(C_INDEX_UNKNOWN),
                 VFSI_ERROR_TRANSPORT,
@@ -462,9 +472,9 @@ fn mask() -> AttrMask {
 
 fn vf_code(e: &VfError) -> c_int {
     match e {
-        VfError::Op { err_no, .. } => *err_no as c_int,
+        VfError::Op { err_no, .. } | VfError::OpUnattributed { err_no, .. } => *err_no as c_int,
         VfError::Transport { .. } => libc::EIO,
-        _ => libc::EIO,
+        _ => e.err_no() as c_int,
     }
 }
 
@@ -2085,6 +2095,20 @@ mod tests {
         assert!(items
             .iter()
             .all(|item| item.category == VFSI_ERROR_INDETERMINATE));
+    }
+
+    #[test]
+    fn unattributed_status_keeps_its_errno_and_category_for_c_callers() {
+        // A compound-level NFS status with no per-op index must still surface
+        // its real errno through the scalar helpers and stay a filesystem
+        // error, not be downgraded to EIO/transport.
+        let error = VfError::from_rpc(vnfs::error::RpcError::op(0, 10005), None);
+        assert_eq!(error.index_opt(), None);
+        assert_eq!(vf_code(&error), 10005);
+        let failure = vfsi_result::from_error(error);
+        assert_eq!(failure.index, C_INDEX_UNKNOWN);
+        assert_eq!(failure.category, VFSI_ERROR_FILESYSTEM);
+        assert_eq!(failure.err_no, 10005);
     }
 
     #[test]

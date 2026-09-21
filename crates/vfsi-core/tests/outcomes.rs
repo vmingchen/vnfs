@@ -44,6 +44,28 @@ fn nfs_status_is_not_conflated_with_errno() {
 }
 
 #[test]
+fn status_without_a_known_index_is_not_reported_as_operation_zero() {
+    // A compound-level status (for example NFS4ERR_MINOR_VERS_MISMATCH) has no
+    // per-operation result, so `None` must stay unattributed rather than
+    // silently becoming operation 0.
+    let error = VfError::from_rpc(vfsi_core::RpcError::op(0, 10021), None);
+    assert!(!error.is_transport());
+    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.domain(), ErrorDomain::Nfs);
+    assert_eq!(error.status(), Some(StatusCode::Nfs(10021)));
+    assert_eq!(error.err_no(), 10021);
+
+    // Re-attributing turns it into a concrete operation failure.
+    let attributed = error.with_index(5);
+    assert_eq!(attributed.index_opt(), Some(5));
+    assert_eq!(attributed.status(), Some(StatusCode::Nfs(10021)));
+
+    // An explicitly indexed status is still attributed directly.
+    let indexed = VfError::from_rpc(vfsi_core::RpcError::op(0, 10021), Some(0));
+    assert_eq!(indexed.index_opt(), Some(0));
+}
+
+#[test]
 fn metadata_converts_fractional_pre_epoch_timestamps() {
     let attributes = VfAttrs {
         returned: AttrMask::ATIME,

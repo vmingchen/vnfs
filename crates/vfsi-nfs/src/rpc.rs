@@ -416,17 +416,7 @@ impl RpcClient {
             (*reqp).cc_size = std::mem::size_of::<clnt_req>();
             (*reqp).cc_refcnt = 1;
 
-            libc::pthread_mutex_init(
-                &mut (*reqp).cc_we.mtx as *mut _ as *mut libc::pthread_mutex_t,
-                std::ptr::null(),
-            );
-            libc::pthread_cond_init(
-                &mut (*reqp).cc_we.cv as *mut _ as *mut libc::pthread_cond_t,
-                std::ptr::null(),
-            );
-            libc::pthread_mutex_lock(
-                &mut (*reqp).cc_we.mtx as *mut _ as *mut libc::pthread_mutex_t,
-            );
+            waitq_init(reqp);
 
             let timeout = self.request_timeout;
             let stat = clnt_req_setup(reqp, timeout);
@@ -472,6 +462,42 @@ unsafe fn destroy_auth(auth: *mut AUTH) {
         if !auth.is_null() {
             vfsi_libntirpc_auth_destroy(auth);
         }
+    }
+}
+
+/// Initialize and lock the wait queue embedded in a `clnt_req`.
+///
+/// libntirpc initializes this in its static-inline `clnt_req_fill`, which is
+/// not a linkable symbol. There is deliberately no matching explicit teardown
+/// here: `clnt_req_release` runs `clnt_req_reset` followed by `clnt_req_fini`,
+/// which destroys the condition variable and unlocks/destroys the mutex
+/// before invoking our free callback.
+unsafe fn waitq_init(reqp: *mut clnt_req) {
+    unsafe {
+        libc::pthread_mutex_init(
+            &mut (*reqp).cc_we.mtx as *mut _ as *mut libc::pthread_mutex_t,
+            std::ptr::null(),
+        );
+        libc::pthread_mutex_lock(&mut (*reqp).cc_we.mtx as *mut _ as *mut libc::pthread_mutex_t);
+        libc::pthread_cond_init(
+            &mut (*reqp).cc_we.cv as *mut _ as *mut libc::pthread_cond_t,
+            std::ptr::null(),
+        );
+    }
+}
+
+/// Destroy the wait queue and release the lock taken by [`waitq_init`].
+///
+/// Mirrors libntirpc's `clnt_req_fini` (condition variable first, then the
+/// mutex) for use by tests. Production code does not call this directly:
+/// `clnt_req_release` performs the same teardown before invoking our free
+/// callback, so finalizing here as well would be a double destroy.
+#[cfg(test)]
+unsafe fn waitq_fini(reqp: *mut clnt_req) {
+    unsafe {
+        libc::pthread_cond_destroy(&mut (*reqp).cc_we.cv as *mut _ as *mut libc::pthread_cond_t);
+        libc::pthread_mutex_unlock(&mut (*reqp).cc_we.mtx as *mut _ as *mut libc::pthread_mutex_t);
+        libc::pthread_mutex_destroy(&mut (*reqp).cc_we.mtx as *mut _ as *mut libc::pthread_mutex_t);
     }
 }
 
@@ -580,5 +606,35 @@ mod tests {
             std::mem::align_of::<RpcGssSec>(),
             std::mem::align_of::<usize>()
         );
+    }
+
+    /// Probe whether the wait-queue mutex is currently held, using a second
+    /// thread so the result is not affected by same-thread recursion rules.
+    fn mutex_is_held(req: &clnt_req) -> bool {
+        let mutex = &req.cc_we.mtx as *const _ as usize;
+        std::thread::spawn(move || unsafe {
+            libc::pthread_mutex_trylock(mutex as *mut libc::pthread_mutex_t) == libc::EBUSY
+        })
+        .join()
+        .expect("probe thread panicked")
+    }
+
+    #[test]
+    fn waitq_init_locks_the_queue_like_clnt_req_fill() {
+        // Production relies on `clnt_req_release` (which calls
+        // `clnt_req_reset` + `clnt_req_fini`) to tear the wait queue down.
+        // This test pins the init half of the contract: `waitq_init` mirrors
+        // `clnt_req_fill` and leaves the mutex locked. `waitq_fini` replicates
+        // libntirpc's teardown so the test itself can release the queue and
+        // reuse the same storage.
+        let mut req: clnt_req = unsafe { std::mem::zeroed() };
+        for _ in 0..16 {
+            unsafe { waitq_init(&mut req) };
+            assert!(
+                mutex_is_held(&req),
+                "waitq_init must leave the mutex locked for clnt_req"
+            );
+            unsafe { waitq_fini(&mut req) };
+        }
     }
 }

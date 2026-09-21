@@ -54,7 +54,7 @@ impl Session {
     }
 
     pub fn connect(host: &str) -> RpcResult<Session> {
-        Self::connect_minor(host, 1)
+        negotiate_minor(|minorversion| Self::connect_minor(host, minorversion))
     }
 
     pub fn connect_minor(host: &str, minorversion: u32) -> RpcResult<Session> {
@@ -198,45 +198,10 @@ impl Session {
     }
 
     fn create_session(&mut self) -> RpcResult<()> {
-        let fore = channel_attrs4 {
-            ca_headerpadsize: 0,
-            ca_maxrequestsize: 4 * 1024 * 1024,
-            ca_maxresponsesize: 4 * 1024 * 1024,
-            ca_maxresponsesize_cached: 4 * 1024 * 1024,
-            ca_maxoperations: 256,
-            ca_maxrequests: 256,
-            ca_rdma_ird: channel_attrs4__bindgen_ty_1 {
-                ca_rdma_ird_len: 0,
-                ca_rdma_ird_val: std::ptr::null_mut(),
-            },
-        };
-        let back = channel_attrs4 {
-            ca_headerpadsize: 0,
-            ca_maxrequestsize: 4 * 1024 * 1024,
-            ca_maxresponsesize: 4 * 1024 * 1024,
-            ca_maxresponsesize_cached: 4 * 1024 * 1024,
-            ca_maxoperations: 2,
-            ca_maxrequests: 2,
-            ca_rdma_ird: channel_attrs4__bindgen_ty_1 {
-                ca_rdma_ird_len: 0,
-                ca_rdma_ird_val: std::ptr::null_mut(),
-            },
-        };
         let mut c = Compound::new();
         c.args.minorversion = self.minorversion;
         c.tag(b"create_session");
-        c.create_session(CREATE_SESSION4args {
-            csa_clientid: self.clientid,
-            csa_sequence: 1,
-            csa_flags: 0,
-            csa_fore_chan_attrs: fore,
-            csa_back_chan_attrs: back,
-            csa_cb_program: 0,
-            csa_sec_parms: CREATE_SESSION4args__bindgen_ty_1 {
-                csa_sec_parms_len: 0,
-                csa_sec_parms_val: std::ptr::null_mut(),
-            },
-        });
+        c.create_session(create_session_args(self.clientid));
         let res = c.call(&self.rpc)?;
         let st = res.try_op_status(0)?;
         if st != nfsstat4_NFS4_OK {
@@ -379,4 +344,146 @@ pub fn make_verifier() -> verifier4 {
         *b = ((now >> (8 * i)) & 0xff) as libc::c_char;
     }
     v
+}
+
+/// Highest NFSv4 minor version attempted before falling back.
+pub(crate) const PREFERRED_MINOR_VERSION: u32 = 2;
+/// Minor version used when the server reports `NFS4ERR_MINOR_VERS_MISMATCH`.
+pub(crate) const FALLBACK_MINOR_VERSION: u32 = 1;
+
+/// Attempt the preferred minor version and fall back to NFSv4.1 only when the
+/// server reports `NFS4ERR_MINOR_VERS_MISMATCH`. Every other error is returned
+/// unchanged. Shared by the low-level [`Session`] handshake and the
+/// [`NfsClient`](crate::client::NfsClient) handshake so both negotiate
+/// identically.
+pub(crate) fn negotiate_minor<T>(mut attempt: impl FnMut(u32) -> RpcResult<T>) -> RpcResult<T> {
+    match attempt(PREFERRED_MINOR_VERSION) {
+        Ok(value) => Ok(value),
+        Err(error) if error.status == nfsstat4_NFS4ERR_MINOR_VERS_MISMATCH => {
+            attempt(FALLBACK_MINOR_VERSION)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn rdma_ird_none() -> channel_attrs4__bindgen_ty_1 {
+    channel_attrs4__bindgen_ty_1 {
+        ca_rdma_ird_len: 0,
+        ca_rdma_ird_val: std::ptr::null_mut(),
+    }
+}
+
+/// Fore-channel attributes requested for a new session.
+fn fore_channel_attrs() -> channel_attrs4 {
+    channel_attrs4 {
+        ca_headerpadsize: 0,
+        ca_maxrequestsize: 4 * 1024 * 1024,
+        ca_maxresponsesize: 4 * 1024 * 1024,
+        ca_maxresponsesize_cached: 4 * 1024 * 1024,
+        ca_maxoperations: 256,
+        ca_maxrequests: 256,
+        ca_rdma_ird: rdma_ird_none(),
+    }
+}
+
+/// Back-channel attributes for a client that does not service callbacks.
+///
+/// `csa_cb_program` is zero, so the server has no callback program to target
+/// and this client never services a `CB_COMPOUND`. The offered capacity is
+/// therefore the smallest a conforming server accepts rather than a
+/// meaningful promise: `ca_maxoperations` is 2 because a `CB_COMPOUND` needs
+/// a `CB_SEQUENCE` plus at least one operation, and `ca_maxrequests` is one
+/// slot. Setting either lower makes NFS-Ganesha reject CREATE_SESSION with
+/// `NFS4ERR_TOOSMALL`; this was verified against the reference server.
+fn back_channel_attrs() -> channel_attrs4 {
+    channel_attrs4 {
+        ca_headerpadsize: 0,
+        ca_maxrequestsize: 4 * 1024 * 1024,
+        ca_maxresponsesize: 4 * 1024 * 1024,
+        ca_maxresponsesize_cached: 4 * 1024 * 1024,
+        ca_maxoperations: 2,
+        ca_maxrequests: 1,
+        ca_rdma_ird: rdma_ird_none(),
+    }
+}
+
+fn create_session_args(clientid: clientid4) -> CREATE_SESSION4args {
+    CREATE_SESSION4args {
+        csa_clientid: clientid,
+        csa_sequence: 1,
+        csa_flags: 0,
+        csa_fore_chan_attrs: fore_channel_attrs(),
+        csa_back_chan_attrs: back_channel_attrs(),
+        csa_cb_program: 0,
+        csa_sec_parms: CREATE_SESSION4args__bindgen_ty_1 {
+            csa_sec_parms_len: 0,
+            csa_sec_parms_val: std::ptr::null_mut(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minor_mismatch() -> RpcError {
+        RpcError::op(0, nfsstat4_NFS4ERR_MINOR_VERS_MISMATCH)
+    }
+
+    #[test]
+    fn negotiate_minor_prefers_v42_and_falls_back_to_v41() {
+        let mut attempts = Vec::new();
+        let result = negotiate_minor(|minor| {
+            attempts.push(minor);
+            if minor == PREFERRED_MINOR_VERSION {
+                Err(minor_mismatch())
+            } else {
+                Ok(minor)
+            }
+        })
+        .unwrap();
+        assert_eq!(attempts, vec![2, 1]);
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn negotiate_minor_does_not_retry_on_other_errors() {
+        let mut attempts = Vec::new();
+        let error = negotiate_minor(|minor| -> RpcResult<u32> {
+            attempts.push(minor);
+            Err(RpcError::op(0, nfsstat4_NFS4ERR_IO))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, vec![2]);
+        assert_eq!(error.status, nfsstat4_NFS4ERR_IO);
+    }
+
+    #[test]
+    fn session_connect_negotiates_like_the_nfs_client() {
+        // Regression: Session::connect used to pin minor version 1 while the
+        // NfsClient handshake negotiated 4.2 then 4.1.
+        let mut attempts = Vec::new();
+        negotiate_minor(|minor| {
+            attempts.push(minor);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(attempts, vec![PREFERRED_MINOR_VERSION]);
+    }
+
+    #[test]
+    fn create_session_advertises_only_a_minimal_backchannel() {
+        let args = create_session_args(7);
+        assert_eq!(args.csa_clientid, 7);
+        // No callback program means this client never services callbacks.
+        assert_eq!(args.csa_cb_program, 0);
+        // A CB_COMPOUND needs CB_SEQUENCE plus an operation, and the server
+        // rejects a smaller offer with NFS4ERR_TOOSMALL, so this is the
+        // minimum interoperable capacity rather than a real callback promise.
+        assert_eq!(args.csa_back_chan_attrs.ca_maxoperations, 2);
+        assert_eq!(args.csa_back_chan_attrs.ca_maxrequests, 1);
+        // The fore channel keeps the negotiated request/operation budget.
+        assert_eq!(args.csa_fore_chan_attrs.ca_maxrequests, 256);
+        assert_eq!(args.csa_fore_chan_attrs.ca_maxoperations, 256);
+    }
 }

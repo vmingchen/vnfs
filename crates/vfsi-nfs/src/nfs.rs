@@ -459,6 +459,23 @@ fn non_destructive_reopen_flags(flags: i32) -> i32 {
     flags & !(libc::O_CREAT | libc::O_EXCL | libc::O_TRUNC)
 }
 
+/// Root-relative application path for `path`, per the `VecFs::abs_path`
+/// contract: absolute inputs are taken relative to the application root and
+/// relative inputs resolve against `cwd`; neither includes the export prefix.
+fn namespace_path(cwd: &Path, path: &Path) -> PathBuf {
+    let namespace_relative = if path.is_absolute() {
+        path.strip_prefix("/").unwrap_or(path).to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    path_from_bytes(&normalize_bytes(path_bytes(&namespace_relative)))
+}
+
+/// Export-root path used for NFS resolution.
+fn server_path_for(root: &Path, cwd: &Path, path: &Path) -> PathBuf {
+    root.join(namespace_path(cwd, path))
+}
+
 fn adb_block_base(pattern: &Adb, block: usize, index: usize) -> VfResult<u64> {
     let relative = (block as u64)
         .checked_mul(pattern.adb_block_size)
@@ -561,6 +578,31 @@ impl NfsVecFs {
                 .unwrap_or(server_path),
         )
     }
+
+    /// Server path (export root joined with the namespace-relative path) used
+    /// for NFS resolution.
+    fn server_path(&self, path: &Path) -> PathBuf {
+        server_path_for(&self.connection.root, &self.cwd, path)
+    }
+
+    /// Server-path equivalent of [`VecFs::vf_path`]. Descriptors and the
+    /// saved/cwd sentinels have no path.
+    fn server_vf_path(&self, file: &VfFile) -> VfResult<PathBuf> {
+        match file {
+            VfFile::Path {
+                base: VfPathBase::Abs,
+                path,
+            } => Ok(self.server_path(&Path::new("/").join(path))),
+            VfFile::Path {
+                base: VfPathBase::Cwd,
+                path,
+            }
+            | VfFile::CwdPath(path) => Ok(self.server_path(path)),
+            VfFile::Cwd => Ok(self.server_path(Path::new(""))),
+            VfFile::Descriptor(_) | VfFile::Saved => Err(VfError::failure(0, ERR_INVAL)),
+            _ => Err(VfError::failure(0, ERR_INVAL)),
+        }
+    }
     /// Force a particular merged-compound mode (diagnostics/tests): "full"
     /// (default, one compound incl. CLOSE), "openwrite" (open+I/O compound +
     /// separate close), or "off" (legacy phased path).
@@ -616,7 +658,7 @@ impl NfsVecFs {
                 };
                 continue;
             }
-            let path = self.vf_path(f).map_err(|e| e.with_index(i))?;
+            let path = self.server_vf_path(f).map_err(|e| e.with_index(i))?;
             if path.as_os_str().is_empty() {
                 // The export root itself.
                 out[i] = Ok((self.nfs.root().clone(), nfs_ftype4_NF4DIR));
@@ -657,7 +699,7 @@ impl NfsVecFs {
                 match r {
                     Ok((fh, ftype)) => {
                         if follow && ftype == nfs_ftype4_NF4LNK {
-                            let full = self.vf_path(files[*i])?;
+                            let full = self.server_vf_path(files[*i])?;
                             out[*i] = match self.resolve_follow(&full) {
                                 Ok(fh) => Ok((fh, ftype)),
                                 Err(e) => Err(e.err_no()),
@@ -702,8 +744,10 @@ impl NfsVecFs {
                 crate::client::FileRef::Handle(open.fh.clone())
             } else {
                 crate::client::FileRef::Path(
-                    crate::path::path_bytes(&self.vf_path(&a.file).map_err(|e| e.with_index(i))?)
-                        .to_vec(),
+                    crate::path::path_bytes(
+                        &self.server_vf_path(&a.file).map_err(|e| e.with_index(i))?,
+                    )
+                    .to_vec(),
                 )
             };
             let mode = if a.masks.contains(AttrMask::MODE) {
@@ -844,8 +888,10 @@ impl NfsVecFs {
                 crate::client::FileRef::Handle(open.fh.clone())
             } else {
                 crate::client::FileRef::Path(
-                    crate::path::path_bytes(&self.vf_path(&a.file).map_err(|e| e.with_index(i))?)
-                        .to_vec(),
+                    crate::path::path_bytes(
+                        &self.server_vf_path(&a.file).map_err(|e| e.with_index(i))?,
+                    )
+                    .to_vec(),
                 )
             };
             ops.push(crate::client::PathGetattrOp {
@@ -930,7 +976,9 @@ impl NfsVecFs {
 
     /// stat one path following final-component symlinks (phased).
     fn stat_one_following(&mut self, index: usize, a: &mut VfAttrs) -> VfResult<()> {
-        let path = self.vf_path(&a.file).map_err(|e| e.with_index(index))?;
+        let path = self
+            .server_vf_path(&a.file)
+            .map_err(|e| e.with_index(index))?;
         let fh = self
             .resolve_follow(&path)
             .map_err(|e| e.with_index(index))?;
@@ -946,7 +994,9 @@ impl NfsVecFs {
 
     /// setattr one path following final-component symlinks (phased).
     fn setattr_one_following(&mut self, index: usize, a: &VfAttrs) -> VfResult<()> {
-        let path = self.vf_path(&a.file).map_err(|e| e.with_index(index))?;
+        let path = self
+            .server_vf_path(&a.file)
+            .map_err(|e| e.with_index(index))?;
         let fh = self
             .resolve_follow(&path)
             .map_err(|e| e.with_index(index))?;
@@ -1062,7 +1112,9 @@ impl NfsVecFs {
 
     fn from_client(nfs: NfsClient, connection: ConnectionConfig) -> NfsVecFs {
         let server_copy_enabled = cfg!(feature = "server-copy") && nfs.minorversion() >= 2;
-        let cwd = connection.root.clone();
+        // `cwd` is namespace-relative (the `/`-rooted application namespace),
+        // not the server path; `server_path` adds `connection.root`.
+        let cwd = PathBuf::new();
         NfsVecFs {
             nfs,
             connection,
@@ -1296,8 +1348,7 @@ impl NfsVecFs {
                         .nfs
                         .getattr(&fh, &[FATTR4_TYPE])
                         .map_err(|e| VfError::from_rpc(e, 0))?;
-                    let mut off = 0;
-                    if read_u32(&t, &mut off).unwrap_or(0) != nfs_ftype4_NF4LNK {
+                    if !type_is_symlink(&t)? {
                         return Ok(fh);
                     }
                     let target = self
@@ -1415,7 +1466,7 @@ impl NfsVecFs {
                 crate::client::OpenCreate::NoCreate
             };
             ops.push(crate::client::PathOpenOp {
-                path: path_bytes(&self.abs_path(p)).to_vec(),
+                path: path_bytes(&self.server_path(p)).to_vec(),
                 access: Self::flags_to_access(flags[i]),
                 create,
                 mode: Some(modes[i] & 0o7777),
@@ -1472,7 +1523,7 @@ impl NfsVecFs {
                 cur_offset: 0,
                 append: flags[index] & O_APPEND != 0,
                 reopen: Some(ReopenFile {
-                    path: self.visible_path(&self.abs_path(paths[index])),
+                    path: self.visible_path(&self.server_path(paths[index])),
                     flags: non_destructive_reopen_flags(flags[index]),
                     mode: modes[index],
                 }),
@@ -1543,7 +1594,7 @@ impl NfsVecFs {
                 VfFile::Descriptor(_) => unreachable!(),
                 _ => return Err(VfError::unsupported(i)),
             }
-            let full = self.vf_path(f).map_err(|e| e.with_index(i))?;
+            let full = self.server_vf_path(f).map_err(|e| e.with_index(i))?;
             let (dir, name) =
                 split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
             let dirfh = match dir_cache.get(&dir) {
@@ -1581,7 +1632,7 @@ impl NfsVecFs {
                 Ok((_fh, ftype)) if ftype == nfs_ftype4_NF4LNK => {
                     // OPEN cannot target a symlink: follow the chain (creation
                     // follows dangling links and creates the target).
-                    let full = &self.vf_path(files[*orig])?;
+                    let full = &self.server_vf_path(files[*orig])?;
                     let full = self
                         .follow_target_path(full)
                         .map_err(|e| e.with_index(*orig))?;
@@ -1984,7 +2035,7 @@ impl NfsVecFs {
                 .map(|o| o.fh.clone())
                 .ok_or_else(|| VfError::failure(0, ERR_EBADF)),
             VfFile::Path { .. } | VfFile::Cwd | VfFile::CwdPath(_) => {
-                let path = self.vf_path(f)?;
+                let path = self.server_vf_path(f)?;
                 if follow {
                     self.resolve_follow(&path)
                 } else {
@@ -2067,7 +2118,7 @@ impl NfsVecFs {
                 break;
             }
             // A directory argument may itself be a symlink to a directory.
-            let dirfh = self.resolve_path(&self.abs_path(&current), true)?;
+            let dirfh = self.resolve_path(&self.server_path(&current), true)?;
             let mut children = Vec::new();
             let mut cookie = 0u64;
             loop {
@@ -2238,11 +2289,11 @@ impl NfsVecFs {
     fn copy_extents_server_side(&mut self, pairs: &[ExtentPair]) -> VfRes {
         let src_files: Vec<VfFile> = pairs
             .iter()
-            .map(|p| VfFile::from_os_path(&self.abs_path(&p.src_path)))
+            .map(|p| VfFile::from_os_path(&p.src_path))
             .collect();
         let dst_files: Vec<VfFile> = pairs
             .iter()
-            .map(|p| VfFile::from_os_path(&self.abs_path(&p.dst_path)))
+            .map(|p| VfFile::from_os_path(&p.dst_path))
             .collect();
         let src_refs: Vec<&VfFile> = src_files.iter().collect();
         let dst_refs: Vec<&VfFile> = dst_files.iter().collect();
@@ -2692,8 +2743,8 @@ impl NfsVecFs {
             std::collections::HashMap::new();
         let mut ops = Vec::with_capacity(pairs.len());
         for (i, (src, dst)) in pairs.iter().enumerate() {
-            let s = self.vf_path(src).map_err(|e| e.with_index(i))?;
-            let d = self.vf_path(dst).map_err(|e| e.with_index(i))?;
+            let s = self.server_vf_path(src).map_err(|e| e.with_index(i))?;
+            let d = self.server_vf_path(dst).map_err(|e| e.with_index(i))?;
             let (sdir, sname) =
                 split_path_bytes(path_bytes(&s)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
             let (ddir, dname) =
@@ -2736,7 +2787,7 @@ impl NfsVecFs {
         // Group by parent directory to batch REMOVEs.
         let mut groups: BTreeMap<Vec<u8>, Vec<Vec<u8>>> = BTreeMap::new();
         for (i, f) in files.iter().enumerate() {
-            let path = self.vf_path(f).map_err(|e| e.with_index(i))?;
+            let path = self.server_vf_path(f).map_err(|e| e.with_index(i))?;
             let (dir, name) =
                 split_path_bytes(path_bytes(&path)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
             groups.entry(dir).or_default().push(name);
@@ -2759,7 +2810,7 @@ impl NfsVecFs {
         let mut indices = Vec::with_capacity(dirs.len());
         for (i, a) in dirs.iter().enumerate() {
             if a.masks.contains(AttrMask::MODE) {
-                let path = match self.vf_path(&a.file) {
+                let path = match self.server_vf_path(&a.file) {
                     Ok(p) => p,
                     Err(e) => return Err(e.with_index(i)),
                 };
@@ -2829,20 +2880,11 @@ impl VecFs for NfsVecFs {
             }
     }
 
+    /// Namespace-relative path (no leading `/`), per the [`VecFs::abs_path`]
+    /// contract. The export root (`connection.root`) is not included; use
+    /// `NfsVecFs::server_path` for the path sent to the NFS server.
     fn abs_path(&self, path: &Path) -> PathBuf {
-        let namespace_relative = if path.is_absolute() {
-            path.strip_prefix("/").unwrap_or(path).to_path_buf()
-        } else {
-            self.cwd
-                .strip_prefix(&self.connection.root)
-                .unwrap_or(Path::new(""))
-                .join(path)
-        };
-        self.connection
-            .root
-            .join(path_from_bytes(&normalize_bytes(path_bytes(
-                &namespace_relative,
-            ))))
+        namespace_path(&self.cwd, path)
     }
 
     fn open_by_path(
@@ -2854,8 +2896,8 @@ impl VecFs for NfsVecFs {
     ) -> VfResult<VfFile> {
         use libc::{O_APPEND, O_CREAT, O_EXCL, O_TRUNC};
         let full = match base {
-            VfPathBase::Abs => self.abs_path(&Path::new("/").join(pathname)),
-            VfPathBase::Cwd => self.abs_path(pathname),
+            VfPathBase::Abs => self.server_path(&Path::new("/").join(pathname)),
+            VfPathBase::Cwd => self.server_path(pathname),
         };
         let full = path_from_bytes(&normalize_bytes(path_bytes(&full)));
         // Follow a final symlink chain so O_CREAT creates the target
@@ -3043,11 +3085,7 @@ impl VecFs for NfsVecFs {
     }
 
     fn getcwd(&self) -> PathBuf {
-        Path::new("/").join(
-            self.cwd
-                .strip_prefix(&self.connection.root)
-                .unwrap_or(&self.cwd),
-        )
+        Path::new("/").join(&self.cwd)
     }
 
     fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
@@ -3068,7 +3106,7 @@ impl VecFs for NfsVecFs {
             let off = match r.offset {
                 VfOffset::At(o) => o,
                 VfOffset::End => {
-                    let path = self.vf_path(&r.file).map_err(|e| e.with_index(i))?;
+                    let path = self.server_vf_path(&r.file).map_err(|e| e.with_index(i))?;
                     let fh = self.resolve_follow(&path).map_err(|e| e.with_index(i))?;
                     self.file_size(&fh).map_err(|e| e.with_index(i))?
                 }
@@ -3096,8 +3134,10 @@ impl VecFs for NfsVecFs {
                 crate::client::FileRef::Handle(open.fh.clone())
             } else {
                 crate::client::FileRef::Path(
-                    crate::path::path_bytes(&self.vf_path(&r.file).map_err(|e| e.with_index(i))?)
-                        .to_vec(),
+                    crate::path::path_bytes(
+                        &self.server_vf_path(&r.file).map_err(|e| e.with_index(i))?,
+                    )
+                    .to_vec(),
                 )
             };
             path_ops.push(crate::client::PathReadOp {
@@ -3195,7 +3235,7 @@ impl VecFs for NfsVecFs {
             let off = match w.offset {
                 VfOffset::At(o) => o,
                 VfOffset::End => {
-                    let path = self.vf_path(&w.file).map_err(|e| e.with_index(i))?;
+                    let path = self.server_vf_path(&w.file).map_err(|e| e.with_index(i))?;
                     let fh = self.resolve_follow(&path).map_err(|e| e.with_index(i))?;
                     self.file_size(&fh).map_err(|e| e.with_index(i))?
                 }
@@ -3223,8 +3263,10 @@ impl VecFs for NfsVecFs {
                 crate::client::FileRef::Handle(open.fh.clone())
             } else {
                 crate::client::FileRef::Path(
-                    crate::path::path_bytes(&self.vf_path(&w.file).map_err(|e| e.with_index(i))?)
-                        .to_vec(),
+                    crate::path::path_bytes(
+                        &self.server_vf_path(&w.file).map_err(|e| e.with_index(i))?,
+                    )
+                    .to_vec(),
                 )
             };
             path_ops.push(crate::client::PathWriteOp {
@@ -3457,7 +3499,7 @@ impl VecFs for NfsVecFs {
         options: WalkOptions,
         sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<WalkEntry>> {
-        let root_fh = self.resolve_path(&self.abs_path(root), true)?;
+        let root_fh = self.resolve_path(&self.server_path(root), true)?;
         let ids = request_mask_to_attr_list(&masks);
         let mut collected: std::collections::HashMap<PathBuf, Vec<VfAttrs>> =
             std::collections::HashMap::new();
@@ -3621,8 +3663,8 @@ impl VecFs for NfsVecFs {
         }
         let mut prs = Vec::with_capacity(pairs.len());
         for (i, (src, dst)) in pairs.iter().enumerate() {
-            let s = self.vf_path(src).map_err(|e| e.with_index(i))?;
-            let d = self.vf_path(dst).map_err(|e| e.with_index(i))?;
+            let s = self.server_vf_path(src).map_err(|e| e.with_index(i))?;
+            let d = self.server_vf_path(dst).map_err(|e| e.with_index(i))?;
             prs.push(crate::client::PathRenamePair {
                 src: path_bytes(&s).to_vec(),
                 dst: path_bytes(&d).to_vec(),
@@ -3653,7 +3695,7 @@ impl VecFs for NfsVecFs {
         }
         let mut paths = Vec::with_capacity(files.len());
         for (i, f) in files.iter().enumerate() {
-            paths.push(path_bytes(&self.vf_path(f).map_err(|e| e.with_index(i))?).to_vec());
+            paths.push(path_bytes(&self.server_vf_path(f).map_err(|e| e.with_index(i))?).to_vec());
         }
         let outcome = self
             .nfs
@@ -3678,7 +3720,7 @@ impl VecFs for NfsVecFs {
         let mut parents: Vec<PathBuf> = Vec::with_capacity(dirs.len());
         let mut names: Vec<Vec<u8>> = Vec::with_capacity(dirs.len());
         for (i, a) in dirs.iter().enumerate() {
-            let path = self.vf_path(&a.file).map_err(|e| e.with_index(i))?;
+            let path = self.server_vf_path(&a.file).map_err(|e| e.with_index(i))?;
             let (dir, name) =
                 split_path_bytes(path_bytes(&path)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
             parents.push(self.visible_path(&path_from_bytes(&dir)));
@@ -3722,7 +3764,7 @@ impl VecFs for NfsVecFs {
         let mut parents: Vec<PathBuf> = Vec::with_capacity(newpaths.len());
         let mut names: Vec<Vec<u8>> = Vec::with_capacity(newpaths.len());
         for (i, new) in newpaths.iter().enumerate() {
-            let full = self.abs_path(new);
+            let full = self.server_path(new);
             let (dir, name) =
                 split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
             parents.push(self.visible_path(&path_from_bytes(&dir)));
@@ -3790,7 +3832,7 @@ impl VecFs for NfsVecFs {
         let mut parents: Vec<PathBuf> = Vec::with_capacity(newpaths.len());
         let mut names: Vec<Vec<u8>> = Vec::with_capacity(newpaths.len());
         for (i, new) in newpaths.iter().enumerate() {
-            let full = self.abs_path(new);
+            let full = self.server_path(new);
             let (dir, name) =
                 split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
             parents.push(self.visible_path(&path_from_bytes(&dir)));
@@ -3830,10 +3872,10 @@ impl VecFs for NfsVecFs {
             // Follow final-component symlinks for both ends, matching the
             // `std::fs` backend (OPEN cannot target a symlink directly).
             let src = self
-                .follow_target_path(&self.abs_path(&p.src_path))
+                .follow_target_path(&self.server_path(&p.src_path))
                 .map_err(|e| e.with_index(i))?;
             let dst = self
-                .follow_target_path(&self.abs_path(&p.dst_path))
+                .follow_target_path(&self.server_path(&p.dst_path))
                 .map_err(|e| e.with_index(i))?;
             self.copy_extent(&src, &dst, p)
                 .map_err(|e| e.with_index(i))?;
@@ -3851,9 +3893,9 @@ impl VecFs for NfsVecFs {
                     .map_err(|e| e.with_index(i))?;
             } else {
                 let dst = self
-                    .follow_target_path(&self.abs_path(&p.dst_path))
+                    .follow_target_path(&self.server_path(&p.dst_path))
                     .map_err(|e| e.with_index(i))?;
-                self.copy_extent(&self.abs_path(&p.src_path), &dst, p)
+                self.copy_extent(&self.server_path(&p.src_path), &dst, p)
                     .map_err(|e| e.with_index(i))?;
             }
         }
@@ -3924,7 +3966,7 @@ impl VecFs for NfsVecFs {
                     .transpose()?;
                 layout.push((block_number, number_offset, pattern_offset));
             }
-            let full = self.abs_path(&p.path);
+            let full = self.server_path(&p.path);
             let (dir, name) = match split_path_bytes(path_bytes(&full)) {
                 Ok(x) => x,
                 Err(_) => return Err(VfError::failure(i, ERR_NOENT)),
@@ -4019,10 +4061,10 @@ impl VecFs for NfsVecFs {
                     let pair =
                         ExtentPair::from_os_paths(&source_child, 0, &destination_child, 0, None);
                     let source_target = self
-                        .follow_target_path(&self.abs_path(&source_child))
+                        .follow_target_path(&self.server_path(&source_child))
                         .map_err(|error| error.with_index(0))?;
                     let destination_target = self
-                        .follow_target_path(&self.abs_path(&destination_child))
+                        .follow_target_path(&self.server_path(&destination_child))
                         .map_err(|error| error.with_index(0))?;
                     self.copy_extent(&source_target, &destination_target, &pair)
                         .map_err(|error| error.with_index(0))?;
@@ -4291,6 +4333,13 @@ fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
     }
 }
 
+/// Whether a single `FATTR4_TYPE` attribute payload names a symlink. A
+/// malformed list is an error, never an implicit "not a symlink".
+fn type_is_symlink(attrs: &[u8]) -> VfResult<bool> {
+    let mut off = 0;
+    Ok(read_u32(attrs, &mut off)? == nfs_ftype4_NF4LNK)
+}
+
 fn read_u32(buf: &[u8], off: &mut usize) -> VfResult<u32> {
     let end = off.checked_add(4).ok_or_else(attr_decode_error)?;
     let bytes = buf.get(*off..end).ok_or_else(attr_decode_error)?;
@@ -4338,6 +4387,56 @@ fn read_str(buf: &[u8], off: &mut usize) -> VfResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn abs_path_is_namespace_relative_and_server_path_prepends_the_export_root() {
+        let root = Path::new("/export/data");
+        // Absolute application paths are relative to the export namespace,
+        // not the server path (the bug fixed here included the export root).
+        assert_eq!(
+            namespace_path(Path::new(""), Path::new("/foo")),
+            PathBuf::from("foo")
+        );
+        assert_eq!(
+            server_path_for(root, Path::new(""), Path::new("/foo")),
+            PathBuf::from("/export/data/foo")
+        );
+        // Relative paths resolve against the namespace-relative cwd.
+        assert_eq!(
+            namespace_path(Path::new("sub"), Path::new("f")),
+            PathBuf::from("sub/f")
+        );
+        assert_eq!(
+            server_path_for(root, Path::new("sub"), Path::new("f")),
+            PathBuf::from("/export/data/sub/f")
+        );
+        // The application root itself is empty relative to the namespace and
+        // maps to the export root when resolved on the server.
+        assert_eq!(
+            namespace_path(Path::new(""), Path::new("/")),
+            PathBuf::new()
+        );
+        assert_eq!(
+            server_path_for(root, Path::new(""), Path::new("/")),
+            PathBuf::from("/export/data")
+        );
+        // `..` cannot escape the namespace root.
+        assert_eq!(
+            namespace_path(Path::new(""), Path::new("../../etc")),
+            PathBuf::from("etc")
+        );
+    }
+
+    #[test]
+    fn malformed_type_attribute_is_an_error_not_a_regular_type() {
+        // An empty or truncated FATTR4_TYPE payload must not be silently
+        // treated as "not a symlink" (which would skip following a link).
+        assert!(type_is_symlink(&[]).is_err());
+        assert!(type_is_symlink(&[0, 0, 0]).is_err());
+
+        assert!(type_is_symlink(&nfs_ftype4_NF4LNK.to_be_bytes()).unwrap());
+        assert!(!type_is_symlink(&nfs_ftype4_NF4REG.to_be_bytes()).unwrap());
+    }
 
     #[test]
     fn descriptor_chunk_errors_report_the_original_vector_owner() {

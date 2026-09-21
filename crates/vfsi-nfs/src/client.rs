@@ -637,13 +637,7 @@ impl NfsClient {
 
     /// Connect, run the session handshake, and resolve the export root.
     pub fn connect(host: &str) -> RpcResult<NfsClient> {
-        match Self::connect_minor(host, 2) {
-            Ok(client) => Ok(client),
-            Err(error) if error.status == nfsstat4_NFS4ERR_MINOR_VERS_MISMATCH => {
-                Self::connect_minor(host, 1)
-            }
-            Err(error) => Err(error),
-        }
+        crate::session::negotiate_minor(|minorversion| Self::connect_minor(host, minorversion))
     }
 
     pub fn connect_minor(host: &str, minorversion: u32) -> RpcResult<NfsClient> {
@@ -693,29 +687,17 @@ impl NfsClient {
         client_owner: Option<&[u8]>,
         client_verifier: Option<verifier4>,
     ) -> RpcResult<NfsClient> {
-        match Self::connect_minor_with_identity(
-            host,
-            2,
-            connect_timeout,
-            request_timeout,
-            authentication,
-            client_owner,
-            client_verifier,
-        ) {
-            Ok(client) => Ok(client),
-            Err(error) if error.status == nfsstat4_NFS4ERR_MINOR_VERS_MISMATCH => {
-                Self::connect_minor_with_identity(
-                    host,
-                    1,
-                    connect_timeout,
-                    request_timeout,
-                    authentication,
-                    client_owner,
-                    client_verifier,
-                )
-            }
-            Err(error) => Err(error),
-        }
+        crate::session::negotiate_minor(|minorversion| {
+            Self::connect_minor_with_identity(
+                host,
+                minorversion,
+                connect_timeout,
+                request_timeout,
+                authentication,
+                client_owner,
+                client_verifier,
+            )
+        })
     }
 
     pub fn connect_minor_with_timeouts(

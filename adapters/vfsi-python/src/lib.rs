@@ -77,7 +77,7 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
         VfError::Transport { message, .. } => {
             PyErr::new::<PyConnectionError, _>(format!("{}{}", message, what))
         }
-        VfError::Op { err_no, .. } => match err_no {
+        VfError::Op { err_no, .. } | VfError::OpUnattributed { err_no, .. } => match err_no {
             ERR_NOENT => PyErr::new::<PyFileNotFoundError, _>((
                 2,
                 format!("No such file or directory{}", what),

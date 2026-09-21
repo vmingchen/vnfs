@@ -66,6 +66,16 @@ pub enum VfError {
         operation: Option<&'static str>,
         path: Option<PathBuf>,
     },
+    /// A filesystem / protocol status that cannot be attributed to a specific
+    /// operation index (for example a compound-level failure with no per-op
+    /// result). Unlike [`Op`](VfError::Op), it does not pretend the failure is
+    /// operation 0. [`index_opt`](VfError::index_opt) reports `None`.
+    OpUnattributed {
+        err_no: u32,
+        domain: ErrorDomain,
+        operation: Option<&'static str>,
+        path: Option<PathBuf>,
+    },
     /// A transport / client-side failure with a human-readable message; there
     /// is no filesystem status ([`err_no`](VfError::err_no) reports
     /// [`VF_ERR_RPC`]). `index` is `None` when the failure cannot be
@@ -163,6 +173,7 @@ impl VfError {
     pub fn index(&self) -> usize {
         match self {
             VfError::Op { index, .. } => *index,
+            VfError::OpUnattributed { .. } => 0,
             VfError::Transport { index, .. } => index.unwrap_or(0),
         }
     }
@@ -172,6 +183,7 @@ impl VfError {
     pub fn index_opt(&self) -> Option<usize> {
         match self {
             VfError::Op { index, .. } => Some(*index),
+            VfError::OpUnattributed { .. } => None,
             VfError::Transport { index, .. } => *index,
         }
     }
@@ -179,7 +191,7 @@ impl VfError {
     /// The filesystem status code, or [`VF_ERR_RPC`] for transport failures.
     pub fn err_no(&self) -> u32 {
         match self {
-            VfError::Op { err_no, .. } => *err_no,
+            VfError::Op { err_no, .. } | VfError::OpUnattributed { err_no, .. } => *err_no,
             VfError::Transport { .. } => VF_ERR_RPC,
         }
     }
@@ -204,12 +216,22 @@ impl VfError {
                 path: None,
             }
         } else {
-            VfError::Op {
-                index: index.into().unwrap_or(0),
-                err_no: e.status,
-                domain: ErrorDomain::Nfs,
-                operation: None,
-                path: None,
+            match index.into() {
+                Some(index) => VfError::Op {
+                    index,
+                    err_no: e.status,
+                    domain: ErrorDomain::Nfs,
+                    operation: None,
+                    path: None,
+                },
+                // A status with no known operation index must not masquerade
+                // as operation 0. Preserve it as unattributed.
+                None => VfError::OpUnattributed {
+                    err_no: e.status,
+                    domain: ErrorDomain::Nfs,
+                    operation: None,
+                    path: None,
+                },
             }
         }
     }
@@ -235,6 +257,12 @@ impl VfError {
                 operation,
                 path,
                 ..
+            }
+            | VfError::OpUnattributed {
+                err_no,
+                domain,
+                operation,
+                path,
             } => VfError::Op {
                 index,
                 err_no,
@@ -273,6 +301,11 @@ impl VfError {
                 path: p,
                 ..
             }
+            | VfError::OpUnattributed {
+                operation: op,
+                path: p,
+                ..
+            }
             | VfError::Transport {
                 operation: op,
                 path: p,
@@ -287,42 +320,39 @@ impl VfError {
 
     pub fn domain(&self) -> ErrorDomain {
         match self {
-            VfError::Op { domain, .. } => *domain,
+            VfError::Op { domain, .. } | VfError::OpUnattributed { domain, .. } => *domain,
             VfError::Transport { .. } => ErrorDomain::Transport,
         }
     }
 
     pub fn status(&self) -> Option<StatusCode> {
-        match self {
-            VfError::Op {
-                err_no,
-                domain: ErrorDomain::Nfs,
-                ..
-            } => Some(StatusCode::Nfs(*err_no)),
-            VfError::Op {
-                err_no,
-                domain: ErrorDomain::Smb,
-                ..
-            } => Some(StatusCode::Smb(*err_no)),
-            VfError::Op {
-                err_no,
-                domain: ErrorDomain::Client,
-                ..
-            } => Some(StatusCode::Client(*err_no)),
-            VfError::Op { err_no, .. } => Some(StatusCode::Errno(*err_no)),
-            VfError::Transport { .. } => None,
-        }
+        let (err_no, domain) = match self {
+            VfError::Op { err_no, domain, .. } | VfError::OpUnattributed { err_no, domain, .. } => {
+                (*err_no, *domain)
+            }
+            VfError::Transport { .. } => return None,
+        };
+        Some(match domain {
+            ErrorDomain::Nfs => StatusCode::Nfs(err_no),
+            ErrorDomain::Smb => StatusCode::Smb(err_no),
+            ErrorDomain::Client => StatusCode::Client(err_no),
+            _ => StatusCode::Errno(err_no),
+        })
     }
 
     pub fn operation(&self) -> Option<&'static str> {
         match self {
-            VfError::Op { operation, .. } | VfError::Transport { operation, .. } => *operation,
+            VfError::Op { operation, .. }
+            | VfError::OpUnattributed { operation, .. }
+            | VfError::Transport { operation, .. } => *operation,
         }
     }
 
     pub fn path(&self) -> Option<&Path> {
         match self {
-            VfError::Op { path, .. } | VfError::Transport { path, .. } => path.as_deref(),
+            VfError::Op { path, .. }
+            | VfError::OpUnattributed { path, .. }
+            | VfError::Transport { path, .. } => path.as_deref(),
         }
     }
 }
@@ -345,6 +375,22 @@ impl std::fmt::Display for VfError {
                     write!(f, " for {}", path.display())?;
                 }
                 write!(f, " failed: {}", err_no)
+            }
+            VfError::OpUnattributed {
+                err_no,
+                operation,
+                path,
+                ..
+            } => {
+                if let Some(operation) = operation {
+                    write!(f, "{operation}")?;
+                } else {
+                    write!(f, "operation")?;
+                }
+                if let Some(path) = path {
+                    write!(f, " for {}", path.display())?;
+                }
+                write!(f, " failed: {} (operation index unknown)", err_no)
             }
             VfError::Transport {
                 index: Some(index),
