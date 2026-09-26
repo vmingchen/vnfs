@@ -147,9 +147,8 @@ for authentication in ("krb5", "krb5i"):
     fs = fsspec.filesystem(
         "nfs4",
         host=os.environ["VNFS_GSS_HOST"],
-        authentication=authentication,
+        auth=authentication,
         service_principal="nfs@localhost.",
-        require_secure_authentication=True,
         skip_instance_cache=True,
     )
     path = f"/python-{authentication}"

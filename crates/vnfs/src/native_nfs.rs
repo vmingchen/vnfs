@@ -85,11 +85,6 @@ impl NfsBuilder {
         self
     }
 
-    pub fn require_secure_authentication(mut self, required: bool) -> Self {
-        self.inner = self.inner.require_secure_authentication(required);
-        self
-    }
-
     pub fn connect(self) -> VfResult<NfsClient> {
         self.inner.connect().map(FsClient::new)
     }

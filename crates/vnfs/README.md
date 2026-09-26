@@ -330,9 +330,9 @@ vnfs = { version = "0.0.13", default-features = false }
 
 AUTH_SYS carries the calling process's numeric UID/GID without cryptographic
 peer identity, integrity, or privacy. Use it only on a trusted network with
-server export policy that treats those credentials appropriately. Production
-builders can set `require_secure_authentication(true)` to fail closed instead
-of accidentally connecting with AUTH_SYS.
+server export policy that treats those credentials appropriately. AUTH_SYS is
+the compatibility default; selecting `NfsAuthentication::RpcsecGss` explicitly
+requests Kerberos-backed authentication and never downgrades to AUTH_SYS.
 
 Enable Kerberos-backed RPCSEC_GSS explicitly:
 

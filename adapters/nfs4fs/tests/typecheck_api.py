@@ -37,8 +37,7 @@ def use_api(root: Path) -> None:
     fs.close()
     secure: Nfs4FileSystem = Nfs4FileSystem(
         host="nfs.example",
-        authentication="krb5i",
+        auth="krb5i",
         service_principal="nfs@nfs.example",
-        require_secure_authentication=True,
     )
     secure.close()

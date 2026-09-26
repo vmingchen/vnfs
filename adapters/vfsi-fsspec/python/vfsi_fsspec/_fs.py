@@ -1772,9 +1772,8 @@ class VfsiFileSystem(AbstractFileSystem):
         directory_max_entries=100_000,
         directory_max_path_bytes=16 * 1024 * 1024,
         walk_max_depth=128,
-        authentication="auth_sys",
+        auth=None,
         service_principal=None,
-        require_secure_authentication=False,
         connection_pool_size=1,
         **kwargs,
     ):
@@ -1793,24 +1792,20 @@ class VfsiFileSystem(AbstractFileSystem):
             raise ValueError("compound_size_limit must be a positive integer")
         if minor_version not in (None, 1, 2):
             raise ValueError("minor_version must be 1, 2, or None")
-        if authentication not in ("auth_sys", "krb5", "krb5i"):
-            raise ValueError("authentication must be 'auth_sys', 'krb5', or 'krb5i'")
-        if backend != "nfs" and (
-            authentication != "auth_sys"
-            or service_principal is not None
-            or require_secure_authentication
-        ):
+        if auth is None and backend == "nfs":
+            raise ValueError(
+                "auth must be explicitly set to 'auth_sys', 'krb5', or 'krb5i'"
+            )
+        if auth is not None and auth not in ("auth_sys", "krb5", "krb5i"):
+            raise ValueError("auth must be 'auth_sys', 'krb5', or 'krb5i'")
+        if auth is None:
+            auth = "auth_sys"
+        if backend != "nfs" and (auth != "auth_sys" or service_principal is not None):
             raise ValueError("secure authentication options are NFS-only")
         if service_principal is not None and not isinstance(service_principal, str):
             raise TypeError("service_principal must be a string or None")
-        if service_principal is not None and authentication == "auth_sys":
-            raise ValueError(
-                "service_principal requires authentication='krb5' or 'krb5i'"
-            )
-        if require_secure_authentication and authentication == "auth_sys":
-            raise ValueError(
-                "require_secure_authentication requires authentication='krb5' or 'krb5i'"
-            )
+        if service_principal is not None and auth == "auth_sys":
+            raise ValueError("service_principal requires auth='krb5' or 'krb5i'")
         for name, value in (
             ("batch_size", batch_size),
             ("max_batch_bytes", max_batch_bytes),
@@ -1868,9 +1863,8 @@ class VfsiFileSystem(AbstractFileSystem):
         self.share = share
         self.username = username
         self.domain = domain
-        self.authentication = authentication
+        self.auth = auth
         self.service_principal = service_principal
-        self.require_secure_authentication = bool(require_secure_authentication)
         self.connection_pool_size = connection_pool_size
         self.batch_size = batch_size
         self.max_batch_bytes = max_batch_bytes
@@ -1907,9 +1901,8 @@ class VfsiFileSystem(AbstractFileSystem):
                 self.directory_max_entries,
                 self.directory_max_path_bytes,
                 self.walk_max_depth,
-                self.authentication,
+                self.auth,
                 self.service_principal,
-                self.require_secure_authentication,
             ),
             size=self.connection_pool_size,
             auto_reconnect=self.auto_reconnect,

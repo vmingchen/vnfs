@@ -110,7 +110,6 @@ pub struct NfsClientBuilder {
     host: String,
     options: NfsConnectOptions,
     observer: Option<Arc<dyn NfsObserver>>,
-    require_secure_authentication: bool,
 }
 
 impl std::fmt::Debug for NfsClientBuilder {
@@ -120,10 +119,6 @@ impl std::fmt::Debug for NfsClientBuilder {
             .field("host", &self.host)
             .field("options", &self.options)
             .field("observer", &self.observer.as_ref().map(|_| "configured"))
-            .field(
-                "require_secure_authentication",
-                &self.require_secure_authentication,
-            )
             .finish()
     }
 }
@@ -134,7 +129,6 @@ impl NfsClientBuilder {
             host: host.into(),
             options: NfsConnectOptions::default(),
             observer: None,
-            require_secure_authentication: false,
         }
     }
 
@@ -188,13 +182,6 @@ impl NfsClientBuilder {
         self
     }
 
-    /// Refuse to connect with AUTH_SYS. This is a fail-closed guard for
-    /// deployments which require cryptographic peer authentication.
-    pub fn require_secure_authentication(mut self, required: bool) -> Self {
-        self.require_secure_authentication = required;
-        self
-    }
-
     /// Connect a reusable bounded pool for ordered pipelined large-file reads.
     pub fn connect_read_pool(self, options: NfsReadPoolOptions) -> VfResult<NfsReadPool> {
         self.validate()?;
@@ -212,13 +199,6 @@ impl NfsClientBuilder {
     }
 
     fn validate(&self) -> VfResult<()> {
-        if self.require_secure_authentication
-            && matches!(&self.options.authentication, NfsAuthentication::AuthSys)
-        {
-            return Err(
-                VfError::client(0, ERR_ACCES).with_context("connect", Path::new(&self.host))
-            );
-        }
         if self
             .options
             .client_owner
@@ -4684,18 +4664,6 @@ mod tests {
         assert_eq!(builder.options.recovery_policy, policy);
         assert!(!builder.options.auto_reconnect);
         assert_eq!(builder.options.max_compound_bytes, 64 * 1024);
-    }
-
-    #[test]
-    fn secure_authentication_requirement_fails_closed_before_network_io() {
-        let error = NfsClientBuilder::new("unreachable.invalid")
-            .require_secure_authentication(true)
-            .connect()
-            .err()
-            .expect("AUTH_SYS must be rejected");
-        assert_eq!(error.domain(), ErrorDomain::Client);
-        assert_eq!(error.err_no(), ERR_ACCES);
-        assert_eq!(error.operation(), Some("connect"));
     }
 
     #[test]

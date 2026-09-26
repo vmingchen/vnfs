@@ -41,13 +41,16 @@ fs = fsspec.filesystem(
     "nfs4",
     host="nfs.example",
     root="exports/project",
+    auth="auth_sys",
     auto_mkdir=False,
 )
 
 fs.pipe({"/file-1": b"hello", "/file-2": b"world"})
 files = fs.cat(["/file-1", "/file-2"])
 
-with fsspec.open("nfs4://nfs.example/exports/project/file-1", "rb") as file:
+with fsspec.open(
+    "nfs4://nfs.example/exports/project/file-1", "rb", auth="auth_sys"
+) as file:
     print(file.read())
 ```
 
@@ -58,19 +61,33 @@ it currently uses one compound for bounded size discovery and one for the
 reads.
 
 The client negotiates NFSv4.2 and falls back to NFSv4.1. Set
-`minor_version=1` or `minor_version=2` to require a specific version. AUTH_SYS
-remains the default. For Kerberos-backed RPCSEC_GSS, obtain a ticket in the
-process credential cache and select `authentication="krb5"` or
-`authentication="krb5i"`; the latter integrity-protects RPC payloads. Set
-`require_secure_authentication=True` to fail closed if AUTH_SYS was selected.
-An optional `service_principal` overrides the default `nfs@<host>` principal.
+`minor_version=1` or `minor_version=2` to require a specific version. Select
+`auth="auth_sys"` explicitly to use AUTH_SYS. For Kerberos-backed RPCSEC_GSS,
+obtain a ticket in the
+process credential cache and select `auth="krb5"` or `auth="krb5i"`; the latter
+integrity-protects RPC payloads. Selecting either mode is explicit and fails
+closed if Kerberos authentication cannot be established; the client does not
+downgrade to AUTH_SYS. An optional `service_principal` overrides the default
+`nfs@<host>` principal.
+
+```sh
+kinit user@EXAMPLE.COM
+```
+
+```python
+fs = fsspec.filesystem(
+    "nfs4",
+    host="nfs.example.com",
+    auth="krb5i",
+)
+```
 
 `compound_size_limit` caps the payload merged into one compound. The default is
 1 MiB; lower it when a server has a smaller request limit:
 
 ```python
 fs = fsspec.filesystem(
-    "nfs4", host="nfs.example", compound_size_limit=256 * 1024
+    "nfs4", host="nfs.example", auth="auth_sys", compound_size_limit=256 * 1024
 )
 ```
 
@@ -81,6 +98,7 @@ are 10 seconds and 5 seconds, respectively:
 fs = fsspec.filesystem(
     "nfs4",
     host="nfs.example",
+    auth="auth_sys",
     connect_timeout=5.0,
     request_timeout=15.0,
 )
@@ -159,6 +177,7 @@ filesystem or per direct `fs.open()` call:
 fs = fsspec.filesystem(
     "nfs4",
     host="nfs.example",
+    auth="auth_sys",
     block_size=256 * 1024,
     cache_type="readahead",
 )
@@ -183,7 +202,7 @@ fsspec also provides a persistent sparse-file wrapper under the same
 cached = fsspec.filesystem(
     "blockcache",
     target_protocol="nfs4",
-    target_options={"host": "nfs.example"},
+    target_options={"host": "nfs.example", "auth": "auth_sys"},
     cache_storage="/var/tmp/nfs4fs-cache",
     check_files=True,
 )
@@ -231,6 +250,7 @@ fs = fsspec.filesystem(
     "nfs4",
     host="nfs.example",
     root="exports/project",
+    auth="auth_sys",
     use_listings_cache=True,
     listings_expiry_time=1.0,
     max_paths=1024,

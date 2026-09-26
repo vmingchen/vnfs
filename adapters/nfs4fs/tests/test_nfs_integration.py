@@ -93,6 +93,7 @@ def test_round_trip_bounds(nfs_fs):
         "nfs4:///rt/of_*.txt",
         mode="wb",
         num=n,
+        auth=fs.auth,
         host=fs.host,
         root=fs._root,
         minor_version=fs.minor_version,
@@ -178,6 +179,7 @@ def test_open_files_reads_are_batched(nfs_fs):
         "nfs4:///ofr/*.txt",
         mode="rb",
         host=fs.host,
+        auth=fs.auth,
         root=fs._root,
         minor_version=fs.minor_version,
     )
@@ -198,6 +200,7 @@ def test_compound_size_limit_is_configurable(nfs_fs):
         host=nfs_fs.host,
         root=nfs_fs._root + "_limit",
         minor_version=nfs_fs.minor_version,
+        auth=nfs_fs.auth,
         compound_size_limit=64 * 1024,
     ) as fs:
         fs.mkdir("nfs4:///", create_parents=True)

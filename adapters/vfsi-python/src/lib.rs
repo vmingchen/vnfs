@@ -514,7 +514,7 @@ impl NfsClient {
     /// Connect to an NFS server (`backend="nfs"`, default), an SMB2/3 share
     /// (`backend="smb"`), or a local directory (`backend="dummy"`).
     #[new]
-    #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None, minor_version=None, share=None, username="", password="", domain="", connect_timeout=10.0, request_timeout=5.0, read_all_max_total_bytes=16777216, directory_max_entries=100000, directory_max_path_bytes=16777216, walk_max_depth=128, authentication="auth_sys", service_principal=None, require_secure_authentication=false))]
+    #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None, minor_version=None, share=None, username="", password="", domain="", connect_timeout=10.0, request_timeout=5.0, read_all_max_total_bytes=16777216, directory_max_entries=100000, directory_max_path_bytes=16777216, walk_max_depth=128, auth=None, service_principal=None))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -533,9 +533,8 @@ impl NfsClient {
         directory_max_entries: usize,
         directory_max_path_bytes: usize,
         walk_max_depth: usize,
-        authentication: &str,
+        auth: Option<&str>,
         service_principal: Option<String>,
-        require_secure_authentication: bool,
     ) -> PyResult<Self> {
         let connect_timeout = Duration::try_from_secs_f64(connect_timeout)
             .map_err(|_| PyValueError::new_err("connect_timeout must be finite and positive"))?;
@@ -554,18 +553,22 @@ impl NfsClient {
             username,
             password,
             domain,
-            authentication,
+            &auth,
             &service_principal,
-            require_secure_authentication,
         );
         let fs: Box<dyn VecFs + Send> = py.detach(|| {
             Ok(match backend {
                 #[cfg(feature = "nfs")]
                 "nfs" => {
+                    let auth = auth.ok_or_else(|| {
+                        PyValueError::new_err(
+                            "auth must be explicitly set to 'auth_sys', 'krb5', or 'krb5i'",
+                        )
+                    })?;
                     if minor_version.is_some_and(|version| !matches!(version, 1 | 2)) {
                         return Err(PyValueError::new_err("minor_version must be 1, 2, or None"));
                     }
-                    let nfs_authentication = match authentication {
+                    let nfs_authentication = match auth {
                         "auth_sys" => NfsAuthentication::AuthSys,
                         #[cfg(feature = "nfs-rpcsec-gss")]
                         "krb5" => NfsAuthentication::RpcsecGss {
@@ -585,7 +588,7 @@ impl NfsClient {
                         }
                         other => {
                             return Err(PyValueError::new_err(format!(
-                                "authentication must be 'auth_sys', 'krb5', or 'krb5i', got {other:?}"
+                                "auth must be 'auth_sys', 'krb5', or 'krb5i', got {other:?}"
                             )));
                         }
                     };
@@ -593,8 +596,7 @@ impl NfsClient {
                         .minor_version(minor_version)
                         .connect_timeout(connect_timeout)
                         .request_timeout(request_timeout)
-                        .authentication(nfs_authentication)
-                        .require_secure_authentication(require_secure_authentication);
+                        .authentication(nfs_authentication);
                     if let Some(limit) = compound_size_limit {
                         builder = builder.max_compound_bytes(limit);
                     }

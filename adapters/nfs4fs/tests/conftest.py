@@ -31,7 +31,9 @@ def nfs_fs():
             pytest.fail(f"required NFS server {host!r} is not reachable")
         pytest.skip(f"NFS server {host!r} is not reachable")
     root = f"git/nfs4fs_it_{os.getpid()}_{uuid.uuid4().hex[:8]}"
-    fs = fsspec.filesystem("nfs4", host=host, root=root, minor_version=minor_version)
+    fs = fsspec.filesystem(
+        "nfs4", host=host, root=root, minor_version=minor_version, auth="auth_sys"
+    )
     fs.mkdir("nfs4:///", create_parents=True)
     yield fs
     try:

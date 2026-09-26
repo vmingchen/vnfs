@@ -175,20 +175,21 @@ def test_failed_close_retains_descriptor_for_retry(tmp_path, monkeypatch):
     fs.close()
 
 
-def test_secure_authentication_configuration_fails_closed_without_network(tmp_path):
-    with pytest.raises(ValueError, match="requires authentication"):
-        fs_module.Nfs4FileSystem(
-            host="unused",
-            require_secure_authentication=True,
-            skip_instance_cache=True,
-        )
+def test_authentication_configuration_is_validated_without_network(tmp_path):
+    with pytest.raises(ValueError, match="auth must be explicitly set"):
+        fs_module.Nfs4FileSystem(host="unused", skip_instance_cache=True)
+
+    with pytest.raises(ValueError, match="auth must be explicitly set"):
+        fs_module._native.NfsClient("unused")
+
     with pytest.raises(ValueError, match="NFS-only"):
-        _dummy(tmp_path / "secure", authentication="krb5i")
-    with pytest.raises(ValueError, match="authentication"):
-        _dummy(tmp_path / "secure", authentication="unknown")
+        _dummy(tmp_path / "secure", auth="krb5i")
+    with pytest.raises(ValueError, match="auth"):
+        _dummy(tmp_path / "secure", auth="unknown")
     with pytest.raises(ValueError, match="service_principal requires"):
         fs_module.Nfs4FileSystem(
             host="unused",
+            auth="auth_sys",
             service_principal="nfs@server.example",
             skip_instance_cache=True,
         )
