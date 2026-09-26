@@ -44,6 +44,8 @@ pub trait DirectoryFileSystem: FileSystem {
 /// Namespace mutations shared by files and directories.
 pub trait NamespaceFileSystem: FileSystem {
     fn remove_one(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()>;
+    /// Remove the contents of a directory, keeping the directory itself.
+    fn remove_dir_contents(&mut self, path: &std::path::Path) -> VfResult<()>;
     fn rename_one(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()>;
 }
 
@@ -310,6 +312,11 @@ impl<T: VecFs + ?Sized> NamespaceFileSystem for T {
     fn remove_one(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()> {
         self.rm(&[path], recursive)
             .map_err(|error| error.with_context("remove", path))
+    }
+
+    fn remove_dir_contents(&mut self, path: &std::path::Path) -> VfResult<()> {
+        self.rm_contents(path)
+            .map_err(|error| error.with_context("remove_dir_contents", path))
     }
 
     fn rename_one(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()> {

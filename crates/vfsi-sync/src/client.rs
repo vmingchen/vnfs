@@ -333,6 +333,17 @@ impl<F: NamespaceFileSystem + MetadataFileSystem> FsClient<F> {
         self.lock()?.remove_one(path, true)
     }
 
+    /// Remove the contents of a directory, keeping the directory itself.
+    pub fn remove_dir_contents(&self, path: impl AsRef<Path>) -> VfResult<()> {
+        let path = path.as_ref();
+        if !self.removal_metadata(path, "remove_dir_contents")?.is_dir() {
+            return Err(
+                VfError::client(0, crate::ERR_NOTDIR).with_context("remove_dir_contents", path)
+            );
+        }
+        self.lock()?.remove_dir_contents(path)
+    }
+
     pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> VfResult<()> {
         self.lock()?.rename_one(from.as_ref(), to.as_ref())
     }

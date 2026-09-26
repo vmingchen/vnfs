@@ -2187,6 +2187,27 @@ fn rm_recursive_api() {
 }
 
 #[test]
+fn rm_contents_keeps_the_directory() {
+    let dir = setup_dir("rm_contents");
+    let mut c = client();
+    c.ensure_dir(Path::new(&format!("{}/x/y", dir)), 0o755)
+        .unwrap();
+    write_file(&mut c, Path::new(&format!("{}/top", dir)), b"t");
+    write_file(&mut c, Path::new(&format!("{}/x/deep", dir)), b"d");
+    write_file(&mut c, Path::new(&format!("{}/x/y/deep2", dir)), b"e");
+
+    c.rm_contents(Path::new(&dir)).unwrap();
+
+    assert!(c.exists(Path::new(&dir)).unwrap(), "root is kept");
+    assert!(
+        c.listdir(Path::new(&dir), vnfs::AttrMask::default(), 0, false)
+            .unwrap()
+            .is_empty(),
+        "contents are gone"
+    );
+}
+
+#[test]
 fn rm_nonrecursive_keeps_subdirs() {
     let dir = setup_dir("rm_norec");
     let mut c = client();

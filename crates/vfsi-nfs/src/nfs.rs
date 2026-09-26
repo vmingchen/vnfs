@@ -56,13 +56,66 @@ struct ReopenFile {
 ///
 /// `fh` addresses the directory itself (for READDIR and child LOOKUPs), while
 /// `parent`/`name` address its entry in the parent for the final REMOVE. No
-/// path is re-resolved after the root's parent is resolved once.
+/// path is re-resolved after the operand's parent is resolved once. A `None`
+/// parent keeps the directory (used by [`VecFs::rm_contents`]).
 struct RemoveDir {
     fh: FileHandle,
-    parent: FileHandle,
+    parent: Option<FileHandle>,
     name: Vec<u8>,
     /// Operand index this directory belongs to, for error attribution.
     root: usize,
+}
+
+/// A unit of work for the recursive remover.
+enum RmTask {
+    /// REMOVE `name` from `parent`. When `expand` is set and the entry turns
+    /// out to be a non-empty directory, resolve it and enter it instead.
+    RemoveOrEnter {
+        parent: FileHandle,
+        name: Vec<u8>,
+        root: usize,
+        expand: bool,
+    },
+    /// List a directory, remove its non-directory children, and schedule its
+    /// `Finish` followed by its child directories.
+    Enter(RemoveDir),
+    /// The directory's children are gone: batch-remove them from here, then
+    /// mark this directory ready to be removed by its own parent.
+    Finish(RemoveDir),
+}
+
+/// Starting REMOVE batch size. Servers may enforce a lower effective
+/// compound-op cap than the negotiated `ca_maxoperations` (NFS-Ganesha returns
+/// NFS4ERR_RESOURCE above roughly 100 ops), so the batch shrinks adaptively
+/// when that status is seen.
+//
+// TODO: probe the server's real per-compound limit instead of assuming a fixed
+// starting batch: halve from the negotiated `ca_maxoperations` on the first
+// NFS4ERR_RESOURCE and cache the largest working batch per session (and per
+// operation shape).
+const REMOVE_BATCH_START: usize = 24;
+
+/// Bounded retries for retryable per-name NFS statuses.
+const REMOVE_RETRIES: u32 = 4;
+
+/// Transient NFS statuses for which a REMOVE may be retried.
+fn remove_status_is_retryable(status: u32) -> bool {
+    matches!(
+        status,
+        nfsstat4_NFS4ERR_DELAY | nfsstat4_NFS4ERR_SERVERFAULT
+    )
+}
+
+/// Exponential backoff for REMOVE retries (10 ms, 20 ms, ...).
+fn remove_backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(10u64 << attempt.min(6))
+}
+
+/// Keep the first error seen while continuing best-effort removal.
+fn record_error(slot: &mut Option<VfError>, error: VfError) {
+    if slot.is_none() {
+        *slot = Some(error);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2867,6 +2920,359 @@ impl NfsVecFs {
                 | nfsstat4_NFS4ERR_NOTSUPP
         )
     }
+
+    /// Resolve a path operand to its parent handle and final component name.
+    fn remove_parent_handle(&mut self, path: &Path) -> VfResult<(FileHandle, Vec<u8>)> {
+        let full = self.server_vf_path(&VfFile::from_os_path(path))?;
+        let (dir, name) =
+            split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(0, ERR_NOENT))?;
+        let parent = self.resolve_path(&path_from_bytes(&dir), true)?;
+        Ok((parent, name))
+    }
+
+    /// Drive recursive removal. Directories are processed depth-first (memory
+    /// bounded by the current path) so that, at each directory, the batch of
+    /// work under it is vectorized. Empty directories are collected in `ready`
+    /// and removed a parent at a time, so sibling REMOVEs are batched too.
+    ///
+    /// Returns only transport/abort errors; per-entry filesystem errors are
+    /// recorded in `first_error` and removal continues best-effort.
+    fn run_rm_tasks(
+        &mut self,
+        mut stack: Vec<RmTask>,
+        first_error: &mut Option<VfError>,
+    ) -> VfResult<()> {
+        let mut ready: std::collections::HashMap<FileHandle, Vec<(Vec<u8>, usize)>> =
+            std::collections::HashMap::new();
+        while let Some(task) = stack.pop() {
+            match task {
+                RmTask::RemoveOrEnter {
+                    parent,
+                    name,
+                    root,
+                    expand,
+                } => self.remove_or_enter(&parent, &name, root, expand, &mut stack, first_error)?,
+                RmTask::Enter(dir) => self.enter_directory(&dir, &mut stack, first_error)?,
+                RmTask::Finish(dir) => {
+                    if let Some(children) = ready.remove(&dir.fh) {
+                        self.remove_list(&dir.fh, &children, first_error)?;
+                    }
+                    if let Some(parent) = &dir.parent {
+                        ready
+                            .entry(parent.clone())
+                            .or_default()
+                            .push((dir.name.clone(), dir.root));
+                    }
+                }
+            }
+        }
+        // The operands themselves (and any directories still ready) are removed
+        // from their parents, batched per parent.
+        for (parent, children) in ready {
+            self.remove_list(&parent, &children, first_error)?;
+        }
+        Ok(())
+    }
+
+    /// REMOVE one entry. A non-empty directory (NFS4ERR_NOTEMPTY) is expanded
+    /// when `expand`; everything else is recorded and skipped. Transient
+    /// statuses are retried; transport errors abort (the outcome is ambiguous).
+    fn remove_or_enter(
+        &mut self,
+        parent: &FileHandle,
+        name: &[u8],
+        root: usize,
+        expand: bool,
+        stack: &mut Vec<RmTask>,
+        first_error: &mut Option<VfError>,
+    ) -> VfResult<()> {
+        let owned = name.to_vec();
+        let mut attempts = 0u32;
+        loop {
+            match self.nfs.remove_many(parent, std::slice::from_ref(&owned)) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.is_transport() => return Err(VfError::from_rpc(error, root)),
+                Err(error) if error.status == nfsstat4_NFS4ERR_NOENT => return Ok(()),
+                Err(error) if error.status == nfsstat4_NFS4ERR_NOTEMPTY => {
+                    if expand {
+                        match self.nfs.lookup(parent, name) {
+                            Ok(fh) => stack.push(RmTask::Enter(RemoveDir {
+                                fh,
+                                parent: Some(parent.clone()),
+                                name: owned,
+                                root,
+                            })),
+                            Err(lookup) if lookup.is_transport() => {
+                                return Err(VfError::from_rpc(lookup, root));
+                            }
+                            Err(lookup) => {
+                                record_error(first_error, VfError::from_rpc(lookup, root));
+                            }
+                        }
+                    } else {
+                        record_error(first_error, VfError::failure(root, ERR_ISDIR));
+                    }
+                    return Ok(());
+                }
+                Err(error)
+                    if remove_status_is_retryable(error.status) && attempts < REMOVE_RETRIES =>
+                {
+                    attempts += 1;
+                    std::thread::sleep(remove_backoff(attempts));
+                }
+                Err(error) => {
+                    record_error(first_error, VfError::from_rpc(error, root));
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Enumerate a directory with `FATTR4_TYPE`, so directories can be
+    /// descended into without an extra lookup while files are removed directly.
+    fn readdir_typed(&mut self, fh: &FileHandle) -> Result<Vec<crate::client::DirEntry>, RpcError> {
+        let mut entries = Vec::new();
+        let mut cookie = 0u64;
+        loop {
+            let page = self.nfs.readdir(fh, cookie, &[FATTR4_TYPE])?;
+            if page.is_empty() {
+                break;
+            }
+            cookie = page.last().map(|entry| entry.cookie).unwrap_or(0);
+            entries.extend(page);
+            if cookie == 0 {
+                break;
+            }
+        }
+        Ok(entries)
+    }
+
+    /// List a directory, optimistically remove its non-directory children, and
+    /// schedule its own removal after its subdirectories.
+    fn enter_directory(
+        &mut self,
+        dir: &RemoveDir,
+        stack: &mut Vec<RmTask>,
+        first_error: &mut Option<VfError>,
+    ) -> VfResult<()> {
+        let entries = match self.readdir_typed(&dir.fh) {
+            Ok(entries) => entries,
+            Err(error) if error.status == nfsstat4_NFS4ERR_NOTDIR => {
+                // Race: it is no longer a directory. Remove the entry instead.
+                if let Some(parent) = &dir.parent {
+                    self.remove_list(parent, &[(dir.name.clone(), dir.root)], first_error)?;
+                }
+                return Ok(());
+            }
+            Err(error) => return Err(VfError::from_rpc(error, dir.root)),
+        };
+
+        let mut file_names = Vec::new();
+        let mut dir_names = Vec::new();
+        for entry in entries {
+            let values = parse_attr_list(&[FATTR4_TYPE], &entry.attrs)
+                .map_err(|error| error.with_index(dir.root))?;
+            if values.ftype == Some(nfs_ftype4_NF4DIR) {
+                dir_names.push(entry.name);
+            } else {
+                file_names.push(entry.name);
+            }
+        }
+        // Files (and symlinks, and empty directories) go in one batched pass.
+        // A name that turned out to be a non-empty directory is promoted.
+        let promoted = self.remove_names(&dir.fh, &file_names, dir.root, first_error)?;
+        dir_names.extend(promoted);
+
+        let children = self.lookup_children(&dir.fh, &dir_names, dir.root, first_error)?;
+        stack.push(RmTask::Finish(RemoveDir {
+            fh: dir.fh.clone(),
+            parent: dir.parent.clone(),
+            name: dir.name.clone(),
+            root: dir.root,
+        }));
+        for (fh, name) in children {
+            stack.push(RmTask::Enter(RemoveDir {
+                fh,
+                parent: Some(dir.fh.clone()),
+                name,
+                root: dir.root,
+            }));
+        }
+        Ok(())
+    }
+
+    /// Optimistically REMOVE every name in `names`, returning the names that
+    /// turned out to be non-empty directories (NFS4ERR_NOTEMPTY). Other
+    /// per-entry failures are recorded and skipped; transport errors abort.
+    fn remove_names(
+        &mut self,
+        dir: &FileHandle,
+        names: &[Vec<u8>],
+        root: usize,
+        first_error: &mut Option<VfError>,
+    ) -> VfResult<Vec<Vec<u8>>> {
+        let mut subdirs = Vec::new();
+        let mut batch = REMOVE_BATCH_START;
+        let mut start = 0;
+        while start < names.len() {
+            let take = (names.len() - start).min(batch.max(1));
+            match self.nfs.remove_many(dir, &names[start..start + take]) {
+                Ok(()) => start += take,
+                Err(error) if error.is_transport() => return Err(VfError::from_rpc(error, root)),
+                Err(error)
+                    if matches!(
+                        error.status,
+                        nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
+                    ) && take > 1 =>
+                {
+                    batch = take / 2;
+                }
+                Err(error) => {
+                    let status = error.status;
+                    let index = error.op_index.min(take.saturating_sub(1));
+                    let name = names[start + index].clone();
+                    if status == nfsstat4_NFS4ERR_NOTEMPTY {
+                        subdirs.push(name);
+                    } else if status == nfsstat4_NFS4ERR_NOENT {
+                        // Already gone.
+                    } else if remove_status_is_retryable(status) {
+                        self.retry_remove_name(dir, &name, root, first_error)?;
+                    } else {
+                        record_error(first_error, VfError::from_rpc(error, root));
+                    }
+                    start += index + 1;
+                }
+            }
+        }
+        Ok(subdirs)
+    }
+
+    /// REMOVE a batch of `(name, root)` entries from one parent, used once the
+    /// directories are known to be empty. Errors are recorded and skipped.
+    fn remove_list(
+        &mut self,
+        parent: &FileHandle,
+        entries: &[(Vec<u8>, usize)],
+        first_error: &mut Option<VfError>,
+    ) -> VfResult<()> {
+        let mut batch = REMOVE_BATCH_START;
+        let mut start = 0;
+        while start < entries.len() {
+            let take = (entries.len() - start).min(batch.max(1));
+            let chunk = &entries[start..start + take];
+            let names: Vec<Vec<u8>> = chunk.iter().map(|(name, _)| name.clone()).collect();
+            match self.nfs.remove_many(parent, &names) {
+                Ok(()) => start += take,
+                Err(error) if error.is_transport() => {
+                    return Err(VfError::from_rpc(error, chunk[0].1));
+                }
+                Err(error)
+                    if matches!(
+                        error.status,
+                        nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
+                    ) && take > 1 =>
+                {
+                    batch = take / 2;
+                }
+                Err(error) => {
+                    let status = error.status;
+                    let index = error.op_index.min(take.saturating_sub(1));
+                    let (name, root) = chunk[index].clone();
+                    if status == nfsstat4_NFS4ERR_NOENT {
+                        // Already gone.
+                    } else if remove_status_is_retryable(status) {
+                        self.retry_remove_name(parent, &name, root, first_error)?;
+                    } else {
+                        // A non-empty directory here means a concurrent actor
+                        // added entries; record it and move on.
+                        record_error(first_error, VfError::from_rpc(error, root));
+                    }
+                    start += index + 1;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve child directory names to handles, batched. Missing children
+    /// (removed concurrently) are skipped; transport errors abort.
+    fn lookup_children(
+        &mut self,
+        dir: &FileHandle,
+        names: &[Vec<u8>],
+        root: usize,
+        first_error: &mut Option<VfError>,
+    ) -> VfResult<Vec<(FileHandle, Vec<u8>)>> {
+        let mut children = Vec::new();
+        let mut batch = REMOVE_BATCH_START;
+        let mut start = 0;
+        while start < names.len() {
+            let take = (names.len() - start).min(batch.max(1));
+            let chunk = &names[start..start + take];
+            let ops: Vec<(FileHandle, Vec<u8>)> = chunk
+                .iter()
+                .map(|name| (dir.clone(), name.clone()))
+                .collect();
+            match self.nfs.lookup_many(&ops) {
+                Ok(results) => {
+                    for (name, result) in chunk.iter().cloned().zip(results) {
+                        match result {
+                            Ok(fh) => children.push((fh, name)),
+                            Err(nfsstat4_NFS4ERR_NOENT) => {}
+                            Err(status) => {
+                                record_error(first_error, VfError::nfs(root, status));
+                            }
+                        }
+                    }
+                    start += take;
+                }
+                Err(error) if error.is_transport() => return Err(VfError::from_rpc(error, root)),
+                Err(error)
+                    if matches!(
+                        error.status,
+                        nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
+                    ) && take > 1 =>
+                {
+                    batch = take / 2;
+                }
+                Err(error) => {
+                    record_error(first_error, VfError::from_rpc(error, root));
+                    start += take;
+                }
+            }
+        }
+        Ok(children)
+    }
+
+    /// Retry one REMOVE with bounded backoff; record the failure if it
+    /// persists. Transport errors abort because the outcome is ambiguous.
+    fn retry_remove_name(
+        &mut self,
+        dir: &FileHandle,
+        name: &[u8],
+        root: usize,
+        first_error: &mut Option<VfError>,
+    ) -> VfResult<()> {
+        let owned = name.to_vec();
+        let mut attempts = 0u32;
+        loop {
+            match self.nfs.remove_many(dir, std::slice::from_ref(&owned)) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.is_transport() => return Err(VfError::from_rpc(error, root)),
+                Err(error) if error.status == nfsstat4_NFS4ERR_NOENT => return Ok(()),
+                Err(error)
+                    if remove_status_is_retryable(error.status) && attempts < REMOVE_RETRIES =>
+                {
+                    attempts += 1;
+                    std::thread::sleep(remove_backoff(attempts));
+                }
+                Err(error) => {
+                    record_error(first_error, VfError::from_rpc(error, root));
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 impl VecFs for NfsVecFs {
@@ -4020,158 +4426,51 @@ impl VecFs for NfsVecFs {
     }
 
     fn rm(&mut self, objs: &[&Path], recursive: bool) -> VfRes {
-        if objs.is_empty() {
-            return Ok(());
-        }
-
-        // Resolve each operand's parent once and LOOKUP the operand itself.
-        // From here every directory is held by filehandle, so no intermediate
-        // path component is re-resolved (and cannot be swapped for a symlink
-        // between operations).
-        let mut dirs: Vec<RemoveDir> = Vec::new();
-        let mut files: Vec<(FileHandle, Vec<u8>, usize)> = Vec::new();
+        // Resolve each operand's parent once; the operand itself is then
+        // addressed by filehandle. Removal is optimistic: trying to REMOVE an
+        // entry and expanding it on NFS4ERR_NOTEMPTY avoids a separate type
+        // lookup that could race with the removal itself.
+        let mut stack: Vec<RmTask> = Vec::new();
+        let mut first_error: Option<VfError> = None;
         for (root, path) in objs.iter().enumerate() {
             #[cfg(feature = "test-faults")]
             self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: root })?;
-            let full = self
-                .server_vf_path(&VfFile::from_os_path(path))
-                .map_err(|error| error.with_index(root))?;
-            let (dir, name) = split_path_bytes(path_bytes(&full))
-                .map_err(|_| VfError::failure(root, ERR_NOENT))?;
-            let parent = self
-                .resolve_path(&path_from_bytes(&dir), true)
-                .map_err(|error| error.with_index(root))?;
-            let (fh, ftype) = self
-                .nfs
-                .lookup_getattr(&parent, &name)
-                .map_err(|error| VfError::from_rpc(error, root))?;
-            if recursive && ftype == nfs_ftype4_NF4DIR {
-                dirs.push(RemoveDir {
-                    fh,
+            match self.remove_parent_handle(path) {
+                Ok((parent, name)) => stack.push(RmTask::RemoveOrEnter {
                     parent,
                     name,
                     root,
-                });
-            } else {
-                files.push((parent, name, root));
+                    expand: recursive,
+                }),
+                Err(error) => record_error(&mut first_error, error.with_index(root)),
             }
         }
-        for (parent, name, root) in files {
-            self.nfs
-                .remove_many(&parent, std::slice::from_ref(&name))
-                .map_err(|error| VfError::from_rpc(error, root))?;
+        self.run_rm_tasks(stack, &mut first_error)?;
+        first_error.map_or(Ok(()), Err)
+    }
+
+    fn rm_contents(&mut self, dir: &Path) -> VfRes {
+        // Resolve the directory without following a final symlink; a symlink to
+        // a directory is not something to empty.
+        let (parent, name) = self
+            .remove_parent_handle(dir)
+            .map_err(|error| error.with_index(0))?;
+        let (fh, ftype) = self
+            .nfs
+            .lookup_getattr(&parent, &name)
+            .map_err(|error| VfError::from_rpc(error, 0))?;
+        if ftype != nfs_ftype4_NF4DIR {
+            return Err(VfError::failure(0, ERR_NOTDIR));
         }
-
-        let type_ids = [FATTR4_TYPE];
-        // Servers may enforce a lower effective compound-op cap than the
-        // negotiated `ca_maxoperations` (NFS-Ganesha returns NFS4ERR_RESOURCE
-        // above roughly 100 ops), so keep each batched compound well under it.
-        const VECTOR_BATCH: usize = 24;
-        // `levels[k]` holds the directories at depth `k`, removed in reverse
-        // once every deeper level is gone.
-        let mut levels: Vec<Vec<RemoveDir>> = Vec::new();
-        let mut frontier = dirs;
-        while !frontier.is_empty() {
-            // READDIR each directory in the level. Batching many READDIRs into
-            // one compound can exceed a server's compound resource limit (seen
-            // as NFS4ERR_RESOURCE on NFS-Ganesha), so listing stays per
-            // directory; the batching is in the REMOVEs and LOOKUPs below.
-            let mut listing: Vec<Vec<crate::client::DirEntry>> =
-                (0..frontier.len()).map(|_| Vec::new()).collect();
-            for (index, dir) in frontier.iter().enumerate() {
-                let mut cookie = 0u64;
-                loop {
-                    let page = self
-                        .nfs
-                        .readdir(&dir.fh, cookie, &type_ids)
-                        .map_err(|error| VfError::from_rpc(error, dir.root))?;
-                    if page.is_empty() {
-                        break;
-                    }
-                    cookie = page.last().map(|entry| entry.cookie).unwrap_or(0);
-                    listing[index].extend(page);
-                    if cookie == 0 {
-                        break;
-                    }
-                }
-            }
-
-            let mut next_frontier: Vec<RemoveDir> = Vec::new();
-            for (dir, entries) in frontier.iter().zip(listing) {
-                let mut file_names: Vec<Vec<u8>> = Vec::new();
-                let mut subdir_names: Vec<Vec<u8>> = Vec::new();
-                for entry in entries {
-                    let values = parse_attr_list(&type_ids, &entry.attrs)
-                        .map_err(|error| error.with_index(dir.root))?;
-                    if values.ftype == Some(nfs_ftype4_NF4DIR) {
-                        subdir_names.push(entry.name);
-                    } else {
-                        file_names.push(entry.name);
-                    }
-                }
-                if !file_names.is_empty() {
-                    for chunk in file_names.chunks(VECTOR_BATCH) {
-                        self.nfs
-                            .remove_many(&dir.fh, chunk)
-                            .map_err(|error| VfError::from_rpc(error, dir.root))?;
-                    }
-                }
-                if !subdir_names.is_empty() {
-                    let mut resolved: Vec<Result<FileHandle, u32>> =
-                        Vec::with_capacity(subdir_names.len());
-                    for chunk in subdir_names.chunks(VECTOR_BATCH) {
-                        let ops: Vec<(FileHandle, Vec<u8>)> = chunk
-                            .iter()
-                            .map(|name| (dir.fh.clone(), name.clone()))
-                            .collect();
-                        let part = self
-                            .nfs
-                            .lookup_many(&ops)
-                            .map_err(|error| VfError::from_rpc(error, dir.root))?;
-                        resolved.extend(part);
-                    }
-                    for (name, result) in subdir_names.into_iter().zip(resolved) {
-                        match result {
-                            Ok(fh) => next_frontier.push(RemoveDir {
-                                fh,
-                                parent: dir.fh.clone(),
-                                name,
-                                root: dir.root,
-                            }),
-                            // Removed concurrently: nothing left to remove.
-                            Err(status) if status == nfsstat4_NFS4ERR_NOENT => {}
-                            Err(status) => return Err(VfError::nfs(dir.root, status)),
-                        }
-                    }
-                }
-            }
-            levels.push(frontier);
-            frontier = next_frontier;
-        }
-
-        // Deepest first: each directory is empty now. Siblings share a parent
-        // handle and are removed in one compound.
-        for level in levels.iter().rev() {
-            let mut groups: Vec<(FileHandle, Vec<Vec<u8>>, usize)> = Vec::new();
-            for dir in level {
-                match groups
-                    .iter_mut()
-                    .find(|(parent, _, _)| *parent == dir.parent)
-                {
-                    Some((_, names, _)) => names.push(dir.name.clone()),
-                    None => groups.push((dir.parent.clone(), vec![dir.name.clone()], dir.root)),
-                }
-            }
-            for (parent, names, root) in groups {
-                for chunk in names.chunks(VECTOR_BATCH) {
-                    self.nfs
-                        .remove_many(&parent, chunk)
-                        .map_err(|error| VfError::from_rpc(error, root))?;
-                }
-            }
-        }
-
-        Ok(())
+        let mut first_error: Option<VfError> = None;
+        let stack = vec![RmTask::Enter(RemoveDir {
+            fh,
+            parent: None,
+            name,
+            root: 0,
+        })];
+        self.run_rm_tasks(stack, &mut first_error)?;
+        first_error.map_or(Ok(()), Err)
     }
 
     fn cp_recursive(

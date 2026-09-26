@@ -243,6 +243,32 @@ fn path_extension_accepts_strings() {
 }
 
 #[test]
+fn rm_contents_keeps_the_directory() {
+    let mut fs = dummy();
+    fs.mkdir_path("/keep", 0o755).unwrap();
+    fs.mkdir_path("/keep/sub", 0o755).unwrap();
+    for path in ["/keep/a", "/keep/sub/b"] {
+        fs.writev(&[
+            vnfs::WriteOp::from_path(path, VfOffset::At(0), b"x".to_vec()).with_creation(),
+        ])
+        .unwrap();
+    }
+    fs.rm_contents_path("/keep").unwrap();
+    assert!(fs.exists_path("/keep").unwrap(), "root is kept");
+    assert!(
+        fs.listdir(
+            std::path::Path::new("/keep"),
+            vnfs::AttrMask::default(),
+            0,
+            false
+        )
+        .unwrap()
+        .is_empty(),
+        "contents are gone"
+    );
+}
+
+#[test]
 fn standard_io_handle_is_raii_and_seekable() {
     use std::io::{Read, Seek, SeekFrom, Write};
     use vnfs::VfOpenOptions;

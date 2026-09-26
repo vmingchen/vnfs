@@ -778,6 +778,36 @@ pub trait VecFs {
         Ok(())
     }
 
+    /// Remove everything inside `dir`, keeping `dir` itself.
+    ///
+    /// Backends that hold directory handles (NFS) override this to avoid
+    /// re-resolving the directory; the default lists one level and removes each
+    /// child recursively.
+    fn rm_contents(&mut self, dir: &Path) -> VfRes {
+        let entries = self
+            .listdir(dir, AttrMask::default(), 0, false)
+            .map_err(|error| error.with_index(0))?;
+        let mut files: Vec<VfFile> = Vec::new();
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        for attrs in entries {
+            if attrs.ftype == VfType::Directory {
+                if let Some(path) = attrs.file.path() {
+                    dirs.push(path.to_path_buf());
+                }
+            } else {
+                files.push(attrs.file);
+            }
+        }
+        if !files.is_empty() {
+            self.removev(&files).map_err(|error| error.with_index(0))?;
+        }
+        for sub in dirs {
+            self.rm(&[sub.as_path()], true)
+                .map_err(|error| error.with_index(0))?;
+        }
+        Ok(())
+    }
+
     /// Recursively copy a directory tree, `tc_cp_recursive()`.
     fn cp_recursive(
         &mut self,
@@ -1169,6 +1199,10 @@ pub trait VecFsExt: VecFs {
 
     fn rm_recursive_path<P: AsRef<Path>>(&mut self, path: P) -> VfRes {
         self.rm(&[path.as_ref()], true)
+    }
+
+    fn rm_contents_path<P: AsRef<Path>>(&mut self, path: P) -> VfRes {
+        self.rm_contents(path.as_ref())
     }
 }
 
