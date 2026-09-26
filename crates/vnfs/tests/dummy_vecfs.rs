@@ -243,6 +243,146 @@ fn path_extension_accepts_strings() {
 }
 
 #[test]
+fn rm_contents_keeps_the_directory() {
+    let mut fs = dummy();
+    fs.mkdir_path("/keep", 0o755).unwrap();
+    fs.mkdir_path("/keep/sub", 0o755).unwrap();
+    for path in ["/keep/a", "/keep/sub/b"] {
+        fs.writev(&[
+            vnfs::WriteOp::from_path(path, VfOffset::At(0), b"x".to_vec()).with_creation(),
+        ])
+        .unwrap();
+    }
+    fs.rm_contents_path("/keep").unwrap();
+    assert!(fs.exists_path("/keep").unwrap(), "root is kept");
+    assert!(
+        fs.listdir(
+            std::path::Path::new("/keep"),
+            vnfs::AttrMask::default(),
+            0,
+            false
+        )
+        .unwrap()
+        .is_empty(),
+        "contents are gone"
+    );
+}
+
+#[test]
+fn rm_contents_rejects_a_symlink_to_a_directory() {
+    let mut fs = dummy();
+    fs.mkdir_path("/target", 0o755).unwrap();
+    fs.writev(&[
+        vnfs::WriteOp::from_path("/target/keep", VfOffset::At(0), b"k".to_vec()).with_creation(),
+    ])
+    .unwrap();
+    fs.symlink_path("target", "link").unwrap();
+
+    assert!(fs.rm_contents_path("/link").is_err());
+    assert!(fs.exists_path("/target/keep").unwrap());
+}
+
+#[test]
+fn recursive_rm_removes_a_symlink_not_its_target() {
+    let mut fs = dummy();
+    fs.mkdir_path("/target", 0o755).unwrap();
+    fs.writev(&[
+        vnfs::WriteOp::from_path("/target/keep", VfOffset::At(0), b"k".to_vec()).with_creation(),
+    ])
+    .unwrap();
+    fs.symlink_path("target", "link").unwrap();
+
+    fs.rm(&[Path::new("/link")], true).unwrap();
+    assert!(!fs.exists_path("/link").unwrap());
+    assert!(fs.exists_path("/target/keep").unwrap());
+}
+
+#[test]
+fn ensure_empty_dir_creates_empties_and_rejects_files() {
+    let mut fs = dummy();
+    fs.ensure_empty_dir_path("/made").unwrap();
+    assert!(fs.exists_path("/made").unwrap());
+    assert!(
+        fs.listdir(Path::new("/made"), vnfs::AttrMask::default(), 0, false)
+            .unwrap()
+            .is_empty()
+    );
+
+    fs.mkdir_path("/full", 0o755).unwrap();
+    fs.writev(&[
+        vnfs::WriteOp::from_path("/full/child", VfOffset::At(0), b"x".to_vec()).with_creation(),
+    ])
+    .unwrap();
+    fs.ensure_empty_dir_path("/full").unwrap();
+    assert!(
+        fs.listdir(Path::new("/full"), vnfs::AttrMask::default(), 0, false)
+            .unwrap()
+            .is_empty()
+    );
+
+    fs.writev(&[
+        vnfs::WriteOp::from_path("/afile", VfOffset::At(0), b"f".to_vec()).with_creation(),
+    ])
+    .unwrap();
+    assert!(fs.ensure_empty_dir_path("/afile").is_err());
+    assert!(fs.exists_path("/afile").unwrap());
+}
+
+#[test]
+fn open_dir_handle_empties_contents() {
+    let mut fs = dummy();
+    fs.mkdir_path("/d", 0o755).unwrap();
+    fs.mkdir_path("/d/sub", 0o755).unwrap();
+    fs.writev(&[vnfs::WriteOp::from_path("/d/a", VfOffset::At(0), b"a".to_vec()).with_creation()])
+        .unwrap();
+    fs.writev(&[
+        vnfs::WriteOp::from_path("/d/sub/b", VfOffset::At(0), b"b".to_vec()).with_creation(),
+    ])
+    .unwrap();
+
+    let handle = fs.open_dir(Path::new("/d")).unwrap();
+    fs.rm_dir_contents(&handle).unwrap();
+    fs.close_dir(&handle).unwrap();
+    assert!(fs.exists_path("/d").unwrap());
+    assert!(
+        fs.listdir(Path::new("/d"), vnfs::AttrMask::default(), 0, false)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn generic_remover_rejects_options_it_cannot_honor() {
+    let mut fs = dummy();
+    fs.mkdir_path("/d", 0o755).unwrap();
+    fs.writev(&[
+        vnfs::WriteOp::from_path("/d/keep", VfOffset::At(0), b"x".to_vec()).with_creation(),
+    ])
+    .unwrap();
+    let handle = fs.open_dir(Path::new("/d")).unwrap();
+    for options in [
+        vnfs::RemoveOptions::new().continue_on_error(true),
+        vnfs::RemoveOptions::new().batch(2),
+        vnfs::RemoveOptions::new().retries(0),
+    ] {
+        assert!(
+            fs.rm_with_options(&[Path::new("/d/keep")], false, options)
+                .is_err()
+        );
+        assert!(
+            fs.rm_contents_with_options(Path::new("/d"), options)
+                .is_err()
+        );
+        assert!(fs.rm_dir_contents_with_options(&handle, options).is_err());
+    }
+    assert!(
+        fs.exists_path("/d/keep").unwrap(),
+        "rejected options must not mutate"
+    );
+    fs.close_dir(&handle).unwrap();
+}
+
+#[test]
 fn standard_io_handle_is_raii_and_seekable() {
     use std::io::{Read, Seek, SeekFrom, Write};
     use vnfs::VfOpenOptions;

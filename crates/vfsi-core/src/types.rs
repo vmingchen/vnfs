@@ -1455,3 +1455,71 @@ bitflags::bitflags! {
         const UNIX_SEMANTICS = VF_CAP_UNIX_SEMANTICS;
     }
 }
+
+/// Options controlling recursive removal.
+///
+/// The `continue_on_error`/`retries` behavior was previously hardcoded in the
+/// NFS backend; exposing it lets callers choose GNU `rm -r` semantics (delete
+/// as much as possible, report the first error) or fail fast. Backends using
+/// the generic remover support only the default options and reject others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoveOptions {
+    /// Keep removing after a per-entry failure and report the first error at
+    /// the end. When `false`, the first failure aborts.
+    pub continue_on_error: bool,
+    /// Starting batch size for vectorized removals; `0` uses the backend
+    /// default (and the backend may shrink it further if the server rejects it).
+    pub batch: usize,
+    /// Bounded retries for retryable per-entry statuses.
+    pub retries: u32,
+}
+
+impl Default for RemoveOptions {
+    fn default() -> Self {
+        Self {
+            continue_on_error: false,
+            batch: 0,
+            retries: 4,
+        }
+    }
+}
+
+impl RemoveOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn continue_on_error(mut self, value: bool) -> Self {
+        self.continue_on_error = value;
+        self
+    }
+
+    pub fn batch(mut self, value: usize) -> Self {
+        self.batch = value;
+        self
+    }
+
+    pub fn retries(mut self, value: u32) -> Self {
+        self.retries = value;
+        self
+    }
+}
+
+/// An opaque handle to an open directory.
+///
+/// It exists so recursive removal can be rooted at an already-resolved
+/// directory instead of a path. Path-based entry points re-resolve the path and
+/// are therefore subject to the classic entry-point TOCTOU race: a concurrent
+/// actor can replace a path component with a symlink between the caller naming
+/// the path and the removal starting. A handle removes that race for the root
+/// of the removal (the same guarantee `remove_dir_all`'s `RemoveDir` trait
+/// gives). Backends without directory handles return [`VfDir::Path`], which
+/// carries no such guarantee.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VfDir {
+    /// A backend-assigned directory handle, bound to the client that opened it.
+    Descriptor { fd: Fd, owner: u64 },
+    /// A backend without directory handles; the removal re-resolves this path.
+    Path(PathBuf),
+}

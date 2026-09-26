@@ -1261,28 +1261,6 @@ impl SmbVecFs {
         let _ = self.raw_close(src_id);
         result
     }
-
-    fn rm_one(&mut self, path: &Path, recursive: bool) -> VfResult<()> {
-        let mut pending = vec![(path.to_path_buf(), false)];
-        while let Some((current, visited)) = pending.pop() {
-            let attrs = self.stat(&current)?;
-            if attrs.ftype == VfType::Directory && recursive && !visited {
-                pending.push((current.clone(), true));
-                let entries = self.listdir(&current, AttrMask::empty(), 0, false)?;
-                for entry in entries.into_iter().rev() {
-                    let child = entry
-                        .file
-                        .path()
-                        .ok_or_else(|| VfError::failure(0, ERR_INVAL))?
-                        .to_path_buf();
-                    pending.push((child, false));
-                }
-            } else {
-                self.removev(&[VfFile::from_os_path(&current)])?;
-            }
-        }
-        Ok(())
-    }
 }
 
 impl VecFs for SmbVecFs {
@@ -2188,14 +2166,6 @@ impl VecFs for SmbVecFs {
             close.map_err(|e| e.with_index(index))?;
         }
         Ok(counts)
-    }
-
-    fn rm(&mut self, objects: &[&Path], recursive: bool) -> VfRes {
-        for (index, object) in objects.iter().enumerate() {
-            self.rm_one(object, recursive)
-                .map_err(|e| e.with_index(index))?;
-        }
-        Ok(())
     }
 
     fn cp_recursive(

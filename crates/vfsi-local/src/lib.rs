@@ -813,30 +813,6 @@ impl DummyVecFs {
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         Ok(())
     }
-
-    fn rm_one(&mut self, path: &Path, recursive: bool) -> VfResult<()> {
-        let mut pending = vec![(path.to_path_buf(), false)];
-        while let Some((current, visited)) = pending.pop() {
-            #[cfg(feature = "test-faults")]
-            self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: 0 })?;
-            let file_type = self.file_type(&current)?;
-            if file_type == VfType::Directory && recursive && !visited {
-                pending.push((current.clone(), true));
-                let entries = self.listdir(&current, AttrMask::default(), usize::MAX, false)?;
-                for entry in entries.into_iter().rev() {
-                    let child = entry
-                        .file
-                        .path()
-                        .ok_or_else(|| VfError::failure(0, ERR_INVAL))?
-                        .to_path_buf();
-                    pending.push((child, false));
-                }
-            } else {
-                self.unlink(&current)?;
-            }
-        }
-        Ok(())
-    }
 }
 
 impl VecFs for DummyVecFs {
@@ -856,6 +832,12 @@ impl VecFs for DummyVecFs {
     fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeCleanup { index: _index })?;
+        Ok(())
+    }
+
+    fn before_remove_type(&mut self, _index: usize) -> VfResult<()> {
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: _index })?;
         Ok(())
     }
 
@@ -1308,13 +1290,6 @@ impl VecFs for DummyVecFs {
             counts.push(written);
         }
         Ok(counts)
-    }
-
-    fn rm(&mut self, objs: &[&Path], recursive: bool) -> VfRes {
-        for (i, o) in objs.iter().enumerate() {
-            self.rm_one(o, recursive).map_err(|e| e.with_index(i))?;
-        }
-        Ok(())
     }
 
     fn cp_recursive(

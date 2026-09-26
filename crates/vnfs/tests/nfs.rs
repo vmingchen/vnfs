@@ -2187,6 +2187,220 @@ fn rm_recursive_api() {
 }
 
 #[test]
+fn rm_contents_keeps_the_directory() {
+    let dir = setup_dir("rm_contents");
+    let mut c = client();
+    c.ensure_dir(Path::new(&format!("{}/x/y", dir)), 0o755)
+        .unwrap();
+    write_file(&mut c, Path::new(&format!("{}/top", dir)), b"t");
+    write_file(&mut c, Path::new(&format!("{}/x/deep", dir)), b"d");
+    write_file(&mut c, Path::new(&format!("{}/x/y/deep2", dir)), b"e");
+
+    c.rm_contents(Path::new(&dir)).unwrap();
+
+    assert!(c.exists(Path::new(&dir)).unwrap(), "root is kept");
+    assert!(
+        c.listdir(Path::new(&dir), vnfs::AttrMask::default(), 0, false)
+            .unwrap()
+            .is_empty(),
+        "contents are gone"
+    );
+}
+
+#[test]
+fn rm_contents_rejects_a_symlink_to_a_directory() {
+    let dir = setup_dir("rm_contents_symlink");
+    let mut c = client();
+    c.ensure_dir(Path::new(&format!("{}/target", dir)), 0o755)
+        .unwrap();
+    write_file(&mut c, Path::new(&format!("{}/target/keep", dir)), b"k");
+    c.symlink(Path::new("target"), Path::new(&format!("{}/link", dir)))
+        .unwrap();
+
+    assert!(
+        c.rm_contents(Path::new(&format!("{}/link", dir))).is_err(),
+        "a symlink to a directory must not be emptied"
+    );
+    assert!(
+        c.exists(Path::new(&format!("{}/target/keep", dir)))
+            .unwrap(),
+        "the symlink target is preserved"
+    );
+}
+
+#[test]
+fn recursive_rm_removes_a_symlink_not_its_target() {
+    let dir = setup_dir("rm_symlink");
+    let mut c = client();
+    c.ensure_dir(Path::new(&format!("{}/target", dir)), 0o755)
+        .unwrap();
+    write_file(&mut c, Path::new(&format!("{}/target/keep", dir)), b"k");
+    c.symlink(Path::new("target"), Path::new(&format!("{}/link", dir)))
+        .unwrap();
+
+    c.rm(&[Path::new(&format!("{}/link", dir))], true).unwrap();
+    assert!(
+        !c.exists(Path::new(&format!("{}/link", dir))).unwrap(),
+        "the symlink itself is removed"
+    );
+    assert!(
+        c.exists(Path::new(&format!("{}/target/keep", dir)))
+            .unwrap(),
+        "the symlink target is preserved"
+    );
+}
+
+#[test]
+fn ensure_empty_dir_creates_empties_and_rejects_files() {
+    let dir = setup_dir("ensure_empty");
+    let mut c = client();
+    let missing = format!("{}/made", dir);
+    c.ensure_empty_dir(Path::new(&missing)).unwrap();
+    assert!(c.exists(Path::new(&missing)).unwrap());
+    assert!(
+        c.listdir(Path::new(&missing), vnfs::AttrMask::default(), 0, false)
+            .unwrap()
+            .is_empty()
+    );
+
+    c.ensure_dir(Path::new(&format!("{}/full", dir)), 0o755)
+        .unwrap();
+    write_file(&mut c, Path::new(&format!("{}/full/child", dir)), b"x");
+    c.ensure_empty_dir(Path::new(&format!("{}/full", dir)))
+        .unwrap();
+    assert!(
+        c.listdir(
+            Path::new(&format!("{}/full", dir)),
+            vnfs::AttrMask::default(),
+            0,
+            false
+        )
+        .unwrap()
+        .is_empty()
+    );
+
+    let file = format!("{}/afile", dir);
+    write_file(&mut c, Path::new(&file), b"f");
+    assert!(c.ensure_empty_dir(Path::new(&file)).is_err());
+    assert!(c.exists(Path::new(&file)).unwrap());
+}
+
+#[test]
+fn open_dir_handle_empties_without_following_symlinks() {
+    let dir = setup_dir("open_dir");
+    let mut c = client();
+    c.ensure_dir(Path::new(&format!("{}/d/sub", dir)), 0o755)
+        .unwrap();
+    write_file(&mut c, Path::new(&format!("{}/d/a", dir)), b"a");
+    write_file(&mut c, Path::new(&format!("{}/d/sub/b", dir)), b"b");
+
+    let handle = c.open_dir(Path::new(&format!("{}/d", dir))).unwrap();
+    c.rm_dir_contents(&handle).unwrap();
+    c.close_dir(&handle).unwrap();
+    assert!(c.exists(Path::new(&format!("{}/d", dir))).unwrap(), "kept");
+    assert!(
+        c.listdir(
+            Path::new(&format!("{}/d", dir)),
+            vnfs::AttrMask::default(),
+            0,
+            false
+        )
+        .unwrap()
+        .is_empty()
+    );
+
+    c.symlink(Path::new("d"), Path::new(&format!("{}/link", dir)))
+        .unwrap();
+    assert!(
+        c.open_dir(Path::new(&format!("{}/link", dir))).is_err(),
+        "opening a symlink to a directory is rejected"
+    );
+}
+
+#[test]
+fn directory_handle_is_bound_to_its_client() {
+    let dir = setup_dir("dir_handle_owner");
+    let mut a = client();
+    let mut b = client();
+    for name in ["a", "b"] {
+        a.ensure_dir(Path::new(&format!("{dir}/{name}")), 0o755)
+            .unwrap();
+        write_file(&mut a, Path::new(&format!("{dir}/{name}/keep")), b"x");
+    }
+    let a_handle = a.open_dir(Path::new(&format!("{dir}/a"))).unwrap();
+    let b_handle = b.open_dir(Path::new(&format!("{dir}/b"))).unwrap();
+    assert!(b.rm_dir_contents(&a_handle).is_err());
+    assert!(b.close_dir(&a_handle).is_err());
+    assert!(b.exists(Path::new(&format!("{dir}/b/keep"))).unwrap());
+    b.rm_dir_contents(&b_handle).unwrap();
+    b.close_dir(&b_handle).unwrap();
+    assert!(!b.exists(Path::new(&format!("{dir}/b/keep"))).unwrap());
+    assert!(a.exists(Path::new(&format!("{dir}/a/keep"))).unwrap());
+    a.close_dir(&a_handle).unwrap();
+}
+
+#[test]
+fn directory_handle_survives_reconnect() {
+    let dir = setup_dir("dir_handle_reconnect");
+    let mut c = client();
+    let child = format!("{dir}/keep");
+    write_file(&mut c, Path::new(&child), b"x");
+    let handle = c.open_dir(Path::new(&dir)).unwrap();
+    c.reconnect().unwrap();
+    c.rm_dir_contents(&handle).unwrap();
+    c.close_dir(&handle).unwrap();
+    assert!(!c.exists(Path::new(&child)).unwrap());
+}
+
+#[test]
+fn open_dir_accepts_namespace_root() {
+    let mut c = client();
+    let handle = c.open_dir(Path::new("/")).unwrap();
+    c.close_dir(&handle).unwrap();
+}
+
+#[test]
+fn rm_is_fail_fast_but_explicit_best_effort_continues() {
+    let dir = setup_dir("rm_fail_fast");
+    let mut c = client();
+    let missing = format!("{dir}/missing/leaf");
+    let victim = format!("{dir}/victim");
+    write_file(&mut c, Path::new(&victim), b"x");
+    assert!(
+        c.rm(&[Path::new(&missing), Path::new(&victim)], true)
+            .is_err()
+    );
+    assert!(c.exists(Path::new(&victim)).unwrap());
+    assert!(
+        c.rm_with_options(
+            &[Path::new(&missing), Path::new(&victim)],
+            true,
+            vnfs::RemoveOptions::new().continue_on_error(true),
+        )
+        .is_err()
+    );
+    assert!(!c.exists(Path::new(&victim)).unwrap());
+}
+
+#[test]
+fn rm_with_options_honors_batch_size() {
+    let dir = setup_dir("rm_options");
+    let mut c = client();
+    c.ensure_dir(Path::new(&format!("{}/a/b/c", dir)), 0o755)
+        .unwrap();
+    for rel in ["a/one", "a/b/two", "a/b/c/three"] {
+        write_file(&mut c, Path::new(&format!("{dir}/{rel}")), b"x");
+    }
+    c.rm_with_options(
+        &[Path::new(&dir)],
+        true,
+        vnfs::RemoveOptions::new().batch(2).retries(1),
+    )
+    .unwrap();
+    assert!(!c.exists(Path::new(&dir)).unwrap());
+}
+
+#[test]
 fn rm_nonrecursive_keeps_subdirs() {
     let dir = setup_dir("rm_norec");
     let mut c = client();
