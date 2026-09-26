@@ -52,6 +52,19 @@ struct ReopenFile {
     mode: u32,
 }
 
+/// A directory held by filehandle during vectorized recursive removal.
+///
+/// `fh` addresses the directory itself (for READDIR and child LOOKUPs), while
+/// `parent`/`name` address its entry in the parent for the final REMOVE. No
+/// path is re-resolved after the root's parent is resolved once.
+struct RemoveDir {
+    fh: FileHandle,
+    parent: FileHandle,
+    name: Vec<u8>,
+    /// Operand index this directory belongs to, for error attribution.
+    root: usize,
+}
+
 #[derive(Debug, Clone)]
 struct ConnectionConfig {
     host: String,
@@ -2172,30 +2185,6 @@ impl NfsVecFs {
         Ok(())
     }
 
-    fn rm_one(&mut self, path: &Path, recursive: bool) -> VfResult<()> {
-        let mut pending = vec![(path.to_path_buf(), false)];
-        while let Some((current, visited)) = pending.pop() {
-            #[cfg(feature = "test-faults")]
-            self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: 0 })?;
-            let file_type = self.file_type(&current)?;
-            if file_type == VfType::Directory && recursive && !visited {
-                pending.push((current.clone(), true));
-                let entries = self.listdir(&current, AttrMask::default(), usize::MAX, false)?;
-                for entry in entries.into_iter().rev() {
-                    let child = entry
-                        .file
-                        .path()
-                        .ok_or_else(|| VfError::failure(0, ERR_INVAL))?
-                        .to_path_buf();
-                    pending.push((child, false));
-                }
-            } else {
-                self.unlink(&current)?;
-            }
-        }
-        Ok(())
-    }
-
     fn copy_extent(
         &mut self,
         src_root_rel: &Path,
@@ -4031,9 +4020,157 @@ impl VecFs for NfsVecFs {
     }
 
     fn rm(&mut self, objs: &[&Path], recursive: bool) -> VfRes {
-        for (i, o) in objs.iter().enumerate() {
-            self.rm_one(o, recursive).map_err(|e| e.with_index(i))?;
+        if objs.is_empty() {
+            return Ok(());
         }
+
+        // Resolve each operand's parent once and LOOKUP the operand itself.
+        // From here every directory is held by filehandle, so no intermediate
+        // path component is re-resolved (and cannot be swapped for a symlink
+        // between operations).
+        let mut dirs: Vec<RemoveDir> = Vec::new();
+        let mut files: Vec<(FileHandle, Vec<u8>, usize)> = Vec::new();
+        for (root, path) in objs.iter().enumerate() {
+            #[cfg(feature = "test-faults")]
+            self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: root })?;
+            let full = self
+                .server_vf_path(&VfFile::from_os_path(path))
+                .map_err(|error| error.with_index(root))?;
+            let (dir, name) = split_path_bytes(path_bytes(&full))
+                .map_err(|_| VfError::failure(root, ERR_NOENT))?;
+            let parent = self
+                .resolve_path(&path_from_bytes(&dir), true)
+                .map_err(|error| error.with_index(root))?;
+            let (fh, ftype) = self
+                .nfs
+                .lookup_getattr(&parent, &name)
+                .map_err(|error| VfError::from_rpc(error, root))?;
+            if recursive && ftype == nfs_ftype4_NF4DIR {
+                dirs.push(RemoveDir {
+                    fh,
+                    parent,
+                    name,
+                    root,
+                });
+            } else {
+                files.push((parent, name, root));
+            }
+        }
+        for (parent, name, root) in files {
+            self.nfs
+                .remove_many(&parent, std::slice::from_ref(&name))
+                .map_err(|error| VfError::from_rpc(error, root))?;
+        }
+
+        let type_ids = [FATTR4_TYPE];
+        // Servers may enforce a lower effective compound-op cap than the
+        // negotiated `ca_maxoperations` (NFS-Ganesha returns NFS4ERR_RESOURCE
+        // above roughly 100 ops), so keep each batched compound well under it.
+        const VECTOR_BATCH: usize = 24;
+        // `levels[k]` holds the directories at depth `k`, removed in reverse
+        // once every deeper level is gone.
+        let mut levels: Vec<Vec<RemoveDir>> = Vec::new();
+        let mut frontier = dirs;
+        while !frontier.is_empty() {
+            // READDIR each directory in the level. Batching many READDIRs into
+            // one compound can exceed a server's compound resource limit (seen
+            // as NFS4ERR_RESOURCE on NFS-Ganesha), so listing stays per
+            // directory; the batching is in the REMOVEs and LOOKUPs below.
+            let mut listing: Vec<Vec<crate::client::DirEntry>> =
+                (0..frontier.len()).map(|_| Vec::new()).collect();
+            for (index, dir) in frontier.iter().enumerate() {
+                let mut cookie = 0u64;
+                loop {
+                    let page = self
+                        .nfs
+                        .readdir(&dir.fh, cookie, &type_ids)
+                        .map_err(|error| VfError::from_rpc(error, dir.root))?;
+                    if page.is_empty() {
+                        break;
+                    }
+                    cookie = page.last().map(|entry| entry.cookie).unwrap_or(0);
+                    listing[index].extend(page);
+                    if cookie == 0 {
+                        break;
+                    }
+                }
+            }
+
+            let mut next_frontier: Vec<RemoveDir> = Vec::new();
+            for (dir, entries) in frontier.iter().zip(listing) {
+                let mut file_names: Vec<Vec<u8>> = Vec::new();
+                let mut subdir_names: Vec<Vec<u8>> = Vec::new();
+                for entry in entries {
+                    let values = parse_attr_list(&type_ids, &entry.attrs)
+                        .map_err(|error| error.with_index(dir.root))?;
+                    if values.ftype == Some(nfs_ftype4_NF4DIR) {
+                        subdir_names.push(entry.name);
+                    } else {
+                        file_names.push(entry.name);
+                    }
+                }
+                if !file_names.is_empty() {
+                    for chunk in file_names.chunks(VECTOR_BATCH) {
+                        self.nfs
+                            .remove_many(&dir.fh, chunk)
+                            .map_err(|error| VfError::from_rpc(error, dir.root))?;
+                    }
+                }
+                if !subdir_names.is_empty() {
+                    let mut resolved: Vec<Result<FileHandle, u32>> =
+                        Vec::with_capacity(subdir_names.len());
+                    for chunk in subdir_names.chunks(VECTOR_BATCH) {
+                        let ops: Vec<(FileHandle, Vec<u8>)> = chunk
+                            .iter()
+                            .map(|name| (dir.fh.clone(), name.clone()))
+                            .collect();
+                        let part = self
+                            .nfs
+                            .lookup_many(&ops)
+                            .map_err(|error| VfError::from_rpc(error, dir.root))?;
+                        resolved.extend(part);
+                    }
+                    for (name, result) in subdir_names.into_iter().zip(resolved) {
+                        match result {
+                            Ok(fh) => next_frontier.push(RemoveDir {
+                                fh,
+                                parent: dir.fh.clone(),
+                                name,
+                                root: dir.root,
+                            }),
+                            // Removed concurrently: nothing left to remove.
+                            Err(status) if status == nfsstat4_NFS4ERR_NOENT => {}
+                            Err(status) => return Err(VfError::nfs(dir.root, status)),
+                        }
+                    }
+                }
+            }
+            levels.push(frontier);
+            frontier = next_frontier;
+        }
+
+        // Deepest first: each directory is empty now. Siblings share a parent
+        // handle and are removed in one compound.
+        for level in levels.iter().rev() {
+            let mut groups: Vec<(FileHandle, Vec<Vec<u8>>, usize)> = Vec::new();
+            for dir in level {
+                match groups
+                    .iter_mut()
+                    .find(|(parent, _, _)| *parent == dir.parent)
+                {
+                    Some((_, names, _)) => names.push(dir.name.clone()),
+                    None => groups.push((dir.parent.clone(), vec![dir.name.clone()], dir.root)),
+                }
+            }
+            for (parent, names, root) in groups {
+                for chunk in names.chunks(VECTOR_BATCH) {
+                    self.nfs
+                        .remove_many(&parent, chunk)
+                        .map_err(|error| VfError::from_rpc(error, root))?;
+                }
+            }
+        }
+
         Ok(())
     }
 

@@ -20,7 +20,7 @@ use crate::session::Session;
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
 /// An NFS file handle owned by the client.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FileHandle {
     bytes: Vec<u8>,
 }

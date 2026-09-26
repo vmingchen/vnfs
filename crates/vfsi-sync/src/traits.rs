@@ -691,7 +691,92 @@ pub trait VecFs {
     }
 
     /// Remove a list of objects, recursively when `recursive`, `tc_rm()`.
-    fn rm(&mut self, objs: &[&Path], recursive: bool) -> VfRes;
+    ///
+    /// Recursive removal is a vectorized, iterative level-order walk rather
+    /// than a scalar recursion: each level's directories are listed in one
+    /// batch, their non-directory children are removed with one vectorized
+    /// [`removev`](Self::removev) per directory, and the directories are then
+    /// removed deepest-first (once empty). Paths are the addressing unit here;
+    /// backends that can hold directory handles (NFS) override this to avoid
+    /// re-resolving paths. The returned error index is always the operand
+    /// index in `objs`.
+    fn rm(&mut self, objs: &[&Path], recursive: bool) -> VfRes {
+        if objs.is_empty() {
+            return Ok(());
+        }
+        if !recursive {
+            let files: Vec<VfFile> = objs.iter().map(|p| VfFile::from_os_path(p)).collect();
+            return self.removev(&files);
+        }
+
+        for (root_index, root) in objs.iter().enumerate() {
+            self.before_remove_type(root_index)?;
+            // Classify the root (no-follow); a non-directory is just removed.
+            let mut root_attrs = VfAttrs {
+                file: VfFile::from_os_path(root),
+                masks: AttrMask::default(),
+                ..VfAttrs::default()
+            };
+            self.lgetattrsv(std::slice::from_mut(&mut root_attrs))
+                .map_err(|error| error.map_index(|_| root_index))?;
+            if root_attrs.ftype != VfType::Directory {
+                self.removev(&[VfFile::from_os_path(root)])
+                    .map_err(|error| error.map_index(|_| root_index))?;
+                continue;
+            }
+
+            // `dir_levels[k]` holds the directories at depth `k`; they are
+            // removed in reverse once deeper levels are gone.
+            let mut dir_levels: Vec<Vec<PathBuf>> = Vec::new();
+            let mut frontier: Vec<PathBuf> = vec![root.to_path_buf()];
+            while !frontier.is_empty() {
+                let refs: Vec<&Path> = frontier.iter().map(PathBuf::as_path).collect();
+                let mut per_dir: Vec<Vec<VfAttrs>> = (0..refs.len()).map(|_| Vec::new()).collect();
+                {
+                    let index_of: std::collections::HashMap<&Path, usize> =
+                        refs.iter().enumerate().map(|(i, p)| (*p, i)).collect();
+                    let mut cb = |attrs: &VfAttrs, dir: &Path| {
+                        if let Some(&slot) = index_of.get(dir) {
+                            per_dir[slot].push(attrs.clone());
+                        }
+                        true
+                    };
+                    self.listdirv(&refs, AttrMask::default(), 0, false, &mut cb)
+                        .map_err(|error| error.map_index(|_| root_index))?;
+                }
+
+                let mut next: Vec<PathBuf> = Vec::new();
+                for entries in per_dir {
+                    let mut files: Vec<VfFile> = Vec::new();
+                    for attrs in entries {
+                        if attrs.ftype == VfType::Directory {
+                            if let Some(path) = attrs.file.path() {
+                                next.push(path.to_path_buf());
+                            }
+                        } else {
+                            files.push(attrs.file);
+                        }
+                    }
+                    if !files.is_empty() {
+                        self.removev(&files)
+                            .map_err(|error| error.map_index(|_| root_index))?;
+                    }
+                }
+                dir_levels.push(frontier);
+                frontier = next;
+            }
+
+            for level in dir_levels.iter().rev() {
+                let dirs: Vec<VfFile> = level
+                    .iter()
+                    .map(|path| VfFile::from_os_path(path))
+                    .collect();
+                self.removev(&dirs)
+                    .map_err(|error| error.map_index(|_| root_index))?;
+            }
+        }
+        Ok(())
+    }
 
     /// Recursively copy a directory tree, `tc_cp_recursive()`.
     fn cp_recursive(
@@ -787,6 +872,12 @@ pub trait VecFs {
     /// after a strict `openv` failure.
     #[doc(hidden)]
     fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
+        Ok(())
+    }
+
+    /// Test seam invoked before recursive removal classifies each operand.
+    #[doc(hidden)]
+    fn before_remove_type(&mut self, _index: usize) -> VfResult<()> {
         Ok(())
     }
 
