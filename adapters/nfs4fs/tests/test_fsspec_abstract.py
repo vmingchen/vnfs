@@ -45,6 +45,7 @@ class Nfs4AbstractFixtures(AbstractFixtures):
             root=nfs_root,
             auto_mkdir=True,
             minor_version=minor_version,
+            auth="auth_sys",
         )
         fs.mkdir("nfs4:///", create_parents=True)
         yield fs

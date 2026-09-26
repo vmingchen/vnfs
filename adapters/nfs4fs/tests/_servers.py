@@ -16,7 +16,7 @@ def nfs_reachable(host, minor_version):
     from nfs4fs import _native
 
     try:
-        client = _native.NfsClient(host, minor_version=minor_version)
+        client = _native.NfsClient(host, minor_version=minor_version, auth="auth_sys")
         client.shutdown()
         return True
     except Exception:

@@ -14,6 +14,27 @@ import nfs4fs._fs as fs_module
 import pytest
 import vfsi_fsspec._fs as engine_module
 
+from ._servers import nfs_reachable
+
+
+def test_live_server_probe_selects_auth_sys_explicitly(monkeypatch):
+    calls = []
+
+    class ProbeClient:
+        def __init__(self, host, **kwargs):
+            calls.append((host, kwargs))
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(fs_module._native, "NfsClient", ProbeClient)
+    nfs_reachable.cache_clear()
+    try:
+        assert nfs_reachable("probe.example", 1)
+        assert calls == [("probe.example", {"minor_version": 1, "auth": "auth_sys"})]
+    finally:
+        nfs_reachable.cache_clear()
+
 
 def _dummy(tmp_path, **kwargs):
     return fsspec.filesystem(
