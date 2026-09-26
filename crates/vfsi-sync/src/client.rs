@@ -11,8 +11,8 @@ use crate::{
     AttrMask, Capabilities, CopyFileSystem, DEFAULT_READ_MAX_BYTES, DirEntry, DirectoryFileSystem,
     FileSystem, LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
     NamespaceFileSystem, OpenFlags, OpenRequest, Permissions, ReadDirOptions, ReadOp, ReadResult,
-    ReadStreamOptions, SetAttributes, VecFs, VectorFileSystem, VfError, VfFile, VfOffset, VfResult,
-    WriteOpRef, WriteResult,
+    ReadStreamOptions, SetAttributes, VecFs, VectorFileSystem, VfDir, VfError, VfFile, VfOffset,
+    VfResult, WriteOpRef, WriteResult,
 };
 
 fn io_error(error: VfError) -> io::Error {
@@ -346,6 +346,31 @@ impl<F: NamespaceFileSystem + MetadataFileSystem> FsClient<F> {
 
     pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> VfResult<()> {
         self.lock()?.rename_one(from.as_ref(), to.as_ref())
+    }
+}
+
+impl<F: VecFs> FsClient<F> {
+    /// Create `path` if missing, otherwise empty it. Errors if it exists and is
+    /// not a directory (a symlink to a directory is not a directory here).
+    pub fn ensure_empty_dir(&self, path: impl AsRef<Path>) -> VfResult<()> {
+        self.lock()?.ensure_empty_dir(path.as_ref())
+    }
+
+    /// Open a directory for handle-rooted removal. The returned handle cannot
+    /// be swapped for a symlink between opening and removal; release it with
+    /// [`close_dir`](Self::close_dir).
+    pub fn open_dir(&self, path: impl AsRef<Path>) -> VfResult<VfDir> {
+        self.lock()?.open_dir(path.as_ref())
+    }
+
+    /// Remove the contents of a directory handle, keeping the directory.
+    pub fn remove_dir_contents_handle(&self, dir: &VfDir) -> VfResult<()> {
+        self.lock()?.rm_dir_contents(dir)
+    }
+
+    /// Release a handle from [`open_dir`](Self::open_dir).
+    pub fn close_dir(&self, dir: &VfDir) -> VfResult<()> {
+        self.lock()?.close_dir(dir)
     }
 }
 

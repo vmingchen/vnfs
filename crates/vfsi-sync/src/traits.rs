@@ -692,15 +692,38 @@ pub trait VecFs {
 
     /// Remove a list of objects, recursively when `recursive`, `tc_rm()`.
     ///
-    /// Recursive removal is a vectorized, iterative level-order walk rather
-    /// than a scalar recursion: each level's directories are listed in one
-    /// batch, their non-directory children are removed with one vectorized
-    /// [`removev`](Self::removev) per directory, and the directories are then
-    /// removed deepest-first (once empty). Paths are the addressing unit here;
-    /// backends that can hold directory handles (NFS) override this to avoid
-    /// re-resolving paths. The returned error index is always the operand
-    /// index in `objs`.
+    /// This is the fail-fast spelling of
+    /// [`rm_with_options`](Self::rm_with_options); callers wanting best-effort
+    /// semantics should use that.
+    ///
+    /// # Path entry-point race
+    ///
+    /// `objs` are paths. Between the caller naming one and the backend starting
+    /// work, a concurrent actor may replace a path component with a symbolic
+    /// link, causing an unexpected tree to be removed (the classic entry-point
+    /// TOCTOU, RUSTSEC-2023-0018). Prefer the handle-rooted
+    /// [`open_dir`](Self::open_dir) + [`rm_dir_contents`](Self::rm_dir_contents)
+    /// for privileged or attacker-influenced paths.
+    ///
+    /// The returned error index is always the operand index in `objs`.
     fn rm(&mut self, objs: &[&Path], recursive: bool) -> VfRes {
+        self.rm_with_options(objs, recursive, RemoveOptions::default())
+    }
+
+    /// Recursive removal with explicit [`RemoveOptions`].
+    ///
+    /// The generic implementation is fail-fast and uses `objs` as paths;
+    /// backends with a native remover (NFS) override this to honor the options,
+    /// address directories by handle, and batch protocol operations.
+    fn rm_with_options(
+        &mut self,
+        objs: &[&Path],
+        recursive: bool,
+        options: RemoveOptions,
+    ) -> VfRes {
+        if options != RemoveOptions::default() {
+            return Err(VfError::unsupported(0));
+        }
         if objs.is_empty() {
             return Ok(());
         }
@@ -778,12 +801,64 @@ pub trait VecFs {
         Ok(())
     }
 
+    // -- directory handles --------------------------------------------------
+
+    /// Open a directory and return a handle suitable for
+    /// [`rm_dir_contents`](Self::rm_dir_contents).
+    ///
+    /// The directory is opened without following a final symbolic link, so a
+    /// symlink to a directory is rejected. Backends with native directory
+    /// handles (NFS) return [`VfDir::Descriptor`]; the default verifies the
+    /// type and returns [`VfDir::Path`], which callers must treat as no more
+    /// race-safe than the path API. Release a handle with
+    /// [`close_dir`](Self::close_dir).
+    fn open_dir(&mut self, path: &Path) -> VfResult<VfDir> {
+        let mut attrs = VfAttrs {
+            file: VfFile::from_os_path(path),
+            masks: AttrMask::default(),
+            ..VfAttrs::default()
+        };
+        self.lgetattrsv(std::slice::from_mut(&mut attrs))?;
+        if attrs.ftype != VfType::Directory {
+            return Err(VfError::failure(0, ERR_NOTDIR));
+        }
+        Ok(VfDir::Path(path.to_path_buf()))
+    }
+
+    /// Remove the contents of the directory referenced by `dir`, keeping the
+    /// directory itself. Because `dir` is a handle, the tree root cannot be
+    /// swapped for a symlink between opening and removal.
+    fn rm_dir_contents(&mut self, dir: &VfDir) -> VfRes {
+        self.rm_dir_contents_with_options(dir, RemoveOptions::default())
+    }
+
+    /// [`rm_dir_contents`](Self::rm_dir_contents) with explicit options.
+    fn rm_dir_contents_with_options(&mut self, dir: &VfDir, options: RemoveOptions) -> VfRes {
+        match dir {
+            VfDir::Path(path) => self.rm_contents_with_options(path, options),
+            _ => Err(VfError::unsupported(0)),
+        }
+    }
+
+    /// Release a handle obtained from [`open_dir`](Self::open_dir).
+    fn close_dir(&mut self, _dir: &VfDir) -> VfResult<()> {
+        Ok(())
+    }
+
     /// Remove everything inside `dir`, keeping `dir` itself.
     ///
-    /// Backends that hold directory handles (NFS) override this to avoid
-    /// re-resolving the directory; the default lists one level and removes each
-    /// child recursively.
+    /// This takes a path and is therefore subject to the entry-point race
+    /// described on [`rm`](Self::rm); prefer
+    /// [`open_dir`](Self::open_dir) + [`rm_dir_contents`](Self::rm_dir_contents).
     fn rm_contents(&mut self, dir: &Path) -> VfRes {
+        self.rm_contents_with_options(dir, RemoveOptions::default())
+    }
+
+    /// [`rm_contents`](Self::rm_contents) with explicit options.
+    fn rm_contents_with_options(&mut self, dir: &Path, options: RemoveOptions) -> VfRes {
+        if options != RemoveOptions::default() {
+            return Err(VfError::unsupported(0));
+        }
         let entries = self
             .listdir(dir, AttrMask::default(), 0, false)
             .map_err(|error| error.with_index(0))?;
@@ -806,6 +881,30 @@ pub trait VecFs {
                 .map_err(|error| error.with_index(0))?;
         }
         Ok(())
+    }
+
+    /// Make `dir` an empty directory: create it if missing, otherwise empty it.
+    ///
+    /// Errors if `dir` exists and is not a directory (including a symlink to a
+    /// directory). Subject to the same entry-point race as
+    /// [`rm_contents`](Self::rm_contents).
+    fn ensure_empty_dir(&mut self, dir: &Path) -> VfRes {
+        match self.mkdir(dir, 0o777) {
+            Ok(()) => Ok(()),
+            Err(error) if error.err_no() == ERR_EXIST => {
+                let mut attrs = VfAttrs {
+                    file: VfFile::from_os_path(dir),
+                    masks: AttrMask::default(),
+                    ..VfAttrs::default()
+                };
+                self.lgetattrsv(std::slice::from_mut(&mut attrs))?;
+                if attrs.ftype != VfType::Directory {
+                    return Err(VfError::failure(0, ERR_NOTDIR));
+                }
+                self.rm_contents(dir)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Recursively copy a directory tree, `tc_cp_recursive()`.
@@ -1203,6 +1302,10 @@ pub trait VecFsExt: VecFs {
 
     fn rm_contents_path<P: AsRef<Path>>(&mut self, path: P) -> VfRes {
         self.rm_contents(path.as_ref())
+    }
+
+    fn ensure_empty_dir_path<P: AsRef<Path>>(&mut self, path: P) -> VfRes {
+        self.ensure_empty_dir(path.as_ref())
     }
 }
 

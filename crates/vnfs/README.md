@@ -297,6 +297,37 @@ server was unavailable. Streaming callback APIs are not replayed because a
 callback may already have observed a prefix. Treat an error from those APIs as
 partial progress and restart at an application-defined checkpoint.
 
+### Recursive removal and path-entry races
+
+`rm`, `rm_contents`, and `ensure_empty_dir` take paths. Between the caller
+naming a path and the backend starting work, a concurrent actor can replace a
+path component with a symbolic link, so a privileged process may remove an
+unintended tree. This is the entry-point TOCTOU described by
+[RUSTSEC-2023-0018](https://rustsec.org/advisories/RUSTSEC-2023-0018.html); it
+cannot be fixed inside a path-taking library and must be handled by the caller.
+
+Inside the tree, removal is already safe: directories are addressed by
+filehandle and every `REMOVE`/`READDIR` is issued relative to a held handle, so
+an intermediate component swapped for a symlink cannot redirect the walk.
+
+For privileged or attacker-influenced paths, root the removal at an
+already-open directory instead of a path:
+
+```rust
+let dir = client.open_dir("/attacker/controlled")?;   // resolved once
+client.remove_dir_contents_handle(&dir)?;             // no path re-resolution
+client.close_dir(&dir)?;
+```
+
+`open_dir` resolves the directory once, without following a final symlink (a
+symlink to a directory is rejected). `rm_dir_contents` empties that handle
+while keeping the directory. `rm_with_options` and `rm_contents_with_options`
+accept a [`RemoveOptions`](https://docs.rs/vnfs) value choosing best-effort vs
+fail-fast removal (`continue_on_error`, defaulting to fail-fast), the starting vector batch size
+(`batch`), and the retry count for transient per-entry statuses (`retries`).
+These tuning options are implemented by the NFS backend. Backends using the
+generic remover reject non-default options rather than silently ignoring them.
+
 ## Platform and build requirements
 
 The supported native target is Linux. The minimum supported Rust version is
