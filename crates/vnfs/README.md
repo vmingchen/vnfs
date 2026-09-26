@@ -172,6 +172,85 @@ path, operation, vector index, and retry information. The standard `Read`,
 `Write`, and `Seek` implementations remain available when integration with
 generic `std::io` code is more important than retaining that detail.
 
+## Large-file streaming and tuning
+
+For a large file, stream bounded chunks instead of collecting the complete
+file in a `Vec`. The default chunk size is 1 MiB; tune it for the server,
+network RTT, and consumer. The backend still obeys negotiated NFS limits, so
+the callback may receive smaller chunks. It runs synchronously while the
+client's backend is borrowed and should not call back into the same client.
+
+```rust,no_run
+use vnfs::prelude::*;
+
+fn main() -> vnfs::Result<()> {
+    let client = Nfs::connect("nfs.example.com")?;
+    let mut bytes_seen = 0u64;
+    client.read_stream_with_options(
+        "/dataset/large.bin",
+        ReadStreamOptions::new().chunk_size(4 * 1024 * 1024),
+        |offset, chunk| {
+            assert_eq!(offset, bytes_seen);
+            // Consume/process this chunk here; do not retain it to keep memory bounded.
+            bytes_seen += chunk.len() as u64;
+            Ok(true)
+        },
+    )?;
+    println!("read {bytes_seen} bytes");
+    Ok(())
+}
+```
+
+Benchmark a real export while sweeping chunk sizes; the driver counts bytes
+without retaining them, reports median throughput and chunk count, and compares
+single-session reads against a persistent pool of independent NFS sessions.
+Pool setup is reported separately from read time. The pool bounds outstanding
+chunks by `max_buffered_bytes`, delivers chunks in file order, and does not
+provide snapshot consistency if another client modifies the file while it is
+being read:
+
+```console
+cargo run --release -p vnfs --example large_file_read_benchmark --features nfs -- \
+  --host 127.0.0.1 --root /export --path /large.bin \
+  --chunk-sizes 65536,262144,1048576,4194304 --rounds 7 --warmups 2
+```
+
+Add `--minor-version 1` or `--minor-version 2` to pin an NFS version instead
+of using the client's default negotiation.
+
+Use the same file and server when comparing chunk sizes. For network-latency
+experiments, add controlled RTT with `tc netem` on the client/server path and
+record the applied delay; report cold and warm runs separately. The best size
+depends on negotiated server limits, latency, throughput, and callback work.
+This synchronous client serializes operations on a connection; use
+`connect_read_pool` when the server and network can benefit from multiple
+independent sessions. `NfsReadPoolOptions` defaults to four workers, 1 MiB
+chunks, at most eight outstanding ranges, and a 16 MiB buffer budget. A pool
+keeps its sessions alive across streams, but opens and closes a file on each
+worker for every stream. Tune worker count and chunk size against measured
+throughput: more sessions can increase server load and are not always faster.
+
+```rust,no_run
+use vnfs::prelude::*;
+
+fn main() -> vnfs::Result<()> {
+    let mut pool = Nfs::builder("nfs.example.com").root("/export")
+        .connect_read_pool(
+            NfsReadPoolOptions::new()
+                .worker_count(4)
+                .chunk_size(1024 * 1024)
+                .max_in_flight(8)
+                .max_buffered_bytes(16 * 1024 * 1024),
+        )?;
+    pool.read_stream("/dataset/large.bin", |offset, chunk| {
+        // Consume chunks in order; false cancels after this chunk.
+        println!("received {} bytes at {offset}", chunk.len());
+        Ok(true)
+    })?;
+    Ok(())
+}
+```
+
 One backend connection serializes access to its stateful NFS session, while
 `FsClient::readv` and `writev` preserve useful compound batching.
 Create a bounded pool of clients when parallel network requests are required;

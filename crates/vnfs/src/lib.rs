@@ -47,16 +47,17 @@ pub mod legacy {
 /// Common Rust-native imports without protocol or FFI internals.
 pub mod prelude {
     #[cfg(feature = "nfs")]
-    pub use crate::{Nfs, NfsBuilder, NfsClient, NfsFile};
+    pub use crate::{Nfs, NfsBuilder, NfsClient, NfsFile, NfsReadPool, NfsReadPoolOptions};
     pub use vfsi_core::{
         Capabilities, DirEntry, Metadata, OpenFlags, OpenRequest, Permissions, ReadResult, VfError,
         VfResult, WriteResult,
     };
     pub use vfsi_sync::{
         CopyFileSystem, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES,
-        DirectoryFileSystem, FileSystem, FsClient, FsFile, LinkFileSystem, MetadataFileSystem,
-        NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadAllOptions, ReadDirOptions,
-        SetMetadata, VectorFileSystem, WalkOptions,
+        DEFAULT_READ_STREAM_CHUNK_BYTES, DirectoryFileSystem, FileSystem, FsClient, FsFile,
+        LinkFileSystem, MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions,
+        ReadAllOptions, ReadDirOptions, ReadStreamOptions, SetMetadata, VectorFileSystem,
+        WalkOptions,
     };
 }
 
@@ -72,13 +73,13 @@ pub use vfsi_nfs::RpcsecGssProtection;
 #[cfg(feature = "nfs")]
 pub use vfsi_nfs::{
     NfsAuthentication, NfsClientBuilder, NfsConnectOptions, NfsEvent, NfsExtensions, NfsObserver,
-    NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
+    NfsReadPool, NfsReadPoolOptions, NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
 };
 pub use vfsi_sync::{
     CopyFileSystem, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
-    DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_WALK_MAX_DEPTH,
-    DirectoryFileSystem, FileSystem, FsClient, FsFile, FsRead, FsReadInto, FsWrite, LinkFileSystem,
-    MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadAllOptions,
-    ReadDirOptions, SetMetadata, VecFs, VecFsExt, VectorFileSystem, VfFileHandle, VfOpenOptions,
-    WalkOptions, rm_recursive,
+    DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
+    DEFAULT_WALK_MAX_DEPTH, DirectoryFileSystem, FileSystem, FsClient, FsFile, FsRead, FsReadInto,
+    FsWrite, LinkFileSystem, MetadataFileSystem, NamespaceFileSystem, NativeFileSystem,
+    OpenOptions, ReadAllOptions, ReadDirOptions, ReadStreamOptions, SetMetadata, VecFs, VecFsExt,
+    VectorFileSystem, VfFileHandle, VfOpenOptions, WalkOptions, rm_recursive,
 };

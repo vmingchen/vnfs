@@ -42,8 +42,8 @@ pub mod vecfs {
 pub use nfs::RpcsecGssProtection;
 #[cfg(feature = "ffi")]
 pub use nfs::{
-    NfsAuthentication, NfsClientBuilder, NfsConnectOptions, NfsEvent, NfsObserver,
-    NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
+    NfsAuthentication, NfsClientBuilder, NfsConnectOptions, NfsEvent, NfsObserver, NfsReadPool,
+    NfsReadPoolOptions, NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
 };
 
 /// NFS-only negotiated state, kept out of protocol-neutral VFSI traits.

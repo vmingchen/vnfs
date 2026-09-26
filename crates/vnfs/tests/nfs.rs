@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use vnfs::NfsVecFs;
 use vnfs::legacy::nfs::*;
+use vnfs::{Nfs, NfsReadPoolOptions};
 
 #[cfg(feature = "test-faults")]
 use std::io::{self, Read, Write};
@@ -349,6 +350,66 @@ fn init_deinit() {
     let cwd = c.getcwd();
     assert_eq!(cwd, Path::new("/"));
     drop(c);
+}
+
+#[test]
+fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
+    let dir = setup_dir("read_pool");
+    let path = format!("{dir}/large.bin");
+    let expected: Vec<u8> = (0usize..(3 * 1024 * 1024 + 173))
+        .map(|index| (index.wrapping_mul(31) % 251) as u8)
+        .collect();
+    let client = Nfs::connect("127.0.0.1").expect("connect NFS client");
+    client.write(&path, &expected).expect("write fixture");
+
+    let options = NfsReadPoolOptions::new()
+        .worker_count(3)
+        .chunk_size(64 * 1024)
+        .max_in_flight(5)
+        .max_buffered_bytes(5 * 64 * 1024);
+    let mut pool = Nfs::builder("127.0.0.1")
+        .connect_read_pool(options)
+        .expect("connect read pool");
+
+    let mut actual = Vec::with_capacity(expected.len());
+    let mut next_offset = 0u64;
+    pool.read_stream(&path, |offset, data| {
+        assert_eq!(offset, next_offset, "callbacks are delivered in order");
+        next_offset += data.len() as u64;
+        actual.extend_from_slice(data);
+        Ok(true)
+    })
+    .expect("stream complete file");
+    assert_eq!(actual, expected);
+
+    let mut callbacks = 0;
+    pool.read_stream(&path, |_, _| {
+        callbacks += 1;
+        Ok(false)
+    })
+    .expect("cancel stream");
+    assert_eq!(callbacks, 1);
+
+    let callback_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = pool.read_stream(&path, |_, _| -> vnfs::VfResult<bool> {
+            panic!("injected callback panic")
+        });
+    }));
+    assert!(
+        callback_panic.is_err(),
+        "callback panic should resume to caller"
+    );
+
+    // Cancellation and callback unwinding must close worker descriptors and
+    // leave the pool usable for another complete stream.
+    let mut reread = Vec::with_capacity(expected.len());
+    pool.read_stream(&path, |_, data| {
+        reread.extend_from_slice(data);
+        Ok(true)
+    })
+    .expect("reuse pool after cancellation");
+    assert_eq!(reread, expected);
+    client.remove_file(&path).expect("remove fixture");
 }
 
 // ---------------------------------------------------------------------------

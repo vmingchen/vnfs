@@ -11,7 +11,8 @@ use crate::{
     AttrMask, Capabilities, CopyFileSystem, DEFAULT_READ_MAX_BYTES, DirEntry, DirectoryFileSystem,
     FileSystem, LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
     NamespaceFileSystem, OpenFlags, OpenRequest, Permissions, ReadDirOptions, ReadOp, ReadResult,
-    SetAttributes, VectorFileSystem, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
+    ReadStreamOptions, SetAttributes, VecFs, VectorFileSystem, VfError, VfFile, VfOffset, VfResult,
+    WriteOpRef, WriteResult,
 };
 
 fn io_error(error: VfError) -> io::Error {
@@ -156,6 +157,67 @@ impl<F: FileSystem> FsClient<F> {
             written += count;
         }
         file.close()
+    }
+}
+
+impl<F: FileSystem + VecFs> FsClient<F> {
+    /// Stream one file from offset zero in bounded chunks.
+    ///
+    /// The callback runs while the backend is borrowed and must not reenter
+    /// this client. Return `Ok(false)` to stop successfully. Callback errors
+    /// are propagated. The file is closed on success, cancellation, callback
+    /// error, or read error. At most one requested chunk is buffered at once.
+    pub fn read_stream(
+        &self,
+        path: impl AsRef<Path>,
+        callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
+    ) -> VfResult<()> {
+        self.read_stream_with_options(path, ReadStreamOptions::default(), callback)
+    }
+
+    /// Stream one file using an explicit maximum chunk size.
+    pub fn read_stream_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: ReadStreamOptions,
+        mut callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
+    ) -> VfResult<()> {
+        let chunk_size = options.chunk_size_bytes();
+        if chunk_size == 0 {
+            return Err(VfError::failure(0, crate::ERR_INVAL));
+        }
+
+        let file = self.open(path)?;
+        let raw_file = file.raw().clone();
+        let mut callback_error = None;
+        let operation = (|| {
+            self.lock()?.read_streamv(
+                std::slice::from_ref(&raw_file),
+                chunk_size,
+                chunk_size,
+                &mut |_, offset, data, _| {
+                    if data.is_empty() {
+                        return true;
+                    }
+                    match callback(offset, data) {
+                        Ok(keep_going) => keep_going,
+                        Err(error) => {
+                            callback_error = Some(error);
+                            false
+                        }
+                    }
+                },
+            )
+        })();
+        let operation = match callback_error {
+            Some(error) => Err(error),
+            None => operation,
+        };
+        let close = file.close();
+        match operation {
+            Err(error) => Err(error),
+            Ok(()) => close,
+        }
     }
 }
 

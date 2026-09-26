@@ -4,8 +4,44 @@ use vfsi_core::internal::ManyResults;
 /// Default payload limit for APIs that allocate and return complete contents.
 pub const DEFAULT_READ_MAX_BYTES: usize = 16 * 1024 * 1024;
 
+/// Default size of each chunk delivered by the bounded single-file stream API.
+pub const DEFAULT_READ_STREAM_CHUNK_BYTES: usize = 1024 * 1024;
+
 /// Default aggregate payload limit for [`VecFs::read_allv`].
 pub const DEFAULT_READ_ALLV_MAX_TOTAL_BYTES: usize = DEFAULT_READ_MAX_BYTES;
+
+/// Tuning options for bounded single-file streaming reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadStreamOptions {
+    chunk_size: usize,
+}
+
+impl ReadStreamOptions {
+    pub const fn new() -> Self {
+        Self {
+            chunk_size: DEFAULT_READ_STREAM_CHUNK_BYTES,
+        }
+    }
+
+    /// Set the maximum bytes delivered to the callback at once.
+    ///
+    /// NFS and other backends may return smaller chunks due to negotiated
+    /// protocol limits. A larger setting does not bypass those limits.
+    pub const fn chunk_size(mut self, bytes: usize) -> Self {
+        self.chunk_size = bytes;
+        self
+    }
+
+    pub const fn chunk_size_bytes(self) -> usize {
+        self.chunk_size
+    }
+}
+
+impl Default for ReadStreamOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Default maximum number of entries returned by allocating directory APIs.
 pub const DEFAULT_DIRECTORY_MAX_ENTRIES: usize = 100_000;

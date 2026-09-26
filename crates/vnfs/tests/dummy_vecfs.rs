@@ -58,6 +58,83 @@ fn dummy_write_read_roundtrip() {
 }
 
 #[test]
+fn single_file_stream_is_bounded_ordered_and_cancellable() {
+    use vnfs::{FsClient, ReadStreamOptions, VfError};
+
+    let client = FsClient::new(dummy());
+    let payload: Vec<u8> = (0..(2 * 1024 * 1024 + 37))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    client.write("/stream", &payload).unwrap();
+
+    let mut actual = Vec::new();
+    let mut next_offset = 0u64;
+    client
+        .read_stream_with_options(
+            "/stream",
+            ReadStreamOptions::new().chunk_size(64 * 1024),
+            |offset, chunk| {
+                assert_eq!(offset, next_offset);
+                assert!(!chunk.is_empty());
+                assert!(chunk.len() <= 64 * 1024);
+                next_offset += chunk.len() as u64;
+                actual.extend_from_slice(chunk);
+                Ok(true)
+            },
+        )
+        .unwrap();
+    assert_eq!(actual, payload);
+
+    let mut default_bytes = 0usize;
+    client
+        .read_stream("/stream", |offset, chunk| {
+            assert_eq!(offset, default_bytes as u64);
+            assert!(chunk.len() <= vnfs::DEFAULT_READ_STREAM_CHUNK_BYTES);
+            default_bytes += chunk.len();
+            Ok(true)
+        })
+        .unwrap();
+    assert_eq!(default_bytes, payload.len());
+
+    let mut seen = 0usize;
+    client
+        .read_stream_with_options(
+            "/stream",
+            ReadStreamOptions::new().chunk_size(1234),
+            |_, chunk| {
+                seen += chunk.len();
+                Ok(false)
+            },
+        )
+        .unwrap();
+    assert_eq!(seen, 1234);
+
+    let error = client
+        .read_stream("/stream", |_, _| Err(VfError::client(0, libc::EIO as u32)))
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EIO as u32);
+
+    client.write("/empty", &[]).unwrap();
+    let mut empty_callbacks = 0;
+    client
+        .read_stream("/empty", |_, _| {
+            empty_callbacks += 1;
+            Ok(true)
+        })
+        .unwrap();
+    assert_eq!(empty_callbacks, 0);
+
+    let error = client
+        .read_stream_with_options(
+            "/does-not-exist",
+            ReadStreamOptions::new().chunk_size(0),
+            |_, _| Ok(true),
+        )
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EINVAL as u32);
+}
+
+#[test]
 fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
     use vnfs::{
         DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, FsClient, VecFs, VfFile,

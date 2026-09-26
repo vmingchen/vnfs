@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{
-    FsClient, FsFile, NfsAuthentication, NfsClientBuilder, NfsObserver, NfsRecoveryPolicy,
-    NfsVecFs, VfResult,
+    FsClient, FsFile, NfsAuthentication, NfsClientBuilder, NfsObserver, NfsReadPool,
+    NfsReadPoolOptions, NfsRecoveryPolicy, NfsVecFs, VfResult,
 };
 
 pub type NfsClient = FsClient<NfsVecFs>;
@@ -96,5 +96,10 @@ impl NfsBuilder {
 
     pub fn connect_backend(self) -> VfResult<NfsVecFs> {
         self.inner.connect()
+    }
+
+    /// Connect a reusable bounded pool for ordered pipelined large-file reads.
+    pub fn connect_read_pool(self, options: NfsReadPoolOptions) -> VfResult<NfsReadPool> {
+        self.inner.connect_read_pool(options)
     }
 }

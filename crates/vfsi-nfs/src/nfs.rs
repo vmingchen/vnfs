@@ -22,6 +22,9 @@ use crate::path::{
     split_path_bytes,
 };
 use crate::session::make_verifier;
+#[path = "read_pool.rs"]
+mod read_pool;
+pub use read_pool::{NfsReadPool, NfsReadPoolOptions};
 // Re-export the shared types/trait so `use vnfs::legacy::nfs::*` works.
 pub use crate::rpc::NfsAuthentication;
 #[cfg(feature = "rpcsec-gss")]
@@ -192,7 +195,23 @@ impl NfsClientBuilder {
         self
     }
 
+    /// Connect a reusable bounded pool for ordered pipelined large-file reads.
+    pub fn connect_read_pool(self, options: NfsReadPoolOptions) -> VfResult<NfsReadPool> {
+        self.validate()?;
+        NfsReadPool::connect(self, options)
+    }
+
     pub fn connect(self) -> VfResult<NfsVecFs> {
+        self.validate()?;
+        let mut filesystem = NfsVecFs::connect_with_options(&self.host, self.options)?;
+        filesystem.observer = self.observer;
+        filesystem.notify(NfsEvent::Connected {
+            minor_version: filesystem.minorversion(),
+        });
+        Ok(filesystem)
+    }
+
+    fn validate(&self) -> VfResult<()> {
         if self.require_secure_authentication
             && matches!(&self.options.authentication, NfsAuthentication::AuthSys)
         {
@@ -210,12 +229,7 @@ impl NfsClientBuilder {
                 VfError::client(0, ERR_INVAL).with_context("connect", Path::new(&self.host))
             );
         }
-        let mut filesystem = NfsVecFs::connect_with_options(&self.host, self.options)?;
-        filesystem.observer = self.observer;
-        filesystem.notify(NfsEvent::Connected {
-            minor_version: filesystem.minorversion(),
-        });
-        Ok(filesystem)
+        Ok(())
     }
 }
 
