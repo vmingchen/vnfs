@@ -230,6 +230,18 @@ keeps its sessions alive across streams, but opens and closes a file on each
 worker for every stream. Tune worker count and chunk size against measured
 throughput: more sessions can increase server load and are not always faster.
 
+On an isolated Linux test host, this helper applies 500 microseconds of
+egress delay to loopback (about 1 ms added RTT), runs the sweep, and removes
+the qdisc on exit. It refuses to replace an existing loopback qdisc and only
+accepts loopback server addresses:
+
+```console
+sudo apt install iproute2
+dd if=/dev/zero of=/srv/vnfs-ci/.vnfs-large-read-benchmark bs=1M count=32
+./ci/benchmark-large-read-pipeline.sh 127.0.0.1 / /.vnfs-large-read-benchmark 500us 5 1
+rm /srv/vnfs-ci/.vnfs-large-read-benchmark
+```
+
 ```rust,no_run
 use vnfs::prelude::*;
 

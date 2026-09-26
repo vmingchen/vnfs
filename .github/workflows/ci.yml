@@ -480,7 +480,7 @@ jobs:
       - name: Install NFS-Ganesha and build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev nfs-ganesha nfs-ganesha-vfs
+          sudo apt-get install -y clang libclang-dev cmake pkg-config iproute2 libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev nfs-ganesha nfs-ganesha-vfs
       - name: Start local NFSv4 server
         run: |
           sudo systemctl stop nfs-ganesha.service || true
@@ -533,6 +533,14 @@ jobs:
           done
           cat /tmp/ganesha.log
           exit 1
+      - name: Benchmark single-file streaming with controlled loopback RTT
+        run: |
+          file=/srv/vnfs-ci/.vnfs-large-read-benchmark
+          trap 'rm -f "$file"' EXIT
+          dd if=/dev/zero of="$file" bs=1M count=32 status=none
+          ./ci/benchmark-large-read-pipeline.sh 127.0.0.1 / /.vnfs-large-read-benchmark 500us 3 1
+          rm -f "$file"
+          trap - EXIT
       - name: Run NFS integration suite
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}

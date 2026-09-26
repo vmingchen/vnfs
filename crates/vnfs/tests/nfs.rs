@@ -286,10 +286,14 @@ fn rust_native_client_workflow_on_nfs() {
 }
 
 fn client() -> NfsVecFs {
+    // CI servers normally register NFS with rpcbind. Local test daemons often
+    // listen directly on 2049 without registration, so allow an explicit
+    // endpoint (for example, `127.0.0.1:2049`) for those environments.
+    let host = std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     match std::env::var("VNFS_TEST_MINOR").as_deref() {
-        Ok("1") => NfsVecFs::connect_minor("127.0.0.1", 1),
-        Ok("2") => NfsVecFs::connect_minor("127.0.0.1", 2),
-        _ => NfsVecFs::connect("127.0.0.1"),
+        Ok("1") => NfsVecFs::connect_minor(&host, 1),
+        Ok("2") => NfsVecFs::connect_minor(&host, 2),
+        _ => NfsVecFs::connect(&host),
     }
     .expect("connect to local nfs server")
 }
@@ -1801,6 +1805,46 @@ fn openv_does_not_replay_exclusive_create_after_real_reply_loss() {
     assert!(admin.exists(Path::new(&paths[0])).unwrap());
     assert!(admin.exists(Path::new(&paths[1])).unwrap());
     admin.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn pipelined_read_recovers_after_a_lost_read_reply() {
+    use vnfs::{Nfs, NfsReadPoolOptions};
+
+    let dir = setup_dir("read_pool_proxy_reply_loss");
+    let path = format!("{dir}/large.bin");
+    let expected: Vec<u8> = (0usize..(2 * 1024 * 1024 + 19))
+        .map(|index| (index.wrapping_mul(17) % 251) as u8)
+        .collect();
+    let mut admin = client();
+    write_file(&mut admin, Path::new(&path), &expected);
+
+    let proxy = DropReplyProxy::start("127.0.0.1:2049".parse().unwrap());
+    let mut pool = Nfs::builder(proxy.endpoint())
+        .connect_read_pool(
+            NfsReadPoolOptions::new()
+                .worker_count(3)
+                .chunk_size(32 * 1024)
+                .max_in_flight(6)
+                .max_buffered_bytes(6 * 32 * 1024),
+        )
+        .expect("connect read pool through NFS reply-loss proxy");
+
+    let mut actual = Vec::with_capacity(expected.len());
+    let mut first_chunk = true;
+    pool.read_stream(&path, |_, data| {
+        if first_chunk {
+            first_chunk = false;
+            proxy.arm();
+        }
+        actual.extend_from_slice(data);
+        Ok(true)
+    })
+    .expect("read should recover after the lost read response");
+    proxy.wait_for_drop();
+    assert_eq!(actual, expected);
+    admin.removev(&[VfFile::from_path(&path)]).unwrap();
 }
 
 #[test]

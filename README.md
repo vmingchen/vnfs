@@ -99,8 +99,9 @@ server-side copy when the server advertises it.
 
 VFSI and its Python packages are beta software. The core behavior is covered
 by Rust, Python, upstream `fsspec` contract, C ABI, NFS, and Samba integration
-tests. AUTH_SYS remains the default; production Rust clients can opt into
-Kerberos RPCSEC_GSS, while the Python adapter does not yet expose that option.
+tests. AUTH_SYS remains the default; Rust and Python clients can opt into
+Kerberos RPCSEC_GSS (`krb5` or `krb5i`). The private-realm integration test
+covers authentication, renewable-ticket expiry, and reconnect.
 The API is synchronous, and Linux is the only native-package platform. Read-only NFS
 operations recover automatically from transport and session failures with
 bounded reconnect/reopen attempts; mutations are not replayed when a lost
