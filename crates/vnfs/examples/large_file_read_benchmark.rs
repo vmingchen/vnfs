@@ -21,6 +21,7 @@ struct Args {
     rounds: usize,
     warmups: usize,
     chunk_sizes: Vec<usize>,
+    worker_counts: Vec<usize>,
 }
 
 impl Default for Args {
@@ -33,6 +34,7 @@ impl Default for Args {
             rounds: 5,
             warmups: 1,
             chunk_sizes: vec![64 * 1024, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024],
+            worker_counts: vec![2, 4],
         }
     }
 }
@@ -70,9 +72,15 @@ fn parse() -> Result<Args> {
                     .map(str::parse)
                     .collect::<std::result::Result<_, _>>()?;
             }
+            "--worker-counts" => {
+                parsed.worker_counts = value(&mut args, "--worker-counts")?
+                    .split(',')
+                    .map(str::parse)
+                    .collect::<std::result::Result<_, _>>()?;
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run --release -p vnfs --example large_file_read_benchmark --features nfs -- --host HOST --root EXPORT_ROOT --path FILE [--minor-version 1|2] [--rounds N] [--warmups N] [--chunk-sizes BYTES,...]"
+                    "Usage: cargo run --release -p vnfs --example large_file_read_benchmark --features nfs -- --host HOST --root EXPORT_ROOT --path FILE [--minor-version 1|2] [--rounds N] [--warmups N] [--chunk-sizes BYTES,...] [--worker-counts N,...]"
                 );
                 std::process::exit(0);
             }
@@ -89,6 +97,8 @@ fn parse() -> Result<Args> {
         || parsed.rounds == 0
         || parsed.chunk_sizes.is_empty()
         || parsed.chunk_sizes.contains(&0)
+        || parsed.worker_counts.is_empty()
+        || parsed.worker_counts.contains(&0)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -171,7 +181,7 @@ fn main() -> Result<()> {
             elapsed * 1000.0
         );
 
-        for worker_count in [2, 4] {
+        for &worker_count in &args.worker_counts {
             let setup_started = Instant::now();
             let mut pool = Nfs::builder(args.host.clone())
                 .root(args.root.clone())

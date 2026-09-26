@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 3 ]]; then
-    echo "usage: $0 HOST EXPORT_ROOT FILE [DELAY] [ROUNDS] [WARMUPS]" >&2
+    echo "usage: $0 HOST EXPORT_ROOT FILE [DELAY] [ROUNDS] [WARMUPS] [CHUNK_SIZES] [WORKER_COUNTS]" >&2
     exit 2
 fi
 
@@ -12,6 +12,8 @@ path=$3
 delay=${4:-500us}
 rounds=${5:-5}
 warmups=${6:-1}
+chunk_sizes=${7:-}
+worker_counts=${8:-}
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 interface=lo
 
@@ -40,6 +42,15 @@ trap 'exit 143' TERM
 sudo tc qdisc add dev "$interface" root netem delay "$delay"
 echo "Applying $delay egress delay on $interface (loopback RTT is approximately twice this)."
 cd "$repo_root"
-cargo run --release -p vnfs --example large_file_read_benchmark --features nfs -- \
+benchmark_args=(
     --host "$host" --root "$root" --path "$path" \
     --rounds "$rounds" --warmups "$warmups"
+)
+if [[ -n "$chunk_sizes" ]]; then
+    benchmark_args+=(--chunk-sizes "$chunk_sizes")
+fi
+if [[ -n "$worker_counts" ]]; then
+    benchmark_args+=(--worker-counts "$worker_counts")
+fi
+cargo run --release -p vnfs --example large_file_read_benchmark --features nfs -- \
+    "${benchmark_args[@]}"

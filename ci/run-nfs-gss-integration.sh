@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 state_dir=$(mktemp -d "${TMPDIR:-/tmp}/vnfs-gss.XXXXXX")
+sudo install -d -m 755 /export
 export_dir=$(sudo mktemp -d /export/vnfs-gss.XXXXXX)
 ganesha_bin=${GANESHA_BIN:-ganesha.nfsd}
 kdc_pid=

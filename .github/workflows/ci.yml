@@ -538,7 +538,7 @@ jobs:
           file=/srv/vnfs-ci/.vnfs-large-read-benchmark
           trap 'rm -f "$file"' EXIT
           dd if=/dev/zero of="$file" bs=1M count=32 status=none
-          ./ci/benchmark-large-read-pipeline.sh 127.0.0.1 / /.vnfs-large-read-benchmark 500us 3 1
+          ./ci/benchmark-large-read-pipeline.sh 127.0.0.1 / /.vnfs-large-read-benchmark 500us 3 1 65536,262144 2
           rm -f "$file"
           trap - EXIT
       - name: Run NFS integration suite
