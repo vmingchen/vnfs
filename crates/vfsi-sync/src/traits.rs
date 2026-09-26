@@ -715,6 +715,9 @@ pub trait VecFs {
     /// The generic implementation is fail-fast and uses `objs` as paths;
     /// backends with a native remover (NFS) override this to honor the options,
     /// address directories by handle, and batch protocol operations.
+    /// Generic recursive removal requires no-follow metadata (`LSTAT`); a
+    /// backend that cannot provide it returns `unsupported` rather than risk
+    /// traversing a symbolic link. Non-recursive removal does not require it.
     fn rm_with_options(
         &mut self,
         objs: &[&Path],

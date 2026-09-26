@@ -602,7 +602,16 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     fs.chdir(Path::new(&sub)).expect("chdir");
     assert_eq!(fs.getcwd().file_name(), Some(Path::new("sub").as_os_str()));
 
-    // rm recursive removes the whole tree.
-    fs.rm(&[Path::new(&dir)], true).expect("rm recursive");
-    assert!(!fs.exists(Path::new(&dir)).unwrap());
+    // Generic recursive removal requires no-follow metadata. Backends without
+    // LSTAT must reject it without changing the tree.
+    if capabilities & VF_CAP_LSTAT != 0 {
+        fs.rm(&[Path::new(&dir)], true).expect("rm recursive");
+        assert!(!fs.exists(Path::new(&dir)).unwrap());
+    } else {
+        assert_eq!(
+            fs.rm(&[Path::new(&dir)], true).unwrap_err().err_no(),
+            VF_ERR_UNSUPPORTED
+        );
+        assert!(fs.exists(Path::new(&dir)).unwrap());
+    }
 }

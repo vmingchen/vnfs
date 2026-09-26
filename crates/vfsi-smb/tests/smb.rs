@@ -6,9 +6,12 @@
 //! Set `VFSI_SMB_RESTART_COMMAND` to a command that restarts the configured
 //! server to enable recovery coverage.
 
-use std::path::{Path, PathBuf};
 #[cfg(feature = "test-faults")]
-use std::{fs, os::unix::fs::PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use vfsi_smb::SmbExtensions;
 use vfsi_smb::{SmbConnectOptions, SmbVecFs};
@@ -29,6 +32,28 @@ use vfsi_sync::VfError;
 
 fn required(name: &str) -> bool {
     std::env::var(name).as_deref() == Ok("1")
+}
+
+/// Remove test fixtures through the local backing directory when the server
+/// is running on this host. SMB intentionally lacks no-follow metadata, so the
+/// generic recursive remover rejects these path-based cleanups.
+fn cleanup_test_tree(path: &Path) {
+    let Ok(local_root) = std::env::var("VFSI_SMB_LOCAL_ROOT") else {
+        return;
+    };
+    let relative = path
+        .strip_prefix("/")
+        .expect("SMB test fixture paths are share-root relative");
+    assert!(
+        relative
+            .components()
+            .all(|component| { matches!(component, std::path::Component::Normal(_)) })
+    );
+    match fs::remove_dir_all(Path::new(&local_root).join(relative)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("remove local SMB test fixture {path:?}: {error}"),
+    }
 }
 
 fn connect() -> Option<SmbVecFs> {
@@ -124,7 +149,7 @@ fn concurrent_write_preflight_keeps_distinct_files_vectorized() {
         return;
     };
     let root = PathBuf::from(format!("/vfsi-smb-identities-{}", std::process::id()));
-    let _ = client.rm(&[root.as_path()], true);
+    cleanup_test_tree(&root);
     client.mkdir(&root, 0o755).unwrap();
     let first = root.join("first");
     let second = root.join("second");
@@ -141,8 +166,30 @@ fn concurrent_write_preflight_keeps_distinct_files_vectorized() {
         ])
         .unwrap();
     assert!(client.test_last_writev_was_concurrent());
-    client.rm(&[root.as_path()], true).unwrap();
+    cleanup_test_tree(&root);
     client.shutdown().unwrap();
+}
+
+#[test]
+fn recursive_remove_requires_no_follow_metadata() {
+    let Some(mut fs) = connect() else {
+        eprintln!("skipping SMB removal capability test: VFSI_SMB_SERVER/SHARE not set");
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-no-lstat-{}", std::process::id()));
+    cleanup_test_tree(&root);
+    fs.mkdir(&root, 0o755).unwrap();
+    let child = root.join("keep");
+    fs.writev(&[WriteOp::from_os_path(&child, VfOffset::At(0), b"x".to_vec()).with_creation()])
+        .unwrap();
+
+    let error = fs.rm(&[root.as_path()], true).unwrap_err();
+    assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
+    assert!(
+        fs.exists(&child).unwrap(),
+        "unsupported removal must not mutate"
+    );
+    cleanup_test_tree(&root);
 }
 
 #[test]
@@ -153,7 +200,7 @@ fn rust_native_file_workflow_on_smb() {
     };
     let client = vfsi_sync::FsClient::new(fs);
     let root = PathBuf::from(format!("/vfsi-smb-native-{}", std::process::id()));
-    let _ = client.remove_dir_all(&root);
+    cleanup_test_tree(&root);
     client.create_dir(&root).unwrap();
     let paths = [root.join("one"), root.join("two")];
     let files = client
@@ -179,7 +226,7 @@ fn rust_native_file_workflow_on_smb() {
     assert_eq!(values[0].data, b"one");
     assert_eq!(values[1].data, b"two");
     client.closev(files).unwrap();
-    client.remove_dir_all(&root).unwrap();
+    cleanup_test_tree(&root);
 }
 
 #[cfg(feature = "test-faults")]
@@ -190,7 +237,7 @@ fn smb_openv_injected_registration_failure_closes_all_successes() {
         return;
     };
     let root = PathBuf::from(format!("/vfsi-smb-openv-fault-{}", std::process::id()));
-    let _ = fs.rm(&[root.as_path()], true);
+    cleanup_test_tree(&root);
     fs.mkdir(root.as_path(), 0o755).unwrap();
     let paths = [root.join("f0"), root.join("f1"), root.join("f2")];
     let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
@@ -213,7 +260,7 @@ fn smb_openv_injected_registration_failure_closes_all_successes() {
         script.remaining()
     );
     assert_eq!(fs.test_open_handle_count(), 0);
-    fs.rm(&[root.as_path()], true).unwrap();
+    cleanup_test_tree(&root);
 }
 
 #[cfg(feature = "test-faults")]
@@ -224,7 +271,7 @@ fn smb_failed_strict_open_quarantines_unconfirmed_cleanup() {
         return;
     };
     let root = PathBuf::from(format!("/vfsi-smb-cleanup-fault-{}", std::process::id()));
-    let _ = fs.rm(&[root.as_path()], true);
+    cleanup_test_tree(&root);
     fs.mkdir(root.as_path(), 0o755).unwrap();
     let paths = [root.join("one"), root.join("two")];
     let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
@@ -257,7 +304,7 @@ fn smb_failed_strict_open_quarantines_unconfirmed_cleanup() {
         .unwrap();
     assert_eq!(fs.test_deferred_close_count(), 0);
     fs.closev(&next).unwrap();
-    fs.rm(&[root.as_path()], true).unwrap();
+    cleanup_test_tree(&root);
 }
 
 #[cfg(feature = "test-faults")]
@@ -268,7 +315,7 @@ fn smb_closev_failure_keeps_handles_available_for_cleanup() {
         return;
     };
     let root = PathBuf::from(format!("/vfsi-smb-closev-fault-{}", std::process::id()));
-    let _ = fs.rm(&[root.as_path()], true);
+    cleanup_test_tree(&root);
     fs.mkdir(root.as_path(), 0o755).unwrap();
     let paths = [root.join("f0"), root.join("f1")];
     let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
@@ -288,7 +335,7 @@ fn smb_closev_failure_keeps_handles_available_for_cleanup() {
     assert_eq!(fs.test_open_handle_count(), 2);
     assert!(script.is_consumed());
     fs.closev(&files).unwrap();
-    fs.rm(&[root.as_path()], true).unwrap();
+    cleanup_test_tree(&root);
 }
 
 #[cfg(feature = "test-faults")]
@@ -299,7 +346,7 @@ fn smb_closev_removes_successes_on_both_sides_of_a_failure() {
         return;
     };
     let root = PathBuf::from(format!("/vfsi-smb-close-results-{}", std::process::id()));
-    let _ = fs.rm(&[root.as_path()], true);
+    cleanup_test_tree(&root);
     fs.mkdir(root.as_path(), 0o755).unwrap();
     let paths = [root.join("f0"), root.join("f1"), root.join("f2")];
     let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
@@ -321,7 +368,7 @@ fn smb_closev_removes_successes_on_both_sides_of_a_failure() {
     assert_eq!(fs.test_open_handle_count(), 1);
     fs.close(&files[1]).unwrap();
     assert_eq!(fs.test_open_handle_count(), 0);
-    fs.rm(&[root.as_path()], true).unwrap();
+    cleanup_test_tree(&root);
 }
 
 #[cfg(feature = "test-faults")]
@@ -335,7 +382,7 @@ fn smb_scalar_open_registration_failure_closes_remote_open() {
         "/vfsi-smb-scalar-open-fault-{}",
         std::process::id()
     ));
-    let _ = fs.rm(&[root.as_path()], true);
+    cleanup_test_tree(&root);
     fs.mkdir(root.as_path(), 0o755).unwrap();
     let path = root.join("file");
     let script = Arc::new(FaultScript::one(
@@ -350,7 +397,7 @@ fn smb_scalar_open_registration_failure_closes_remote_open() {
     );
     assert!(script.is_consumed());
     assert_eq!(fs.test_open_handle_count(), 0);
-    fs.rm(&[root.as_path()], true).unwrap();
+    cleanup_test_tree(&root);
 }
 
 #[cfg(feature = "test-faults")]
@@ -361,7 +408,7 @@ fn smb_confirmed_write_advances_descriptor_when_flush_path_fails() {
         return;
     };
     let root = PathBuf::from(format!("/vfsi-smb-partial-write-{}", std::process::id()));
-    let _ = fs.rm(&[root.as_path()], true);
+    cleanup_test_tree(&root);
     fs.mkdir(root.as_path(), 0o755).unwrap();
     let path = root.join("file");
     let file = fs
@@ -385,7 +432,7 @@ fn smb_confirmed_write_advances_descriptor_when_flush_path_fails() {
         .unwrap();
     assert_eq!(read[0].data, b"ab");
     fs.close(&file).unwrap();
-    fs.rm(&[root.as_path()], true).unwrap();
+    cleanup_test_tree(&root);
 }
 
 #[test]
@@ -414,7 +461,7 @@ fn samba_round_trip_and_copy() {
     );
 
     let root = PathBuf::from(format!("/vfsi-smb-test-{}", std::process::id()));
-    let _ = fs.rm(&[root.as_path()], true);
+    cleanup_test_tree(&root);
     fs.ensure_dir(&root, 0o755).expect("create test directory");
 
     let batch_dirs = [root.join("batch-a"), root.join("batch-b")];
@@ -517,7 +564,7 @@ fn samba_round_trip_and_copy() {
             .expect("large SMB read")[0],
         large_data
     );
-    fs.rm(&[Path::new(&root)], true).expect("remove test tree");
+    cleanup_test_tree(Path::new(&root));
 }
 
 #[test]
@@ -527,10 +574,9 @@ fn shared_suite_on_smb() {
         return;
     };
     let base = format!("/vfsi-smb-conformance-{}", std::process::id());
-    let _ = fs.rm(&[Path::new(&base)], true);
+    cleanup_test_tree(Path::new(&base));
     common::run_suite(&mut fs, &base);
-    fs.rm(&[Path::new(&base)], true)
-        .expect("remove conformance root");
+    cleanup_test_tree(Path::new(&base));
 }
 
 #[test]
@@ -549,7 +595,7 @@ fn path_reads_recover_after_server_restart() {
     };
     let root = PathBuf::from(format!("/vfsi-smb-reconnect-{}", std::process::id()));
     let file = root.join("survives.bin");
-    let _ = fs.rm(&[root.as_path()], true);
+    cleanup_test_tree(&root);
     fs.ensure_dir(&root, 0o755).unwrap();
     fs.writev(&[
         WriteOp::from_os_path(&file, VfOffset::At(0), b"after restart".to_vec())
@@ -571,5 +617,5 @@ fn path_reads_recover_after_server_restart() {
         .expect("path read should reconnect and re-establish the share");
     assert_eq!(result[0].data, b"after restart");
     assert_eq!(fs.stat(&file).unwrap().size, 13);
-    fs.rm(&[root.as_path()], true).unwrap();
+    cleanup_test_tree(&root);
 }
