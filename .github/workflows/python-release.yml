@@ -102,7 +102,10 @@ jobs:
             /bin/bash -c '
               set -e
               py="/opt/python/${TEST_PYTHON}/bin/python"
-              "$py" -m pip install /io/adapters/vfsi-fsspec /io/adapters/nfs4fs/dist/*.whl
+              # Resolve vfsi-fsspec from the published dependency floor, not
+              # the checkout; this detects incompatible release metadata.
+              "$py" -m pip install /io/adapters/nfs4fs/dist/*.whl
+              "$py" -m pip check
               cd /tmp
               "$py" - <<"PY"
           import tempfile
@@ -143,6 +146,33 @@ jobs:
           path: adapters/nfs4fs/dist/*.tar.gz
           if-no-files-found: error
 
+  wheel-nfs-integration:
+    name: Installed wheel against live NFS RPCSEC_GSS
+    needs: wheels
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: wheel-x86_64-unknown-linux-gnu-abi3
+          path: dist
+      - name: Install private NFS and Kerberos server
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y krb5-admin-server krb5-kdc krb5-user \
+            nfs-ganesha nfs-ganesha-vfs rpcbind
+      - name: Exercise the published dependency and repaired wheel
+        run: |
+          wheels=(dist/nfs4fs-*.whl)
+          test "${#wheels[@]}" -eq 1
+          NFS4FS_WHEEL="$PWD/${wheels[0]}" ci/run-nfs-gss-integration.sh
+
   sbom:
     runs-on: ubuntu-24.04
     steps:
@@ -182,7 +212,7 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/nfs4fs-v')
-    needs: [verify, wheels, sdist, sbom]
+    needs: [verify, wheels, wheel-nfs-integration, sdist, sbom]
     runs-on: ubuntu-24.04
     environment:
       name: pypi

@@ -7,6 +7,11 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ### Changed
 
+- nfs4fs now requires an explicit `auth=` selection at construction. Use
+  `auth="auth_sys"` for legacy AUTH_SYS, or `auth="krb5"`/`auth="krb5i"` for
+  RPCSEC_GSS. The old `authentication=` spelling and implicit AUTH_SYS fallback
+  are no longer accepted. nfs4fs 0.3.3 requires vfsi-fsspec 0.1.3, which
+  carries the matching native constructor and process-safe block-cache locks.
 - Made nfs4fs reconnects session-scoped and lifecycle-safe: healthy pooled
   sessions remain usable, writable handles are never destructively reopened,
   and failed setup cleanup retains retryable descriptor ownership. Whole-file
@@ -154,7 +159,7 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 - Initial `nfs4fs` release with a vectorized NFSv4.1 backend.
 
-[Unreleased]: https://github.com/vmingchen/vnfs/compare/nfs4fs-v0.3.0...HEAD
+[Unreleased]: https://github.com/vmingchen/vnfs/compare/nfs4fs-v0.3.2...HEAD
 [0.3.0]: https://pypi.org/project/nfs4fs/0.3.0/
 [0.2.0]: https://pypi.org/project/nfs4fs/0.2.0/
 [0.1.0]: https://pypi.org/project/nfs4fs/0.1.0/

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Enforce VFSI package identity and protocol ownership in registry metadata."""
 
-from pathlib import Path
 import sys
-import tomllib
+from pathlib import Path
 
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -54,13 +54,29 @@ def main() -> int:
     for relative_path in PRIVATE_RUST_PACKAGES:
         package = load(relative_path)["package"]
         if package.get("publish") is not False:
-            errors.append(f"{relative_path}: native build crate must set publish = false")
+            errors.append(
+                f"{relative_path}: native build crate must set publish = false"
+            )
 
     for relative_path in PYTHON_PACKAGES:
         project = load(relative_path)["project"]
         keywords = {keyword.lower() for keyword in project.get("keywords", [])}
         if "vfsi" not in keywords:
             errors.append(f"{relative_path}: [project].keywords must include 'vfsi'")
+
+    nfs4fs = load("adapters/nfs4fs/pyproject.toml")["project"]
+    engine = load("adapters/vfsi-fsspec/pyproject.toml")["project"]
+    nfs4fs_native = load("adapters/nfs4fs/Cargo.toml")["package"]
+    if nfs4fs["version"] != nfs4fs_native["version"]:
+        errors.append("nfs4fs: Python and native package versions must match")
+    engine_requirements = [
+        dependency
+        for dependency in nfs4fs["dependencies"]
+        if dependency.startswith("vfsi-fsspec>=")
+    ]
+    expected = f"vfsi-fsspec>={engine['version']},<0.2"
+    if engine_requirements != [expected]:
+        errors.append(f"nfs4fs: require the current shared engine with {expected!r}")
 
     vnfs = load("crates/vnfs/Cargo.toml")
     package = vnfs["package"]

@@ -1,7 +1,19 @@
 """Cross-cache coherence tests anchored to fsspec's local filesystem behavior."""
 
+import multiprocessing
+import threading
+from types import SimpleNamespace
+
 import fsspec
 import pytest
+from vfsi_fsspec._blockcache import _cache_lock
+
+
+def _acquire_cache_in_child(storage, ready, acquired):
+    cache = SimpleNamespace(storage=[storage])
+    ready.set()
+    with _cache_lock(cache):
+        acquired.set()
 
 
 def _read(fs, path):
@@ -28,6 +40,88 @@ def _persistent_fs(tmp_path):
         skip_instance_cache=True,
     )
     return target, cached
+
+
+def test_blockcache_lock_is_shared_across_independent_targets(tmp_path):
+    first_target, first = _persistent_fs(tmp_path)
+    second_target, second = _persistent_fs(tmp_path)
+    started = threading.Event()
+    acquired = threading.Event()
+
+    def contender():
+        started.set()
+        with _cache_lock(second):
+            acquired.set()
+
+    try:
+        with _cache_lock(first):
+            thread = threading.Thread(target=contender)
+            thread.start()
+            assert started.wait(2)
+            assert not acquired.wait(0.2)
+        thread.join(5)
+        assert not thread.is_alive()
+        assert acquired.is_set()
+    finally:
+        first_target.close()
+        second_target.close()
+
+
+def test_blockcache_lock_is_shared_across_processes(tmp_path):
+    storage = str(tmp_path / "cache")
+    cache = SimpleNamespace(storage=[storage])
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    acquired = context.Event()
+    process = context.Process(
+        target=_acquire_cache_in_child, args=(storage, ready, acquired)
+    )
+    try:
+        with _cache_lock(cache):
+            process.start()
+            assert ready.wait(10)
+            assert not acquired.wait(0.2)
+        process.join(10)
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+    assert process.exitcode == 0
+    assert acquired.is_set()
+
+
+def test_blockcache_shared_storage_reloads_independent_target_metadata(tmp_path):
+    first_target, first = _persistent_fs(tmp_path)
+    second_target, second = _persistent_fs(tmp_path)
+    try:
+        first_target.pipe_file("/file", b"old")
+        assert _read(first, "/file") == b"old"
+        assert _read(second, "/file") == b"old"
+
+        first_target.pipe_file("/file", b"updated")
+
+        assert _read(second, "/file") == b"updated"
+    finally:
+        first_target.close()
+        second_target.close()
+
+
+def test_stale_open_handle_cannot_commit_blocks_into_new_generation(tmp_path):
+    first_target, first = _persistent_fs(tmp_path)
+    second_target, second = _persistent_fs(tmp_path)
+    try:
+        first_target.pipe_file("/file", b"original")
+        handle = first.open("/file", "rb", block_size=4)
+        assert handle.read(4) == b"orig"
+
+        second_target.pipe_file("/file", b"replacement")
+        assert _read(second, "/file") == b"replacement"
+        handle.close()
+
+        assert _read(first, "/file") == b"replacement"
+    finally:
+        first_target.close()
+        second_target.close()
 
 
 def test_local_new_opens_observe_same_filesystem_mutations(tmp_path):

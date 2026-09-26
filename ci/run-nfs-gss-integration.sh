@@ -110,6 +110,7 @@ if sudo grep -Eq "No export entries found|Failed to load FSAL|Errors processing 
 fi
 
 cd "$repo_root"
+if [[ -z "${NFS4FS_WHEEL:-}" ]]; then
 # The trailing dot makes the host name absolute. Without it, some CI runners
 # append their cloud search domain before requesting the service ticket.
 VNFS_GSS_INTEGRATION=1 \
@@ -130,16 +131,30 @@ KRB5CCNAME="$expiry_ccache" \
 KRB5_TRACE="$state_dir/expiry-krb5.trace" \
 cargo test -p vnfs --test nfs_gss --features rpcsec-gss \
     renewable_ticket_allows_reconnect_after_ticket_expiry -- --exact --test-threads=1
+fi
 
 python3 -m venv "$state_dir/python"
-"$state_dir/python/bin/pip" install -q 'maturin==1.14.1' \
-    'fsspec>=2024.12.0,<2027.0.0'
-"$state_dir/python/bin/pip" install -q -e adapters/vfsi-fsspec
+if [[ -n "${NFS4FS_WHEEL:-}" ]]; then
+    test -f "$NFS4FS_WHEEL"
+    if [[ -n "${VFSI_FSSPEC_WHEEL:-}" ]]; then
+        test -f "$VFSI_FSSPEC_WHEEL"
+        "$state_dir/python/bin/pip" install -q "$VFSI_FSSPEC_WHEEL" "$NFS4FS_WHEEL"
+    else
+        "$state_dir/python/bin/pip" install -q "$NFS4FS_WHEEL"
+    fi
+    "$state_dir/python/bin/pip" check
+else
+    "$state_dir/python/bin/pip" install -q 'maturin==1.14.1' \
+        'fsspec>=2024.12.0,<2027.0.0'
+    "$state_dir/python/bin/pip" install -q -e adapters/vfsi-fsspec
+    (
+        cd adapters/nfs4fs
+        VIRTUAL_ENV="$state_dir/python" "$state_dir/python/bin/maturin" develop -q
+    )
+fi
 (
-    cd adapters/nfs4fs
-    VIRTUAL_ENV="$state_dir/python" "$state_dir/python/bin/maturin" develop -q
-)
-VNFS_GSS_HOST="$gss_host" "$state_dir/python/bin/python" - <<'PY'
+cd "$state_dir"
+VNFS_GSS_HOST="$gss_host" python/bin/python - <<'PY'
 import os
 import fsspec
 
@@ -156,3 +171,4 @@ for authentication in ("krb5", "krb5i"):
     assert fs.cat_file(path) == authentication.encode()
     fs.close()
 PY
+)

@@ -6,9 +6,12 @@ floor contains equivalent generation and mmap-boundary fixes.
 """
 
 import errno
+import fcntl
 import os
 import threading
 import time
+import weakref
+from contextlib import contextmanager
 
 from fsspec.caching import MMapCache
 from fsspec.exceptions import BlocksizeMismatchError
@@ -18,6 +21,36 @@ _CACHE_FORMAT_KEY = "nfs4fs_blockcache_format"
 _CACHE_FORMAT = 1
 _PATCH_MARKER = "_nfs4fs_blockcache_compat"
 _INVALID_CACHE_FORMAT = -1
+_LOCKS_GUARD = threading.RLock()
+_STORAGE_LOCKS = weakref.WeakValueDictionary()
+_ACTIVE_LOCK_FDS = set()
+_HELD_STORAGE = threading.local()
+
+
+def _before_fork():
+    _LOCKS_GUARD.acquire()
+
+
+def _after_fork_parent():
+    _LOCKS_GUARD.release()
+
+
+def _after_fork_child():
+    global _LOCKS_GUARD, _STORAGE_LOCKS, _ACTIVE_LOCK_FDS, _HELD_STORAGE
+    for fd in _ACTIVE_LOCK_FDS:
+        os.close(fd)
+    _LOCKS_GUARD = threading.RLock()
+    _STORAGE_LOCKS = weakref.WeakValueDictionary()
+    _ACTIVE_LOCK_FDS = set()
+    _HELD_STORAGE = threading.local()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(
+        before=_before_fork,
+        after_in_parent=_after_fork_parent,
+        after_in_child=_after_fork_child,
+    )
 
 
 class _Nfs4MMapCache(MMapCache):
@@ -170,6 +203,11 @@ def _mark_compatible_cache(cache_fs, path, file):
             changed = True
         if changed:
             _save_writable_metadata(cache_fs)
+        file._vfsi_cache_generation = (
+            detail.get("fn"),
+            detail.get("time"),
+            detail.get("uid"),
+        )
 
 
 def _close_and_update_complete_blocks(cache_fs, file, close):
@@ -177,7 +215,19 @@ def _close_and_update_complete_blocks(cache_fs, file, close):
     if file.closed:
         return
     path = cache_fs._strip_protocol(file.path)
-    detail = cache_fs._metadata.cached_files[-1][path]
+    cache_fs.load_cache()
+    detail = cache_fs._metadata.cached_files[-1].get(path)
+    generation = getattr(file, "_vfsi_cache_generation", None)
+    if detail is None or generation != (
+        detail.get("fn"),
+        detail.get("time"),
+        detail.get("uid"),
+    ):
+        # A different wrapper/process replaced this generation while the
+        # handle was open. Never commit its old block set into the new record.
+        close()
+        file.closed = True
+        return
     cache = getattr(file, "cache", None)
     blocks = getattr(cache, "blocks", detail["blocks"])
     detail["blocks"] = blocks
@@ -220,16 +270,48 @@ def _reuse_generation_blocksize(cache_fs, path, args, kwargs):
     return tuple(args), kwargs
 
 
+@contextmanager
 def _cache_lock(cache_fs):
-    fs_attributes = object.__getattribute__(cache_fs.fs, "__dict__")
-    registry_lock = fs_attributes.get("_nfs4fs_cache_locks_lock")
-    if registry_lock is None:
-        registry_lock = threading.RLock()
-        fs_attributes["_nfs4fs_cache_locks_lock"] = registry_lock
-    key = tuple(os.path.realpath(storage) for storage in cache_fs.storage)
-    with registry_lock:
-        locks = fs_attributes.setdefault("_nfs4fs_cache_locks", {})
-        return locks.setdefault(key, threading.RLock())
+    """Serialize one writable cache generation across wrappers and processes."""
+    storage = os.path.realpath(cache_fs.storage[-1])
+    with _LOCKS_GUARD:
+        lock = _STORAGE_LOCKS.get(storage)
+        if lock is None:
+            lock = threading.RLock()
+            _STORAGE_LOCKS[storage] = lock
+    with lock:
+        held = getattr(_HELD_STORAGE, "depth", None)
+        if held is None:
+            held = {}
+            _HELD_STORAGE.depth = held
+        if storage in held:
+            held[storage] += 1
+            try:
+                yield
+            finally:
+                held[storage] -= 1
+            return
+        os.makedirs(storage, exist_ok=True)
+        with _LOCKS_GUARD:
+            fd = os.open(
+                os.path.join(storage, ".vfsi-cache.lock"), os.O_CREAT | os.O_RDWR, 0o600
+            )
+            _ACTIVE_LOCK_FDS.add(fd)
+        acquired = False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            acquired = True
+            held[storage] = 1
+            try:
+                yield
+            finally:
+                held.pop(storage, None)
+        finally:
+            if acquired:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            with _LOCKS_GUARD:
+                _ACTIVE_LOCK_FDS.discard(fd)
+                os.close(fd)
 
 
 def _invalidate_registered_paths(cache_fs, paths, subtrees=False):
@@ -267,7 +349,7 @@ def _pop_writable_cache_file(cache_fs, path):
     """Remove one writable generation without fsspec's merge-on-save."""
     normalized = _cache_path(cache_fs, path)
     with _cache_lock(cache_fs):
-        cache_fs._check_cache()
+        cache_fs.load_cache()
         writable = cache_fs._metadata.cached_files[-1]
         detail = writable.pop(normalized, None)
         if detail is None:
@@ -444,6 +526,7 @@ def _open_many_with_cache(cache_fs, open_files, target_type):
         return _delegate_open_many(cache_fs, open_files)
 
     paths = [_cache_path(cache_fs, open_file.path) for open_file in open_files]
+    cache_fs.load_cache()
     records = _prepare_cache_records(cache_fs, paths)
     if records is None:
         return _enter_individually(open_files)
@@ -489,6 +572,11 @@ def _open_many_with_cache(cache_fs, open_files, target_type):
                         f"original (old: {old_blocksize}, new {file.blocksize})"
                     )
                 detail["blocksize"] = file.blocksize
+                file._vfsi_cache_generation = (
+                    detail.get("fn"),
+                    detail.get("time"),
+                    detail.get("uid"),
+                )
                 file.cache = _Nfs4MMapCache(
                     file.blocksize,
                     file._fetch_range,
@@ -550,6 +638,7 @@ def install_fsspec_blockcache_compat(target_type):
         if mode.replace("t", "").replace("b", "") != "r":
             return original_open(cache_fs, path, *args, **kwargs)
         with _cache_lock(cache_fs):
+            cache_fs.load_cache()
             normalized = _cache_path(cache_fs, path)
             _reset_stale_generation(cache_fs, normalized)
             args, kwargs = _reuse_generation_blocksize(
