@@ -128,24 +128,16 @@ impl AuthSysIdentity {
         let uid = unsafe { libc::geteuid() };
         let gid = unsafe { libc::getegid() };
         if fsuid as libc::uid_t != uid || fsgid as libc::gid_t != gid {
-            #[cfg(test)]
-            eprintln!(
-                "Auto AUTH_SYS fs identity differs: fsuid={fsuid} uid={uid} fsgid={fsgid} gid={gid}"
-            );
             return None;
         }
         let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
         // AUTH_SYS carries at most 16 supplementary groups. Let the kernel
         // handle identities that would be truncated by the direct client.
         if !(0..=16).contains(&count) {
-            #[cfg(test)]
-            eprintln!("Auto AUTH_SYS supplementary group count is {count}");
             return None;
         }
         let mut groups = vec![0; count as usize];
         if unsafe { libc::getgroups(count, groups.as_mut_ptr()) } != count {
-            #[cfg(test)]
-            eprintln!("Auto AUTH_SYS supplementary groups changed during capture");
             return None;
         }
         Some(Self { uid, gid, groups })
@@ -283,42 +275,16 @@ impl AutoClient {
         }
         // Connection failure is a pre-dispatch fallback. Never replay a
         // possibly completed mutation through the mounted backend.
-        let client = match Nfs::builder(&spec.server)
+        let client = Nfs::builder(&spec.server)
             .root(&spec.export)
             .minor_version(Some(spec.minor))
             .connect()
-        {
-            Ok(client) => client,
-            Err(_error) => {
-                #[cfg(test)]
-                eprintln!("Auto direct NFS connection failed: {_error:?}");
-                return None;
-            }
-        };
-        let kernel_id = match fs::metadata(&spec.mount_point) {
-            Ok(metadata) => metadata.ino(),
-            Err(_error) => {
-                #[cfg(test)]
-                eprintln!("Auto kernel NFS root metadata failed: {_error}");
-                return None;
-            }
-        };
-        let direct_id = match client.metadata("/") {
-            Ok(metadata) => metadata.file_id(),
-            Err(_error) => {
-                #[cfg(test)]
-                eprintln!("Auto direct NFS root metadata failed: {_error:?}");
-                return None;
-            }
-        };
-        if direct_id != Some(kernel_id) {
-            #[cfg(test)]
-            eprintln!("Auto NFS root identity mismatch: direct={direct_id:?} kernel={kernel_id}");
+            .ok()?;
+        let kernel_id = fs::metadata(&spec.mount_point).ok()?.ino();
+        if client.metadata("/").ok()?.file_id() != Some(kernel_id) {
             return None;
         }
         if AuthSysIdentity::current().as_ref() != Some(&credentials) {
-            #[cfg(test)]
-            eprintln!("Auto AUTH_SYS credentials changed while connecting");
             return None;
         }
         let connection = NfsConnection {
@@ -327,14 +293,7 @@ impl AutoClient {
             identity: Arc::new(()),
             credentials,
         };
-        let mut cache = match self.connections.lock() {
-            Ok(cache) => cache,
-            Err(_) => {
-                #[cfg(test)]
-                eprintln!("Auto connection cache lock is poisoned");
-                return None;
-            }
-        };
+        let mut cache = self.connections.lock().ok()?;
         if let Some(existing) = cache.get(&spec.id)
             && existing.spec == *spec
             && existing.credentials == connection.credentials
@@ -1286,43 +1245,21 @@ mod tests {
         };
         let client = Auto::new("/").unwrap();
         let mount = PathBuf::from(mount);
-        let route = client.route_for(&mount);
-        if !matches!(route, AutoRoute::DirectNfs { .. }) {
-            let table = read_mounts(false);
-            let spec = table.eligible.iter().find(|spec| spec.mount_point == mount);
-            let probe = spec.map(|spec| {
-                Nfs::builder(&spec.server)
-                    .root(&spec.export)
-                    .minor_version(Some(spec.minor))
-                    .connect()
-                    .and_then(|direct| direct.metadata("/"))
-                    .map(|metadata| metadata.file_id())
-            });
-            let mountinfo = fs::read_to_string("/proc/self/mountinfo")
-                .unwrap_or_default()
-                .lines()
-                .filter(|line| line.contains(" - nfs"))
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            let host_path = client.host_path(&mount);
-            let canonical = host_path.as_ref().map(fs::canonicalize);
-            let canonical_id = canonical
-                .as_ref()
-                .and_then(|result| result.as_ref().ok())
-                .and_then(|path| path_mount_id(path));
-            panic!(
-                "Auto chose {route:?}; mount={mount:?}; mount_id={:?}; \
-                 root={:?}; host_path={host_path:?}; canonical={canonical:?}; \
-                 canonical_id={canonical_id:?}; cached_connections={:?}; \
-                 eligible={spec:?}; credentials={:?}; kernel_inode={:?}; \
-                 direct_probe={probe:?}; nfs_mountinfo={mountinfo:?}",
-                path_mount_id(&mount),
-                client.root,
-                client.connections.lock().map(|cache| cache.len()),
-                AuthSysIdentity::current(),
-                fs::metadata(&mount).map(|metadata| metadata.ino()),
-            );
+        let mut route = client.route_for(&mount);
+        // A just-mounted kernel NFS client can briefly return EREMOTEIO for
+        // the root stat. Auto safely falls back for that attempt; retry the
+        // read-only route probe after the mount has settled.
+        for delay_ms in [5, 20] {
+            if matches!(&route, AutoRoute::DirectNfs { .. }) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            route = client.route_for(&mount);
         }
+        assert!(
+            matches!(&route, AutoRoute::DirectNfs { .. }),
+            "Auto chose {route:?}"
+        );
         assert!(client.metadata(&mount).unwrap().is_dir());
         let unique = format!(
             "vnfs-auto-{}-{:?}",
