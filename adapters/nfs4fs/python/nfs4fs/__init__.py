@@ -6,7 +6,9 @@ protocol-neutral ``vfsi`` alias with fsspec:
     import fsspec
     import nfs4fs
 
-    fs = fsspec.filesystem("nfs4", host="127.0.0.1", root="git/some/tree")
+    fs = fsspec.filesystem(
+        "nfs4", host="127.0.0.1", root="git/some/tree", auth="auth_sys"
+    )
 """
 
 import fsspec

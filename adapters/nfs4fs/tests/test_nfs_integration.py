@@ -30,6 +30,21 @@ def test_nfs_identity_and_required_server_copy(nfs_fs):
         assert nfs_fs._client.server_copy_enabled(), "server COPY was disabled"
 
 
+def test_pipelined_stream_reads_live_nfs_in_order(nfs_fs):
+    payload = bytes(range(256)) * 16
+    nfs_fs.pipe_file("nfs4:///pipelined-read", payload)
+    chunks = []
+    total = nfs_fs.read_stream_pipelined(
+        "nfs4:///pipelined-read",
+        lambda offset, data: chunks.append((offset, data)),
+        workers=1,
+        chunk_size=700,
+    )
+    assert total == len(payload)
+    assert b"".join(data for _, data in chunks) == payload
+    assert [offset for offset, _ in chunks] == list(range(0, len(payload), 700))
+
+
 def test_python_reader_recovers_across_server_restart(nfs_fs):
     control = os.environ.get("NFS4FS_RECOVERY_CONTROL_DIR")
     if not control:

@@ -44,9 +44,10 @@ during setup, when that path is available.
 batch; its default remains the package default (128). The large-file driver's
 optional `--pipeline-workers` adds a third measurement using
 `Nfs4FileSystem.read_stream_pipelined()` and independent native sessions.
-`--in-flight` bounds outstanding chunks; the driver enforces a 16 MiB
-read-ahead budget. Its ordinary nfs4fs and kernel measurements remain in the
-report for comparison. Pipelining is opt-in and does not change `fs.open()`.
+`--in-flight` bounds outstanding chunks, further capped at one per worker; the
+driver enforces a 16 MiB read-ahead budget. Its ordinary nfs4fs and kernel
+measurements remain in the report for comparison. Pipelining is opt-in and
+does not change `fs.open()`.
 
 Setup, export checks, and optional warm-ups are excluded from timing. Each
 driver alternates client order across rounds and reports medians. The

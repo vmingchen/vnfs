@@ -56,12 +56,16 @@ required:
 ```python
 import fsspec
 
-fs = fsspec.filesystem("nfs4", host="nfs.example", root="exports/data")
+fs = fsspec.filesystem(
+    "nfs4", host="nfs.example", root="exports/data", auth="auth_sys"
+)
 fs.pipe({"/a.txt": b"hello", "/b.txt": b"world"})
 print(fs.cat(["/a.txt", "/b.txt"]))
 
 # The server can also be supplied by the URL.
-with fsspec.open("nfs4://nfs.example/exports/data/a.txt", "rb") as file:
+with fsspec.open(
+    "nfs4://nfs.example/exports/data/a.txt", "rb", auth="auth_sys"
+) as file:
     print(file.read())
 ```
 

@@ -56,6 +56,65 @@ def test_pipelined_stream_is_ordered_and_bounded(fs, monkeypatch):
     assert 1 < peak <= 3
 
 
+def test_pipelined_stream_never_overlaps_reads_on_one_descriptor(fs, monkeypatch):
+    payload = b"abcdefghijklmnopqrstuvwx"
+    fs.pipe_file("/data", payload)
+    original = fs._client.pread
+    first_started = threading.Event()
+    later_started = threading.Event()
+    lock = threading.Lock()
+    active = {}
+    peak_per_descriptor = 0
+
+    def monitored(fd, length, offset):
+        nonlocal peak_per_descriptor
+        with lock:
+            active[fd] = active.get(fd, 0) + 1
+            peak_per_descriptor = max(peak_per_descriptor, active[fd])
+        try:
+            if offset == 0:
+                first_started.set()
+                later_started.wait(0.5)
+            elif offset == 4:
+                assert first_started.wait(2)
+            elif offset == 8:
+                later_started.set()
+            return original(fd, length, offset)
+        finally:
+            with lock:
+                active[fd] -= 1
+
+    monkeypatch.setattr(fs._client, "pread", monitored)
+    chunks = []
+    assert fs.read_stream_pipelined(
+        "/data",
+        lambda offset, data: chunks.append((offset, data)),
+        workers=2,
+        chunk_size=4,
+        max_in_flight=8,
+        max_buffered_bytes=32,
+    ) == len(payload)
+    assert b"".join(data for _, data in chunks) == payload
+    assert peak_per_descriptor == 1
+
+
+def test_pipelined_stream_budget_counts_active_workers(fs):
+    fs.pipe_file("/data", b"abcdefgh")
+    chunks = []
+    assert (
+        fs.read_stream_pipelined(
+            "/data",
+            lambda offset, data: chunks.append((offset, data)),
+            workers=2,
+            chunk_size=4,
+            max_in_flight=8,
+            max_buffered_bytes=8,
+        )
+        == 8
+    )
+    assert chunks == [(0, b"abcd"), (4, b"efgh")]
+
+
 def test_pipelined_stream_retries_short_reads(fs, monkeypatch):
     fs.pipe_file("/data", b"abcdefghij")
     original = fs._client.pread
@@ -75,6 +134,97 @@ def test_pipelined_stream_retries_short_reads(fs, monkeypatch):
         == 10
     )
     assert chunks == [(0, b"abcd"), (4, b"efgh"), (8, b"ij")]
+
+
+def test_pipelined_stream_recovers_one_dropped_read(fs, monkeypatch):
+    payload = b"abcdefghij" * 8
+    fs.pipe_file("/data", payload)
+    original = fs._client.pread
+    failures = []
+    reconnects = []
+    original_reconnect = fs._client.reconnect_descriptor
+
+    def dropped_once(fd, length, offset):
+        if offset >= 10 and not failures:
+            failures.append((fd, offset))
+            raise ConnectionError("dropped read reply")
+        return original(fd, length, offset)
+
+    def record_reconnect(fd):
+        reconnects.append(fd)
+        return original_reconnect(fd)
+
+    monkeypatch.setattr(fs._client, "pread", dropped_once)
+    monkeypatch.setattr(fs._client, "reconnect_descriptor", record_reconnect)
+    chunks = []
+    assert fs.read_stream_pipelined(
+        "/data",
+        lambda offset, data: chunks.append((offset, data)),
+        workers=3,
+        chunk_size=10,
+        max_in_flight=8,
+        max_buffered_bytes=80,
+    ) == len(payload)
+    assert b"".join(data for _, data in chunks) == payload
+    assert [offset for offset, _ in chunks] == list(range(0, len(payload), 10))
+    assert len(failures) == len(reconnects) == 1
+    assert reconnects[0] == failures[0][0]
+
+
+def test_pipelined_stream_does_not_retry_callback_connection_error(fs, monkeypatch):
+    fs.pipe_file("/data", b"abcdefgh")
+    reconnects = []
+    monkeypatch.setattr(
+        fs._client, "reconnect_descriptor", lambda fd: reconnects.append(fd)
+    )
+
+    def fail(_offset, _data):
+        raise ConnectionError("callback transport failed")
+
+    with pytest.raises(ConnectionError, match="callback transport failed"):
+        fs.read_stream_pipelined("/data", fail, workers=2, chunk_size=4)
+    assert reconnects == []
+
+
+def test_pipelined_stream_recovers_size_probe(fs, monkeypatch):
+    fs.pipe_file("/data", b"abcdefgh")
+    original = fs._client.fstat
+    attempts = []
+
+    def drop_first_probe(fd):
+        attempts.append(fd)
+        if len(attempts) == 1:
+            raise ConnectionError("dropped size reply")
+        return original(fd)
+
+    monkeypatch.setattr(fs._client, "fstat", drop_first_probe)
+    chunks = []
+    assert (
+        fs.read_stream_pipelined(
+            "/data", lambda offset, data: chunks.append((offset, data)), chunk_size=4
+        )
+        == 8
+    )
+    assert chunks == [(0, b"abcd"), (4, b"efgh")]
+    assert len(attempts) == 2
+    assert attempts[0] != attempts[1]
+
+
+def test_pipelined_stream_respects_disabled_reconnect(fs, monkeypatch):
+    fs.pipe_file("/data", b"abcdefgh")
+    fs.auto_reconnect = False
+    reconnects = []
+    monkeypatch.setattr(
+        fs._client, "reconnect_descriptor", lambda fd: reconnects.append(fd)
+    )
+
+    def fail_read(*_args):
+        raise ConnectionError("dropped read reply")
+
+    monkeypatch.setattr(fs._client, "pread", fail_read)
+    with pytest.raises(ConnectionError, match="dropped read reply"):
+        fs.read_stream_pipelined("/data", lambda *_: None, chunk_size=4)
+    assert reconnects == []
 
 
 def test_pipelined_stream_tiny_reads_do_not_accumulate_objects(fs, monkeypatch):

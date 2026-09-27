@@ -188,9 +188,11 @@ with open("download.bin", "wb") as output:
     )
 ```
 
-The default read-ahead cap is eight 1 MiB chunks (8 MiB); `max_in_flight` and
-`max_buffered_bytes` are configurable. This does not change `fs.open()` and is
-not a coherent snapshot if another client modifies the file during the read.
+Read-ahead is capped at one chunk per worker-owned descriptor, up to
+`max_in_flight` chunks and `max_buffered_bytes` total. With the default three
+workers and 1 MiB chunks, at most 3 MiB is in flight. This does not change
+`fs.open()` and is not a coherent snapshot if another client modifies the file
+during the read.
 On the development VM, a 64 MiB warm-file read with approximately 5 ms RTT
 fell from a 607 ms sequential median to 262 ms with three workers; the kernel
 client's warm page-cache read was still faster. See the
@@ -311,14 +313,17 @@ visible when the TTL expires or when the caller requests a refresh. Use
 
 ## Production notes
 
-- One filesystem instance owns one native session protected by a mutex.
-  Operations on that instance are serialized. Use separate instances with
-  `skip_instance_cache=True` when independent connections are required.
+- One filesystem instance owns `connection_pool_size` native sessions (one by
+  default), each protected by its own mutex. Operations on one session are
+  serialized, while a larger pool permits concurrent independent requests.
+  Use separate instances with `skip_instance_cache=True` when independent
+  filesystem lifetimes or configuration are required.
 - Native calls release the CPython interpreter lock while waiting for storage.
   The extension also declares free-threaded CPython support; each filesystem's
-  native-session mutex still serializes that instance.
-- On a transport failure, safe idempotent path reads reconnect and retry once
-  by default. Mutations are never replayed automatically because the server may
+  native-session mutex still serializes operations assigned to that session.
+- On a transport failure, safe idempotent path reads and positional reads in
+  `read_stream_pipelined()` reconnect their affected session and retry once by
+  default. Mutations are never replayed automatically because the server may
   already have completed an ambiguously failed request. Set
   `auto_reconnect=False` to disable automatic read recovery.
 - A process fork is detected before the next operation and creates a fresh

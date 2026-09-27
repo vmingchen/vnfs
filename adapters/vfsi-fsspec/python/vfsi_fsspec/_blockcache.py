@@ -1,7 +1,7 @@
 """Compatibility fixes for fsspec's persistent block-cache wrapper.
 
 The fixes are deliberately scoped to ``CachingFileSystem`` instances backed
-by the VFSI adapter engine. They can be removed after the supported fsspec
+by registered VFSI adapters. They can be removed after the supported fsspec
 floor contains equivalent generation and mmap-boundary fixes.
 """
 
@@ -20,6 +20,8 @@ from fsspec.implementations.cached import CachingFileSystem
 _CACHE_FORMAT_KEY = "nfs4fs_blockcache_format"
 _CACHE_FORMAT = 1
 _PATCH_MARKER = "_nfs4fs_blockcache_compat"
+_INSTALL_LOCK = threading.RLock()
+_TARGET_TYPES = ()
 _INVALID_CACHE_FORMAT = -1
 _LOCKS_GUARD = threading.RLock()
 _STORAGE_LOCKS = weakref.WeakValueDictionary()
@@ -516,8 +518,12 @@ def _prepare_cache_records(cache_fs, paths):
     return records
 
 
-def _open_many_with_cache(cache_fs, open_files, target_type):
-    if not isinstance(getattr(cache_fs, "fs", None), target_type):
+def _is_compatible_backend(cache_fs):
+    return isinstance(getattr(cache_fs, "fs", None), _TARGET_TYPES)
+
+
+def _open_many_with_cache(cache_fs, open_files):
+    if not _is_compatible_backend(cache_fs):
         return _delegate_open_many(cache_fs, open_files)
     _register_cache(cache_fs)
     if not all(_is_plain_read(open_file) for open_file in open_files):
@@ -615,9 +621,19 @@ def _open_many_with_cache(cache_fs, open_files, target_type):
 
 
 def install_fsspec_blockcache_compat(target_type):
-    """Install nfs4fs-only fixes around fsspec's persistent block cache."""
-    if getattr(CachingFileSystem, _PATCH_MARKER, False):
-        return
+    """Install persistent-cache fixes for every registered VFSI adapter."""
+    global _TARGET_TYPES
+    if not isinstance(target_type, type):
+        raise TypeError("target_type must be a filesystem class")
+    with _INSTALL_LOCK:
+        if target_type not in _TARGET_TYPES:
+            _TARGET_TYPES = (*_TARGET_TYPES, target_type)
+        if getattr(CachingFileSystem, _PATCH_MARKER, False):
+            return
+        _install_fsspec_blockcache_wrappers()
+
+
+def _install_fsspec_blockcache_wrappers():
     original_init = CachingFileSystem.__init__
     original_open = CachingFileSystem._open
     original_close_and_update = CachingFileSystem.close_and_update
@@ -625,9 +641,7 @@ def install_fsspec_blockcache_compat(target_type):
 
     def init_with_compat(cache_fs, *args, **kwargs):
         original_init(cache_fs, *args, **kwargs)
-        if type(cache_fs) is CachingFileSystem and isinstance(
-            getattr(cache_fs, "fs", None), target_type
-        ):
+        if type(cache_fs) is CachingFileSystem and _is_compatible_backend(cache_fs):
             # fsspec installs an instance-level path stripper that discards
             # the target URL authority before the backend can validate it.
             def strip_checked(path):
@@ -638,7 +652,7 @@ def install_fsspec_blockcache_compat(target_type):
             _register_cache(cache_fs)
 
     def open_with_compat(cache_fs, path, *args, **kwargs):
-        if not isinstance(getattr(cache_fs, "fs", None), target_type):
+        if not _is_compatible_backend(cache_fs):
             return original_open(cache_fs, path, *args, **kwargs)
         _register_cache(cache_fs)
         mode = kwargs.get("mode", args[0] if args else "rb")
@@ -656,19 +670,19 @@ def install_fsspec_blockcache_compat(target_type):
             return file
 
     def close_and_update_with_compat(cache_fs, file, close):
-        if not isinstance(getattr(cache_fs, "fs", None), target_type):
+        if not _is_compatible_backend(cache_fs):
             return original_close_and_update(cache_fs, file, close)
         with _cache_lock(cache_fs):
             return _close_and_update_complete_blocks(cache_fs, file, close)
 
     def open_many_with_compat(cache_fs, open_files):
-        if not isinstance(getattr(cache_fs, "fs", None), target_type):
+        if not _is_compatible_backend(cache_fs):
             return _delegate_open_many(cache_fs, open_files)
         with _cache_lock(cache_fs):
-            return _open_many_with_cache(cache_fs, open_files, target_type)
+            return _open_many_with_cache(cache_fs, open_files)
 
     def pop_from_cache_with_compat(cache_fs, path):
-        if not isinstance(getattr(cache_fs, "fs", None), target_type):
+        if not _is_compatible_backend(cache_fs):
             return original_pop_from_cache(cache_fs, path)
         return _pop_writable_cache_file(cache_fs, path)
 

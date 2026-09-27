@@ -6,6 +6,7 @@ from contextlib import ExitStack
 
 from vfsi_fsspec import VfsiFile
 from vfsi_fsspec import VfsiFileSystem as _VfsiFileSystem
+from vfsi_fsspec._fs import _RawVfsiFile
 
 from . import _native
 
@@ -31,8 +32,9 @@ class Nfs4FileSystem(_VfsiFileSystem):
 
         The callback receives ``(offset, bytes)``. Its return value is ignored;
         exceptions propagate after all outstanding reads are drained. At most
-        ``max_in_flight * chunk_size`` bytes are requested at a time. This is
-        not a snapshot: concurrent changes to the file can produce mixed data.
+        ``min(max_in_flight, workers) * chunk_size`` bytes are requested at a
+        time, with only one request in flight per worker-owned descriptor.
+        This is not a snapshot: concurrent changes can produce mixed data.
         Use for stable files, or check application-level version metadata.
         By default, use up to three sessions from ``connection_pool_size``.
         """
@@ -46,7 +48,10 @@ class Nfs4FileSystem(_VfsiFileSystem):
             raise ValueError("workers must be between 1 and connection_pool_size")
         if not 0 < chunk_size <= min(1 << 20, self.read_all_max_total_bytes):
             raise ValueError("chunk_size must be positive and at most 1 MiB")
-        if max_in_flight < 1 or max_in_flight * chunk_size > max_buffered_bytes:
+        if max_in_flight < 1:
+            raise ValueError("max_in_flight must be positive")
+        in_flight_limit = min(max_in_flight, workers)
+        if in_flight_limit * chunk_size > max_buffered_bytes:
             raise ValueError("read-ahead exceeds max_buffered_bytes")
 
         internal = self._checked_strip_protocol(path)
@@ -54,18 +59,29 @@ class Nfs4FileSystem(_VfsiFileSystem):
         total = 0
 
         with ExitStack() as stack:
-            fds = []
+            readers = []
             for _ in range(workers):
                 fd = self._client.open(native_path, "rb")
-                fds.append(fd)
-                stack.callback(self._client.close, fd)
-            size = self._client.fstat(fds[0])["size"]
+                try:
+                    reader = _RawVfsiFile(self, internal, "rb", fd=fd)
+                except BaseException:
+                    self._client.close(fd)
+                    raise
+                readers.append(reader)
+                stack.callback(reader.close)
+            try:
+                size = self._client.fstat(readers[0]._ensure_open())["size"]
+            except ConnectionError:
+                if not self.auto_reconnect:
+                    raise
+                self._client.reconnect_descriptor(readers[0]._fd)
+                size = self._client.fstat(readers[0]._ensure_open())["size"]
 
-            def read_exact(fd, offset, length):
+            def read_exact(reader, offset, length):
                 data = bytearray(length)
                 filled = 0
                 while filled < length:
-                    chunk = self._client.pread(fd, length - filled, offset + filled)
+                    chunk = reader._pread_at(offset + filled, length - filled)
                     if not chunk:
                         raise OSError(f"short pipelined read at offset {offset}")
                     if len(chunk) > length - filled:
@@ -78,12 +94,18 @@ class Nfs4FileSystem(_VfsiFileSystem):
             next_offset = 0
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 while next_offset < size or pending:
-                    while next_offset < size and len(pending) < max_in_flight:
+                    # Consecutive chunks rotate over the readers. A window no
+                    # larger than the reader count keeps each mutable descriptor
+                    # exclusive to one task, including during reconnect.
+                    while next_offset < size and len(pending) < in_flight_limit:
                         offset = next_offset
                         length = min(chunk_size, size - offset)
-                        fd = fds[(offset // chunk_size) % workers]
+                        reader = readers[(offset // chunk_size) % workers]
                         pending.append(
-                            (offset, executor.submit(read_exact, fd, offset, length))
+                            (
+                                offset,
+                                executor.submit(read_exact, reader, offset, length),
+                            )
                         )
                         next_offset += length
                     offset, future = pending.popleft()

@@ -5,7 +5,9 @@ import threading
 from types import SimpleNamespace
 
 import fsspec
+import nfs4fs
 import pytest
+from vfsi_fsspec import VfsiFileSystem, install_fsspec_blockcache_compat
 from vfsi_fsspec._blockcache import _cache_lock
 
 
@@ -40,6 +42,53 @@ def _persistent_fs(tmp_path):
         skip_instance_cache=True,
     )
     return target, cached
+
+
+@pytest.mark.parametrize("reverse_registration", [False, True])
+def test_persistent_cache_registers_multiple_backend_types(
+    tmp_path, reverse_registration
+):
+    """Both protocol adapters must retain invalidation after either import order."""
+    backends = [
+        type(
+            name,
+            (VfsiFileSystem,),
+            {
+                "protocol": name.lower(),
+                "_native_module": nfs4fs._native,
+                "_supported_backends": frozenset({"dummy"}),
+            },
+        )
+        for name in ("FirstAdapter", "SecondAdapter")
+    ]
+    if reverse_registration:
+        backends.reverse()
+    for backend in backends:
+        install_fsspec_blockcache_compat(backend)
+
+    for index, backend in enumerate(backends):
+        target = backend(
+            backend="dummy",
+            dummy_root=str(tmp_path / f"remote-{index}"),
+            skip_instance_cache=True,
+        )
+        cached = fsspec.filesystem(
+            "blockcache",
+            fs=target,
+            cache_storage=str(tmp_path / f"cache-{index}"),
+            cache_check=0,
+            check_files=False,
+            expiry_time=0,
+            skip_instance_cache=True,
+        )
+        try:
+            target.pipe_file("/file", b"old!")
+            assert _read(cached, "/file") == b"old!"
+            target.pipe_file("/file", b"new!")
+            assert _read(cached, "/file") == b"new!"
+        finally:
+            cached.clear_cache()
+            target.close()
 
 
 def test_blockcache_lock_is_shared_across_independent_targets(tmp_path):
