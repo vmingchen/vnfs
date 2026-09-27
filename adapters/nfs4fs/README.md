@@ -82,6 +82,11 @@ fs = fsspec.filesystem(
 )
 ```
 
+`root` is a client-side path prefix, not a security boundary. A relative
+symlink inside it can resolve elsewhere in the same NFS export. Configure a
+server export rooted at the intended directory when callers must be confined
+to that directory.
+
 `compound_size_limit` caps the payload merged into one compound. The default is
 1 MiB; lower it when a server has a smaller request limit:
 
@@ -231,6 +236,10 @@ may contain a whole small file). Set `vectorized_buffering=False` to disable
 this adaptive fan-out. The persistent `blockcache` wrapper participates in the
 same coordinator: it validates source identities in a metadata batch, serves
 complete hits locally, and fills sparse misses with vector reads.
+
+Scalar `fs.open()` pins a native descriptor immediately so its handle remains
+bound to the opened file after a rename or pathname replacement. Path-based
+`cat()` and grouped `open_files()` retain their batched read paths.
 
 Writes remain write-through by default. Set `write_buffering=True` to delay
 small writes until `flush()` or `close()`; an `open_files()` write group drains

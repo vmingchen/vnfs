@@ -128,12 +128,14 @@ def test_known_parts_cache_type(dummy_fs, monkeypatch):
         assert calls == []
 
 
-def test_whole_file_read_keeps_no_open_fast_path(dummy_fs):
+def test_scalar_whole_file_read_keeps_open_descriptor(dummy_fs):
     dummy_fs.pipe_file("/whole", b"whole file")
     with dummy_fs.open("/whole", "rb") as file:
-        # Direct open preflights metadata, but does not create a descriptor.
+        # Whole-file reads on a scalar handle use its pinned descriptor.
+        descriptor = file._fd
+        assert descriptor is not None
         assert file.read() == b"whole file"
-        assert file._fd is None
+        assert file._fd == descriptor
 
 
 def test_update_modes_remain_raw(dummy_fs):

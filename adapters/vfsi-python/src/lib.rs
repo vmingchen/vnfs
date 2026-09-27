@@ -1002,6 +1002,22 @@ impl NfsClient {
         })
     }
 
+    /// Set the size of the object referenced by an open descriptor. Unlike
+    /// path-based truncate, this remains bound to the original file after a
+    /// rename or replacement of its directory entry.
+    fn ftruncate(&self, py: Python<'_>, fd: i64, size: u64) -> PyResult<()> {
+        let a = VfAttrs {
+            file: VfFile::from_fd(fd as i32),
+            masks: AttrMask::SIZE,
+            size,
+            ..VfAttrs::default()
+        };
+        self.with_fs(py, move |fs| {
+            fs.setattrsv(std::slice::from_ref(&a))
+                .map_err(|e| to_py_err(e, None))
+        })
+    }
+
     fn touch(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1535,6 +1551,33 @@ impl NfsClient {
                     data[index] = None;
                     oversized.retain(|&candidate| candidate != index);
                     errors.insert(index, ERR_SAME_FILE);
+                }
+            }
+
+            // A hard link or a symlink can give the destination a different
+            // spelling for the source inode. Check the small-file path too:
+            // its truncating WRITE would otherwise modify the source itself.
+            let candidates: Vec<usize> = (0..n).filter(|&index| data[index].is_some()).collect();
+            if !candidates.is_empty() {
+                let identity_paths: Vec<PathBuf> = candidates
+                    .iter()
+                    .flat_map(|&index| [sources[index].clone(), dests[index].clone()])
+                    .collect();
+                let (attrs, _identity_errors) =
+                    attrs_many_impl(fs, &identity_paths, AttrMask::FILEID, true)
+                        .map_err(|e| to_py_err(e, None))?;
+                for (pair_index, &index) in candidates.iter().enumerate() {
+                    let source = attrs[2 * pair_index].as_ref();
+                    let destination = attrs[2 * pair_index + 1].as_ref();
+                    if let (Some(source), Some(destination)) = (source, destination) {
+                        if source.returned.contains(AttrMask::FILEID)
+                            && destination.returned.contains(AttrMask::FILEID)
+                            && source.fileid == destination.fileid
+                        {
+                            data[index] = None;
+                            errors.insert(index, ERR_SAME_FILE);
+                        }
+                    }
                 }
             }
 

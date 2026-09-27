@@ -1,5 +1,6 @@
 """Resource, recovery, lifecycle, and concurrency regression tests."""
 
+import builtins
 import errno
 import math
 import os
@@ -8,6 +9,7 @@ import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import fsspec
 import nfs4fs._fs as fs_module
@@ -781,4 +783,163 @@ def test_writable_handle_is_never_reopened_after_reconnect(tmp_path):
     writer.close()
 
     assert fs.cat_file("/writer") == b"abc"
+    fs.close()
+
+
+def test_instance_rejects_url_for_different_server(tmp_path):
+    fs = _dummy(tmp_path / "url-authority", host="server-a")
+    fs.pipe_file("/file", b"on server A")
+    assert fs.cat_file("nfs4://server-a/file") == b"on server A"
+    with pytest.raises(ValueError, match="authority"):
+        fs.cat_file("nfs4://server-b/file")
+    with pytest.raises(ValueError, match="authority"):
+        fs.open("nfs4://server-b/file", "rb")
+    with pytest.raises(ValueError, match="authority"):
+        fs.glob("nfs4://server-b/*")
+    with pytest.raises(ValueError, match="authority"):
+        fs.copy("nfs4://server-b/file", "/copy")
+    with pytest.raises(ValueError, match="authority"):
+        fs.get("nfs4://server-b/file", str(tmp_path / "download"))
+    cache = fsspec.filesystem(
+        "blockcache",
+        fs=fs,
+        cache_storage=str(tmp_path / "cache"),
+        skip_instance_cache=True,
+    )
+    with pytest.raises(ValueError, match="authority"):
+        cache.cat_file("nfs4://server-b/file")
+    fs.close()
+
+
+def test_root_prefix_is_not_a_symlink_security_boundary(tmp_path):
+    shared_root = tmp_path / "shared-export"
+    base = _dummy(shared_root)
+    base.pipe_file("/outside", b"outside scope")
+    base.mkdir("/scope")
+    scoped = _dummy(shared_root, root="scope")
+    scoped.symlink("../outside", "/link")
+
+    # A server resolves this link outside the client-side root prefix.
+    assert scoped.cat_file("/link") == b"outside scope"
+    assert "not a security boundary" in " ".join(
+        engine_module.VfsiFileSystem.__doc__.split()
+    )
+    scoped.close()
+    base.close()
+
+
+def test_put_bounds_actual_local_read_after_size_changes(tmp_path, monkeypatch):
+    fs = _dummy(tmp_path / "bounded-put", max_batch_bytes=4)
+    source = tmp_path / "upload"
+    source.write_bytes(b"12345678")
+    original_getsize = os.path.getsize
+    original_open = builtins.open
+
+    def stale_getsize(path):
+        return 1 if os.fspath(path) == str(source) else original_getsize(path)
+
+    class BoundedReader:
+        def __init__(self, file):
+            self.file = file
+
+        def __enter__(self):
+            self.file.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.file.__exit__(*args)
+
+        def read(self, size=-1):
+            assert 0 < size <= fs.max_batch_bytes + 1
+            return self.file.read(size)
+
+    def checked_open(path, *args, **kwargs):
+        file = original_open(path, *args, **kwargs)
+        return BoundedReader(file) if os.fspath(path) == str(source) else file
+
+    monkeypatch.setattr(os.path, "getsize", stale_getsize)
+    monkeypatch.setattr(builtins, "open", checked_open)
+    fs.put(str(source), "/uploaded")
+    assert fs.cat_file("/uploaded") == b"12345678"
+    fs.close()
+
+
+def test_put_keeps_small_uploads_vectorized(tmp_path):
+    fs = _dummy(tmp_path / "vectorized-put", max_batch_bytes=8, batch_size=4)
+    source_a = tmp_path / "a"
+    source_b = tmp_path / "b"
+    source_a.write_bytes(b"abc")
+    source_b.write_bytes(b"def")
+    calls = []
+    original = fs._client.write_many
+
+    def recording_write_many(paths, values, truncate=True):
+        calls.append((list(paths), [len(value) for value in values]))
+        return original(paths, values, truncate)
+
+    fs._client.write_many = recording_write_many
+    fs.put([str(source_a), str(source_b)], ["/a", "/b"])
+    assert calls == [(["/a", "/b"], [3, 3])]
+    assert fs.cat(["/a", "/b"]) == {"/a": b"abc", "/b": b"def"}
+    fs.close()
+
+
+@pytest.mark.parametrize("operation", ["get", "put"])
+def test_explicit_transfer_lists_reject_length_mismatch(tmp_path, operation):
+    fs = _dummy(tmp_path / "mismatched-transfers")
+    local_a = tmp_path / "a"
+    local_b = tmp_path / "b"
+    local_a.write_bytes(b"a")
+    local_b.write_bytes(b"b")
+    fs.pipe({"/a": b"remote-a", "/b": b"remote-b"})
+    if operation == "get":
+        with pytest.raises(ValueError, match="equal length"):
+            fs.get(["/a", "/b"], [str(local_a)])
+        assert local_a.read_bytes() == b"a"
+    else:
+        with pytest.raises(ValueError, match="equal length"):
+            fs.put([str(local_a), str(local_b)], ["/a"])
+        assert fs.cat_file("/a") == b"remote-a"
+    fs.close()
+
+
+def test_update_handle_truncate_keeps_original_inode_after_rename(tmp_path):
+    fs = _dummy(tmp_path / "pinned-truncate")
+    fs.pipe({"/original": b"abcdefgh", "/replacement": b"xyz"})
+    with fs.open("/original", "r+b") as file:
+        fs.mv("/original", "/moved")
+        fs.mv("/replacement", "/original")
+        file.truncate(3)
+        assert file.read(3) == b"abc"
+    assert fs.cat_file("/moved") == b"abc"
+    assert fs.cat_file("/original") == b"xyz"
+    fs.close()
+
+
+def test_failed_descriptor_truncate_does_not_replay(tmp_path, monkeypatch):
+    fs = _dummy(tmp_path / "ambiguous-truncate")
+    fs.pipe_file("/file", b"abcdef")
+    calls = []
+
+    def ambiguous_truncate(fd, size):
+        calls.append((fd, size))
+        raise ConnectionError("injected transport failure")
+
+    with fs.open("/file", "r+b") as file:
+        monkeypatch.setattr(fs._client, "ftruncate", ambiguous_truncate)
+        with pytest.raises(ConnectionError, match="injected"):
+            file.truncate(2)
+        with pytest.raises(ConnectionError, match="unusable"):
+            file.truncate(2)
+    assert len(calls) == 1
+    fs.close()
+
+
+def test_open_many_rejects_bad_sizes_before_truncating(tmp_path):
+    fs = _dummy(tmp_path / "open-many-validation")
+    fs.pipe_file("/existing", b"preserve me")
+    request = SimpleNamespace(path="/existing", mode="wb")
+    with pytest.raises(ValueError, match="sizes must have one entry"):
+        fs.open_many([request], sizes=[])
+    assert fs.cat_file("/existing") == b"preserve me"
     fs.close()

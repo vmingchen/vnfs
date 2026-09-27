@@ -7,6 +7,7 @@ written to fail on the pre-fix behavior and pass after the fixes.
 
 import datetime
 import io
+import shutil
 import time
 
 import pytest
@@ -40,8 +41,8 @@ def test_checksum_changes_when_contents_change(fs):
 
 def test_absolute_symlink_targets_resolve_inside_root(fs):
     _require_capability(fs, "CAP_SYMLINKS")
-    # Absolute targets are chroot-relative: they must resolve within the
-    # filesystem root, not the export root (NFS) or the OS root (dummy).
+    # The adapter prefixes absolute targets with its configured root. This
+    # mapping does not confine relative symlinks to that prefix.
     fs.pipe_file("nfs4:///target.txt", b"t")
     fs.symlink("nfs4:///target.txt", "nfs4:///proto-link.txt")
     assert fs.cat_file("nfs4:///proto-link.txt") == b"t"
@@ -283,3 +284,33 @@ def test_minus_one_effective_range_length_matches_local(fs):
         fs.cat_file("nfs4:///missing-range", start=1, end=0)
     missing = fs.cat_ranges(["nfs4:///missing-range"], [1], [0])
     assert len(missing) == 1 and isinstance(missing[0], FileNotFoundError)
+
+
+@pytest.mark.parametrize("cache_type", ["readahead", "none"])
+@pytest.mark.parametrize("read_before_replace", [False, True])
+def test_open_reader_stays_on_original_file_after_path_replacement(
+    fs, cache_type, read_before_replace
+):
+    fs.pipe_file("nfs4:///open-identity", b"original")
+    with fs.open("nfs4:///open-identity", "rb", cache_type=cache_type) as reader:
+        if read_before_replace:
+            assert reader.read() == b"original"
+            reader.seek(0)
+        fs.mv("nfs4:///open-identity", "nfs4:///renamed-identity")
+        fs.pipe_file("nfs4:///open-identity", b"replacement")
+        assert reader.read() == b"original"
+
+
+@pytest.mark.parametrize("alias_kind", ["hardlink", "symlink"])
+def test_copy_rejects_different_paths_to_same_file(fs, alias_kind):
+    _require_capability(
+        fs, "CAP_HARDLINKS" if alias_kind == "hardlink" else "CAP_SYMLINKS"
+    )
+    fs.pipe_file("nfs4:///copy-source", b"source contents")
+    if alias_kind == "hardlink":
+        fs.hardlink("nfs4:///copy-source", "nfs4:///copy-alias")
+    else:
+        fs.symlink("copy-source", "nfs4:///copy-alias")
+    with pytest.raises(shutil.SameFileError):
+        fs.cp_file("nfs4:///copy-source", "nfs4:///copy-alias")
+    assert fs.cat_file("nfs4:///copy-source") == b"source contents"

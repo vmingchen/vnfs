@@ -107,7 +107,7 @@ class _Nfs4MMapCache(MMapCache):
 
 def _cache_path(cache_fs, path):
     path = cache_fs._strip_protocol(path)
-    return cache_fs.fs._strip_protocol(path)
+    return cache_fs.fs._checked_strip_protocol(path)
 
 
 def _save_writable_metadata(cache_fs):
@@ -175,8 +175,8 @@ def _mark_compatible_cache(cache_fs, path, file):
     if isinstance(cache, MMapCache):
         # LocalFileSystem establishes its descriptor during open(), so an
         # already-open cache handle remains usable after rename or unlink.
-        # VfsiFile normally opens lazily for vectorized whole-file fast paths;
-        # persistent blockcache handles need the local descriptor lifetime.
+        # Ensure an already-open cache handle retains its native descriptor
+        # across rename or unlink, including wrapper-created file objects.
         raw = getattr(file, "_raw", None)
         if raw is not None:
             raw._ensure_open()
@@ -628,6 +628,13 @@ def install_fsspec_blockcache_compat(target_type):
         if type(cache_fs) is CachingFileSystem and isinstance(
             getattr(cache_fs, "fs", None), target_type
         ):
+            # fsspec installs an instance-level path stripper that discards
+            # the target URL authority before the backend can validate it.
+            def strip_checked(path):
+                outer = type(cache_fs)._strip_protocol(path)
+                return cache_fs.fs._checked_strip_protocol(outer)
+
+            cache_fs._strip_protocol = strip_checked
             _register_cache(cache_fs)
 
     def open_with_compat(cache_fs, path, *args, **kwargs):

@@ -64,19 +64,17 @@ def test_dummy_root_is_isolated(dummy_fs, tmp_path):
     assert not (tmp_path / "only-here.txt").exists()
 
 
-def test_direct_read_open_validates_but_defers_descriptor(dummy_fs):
+def test_direct_read_open_pins_descriptor(dummy_fs):
     dummy_fs.pipe_file("nfs4:///f.txt", b"data")
     f = dummy_fs.open("nfs4:///f.txt", "rb")
-    # Direct open performs a metadata/type preflight for LocalFileSystem error
-    # parity, but the actual descriptor remains lazy. Whole-file reads still
-    # use read_allv and do not need OPEN/CLOSE.
-    assert f._fd is None
-    assert f.read() == b"data"
-    assert f._fd is None
-    assert f.seek(1) == 1
-    # A ranged read does open the descriptor.
-    assert f.read(2) == b"at"
+    # Scalar open pins file identity, including for the whole-file fast path.
     assert f._fd is not None
+    descriptor = f._fd
+    assert f.read() == b"data"
+    assert f._fd == descriptor
+    assert f.seek(1) == 1
+    assert f.read(2) == b"at"
+    assert f._fd == descriptor
     f.close()
 
 

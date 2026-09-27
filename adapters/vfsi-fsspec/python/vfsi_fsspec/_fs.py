@@ -249,6 +249,7 @@ class _ClientPool:
             "pwrite",
             "fseek",
             "fstat",
+            "ftruncate",
         }
     )
     _FD_MANY_METHODS = frozenset(
@@ -565,10 +566,10 @@ class _ClientPool:
 class _RawVfsiFile(io.RawIOBase):
     """A binary file object backed by an open vnfs descriptor.
 
-    The descriptor is opened lazily (first I/O) for read modes so bulk paths
-    (``cat``/``cat_ranges``/``OpenFiles`` reads) never pay per-file OPEN/CLOSE
-    compounds; write/append modes open eagerly so ``wb`` truncates and ``ab``
-    appends at open time, matching POSIX ``open()``.
+    Direct raw construction may defer read OPEN until first I/O. Public scalar
+    ``fs.open()`` pins a descriptor at open time, while bulk path operations
+    keep their vectorized no-OPEN paths. Write/append modes open eagerly so
+    ``wb`` truncates and ``ab`` appends at open time, matching POSIX ``open()``.
     """
 
     def __init__(self, fs, path, mode="rb", fd=None):
@@ -580,7 +581,7 @@ class _RawVfsiFile(io.RawIOBase):
         self._fd_generation = fs._client.generation if fd is not None else None
         self._broken = False
         self.fs = fs
-        self.path = fs._strip_protocol(path)
+        self.path = fs._checked_strip_protocol(path)
         self.mode = mode
         self._base_mode = _normalize_mode(mode)
         self._pos = 0
@@ -791,9 +792,18 @@ class _RawVfsiFile(io.RawIOBase):
             raise io.UnsupportedOperation("not writable")
         if size is None:
             size = self._pos
+        if size < 0:
+            raise OSError(errno.EINVAL, "Invalid argument")
         self.fs._invalidate_persistent_caches([self.path])
         self.fs._invalidate_parent_listing(self.path)
-        self.fs._client.truncate(self.fs._native_path(self.path), size)
+        fd = self._ensure_open()
+        try:
+            self.fs._client.ftruncate(fd, size)
+        except ConnectionError:
+            # The server may have applied the size change before the reply
+            # was lost. Never replay it on a potentially different handle.
+            self._broken = True
+            raise
         self._cached_size = size
         return size
 
@@ -1012,6 +1022,12 @@ class VfsiFile(AbstractBufferedFile):
                 raise ValueError("I/O operation on closed file")
             if self._buffer_group is not None and self.fs.vectorized_buffering:
                 data = self._buffer_group.read_all(self)
+            elif self._raw._fd is not None:
+                # A scalar open pins a native descriptor. A path-based
+                # read_all_many could switch to a replacement inode after a
+                # rename, even on a handle that was already read once.
+                self._raw.seek(0)
+                data = self._raw.read()
             else:
                 data, errors = self.fs._client.read_all_many(
                     [self.fs._native_path(self.path)]
@@ -1698,8 +1714,10 @@ class VfsiFileSystem(AbstractFileSystem):
     host: str
         Network filesystem server host (default 127.0.0.1).
     root: str
-        Export-relative prefix ("chroot") all paths are resolved under, e.g.
-        ``"git/vnfs_tests"``.
+        Export-relative path prefix, e.g. ``"git/vnfs_tests"``. This is not a
+        security boundary: server-side symlink resolution can leave the
+        prefix. Use a server export rooted at the intended directory for
+        isolation.
     backend: "nfs", "smb", or "dummy"
         ``dummy`` uses a local-directory implementation of the same vectorized
         API. ``smb`` connects to the SMB2/3 share named by ``share``.
@@ -1947,6 +1965,22 @@ class VfsiFileSystem(AbstractFileSystem):
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
+    def open(self, path, *args, **kwargs):
+        # AbstractFileSystem.open strips the URL before calling _open.
+        self._checked_strip_protocol(path)
+        return super().open(path, *args, **kwargs)
+
+    def glob(self, path, *args, **kwargs):
+        # The base glob implementation strips the URL before calling find.
+        self._checked_strip_protocol(path)
+        return super().glob(path, *args, **kwargs)
+
+    def expand_path(self, path, *args, **kwargs):
+        # get(), copy(), and cat() may pass through this base method before
+        # their own backend operations see the path.
+        self._checked_strip_protocol(path)
+        return super().expand_path(path, *args, **kwargs)
+
     def smb_dialect(self):
         """Return the negotiated SMB dialect revision, or ``None``."""
         return self._client.smb_dialect()
@@ -2001,6 +2035,22 @@ class VfsiFileSystem(AbstractFileSystem):
             path = "/" + path
         path = posixpath.normpath(path).rstrip("/")
         return path or cls.root_marker
+
+    def _checked_strip_protocol(self, path):
+        """Normalize an instance path without silently changing its server."""
+        if isinstance(path, list):
+            return [self._checked_strip_protocol(item) for item in path]
+        if isinstance(path, str):
+            requested_host = type(self)._get_kwargs_from_urls(path).get("host")
+            if (
+                requested_host is not None
+                and requested_host.casefold() != self.host.casefold()
+            ):
+                raise ValueError(
+                    f"URL authority {requested_host!r} does not match "
+                    f"filesystem host {self.host!r}"
+                )
+        return type(self)._strip_protocol(path)
 
     def _native_path(self, internal):
         """Internal ('/a/b') -> root-prefixed path for the native client."""
@@ -2110,7 +2160,7 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def _invalidate_persistent_caches(self, paths, subtrees=False):
         """Make registered persistent data generations stale before mutation."""
-        internals = {self._strip_protocol(path) for path in paths}
+        internals = {self._checked_strip_protocol(path) for path in paths}
         if not internals:
             return
         with self._persistent_cache_lock:
@@ -2132,13 +2182,13 @@ class VfsiFileSystem(AbstractFileSystem):
         This follows fsspec's public contract for ``path`` while still calling
         the base method so invalidations are replayed after transactions.
         """
-        internal = None if path is None else self._strip_protocol(path)
+        internal = None if path is None else self._checked_strip_protocol(path)
         self._evict_dircache(subtrees={"/" if internal is None else internal})
         super().invalidate_cache(internal)
 
     def _invalidate_parent_listing(self, path):
         """Discard only the listing containing ``path``."""
-        internal = self._strip_protocol(path)
+        internal = self._checked_strip_protocol(path)
         parent = posixpath.dirname(internal.rstrip("/")) or "/"
         self._evict_dircache(exact={parent})
         # Preserve fsspec's deferred transaction invalidation behavior. Its
@@ -2147,7 +2197,7 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def _invalidate_namespace(self, paths):
         """Invalidate object subtrees, parents, and cached parent metadata."""
-        internals = {self._strip_protocol(path) for path in paths}
+        internals = {self._checked_strip_protocol(path) for path in paths}
         if not internals:
             return
         self._invalidate_persistent_caches(internals, subtrees=True)
@@ -2187,7 +2237,7 @@ class VfsiFileSystem(AbstractFileSystem):
             for info in infos:
                 if info["type"] != "directory":
                     continue
-                child = self._strip_protocol(info["name"])
+                child = self._checked_strip_protocol(info["name"])
                 if limit is None or _depth(child) <= limit:
                     children.append(child)
             pending.extend(reversed(children))
@@ -2242,7 +2292,7 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def _makedirs_batched(self, paths, exist_ok=False):
         """fsspec ``makedirs`` semantics for many paths, batched."""
-        paths = list(dict.fromkeys(self._strip_protocol(p) for p in paths))
+        paths = list(dict.fromkeys(self._checked_strip_protocol(p) for p in paths))
         if not paths:
             return
         native = [self._native_path(p) for p in paths]
@@ -2275,7 +2325,7 @@ class VfsiFileSystem(AbstractFileSystem):
     # -- metadata ----------------------------------------------------------
 
     def info(self, path, **kwargs):
-        internal = self._strip_protocol(path)
+        internal = self._checked_strip_protocol(path)
         stats, errors = self._client.stat_many([self._native_path(internal)])
         if errors:
             raise _oserror(errors[0], internal)
@@ -2283,7 +2333,7 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def _info_many(self, paths):
         """Return metadata for several paths in one vector operation."""
-        internals = [self._strip_protocol(path) for path in paths]
+        internals = [self._checked_strip_protocol(path) for path in paths]
         stats, errors = self._client.stat_many(
             [self._native_path(path) for path in internals]
         )
@@ -2296,7 +2346,7 @@ class VfsiFileSystem(AbstractFileSystem):
         ]
 
     def ls(self, path, detail=True, refresh=False, **kwargs):
-        internal = self._strip_protocol(path)
+        internal = self._checked_strip_protocol(path)
         if not refresh:
             cached = self._cached_listing(internal)
             if cached is not None:
@@ -2320,7 +2370,7 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def exists(self, path, **kwargs):
         try:
-            internal = self._strip_protocol(path)
+            internal = self._checked_strip_protocol(path)
             return self._client.exists_many([self._native_path(internal)])[0]
         except (FileNotFoundError, NotADirectoryError):
             return False
@@ -2342,7 +2392,7 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def sizes(self, paths):
         """Size of each path in one stat_many batch."""
-        internals = [self._strip_protocol(p) for p in paths]
+        internals = [self._checked_strip_protocol(p) for p in paths]
         stats, errors = self._client.stat_many(
             [self._native_path(p) for p in internals]
         )
@@ -2476,11 +2526,11 @@ class VfsiFileSystem(AbstractFileSystem):
         callback = Callback.as_callback(callback)
         if isinstance(path, str):
             paths = self.expand_path(path, recursive=recursive, **kwargs)
-            if len(paths) == 1 and paths[0] == self._strip_protocol(path):
+            if len(paths) == 1 and paths[0] == self._checked_strip_protocol(path):
                 # Single literal path: cat_file semantics (raise on error).
                 return self.cat_file(paths[0], callback=callback, **kwargs)
             return self._cat_batch(paths, on_error, callback=callback)
-        paths = [self._strip_protocol(p) for p in path]
+        paths = [self._checked_strip_protocol(p) for p in path]
         if recursive:
             expanded = []
             for p in paths:
@@ -2490,7 +2540,7 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def cat_file(self, path, start=None, end=None, callback=DEFAULT_CALLBACK, **kwargs):
         callback = Callback.as_callback(callback)
-        internal = self._strip_protocol(path)
+        internal = self._checked_strip_protocol(path)
         size = None
         if (start is not None and start < 0) or (end is not None and end < 0):
             size = self.size(internal)
@@ -2548,7 +2598,7 @@ class VfsiFileSystem(AbstractFileSystem):
         if len(starts) != len(paths) or len(ends) != len(paths):
             raise ValueError("starts/ends must match paths")
         callback.set_size(len(paths))
-        internals = [self._strip_protocol(p) for p in paths]
+        internals = [self._checked_strip_protocol(p) for p in paths]
         native = [self._native_path(p) for p in internals]
         errors = {}
         sizes = [None] * len(paths)
@@ -2710,7 +2760,7 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def _write_one_streamed(self, path, value, callback=None):
         """Overwrite one in-memory value with bounded native write calls."""
-        internal = self._strip_protocol(path)
+        internal = self._checked_strip_protocol(path)
         parent = posixpath.dirname(internal)
         if self.auto_mkdir and parent not in ("", "/"):
             self._ensure_dirs([parent], 0o755)
@@ -2725,7 +2775,7 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def _write_one_exclusive(self, path, value, callback=None):
         """Atomically create one path with O_EXCL and bounded writes."""
-        internal = self._strip_protocol(path)
+        internal = self._checked_strip_protocol(path)
         parent = posixpath.dirname(internal)
         if self.auto_mkdir and parent not in ("", "/"):
             self._ensure_dirs([parent], 0o755)
@@ -2801,7 +2851,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 **kwargs,
             )
         elif isinstance(path, dict):
-            paths = [self._strip_protocol(k) for k in path]
+            paths = [self._checked_strip_protocol(k) for k in path]
             values = list(path.values())
         else:
             raise ValueError("path must be str or dict")
@@ -2818,7 +2868,7 @@ class VfsiFileSystem(AbstractFileSystem):
     ):
         callback = Callback.as_callback(callback)
         self._write_batch(
-            [self._strip_protocol(path)], [value], mode, callback=callback
+            [self._checked_strip_protocol(path)], [value], mode, callback=callback
         )
 
     # -- batched local <-> remote transfer --------------------------------
@@ -2844,6 +2894,8 @@ class VfsiFileSystem(AbstractFileSystem):
 
         pre_stats = None
         if isinstance(lpath, list) and isinstance(rpath, list):
+            if len(rpath) != len(lpath):
+                raise ValueError("rpath and lpath must have equal length")
             rpaths = rpath
             lpaths = lpath
         else:
@@ -2856,7 +2908,10 @@ class VfsiFileSystem(AbstractFileSystem):
                 if not candidates:
                     return
                 cstats, cerrs = self._client.stat_many(
-                    [self._native_path(self._strip_protocol(p)) for p in candidates]
+                    [
+                        self._native_path(self._checked_strip_protocol(p))
+                        for p in candidates
+                    ]
                 )
                 if cerrs:
                     i = min(cerrs)
@@ -2892,7 +2947,9 @@ class VfsiFileSystem(AbstractFileSystem):
             stats = [pre_stats.get(r) for r in rpaths]
         else:
             # Classify directories with one stat_many batch.
-            native_all = [self._native_path(self._strip_protocol(r)) for r in rpaths]
+            native_all = [
+                self._native_path(self._checked_strip_protocol(r)) for r in rpaths
+            ]
             stats, _stat_errors = self._client.stat_many(native_all)
         pairs = []
         for i, (remote_path, local_path) in enumerate(zip(rpaths, lpaths)):
@@ -2930,7 +2987,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 continue
             selected = [pairs[i] for i in batch]
             native = [
-                self._native_path(self._strip_protocol(remote_path))
+                self._native_path(self._checked_strip_protocol(remote_path))
                 for remote_path, _, _ in selected
             ]
             data, errors = self._client.read_all_many(native)
@@ -2967,6 +3024,8 @@ class VfsiFileSystem(AbstractFileSystem):
         from fsspec.utils import other_paths
 
         if isinstance(lpath, list) and isinstance(rpath, list):
+            if len(lpath) != len(rpath):
+                raise ValueError("lpath and rpath must have equal length")
             rpaths = rpath
             lpaths = lpath
         else:
@@ -2986,9 +3045,9 @@ class VfsiFileSystem(AbstractFileSystem):
                 trailing_sep(rpath) or self.isdir(rpath)
             )
             rpath = (
-                self._strip_protocol(rpath)
+                self._checked_strip_protocol(rpath)
                 if isinstance(rpath, str)
-                else [self._strip_protocol(p) for p in rpath]
+                else [self._checked_strip_protocol(p) for p in rpath]
             )
             exists = source_is_str and (
                 (has_magic(lpath) and source_is_file)
@@ -3016,39 +3075,65 @@ class VfsiFileSystem(AbstractFileSystem):
             return
         mode = kwargs.get("mode", "overwrite")
         sizes = [os.path.getsize(local_path) for local_path, _ in pairs]
+
+        def upload_streamed(local_path, remote_path, size):
+            remote = self.open(remote_path, "xb" if mode == "create" else "wb")
+            with callback.branched(local_path, remote_path) as child:
+                child.set_size(size)
+                with remote, open(local_path, "rb") as source:
+                    while True:
+                        chunk = source.read(
+                            min(self.transfer_chunk_size, self.max_batch_bytes)
+                        )
+                        if not chunk:
+                            break
+                        remote.write(chunk)
+                        child.relative_update(len(chunk))
+            callback.relative_update()
+
+        def upload_batched(items):
+            if not items:
+                return
+            self._write_batch(
+                [
+                    self._checked_strip_protocol(remote_path)
+                    for _, remote_path, _ in items
+                ],
+                [data for _, _, data in items],
+                mode=mode,
+            )
+            for local_path, remote_path, data in items:
+                with callback.branched(local_path, remote_path) as child:
+                    child.set_size(len(data))
+                    child.relative_update(len(data))
+                callback.relative_update()
+
         for batch in _bounded_batches(sizes, self.batch_size, self.max_batch_bytes):
             if len(batch) == 1 and sizes[batch[0]] > self.max_batch_bytes:
                 i = batch[0]
                 local_path, remote_path = pairs[i]
-                if mode == "create":
-                    remote = self.open(remote_path, "xb")
-                else:
-                    remote = self.open(remote_path, "wb")
-                with callback.branched(local_path, remote_path) as child:
-                    child.set_size(sizes[i])
-                    with remote, open(local_path, "rb") as source:
-                        while True:
-                            chunk = source.read(self.transfer_chunk_size)
-                            if not chunk:
-                                break
-                            remote.write(chunk)
-                            child.relative_update(len(chunk))
-                callback.relative_update()
+                upload_streamed(local_path, remote_path, sizes[i])
                 continue
-            selected = [pairs[i] for i in batch]
-            datas = []
-            for local_path, _ in selected:
+            staged = []
+            staged_bytes = 0
+            for i in batch:
+                local_path, remote_path = pairs[i]
+                remaining = self.max_batch_bytes - staged_bytes
                 with open(local_path, "rb") as fh:
-                    datas.append(fh.read())
-            remote_paths = [
-                self._strip_protocol(remote_path) for _, remote_path in selected
-            ]
-            self._write_batch(remote_paths, datas, mode=mode)
-            for (local_path, remote_path), buf in zip(selected, datas):
-                with callback.branched(local_path, remote_path) as child:
-                    child.set_size(len(buf))
-                    child.relative_update(len(buf))
-                callback.relative_update()
+                    data = fh.read(remaining + 1)
+                if len(data) > remaining:
+                    upload_batched(staged)
+                    staged = []
+                    staged_bytes = 0
+                    if remaining < self.max_batch_bytes:
+                        with open(local_path, "rb") as fh:
+                            data = fh.read(self.max_batch_bytes + 1)
+                    if len(data) > self.max_batch_bytes:
+                        upload_streamed(local_path, remote_path, sizes[i])
+                        continue
+                staged.append((local_path, remote_path, data))
+                staged_bytes += len(data)
+            upload_batched(staged)
 
     # -- open / file objects ----------------------------------------------
 
@@ -3064,7 +3149,7 @@ class VfsiFileSystem(AbstractFileSystem):
         size=None,
         **kwargs,
     ):
-        internal = self._strip_protocol(path)
+        internal = self._checked_strip_protocol(path)
         if not autocommit and any(c in mode for c in "wax"):
             # fsspec transactions: defer the write until commit()/discard().
             return _DeferredWriteFile(self, internal, mode)
@@ -3073,28 +3158,47 @@ class VfsiFileSystem(AbstractFileSystem):
             if parent not in ("", "/"):
                 self._ensure_dirs([parent], 0o755)
         base_mode = _normalize_mode(mode)
-        if base_mode in ("r", "r+"):
-            attrs = self._client.stat(self._native_path(internal))
-            if attrs["type"] == "directory":
-                raise IsADirectoryError(errno.EISDIR, "Is a directory", internal)
-            if size is None:
-                size = attrs["size"]
-        return VfsiFile(
-            self,
-            internal,
-            mode,
-            block_size=self.block_size if block_size is None else block_size,
-            cache_type=self.cache_type if cache_type is None else cache_type,
-            cache_options=(
-                self.cache_options if cache_options is None else cache_options
-            ),
-            write_buffering=(
-                self.write_buffering
-                if write_buffering is None
-                else bool(write_buffering)
-            ),
-            size=size,
-        )
+        fd = None
+        try:
+            if base_mode in ("r", "r+"):
+                # A scalar open is the point at which Python promises a file
+                # handle. Pin its native identity here; open_many() retains its
+                # batched OPEN path for multi-file workloads.
+                fd = self._client.open(
+                    self._native_path(internal), "rb+" if base_mode == "r+" else "rb"
+                )
+                attrs = self._client.fstat(fd)
+                if attrs["type"] == "directory":
+                    raise IsADirectoryError(errno.EISDIR, "Is a directory", internal)
+                if size is None:
+                    size = attrs["size"]
+            file = VfsiFile(
+                self,
+                internal,
+                mode,
+                fd=fd,
+                block_size=self.block_size if block_size is None else block_size,
+                cache_type=self.cache_type if cache_type is None else cache_type,
+                cache_options=(
+                    self.cache_options if cache_options is None else cache_options
+                ),
+                write_buffering=(
+                    self.write_buffering
+                    if write_buffering is None
+                    else bool(write_buffering)
+                ),
+                size=size,
+            )
+            if fd is not None:
+                file._raw._cached_size = attrs["size"]
+            return file
+        except BaseException:
+            if fd is not None and self._client.descriptor_valid(fd):
+                try:
+                    self._client.close(fd)
+                except BaseException:
+                    self._client.defer_close_many([fd])
+            raise
 
     def open_many(
         self,
@@ -3107,7 +3211,7 @@ class VfsiFileSystem(AbstractFileSystem):
         sizes=None,
     ):
         """Open a list of ``OpenFile`` objects in one openv batch."""
-        paths = [self._strip_protocol(f.path) for f in open_files]
+        paths = [self._checked_strip_protocol(f.path) for f in open_files]
         modes = [f.mode for f in open_files]
         effective_block_size = self.block_size if block_size is None else block_size
         effective_cache_type = self.cache_type if cache_type is None else cache_type
@@ -3117,6 +3221,12 @@ class VfsiFileSystem(AbstractFileSystem):
         effective_write_buffering = (
             self.write_buffering if write_buffering is None else bool(write_buffering)
         )
+        if sizes is None:
+            discovered_sizes = [None] * len(paths)
+        else:
+            discovered_sizes = list(sizes)
+            if len(discovered_sizes) != len(paths):
+                raise ValueError("sizes must have one entry per open file")
         if self.auto_mkdir and any(any(c in m for c in "wax") for m in modes):
             parents = {
                 posixpath.dirname(p) for p in paths if posixpath.dirname(p) != "/"
@@ -3131,12 +3241,6 @@ class VfsiFileSystem(AbstractFileSystem):
         fds = self._client.open_many([self._native_path(p) for p in paths], modes)
         files = []
         try:
-            if sizes is None:
-                discovered_sizes = [None] * len(fds)
-            else:
-                discovered_sizes = list(sizes)
-                if len(discovered_sizes) != len(fds):
-                    raise ValueError("sizes must have one entry per open file")
             metadata_indices = [
                 index
                 for index, mode in enumerate(modes)
@@ -3225,7 +3329,7 @@ class VfsiFileSystem(AbstractFileSystem):
     # -- mutation ----------------------------------------------------------
 
     def mkdir(self, path, create_parents=True, **kwargs):
-        internal = self._strip_protocol(path)
+        internal = self._checked_strip_protocol(path)
         mode = (kwargs.get("mode", 0o755) or 0o755) & 0o7777
         if create_parents:
             if self.exists(internal):
@@ -3239,7 +3343,7 @@ class VfsiFileSystem(AbstractFileSystem):
         self._makedirs_batched([path], exist_ok)
 
     def rmdir(self, path):
-        internal = self._strip_protocol(path)
+        internal = self._checked_strip_protocol(path)
         self._invalidate_namespace([internal])
         self._client.remove_many([self._native_path(internal)])
 
@@ -3249,9 +3353,9 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def rm(self, path, recursive=False, maxdepth=None):
         if isinstance(path, str):
-            paths = [self._strip_protocol(path)]
+            paths = [self._checked_strip_protocol(path)]
         else:
-            paths = [self._strip_protocol(p) for p in path]
+            paths = [self._checked_strip_protocol(p) for p in path]
         self._invalidate_namespace(paths)
         if recursive:
             self._rm_recursive(paths)
@@ -3308,12 +3412,12 @@ class VfsiFileSystem(AbstractFileSystem):
             ):
                 raise ValueError("path1 and path2 must both be lists of equal length")
             pairs = [
-                (self._strip_protocol(a), self._strip_protocol(b))
+                (self._checked_strip_protocol(a), self._checked_strip_protocol(b))
                 for a, b in zip(path1, path2)
             ]
         else:
-            src = self._strip_protocol(path1)
-            dst = self._strip_protocol(path2)
+            src = self._checked_strip_protocol(path1)
+            dst = self._checked_strip_protocol(path2)
             if src == dst:
                 return
             if self.isdir(dst):
@@ -3369,8 +3473,8 @@ class VfsiFileSystem(AbstractFileSystem):
     def cp_file(self, path1, path2, callback=DEFAULT_CALLBACK, **kwargs):
         """Copy a single file (or create a directory) between two paths."""
         callback = Callback.as_callback(callback)
-        src = self._strip_protocol(path1)
-        dst = self._strip_protocol(path2)
+        src = self._checked_strip_protocol(path1)
+        dst = self._checked_strip_protocol(path2)
         info = self.info(src)
         if info["type"] == "directory":
             self._ensure_dirs([dst], 0o755)
@@ -3400,7 +3504,7 @@ class VfsiFileSystem(AbstractFileSystem):
             if len(path1) != len(path2):
                 raise ValueError("path1 and path2 must be lists of equal length")
             pairs = [
-                (self._strip_protocol(a), self._strip_protocol(b))
+                (self._checked_strip_protocol(a), self._checked_strip_protocol(b))
                 for a, b in zip(path1, path2)
             ]
             self._copy_pairs(
@@ -3416,8 +3520,8 @@ class VfsiFileSystem(AbstractFileSystem):
             and not path1.endswith("/")
             and not (isinstance(path2, str) and path2.endswith("/"))
         ):
-            src = self._strip_protocol(path1)
-            dst = self._strip_protocol(path2)
+            src = self._checked_strip_protocol(path1)
+            dst = self._checked_strip_protocol(path2)
             stats, errors = self._client.stat_many(
                 [self._native_path(src), self._native_path(dst)]
             )
@@ -3460,7 +3564,7 @@ class VfsiFileSystem(AbstractFileSystem):
         )
         paths2 = other_paths(paths1, path2, exists=exists, flatten=not source_is_str)
         pairs = [
-            (self._strip_protocol(a), self._strip_protocol(b))
+            (self._checked_strip_protocol(a), self._checked_strip_protocol(b))
             for a, b in zip(paths1, paths2)
         ]
         callback.set_size(len(pairs))
@@ -3546,7 +3650,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 raise exc
 
     def touch(self, path, truncate=True, **kwargs):
-        internal = self._strip_protocol(path)
+        internal = self._checked_strip_protocol(path)
         if not truncate and self.exists(internal):
             self._invalidate_namespace([internal])
             self._client.touch(self._native_path(internal))
@@ -3555,7 +3659,7 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def symlink(self, target, path, **kwargs):
         self._invalidate_namespace([path])
-        link = self._native_path(self._strip_protocol(path))
+        link = self._native_path(self._checked_strip_protocol(path))
         protocols = (
             (type(self).protocol,)
             if isinstance(type(self).protocol, str)
@@ -3566,22 +3670,23 @@ class VfsiFileSystem(AbstractFileSystem):
             for protocol in protocols
         )
         if absolute_target:
-            # Absolute targets are relative to the filesystem root (chroot
-            # semantics, matching LocalFileSystem's OS-absolute targets);
-            # map them through the root prefix. Relative targets are stored
-            # as-is and resolve relative to the link's directory.
-            target = self._native_path(self._strip_protocol(target))
+            # Map absolute targets through the configured path prefix.
+            # Relative targets are stored as-is and may resolve outside that
+            # prefix; the server export is the actual security boundary.
+            target = self._native_path(self._checked_strip_protocol(target))
         self._client.symlink(target, link)
 
     def readlink(self, path):
-        return self._client.readlink(self._native_path(self._strip_protocol(path)))
+        return self._client.readlink(
+            self._native_path(self._checked_strip_protocol(path))
+        )
 
     def hardlink(self, src, dst):
         self._invalidate_namespace([dst])
         self._invalidate_parent_listing(src)
         self._client.hardlink(
-            self._native_path(self._strip_protocol(src)),
-            self._native_path(self._strip_protocol(dst)),
+            self._native_path(self._checked_strip_protocol(src)),
+            self._native_path(self._checked_strip_protocol(dst)),
         )
 
     # -- traversal ---------------------------------------------------------
@@ -3591,7 +3696,7 @@ class VfsiFileSystem(AbstractFileSystem):
             raise ValueError("maxdepth must be at least 1")
         detail = kwargs.pop("detail", False)
         refresh = kwargs.pop("refresh", False)
-        internal = self._strip_protocol(path)
+        internal = self._checked_strip_protocol(path)
         tree = None if refresh else self._cached_walk_tree(internal, maxdepth)
         if tree is None:
             # A native miss refreshes the complete subtree in one vectorized
@@ -3621,7 +3726,7 @@ class VfsiFileSystem(AbstractFileSystem):
             dirs = {}
             files = {}
             for info in infos:
-                entry_internal = self._strip_protocol(info["name"])
+                entry_internal = self._checked_strip_protocol(info["name"])
                 name = posixpath.basename(entry_internal.rstrip("/"))
                 (dirs if info["type"] == "directory" else files)[name] = dict(info)
             by_dir[directory] = (dirs, files)
@@ -3639,7 +3744,7 @@ class VfsiFileSystem(AbstractFileSystem):
             yield d, dirs, files
 
     def find(self, path, maxdepth=None, withdirs=False, detail=False, **kwargs):
-        internal = self._strip_protocol(path)
+        internal = self._checked_strip_protocol(path)
         root_depth = _depth(internal)
         out = {}
         if withdirs and internal != "" and self.isdir(internal):
@@ -3651,7 +3756,7 @@ class VfsiFileSystem(AbstractFileSystem):
             if withdirs:
                 entries.extend(dirs.values() if isinstance(dirs, dict) else [])
             for info in entries:
-                full = self._strip_protocol(info["name"])
+                full = self._checked_strip_protocol(info["name"])
                 if maxdepth is not None and _depth(full) > root_depth + maxdepth:
                     continue
                 out[full] = dict(info)
@@ -3663,7 +3768,7 @@ class VfsiFileSystem(AbstractFileSystem):
         return {n: out[n] for n in names}
 
     def du(self, path, total=True, maxdepth=None, withdirs=False, **kwargs):
-        internal = self._strip_protocol(path)
+        internal = self._checked_strip_protocol(path)
         sizes = {}
         if withdirs and self.isdir(internal):
             info = self.info(internal)

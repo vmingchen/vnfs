@@ -550,6 +550,18 @@ impl DummyVecFs {
     }
 
     fn setattr_one(&mut self, a: &VfAttrs, i: usize) -> VfResult<()> {
+        if let VfFile::Descriptor(fd) = &a.file
+            && a.masks == AttrMask::SIZE
+        {
+            let open = self
+                .open_files
+                .get(fd)
+                .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
+            return open
+                .file
+                .set_len(a.size)
+                .map_err(|error| VfError::failure(i, Self::errno(&error)));
+        }
         let p = self
             .real_path(&self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?)
             .map_err(|e| e.with_index(i))?;
