@@ -50,6 +50,36 @@ def _summary(samples: list[float]) -> dict[str, float]:
     }
 
 
+def _wait_for_kernel_fixture(
+    local,
+    mounted_path: Path,
+    fixture_path: Path,
+    directories: int,
+    files_per_dir: int,
+    size: int,
+) -> None:
+    """Exclude cross-client visibility delay from the timed tree walk."""
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            _check_tree(
+                local.find(str(mounted_path), withdirs=True, detail=True),
+                directories,
+                files_per_dir,
+                size,
+            )
+            return
+        except RuntimeError as error:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"kernel fixture did not become visible: {error}; "
+                    f"mounted_exists={mounted_path.exists()}, "
+                    f"server_exists={fixture_path.exists()}, "
+                    f"server_children={list(fixture_path.iterdir()) if fixture_path.exists() else []}"
+                ) from error
+            time.sleep(0.1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
@@ -131,6 +161,14 @@ def main() -> None:
                 args.files_per_dir,
                 payload,
             )
+            _wait_for_kernel_fixture(
+                local,
+                mounted_run / suffixes[1],
+                fixture_run / suffixes[1],
+                args.directories,
+                args.files_per_dir,
+                args.bytes_per_file,
+            )
             paths = (
                 f"/{run_name}/{suffixes[0]}",
                 str(mounted_run / suffixes[1]),
@@ -197,6 +235,7 @@ def main() -> None:
         "files_per_directory": args.files_per_dir,
         "bytes_per_file": args.bytes_per_file,
         "rounds": args.rounds,
+        "fixture_visibility_wait_excluded": True,
         "operations": {},
     }
     for operation, samples in results.items():
