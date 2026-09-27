@@ -172,8 +172,11 @@ jobs:
             echo "SMB dependencies must live in the vfsi-smb package" >&2
             exit 1
           fi
-          if cargo tree -p vnfs --edges normal --prefix none | grep -Eq '^vfsi-local '; then
-            echo "the local test backend must remain opt-in" >&2
+          # The default auto feature intentionally includes vfsi-local as a
+          # mounted-path fallback; the NFS-only feature set must not.
+          if cargo tree -p vnfs --no-default-features --features nfs \
+              --edges normal --prefix none | grep -Eq '^vfsi-local '; then
+            echo "the NFS-only feature set must not include vfsi-local" >&2
             exit 1
           fi
       - name: Verify checked-in C header and smoke test
