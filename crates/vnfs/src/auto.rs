@@ -1245,10 +1245,33 @@ mod tests {
         };
         let client = Auto::new("/").unwrap();
         let mount = PathBuf::from(mount);
-        assert!(matches!(
-            client.route_for(&mount),
-            AutoRoute::DirectNfs { .. }
-        ));
+        let route = client.route_for(&mount);
+        if !matches!(route, AutoRoute::DirectNfs { .. }) {
+            let table = read_mounts(false);
+            let spec = table.eligible.iter().find(|spec| spec.mount_point == mount);
+            let probe = spec.map(|spec| {
+                Nfs::builder(&spec.server)
+                    .root(&spec.export)
+                    .minor_version(Some(spec.minor))
+                    .connect()
+                    .and_then(|direct| direct.metadata("/"))
+                    .map(|metadata| metadata.file_id())
+            });
+            let mountinfo = fs::read_to_string("/proc/self/mountinfo")
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.contains(" - nfs"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            panic!(
+                "Auto chose {route:?}; mount={mount:?}; mount_id={:?}; \
+                 eligible={spec:?}; credentials={:?}; kernel_inode={:?}; \
+                 direct_probe={probe:?}; nfs_mountinfo={mountinfo:?}",
+                path_mount_id(&mount),
+                AuthSysIdentity::current(),
+                fs::metadata(&mount).map(|metadata| metadata.ino()),
+            );
+        }
         assert!(client.metadata(&mount).unwrap().is_dir());
         let unique = format!(
             "vnfs-auto-{}-{:?}",
