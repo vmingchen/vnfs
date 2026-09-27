@@ -89,6 +89,57 @@ The same model applies to `openv`, `writev`, `getattrsv`, `listdirv`,
 for metadata-heavy workloads and for many small, independent I/O operations,
 where network latency dominates transfer time.
 
+## Use existing Linux mounts
+
+If paths already live under Linux mounts, `Auto` accepts ordinary mounted
+paths. For an unambiguous read-write NFSv4.1/4.2 mount with `sec=sys`, it
+discovers the server/export, verifies the remote root, and reuses a direct
+NFS connection so adjacent operations on that mount can form COMPOUNDs.
+Local paths, SMB/CIFS mounts, Kerberos mounts, and mounts it cannot safely
+identify continue through the kernel. The chosen route is observable on each
+opened file:
+
+```rust,no_run
+use vnfs::{Auto, OpenFlags, OpenRequest};
+
+fn main() -> vnfs::Result<()> {
+    let fs = Auto::new("/")?;
+    let paths = ["/mnt/nfs/file-1", "/mnt/nfs/file-2"];
+    let requests = paths.map(|p| OpenRequest::new(p, OpenFlags::READ));
+    let files = fs.openv(&requests)?;
+    println!("route: {:?}", files[0].route());
+    let contents = fs.readv(&[
+        files[0].read_request_at(0, 5),
+        files[1].read_request_at(0, 5),
+    ])?;
+    assert_eq!(contents.len(), 2);
+    fs.closev(files)?;
+    Ok(())
+}
+```
+
+Use `Mounted::new("/")?` to **always** use the kernel client, or
+`Nfs::builder(server).root(export).connect()?` for a fully explicit direct
+connection. `Auto` selects a backend before dispatch; it never replays a
+possibly completed write through a different backend. Open handles remain
+pinned to their selected backend. `Auto::with_readv_limit` adjusts the default
+16 MiB total allocation limit for an `Auto::readv` call; file `Read` calls
+are chunked to 1 MiB.
+
+The direct connection has its own NFS client state, separate from the mounted
+kernel client's caches. If the same files are also accessed through the
+kernel mount, normal NFS cache/close-to-open caveats apply. `Auto` captures
+AUTH_SYS credentials per direct connection and rejects use of a direct file
+after that thread's filesystem identity changes. Prefer `Mounted` where exact
+kernel mount semantics or warm page-cache hits are more important than
+cross-file vectorization.
+
+`Auto::route_for(path)` reports a candidate route, not a promise about every
+operation on that path. For example, `openv` leaves final symlinks and
+ambiguous create-if-missing paths on the kernel route; `CREATE_NEW` requests
+can take the direct path without following a pre-existing symlink. The
+`AutoFile::route()` value is the definitive choice for an open handle.
+
 ## Small-file benchmark
 
 The repository includes a [Rust benchmark driver][benchmark] that compares

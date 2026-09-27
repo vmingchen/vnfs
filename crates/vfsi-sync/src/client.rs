@@ -394,6 +394,30 @@ impl<F: CopyFileSystem> FsClient<F> {
     }
 }
 
+impl<F: VecFs> FsClient<F> {
+    /// Fetch no-follow metadata for many paths using the backend's vector
+    /// operation. Useful for routing without one metadata RPC per path.
+    pub fn symlink_metadatav(&self, paths: &[&Path]) -> VfResult<Vec<Metadata>> {
+        let mut attrs: Vec<_> = paths
+            .iter()
+            .map(|path| crate::VfAttrs {
+                file: VfFile::from_os_path(path),
+                masks: AttrMask::MODE,
+                ..crate::VfAttrs::default()
+            })
+            .collect();
+        self.lock()?.lgetattrsv(&mut attrs).map_err(|error| {
+            error
+                .index_opt()
+                .and_then(|index| paths.get(index))
+                .map_or(error.clone(), |path| {
+                    error.with_context("symlink_metadatav", path)
+                })
+        })?;
+        Ok(attrs.into_iter().map(Metadata::from).collect())
+    }
+}
+
 impl<F: VectorFileSystem> FsClient<F> {
     /// Open an ordered vector of files.
     ///

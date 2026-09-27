@@ -541,6 +541,18 @@ jobs:
           ./ci/benchmark-large-read-pipeline.sh 127.0.0.1 / /.vnfs-large-read-benchmark 500us 3 1 65536,262144 2
           rm -f "$file"
           trap - EXIT
+      - name: Verify Auto routes an AUTH_SYS mount to direct NFS
+        run: |
+          sudo mkdir -p /mnt/vnfs-ci-auto
+          sudo mount -t nfs4 -o vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049 127.0.0.1:/ /mnt/vnfs-ci-auto
+          bind_target=/mnt/vnfs-ci-auto/.vnfs-auto-bind
+          bind_source=$(mktemp)
+          trap 'sudo umount "$bind_target" 2>/dev/null || true; rm -f "$bind_target" "$bind_source"; sudo umount /mnt/vnfs-ci-auto' EXIT
+          printf 'underlying NFS\n' > "$bind_target"
+          printf 'bind source\n' > "$bind_source"
+          sudo mount --bind "$bind_source" "$bind_target"
+          VFSI_AUTO_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_AUTO_TEST_BIND="$bind_target" \
+            cargo test -p vnfs --lib auto::tests::live_ -- --nocapture
       - name: Run NFS integration suite
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}

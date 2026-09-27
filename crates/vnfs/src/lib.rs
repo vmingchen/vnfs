@@ -44,8 +44,16 @@ pub mod legacy {
     pub use vfsi_nfs::{client, compound, nfs, rpc, session};
 }
 
+/// Linux-mounted path routing with conservative automatic direct NFSv4 selection.
+#[cfg(all(feature = "auto", target_os = "linux"))]
+mod auto;
+#[cfg(all(feature = "auto", target_os = "linux"))]
+pub use auto::{Auto, AutoClient, AutoFile, AutoRead, AutoRoute, AutoWrite, Mounted};
+
 /// Common Rust-native imports without protocol or FFI internals.
 pub mod prelude {
+    #[cfg(all(feature = "auto", target_os = "linux"))]
+    pub use crate::{Auto, AutoClient, AutoFile, Mounted};
     #[cfg(feature = "nfs")]
     pub use crate::{Nfs, NfsBuilder, NfsClient, NfsFile, NfsReadPool, NfsReadPoolOptions};
     pub use vfsi_core::{
