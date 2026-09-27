@@ -9,6 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "=0.4.13"
+libntirpc-sys = { path = "../third-party/libntirpc-sys", features = ["fuzzing"] }
 vfsi-nfs = { path = "../crates/vfsi-nfs", version = "0.1.1", features = ["fuzzing"] }
 
 [[bin]]
@@ -21,6 +22,13 @@ bench = false
 [[bin]]
 name = "nfs_attribute_list"
 path = "fuzz_targets/nfs_attribute_list.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "libntirpc_rpc_xdr"
+path = "fuzz_targets/libntirpc_rpc_xdr.rs"
 test = false
 doc = false
 bench = false

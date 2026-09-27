@@ -35,6 +35,7 @@ repository = "https://github.com/vmingchen/libntirpc-sys"
 
 [features]
 default = []
+fuzzing = []
 rpcsec-gss = []
 
 [lib]
