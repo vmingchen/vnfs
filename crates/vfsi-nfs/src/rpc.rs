@@ -307,6 +307,9 @@ impl RpcClient {
             } => {
                 use libntirpc_sys::rpcsec_gss::RpcGssSec;
 
+                // Install before the first RPC: libntirpc dispatches xp_ops
+                // without a lock, so the shim must be in place before the
+                // transport can process any request.
                 if !unsafe { vfsi_libntirpc_install_reply_verifier_fix(clnt) } {
                     unsafe { destroy_client(clnt) };
                     return Err(RpcError::transport(

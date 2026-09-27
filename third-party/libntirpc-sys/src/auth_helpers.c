@@ -75,6 +75,20 @@ struct vfsi_rpc_dplx_prefix {
  * once and leave the patch reachable for the life of the process. libntirpc's
  * ops tables are file-scope statics, so the cache holds only a handful of
  * entries and the retained memory is bounded.
+ *
+ * Installation itself still mutates `xprt->xp_ops`, which libntirpc reads
+ * without a lock. The patch is fully initialised before a single release store
+ * publishes it, so any concurrent dispatch observes either the original table
+ * or the complete shim, never a partially built one, and `vfsi_patch_lock`
+ * serialises concurrent installers. That is only a guarantee that readers see
+ * a valid table; it does not synchronise the swap with libntirpc. The caller
+ * therefore MUST install before the transport can process any request, which
+ * is why `vfsi-nfs` installs immediately after `clnt_vc_ncreatef` and before
+ * the first RPC. Installing on a transport that is already serving (for
+ * example one shared via `clnt_vc_ncreate_svc`) is unsupported. The install
+ * entry point additionally refuses to proceed while a client request is
+ * outstanding, but server-side activity on a shared transport is not
+ * detectable there.
  */
 struct vfsi_patched_ops {
     struct xp_ops ops;
@@ -97,39 +111,32 @@ static SVCXPRT *vfsi_client_xprt(CLIENT *client)
 
 static enum xprt_stat vfsi_decode_with_reply_verifier(struct svc_req *request);
 
-static struct vfsi_patched_ops *vfsi_patch_for(struct xp_ops *original)
+/* The caller must hold vfsi_patch_lock. */
+static struct vfsi_patched_ops *vfsi_patch_for_locked(struct xp_ops *original)
 {
     struct vfsi_patch *entry;
-    struct vfsi_patched_ops *patched = NULL;
 
-    pthread_mutex_lock(&vfsi_patch_lock);
     for (entry = vfsi_patches; entry != NULL; entry = entry->next) {
-        if (entry->original == original) {
-            patched = &entry->patched;
-            break;
-        }
+        if (entry->original == original)
+            return &entry->patched;
     }
-    if (patched == NULL) {
-        entry = calloc(1, sizeof(*entry));
-        if (entry != NULL) {
-            entry->original = original;
-            entry->patched.ops = *original;
-            entry->patched.original_decode = original->xp_decode;
-            entry->patched.ops.xp_decode = vfsi_decode_with_reply_verifier;
-            entry->next = vfsi_patches;
-            vfsi_patches = entry;
-            patched = &entry->patched;
-        }
-    }
-    pthread_mutex_unlock(&vfsi_patch_lock);
-    return patched;
+    entry = calloc(1, sizeof(*entry));
+    if (entry == NULL)
+        return NULL;
+    entry->original = original;
+    entry->patched.ops = *original;
+    entry->patched.original_decode = original->xp_decode;
+    entry->patched.ops.xp_decode = vfsi_decode_with_reply_verifier;
+    entry->next = vfsi_patches;
+    vfsi_patches = entry;
+    return &entry->patched;
 }
 
 static enum xprt_stat vfsi_decode_with_reply_verifier(struct svc_req *request)
 {
     SVCXPRT *xprt = request->rq_xprt;
-    struct vfsi_patched_ops *patched =
-        (struct vfsi_patched_ops *)xprt->xp_ops;
+    struct vfsi_patched_ops *patched = (struct vfsi_patched_ops *)
+        __atomic_load_n(&xprt->xp_ops, __ATOMIC_ACQUIRE);
     struct vfsi_rpc_dplx_prefix *record =
         (struct vfsi_rpc_dplx_prefix *)xprt;
     struct rpc_msg decoded_message;
@@ -164,17 +171,44 @@ static enum xprt_stat vfsi_decode_with_reply_verifier(struct svc_req *request)
 bool vfsi_libntirpc_install_reply_verifier_fix(CLIENT *client)
 {
     SVCXPRT *xprt = vfsi_client_xprt(client);
-    struct vfsi_patched_ops *patched;
+    struct xp_ops *original;
+    struct vfsi_patched_ops *patched = NULL;
 
-    if (xprt == NULL || xprt->xp_ops == NULL || xprt->xp_ops->xp_decode == NULL)
+    if (xprt == NULL)
         return false;
-    if (xprt->xp_ops->xp_decode == vfsi_decode_with_reply_verifier)
+    original = __atomic_load_n(&xprt->xp_ops, __ATOMIC_ACQUIRE);
+    if (original == NULL || original->xp_decode == NULL)
+        return false;
+    if (original->xp_decode == vfsi_decode_with_reply_verifier)
         return true;
-    patched = vfsi_patch_for(xprt->xp_ops);
-    if (patched == NULL)
-        return false;
-    xprt->xp_ops = &patched->ops;
-    return true;
+
+    /*
+     * Refuse to install on a transport that is already processing a client
+     * request: an outstanding request means another worker can dispatch
+     * through `xp_ops` while we swap it. This is the observable part of the
+     * "install before use" contract. Server-side activity on a transport shared
+     * via `clnt_vc_ncreate_svc` is not visible here and remains unsupported.
+     */
+    {
+        struct vfsi_rpc_dplx_prefix *record =
+            (struct vfsi_rpc_dplx_prefix *)xprt;
+        bool quiescent;
+
+        mutex_lock(&record->recv.lock.wait.mtx);
+        quiescent = opr_rbtree_first(&record->call_replies) == NULL;
+        mutex_unlock(&record->recv.lock.wait.mtx);
+        if (!quiescent)
+            return false;
+    }
+
+    /* Serialise installers and publish the fully initialised table with one
+     * release store; see the lifetime note above. */
+    pthread_mutex_lock(&vfsi_patch_lock);
+    patched = vfsi_patch_for_locked(original);
+    if (patched != NULL)
+        __atomic_store_n(&xprt->xp_ops, &patched->ops, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&vfsi_patch_lock);
+    return patched != NULL;
 }
 
 void vfsi_libntirpc_uninstall_reply_verifier_fix(CLIENT *client)

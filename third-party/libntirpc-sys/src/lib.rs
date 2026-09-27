@@ -40,6 +40,13 @@ unsafe extern "C" {
         service: *mut ::std::os::raw::c_char,
         security: *mut ::std::os::raw::c_void,
     ) -> *mut AUTH;
+    /// Install the RPCSEC_GSS reply-verifier shim on a client transport.
+    ///
+    /// Must be called on a freshly created transport before it can process any
+    /// request (as `vfsi-nfs` does immediately after `clnt_vc_ncreatef` and
+    /// before the first call). libntirpc dispatches `xp_ops` without a lock,
+    /// so installing on a transport that is already serving requests — for
+    /// example one shared via `clnt_vc_ncreate_svc` — is unsupported.
     #[cfg(feature = "rpcsec-gss")]
     pub fn vfsi_libntirpc_install_reply_verifier_fix(client: *mut CLIENT) -> bool;
     /// Kept for API compatibility but intentionally does not touch the

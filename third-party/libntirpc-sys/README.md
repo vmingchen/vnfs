@@ -67,14 +67,16 @@ which prints `Hello, Alice!`. Both arguments are optional (`name` defaults to
 
 ## Dependencies
 
-Normal builds discover the administrator-provided `libntirpc` 6.3 or newer
-through `pkg-config` and generate Rust declarations from its installed
-headers. The build script does not access the network or download native
-source. The currently supported native target is Linux.
+Normal builds discover the administrator-provided `libntirpc` through
+`pkg-config` and generate Rust declarations from its installed headers. The
+build script does not access the network or download native source. The
+currently supported native target is Linux. `build.rs` accepts `libntirpc` 6.3
+or newer, but that is only a lower bound; see the ABI notes below for the
+releases actually validated.
 
 | Dependency | Package (Ubuntu) | Purpose |
 | --- | --- | --- |
-| libntirpc | `libntirpc-dev` | RPC implementation and headers (6.3+) |
+| libntirpc | `libntirpc-dev` | RPC implementation and headers (6.3+, validated on 6.3 and 15.x) |
 | pkg-config | `pkg-config` | locate the installed library and headers |
 | C toolchain | `build-essential` | compile the `auth_helpers.c` ABI shims |
 | clang | `clang` | provide the headers used by bindgen to generate bindings |
@@ -103,7 +105,21 @@ always bind to the locally installed headers.
 ## Supported libntirpc versions and ABI notes
 
 The crate links the administrator-provided `libntirpc` and never vendors
-native source, so build-time compatibility is not purely a version check.
+native source, so compatibility is not a simple version range. `build.rs`
+accepts 6.3 or newer, but the RPC helpers depend on a copied private
+`rpc_dplx_rec` layout and on `SVCXPRT` having been built with `INET6`; neither
+is exposed by the installed headers (`sizeof` in the C shim is compared only
+with bindgen, not with the linked library). The releases validated so far are:
+
+- Ubuntu 24.04's `libntirpc` 6.3: build, unit tests and the RPCSEC_GSS runtime
+  integration job (client and server).
+- Upstream v15.3: ABI/compile tests and the scheduled client-side RPCSEC_GSS
+  runtime job.
+
+Any other 6.3+ release is accepted but not guaranteed to match the private
+layout or to have been built with `INET6`. Re-run the RPCSEC_GSS integration
+test against a new library before enabling the feature in production.
+
 Several upstream ABI changes did not bump the reported version, which is why
 `build.rs` verifies what it can:
 
@@ -130,5 +146,11 @@ Several upstream ABI changes did not bump the reported version, which is why
   hook at runtime (the NFS server in that job remains the distribution
   package). Treat the feature as version-bounded and re-run the RPCSEC_GSS
   integration test whenever libntirpc is upgraded.
-- The currently verified targets are Linux/glibc; `README` continues to list
-  the packages needed on Ubuntu.
+- The reply-verifier shim replaces the client transport's `xp_ops` table.
+  libntirpc dispatches `xp_ops` without a lock, so the shim must be installed
+  on a freshly created transport before it can process any request; `vfsi-nfs`
+  installs it immediately after `clnt_vc_ncreatef`. Installation on a
+  transport that is already serving (for example one shared via
+  `clnt_vc_ncreate_svc`) is unsupported; the installer also refuses to run
+  while a client request is outstanding.
+- The validated platform is Linux/glibc; other platforms are untested.
