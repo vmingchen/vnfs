@@ -6,9 +6,135 @@
 //! distinction explicit and centralizes the rules for deciding what may be
 //! retried or continued.
 
-use std::fmt;
+use std::{collections::HashMap, fmt};
+
+use nfsv41_sys::{nfsstat4_NFS4ERR_RESOURCE, nfsstat4_NFS4ERR_TOO_MANY_OPS};
 
 use crate::compound::CompoundRes;
+
+/// Per-session, per-operation-shape compound size. Successful work is the
+/// only probe: a full compound allows the *next* compound to be a little
+/// larger, so learning never adds a network round trip of its own.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AdaptiveBatchSizer {
+    current: usize,
+    ceiling: usize,
+}
+
+impl AdaptiveBatchSizer {
+    pub(crate) fn new(conservative_start: usize, negotiated_capacity: usize) -> Self {
+        let ceiling = negotiated_capacity.max(1);
+        Self {
+            current: conservative_start.max(1).min(ceiling),
+            ceiling,
+        }
+    }
+
+    /// A nonzero caller cap is a hard maximum, not a request to exceed the
+    /// session's learned safe size.
+    pub(crate) fn next(&self, remaining: usize, caller_cap: usize) -> usize {
+        let cap = if caller_cap == 0 {
+            self.current
+        } else {
+            self.current.min(caller_cap)
+        };
+        remaining.min(cap)
+    }
+
+    pub(crate) fn current(&self) -> usize {
+        self.current
+    }
+
+    pub(crate) fn succeeded(&mut self, attempted: usize, more_work: bool) {
+        if more_work && attempted == self.current {
+            // Additive growth avoids jumping from a working batch straight
+            // to the negotiated maximum on servers with smaller real limits.
+            self.current = self.current.saturating_add(8).min(self.ceiling);
+        }
+    }
+
+    /// Shrink after a server resource rejection. For an ordered mutation,
+    /// `confirmed_prefix` items already succeeded and must not be replayed.
+    /// The caller advances by the returned count before retrying the suffix.
+    pub(crate) fn rejected(&mut self, attempted: usize, confirmed_prefix: usize) -> usize {
+        let confirmed = confirmed_prefix.min(attempted.saturating_sub(1));
+        if confirmed > 0 {
+            self.ceiling = self.ceiling.min(confirmed);
+            self.current = self.current.min(self.ceiling);
+        } else if attempted > 1 {
+            self.ceiling = self.ceiling.min(attempted - 1);
+            self.current = self.current.min((attempted / 2).max(1));
+        }
+        confirmed
+    }
+}
+
+/// One capability learner for every compound shape in a session. The COMPOUND
+/// tag is the shape key, so a large READ payload cannot reduce the budget for
+/// metadata-only REMOVE or LOOKUP requests. Builders consult this before
+/// packing work; dispatch observes real replies but never replays mutations.
+#[derive(Debug)]
+pub(crate) struct AdaptiveCompoundLimits {
+    negotiated_ops: usize,
+    shapes: HashMap<Vec<u8>, AdaptiveBatchSizer>,
+}
+
+impl AdaptiveCompoundLimits {
+    pub(crate) fn new(negotiated_ops: usize) -> Self {
+        Self {
+            negotiated_ops,
+            shapes: HashMap::new(),
+        }
+    }
+
+    fn starting_ops(tag: &[u8], negotiated_ops: usize) -> usize {
+        match tag {
+            b"removev" => 26, // SEQUENCE + PUTFH + 24 REMOVEs
+            b"lookupv" => 73, // SEQUENCE + 24 × (PUTFH, LOOKUP, GETFH)
+            // These shapes can retry a semantic resource rejection without
+            // replaying a mutation. Leave potentially mutating shapes at the
+            // already negotiated maximum rather than probing upward into an
+            // avoidable partial side effect.
+            b"lookup_typev" | b"getattrv" | b"getattrv1" | b"readlinkv" | b"readv" | b"readv1"
+            | b"readv2" | b"readdir_children" | b"readdir_pages" => 96,
+            _ => negotiated_ops,
+        }
+    }
+
+    pub(crate) fn limit(&self, tag: &[u8]) -> usize {
+        self.shapes.get(tag).map_or_else(
+            || Self::starting_ops(tag, self.negotiated_ops).min(self.negotiated_ops),
+            |size| size.next(usize::MAX, 0),
+        )
+    }
+
+    pub(crate) fn observe(&mut self, tag: &[u8], sent_ops: usize, status: u32, reply_ops: usize) {
+        if let Some(limit) = self.shapes.get_mut(tag) {
+            Self::record(limit, sent_ops, status, reply_ops);
+            return;
+        }
+        let mut limit = AdaptiveBatchSizer::new(
+            Self::starting_ops(tag, self.negotiated_ops),
+            self.negotiated_ops,
+        );
+        Self::record(&mut limit, sent_ops, status, reply_ops);
+        self.shapes.insert(tag.to_vec(), limit);
+    }
+
+    fn record(limit: &mut AdaptiveBatchSizer, sent_ops: usize, status: u32, reply_ops: usize) {
+        if status == NFS_OK {
+            // Builders reserve headroom for path resolution. Treat a compound
+            // within 16 operations of the current cap as useful evidence.
+            if sent_ops >= limit.current().saturating_sub(16) {
+                limit.succeeded(limit.current(), true);
+            }
+        } else if status == nfsstat4_NFS4ERR_RESOURCE || status == nfsstat4_NFS4ERR_TOO_MANY_OPS {
+            // NFS4ERR_RESOURCE / NFS4ERR_TOO_MANY_OPS. A failed reply's last
+            // operation did not complete; earlier operations may have done so.
+            limit.rejected(sent_ops, reply_ops.saturating_sub(1));
+        }
+    }
+}
 
 pub(crate) const NFS_OK: u32 = 0;
 
@@ -610,5 +736,94 @@ mod tests {
             assert_eq!(report.completed.len(), failed_item);
             assert_eq!(report.unexecuted.len(), 31 - failed_item);
         }
+    }
+
+    #[test]
+    fn adaptive_batch_learns_only_from_followup_work() {
+        let mut remove = AdaptiveBatchSizer::new(24, 100);
+        assert_eq!(remove.next(100, 0), 24);
+        remove.succeeded(24, false);
+        assert_eq!(remove.next(100, 0), 24);
+        remove.succeeded(24, true);
+        assert_eq!(remove.next(100, 0), 32);
+        assert_eq!(remove.next(100, 5), 5);
+        remove.succeeded(5, true);
+        assert_eq!(remove.next(100, 0), 32);
+    }
+
+    #[test]
+    fn adaptive_batch_shrinks_and_never_retries_a_rejected_size() {
+        let mut remove = AdaptiveBatchSizer::new(24, 100);
+        remove.succeeded(24, true);
+        assert_eq!(remove.rejected(32, 0), 0);
+        assert_eq!(remove.next(100, 0), 16);
+        for _ in 0..20 {
+            let take = remove.next(100, 0);
+            assert!(take < 32);
+            remove.succeeded(take, true);
+        }
+        assert_eq!(remove.next(100, 0), 31);
+    }
+
+    #[test]
+    fn adaptive_batch_retains_a_confirmed_mutation_prefix() {
+        let mut remove = AdaptiveBatchSizer::new(24, 100);
+        assert_eq!(remove.rejected(24, 17), 17);
+        assert_eq!(remove.next(100, 0), 17);
+        remove.succeeded(17, true);
+        assert_eq!(remove.next(100, 0), 17);
+    }
+
+    #[test]
+    fn adaptive_batch_honors_negotiated_limit_and_is_shape_local() {
+        let mut remove = AdaptiveBatchSizer::new(24, 7);
+        let lookup = AdaptiveBatchSizer::new(24, 40);
+        assert_eq!(remove.next(100, 0), 7);
+        assert_eq!(lookup.next(100, 0), 24);
+        remove.rejected(7, 0);
+        assert_eq!(lookup.next(100, 0), 24);
+    }
+
+    #[test]
+    fn every_compound_shape_learns_without_extra_requests() {
+        let mut limits = AdaptiveCompoundLimits::new(256);
+        assert_eq!(limits.limit(b"removev"), 26);
+        assert_eq!(limits.limit(b"lookupv"), 73);
+        assert_eq!(limits.limit(b"readv1"), 96);
+        limits.observe(b"readv1", 82, NFS_OK, 82);
+        assert_eq!(limits.limit(b"readv1"), 104);
+        assert_eq!(limits.limit(b"removev"), 26);
+        limits.observe(b"removev", 26, NFS_OK, 26);
+        assert_eq!(limits.limit(b"removev"), 34);
+    }
+
+    #[test]
+    fn mutating_shapes_are_not_upward_probed_but_learn_from_rejection() {
+        let mut limits = AdaptiveCompoundLimits::new(256);
+        assert_eq!(limits.limit(b"openv1"), 256);
+        limits.observe(b"openv1", 200, NFS_OK, 200);
+        assert_eq!(limits.limit(b"openv1"), 256);
+        limits.observe(b"openv1", 200, nfsstat4_NFS4ERR_RESOURCE, 90);
+        assert_eq!(limits.limit(b"openv1"), 89);
+    }
+
+    #[test]
+    fn resource_feedback_is_shape_local_and_preserves_the_prefix() {
+        let mut limits = AdaptiveCompoundLimits::new(256);
+        limits.observe(b"writev1", 90, nfsstat4_NFS4ERR_RESOURCE, 40);
+        assert_eq!(limits.limit(b"writev1"), 39);
+        assert_eq!(limits.limit(b"readv1"), 96);
+        limits.observe(b"readv1", 96, nfsstat4_NFS4ERR_TOO_MANY_OPS, 0);
+        assert_eq!(limits.limit(b"readv1"), 48);
+    }
+
+    #[test]
+    fn negotiated_limit_always_wins() {
+        let mut limits = AdaptiveCompoundLimits::new(30);
+        assert_eq!(limits.limit(b"openv1"), 30);
+        for _ in 0..10 {
+            limits.observe(b"openv1", 30, NFS_OK, 30);
+        }
+        assert_eq!(limits.limit(b"openv1"), 30);
     }
 }

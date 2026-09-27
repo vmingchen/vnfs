@@ -25,6 +25,7 @@ pub struct Compound {
     pub args: COMPOUND4args,
     ops: Vec<nfs_argop4>,
     keep: Vec<Vec<u8>>,
+    tag_index: Option<usize>,
 }
 
 impl Default for Compound {
@@ -49,6 +50,7 @@ impl Compound {
             },
             ops: Vec::new(),
             keep: Vec::new(),
+            tag_index: None,
         }
     }
 
@@ -97,10 +99,15 @@ impl Compound {
 
     pub fn tag(&mut self, tag: &[u8]) {
         let (ptr, len) = self.keep(tag);
+        self.tag_index = Some(self.keep.len() - 1);
         self.args.tag = utf8string {
             utf8string_len: len,
             utf8string_val: ptr,
         };
+    }
+
+    pub(crate) fn tag_bytes(&self) -> &[u8] {
+        self.tag_index.map_or(b"", |index| &self.keep[index])
     }
 
     pub fn putfh(&mut self, fh: &nfs_fh4) {

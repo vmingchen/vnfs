@@ -280,16 +280,8 @@ impl Session {
     /// Require the compound and every op to have succeeded, returning the
     /// index and NFS status of the first failure.
     pub fn expect_all_ok(&self, res: &CompoundRes) -> RpcResult<()> {
-        if res.status() != nfsstat4_NFS4_OK {
-            return Err(RpcError::op(0, res.status()));
-        }
-        for i in 0..res.nops() {
-            let st = res.op_status(i);
-            if st != nfsstat4_NFS4_OK {
-                return Err(RpcError::op(i, st));
-            }
-        }
-        Ok(())
+        first_compound_failure(res.status(), (0..res.nops()).map(|i| res.op_status(i)))
+            .map_or(Ok(()), |(index, status)| Err(RpcError::op(index, status)))
     }
 
     /// Tear down the session and clientid, reporting the first failure.
@@ -325,6 +317,19 @@ impl Session {
     fn destroy(&mut self) {
         let _ = self.shutdown();
     }
+}
+
+fn first_compound_failure(
+    compound_status: u32,
+    op_statuses: impl Iterator<Item = u32>,
+) -> Option<(usize, u32)> {
+    // A server may reject a compound before returning any operation.
+    // Otherwise preserve the actual failing op: ordered mutations before it
+    // may have completed and must not be replayed.
+    op_statuses
+        .enumerate()
+        .find(|(_, status)| *status != nfsstat4_NFS4_OK)
+        .or_else(|| (compound_status != nfsstat4_NFS4_OK).then_some((0, compound_status)))
 }
 
 impl Drop for Session {
@@ -428,6 +433,21 @@ mod tests {
 
     fn minor_mismatch() -> RpcError {
         RpcError::op(0, nfsstat4_NFS4ERR_MINOR_VERS_MISMATCH)
+    }
+
+    #[test]
+    fn compound_failure_preserves_executed_prefix_position() {
+        let ok = nfsstat4_NFS4_OK;
+        let resource = nfsstat4_NFS4ERR_RESOURCE;
+        assert_eq!(
+            first_compound_failure(resource, [ok, ok, ok, resource].into_iter()),
+            Some((3, resource))
+        );
+        assert_eq!(
+            first_compound_failure(resource, std::iter::empty()),
+            Some((0, resource))
+        );
+        assert_eq!(first_compound_failure(ok, [ok, ok].into_iter()), None);
     }
 
     #[test]

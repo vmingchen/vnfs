@@ -2401,6 +2401,38 @@ fn rm_with_options_honors_batch_size() {
 }
 
 #[test]
+fn recursive_rm_learns_larger_batches_from_useful_compounds() {
+    let dir = setup_dir("rm_adaptive_batches");
+    let mut c = client();
+    let adaptive = format!("{dir}/adaptive");
+    let fixed = format!("{dir}/fixed");
+    for subdir in [&adaptive, &fixed] {
+        c.ensure_dir(Path::new(subdir), 0o755).unwrap();
+        for index in 0..160 {
+            write_file(&mut c, Path::new(&format!("{subdir}/f{index:03}")), b"x");
+        }
+    }
+
+    let _ = vnfs::legacy::compound::thread_compound_stats();
+    c.rm(&[Path::new(&adaptive)], true).unwrap();
+    let learned_compounds = vnfs::legacy::compound::thread_compound_stats().0;
+
+    let _ = vnfs::legacy::compound::thread_compound_stats();
+    c.rm_with_options(
+        &[Path::new(&fixed)],
+        true,
+        vnfs::RemoveOptions::new().batch(24),
+    )
+    .unwrap();
+    let fixed_compounds = vnfs::legacy::compound::thread_compound_stats().0;
+
+    assert!(
+        learned_compounds < fixed_compounds,
+        "adaptive batching should use fewer compounds than fixed-size batching: {learned_compounds} vs {fixed_compounds}"
+    );
+}
+
+#[test]
 fn rm_nonrecursive_keeps_subdirs() {
     let dir = setup_dir("rm_norec");
     let mut c = client();

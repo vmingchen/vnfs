@@ -1467,8 +1467,8 @@ pub struct RemoveOptions {
     /// Keep removing after a per-entry failure and report the first error at
     /// the end. When `false`, the first failure aborts.
     pub continue_on_error: bool,
-    /// Starting batch size for vectorized removals; `0` uses the backend
-    /// default (and the backend may shrink it further if the server rejects it).
+    /// Maximum batch size for vectorized removals; `0` lets the backend learn
+    /// a safe size from useful work, starting at a conservative default.
     pub batch: usize,
     /// Bounded retries for retryable per-entry statuses.
     pub retries: u32,

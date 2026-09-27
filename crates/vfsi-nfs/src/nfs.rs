@@ -87,16 +87,20 @@ enum RmTask {
     Finish(RemoveDir),
 }
 
-/// Starting REMOVE batch size. Servers may enforce a lower effective
-/// compound-op cap than the negotiated `ca_maxoperations` (NFS-Ganesha returns
-/// NFS4ERR_RESOURCE above roughly 100 ops), so the batch shrinks adaptively
-/// when that status is seen.
-//
-// TODO: probe the server's real per-compound limit instead of assuming a fixed
-// starting batch: halve from the negotiated `ca_maxoperations` on the first
-// NFS4ERR_RESOURCE and cache the largest working batch per session (and per
-// operation shape).
-const REMOVE_BATCH_START: usize = 24;
+fn resource_status(status: u32) -> bool {
+    matches!(
+        status,
+        nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
+    )
+}
+
+fn removal_batch_take(remaining: usize, learned: usize, caller_cap: usize) -> usize {
+    remaining.min(learned).min(if caller_cap == 0 {
+        usize::MAX
+    } else {
+        caller_cap
+    })
+}
 
 /// Transient NFS statuses for which a REMOVE may be retried.
 fn remove_status_is_retryable(status: u32) -> bool {
@@ -2946,15 +2950,6 @@ impl NfsVecFs {
         Ok((parent, name))
     }
 
-    /// Starting batch size for one removal, honoring the caller's option.
-    fn remove_batch(options: RemoveOptions) -> usize {
-        if options.batch == 0 {
-            REMOVE_BATCH_START
-        } else {
-            options.batch
-        }
-    }
-
     /// Drive recursive removal. Directories are processed depth-first (memory
     /// bounded by the current path) so that, at each directory, the batch of
     /// work under it is vectorized. Empty directories are collected in `ready`
@@ -3154,20 +3149,20 @@ impl NfsVecFs {
         options: RemoveOptions,
     ) -> VfResult<Vec<Vec<u8>>> {
         let mut subdirs = Vec::new();
-        let mut batch = Self::remove_batch(options);
         let mut start = 0;
         while start < names.len() {
-            let take = (names.len() - start).min(batch.max(1));
+            let take = removal_batch_take(
+                names.len() - start,
+                self.nfs.remove_batch_capacity(),
+                options.batch,
+            );
             match self.nfs.remove_many(dir, &names[start..start + take]) {
                 Ok(()) => start += take,
                 Err(error) if error.is_transport() => return Err(VfError::from_rpc(error, root)),
-                Err(error)
-                    if matches!(
-                        error.status,
-                        nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
-                    ) && take > 1 =>
-                {
-                    batch = take / 2;
+                Err(error) if resource_status(error.status) && take > 1 => {
+                    // REMOVE is ordered: only retry the suffix after the
+                    // server-confirmed successful prefix.
+                    start += error.op_index.min(take.saturating_sub(1));
                 }
                 Err(error) => {
                     let status = error.status;
@@ -3198,10 +3193,13 @@ impl NfsVecFs {
         first_error: &mut Option<VfError>,
         options: RemoveOptions,
     ) -> VfResult<()> {
-        let mut batch = Self::remove_batch(options);
         let mut start = 0;
         while start < entries.len() {
-            let take = (entries.len() - start).min(batch.max(1));
+            let take = removal_batch_take(
+                entries.len() - start,
+                self.nfs.remove_batch_capacity(),
+                options.batch,
+            );
             let chunk = &entries[start..start + take];
             let names: Vec<Vec<u8>> = chunk.iter().map(|(name, _)| name.clone()).collect();
             match self.nfs.remove_many(parent, &names) {
@@ -3209,13 +3207,8 @@ impl NfsVecFs {
                 Err(error) if error.is_transport() => {
                     return Err(VfError::from_rpc(error, chunk[0].1));
                 }
-                Err(error)
-                    if matches!(
-                        error.status,
-                        nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
-                    ) && take > 1 =>
-                {
-                    batch = take / 2;
+                Err(error) if resource_status(error.status) && take > 1 => {
+                    start += error.op_index.min(take.saturating_sub(1));
                 }
                 Err(error) => {
                     let status = error.status;
@@ -3248,10 +3241,13 @@ impl NfsVecFs {
         options: RemoveOptions,
     ) -> VfResult<Vec<(FileHandle, Vec<u8>)>> {
         let mut children = Vec::new();
-        let mut batch = Self::remove_batch(options);
         let mut start = 0;
         while start < names.len() {
-            let take = (names.len() - start).min(batch.max(1));
+            let take = removal_batch_take(
+                names.len() - start,
+                self.nfs.lookup_batch_capacity(),
+                options.batch,
+            );
             let chunk = &names[start..start + take];
             let ops: Vec<(FileHandle, Vec<u8>)> = chunk
                 .iter()
@@ -3259,6 +3255,15 @@ impl NfsVecFs {
                 .collect();
             match self.nfs.lookup_many(&ops) {
                 Ok(results) => {
+                    if take > 1
+                        && results
+                            .iter()
+                            .any(|result| matches!(result, Err(status) if resource_status(*status)))
+                    {
+                        // LOOKUP is read-only, so a rejected compound can be
+                        // retried in smaller pieces without replay concerns.
+                        continue;
+                    }
                     for (name, result) in chunk.iter().cloned().zip(results) {
                         match result {
                             Ok(fh) => children.push((fh, name)),
@@ -3271,14 +3276,7 @@ impl NfsVecFs {
                     start += take;
                 }
                 Err(error) if error.is_transport() => return Err(VfError::from_rpc(error, root)),
-                Err(error)
-                    if matches!(
-                        error.status,
-                        nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
-                    ) && take > 1 =>
-                {
-                    batch = take / 2;
-                }
+                Err(error) if resource_status(error.status) && take > 1 => {}
                 Err(error) => {
                     note_error(first_error, VfError::from_rpc(error, root), options)?;
                     start += take;

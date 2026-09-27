@@ -14,7 +14,10 @@ use nfsv41_sys::*;
 use crate::compound::{Compound, CompoundRes};
 use crate::error::{RpcError, RpcResult};
 use crate::path::{components_bytes, split_path_bytes};
-use crate::planner::{ExecutionMap, FailureCause, RecoveryAction, RequestSafety, recovery_action};
+use crate::planner::{
+    AdaptiveCompoundLimits, ExecutionMap, FailureCause, RecoveryAction, RequestSafety,
+    recovery_action,
+};
 use crate::session::Session;
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
@@ -72,6 +75,7 @@ pub struct NfsClient {
     pub max_response_bytes: usize,
     /// Server-confirmed maximum operations per compound (merged builders).
     pub max_ops: usize,
+    compound_limits: AdaptiveCompoundLimits,
     server_max_request_bytes: usize,
     configured_max_request_bytes: Option<usize>,
     deferred_path_closes: Vec<CloseOp>,
@@ -217,6 +221,11 @@ pub struct CopyOp {
 /// The server confirmed `ca_maxoperations` from CREATE_SESSION; keep every
 /// compound (plus the implicit SEQUENCE) under it.
 const MAX_COMPOUND_OPS: usize = 256;
+
+fn remove_result_index(op_index: usize, item_count: usize) -> usize {
+    // The response starts with SEQUENCE and PUTFH before the first REMOVE.
+    op_index.saturating_sub(2).min(item_count.saturating_sub(1))
+}
 
 /// One source of truth for the negotiated operation budget. NFS counts the
 /// mandatory SEQUENCE operation in `ca_maxoperations`, while Compound builders
@@ -765,6 +774,7 @@ impl NfsClient {
             max_compound_bytes,
             max_response_bytes,
             max_ops,
+            compound_limits: AdaptiveCompoundLimits::new(max_ops),
             server_max_request_bytes,
             configured_max_request_bytes,
             deferred_path_closes: Vec::new(),
@@ -826,15 +836,37 @@ impl NfsClient {
         &self.root
     }
 
-    fn op_budget(&self) -> CompoundBudget {
-        CompoundBudget::new(self.max_ops)
+    fn op_budget_for(&self, tag: &[u8], one_item_ops: usize) -> CompoundBudget {
+        CompoundBudget::new(
+            self.compound_limits
+                .limit(tag)
+                .min(self.max_ops)
+                .max(one_item_ops.min(self.max_ops)),
+        )
+    }
+
+    /// REMOVE uses SEQUENCE, PUTFH, then one operation per item.
+    pub(crate) fn remove_batch_capacity(&self) -> usize {
+        self.op_budget_for(b"removev", 3)
+            .max_ops
+            .saturating_sub(2)
+            .max(1)
+    }
+
+    /// LOOKUP uses SEQUENCE, then PUTFH/LOOKUP/GETFH per item.
+    pub(crate) fn lookup_batch_capacity(&self) -> usize {
+        (self.op_budget_for(b"lookupv", 4).max_ops.saturating_sub(1) / 3).max(1)
     }
 
     /// Send a compound only when its final size, including SEQUENCE, honors
     /// the server-confirmed `ca_maxoperations` value.
     fn call_compound(&mut self, compound: &mut Compound) -> RpcResult<CompoundRes> {
-        self.op_budget().ensure(compound)?;
-        self.session.compound(compound)
+        CompoundBudget::new(self.max_ops).ensure(compound)?;
+        let sent_ops = compound.op_count().saturating_add(1);
+        let reply = self.session.compound(compound)?;
+        self.compound_limits
+            .observe(compound.tag_bytes(), sent_ops, reply.status(), reply.nops());
+        Ok(reply)
     }
 
     /// Send a compound while preserving whether a lost response makes the
@@ -913,11 +945,11 @@ impl NfsClient {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
-        let mut batch_capacity = self.op_budget().batch_capacity(4)?;
         let mut out: Vec<Option<Result<(FileHandle, u32), u32>>> =
             (0..ops.len()).map(|_| None).collect();
         let mut cursor = 0usize;
         while cursor < ops.len() {
+            let batch_capacity = self.op_budget_for(b"lookup_typev", 5).batch_capacity(4)?;
             let end = (cursor + batch_capacity).min(ops.len());
             let mut map = ExecutionMap::new();
             let mut c = Compound::new();
@@ -937,12 +969,15 @@ impl NfsClient {
             })?;
 
             if let Some(status) = report.compound_failure {
-                if status == nfsstat4_NFS4ERR_TOO_MANY_OPS && end - cursor > 1 {
+                if matches!(
+                    status,
+                    nfsstat4_NFS4ERR_TOO_MANY_OPS | nfsstat4_NFS4ERR_RESOURCE
+                ) && end - cursor > 1
+                {
                     debug_assert_eq!(
                         recovery_action(RequestSafety::ReadOnly, FailureCause::ResourceLimit, true,),
                         RecoveryAction::SplitAndRetry
                     );
-                    batch_capacity = ((end - cursor) / 2).max(1);
                     continue;
                 }
                 return Err(RpcError::op(cursor, status));
@@ -960,6 +995,14 @@ impl NfsClient {
                 out[caller] = Some(Ok((fh, ftype)));
             }
             if let Some(failure) = report.failure {
+                if matches!(
+                    failure.status,
+                    nfsstat4_NFS4ERR_TOO_MANY_OPS | nfsstat4_NFS4ERR_RESOURCE
+                ) && end - cursor > 1
+                {
+                    cursor = failure.caller;
+                    continue;
+                }
                 out[failure.caller] = Some(Err(failure.status));
                 debug_assert_eq!(
                     recovery_action(RequestSafety::ReadOnly, FailureCause::ItemStatus, true,),
@@ -995,10 +1038,10 @@ impl NfsClient {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
-        let mut batch_capacity = self.op_budget().batch_capacity(3)?;
         let mut out: Vec<Option<Result<FileHandle, u32>>> = (0..ops.len()).map(|_| None).collect();
         let mut cursor = 0usize;
         while cursor < ops.len() {
+            let batch_capacity = self.op_budget_for(b"lookupv", 4).batch_capacity(3)?;
             let end = (cursor + batch_capacity).min(ops.len());
             let mut map = ExecutionMap::new();
             let mut c = Compound::new();
@@ -1017,8 +1060,11 @@ impl NfsClient {
             })?;
 
             if let Some(status) = report.compound_failure {
-                if status == nfsstat4_NFS4ERR_TOO_MANY_OPS && end - cursor > 1 {
-                    batch_capacity = ((end - cursor) / 2).max(1);
+                if matches!(
+                    status,
+                    nfsstat4_NFS4ERR_TOO_MANY_OPS | nfsstat4_NFS4ERR_RESOURCE
+                ) && end - cursor > 1
+                {
                     continue;
                 }
                 return Err(RpcError::op(cursor, status));
@@ -1028,6 +1074,14 @@ impl NfsClient {
                 out[caller] = Some(Ok(FileHandle::from_nfs_fh(res.getfh(start + 2))));
             }
             if let Some(failure) = report.failure {
+                if matches!(
+                    failure.status,
+                    nfsstat4_NFS4ERR_TOO_MANY_OPS | nfsstat4_NFS4ERR_RESOURCE
+                ) && end - cursor > 1
+                {
+                    cursor = failure.caller;
+                    continue;
+                }
                 out[failure.caller] = Some(Err(failure.status));
                 cursor = failure.caller + 1;
             } else {
@@ -1123,11 +1177,8 @@ impl NfsClient {
     /// REMOVE several names from `dir` in one compound. REMOVE leaves the
     /// current filehandle on `dir`, so consecutive REMOVEs chain.
     pub fn remove_many(&mut self, dir: &FileHandle, names: &[Vec<u8>]) -> RpcResult<()> {
-        let map = |op_index: usize| {
-            op_index
-                .saturating_sub(1)
-                .min(names.len().saturating_sub(1))
-        };
+        // The response includes SEQUENCE and PUTFH before the first REMOVE.
+        let map = |op_index: usize| remove_result_index(op_index, names.len());
         let mut c = Compound::new();
         c.tag(b"removev");
         c.putfh(&dir.as_nfs_fh());
@@ -1241,10 +1292,12 @@ impl NfsClient {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
-        let chunk_size = self.op_budget().batch_capacity(per_op)?;
+        let read_only = matches!(tag, b"getattrv" | b"readlinkv" | b"readv");
         let mut out = Vec::with_capacity(ops.len());
         let mut global = 0usize;
-        for chunk in ops.chunks(chunk_size) {
+        while global < ops.len() {
+            let chunk_size = self.op_budget_for(tag, 1 + per_op).batch_capacity(per_op)?;
+            let chunk = &ops[global..(global + chunk_size).min(ops.len())];
             let chunk_start = global;
             let mut c = Compound::new();
             c.tag(tag);
@@ -1262,6 +1315,24 @@ impl NfsClient {
             // compound-level status, the failing op is the first one whose
             // result is missing.
             let bad = (0..res.nops()).find(|&i| res.op_status(i) != nfsstat4_NFS4_OK);
+            let status = bad.map_or(res.status(), |i| res.op_status(i));
+            if read_only
+                && chunk.len() > 1
+                && matches!(
+                    status,
+                    nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
+                )
+            {
+                let completed = bad.unwrap_or(0).saturating_sub(1) / per_op;
+                let next_capacity = self.op_budget_for(tag, 1 + per_op).batch_capacity(per_op)?;
+                if completed > 0 || next_capacity < chunk.len() {
+                    for i in 0..completed {
+                        out.push(extract(&res, i));
+                    }
+                    global = chunk_start + completed;
+                    continue;
+                }
+            }
             match bad {
                 Some(i) => {
                     let idx = caller_index(i, per_op, chunk_start, chunk.len());
@@ -1503,7 +1574,6 @@ impl NfsClient {
         let per_file = 4;
         // Headroom for a new directory's path resolution inside a compound.
         let reserve = 8;
-        let budget = self.op_budget().merged_limit(reserve, per_file);
         let per_op = self.per_op_bytes();
 
         let mut global = 0usize;
@@ -1511,6 +1581,16 @@ impl NfsClient {
         // (>0 means ops[global] is being continued mid-file).
         let mut part_off = 0usize;
         while global < n {
+            let budget = self
+                .op_budget_for(
+                    if close_in_compound {
+                        b"writev1"
+                    } else {
+                        b"writev2"
+                    },
+                    1 + per_file,
+                )
+                .merged_limit(reserve, per_file);
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
             let mut map = ExecutionMap::new();
@@ -1720,7 +1800,7 @@ impl NfsClient {
                 c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
                 map.note_ops(1);
             }
-            self.op_budget().ensure(&c)?;
+            CompoundBudget::new(self.max_ops).ensure(&c)?;
             self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
 
             let res =
@@ -1812,7 +1892,6 @@ impl NfsClient {
         let mut close_failed: Option<u32> = None;
         let per_file = 4;
         let reserve = 8;
-        let budget = self.op_budget().merged_limit(reserve, per_file);
         let per_op = self.read_per_op_bytes();
 
         let mut global = 0usize;
@@ -1820,6 +1899,16 @@ impl NfsClient {
         // (>0 means ops[global] is being continued mid-file).
         let mut part_off = 0usize;
         while global < n {
+            let budget = self
+                .op_budget_for(
+                    if close_in_compound {
+                        b"readv1"
+                    } else {
+                        b"readv2"
+                    },
+                    1 + per_file,
+                )
+                .merged_limit(reserve, per_file);
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
             let mut map = ExecutionMap::new();
@@ -1998,7 +2087,7 @@ impl NfsClient {
                 c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
                 map.note_ops(1);
             }
-            self.op_budget().ensure(&c)?;
+            CompoundBudget::new(self.max_ops).ensure(&c)?;
             self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
 
             let res = self.call_compound_with_safety(&mut c, RequestSafety::ReadOnly)?;
@@ -2085,9 +2174,11 @@ impl NfsClient {
         let mut failed: Option<(usize, u32)> = None;
         let per_file = 4; // RESTOREFH + LOOKUP + GETATTR + margin
         let reserve = 16;
-        let budget = self.op_budget().merged_limit(reserve, per_file);
         let mut global = 0usize;
         while global < n {
+            let budget = self
+                .op_budget_for(b"getattrv1", 1 + per_file)
+                .merged_limit(reserve, per_file);
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
             let mut map = ExecutionMap::new();
@@ -2180,9 +2271,11 @@ impl NfsClient {
         let mut failed: Option<(usize, u32)> = None;
         let per_file = 5; // RESTOREFH + LOOKUP + [GETATTR] + SETATTR + margin
         let reserve = 16;
-        let budget = self.op_budget().merged_limit(reserve, per_file);
         let mut global = 0usize;
         while global < n {
+            let budget = self
+                .op_budget_for(b"setattrv1", 1 + per_file)
+                .merged_limit(reserve, per_file);
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
             let mut map = ExecutionMap::new();
@@ -2289,11 +2382,13 @@ impl NfsClient {
         let mut failed: Option<(usize, u32)> = None;
         let per_file = 6; // RESTOREFH + OPEN + GETFH + [SETATTR x2] + margin
         let reserve = 16;
-        let budget = self.op_budget().merged_limit(reserve, per_file);
         let mut global = 0usize;
         #[cfg(feature = "test-faults")]
         let mut chunk_index = 0usize;
         while global < n {
+            let budget = self
+                .op_budget_for(b"openv1", 1 + per_file)
+                .merged_limit(reserve, per_file);
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
             let mut map = ExecutionMap::new();
@@ -2366,7 +2461,7 @@ impl NfsClient {
                 failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
                 break;
             }
-            self.op_budget().ensure(&c)?;
+            CompoundBudget::new(self.max_ops).ensure(&c)?;
             #[cfg(feature = "test-faults")]
             if let Some(injector) = self.fault_injector.clone()
                 && let Err(error) =
@@ -2441,9 +2536,11 @@ impl NfsClient {
         let mut failed: Option<(usize, u32)> = None;
         let per_file = 3; // RESTOREFH + REMOVE + margin
         let reserve = 16;
-        let budget = self.op_budget().merged_limit(reserve, per_file);
         let mut global = 0usize;
         while global < n {
+            let budget = self
+                .op_budget_for(b"removev1", 1 + per_file)
+                .merged_limit(reserve, per_file);
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
             let mut map = ExecutionMap::new();
@@ -2522,9 +2619,11 @@ impl NfsClient {
         let mut failed: Option<(usize, u32)> = None;
         let per_file = 8; // two dir resolutions + RENAME + margin
         let reserve = 16;
-        let budget = self.op_budget().merged_limit(reserve, per_file);
         let mut global = 0usize;
         while global < n {
+            let budget = self
+                .op_budget_for(b"renamev1", 1 + per_file)
+                .merged_limit(reserve, per_file);
             let chunk_start = global;
             let mut cursor = CfhCursor::default();
             let mut map = ExecutionMap::new();
@@ -2911,10 +3010,13 @@ impl NfsClient {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
-        let per_chunk = self.op_budget().batch_capacity(4)?;
         let mut out = Vec::with_capacity(ops.len());
         let zeroverf: verifier4 = [0; 8];
-        for chunk in ops.chunks(per_chunk) {
+        while out.len() < ops.len() {
+            let per_chunk = self
+                .op_budget_for(b"readdir_children", 5)
+                .batch_capacity(4)?;
+            let chunk = &ops[out.len()..(out.len() + per_chunk).min(ops.len())];
             let (dircount, maxcount) = self.readdir_limits(chunk.len());
             let map = |op_index: usize| {
                 let local = op_index.saturating_sub(1) / 4;
@@ -2932,6 +3034,18 @@ impl NfsClient {
                 let idx = map(e.op_index);
                 e.with_op_index(idx)
             })?;
+            if chunk.len() > 1
+                && matches!(
+                    res.status(),
+                    nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
+                )
+                && self
+                    .op_budget_for(b"readdir_children", 5)
+                    .batch_capacity(4)?
+                    < chunk.len()
+            {
+                continue;
+            }
             self.session.expect_all_ok(&res).map_err(|e| {
                 let idx = map(e.op_index);
                 e.with_op_index(idx)
@@ -2960,10 +3074,11 @@ impl NfsClient {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
-        let per_chunk = self.op_budget().batch_capacity(2)?;
         let mut out = Vec::with_capacity(ops.len());
         let zeroverf: verifier4 = [0; 8];
-        for chunk in ops.chunks(per_chunk) {
+        while out.len() < ops.len() {
+            let per_chunk = self.op_budget_for(b"readdir_pages", 3).batch_capacity(2)?;
+            let chunk = &ops[out.len()..(out.len() + per_chunk).min(ops.len())];
             let (dircount, maxcount) = self.readdir_limits(chunk.len());
             let map = |op_index: usize| {
                 let local = op_index.saturating_sub(1) / 2;
@@ -2979,6 +3094,15 @@ impl NfsClient {
                 let idx = map(e.op_index);
                 e.with_op_index(idx)
             })?;
+            if chunk.len() > 1
+                && matches!(
+                    res.status(),
+                    nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
+                )
+                && self.op_budget_for(b"readdir_pages", 3).batch_capacity(2)? < chunk.len()
+            {
+                continue;
+            }
             self.session.expect_all_ok(&res).map_err(|e| {
                 let idx = map(e.op_index);
                 e.with_op_index(idx)
@@ -3149,6 +3273,15 @@ mod tests {
         assert!(CompoundBudget::new(4).batch_capacity(4).is_err());
         assert_eq!(CompoundBudget::new(8).batch_capacity(4).unwrap(), 1);
         assert_eq!(CompoundBudget::new(32).batch_capacity(4).unwrap(), 7);
+    }
+
+    #[test]
+    fn remove_failure_index_counts_only_remove_items() {
+        assert_eq!(remove_result_index(0, 4), 0); // SEQUENCE
+        assert_eq!(remove_result_index(1, 4), 0); // PUTFH
+        assert_eq!(remove_result_index(2, 4), 0); // first REMOVE
+        assert_eq!(remove_result_index(3, 4), 1);
+        assert_eq!(remove_result_index(5, 4), 3);
     }
 
     #[test]
