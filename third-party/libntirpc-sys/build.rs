@@ -24,9 +24,9 @@ fn main() {
     // library. This keeps Cargo builds offline/hermetic: build.rs never clones
     // or downloads native source code behind Cargo's back.
     let library = pkg_config::Config::new()
-        .atleast_version("4.3")
+        .atleast_version("6.3")
         .probe("libntirpc")
-        .expect("libntirpc >= 4.3 was not found; install libntirpc-dev");
+        .expect("libntirpc >= 6.3 was not found; install libntirpc-dev");
     let major = library
         .version
         .split('.')
