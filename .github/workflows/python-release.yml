@@ -12,7 +12,7 @@ permissions:
 jobs:
   verify:
     name: Verify CI passed
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       actions: read
       contents: read
@@ -25,7 +25,7 @@ jobs:
 
   wheels:
     name: wheel (${{ matrix.target }}, ${{ matrix.wheel-kind }})
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -131,7 +131,7 @@ jobs:
           if-no-files-found: error
 
   sdist:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -149,7 +149,7 @@ jobs:
   wheel-nfs-integration:
     name: Installed wheel against live NFS RPCSEC_GSS
     needs: wheels
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -174,7 +174,7 @@ jobs:
           NFS4FS_WHEEL="$PWD/${wheels[0]}" ci/run-nfs-gss-integration.sh
 
   sbom:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -213,7 +213,7 @@ jobs:
   publish:
     if: startsWith(github.ref, 'refs/tags/nfs4fs-v')
     needs: [verify, wheels, wheel-nfs-integration, sdist, sbom]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     environment:
       name: pypi
       url: https://pypi.org/project/nfs4fs/

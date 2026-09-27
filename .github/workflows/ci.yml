@@ -12,7 +12,7 @@ env:
 
 jobs:
   nfs-adversarial:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,7 +51,7 @@ jobs:
           cargo fuzz run libntirpc_rpc_xdr -- -runs=5000
 
   rust:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -185,7 +185,7 @@ jobs:
           LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke /tmp/vfsi-smoke-root
 
   python:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -236,7 +236,7 @@ jobs:
             adapters/vsmbfs/tests/test_package.py
 
   python-package:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -381,7 +381,7 @@ jobs:
             "$GITHUB_WORKSPACE/adapters/vsmbfs/tests/typecheck_api.py"
 
   security:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -467,7 +467,7 @@ jobs:
           if-no-files-found: error
 
   nfs-integration:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -692,7 +692,7 @@ jobs:
           test ! -e /tmp/ganesha-restart.log || cat /tmp/ganesha-restart.log
 
   nfs-gss-integration:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -710,7 +710,7 @@ jobs:
         run: ci/run-nfs-gss-integration.sh
 
   nfs-server-copy-integration:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -794,7 +794,7 @@ jobs:
         run: docker rm --force vnfs-ganesha-copy 2>/dev/null || true
 
   smb-integration:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
