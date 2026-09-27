@@ -1280,11 +1280,21 @@ mod tests {
                 .filter(|line| line.contains(" - nfs"))
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
+            let host_path = client.host_path(&mount);
+            let canonical = host_path.as_ref().map(fs::canonicalize);
+            let canonical_id = canonical
+                .as_ref()
+                .and_then(|result| result.as_ref().ok())
+                .and_then(|path| path_mount_id(path));
             panic!(
                 "Auto chose {route:?}; mount={mount:?}; mount_id={:?}; \
+                 root={:?}; host_path={host_path:?}; canonical={canonical:?}; \
+                 canonical_id={canonical_id:?}; cached_connections={:?}; \
                  eligible={spec:?}; credentials={:?}; kernel_inode={:?}; \
                  direct_probe={probe:?}; nfs_mountinfo={mountinfo:?}",
                 path_mount_id(&mount),
+                client.root,
+                client.connections.lock().map(|cache| cache.len()),
                 AuthSysIdentity::current(),
                 fs::metadata(&mount).map(|metadata| metadata.ino()),
             );
