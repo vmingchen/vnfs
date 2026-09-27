@@ -19,6 +19,8 @@ use crate::compound::CompoundRes;
 pub(crate) struct AdaptiveBatchSizer {
     current: usize,
     ceiling: usize,
+    resource_backoff: u8,
+    successes_at_limit: usize,
 }
 
 impl AdaptiveBatchSizer {
@@ -27,6 +29,8 @@ impl AdaptiveBatchSizer {
         Self {
             current: conservative_start.max(1).min(ceiling),
             ceiling,
+            resource_backoff: 0,
+            successes_at_limit: 0,
         }
     }
 
@@ -41,31 +45,38 @@ impl AdaptiveBatchSizer {
         remaining.min(cap)
     }
 
-    pub(crate) fn current(&self) -> usize {
-        self.current
-    }
-
     pub(crate) fn succeeded(&mut self, attempted: usize, more_work: bool) {
-        if more_work && attempted == self.current {
-            // Additive growth avoids jumping from a working batch straight
-            // to the negotiated maximum on servers with smaller real limits.
+        if !more_work || attempted < self.current.saturating_sub(16) {
+            return;
+        }
+        self.successes_at_limit += 1;
+        let needed = 1usize << self.resource_backoff;
+        if self.successes_at_limit >= needed {
+            // Additive growth probes using ordinary follow-up work. After
+            // repeated RESOURCE replies, exponentially more successful
+            // compounds are required before the next upward probe.
             self.current = self.current.saturating_add(8).min(self.ceiling);
+            self.successes_at_limit = 0;
         }
     }
 
-    /// Shrink after a server resource rejection. For an ordered mutation,
-    /// `confirmed_prefix` items already succeeded and must not be replayed.
-    /// The caller advances by the returned count before retrying the suffix.
-    pub(crate) fn rejected(&mut self, attempted: usize, confirmed_prefix: usize) -> usize {
-        let confirmed = confirmed_prefix.min(attempted.saturating_sub(1));
-        if confirmed > 0 {
-            self.ceiling = self.ceiling.min(confirmed);
-            self.current = self.current.min(self.ceiling);
-        } else if attempted > 1 {
+    /// RESOURCE can be transient or payload-related; lower the next window
+    /// without permanently ruling out larger compounds.
+    pub(crate) fn resource_rejected(&mut self, attempted: usize) {
+        self.current = self.current.min((attempted / 2).max(1));
+        self.resource_backoff = self.resource_backoff.saturating_add(1).min(5);
+        self.successes_at_limit = 0;
+    }
+
+    /// TOO_MANY_OPS is specifically an operation-count limit. Keep rejected
+    /// sizes out of future probes, but do not confuse reply length with the
+    /// server's actual maximum operation count.
+    pub(crate) fn op_limit_rejected(&mut self, attempted: usize) {
+        if attempted > 1 {
             self.ceiling = self.ceiling.min(attempted - 1);
             self.current = self.current.min((attempted / 2).max(1));
+            self.successes_at_limit = 0;
         }
-        confirmed
     }
 }
 
@@ -121,17 +132,15 @@ impl AdaptiveCompoundLimits {
         self.shapes.insert(tag.to_vec(), limit);
     }
 
-    fn record(limit: &mut AdaptiveBatchSizer, sent_ops: usize, status: u32, reply_ops: usize) {
+    fn record(limit: &mut AdaptiveBatchSizer, sent_ops: usize, status: u32, _reply_ops: usize) {
         if status == NFS_OK {
             // Builders reserve headroom for path resolution. Treat a compound
             // within 16 operations of the current cap as useful evidence.
-            if sent_ops >= limit.current().saturating_sub(16) {
-                limit.succeeded(limit.current(), true);
-            }
-        } else if status == nfsstat4_NFS4ERR_RESOURCE || status == nfsstat4_NFS4ERR_TOO_MANY_OPS {
-            // NFS4ERR_RESOURCE / NFS4ERR_TOO_MANY_OPS. A failed reply's last
-            // operation did not complete; earlier operations may have done so.
-            limit.rejected(sent_ops, reply_ops.saturating_sub(1));
+            limit.succeeded(sent_ops, true);
+        } else if status == nfsstat4_NFS4ERR_RESOURCE {
+            limit.resource_rejected(sent_ops);
+        } else if status == nfsstat4_NFS4ERR_TOO_MANY_OPS {
+            limit.op_limit_rejected(sent_ops);
         }
     }
 }
@@ -800,26 +809,36 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_batch_shrinks_and_never_retries_a_rejected_size() {
+    fn resource_backoff_allows_cautious_recovery() {
         let mut remove = AdaptiveBatchSizer::new(24, 100);
         remove.succeeded(24, true);
-        assert_eq!(remove.rejected(32, 0), 0);
+        remove.resource_rejected(32);
         assert_eq!(remove.next(100, 0), 16);
-        for _ in 0..20 {
-            let take = remove.next(100, 0);
-            assert!(take < 32);
-            remove.succeeded(take, true);
+        remove.succeeded(16, true);
+        assert_eq!(remove.next(100, 0), 16);
+        remove.succeeded(16, true);
+        assert_eq!(remove.next(100, 0), 24);
+        remove.resource_rejected(24);
+        assert_eq!(remove.next(100, 0), 12);
+        for _ in 0..3 {
+            remove.succeeded(12, true);
+            assert_eq!(remove.next(100, 0), 12);
         }
-        assert_eq!(remove.next(100, 0), 31);
+        remove.succeeded(12, true);
+        assert_eq!(remove.next(100, 0), 20);
     }
 
     #[test]
-    fn adaptive_batch_retains_a_confirmed_mutation_prefix() {
+    fn explicit_operation_limit_remains_a_hard_ceiling() {
         let mut remove = AdaptiveBatchSizer::new(24, 100);
-        assert_eq!(remove.rejected(24, 17), 17);
-        assert_eq!(remove.next(100, 0), 17);
-        remove.succeeded(17, true);
-        assert_eq!(remove.next(100, 0), 17);
+        remove.op_limit_rejected(24);
+        assert_eq!(remove.next(100, 0), 12);
+        for _ in 0..20 {
+            let take = remove.next(100, 0);
+            assert!(take < 24);
+            remove.succeeded(take, true);
+        }
+        assert_eq!(remove.next(100, 0), 23);
     }
 
     #[test]
@@ -828,7 +847,7 @@ mod tests {
         let lookup = AdaptiveBatchSizer::new(24, 40);
         assert_eq!(remove.next(100, 0), 7);
         assert_eq!(lookup.next(100, 0), 24);
-        remove.rejected(7, 0);
+        remove.resource_rejected(7);
         assert_eq!(lookup.next(100, 0), 24);
     }
 
@@ -846,20 +865,24 @@ mod tests {
     }
 
     #[test]
-    fn mutating_shapes_are_not_upward_probed_but_learn_from_rejection() {
+    fn mutating_shapes_recover_after_transient_resource_rejection() {
         let mut limits = AdaptiveCompoundLimits::new(256);
         assert_eq!(limits.limit(b"openv1"), 256);
         limits.observe(b"openv1", 200, NFS_OK, 200);
         assert_eq!(limits.limit(b"openv1"), 256);
         limits.observe(b"openv1", 200, nfsstat4_NFS4ERR_RESOURCE, 90);
-        assert_eq!(limits.limit(b"openv1"), 89);
+        assert_eq!(limits.limit(b"openv1"), 100);
+        limits.observe(b"openv1", 100, NFS_OK, 100);
+        assert_eq!(limits.limit(b"openv1"), 100);
+        limits.observe(b"openv1", 100, NFS_OK, 100);
+        assert_eq!(limits.limit(b"openv1"), 108);
     }
 
     #[test]
-    fn resource_feedback_is_shape_local_and_preserves_the_prefix() {
+    fn resource_feedback_is_shape_local_and_not_a_permanent_ceiling() {
         let mut limits = AdaptiveCompoundLimits::new(256);
         limits.observe(b"writev1", 90, nfsstat4_NFS4ERR_RESOURCE, 40);
-        assert_eq!(limits.limit(b"writev1"), 39);
+        assert_eq!(limits.limit(b"writev1"), 45);
         assert_eq!(limits.limit(b"readv1"), 96);
         limits.observe(b"readv1", 96, nfsstat4_NFS4ERR_TOO_MANY_OPS, 0);
         assert_eq!(limits.limit(b"readv1"), 48);

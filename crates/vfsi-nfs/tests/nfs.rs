@@ -10,7 +10,7 @@ use vfsi_core::VfError;
 use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
 use vfsi_nfs::NfsVecFs;
 #[cfg(feature = "test-faults")]
-use vfsi_nfs::client::{FileRef, NfsClient, OpenCreate, PathWriteOp};
+use vfsi_nfs::client::{FileRef, NfsClient, OpenCreate, PathOpenOp, PathWriteOp};
 use vfsi_sync::{VecFs, test_support};
 
 fn required() -> bool {
@@ -115,6 +115,71 @@ fn pre_dispatch_resource_rejection_splits_merged_writes_without_replay() {
     client
         .remove(&root, &dirname)
         .expect("remove test directory");
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn variable_depth_paths_repack_before_exceeding_compound_limit() {
+    let server = match std::env::var("VFSI_NFS_SERVER") {
+        Ok(server) => server,
+        Err(_) => {
+            assert!(!required(), "VFSI_NFS_SERVER is required");
+            return;
+        }
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .ok()
+        .map(|value| value.parse::<u32>().expect("NFS minor version"))
+        .unwrap_or(2);
+    let mut client = NfsClient::connect_minor(&server, minor).expect("connect NFS client");
+    let root = client.root().clone();
+    let dirname = format!("vfsi-nfs-deep-path-{}", std::process::id());
+    let mut parent = client
+        .mkdir(&root, &dirname)
+        .expect("create root directory");
+    let top = parent.clone();
+    let mut dirs = vec![(root.clone(), dirname.clone())];
+    let mut deep_path = dirname.clone();
+    for index in 0..24 {
+        let name = format!("d{index}");
+        let child = client.mkdir(&parent, &name).expect("create path component");
+        dirs.push((parent, name.clone()));
+        parent = child;
+        deep_path.push('/');
+        deep_path.push_str(&name);
+    }
+
+    // The shallow and deep OPENs each fit in 32 operations, but the
+    // combined variable-length path resolution does not. The builder must
+    // repack before dispatch instead of failing its hard-cap check.
+    client.max_ops = 32;
+    let outcome = client
+        .openv_path_compound(&[
+            PathOpenOp {
+                path: format!("{dirname}/shallow").into_bytes(),
+                access: nfsv41_sys::OPEN4_SHARE_ACCESS_BOTH,
+                create: OpenCreate::Unchecked,
+                mode: None,
+                truncate: false,
+            },
+            PathOpenOp {
+                path: format!("{deep_path}/deep").into_bytes(),
+                access: nfsv41_sys::OPEN4_SHARE_ACCESS_BOTH,
+                create: OpenCreate::Unchecked,
+                mode: None,
+                truncate: false,
+            },
+        ])
+        .expect("split variable-length paths");
+    assert_eq!(outcome.failed, None);
+    for (fh, stateid) in outcome.opened.into_iter().map(Option::unwrap) {
+        client.close(&fh, &stateid).expect("close opened file");
+    }
+    client.remove(&top, "shallow").expect("remove shallow file");
+    client.remove(&parent, "deep").expect("remove deep file");
+    for (dir, name) in dirs.into_iter().rev() {
+        client.remove(&dir, &name).expect("remove test directory");
+    }
 }
 
 #[cfg(feature = "test-faults")]

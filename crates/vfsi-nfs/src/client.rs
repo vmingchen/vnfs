@@ -861,6 +861,21 @@ impl NfsClient {
         )
     }
 
+    /// Path resolution has a variable number of LOOKUPs. The packing
+    /// estimate is only a hint; check the finished compound before sending.
+    /// A lone item may exceed the learned limit when its path itself is
+    /// deeper than that limit, but still must fit the negotiated hard cap.
+    fn merged_paths_need_repack(
+        &self,
+        tag: &[u8],
+        one_item_ops: usize,
+        compound: &Compound,
+        items: usize,
+    ) -> bool {
+        items > 1
+            && compound.op_count().saturating_add(1) > self.op_budget_for(tag, one_item_ops).max_ops
+    }
+
     /// The adaptive learner has already observed this reply in
     /// `call_compound`. Only a rejection before the first mutating operation
     /// permits rebuilding this chunk with its newly smaller budget.
@@ -1689,6 +1704,7 @@ impl NfsClient {
         // Bytes of ops[global] already emitted across earlier compounds
         // (>0 means ops[global] is being continued mid-file).
         let mut part_off = 0usize;
+        let mut max_items = usize::MAX;
         while global < n {
             let tag = if close_in_compound {
                 b"writev1".as_slice()
@@ -1710,7 +1726,7 @@ impl NfsClient {
             let base_seq = self.session.path_owner.seqid;
             let mut payload = 0usize;
 
-            while global < n && map.next + per_file <= budget {
+            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
                 let op = &ops[global];
                 let start = part_off;
                 let remaining = op.data.len() - start;
@@ -1904,7 +1920,16 @@ impl NfsClient {
                 c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
                 map.note_ops(1);
             }
+            if failed.is_none()
+                && self.merged_paths_need_repack(tag, 1 + per_file, &c, map.ranges.len())
+            {
+                max_items = map.ranges.len() - 1;
+                global = chunk_start;
+                part_off = chunk_part_off;
+                continue;
+            }
             CompoundBudget::new(self.max_ops).ensure(&c)?;
+            max_items = usize::MAX;
             self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
 
             let res =
@@ -2014,6 +2039,7 @@ impl NfsClient {
         // Bytes of ops[global] already fetched across earlier compounds
         // (>0 means ops[global] is being continued mid-file).
         let mut part_off = 0usize;
+        let mut max_items = usize::MAX;
         while global < n {
             let tag = if close_in_compound {
                 b"readv1".as_slice()
@@ -2035,7 +2061,7 @@ impl NfsClient {
             let base_seq = self.session.path_owner.seqid;
             let mut payload = 0usize;
 
-            while global < n && map.next + per_file <= budget {
+            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
                 let op = &ops[global];
                 let start = part_off;
                 let remaining = op.count.saturating_sub(start);
@@ -2198,7 +2224,16 @@ impl NfsClient {
                 c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
                 map.note_ops(1);
             }
+            if failed.is_none()
+                && self.merged_paths_need_repack(tag, 1 + per_file, &c, map.ranges.len())
+            {
+                max_items = map.ranges.len() - 1;
+                global = chunk_start;
+                part_off = chunk_part_off;
+                continue;
+            }
             CompoundBudget::new(self.max_ops).ensure(&c)?;
+            max_items = usize::MAX;
             self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
 
             let res = self.call_compound_with_safety(&mut c, RequestSafety::ReadOnly)?;
@@ -2294,6 +2329,7 @@ impl NfsClient {
         let per_file = 4; // RESTOREFH + LOOKUP + GETATTR + margin
         let reserve = 16;
         let mut global = 0usize;
+        let mut max_items = usize::MAX;
         while global < n {
             let budget = self
                 .op_budget_for(b"getattrv1", 1 + per_file)
@@ -2304,7 +2340,7 @@ impl NfsClient {
             let mut c = Compound::new();
             c.tag(b"getattrv1");
             let mut payload = 0usize;
-            while global < n && map.next + per_file <= budget {
+            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
                 let op = &ops[global];
                 let est = 256;
                 if payload > 0
@@ -2347,6 +2383,14 @@ impl NfsClient {
                 failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
                 break;
             }
+            if failed.is_none()
+                && self.merged_paths_need_repack(b"getattrv1", 1 + per_file, &c, map.ranges.len())
+            {
+                max_items = map.ranges.len() - 1;
+                global = chunk_start;
+                continue;
+            }
+            max_items = usize::MAX;
             let res = self.call_compound_with_safety(&mut c, RequestSafety::IdempotentMutation)?;
             if self.can_retry_read_only_merged_resource(
                 b"getattrv1",
@@ -2401,6 +2445,7 @@ impl NfsClient {
         let per_file = 5; // RESTOREFH + LOOKUP + [GETATTR] + SETATTR + margin
         let reserve = 16;
         let mut global = 0usize;
+        let mut max_items = usize::MAX;
         while global < n {
             let budget = self
                 .op_budget_for(b"setattrv1", 1 + per_file)
@@ -2411,7 +2456,7 @@ impl NfsClient {
             let mut c = Compound::new();
             c.tag(b"setattrv1");
             let mut payload = 0usize;
-            while global < n && map.next + per_file <= budget {
+            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
                 let op = &ops[global];
                 let est = 256;
                 if payload > 0
@@ -2467,6 +2512,14 @@ impl NfsClient {
                 failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
                 break;
             }
+            if failed.is_none()
+                && self.merged_paths_need_repack(b"setattrv1", 1 + per_file, &c, map.ranges.len())
+            {
+                max_items = map.ranges.len() - 1;
+                global = chunk_start;
+                continue;
+            }
+            max_items = usize::MAX;
             let res = self.call_compound(&mut c)?;
             if self.can_retry_merged_resource(b"setattrv1", &res, budget, reserve, per_file) {
                 global = chunk_start;
@@ -2516,6 +2569,7 @@ impl NfsClient {
         let per_file = 6; // RESTOREFH + OPEN + GETFH + [SETATTR x2] + margin
         let reserve = 16;
         let mut global = 0usize;
+        let mut max_items = usize::MAX;
         #[cfg(feature = "test-faults")]
         let mut chunk_index = 0usize;
         while global < n {
@@ -2530,7 +2584,7 @@ impl NfsClient {
             let mut opens_in_chunk = 0usize;
             let base_seq = self.session.path_owner.seqid;
             let mut payload = 0usize;
-            while global < n && map.next + per_file <= budget {
+            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
                 let op = &ops[global];
                 let est = 256;
                 if payload > 0
@@ -2594,7 +2648,15 @@ impl NfsClient {
                 failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
                 break;
             }
+            if failed.is_none()
+                && self.merged_paths_need_repack(b"openv1", 1 + per_file, &c, map.ranges.len())
+            {
+                max_items = map.ranges.len() - 1;
+                global = chunk_start;
+                continue;
+            }
             CompoundBudget::new(self.max_ops).ensure(&c)?;
+            max_items = usize::MAX;
             #[cfg(feature = "test-faults")]
             if let Some(injector) = self.fault_injector.clone()
                 && let Err(error) =
@@ -2677,6 +2739,7 @@ impl NfsClient {
         let per_file = 3; // RESTOREFH + REMOVE + margin
         let reserve = 16;
         let mut global = 0usize;
+        let mut max_items = usize::MAX;
         while global < n {
             let budget = self
                 .op_budget_for(b"removev1", 1 + per_file)
@@ -2687,7 +2750,7 @@ impl NfsClient {
             let mut c = Compound::new();
             c.tag(b"removev1");
             let mut payload = 0usize;
-            while global < n && map.next + per_file <= budget {
+            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
                 let est = 128;
                 if payload > 0
                     && self.max_compound_bytes > 0
@@ -2720,6 +2783,14 @@ impl NfsClient {
                 failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
                 break;
             }
+            if failed.is_none()
+                && self.merged_paths_need_repack(b"removev1", 1 + per_file, &c, map.ranges.len())
+            {
+                max_items = map.ranges.len() - 1;
+                global = chunk_start;
+                continue;
+            }
+            max_items = usize::MAX;
             let res =
                 self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
             if self.can_retry_merged_resource(b"removev1", &res, budget, reserve, per_file) {
@@ -2764,6 +2835,7 @@ impl NfsClient {
         let per_file = 8; // two dir resolutions + RENAME + margin
         let reserve = 16;
         let mut global = 0usize;
+        let mut max_items = usize::MAX;
         while global < n {
             let budget = self
                 .op_budget_for(b"renamev1", 1 + per_file)
@@ -2774,7 +2846,7 @@ impl NfsClient {
             let mut c = Compound::new();
             c.tag(b"renamev1");
             let mut payload = 0usize;
-            while global < n && map.next + per_file <= budget {
+            while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
                 let pair = &pairs[global];
                 let est = 256;
                 if payload > 0
@@ -2816,6 +2888,14 @@ impl NfsClient {
                 failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
                 break;
             }
+            if failed.is_none()
+                && self.merged_paths_need_repack(b"renamev1", 1 + per_file, &c, map.ranges.len())
+            {
+                max_items = map.ranges.len() - 1;
+                global = chunk_start;
+                continue;
+            }
+            max_items = usize::MAX;
             let res =
                 self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
             if self.can_retry_merged_resource(b"renamev1", &res, budget, reserve, per_file) {
