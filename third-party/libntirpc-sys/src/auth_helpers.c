@@ -1,3 +1,5 @@
+#include <stddef.h>
+
 #include <rpc/auth.h>
 #include <rpc/svc.h>
 
@@ -12,6 +14,7 @@
 
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -31,7 +34,10 @@
  *
  * rpc_dplx_rec is private to libntirpc, but its prefix has been ABI-stable
  * throughout the supported releases.  Keep the definition limited to the
- * fields needed to reach call_replies and its lock.
+ * fields needed to reach call_replies and its lock.  The optional
+ * rdma_call_expires member is selected by build.rs from the linked library's
+ * exported symbols (not from the version string, which does not distinguish
+ * the two layouts).  See build.rs for the exact detection.
  */
 struct vfsi_rpc_dplx_lock {
     struct waitq_entry wait;
@@ -56,41 +62,88 @@ struct vfsi_rpc_dplx_prefix {
     } recv;
 };
 
+/*
+ * One patched transport-operations table per distinct libntirpc ops table.
+ *
+ * libntirpc dispatches `xprt->xp_ops->xp_decode` without taking any lock, so a
+ * worker can already have loaded the shim pointer and be about to enter it
+ * while another thread uninstalls. Freeing or swapping `xp_ops` back at that
+ * point is a use-after-free: the worker would cast the restored table to
+ * `vfsi_patched_ops` and read `original_decode` out of bounds, and libntirpc
+ * itself may read `xp_ops` concurrently. The only lifetime that is safe
+ * against an unlocked dispatch is "never freed and never swapped": install
+ * once and leave the patch reachable for the life of the process. libntirpc's
+ * ops tables are file-scope statics, so the cache holds only a handful of
+ * entries and the retained memory is bounded.
+ *
+ * Installation itself mutates `xprt->xp_ops`, which libntirpc reads with plain
+ * (non-atomic, unlocked) loads on dispatch, status and cleanup paths. The
+ * release store below and `vfsi_patch_lock` only guarantee that a reader never
+ * observes a partially built table and that concurrent installers agree; they
+ * do NOT synchronise with those plain reads. `clnt_vc_ncreatef` registers the
+ * transport with the event channel before it returns (see its
+ * `svc_rqst_evchan_reg` call), so there is no window in which the transport is
+ * guaranteed to be unobservable. Installation on a transport created that way
+ * is therefore NOT race-free; a fully race-free install would have to happen
+ * before registration, which libntirpc does not expose for this client path.
+ * The quiescence check below only rejects the case where a client request is
+ * already outstanding; it is not a proof of safety. The residual window is a
+ * single aligned pointer store where both the old and new tables are valid, so
+ * a reader sees one of two usable tables, but the mixed atomic/plain access is
+ * not a synchronised race.
+ *
+ * The long-term fix belongs upstream: populate `clnt_req.cc_verf` from the
+ * decoded reply verifier inside libntirpc before AUTH_VALIDATE, which removes
+ * the need for this transport-ops shim entirely. See
+ * https://github.com/nfs-ganesha/ntirpc/pull/414.
+ */
 struct vfsi_patched_ops {
     struct xp_ops ops;
-    struct xp_ops *original_ops;
     svc_req_fun_t original_decode;
 };
 
-#ifndef VFSI_LIBNTIRPC_HAS_CLIENT_XPRT
-/* Older releases do not export clnt_vc_get_client_xprt(). CLIENT is the first
- * member of their private cx_data and the duplex record immediately follows.
- */
-struct vfsi_client_prefix {
-    CLIENT client;
-    struct vfsi_rpc_dplx_prefix *record;
+struct vfsi_patch {
+    struct xp_ops *original;
+    struct vfsi_patched_ops patched;
+    struct vfsi_patch *next;
 };
-#endif
+
+static pthread_mutex_t vfsi_patch_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct vfsi_patch *vfsi_patches;
 
 static SVCXPRT *vfsi_client_xprt(CLIENT *client)
 {
-#ifdef VFSI_LIBNTIRPC_HAS_CLIENT_XPRT
     return clnt_vc_get_client_xprt(client);
-#else
-    struct vfsi_client_prefix *prefix =
-        (struct vfsi_client_prefix *)client;
+}
 
-    if (prefix == NULL || prefix->record == NULL)
+static enum xprt_stat vfsi_decode_with_reply_verifier(struct svc_req *request);
+
+/* The caller must hold vfsi_patch_lock. */
+static struct vfsi_patched_ops *vfsi_patch_for_locked(struct xp_ops *original)
+{
+    struct vfsi_patch *entry;
+
+    for (entry = vfsi_patches; entry != NULL; entry = entry->next) {
+        if (entry->original == original)
+            return &entry->patched;
+    }
+    entry = calloc(1, sizeof(*entry));
+    if (entry == NULL)
         return NULL;
-    return &prefix->record->xprt;
-#endif
+    entry->original = original;
+    entry->patched.ops = *original;
+    entry->patched.original_decode = original->xp_decode;
+    entry->patched.ops.xp_decode = vfsi_decode_with_reply_verifier;
+    entry->next = vfsi_patches;
+    vfsi_patches = entry;
+    return &entry->patched;
 }
 
 static enum xprt_stat vfsi_decode_with_reply_verifier(struct svc_req *request)
 {
     SVCXPRT *xprt = request->rq_xprt;
-    struct vfsi_patched_ops *patched =
-        (struct vfsi_patched_ops *)xprt->xp_ops;
+    struct vfsi_patched_ops *patched = (struct vfsi_patched_ops *)
+        __atomic_load_n(&xprt->xp_ops, __ATOMIC_ACQUIRE);
     struct vfsi_rpc_dplx_prefix *record =
         (struct vfsi_rpc_dplx_prefix *)xprt;
     struct rpc_msg decoded_message;
@@ -107,6 +160,8 @@ static enum xprt_stat vfsi_decode_with_reply_verifier(struct svc_req *request)
 
         memset(&key, 0, sizeof(key));
         key.cc_xid = decoded_message.rm_xid;
+        /* The same lock guards removal from call_replies, so the matching
+         * clnt_req cannot be released while we copy the verifier into it. */
         mutex_lock(&record->recv.lock.wait.mtx);
         node = opr_rbtree_lookup(&record->call_replies, &key.cc_dplx);
         if (node != NULL) {
@@ -123,35 +178,55 @@ static enum xprt_stat vfsi_decode_with_reply_verifier(struct svc_req *request)
 bool vfsi_libntirpc_install_reply_verifier_fix(CLIENT *client)
 {
     SVCXPRT *xprt = vfsi_client_xprt(client);
-    struct vfsi_patched_ops *patched;
+    struct xp_ops *original;
+    struct vfsi_patched_ops *patched = NULL;
 
-    if (xprt == NULL || xprt->xp_ops == NULL || xprt->xp_ops->xp_decode == NULL)
+    if (xprt == NULL)
         return false;
-    if (xprt->xp_ops->xp_decode == vfsi_decode_with_reply_verifier)
+    original = __atomic_load_n(&xprt->xp_ops, __ATOMIC_ACQUIRE);
+    if (original == NULL || original->xp_decode == NULL)
+        return false;
+    if (original->xp_decode == vfsi_decode_with_reply_verifier)
         return true;
 
-    patched = malloc(sizeof(*patched));
-    if (patched == NULL)
-        return false;
-    patched->ops = *xprt->xp_ops;
-    patched->original_ops = xprt->xp_ops;
-    patched->original_decode = xprt->xp_ops->xp_decode;
-    patched->ops.xp_decode = vfsi_decode_with_reply_verifier;
-    xprt->xp_ops = &patched->ops;
-    return true;
+    /*
+     * Best-effort: refuse to install while a client request is already
+     * outstanding. This does not make the swap race-free (see the note above);
+     * it only avoids the obvious "already in use" case. Server-side activity
+     * on a transport shared via `clnt_vc_ncreate_svc` is not visible here.
+     */
+    {
+        struct vfsi_rpc_dplx_prefix *record =
+            (struct vfsi_rpc_dplx_prefix *)xprt;
+        bool quiescent;
+
+        mutex_lock(&record->recv.lock.wait.mtx);
+        quiescent = opr_rbtree_first(&record->call_replies) == NULL;
+        mutex_unlock(&record->recv.lock.wait.mtx);
+        if (!quiescent)
+            return false;
+    }
+
+    /* Serialise installers and publish the fully initialised table with one
+     * release store; see the lifetime note above. */
+    pthread_mutex_lock(&vfsi_patch_lock);
+    patched = vfsi_patch_for_locked(original);
+    if (patched != NULL)
+        __atomic_store_n(&xprt->xp_ops, &patched->ops, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&vfsi_patch_lock);
+    return patched != NULL;
 }
 
 void vfsi_libntirpc_uninstall_reply_verifier_fix(CLIENT *client)
 {
-    SVCXPRT *xprt = vfsi_client_xprt(client);
-    struct vfsi_patched_ops *patched;
-
-    if (xprt == NULL || xprt->xp_ops == NULL ||
-        xprt->xp_ops->xp_decode != vfsi_decode_with_reply_verifier)
-        return;
-    patched = (struct vfsi_patched_ops *)xprt->xp_ops;
-    xprt->xp_ops = patched->original_ops;
-    free(patched);
+    /*
+     * Intentionally a no-op. Restoring or freeing the patch here would race
+     * with libntirpc's unlocked `xp_ops` reads and with workers that already
+     * loaded the shim pointer. The patch is process-lifetime and harmless once
+     * GSS is no longer in use: it only copies a reply verifier before
+     * delegating to the original decoder.
+     */
+    (void)client;
 }
 
 /*
@@ -166,6 +241,7 @@ void vfsi_libntirpc_uninstall_reply_verifier_fix(CLIENT *client)
  */
 static pthread_once_t zeroing_allocator_once = PTHREAD_ONCE_INIT;
 static _Thread_local bool zero_ntirpc_allocations;
+static bool zeroing_allocator_installed;
 static void *(*original_malloc)(size_t, const char *, int, const char *);
 
 static void *vfsi_zeroing_malloc(size_t size, const char *file, int line,
@@ -184,9 +260,13 @@ static void install_zeroing_allocator(void)
 
     if (!tirpc_control(TIRPC_GET_PARAMETERS, &parameters))
         return;
+    if (parameters.malloc_ == NULL)
+        return;
     original_malloc = parameters.malloc_;
     parameters.malloc_ = vfsi_zeroing_malloc;
-    (void)tirpc_control(TIRPC_PUT_PARAMETERS, &parameters);
+    if (!tirpc_control(TIRPC_PUT_PARAMETERS, &parameters))
+        return;
+    zeroing_allocator_installed = true;
 }
 
 #endif /* VFSI_RPCSEC_GSS */
@@ -201,6 +281,17 @@ void vfsi_libntirpc_set_process_cb(SVCXPRT *xprt, svc_req_fun_t callback)
     xprt->xp_dispatch.process_cb = callback;
 }
 
+/*
+ * Returns `sizeof(SVCXPRT)` as the C shims (and therefore the linked library)
+ * see it. The Rust bindings assert this equals `size_of::<SVCXPRT>()` so a
+ * build-flag divergence (notably `INET6`) fails loudly instead of corrupting
+ * the private rpc_dplx_rec offsets.
+ */
+size_t vfsi_libntirpc_sizeof_svcxprt(void)
+{
+    return sizeof(SVCXPRT);
+}
+
 #ifdef VFSI_RPCSEC_GSS
 AUTH *vfsi_libntirpc_authgss_ncreate_default(CLIENT *client, char *service,
                                               struct rpc_gss_sec *security)
@@ -209,6 +300,16 @@ AUTH *vfsi_libntirpc_authgss_ncreate_default(CLIENT *client, char *service,
     bool previous;
 
     (void)pthread_once(&zeroing_allocator_once, install_zeroing_allocator);
+    if (!zeroing_allocator_installed) {
+        /* Fail closed: without the zeroing allocator, authgss_ncreate_default
+         * can encode an uninitialized gc_ctx/gc_seq. The caller reports the
+         * NULL return as a credential-creation failure. */
+        fprintf(stderr,
+                "libntirpc-sys: refusing to create RPCSEC_GSS credentials "
+                "because the libntirpc zeroing allocator could not be "
+                "installed\n");
+        return NULL;
+    }
     previous = zero_ntirpc_allocations;
     zero_ntirpc_allocations = true;
     auth = authgss_ncreate_default(client, service, security);

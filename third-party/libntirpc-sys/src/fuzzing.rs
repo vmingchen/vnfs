@@ -39,11 +39,13 @@ fn memory_stream(data: &[u8]) -> (Vec<u32>, XDR) {
         bytes[..data.len()].copy_from_slice(data);
     }
     let mut xdrs: XDR = unsafe { std::mem::zeroed() };
+    // `xdrmem_ncreate` takes a 32-bit length; never let a larger slice wrap.
+    let length = data.len().min(u_int::MAX as usize) as u_int;
     unsafe {
         xdrmem_ncreate(
             &mut xdrs,
             buffer.as_mut_ptr().cast::<c_char>(),
-            data.len() as u_int,
+            length,
             xdr_op_XDR_DECODE,
         );
     }

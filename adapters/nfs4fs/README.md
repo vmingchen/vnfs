@@ -369,7 +369,7 @@ On Ubuntu/Debian:
 
 ```sh
 sudo apt-get install clang libclang-dev pkg-config libntirpc-dev \
-  libkrb5-dev libgssglue-dev liburcu-dev
+  libkrb5-dev libgssglue-dev
 python -m venv .venv
 .venv/bin/pip install hypothesis maturin fsspec pytest
 cd adapters/nfs4fs

@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "=0.4.13"
-libntirpc-sys = { path = "../third-party/libntirpc-sys", version = "0.2.3", features = ["fuzzing"] }
+libntirpc-sys = { path = "../third-party/libntirpc-sys", version = "0.2.6", features = ["fuzzing"] }
 vfsi-nfs = { path = "../crates/vfsi-nfs", version = "0.1.1", features = ["fuzzing"] }
 
 [[bin]]

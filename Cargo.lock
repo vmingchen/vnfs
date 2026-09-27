@@ -122,14 +122,12 @@ dependencies = [
  "bitflags",
  "cexpr",
  "clang-sys",
- "log",
- "prettyplease",
  "proc-macro2",
  "quote",
  "regex",
  "rustc-hash",
  "shlex",
- "syn 3.0.5",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -539,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "libntirpc-sys"
-version = "0.2.3"
+version = "0.2.6"
 dependencies = [
  "bindgen",
  "libc",
@@ -710,16 +708,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
-]
-
-[[package]]
-name = "prettyplease"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bfe0f4c752e450fc2faf62654f1c134747922825d5b04ca717b8874f41a40c0"
-dependencies = [
- "proc-macro2",
- "syn 3.0.5",
 ]
 
 [[package]]

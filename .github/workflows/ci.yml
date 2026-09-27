@@ -23,7 +23,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev
       - name: AddressSanitizer NFS parser and response tests
         env:
           ASAN_OPTIONS: detect_leaks=0
@@ -60,7 +60,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Check the detached Python native crate
@@ -223,7 +223,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev
       - name: Build the current native extension before tests
         run: |
           if test ! -x .venv/bin/python; then python -m venv .venv; fi
@@ -255,7 +255,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev
       - name: Build and inspect wheel and source distribution
         run: |
           python -m pip install --upgrade pip build maturin patchelf twine
@@ -490,7 +490,7 @@ jobs:
       - name: Install NFS-Ganesha and build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config iproute2 libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev nfs-ganesha nfs-ganesha-vfs
+          sudo apt-get install -y clang libclang-dev cmake pkg-config iproute2 libntirpc-dev libkrb5-dev libgssglue-dev nfs-ganesha nfs-ganesha-vfs
       - name: Start local NFSv4 server
         run: |
           sudo systemctl stop nfs-ganesha.service || true
@@ -715,7 +715,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev cmake pkg-config \
-            libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev \
+            libntirpc-dev libkrb5-dev libgssglue-dev \
             krb5-admin-server krb5-kdc krb5-user \
             nfs-ganesha nfs-ganesha-vfs rpcbind
       - name: Exercise supported RPCSEC_GSS levels against a private test realm
@@ -733,7 +733,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev
       - name: Build patched NFS-Ganesha image
         run: docker build --tag vnfs-ganesha-copy:ci ci/nfs-ganesha
       - name: Start patched NFSv4.2 server
@@ -849,7 +849,7 @@ jobs:
       - name: Install Samba and build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev samba smbclient
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev samba smbclient
       - name: Start a loopback-only test share
         env:
           SMB_MIN_PROTOCOL: ${{ matrix.min_protocol }}

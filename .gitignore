@@ -6,6 +6,8 @@
 **/dist/
 *.pyc
 *.so
+*.swp
+*.swo
 # Commit lockfiles for every workspace (including the detached Python and fuzz
 # workspaces) so dependency versions are reproducible and auditable. The
 # leading slash keeps the root exception anchored to the repository root.
