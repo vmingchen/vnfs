@@ -42,6 +42,26 @@ fn main() {
         .include_paths
         .first()
         .expect("libntirpc pkg-config metadata has no include directory");
+    // Ubuntu 26.04's libntirpc-dev 6.3 package installs headers that include
+    // config.h, but omits that generated header on x86_64. Supply the
+    // matching distro configuration only for that known packaging defect.
+    let fallback_config = if include.join("config.h").exists() {
+        false
+    } else {
+        let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+        let ubuntu_26_04 = os_release.lines().any(|line| line == "ID=ubuntu")
+            && os_release
+                .lines()
+                .any(|line| line == "VERSION_ID=\"26.04\"");
+        assert!(
+            ubuntu_26_04 && library.version.starts_with("6.3"),
+            "libntirpc development headers are missing config.h"
+        );
+        std::fs::copy("src/config-ubuntu-26.04.h", out_dir.join("config.h"))
+            .expect("copy Ubuntu 26.04 libntirpc config fallback");
+        println!("cargo:rerun-if-changed=src/config-ubuntu-26.04.h");
+        true
+    };
 
     // auth_destroy is a reference-counting macro/static-inline API, not an
     // exported symbol. Compile a stable callable shim so Rust never bypasses
@@ -57,6 +77,9 @@ fn main() {
         .arg("-D_GNU_SOURCE=1")
         .arg("-DINET6=1")
         .arg(format!("-I{}", include.display()));
+    if fallback_config {
+        helper_compile.arg(format!("-I{}", out_dir.display()));
+    }
     if env::var_os("CARGO_FEATURE_RPCSEC_GSS").is_some() {
         helper_compile.arg("-DVFSI_RPCSEC_GSS=1");
         if major >= 6 {
@@ -83,7 +106,7 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=ntirpc_helpers");
 
-    bindgen::Builder::default()
+    let mut bindings = bindgen::Builder::default()
         .header("src/wrapper.h")
         .clang_arg(format!("-I{}", include.display()))
         .blocklist_type("rpcblist")
@@ -94,7 +117,11 @@ fn main() {
         .blocklist_function("qfcvt_r")
         .blocklist_function("qecvt")
         .blocklist_function("qfcvt")
-        .blocklist_function("qgcvt")
+        .blocklist_function("qgcvt");
+    if fallback_config {
+        bindings = bindings.clang_arg(format!("-I{}", out_dir.display()));
+    }
+    bindings
         .generate()
         .expect("generate libntirpc bindings")
         .write_to_file(out_dir.join("bindings.rs"))
