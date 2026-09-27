@@ -76,19 +76,26 @@ struct vfsi_rpc_dplx_prefix {
  * ops tables are file-scope statics, so the cache holds only a handful of
  * entries and the retained memory is bounded.
  *
- * Installation itself still mutates `xprt->xp_ops`, which libntirpc reads
- * without a lock. The patch is fully initialised before a single release store
- * publishes it, so any concurrent dispatch observes either the original table
- * or the complete shim, never a partially built one, and `vfsi_patch_lock`
- * serialises concurrent installers. That is only a guarantee that readers see
- * a valid table; it does not synchronise the swap with libntirpc. The caller
- * therefore MUST install before the transport can process any request, which
- * is why `vfsi-nfs` installs immediately after `clnt_vc_ncreatef` and before
- * the first RPC. Installing on a transport that is already serving (for
- * example one shared via `clnt_vc_ncreate_svc`) is unsupported. The install
- * entry point additionally refuses to proceed while a client request is
- * outstanding, but server-side activity on a shared transport is not
- * detectable there.
+ * Installation itself mutates `xprt->xp_ops`, which libntirpc reads with plain
+ * (non-atomic, unlocked) loads on dispatch, status and cleanup paths. The
+ * release store below and `vfsi_patch_lock` only guarantee that a reader never
+ * observes a partially built table and that concurrent installers agree; they
+ * do NOT synchronise with those plain reads. `clnt_vc_ncreatef` registers the
+ * transport with the event channel before it returns (see its
+ * `svc_rqst_evchan_reg` call), so there is no window in which the transport is
+ * guaranteed to be unobservable. Installation on a transport created that way
+ * is therefore NOT race-free; a fully race-free install would have to happen
+ * before registration, which libntirpc does not expose for this client path.
+ * The quiescence check below only rejects the case where a client request is
+ * already outstanding; it is not a proof of safety. The residual window is a
+ * single aligned pointer store where both the old and new tables are valid, so
+ * a reader sees one of two usable tables, but the mixed atomic/plain access is
+ * not a synchronised race.
+ *
+ * The long-term fix belongs upstream: populate `clnt_req.cc_verf` from the
+ * decoded reply verifier inside libntirpc before AUTH_VALIDATE, which removes
+ * the need for this transport-ops shim entirely. See
+ * https://github.com/nfs-ganesha/ntirpc/pull/414.
  */
 struct vfsi_patched_ops {
     struct xp_ops ops;
@@ -183,11 +190,10 @@ bool vfsi_libntirpc_install_reply_verifier_fix(CLIENT *client)
         return true;
 
     /*
-     * Refuse to install on a transport that is already processing a client
-     * request: an outstanding request means another worker can dispatch
-     * through `xp_ops` while we swap it. This is the observable part of the
-     * "install before use" contract. Server-side activity on a transport shared
-     * via `clnt_vc_ncreate_svc` is not visible here and remains unsupported.
+     * Best-effort: refuse to install while a client request is already
+     * outstanding. This does not make the swap race-free (see the note above);
+     * it only avoids the obvious "already in use" case. Server-side activity
+     * on a transport shared via `clnt_vc_ncreate_svc` is not visible here.
      */
     {
         struct vfsi_rpc_dplx_prefix *record =

@@ -147,10 +147,15 @@ Several upstream ABI changes did not bump the reported version, which is why
   package). Treat the feature as version-bounded and re-run the RPCSEC_GSS
   integration test whenever libntirpc is upgraded.
 - The reply-verifier shim replaces the client transport's `xp_ops` table.
-  libntirpc dispatches `xp_ops` without a lock, so the shim must be installed
-  on a freshly created transport before it can process any request; `vfsi-nfs`
-  installs it immediately after `clnt_vc_ncreatef`. Installation on a
-  transport that is already serving (for example one shared via
-  `clnt_vc_ncreate_svc`) is unsupported; the installer also refuses to run
-  while a client request is outstanding.
+  libntirpc reads that pointer with plain, unlocked loads, and
+  `clnt_vc_ncreatef` registers the transport with its worker before the shim
+  can be installed, so the swap is **not race-free**. `vfsi-nfs` installs as
+  early as possible and the installer refuses to run while a client request is
+  already outstanding, but a small window remains. A race-free install would
+  require registering the transport only after the shim is in place, which
+  libntirpc's client path does not expose. Treat `rpcsec-gss` as best-effort on
+  this path. The long-term fix is upstream
+  (https://github.com/nfs-ganesha/ntirpc/pull/414): populate `clnt_req.cc_verf`
+  from the decoded reply verifier inside libntirpc itself, removing the need
+  for this shim.
 - The validated platform is Linux/glibc; other platforms are untested.
