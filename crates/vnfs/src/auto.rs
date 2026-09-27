@@ -128,16 +128,24 @@ impl AuthSysIdentity {
         let uid = unsafe { libc::geteuid() };
         let gid = unsafe { libc::getegid() };
         if fsuid as libc::uid_t != uid || fsgid as libc::gid_t != gid {
+            #[cfg(test)]
+            eprintln!(
+                "Auto AUTH_SYS fs identity differs: fsuid={fsuid} uid={uid} fsgid={fsgid} gid={gid}"
+            );
             return None;
         }
         let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
         // AUTH_SYS carries at most 16 supplementary groups. Let the kernel
         // handle identities that would be truncated by the direct client.
         if !(0..=16).contains(&count) {
+            #[cfg(test)]
+            eprintln!("Auto AUTH_SYS supplementary group count is {count}");
             return None;
         }
         let mut groups = vec![0; count as usize];
         if unsafe { libc::getgroups(count, groups.as_mut_ptr()) } != count {
+            #[cfg(test)]
+            eprintln!("Auto AUTH_SYS supplementary groups changed during capture");
             return None;
         }
         Some(Self { uid, gid, groups })
@@ -287,7 +295,14 @@ impl AutoClient {
                 return None;
             }
         };
-        let kernel_id = fs::metadata(&spec.mount_point).ok()?.ino();
+        let kernel_id = match fs::metadata(&spec.mount_point) {
+            Ok(metadata) => metadata.ino(),
+            Err(_error) => {
+                #[cfg(test)]
+                eprintln!("Auto kernel NFS root metadata failed: {_error}");
+                return None;
+            }
+        };
         let direct_id = match client.metadata("/") {
             Ok(metadata) => metadata.file_id(),
             Err(_error) => {
@@ -302,6 +317,8 @@ impl AutoClient {
             return None;
         }
         if AuthSysIdentity::current().as_ref() != Some(&credentials) {
+            #[cfg(test)]
+            eprintln!("Auto AUTH_SYS credentials changed while connecting");
             return None;
         }
         let connection = NfsConnection {
@@ -310,7 +327,14 @@ impl AutoClient {
             identity: Arc::new(()),
             credentials,
         };
-        let mut cache = self.connections.lock().ok()?;
+        let mut cache = match self.connections.lock() {
+            Ok(cache) => cache,
+            Err(_) => {
+                #[cfg(test)]
+                eprintln!("Auto connection cache lock is poisoned");
+                return None;
+            }
+        };
         if let Some(existing) = cache.get(&spec.id)
             && existing.spec == *spec
             && existing.credentials == connection.credentials
