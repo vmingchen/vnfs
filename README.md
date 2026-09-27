@@ -24,9 +24,11 @@ The repository provides:
 
 - composable scalar (`sfsi`) and vectorized (`vfsi`) Rust API facets;
 - NFSv4.1, NFSv4.2, optional SMB2/3, and local backends;
-- the [`nfs4fs`](adapters/nfs4fs/) NFS fsspec package, the low-level Python
-  [`vsmb`](adapters/vsmb/) client, and the [`vsmbfs`](adapters/vsmbfs/) fsspec
-  adapter for SMB;
+- the [`nfs4fs`](https://pypi.org/project/nfs4fs/) NFS fsspec package, the
+  low-level Python [`vsmb`](https://pypi.org/project/vsmb/) client, and the
+  [`vsmbfs`](https://pypi.org/project/vsmbfs/) fsspec adapter for SMB;
+- the [`libntirpc-sys`](https://crates.io/crates/libntirpc-sys) Rust bindings
+  for libntirpc;
 - a versioned [C ABI](bindings/c/) with a checked-in header;
 - integration tests against NFS-Ganesha, a patched NFSv4.2 COPY server, and
   Samba dialects from SMB 2.1 through SMB 3.1.1.
@@ -64,6 +66,10 @@ with fsspec.open("nfs4://nfs.example/exports/data/a.txt", "rb") as file:
 ```
 
 For SMB, install `vsmb` for the low-level vector API or `vsmbfs` for fsspec:
+
+```sh
+python -m pip install vsmbfs
+```
 
 ```python
 import fsspec
