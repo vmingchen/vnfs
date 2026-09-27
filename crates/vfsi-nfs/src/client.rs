@@ -1897,7 +1897,10 @@ impl NfsClient {
                                 }
                             };
                             map.note_ops(nops);
-                            if op.create && op.truncate {
+                            // A split write reopens the path in later
+                            // compounds. Truncating on those continuation
+                            // opens would erase the chunks already written.
+                            if op.create && op.truncate && start == 0 {
                                 c.open_claim_null_create_mode(
                                     base_seq + opens_in_chunk as u32,
                                     OPEN4_SHARE_ACCESS_BOTH,
@@ -1933,7 +1936,7 @@ impl NfsClient {
                             opened_path = Some(p.clone());
                             fh_at_opened = true;
                             newly_opened = true;
-                            if op.truncate && !op.create {
+                            if op.truncate && !op.create && start == 0 {
                                 // Truncate in-compound right after OPEN so a
                                 // no-create open still has O_TRUNC semantics.
                                 // Creation opens carry size=0 in OPEN's

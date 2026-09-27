@@ -119,6 +119,60 @@ fn pre_dispatch_resource_rejection_splits_merged_writes_without_replay() {
 
 #[cfg(feature = "test-faults")]
 #[test]
+fn split_path_write_truncates_only_before_the_first_chunk() {
+    let server = match std::env::var("VFSI_NFS_SERVER") {
+        Ok(server) => server,
+        Err(_) => {
+            assert!(!required(), "VFSI_NFS_SERVER is required");
+            return;
+        }
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .ok()
+        .map(|value| value.parse::<u32>().expect("NFS minor version"))
+        .unwrap_or(2);
+    let mut client = NfsClient::connect_minor(&server, minor).expect("connect NFS client");
+    let root = client.root().clone();
+    let name = format!("vfsi-nfs-split-truncate-{}", std::process::id());
+    let data = vec![b'x'; 64 * 1024];
+
+    // The limit includes framing, so the payload must span two compounds.
+    client.set_max_compound_bytes(64 * 1024);
+    let outcome = client
+        .writev_path_compound(
+            &[PathWriteOp {
+                file: FileRef::Path(name.as_bytes().to_vec()),
+                offset: 0,
+                data: data.clone(),
+                create: true,
+                truncate: true,
+                stateid: None,
+            }],
+            true,
+        )
+        .expect("write split path payload");
+    assert_eq!(outcome.failed, None);
+    assert_eq!(outcome.counts, vec![Some(data.len() as u32)]);
+    client.set_max_compound_bytes(0);
+
+    let (fh, stateid) = client
+        .open(
+            &root,
+            name.as_bytes(),
+            nfsv41_sys::OPEN4_SHARE_ACCESS_READ,
+            OpenCreate::NoCreate,
+        )
+        .expect("open written file");
+    let (actual, _) = client
+        .read(&fh, &stateid, 0, data.len() as u32)
+        .expect("read written file");
+    assert_eq!(actual, data);
+    client.close(&fh, &stateid).expect("close written file");
+    client.remove(&root, &name).expect("remove test file");
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
 fn variable_depth_paths_repack_before_exceeding_compound_limit() {
     let server = match std::env::var("VFSI_NFS_SERVER") {
         Ok(server) => server,
