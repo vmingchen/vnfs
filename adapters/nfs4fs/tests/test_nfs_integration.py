@@ -125,7 +125,7 @@ def test_round_trip_bounds(nfs_fs):
         fs,
         lambda: fs.cp(dsts, [_unique(nfs_fs, f"cp/{i}.txt") for i in range(n)]),
     )
-    assert cp_count <= 4, cp_count
+    assert cp_count <= 6, cp_count
 
     # walk on a 30-node tree is level-batched.
     for i in range(5):

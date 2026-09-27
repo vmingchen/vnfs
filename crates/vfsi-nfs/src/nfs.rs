@@ -983,8 +983,15 @@ impl NfsVecFs {
                     // path, re-attributing its error to the original index.
                     let mut prefix_attrs = attrs[..i].to_vec();
                     for (k, a) in prefix_attrs.iter_mut().enumerate() {
-                        let list = outcome.lists[k].as_deref().unwrap_or_default();
-                        let v = parse_attr_list(&ops[k].attrs, list)?;
+                        let Some(list) = outcome.lists[k].as_deref() else {
+                            return self.getattrsv_phased(attrs, follow);
+                        };
+                        let Ok(v) = parse_attr_list(&ops[k].attrs, list) else {
+                            // A malformed merged result is not a valid
+                            // completed prefix. Retry the read-only GETATTR
+                            // through the independently decoded phased path.
+                            return self.getattrsv_phased(attrs, follow);
+                        };
                         apply_attrs(a, &v);
                         if follow && a.ftype == VfType::Symlink {
                             self.stat_one_following(k, a)?;
@@ -997,9 +1004,17 @@ impl NfsVecFs {
                     return Ok(());
                 }
                 let mut symlinks = Vec::new();
-                for (i, (a, op)) in attrs.iter_mut().zip(&ops).enumerate() {
-                    let list = outcome.lists[i].as_deref().unwrap_or_default();
-                    let v = parse_attr_list(&op.attrs, list)?;
+                let mut parsed = Vec::with_capacity(attrs.len());
+                for (i, op) in ops.iter().enumerate() {
+                    let Some(list) = outcome.lists[i].as_deref() else {
+                        return self.getattrsv_phased(attrs, follow);
+                    };
+                    let Ok(v) = parse_attr_list(&op.attrs, list) else {
+                        return self.getattrsv_phased(attrs, follow);
+                    };
+                    parsed.push(v);
+                }
+                for (i, (a, v)) in attrs.iter_mut().zip(parsed).enumerate() {
                     apply_attrs(a, &v);
                     if follow && a.ftype == VfType::Symlink {
                         symlinks.push(i);

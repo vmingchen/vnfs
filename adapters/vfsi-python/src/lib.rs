@@ -1615,7 +1615,7 @@ impl NfsClient {
                     .flat_map(|&index| [sources[index].clone(), dests[index].clone()])
                     .collect();
                 let (attrs, _identity_errors) =
-                    attrs_many_impl(fs, &identity_paths, AttrMask::MODE | AttrMask::FILEID, true)
+                    attrs_many_impl(fs, &identity_paths, AttrMask::stat(), true)
                         .map_err(|e| to_py_err(e, None))?;
                 for (pair_index, &index) in existing_candidates.iter().enumerate() {
                     let source = attrs[2 * pair_index].as_ref();
