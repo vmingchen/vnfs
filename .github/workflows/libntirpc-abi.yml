@@ -1,0 +1,69 @@
+name: libntirpc ABI
+
+# The main CI runs against Ubuntu 24.04's libntirpc 6.3 only, so the
+# version-gated ABI paths (legacy_free_cb = 0, rdma_call_expires) are never
+# compiled there. This workflow builds a pinned newer libntirpc from source
+# and runs the crate against it. It is scheduled/manual so a bad upstream pin
+# cannot block pull requests.
+on:
+  schedule:
+    - cron: "43 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  NTIRPC_REVISION: v15.3
+
+jobs:
+  newer-libntirpc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang libclang-dev pkg-config \
+            libgssglue-dev libkrb5-dev liburcu-dev
+      - name: Build the libntirpc build image
+        run: docker build --tag vnfs-libntirpc-build:ci ci/libntirpc
+      - name: Fetch the pinned libntirpc source
+        run: |
+          git clone --depth=1 --branch "$NTIRPC_REVISION" \
+            --recurse-submodules --shallow-submodules \
+            https://github.com/nfs-ganesha/ntirpc.git target/ntirpc-src
+      - name: Build and install the newer libntirpc
+        run: |
+          prefix="$PWD/target/ntirpc-prefix"
+          mkdir -p "$prefix"
+          # Mount the install prefix at its own host path so the generated
+          # libntirpc.pc records a prefix that exists when Cargo runs on the
+          # host afterwards.
+          docker run --rm \
+            --volume "$PWD/target/ntirpc-src:/src:ro" \
+            --volume "$prefix:$prefix" \
+            --workdir /tmp \
+            vnfs-libntirpc-build:ci \
+            bash -c "cmake -S /src -B /tmp/build \
+                       -DCMAKE_BUILD_TYPE=Release \
+                       -DCMAKE_INSTALL_PREFIX=\"$prefix\" \
+                       -DUSE_LTTNG=Off \
+                       -DUSE_MONITORING=Off \
+                     && cmake --build /tmp/build --parallel \
+                     && cmake --install /tmp/build"
+          pc=$(find "$prefix" -name libntirpc.pc -print -quit)
+          test -n "$pc"
+          echo "PKG_CONFIG_PATH=$(dirname "$pc")" >>"$GITHUB_ENV"
+      - name: Report the detected libntirpc version
+        run: pkg-config --modversion libntirpc
+      - name: Test the crate against the newer libntirpc
+        run: |
+          cargo test -p libntirpc-sys --all-features
+          # Compiles the non-legacy clnt_req free callback and the
+          # rdma_call_expires layout selected by the symbol probe.
+          cargo build -p vfsi-nfs --features rpcsec-gss

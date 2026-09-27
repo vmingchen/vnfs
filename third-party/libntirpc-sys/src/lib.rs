@@ -7,6 +7,9 @@
 // bitfield accessors that trip these lints; they are never called from this
 // crate and are safe to ignore.
 #![allow(unnecessary_transmutes)]
+// Bindgen output trips these. They cannot be scoped to the include! because
+// the macros expand at module scope; audit hand-written code in this file
+// separately instead.
 #![allow(improper_ctypes)]
 #![allow(improper_ctypes_definitions)]
 // Edition 2024 makes unsafe_op_in_unsafe_fn deny-by-default, which the
@@ -28,6 +31,9 @@ unsafe extern "C" {
     /// Set a server transport's process callback without exposing bindgen's
     /// version-dependent representation of the anonymous dispatch union.
     pub fn vfsi_libntirpc_set_process_cb(xprt: *mut SVCXPRT, callback: svc_req_fun_t);
+    /// `sizeof(SVCXPRT)` as the C shims see it. Used to assert that the
+    /// generated bindings and the shims agree on the transport ABI.
+    pub fn vfsi_libntirpc_sizeof_svcxprt() -> usize;
     #[cfg(feature = "rpcsec-gss")]
     pub fn vfsi_libntirpc_authgss_ncreate_default(
         client: *mut CLIENT,
@@ -90,5 +96,19 @@ mod test {
                 std::ptr::null_mut::<std::os::raw::c_void>(),
             )
         });
+    }
+
+    /// The bindgen invocation and the C shims must compile `SVCXPRT` with the
+    /// same feature macros (notably `INET6`), otherwise every field of the
+    /// private `rpc_dplx_rec` after the transport is misaligned.
+    #[test]
+    fn svcxprt_abi_matches_shims() {
+        let bindgen = std::mem::size_of::<SVCXPRT>();
+        let shims = unsafe { vfsi_libntirpc_sizeof_svcxprt() };
+        assert_eq!(
+            bindgen, shims,
+            "bindgen and the C shims disagree on sizeof(SVCXPRT) \
+             ({bindgen} vs {shims}); check the -D flags passed to both",
+        );
     }
 }

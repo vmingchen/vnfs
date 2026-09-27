@@ -76,6 +76,7 @@ source. The currently supported native target is Linux.
 | --- | --- | --- |
 | libntirpc | `libntirpc-dev` | RPC implementation and headers (6.3+) |
 | pkg-config | `pkg-config` | locate the installed library and headers |
+| C toolchain | `build-essential` | compile the `auth_helpers.c` ABI shims |
 | clang | `clang` | provide the headers used by bindgen to generate bindings |
 | GSSAPI headers | `libkrb5-dev` | only for the optional `rpcsec-gss` feature |
 
@@ -98,3 +99,31 @@ depends on both, so a default build needs no extra development packages.
 docs.rs uses checked-in declarations and therefore does not require native
 packages. Those declarations are only a documentation input; normal builds
 always bind to the locally installed headers.
+
+## Supported libntirpc versions and ABI notes
+
+The crate links the administrator-provided `libntirpc` and never vendors
+native source, so build-time compatibility is not purely a version check.
+Several upstream ABI changes did not bump the reported version, which is why
+`build.rs` verifies what it can:
+
+- The private `struct rpc_dplx_rec` gained an `rdma_call_expires` member
+  together with the exported `clnt_tli_ncreate_opt` symbol (upstream v9.15),
+  but the reported version stayed `7.2`. `build.rs` therefore probes the
+  linked library's symbols (`nm`, overridable with `NM`) instead of trusting
+  the version string. If the probe cannot run, set
+  `LIBNTIRPC_RPC_DPLX_RDMA_EXPIRES=0` or `=1` explicitly; an ambiguous
+  version with no probe fails the build instead of guessing.
+- The `clnt_req` free callback changed arity at upstream v15.0. The crate
+  exposes this as the `DEP_NTIRPC_LEGACY_FREE_CB` build-script variable for
+  dependent crates.
+- `SVCXPRT` is compiled with `_GNU_SOURCE` and `INET6`, matching the
+  supported Linux packages. A unit test asserts that the C shims and the
+  bindgen output agree on `sizeof(SVCXPRT)`, so a flag divergence fails the
+  build rather than corrupting the private layout.
+- The `rpcsec-gss` feature patches a private `rpc_dplx_rec` field and installs
+  a process-global allocator hook. It has been verified against Ubuntu 24.04's
+  libntirpc 6.3 and against upstream 15.x; treat it as version-bounded and
+  re-run the RPCSEC_GSS integration test whenever libntirpc is upgraded.
+- The currently verified targets are Linux/glibc; `README` continues to list
+  the packages needed on Ubuntu.
