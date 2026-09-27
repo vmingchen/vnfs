@@ -32,6 +32,28 @@ def _read_stream(fs, path: str, chunk_bytes: int, *, direct: bool) -> tuple[int,
     return total, digest.hexdigest()
 
 
+def _read_pipelined(fs, path: str, chunk_bytes: int, workers: int, in_flight: int):
+    """Hash ordered chunks delivered by nfs4fs's bounded read-ahead API."""
+    digest = hashlib.blake2b()
+    total = fs.read_stream_pipelined(
+        path,
+        lambda _offset, data: digest.update(data),
+        workers=workers,
+        chunk_size=chunk_bytes,
+        max_in_flight=in_flight,
+    )
+    return total, digest.hexdigest()
+
+
+def _pool_stats(fs):
+    """Read reset-on-read counters for every native session in a pool."""
+    clients = fs._client._clients
+    return (
+        sum(client.compound_stats()[0] for client in clients),
+        sum(client.rpc_stats()[0] for client in clients),
+    )
+
+
 def _summary(samples: list[float], size_bytes: int) -> dict[str, float]:
     median_ms = statistics.median(samples)
     return {
@@ -56,11 +78,24 @@ def main() -> None:
     parser.add_argument("--chunk-kib", type=int, default=1024)
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--warmups", type=int, default=1)
+    parser.add_argument(
+        "--pipeline-workers",
+        type=int,
+        default=0,
+        help="also profile bounded positional read-ahead using this many sessions",
+    )
+    parser.add_argument("--in-flight", type=int, default=8)
     args = parser.parse_args()
     if args.size_mib <= 0 or args.chunk_kib <= 0 or args.rounds <= 0:
         parser.error("--size-mib, --chunk-kib, and --rounds must be positive")
     if args.warmups < 0:
         parser.error("--warmups must be non-negative")
+    if args.pipeline_workers < 0 or args.in_flight <= 0:
+        parser.error("--pipeline-workers must be non-negative and --in-flight positive")
+    if args.pipeline_workers and args.chunk_kib > 1024:
+        parser.error("pipelined reads currently require --chunk-kib <= 1024")
+    if args.pipeline_workers and args.in_flight * args.chunk_kib > 16 * 1024:
+        parser.error("pipelined read-ahead must stay within 16 MiB")
 
     run_name = f"nfs4fs-large-{uuid.uuid4().hex}"
     prefix = args.remote_root.strip("/")
@@ -71,11 +106,15 @@ def main() -> None:
     size_bytes = args.size_mib * 1024 * 1024
     chunk_bytes = args.chunk_kib * 1024
     nfs = None
+    nfs_pool = None
     local = None
     nfs_ms: list[float] = []
     kernel_ms: list[float] = []
     nfs_rpcs: list[int] = []
     nfs_compounds: list[int] = []
+    pipeline_ms: list[float] = []
+    pipeline_compounds: list[int] = []
+    pipeline_rpcs: list[int] = []
 
     try:
         fixture_run.mkdir(parents=True)
@@ -86,6 +125,15 @@ def main() -> None:
             auth="auth_sys",
             skip_instance_cache=True,
         )
+        if args.pipeline_workers:
+            nfs_pool = fsspec.filesystem(
+                "nfs4",
+                host=args.host,
+                root=args.remote_root,
+                auth="auth_sys",
+                connection_pool_size=args.pipeline_workers,
+                skip_instance_cache=True,
+            )
         local = fsspec.filesystem("file", skip_instance_cache=True)
         probe = b"same-export-" + run_name.encode()
         (fixture_run / "probe").write_bytes(probe)
@@ -116,6 +164,17 @@ def main() -> None:
                 != expected_result
             ):
                 raise RuntimeError("kernel NFS warm-up returned incorrect data")
+            if nfs_pool is not None and (
+                _read_pipelined(
+                    nfs_pool,
+                    remote_file,
+                    chunk_bytes,
+                    args.pipeline_workers,
+                    args.in_flight,
+                )
+                != expected_result
+            ):
+                raise RuntimeError("pipelined nfs4fs warm-up returned incorrect data")
 
         for index in range(args.rounds):
 
@@ -138,43 +197,74 @@ def main() -> None:
                     )
                 return elapsed, 0, 0
 
-            if index % 2:
-                kernel_ms.append(measure(local, mounted_file, False)[0])
+            def measure_sequential():
                 elapsed, compounds, rpcs = measure(nfs, remote_file, True)
-            else:
-                elapsed, compounds, rpcs = measure(nfs, remote_file, True)
-                kernel_ms.append(measure(local, mounted_file, False)[0])
-            nfs_ms.append(elapsed)
-            nfs_compounds.append(compounds)
-            nfs_rpcs.append(rpcs)
+                nfs_ms.append(elapsed)
+                nfs_compounds.append(compounds)
+                nfs_rpcs.append(rpcs)
+
+            def measure_pipeline():
+                _pool_stats(nfs_pool)
+                started = time.perf_counter_ns()
+                result = _read_pipelined(
+                    nfs_pool,
+                    remote_file,
+                    chunk_bytes,
+                    args.pipeline_workers,
+                    args.in_flight,
+                )
+                elapsed = (time.perf_counter_ns() - started) / 1_000_000
+                if result != expected_result:
+                    raise RuntimeError("pipelined nfs4fs returned incorrect data")
+                compounds, rpcs = _pool_stats(nfs_pool)
+                pipeline_ms.append(elapsed)
+                pipeline_compounds.append(compounds)
+                pipeline_rpcs.append(rpcs)
+
+            actions = [
+                measure_sequential,
+                lambda: kernel_ms.append(measure(local, mounted_file, False)[0]),
+            ]
+            if nfs_pool is not None:
+                actions.append(measure_pipeline)
+            order = index % len(actions)
+            for action in actions[order:] + actions[:order]:
+                action()
     finally:
         if nfs is not None:
             nfs.close()
+        if nfs_pool is not None:
+            nfs_pool.close()
         close_local = getattr(local, "close", None) if local is not None else None
         if close_local is not None:
             close_local()
         shutil.rmtree(fixture_run, ignore_errors=True)
 
-    print(
-        json.dumps(
-            {
-                "benchmark": "single_large_file_sequential_read",
-                "size_bytes": size_bytes,
-                "chunk_bytes": chunk_bytes,
-                "rounds": args.rounds,
-                "warmups": args.warmups,
-                "nfs4fs": {
-                    **_summary(nfs_ms, size_bytes),
-                    "median_compounds": statistics.median(nfs_compounds),
-                    "median_rpcs": statistics.median(nfs_rpcs),
-                },
-                "kernel_nfs": _summary(kernel_ms, size_bytes),
-                "speedup": statistics.median(kernel_ms) / statistics.median(nfs_ms),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
+    report = {
+        "benchmark": "single_large_file_sequential_read",
+        "size_bytes": size_bytes,
+        "chunk_bytes": chunk_bytes,
+        "rounds": args.rounds,
+        "warmups": args.warmups,
+        "nfs4fs": {
+            **_summary(nfs_ms, size_bytes),
+            "median_compounds": statistics.median(nfs_compounds),
+            "median_rpcs": statistics.median(nfs_rpcs),
+        },
+        "kernel_nfs": _summary(kernel_ms, size_bytes),
+        "speedup": statistics.median(kernel_ms) / statistics.median(nfs_ms),
+    }
+    if pipeline_ms:
+        report["nfs4fs_pipelined"] = {
+            **_summary(pipeline_ms, size_bytes),
+            "workers": args.pipeline_workers,
+            "max_in_flight": args.in_flight,
+            "median_compounds": statistics.median(pipeline_compounds),
+            "median_rpcs": statistics.median(pipeline_rpcs),
+            "speedup_vs_sequential": statistics.median(nfs_ms)
+            / statistics.median(pipeline_ms),
+        }
+    print(json.dumps(report, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

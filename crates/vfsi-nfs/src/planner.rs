@@ -160,6 +160,23 @@ impl ReplyView for CompoundRes {
     }
 }
 
+/// A mutation compound can be resent with a smaller budget only when the
+/// reply proves no mutating operation ran. All `batch_ops` mutation shapes
+/// begin with a non-mutating PUTFH after the implicit SEQUENCE. A failure
+/// inside OPEN/WRITE/CLOSE/etc. is *not* safe to replay, even at item zero.
+pub(crate) fn resource_rejected_before_mutation<R: ReplyView>(reply: &R) -> bool {
+    if reply.status() != nfsstat4_NFS4ERR_RESOURCE
+        && reply.status() != nfsstat4_NFS4ERR_TOO_MANY_OPS
+    {
+        return false;
+    }
+    match reply.nops() {
+        0 | 1 => true,
+        2 => reply.op_status(1) != NFS_OK,
+        _ => false,
+    }
+}
+
 /// Maps response-operation positions to caller-visible vector items.
 #[derive(Debug)]
 pub(crate) struct ExecutionMap {
@@ -455,6 +472,37 @@ mod tests {
             map.end();
         }
         map
+    }
+
+    #[test]
+    fn only_pre_mutation_resource_replies_allow_a_smaller_retry() {
+        let resource = nfsstat4_NFS4ERR_RESOURCE;
+        assert!(resource_rejected_before_mutation(&MockReply {
+            status: resource,
+            ops: vec![],
+        }));
+        assert!(resource_rejected_before_mutation(&MockReply {
+            status: resource,
+            ops: vec![resource],
+        }));
+        assert!(resource_rejected_before_mutation(&MockReply {
+            status: resource,
+            ops: vec![0, resource],
+        }));
+        // An OPEN could have run before a failing GETFH, or the failure
+        // could be in a later item after a successful mutation.
+        assert!(!resource_rejected_before_mutation(&MockReply {
+            status: resource,
+            ops: vec![0, 0, resource],
+        }));
+        assert!(!resource_rejected_before_mutation(&MockReply {
+            status: resource,
+            ops: vec![0, 0, 0, 0, resource],
+        }));
+        assert!(!resource_rejected_before_mutation(&MockReply {
+            status: 5,
+            ops: vec![0, 5],
+        }));
     }
 
     #[test]

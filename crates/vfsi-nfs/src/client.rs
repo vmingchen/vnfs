@@ -16,7 +16,7 @@ use crate::error::{RpcError, RpcResult};
 use crate::path::{components_bytes, split_path_bytes};
 use crate::planner::{
     AdaptiveCompoundLimits, ExecutionMap, FailureCause, RecoveryAction, RequestSafety,
-    recovery_action,
+    recovery_action, resource_rejected_before_mutation,
 };
 use crate::session::Session;
 #[cfg(feature = "test-faults")]
@@ -83,6 +83,8 @@ pub struct NfsClient {
     fault_injector: Option<Arc<dyn FaultInjector>>,
     #[cfg(feature = "test-faults")]
     confirmed_path_closes: usize,
+    #[cfg(feature = "test-faults")]
+    reject_next_compound_tag: Option<Vec<u8>>,
 }
 
 /// Upper bound for the per-compound payload cap for merged path I/O; the
@@ -591,6 +593,18 @@ fn first_failed_range(res: &CompoundRes, map: &ExecutionMap) -> RpcResult<Option
 }
 
 impl NfsClient {
+    /// Inject one pre-dispatch NFS4ERR_RESOURCE response for this compound
+    /// shape. Test-only: no request is sent and no mutation can have run.
+    #[cfg(feature = "test-faults")]
+    pub fn inject_resource_rejection_once(&mut self, tag: &[u8]) {
+        self.reject_next_compound_tag = Some(tag.to_vec());
+    }
+
+    #[cfg(feature = "test-faults")]
+    pub fn resource_rejection_pending(&self) -> bool {
+        self.reject_next_compound_tag.is_some()
+    }
+
     #[cfg(feature = "test-faults")]
     pub fn set_fault_injector(&mut self, injector: Arc<dyn FaultInjector>) {
         self.fault_injector = Some(injector);
@@ -782,6 +796,8 @@ impl NfsClient {
             fault_injector: None,
             #[cfg(feature = "test-faults")]
             confirmed_path_closes: 0,
+            #[cfg(feature = "test-faults")]
+            reject_next_compound_tag: None,
         })
     }
 
@@ -845,6 +861,40 @@ impl NfsClient {
         )
     }
 
+    /// The adaptive learner has already observed this reply in
+    /// `call_compound`. Only a rejection before the first mutating operation
+    /// permits rebuilding this chunk with its newly smaller budget.
+    fn can_retry_merged_resource(
+        &self,
+        tag: &[u8],
+        reply: &CompoundRes,
+        old_budget: usize,
+        reserve: usize,
+        per_item: usize,
+    ) -> bool {
+        resource_rejected_before_mutation(reply)
+            && self
+                .op_budget_for(tag, 1 + per_item)
+                .merged_limit(reserve, per_item)
+                < old_budget
+    }
+
+    fn can_retry_read_only_merged_resource(
+        &self,
+        tag: &[u8],
+        reply: &CompoundRes,
+        old_budget: usize,
+        reserve: usize,
+        per_item: usize,
+    ) -> bool {
+        (reply.status() == nfsstat4_NFS4ERR_RESOURCE
+            || reply.status() == nfsstat4_NFS4ERR_TOO_MANY_OPS)
+            && self
+                .op_budget_for(tag, 1 + per_item)
+                .merged_limit(reserve, per_item)
+                < old_budget
+    }
+
     /// REMOVE uses SEQUENCE, PUTFH, then one operation per item.
     pub(crate) fn remove_batch_capacity(&self) -> usize {
         self.op_budget_for(b"removev", 3)
@@ -863,6 +913,18 @@ impl NfsClient {
     fn call_compound(&mut self, compound: &mut Compound) -> RpcResult<CompoundRes> {
         CompoundBudget::new(self.max_ops).ensure(compound)?;
         let sent_ops = compound.op_count().saturating_add(1);
+        #[cfg(feature = "test-faults")]
+        if self.reject_next_compound_tag.as_deref() == Some(compound.tag_bytes()) {
+            self.reject_next_compound_tag = None;
+            let reply = CompoundRes::injected_resource_rejection(nfsstat4_NFS4ERR_RESOURCE);
+            self.compound_limits.observe(
+                compound.tag_bytes(),
+                sent_ops,
+                reply.status(),
+                reply.nops(),
+            );
+            return Ok(reply);
+        }
         let reply = self.session.compound(compound)?;
         self.compound_limits
             .observe(compound.tag_bytes(), sent_ops, reply.status(), reply.nops());
@@ -1098,26 +1160,47 @@ impl NfsClient {
             .collect()
     }
 
-    /// Resolve a slash-separated path from the export root in a single
-    /// compound: `[PUTFH root, LOOKUP a, LOOKUP b, ..., GETFH]`. After each
-    /// LOOKUP the current filehandle is the looked-up object, so consecutive
-    /// LOOKUPs chain without intermediate round trips.
+    /// Resolve a slash-separated path from the export root. LOOKUPs chain
+    /// within each compound, with long paths split at the learned operation
+    /// limit; a server-side resource rejection rebuilds the current chunk.
     pub fn resolve(&mut self, path: &[u8]) -> RpcResult<FileHandle> {
-        let mut c = Compound::new();
-        c.tag(b"resolve");
-        c.putfh(&self.root.as_nfs_fh());
-        let mut ncomps = 0usize;
-        for comp in crate::path::components_bytes(path) {
-            c.lookup(&comp);
-            ncomps += 1;
-        }
-        if ncomps == 0 {
+        let components = crate::path::components_bytes(path);
+        if components.is_empty() {
             return Ok(self.root.clone());
         }
-        c.getfh();
-        let res = self.call_compound(&mut c)?;
-        self.session.expect_all_ok(&res)?;
-        Ok(FileHandle::from_nfs_fh(res.getfh(2 + ncomps)))
+        let mut current = self.root.clone();
+        let mut cursor = 0;
+        while cursor < components.len() {
+            // SEQUENCE, PUTFH, and GETFH leave room for this many LOOKUPs.
+            let capacity = self.op_budget_for(b"resolve", 4).max_ops.saturating_sub(3);
+            if capacity == 0 {
+                return Err(RpcError::transport(
+                    "NFS compound operation budget cannot resolve one path component",
+                ));
+            }
+            let take = capacity.min(components.len() - cursor);
+            let mut c = Compound::new();
+            c.tag(b"resolve");
+            c.putfh(&current.as_nfs_fh());
+            for component in &components[cursor..cursor + take] {
+                c.lookup(component);
+            }
+            c.getfh();
+            let res = self.call_compound(&mut c)?;
+            if take > 1
+                && matches!(
+                    res.status(),
+                    nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
+                )
+                && self.op_budget_for(b"resolve", 4).max_ops.saturating_sub(3) < take
+            {
+                continue;
+            }
+            self.session.expect_all_ok(&res)?;
+            current = FileHandle::from_nfs_fh(res.getfh(2 + take));
+            cursor += take;
+        }
+        Ok(current)
     }
 
     /// WRITE several `[PUTFH, WRITE]` pairs in as few compounds as possible.
@@ -1177,22 +1260,36 @@ impl NfsClient {
     /// REMOVE several names from `dir` in one compound. REMOVE leaves the
     /// current filehandle on `dir`, so consecutive REMOVEs chain.
     pub fn remove_many(&mut self, dir: &FileHandle, names: &[Vec<u8>]) -> RpcResult<()> {
-        // The response includes SEQUENCE and PUTFH before the first REMOVE.
-        let map = |op_index: usize| remove_result_index(op_index, names.len());
-        let mut c = Compound::new();
-        c.tag(b"removev");
-        c.putfh(&dir.as_nfs_fh());
-        for n in names {
-            c.remove(n);
+        let mut start = 0usize;
+        while start < names.len() {
+            // SEQUENCE and PUTFH precede the first REMOVE. Keep each request
+            // within the shape's learned operation budget.
+            let take = self.remove_batch_capacity().min(names.len() - start);
+            let mut c = Compound::new();
+            c.tag(b"removev");
+            c.putfh(&dir.as_nfs_fh());
+            for name in &names[start..start + take] {
+                c.remove(name);
+            }
+            let map = |op_index: usize| start + remove_result_index(op_index, take);
+            let res = self
+                .call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)
+                .map_err(|error| {
+                    let index = map(error.op_index);
+                    error.with_op_index(index)
+                })?;
+            if take > 1
+                && resource_rejected_before_mutation(&res)
+                && self.remove_batch_capacity() < take
+            {
+                continue;
+            }
+            self.session.expect_all_ok(&res).map_err(|error| {
+                let index = map(error.op_index);
+                error.with_op_index(index)
+            })?;
+            start += take;
         }
-        let res = self.call_compound(&mut c).map_err(|e| {
-            let idx = map(e.op_index);
-            e.with_op_index(idx)
-        })?;
-        self.session.expect_all_ok(&res).map_err(|e| {
-            let idx = map(e.op_index);
-            e.with_op_index(idx)
-        })?;
         Ok(())
     }
 
@@ -1316,6 +1413,18 @@ impl NfsClient {
             // result is missing.
             let bad = (0..res.nops()).find(|&i| res.op_status(i) != nfsstat4_NFS4_OK);
             let status = bad.map_or(res.status(), |i| res.op_status(i));
+            if !read_only && chunk.len() > 1 && resource_rejected_before_mutation(&res) {
+                // The server rejected this compound before its first PUTFH
+                // completed, so no mutation can have run. The adaptive
+                // budget learned from the rejection; resend only if it now
+                // produces a smaller chunk. Never replay an uncertain OPEN,
+                // WRITE, or completed prefix.
+                let smaller = self.op_budget_for(tag, 1 + per_op).batch_capacity(per_op)?;
+                if smaller < chunk.len() {
+                    global = chunk_start;
+                    continue;
+                }
+            }
             if read_only
                 && chunk.len() > 1
                 && matches!(
@@ -1581,25 +1690,20 @@ impl NfsClient {
         // (>0 means ops[global] is being continued mid-file).
         let mut part_off = 0usize;
         while global < n {
+            let tag = if close_in_compound {
+                b"writev1".as_slice()
+            } else {
+                b"writev2".as_slice()
+            };
             let budget = self
-                .op_budget_for(
-                    if close_in_compound {
-                        b"writev1"
-                    } else {
-                        b"writev2"
-                    },
-                    1 + per_file,
-                )
+                .op_budget_for(tag, 1 + per_file)
                 .merged_limit(reserve, per_file);
             let chunk_start = global;
+            let chunk_part_off = part_off;
             let mut cursor = CfhCursor::default();
             let mut map = ExecutionMap::new();
             let mut c = Compound::new();
-            c.tag(if close_in_compound {
-                b"writev1"
-            } else {
-                b"writev2"
-            });
+            c.tag(tag);
             let mut opened_path: Option<Vec<u8>> = None;
             let mut fh_at_opened = false;
             let mut opens_in_chunk = 0usize;
@@ -1805,6 +1909,18 @@ impl NfsClient {
 
             let res =
                 self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
+            if resource_rejected_before_mutation(&res) {
+                // No OPEN or WRITE ran. Restore the unsent open-owner seqids
+                // and rebuild the exact same pending range using the smaller
+                // per-shape budget learned by call_compound. A rejection
+                // after any mutation never enters this branch.
+                self.session.path_owner.seqid = base_seq;
+                if self.can_retry_merged_resource(tag, &res, budget, reserve, per_file) {
+                    global = chunk_start;
+                    part_off = chunk_part_off;
+                    continue;
+                }
+            }
             let report = map.analyze(&res).map_err(|error| {
                 RpcError::transport(format!("malformed writev COMPOUND reply: {error}"))
             })?;
@@ -1899,25 +2015,20 @@ impl NfsClient {
         // (>0 means ops[global] is being continued mid-file).
         let mut part_off = 0usize;
         while global < n {
+            let tag = if close_in_compound {
+                b"readv1".as_slice()
+            } else {
+                b"readv2".as_slice()
+            };
             let budget = self
-                .op_budget_for(
-                    if close_in_compound {
-                        b"readv1"
-                    } else {
-                        b"readv2"
-                    },
-                    1 + per_file,
-                )
+                .op_budget_for(tag, 1 + per_file)
                 .merged_limit(reserve, per_file);
             let chunk_start = global;
+            let chunk_part_off = part_off;
             let mut cursor = CfhCursor::default();
             let mut map = ExecutionMap::new();
             let mut c = Compound::new();
-            c.tag(if close_in_compound {
-                b"readv1"
-            } else {
-                b"readv2"
-            });
+            c.tag(tag);
             let mut opened_path: Option<Vec<u8>> = None;
             let mut fh_at_opened = false;
             let mut opens_in_chunk = 0usize;
@@ -2091,6 +2202,14 @@ impl NfsClient {
             self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
 
             let res = self.call_compound_with_safety(&mut c, RequestSafety::ReadOnly)?;
+            if resource_rejected_before_mutation(&res) {
+                self.session.path_owner.seqid = base_seq;
+                if self.can_retry_merged_resource(tag, &res, budget, reserve, per_file) {
+                    global = chunk_start;
+                    part_off = chunk_part_off;
+                    continue;
+                }
+            }
             let report = map.analyze(&res).map_err(|error| {
                 RpcError::transport(format!("malformed readv COMPOUND reply: {error}"))
             })?;
@@ -2229,6 +2348,16 @@ impl NfsClient {
                 break;
             }
             let res = self.call_compound_with_safety(&mut c, RequestSafety::IdempotentMutation)?;
+            if self.can_retry_read_only_merged_resource(
+                b"getattrv1",
+                &res,
+                budget,
+                reserve,
+                per_file,
+            ) {
+                global = chunk_start;
+                continue;
+            }
             if let Some((caller, st)) = first_failed_range(&res, &map)? {
                 failed = Some((caller, st));
                 // Keep the prefix results (the caller resumes from here).
@@ -2339,6 +2468,10 @@ impl NfsClient {
                 break;
             }
             let res = self.call_compound(&mut c)?;
+            if self.can_retry_merged_resource(b"setattrv1", &res, budget, reserve, per_file) {
+                global = chunk_start;
+                continue;
+            }
             if let Some((caller, st)) = first_failed_range(&res, &map)? {
                 failed = Some((caller, st));
                 // Keep the prefix types (the caller resumes from here).
@@ -2490,6 +2623,13 @@ impl NfsClient {
                     return Err(error);
                 }
             };
+            if resource_rejected_before_mutation(&res) {
+                self.session.path_owner.seqid = base_seq;
+                if self.can_retry_merged_resource(b"openv1", &res, budget, reserve, per_file) {
+                    global = chunk_start;
+                    continue;
+                }
+            }
             if let Some((caller, st)) = first_failed_range(&res, &map)? {
                 failed = Some((caller, st));
                 // Keep the prefix opens (the caller resumes from here).
@@ -2582,6 +2722,10 @@ impl NfsClient {
             }
             let res =
                 self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
+            if self.can_retry_merged_resource(b"removev1", &res, budget, reserve, per_file) {
+                global = chunk_start;
+                continue;
+            }
             let done = first_failed_range(&res, &map)?;
             match done {
                 Some((caller, st)) => {
@@ -2674,6 +2818,10 @@ impl NfsClient {
             }
             let res =
                 self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
+            if self.can_retry_merged_resource(b"renamev1", &res, budget, reserve, per_file) {
+                global = chunk_start;
+                continue;
+            }
             let done = first_failed_range(&res, &map)?;
             match done {
                 Some((caller, st)) => {

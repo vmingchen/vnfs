@@ -24,7 +24,8 @@ python adapters/nfs4fs/benchmarks/directories.py \
 
 python adapters/nfs4fs/benchmarks/large_file.py \
   --host 127.0.0.1:2049 --fixture-root /srv/vnfs-ci --mount-root /mnt/nfs \
-  --size-mib 256 --chunk-kib 1024 --rounds 5 --warmups 1
+  --size-mib 256 --chunk-kib 1024 --rounds 5 --warmups 1 \
+  --pipeline-workers 3 --in-flight 8
 ```
 
 `--remote-root` applies the same subdirectory prefix to the direct client and
@@ -39,6 +40,14 @@ during setup, when that path is available.
 | `directories.py` | `find(withdirs=True)` and recursive `rm` across a multi-directory tree | File count, byte total, and removal |
 | `large_file.py` | One sequential open/read/close using bounded chunks (`cache_type="none"` for nfs4fs) | Byte count and BLAKE2b digest |
 
+`small_files.py --batch-size` varies the maximum files sent to one nfs4fs
+batch; its default remains the package default (128). The large-file driver's
+optional `--pipeline-workers` adds a third measurement using
+`Nfs4FileSystem.read_stream_pipelined()` and independent native sessions.
+`--in-flight` bounds outstanding chunks; the driver enforces a 16 MiB
+read-ahead budget. Its ordinary nfs4fs and kernel measurements remain in the
+report for comparison. Pipelining is opt-in and does not change `fs.open()`.
+
 Setup, export checks, and optional warm-ups are excluded from timing. Each
 driver alternates client order across rounds and reports medians. The
 small-file driver uses fresh paths by default; `--reuse-paths` adds an untimed
@@ -49,3 +58,42 @@ kernel or server caches. These numbers describe the specified workload and
 cache state, not an intrinsic protocol speedup. Record the server, mount
 options, client versions, RTT, and CPU configuration alongside published
 results.
+
+## Reproducing the latency sweep
+
+On a **dedicated Linux VM only**, `tc netem` can add one-way delay to the
+loopback interface. It affects all loopback traffic while active, including
+unrelated services. Verify `tc qdisc show dev lo` is unmodified first, and
+use a shell trap so the qdisc is removed even if a benchmark fails:
+
+```sh
+set -e
+sudo tc qdisc add dev lo root netem delay 2.5ms # approximately 5 ms RTT
+trap 'sudo tc qdisc del dev lo root' EXIT
+# Run the commands above with your workload parameters.
+```
+
+Use `delay 0.5ms` for approximately 1 ms RTT, and run without a qdisc for the
+baseline. Do not apply this to a production interface or overwrite an
+existing qdisc. Record cache state: repeated reads of the same large file
+warm the kernel page cache, so the kernel result may involve no network I/O.
+The direct nfs4fs reads still issue RPCs. The large-file comparison therefore
+measures warm-file application behavior, not equal amounts of wire traffic.
+
+On the development VM (local NFSv4.2 export, 64 MiB file, 1 MiB chunks,
+three rounds and one warm-up), the observed median times were:
+
+| Approx. RTT | nfs4fs sequential | nfs4fs pipelined | Kernel NFS, warm |
+| --- | ---: | ---: | ---: |
+| Baseline loopback | 200 ms | 109 ms (3 workers) | 88 ms |
+| 1 ms | 250 ms | 103 ms (3 workers) | 84 ms |
+| 5 ms | 607 ms | 262 ms (3 workers) | 99 ms |
+
+More workers were not always better: at 5 ms, 8 and 16 workers took 512 and
+875 ms respectively, largely because each extra worker opens and closes its
+own NFS descriptor. For 128 fresh 4 KiB files at 5 ms, setting
+`--batch-size 16` used 8 write RPCs and a 294 ms median, versus about 47 RPCs
+and 812 ms with batches of 32. The larger batches hit this server's resource
+limit and fell back to extra work. These are tuning observations for this
+server, **not** general defaults or guaranteed speedups; rerun on the target
+server before changing application settings.

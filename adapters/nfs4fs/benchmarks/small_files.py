@@ -46,10 +46,16 @@ def main() -> None:
     parser.add_argument("--files", type=int, default=20)
     parser.add_argument("--bytes", type=int, default=4096)
     parser.add_argument("--rounds", type=int, default=30)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=128,
+        help="maximum files in one nfs4fs batch (default: package default 128)",
+    )
     parser.add_argument("--reuse-paths", action="store_true")
     args = parser.parse_args()
-    if args.files <= 0 or args.bytes <= 0 or args.rounds <= 0:
-        parser.error("--files, --bytes, and --rounds must be positive")
+    if args.files <= 0 or args.bytes <= 0 or args.rounds <= 0 or args.batch_size <= 0:
+        parser.error("--files, --bytes, --rounds, and --batch-size must be positive")
 
     run_name = f"nfs4fs-benchmark-{uuid.uuid4().hex}"
     direct_run = args.direct_root / args.remote_root.strip("/") / run_name
@@ -74,6 +80,7 @@ def main() -> None:
             host=args.host,
             root=args.remote_root,
             auth="auth_sys",
+            batch_size=args.batch_size,
             skip_instance_cache=True,
         )
         local = fsspec.filesystem("file", skip_instance_cache=True)
@@ -205,6 +212,7 @@ def main() -> None:
         "files": args.files,
         "bytes_per_file": args.bytes,
         "rounds": args.rounds,
+        "batch_size": args.batch_size,
         "path_mode": "reused" if args.reuse_paths else "fresh",
         "two_file_pipe_compounds": two_file_pipe_compounds,
         "write": {

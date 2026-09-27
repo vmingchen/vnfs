@@ -563,7 +563,7 @@ jobs:
           VFSI_NFS_REQUIRED: 1
           VFSI_NFS_SERVER: 127.0.0.1
           VFSI_NFS_MINOR: ${{ matrix.minor-version }}
-        run: cargo test -p vfsi-nfs --features server-copy --test nfs -- --test-threads=1
+        run: cargo test -p vfsi-nfs --features "server-copy test-faults" --test nfs -- --test-threads=1
       - name: Recover read-only work across an NFS server restart
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}
@@ -645,7 +645,8 @@ jobs:
             --directories 2 --files-per-dir 2 --bytes-per-file 32 --rounds 1
           .venv/bin/python adapters/nfs4fs/benchmarks/large_file.py \
             --host 127.0.0.1:2049 --fixture-root /srv/vnfs-ci --mount-root /mnt/vnfs-ci-bench \
-            --size-mib 2 --chunk-kib 256 --rounds 1 --warmups 0
+            --size-mib 2 --chunk-kib 256 --rounds 1 --warmups 0 \
+            --pipeline-workers 2 --in-flight 4
       - name: Recover a Python reader across an NFS server restart
         env:
           VFSI_NFS_REQUIRED: 1
@@ -755,7 +756,7 @@ jobs:
           VFSI_NFS_REQUIRED: 1
           VFSI_NFS_SERVER: 127.0.0.1
           VFSI_NFS_MINOR: 2
-        run: cargo test -p vfsi-nfs --features server-copy --test nfs -- --test-threads=1
+        run: cargo test -p vfsi-nfs --features "server-copy test-faults" --test nfs -- --test-threads=1
       - name: Require server-side COPY through the C ABI
         env:
           VFSI_REQUIRE_SERVER_COPY: 1

@@ -804,6 +804,14 @@ fn response_op_status(ro: &nfs_resop4) -> u32 {
 }
 
 impl CompoundRes {
+    /// Model a server rejecting a compound before executing SEQUENCE.
+    #[cfg(feature = "test-faults")]
+    pub(crate) fn injected_resource_rejection(status: u32) -> Self {
+        let mut res: COMPOUND4res = unsafe { std::mem::zeroed() };
+        res.status = status;
+        Self { res }
+    }
+
     pub fn status(&self) -> u32 {
         self.res.status
     }

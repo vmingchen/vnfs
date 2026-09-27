@@ -134,7 +134,7 @@ The server was NFS-Ganesha V15.3 over NFSv4.2 on an AArch64 Ubuntu VM, using
 nfs4fs 0.3.1 and fsspec 2026.7.0. Linux `netem` added 500 microseconds to each
 loopback traversal, approximately 1 ms of network round-trip delay; ping
 averaged 1.43 ms including VM scheduling overhead. Each result is the median
-of 30 cold-path trials over 20 files of 4 KiB, with connection setup excluded,
+of 30 fresh-path trials over 20 files of 4 KiB, with connection setup excluded,
 fresh paths used for every trial, and client execution order alternated.
 
 | Operation | nfs4fs | Kernel NFS + `LocalFileSystem` | Speedup | nfs4fs RPCs |
@@ -174,6 +174,28 @@ bounded sequential reading of a single large file. Each compares nfs4fs with
 fsspec `LocalFileSystem` on the same kernel NFS mount, checks results, and
 reports timings alongside nfs4fs RPC counts. The large-file driver explicitly
 disables per-open read caching so it measures the streaming path.
+
+For stable large files, opt-in `read_stream_pipelined()` overlaps positional
+reads across independent native sessions while delivering chunks in order:
+
+```python
+fs = fsspec.filesystem(
+    "nfs4", host="nfs.example", auth="auth_sys", connection_pool_size=3
+)
+with open("download.bin", "wb") as output:
+    fs.read_stream_pipelined(
+        "/large.bin", lambda offset, data: output.write(data), workers=3
+    )
+```
+
+The default read-ahead cap is eight 1 MiB chunks (8 MiB); `max_in_flight` and
+`max_buffered_bytes` are configurable. This does not change `fs.open()` and is
+not a coherent snapshot if another client modifies the file during the read.
+On the development VM, a 64 MiB warm-file read with approximately 5 ms RTT
+fell from a 607 ms sequential median to 262 ms with three workers; the kernel
+client's warm page-cache read was still faster. See the
+[benchmark methodology](https://github.com/vmingchen/vnfs/blob/main/adapters/nfs4fs/benchmarks/README.md)
+for the measured workload and limits.
 
 All data-transfer entry points accept fsspec's `callback=` argument. Bulk
 operations (`cat`, `cat_ranges`, `pipe`, `get`, `put`, and `copy`) report item

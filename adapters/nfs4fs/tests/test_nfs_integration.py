@@ -171,6 +171,26 @@ def test_round_trips_do_not_scale_with_file_count(nfs_fs):
         assert large_c <= small_c + 1, (small, large)
 
 
+def test_large_write_batch_shrinks_after_resource_rejection(nfs_fs):
+    """A server's lower real compound limit must not break bulk pipe."""
+    fs = nfs_fs
+    fs.mkdir("nfs4:///resource-batch", create_parents=True)
+    payloads = {
+        f"/resource-batch/file-{index:04d}": bytes([index]) * 4096
+        for index in range(64)
+    }
+    _, compounds = _measured(fs, lambda: fs.pipe(payloads))
+    assert fs.cat(list(payloads)) == payloads
+    assert compounds < 20, compounds
+
+
+def test_deep_path_resolution_uses_compound_budget(nfs_fs):
+    """A deep path must not exceed the negotiated or learned op budget."""
+    path = "nfs4:///" + "/".join(f"d{index}" for index in range(40))
+    nfs_fs.mkdir(path, create_parents=True)
+    assert nfs_fs.isdir(path)
+
+
 def test_open_files_reads_are_batched(nfs_fs):
     fs = nfs_fs
     fs.mkdir("nfs4:///ofr", create_parents=True)
