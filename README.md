@@ -1,4 +1,4 @@
-# VFSI: vectorized filesystem interfaces
+# VFSI: Vectorized Filesystem Interfaces
 
 [![CI](https://github.com/vmingchen/vnfs/actions/workflows/ci.yml/badge.svg)](https://github.com/vmingchen/vnfs/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/vnfs.svg)](https://crates.io/crates/vnfs)
@@ -6,10 +6,19 @@
 [![Python](https://img.shields.io/pypi/pyversions/nfs4fs.svg)](https://pypi.org/project/nfs4fs/)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-VFSI is a Rust filesystem client built around vector operations. It turns a
-batch of independent file operations into a small number of protocol requests,
-so applications can benefit from NFSv4 compounds and SMB2/3 related compounds
-without mounting a filesystem or rewriting their data path in C.
+VFSI is a Rust filesystem client built around vector operations. It grew out
+of my PhD research on
+[vNFS](https://www.usenix.org/conference/fast17/technical-sessions/presentation/chen)
+and [related work on filesystem
+interfaces](https://www.fsl.cs.sunysb.edu/docs/cosy-hotos/hotstorage17posux.pdf).
+It batches independent file operations into a small number of protocol
+requests, letting applications benefit from NFSv4 compounds and SMB2/3
+compound requests without mounting a filesystem or rewriting their data paths
+in C.
+
+The original vNFS research proposed porting applications to faster,
+vectorized filesystem interfaces in 2017. Making such ports widespread was
+difficult then. With today's agentic coding tools, we can make them practical.
 
 The repository provides:
 
