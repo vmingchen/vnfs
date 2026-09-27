@@ -231,10 +231,10 @@ def test_compound_size_limit_is_configurable(nfs_fs):
             fs._client.compound_stats()
             fs.pipe({p: data for p in paths})
             count = fs._client.compound_stats()[0]
-            # 64 KiB writes under a 64 KiB cap: one write compound per file,
-            # with the truncate fused into each write compound (no separate
-            # truncate round trip).
-            assert count >= 4 and count <= 6, count
+            # The 64 KiB cap includes RPC/auth and COMPOUND framing, so a
+            # 64 KiB payload needs two bounded write compounds per file.
+            # Truncate is fused into the first write compound.
+            assert 8 <= count <= 10, count
             for p in paths:
                 assert fs.cat_file(p) == data
         finally:
