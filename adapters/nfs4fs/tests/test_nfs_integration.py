@@ -119,12 +119,13 @@ def test_round_trip_bounds(nfs_fs):
     _, mv_count = _measured(fs, lambda: fs.mv(srcs, dsts))
     assert mv_count == 1, mv_count
 
-    # cp: no-stat read_allv + one truncating writev compound.
+    # cp: batched read/write plus one bounded destination-parent listing to
+    # avoid per-file identity checks when all destinations are new.
     _, cp_count = _measured(
         fs,
         lambda: fs.cp(dsts, [_unique(nfs_fs, f"cp/{i}.txt") for i in range(n)]),
     )
-    assert cp_count == 2, cp_count
+    assert cp_count <= 4, cp_count
 
     # walk on a 30-node tree is level-batched.
     for i in range(5):

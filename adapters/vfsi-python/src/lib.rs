@@ -5,7 +5,7 @@
 //! through vectorized calls here, so round trips scale with batches and
 //! directories rather than files.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1526,6 +1526,8 @@ impl NfsClient {
         let dests: Vec<PathBuf> = pairs.iter().map(|(_, d)| d.clone()).collect();
         let n = pairs.len();
         let max_total_bytes = self.read_all_max_total_bytes;
+        let max_directory_entries = self.directory_max_entries;
+        let max_directory_path_bytes = self.directory_max_path_bytes;
         self.with_fs(py, move |fs| {
             let mut copied: Vec<Option<u64>> = vec![None; n];
             let mut errors = HashMap::new();
@@ -1558,25 +1560,73 @@ impl NfsClient {
             // spelling for the source inode. Check the small-file path too:
             // its truncating WRITE would otherwise modify the source itself.
             let candidates: Vec<usize> = (0..n).filter(|&index| data[index].is_some()).collect();
-            if !candidates.is_empty() {
-                let identity_paths: Vec<PathBuf> = candidates
+            // A destination that does not exist cannot alias its source. One
+            // bounded parent listing avoids a failing GETATTR for every new
+            // destination in the common multi-file copy case. If listing is
+            // unavailable or reaches its budget, conservatively check all
+            // candidates by identity instead.
+            let existing_candidates = if candidates.len() > 1 {
+                let parents: Vec<PathBuf> = candidates
+                    .iter()
+                    .filter_map(|&index| dests[index].parent().map(Path::to_path_buf))
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                let parent_refs: Vec<&Path> = parents.iter().map(PathBuf::as_path).collect();
+                let mut existing = HashSet::new();
+                let mut entries = 0usize;
+                let mut path_bytes = 0usize;
+                let mut exhausted = false;
+                let listed = fs.listdirv(
+                    &parent_refs,
+                    AttrMask::MODE,
+                    max_directory_entries.saturating_add(1),
+                    false,
+                    &mut |attr, _| {
+                        entries += 1;
+                        if let Some(path) = attr.file.path() {
+                            path_bytes = path_bytes.saturating_add(path.as_os_str().len());
+                            existing.insert(path.to_path_buf());
+                        }
+                        exhausted = (max_directory_entries != 0 && entries > max_directory_entries)
+                            || (max_directory_path_bytes != 0
+                                && path_bytes > max_directory_path_bytes);
+                        !exhausted
+                    },
+                );
+                if listed.is_ok()
+                    && !exhausted
+                    && (max_directory_entries == 0 || entries <= max_directory_entries)
+                {
+                    candidates
+                        .iter()
+                        .copied()
+                        .filter(|&index| existing.contains(&dests[index]))
+                        .collect()
+                } else {
+                    candidates
+                }
+            } else {
+                candidates
+            };
+            if !existing_candidates.is_empty() {
+                let identity_paths: Vec<PathBuf> = existing_candidates
                     .iter()
                     .flat_map(|&index| [sources[index].clone(), dests[index].clone()])
                     .collect();
                 let (attrs, _identity_errors) =
-                    attrs_many_impl(fs, &identity_paths, AttrMask::FILEID, true)
+                    attrs_many_impl(fs, &identity_paths, AttrMask::MODE | AttrMask::FILEID, true)
                         .map_err(|e| to_py_err(e, None))?;
-                for (pair_index, &index) in candidates.iter().enumerate() {
+                for (pair_index, &index) in existing_candidates.iter().enumerate() {
                     let source = attrs[2 * pair_index].as_ref();
                     let destination = attrs[2 * pair_index + 1].as_ref();
-                    if let (Some(source), Some(destination)) = (source, destination) {
-                        if source.returned.contains(AttrMask::FILEID)
-                            && destination.returned.contains(AttrMask::FILEID)
-                            && source.fileid == destination.fileid
-                        {
-                            data[index] = None;
-                            errors.insert(index, ERR_SAME_FILE);
-                        }
+                    if let (Some(source), Some(destination)) = (source, destination)
+                        && source.returned.contains(AttrMask::FILEID)
+                        && destination.returned.contains(AttrMask::FILEID)
+                        && source.fileid == destination.fileid
+                    {
+                        data[index] = None;
+                        errors.insert(index, ERR_SAME_FILE);
                     }
                 }
             }

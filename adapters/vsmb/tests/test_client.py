@@ -66,4 +66,7 @@ def test_live_vector_client_round_trip():
             assert errors == {}
             assert values == [b"alpha", b"beta"]
         finally:
-            client.rm([root], True)
+            # SMB's scalar recursive rm is intentionally unsupported. Remove
+            # the two known children before removing their empty directory.
+            client.remove_many(paths)
+            client.remove_many([root])
