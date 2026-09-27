@@ -14,14 +14,14 @@ Its implementation is adapted from the
 
 ## Dependencies
 
-Normal builds discover the administrator-provided `libntirpc` 4.3 or newer
+Normal builds discover the administrator-provided `libntirpc` 6.3 or newer
 through `pkg-config` and generate Rust declarations from its installed
 headers. The build script does not access the network or download native
 source. The currently supported native target is Linux.
 
 | Dependency | Package (Ubuntu) | Purpose |
 | --- | --- | --- |
-| libntirpc | `libntirpc-dev` | RPC implementation and headers (4.3+) |
+| libntirpc | `libntirpc-dev` | RPC implementation and headers (6.3+) |
 | pkg-config | `pkg-config` | locate the installed library and headers |
 | clang | `clang` | provide the headers used by bindgen to generate bindings |
 | liburcu | `liburcu-dev` | userspace RCU library used by libntirpc |

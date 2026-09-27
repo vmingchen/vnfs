@@ -27,7 +27,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "shlex",
- "syn 3.0.5",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -92,7 +92,7 @@ dependencies = [
 
 [[package]]
 name = "libntirpc-sys"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "bindgen",
  "pkg-config",
@@ -306,7 +306,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
 dependencies = [
  "proc-macro2",
- "quote",
  "unicode-ident",
 ]
 
