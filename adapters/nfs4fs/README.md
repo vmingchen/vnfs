@@ -166,6 +166,15 @@ it verifies returned data and reports VFSI's compound and RPC counters so
 batching regressions are visible alongside timing changes. Pass
 `--reuse-paths` to reproduce the warm-cache variant.
 
+## Directory and large-file benchmarks
+
+The [benchmark drivers](https://github.com/vmingchen/vnfs/tree/main/adapters/nfs4fs/benchmarks)
+also measure a metadata-heavy directory tree (`find` and recursive `rm`) and
+bounded sequential reading of a single large file. Each compares nfs4fs with
+fsspec `LocalFileSystem` on the same kernel NFS mount, checks results, and
+reports timings alongside nfs4fs RPC counts. The large-file driver explicitly
+disables per-open read caching so it measures the streaming path.
+
 All data-transfer entry points accept fsspec's `callback=` argument. Bulk
 operations (`cat`, `cat_ranges`, `pipe`, `get`, `put`, and `copy`) report item
 progress on the parent callback and byte progress on a branched callback for

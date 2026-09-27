@@ -33,9 +33,8 @@ def _median(values: list[float | int]) -> float:
     return float(statistics.median(values))
 
 
-def _remote_path(root: str, relative: str) -> str:
-    root = root.strip("/")
-    return f"/{root}/{relative}" if root else f"/{relative}"
+def _remote_path(relative: str) -> str:
+    return f"/{relative}"
 
 
 def main() -> None:
@@ -55,15 +54,8 @@ def main() -> None:
     run_name = f"nfs4fs-benchmark-{uuid.uuid4().hex}"
     direct_run = args.direct_root / args.remote_root.strip("/") / run_name
     mount_run = args.mount_root / args.remote_root.strip("/") / run_name
-    direct_run.mkdir(parents=True)
-
-    nfs = fsspec.filesystem(
-        "nfs4",
-        host=args.host,
-        root=args.remote_root,
-        skip_instance_cache=True,
-    )
-    local = fsspec.filesystem("file", skip_instance_cache=True)
+    nfs = None
+    local = None
     payload = bytes((index % 251 for index in range(args.bytes)))
 
     nfs_write_ms: list[float] = []
@@ -76,11 +68,26 @@ def main() -> None:
     read_rpcs: list[int] = []
 
     try:
+        direct_run.mkdir(parents=True)
+        nfs = fsspec.filesystem(
+            "nfs4",
+            host=args.host,
+            root=args.remote_root,
+            auth="auth_sys",
+            skip_instance_cache=True,
+        )
+        local = fsspec.filesystem("file", skip_instance_cache=True)
+        probe = b"same-export-" + run_name.encode()
+        (direct_run / "mapping-probe").write_bytes(probe)
+        if nfs.cat_file(f"/{run_name}/mapping-probe") != probe:
+            raise RuntimeError("nfs4fs does not see the fixture export")
+        if local.cat_file(str(mount_run / "mapping-probe")) != probe:
+            raise RuntimeError("kernel mount does not see the fixture export")
+        (direct_run / "mapping-probe").unlink()
         probe_dir = direct_run / "two-file-probe"
         probe_dir.mkdir()
         probe_paths = [
-            _remote_path(args.remote_root, f"{run_name}/two-file-probe/file-{i}")
-            for i in (1, 2)
+            _remote_path(f"{run_name}/two-file-probe/file-{i}") for i in (1, 2)
         ]
         nfs._client.compound_stats()
         nfs.pipe({probe_paths[0]: b"hello", probe_paths[1]: b"world"})
@@ -102,7 +109,6 @@ def main() -> None:
 
             nfs_write_paths = [
                 _remote_path(
-                    args.remote_root,
                     f"{run_name}/{nfs_write_rel}/file-{index:04}",
                 )
                 for index in range(args.files)
@@ -149,7 +155,6 @@ def main() -> None:
                 os.sync()
             nfs_read_paths = [
                 _remote_path(
-                    args.remote_root,
                     f"{run_name}/{nfs_read_rel}/file-{index:04}",
                 )
                 for index in range(args.files)
@@ -189,8 +194,9 @@ def main() -> None:
                 measure_nfs_read()
                 measure_local_read()
     finally:
-        nfs.close()
-        close_local = getattr(local, "close", None)
+        if nfs is not None:
+            nfs.close()
+        close_local = getattr(local, "close", None) if local is not None else None
         if close_local is not None:
             close_local()
         shutil.rmtree(direct_run, ignore_errors=True)
@@ -199,7 +205,7 @@ def main() -> None:
         "files": args.files,
         "bytes_per_file": args.bytes,
         "rounds": args.rounds,
-        "path_mode": "warm" if args.reuse_paths else "cold",
+        "path_mode": "reused" if args.reuse_paths else "fresh",
         "two_file_pipe_compounds": two_file_pipe_compounds,
         "write": {
             "nfs4fs_median_ms": _median(nfs_write_ms),

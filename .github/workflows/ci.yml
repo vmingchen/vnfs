@@ -632,6 +632,20 @@ jobs:
             tests/test_callbacks.py::test_callback_smoke_on_network_backends \
             tests/test_listing_cache.py::test_listing_cache_smoke_on_network_backends \
             tests/test_file_buffering.py::test_file_buffering_smoke_on_network_backends
+      - name: Smoke-test nfs4fs benchmark drivers
+        run: |
+          sudo mkdir -p /mnt/vnfs-ci-bench
+          sudo mount -t nfs4 -o vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049 127.0.0.1:/ /mnt/vnfs-ci-bench
+          trap 'sudo umount /mnt/vnfs-ci-bench' EXIT
+          .venv/bin/python adapters/nfs4fs/benchmarks/small_files.py \
+            --host 127.0.0.1:2049 --direct-root /srv/vnfs-ci --mount-root /mnt/vnfs-ci-bench \
+            --files 2 --bytes 32 --rounds 1
+          .venv/bin/python adapters/nfs4fs/benchmarks/directories.py \
+            --host 127.0.0.1:2049 --fixture-root /srv/vnfs-ci --mount-root /mnt/vnfs-ci-bench \
+            --directories 2 --files-per-dir 2 --bytes-per-file 32 --rounds 1
+          .venv/bin/python adapters/nfs4fs/benchmarks/large_file.py \
+            --host 127.0.0.1:2049 --fixture-root /srv/vnfs-ci --mount-root /mnt/vnfs-ci-bench \
+            --size-mib 2 --chunk-kib 256 --rounds 1 --warmups 0
       - name: Recover a Python reader across an NFS server restart
         env:
           VFSI_NFS_REQUIRED: 1
