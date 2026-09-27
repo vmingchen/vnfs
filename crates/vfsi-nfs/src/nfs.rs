@@ -2047,11 +2047,7 @@ impl NfsVecFs {
         }
         // Keep each compound's request under ca_maxrequestsize. Pack by the
         // actual chunk lengths so small writes retain vectorization.
-        let byte_limit = if self.nfs.max_compound_bytes > 0 {
-            self.nfs.max_compound_bytes.saturating_sub(128)
-        } else {
-            usize::MAX
-        };
+        let byte_limit = self.nfs.max_request_arg_bytes().saturating_sub(1024);
         let mut results = Vec::with_capacity(ops.len());
         let mut start = 0;
         #[cfg(feature = "test-faults")]
@@ -2060,7 +2056,10 @@ impl NfsVecFs {
             let mut end = start;
             let mut bytes = 0usize;
             while end < ops.len() {
-                let next = ops[end].data.len();
+                // Include a conservative per-operation allowance for PUTFH,
+                // stateid, offsets, and XDR length/padding fields. The final
+                // encoded-size guard remains authoritative before dispatch.
+                let next = ops[end].data.len().saturating_add(256);
                 if end > start && bytes.saturating_add(next) > byte_limit {
                     break;
                 }

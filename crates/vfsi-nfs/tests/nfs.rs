@@ -10,7 +10,7 @@ use vfsi_core::VfError;
 use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
 use vfsi_nfs::NfsVecFs;
 #[cfg(feature = "test-faults")]
-use vfsi_nfs::client::{FileRef, NfsClient, OpenCreate, PathOpenOp, PathWriteOp};
+use vfsi_nfs::client::{FileRef, NfsClient, OpenCreate, PathOpenOp, PathWriteOp, ReadOp, WriteOp};
 use vfsi_sync::{VecFs, test_support};
 
 fn required() -> bool {
@@ -180,6 +180,165 @@ fn variable_depth_paths_repack_before_exceeding_compound_limit() {
     for (dir, name) in dirs.into_iter().rev() {
         client.remove(&dir, &name).expect("remove test directory");
     }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn encoded_request_limit_rejects_oversize_write_before_dispatch() {
+    let server = match std::env::var("VFSI_NFS_SERVER") {
+        Ok(server) => server,
+        Err(_) => {
+            assert!(!required(), "VFSI_NFS_SERVER is required");
+            return;
+        }
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .ok()
+        .map(|value| value.parse::<u32>().expect("NFS minor version"))
+        .unwrap_or(2);
+    let mut client = NfsClient::connect_minor(&server, minor).expect("connect NFS client");
+    let root = client.root().clone();
+    let name = format!("vfsi-nfs-byte-limit-{}", std::process::id());
+    let (fh, stateid) = client
+        .open(
+            &root,
+            name.as_bytes(),
+            nfsv41_sys::OPEN4_SHARE_ACCESS_BOTH,
+            OpenCreate::Unchecked,
+        )
+        .expect("create test file");
+    client.set_max_compound_bytes(1400);
+    let error = client
+        .write(&fh, &stateid, 0, &[7; 512])
+        .expect_err("oversize encoded request must be rejected locally");
+    assert_eq!(error.status, nfsv41_sys::nfsstat4_NFS4ERR_REQ_TOO_BIG);
+    client.set_max_compound_bytes(0);
+    let (data, _) = client.read(&fh, &stateid, 0, 512).expect("read test file");
+    assert!(data.is_empty(), "rejected WRITE must not reach the server");
+    let oversized_read = client
+        .readv(&[ReadOp {
+            fh: fh.clone(),
+            stateid,
+            offset: 0,
+            count: u32::MAX,
+        }])
+        .expect_err("unbounded READ reply must be rejected locally");
+    assert_eq!(
+        oversized_read.status,
+        nfsv41_sys::nfsstat4_NFS4ERR_REP_TOO_BIG
+    );
+    client.close(&fh, &stateid).expect("close test file");
+    client.remove(&root, &name).expect("remove test file");
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn writev_rebuilds_batch_before_exceeding_request_bytes() {
+    let server = match std::env::var("VFSI_NFS_SERVER") {
+        Ok(server) => server,
+        Err(_) => {
+            assert!(!required(), "VFSI_NFS_SERVER is required");
+            return;
+        }
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .ok()
+        .map(|value| value.parse::<u32>().expect("NFS minor version"))
+        .unwrap_or(2);
+    let mut client = NfsClient::connect_minor(&server, minor).expect("connect NFS client");
+    let root = client.root().clone();
+    let name = format!("vfsi-nfs-byte-batch-{}", std::process::id());
+    let (fh, stateid) = client
+        .open(
+            &root,
+            name.as_bytes(),
+            nfsv41_sys::OPEN4_SHARE_ACCESS_BOTH,
+            OpenCreate::Unchecked,
+        )
+        .expect("create test file");
+    let block = 512 * 1024;
+    let ops: Vec<WriteOp> = (0..8)
+        .map(|index| WriteOp {
+            fh: fh.clone(),
+            stateid,
+            offset: (index * block) as u64,
+            data: vec![index as u8; block],
+        })
+        .collect();
+    let written = client
+        .writev(&ops)
+        .expect("repack encoded byte-heavy batch");
+    assert_eq!(written.len(), ops.len());
+    assert!(written.iter().all(|(count, _)| *count as usize == block));
+    let reads: Vec<ReadOp> = (0..8)
+        .map(|index| ReadOp {
+            fh: fh.clone(),
+            stateid,
+            offset: (index * block) as u64,
+            count: block as u32,
+        })
+        .collect();
+    let read_results = client.readv(&reads).expect("bound aggregate reply bytes");
+    for (index, (data, _)) in read_results.iter().enumerate() {
+        assert_eq!(data.len(), block);
+        assert!(data.iter().all(|byte| *byte == index as u8));
+    }
+    let (data, _) = client
+        .read(&fh, &stateid, (7 * block) as u64, 16)
+        .expect("read last block");
+    assert_eq!(data, vec![7; 16]);
+    client.close(&fh, &stateid).expect("close test file");
+    client.remove(&root, &name).expect("remove test file");
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn openv_repacks_variable_length_names_for_encoded_byte_limit() {
+    let server = match std::env::var("VFSI_NFS_SERVER") {
+        Ok(server) => server,
+        Err(_) => {
+            assert!(!required(), "VFSI_NFS_SERVER is required");
+            return;
+        }
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .ok()
+        .map(|value| value.parse::<u32>().expect("NFS minor version"))
+        .unwrap_or(2);
+    let mut client = NfsClient::connect_minor(&server, minor).expect("connect NFS client");
+    let root = client.root().clone();
+    let dirname = format!("vfsi-nfs-byte-path-{}", std::process::id());
+    let dir = client
+        .mkdir(&root, &dirname)
+        .expect("create test directory");
+    let names: Vec<String> = (0..4)
+        .map(|index| format!("{index}-{}", "x".repeat(236)))
+        .collect();
+    let opens: Vec<PathOpenOp> = names
+        .iter()
+        .map(|name| PathOpenOp {
+            path: format!("{dirname}/{name}").into_bytes(),
+            access: nfsv41_sys::OPEN4_SHARE_ACCESS_BOTH,
+            create: OpenCreate::Unchecked,
+            mode: None,
+            truncate: false,
+        })
+        .collect();
+    client.set_max_compound_bytes(2100);
+    let outcome = client
+        .openv_path_compound(&opens)
+        .expect("repack encoded variable-length paths");
+    assert_eq!(outcome.failed, None);
+    client.set_max_compound_bytes(0);
+    for (fh, stateid) in outcome.opened.into_iter().map(Option::unwrap) {
+        client.close(&fh, &stateid).expect("close test file");
+    }
+    for name in names {
+        client.remove(&dir, &name).expect("remove test file");
+    }
+    client
+        .remove(&root, &dirname)
+        .expect("remove test directory");
 }
 
 #[cfg(feature = "test-faults")]

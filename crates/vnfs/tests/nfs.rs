@@ -1599,7 +1599,9 @@ fn scalar_open_registration_failure_closes_remote_open() {
 fn confirmed_write_chunk_advances_descriptor_after_later_failure() {
     let dir = setup_dir("partial_write_cursor");
     let mut client = client();
-    client.set_max_compound_bytes(4096);
+    // The request cap includes the RPC envelope and COMPOUND framing. This
+    // value leaves a 4096-byte first WRITE chunk after those reservations.
+    client.set_max_compound_bytes(6144);
     let path = format!("{dir}/file");
     let file = client
         .open(Path::new(&path), libc::O_CREAT | libc::O_RDWR, 0o600)

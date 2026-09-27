@@ -80,10 +80,12 @@ impl AdaptiveBatchSizer {
     }
 }
 
-/// One capability learner for every compound shape in a session. The COMPOUND
-/// tag is the shape key, so a large READ payload cannot reduce the budget for
-/// metadata-only REMOVE or LOOKUP requests. Builders consult this before
-/// packing work; dispatch observes real replies but never replays mutations.
+/// A soft batching window for each compound shape in a session. These
+/// windows are not protocol maxima: CREATE_SESSION supplies the hard request,
+/// response, and operation limits, which dispatch enforces independently.
+/// RESOURCE feedback is transient backpressure, not evidence that the server
+/// advertised an incorrect limit. The COMPOUND tag isolates shapes so a
+/// large READ does not throttle unrelated metadata work.
 #[derive(Debug)]
 pub(crate) struct AdaptiveCompoundLimits {
     negotiated_ops: usize,

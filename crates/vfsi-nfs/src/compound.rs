@@ -4,12 +4,24 @@
 // must match against; silence the style lint for those patterns.
 #![allow(non_upper_case_globals)]
 
+use std::cell::{Cell, RefCell};
 use std::os::raw::{c_char, c_void};
 
 use nfsv41_sys::*;
 
 use crate::error::{RpcError, RpcResult};
 use crate::rpc::{NFSPROC4_COMPOUND, RpcClient};
+
+thread_local! {
+    // XDR requires word-aligned storage. Reuse it so the preflight does not
+    // allocate a request-sized buffer for every compound.
+    static SIZE_SCRATCH: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// XDR size of the mandatory SEQUENCE argop: op number, session ID, three
+/// u32 fields, and the cache-this flag. This is added before Session inserts
+/// the operation so builders can preflight without mutating their compound.
+pub(crate) const SEQUENCE_XDR_BYTES: usize = 36;
 
 unsafe extern "C" fn wrap_compound4args(xdrs: *mut libntirpc_sys::XDR, objp: *mut c_void) -> bool {
     unsafe { xdr_wrap_COMPOUND4args(xdrs as *mut nfsv41_sys::XDR, objp as *mut COMPOUND4args) }
@@ -26,6 +38,9 @@ pub struct Compound {
     ops: Vec<nfs_argop4>,
     keep: Vec<Vec<u8>>,
     tag_index: Option<usize>,
+    // Reuse a builder's final XDR preflight at dispatch, but never after a
+    // change to the compound's operations or backing data.
+    size_check: Cell<Option<(usize, Option<usize>)>>,
 }
 
 impl Default for Compound {
@@ -51,14 +66,17 @@ impl Compound {
             ops: Vec::new(),
             keep: Vec::new(),
             tag_index: None,
+            size_check: Cell::new(None),
         }
     }
 
     fn push(&mut self, op: nfs_argop4) {
+        self.size_check.set(None);
         self.ops.push(op);
     }
 
     fn insert0(&mut self, op: nfs_argop4) {
+        self.size_check.set(None);
         self.ops.insert(0, op);
     }
 
@@ -68,7 +86,75 @@ impl Compound {
         self.ops.len()
     }
 
+    /// Encode the actual COMPOUND arguments into bounded scratch space.
+    /// `None` means the XDR representation cannot fit `limit` bytes. The
+    /// caller accounts separately for the RPC/authentication envelope.
+    pub(crate) fn encoded_len_up_to(&self, limit: usize) -> RpcResult<Option<usize>> {
+        if let Some((checked_limit, result)) = self.size_check.get()
+            && checked_limit == limit
+        {
+            return Ok(result);
+        }
+        if self
+            .keep
+            .iter()
+            .any(|bytes| bytes.len() > u32::MAX as usize)
+        {
+            return Ok(None);
+        }
+        if limit == 0 {
+            return Ok(None);
+        }
+        let limit = limit.min(u32::MAX as usize) & !3;
+        if limit < 4 {
+            return Ok(None);
+        }
+        let mut args = COMPOUND4args {
+            tag: self.args.tag,
+            minorversion: self.args.minorversion,
+            argarray: COMPOUND4args__bindgen_ty_1 {
+                argarray_len: self.ops.len() as u32,
+                argarray_val: self.ops.as_ptr() as *mut nfs_argop4,
+            },
+        };
+        let result = SIZE_SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            let payload = self
+                .keep
+                .iter()
+                .fold(0usize, |total, bytes| total.saturating_add(bytes.len()));
+            let estimate = payload
+                .saturating_add(self.ops.len().saturating_mul(128))
+                .saturating_add(64);
+            let mut capacity = estimate.max(1024).min(limit);
+            loop {
+                scratch.resize(capacity.div_ceil(4), 0);
+                let mut xdr: XDR = unsafe { std::mem::zeroed() };
+                let encoded = unsafe {
+                    xdrmem_ncreate(
+                        &mut xdr,
+                        scratch.as_mut_ptr().cast::<c_char>(),
+                        capacity as u32,
+                        xdr_op_XDR_ENCODE,
+                    );
+                    xdr_wrap_COMPOUND4args(&mut xdr, &mut args)
+                };
+                if encoded {
+                    let size = unsafe { xdr.x_data.offset_from(xdr.x_v.vio_base) as usize };
+                    return Ok(Some(size));
+                }
+                if capacity >= limit {
+                    return Ok(None);
+                }
+                capacity = capacity.saturating_mul(2).min(limit);
+            }
+        })?;
+        self.size_check.set(Some((limit, result)));
+        Ok(result)
+    }
+
     fn keep(&mut self, bytes: &[u8]) -> (*mut c_char, u32) {
+        self.size_check.set(None);
         let buf = bytes.to_vec();
         let ptr = buf.as_ptr() as *mut c_char;
         let len = buf.len() as u32;
@@ -1241,4 +1327,51 @@ pub fn rpc_stats() -> (u64, u64) {
         RPC_CALLS.swap(0, Ordering::Relaxed),
         RPC_TIME_US.swap(0, Ordering::Relaxed),
     )
+}
+
+#[cfg(test)]
+mod request_size_tests {
+    use super::*;
+
+    #[test]
+    fn bounded_xdr_size_counts_variable_payload_and_sequence() {
+        let mut compound = Compound::new();
+        compound.tag(b"size-test");
+        compound.putrootfh();
+        compound.lookup(&vec![b'x'; 233]);
+        compound.write(
+            &unsafe { std::mem::zeroed() },
+            0,
+            stable_how4_FILE_SYNC4,
+            &vec![7; 4097],
+        );
+        let before = compound.encoded_len_up_to(8192).unwrap().unwrap();
+        assert_eq!(compound.encoded_len_up_to(before).unwrap(), Some(before));
+        assert_eq!(compound.encoded_len_up_to(before - 1).unwrap(), None);
+
+        let mut sequence: nfs_argop4 = unsafe { std::mem::zeroed() };
+        sequence.argop = nfs_opnum4_NFS4_OP_SEQUENCE;
+        compound.prepend_sequence(sequence);
+        let after = compound.encoded_len_up_to(8192).unwrap().unwrap();
+        assert_eq!(after - before, SEQUENCE_XDR_BYTES);
+    }
+
+    #[test]
+    fn preflight_cache_is_invalidated_by_compound_mutations() {
+        let mut compound = Compound::new();
+        compound.tag(b"first");
+        compound.putrootfh();
+        let first = compound.encoded_len_up_to(4096).unwrap().unwrap();
+        assert_eq!(compound.size_check.get(), Some((4096, Some(first))));
+        assert_eq!(compound.encoded_len_up_to(4096).unwrap(), Some(first));
+
+        compound.lookup(b"child");
+        assert_eq!(compound.size_check.get(), None);
+        let second = compound.encoded_len_up_to(4096).unwrap().unwrap();
+        assert!(second > first);
+
+        compound.tag(b"a-longer-compound-tag");
+        assert_eq!(compound.size_check.get(), None);
+        assert!(compound.encoded_len_up_to(4096).unwrap().unwrap() > second);
+    }
 }
