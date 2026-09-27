@@ -62,37 +62,78 @@ struct vfsi_rpc_dplx_prefix {
     } recv;
 };
 
+/*
+ * One patched transport-operations table per distinct libntirpc ops table.
+ *
+ * libntirpc dispatches `xprt->xp_ops->xp_decode` without taking any lock, so a
+ * worker can already have loaded the shim pointer and be about to enter it
+ * while another thread uninstalls. Freeing or swapping `xp_ops` back at that
+ * point is a use-after-free: the worker would cast the restored table to
+ * `vfsi_patched_ops` and read `original_decode` out of bounds, and libntirpc
+ * itself may read `xp_ops` concurrently. The only lifetime that is safe
+ * against an unlocked dispatch is "never freed and never swapped": install
+ * once and leave the patch reachable for the life of the process. libntirpc's
+ * ops tables are file-scope statics, so the cache holds only a handful of
+ * entries and the retained memory is bounded.
+ */
 struct vfsi_patched_ops {
     struct xp_ops ops;
-    struct xp_ops *original_ops;
     svc_req_fun_t original_decode;
 };
 
-/*
- * Serializes transport operation patching against in-flight decodes: decodes
- * hold the read lock and install/uninstall hold the write lock, so a patch is
- * only freed once no worker can still reach it.
- */
-static pthread_rwlock_t vfsi_ops_lock = PTHREAD_RWLOCK_INITIALIZER;
+struct vfsi_patch {
+    struct xp_ops *original;
+    struct vfsi_patched_ops patched;
+    struct vfsi_patch *next;
+};
+
+static pthread_mutex_t vfsi_patch_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct vfsi_patch *vfsi_patches;
 
 static SVCXPRT *vfsi_client_xprt(CLIENT *client)
 {
     return clnt_vc_get_client_xprt(client);
 }
 
+static enum xprt_stat vfsi_decode_with_reply_verifier(struct svc_req *request);
+
+static struct vfsi_patched_ops *vfsi_patch_for(struct xp_ops *original)
+{
+    struct vfsi_patch *entry;
+    struct vfsi_patched_ops *patched = NULL;
+
+    pthread_mutex_lock(&vfsi_patch_lock);
+    for (entry = vfsi_patches; entry != NULL; entry = entry->next) {
+        if (entry->original == original) {
+            patched = &entry->patched;
+            break;
+        }
+    }
+    if (patched == NULL) {
+        entry = calloc(1, sizeof(*entry));
+        if (entry != NULL) {
+            entry->original = original;
+            entry->patched.ops = *original;
+            entry->patched.original_decode = original->xp_decode;
+            entry->patched.ops.xp_decode = vfsi_decode_with_reply_verifier;
+            entry->next = vfsi_patches;
+            vfsi_patches = entry;
+            patched = &entry->patched;
+        }
+    }
+    pthread_mutex_unlock(&vfsi_patch_lock);
+    return patched;
+}
+
 static enum xprt_stat vfsi_decode_with_reply_verifier(struct svc_req *request)
 {
     SVCXPRT *xprt = request->rq_xprt;
-    struct vfsi_patched_ops *patched;
+    struct vfsi_patched_ops *patched =
+        (struct vfsi_patched_ops *)xprt->xp_ops;
     struct vfsi_rpc_dplx_prefix *record =
         (struct vfsi_rpc_dplx_prefix *)xprt;
     struct rpc_msg decoded_message;
-    u_int position;
-    enum xprt_stat status;
-
-    pthread_rwlock_rdlock(&vfsi_ops_lock);
-    patched = (struct vfsi_patched_ops *)xprt->xp_ops;
-    position = XDR_GETPOS(request->rq_xdrs);
+    u_int position = XDR_GETPOS(request->rq_xdrs);
 
     memset(&decoded_message, 0, sizeof(decoded_message));
     rpc_msg_init(&decoded_message);
@@ -117,9 +158,7 @@ static enum xprt_stat vfsi_decode_with_reply_verifier(struct svc_req *request)
         mutex_unlock(&record->recv.lock.wait.mtx);
     }
     (void)XDR_SETPOS(request->rq_xdrs, position);
-    status = patched->original_decode(request);
-    pthread_rwlock_unlock(&vfsi_ops_lock);
-    return status;
+    return patched->original_decode(request);
 }
 
 bool vfsi_libntirpc_install_reply_verifier_fix(CLIENT *client)
@@ -127,52 +166,27 @@ bool vfsi_libntirpc_install_reply_verifier_fix(CLIENT *client)
     SVCXPRT *xprt = vfsi_client_xprt(client);
     struct vfsi_patched_ops *patched;
 
-    if (xprt == NULL)
+    if (xprt == NULL || xprt->xp_ops == NULL || xprt->xp_ops->xp_decode == NULL)
         return false;
-    pthread_rwlock_wrlock(&vfsi_ops_lock);
-    if (xprt->xp_ops == NULL || xprt->xp_ops->xp_decode == NULL) {
-        pthread_rwlock_unlock(&vfsi_ops_lock);
-        return false;
-    }
-    if (xprt->xp_ops->xp_decode == vfsi_decode_with_reply_verifier) {
-        pthread_rwlock_unlock(&vfsi_ops_lock);
+    if (xprt->xp_ops->xp_decode == vfsi_decode_with_reply_verifier)
         return true;
-    }
-
-    patched = malloc(sizeof(*patched));
-    if (patched == NULL) {
-        pthread_rwlock_unlock(&vfsi_ops_lock);
+    patched = vfsi_patch_for(xprt->xp_ops);
+    if (patched == NULL)
         return false;
-    }
-    patched->ops = *xprt->xp_ops;
-    patched->original_ops = xprt->xp_ops;
-    patched->original_decode = xprt->xp_ops->xp_decode;
-    patched->ops.xp_decode = vfsi_decode_with_reply_verifier;
     xprt->xp_ops = &patched->ops;
-    pthread_rwlock_unlock(&vfsi_ops_lock);
     return true;
 }
 
 void vfsi_libntirpc_uninstall_reply_verifier_fix(CLIENT *client)
 {
-    SVCXPRT *xprt = vfsi_client_xprt(client);
-    struct vfsi_patched_ops *patched;
-
-    if (xprt == NULL)
-        return;
-    pthread_rwlock_wrlock(&vfsi_ops_lock);
-    if (xprt->xp_ops == NULL ||
-        xprt->xp_ops->xp_decode != vfsi_decode_with_reply_verifier) {
-        pthread_rwlock_unlock(&vfsi_ops_lock);
-        return;
-    }
-    patched = (struct vfsi_patched_ops *)xprt->xp_ops;
-    xprt->xp_ops = patched->original_ops;
-    /* Safe to free after releasing the write lock: the transport no longer
-     * points at the patch, and no decode could have entered while the write
-     * lock was held. */
-    pthread_rwlock_unlock(&vfsi_ops_lock);
-    free(patched);
+    /*
+     * Intentionally a no-op. Restoring or freeing the patch here would race
+     * with libntirpc's unlocked `xp_ops` reads and with workers that already
+     * loaded the shim pointer. The patch is process-lifetime and harmless once
+     * GSS is no longer in use: it only copies a reply verifier before
+     * delegating to the original decoder.
+     */
+    (void)client;
 }
 
 /*

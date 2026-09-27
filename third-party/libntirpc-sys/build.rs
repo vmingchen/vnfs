@@ -1,5 +1,5 @@
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -11,9 +11,30 @@ fn write_docs_bindings(out_dir: &Path) {
 
 /// Locate the libntirpc object that `pkg-config` will actually link.
 ///
-/// Prefer the unversioned `libntirpc.so` symlink (that is what `-lntirpc`
-/// resolves to), then any versioned `libntirpc.so.*`, then a static archive.
-fn find_library(library: &pkg_config::Library) -> Option<PathBuf> {
+/// The preferred method asks the compiler to resolve `-l<name>` for us: it
+/// searches the same directories the linker will, including the standard and
+/// multiarch paths that pkg-config omits when it prints a bare `-lntirpc`
+/// (which means `Library::link_paths` can legitimately be empty). When the
+/// compiler cannot resolve it, fall back to scanning any explicit link paths.
+fn find_library(library: &pkg_config::Library, compiler: &OsStr) -> Option<PathBuf> {
+    for lib in &library.libs {
+        for name in [format!("lib{lib}.so"), format!("lib{lib}.a")] {
+            let Ok(output) = Command::new(compiler)
+                .arg(format!("-print-file-name={name}"))
+                .output()
+            else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            if path.is_absolute() && path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
     for directory in &library.link_paths {
         for lib in &library.libs {
             let exact = directory.join(format!("lib{lib}.so"));
@@ -56,8 +77,8 @@ fn find_library(library: &pkg_config::Library) -> Option<PathBuf> {
 /// symbol (upstream v9.15), but the reported library version did not change
 /// (it stayed `7.2`), so the ABI cannot be inferred from the version string.
 /// Inspect the dynamic symbol table instead. `None` means "could not tell".
-fn detect_rdma_call_expires(library: &pkg_config::Library) -> Option<bool> {
-    let path = find_library(library)?;
+fn detect_rdma_call_expires(library: &pkg_config::Library, compiler: &OsStr) -> Option<bool> {
+    let path = find_library(library, compiler)?;
     let static_archive = path.extension().is_some_and(|extension| extension == "a");
     let nm = env::var_os("NM").unwrap_or_else(|| "nm".into());
 
@@ -75,7 +96,7 @@ fn detect_rdma_call_expires(library: &pkg_config::Library) -> Option<bool> {
 /// Resolve `VFSI_LIBNTIRPC_HAS_RDMA_EXPIRES` from an explicit override, the
 /// linked library's symbols, and finally the version number. Ambiguous
 /// versions fail the build instead of silently selecting the wrong layout.
-fn resolve_rdma_call_expires(library: &pkg_config::Library, major: u32) -> bool {
+fn resolve_rdma_call_expires(library: &pkg_config::Library, major: u32, compiler: &OsStr) -> bool {
     println!("cargo:rerun-if-env-changed=LIBNTIRPC_RPC_DPLX_RDMA_EXPIRES");
     match env::var("LIBNTIRPC_RPC_DPLX_RDMA_EXPIRES").as_deref() {
         Ok("1") => true,
@@ -84,7 +105,7 @@ fn resolve_rdma_call_expires(library: &pkg_config::Library, major: u32) -> bool 
             "LIBNTIRPC_RPC_DPLX_RDMA_EXPIRES must be `0` or `1`, not {other:?}; \
              it overrides the automatic rpc_dplx_rec layout probe"
         ),
-        Err(_) => match detect_rdma_call_expires(library) {
+        Err(_) => match detect_rdma_call_expires(library, compiler) {
             Some(value) => value,
             None if major >= 14 => true,
             None if (7..=13).contains(&major) => panic!(
@@ -133,16 +154,11 @@ fn main() {
         .include_paths
         .first()
         .expect("libntirpc pkg-config metadata has no include directory");
-    let has_rdma_call_expires = resolve_rdma_call_expires(&library, major);
-
-    // auth_destroy is a reference-counting macro/static-inline API, not an
-    // exported symbol. Compile a stable callable shim so Rust never bypasses
-    // libntirpc's ownership protocol by invoking ah_destroy directly.
-    //
     // The compiler and archiver come from the environment (CC/AR plus the
     // target-specific CC_<target>/CFLAGS_<target> and CFLAGS variants) so
     // cross builds and clang-only systems work instead of hard-coding
-    // gcc/ar.
+    // gcc/ar. They are resolved before the ABI probe because the probe asks
+    // the compiler to locate the linked library.
     let target = env::var("TARGET").unwrap_or_default();
     let host = env::var("HOST").unwrap_or_default();
     let cross = !target.is_empty() && target != host;
@@ -166,6 +182,11 @@ fn main() {
             }
         });
 
+    let has_rdma_call_expires = resolve_rdma_call_expires(&library, major, &compiler);
+
+    // auth_destroy is a reference-counting macro/static-inline API, not an
+    // exported symbol. Compile a stable callable shim so Rust never bypasses
+    // libntirpc's ownership protocol by invoking ah_destroy directly.
     let helper_object = out_dir.join("auth_helpers.o");
     let mut helper_compile = Command::new(&compiler);
     helper_compile

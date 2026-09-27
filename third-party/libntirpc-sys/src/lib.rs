@@ -42,6 +42,10 @@ unsafe extern "C" {
     ) -> *mut AUTH;
     #[cfg(feature = "rpcsec-gss")]
     pub fn vfsi_libntirpc_install_reply_verifier_fix(client: *mut CLIENT) -> bool;
+    /// Kept for API compatibility but intentionally does not touch the
+    /// transport: libntirpc dispatches `xp_ops` without locking, so restoring
+    /// or freeing the shim would race an in-flight decode (see
+    /// `auth_helpers.c`).
     #[cfg(feature = "rpcsec-gss")]
     pub fn vfsi_libntirpc_uninstall_reply_verifier_fix(client: *mut CLIENT);
 }

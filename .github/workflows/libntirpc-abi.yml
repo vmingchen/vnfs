@@ -65,5 +65,7 @@ jobs:
         run: |
           cargo test -p libntirpc-sys --all-features
           # Compiles the non-legacy clnt_req free callback and the
-          # rdma_call_expires layout selected by the symbol probe.
+          # rdma_call_expires layout selected by the symbol probe. RPCSEC_GSS
+          # negotiation itself is only exercised at runtime by the main
+          # nfs-gss-integration job against Ubuntu's 6.3 package.
           cargo build -p vfsi-nfs --features rpcsec-gss

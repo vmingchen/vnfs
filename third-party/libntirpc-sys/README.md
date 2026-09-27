@@ -122,8 +122,11 @@ Several upstream ABI changes did not bump the reported version, which is why
   bindgen output agree on `sizeof(SVCXPRT)`, so a flag divergence fails the
   build rather than corrupting the private layout.
 - The `rpcsec-gss` feature patches a private `rpc_dplx_rec` field and installs
-  a process-global allocator hook. It has been verified against Ubuntu 24.04's
-  libntirpc 6.3 and against upstream 15.x; treat it as version-bounded and
-  re-run the RPCSEC_GSS integration test whenever libntirpc is upgraded.
+  a process-global allocator hook. Its runtime behavior is exercised by the
+  RPCSEC_GSS integration job against Ubuntu 24.04's libntirpc 6.3. Newer
+  releases are ABI/compile-tested only: the scheduled `libntirpc-abi` job
+  builds the crate and `vfsi-nfs` against a pinned upstream tag but does not
+  negotiate GSS at runtime. Treat the feature as version-bounded and re-run
+  the RPCSEC_GSS integration test whenever libntirpc is upgraded.
 - The currently verified targets are Linux/glibc; `README` continues to list
   the packages needed on Ubuntu.
