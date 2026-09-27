@@ -111,13 +111,21 @@ def main() -> None:
 
         for round_number in range(args.rounds):
             suffixes = (f"nfs4fs-{round_number}", f"kernel-{round_number}")
-            for suffix in suffixes:
-                _populate(
-                    fixture_run / suffix,
-                    args.directories,
-                    args.files_per_dir,
-                    payload,
-                )
+            _populate(
+                fixture_run / suffixes[0],
+                args.directories,
+                args.files_per_dir,
+                payload,
+            )
+            # Create the kernel-side fixture through the mount. Creating it
+            # behind the mount can leave a stale negative dentry/attribute
+            # cache entry and make LocalFileSystem.rm misclassify the tree.
+            _populate(
+                mounted_run / suffixes[1],
+                args.directories,
+                args.files_per_dir,
+                payload,
+            )
             paths = (
                 f"/{run_name}/{suffixes[0]}",
                 str(mounted_run / suffixes[1]),
@@ -133,7 +141,17 @@ def main() -> None:
                 if operation == "find":
                     entries = fs.find(path, withdirs=True, detail=True)
                 else:
-                    fs.rm(path, recursive=True)
+                    try:
+                        fs.rm(path, recursive=True)
+                    except IsADirectoryError:
+                        if direct:
+                            raise
+                        # LocalFileSystem.rm probes isdir() before calling
+                        # shutil.rmtree(). On an NFS mount, that probe can
+                        # briefly return false even though unlink confirms
+                        # the path is a directory. Use the same recursive
+                        # deletion implementation after that specific race.
+                        shutil.rmtree(path)
                     entries = None
                 elapsed = (time.perf_counter_ns() - started) / 1_000_000
                 compounds = nfs._client.compound_stats()[0] if direct else 0
