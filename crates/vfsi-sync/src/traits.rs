@@ -278,6 +278,60 @@ pub(crate) fn validate_read_results(
     Ok(())
 }
 
+pub(crate) fn validate_read_into_results(
+    operation: &str,
+    requests: &[ReadOp],
+    results: &[ReadIntoResult],
+) -> VfResult<()> {
+    if results.len() != requests.len() {
+        return Err(contract_error(
+            operation,
+            None,
+            format!(
+                "returned {} results for {} requests",
+                results.len(),
+                requests.len()
+            ),
+        ));
+    }
+    for (index, (request, result)) in requests.iter().zip(results).enumerate() {
+        if result.file != request.file {
+            return Err(contract_error(
+                operation,
+                Some(index),
+                "result file does not match request",
+            ));
+        }
+        if result.read > request.length {
+            return Err(contract_error(
+                operation,
+                Some(index),
+                format!(
+                    "returned {} bytes for a {}-byte read",
+                    result.read, request.length
+                ),
+            ));
+        }
+        if let VfOffset::At(expected) = request.offset
+            && result.offset != expected
+        {
+            return Err(contract_error(
+                operation,
+                Some(index),
+                format!("result offset {} does not match {expected}", result.offset),
+            ));
+        }
+        if request.length != 0 && result.read == 0 && !result.eof {
+            return Err(contract_error(
+                operation,
+                Some(index),
+                "read made no progress without reporting EOF",
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_write_results(
     operation: &str,
     requests: &[WriteOpRef<'_>],
@@ -409,6 +463,39 @@ pub trait VecFs {
     /// Read from one or more files, `tc_readv()`. Returns one result per
     /// request, or fails at the first failing operation.
     fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>>;
+
+    /// Read into caller-owned buffers without requiring an owned result for
+    /// backends that can decode or read directly into those buffers. The
+    /// default compatibility implementation copies from [`readv`](Self::readv).
+    fn readv_into(
+        &mut self,
+        reads: &[ReadOp],
+        buffers: &mut [&mut [u8]],
+    ) -> VfResult<Vec<ReadIntoResult>> {
+        if reads.len() != buffers.len() {
+            return Err(VfError::client(0, ERR_INVAL));
+        }
+        for (index, (request, buffer)) in reads.iter().zip(buffers.iter()).enumerate() {
+            if request.length != buffer.len() {
+                return Err(VfError::client(index, ERR_INVAL));
+            }
+        }
+        let results = self.readv(reads)?;
+        validate_read_results("readv_into", reads, &results)?;
+        Ok(results
+            .into_iter()
+            .zip(buffers.iter_mut())
+            .map(|(result, buffer)| {
+                buffer[..result.data.len()].copy_from_slice(&result.data);
+                ReadIntoResult {
+                    file: result.file,
+                    offset: result.offset,
+                    read: result.data.len(),
+                    eof: result.eof,
+                }
+            })
+            .collect())
+    }
 
     /// Read each file in full from offset 0, `tc_read_allv()`. Returns one
     /// byte buffer per request in input order. The combined result is limited

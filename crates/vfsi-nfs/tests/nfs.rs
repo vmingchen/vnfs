@@ -4,13 +4,15 @@ use std::path::Path;
 #[cfg(feature = "test-faults")]
 use std::{path::PathBuf, sync::Arc};
 
+use vfsi_core::RpcError;
 #[cfg(feature = "test-faults")]
 use vfsi_core::VfError;
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
 use vfsi_nfs::NfsVecFs;
 #[cfg(feature = "test-faults")]
-use vfsi_nfs::client::{FileRef, NfsClient, OpenCreate, PathOpenOp, PathWriteOp, ReadOp, WriteOp};
+use vfsi_nfs::client::{FileRef, PathOpenOp, PathWriteOp, WriteOp};
+use vfsi_nfs::client::{NfsClient, OpenCreate, ReadOp};
 use vfsi_sync::{VecFs, test_support};
 
 fn required() -> bool {
@@ -50,6 +52,59 @@ fn shared_contract_through_the_published_crate() {
         .expect("remove NFS contract root");
 }
 
+#[test]
+fn read_into_stops_callbacks_on_first_error() {
+    let server = match std::env::var("VFSI_NFS_SERVER") {
+        Ok(server) => server,
+        Err(_) => {
+            assert!(!required(), "VFSI_NFS_SERVER is required");
+            return;
+        }
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .ok()
+        .map(|value| value.parse::<u32>().expect("NFS minor version"))
+        .unwrap_or(2);
+    let mut client = NfsClient::connect_minor(&server, minor).expect("connect NFS client");
+    let root = client.root().clone();
+    let name = format!("vfsi-nfs-read-into-abort-{}", std::process::id());
+    let (fh, stateid) = client
+        .open(
+            &root,
+            name.as_bytes(),
+            nfsv41_sys::OPEN4_SHARE_ACCESS_BOTH,
+            OpenCreate::Unchecked,
+        )
+        .expect("create test file");
+    client
+        .write(&fh, &stateid, 0, b"abcdef")
+        .expect("write test file");
+    let reads: Vec<ReadOp> = (0..3)
+        .map(|index| ReadOp {
+            fh: fh.clone(),
+            stateid,
+            offset: index * 2,
+            count: 2,
+        })
+        .collect();
+    let mut calls = 0usize;
+    let error = client
+        .readv_into(&reads, |_, _| {
+            calls += 1;
+            if calls == 2 {
+                Err(RpcError::transport("injected callback failure"))
+            } else {
+                Ok(())
+            }
+        })
+        .expect_err("callback error must propagate");
+    client.close(&fh, &stateid).expect("close test file");
+    client.remove(&root, &name).expect("remove test file");
+    assert!(error.is_transport());
+    assert_eq!(error.op_index, 1);
+    assert_eq!(calls, 2, "callbacks must stop on the first error");
+}
+
 #[cfg(feature = "test-faults")]
 #[test]
 fn pre_dispatch_resource_rejection_splits_merged_writes_without_replay() {
@@ -73,15 +128,18 @@ fn pre_dispatch_resource_rejection_splits_merged_writes_without_replay() {
     let names: Vec<Vec<u8>> = (0..24)
         .map(|index| format!("file-{index}").into_bytes())
         .collect();
+    let payloads: Vec<Vec<u8>> = (0..names.len())
+        .map(|index| vec![index as u8; 16])
+        .collect();
     let writes: Vec<PathWriteOp> = names
         .iter()
-        .enumerate()
-        .map(|(index, name)| PathWriteOp {
+        .zip(&payloads)
+        .map(|(name, data)| PathWriteOp {
             file: FileRef::Path(
                 format!("{dirname}/{}", String::from_utf8_lossy(name)).into_bytes(),
             ),
             offset: 0,
-            data: vec![index as u8; 16],
+            data,
             create: true,
             truncate: true,
             stateid: None,
@@ -143,7 +201,7 @@ fn split_path_write_truncates_only_before_the_first_chunk() {
             &[PathWriteOp {
                 file: FileRef::Path(name.as_bytes().to_vec()),
                 offset: 0,
-                data: data.clone(),
+                data: &data,
                 create: true,
                 truncate: true,
                 stateid: None,
@@ -311,12 +369,13 @@ fn writev_rebuilds_batch_before_exceeding_request_bytes() {
         )
         .expect("create test file");
     let block = 512 * 1024;
+    let payloads: Vec<Vec<u8>> = (0..8).map(|index| vec![index as u8; block]).collect();
     let ops: Vec<WriteOp> = (0..8)
         .map(|index| WriteOp {
             fh: fh.clone(),
             stateid,
             offset: (index * block) as u64,
-            data: vec![index as u8; block],
+            data: &payloads[index],
         })
         .collect();
     let written = client

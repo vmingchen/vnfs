@@ -1,9 +1,13 @@
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use vfsi_sync::{
-    Capabilities, FileSystem, FsClient, MetadataQuery, OpenFlags, OpenRequest, ReadOp, ReadResult,
-    SetAttributes, VectorFileSystem, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
+    Capabilities, FileSystem, FsClient, MetadataQuery, OpenFlags, OpenRequest, ReadIntoResult,
+    ReadOp, ReadResult, SetAttributes, VectorFileSystem, VfError, VfFile, VfOffset, VfResult,
+    WriteOpRef, WriteResult,
 };
 
 #[derive(Default)]
@@ -20,6 +24,8 @@ struct ScalarOnly {
     wrong_result_offset: bool,
     close_failures_remaining: usize,
     close_calls: usize,
+    direct_into_only: bool,
+    into_calls: Arc<AtomicUsize>,
 }
 
 impl VectorFileSystem for ScalarOnly {
@@ -56,6 +62,40 @@ impl VectorFileSystem for ScalarOnly {
             .iter()
             .take(limit)
             .map(|request| self.read_one(request))
+            .collect::<VfResult<_>>()?;
+        if let Some(result) = results.first_mut() {
+            if self.wrong_result_file {
+                result.file = VfFile::from_fd(999);
+            }
+            if self.wrong_result_offset {
+                result.offset = result.offset.saturating_add(1);
+            }
+        }
+        Ok(results)
+    }
+
+    fn read_many_into(
+        &mut self,
+        requests: &[ReadOp],
+        buffers: &mut [&mut [u8]],
+    ) -> VfResult<Vec<ReadIntoResult>> {
+        if requests.len() != buffers.len() {
+            return Err(VfError::client(0, libc::EINVAL as u32));
+        }
+        let limit = self
+            .vector_result_limit
+            .lock()
+            .expect("vector limit poisoned")
+            .unwrap_or(usize::MAX);
+        let mut results: Vec<ReadIntoResult> = requests
+            .iter()
+            .zip(buffers.iter_mut())
+            .take(limit)
+            .enumerate()
+            .map(|(index, (request, buffer))| {
+                self.read_one_into(request, buffer)
+                    .map_err(|error| error.with_index(index))
+            })
             .collect::<VfResult<_>>()?;
         if let Some(result) = results.first_mut() {
             if self.wrong_result_file {
@@ -118,6 +158,7 @@ impl FileSystem for ScalarOnly {
     }
 
     fn read_one(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
+        assert!(!self.direct_into_only, "owned read path must not run");
         if self.read_failure {
             return Err(VfError::failure(0, libc::EACCES as u32));
         }
@@ -144,6 +185,43 @@ impl FileSystem for ScalarOnly {
             offset,
             eof: end == self.data.len(),
             data,
+        })
+    }
+
+    fn read_one_into(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
+        if !self.direct_into_only {
+            let result = self.read_one(request)?;
+            if result.data.len() > buffer.len() {
+                return Err(VfError::client(0, vfsi_sync::ERR_IO));
+            }
+            buffer[..result.data.len()].copy_from_slice(&result.data);
+            return Ok(ReadIntoResult {
+                file: result.file,
+                offset: result.offset,
+                read: result.data.len(),
+                eof: result.eof,
+            });
+        }
+        if request.length != buffer.len() {
+            return Err(VfError::client(0, libc::EINVAL as u32));
+        }
+        self.into_calls.fetch_add(1, Ordering::SeqCst);
+        let offset = match request.offset {
+            VfOffset::At(value) => value,
+            VfOffset::Cur => self.cursor,
+            VfOffset::End => self.data.len() as u64,
+            _ => 0,
+        };
+        let start = offset as usize;
+        let end = start.saturating_add(buffer.len()).min(self.data.len());
+        let data = self.data.get(start..end).unwrap_or_default();
+        buffer[..data.len()].copy_from_slice(data);
+        self.cursor = offset + data.len() as u64;
+        Ok(ReadIntoResult {
+            file: request.file.clone(),
+            offset,
+            read: data.len(),
+            eof: end == self.data.len(),
         })
     }
 
@@ -414,4 +492,117 @@ fn explicit_close_failure_keeps_handle_armed_for_drop_cleanup() {
     let backend = client.into_inner().expect("drop released the client");
     assert_eq!(backend.close_calls, 2);
     assert!(!backend.open);
+}
+
+#[test]
+fn failed_try_close_retains_handle_for_explicit_retry() {
+    let client = FsClient::new(ScalarOnly {
+        close_failures_remaining: 1,
+        ..ScalarOnly::default()
+    });
+    let mut file = client.open("/file").unwrap();
+    assert!(file.try_close().is_err());
+    assert!(file.try_close().is_ok());
+    assert!(file.try_close().is_ok());
+    drop(file);
+
+    let backend = client.into_inner().expect("drop released the client");
+    assert_eq!(backend.close_calls, 2);
+    assert!(!backend.open);
+}
+
+#[test]
+fn successfully_closed_handle_returns_ebadf_instead_of_panicking() {
+    let client = FsClient::new(ScalarOnly::default());
+    let mut file = client.open("/file").unwrap();
+    file.try_close().unwrap();
+    let error = file.read_native(&mut [0u8; 1]).unwrap_err();
+    assert_eq!(error.err_no(), vfsi_sync::ERR_EBADF);
+    let error = file.write_native(b"x").unwrap_err();
+    assert_eq!(error.err_no(), vfsi_sync::ERR_EBADF);
+    let error = file.seek_native(SeekFrom::Start(0)).unwrap_err();
+    assert_eq!(error.err_no(), vfsi_sync::ERR_EBADF);
+}
+
+#[test]
+fn stream_callback_can_reenter_client_and_drop_another_file() {
+    let client = FsClient::new(ScalarOnly {
+        data: b"abcdef".to_vec(),
+        ..ScalarOnly::default()
+    });
+    let mut other = Some(client.open("/other").unwrap());
+    let mut received = Vec::new();
+    client
+        .read_stream_with_options(
+            "/file",
+            vfsi_sync::ReadStreamOptions::new().chunk_size(2),
+            |_, data| {
+                drop(other.take());
+                let file = client.open("/nested")?;
+                file.close()?;
+                received.extend_from_slice(data);
+                Ok(true)
+            },
+        )
+        .unwrap();
+    assert_eq!(received, b"abcdef");
+}
+
+#[test]
+fn native_read_into_dispatches_without_owned_read_results() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let client = FsClient::new(ScalarOnly {
+        data: b"abcdef".to_vec(),
+        direct_into_only: true,
+        into_calls: Arc::clone(&calls),
+        ..ScalarOnly::default()
+    });
+    let file = client.open("/file").unwrap();
+    let mut first = [0u8; 3];
+    let mut second = [0u8; 3];
+    let lengths = client
+        .readv_into(&mut [
+            file.read_request_at_into(0, &mut first),
+            file.read_request_at_into(3, &mut second),
+        ])
+        .unwrap();
+    assert_eq!(lengths, [3, 3]);
+    assert_eq!(&first, b"abc");
+    assert_eq!(&second, b"def");
+    let mut scalar = [0u8; 2];
+    assert_eq!(file.read_at(&mut scalar, 2).unwrap(), 2);
+    assert_eq!(&scalar, b"cd");
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn native_read_into_rejects_malformed_backend_results() {
+    let client = FsClient::new(ScalarOnly {
+        data: b"abc".to_vec(),
+        direct_into_only: true,
+        wrong_result_file: true,
+        ..ScalarOnly::default()
+    });
+    let file = client.open("/file").unwrap();
+    let mut buffer = [0u8; 3];
+    let error = client
+        .readv_into(&mut [file.read_request_at_into(0, &mut buffer)])
+        .unwrap_err();
+    assert!(error.is_transport());
+    assert_eq!(error.index_opt(), Some(0));
+
+    let backend = ScalarOnly {
+        data: b"abc".to_vec(),
+        direct_into_only: true,
+        ..ScalarOnly::default()
+    };
+    let limit = Arc::clone(&backend.vector_result_limit);
+    let client = FsClient::new(backend);
+    let file = client.open("/file").unwrap();
+    *limit.lock().unwrap() = Some(0);
+    let error = client
+        .readv_into(&mut [file.read_request_at_into(0, &mut buffer)])
+        .unwrap_err();
+    assert!(error.is_transport());
+    assert_eq!(error.index_opt(), None);
 }

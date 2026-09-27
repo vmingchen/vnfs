@@ -146,11 +146,11 @@ pub struct ReadOp {
 }
 
 /// One WRITE of a batched compound, `[PUTFH, WRITE]`.
-pub struct WriteOp {
+pub struct WriteOp<'a> {
     pub fh: FileHandle,
     pub stateid: stateid4,
     pub offset: u64,
-    pub data: Vec<u8>,
+    pub data: &'a [u8],
 }
 
 /// One GETATTR of a batched compound, `[PUTFH, GETATTR]`.
@@ -328,10 +328,10 @@ pub enum FileRef {
 
 /// One path-based WRITE for a merged compound. The path is root-relative
 /// (no leading slash); the offset is already resolved to an absolute value.
-pub struct PathWriteOp {
+pub struct PathWriteOp<'a> {
     pub file: FileRef,
     pub offset: u64,
-    pub data: Vec<u8>,
+    pub data: &'a [u8],
     pub create: bool,
     /// Truncate the file to zero before writing (emitted as an in-compound
     /// SETATTR size=0 right after the OPEN).
@@ -1344,16 +1344,84 @@ impl NfsClient {
         Ok(results)
     }
 
+    /// Decode READ replies into caller storage while the compound reply is
+    /// still alive. `on_data` sees each wire operation in request order.
+    pub fn readv_into(
+        &mut self,
+        ops: &[ReadOp],
+        mut on_data: impl FnMut(usize, &[u8]) -> RpcResult<()>,
+    ) -> RpcResult<Vec<(usize, bool)>> {
+        let byte_budget = self.read_compound_bytes().saturating_sub(128);
+        let mut results = Vec::with_capacity(ops.len());
+        let mut start = 0usize;
+        while start < ops.len() {
+            let mut end = start;
+            let mut bytes = 0usize;
+            while end < ops.len() {
+                let next = (ops[end].count as usize).saturating_add(128);
+                if bytes.saturating_add(next) > byte_budget {
+                    break;
+                }
+                bytes += next;
+                end += 1;
+            }
+            if end == start {
+                return Err(RpcError::op(start, nfsstat4_NFS4ERR_REP_TOO_BIG));
+            }
+            let mut extracted = 0usize;
+            let chunk = self
+                .batch_ops_fallible(
+                    b"readv",
+                    2,
+                    &ops[start..end],
+                    |c, op, _| {
+                        c.putfh(&op.fh.as_nfs_fh());
+                        c.read(&op.stateid, op.offset, op.count);
+                    },
+                    |res, i| {
+                        let local_index = extracted;
+                        let wire_index = start + local_index;
+                        extracted += 1;
+                        let ok = res.read(2 + 2 * i);
+                        let len = ok.data.data_len as usize;
+                        if len > ops[wire_index].count as usize {
+                            return Err(RpcError::transport(
+                                "NFS READ reply exceeded requested count",
+                            )
+                            .with_op_index(local_index));
+                        }
+                        let data = if len == 0 {
+                            &[][..]
+                        } else {
+                            unsafe {
+                                std::slice::from_raw_parts(ok.data.data_val as *const u8, len)
+                            }
+                        };
+                        on_data(wire_index, data)
+                            .map_err(|error| error.with_op_index(local_index))?;
+                        Ok((len, ok.eof != 0))
+                    },
+                )
+                .map_err(|error| {
+                    let index = start + error.op_index;
+                    error.with_op_index(index)
+                })?;
+            results.extend(chunk);
+            start = end;
+        }
+        Ok(results)
+    }
+
     /// WRITE several `[PUTFH, WRITE]` pairs in as few compounds as possible;
     /// returns (bytes written, commit mode) per request.
-    pub fn writev(&mut self, ops: &[WriteOp]) -> RpcResult<Vec<(u32, u32)>> {
+    pub fn writev(&mut self, ops: &[WriteOp<'_>]) -> RpcResult<Vec<(u32, u32)>> {
         self.batch_ops(
             b"writev",
             2,
             ops,
             |c, op, _| {
                 c.putfh(&op.fh.as_nfs_fh());
-                c.write(&op.stateid, op.offset, stable_how4_FILE_SYNC4, &op.data);
+                c.write(&op.stateid, op.offset, stable_how4_FILE_SYNC4, op.data);
             },
             |res, i| {
                 let ok = res.write(2 + 2 * i);
@@ -1485,8 +1553,19 @@ impl NfsClient {
         tag: &[u8],
         per_op: usize,
         ops: &[T],
+        add: impl FnMut(&mut Compound, &T, usize),
+        mut extract: impl FnMut(&CompoundRes, usize) -> R,
+    ) -> RpcResult<Vec<R>> {
+        self.batch_ops_fallible(tag, per_op, ops, add, |res, index| Ok(extract(res, index)))
+    }
+
+    fn batch_ops_fallible<T, R>(
+        &mut self,
+        tag: &[u8],
+        per_op: usize,
+        ops: &[T],
         mut add: impl FnMut(&mut Compound, &T, usize),
-        extract: impl Fn(&CompoundRes, usize) -> R,
+        mut extract: impl FnMut(&CompoundRes, usize) -> RpcResult<R>,
     ) -> RpcResult<Vec<R>> {
         /// Translate a compound-internal resop index (0 = SEQUENCE) to the
         /// caller's request index: element `i` occupies resops
@@ -1557,7 +1636,7 @@ impl NfsClient {
                 let next_capacity = self.op_budget_for(tag, 1 + per_op).batch_capacity(per_op)?;
                 if completed > 0 || next_capacity < chunk.len() {
                     for i in 0..completed {
-                        out.push(extract(&res, i));
+                        out.push(extract(&res, i)?);
                     }
                     global = chunk_start + completed;
                     continue;
@@ -1577,7 +1656,7 @@ impl NfsClient {
                 None => {}
             }
             for (i, _) in chunk.iter().enumerate() {
-                out.push(extract(&res, i));
+                out.push(extract(&res, i)?);
             }
         }
         Ok(out)
@@ -1791,7 +1870,7 @@ impl NfsClient {
     /// and NFS status.
     pub fn writev_path_compound(
         &mut self,
-        ops: &[PathWriteOp],
+        ops: &[PathWriteOp<'_>],
         close_in_compound: bool,
     ) -> RpcResult<PathWriteOutcome> {
         let n = ops.len();

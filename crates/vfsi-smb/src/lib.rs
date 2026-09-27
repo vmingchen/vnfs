@@ -54,7 +54,7 @@ use crate::path::{normalize_bytes, path_bytes, path_from_bytes};
 use crate::vecfs::{
     Adb, AttrMask, ERR_ACCES, ERR_EBADF, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT, ERR_NOTDIR,
     ExtentPair, Fd, ReadOp, ReadResult, SeekFrom, VF_CAP_SERVER_COPY, VecFs, VfAttrs, VfError,
-    VfFile, VfOffset, VfPathBase, VfRes, VfResult, VfType, WriteOp, WriteResult,
+    VfFile, VfOffset, VfPathBase, VfRes, VfResult, VfType, WriteOp, WriteOpRef, WriteResult,
 };
 
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
@@ -1138,12 +1138,12 @@ impl SmbVecFs {
         })
     }
 
-    fn write_one(&mut self, op: &WriteOp) -> VfResult<WriteResult> {
+    fn write_one(&mut self, op: WriteOpRef<'_>) -> VfResult<WriteResult> {
         if !op.file.is_descriptor() {
             if matches!(op.file, VfFile::Saved) {
                 return Err(VfError::unsupported(0));
             }
-            let path = self.path_string(&self.file_path(&op.file)?)?;
+            let path = self.path_string(&self.file_path(op.file)?)?;
             let offset = match op.offset {
                 VfOffset::At(offset) => offset,
                 VfOffset::End => self.client_stat(&path)?.size,
@@ -1151,7 +1151,7 @@ impl SmbVecFs {
                 _ => return Err(VfError::failure(0, ERR_INVAL)),
             };
             let written =
-                self.compound_write_path(&path, offset, &op.data, op.creation, op.truncate)?;
+                self.compound_write_path(&path, offset, op.data, op.creation, op.truncate)?;
             return Ok(WriteResult {
                 file: op.file.clone(),
                 offset,
@@ -1159,7 +1159,7 @@ impl SmbVecFs {
                 stable: true,
             });
         }
-        let (file_id, temporary, descriptor, append) = match &op.file {
+        let (file_id, temporary, descriptor, append) = match op.file {
             VfFile::Descriptor(fd) => {
                 let open = self
                     .open_files
@@ -1172,7 +1172,7 @@ impl SmbVecFs {
             }
             VfFile::Saved => return Err(VfError::unsupported(0)),
             _ => {
-                let path = self.path_string(&self.file_path(&op.file)?)?;
+                let path = self.path_string(&self.file_path(op.file)?)?;
                 let mut flags = libc::O_WRONLY;
                 if op.creation {
                     flags |= libc::O_CREAT;
@@ -1192,7 +1192,7 @@ impl SmbVecFs {
                 self.resolve_offset(descriptor, op.offset, size)?
             };
             let mut confirmed = 0usize;
-            let write_result = self.raw_write_progress(file_id, offset, &op.data, |written| {
+            let write_result = self.raw_write_progress(file_id, offset, op.data, |written| {
                 confirmed = written;
             });
             if let Some(fd) = descriptor
@@ -1610,6 +1610,11 @@ impl VecFs for SmbVecFs {
     }
 
     fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+        let borrowed: Vec<_> = writes.iter().map(WriteOpRef::from).collect();
+        self.writev_borrowed(&borrowed)
+    }
+
+    fn writev_borrowed(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
         #[cfg(feature = "test-faults")]
         {
             self.last_writev_was_concurrent = false;
@@ -1636,7 +1641,7 @@ impl VecFs for SmbVecFs {
                 let path = self
                     .path_string(
                         &self
-                            .file_path(&write.file)
+                            .file_path(write.file)
                             .map_err(|e| e.with_index(index))?,
                     )
                     .map_err(|e| e.with_index(index))?;
@@ -1652,7 +1657,7 @@ impl VecFs for SmbVecFs {
                 let VfOffset::At(offset) = write.offset else {
                     unreachable!("concurrent write eligibility checked")
                 };
-                prepared.push((create, identity_create, offset, write.data.clone()));
+                prepared.push((create, identity_create, offset, write.data));
             }
             let connection = self.client.connection_mut().clone();
             let tree_id = self.tree.tree_id;
@@ -1671,7 +1676,13 @@ impl VecFs for SmbVecFs {
                     self.last_writev_was_concurrent = true;
                 }
                 let jobs = prepared.into_iter().map(|(create, _, offset, data)| {
-                    concurrent_compound_write(connection.clone(), tree_id, create, offset, data)
+                    concurrent_compound_write(
+                        connection.clone(),
+                        tree_id,
+                        create,
+                        offset,
+                        data.to_vec(),
+                    )
                 });
                 let results = self.runtime.block_on(join_all(jobs));
                 let mut output = Vec::with_capacity(writes.len());
@@ -1692,7 +1703,7 @@ impl VecFs for SmbVecFs {
         }
         let mut output = Vec::with_capacity(writes.len());
         for (index, write) in writes.iter().enumerate() {
-            output.push(self.write_one(write).map_err(|e| e.with_index(index))?);
+            output.push(self.write_one(*write).map_err(|e| e.with_index(index))?);
         }
         Ok(output)
     }

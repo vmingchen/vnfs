@@ -190,6 +190,33 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_write_and_direct_read_into_preserve_offsets_and_eof() {
+        let (_root, mut fs) = fs("borrowed-io");
+        let file = VfFile::from_path("/f");
+        let mut write = WriteOpRef::new(&file, VfOffset::At(0), b"hello");
+        write.creation = true;
+        let written = fs.writev_borrowed(&[write]).unwrap();
+        assert_eq!(written[0].written, 5);
+
+        let reads = [ReadOp::at(file.clone(), 0, 3), ReadOp::at(file, 3, 5)];
+        let mut first = [0u8; 3];
+        let mut second = [0u8; 5];
+        let results = fs
+            .readv_into(&reads, &mut [&mut first, &mut second])
+            .unwrap();
+        assert_eq!(
+            (results[0].offset, results[0].read, results[0].eof),
+            (0, 3, false)
+        );
+        assert_eq!(
+            (results[1].offset, results[1].read, results[1].eof),
+            (3, 2, true)
+        );
+        assert_eq!(&first, b"hel");
+        assert_eq!(&second[..2], b"lo");
+    }
+
+    #[test]
     fn end_offset_writes_append_and_reads_at_end() {
         let (_root, mut fs) = fs("end");
         write(&mut fs, "/f", b"hello world");

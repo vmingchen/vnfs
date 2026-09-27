@@ -18,7 +18,7 @@ use vnfs::{Nfs, NfsReadPoolOptions};
 #[cfg(feature = "test-faults")]
 use std::io::{self, Read, Write};
 #[cfg(feature = "test-faults")]
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 #[cfg(feature = "test-faults")]
 use std::sync::{
     Arc, Condvar, Mutex,
@@ -101,6 +101,31 @@ impl DropReplyProxy {
             .expect("reply-loss state poisoned");
         assert!(*state && !timeout.timed_out(), "proxy did not drop a reply");
     }
+}
+
+#[cfg(feature = "test-faults")]
+fn reply_loss_target() -> SocketAddr {
+    let host = std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    resolve_reply_loss_target(&host)
+}
+
+#[cfg(feature = "test-faults")]
+fn resolve_reply_loss_target(host: &str) -> SocketAddr {
+    let mut addresses = host
+        .to_socket_addrs()
+        .or_else(|_| (host, 2049).to_socket_addrs())
+        .expect("resolve NFS fault proxy target");
+    addresses
+        .next()
+        .expect("NFS fault proxy target has no address")
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn reply_loss_target_accepts_hostname_with_explicit_port() {
+    let target = resolve_reply_loss_target("localhost:2050");
+    assert_eq!(target.port(), 2050);
+    assert!(target.ip().is_loopback());
 }
 
 #[cfg(feature = "test-faults")]
@@ -246,7 +271,8 @@ fn builder_observer_receives_lifecycle_events() {
 #[test]
 fn rust_native_client_workflow_on_nfs() {
     let dir = setup_dir("rust_native_client");
-    let builder = vnfs::Nfs::builder("127.0.0.1").minor_version(
+    let host = std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let builder = vnfs::Nfs::builder(&host).minor_version(
         match std::env::var("VNFS_TEST_MINOR").as_deref() {
             Ok("1") => Some(1),
             Ok("2") => Some(2),
@@ -279,8 +305,27 @@ fn rust_native_client_workflow_on_nfs() {
         .unwrap();
     assert_eq!(values[0].data, b"one");
     assert_eq!(values[1].data, b"two");
+    let mut first = [0u8; 8];
+    let mut second = [0u8; 8];
+    let _ = vnfs::legacy::compound::thread_compound_stats();
+    let lengths = client
+        .readv_into(&mut [
+            files[0].read_request_at_into(0, &mut first),
+            files[1].read_request_at_into(0, &mut second),
+        ])
+        .unwrap();
+    assert_eq!(lengths, [3, 3]);
+    assert_eq!(&first[..3], b"one");
+    assert_eq!(&second[..3], b"two");
+    assert_eq!(vnfs::legacy::compound::thread_compound_stats().0, 1);
     assert_eq!(client.metadata(&paths[0]).unwrap().len(), 3);
     assert_eq!(client.read_dir(&nested).unwrap().len(), 2);
+    let large = vec![0xa5; 2 * 1024 * 1024];
+    files[0].write_at(&large, 0).unwrap();
+    let mut large_buffer = vec![0; large.len() + 16];
+    let read = files[0].read_at(&mut large_buffer, 0).unwrap();
+    assert_eq!(read, large.len());
+    assert_eq!(&large_buffer[..read], large);
     client.closev(files).unwrap();
     client.remove_dir_all(&dir).unwrap();
 }
@@ -1771,7 +1816,7 @@ fn failed_open_cleanup_is_retained_and_retried_before_the_next_openv() {
 #[test]
 fn openv_does_not_replay_exclusive_create_after_real_reply_loss() {
     let dir = setup_dir("openv_proxy_reply_loss");
-    let proxy = DropReplyProxy::start("127.0.0.1:2049".parse().unwrap());
+    let proxy = DropReplyProxy::start(reply_loss_target());
     let endpoint = proxy.endpoint();
     let mut proxied = NfsVecFs::connect_with_options(
         &endpoint,
@@ -1822,7 +1867,7 @@ fn pipelined_read_recovers_after_a_lost_read_reply() {
     let mut admin = client();
     write_file(&mut admin, Path::new(&path), &expected);
 
-    let proxy = DropReplyProxy::start("127.0.0.1:2049".parse().unwrap());
+    let proxy = DropReplyProxy::start(reply_loss_target());
     let mut pool = Nfs::builder(proxy.endpoint())
         .connect_read_pool(
             NfsReadPoolOptions::new()

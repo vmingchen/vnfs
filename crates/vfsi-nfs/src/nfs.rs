@@ -1959,6 +1959,117 @@ impl NfsVecFs {
         Ok(out)
     }
 
+    /// Descriptor READs decoded directly from NFS reply storage into caller
+    /// buffers. The same compound packing and offset rules as `readv_batch`
+    /// apply; no per-result `Vec<u8>` or aggregate read buffer is created.
+    fn readv_batch_into(
+        &mut self,
+        reads: &[ReadOp],
+        buffers: &mut [&mut [u8]],
+    ) -> VfResult<Vec<ReadIntoResult>> {
+        let per = self.nfs.read_per_op_bytes();
+        let mut ops = Vec::with_capacity(reads.len());
+        let mut owners = Vec::with_capacity(reads.len());
+        let mut offsets = Vec::with_capacity(reads.len());
+        for (index, read) in reads.iter().enumerate() {
+            if read.length != buffers[index].len() {
+                return Err(VfError::client(index, ERR_INVAL));
+            }
+            let offset = self
+                .resolve_offset(&read.file, read.offset)
+                .map_err(|error| error.with_index(index))?;
+            let length = u64::try_from(read.length)
+                .map_err(|_| VfError::failure(index, libc::EOVERFLOW as u32))?;
+            offset
+                .checked_add(length)
+                .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
+            let open = self
+                .open_files
+                .get(&read.file.fd().unwrap())
+                .cloned()
+                .ok_or_else(|| VfError::failure(index, ERR_EBADF))?;
+            let mut remaining = read.length;
+            let mut start = 0usize;
+            loop {
+                let count = remaining.min(per);
+                ops.push(crate::client::ReadOp {
+                    fh: open.fh.clone(),
+                    stateid: open.stateid,
+                    offset: offset
+                        .checked_add(start as u64)
+                        .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?,
+                    count: count as u32,
+                });
+                owners.push(index);
+                remaining -= count;
+                if remaining == 0 {
+                    break;
+                }
+                start += count;
+            }
+            offsets.push(offset);
+        }
+        let byte_limit = if self.nfs.max_response_bytes > 0 {
+            self.nfs.read_compound_bytes().saturating_sub(128)
+        } else {
+            usize::MAX
+        };
+        let mut lengths = vec![0usize; reads.len()];
+        let mut eofs = vec![false; reads.len()];
+        let mut cursor = 0usize;
+        while cursor < ops.len() {
+            let mut end = cursor;
+            let mut bytes = 0usize;
+            while end < ops.len() {
+                let next = ops[end].count as usize;
+                if end > cursor && bytes.saturating_add(next) > byte_limit {
+                    break;
+                }
+                bytes = bytes.saturating_add(next);
+                end += 1;
+            }
+            let chunk = self
+                .nfs
+                .readv_into(&ops[cursor..end], |local_index, data| {
+                    let wire_index = cursor + local_index;
+                    let owner = owners[wire_index];
+                    let start = lengths[owner];
+                    let Some(destination) = buffers[owner].get_mut(start..start + data.len())
+                    else {
+                        return Err(RpcError::transport("NFS READ reply exceeds caller buffer")
+                            .with_op_index(local_index));
+                    };
+                    destination.copy_from_slice(data);
+                    lengths[owner] += data.len();
+                    Ok(())
+                })
+                .map_err(|error| {
+                    let error = VfError::from_rpc_indexed(error);
+                    remap_descriptor_chunk_error(error, cursor, &owners)
+                })?;
+            for (wire_index, (_, eof)) in (cursor..end).zip(chunk) {
+                let owner = owners[wire_index];
+                eofs[owner] = eof;
+            }
+            cursor = end;
+        }
+        let mut results = Vec::with_capacity(reads.len());
+        for (index, read) in reads.iter().enumerate() {
+            let offset = offsets[index];
+            let next = offset
+                .checked_add(lengths[index] as u64)
+                .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
+            self.advance_offset(&read.file, next);
+            results.push(ReadIntoResult {
+                file: read.file.clone(),
+                offset,
+                read: lengths[index],
+                eof: eofs[index],
+            });
+        }
+        Ok(results)
+    }
+
     /// Resolve a [`VfOffset`] to a concrete file offset.
     fn resolve_offset(&mut self, file: &VfFile, off: VfOffset) -> VfResult<u64> {
         match off {
@@ -2004,14 +2115,14 @@ impl NfsVecFs {
     }
 
     /// Batched writev for open (descriptor) ops.
-    fn writev_batch(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+    fn writev_batch(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
         let per = self.nfs.per_op_bytes();
         let mut ops = Vec::with_capacity(writes.len());
         let mut offsets = Vec::with_capacity(writes.len());
         let mut owner = Vec::with_capacity(writes.len());
         for (i, op) in writes.iter().enumerate() {
             let off = self
-                .write_offset(&op.file, op.offset)
+                .write_offset(op.file, op.offset)
                 .map_err(|e| e.with_index(i))?;
             let length = u64::try_from(op.data.len())
                 .map_err(|_| VfError::failure(i, libc::EOVERFLOW as u32))?;
@@ -2032,7 +2143,7 @@ impl NfsVecFs {
                     offset: off
                         .checked_add(chunk_off)
                         .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?,
-                    data: op.data[chunk_off as usize..chunk_off as usize + n].to_vec(),
+                    data: &op.data[chunk_off as usize..chunk_off as usize + n],
                 });
                 owner.push(i);
                 remaining -= n;
@@ -2077,7 +2188,7 @@ impl NfsVecFs {
                     .offset
                     .checked_add(*written as u64)
                     .ok_or_else(|| VfError::failure(request_index, libc::EOVERFLOW as u32))?;
-                self.advance_offset(&writes[request_index].file, new_offset);
+                self.advance_offset(writes[request_index].file, new_offset);
             }
             results.extend(r);
             #[cfg(feature = "test-faults")]
@@ -2105,7 +2216,7 @@ impl NfsVecFs {
             let new_offset = off
                 .checked_add(written)
                 .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
-            self.advance_offset(&op.file, new_offset);
+            self.advance_offset(op.file, new_offset);
             out.push(WriteResult {
                 file: op.file.clone(),
                 offset: off,
@@ -2661,7 +2772,7 @@ impl NfsVecFs {
     }
 
     /// The legacy phased path-based writev.
-    fn writev_path_fallback(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+    fn writev_path_fallback(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
         if writes.is_empty() {
             return Ok(Vec::new());
         }
@@ -2670,7 +2781,7 @@ impl NfsVecFs {
         let mut creation = Vec::with_capacity(writes.len());
         let mut needs_open = false;
         for (i, w) in writes.iter().enumerate() {
-            files.push(&w.file);
+            files.push(w.file);
             creation.push(w.creation);
             if !w.file.is_descriptor() {
                 needs_open = true;
@@ -2683,16 +2794,21 @@ impl NfsVecFs {
             let truncation: Vec<bool> = writes.iter().map(|w| w.truncate).collect();
             tmp = self.open_path_batch(&files, &creation, true, &truncation)?;
         }
-        let remapped: Vec<WriteOp> = writes
+        let remapped_files: Vec<VfFile> = writes
             .iter()
             .enumerate()
-            .map(|(i, w)| WriteOp {
-                file: match tmp[i] {
-                    Some(fd) => VfFile::from_fd(fd),
-                    None => w.file.clone(),
-                },
+            .map(|(i, w)| match tmp[i] {
+                Some(fd) => VfFile::from_fd(fd),
+                None => w.file.clone(),
+            })
+            .collect();
+        let remapped: Vec<WriteOpRef<'_>> = writes
+            .iter()
+            .zip(&remapped_files)
+            .map(|(w, file)| WriteOpRef {
+                file,
                 offset: w.offset,
-                data: w.data.clone(),
+                data: w.data,
                 creation: false,
                 truncate: false,
             })
@@ -2708,8 +2824,8 @@ impl NfsVecFs {
 
     fn writev_path_openwrite(
         &mut self,
-        writes: &[WriteOp],
-        path_ops: &[crate::client::PathWriteOp],
+        writes: &[WriteOpRef<'_>],
+        path_ops: &[crate::client::PathWriteOp<'_>],
         offsets: &[u64],
     ) -> VfResult<Vec<WriteResult>> {
         match self.nfs.writev_path_compound(path_ops, false) {
@@ -2740,8 +2856,8 @@ impl NfsVecFs {
 
     fn writev_path_full(
         &mut self,
-        writes: &[WriteOp],
-        path_ops: &[crate::client::PathWriteOp],
+        writes: &[WriteOpRef<'_>],
+        path_ops: &[crate::client::PathWriteOp<'_>],
         offsets: &[u64],
     ) -> VfResult<Vec<WriteResult>> {
         match self.nfs.writev_path_compound(path_ops, true) {
@@ -2778,7 +2894,7 @@ impl NfsVecFs {
 
     fn assemble_writes(
         &self,
-        writes: &[WriteOp],
+        writes: &[WriteOpRef<'_>],
         offsets: &[u64],
         counts: &[Option<u32>],
         committed: &[Option<u32>],
@@ -3619,6 +3735,61 @@ impl VecFs for NfsVecFs {
         Ok(out)
     }
 
+    fn readv_into(
+        &mut self,
+        reads: &[ReadOp],
+        buffers: &mut [&mut [u8]],
+    ) -> VfResult<Vec<ReadIntoResult>> {
+        if reads.len() != buffers.len() {
+            return Err(VfError::client(0, ERR_INVAL));
+        }
+        for (index, (read, buffer)) in reads.iter().zip(buffers.iter()).enumerate() {
+            if read.length != buffer.len() {
+                return Err(VfError::client(index, ERR_INVAL));
+            }
+        }
+        if !self.recovery_in_progress {
+            return self.read_with_recovery(|client| client.readv_into(reads, buffers));
+        }
+        if reads.iter().all(|read| read.file.is_descriptor()) {
+            return self.readv_batch_into(reads, buffers);
+        }
+        // Path-based reads still use the merged path planner; its owned
+        // results are copied until that decoder also supports caller storage.
+        let results = self.readv(reads)?;
+        if results.len() != reads.len() {
+            return Err(VfError::transport(
+                None,
+                "readv_into returned wrong result count",
+            ));
+        }
+        let mut output = Vec::with_capacity(reads.len());
+        for (index, ((read, result), buffer)) in reads
+            .iter()
+            .zip(results)
+            .zip(buffers.iter_mut())
+            .enumerate()
+        {
+            if result.file != read.file
+                || result.data.len() > buffer.len()
+                || matches!(read.offset, VfOffset::At(offset) if result.offset != offset)
+            {
+                return Err(VfError::transport(
+                    Some(index),
+                    "malformed readv_into result",
+                ));
+            }
+            buffer[..result.data.len()].copy_from_slice(&result.data);
+            output.push(ReadIntoResult {
+                file: result.file,
+                offset: result.offset,
+                read: result.data.len(),
+                eof: result.eof,
+            });
+        }
+        Ok(output)
+    }
+
     fn read_allv_with_options(
         &mut self,
         files: &[VfFile],
@@ -3674,6 +3845,11 @@ impl VecFs for NfsVecFs {
     }
 
     fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+        let borrowed: Vec<_> = writes.iter().map(WriteOpRef::from).collect();
+        self.writev_borrowed(&borrowed)
+    }
+
+    fn writev_borrowed(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
         if writes.is_empty() {
             return Ok(Vec::new());
         }
@@ -3686,7 +3862,7 @@ impl VecFs for NfsVecFs {
             let off = match w.offset {
                 VfOffset::At(o) => o,
                 VfOffset::End => {
-                    let path = self.server_vf_path(&w.file).map_err(|e| e.with_index(i))?;
+                    let path = self.server_vf_path(w.file).map_err(|e| e.with_index(i))?;
                     let fh = self.resolve_follow(&path).map_err(|e| e.with_index(i))?;
                     self.file_size(&fh).map_err(|e| e.with_index(i))?
                 }
@@ -3715,7 +3891,7 @@ impl VecFs for NfsVecFs {
             } else {
                 crate::client::FileRef::Path(
                     crate::path::path_bytes(
-                        &self.server_vf_path(&w.file).map_err(|e| e.with_index(i))?,
+                        &self.server_vf_path(w.file).map_err(|e| e.with_index(i))?,
                     )
                     .to_vec(),
                 )
@@ -3723,7 +3899,7 @@ impl VecFs for NfsVecFs {
             path_ops.push(crate::client::PathWriteOp {
                 file,
                 offset: off,
-                data: w.data.clone(),
+                data: w.data,
                 create: w.creation && !w.file.is_descriptor(),
                 truncate: w.truncate && !w.file.is_descriptor(),
                 stateid: w
@@ -3744,7 +3920,7 @@ impl VecFs for NfsVecFs {
                     .offset
                     .checked_add(out[i].written as u64)
                     .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
-                self.advance_offset(&w.file, new);
+                self.advance_offset(w.file, new);
             }
         }
         Ok(out)

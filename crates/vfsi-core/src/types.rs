@@ -865,6 +865,15 @@ pub struct ReadResult {
     pub eof: bool,
 }
 
+/// Metadata for a read placed directly into caller-provided storage.
+#[derive(Debug, Clone)]
+pub struct ReadIntoResult {
+    pub file: VfFile,
+    pub offset: u64,
+    pub read: usize,
+    pub eof: bool,
+}
+
 /// One element of a batched write.
 #[derive(Debug, Clone)]
 pub struct WriteOp {
@@ -897,6 +906,18 @@ impl<'a> WriteOpRef<'a> {
             data,
             creation: false,
             truncate: false,
+        }
+    }
+}
+
+impl<'a> From<&'a WriteOp> for WriteOpRef<'a> {
+    fn from(write: &'a WriteOp) -> Self {
+        Self {
+            file: &write.file,
+            offset: write.offset,
+            data: &write.data,
+            creation: write.creation,
+            truncate: write.truncate,
         }
     }
 }

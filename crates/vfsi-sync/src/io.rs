@@ -2,7 +2,7 @@ use std::io::{self, Read, Seek, SeekFrom as IoSeekFrom, Write};
 use std::path::Path;
 
 use crate::traits::{validate_read_results, validate_write_results};
-use crate::{ReadOp, SeekFrom, VecFs, VfFile, VfOffset, WriteOp};
+use crate::{ReadOp, SeekFrom, VecFs, VfFile, VfOffset};
 
 fn io_error(error: crate::VfError) -> io::Error {
     let kind = match error.err_no() {
@@ -150,15 +150,32 @@ pub struct VfFileHandle<'a, F: VecFs + ?Sized> {
 }
 
 impl<F: VecFs + ?Sized> VfFileHandle<'_, F> {
+    /// Descriptor of an open handle. Use [`try_descriptor`](Self::try_descriptor)
+    /// when the handle might already have been closed with `try_close`.
     pub fn descriptor(&self) -> &VfFile {
         self.file.as_ref().expect("open handle has a descriptor")
     }
 
-    pub fn close(mut self) -> io::Result<()> {
-        let file = self.file.as_ref().expect("open handle has a descriptor");
+    pub fn try_descriptor(&self) -> io::Result<&VfFile> {
+        self.file
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "file handle is closed"))
+    }
+
+    /// Attempt CLOSE while retaining this handle if the backend reports an
+    /// error. A second attempt should follow the backend's recovery policy.
+    pub fn try_close(&mut self) -> io::Result<()> {
+        let Some(file) = self.file.as_ref() else {
+            return Ok(());
+        };
         self.filesystem.close(file).map_err(io_error)?;
         self.file = None;
         Ok(())
+    }
+
+    /// Consume and close the handle. On failure, `Drop` attempts cleanup.
+    pub fn close(mut self) -> io::Result<()> {
+        self.try_close()
     }
 }
 
@@ -167,7 +184,7 @@ impl<F: VecFs + ?Sized> Read for VfFileHandle<'_, F> {
         if buffer.is_empty() {
             return Ok(0);
         }
-        let file = self.file.as_ref().expect("open handle").clone();
+        let file = self.try_descriptor()?.clone();
         let requests = [ReadOp::new(file, VfOffset::Cur, buffer.len())];
         let mut results = self.filesystem.readv(&requests).map_err(io_error)?;
         validate_read_results("Read::read", &requests, &results).map_err(io_error)?;
@@ -182,32 +199,25 @@ impl<F: VecFs + ?Sized> Write for VfFileHandle<'_, F> {
         if buffer.is_empty() {
             return Ok(0);
         }
-        let file = self.file.as_ref().expect("open handle").clone();
-        let owned = WriteOp::new(file, VfOffset::Cur, buffer.to_vec());
-        let requests = [crate::WriteOpRef {
-            file: &owned.file,
-            offset: owned.offset,
-            data: &owned.data,
-            creation: owned.creation,
-            truncate: owned.truncate,
-        }];
+        let file = self.try_descriptor()?.clone();
+        let requests = [crate::WriteOpRef::new(&file, VfOffset::Cur, buffer)];
         let mut results = self
             .filesystem
-            .writev(std::slice::from_ref(&owned))
+            .writev_borrowed(&requests)
             .map_err(io_error)?;
         validate_write_results("Write::write", &requests, &results).map_err(io_error)?;
         Ok(results.pop().expect("validated one write result").written)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let file = self.file.as_ref().expect("open handle");
-        self.filesystem.sync_data(file).map_err(io_error)
+        let file = self.try_descriptor()?.clone();
+        self.filesystem.sync_data(&file).map_err(io_error)
     }
 }
 
 impl<F: VecFs + ?Sized> Seek for VfFileHandle<'_, F> {
     fn seek(&mut self, position: IoSeekFrom) -> io::Result<u64> {
-        let file = self.file.as_ref().expect("open handle").clone();
+        let file = self.try_descriptor()?.clone();
         let (offset, whence) = match position {
             IoSeekFrom::Start(offset) => (
                 i64::try_from(offset).map_err(|_| {

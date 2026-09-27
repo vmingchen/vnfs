@@ -407,6 +407,28 @@ fn standard_io_handle_is_raii_and_seekable() {
 }
 
 #[test]
+fn legacy_handle_try_close_leaves_an_inert_handle() {
+    use std::io::{Read, Write};
+    use vnfs::VfOpenOptions;
+
+    let mut fs = dummy();
+    let mut options = VfOpenOptions::new();
+    options.read(true).write(true).create(true);
+    let mut file = options.open(&mut fs, "/try-close").unwrap();
+    file.try_close().unwrap();
+    file.try_close().unwrap();
+    assert!(file.try_descriptor().is_err());
+    assert_eq!(
+        file.read(&mut [0u8; 1]).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        file.write(b"x").unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+}
+
+#[test]
 fn standard_open_options_validate_access_modes() {
     use vnfs::VfOpenOptions;
 

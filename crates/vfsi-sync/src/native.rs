@@ -3,7 +3,7 @@
 //! [`VecFs`] remains the compatibility/backend implementation trait. New
 //! applications should bound generic code by these smaller interfaces.
 
-use crate::traits::{validate_read_results, validate_write_results};
+use crate::traits::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::*;
 
 /// Core synchronous scalar filesystem operations.
@@ -14,6 +14,28 @@ pub trait FileSystem {
     fn sync_data(&mut self, file: &VfFile) -> VfResult<()>;
     fn sync_all(&mut self, file: &VfFile) -> VfResult<()>;
     fn read_one(&mut self, request: &ReadOp) -> VfResult<ReadResult>;
+    /// Read directly into caller storage when supported by the backend.
+    fn read_one_into(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
+        if request.length != buffer.len() {
+            return Err(VfError::client(0, ERR_INVAL));
+        }
+        let result = self.read_one(request)?;
+        if result.data.len() > buffer.len() {
+            return Err(VfError::client(0, ERR_IO));
+        }
+        validate_read_results(
+            "read_one_into",
+            std::slice::from_ref(request),
+            std::slice::from_ref(&result),
+        )?;
+        buffer[..result.data.len()].copy_from_slice(&result.data);
+        Ok(ReadIntoResult {
+            file: result.file,
+            offset: result.offset,
+            read: result.data.len(),
+            eof: result.eof,
+        })
+    }
     fn write_one(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult>;
     fn seek_one(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64>;
     fn metadata(&mut self, query: MetadataQuery) -> VfResult<VfAttrs>;
@@ -105,6 +127,38 @@ pub trait VectorFileSystem: FileSystem {
     #[doc(hidden)]
     fn read_many(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>>;
 
+    /// Vector read into caller storage. Backends can override the copying
+    /// fallback without changing the owned-result `read_many` contract.
+    fn read_many_into(
+        &mut self,
+        requests: &[ReadOp],
+        buffers: &mut [&mut [u8]],
+    ) -> VfResult<Vec<ReadIntoResult>> {
+        if requests.len() != buffers.len() {
+            return Err(VfError::client(0, ERR_INVAL));
+        }
+        for (index, (request, buffer)) in requests.iter().zip(buffers.iter()).enumerate() {
+            if request.length != buffer.len() {
+                return Err(VfError::client(index, ERR_INVAL));
+            }
+        }
+        let results = self.read_many(requests)?;
+        validate_read_results("read_many_into", requests, &results)?;
+        Ok(results
+            .into_iter()
+            .zip(buffers.iter_mut())
+            .map(|(result, buffer)| {
+                buffer[..result.data.len()].copy_from_slice(&result.data);
+                ReadIntoResult {
+                    file: result.file,
+                    offset: result.offset,
+                    read: result.data.len(),
+                    eof: result.eof,
+                }
+            })
+            .collect())
+    }
+
     /// Return exactly one result per request, in request order.
     #[doc(hidden)]
     fn write_many(&mut self, requests: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>>;
@@ -150,6 +204,12 @@ impl<T: VecFs + ?Sized> FileSystem for T {
     fn read_one(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
         let mut results = self.readv(std::slice::from_ref(request))?;
         validate_read_results("read_one", std::slice::from_ref(request), &results)?;
+        Ok(results.pop().expect("validated one result"))
+    }
+
+    fn read_one_into(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
+        let mut results = self.readv_into(std::slice::from_ref(request), &mut [buffer])?;
+        validate_read_into_results("read_one_into", std::slice::from_ref(request), &results)?;
         Ok(results.pop().expect("validated one result"))
     }
 
@@ -382,6 +442,14 @@ impl<T: VecFs + ?Sized> VectorFileSystem for T {
 
     fn read_many(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         self.readv(requests)
+    }
+
+    fn read_many_into(
+        &mut self,
+        requests: &[ReadOp],
+        buffers: &mut [&mut [u8]],
+    ) -> VfResult<Vec<ReadIntoResult>> {
+        self.readv_into(requests, buffers)
     }
 
     fn write_many(&mut self, requests: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {

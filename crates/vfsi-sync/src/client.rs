@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
-use crate::traits::{validate_read_results, validate_write_results};
+use crate::traits::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::{
     AttrMask, Capabilities, CopyFileSystem, DEFAULT_READ_MAX_BYTES, DirEntry, DirectoryFileSystem,
     FileSystem, LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
@@ -160,11 +160,12 @@ impl<F: FileSystem> FsClient<F> {
     }
 }
 
-impl<F: FileSystem + VecFs> FsClient<F> {
+impl<F: FileSystem> FsClient<F> {
     /// Stream one file from offset zero in bounded chunks.
     ///
-    /// The callback runs while the backend is borrowed and must not reenter
-    /// this client. Return `Ok(false)` to stop successfully. Callback errors
+    /// The callback runs without holding the backend lock, so it may use this
+    /// client or drop other files owned by it. Return `Ok(false)` to stop
+    /// successfully. Callback errors
     /// are propagated. The file is closed on success, cancellation, callback
     /// error, or read error. At most one requested chunk is buffered at once.
     pub fn read_stream(
@@ -188,31 +189,33 @@ impl<F: FileSystem + VecFs> FsClient<F> {
         }
 
         let file = self.open(path)?;
-        let raw_file = file.raw().clone();
-        let mut callback_error = None;
-        let operation = (|| {
-            self.lock()?.read_streamv(
-                std::slice::from_ref(&raw_file),
-                chunk_size,
-                chunk_size,
-                &mut |_, offset, data, _| {
-                    if data.is_empty() {
-                        return true;
-                    }
-                    match callback(offset, data) {
-                        Ok(keep_going) => keep_going,
-                        Err(error) => {
-                            callback_error = Some(error);
-                            false
-                        }
-                    }
-                },
-            )
+        let raw_file = file.raw()?.clone();
+        let operation = (|| -> VfResult<()> {
+            let mut offset = 0u64;
+            loop {
+                let request = ReadOp::at(raw_file.clone(), offset, chunk_size);
+                let result = {
+                    let mut backend = self.lock()?;
+                    let result = backend.read_one(&request)?;
+                    validate_read_results(
+                        "read_stream",
+                        std::slice::from_ref(&request),
+                        std::slice::from_ref(&result),
+                    )?;
+                    result
+                };
+                let length = result.data.len();
+                if !result.data.is_empty() && !callback(offset, &result.data)? {
+                    return Ok(());
+                }
+                if result.eof {
+                    return Ok(());
+                }
+                offset = offset
+                    .checked_add(length as u64)
+                    .ok_or_else(|| VfError::client(0, libc::EOVERFLOW as u32))?;
+            }
         })();
-        let operation = match callback_error {
-            Some(error) => Err(error),
-            None => operation,
-        };
         let close = file.close();
         match operation {
             Err(error) => Err(error),
@@ -462,7 +465,10 @@ impl<F: VectorFileSystem> FsClient<F> {
         for (index, file) in files.iter().enumerate() {
             self.validate_owner(file, index)?;
         }
-        let descriptors: Vec<VfFile> = files.iter().map(|file| file.raw().clone()).collect();
+        let descriptors: Vec<VfFile> = files
+            .iter()
+            .map(|file| file.raw().cloned())
+            .collect::<VfResult<_>>()?;
         self.lock()?.close_many(&descriptors).map_err(|error| {
             error
                 .index_opt()
@@ -506,7 +512,7 @@ impl<F: VectorFileSystem> FsClient<F> {
         for (index, request) in requests.iter().enumerate() {
             self.validate_owner(request.file, index)?;
             reads.push(ReadOp::new(
-                request.file.raw().clone(),
+                request.file.raw()?.clone(),
                 request.offset,
                 request.length,
             ));
@@ -519,37 +525,35 @@ impl<F: VectorFileSystem> FsClient<F> {
         for (index, request) in requests.iter().enumerate() {
             self.validate_owner(request.file, index)?;
             reads.push(ReadOp::new(
-                request.file.raw().clone(),
+                request.file.raw()?.clone(),
                 request.offset,
                 request.buffer.len(),
             ));
         }
-        let results = self.lock()?.read_many(&reads).map_err(|error| {
-            error
-                .index_opt()
-                .and_then(|index| requests.get(index))
-                .map_or(error.clone(), |request| {
-                    error.with_context("readv_into", request.file.path())
-                })
-        })?;
-        validate_read_results("readv_into", &reads, &results).map_err(|error| {
-            error
-                .index_opt()
-                .and_then(|index| requests.get(index))
-                .map_or(error.clone(), |request| {
-                    error.with_context("readv_into", request.file.path())
-                })
-        })?;
-        let mut lengths = Vec::with_capacity(results.len());
-        for (index, (request, result)) in requests.iter_mut().zip(results).enumerate() {
-            if result.data.len() > request.buffer.len() {
-                return Err(VfError::client(index, crate::ERR_IO)
-                    .with_context("readv_into", request.file.path()));
-            }
-            request.buffer[..result.data.len()].copy_from_slice(&result.data);
-            lengths.push(result.data.len());
+        let results = {
+            let mut buffers: Vec<&mut [u8]> = requests
+                .iter_mut()
+                .map(|request| &mut *request.buffer)
+                .collect();
+            self.lock()?.read_many_into(&reads, &mut buffers)
         }
-        Ok(lengths)
+        .map_err(|error| {
+            error
+                .index_opt()
+                .and_then(|index| requests.get(index))
+                .map_or(error.clone(), |request| {
+                    error.with_context("readv_into", request.file.path())
+                })
+        })?;
+        validate_read_into_results("readv_into", &reads, &results).map_err(|error| {
+            error
+                .index_opt()
+                .and_then(|index| requests.get(index))
+                .map_or(error.clone(), |request| {
+                    error.with_context("readv_into", request.file.path())
+                })
+        })?;
+        Ok(results.into_iter().map(|result| result.read).collect())
     }
 
     pub fn writev(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<WriteResult>> {
@@ -581,7 +585,7 @@ impl<F: VectorFileSystem> FsClient<F> {
         for (index, request) in requests.iter().enumerate() {
             self.validate_owner(request.file, index)?;
             writes.push(WriteOpRef::new(
-                request.file.raw(),
+                request.file.raw()?,
                 request.offset,
                 request.data,
             ));
@@ -749,6 +753,10 @@ impl<F: MetadataFileSystem> SetMetadata<'_, F> {
 }
 
 /// Owned RAII file which does not borrow the client.
+///
+/// Dropping an open file attempts a best-effort CLOSE. This can block on the
+/// backend mutex and on network I/O; use [`FsFile::try_close`] when the close
+/// result matters or when its timing must be controlled.
 pub struct FsFile<F: FileSystem> {
     inner: Arc<Mutex<F>>,
     file: Option<VfFile>,
@@ -766,8 +774,10 @@ impl<F: FileSystem> fmt::Debug for FsFile<F> {
 }
 
 impl<F: FileSystem> FsFile<F> {
-    fn raw(&self) -> &VfFile {
-        self.file.as_ref().expect("open file")
+    fn raw(&self) -> VfResult<&VfFile> {
+        self.file
+            .as_ref()
+            .ok_or_else(|| VfError::client(0, crate::ERR_EBADF))
     }
 
     /// Positional read which does not alter the file cursor.
@@ -807,14 +817,14 @@ impl<F: FileSystem> FsFile<F> {
         self.inner
             .lock()
             .map_err(|_| poisoned())?
-            .metadata(MetadataQuery::new(self.raw().clone(), attributes))
+            .metadata(MetadataQuery::new(self.raw()?.clone(), attributes))
             .map(Metadata::from)
             .map_err(|error| error.with_context("metadata", &self.path))
     }
 
     /// Truncate or extend the open file.
     pub fn set_len(&self, len: u64) -> VfResult<()> {
-        let mut update = SetAttributes::new(self.raw().clone());
+        let mut update = SetAttributes::new(self.raw()?.clone());
         update.size = Some(len);
         self.inner
             .lock()
@@ -825,7 +835,7 @@ impl<F: FileSystem> FsFile<F> {
 
     /// Change permissions on the open file.
     pub fn set_permissions(&self, permissions: Permissions) -> VfResult<()> {
-        let mut update = SetAttributes::new(self.raw().clone());
+        let mut update = SetAttributes::new(self.raw()?.clone());
         update.mode = Some(permissions.mode());
         self.inner
             .lock()
@@ -866,24 +876,27 @@ impl<F: FileSystem> FsFile<F> {
         if buffer.is_empty() {
             return Ok(0);
         }
+        let request = ReadOp::new(self.raw()?.clone(), offset, buffer.len());
         let result = self
             .inner
             .lock()
             .map_err(|_| poisoned())?
-            .read_one(&ReadOp::new(self.raw().clone(), offset, buffer.len()))
+            .read_one_into(&request, buffer)
             .map_err(|error| error.with_context("read", &self.path))?;
-        if result.data.len() > buffer.len() {
-            return Err(VfError::client(0, crate::ERR_IO).with_context("read", &self.path));
-        }
-        buffer[..result.data.len()].copy_from_slice(&result.data);
-        Ok(result.data.len())
+        validate_read_into_results(
+            "read",
+            std::slice::from_ref(&request),
+            std::slice::from_ref(&result),
+        )
+        .map_err(|error| error.with_context("read", &self.path))?;
+        Ok(result.read)
     }
 
     fn write_from(&self, buffer: &[u8], offset: VfOffset) -> VfResult<usize> {
         if buffer.is_empty() {
             return Ok(0);
         }
-        let file = self.raw().clone();
+        let file = self.raw()?.clone();
         let result = self
             .inner
             .lock()
@@ -900,7 +913,7 @@ impl<F: FileSystem> FsFile<F> {
         self.inner
             .lock()
             .map_err(|_| poisoned())?
-            .sync_data(self.raw())
+            .sync_data(self.raw()?)
             .map_err(|error| error.with_context("sync_data", &self.path))
     }
 
@@ -908,12 +921,16 @@ impl<F: FileSystem> FsFile<F> {
         self.inner
             .lock()
             .map_err(|_| poisoned())?
-            .sync_all(self.raw())
+            .sync_all(self.raw()?)
             .map_err(|error| error.with_context("sync_all", &self.path))
     }
 
-    pub fn close(mut self) -> VfResult<()> {
-        let file = self.file.as_ref().expect("open file");
+    /// Attempt to close without consuming the handle. A failed close leaves
+    /// the handle armed so the caller can reconcile or retry it explicitly.
+    pub fn try_close(&mut self) -> VfResult<()> {
+        let Some(file) = self.file.as_ref() else {
+            return Ok(());
+        };
         self.inner
             .lock()
             .map_err(|_| poisoned())?
@@ -923,12 +940,18 @@ impl<F: FileSystem> FsFile<F> {
         Ok(())
     }
 
+    /// Consume and close the handle. On failure, `Drop` makes one best-effort
+    /// cleanup attempt; use [`try_close`](Self::try_close) to retain control.
+    pub fn close(mut self) -> VfResult<()> {
+        self.try_close()
+    }
+
     /// Seek while retaining [`VfError`] protocol and path information.
     pub fn seek_native(&mut self, position: IoSeekFrom) -> VfResult<u64> {
         self.inner
             .lock()
             .map_err(|_| poisoned())?
-            .seek_one(self.raw(), position)
+            .seek_one(self.raw()?, position)
             .map_err(|error| error.with_context("seek", &self.path))
     }
 }
