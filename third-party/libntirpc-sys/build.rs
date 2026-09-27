@@ -59,6 +59,25 @@ fn main() {
         .arg(format!("-I{}", include.display()));
     if env::var_os("CARGO_FEATURE_RPCSEC_GSS").is_some() {
         helper_compile.arg("-DVFSI_RPCSEC_GSS=1");
+        // GSSAPI headers are needed only for `rpcsec-gss`; the base bindings
+        // deliberately avoid them. Probe the Kerberos/GSS pkg-config modules
+        // for their include directory and fail early with an actionable
+        // message when no GSSAPI implementation is installed.
+        match ["krb5-gssapi", "mit-krb5-gssapi", "libgssglue", "gssglue"]
+            .iter()
+            .find_map(|name| pkg_config::Config::new().probe(name).ok())
+        {
+            Some(gss) => {
+                for path in gss.include_paths {
+                    helper_compile.arg(format!("-I{}", path.display()));
+                }
+            }
+            None => assert!(
+                std::path::Path::new("/usr/include/gssapi/gssapi.h").exists(),
+                "the `rpcsec-gss` feature requires GSSAPI headers; \
+                 install libkrb5-dev (or libgssglue-dev)"
+            ),
+        }
         if major >= 6 {
             helper_compile.arg("-DVFSI_LIBNTIRPC_HAS_CLIENT_XPRT=1");
         }

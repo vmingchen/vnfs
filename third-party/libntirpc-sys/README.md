@@ -24,14 +24,23 @@ source. The currently supported native target is Linux.
 | libntirpc | `libntirpc-dev` | RPC implementation and headers (6.3+) |
 | pkg-config | `pkg-config` | locate the installed library and headers |
 | clang | `clang` | provide the headers used by bindgen to generate bindings |
-| liburcu | `liburcu-dev` | userspace RCU library used by libntirpc |
-| libkrb5 | `libkrb5-dev` | RPCSEC_GSS support, required by libntirpc (GSS is on by default) |
+| GSSAPI headers | `libkrb5-dev` | only for the optional `rpcsec-gss` feature |
 
 Install them on Ubuntu with:
 
 ```sh
-sudo apt install clang libclang-dev pkg-config libntirpc-dev liburcu-dev libkrb5-dev
+sudo apt install clang libclang-dev pkg-config libntirpc-dev
 ```
+
+Add `libkrb5-dev` only when building the `rpcsec-gss` feature:
+
+```sh
+sudo apt install libkrb5-dev
+```
+
+The `libntirpc` shared object is linked against `liburcu-bp` and, when the
+distribution enables it, `libgssapi_krb5`. The runtime `libntirpc6.3` package
+depends on both, so a default build needs no extra development packages.
 
 docs.rs uses checked-in declarations and therefore does not require native
 packages. Those declarations are only a documentation input; normal builds

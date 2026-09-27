@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.88"
 name = "libntirpc-sys"
-version = "0.2.4"
+version = "0.2.5"
 authors = ["Ming Chen <v.mingchen@gmail.com>"]
 build = "build.rs"
 links = "ntirpc"
@@ -29,6 +29,7 @@ keywords = [
     "rpc",
     "tirpc",
     "ntirpc",
+    "nfs",
 ]
 license = "BSD-3-Clause"
 repository = "https://github.com/vmingchen/libntirpc-sys"
