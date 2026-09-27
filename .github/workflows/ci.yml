@@ -641,7 +641,10 @@ jobs:
       - name: Smoke-test nfs4fs benchmark drivers
         run: |
           sudo mkdir -p /mnt/vnfs-ci-bench
-          sudo mount -t nfs4 -o vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049 127.0.0.1:/ /mnt/vnfs-ci-bench
+          # Benchmark fixtures mix direct NFS and kernel access. Disable the
+          # kernel's attribute/lookup caches for this smoke test so a freshly
+          # created tree is visible to both clients before timing begins.
+          sudo mount -t nfs4 -o vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049,actimeo=0,lookupcache=none 127.0.0.1:/ /mnt/vnfs-ci-bench
           trap 'sudo umount /mnt/vnfs-ci-bench' EXIT
           .venv/bin/python adapters/nfs4fs/benchmarks/small_files.py \
             --host 127.0.0.1:2049 --direct-root /srv/vnfs-ci --mount-root /mnt/vnfs-ci-bench \

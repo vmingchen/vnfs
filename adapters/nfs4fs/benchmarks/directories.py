@@ -30,8 +30,13 @@ def _check_tree(entries: dict, directories: int, files_per_dir: int, size: int) 
     files = [entry for entry in entries.values() if entry["type"] == "file"]
     dirs = [entry for entry in entries.values() if entry["type"] == "directory"]
     if len(files) != directories * files_per_dir or len(dirs) < directories:
+        observed = [
+            (Path(name).name, entry.get("type"))
+            for name, entry in list(entries.items())[:8]
+        ]
         raise RuntimeError(
-            f"incomplete tree: {len(dirs)} directories, {len(files)} files"
+            f"incomplete tree: {len(dirs)} directories, {len(files)} files; "
+            f"first entries: {observed}"
         )
     if sum(entry["size"] for entry in files) != directories * files_per_dir * size:
         raise RuntimeError("tree has the wrong total file size")
