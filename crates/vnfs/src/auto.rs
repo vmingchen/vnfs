@@ -275,13 +275,30 @@ impl AutoClient {
         }
         // Connection failure is a pre-dispatch fallback. Never replay a
         // possibly completed mutation through the mounted backend.
-        let client = Nfs::builder(&spec.server)
+        let client = match Nfs::builder(&spec.server)
             .root(&spec.export)
             .minor_version(Some(spec.minor))
             .connect()
-            .ok()?;
+        {
+            Ok(client) => client,
+            Err(_error) => {
+                #[cfg(test)]
+                eprintln!("Auto direct NFS connection failed: {_error:?}");
+                return None;
+            }
+        };
         let kernel_id = fs::metadata(&spec.mount_point).ok()?.ino();
-        if client.metadata("/").ok()?.file_id() != Some(kernel_id) {
+        let direct_id = match client.metadata("/") {
+            Ok(metadata) => metadata.file_id(),
+            Err(_error) => {
+                #[cfg(test)]
+                eprintln!("Auto direct NFS root metadata failed: {_error:?}");
+                return None;
+            }
+        };
+        if direct_id != Some(kernel_id) {
+            #[cfg(test)]
+            eprintln!("Auto NFS root identity mismatch: direct={direct_id:?} kernel={kernel_id}");
             return None;
         }
         if AuthSysIdentity::current().as_ref() != Some(&credentials) {
