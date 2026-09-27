@@ -11,30 +11,17 @@ fn write_docs_bindings(out_dir: &Path) {
 
 /// Locate the libntirpc object that `pkg-config` will actually link.
 ///
-/// The preferred method asks the compiler to resolve `-l<name>` for us: it
-/// searches the same directories the linker will, including the standard and
-/// multiarch paths that pkg-config omits when it prints a bare `-lntirpc`
-/// (which means `Library::link_paths` can legitimately be empty). When the
-/// compiler cannot resolve it, fall back to scanning any explicit link paths.
+/// Explicit `-L` paths from pkg-config are checked first, in the order the
+/// linker will search them. They are emitted as `cargo:rustc-link-search`
+/// before `-lntirpc`, so they take precedence over any default directory; if
+/// they are ignored here, a custom prefix selected via `PKG_CONFIG_PATH` could
+/// be probed as the system library instead.
+///
+/// Only when pkg-config reports no link path (it commonly prints a bare
+/// `-lntirpc`, leaving [`pkg_config::Library::link_paths`] empty) do we ask the
+/// compiler to resolve `-l<name>`, which covers `LIBRARY_PATH` and the
+/// standard/multiarch directories.
 fn find_library(library: &pkg_config::Library, compiler: &OsStr) -> Option<PathBuf> {
-    for lib in &library.libs {
-        for name in [format!("lib{lib}.so"), format!("lib{lib}.a")] {
-            let Ok(output) = Command::new(compiler)
-                .arg(format!("-print-file-name={name}"))
-                .output()
-            else {
-                continue;
-            };
-            if !output.status.success() {
-                continue;
-            }
-            let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
-            if path.is_absolute() && path.exists() {
-                return Some(path);
-            }
-        }
-    }
-
     for directory in &library.link_paths {
         for lib in &library.libs {
             let exact = directory.join(format!("lib{lib}.so"));
@@ -64,6 +51,24 @@ fn find_library(library: &pkg_config::Library, compiler: &OsStr) -> Option<PathB
             let archive = directory.join(format!("lib{lib}.a"));
             if archive.exists() {
                 return Some(archive);
+            }
+        }
+    }
+
+    for lib in &library.libs {
+        for name in [format!("lib{lib}.so"), format!("lib{lib}.a")] {
+            let Ok(output) = Command::new(compiler)
+                .arg(format!("-print-file-name={name}"))
+                .output()
+            else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            if path.is_absolute() && path.exists() {
+                return Some(path);
             }
         }
     }

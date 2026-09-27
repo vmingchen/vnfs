@@ -1,10 +1,11 @@
 name: libntirpc ABI
 
 # The main CI runs against Ubuntu 24.04's libntirpc 6.3 only, so the
-# version-gated ABI paths (legacy_free_cb = 0, rdma_call_expires) are never
-# compiled there. This workflow builds a pinned newer libntirpc from source
-# and runs the crate against it. It is scheduled/manual so a bad upstream pin
-# cannot block pull requests.
+# version-gated ABI paths (legacy_free_cb = 0, rdma_call_expires) and the
+# client-side RPCSEC_GSS reply-verifier shim are never exercised there. This
+# workflow builds a pinned newer libntirpc from source, links the Rust client
+# against it, and negotiates RPCSEC_GSS at runtime. It is scheduled/manual so a
+# bad upstream pin cannot block pull requests.
 on:
   schedule:
     - cron: "43 4 * * 1"
@@ -20,16 +21,18 @@ env:
 jobs:
   newer-libntirpc:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - name: Install host build dependencies
+      - name: Install host build and RPCSEC_GSS runtime dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             clang libclang-dev pkg-config \
-            libgssglue-dev libkrb5-dev liburcu-dev
+            libgssglue-dev libkrb5-dev liburcu-dev \
+            krb5-admin-server krb5-kdc krb5-user \
+            nfs-ganesha nfs-ganesha-vfs rpcbind
       - name: Build the libntirpc build image
         run: docker build --tag vnfs-libntirpc-build:ci ci/libntirpc
       - name: Fetch the pinned libntirpc source
@@ -59,13 +62,21 @@ jobs:
           pc=$(find "$prefix" -name libntirpc.pc -print -quit)
           test -n "$pc"
           echo "PKG_CONFIG_PATH=$(dirname "$pc")" >>"$GITHUB_ENV"
+          # The client must load the custom library at test runtime, not the
+          # distribution's libntirpc.
+          echo "LD_LIBRARY_PATH=$(dirname "$(dirname "$pc")")" >>"$GITHUB_ENV"
       - name: Report the detected libntirpc version
         run: pkg-config --modversion libntirpc
       - name: Test the crate against the newer libntirpc
         run: |
           cargo test -p libntirpc-sys --all-features
-          # Compiles the non-legacy clnt_req free callback and the
-          # rdma_call_expires layout selected by the symbol probe. RPCSEC_GSS
-          # negotiation itself is only exercised at runtime by the main
-          # nfs-gss-integration job against Ubuntu's 6.3 package.
           cargo build -p vfsi-nfs --features rpcsec-gss
+      - name: Negotiate RPCSEC_GSS with the newer client library
+        # The NFS server is the distribution's Ganesha (libntirpc 6.3); the
+        # client under test links the custom library via PKG_CONFIG_PATH and
+        # LD_LIBRARY_PATH, so this exercises the v15.3 client-side
+        # reply-verifier shim, rdma_call_expires layout and allocator hook
+        # against a live KDC.
+        env:
+          VNFS_GSS_SKIP_PYTHON: "1"
+        run: ci/run-nfs-gss-integration.sh

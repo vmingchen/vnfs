@@ -123,10 +123,12 @@ Several upstream ABI changes did not bump the reported version, which is why
   build rather than corrupting the private layout.
 - The `rpcsec-gss` feature patches a private `rpc_dplx_rec` field and installs
   a process-global allocator hook. Its runtime behavior is exercised by the
-  RPCSEC_GSS integration job against Ubuntu 24.04's libntirpc 6.3. Newer
-  releases are ABI/compile-tested only: the scheduled `libntirpc-abi` job
-  builds the crate and `vfsi-nfs` against a pinned upstream tag but does not
-  negotiate GSS at runtime. Treat the feature as version-bounded and re-run
-  the RPCSEC_GSS integration test whenever libntirpc is upgraded.
+  RPCSEC_GSS integration job against Ubuntu 24.04's libntirpc 6.3 (both client
+  and server). The scheduled `libntirpc-abi` job additionally negotiates
+  RPCSEC_GSS with a client linked against a pinned newer upstream libntirpc,
+  exercising the reply-verifier shim, `rdma_call_expires` layout and allocator
+  hook at runtime (the NFS server in that job remains the distribution
+  package). Treat the feature as version-bounded and re-run the RPCSEC_GSS
+  integration test whenever libntirpc is upgraded.
 - The currently verified targets are Linux/glibc; `README` continues to list
   the packages needed on Ubuntu.
