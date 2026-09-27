@@ -19,6 +19,9 @@
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 pub type rpcblist = rp__list;
 
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
+
 unsafe extern "C" {
     /// Release an AUTH reference using libntirpc's `auth_destroy` macro.
     pub fn vfsi_libntirpc_auth_destroy(auth: *mut AUTH);
