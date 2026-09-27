@@ -1,10 +1,9 @@
-# Vendored fork of `libntirpc-sys` shipped inside the VFSI workspace and
-# consumed through the workspace `[patch.crates-io]` entry. It is deliberately
-# NOT publishable: the upstream crate is `https://github.com/vmingchen/libntirpc-sys`
-# and this copy carries VFSI-specific build probing and C ABI shims.
+# `libntirpc-sys` is published to crates.io from this copy and is also consumed
+# inside the VFSI workspace through the workspace `[patch.crates-io]` entry.
+# Keep the published crate and the vendored copy in sync.
 [package]
 name = "libntirpc-sys"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Ming Chen <v.mingchen@gmail.com>"]
@@ -19,7 +18,6 @@ keywords = [
     "ntirpc",
     "nfs",
 ]
-publish = false
 build = "build.rs"
 links = "ntirpc"
 
