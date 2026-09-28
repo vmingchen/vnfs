@@ -29,7 +29,7 @@ is required. Add the crate:
 
 ```toml
 [dependencies]
-vnfs = "0.0.14"
+vnfs = "0.0.15"
 ```
 
 On Ubuntu 24.04 or newer, install the native build dependencies once:
@@ -434,7 +434,7 @@ enabled by default.
 Applications that only need interface types can disable default features:
 
 ```toml
-vnfs = { version = "0.0.14", default-features = false }
+vnfs = { version = "0.0.15", default-features = false }
 ```
 
 ## Secure authentication (optional)
@@ -448,7 +448,7 @@ requests Kerberos-backed authentication and never downgrades to AUTH_SYS.
 Enable Kerberos-backed RPCSEC_GSS explicitly:
 
 ```toml
-vnfs = { version = "0.0.14", features = ["rpcsec-gss"] }
+vnfs = { version = "0.0.15", features = ["rpcsec-gss"] }
 ```
 
 The client uses the process's default GSS credential cache (normally populated
