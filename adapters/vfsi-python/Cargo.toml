@@ -20,11 +20,11 @@ dummy = ["dep:vfsi-local"]
 [dependencies]
 libc = "0.2"
 pyo3 = { version = "0.29", features = ["abi3-py39", "abi3t"] }
-vfsi-core = { path = "../../crates/vfsi-core", version = "0.1.1" }
-vfsi-local = { path = "../../crates/vfsi-local", version = "0.1.1", optional = true }
-vfsi-nfs = { path = "../../crates/vfsi-nfs", version = "0.1.1", optional = true }
-vfsi-sync = { path = "../../crates/vfsi-sync", version = "0.1.2" }
-vfsi-smb = { path = "../../crates/vfsi-smb", version = "0.1.1", optional = true }
+vfsi-core = { path = "../../crates/vfsi-core", version = "0.1.2" }
+vfsi-local = { path = "../../crates/vfsi-local", version = "0.1.2", optional = true }
+vfsi-nfs = { path = "../../crates/vfsi-nfs", version = "0.1.2", optional = true }
+vfsi-sync = { path = "../../crates/vfsi-sync", version = "0.1.3" }
+vfsi-smb = { path = "../../crates/vfsi-smb", version = "0.1.2", optional = true }
 
 [patch.crates-io]
 # This detached workspace must use the same libntirpc compatibility shim as

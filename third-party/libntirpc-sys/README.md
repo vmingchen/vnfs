@@ -77,6 +77,7 @@ releases actually validated.
 | Dependency | Package (Ubuntu) | Purpose |
 | --- | --- | --- |
 | libntirpc | `libntirpc-dev` | RPC implementation and headers (6.3+, validated on 6.3 and 15.x) |
+| userspace RCU | `liburcu-dev` | linker name for libntirpc's `urcu-bp` dependency |
 | pkg-config | `pkg-config` | locate the installed library and headers |
 | C toolchain | `build-essential` | compile the `auth_helpers.c` ABI shims |
 | clang | `clang` | provide the headers used by bindgen to generate bindings |
@@ -85,7 +86,7 @@ releases actually validated.
 Install them on Ubuntu with:
 
 ```sh
-sudo apt install clang libclang-dev pkg-config libntirpc-dev
+sudo apt install clang libclang-dev pkg-config libntirpc-dev liburcu-dev
 ```
 
 Add `libkrb5-dev` only when building the `rpcsec-gss` feature:
@@ -96,7 +97,8 @@ sudo apt install libkrb5-dev
 
 The `libntirpc` shared object is linked against `liburcu-bp` and, when the
 distribution enables it, `libgssapi_krb5`. The runtime `libntirpc6.3` package
-depends on both, so a default build needs no extra development packages.
+supplies runtime dependencies, but builds that link a Rust binary still need
+`liburcu-dev` for the unversioned linker name.
 
 docs.rs uses checked-in declarations and therefore does not require native
 packages. Those declarations are only a documentation input; normal builds
