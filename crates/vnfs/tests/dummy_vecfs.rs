@@ -6,13 +6,13 @@ use vfsi_sync::test_support as common;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use vnfs::dummy_vecfs::DummyVecFs;
-use vnfs::{VecFs, VecFsExt, VfOffset};
+use vnfs::backend::DummyVecFs;
+use vnfs::backend::{VecFs, VecFsExt, VfOffset};
 
 #[cfg(feature = "test-faults")]
 use std::sync::Arc;
 #[cfg(feature = "test-faults")]
-use vnfs::internal::faults::{FaultScript, OpenFaultPoint};
+use vnfs::backend::internal::faults::{FaultScript, OpenFaultPoint};
 
 /// A `DummyVecFs` rooted at a fresh unique temp directory.
 fn dummy() -> DummyVecFs {
@@ -27,6 +27,160 @@ fn dummy() -> DummyVecFs {
         NEXT_DUMMY_ID.fetch_add(1, Ordering::Relaxed)
     ));
     DummyVecFs::new(root)
+}
+
+#[test]
+fn one_shot_file_vectors_roundtrip_and_limit_allocations() {
+    use vnfs::{FsClient, ReadAllOptions};
+
+    let client = FsClient::new(dummy());
+    client
+        .write_files(&[
+            ("/file-1", b"hello".as_slice()),
+            ("/file-2", b"world".as_slice()),
+        ])
+        .unwrap();
+    assert_eq!(
+        client.read_files(&["/file-1", "/file-2"]).unwrap(),
+        vec![b"hello".to_vec(), b"world".to_vec()]
+    );
+    let error = client
+        .read_files_with_options(
+            &["/file-1", "/file-2"],
+            ReadAllOptions::new().max_total_bytes(9),
+        )
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.path(), Some(Path::new("/file-2")));
+    // The failed bounded read leaves the client usable.
+    assert_eq!(
+        client.read_files(&["/file-1"]).unwrap(),
+        vec![b"hello".to_vec()]
+    );
+}
+
+#[test]
+fn one_shot_file_vectors_handle_empty_batches_and_replace_files() {
+    use vnfs::FsClient;
+
+    let client = FsClient::new(dummy());
+    client.write_files::<&str, &[u8]>(&[]).unwrap();
+    assert!(client.read_files::<&str>(&[]).unwrap().is_empty());
+    client
+        .write_files(&[("/file", b"longer".as_slice())])
+        .unwrap();
+    client.write_files(&[("/file", b"x".as_slice())]).unwrap();
+    assert_eq!(client.read_files(&["/file"]).unwrap(), vec![b"x".to_vec()]);
+
+    let error = client
+        .write_files(&[
+            ("/file", b"first".as_slice()),
+            ("/file", b"second".as_slice()),
+        ])
+        .unwrap_err();
+    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.path(), Some(Path::new("/file")));
+    assert_eq!(client.read_files(&["/file"]).unwrap(), vec![b"x".to_vec()]);
+}
+
+#[test]
+fn application_directory_vectors_preserve_fields_and_limits() {
+    use vnfs::{FsClient, MetadataFields, ReadDirOptions, WalkOptions};
+
+    let client = FsClient::new(dummy());
+    client.create_dir("/a").unwrap();
+    client.create_dir("/b").unwrap();
+    client.write("/a/one", b"1").unwrap();
+    client.write("/b/two", b"22").unwrap();
+
+    let fields = MetadataFields::MODE | MetadataFields::SIZE | MetadataFields::BLOCKS;
+    let listed = client
+        .read_dirs_with_options(&["/a", "/b"], fields, ReadDirOptions::new())
+        .unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].path, Path::new("/a"));
+    assert_eq!(listed[0].entries[0].path(), Path::new("/a/one"));
+    assert_eq!(listed[1].entries[0].metadata().len(), 2);
+    assert!(listed[0].entries[0].metadata().mode().is_some());
+    assert!(listed[0].entries[0].metadata().blocks().is_some());
+    assert_eq!(listed[0].entries[0].metadata().device_id(), None);
+
+    let error = client
+        .read_dirs_with_options(&["/a", "/b"], fields, ReadDirOptions::new().max_entries(1))
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    let repeated = client
+        .read_dirs_with_options(&["/a", "/a"], fields, ReadDirOptions::new())
+        .unwrap();
+    assert_eq!(repeated.len(), 2);
+    assert_eq!(repeated[0], repeated[1]);
+    let error = client
+        .read_dirs_with_options(&["/a", "/a"], fields, ReadDirOptions::new().max_entries(1))
+        .unwrap_err();
+    assert_eq!(error.index_opt(), Some(1));
+
+    let tree = client
+        .walk_with_options("/", fields, WalkOptions::new())
+        .unwrap();
+    assert!(
+        tree.iter()
+            .any(|directory| directory.path == Path::new("/a"))
+    );
+    assert!(
+        tree.iter()
+            .any(|directory| directory.path == Path::new("/b"))
+    );
+    let error = client
+        .walk_with_options("/", fields, WalkOptions::new().max_entries(1))
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+}
+
+#[test]
+fn application_metadata_and_batch_mutations() {
+    use vnfs::{FsClient, MetadataFields};
+
+    let client = FsClient::new(dummy());
+    client.write("/source-1", b"abc").unwrap();
+    client.write("/source-2", b"defg").unwrap();
+    client.symlink("/source-1", "/link").unwrap();
+    let metadata = client
+        .symlink_metadata_with_fields("/link", MetadataFields::MODE | MetadataFields::BLOCKS)
+        .unwrap();
+    assert!(metadata.is_symlink());
+    assert!(metadata.mode().is_some());
+    assert_eq!(metadata.device_id(), None);
+
+    client
+        .copy_files(&[("/source-1", "/copy-1"), ("/source-2", "/copy-2")])
+        .unwrap();
+    assert_eq!(client.read("/copy-1").unwrap(), b"abc");
+    assert_eq!(client.read("/copy-2").unwrap(), b"defg");
+    client.remove_paths(&["/copy-1", "/copy-2"], false).unwrap();
+    assert!(client.read("/copy-1").is_err());
+}
+
+#[test]
+fn application_directory_cohorts_preserve_global_error_index() {
+    use vnfs::{FsClient, MetadataFields, ReadDirOptions};
+
+    let client = FsClient::new(dummy());
+    let mut paths = Vec::new();
+    for index in 0..32 {
+        let path = format!("/d{index}");
+        client.create_dir(&path).unwrap();
+        paths.push(path);
+    }
+    paths.push(paths[0].clone());
+    let listings = client
+        .read_dirs_with_options(&paths, MetadataFields::MODE, ReadDirOptions::new())
+        .unwrap();
+    assert_eq!(listings[0], listings[32]);
+    paths.push("/missing".to_string());
+    let error = client
+        .read_dirs_with_options(&paths, MetadataFields::MODE, ReadDirOptions::new())
+        .unwrap_err();
+    assert_eq!(error.index_opt(), Some(33));
 }
 
 #[test]
@@ -46,7 +200,7 @@ fn dummy_getcwd() {
 
 #[test]
 fn dummy_write_read_roundtrip() {
-    use vnfs::{ReadOp, VecFs, WriteOp};
+    use vnfs::backend::{ReadOp, VecFs, WriteOp};
 
     let mut fs = dummy();
     fs.ensure_dir(Path::new("/data"), 0o755).unwrap();
@@ -92,7 +246,7 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     client
         .read_stream("/stream", |offset, chunk| {
             assert_eq!(offset, default_bytes as u64);
-            assert!(chunk.len() <= vnfs::DEFAULT_READ_STREAM_CHUNK_BYTES);
+            assert!(chunk.len() <= vnfs::backend::DEFAULT_READ_STREAM_CHUNK_BYTES);
             default_bytes += chunk.len();
             Ok(true)
         })
@@ -139,9 +293,9 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
 
 #[test]
 fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
-    use vnfs::{
-        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, FsClient, VecFs, VfFile,
-        VfOffset, WriteOp,
+    use vnfs::FsClient;
+    use vnfs::backend::{
+        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, VecFs, VfFile, VfOffset, WriteOp,
     };
 
     let mut fs = dummy();
@@ -167,7 +321,7 @@ fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
 
 #[test]
 fn dummy_errors_on_missing_file() {
-    use vnfs::{ReadOp, VecFs, VfOffset};
+    use vnfs::backend::{ReadOp, VecFs, VfOffset};
 
     let mut fs = dummy();
     fs.ensure_dir(Path::new("/data"), 0o755).unwrap();
@@ -207,7 +361,7 @@ fn dummy_stays_under_root() {
 #[test]
 fn non_utf8_filenames_roundtrip() {
     use std::os::unix::ffi::OsStringExt;
-    use vnfs::{ReadOp, VecFs, VfOffset, WriteOp};
+    use vnfs::backend::{ReadOp, VecFs, VfOffset, WriteOp};
 
     let mut fs = dummy();
     let raw = b"n\xffb";
@@ -215,7 +369,7 @@ fn non_utf8_filenames_roundtrip() {
     fs.writev(&[WriteOp::from_os_path(&path, VfOffset::At(0), b"data".to_vec()).with_creation()])
         .unwrap();
     let listed = fs
-        .listdir(Path::new("/"), vnfs::AttrMask::stat(), 0, false)
+        .listdir(Path::new("/"), vnfs::backend::AttrMask::stat(), 0, false)
         .unwrap();
     assert_eq!(listed.len(), 1);
     let got = listed[0]
@@ -252,7 +406,7 @@ fn rm_contents_keeps_the_directory() {
     fs.mkdir_path("/keep/sub", 0o755).unwrap();
     for path in ["/keep/a", "/keep/sub/b"] {
         fs.writev(&[
-            vnfs::WriteOp::from_path(path, VfOffset::At(0), b"x".to_vec()).with_creation(),
+            vnfs::backend::WriteOp::from_path(path, VfOffset::At(0), b"x".to_vec()).with_creation(),
         ])
         .unwrap();
     }
@@ -261,7 +415,7 @@ fn rm_contents_keeps_the_directory() {
     assert!(
         fs.listdir(
             std::path::Path::new("/keep"),
-            vnfs::AttrMask::default(),
+            vnfs::backend::AttrMask::default(),
             0,
             false
         )
@@ -276,7 +430,8 @@ fn rm_contents_rejects_a_symlink_to_a_directory() {
     let mut fs = dummy();
     fs.mkdir_path("/target", 0o755).unwrap();
     fs.writev(&[
-        vnfs::WriteOp::from_path("/target/keep", VfOffset::At(0), b"k".to_vec()).with_creation(),
+        vnfs::backend::WriteOp::from_path("/target/keep", VfOffset::At(0), b"k".to_vec())
+            .with_creation(),
     ])
     .unwrap();
     fs.symlink_path("target", "link").unwrap();
@@ -290,7 +445,8 @@ fn recursive_rm_removes_a_symlink_not_its_target() {
     let mut fs = dummy();
     fs.mkdir_path("/target", 0o755).unwrap();
     fs.writev(&[
-        vnfs::WriteOp::from_path("/target/keep", VfOffset::At(0), b"k".to_vec()).with_creation(),
+        vnfs::backend::WriteOp::from_path("/target/keep", VfOffset::At(0), b"k".to_vec())
+            .with_creation(),
     ])
     .unwrap();
     fs.symlink_path("target", "link").unwrap();
@@ -306,25 +462,36 @@ fn ensure_empty_dir_creates_empties_and_rejects_files() {
     fs.ensure_empty_dir_path("/made").unwrap();
     assert!(fs.exists_path("/made").unwrap());
     assert!(
-        fs.listdir(Path::new("/made"), vnfs::AttrMask::default(), 0, false)
-            .unwrap()
-            .is_empty()
+        fs.listdir(
+            Path::new("/made"),
+            vnfs::backend::AttrMask::default(),
+            0,
+            false
+        )
+        .unwrap()
+        .is_empty()
     );
 
     fs.mkdir_path("/full", 0o755).unwrap();
     fs.writev(&[
-        vnfs::WriteOp::from_path("/full/child", VfOffset::At(0), b"x".to_vec()).with_creation(),
+        vnfs::backend::WriteOp::from_path("/full/child", VfOffset::At(0), b"x".to_vec())
+            .with_creation(),
     ])
     .unwrap();
     fs.ensure_empty_dir_path("/full").unwrap();
     assert!(
-        fs.listdir(Path::new("/full"), vnfs::AttrMask::default(), 0, false)
-            .unwrap()
-            .is_empty()
+        fs.listdir(
+            Path::new("/full"),
+            vnfs::backend::AttrMask::default(),
+            0,
+            false
+        )
+        .unwrap()
+        .is_empty()
     );
 
     fs.writev(&[
-        vnfs::WriteOp::from_path("/afile", VfOffset::At(0), b"f".to_vec()).with_creation(),
+        vnfs::backend::WriteOp::from_path("/afile", VfOffset::At(0), b"f".to_vec()).with_creation(),
     ])
     .unwrap();
     assert!(fs.ensure_empty_dir_path("/afile").is_err());
@@ -336,10 +503,13 @@ fn open_dir_handle_empties_contents() {
     let mut fs = dummy();
     fs.mkdir_path("/d", 0o755).unwrap();
     fs.mkdir_path("/d/sub", 0o755).unwrap();
-    fs.writev(&[vnfs::WriteOp::from_path("/d/a", VfOffset::At(0), b"a".to_vec()).with_creation()])
-        .unwrap();
     fs.writev(&[
-        vnfs::WriteOp::from_path("/d/sub/b", VfOffset::At(0), b"b".to_vec()).with_creation(),
+        vnfs::backend::WriteOp::from_path("/d/a", VfOffset::At(0), b"a".to_vec()).with_creation(),
+    ])
+    .unwrap();
+    fs.writev(&[
+        vnfs::backend::WriteOp::from_path("/d/sub/b", VfOffset::At(0), b"b".to_vec())
+            .with_creation(),
     ])
     .unwrap();
 
@@ -348,9 +518,14 @@ fn open_dir_handle_empties_contents() {
     fs.close_dir(&handle).unwrap();
     assert!(fs.exists_path("/d").unwrap());
     assert!(
-        fs.listdir(Path::new("/d"), vnfs::AttrMask::default(), 0, false)
-            .unwrap()
-            .is_empty()
+        fs.listdir(
+            Path::new("/d"),
+            vnfs::backend::AttrMask::default(),
+            0,
+            false
+        )
+        .unwrap()
+        .is_empty()
     );
 }
 
@@ -359,14 +534,15 @@ fn generic_remover_rejects_options_it_cannot_honor() {
     let mut fs = dummy();
     fs.mkdir_path("/d", 0o755).unwrap();
     fs.writev(&[
-        vnfs::WriteOp::from_path("/d/keep", VfOffset::At(0), b"x".to_vec()).with_creation(),
+        vnfs::backend::WriteOp::from_path("/d/keep", VfOffset::At(0), b"x".to_vec())
+            .with_creation(),
     ])
     .unwrap();
     let handle = fs.open_dir(Path::new("/d")).unwrap();
     for options in [
-        vnfs::RemoveOptions::new().continue_on_error(true),
-        vnfs::RemoveOptions::new().batch(2),
-        vnfs::RemoveOptions::new().retries(0),
+        vnfs::backend::RemoveOptions::new().continue_on_error(true),
+        vnfs::backend::RemoveOptions::new().batch(2),
+        vnfs::backend::RemoveOptions::new().retries(0),
     ] {
         assert!(
             fs.rm_with_options(&[Path::new("/d/keep")], false, options)
@@ -388,7 +564,7 @@ fn generic_remover_rejects_options_it_cannot_honor() {
 #[test]
 fn standard_io_handle_is_raii_and_seekable() {
     use std::io::{Read, Seek, SeekFrom, Write};
-    use vnfs::VfOpenOptions;
+    use vnfs::backend::VfOpenOptions;
 
     let mut fs = dummy();
     let descriptor;
@@ -412,7 +588,7 @@ fn standard_io_handle_is_raii_and_seekable() {
 #[test]
 fn legacy_handle_try_close_leaves_an_inert_handle() {
     use std::io::{Read, Write};
-    use vnfs::VfOpenOptions;
+    use vnfs::backend::VfOpenOptions;
 
     let mut fs = dummy();
     let mut options = VfOpenOptions::new();
@@ -433,7 +609,7 @@ fn legacy_handle_try_close_leaves_an_inert_handle() {
 
 #[test]
 fn standard_open_options_validate_access_modes() {
-    use vnfs::VfOpenOptions;
+    use vnfs::backend::VfOpenOptions;
 
     let mut fs = dummy();
     assert_eq!(
@@ -499,7 +675,7 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
             .readv(&[first.read_request_at(0, 1)])
             .unwrap_err()
             .err_no(),
-        vnfs::ERR_INVAL
+        vnfs::backend::ERR_INVAL
     );
     first.flush().unwrap();
     second.flush().unwrap();
@@ -592,11 +768,11 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
             .remove_dir("/tree/nested/hardlink")
             .unwrap_err()
             .err_no(),
-        vnfs::ERR_NOTDIR
+        vnfs::backend::ERR_NOTDIR
     );
     assert_eq!(
         client.remove_file("/tree/nested").unwrap_err().err_no(),
-        vnfs::ERR_ISDIR
+        vnfs::backend::ERR_ISDIR
     );
     client.remove_dir_all("/tree").unwrap();
 }
@@ -726,10 +902,13 @@ fn openv_fault_after_registration_closes_the_injected_handle() {
 #[test]
 fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
     let mut fs = dummy();
-    fs.writev(&[
-        vnfs::WriteOp::from_path("/exists", VfOffset::At(0), b"existing".to_vec()).with_creation(),
-    ])
-    .unwrap();
+    fs.writev(&[vnfs::backend::WriteOp::from_path(
+        "/exists",
+        VfOffset::At(0),
+        b"existing".to_vec(),
+    )
+    .with_creation()])
+        .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeCleanup { index: 0 },
         vnfs::VfError::transport(None, "injected cleanup failure"),
@@ -757,7 +936,8 @@ fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
 fn recursive_remove_propagates_type_lookup_failure_without_unlinking() {
     let mut fs = dummy();
     fs.writev(&[
-        vnfs::WriteOp::from_path("/kept", VfOffset::At(0), b"data".to_vec()).with_creation(),
+        vnfs::backend::WriteOp::from_path("/kept", VfOffset::At(0), b"data".to_vec())
+            .with_creation(),
     ])
     .unwrap();
     let script = Arc::new(FaultScript::one(
@@ -804,12 +984,12 @@ fn mkdir_mode_failure_is_reported_instead_of_ignored() {
 
 #[test]
 fn strict_vectors_report_failure_index_without_rollback() {
-    use vnfs::VfFile;
+    use vnfs::backend::VfFile;
 
     let mut fs = dummy();
     fs.writev(&[
-        vnfs::WriteOp::from_path("/first", VfOffset::At(0), Vec::new()).with_creation(),
-        vnfs::WriteOp::from_path("/third", VfOffset::At(0), Vec::new()).with_creation(),
+        vnfs::backend::WriteOp::from_path("/first", VfOffset::At(0), Vec::new()).with_creation(),
+        vnfs::backend::WriteOp::from_path("/third", VfOffset::At(0), Vec::new()).with_creation(),
     ])
     .unwrap();
     let error = fs
@@ -826,9 +1006,8 @@ fn strict_vectors_report_failure_index_without_rollback() {
 
 #[test]
 fn native_scalar_contract_separates_metadata_query_from_update() {
-    use vnfs::{
-        AttrMask, FileSystem, MetadataQuery, OpenFlags, OpenRequest, SetAttributes, VfFile,
-    };
+    use vnfs::backend::{AttrMask, FileSystem, MetadataQuery, SetAttributes, VfFile};
+    use vnfs::{OpenFlags, OpenRequest};
 
     let mut fs = dummy();
     let file = FileSystem::open_one(
@@ -856,7 +1035,8 @@ fn native_scalar_contract_separates_metadata_query_from_update() {
 
 #[test]
 fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
-    use vnfs::{AttrMask, FsClient, ReadDirOptions, WalkOptions, WriteOp};
+    use vnfs::backend::{AttrMask, WriteOp};
+    use vnfs::{FsClient, ReadDirOptions, WalkOptions};
 
     let mut fs = dummy();
     fs.ensure_dir(Path::new("/tree/sub"), 0o755).unwrap();
@@ -902,7 +1082,8 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
 
 #[test]
 fn directory_visitor_supports_limits_early_stop_and_callback_errors() {
-    use vnfs::{FsClient, ReadDirOptions, VfError, WriteOp};
+    use vnfs::backend::WriteOp;
+    use vnfs::{FsClient, ReadDirOptions, VfError};
 
     let mut fs = dummy();
     fs.ensure_dir(Path::new("/tree"), 0o755).unwrap();

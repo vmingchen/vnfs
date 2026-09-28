@@ -1,10 +1,8 @@
 //! Rust-native scalar and vector NFS workflow.
 
-use std::error::Error;
-
 use vnfs::prelude::*;
 
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> vnfs::Result<()> {
     let host = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1".to_owned());

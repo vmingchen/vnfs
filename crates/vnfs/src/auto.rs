@@ -12,9 +12,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DirEntry, DummyVecFs, FsClient, FsFile, Nfs, NfsClient,
-    NfsFile, OpenFlags, OpenRequest, ReadDirOptions, ReadResult, VfError, VfResult, WriteResult,
+    DirEntry, FsClient, FsFile, Nfs, NfsClient, NfsFile, OpenFlags, OpenRequest, ReadDirOptions,
+    ReadResult, VfError, VfResult, WriteResult,
 };
+use vfsi_local::DummyVecFs;
+use vfsi_sync::DEFAULT_READ_ALLV_MAX_TOTAL_BYTES;
 
 const READ_CHUNK: usize = 1024 * 1024;
 

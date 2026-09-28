@@ -5,9 +5,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::{
-    FsClient, FsFile, NfsAuthentication, NfsClientBuilder, NfsObserver, NfsReadPool,
-    NfsReadPoolOptions, NfsRecoveryPolicy, NfsVecFs, VfResult,
+use crate::{FsClient, FsFile, VfResult};
+use vfsi_nfs::{
+    NfsAuthentication, NfsClientBuilder, NfsObserver, NfsReadPool, NfsReadPoolOptions,
+    NfsRecoveryPolicy, NfsVecFs,
 };
 
 pub type NfsClient = FsClient<NfsVecFs>;
@@ -90,8 +91,8 @@ impl NfsBuilder {
         self
     }
 
-    pub fn authentication(mut self, authentication: NfsAuthentication) -> Self {
-        self.inner = self.inner.authentication(authentication);
+    pub fn auth(mut self, auth: NfsAuthentication) -> Self {
+        self.inner = self.inner.authentication(auth);
         self
     }
 

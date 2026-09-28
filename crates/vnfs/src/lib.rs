@@ -1,7 +1,8 @@
-//! VFSI compatibility facade.
+//! Vectorized, synchronous NFSv4 for Rust applications.
 //!
-//! The published `vnfs` package retains its historical paths while the
-//! implementation is split into interface and backend workspace crates.
+//! Start with `Nfs::connect` or `Nfs::builder`, then use scalar methods or
+//! vector calls such as `NfsClient::openv`, `NfsClient::read_files`, and
+//! `NfsClient::write_files`. Protocol internals live in [`backend`].
 
 /// Application-facing result type for the Rust-native API.
 pub type Result<T> = vfsi_core::VfResult<T>;
@@ -9,39 +10,23 @@ pub type Result<T> = vfsi_core::VfResult<T>;
 /// Application-facing error type for the Rust-native API.
 pub type Error = vfsi_core::VfError;
 
-/// Shared low-level error compatibility path.
-pub mod error {
-    pub use vfsi_core::{RpcError, RpcResult, STATUS_TRANSPORT};
-}
-
-/// Synchronous vector interface compatibility path.
-pub mod vecfs {
-    pub use vfsi_sync::*;
-}
-
-/// Scalar/singular synchronous API facet.
-pub mod sfsi {
-    pub use vfsi_sync::sfsi::*;
-}
-
-/// Vectorized synchronous API facet.
-pub mod vfsi {
-    pub use vfsi_sync::vfsi::*;
-}
-
-#[cfg(feature = "dummy")]
-pub mod dummy_vecfs {
-    pub use vfsi_local::DummyVecFs;
-}
-
-/// Compatibility and protocol-construction APIs. New applications should use
-/// the curated crate root or [`prelude`] instead.
-pub mod legacy {
+/// Backend implementer and protocol-construction APIs. Most applications
+/// need only the crate root; these are also available from the `vfsi-*` crates.
+pub mod backend {
     pub use vfsi_core::*;
-    pub use vfsi_sync::{VecFs, VecFsExt, VfFileHandle, VfOpenOptions, rm_recursive};
+    pub use vfsi_sync::{
+        CopyFileSystem, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
+        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
+        DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DirectoryFileSystem, FileSystem,
+        FsRead, FsReadInto, FsWrite, LinkFileSystem, MetadataFileSystem, NamespaceFileSystem,
+        NativeFileSystem, SetMetadata, VecFs, VecFsExt, VectorFileSystem, VfFileHandle,
+        VfOpenOptions, rm_recursive,
+    };
 
+    #[cfg(feature = "dummy")]
+    pub use vfsi_local::DummyVecFs;
     #[cfg(feature = "nfs")]
-    pub use vfsi_nfs::{client, compound, nfs, rpc, session};
+    pub use vfsi_nfs::{NfsVecFs, client, compound, nfs, rpc, session};
 }
 
 /// Linux-mounted path routing with conservative automatic direct NFSv4 selection.
@@ -50,47 +35,34 @@ mod auto;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub use auto::{Auto, AutoClient, AutoFile, AutoRead, AutoRoute, AutoWrite, Mounted};
 
-/// Common Rust-native imports without protocol or FFI internals.
+/// Common application imports.
 pub mod prelude {
+    pub use crate::MetadataFields;
     #[cfg(all(feature = "auto", target_os = "linux"))]
-    pub use crate::{Auto, AutoClient, AutoFile, Mounted};
+    pub use crate::{Auto, Mounted};
     #[cfg(feature = "nfs")]
-    pub use crate::{
-        Nfs, NfsBuilder, NfsClient, NfsClientPool, NfsFile, NfsReadPool, NfsReadPoolOptions,
-    };
-    pub use vfsi_core::{
-        Capabilities, DirEntry, Metadata, OpenFlags, OpenRequest, Permissions, ReadResult, VfError,
-        VfResult, WriteResult,
-    };
-    pub use vfsi_sync::{
-        CopyFileSystem, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES,
-        DEFAULT_READ_STREAM_CHUNK_BYTES, DEFAULT_READV_MAX_TOTAL_BYTES, DirectoryFileSystem,
-        FileSystem, FsClient, FsFile, LinkFileSystem, MetadataFileSystem, NamespaceFileSystem,
-        NativeFileSystem, OpenOptions, ReadAllOptions, ReadDirOptions, ReadStreamOptions,
-        SetMetadata, VectorFileSystem, WalkOptions,
-    };
+    pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile};
+    pub use vfsi_core::{OpenFlags, OpenRequest};
+    pub use vfsi_sync::{ReadAllOptions, ReadDirOptions, ReadStreamOptions, WalkOptions};
 }
 
-pub use vfsi_core::*;
+/// Attribute selection for metadata queries, directory listings, and walks.
+pub use vfsi_core::AttrMask as MetadataFields;
+pub use vfsi_core::{
+    Capabilities, DirEntry, Metadata, OpenFlags, OpenRequest, Permissions, ReadResult, VfError,
+    VfResult, VfType, WriteResult,
+};
+pub use vfsi_sync::{
+    DirectoryListing, FsClient, FsFile, OpenOptions, ReadAllOptions, ReadDirOptions,
+    ReadStreamOptions, WalkOptions,
+};
 #[cfg(feature = "nfs")]
 mod native_nfs;
 #[cfg(feature = "nfs")]
 pub use native_nfs::{Nfs, NfsBuilder, NfsClient, NfsClientPool, NfsFile};
-#[cfg(feature = "dummy")]
-pub use vfsi_local::DummyVecFs;
 #[cfg(all(feature = "nfs", feature = "rpcsec-gss"))]
 pub use vfsi_nfs::RpcsecGssProtection;
 #[cfg(feature = "nfs")]
 pub use vfsi_nfs::{
-    NfsAuthentication, NfsClientBuilder, NfsConnectOptions, NfsEvent, NfsExtensions, NfsObserver,
-    NfsReadPool, NfsReadPoolOptions, NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
-};
-pub use vfsi_sync::{
-    CopyFileSystem, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
-    DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
-    DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DirectoryFileSystem, FileSystem,
-    FsClient, FsFile, FsRead, FsReadInto, FsWrite, LinkFileSystem, MetadataFileSystem,
-    NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadAllOptions, ReadDirOptions,
-    ReadStreamOptions, SetMetadata, VecFs, VecFsExt, VectorFileSystem, VfFileHandle, VfOpenOptions,
-    WalkOptions, rm_recursive,
+    NfsAuthentication, NfsEvent, NfsObserver, NfsReadPool, NfsReadPoolOptions, NfsRecoveryPolicy,
 };

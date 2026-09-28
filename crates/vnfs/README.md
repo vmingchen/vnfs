@@ -16,7 +16,7 @@ network latency costs more than transferring the data itself.
 NFSv4 supports *COMPOUND* requests: one RPC can carry an ordered sequence of
 file operations. A conventional POSIX-style loop hides that capability behind
 one-file-at-a-time calls, so latency grows with the number of files. `vnfs`
-instead exposes a vectorized `VecFs` API (the idea from the FAST'17 paper
+instead exposes vectorized file operations (the idea from the FAST'17 paper
 [vNFS: Maximizing NFS Performance with Compounds and Vectorized I/O][fast])
 as a Rust crate. The NFS backend packs each vector into compounds up to the
 server's negotiated operation and message-size limits, then returns results in
@@ -41,8 +41,8 @@ sudo apt-get install clang libclang-dev pkg-config libntirpc-dev \
 
 ## Rust-native example
 
-Write two independent files, then read them back, using one vector call for
-each phase:
+Write two independent files, then read them back. The convenience methods
+batch each phase across both files:
 
 ```rust,no_run
 use vnfs::prelude::*;
@@ -51,46 +51,56 @@ fn main() -> vnfs::Result<()> {
     let client = Nfs::builder("nfs.example.com")
         .root("/export/application")
         .connect()?;
-    let files = client
-        .open_options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .openv(&["/file-1", "/file-2"])?;
-
-    client
-        .write_allv(&[
-            files[0].write_request_at(0, b"hello"),
-            files[1].write_request_at(0, b"world"),
-        ])?;
-
-    let contents = client
-        .readv(&[
-            files[0].read_request_at(0, 5),
-            files[1].read_request_at(0, 5),
-        ])?;
-    assert_eq!(contents[0].data, b"hello");
-    assert_eq!(contents[1].data, b"world");
-    client.closev(files)?;
+    client.write_files(&[
+        ("/file-1", b"hello".as_slice()),
+        ("/file-2", b"world".as_slice()),
+    ])?;
+    let contents = client.read_files(&["/file-1", "/file-2"])?;
+    assert_eq!(contents, [b"hello".to_vec(), b"world".to_vec()]);
     Ok(())
 }
 ```
 
-For these two small files, `openv`, `write_allv`, and `readv` each put
-both independent operations into one NFSv4 COMPOUND and therefore one network
-round trip per phase when each write completes in full. `write_allv` checks
-per-file byte counts and sends another vector wave if a server returns a short
-write; ordinary `writev` returns those counts for callers that prefer to handle
-partial progress themselves. A scalar POSIX-style loop hides this opportunity and pays
-latency for each file operation. Larger vectors are packed into as few
+`write_files` performs vector OPEN, WRITE, and CLOSE phases. `read_files`
+reads directly by path, so small files can share one READ COMPOUND without
+remote OPEN/CLOSE phases when the server's negotiated limits permit.
+`write_files` retries short
+writes through `write_allv`; it is not transactional, so a failed call may have
+modified a prefix of files. `read_files` limits the combined returned data to
+16 MiB by default; use `read_files_with_options` to adjust the limit, or stream
+large files. A scalar POSIX-style loop pays latency for each file operation.
+Larger vectors are packed into as few
 compounds as the server's negotiated operation, request, and response-size
 limits allow; oversized vectors are split automatically.
 
-The same model applies to `openv`, `writev`, `getattrsv`, `listdirv`,
-`renamev`, `removev`, and the other vector methods. This is especially useful
-for metadata-heavy workloads and for many small, independent I/O operations,
-where network latency dominates transfer time.
+The same model applies to `openv`, `readv`, `writev`, and high-level
+`read_dirs_with_options`, `copy_files`, and `remove_paths`. For tools such as
+`ls`, `du`, and `find`, `MetadataFields` chooses which attributes a directory
+listing fetches, and each `DirectoryListing` includes metadata for its entries
+without a separate stat call per file. For example:
+
+```rust,no_run
+use vnfs::{MetadataFields, Nfs, ReadDirOptions};
+
+fn main() -> vnfs::Result<()> {
+    let fs = Nfs::connect("nfs.example.com")?;
+    let directories = ["/export/a", "/export/b"];
+    let listings = fs.read_dirs_with_options(
+        &directories,
+        MetadataFields::MODE | MetadataFields::SIZE | MetadataFields::BLOCKS,
+        ReadDirOptions::new(),
+    )?;
+    for directory in listings {
+        println!("{}: {} entries", directory.path.display(), directory.entries.len());
+    }
+    Ok(())
+}
+```
+
+The NFS backend batches directory lookups and READDIR pages into compounds;
+large listings continue page by page. The aggregate entry and path-byte
+limits prevent an accidental unbounded result. `read_dir_with_options` handles
+one directory, while `walk_with_options` handles a bounded recursive tree.
 
 Owned `NfsClient::readv` results are limited to 16 MiB of requested data per
 call. Use `readv_with_limit` to choose another aggregate limit or `readv_into`
@@ -349,7 +359,7 @@ reconcile uncertain close status explicitly; a confirmed successful call
 disarms every handle.
 
 Low-level compound, RPC, and session construction is isolated under
-`vnfs::legacy`; it is not part of the recommended application API.
+`vnfs::backend`; it is not part of the recommended application API.
 
 Lost replies to create, write, rename, copy, remove, and other mutations are
 reported as ambiguous and are never replayed automatically; replay could
@@ -412,9 +422,9 @@ currently no RPC-over-TLS, callback/delegation, or asynchronous API.
 
 ## Package boundary
 
-The `vnfs` crate is the NFS-focused Rust compatibility package in the wider
-VFSI project. It provides [`NfsVecFs`], the shared [`VecFs`] interfaces and
-types, and [`DummyVecFs`] for local testing. New protocol backends are
+The `vnfs` crate is the NFS-focused application package in the wider VFSI
+project. Backend implementers can use `vnfs::backend` or depend directly on
+`vfsi-core`, `vfsi-sync`, and `vfsi-nfs`. New protocol backends are
 published as separate `vfsi-*` crates so each backend has an independent
 dependency and release boundary.
 
@@ -424,7 +434,7 @@ enabled by default.
 Applications that only need interface types can disable default features:
 
 ```toml
-vnfs = { version = "0.0.13", default-features = false }
+vnfs = { version = "0.0.14", default-features = false }
 ```
 
 ## Secure authentication (optional)
@@ -438,7 +448,7 @@ requests Kerberos-backed authentication and never downgrades to AUTH_SYS.
 Enable Kerberos-backed RPCSEC_GSS explicitly:
 
 ```toml
-vnfs = { version = "0.0.13", features = ["rpcsec-gss"] }
+vnfs = { version = "0.0.14", features = ["rpcsec-gss"] }
 ```
 
 The client uses the process's default GSS credential cache (normally populated
@@ -446,21 +456,18 @@ with `kinit`) and does not accept or retain passwords. Integrity protection is
 the recommended baseline.
 
 ```rust,no_run
-use vnfs::{NfsAuthentication, NfsConnectOptions, NfsVecFs, RpcsecGssProtection};
+use vnfs::{Nfs, NfsAuthentication, RpcsecGssProtection};
 
 fn main() -> vnfs::Result<()> {
-    let fs = NfsVecFs::connect_with_options(
-        "nfs.example.com",
-        NfsConnectOptions {
-            authentication: NfsAuthentication::RpcsecGss {
-                // None derives the GSS host-based name nfs@nfs.example.com.
-                service_principal: None,
-                protection: RpcsecGssProtection::Integrity,
-            },
-            ..NfsConnectOptions::default()
-        },
-    )?;
-    drop(fs);
+    let client = Nfs::builder("nfs.example.com")
+        .root("/export/application")
+        .auth(NfsAuthentication::RpcsecGss {
+            // None derives the GSS host-based name nfs@nfs.example.com.
+            service_principal: None,
+            protection: RpcsecGssProtection::Integrity,
+        })
+        .connect()?;
+    drop(client);
     Ok(())
 }
 ```
@@ -486,6 +493,3 @@ at your option.
 
 [fast]: https://www.usenix.org/conference/fast17/technical-sessions/presentation/chen
 [benchmark]: https://github.com/vmingchen/vnfs/blob/main/crates/vnfs/examples/small_files_benchmark.rs
-[`VecFs`]: https://docs.rs/vnfs/latest/vnfs/trait.VecFs.html
-[`NfsVecFs`]: https://docs.rs/vnfs/latest/vnfs/struct.NfsVecFs.html
-[`DummyVecFs`]: https://docs.rs/vnfs/latest/vnfs/struct.DummyVecFs.html

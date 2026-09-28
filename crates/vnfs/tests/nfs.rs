@@ -11,8 +11,8 @@ use nfsv41_sys::nfsstat4_NFS4ERR_EXIST;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use vnfs::NfsVecFs;
-use vnfs::legacy::nfs::*;
+use vnfs::backend::NfsVecFs;
+use vnfs::backend::nfs::*;
 use vnfs::{Nfs, NfsReadPoolOptions};
 
 #[cfg(feature = "test-faults")]
@@ -29,7 +29,7 @@ use std::thread::JoinHandle;
 #[cfg(feature = "test-faults")]
 use std::time::Duration;
 #[cfg(feature = "test-faults")]
-use vnfs::internal::faults::{FaultScript, OpenFaultPoint};
+use vnfs::backend::internal::faults::{FaultScript, OpenFaultPoint};
 
 use vfsi_sync::test_support as common;
 
@@ -307,7 +307,7 @@ fn rust_native_client_workflow_on_nfs() {
     assert_eq!(values[1].data, b"two");
     let mut first = [0u8; 8];
     let mut second = [0u8; 8];
-    let _ = vnfs::legacy::compound::thread_compound_stats();
+    let _ = vnfs::backend::compound::thread_compound_stats();
     let lengths = client
         .readv_into(&mut [
             files[0].read_request_at_into(0, &mut first),
@@ -317,7 +317,7 @@ fn rust_native_client_workflow_on_nfs() {
     assert_eq!(lengths, [3, 3]);
     assert_eq!(&first[..3], b"one");
     assert_eq!(&second[..3], b"two");
-    assert_eq!(vnfs::legacy::compound::thread_compound_stats().0, 1);
+    assert_eq!(vnfs::backend::compound::thread_compound_stats().0, 1);
     assert_eq!(client.metadata(&paths[0]).unwrap().len(), 3);
     assert_eq!(client.read_dir(&nested).unwrap().len(), 2);
     let mut visited = Vec::new();
@@ -343,6 +343,24 @@ fn rust_native_client_workflow_on_nfs() {
     assert_eq!(read, large.len());
     assert_eq!(&large_buffer[..read], large);
     client.closev(files).unwrap();
+
+    // The short application API must work through the same native NFS backend.
+    client
+        .write_files(&[
+            (paths[0].as_str(), b"first".as_slice()),
+            (paths[1].as_str(), b"second".as_slice()),
+        ])
+        .unwrap();
+    let _ = vnfs::backend::compound::thread_compound_stats();
+    assert_eq!(
+        client.read_files(&paths).unwrap(),
+        vec![b"first".to_vec(), b"second".to_vec()]
+    );
+    assert_eq!(
+        vnfs::backend::compound::thread_compound_stats().0,
+        1,
+        "small path-based whole-file reads should share one compound"
+    );
     client.remove_dir_all(&dir).unwrap();
 }
 
@@ -1091,14 +1109,14 @@ fn path_readv_is_batched() {
             p
         })
         .collect();
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let ops: Vec<ReadOp> = paths
         .iter()
         .map(|p| ReadOp::at(VfFile::from_path(p), 0, 1))
         .collect();
     let res = c.readv(&ops).unwrap();
     assert_eq!(res.len(), 5);
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     // Batching must beat the per-op open+read+close round trips.
     assert!(
         compounds < 3 * paths.len() as u64,
@@ -1113,14 +1131,14 @@ fn writev_path_is_one_compound_per_dir() {
     let dir = setup_dir("writev1");
     let mut c = client();
     let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let ops: Vec<WriteOp> = paths
         .iter()
         .map(|p| WriteOp::at(VfFile::from_path(p), 0, b"x".to_vec()).with_creation())
         .collect();
     let res = c.writev(&ops).unwrap();
     assert_eq!(res.len(), 5);
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(
         compounds, 1,
         "path writev of N files in one dir must be a single compound, got {}",
@@ -1143,7 +1161,7 @@ fn readv_path_is_one_compound_per_dir() {
             data
         })
         .collect();
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let ops: Vec<ReadOp> = paths
         .iter()
         .zip(&payloads)
@@ -1151,7 +1169,7 @@ fn readv_path_is_one_compound_per_dir() {
         .collect();
     let res = c.readv(&ops).unwrap();
     assert_eq!(res.len(), 5);
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(
         compounds, 1,
         "path readv of N files in one dir must be a single compound, got {}",
@@ -1170,7 +1188,7 @@ fn writev_path_openwrite_form_is_two_compounds() {
     c.set_merged_mode("openwrite");
     let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
     let payloads: Vec<Vec<u8>> = (0..5).map(|i| format!("data-{}", i).into_bytes()).collect();
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let ops: Vec<WriteOp> = paths
         .iter()
         .zip(&payloads)
@@ -1178,7 +1196,7 @@ fn writev_path_openwrite_form_is_two_compounds() {
         .collect();
     let res = c.writev(&ops).unwrap();
     assert_eq!(res.len(), 5);
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(
         compounds, 2,
         "openwrite form must use 2 compounds, got {}",
@@ -1246,7 +1264,7 @@ fn readv_path_openwrite_form_is_two_compounds() {
         write_file(&mut c, Path::new(p), d);
     }
     c.set_merged_mode("openwrite");
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let ops: Vec<ReadOp> = paths
         .iter()
         .zip(&payloads)
@@ -1254,7 +1272,7 @@ fn readv_path_openwrite_form_is_two_compounds() {
         .collect();
     let res = c.readv(&ops).unwrap();
     assert_eq!(res.len(), 5);
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(
         compounds, 2,
         "openwrite form must use 2 compounds, got {}",
@@ -1273,7 +1291,7 @@ fn getattrsv_path_is_one_compound() {
     for p in &paths {
         write_file(&mut c, Path::new(p), b"x");
     }
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let mut attrs: Vec<VfAttrs> = paths
         .iter()
         .map(|p| VfAttrs {
@@ -1283,7 +1301,7 @@ fn getattrsv_path_is_one_compound() {
         })
         .collect();
     c.getattrsv(&mut attrs).unwrap();
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(
         compounds, 1,
         "getattrsv must be one compound, got {}",
@@ -1303,7 +1321,7 @@ fn setattrsv_path_is_one_compound() {
     for p in &paths {
         write_file(&mut c, Path::new(p), b"long content");
     }
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let attrs: Vec<VfAttrs> = paths
         .iter()
         .map(|p| VfAttrs {
@@ -1314,7 +1332,7 @@ fn setattrsv_path_is_one_compound() {
         })
         .collect();
     c.setattrsv(&attrs).unwrap();
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(
         compounds, 1,
         "setattrsv must be one compound, got {}",
@@ -1331,7 +1349,7 @@ fn openv_closev_path_is_one_compound_each() {
     let mut c = client();
     let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
     let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let files = VecFs::openv(
         &mut c,
         &refs,
@@ -1339,15 +1357,15 @@ fn openv_closev_path_is_one_compound_each() {
         &[0o644; 5],
     )
     .unwrap();
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(
         compounds, 1,
         "openv must be one compound, got {}",
         compounds
     );
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     c.closev(&files).unwrap();
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(
         compounds, 1,
         "closev must be one compound, got {}",
@@ -1364,9 +1382,9 @@ fn removev_path_is_one_compound() {
         write_file(&mut c, Path::new(p), b"x");
     }
     let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_path(p)).collect();
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     c.removev(&files).unwrap();
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(
         compounds, 1,
         "removev must be one compound, got {}",
@@ -1391,9 +1409,9 @@ fn renamev_path_is_one_compound() {
         .zip(&dsts)
         .map(|(s, d)| (VfFile::from_path(s), VfFile::from_path(d)))
         .collect();
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     c.renamev(&pairs).unwrap();
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(
         compounds, 1,
         "renamev must be one compound, got {}",
@@ -1448,7 +1466,7 @@ fn writev_path_compresses_shared_prefix() {
     let f2 = format!("{}/b/c/f2", base);
     c.ensure_dir(Path::new(&format!("{}/b/c", base)), 0o755)
         .unwrap();
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let res = c
         .writev(&[
             WriteOp::at(VfFile::from_path(&f0), 0, b"0".to_vec()).with_creation(),
@@ -1457,7 +1475,7 @@ fn writev_path_compresses_shared_prefix() {
         ])
         .unwrap();
     assert_eq!(res.len(), 3);
-    let (compounds, ops, _, _) = vnfs::legacy::compound::thread_compound_stats();
+    let (compounds, ops, _, _) = vnfs::backend::compound::thread_compound_stats();
     assert_eq!(compounds, 1, "compressed writev must stay one compound");
     // Re-walking /p/a from the root for each new directory would cost more
     // ops than the relative LOOKUP walk from the saved directory.
@@ -1479,7 +1497,7 @@ fn readv_writev_mixes_descriptors_and_paths() {
         .open(Path::new(&fdpath), libc::O_CREAT | libc::O_RDWR, 0o644)
         .unwrap();
 
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let w = c
         .writev(&[
             WriteOp::new(fd.clone(), VfOffset::At(0), b"fd-data".to_vec()),
@@ -1487,10 +1505,10 @@ fn readv_writev_mixes_descriptors_and_paths() {
         ])
         .unwrap();
     assert_eq!(w.len(), 2);
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(compounds, 1, "mixed writev must be one compound");
 
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let r = c
         .readv(&[
             ReadOp::new(fd.clone(), VfOffset::At(0), 7),
@@ -1501,7 +1519,7 @@ fn readv_writev_mixes_descriptors_and_paths() {
     assert_eq!(r[1].data, b"path-data");
     assert!(r[0].file.is_descriptor(), "result echoes the descriptor op");
     assert!(r[1].file.path().is_some(), "result echoes the path op");
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(compounds, 1, "mixed readv must be one compound");
     c.close(&fd).unwrap();
 }
@@ -1514,14 +1532,14 @@ fn writev_respects_compound_size_limit() {
     c.set_max_compound_bytes(100 * 1024);
     let paths: Vec<String> = (0..4).map(|i| format!("{}/f{}", dir, i)).collect();
     let payload = vec![b'x'; 64 * 1024];
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let ops: Vec<WriteOp> = paths
         .iter()
         .map(|p| WriteOp::at(VfFile::from_path(p), 0, payload.clone()).with_creation())
         .collect();
     let res = c.writev(&ops).unwrap();
     assert_eq!(res.len(), 4);
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(compounds, 4, "payload cap must split into 4 compounds");
     for p in &paths {
         assert_eq!(c.stat(Path::new(p)).unwrap().size, payload.len() as u64);
@@ -2073,7 +2091,7 @@ fn listdirv_batches_many_directories() {
     }
     let dirs: Vec<String> = (0..10).map(|i| format!("{}/d{}", dir, i)).collect();
     let refs: Vec<&Path> = dirs.iter().map(Path::new).collect();
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let mut seen = 0usize;
     let mut cb = |_: &VfAttrs, _: &Path| {
         seen += 1;
@@ -2081,13 +2099,64 @@ fn listdirv_batches_many_directories() {
     };
     c.listdirv(&refs, AttrMask::stat(), 0, false, &mut cb)
         .unwrap();
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert_eq!(seen, 10);
     assert!(
         compounds <= 6,
         "10 directories should list in a few compounds, got {}",
         compounds
     );
+}
+
+#[test]
+fn native_read_dirs_batches_and_reports_bounded_errors() {
+    use vnfs::{MetadataFields, ReadDirOptions};
+
+    let dir = setup_dir("native_read_dirs_batch");
+    let mut backend = client();
+    for i in 0..10 {
+        backend
+            .ensure_dir(Path::new(&format!("{dir}/d{i}")), 0o755)
+            .unwrap();
+        write_file(&mut backend, Path::new(&format!("{dir}/d{i}/f")), b"x");
+    }
+    let client = vnfs::FsClient::new(backend);
+    let directories: Vec<String> = (0..10).map(|i| format!("{dir}/d{i}")).collect();
+    let _ = vnfs::backend::compound::thread_compound_stats();
+    let listings = client
+        .read_dirs_with_options(
+            &directories,
+            MetadataFields::MODE | MetadataFields::SIZE | MetadataFields::BLOCKS,
+            ReadDirOptions::new(),
+        )
+        .unwrap();
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
+    assert_eq!(listings.len(), 10);
+    assert!(listings.iter().all(|listing| listing.entries.len() == 1));
+    assert!(
+        listings
+            .iter()
+            .all(|listing| listing.entries[0].metadata().blocks().is_some())
+    );
+    assert!(
+        compounds <= 6,
+        "expected batched directory listing, got {compounds} compounds"
+    );
+
+    let error = client
+        .read_dirs_with_options(
+            &directories,
+            MetadataFields::MODE,
+            ReadDirOptions::new().max_entries(5),
+        )
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+
+    let missing = [directories[0].clone(), format!("{dir}/missing")];
+    let error = client
+        .read_dirs_with_options(&missing, MetadataFields::MODE, ReadDirOptions::new())
+        .unwrap_err();
+    assert_eq!(error.index_opt(), Some(1));
 }
 
 #[test]
@@ -2100,23 +2169,23 @@ fn large_writev_readv_roundtrip() {
     let data = vec![b'x'; 2 * 1024 * 1024 + 123];
     // The 2 MiB payload must travel as a single WRITE op (the XDR I/O cap is
     // 64 MiB, so the per-op limit is the compound budget, not 1 MiB).
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let w = c
         .writev(&[WriteOp::at(VfFile::from_path(&p), 0, data.clone()).with_creation()])
         .unwrap();
     assert_eq!(w[0].written, data.len());
     assert_eq!(
-        vnfs::legacy::compound::thread_compound_stats().0,
+        vnfs::backend::compound::thread_compound_stats().0,
         1,
         "writev must be 1 compound"
     );
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let r = c
         .readv(&[ReadOp::at(VfFile::from_path(&p), 0, data.len())])
         .unwrap();
     assert_eq!(r[0].data, data);
     assert_eq!(
-        vnfs::legacy::compound::thread_compound_stats().0,
+        vnfs::backend::compound::thread_compound_stats().0,
         1,
         "readv must be 1 compound"
     );
@@ -2139,14 +2208,14 @@ fn read_allv_is_no_stat_whole_file_read() {
         files.push((p, data));
     }
     let refs: Vec<VfFile> = files.iter().map(|(p, _)| VfFile::from_path(p)).collect();
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let out = c.read_allv(&refs).unwrap();
     for (i, (_, data)) in files.iter().enumerate() {
         assert_eq!(&out[i], data);
     }
     // The whole batch fits one compound (4 x ~2 MiB requested, chunked into
     // per-op READs and byte-budgeted) — and no separate stat round trip.
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert!(
         compounds <= 4,
         "read_allv(4 x 2 MiB) must be a few compounds, got {}",
@@ -2186,9 +2255,9 @@ fn mkdirv_batches_parent_resolution() {
             ..VfAttrs::default()
         })
         .collect();
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     c.mkdirv(&attrs).unwrap();
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert!(
         compounds <= 8,
         "mkdirv of 8 dirs should batch parent resolution, got {}",
@@ -2241,19 +2310,19 @@ fn symlinkv_readlinkv_hardlinkv_batch_resolution() {
     let links: Vec<String> = (0..5).map(|i| format!("{}/l{}", dir, i)).collect();
     let t_refs: Vec<&Path> = targets.iter().map(Path::new).collect();
     let l_refs: Vec<&Path> = links.iter().map(Path::new).collect();
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     c.symlinkv(&t_refs, &l_refs).unwrap();
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert!(
         compounds <= 4,
         "symlinkv of 5 links should batch parent resolution, got {}",
         compounds
     );
     // readlinkv of all links: one batched resolve + one READLINK.
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     let got = c.readlinkv(&l_refs).unwrap();
     assert_eq!(got.len(), 5);
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert!(
         compounds <= 4,
         "readlinkv of 5 links should batch resolution, got {}",
@@ -2262,9 +2331,9 @@ fn symlinkv_readlinkv_hardlinkv_batch_resolution() {
     // hardlinkv: sources + destination parents batched, then one LINK.
     let hard: Vec<String> = (0..5).map(|i| format!("{}/h{}", dir, i)).collect();
     let h_refs: Vec<&Path> = hard.iter().map(Path::new).collect();
-    let _ = vnfs::legacy::compound::thread_compound_stats(); // reset counters
+    let _ = vnfs::backend::compound::thread_compound_stats(); // reset counters
     c.hardlinkv(&l_refs, &h_refs).unwrap();
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     assert!(
         compounds <= 7,
         "hardlinkv of 5 links should batch resolution, got {}",
@@ -2383,9 +2452,14 @@ fn rm_contents_keeps_the_directory() {
 
     assert!(c.exists(Path::new(&dir)).unwrap(), "root is kept");
     assert!(
-        c.listdir(Path::new(&dir), vnfs::AttrMask::default(), 0, false)
-            .unwrap()
-            .is_empty(),
+        c.listdir(
+            Path::new(&dir),
+            vnfs::backend::AttrMask::default(),
+            0,
+            false
+        )
+        .unwrap()
+        .is_empty(),
         "contents are gone"
     );
 }
@@ -2441,9 +2515,14 @@ fn ensure_empty_dir_creates_empties_and_rejects_files() {
     c.ensure_empty_dir(Path::new(&missing)).unwrap();
     assert!(c.exists(Path::new(&missing)).unwrap());
     assert!(
-        c.listdir(Path::new(&missing), vnfs::AttrMask::default(), 0, false)
-            .unwrap()
-            .is_empty()
+        c.listdir(
+            Path::new(&missing),
+            vnfs::backend::AttrMask::default(),
+            0,
+            false
+        )
+        .unwrap()
+        .is_empty()
     );
 
     c.ensure_dir(Path::new(&format!("{}/full", dir)), 0o755)
@@ -2454,7 +2533,7 @@ fn ensure_empty_dir_creates_empties_and_rejects_files() {
     assert!(
         c.listdir(
             Path::new(&format!("{}/full", dir)),
-            vnfs::AttrMask::default(),
+            vnfs::backend::AttrMask::default(),
             0,
             false
         )
@@ -2484,7 +2563,7 @@ fn open_dir_handle_empties_without_following_symlinks() {
     assert!(
         c.listdir(
             Path::new(&format!("{}/d", dir)),
-            vnfs::AttrMask::default(),
+            vnfs::backend::AttrMask::default(),
             0,
             false
         )
@@ -2558,7 +2637,7 @@ fn rm_is_fail_fast_but_explicit_best_effort_continues() {
         c.rm_with_options(
             &[Path::new(&missing), Path::new(&victim)],
             true,
-            vnfs::RemoveOptions::new().continue_on_error(true),
+            vnfs::backend::RemoveOptions::new().continue_on_error(true),
         )
         .is_err()
     );
@@ -2577,7 +2656,7 @@ fn rm_with_options_honors_batch_size() {
     c.rm_with_options(
         &[Path::new(&dir)],
         true,
-        vnfs::RemoveOptions::new().batch(2).retries(1),
+        vnfs::backend::RemoveOptions::new().batch(2).retries(1),
     )
     .unwrap();
     assert!(!c.exists(Path::new(&dir)).unwrap());
@@ -2596,18 +2675,18 @@ fn recursive_rm_learns_larger_batches_from_useful_compounds() {
         }
     }
 
-    let _ = vnfs::legacy::compound::thread_compound_stats();
+    let _ = vnfs::backend::compound::thread_compound_stats();
     c.rm(&[Path::new(&adaptive)], true).unwrap();
-    let learned_compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let learned_compounds = vnfs::backend::compound::thread_compound_stats().0;
 
-    let _ = vnfs::legacy::compound::thread_compound_stats();
+    let _ = vnfs::backend::compound::thread_compound_stats();
     c.rm_with_options(
         &[Path::new(&fixed)],
         true,
-        vnfs::RemoveOptions::new().batch(24),
+        vnfs::backend::RemoveOptions::new().batch(24),
     )
     .unwrap();
-    let fixed_compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let fixed_compounds = vnfs::backend::compound::thread_compound_stats().0;
 
     assert!(
         learned_compounds < fixed_compounds,
@@ -2749,9 +2828,9 @@ fn copyv_batches_nfs42_server_copies_or_falls_back() {
         pairs.push(ExtentPair::new(&src, 0, &dst, 0, None));
     }
     let before = c.server_copy_stats();
-    let _ = vnfs::legacy::compound::thread_compound_stats();
+    let _ = vnfs::backend::compound::thread_compound_stats();
     c.copyv(&pairs).expect("batched NFSv4.2 COPY");
-    let compounds = vnfs::legacy::compound::thread_compound_stats().0;
+    let compounds = vnfs::backend::compound::thread_compound_stats().0;
     let server_copy_enabled = c.server_copy_enabled();
     let copy_stats = c.server_copy_stats();
     if std::env::var_os("VNFS_TEST_REQUIRE_SERVER_COPY").is_some() {

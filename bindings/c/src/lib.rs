@@ -15,9 +15,9 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use vfsi_smb::SmbVecFs;
-use vnfs::dummy_vecfs::DummyVecFs;
-use vnfs::legacy::nfs::NfsVecFs;
-use vnfs::vecfs::{
+use vnfs::backend::nfs::NfsVecFs;
+use vnfs::backend::DummyVecFs;
+use vnfs::backend::{
     AttrMask, ExtentPair, ReadOp, VfAttrs, VfError, VfFile, WriteOp, ERR_EBADF, ERR_NOENT,
     VF_ERR_UNSUPPORTED,
 };
@@ -65,11 +65,11 @@ pub const VFSI_CAP_NON_UTF8_PATHS: u64 = 1 << 4;
 /// The backend implements no-follow metadata operations.
 pub const VFSI_CAP_LSTAT: u64 = 1 << 5;
 
-const _: () = assert!(VFSI_CAP_POSIX_METADATA == vnfs::VF_CAP_POSIX_METADATA);
-const _: () = assert!(VFSI_CAP_SYMLINKS == vnfs::VF_CAP_SYMLINKS);
-const _: () = assert!(VFSI_CAP_HARDLINKS == vnfs::VF_CAP_HARDLINKS);
-const _: () = assert!(VFSI_CAP_NON_UTF8_PATHS == vnfs::VF_CAP_NON_UTF8_PATHS);
-const _: () = assert!(VFSI_CAP_LSTAT == vnfs::VF_CAP_LSTAT);
+const _: () = assert!(VFSI_CAP_POSIX_METADATA == vnfs::backend::VF_CAP_POSIX_METADATA);
+const _: () = assert!(VFSI_CAP_SYMLINKS == vnfs::backend::VF_CAP_SYMLINKS);
+const _: () = assert!(VFSI_CAP_HARDLINKS == vnfs::backend::VF_CAP_HARDLINKS);
+const _: () = assert!(VFSI_CAP_NON_UTF8_PATHS == vnfs::backend::VF_CAP_NON_UTF8_PATHS);
+const _: () = assert!(VFSI_CAP_LSTAT == vnfs::backend::VF_CAP_LSTAT);
 
 macro_rules! ffi_guard {
     ($fallback:expr, $body:block) => {{
@@ -90,7 +90,7 @@ macro_rules! fail_batch {
 
 /// Opaque filesystem handle owned by C.
 pub struct vfsi_fs {
-    fs: Mutex<Box<dyn vnfs::VecFs>>,
+    fs: Mutex<Box<dyn vnfs::backend::VecFs>>,
     files: Mutex<std::collections::HashMap<i32, VfFile>>,
     next_fd: AtomicI32,
     /// Kernel mountpoint used by application-visible paths.
@@ -308,7 +308,7 @@ impl vfsi_result {
             VfError::Transport { index, message, .. } => Self::base(
                 index.unwrap_or(C_INDEX_UNKNOWN),
                 VFSI_ERROR_TRANSPORT,
-                vnfs::VF_ERR_RPC,
+                vnfs::backend::VF_ERR_RPC,
                 &message,
             ),
             _ => Self::base(0, VFSI_ERROR_TRANSPORT, libc::EIO as u32, "unknown error"),
@@ -522,7 +522,11 @@ fn path_for(fs: &vfsi_fs, path: &Path) -> Option<PathBuf> {
     Some(mapped)
 }
 
-fn make_fs(fs: Box<dyn vnfs::VecFs>, mountpoint: PathBuf, backend_root: PathBuf) -> *mut vfsi_fs {
+fn make_fs(
+    fs: Box<dyn vnfs::backend::VecFs>,
+    mountpoint: PathBuf,
+    backend_root: PathBuf,
+) -> *mut vfsi_fs {
     Box::into_raw(Box::new(vfsi_fs {
         fs: Mutex::new(fs),
         files: Mutex::new(std::collections::HashMap::new()),
@@ -567,7 +571,7 @@ pub unsafe extern "C" fn vfsi_dummy_open(root: *const c_char, out: *mut *mut vfs
             return libc::EINVAL;
         };
         let fs = match DummyVecFs::try_new(root) {
-            Ok(fs) => Box::new(fs) as Box<dyn vnfs::VecFs>,
+            Ok(fs) => Box::new(fs) as Box<dyn vnfs::backend::VecFs>,
             Err(error) => return error.err_no() as c_int,
         };
         *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
@@ -593,7 +597,7 @@ pub unsafe extern "C" fn vfsi_dummy_open_mount(
             return libc::EINVAL;
         };
         let fs = match DummyVecFs::try_new(root) {
-            Ok(fs) => Box::new(fs) as Box<dyn vnfs::VecFs>,
+            Ok(fs) => Box::new(fs) as Box<dyn vnfs::backend::VecFs>,
             Err(error) => return error.err_no() as c_int,
         };
         *out = make_fs(fs, mountpoint, PathBuf::from("/"));
@@ -613,7 +617,7 @@ pub unsafe extern "C" fn vfsi_nfs_open(host: *const c_char, out: *mut *mut vfsi_
             return libc::EINVAL;
         };
         match NfsVecFs::connect(host)
-            .map(|f| Box::new(f) as Box<dyn vnfs::VecFs>)
+            .map(|f| Box::new(f) as Box<dyn vnfs::backend::VecFs>)
             .map_err(|e| vf_code(&e))
         {
             Ok(fs) => {
@@ -640,7 +644,7 @@ pub unsafe extern "C" fn vfsi_nfs_open_minor(
             return libc::EINVAL;
         };
         match NfsVecFs::connect_minor(host, minorversion)
-            .map(|f| Box::new(f) as Box<dyn vnfs::VecFs>)
+            .map(|f| Box::new(f) as Box<dyn vnfs::backend::VecFs>)
             .map_err(|e| vf_code(&e))
         {
             Ok(fs) => {
@@ -695,7 +699,7 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount_export(
             return libc::EINVAL;
         }
         match NfsVecFs::connect(host)
-            .map(|f| Box::new(f) as Box<dyn vnfs::VecFs>)
+            .map(|f| Box::new(f) as Box<dyn vnfs::backend::VecFs>)
             .map_err(|e| vf_code(&e))
         {
             Ok(fs) => {
@@ -734,7 +738,7 @@ pub unsafe extern "C" fn vfsi_smb_open(
         match SmbVecFs::connect(&server, &share, &username, &password, &domain) {
             Ok(backend) => {
                 *out = make_fs(
-                    Box::new(backend) as Box<dyn vnfs::VecFs>,
+                    Box::new(backend) as Box<dyn vnfs::backend::VecFs>,
                     PathBuf::from("/"),
                     PathBuf::from("/"),
                 );
@@ -788,7 +792,7 @@ pub unsafe extern "C" fn vfsi_smb_open_mount(
         match SmbVecFs::connect(&server, &share, &username, &password, &domain) {
             Ok(backend) => {
                 *out = make_fs(
-                    Box::new(backend) as Box<dyn vnfs::VecFs>,
+                    Box::new(backend) as Box<dyn vnfs::backend::VecFs>,
                     mountpoint,
                     share_root,
                 );
@@ -806,7 +810,7 @@ pub unsafe extern "C" fn vfsi_free(fs: *mut vfsi_fs) {
     ffi_guard!((), {
         if !fs.is_null() {
             if std::env::var("VNFS_STATS").as_deref() == Ok("1") {
-                let (n, ops, bytes, max) = vnfs::legacy::compound::compound_stats();
+                let (n, ops, bytes, max) = vnfs::backend::compound::compound_stats();
                 if n > 0 {
                     eprintln!(
                     "[vfsi] compounds={} avg_ops={:.2} max_ops={} avg_bytes={:.0} total_bytes={}",
@@ -817,7 +821,7 @@ pub unsafe extern "C" fn vfsi_free(fs: *mut vfsi_fs) {
                     bytes
                 );
                 }
-                let (calls, us) = vnfs::legacy::compound::rpc_stats();
+                let (calls, us) = vnfs::backend::compound::rpc_stats();
                 if calls > 0 {
                     eprintln!(
                         "[vfsi] rpc_calls={} avg_rpc_ms={:.2} total_rpc_ms={:.1}",
@@ -2102,7 +2106,7 @@ mod tests {
         // A compound-level NFS status with no per-op index must still surface
         // its real errno through the scalar helpers and stay a filesystem
         // error, not be downgraded to EIO/transport.
-        let error = VfError::from_rpc(vnfs::error::RpcError::op(0, 10005), None);
+        let error = VfError::from_rpc(vnfs::backend::RpcError::op(0, 10005), None);
         assert_eq!(error.index_opt(), None);
         assert_eq!(vf_code(&error), 10005);
         let failure = vfsi_result::from_error(error);
@@ -2455,7 +2459,7 @@ mod tests {
         let root = temp_root();
         let backend = Box::new(DummyVecFs::new(PathBuf::from(
             root.to_string_lossy().into_owned(),
-        ))) as Box<dyn vnfs::VecFs>;
+        ))) as Box<dyn vnfs::backend::VecFs>;
         let raw = make_fs(
             backend,
             PathBuf::from("/mnt/repos"),

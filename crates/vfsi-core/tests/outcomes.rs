@@ -81,6 +81,28 @@ fn metadata_converts_fractional_pre_epoch_timestamps() {
 }
 
 #[test]
+fn metadata_distinguishes_unavailable_fields_from_zero_and_false() {
+    let absent = Metadata::from(VfAttrs::default());
+    assert_eq!(absent.mode(), None);
+    assert_eq!(absent.blocks(), None);
+    assert_eq!(absent.device_id(), None);
+    assert_eq!(absent.has_named_attributes(), None);
+
+    let present = Metadata::from(VfAttrs {
+        returned: AttrMask::MODE | AttrMask::BLOCKS | AttrMask::RDEV | AttrMask::NAMED_ATTR,
+        mode: libc::S_IFREG,
+        blocks: 0,
+        rdev: 0,
+        has_named_attr: false,
+        ..VfAttrs::default()
+    });
+    assert_eq!(present.mode(), Some(libc::S_IFREG));
+    assert_eq!(present.blocks(), Some(0));
+    assert_eq!(present.device_id(), Some(0));
+    assert_eq!(present.has_named_attributes(), Some(false));
+}
+
+#[test]
 fn protocol_status_constructors_preserve_their_domains() {
     let nfs = VfError::nfs(4, 10_001);
     assert_eq!(nfs.index_opt(), Some(4));

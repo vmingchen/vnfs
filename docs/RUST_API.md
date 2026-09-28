@@ -24,12 +24,12 @@ POSIX/C compatibility surface.
 - `NfsVecFs::shutdown` reports close/session teardown errors; `Drop` remains a
   best-effort safety net.
 
-## Compatibility boundary
+## Application and backend boundary
 
-`VecFs`, `VfFile`, `Fd`, `VfAttrs`, `VfOpenOptions`, and raw libc flags remain
-available while existing C and Python bindings migrate. Raw NFS protocol
-modules are available only under `vnfs::legacy`. New application code should
-start with:
+The `vnfs` crate root exposes the NFS application API. `VecFs`, `VfFile`,
+`Fd`, `VfAttrs`, `VfOpenOptions`, raw libc flags, and NFS protocol modules live
+under `vnfs::backend` or in the corresponding `vfsi-*` crates. New application
+code can start with:
 
 ```rust
 use vnfs::prelude::*;
@@ -41,12 +41,26 @@ client, preventing accidental cross-session descriptor use.
 
 Application code should connect through `Nfs::builder`, which directly
 returns the concrete `NfsClient` alias. `NfsVecFs` and `NfsClientBuilder`
-remain available for embedding and compatibility. `NfsClient::open_options`
+remain available in `vfsi-nfs` for backend embedding. `NfsClient::open_options`
 mirrors `std::fs::OpenOptions`; direct `read_at` and `write_at` perform
 positional I/O, while explicitly named `read_request_at` and
-`write_request_at` values compose vector calls. `closev` consumes a group
+`write_request_at` values compose vector calls. `read_files` performs bounded
+path-based vector reads without remote OPEN/CLOSE phases; `write_files` batches
+OPEN, WRITE, and CLOSE phases across files. `read_files` has a 16 MiB aggregate allocation limit by
+default. `closev` consumes a group
 of handles and closes them with the vector backend rather than serializing
 one close per dropped handle.
+
+Real application ports also need metadata-rich traversal and namespace
+operations without constructing `VfAttrs` or calling `VecFs` directly.
+`MetadataFields` selects only needed attributes; `Metadata` reports optional
+fields such as allocated blocks, device ID, full mode, and named-attribute
+presence as `Option` so an absent value is not confused with zero. Use
+`symlink_metadata_with_fields` for a no-follow query,
+`read_dirs_with_options` to batch several directory operands, and
+`walk_with_options` for a bounded recursive tree. `DirectoryListing` carries
+paths and already-fetched entry metadata. `copy_files` and `remove_paths`
+perform ordered batches without promising transactionality.
 
 ## Durability and failure rules
 
@@ -83,9 +97,13 @@ reads instead of raising a whole-file allocation limit without bound.
 Allocating directory APIs are bounded for the same reason. `FsClient::read_dir`
 uses finite entry and combined-path-byte defaults; `read_dir_with_options` and
 `ReadDirOptions` select tighter limits or explicitly opt into unlimited
-collection. Recursive `VecFs::walk` additionally has a default depth limit and
-accepts `WalkOptions`. The callback-based `listdirv` remains the preferred API
-when an application can consume entries incrementally.
+collection. `read_dirs_with_options` applies these limits across the entire
+returned vector. Recursive `FsClient::walk_with_options` additionally has a
+default depth limit and accepts `WalkOptions`. NFS multi-directory listing
+delivers each bounded READDIR page before requesting continuation pages, so
+early-stop callbacks no longer retain the whole remote listing. Applications
+needing to consume one directory incrementally can use `visit_dir_with_options`;
+its callback must not reenter the same client while the backend lock is held.
 
 The SMB backend exposes `SmbConnectOptions` through
 `SmbVecFs::connect_with_options`. Connect setup and ordinary requests have
