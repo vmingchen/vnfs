@@ -109,6 +109,24 @@ jobs:
               "patch.crates-io.$package.path=\"$GITHUB_WORKSPACE/target/package/$package-$version\"")
           done <"$package_list"
 
+          # vfsi-c's build script invokes cargo metadata through cbindgen.
+          # That child Cargo process does not inherit the CLI --config flags,
+          # so give its extracted archive the same local crate patches.
+          c_version=$(python -c \
+            'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("bindings/c/Cargo.toml").read_text())["package"]["version"])')
+          c_archive="target/package/vfsi-c-$c_version"
+          mkdir -p "$c_archive/.cargo"
+          {
+            printf '[patch.crates-io]\n'
+            while read -r package manifest; do
+              version=$(python -c \
+                'import pathlib,sys,tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["package"]["version"])' \
+                "$manifest")
+              printf '%s = { path = "%s/target/package/%s-%s" }\n' \
+                "$package" "$GITHUB_WORKSPACE" "$package" "$version"
+            done <"$package_list"
+          } >"$c_archive/.cargo/config.toml"
+
           # Compile each exact package archive against the exact archives of
           # its workspace peers. This catches missing packaged files and
           # cross-package API changes before dependent versions reach crates.io.
