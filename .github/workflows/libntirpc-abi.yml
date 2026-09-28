@@ -58,7 +58,7 @@ jobs:
                        -DCMAKE_INSTALL_PREFIX=\"$prefix\" \
                        -DUSE_LTTNG=Off \
                        -DUSE_MONITORING=Off \
-                     && cmake --build /tmp/build --parallel \
+                     && cmake --build /tmp/build --target ntirpc --parallel \
                      && cmake --install /tmp/build"
           pc=$(find "$prefix" -name libntirpc.pc -print -quit)
           test -n "$pc"
