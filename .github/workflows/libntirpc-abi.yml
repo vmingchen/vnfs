@@ -63,6 +63,9 @@ jobs:
           pc=$(find "$prefix" -name libntirpc.pc -print -quit)
           test -n "$pc"
           echo "PKG_CONFIG_PATH=$(dirname "$pc")" >>"$GITHUB_ENV"
+          # v15.3's generated config.h includes <ntirpc/version.h>, which
+          # needs the parent include directory for every native consumer.
+          echo "CPATH=$prefix/include" >>"$GITHUB_ENV"
           # The upstream .pc file omits a usable link search path for this
           # custom prefix. Make both the build-script ABI probe and Rust's
           # linker resolve the same freshly built library.
