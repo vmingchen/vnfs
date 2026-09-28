@@ -26,6 +26,9 @@ struct ScalarOnly {
     close_calls: usize,
     direct_into_only: bool,
     into_calls: Arc<AtomicUsize>,
+    read_calls: Arc<AtomicUsize>,
+    write_calls: Arc<AtomicUsize>,
+    max_write_once: Option<usize>,
 }
 
 impl VectorFileSystem for ScalarOnly {
@@ -158,6 +161,7 @@ impl FileSystem for ScalarOnly {
     }
 
     fn read_one(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
+        self.read_calls.fetch_add(1, Ordering::SeqCst);
         assert!(!self.direct_into_only, "owned read path must not run");
         if self.read_failure {
             return Err(VfError::failure(0, libc::EACCES as u32));
@@ -226,6 +230,7 @@ impl FileSystem for ScalarOnly {
     }
 
     fn write_one(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult> {
+        self.write_calls.fetch_add(1, Ordering::SeqCst);
         if self.oversized_write_count {
             return Ok(WriteResult {
                 file: request.file.clone(),
@@ -241,14 +246,17 @@ impl FileSystem for ScalarOnly {
             _ => 0,
         };
         let start = offset as usize;
-        self.data
-            .resize(self.data.len().max(start + request.data.len()), 0);
-        self.data[start..start + request.data.len()].copy_from_slice(request.data);
-        self.cursor = offset + request.data.len() as u64;
+        let length = request
+            .data
+            .len()
+            .min(self.max_write_once.unwrap_or(usize::MAX));
+        self.data.resize(self.data.len().max(start + length), 0);
+        self.data[start..start + length].copy_from_slice(&request.data[..length]);
+        self.cursor = offset + length as u64;
         Ok(WriteResult {
             file: request.file.clone(),
             offset,
-            written: request.data.len(),
+            written: length,
             stable: true,
         })
     }
@@ -441,6 +449,153 @@ fn readv_and_writev_reject_wrong_result_counts() {
 }
 
 #[test]
+fn owned_vector_reads_reject_oversized_batches_before_backend_io() {
+    let read_calls = Arc::new(AtomicUsize::new(0));
+    let client = FsClient::new(ScalarOnly {
+        data: b"abcdef".to_vec(),
+        read_calls: Arc::clone(&read_calls),
+        ..ScalarOnly::default()
+    });
+    let file = client.open("/file").unwrap();
+    let error = client
+        .readv_with_limit(&[file.read_request_at(0, 3), file.read_request_at(3, 3)], 5)
+        .unwrap_err();
+    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(error.path(), Some(std::path::Path::new("/file")));
+    assert_eq!(read_calls.load(Ordering::SeqCst), 0);
+
+    let error = client
+        .readv(&[file.read_request_at(0, vfsi_sync::DEFAULT_READV_MAX_TOTAL_BYTES + 1)])
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(read_calls.load(Ordering::SeqCst), 0);
+
+    let results = client
+        .readv_with_limit(&[file.read_request_at(0, 3)], 3)
+        .unwrap();
+    assert_eq!(results[0].data, b"abc");
+}
+
+#[test]
+fn write_allv_retries_short_writes_in_vector_waves() {
+    let write_calls = Arc::new(AtomicUsize::new(0));
+    let client = FsClient::new(ScalarOnly {
+        max_write_once: Some(2),
+        write_calls: Arc::clone(&write_calls),
+        ..ScalarOnly::default()
+    });
+    let file = client
+        .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
+        .unwrap();
+    let results = client
+        .write_allv(&[
+            file.write_request_at(0, b"abcde"),
+            file.write_request_at(10, b"VWXYZ"),
+        ])
+        .unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.written)
+            .collect::<Vec<_>>(),
+        [5, 5]
+    );
+    assert!(results.iter().all(|result| result.stable));
+    assert_eq!(write_calls.load(Ordering::SeqCst), 6);
+    drop(file);
+    let backend = client.into_inner().unwrap();
+    assert_eq!(&backend.data[..5], b"abcde");
+    assert_eq!(&backend.data[10..15], b"VWXYZ");
+}
+
+#[test]
+fn write_allv_preserves_order_for_overlapping_short_writes() {
+    let client = FsClient::new(ScalarOnly {
+        max_write_once: Some(2),
+        ..ScalarOnly::default()
+    });
+    let file = client
+        .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
+        .unwrap();
+    let results = client
+        .write_allv(&[
+            file.write_request_at(0, b"AAAA"),
+            file.write_request_at(2, b"BBBB"),
+        ])
+        .unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.written)
+            .collect::<Vec<_>>(),
+        [4, 4]
+    );
+    drop(file);
+    assert_eq!(client.into_inner().unwrap().data, b"AABBBB");
+}
+
+#[test]
+fn write_allv_waits_for_every_earlier_overlapping_request() {
+    let client = FsClient::new(ScalarOnly {
+        max_write_once: Some(2),
+        ..ScalarOnly::default()
+    });
+    let file = client
+        .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
+        .unwrap();
+    client
+        .write_allv(&[
+            file.write_request_at(0, b"AAAAAA"),
+            file.write_request_at(6, b"BB"),
+            file.write_request_at(4, b"CCCC"),
+        ])
+        .unwrap();
+    drop(file);
+    assert_eq!(client.into_inner().unwrap().data, b"AAAACCCC");
+}
+
+#[test]
+fn write_allv_rejects_zero_progress() {
+    let client = FsClient::new(ScalarOnly {
+        max_write_once: Some(0),
+        ..ScalarOnly::default()
+    });
+    let file = client
+        .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
+        .unwrap();
+    let error = client
+        .write_allv(&[file.write_request_at(0, b"data")])
+        .unwrap_err();
+    assert_eq!(error.err_no(), vfsi_sync::ERR_IO);
+    assert_eq!(error.index_opt(), Some(0));
+}
+
+#[test]
+fn write_allv_validates_every_request_before_writing_a_prefix() {
+    let write_calls = Arc::new(AtomicUsize::new(0));
+    let client = FsClient::new(ScalarOnly {
+        write_calls: Arc::clone(&write_calls),
+        ..ScalarOnly::default()
+    });
+    let other = FsClient::new(ScalarOnly::default());
+    let local_file = client
+        .open_with(OpenRequest::new("/local", OpenFlags::WRITE))
+        .unwrap();
+    let foreign_file = other
+        .open_with(OpenRequest::new("/foreign", OpenFlags::WRITE))
+        .unwrap();
+    let error = client
+        .write_allv(&[
+            local_file.write_request_at(0, b"would-write"),
+            foreign_file.write_request_at(0, b"invalid"),
+        ])
+        .unwrap_err();
+    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(write_calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn vector_results_must_match_their_requests_and_io_limits() {
     for backend in [
         ScalarOnly {
@@ -507,6 +662,22 @@ fn failed_try_close_retains_handle_for_explicit_retry() {
     drop(file);
 
     let backend = client.into_inner().expect("drop released the client");
+    assert_eq!(backend.close_calls, 2);
+    assert!(!backend.open);
+}
+
+#[test]
+fn failed_try_closev_retains_handles_for_explicit_retry() {
+    let client = FsClient::new(ScalarOnly {
+        close_failures_remaining: 1,
+        ..ScalarOnly::default()
+    });
+    let mut files = vec![client.open("/file").unwrap()];
+    assert!(client.try_closev(&mut files).is_err());
+    assert_eq!(files[0].path(), std::path::Path::new("/file"));
+    client.try_closev(&mut files).unwrap();
+    drop(files);
+    let backend = client.into_inner().unwrap();
     assert_eq!(backend.close_calls, 2);
     assert!(!backend.open);
 }

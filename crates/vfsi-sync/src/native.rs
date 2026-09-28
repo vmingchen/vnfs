@@ -61,6 +61,22 @@ pub trait DirectoryFileSystem: FileSystem {
         path: &std::path::Path,
         options: ReadDirOptions,
     ) -> VfResult<Vec<DirEntry>>;
+
+    /// Visit entries incrementally. The default scalar fallback may still
+    /// materialize a bounded listing; vector backends can page lazily.
+    fn visit_dir_one(
+        &mut self,
+        path: &std::path::Path,
+        options: ReadDirOptions,
+        callback: &mut dyn FnMut(DirEntry) -> VfResult<bool>,
+    ) -> VfResult<()> {
+        for entry in self.read_dir_one(path, options)? {
+            if !callback(entry)? {
+                break;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Namespace mutations shared by files and directories.
@@ -365,6 +381,50 @@ impl<T: VecFs + ?Sized> DirectoryFileSystem for T {
                 Ok(DirEntry::new(entry_path, attributes.into()))
             })
             .collect()
+    }
+
+    fn visit_dir_one(
+        &mut self,
+        path: &std::path::Path,
+        options: ReadDirOptions,
+        callback: &mut dyn FnMut(DirEntry) -> VfResult<bool>,
+    ) -> VfResult<()> {
+        let mut count = 0usize;
+        let mut path_bytes = 0usize;
+        let mut callback_error = None;
+        let requested = options.entry_limit().saturating_add(1);
+        self.visit_dir(path, metadata_mask(), requested, &mut |attributes| {
+            let index = count;
+            if count >= options.entry_limit() {
+                callback_error = Some(
+                    VfError::failure(index, libc::EFBIG as u32).with_context("visit_dir", path),
+                );
+                return false;
+            }
+            let Some(entry_path) = attributes.file.path().map(std::path::Path::to_path_buf) else {
+                callback_error =
+                    Some(VfError::client(index, ERR_IO).with_context("visit_dir", path));
+                return false;
+            };
+            path_bytes = match path_bytes.checked_add(entry_path.as_os_str().len()) {
+                Some(bytes) if bytes <= options.path_byte_limit() => bytes,
+                _ => {
+                    callback_error = Some(
+                        VfError::failure(index, libc::EFBIG as u32).with_context("visit_dir", path),
+                    );
+                    return false;
+                }
+            };
+            count += 1;
+            match callback(DirEntry::new(entry_path, attributes.clone().into())) {
+                Ok(keep_going) => keep_going,
+                Err(error) => {
+                    callback_error = Some(error);
+                    false
+                }
+            }
+        })?;
+        callback_error.map_or(Ok(()), Err)
     }
 }
 

@@ -5,6 +5,7 @@
 use vfsi_sync::test_support as common;
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use vnfs::dummy_vecfs::DummyVecFs;
 use vnfs::{VecFs, VecFsExt, VfOffset};
 
@@ -15,13 +16,15 @@ use vnfs::internal::faults::{FaultScript, OpenFaultPoint};
 
 /// A `DummyVecFs` rooted at a fresh unique temp directory.
 fn dummy() -> DummyVecFs {
+    static NEXT_DUMMY_ID: AtomicU64 = AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!(
-        "vnfs_dummy_{}_{}",
+        "vnfs_dummy_{}_{}_{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        NEXT_DUMMY_ID.fetch_add(1, Ordering::Relaxed)
     ));
     DummyVecFs::new(root)
 }
@@ -895,4 +898,60 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
     assert_eq!(error.err_no(), libc::EFBIG as u32);
 
     assert_eq!(client.read_dir("/tree").unwrap().len(), 3);
+}
+
+#[test]
+fn directory_visitor_supports_limits_early_stop_and_callback_errors() {
+    use vnfs::{FsClient, ReadDirOptions, VfError, WriteOp};
+
+    let mut fs = dummy();
+    fs.ensure_dir(Path::new("/tree"), 0o755).unwrap();
+    let writes: Vec<_> = (0..8)
+        .map(|index| {
+            WriteOp::from_path(&format!("/tree/item-{index}"), VfOffset::At(0), Vec::new())
+                .with_creation()
+        })
+        .collect();
+    fs.writev(&writes).unwrap();
+    let client = FsClient::new(fs);
+
+    let mut seen = 0;
+    let error = client
+        .visit_dir_with_options("/tree", ReadDirOptions::new().max_entries(3), |_| {
+            seen += 1;
+            Ok(true)
+        })
+        .unwrap_err();
+    assert_eq!(seen, 3);
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+
+    let mut first = None;
+    client
+        .visit_dir_with_options("/tree", ReadDirOptions::unlimited(), |entry| {
+            first = Some(entry.path().to_path_buf());
+            Ok(false)
+        })
+        .unwrap();
+    assert!(first.unwrap().starts_with("/tree"));
+
+    let mut all = Vec::new();
+    client
+        .visit_dir_with_options("/tree", ReadDirOptions::unlimited(), |entry| {
+            all.push(entry.path().to_path_buf());
+            Ok(true)
+        })
+        .unwrap();
+    assert_eq!(all.len(), 8);
+
+    let error = client
+        .visit_dir("/tree", |_| Err(VfError::client(0, libc::ECANCELED as u32)))
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::ECANCELED as u32);
+
+    let error = client
+        .visit_dir_with_options("/tree", ReadDirOptions::new().max_path_bytes(1), |_| {
+            panic!("over-budget entry must not reach the callback")
+        })
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
 }

@@ -320,6 +320,22 @@ fn rust_native_client_workflow_on_nfs() {
     assert_eq!(vnfs::legacy::compound::thread_compound_stats().0, 1);
     assert_eq!(client.metadata(&paths[0]).unwrap().len(), 3);
     assert_eq!(client.read_dir(&nested).unwrap().len(), 2);
+    let mut visited = Vec::new();
+    client
+        .visit_dir(&nested, |entry| {
+            visited.push(entry.path().to_path_buf());
+            Ok(true)
+        })
+        .unwrap();
+    assert_eq!(visited.len(), 2);
+    let mut early_count = 0;
+    client
+        .visit_dir(&nested, |_| {
+            early_count += 1;
+            Ok(false)
+        })
+        .unwrap();
+    assert_eq!(early_count, 1);
     let large = vec![0xa5; 2 * 1024 * 1024];
     files[0].write_at(&large, 0).unwrap();
     let mut large_buffer = vec![0; large.len() + 16];
@@ -328,6 +344,54 @@ fn rust_native_client_workflow_on_nfs() {
     assert_eq!(&large_buffer[..read], large);
     client.closev(files).unwrap();
     client.remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn rust_native_client_pool_uses_independent_sessions() {
+    let dir = setup_dir("rust_native_client_pool");
+    let host = std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let pool = Nfs::builder(host)
+        .minor_version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => Some(1),
+            Ok("2") => Some(2),
+            _ => None,
+        })
+        .client_owner(b"vnfs-integration-pool".to_vec())
+        .connect_pool(2)
+        .unwrap();
+    assert_eq!(pool.len(), 2);
+    assert!(!pool.is_empty());
+    assert!(pool.client(2).is_none());
+    let first = pool.client(0).unwrap();
+    use std::io::Write;
+    let paths: Vec<_> = (0..2).map(|index| format!("{dir}/file-{index}")).collect();
+    for path in &paths {
+        let mut file = first
+            .open_options()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .unwrap();
+        file.write_all(b"pool").unwrap();
+        file.close().unwrap();
+    }
+    let threads: Vec<_> = paths
+        .into_iter()
+        .map(|path| {
+            let client = pool.next_client();
+            std::thread::spawn(move || {
+                let file = client.open(&path).unwrap();
+                let mut bytes = [0; 4];
+                assert_eq!(file.read_at(&mut bytes, 0).unwrap(), 4);
+                assert_eq!(&bytes, b"pool");
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    first.remove_dir_all(&dir).unwrap();
 }
 
 fn client() -> NfsVecFs {
@@ -1851,6 +1915,78 @@ fn openv_does_not_replay_exclusive_create_after_real_reply_loss() {
     let mut admin = client();
     assert!(admin.exists(Path::new(&paths[0])).unwrap());
     assert!(admin.exists(Path::new(&paths[1])).unwrap());
+    admin.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn directory_visit_recovers_if_reply_is_lost_before_first_entry() {
+    let dir = setup_dir("visit_dir_proxy_reply_loss");
+    let path = format!("{dir}/entry");
+    let mut admin = client();
+    write_file(&mut admin, Path::new(&path), b"data");
+
+    let proxy = DropReplyProxy::start(reply_loss_target());
+    let visitor = Nfs::builder(proxy.endpoint())
+        .minor_version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => Some(1),
+            Ok("2") => Some(2),
+            _ => None,
+        })
+        .request_timeout(Duration::from_millis(500))
+        .connect()
+        .unwrap();
+    proxy.arm();
+    let mut seen = Vec::new();
+    visitor
+        .visit_dir(&dir, |entry| {
+            seen.push(entry.path().to_path_buf());
+            Ok(true)
+        })
+        .expect("read-only directory visit should reconnect before delivering entries");
+    proxy.wait_for_drop();
+    assert_eq!(seen, [PathBuf::from(path)]);
+    admin.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn directory_visit_does_not_replay_after_delivering_an_entry() {
+    let dir = setup_dir("visit_dir_no_partial_replay");
+    let mut admin = client();
+    let names: Vec<_> = (0..80)
+        .map(|index| format!("{dir}/entry-{index:03}-{}", "x".repeat(96)))
+        .collect();
+    for name in &names {
+        write_file(&mut admin, Path::new(name), b"x");
+    }
+
+    let proxy = DropReplyProxy::start(reply_loss_target());
+    let visitor = Nfs::builder(proxy.endpoint())
+        .minor_version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => Some(1),
+            Ok("2") => Some(2),
+            _ => None,
+        })
+        .request_timeout(Duration::from_millis(500))
+        .max_compound_bytes(8 * 1024)
+        .connect()
+        .unwrap();
+    let mut delivered = 0;
+    let mut unique = std::collections::HashSet::new();
+    let error = visitor
+        .visit_dir(&dir, |entry| {
+            delivered += 1;
+            assert!(unique.insert(entry.path().to_path_buf()), "entry replayed");
+            if delivered == 1 {
+                proxy.arm();
+            }
+            Ok(true)
+        })
+        .unwrap_err();
+    proxy.wait_for_drop();
+    assert!(error.is_transport());
+    assert!(delivered > 0 && delivered <= names.len());
     admin.rm(&[Path::new(&dir)], true).unwrap();
 }
 

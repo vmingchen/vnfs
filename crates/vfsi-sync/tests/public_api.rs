@@ -4,19 +4,15 @@ use std::path::Path;
 
 use vfsi_sync::{sfsi, vfsi};
 
-fn accepts_scalar(_: &mut dyn sfsi::VecFs) {}
+fn accepts_scalar(_: &mut dyn sfsi::FileSystem) {}
 fn accepts_vector(_: &mut dyn vfsi::VecFs) {}
 fn accepts_native_scalar(_: &mut dyn sfsi::FileSystem) {}
 fn accepts_native_vector(_: &mut dyn vfsi::VectorFileSystem) {}
 
 #[test]
 fn scalar_and_vector_facets_share_the_object_safe_contract() {
-    fn bridge(fs: &mut dyn vfsi_sync::VecFs) {
-        accepts_scalar(fs);
-        accepts_vector(fs);
-    }
-
-    let _: fn(&mut dyn vfsi_sync::VecFs) = bridge;
+    let _: fn(&mut dyn sfsi::FileSystem) = accepts_scalar;
+    let _: fn(&mut dyn vfsi_sync::VecFs) = accepts_vector;
 }
 
 #[test]

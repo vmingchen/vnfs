@@ -55,17 +55,19 @@ pub mod prelude {
     #[cfg(all(feature = "auto", target_os = "linux"))]
     pub use crate::{Auto, AutoClient, AutoFile, Mounted};
     #[cfg(feature = "nfs")]
-    pub use crate::{Nfs, NfsBuilder, NfsClient, NfsFile, NfsReadPool, NfsReadPoolOptions};
+    pub use crate::{
+        Nfs, NfsBuilder, NfsClient, NfsClientPool, NfsFile, NfsReadPool, NfsReadPoolOptions,
+    };
     pub use vfsi_core::{
         Capabilities, DirEntry, Metadata, OpenFlags, OpenRequest, Permissions, ReadResult, VfError,
         VfResult, WriteResult,
     };
     pub use vfsi_sync::{
         CopyFileSystem, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES,
-        DEFAULT_READ_STREAM_CHUNK_BYTES, DirectoryFileSystem, FileSystem, FsClient, FsFile,
-        LinkFileSystem, MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions,
-        ReadAllOptions, ReadDirOptions, ReadStreamOptions, SetMetadata, VectorFileSystem,
-        WalkOptions,
+        DEFAULT_READ_STREAM_CHUNK_BYTES, DEFAULT_READV_MAX_TOTAL_BYTES, DirectoryFileSystem,
+        FileSystem, FsClient, FsFile, LinkFileSystem, MetadataFileSystem, NamespaceFileSystem,
+        NativeFileSystem, OpenOptions, ReadAllOptions, ReadDirOptions, ReadStreamOptions,
+        SetMetadata, VectorFileSystem, WalkOptions,
     };
 }
 
@@ -73,7 +75,7 @@ pub use vfsi_core::*;
 #[cfg(feature = "nfs")]
 mod native_nfs;
 #[cfg(feature = "nfs")]
-pub use native_nfs::{Nfs, NfsBuilder, NfsClient, NfsFile};
+pub use native_nfs::{Nfs, NfsBuilder, NfsClient, NfsClientPool, NfsFile};
 #[cfg(feature = "dummy")]
 pub use vfsi_local::DummyVecFs;
 #[cfg(all(feature = "nfs", feature = "rpcsec-gss"))]
@@ -86,8 +88,9 @@ pub use vfsi_nfs::{
 pub use vfsi_sync::{
     CopyFileSystem, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
     DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
-    DEFAULT_WALK_MAX_DEPTH, DirectoryFileSystem, FileSystem, FsClient, FsFile, FsRead, FsReadInto,
-    FsWrite, LinkFileSystem, MetadataFileSystem, NamespaceFileSystem, NativeFileSystem,
-    OpenOptions, ReadAllOptions, ReadDirOptions, ReadStreamOptions, SetMetadata, VecFs, VecFsExt,
-    VectorFileSystem, VfFileHandle, VfOpenOptions, WalkOptions, rm_recursive,
+    DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DirectoryFileSystem, FileSystem,
+    FsClient, FsFile, FsRead, FsReadInto, FsWrite, LinkFileSystem, MetadataFileSystem,
+    NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadAllOptions, ReadDirOptions,
+    ReadStreamOptions, SetMetadata, VecFs, VecFsExt, VectorFileSystem, VfFileHandle, VfOpenOptions,
+    WalkOptions, rm_recursive,
 };

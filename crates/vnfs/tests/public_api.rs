@@ -13,7 +13,7 @@ fn accepts_vecfs(_: &mut dyn VecFs) {}
 
 fn accepts_vecfs_ext<T: VecFsExt + ?Sized>(_: &mut T) {}
 
-fn accepts_sfsi(_: &mut dyn vnfs::sfsi::VecFs) {}
+fn accepts_sfsi(_: &mut dyn vnfs::sfsi::FileSystem) {}
 
 fn accepts_vfsi(_: &mut dyn vnfs::vfsi::VecFs) {}
 
@@ -40,7 +40,7 @@ fn legacy_crate_root_exports_remain_available() {
     )>();
     let _: fn(&mut dyn VecFs) = accepts_vecfs;
     let _ = accepts_vecfs_ext::<dyn VecFs>;
-    let _: fn(&mut dyn vnfs::sfsi::VecFs) = accepts_sfsi;
+    let _: fn(&mut dyn vnfs::sfsi::FileSystem) = accepts_sfsi;
     let _: fn(&mut dyn vnfs::vfsi::VecFs) = accepts_vfsi;
 
     #[cfg(feature = "dummy")]

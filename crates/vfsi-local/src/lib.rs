@@ -1151,6 +1151,43 @@ impl VecFs for DummyVecFs {
         Ok(out)
     }
 
+    fn visit_dir(
+        &mut self,
+        dir: &Path,
+        masks: AttrMask,
+        max_entries: usize,
+        cb: &mut dyn FnMut(&VfAttrs) -> bool,
+    ) -> VfRes {
+        let p = self.no_follow_path(&self.resolve(dir))?;
+        let metadata = std::fs::symlink_metadata(&p)
+            .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+        if metadata.file_type().is_symlink() {
+            return Err(VfError::failure(0, ERR_ACCES));
+        }
+        let entries =
+            std::fs::read_dir(&p).map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+        for (count, entry) in entries.enumerate() {
+            if max_entries != 0 && count >= max_entries {
+                return Ok(());
+            }
+            let entry = entry.map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+            let path = dir.join(entry.file_name());
+            let mut attrs = VfAttrs {
+                file: VfFile::from_os_path(&path),
+                masks,
+                ..VfAttrs::default()
+            };
+            let metadata = std::fs::symlink_metadata(entry.path())
+                .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+            let real = self.no_follow_path(&self.resolve(&path))?;
+            self.fill_attrs(&mut attrs, &real, &metadata);
+            if !cb(&attrs) {
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
     fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
         for (i, (src, dst)) in pairs.iter().enumerate() {
             let sp = self.vf_path(src).map_err(|e| e.with_index(i))?;

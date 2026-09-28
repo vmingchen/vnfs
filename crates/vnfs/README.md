@@ -29,7 +29,7 @@ is required. Add the crate:
 
 ```toml
 [dependencies]
-vnfs = "0.0.13"
+vnfs = "0.0.14"
 ```
 
 On Ubuntu 24.04 or newer, install the native build dependencies once:
@@ -60,7 +60,7 @@ fn main() -> vnfs::Result<()> {
         .openv(&["/file-1", "/file-2"])?;
 
     client
-        .writev(&[
+        .write_allv(&[
             files[0].write_request_at(0, b"hello"),
             files[1].write_request_at(0, b"world"),
         ])?;
@@ -77,9 +77,12 @@ fn main() -> vnfs::Result<()> {
 }
 ```
 
-For these two small files, `openv`, `writev`, and `readv` each put
+For these two small files, `openv`, `write_allv`, and `readv` each put
 both independent operations into one NFSv4 COMPOUND and therefore one network
-round trip per phase. A scalar POSIX-style loop hides this opportunity and pays
+round trip per phase when each write completes in full. `write_allv` checks
+per-file byte counts and sends another vector wave if a server returns a short
+write; ordinary `writev` returns those counts for callers that prefer to handle
+partial progress themselves. A scalar POSIX-style loop hides this opportunity and pays
 latency for each file operation. Larger vectors are packed into as few
 compounds as the server's negotiated operation, request, and response-size
 limits allow; oversized vectors are split automatically.
@@ -88,6 +91,10 @@ The same model applies to `openv`, `writev`, `getattrsv`, `listdirv`,
 `renamev`, `removev`, and the other vector methods. This is especially useful
 for metadata-heavy workloads and for many small, independent I/O operations,
 where network latency dominates transfer time.
+
+Owned `NfsClient::readv` results are limited to 16 MiB of requested data per
+call. Use `readv_with_limit` to choose another aggregate limit or `readv_into`
+to supply your own buffers. The limit is checked before sending any reads.
 
 ## Use existing Linux mounts
 
@@ -223,13 +230,19 @@ path, operation, vector index, and retry information. The standard `Read`,
 `Write`, and `Seek` implementations remain available when integration with
 generic `std::io` code is more important than retaining that detail.
 
+`NfsClient::visit_dir` invokes a callback for each directory entry without
+retaining the full listing. Use `visit_dir_with_options` to adjust the default
+entry and path-byte limits, including `ReadDirOptions::unlimited()` for very
+large directories. The visitor callback runs while the backend lock is held;
+do not use the same client or drop another of its files inside the callback.
+
 ## Large-file streaming and tuning
 
 For a large file, stream bounded chunks instead of collecting the complete
 file in a `Vec`. The default chunk size is 1 MiB; tune it for the server,
 network RTT, and consumer. The backend still obeys negotiated NFS limits, so
-the callback may receive smaller chunks. It runs synchronously while the
-client's backend is borrowed and should not call back into the same client.
+the callback may receive smaller chunks. Unlike the directory visitor, the
+file-stream callback runs without the backend lock and may call the same client.
 
 ```rust,no_run
 use vnfs::prelude::*;
@@ -316,9 +329,11 @@ fn main() -> vnfs::Result<()> {
 
 One backend connection serializes access to its stateful NFS session, while
 `FsClient::readv` and `writev` preserve useful compound batching.
-Create a bounded pool of clients when parallel network requests are required;
-use one vector cohort per worker. Async applications should run these
-synchronous workers with their runtime's blocking-task API.
+Clone a client to share that same connection; use `Nfs::builder(host).connect_pool(4)?`
+when separate vector cohorts need parallel network requests. `next_client()`
+distributes cohorts round-robin across independent sessions; it does not split
+one vector call. Async applications should run these synchronous clients with
+their runtime's blocking-task API.
 
 ## Failure and recovery semantics
 
@@ -328,6 +343,10 @@ have succeeded and the suffix was not executed. Public vector methods return
 all values on success or one indexed `VfError` on failure; they never promise
 rollback. A transport failure may have an unknown index and ambiguous effects,
 which callers must reconcile before retrying a mutation.
+`closev` consumes its handles and attempts best-effort cleanup on failure.
+`try_closev(&mut files)` preserves them after an error so the caller can
+reconcile uncertain close status explicitly; a confirmed successful call
+disarms every handle.
 
 Low-level compound, RPC, and session construction is isolated under
 `vnfs::legacy`; it is not part of the recommended application API.

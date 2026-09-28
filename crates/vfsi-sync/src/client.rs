@@ -1,5 +1,6 @@
 //! Owned, shareable synchronous client and file handles.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom as IoSeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -14,6 +15,9 @@ use crate::{
     ReadStreamOptions, SetAttributes, VecFs, VectorFileSystem, VfDir, VfError, VfFile, VfOffset,
     VfResult, WriteOpRef, WriteResult,
 };
+
+/// Default aggregate payload limit for owned vector reads.
+pub const DEFAULT_READV_MAX_TOTAL_BYTES: usize = DEFAULT_READ_MAX_BYTES;
 
 fn io_error(error: VfError) -> io::Error {
     error.into()
@@ -264,6 +268,28 @@ impl<F: DirectoryFileSystem> FsClient<F> {
     ) -> VfResult<Vec<DirEntry>> {
         self.lock()?.read_dir_one(path.as_ref(), options)
     }
+
+    /// Visit one directory incrementally without retaining all entries in the
+    /// application. The callback runs under the backend lock and must not
+    /// call this client or drop other files owned by it.
+    pub fn visit_dir(
+        &self,
+        path: impl AsRef<Path>,
+        callback: impl FnMut(DirEntry) -> VfResult<bool>,
+    ) -> VfResult<()> {
+        self.visit_dir_with_options(path, ReadDirOptions::default(), callback)
+    }
+
+    /// Visit entries with explicit entry and cumulative path-byte limits.
+    pub fn visit_dir_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: ReadDirOptions,
+        mut callback: impl FnMut(DirEntry) -> VfResult<bool>,
+    ) -> VfResult<()> {
+        self.lock()?
+            .visit_dir_one(path.as_ref(), options, &mut callback)
+    }
 }
 
 impl<F: DirectoryFileSystem + MetadataFileSystem> FsClient<F> {
@@ -456,12 +482,10 @@ impl<F: VectorFileSystem> FsClient<F> {
             .collect())
     }
 
-    /// Close a group of files through one vector operation.
-    ///
-    /// On failure, each handle remains armed for best-effort cleanup on drop;
-    /// explicitly closed prefix handles may consequently receive a harmless
-    /// second close attempt.
-    pub fn closev(&self, mut files: Vec<FsFile<F>>) -> VfResult<()> {
+    /// Try to close a group through one vector operation without consuming
+    /// the handles. On failure, all handles remain armed: the backend may
+    /// have closed a prefix, so callers must reconcile before retrying.
+    pub fn try_closev(&self, files: &mut [FsFile<F>]) -> VfResult<()> {
         for (index, file) in files.iter().enumerate() {
             self.validate_owner(file, index)?;
         }
@@ -477,13 +501,44 @@ impl<F: VectorFileSystem> FsClient<F> {
                     error.with_context("closev", file.path())
                 })
         })?;
-        for file in &mut files {
+        for file in files.iter_mut() {
             file.file = None;
         }
         Ok(())
     }
 
+    /// Close a group of files through one vector operation.
+    ///
+    /// On failure, the handles are dropped and the backend receives
+    /// best-effort scalar cleanup attempts. Use [`try_closev`](Self::try_closev)
+    /// to retain the handles after an error.
+    pub fn closev(&self, mut files: Vec<FsFile<F>>) -> VfResult<()> {
+        self.try_closev(&mut files)
+    }
+
+    /// Read an ordered vector with a 16 MiB aggregate request limit.
+    /// Use [`readv_with_limit`](Self::readv_with_limit) to tune the limit or
+    /// [`readv_into`](Self::readv_into) to provide bounded caller-owned buffers.
     pub fn readv(&self, requests: &[FsRead<'_, F>]) -> VfResult<Vec<ReadResult>> {
+        self.readv_with_limit(requests, DEFAULT_READV_MAX_TOTAL_BYTES)
+    }
+
+    /// Read an ordered vector with an explicit aggregate request limit.
+    pub fn readv_with_limit(
+        &self,
+        requests: &[FsRead<'_, F>],
+        max_total_bytes: usize,
+    ) -> VfResult<Vec<ReadResult>> {
+        let mut requested = 0usize;
+        for (index, request) in requests.iter().enumerate() {
+            requested = requested
+                .checked_add(request.length)
+                .ok_or_else(|| VfError::client(index, libc::EFBIG as u32))?;
+            if requested > max_total_bytes {
+                return Err(VfError::client(index, libc::EFBIG as u32)
+                    .with_context("readv", request.file.path()));
+            }
+        }
         let reads = self.read_ops(requests)?;
         let results = self.lock()?.read_many(&reads).map_err(|error| {
             error
@@ -578,6 +633,105 @@ impl<F: VectorFileSystem> FsClient<F> {
                 })
         })?;
         Ok(results)
+    }
+
+    /// Write every byte in each positional request, retrying short writes in
+    /// vector waves. Like `writev`, this is not transactional: an error may
+    /// follow a successfully written prefix. Overlapping requests through the
+    /// same path complete in input order; different paths are presumed
+    /// independent (including hard-link aliases).
+    pub fn write_allv(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<WriteResult>> {
+        // Validate the entire batch before writing any prefix. In particular,
+        // empty requests must not conceal a foreign or already-closed file.
+        let mut prior_by_path: HashMap<&Path, Vec<(usize, u64, u64)>> = HashMap::new();
+        let mut blocked_by = vec![Vec::new(); requests.len()];
+        for (index, request) in requests.iter().enumerate() {
+            self.validate_owner(request.file, index)?;
+            request.file.raw()?;
+            let VfOffset::At(offset) = request.offset else {
+                return Err(VfError::client(index, crate::ERR_INVAL)
+                    .with_context("write_allv", request.file.path()));
+            };
+            let end = offset
+                .checked_add(request.data.len() as u64)
+                .ok_or_else(|| {
+                    VfError::client(index, libc::EOVERFLOW as u32)
+                        .with_context("write_allv", request.file.path())
+                })?;
+            // Non-overlapping writes commute. An overlapping later request
+            // must wait until every earlier conflicting request is complete:
+            // otherwise a short-write retry can overwrite the later bytes.
+            let prior = prior_by_path.entry(request.file.path()).or_default();
+            for &(earlier, start, earlier_end) in prior.iter() {
+                if offset < earlier_end && start < end {
+                    blocked_by[index].push(earlier);
+                }
+            }
+            prior.push((index, offset, end));
+        }
+        let mut totals = vec![0usize; requests.len()];
+        let mut stable = vec![true; requests.len()];
+        let mut pending: Vec<usize> = (0..requests.len())
+            .filter(|&index| !requests[index].data.is_empty())
+            .collect();
+        while !pending.is_empty() {
+            let wave_indices: Vec<usize> = pending
+                .iter()
+                .copied()
+                .filter(|&index| {
+                    blocked_by[index]
+                        .iter()
+                        .all(|&earlier| totals[earlier] == requests[earlier].data.len())
+                })
+                .collect();
+            let wave: Vec<_> = wave_indices
+                .iter()
+                .map(|&index| {
+                    let request = &requests[index];
+                    let VfOffset::At(offset) = request.offset else {
+                        return Err(VfError::client(index, crate::ERR_INVAL)
+                            .with_context("write_allv", request.file.path()));
+                    };
+                    let offset = offset.checked_add(totals[index] as u64).ok_or_else(|| {
+                        VfError::client(index, libc::EOVERFLOW as u32)
+                            .with_context("write_allv", request.file.path())
+                    })?;
+                    Ok(FsWrite {
+                        file: request.file,
+                        offset: VfOffset::At(offset),
+                        data: &request.data[totals[index]..],
+                    })
+                })
+                .collect::<VfResult<_>>()?;
+            let results = self.writev(&wave).map_err(|error| {
+                error.map_index(|index| wave_indices.get(index).copied().unwrap_or(index))
+            })?;
+            for (&index, result) in wave_indices.iter().zip(results) {
+                if result.written == 0 {
+                    return Err(VfError::client(index, crate::ERR_IO)
+                        .with_context("write_allv", requests[index].file.path()));
+                }
+                totals[index] += result.written;
+                stable[index] &= result.stable;
+            }
+            pending.retain(|&index| totals[index] < requests[index].data.len());
+        }
+        requests
+            .iter()
+            .enumerate()
+            .map(|(index, request)| {
+                let VfOffset::At(offset) = request.offset else {
+                    return Err(VfError::client(index, crate::ERR_INVAL)
+                        .with_context("write_allv", request.file.path()));
+                };
+                Ok(WriteResult {
+                    file: request.file.raw()?.clone(),
+                    offset,
+                    written: totals[index],
+                    stable: stable[index],
+                })
+            })
+            .collect()
     }
 
     fn write_ops<'a>(&self, requests: &'a [FsWrite<'a, F>]) -> VfResult<Vec<WriteOpRef<'a>>> {

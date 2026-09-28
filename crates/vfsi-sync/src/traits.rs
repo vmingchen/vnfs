@@ -1209,6 +1209,20 @@ pub trait VecFs {
         Ok(())
     }
 
+    /// Visit one directory without requiring the application to retain its
+    /// complete listing. Backends may override this to fetch entries page by
+    /// page; the compatibility fallback uses [`listdirv`](Self::listdirv).
+    /// The callback runs while the backend is borrowed and must not reenter it.
+    fn visit_dir(
+        &mut self,
+        dir: &Path,
+        masks: AttrMask,
+        max_entries: usize,
+        cb: &mut dyn FnMut(&VfAttrs) -> bool,
+    ) -> VfRes {
+        self.listdirv(&[dir], masks, max_entries, false, &mut |attrs, _| cb(attrs))
+    }
+
     /// `tc_unlink()`.
     fn unlink(&mut self, pathname: &Path) -> VfResult<()> {
         self.removev(&[VfFile::from_os_path(pathname)])
