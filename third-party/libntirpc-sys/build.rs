@@ -159,6 +159,9 @@ fn main() {
         .include_paths
         .first()
         .expect("libntirpc pkg-config metadata has no include directory");
+    // Newer libntirpc's pkg-config file exposes include/ntirpc, while its
+    // generated config.h includes <ntirpc/version.h> from the parent.
+    let include_parent = include.parent().expect("libntirpc include has no parent");
     // Ubuntu 26.04's libntirpc-dev 6.3 package installs headers that include
     // config.h, but omits that generated header on x86_64. Supply the
     // matching distro configuration only for that known packaging defect.
@@ -223,7 +226,8 @@ fn main() {
         // so the shims and the bindgen output must agree on it (see below).
         .arg("-D_GNU_SOURCE=1")
         .arg("-DINET6=1")
-        .arg(format!("-I{}", include.display()));
+        .arg(format!("-I{}", include.display()))
+        .arg(format!("-I{}", include_parent.display()));
     if fallback_config {
         helper_compile.arg(format!("-I{}", out_dir.display()));
     }
@@ -286,6 +290,7 @@ fn main() {
     let mut bindings = bindgen::Builder::default()
         .header("src/wrapper.h")
         .clang_arg(format!("-I{}", include.display()))
+        .clang_arg(format!("-I{}", include_parent.display()))
         // Keep bindgen's view of SVCXPRT identical to the shims compiled
         // above; otherwise `size_of::<SVCXPRT>()` (and the `xp_pktinfo`
         // union) would not match the linked library.
