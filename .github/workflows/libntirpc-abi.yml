@@ -52,7 +52,8 @@ jobs:
             --volume "$prefix:$prefix" \
             --workdir /tmp \
             vnfs-libntirpc-build:ci \
-            bash -c "cmake -S /src -B /tmp/build \
+            bash -c "cp -a /src /tmp/src \
+                     && cmake -S /tmp/src -B /tmp/build \
                        -DCMAKE_BUILD_TYPE=Release \
                        -DCMAKE_INSTALL_PREFIX=\"$prefix\" \
                        -DUSE_LTTNG=Off \
