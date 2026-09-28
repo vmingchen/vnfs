@@ -29,6 +29,37 @@ pub mod backend {
     pub use vfsi_nfs::{NfsVecFs, client, compound, nfs, rpc, session};
 }
 
+/// Aggregate NFS transport counters for optional application diagnostics.
+/// These counters are process-wide, not per client, and may include other
+/// concurrent NFS clients in the same process.
+#[cfg(feature = "nfs")]
+pub mod diagnostics {
+    /// Snapshot of process-wide NFS compound and RPC activity.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Snapshot {
+        pub compounds: u64,
+        pub operations: u64,
+        pub compound_bytes: u64,
+        pub max_operations: u64,
+        pub rpc_calls: u64,
+        pub rpc_micros: u64,
+    }
+
+    pub fn snapshot() -> Snapshot {
+        let (compounds, operations, compound_bytes, max_operations) =
+            vfsi_nfs::compound::compound_stats();
+        let (rpc_calls, rpc_micros) = vfsi_nfs::compound::rpc_stats();
+        Snapshot {
+            compounds,
+            operations,
+            compound_bytes,
+            max_operations,
+            rpc_calls,
+            rpc_micros,
+        }
+    }
+}
+
 /// Linux-mounted path routing with conservative automatic direct NFSv4 selection.
 #[cfg(all(feature = "auto", target_os = "linux"))]
 mod auto;
