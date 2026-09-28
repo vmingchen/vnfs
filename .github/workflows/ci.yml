@@ -76,7 +76,8 @@ jobs:
         run: |
           DOCS_RS=1 RUSTDOCFLAGS="-D warnings" \
             cargo doc -p vnfs -p vfsi-nfs --all-features --no-deps
-          test -f target/doc/vnfs/struct.NfsVecFs.html
+          test -f target/doc/vnfs/struct.Nfs.html
+          test -f target/doc/vnfs/type.NfsClient.html
           test -f target/doc/vfsi_nfs/nfs/struct.NfsVecFs.html
       - name: Run the repository Rust test suite
         run: ./scripts/test-rust.sh
