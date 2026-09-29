@@ -7,6 +7,7 @@
 // bindgen emits lowercase constants (e.g. nfs_ftype4_NF4DIR) matched here.
 #![allow(non_upper_case_globals)]
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -53,6 +54,13 @@ struct ReopenFile {
     path: PathBuf,
     flags: i32,
     mode: u32,
+}
+
+/// READDIR continuation retained across unlocked application callbacks.
+struct NfsDirectoryCursor {
+    fh: FileHandle,
+    cookie: u64,
+    buffered: VecDeque<crate::client::DirEntry>,
 }
 
 /// A directory held by filehandle during vectorized recursive removal.
@@ -4029,6 +4037,71 @@ impl VecFs for NfsVecFs {
         let mut out = Vec::new();
         self.listdir_rec(dir, masks, max_count, recursive, &mut out)?;
         Ok(out)
+    }
+
+    fn listdir_page(
+        &mut self,
+        dir: &Path,
+        masks: AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        _max_entries: usize,
+    ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
+        if page_size == 0 {
+            return Err(VfError::client(0, ERR_INVAL));
+        }
+        // Only a failed first page may be retried: after a page has reached
+        // the application, a reconnect could invalidate the READDIR cookie.
+        if !self.recovery_in_progress && cursor.is_none() {
+            return self.read_with_recovery(|client| {
+                client.listdir_page(dir, masks, None, page_size, _max_entries)
+            });
+        }
+        let mut state = match cursor {
+            Some(cursor) => cursor.into_state::<NfsDirectoryCursor>()?,
+            None => NfsDirectoryCursor {
+                fh: self.resolve_path(&self.server_path(dir), true)?,
+                cookie: 0,
+                buffered: VecDeque::new(),
+            },
+        };
+        let ids = request_mask_to_attr_list(&masks);
+        if state.buffered.is_empty() {
+            let page = self
+                .nfs
+                .readdir(&state.fh, state.cookie, &ids)
+                .map_err(|error| VfError::from_rpc(error, 0))?;
+            if page.is_empty() {
+                return Ok((Vec::new(), None));
+            }
+            let next_cookie = page.last().map(|entry| entry.cookie).unwrap_or(0);
+            if next_cookie != 0 && next_cookie == state.cookie {
+                return Err(VfError::transport(None, "READDIR cookie made no progress"));
+            }
+            state.cookie = next_cookie;
+            state.buffered = page.into();
+        }
+        let mut output = Vec::with_capacity(state.buffered.len().min(page_size));
+        while output.len() < page_size {
+            let Some(entry) = state.buffered.pop_front() else {
+                break;
+            };
+            let path = dir.join(path_from_bytes(&entry.name));
+            let mut attrs = VfAttrs {
+                file: VfFile::from_os_path(&path),
+                masks,
+                ..VfAttrs::default()
+            };
+            let values = parse_attr_list(&ids, &entry.attrs)?;
+            apply_attrs(&mut attrs, &values);
+            output.push(attrs);
+        }
+        let next = if !state.buffered.is_empty() || state.cookie != 0 {
+            Some(DirPageCursor::new(state))
+        } else {
+            None
+        };
+        Ok((output, next))
     }
 
     fn visit_dir(

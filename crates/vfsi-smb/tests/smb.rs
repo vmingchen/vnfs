@@ -80,6 +80,37 @@ fn connect() -> Option<SmbVecFs> {
 }
 
 #[test]
+fn native_directory_visitor_reenters_client_across_snapshot_pages() {
+    let Some(backend) = connect() else {
+        return;
+    };
+    let Ok(local_root) = std::env::var("VFSI_SMB_LOCAL_ROOT") else {
+        return;
+    };
+    let name = format!("vfsi-smb-visit-{}", std::process::id());
+    let local_dir = Path::new(&local_root).join(&name);
+    let _ = fs::remove_dir_all(&local_dir);
+    fs::create_dir(&local_dir).unwrap();
+    for index in 0..3 {
+        fs::write(local_dir.join(format!("item-{index}")), b"x").unwrap();
+    }
+
+    let client = vfsi_sync::FsClient::new(backend);
+    let remote_dir = format!("/{name}");
+    let mut seen = Vec::new();
+    client
+        .visit_dir(&remote_dir, |entry| {
+            assert_eq!(client.metadata(entry.path())?.len(), 1);
+            seen.push(entry.path().to_path_buf());
+            Ok(true)
+        })
+        .unwrap();
+    assert_eq!(seen.len(), 3);
+    drop(client);
+    fs::remove_dir_all(local_dir).unwrap();
+}
+
+#[test]
 fn configurable_deadlines_connect_to_samba() {
     let (server, share) = match (
         std::env::var("VFSI_SMB_SERVER"),

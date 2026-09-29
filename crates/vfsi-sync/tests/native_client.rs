@@ -5,9 +5,10 @@ use std::sync::{
 };
 
 use vfsi_sync::{
-    Capabilities, FileSystem, FsClient, MetadataQuery, OpenFlags, OpenRequest, ReadIntoResult,
-    ReadOp, ReadResult, SetAttributes, VectorFileSystem, VfError, VfFile, VfOffset, VfResult,
-    WriteOpRef, WriteResult,
+    Capabilities, DirEntry, DirPageCursor, DirectoryFileSystem, FileSystem, FsClient,
+    MetadataQuery, OpenFlags, OpenRequest, ReadDirOptions, ReadIntoResult, ReadOp, ReadResult,
+    SetAttributes, VectorFileSystem, VfAttrs, VfError, VfFile, VfOffset, VfResult, WriteOpRef,
+    WriteResult,
 };
 
 #[derive(Default)]
@@ -29,6 +30,8 @@ struct ScalarOnly {
     read_calls: Arc<AtomicUsize>,
     write_calls: Arc<AtomicUsize>,
     max_write_once: Option<usize>,
+    directory_entries: usize,
+    directory_page_sizes: Arc<Mutex<Vec<usize>>>,
 }
 
 impl VectorFileSystem for ScalarOnly {
@@ -717,6 +720,81 @@ fn stream_callback_can_reenter_client_and_drop_another_file() {
         )
         .unwrap();
     assert_eq!(received, b"abcdef");
+}
+
+impl DirectoryFileSystem for ScalarOnly {
+    fn create_dir_one(&mut self, _: &std::path::Path, _: u32) -> VfResult<()> {
+        Ok(())
+    }
+
+    fn read_dir_one(&mut self, _: &std::path::Path, _: ReadDirOptions) -> VfResult<Vec<DirEntry>> {
+        unreachable!("the visitor must use paged enumeration")
+    }
+
+    fn read_dir_page(
+        &mut self,
+        _: &std::path::Path,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
+        self.directory_page_sizes.lock().unwrap().push(page_size);
+        let start = cursor
+            .map(|cursor| cursor.into_state::<usize>())
+            .transpose()?
+            .unwrap_or(0);
+        let ceiling = if max_entries == 0 {
+            self.directory_entries
+        } else {
+            self.directory_entries.min(max_entries)
+        };
+        let end = start.saturating_add(page_size).min(ceiling);
+        let entries = (start..end)
+            .map(|index| {
+                DirEntry::new(
+                    format!("/tree/item-{index:04}").into(),
+                    VfAttrs::default().into(),
+                )
+            })
+            .collect();
+        let next = (end < ceiling).then(|| DirPageCursor::new(end));
+        Ok((entries, next))
+    }
+}
+
+#[test]
+fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
+    let page_sizes = Arc::new(Mutex::new(Vec::new()));
+    let client = FsClient::new(ScalarOnly {
+        directory_entries: 2_100,
+        directory_page_sizes: Arc::clone(&page_sizes),
+        ..ScalarOnly::default()
+    });
+    client.visit_dir("/tree", |_| Ok(false)).unwrap();
+    assert_eq!(*page_sizes.lock().unwrap(), [1]);
+
+    page_sizes.lock().unwrap().clear();
+    let mut seen = 0;
+    let error = client
+        .visit_dir_with_options("/tree", ReadDirOptions::new().max_entries(3), |_| {
+            seen += 1;
+            Ok(true)
+        })
+        .unwrap_err();
+    assert_eq!(seen, 3);
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(*page_sizes.lock().unwrap(), [1, 3]);
+
+    page_sizes.lock().unwrap().clear();
+    let mut seen = 0;
+    client
+        .visit_dir("/tree", |_| {
+            seen += 1;
+            Ok(true)
+        })
+        .unwrap();
+    assert_eq!(seen, 2_100);
+    assert_eq!(*page_sizes.lock().unwrap(), [1, 1024, 1024, 1024]);
 }
 
 #[test]

@@ -276,9 +276,8 @@ impl<F: DirectoryFileSystem> FsClient<F> {
         self.lock()?.read_dir_one(path.as_ref(), options)
     }
 
-    /// Visit one directory incrementally without retaining all entries in the
-    /// application. The callback runs under the backend lock and must not
-    /// call this client or drop other files owned by it.
+    /// Visit one directory one bounded page at a time. The callback runs
+    /// without the backend lock and may use this client or drop its files.
     pub fn visit_dir(
         &self,
         path: impl AsRef<Path>,
@@ -294,8 +293,62 @@ impl<F: DirectoryFileSystem> FsClient<F> {
         options: ReadDirOptions,
         mut callback: impl FnMut(DirEntry) -> VfResult<bool>,
     ) -> VfResult<()> {
-        self.lock()?
-            .visit_dir_one(path.as_ref(), options, &mut callback)
+        const PAGE_SIZE: usize = 1024;
+        let path = path.as_ref();
+        let mut cursor = None;
+        let mut count = 0usize;
+        let mut path_bytes = 0usize;
+        let max_entries = if options.entry_limit() == usize::MAX {
+            0 // VecFs uses zero for an explicitly unlimited listing.
+        } else {
+            options.entry_limit().saturating_add(1)
+        };
+        loop {
+            // Start with one entry so early-stop callbacks and tight limits
+            // do not trigger a large local scan before application code runs.
+            let page_size = if cursor.is_none() {
+                1
+            } else {
+                PAGE_SIZE.min(
+                    options
+                        .entry_limit()
+                        .saturating_sub(count)
+                        .saturating_add(1),
+                )
+            };
+            let (entries, next) = {
+                self.lock()?
+                    .read_dir_page(path, cursor, page_size, max_entries)?
+            };
+            if entries.is_empty() && next.is_some() {
+                return Err(VfError::transport(None, "directory page made no progress"));
+            }
+            for entry in entries {
+                if count >= options.entry_limit() {
+                    return Err(
+                        VfError::failure(count, libc::EFBIG as u32).with_context("visit_dir", path)
+                    );
+                }
+                path_bytes = path_bytes
+                    .checked_add(entry.path().as_os_str().len())
+                    .ok_or_else(|| {
+                        VfError::failure(count, libc::EFBIG as u32).with_context("visit_dir", path)
+                    })?;
+                if path_bytes > options.path_byte_limit() {
+                    return Err(
+                        VfError::failure(count, libc::EFBIG as u32).with_context("visit_dir", path)
+                    );
+                }
+                count += 1;
+                if !callback(entry)? {
+                    return Ok(());
+                }
+            }
+            match next {
+                Some(value) => cursor = Some(value),
+                None => return Ok(()),
+            }
+        }
     }
 }
 

@@ -17,10 +17,10 @@ pub mod backend {
     pub use vfsi_sync::{
         CopyFileSystem, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
         DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
-        DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DirectoryFileSystem, FileSystem,
-        FsRead, FsReadInto, FsWrite, LinkFileSystem, MetadataFileSystem, NamespaceFileSystem,
-        NativeFileSystem, SetMetadata, VecFs, VecFsExt, VectorFileSystem, VfFileHandle,
-        VfOpenOptions, rm_recursive,
+        DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DirPageCursor, DirectoryFileSystem,
+        FileSystem, FsRead, FsReadInto, FsWrite, LinkFileSystem, MetadataFileSystem,
+        NamespaceFileSystem, NativeFileSystem, SetMetadata, VecFs, VecFsExt, VectorFileSystem,
+        VfFileHandle, VfOpenOptions, rm_recursive,
     };
 
     #[cfg(feature = "dummy")]

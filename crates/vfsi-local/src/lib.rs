@@ -42,6 +42,14 @@ struct DummyOpen {
     append: bool,
 }
 
+/// Owned iterator retained while application callbacks run without the lock.
+struct LocalDirectoryCursor {
+    entries: std::fs::ReadDir,
+    virtual_dir: PathBuf,
+    // DirEntry::path() may refer through this held /proc/self/fd anchor.
+    _anchor: AnchoredPath,
+}
+
 /// A path whose parent directory is held open, preventing a concurrent
 /// symlink rename from redirecting a no-follow operation after validation.
 struct AnchoredPath {
@@ -1149,6 +1157,56 @@ impl VecFs for DummyVecFs {
         let mut out = Vec::new();
         self.listdir_rec(dir, masks, max_count, recursive, &mut out)?;
         Ok(out)
+    }
+
+    fn listdir_page(
+        &mut self,
+        dir: &Path,
+        masks: AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        _max_entries: usize,
+    ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
+        if page_size == 0 {
+            return Err(VfError::client(0, ERR_INVAL));
+        }
+        let mut state = match cursor {
+            Some(cursor) => cursor.into_state::<LocalDirectoryCursor>()?,
+            None => {
+                let p = self.no_follow_path(&self.resolve(dir))?;
+                let metadata = std::fs::symlink_metadata(&p)
+                    .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+                if metadata.file_type().is_symlink() {
+                    return Err(VfError::failure(0, ERR_ACCES));
+                }
+                let entries = std::fs::read_dir(&p)
+                    .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+                LocalDirectoryCursor {
+                    entries,
+                    virtual_dir: dir.to_path_buf(),
+                    _anchor: p,
+                }
+            }
+        };
+        let mut page = Vec::with_capacity(page_size);
+        while page.len() < page_size {
+            let Some(entry) = state.entries.next() else {
+                return Ok((page, None));
+            };
+            let entry = entry.map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+            let path = state.virtual_dir.join(entry.file_name());
+            let mut attrs = VfAttrs {
+                file: VfFile::from_os_path(&path),
+                masks,
+                ..VfAttrs::default()
+            };
+            let metadata = std::fs::symlink_metadata(entry.path())
+                .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+            let real = self.no_follow_path(&self.resolve(&path))?;
+            self.fill_attrs(&mut attrs, &real, &metadata);
+            page.push(attrs);
+        }
+        Ok((page, Some(DirPageCursor::new(state))))
     }
 
     fn visit_dir(

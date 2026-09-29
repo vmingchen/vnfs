@@ -43,6 +43,26 @@ impl Default for ReadStreamOptions {
     }
 }
 
+/// Backend-owned continuation state for a paged directory visit.
+///
+/// The state is dropped automatically when the caller stops or an error
+/// occurs, so backends do not need an explicit cursor-close operation.
+#[doc(hidden)]
+pub struct DirPageCursor(Box<dyn std::any::Any + Send>);
+
+impl DirPageCursor {
+    pub fn new<T: std::any::Any + Send>(state: T) -> Self {
+        Self(Box::new(state))
+    }
+
+    pub fn into_state<T: std::any::Any + Send>(self) -> VfResult<T> {
+        self.0
+            .downcast::<T>()
+            .map(|state| *state)
+            .map_err(|_| VfError::client(0, ERR_INVAL))
+    }
+}
+
 /// Default maximum number of entries returned by allocating directory APIs.
 pub const DEFAULT_DIRECTORY_MAX_ENTRIES: usize = 100_000;
 
@@ -603,6 +623,37 @@ pub trait VecFs {
         max_count: usize,
         recursive: bool,
     ) -> VfResult<Vec<VfAttrs>>;
+
+    /// Fetch at most `page_size` entries using backend-owned continuation
+    /// state. `max_entries` bounds a generic backend's one-time snapshot;
+    /// zero means the caller explicitly requested an unlimited listing.
+    ///
+    /// Backends with native directory iterators or cookies should override
+    /// this default. Dropping the cursor ends enumeration without retaining
+    /// backend state.
+    fn listdir_page(
+        &mut self,
+        dir: &Path,
+        masks: AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
+        if page_size == 0 {
+            return Err(VfError::client(0, ERR_INVAL));
+        }
+        let mut remaining = match cursor {
+            Some(cursor) => cursor.into_state::<std::vec::IntoIter<VfAttrs>>()?,
+            None => self.listdir(dir, masks, max_entries, false)?.into_iter(),
+        };
+        let page: Vec<_> = remaining.by_ref().take(page_size).collect();
+        let next = if remaining.len() == 0 {
+            None
+        } else {
+            Some(DirPageCursor::new(remaining))
+        };
+        Ok((page, next))
+    }
 
     /// Recursively enumerate `root`, returning each directory with its entries.
     ///

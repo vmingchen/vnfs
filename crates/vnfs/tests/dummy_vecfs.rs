@@ -1081,6 +1081,44 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
 }
 
 #[test]
+fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use vnfs::FsClient;
+
+    let client = FsClient::new(dummy());
+    client.create_dir("/tree").unwrap();
+    for index in 0..1100 {
+        client
+            .write(format!("/tree/item-{index:04}"), b"x")
+            .unwrap();
+    }
+    let held_file = client.open("/tree/item-0000").unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let mut held_file = Some(held_file);
+        let mut seen = 0;
+        let result = client.visit_dir("/tree", |entry| {
+            // Both operations acquire the same backend mutex. In particular,
+            // dropping an owned file must not block directory enumeration.
+            assert_eq!(client.metadata(entry.path())?.len(), 1);
+            if let Some(file) = held_file.take() {
+                drop(file);
+            }
+            seen += 1;
+            Ok(true)
+        });
+        sender.send((result, seen)).unwrap();
+    });
+    let (result, seen) = receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("directory callback deadlocked on its own client");
+    result.unwrap();
+    assert_eq!(seen, 1100);
+    worker.join().unwrap();
+}
+
+#[test]
 fn directory_visitor_supports_limits_early_stop_and_callback_errors() {
     use vnfs::backend::WriteOp;
     use vnfs::{FsClient, ReadDirOptions, VfError};

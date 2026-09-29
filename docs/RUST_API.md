@@ -102,8 +102,15 @@ returned vector. Recursive `FsClient::walk_with_options` additionally has a
 default depth limit and accepts `WalkOptions`. NFS multi-directory listing
 delivers each bounded READDIR page before requesting continuation pages, so
 early-stop callbacks no longer retain the whole remote listing. Applications
-needing to consume one directory incrementally can use `visit_dir_with_options`;
-its callback must not reenter the same client while the backend lock is held.
+needing to consume one directory incrementally can use `visit_dir_with_options`.
+The client starts with one entry, then fetches at most 1024 entries per page
+and releases its backend lock before invoking the application callback, which
+may safely reenter the same client or drop its files. NFS retains a resolved
+directory handle and READDIR continuation; the local backend retains its
+directory iterator. Other backends take one bounded listing snapshot rather
+than re-enumerating for each page. Directory mutation during iteration does
+not provide a snapshot and can invalidate continuation or change which entries
+are observed.
 
 The SMB backend exposes `SmbConnectOptions` through
 `SmbVecFs::connect_with_options`. Connect setup and ordinary requests have

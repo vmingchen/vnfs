@@ -321,8 +321,12 @@ fn rust_native_client_workflow_on_nfs() {
     assert_eq!(client.metadata(&paths[0]).unwrap().len(), 3);
     assert_eq!(client.read_dir(&nested).unwrap().len(), 2);
     let mut visited = Vec::new();
+    let mut held_during_visit = Some(client.open(&paths[0]).unwrap());
     client
         .visit_dir(&nested, |entry| {
+            // The application callback must run outside the NFS session lock.
+            assert_eq!(client.metadata(entry.path())?.len(), 3);
+            drop(held_during_visit.take());
             visited.push(entry.path().to_path_buf());
             Ok(true)
         })
@@ -1933,6 +1937,64 @@ fn openv_does_not_replay_exclusive_create_after_real_reply_loss() {
     let mut admin = client();
     assert!(admin.exists(Path::new(&paths[0])).unwrap());
     assert!(admin.exists(Path::new(&paths[1])).unwrap());
+    admin.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[test]
+fn directory_visit_continuation_reuses_resolved_nfs_handle() {
+    let dir = setup_dir("visit_dir_compound_count");
+    let mut admin = client();
+    for index in 0..80 {
+        let path = format!("{dir}/entry-{index:03}-{}", "x".repeat(96));
+        write_file(&mut admin, Path::new(&path), b"x");
+    }
+    let host = std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let mut raw = NfsVecFs::builder(&host)
+        .max_compound_bytes(4 * 1024)
+        .connect()
+        .unwrap();
+    let mask = AttrMask::MODE
+        | AttrMask::SIZE
+        | AttrMask::NLINK
+        | AttrMask::FILEID
+        | AttrMask::UID
+        | AttrMask::GID
+        | AttrMask::ATIME
+        | AttrMask::MTIME
+        | AttrMask::CTIME
+        | AttrMask::CHANGE;
+    let _ = vnfs::backend::compound::thread_compound_stats();
+    let mut raw_count = 0;
+    raw.visit_dir(Path::new(&dir), mask, 0, &mut |_| {
+        raw_count += 1;
+        true
+    })
+    .unwrap();
+    let raw_compounds = vnfs::backend::compound::thread_compound_stats().0;
+
+    let visitor = Nfs::builder(&host)
+        .max_compound_bytes(4 * 1024)
+        .connect()
+        .unwrap();
+    let _ = vnfs::backend::compound::thread_compound_stats();
+    let mut native_count = 0;
+    visitor
+        .visit_dir(&dir, |_| {
+            native_count += 1;
+            Ok(true)
+        })
+        .unwrap();
+    let native_compounds = vnfs::backend::compound::thread_compound_stats().0;
+    assert_eq!(raw_count, 80);
+    assert_eq!(native_count, 80);
+    assert!(
+        raw_compounds > 3,
+        "fixture must require multiple READDIR pages"
+    );
+    assert_eq!(
+        native_compounds, raw_compounds,
+        "native pagination must not re-resolve the directory on each page"
+    );
     admin.rm(&[Path::new(&dir)], true).unwrap();
 }
 

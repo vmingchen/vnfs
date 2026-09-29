@@ -243,8 +243,10 @@ generic `std::io` code is more important than retaining that detail.
 `NfsClient::visit_dir` invokes a callback for each directory entry without
 retaining the full listing. Use `visit_dir_with_options` to adjust the default
 entry and path-byte limits, including `ReadDirOptions::unlimited()` for very
-large directories. The visitor callback runs while the backend lock is held;
-do not use the same client or drop another of its files inside the callback.
+large directories. The client fetches bounded READDIR pages and releases its
+backend lock before invoking the callback, so the callback may use the same
+client or drop another of its files. Concurrent directory mutation can change
+the listing or invalidate its continuation cookie; iteration is not a snapshot.
 
 ## Large-file streaming and tuning
 
