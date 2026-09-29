@@ -201,7 +201,10 @@ jobs:
       - name: Verify checked-in C header and smoke test
         run: |
           cargo build -p vfsi-c
-          generated=$(find target/debug/build/vfsi-c-*/out -name vfsi.h -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+          # Package-archive verification can leave the newest generated
+          # header under target/package rather than the root debug build.
+          generated=$(find target -type f -path '*/build/vfsi-c-*/out/vfsi.h' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
+          test -n "$generated"
           diff -u bindings/c/include/vfsi.h "$generated"
           cc -I bindings/c/include bindings/c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
           LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke /tmp/vfsi-smoke-root
