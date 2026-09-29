@@ -52,16 +52,25 @@ jobs:
             --volume "$prefix:$prefix" \
             --workdir /tmp \
             vnfs-libntirpc-build:ci \
-            bash -c "cmake -S /src -B /tmp/build \
+            bash -c "cp -a /src /tmp/src \
+                     && cmake -S /tmp/src -B /tmp/build \
                        -DCMAKE_BUILD_TYPE=Release \
                        -DCMAKE_INSTALL_PREFIX=\"$prefix\" \
                        -DUSE_LTTNG=Off \
                        -DUSE_MONITORING=Off \
-                     && cmake --build /tmp/build --parallel \
+                     && cmake --build /tmp/build --target ntirpc --parallel \
                      && cmake --install /tmp/build"
           pc=$(find "$prefix" -name libntirpc.pc -print -quit)
           test -n "$pc"
           echo "PKG_CONFIG_PATH=$(dirname "$pc")" >>"$GITHUB_ENV"
+          # v15.3's generated config.h includes <ntirpc/version.h>, which
+          # needs the parent include directory for every native consumer.
+          echo "CPATH=$prefix/include" >>"$GITHUB_ENV"
+          # The upstream .pc file omits a usable link search path for this
+          # custom prefix. Make both the build-script ABI probe and Rust's
+          # linker resolve the same freshly built library.
+          echo "LIBRARY_PATH=$prefix/lib" >>"$GITHUB_ENV"
+          echo "RUSTFLAGS=-Lnative=$prefix/lib" >>"$GITHUB_ENV"
           # The client must load the custom library at test runtime, not the
           # distribution's libntirpc.
           echo "LD_LIBRARY_PATH=$(dirname "$(dirname "$pc")")" >>"$GITHUB_ENV"

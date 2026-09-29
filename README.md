@@ -89,7 +89,7 @@ for protocol-specific configuration.
 
 The platform is organized as a modular monorepo: shared contracts, synchronous
 interfaces, protocol backends, bindings, and adapters are separate workspace
-packages while the published `vnfs` crate preserves the NFS-facing API.
+packages while the published `vnfs` crate provides the NFS-facing application API.
 Modified
 third-party applications live in independent VFSI organization repositories
 and are registered at pinned revisions rather than vendored or added as
@@ -101,7 +101,7 @@ and mirror-promotion policies.
 
 ## Rust
 
-Use `vnfs` for the NFS-focused compatibility crate, `vfsi-core` and
+Use `vnfs` for the NFS-focused application crate, `vfsi-core` and
 `vfsi-sync` for backend-neutral interfaces, and the protocol crates
 `vfsi-nfs`, `vfsi-smb`, and `vfsi-local` when selecting backends directly.
 This keeps protocol dependencies out of packages that do not use them.

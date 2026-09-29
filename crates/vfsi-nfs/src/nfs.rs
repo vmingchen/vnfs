@@ -269,6 +269,32 @@ impl NfsClientBuilder {
         NfsReadPool::connect(self, options)
     }
 
+    /// Connect independent sessions for concurrent, caller-distributed workloads.
+    /// Each member still serializes its own operations; a vector call is never
+    /// split across members. At most 64 sessions may be requested.
+    pub fn connect_pool(self, size: usize) -> VfResult<Vec<NfsVecFs>> {
+        self.validate()?;
+        if !(1..=64).contains(&size) {
+            return Err(
+                VfError::client(0, ERR_INVAL).with_context("connect_pool", Path::new(&self.host))
+            );
+        }
+        let pool_id = NEXT_CLIENT_POOL_ID.fetch_add(1, Ordering::Relaxed);
+        (0..size)
+            .map(|member| self.pool_member(pool_id, member).connect())
+            .collect()
+    }
+
+    fn pool_member(&self, pool_id: u64, member: usize) -> Self {
+        let mut builder = self.clone();
+        if let Some(owner) = &mut builder.options.client_owner {
+            let suffix = format!("-pool-{}-{pool_id:x}-{member}", std::process::id());
+            owner.truncate(1024usize.saturating_sub(suffix.len()));
+            owner.extend_from_slice(suffix.as_bytes());
+        }
+        builder
+    }
+
     pub fn connect(self) -> VfResult<NfsVecFs> {
         self.validate()?;
         let mut filesystem = NfsVecFs::connect_with_options(&self.host, self.options)?;
@@ -383,6 +409,7 @@ pub struct NfsVecFs {
 }
 
 static NEXT_DIR_OWNER: AtomicU64 = AtomicU64::new(1);
+static NEXT_CLIENT_POOL_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Which merged-compound strategy the NFS backend uses for path-based bulk
 /// I/O, downgraded automatically when the server rejects the current form.
@@ -4004,6 +4031,72 @@ impl VecFs for NfsVecFs {
         Ok(out)
     }
 
+    fn visit_dir(
+        &mut self,
+        dir: &Path,
+        masks: AttrMask,
+        max_entries: usize,
+        cb: &mut dyn FnMut(&VfAttrs) -> bool,
+    ) -> VfRes {
+        if !self.recovery_in_progress {
+            // Retry a failed read only before the first callback: replaying
+            // after an entry was delivered would duplicate application work.
+            let mut delivered = false;
+            self.recovery_in_progress = true;
+            let first = self.visit_dir(dir, masks, max_entries, &mut |attrs| {
+                delivered = true;
+                cb(attrs)
+            });
+            self.recovery_in_progress = false;
+            return match first {
+                Err(error) if !delivered && self.auto_reconnect && Self::needs_recovery(&error) => {
+                    self.reconnect()?;
+                    self.recovery_in_progress = true;
+                    let retry = self.visit_dir(dir, masks, max_entries, cb);
+                    self.recovery_in_progress = false;
+                    retry
+                }
+                result => result,
+            };
+        }
+        // Stream each READDIR page before requesting the next one.
+        let fh = self.resolve_path(&self.server_path(dir), true)?;
+        let ids = request_mask_to_attr_list(&masks);
+        let mut cookie = 0u64;
+        let mut count = 0usize;
+        loop {
+            let page = self
+                .nfs
+                .readdir(&fh, cookie, &ids)
+                .map_err(|error| VfError::from_rpc(error, 0))?;
+            for entry in &page {
+                if max_entries != 0 && count >= max_entries {
+                    return Ok(());
+                }
+                let path = dir.join(path_from_bytes(&entry.name));
+                let mut attrs = VfAttrs {
+                    file: VfFile::from_os_path(&path),
+                    masks,
+                    ..VfAttrs::default()
+                };
+                let values = parse_attr_list(&ids, &entry.attrs)?;
+                apply_attrs(&mut attrs, &values);
+                if !cb(&attrs) {
+                    return Ok(());
+                }
+                count += 1;
+            }
+            let next = page.last().map(|entry| entry.cookie).unwrap_or(0);
+            if next == 0 {
+                return Ok(());
+            }
+            if next == cookie {
+                return Err(VfError::transport(None, "READDIR cookie made no progress"));
+            }
+            cookie = next;
+        }
+    }
+
     /// List many directories in a few compounds: the directories are
     /// resolved in one batched lookup, then their first READDIR pages (and
     /// any continuation pages) are drained in batched compounds — mirroring
@@ -4054,15 +4147,57 @@ impl VecFs for NfsVecFs {
             let results = self.nfs.readdir_pages(&ops, &ids).map_err(|error| {
                 remap_active_error(VfError::from_rpc_indexed(error), &level_owners)
             })?;
-            let mut accumulated: Vec<Vec<crate::client::DirEntry>> =
-                results.iter().map(|r| r.0.clone()).collect();
-            let mut pending: Vec<(usize, FileHandle, u64)> = results
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| r.1 != 0)
-                .map(|(i, r)| (i, level[i].0.clone(), r.1))
-                .collect();
-            // Drain continuation pages, batched across directories.
+            if results.len() != level.len() {
+                return Err(VfError::transport(
+                    None,
+                    "READDIR returned the wrong number of directory pages",
+                ));
+            }
+            // Emit each bounded READDIR page before fetching a continuation.
+            // Retaining every page until EOF used memory proportional to the
+            // entire listing even when the caller requested an early stop.
+            let mut next_level: Vec<PathBuf> = Vec::new();
+            let mut next_owners: Vec<usize> = Vec::new();
+            let mut emit_page =
+                |idx: usize, entries: Vec<crate::client::DirEntry>| -> VfResult<bool> {
+                    let dir = &level[idx].1;
+                    let owner = level[idx].2;
+                    for e in entries {
+                        if max_entries != 0 && counted >= max_entries {
+                            return Ok(false);
+                        }
+                        let path = dir.join(path_from_bytes(&e.name));
+                        let mut a = VfAttrs {
+                            file: VfFile::from_os_path(&path),
+                            masks,
+                            ..VfAttrs::default()
+                        };
+                        let vals = parse_attr_list(&ids, &e.attrs)
+                            .map_err(|error| error.with_index(owner))?;
+                        apply_attrs(&mut a, &vals);
+                        if recursive && a.ftype == VfType::Directory {
+                            next_level.push(path);
+                            next_owners.push(owner);
+                        }
+                        if !cb(&a, dir) {
+                            return Ok(false);
+                        }
+                        counted += 1;
+                    }
+                    Ok(true)
+                };
+            // Each page is emitted before another wave is fetched. Entries
+            // for different directories may interleave by page; callers
+            // must discard partial listings after an error.
+            let mut pending = Vec::new();
+            for (idx, (entries, cookie)) in results.into_iter().enumerate() {
+                if !emit_page(idx, entries)? {
+                    return Ok(());
+                }
+                if cookie != 0 {
+                    pending.push((idx, level[idx].0.clone(), cookie));
+                }
+            }
             while !pending.is_empty() {
                 let cont_ops: Vec<(FileHandle, u64)> = pending
                     .iter()
@@ -4073,43 +4208,29 @@ impl VecFs for NfsVecFs {
                 let cont = self.nfs.readdir_pages(&cont_ops, &ids).map_err(|error| {
                     remap_active_error(VfError::from_rpc_indexed(error), &pending_owners)
                 })?;
+                if cont.len() != pending.len() {
+                    return Err(VfError::transport(
+                        None,
+                        "READDIR continuation returned the wrong number of pages",
+                    ));
+                }
                 let mut next_pending = Vec::new();
-                for ((idx, fh, _), (entries, cookie)) in pending.iter().zip(cont) {
-                    accumulated[*idx].extend(entries);
+                for ((idx, fh, previous_cookie), (entries, cookie)) in pending.into_iter().zip(cont)
+                {
+                    if !emit_page(idx, entries)? {
+                        return Ok(());
+                    }
+                    if cookie == previous_cookie {
+                        return Err(VfError::transport(
+                            Some(level[idx].2),
+                            "READDIR continuation cookie made no progress",
+                        ));
+                    }
                     if cookie != 0 {
-                        next_pending.push((*idx, fh.clone(), cookie));
+                        next_pending.push((idx, fh, cookie));
                     }
                 }
                 pending = next_pending;
-            }
-            // Emit entries and collect subdirectories for the next level.
-            let mut next_level: Vec<PathBuf> = Vec::new();
-            let mut next_owners: Vec<usize> = Vec::new();
-            for (idx, entries) in accumulated.iter().enumerate() {
-                let dir = &level[idx].1;
-                let owner = level[idx].2;
-                for e in entries {
-                    if max_entries != 0 && counted >= max_entries {
-                        return Ok(());
-                    }
-                    let path = dir.join(path_from_bytes(&e.name));
-                    let mut a = VfAttrs {
-                        file: VfFile::from_os_path(&path),
-                        masks,
-                        ..VfAttrs::default()
-                    };
-                    let vals =
-                        parse_attr_list(&ids, &e.attrs).map_err(|error| error.with_index(owner))?;
-                    apply_attrs(&mut a, &vals);
-                    if recursive && a.ftype == VfType::Directory {
-                        next_level.push(path);
-                        next_owners.push(owner);
-                    }
-                    if !cb(&a, dir) {
-                        return Ok(());
-                    }
-                    counted += 1;
-                }
             }
             if !recursive {
                 return Ok(());
@@ -5396,5 +5517,25 @@ mod tests {
             assert_eq!(error.err_no(), ERR_INVAL);
             assert_eq!(error.operation(), Some("connect"));
         }
+    }
+
+    #[test]
+    fn client_pool_validates_size_and_gives_explicit_owners_distinct_ids() {
+        for size in [0, 65] {
+            let error = NfsClientBuilder::new("unreachable.invalid")
+                .connect_pool(size)
+                .err()
+                .expect("invalid pool size must be rejected before network I/O");
+            assert_eq!(error.domain(), ErrorDomain::Client);
+            assert_eq!(error.err_no(), ERR_INVAL);
+            assert_eq!(error.operation(), Some("connect_pool"));
+        }
+        let builder = NfsClientBuilder::new("unused").client_owner(vec![b'x'; 1024]);
+        let first = builder.pool_member(1, 0).options.client_owner.unwrap();
+        let second = builder.pool_member(1, 1).options.client_owner.unwrap();
+        let next_pool = builder.pool_member(2, 0).options.client_owner.unwrap();
+        assert_ne!(first, second);
+        assert_ne!(first, next_pool);
+        assert!(first.len() <= 1024);
     }
 }

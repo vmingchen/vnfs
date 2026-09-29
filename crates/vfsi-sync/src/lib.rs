@@ -23,7 +23,10 @@ pub use traits::{
 mod io;
 pub use io::{VfFileHandle, VfOpenOptions};
 mod client;
-pub use client::{FsClient, FsFile, FsRead, FsReadInto, FsWrite, OpenOptions, SetMetadata};
+pub use client::{
+    DEFAULT_READV_MAX_TOTAL_BYTES, DirectoryListing, FsClient, FsFile, FsRead, FsReadInto, FsWrite,
+    OpenOptions, SetMetadata,
+};
 mod native;
 pub use native::{
     CopyFileSystem, DirectoryFileSystem, FileSystem, LinkFileSystem, MetadataFileSystem,
@@ -35,7 +38,7 @@ pub mod sfsi {
     pub use crate::{
         CopyFileSystem, DirectoryFileSystem, FileSystem, FsClient, FsFile, LinkFileSystem,
         MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadDirOptions,
-        ReadStreamOptions, VecFs, VecFsExt, WalkOptions,
+        ReadStreamOptions, WalkOptions,
     };
     pub use vfsi_core::{Fd, VfAttrs, VfError, VfFile, VfOffset, VfResult, VfType};
 }

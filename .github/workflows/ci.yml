@@ -76,7 +76,8 @@ jobs:
         run: |
           DOCS_RS=1 RUSTDOCFLAGS="-D warnings" \
             cargo doc -p vnfs -p vfsi-nfs --all-features --no-deps
-          test -f target/doc/vnfs/struct.NfsVecFs.html
+          test -f target/doc/vnfs/struct.Nfs.html
+          test -f target/doc/vnfs/type.NfsClient.html
           test -f target/doc/vfsi_nfs/nfs/struct.NfsVecFs.html
       - name: Run the repository Rust test suite
         run: ./scripts/test-rust.sh
@@ -108,6 +109,24 @@ jobs:
             patches+=(--config \
               "patch.crates-io.$package.path=\"$GITHUB_WORKSPACE/target/package/$package-$version\"")
           done <"$package_list"
+
+          # vfsi-c's build script invokes cargo metadata through cbindgen.
+          # That child Cargo process does not inherit the CLI --config flags,
+          # so give its extracted archive the same local crate patches.
+          c_version=$(python -c \
+            'import pathlib,tomllib; print(tomllib.loads(pathlib.Path("bindings/c/Cargo.toml").read_text())["package"]["version"])')
+          c_archive="target/package/vfsi-c-$c_version"
+          mkdir -p "$c_archive/.cargo"
+          {
+            printf '[patch.crates-io]\n'
+            while read -r package manifest; do
+              version=$(python -c \
+                'import pathlib,sys,tomllib; print(tomllib.loads(pathlib.Path(sys.argv[1]).read_text())["package"]["version"])' \
+                "$manifest")
+              printf '%s = { path = "%s/target/package/%s-%s" }\n' \
+                "$package" "$GITHUB_WORKSPACE" "$package" "$version"
+            done <"$package_list"
+          } >"$c_archive/.cargo/config.toml"
 
           # Compile each exact package archive against the exact archives of
           # its workspace peers. This catches missing packaged files and

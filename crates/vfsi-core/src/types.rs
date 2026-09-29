@@ -1174,6 +1174,10 @@ pub struct Metadata {
     file_type: VfType,
     len: u64,
     permissions: Permissions,
+    mode: Option<u32>,
+    blocks: Option<u64>,
+    device_id: Option<u64>,
+    has_named_attributes: Option<bool>,
     modified: Option<std::time::SystemTime>,
     accessed: Option<std::time::SystemTime>,
     changed: Option<std::time::SystemTime>,
@@ -1185,6 +1189,26 @@ pub struct Metadata {
 }
 
 impl Metadata {
+    /// Full POSIX mode, including the file type bits, when returned.
+    pub fn mode(&self) -> Option<u32> {
+        self.mode
+    }
+
+    /// Number of allocated 512-byte blocks, when returned.
+    pub fn blocks(&self) -> Option<u64> {
+        self.blocks
+    }
+
+    /// Device identifier for a special file, when returned.
+    pub fn device_id(&self) -> Option<u64> {
+        self.device_id
+    }
+
+    /// Whether named attributes exist, when the backend supplied this field.
+    pub fn has_named_attributes(&self) -> Option<bool> {
+        self.has_named_attributes
+    }
+
     pub fn file_type(&self) -> VfType {
         self.file_type
     }
@@ -1299,6 +1323,14 @@ impl From<VfAttrs> for Metadata {
             file_type: attributes.ftype,
             len: attributes.size,
             permissions: Permissions::from_mode(attributes.mode),
+            mode: returned.contains(AttrMask::MODE).then_some(attributes.mode),
+            blocks: returned
+                .contains(AttrMask::BLOCKS)
+                .then_some(attributes.blocks),
+            device_id: returned.contains(AttrMask::RDEV).then_some(attributes.rdev),
+            has_named_attributes: returned
+                .contains(AttrMask::NAMED_ATTR)
+                .then_some(attributes.has_named_attr),
             modified: returned
                 .contains(AttrMask::MTIME)
                 .then(|| system_time(attributes.mtime_sec, attributes.mtime_nsec))

@@ -2,15 +2,51 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::{
-    FsClient, FsFile, NfsAuthentication, NfsClientBuilder, NfsObserver, NfsReadPool,
-    NfsReadPoolOptions, NfsRecoveryPolicy, NfsVecFs, VfResult,
+use crate::{FsClient, FsFile, VfResult};
+use vfsi_nfs::{
+    NfsAuthentication, NfsClientBuilder, NfsObserver, NfsReadPool, NfsReadPoolOptions,
+    NfsRecoveryPolicy, NfsVecFs,
 };
 
 pub type NfsClient = FsClient<NfsVecFs>;
 pub type NfsFile = FsFile<NfsVecFs>;
+
+/// Independent NFS sessions for caller-distributed parallel workloads.
+/// Cloning a single [`NfsClient`] shares one lock; pool members do not.
+#[derive(Clone, Debug)]
+pub struct NfsClientPool {
+    inner: Arc<NfsClientPoolInner>,
+}
+
+#[derive(Debug)]
+struct NfsClientPoolInner {
+    clients: Vec<NfsClient>,
+    next: AtomicUsize,
+}
+
+impl NfsClientPool {
+    pub fn len(&self) -> usize {
+        self.inner.clients.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.clients.is_empty()
+    }
+
+    /// Return a specific member; cloned handles share that member's session.
+    pub fn client(&self, index: usize) -> Option<NfsClient> {
+        self.inner.clients.get(index).cloned()
+    }
+
+    /// Choose the next independent session in round-robin order.
+    pub fn next_client(&self) -> NfsClient {
+        let index = self.inner.next.fetch_add(1, Ordering::Relaxed) % self.len();
+        self.inner.clients[index].clone()
+    }
+}
 
 /// Entry point for the Rust-native NFS API.
 #[derive(Debug, Clone, Copy, Default)]
@@ -55,8 +91,8 @@ impl NfsBuilder {
         self
     }
 
-    pub fn authentication(mut self, authentication: NfsAuthentication) -> Self {
-        self.inner = self.inner.authentication(authentication);
+    pub fn auth(mut self, auth: NfsAuthentication) -> Self {
+        self.inner = self.inner.authentication(auth);
         self
     }
 
@@ -91,6 +127,23 @@ impl NfsBuilder {
 
     pub fn connect_backend(self) -> VfResult<NfsVecFs> {
         self.inner.connect()
+    }
+
+    /// Connect 1–64 independent clients. Distribute separate vector cohorts
+    /// across members; one vector call itself remains on one session.
+    pub fn connect_pool(self, size: usize) -> VfResult<NfsClientPool> {
+        let clients = self
+            .inner
+            .connect_pool(size)?
+            .into_iter()
+            .map(FsClient::new)
+            .collect();
+        Ok(NfsClientPool {
+            inner: Arc::new(NfsClientPoolInner {
+                clients,
+                next: AtomicUsize::new(0),
+            }),
+        })
     }
 
     /// Connect a reusable bounded pool for ordered pipelined large-file reads.

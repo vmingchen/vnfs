@@ -16,7 +16,7 @@ for every combination of API, protocol, and language.
 The project uses **VFSI** as its public umbrella name. Existing package names
 remain stable:
 
-- `vnfs` is the published NFS-focused Rust compatibility facade;
+- `vnfs` is the published NFS-focused Rust application crate;
 - `vfsi-smb` is the standalone Rust SMB backend;
 - `vfsi-c` is the versioned C ABI;
 - `nfs4fs` is the NFS Python distribution and fsspec adapter;
@@ -68,7 +68,7 @@ The canonical repository is organized by architectural responsibility:
 
 ```text
 crates/
-  vnfs/                 published NFS-focused compatibility facade
+  vnfs/                 published NFS-focused application API
   vfsi-core/            shared operations, types, errors, paths, capabilities
   vfsi-sync/            scalar and vectorized synchronous interfaces
   vfsi-nfs/             NFSv4.1 and NFSv4.2 backend
@@ -205,7 +205,9 @@ package or adapter in the canonical monorepo. Do not create repositories named
 after combinations such as `async-nfs-python`; API facets, backends, and
 bindings compose inside the platform.
 
-New public APIs require compatibility tests and an architecture decision.
+New public APIs require tests and an architecture decision. Before 1.0, the
+Rust source API can change without preserving historical import paths; tests
+should verify the current application surface rather than freeze old aliases.
 New backends require capability documentation, scalar/vector contract tests,
 and live integration coverage. New application ports require registry metadata,
 an upstream provenance document, and a reproducible compatibility test.

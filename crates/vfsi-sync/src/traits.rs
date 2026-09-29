@@ -1179,7 +1179,10 @@ pub trait VecFs {
     }
 
     /// List directories with a callback, `tc_listdirv()`. Returning `false`
-    /// stops the listing early.
+    /// stops the listing early. Callbacks for different directories may
+    /// interleave, and an error can leave partial entries from any directory;
+    /// callers must not treat an indexed failure as proof that earlier
+    /// directory callbacks were complete.
     fn listdirv(
         &mut self,
         dirs: &[&Path],
@@ -1188,9 +1191,34 @@ pub trait VecFs {
         recursive: bool,
         cb: &mut dyn FnMut(&VfAttrs, &Path) -> bool,
     ) -> VfRes {
+        let mut count = 0usize;
         for (i, d) in dirs.iter().enumerate() {
+            if max_entries != 0 && count >= max_entries {
+                break;
+            }
+            let remaining = if max_entries == 0 {
+                0
+            } else {
+                max_entries - count
+            };
+            if !recursive {
+                let mut stopped = false;
+                self.visit_dir(d, masks, remaining, &mut |entry| {
+                    count += 1;
+                    if !cb(entry, d) {
+                        stopped = true;
+                        return false;
+                    }
+                    true
+                })
+                .map_err(|e| e.with_index(i))?;
+                if stopped {
+                    return Ok(());
+                }
+                continue;
+            }
             let entries = self
-                .listdir(d, masks, max_entries, recursive)
+                .listdir(d, masks, remaining, true)
                 .map_err(|e| e.with_index(i))?;
             for e in &entries {
                 /* A recursive list contains descendants too, so report each
@@ -1204,6 +1232,29 @@ pub trait VecFs {
                 if !cb(e, entry_dir) {
                     return Ok(());
                 }
+                count += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Visit one directory without requiring the application to retain its
+    /// complete listing. Backends may override this to fetch entries page by
+    /// page; the compatibility fallback materializes a single directory with
+    /// [`listdir`](Self::listdir). Backends that need a strict peak-memory bound
+    /// should override this method with a streaming implementation.
+    /// The callback runs while the backend is borrowed and must not reenter it.
+    fn visit_dir(
+        &mut self,
+        dir: &Path,
+        masks: AttrMask,
+        max_entries: usize,
+        cb: &mut dyn FnMut(&VfAttrs) -> bool,
+    ) -> VfRes {
+        let entries = self.listdir(dir, masks, max_entries, false)?;
+        for entry in &entries {
+            if !cb(entry) {
+                break;
             }
         }
         Ok(())
