@@ -200,14 +200,19 @@ jobs:
           fi
       - name: Verify checked-in C header and smoke test
         run: |
-          cargo build -p vfsi-c
-          # Package-archive verification can leave the newest generated
-          # header under target/package rather than the root debug build.
-          generated=$(find target -type f -path '*/build/vfsi-c-*/out/vfsi.h' -printf '%T@ %p\n' | sort -nr | head -1 | cut -d' ' -f2-)
-          test -n "$generated"
+          # Ask Cargo for this build script's actual output directory; it can
+          # differ from target/debug after package-archive verification.
+          build_messages=$(cargo build -p vfsi-c --message-format=json)
+          generated=$(printf '%s\n' "$build_messages" | jq -r \
+            'select(.reason == "build-script-executed" and (.package_id | contains("#vfsi-c@"))) | .out_dir + "/vfsi.h"' | tail -1)
+          test -f "$generated"
           diff -u bindings/c/include/vfsi.h "$generated"
-          cc -I bindings/c/include bindings/c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
-          LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke /tmp/vfsi-smoke-root
+          library=$(printf '%s\n' "$build_messages" | jq -r \
+            'select(.reason == "compiler-artifact" and (.package_id | contains("#vfsi-c@"))) | .filenames[] | select(endswith("/libvfsi_c.so"))' | tail -1)
+          test -f "$library"
+          library_dir=$(dirname "$library")
+          cc -I bindings/c/include bindings/c/tests/smoke.c -L "$library_dir" -lvfsi_c -o /tmp/vfsi-smoke
+          LD_LIBRARY_PATH="$library_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" /tmp/vfsi-smoke /tmp/vfsi-smoke-root
 
   python:
     runs-on: ubuntu-26.04
