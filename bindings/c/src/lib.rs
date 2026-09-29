@@ -542,12 +542,17 @@ fn insert_c_file(
     file: VfFile,
 ) -> Result<i32, VfError> {
     for _ in 0..i32::MAX {
-        let fd = fs
-            .next_fd
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                Some(value.checked_add(1).unwrap_or(1))
-            })
-            .expect("descriptor update always supplies a value");
+        let fd = loop {
+            let current = fs.next_fd.load(Ordering::Relaxed);
+            let next = current.checked_add(1).unwrap_or(1);
+            if fs
+                .next_fd
+                .compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                break current;
+            }
+        };
         if let std::collections::hash_map::Entry::Vacant(entry) = files.entry(fd) {
             entry.insert(file);
             return Ok(fd);
