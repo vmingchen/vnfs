@@ -24,8 +24,8 @@ mod io;
 pub use io::{VfFileHandle, VfOpenOptions};
 mod client;
 pub use client::{
-    DEFAULT_READV_MAX_TOTAL_BYTES, DirectoryListing, FsClient, FsFile, FsRead, FsReadInto, FsWrite,
-    OpenOptions, SetMetadata,
+    DEFAULT_READV_MAX_TOTAL_BYTES, DirectoryListing, FsClient, FsDir, FsFile, FsRead, FsReadInto,
+    FsWrite, OpenOptions, SetMetadata,
 };
 mod native;
 pub use native::{

@@ -12,8 +12,8 @@ use crate::{
     AttrMask, Capabilities, CopyFileSystem, DEFAULT_READ_MAX_BYTES, DirEntry, DirectoryFileSystem,
     FileSystem, LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
     NamespaceFileSystem, OpenFlags, OpenRequest, Permissions, ReadAllOptions, ReadDirOptions,
-    ReadOp, ReadResult, ReadStreamOptions, SetAttributes, VecFs, VectorFileSystem, VfDir, VfError,
-    VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
+    ReadOp, ReadResult, ReadStreamOptions, RemoveOptions, SetAttributes, VecFs, VectorFileSystem,
+    VfDir, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
 };
 
 /// Default aggregate payload limit for owned vector reads.
@@ -457,9 +457,59 @@ impl<F: VecFs> FsClient<F> {
         self.lock()?.ensure_empty_dir(path.as_ref())
     }
 
-    /// Open a directory for handle-rooted removal. The returned handle cannot
-    /// be swapped for a symlink between opening and removal; release it with
-    /// [`close_dir`](Self::close_dir).
+    /// Remove a directory tree with explicit error, batching, and retry policy.
+    pub fn remove_dir_all_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: RemoveOptions,
+    ) -> VfResult<()> {
+        let path = path.as_ref();
+        if !self.removal_metadata(path, "remove_dir_all")?.is_dir() {
+            return Err(VfError::client(0, crate::ERR_NOTDIR).with_context("remove_dir_all", path));
+        }
+        self.lock()?
+            .rm_with_options(&[path], true, options)
+            .map_err(|error| error.with_context("remove_dir_all", path))
+    }
+
+    /// Empty a directory while keeping it, with explicit removal policy.
+    pub fn remove_dir_contents_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: RemoveOptions,
+    ) -> VfResult<()> {
+        let path = path.as_ref();
+        if !self.removal_metadata(path, "remove_dir_contents")?.is_dir() {
+            return Err(
+                VfError::client(0, crate::ERR_NOTDIR).with_context("remove_dir_contents", path)
+            );
+        }
+        self.lock()?
+            .rm_contents_with_options(path, options)
+            .map_err(|error| error.with_context("remove_dir_contents", path))
+    }
+
+    /// Open a *genuine* directory handle for race-resistant, handle-rooted
+    /// removal. Backends that only return a path fail instead of silently
+    /// losing the handle safety guarantee.
+    pub fn open_dir_handle(&self, path: impl AsRef<Path>) -> VfResult<FsDir<F>> {
+        let path = path.as_ref();
+        let mut backend = self.lock()?;
+        let dir = backend.open_dir(path)?;
+        if !matches!(dir, VfDir::Descriptor { .. }) {
+            let _ = backend.close_dir(&dir);
+            return Err(VfError::unsupported(0).with_context("open_dir_handle", path));
+        }
+        Ok(FsDir {
+            inner: Arc::clone(&self.inner),
+            dir: Some(dir),
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// Open a low-level directory token. Only `VfDir::Descriptor` is
+    /// handle-rooted; path-only backends return `VfDir::Path`. Prefer
+    /// [`open_dir_handle`](Self::open_dir_handle) when safety matters.
     pub fn open_dir(&self, path: impl AsRef<Path>) -> VfResult<VfDir> {
         self.lock()?.open_dir(path.as_ref())
     }
@@ -472,6 +522,65 @@ impl<F: VecFs> FsClient<F> {
     /// Release a handle from [`open_dir`](Self::open_dir).
     pub fn close_dir(&self, dir: &VfDir) -> VfResult<()> {
         self.lock()?.close_dir(dir)
+    }
+}
+
+/// Owned, handle-rooted directory. Dropping it releases backend state;
+/// [`close`](Self::close) reports cleanup errors explicitly.
+pub struct FsDir<F: VecFs> {
+    inner: Arc<Mutex<F>>,
+    dir: Option<VfDir>,
+    path: PathBuf,
+}
+
+impl<F: VecFs> fmt::Debug for FsDir<F> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FsDir")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<F: VecFs> FsDir<F> {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn remove_contents(&self) -> VfResult<()> {
+        self.remove_contents_with_options(RemoveOptions::default())
+    }
+
+    pub fn remove_contents_with_options(&self, options: RemoveOptions) -> VfResult<()> {
+        let dir = self
+            .dir
+            .as_ref()
+            .ok_or_else(|| VfError::client(0, crate::ERR_EBADF))?;
+        self.inner
+            .lock()
+            .map_err(|_| poisoned())?
+            .rm_dir_contents_with_options(dir, options)
+            .map_err(|error| error.with_context("remove_dir_contents", &self.path))
+    }
+
+    pub fn close(mut self) -> VfResult<()> {
+        let dir = self
+            .dir
+            .as_ref()
+            .ok_or_else(|| VfError::client(0, crate::ERR_EBADF))?;
+        self.inner.lock().map_err(|_| poisoned())?.close_dir(dir)?;
+        self.dir = None;
+        Ok(())
+    }
+}
+
+impl<F: VecFs> Drop for FsDir<F> {
+    fn drop(&mut self) {
+        if let Some(dir) = self.dir.take()
+            && let Ok(mut backend) = self.inner.lock()
+        {
+            let _ = backend.close_dir(&dir);
+        }
     }
 }
 
@@ -701,15 +810,27 @@ impl<F: VecFs> FsClient<F> {
     /// Remove paths in request order, optionally recursing into directories.
     /// A successful prefix may remain if a later path fails.
     pub fn remove_paths<P: AsRef<Path>>(&self, paths: &[P], recursive: bool) -> VfResult<()> {
+        self.remove_paths_with_options(paths, recursive, RemoveOptions::default())
+    }
+
+    /// Remove paths with explicit error, batching, and retry policy.
+    pub fn remove_paths_with_options<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        recursive: bool,
+        options: RemoveOptions,
+    ) -> VfResult<()> {
         let paths: Vec<&Path> = paths.iter().map(AsRef::as_ref).collect();
-        self.lock()?.rm(&paths, recursive).map_err(|error| {
-            error
-                .index_opt()
-                .and_then(|index| paths.get(index))
-                .map_or(error.clone(), |path| {
-                    error.with_context("remove_paths", path)
-                })
-        })
+        self.lock()?
+            .rm_with_options(&paths, recursive, options)
+            .map_err(|error| {
+                error
+                    .index_opt()
+                    .and_then(|index| paths.get(index))
+                    .map_or(error.clone(), |path| {
+                        error.with_context("remove_paths", path)
+                    })
+            })
     }
 
     /// Fetch no-follow metadata for many paths using the backend's vector

@@ -3373,11 +3373,26 @@ impl NfsClient {
         cookie: u64,
         attrs: &[u32],
     ) -> RpcResult<Vec<DirEntry>> {
+        self.readdir_bounded(dir, cookie, attrs, usize::MAX)
+    }
+
+    /// READDIR with a caller-imposed reply budget. The server-negotiated
+    /// response limit remains the upper bound; tiny requested limits are
+    /// raised to 4 KiB so a valid reply can hold at least one entry.
+    pub fn readdir_bounded(
+        &mut self,
+        dir: &FileHandle,
+        cookie: u64,
+        attrs: &[u32],
+        max_response_bytes: usize,
+    ) -> RpcResult<Vec<DirEntry>> {
         let mut c = Compound::new();
         c.tag(b"readdir");
         c.putfh(&dir.as_nfs_fh());
         let zeroverf: verifier4 = [0; 8];
         let (dircount, maxcount) = self.readdir_limits(1);
+        let maxcount = maxcount.min(max_response_bytes.max(4096).min(u32::MAX as usize) as u32);
+        let dircount = dircount.min(maxcount / 4).max(1);
         c.readdir(cookie, &zeroverf, dircount, maxcount, attrs);
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;

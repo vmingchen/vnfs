@@ -530,6 +530,35 @@ fn open_dir_handle_empties_contents() {
 }
 
 #[test]
+fn owned_directory_handle_refuses_path_only_backend() {
+    use vnfs::{FsClient, RemoveOptions};
+
+    let client = FsClient::new(dummy());
+    client.create_dir("/d").unwrap();
+    client.write("/d/keep", b"x").unwrap();
+    let error = client.open_dir_handle("/d").unwrap_err();
+    assert_eq!(error.err_no(), vnfs::backend::VF_ERR_UNSUPPORTED);
+    assert_eq!(client.read("/d/keep").unwrap(), b"x");
+
+    let options = RemoveOptions::new().continue_on_error(true);
+    assert!(
+        client
+            .remove_dir_contents_with_options("/d", options)
+            .is_err()
+    );
+    assert!(client.remove_dir_all_with_options("/d", options).is_err());
+    assert!(
+        client
+            .remove_paths_with_options(&["/d/keep"], false, options)
+            .is_err()
+    );
+    assert_eq!(client.read("/d/keep").unwrap(), b"x");
+    client
+        .remove_dir_all_with_options("/d", RemoveOptions::default())
+        .unwrap();
+}
+
+#[test]
 fn generic_remover_rejects_options_it_cannot_honor() {
     let mut fs = dummy();
     fs.mkdir_path("/d", 0o755).unwrap();

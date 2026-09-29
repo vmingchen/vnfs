@@ -112,6 +112,17 @@ than re-enumerating for each page. Directory mutation during iteration does
 not provide a snapshot and can invalidate continuation or change which entries
 are observed.
 
+For recursive removal, `FsClient::remove_dir_all` is fail-fast and
+`remove_dir_all_with_options`, `remove_dir_contents_with_options`, and
+`remove_paths_with_options` expose `RemoveOptions` at the application layer.
+`FsClient::open_dir_handle` returns an owned `FsDir` only when the backend has
+a genuine directory descriptor; its `remove_contents` methods stay rooted at
+that handle and `Drop` closes it. Backends that only offer path tokens return
+`Unsupported` instead of implying handle safety. The NFS remover processes
+one bounded READDIR reply at a time (32 KiB by default), advances through the
+current pass, and verifies from the beginning after a mutating pass. If a server
+invalidates a continuation cookie, it restarts the scan.
+
 The SMB backend exposes `SmbConnectOptions` through
 `SmbVecFs::connect_with_options`. Connect setup and ordinary requests have
 separate deadlines; the request deadline is also applied to sends, response

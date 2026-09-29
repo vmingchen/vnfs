@@ -2684,6 +2684,57 @@ fn open_dir_accepts_namespace_root() {
 }
 
 #[test]
+fn owned_directory_handle_survives_rename_and_exposes_options() {
+    use vnfs::{FsClient, RemoveOptions};
+
+    let root = setup_dir("owned_remove_dir");
+    let original = format!("{root}/original");
+    let moved = format!("{root}/moved");
+    let file = format!("{moved}/file");
+    let c = FsClient::new(client());
+    c.create_dir(&original).unwrap();
+    c.write(format!("{original}/file"), b"data").unwrap();
+
+    let handle = c.open_dir_handle(&original).unwrap();
+    c.rename(&original, &moved).unwrap();
+    handle
+        .remove_contents_with_options(RemoveOptions::new().batch(2))
+        .unwrap();
+    assert_eq!(handle.path(), Path::new(&original));
+    assert!(c.read_dir(&moved).unwrap().is_empty());
+    assert!(c.metadata(&file).is_err());
+    handle.close().unwrap();
+    let extra = format!("{moved}/extra");
+    c.write(&extra, b"data").unwrap();
+    c.remove_paths_with_options(&[&extra], false, RemoveOptions::new().batch(2))
+        .unwrap();
+    assert!(c.metadata(&extra).is_err());
+    c.remove_dir_all_with_options(&moved, RemoveOptions::new().batch(2))
+        .unwrap();
+    assert!(c.metadata(&moved).is_err());
+}
+
+#[test]
+fn recursive_removal_drains_large_directory_and_nested_children() {
+    use vnfs::{FsClient, RemoveOptions};
+
+    let root = setup_dir("paged_remove_dir");
+    let c = FsClient::new(client());
+    for index in 0..1200 {
+        c.write(format!("{root}/file-{index:04}"), b"x").unwrap();
+    }
+    for index in 0..24 {
+        let child = format!("{root}/dir-{index:03}");
+        c.create_dir(&child).unwrap();
+        c.write(format!("{child}/file"), b"x").unwrap();
+    }
+    c.remove_dir_contents_with_options(&root, RemoveOptions::new().batch(32))
+        .unwrap();
+    assert!(c.read_dir(&root).unwrap().is_empty());
+    c.remove_dir_all(&root).unwrap();
+}
+
+#[test]
 fn rm_is_fail_fast_but_explicit_best_effort_continues() {
     let dir = setup_dir("rm_fail_fast");
     let mut c = client();

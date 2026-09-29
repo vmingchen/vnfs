@@ -388,23 +388,24 @@ unintended tree. This is the entry-point TOCTOU described by
 [RUSTSEC-2023-0018](https://rustsec.org/advisories/RUSTSEC-2023-0018.html); it
 cannot be fixed inside a path-taking library and must be handled by the caller.
 
-Inside the tree, removal is already safe: directories are addressed by
-filehandle and every `REMOVE`/`READDIR` is issued relative to a held handle, so
-an intermediate component swapped for a symlink cannot redirect the walk.
+The NFS backend addresses directories by filehandle and issues `REMOVE` and
+`READDIR` relative to held handles, preventing a swapped intermediate symlink
+from redirecting its walk. Generic/path-only backends do not provide this
+guarantee; do not treat `VfDir::Path` as a secure directory handle.
 
 For privileged or attacker-influenced paths, root the removal at an
 already-open directory instead of a path:
 
 ```rust
-let dir = client.open_dir("/attacker/controlled")?;   // resolved once
-client.remove_dir_contents_handle(&dir)?;             // no path re-resolution
-client.close_dir(&dir)?;
+let dir = client.open_dir_handle("/attacker/controlled")?;
+dir.remove_contents()?; // rooted at the resolved directory handle
+dir.close()?;           // Drop also releases it on other paths
 ```
 
-`open_dir` resolves the directory once, without following a final symlink (a
-symlink to a directory is rejected). `rm_dir_contents` empties that handle
-while keeping the directory. `rm_with_options` and `rm_contents_with_options`
-accept a [`RemoveOptions`](https://docs.rs/vnfs) value choosing best-effort vs
+`open_dir_handle` rejects backends without a genuine handle and does not follow
+a final symlink. It empties the directory while keeping that directory itself.
+`remove_dir_all_with_options`, `remove_dir_contents_with_options`, and
+`remove_paths_with_options` accept a `RemoveOptions` value choosing best-effort vs
 fail-fast removal (`continue_on_error`, defaulting to fail-fast), the starting vector batch size
 (`batch`), and the retry count for transient per-entry statuses (`retries`).
 These tuning options are implemented by the NFS backend. Backends using the

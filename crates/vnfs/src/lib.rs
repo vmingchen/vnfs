@@ -73,18 +73,18 @@ pub mod prelude {
     pub use crate::{Auto, Mounted};
     #[cfg(feature = "nfs")]
     pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile};
-    pub use vfsi_core::{OpenFlags, OpenRequest};
+    pub use vfsi_core::{OpenFlags, OpenRequest, RemoveOptions};
     pub use vfsi_sync::{ReadAllOptions, ReadDirOptions, ReadStreamOptions, WalkOptions};
 }
 
 /// Attribute selection for metadata queries, directory listings, and walks.
 pub use vfsi_core::AttrMask as MetadataFields;
 pub use vfsi_core::{
-    Capabilities, DirEntry, Metadata, OpenFlags, OpenRequest, Permissions, ReadResult, VfError,
-    VfResult, VfType, WriteResult,
+    Capabilities, DirEntry, Metadata, OpenFlags, OpenRequest, Permissions, ReadResult,
+    RemoveOptions, VfError, VfResult, VfType, WriteResult,
 };
 pub use vfsi_sync::{
-    DirectoryListing, FsClient, FsFile, OpenOptions, ReadAllOptions, ReadDirOptions,
+    DirectoryListing, FsClient, FsDir, FsFile, OpenOptions, ReadAllOptions, ReadDirOptions,
     ReadStreamOptions, WalkOptions,
 };
 #[cfg(feature = "nfs")]
