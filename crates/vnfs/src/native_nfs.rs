@@ -1,6 +1,6 @@
 //! Application-facing NFS constructor and concrete client aliases.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -53,6 +53,13 @@ impl NfsClientPool {
 pub struct Nfs;
 
 impl Nfs {
+    /// Connect directly using the configuration of a Linux NFS-mounted directory.
+    /// Operations use the remote directory as their root, without sharing the
+    /// kernel client's cache or falling back to mounted filesystem operations.
+    pub fn from_mount(path: impl AsRef<Path>) -> VfResult<NfsClient> {
+        NfsBuilder::from_mount(path)?.connect()
+    }
+
     pub fn builder(host: impl Into<String>) -> NfsBuilder {
         NfsBuilder {
             inner: NfsClientBuilder::new(host),
@@ -71,6 +78,21 @@ pub struct NfsBuilder {
 }
 
 impl NfsBuilder {
+    /// Discover mount configuration, then customize timeouts and other tuning.
+    pub fn from_mount(path: impl AsRef<Path>) -> VfResult<Self> {
+        #[cfg(target_os = "linux")]
+        {
+            Ok(Self {
+                inner: NfsClientBuilder::from_mount(path)?,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(crate::VfError::client(0, libc::EOPNOTSUPP as u32)
+                .with_context("from_mount requires Linux", path.as_ref()))
+        }
+    }
+
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
         self.inner = self.inner.root(root);
         self
@@ -149,5 +171,68 @@ impl NfsBuilder {
     /// Connect a reusable bounded pool for ordered pipelined large-file reads.
     pub fn connect_read_pool(self, options: NfsReadPoolOptions) -> VfResult<NfsReadPool> {
         self.inner.connect_read_pool(options)
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod mount_tests {
+    use super::*;
+
+    #[test]
+    fn live_mount_constructor_roots_vector_io_at_a_subdirectory() {
+        let Ok(mount) = std::env::var("VFSI_NFS_TEST_MOUNT") else {
+            return;
+        };
+        let directory = Path::new(&mount).join(format!(".vnfs-from-mount-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let fs = NfsBuilder::from_mount(&directory)
+            .unwrap()
+            .request_timeout(Duration::from_secs(2))
+            .connect()
+            .unwrap();
+        fs.write_files(&[
+            ("/file-1", b"hello".as_slice()),
+            ("/file-2", b"world".as_slice()),
+        ])
+        .unwrap();
+        assert_eq!(
+            fs.read_files(&["/file-1", "/file-2"]).unwrap(),
+            [b"hello".to_vec(), b"world".to_vec()]
+        );
+        fs.remove_file("/file-1").unwrap();
+        fs.remove_file("/file-2").unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn live_read_only_mount_rejects_mutations_before_dispatch() {
+        let Ok(mount) = std::env::var("VFSI_NFS_TEST_MOUNT_RO") else {
+            return;
+        };
+        let rw_mount = std::env::var("VFSI_NFS_TEST_MOUNT")
+            .expect("read-only test needs a writable fixture mount");
+        let name = format!(".vnfs-read-only-{}", std::process::id());
+        let fixture = Path::new(&rw_mount).join(&name);
+        std::fs::create_dir(&fixture).unwrap();
+        std::fs::write(fixture.join("marker"), b"unchanged").unwrap();
+        std::fs::create_dir(fixture.join("child")).unwrap();
+        let fs = Nfs::from_mount(Path::new(&mount).join(&name)).unwrap();
+        assert!(fs.metadata("/").unwrap().is_dir());
+        let results = [
+            fs.create("/.mount-forbidden").map(|_| ()),
+            fs.write_files(&[("/.mount-forbidden", b"forbidden")]),
+            fs.create_dir("/.mount-forbidden"),
+            fs.remove_file("/marker"),
+            fs.remove_dir_all("/child"),
+            fs.rename("/marker", "/.other-forbidden"),
+        ];
+        for result in results {
+            assert_eq!(result.unwrap_err().err_no(), libc::EROFS as u32);
+        }
+        assert_eq!(
+            fs.read_files(&["/marker"]).unwrap(),
+            [b"unchanged".to_vec()]
+        );
+        std::fs::remove_dir_all(fixture).unwrap();
     }
 }

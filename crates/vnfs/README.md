@@ -73,6 +73,23 @@ Larger vectors are packed into as few
 compounds as the server's negotiated operation, request, and response-size
 limits allow; oversized vectors are split automatically.
 
+Already have the directory mounted on Linux? Discover its connection:
+
+```rust,no_run
+let client = vnfs::Nfs::from_mount("/mnt/data/git/some/tree")?;
+let files = client.read_files(&["/file-1", "/file-2"])?;
+# Ok::<(), vnfs::VfError>(())
+```
+
+The mount path must be absolute; the selected directory becomes the remote root.
+Discovery supports ordinary
+NFSv4.1/4.2 TCP AUTH_SYS mounts, verifies the remote directory identity, and
+preserves read-only restrictions. Unsupported security and ambiguous mount
+mappings fail explicitly. `NfsBuilder::from_mount(path)?` allows timeout and
+other tuning before connecting. The configuration remains pinned to the
+discovered mount; every operation uses the direct NFS client with its own
+caches and state. Mount discovery requires no per-file probing during I/O.
+
 The same model applies to `openv`, `readv`, `writev`, and high-level
 `read_dirs_with_options`, `copy_files`, and `remove_paths`. For tools such as
 `ls`, `du`, and `find`, `MetadataFields` chooses which attributes a directory

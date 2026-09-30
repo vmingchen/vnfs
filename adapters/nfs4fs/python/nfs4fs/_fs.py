@@ -1,5 +1,7 @@
 """NFS-specific facade over the shared VFSI fsspec engine."""
 
+import inspect
+import os
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -17,6 +19,58 @@ class Nfs4FileSystem(_VfsiFileSystem):
     protocol = "nfs4"
     _native_module = _native
     _supported_backends = frozenset({"nfs", "dummy"})
+
+    def __init__(self, *args, mount=None, **kwargs):
+        """Optionally infer a direct NFS connection from a Linux mounted directory.
+
+        The directory becomes this instance's remote root. Discovery is pinned
+        for pooled connections and reconnects; it does not share kernel caches.
+        """
+        if "_mount_config" in kwargs:
+            raise ValueError("_mount_config is internal; use mount= instead")
+        self.mount = None
+        self.read_only = False
+        if mount is not None:
+            mount = os.fspath(mount)
+            if not os.path.isabs(mount):
+                raise ValueError("mount= must be an absolute path")
+            if (
+                "_mount_config"
+                not in inspect.signature(_VfsiFileSystem.__init__).parameters
+            ):
+                raise ImportError(
+                    "mount= requires a vfsi-fsspec build with mount configuration support; upgrade vfsi-fsspec alongside nfs4fs"
+                )
+            conflicts = {
+                "host",
+                "root",
+                "auth",
+                "minor_version",
+                "service_principal",
+                "dummy_root",
+                "backend",
+                "share",
+                "username",
+                "password",
+                "domain",
+            }
+            supplied = sorted(conflicts.intersection(kwargs))
+            if args or supplied:
+                raise ValueError(
+                    "mount= cannot be combined with explicit connection options"
+                    + (": " + ", ".join(supplied) if supplied else "")
+                )
+            config = self._native_module.discover_mount(os.fspath(mount))
+            self.mount = os.fspath(config.local_path)
+            self.read_only = config.read_only
+            kwargs.update(
+                host=config.host,
+                root="",
+                auth="auth_sys",
+                minor_version=config.minor_version,
+                _mount_config=config,
+            )
+        super().__init__(*args, **kwargs)
 
     def read_stream_pipelined(
         self,

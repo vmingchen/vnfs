@@ -26,6 +26,19 @@ POSIX/C compatibility surface.
 
 ## Application and backend boundary
 
+On Linux, `Nfs::from_mount(path)` constructs the same concrete `NfsClient`
+from an existing NFS-mounted directory. `NfsBuilder::from_mount(path)` supports
+additional tuning. Shared discovery in `vfsi-nfs::mount` also serves nfs4fs's
+`mount=` constructor and the existing `Auto` router. It selects the actual
+covering mount ID, pins its TCP endpoint and root, verifies directory identity,
+and faithfully reproduces supported AUTH_SYS credentials. Read-only mounts
+reject mutations in the backend. Connection root, version, and authentication
+cannot be overridden on a mount-derived builder. Ordinary TCP NFSv4.1/4.2
+`sec=sys` mounts are supported; other security modes, bind-root mappings, and
+roots containing nested mounts return an explicit error. Discovery adds no
+per-operation mount lookups to the resulting direct NFS client and does not
+share the kernel client's caches.
+
 The `vnfs` crate root exposes the NFS application API. `VecFs`, `VfFile`,
 `Fd`, `VfAttrs`, `VfOpenOptions`, raw libc flags, and NFS protocol modules live
 under `vnfs::backend` or in the corresponding `vfsi-*` crates. New application

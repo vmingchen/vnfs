@@ -5,8 +5,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::net::{IpAddr, SocketAddr};
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -112,39 +110,7 @@ struct NfsConnection {
     credentials: AuthSysIdentity,
 }
 
-/// AUTH_SYS credentials are captured when the RPC connection is created.
-/// Do not reuse them for a thread whose filesystem credentials differ.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct AuthSysIdentity {
-    uid: libc::uid_t,
-    gid: libc::gid_t,
-    groups: Vec<libc::gid_t>,
-}
-
-impl AuthSysIdentity {
-    fn current() -> Option<Self> {
-        // Linux rejects (uid_t)-1, making setfsuid/setfsgid a query without
-        // changing the task's filesystem identity.
-        let fsuid = unsafe { libc::setfsuid(!0) };
-        let fsgid = unsafe { libc::setfsgid(!0) };
-        let uid = unsafe { libc::geteuid() };
-        let gid = unsafe { libc::getegid() };
-        if fsuid as libc::uid_t != uid || fsgid as libc::gid_t != gid {
-            return None;
-        }
-        let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
-        // AUTH_SYS carries at most 16 supplementary groups. Let the kernel
-        // handle identities that would be truncated by the direct client.
-        if !(0..=16).contains(&count) {
-            return None;
-        }
-        let mut groups = vec![0; count as usize];
-        if unsafe { libc::getgroups(count, groups.as_mut_ptr()) } != count {
-            return None;
-        }
-        Some(Self { uid, gid, groups })
-    }
-}
+use vfsi_nfs::mount::{AuthSysIdentity, decode_mount_field, path_mount_id};
 
 #[derive(Clone)]
 enum Route {
@@ -775,24 +741,6 @@ impl AutoClient {
     }
 }
 
-fn path_mount_id(path: &Path) -> Option<u64> {
-    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stat: libc::statx = unsafe { std::mem::zeroed() };
-    let result = unsafe {
-        libc::statx(
-            libc::AT_FDCWD,
-            path.as_ptr(),
-            0,
-            libc::STATX_MNT_ID,
-            &mut stat,
-        )
-    };
-    if result != 0 || stat.stx_mask & libc::STATX_MNT_ID == 0 {
-        return None;
-    }
-    Some(stat.stx_mnt_id)
-}
-
 fn indexed(error: VfError, start: usize) -> VfError {
     match error.index_opt() {
         Some(index) => error.with_index(start + index),
@@ -990,111 +938,17 @@ fn mount_point(line: &[u8]) -> Option<PathBuf> {
     decode_mount_field(line.split(|byte| *byte == b' ').nth(4)?)
 }
 
-fn decode_mount_field(field: &[u8]) -> Option<PathBuf> {
-    let mut decoded = Vec::with_capacity(field.len());
-    let mut index = 0;
-    while index < field.len() {
-        if field[index] == b'\\' {
-            if index + 3 >= field.len() {
-                return None;
-            }
-            let digits = &field[index + 1..index + 4];
-            if !digits.iter().all(|digit| (b'0'..=b'7').contains(digit)) {
-                return None;
-            }
-            let value = u16::from(digits[0] - b'0') * 64
-                + u16::from(digits[1] - b'0') * 8
-                + u16::from(digits[2] - b'0');
-            decoded.push(u8::try_from(value).ok()?);
-            index += 4;
-        } else {
-            decoded.push(field[index]);
-            index += 1;
-        }
-    }
-    Some(std::ffi::OsString::from_vec(decoded).into())
-}
-
 fn parse_mount(line: &[u8]) -> Option<MountSpec> {
-    let fields: Vec<_> = line.split(|byte| *byte == b' ').collect();
-    let separator = fields.iter().position(|field| *field == b"-")?;
-    if separator < 6 || fields.len() < separator + 4 {
-        return None;
-    }
-    if fields[separator + 1] != b"nfs" && fields[separator + 1] != b"nfs4" {
-        return None;
-    }
-    if decode_mount_field(fields[3])? != Path::new("/") {
-        return None;
-    }
-    if !fields[5]
-        .split(|byte| *byte == b',')
-        .any(|option| option == b"rw")
-    {
-        return None;
-    }
-    let options = fields[separator + 3];
-    let options: Vec<_> = options.split(|byte| *byte == b',').collect();
-    let security: Vec<_> = options
-        .iter()
-        .filter(|option| option.starts_with(b"sec="))
-        .collect();
-    let protocols: Vec<_> = options
-        .iter()
-        .filter(|option| option.starts_with(b"proto="))
-        .collect();
-    let versions: Vec<_> = options
-        .iter()
-        .filter(|option| option.starts_with(b"vers="))
-        .collect();
-    if security.len() != 1
-        || *security[0] != b"sec=sys"
-        || protocols.len() != 1
-        || *protocols[0] != b"proto=tcp"
-        || versions.len() != 1
-    {
-        return None;
-    }
-    let minor = if options.contains(&b"vers=4.1".as_slice()) {
-        1
-    } else if options.contains(&b"vers=4.2".as_slice()) {
-        2
-    } else {
-        return None;
-    };
-    let source = std::str::from_utf8(fields[separator + 2]).ok()?;
-    let (host, export) = source.rsplit_once(':')?;
-    if host.is_empty() || !export.starts_with('/') {
-        return None;
-    }
-    // The source hostname is not necessarily the endpoint held by the
-    // kernel: DNS can change or return another server. Use the pinned addr
-    // reported for this mount, and decline direct routing if it is ambiguous.
-    let addresses: Vec<_> = options
-        .iter()
-        .filter_map(|option| option.strip_prefix(b"addr="))
-        .collect();
-    let [address] = addresses.as_slice() else {
-        return None;
-    };
-    let address = std::str::from_utf8(address).ok()?;
-    let address: IpAddr = address.trim_matches(['[', ']']).parse().ok()?;
-    let port = match options
-        .iter()
-        .find_map(|option| option.strip_prefix(b"port="))
-    {
-        Some(value) => std::str::from_utf8(value).ok()?.parse::<u16>().ok()?,
-        None => 2049,
-    };
-    if port == 0 {
+    let info = vfsi_nfs::mount::parse_mount(line)?;
+    if info.read_only {
         return None;
     }
     Some(MountSpec {
-        id: std::str::from_utf8(fields[0]).ok()?.parse().ok()?,
-        mount_point: decode_mount_field(fields[4])?,
-        export: decode_mount_field(export.as_bytes())?,
-        server: SocketAddr::new(address, port).to_string(),
-        minor,
+        id: info.id,
+        mount_point: info.mount_point,
+        export: info.export,
+        server: info.server,
+        minor: info.minor,
     })
 }
 

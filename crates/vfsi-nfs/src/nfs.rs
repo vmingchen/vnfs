@@ -223,6 +223,8 @@ pub struct NfsClientBuilder {
     host: String,
     options: NfsConnectOptions,
     observer: Option<Arc<dyn NfsObserver>>,
+    #[cfg(target_os = "linux")]
+    mount: Option<crate::mount::NfsMount>,
 }
 
 impl std::fmt::Debug for NfsClientBuilder {
@@ -242,7 +244,26 @@ impl NfsClientBuilder {
             host: host.into(),
             options: NfsConnectOptions::default(),
             observer: None,
+            #[cfg(target_os = "linux")]
+            mount: None,
         }
+    }
+
+    /// Discover and pin a direct connection from a Linux NFS-mounted directory.
+    #[cfg(target_os = "linux")]
+    pub fn from_mount(path: impl AsRef<Path>) -> VfResult<Self> {
+        Self::from_mount_config(crate::mount::NfsMount::discover(path)?)
+    }
+
+    /// Use a previously discovered mount for independent pooled connections.
+    #[cfg(target_os = "linux")]
+    pub fn from_mount_config(mount: crate::mount::NfsMount) -> VfResult<Self> {
+        mount.check_local()?;
+        let mut builder = Self::new(mount.host())
+            .root(mount.root())
+            .minor_version(Some(mount.minor_version()));
+        builder.mount = Some(mount);
+        Ok(builder)
     }
 
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
@@ -330,6 +351,12 @@ impl NfsClientBuilder {
     pub fn connect(self) -> VfResult<NfsVecFs> {
         self.validate()?;
         let mut filesystem = NfsVecFs::connect_with_options(&self.host, self.options)?;
+        #[cfg(target_os = "linux")]
+        if let Some(mount) = &self.mount {
+            mount.verify(&mut filesystem)?;
+            filesystem.read_only = mount.read_only();
+            filesystem.mount_source = Some(mount.clone());
+        }
         filesystem.observer = self.observer;
         filesystem.notify(NfsEvent::Connected {
             minor_version: filesystem.minorversion(),
@@ -338,6 +365,10 @@ impl NfsClientBuilder {
     }
 
     fn validate(&self) -> VfResult<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(mount) = &self.mount {
+            mount.validate_options(&self.host, &self.options)?;
+        }
         if self
             .options
             .client_owner
@@ -435,6 +466,10 @@ pub struct NfsVecFs {
     /// plus a separate CLOSE compound (portable), or the old phased path.
     merged_mode: MergedIoMode,
     configured_max_compound_bytes: usize,
+    /// A direct connection inferred from a read-only mount must not bypass it.
+    read_only: bool,
+    #[cfg(target_os = "linux")]
+    mount_source: Option<crate::mount::NfsMount>,
     observer: Option<Arc<dyn NfsObserver>>,
     #[cfg(feature = "test-faults")]
     fault_injector: Option<Arc<dyn FaultInjector>>,
@@ -599,6 +634,19 @@ fn non_destructive_reopen_flags(flags: i32) -> i32 {
     flags & !(libc::O_CREAT | libc::O_EXCL | libc::O_TRUNC)
 }
 
+fn open_flags_mutate(flags: i32) -> bool {
+    flags & libc::O_ACCMODE != libc::O_RDONLY
+        || flags & (libc::O_CREAT | libc::O_TRUNC | libc::O_APPEND) != 0
+}
+
+fn check_mount_write(read_only: bool, count: usize) -> VfResult<()> {
+    if read_only && count != 0 {
+        Err(VfError::client(0, libc::EROFS as u32))
+    } else {
+        Ok(())
+    }
+}
+
 /// Root-relative application path for `path`, per the `VecFs::abs_path`
 /// contract: absolute inputs are taken relative to the application root and
 /// relative inputs resolve against `cwd`; neither includes the export prefix.
@@ -632,6 +680,10 @@ fn adb_field_offset(base: u64, relative: u64, index: usize) -> VfResult<u64> {
 }
 
 impl NfsVecFs {
+    fn ensure_writable(&self, count: usize) -> VfResult<()> {
+        check_mount_write(self.read_only, count)
+    }
+
     pub fn builder(host: impl Into<String>) -> NfsClientBuilder {
         NfsClientBuilder::new(host)
     }
@@ -1286,6 +1338,9 @@ impl NfsVecFs {
             server_copy_stats: NfsServerCopyStats::default(),
             merged_mode: MergedIoMode::Full,
             configured_max_compound_bytes: 0,
+            read_only: false,
+            #[cfg(target_os = "linux")]
+            mount_source: None,
             observer: None,
             #[cfg(feature = "test-faults")]
             fault_injector: None,
@@ -1307,6 +1362,10 @@ impl NfsVecFs {
     }
 
     fn reconnect_once(&mut self) -> VfResult<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(mount) = &self.mount_source {
+            mount.check_local()?;
+        }
         let snapshots: Vec<(i32, ReopenFile, u64)> = self
             .open_files
             .iter()
@@ -1324,6 +1383,14 @@ impl NfsVecFs {
             .collect::<VfResult<_>>()?;
         let nfs = Self::connect_client(&self.connection)?;
         let mut replacement = Self::from_client(nfs, self.connection.clone());
+        replacement.read_only = self.read_only;
+        #[cfg(target_os = "linux")]
+        if let Some(mount) = &self.mount_source {
+            replacement.recovery_in_progress = true;
+            mount.verify(&mut replacement)?;
+            replacement.recovery_in_progress = false;
+            replacement.mount_source = Some(mount.clone());
+        }
         replacement.recovery_policy = self.recovery_policy;
         replacement.auto_reconnect = self.auto_reconnect;
         replacement.cwd = self.cwd.clone();
@@ -1381,6 +1448,10 @@ impl NfsVecFs {
     /// Descriptor numbers and current offsets are preserved. Reopen never
     /// repeats create, exclusive-create, or truncate side effects.
     pub fn reconnect(&mut self) -> VfResult<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(mount) = &self.mount_source {
+            mount.check_local()?;
+        }
         self.notify(NfsEvent::ReconnectStarted);
         let attempts = self.recovery_policy.reconnect_attempts.max(1);
         let mut backoff = self.recovery_policy.initial_backoff;
@@ -3616,6 +3687,9 @@ impl VecFs for NfsVecFs {
         mode: u32,
     ) -> VfResult<VfFile> {
         use libc::{O_APPEND, O_CREAT, O_EXCL, O_TRUNC};
+        if open_flags_mutate(flags) {
+            self.ensure_writable(1)?;
+        }
         let full = match base {
             VfPathBase::Abs => self.server_path(&Path::new("/").join(pathname)),
             VfPathBase::Cwd => self.server_path(pathname),
@@ -3694,6 +3768,11 @@ impl VecFs for NfsVecFs {
     ) -> VfResult<ManyResults<VfFile>> {
         if paths.len() != flags.len() || paths.len() != modes.len() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
+        }
+        if self.read_only
+            && let Some(index) = flags.iter().position(|flags| open_flags_mutate(*flags))
+        {
+            return Err(VfError::client(index, libc::EROFS as u32));
         }
         self.drain_deferred_descriptor_closes()?;
         if paths.is_empty() {
@@ -4004,6 +4083,7 @@ impl VecFs for NfsVecFs {
     }
 
     fn writev_borrowed(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
+        self.ensure_writable(writes.len())?;
         if writes.is_empty() {
             return Ok(Vec::new());
         }
@@ -4135,10 +4215,12 @@ impl VecFs for NfsVecFs {
     }
 
     fn setattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
+        self.ensure_writable(attrs.len())?;
         self.setattrsv_impl(attrs, true)
     }
 
     fn lsetattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
+        self.ensure_writable(attrs.len())?;
         self.setattrsv_impl(attrs, false)
     }
 
@@ -4592,6 +4674,7 @@ impl VecFs for NfsVecFs {
     }
 
     fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
+        self.ensure_writable(pairs.len())?;
         if pairs.is_empty() {
             return Ok(());
         }
@@ -4627,6 +4710,7 @@ impl VecFs for NfsVecFs {
     }
 
     fn removev(&mut self, files: &[VfFile]) -> VfRes {
+        self.ensure_writable(files.len())?;
         if files.is_empty() {
             return Ok(());
         }
@@ -4653,6 +4737,7 @@ impl VecFs for NfsVecFs {
     }
 
     fn mkdirv(&mut self, dirs: &[VfAttrs]) -> VfRes {
+        self.ensure_writable(dirs.len())?;
         if dirs.is_empty() {
             return Ok(());
         }
@@ -4697,6 +4782,7 @@ impl VecFs for NfsVecFs {
     }
 
     fn symlinkv(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
+        self.ensure_writable(newpaths.len())?;
         if oldpaths.len() != newpaths.len() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
@@ -4758,6 +4844,7 @@ impl VecFs for NfsVecFs {
     }
 
     fn hardlinkv(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
+        self.ensure_writable(newpaths.len())?;
         if oldpaths.len() != newpaths.len() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
@@ -4808,6 +4895,7 @@ impl VecFs for NfsVecFs {
     }
 
     fn dupv(&mut self, pairs: &[ExtentPair]) -> VfRes {
+        self.ensure_writable(pairs.len())?;
         for (i, p) in pairs.iter().enumerate() {
             // Follow final-component symlinks for both ends, matching the
             // `std::fs` backend (OPEN cannot target a symlink directly).
@@ -4824,6 +4912,7 @@ impl VecFs for NfsVecFs {
     }
 
     fn lcopyv(&mut self, pairs: &[ExtentPair]) -> VfRes {
+        self.ensure_writable(pairs.len())?;
         for (i, p) in pairs.iter().enumerate() {
             let src = self.lstat(&p.src_path).map_err(|e| e.with_index(i))?;
             if src.ftype == VfType::Symlink {
@@ -4843,6 +4932,7 @@ impl VecFs for NfsVecFs {
     }
 
     fn copyv(&mut self, pairs: &[ExtentPair]) -> VfRes {
+        self.ensure_writable(pairs.len())?;
         if !self.server_copy_enabled {
             return self.dupv(pairs);
         }
@@ -4875,6 +4965,7 @@ impl VecFs for NfsVecFs {
     }
 
     fn write_adb(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
+        self.ensure_writable(patterns.len())?;
         let mut counts = Vec::with_capacity(patterns.len());
         for (i, p) in patterns.iter().enumerate() {
             // Validate the entire layout before creating/opening a file so an
@@ -4962,6 +5053,7 @@ impl VecFs for NfsVecFs {
         recursive: bool,
         options: RemoveOptions,
     ) -> VfRes {
+        self.ensure_writable(objs.len())?;
         // Resolve each operand's parent once; the operand itself is then
         // addressed by filehandle. Removal is optimistic: trying to REMOVE an
         // entry and expanding it on NFS4ERR_NOTEMPTY avoids a separate type
@@ -5028,6 +5120,7 @@ impl VecFs for NfsVecFs {
     }
 
     fn rm_dir_contents_with_options(&mut self, dir: &VfDir, options: RemoveOptions) -> VfRes {
+        self.ensure_writable(1)?;
         let fh = match dir {
             VfDir::Descriptor { fd, owner } if *owner == self.dir_owner => self
                 .open_dirs
@@ -5059,6 +5152,7 @@ impl VecFs for NfsVecFs {
         symlinks: bool,
         _use_server_side_copy: bool,
     ) -> VfRes {
+        self.ensure_writable(1)?;
         if !self.exists(dst)? {
             self.ensure_dir(dst, 0o755).map_err(|e| e.with_index(0))?;
         }
@@ -5416,6 +5510,54 @@ fn read_str(buf: &[u8], off: &mut usize) -> VfResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_only_mounts_reject_all_mutating_open_flags() {
+        assert!(!open_flags_mutate(libc::O_RDONLY | libc::O_CLOEXEC));
+        for flags in [
+            libc::O_WRONLY,
+            libc::O_RDWR,
+            libc::O_CREAT,
+            libc::O_TRUNC,
+            libc::O_APPEND,
+        ] {
+            assert!(open_flags_mutate(flags));
+        }
+        assert!(check_mount_write(true, 0).is_ok());
+        assert_eq!(
+            check_mount_write(true, 1).unwrap_err().err_no(),
+            libc::EROFS as u32
+        );
+        assert!(check_mount_write(false, 1).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_read_only_mount_retains_restriction_after_native_reconnect() {
+        let Ok(mount) = std::env::var("VFSI_NFS_TEST_MOUNT_RO") else {
+            return;
+        };
+        let mut backend = NfsClientBuilder::from_mount(&mount)
+            .unwrap()
+            .connect()
+            .unwrap();
+        assert!(backend.read_only);
+        backend.reconnect().unwrap();
+        assert!(backend.read_only);
+        assert!(backend.mount_source.is_some());
+        assert_eq!(
+            backend
+                .open_by_path(
+                    VfPathBase::Abs,
+                    Path::new("/.mount-forbidden"),
+                    libc::O_CREAT | libc::O_WRONLY,
+                    0o600
+                )
+                .unwrap_err()
+                .err_no(),
+            libc::EROFS as u32
+        );
+    }
 
     #[test]
     fn recursive_remove_does_not_revisit_failed_entry_on_every_mutating_page() {

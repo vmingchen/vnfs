@@ -78,9 +78,46 @@ kinit user@EXAMPLE.COM
 fs = fsspec.filesystem(
     "nfs4",
     host="nfs.example.com",
+    root="exports/project",
     auth="krb5i",
 )
 ```
+
+### Connect from an existing mount
+
+If the directory is already mounted on Linux, infer the connection instead:
+
+```python
+fs = fsspec.filesystem("nfs4", mount="/mnt/data/git/some/tree")
+fs.pipe({"/file-1": b"hello", "/file-2": b"world"})
+files = fs.cat(["/file-1", "/file-2"])
+```
+
+`mount` must be an absolute path to an existing directory inside the mount.
+Relative paths are rejected to avoid working-directory-dependent instance
+caching. If `server:/export` is mounted at `/mnt/data`, this example uses
+`/export/git/some/tree` as its
+remote root. Discovery supports NFSv4.1/4.2 TCP `sec=sys` mounts and infers
+AUTH_SYS from that explicit mount configuration. Read-only mounts remain
+read-only through the direct client. Unsupported security modes, bind-root
+mappings, and directories containing nested mounts fail with a descriptive
+error. Do not combine `mount` with `host`, `root`, `auth`, `minor_version`, or
+other explicit connection settings; tuning such as timeouts and pool size
+remains available.
+
+**Kerberos mounts are not supported by mount discovery yet.** A mount using
+RPCSEC_GSS (`sec=krb5`, `sec=krb5i`, or `sec=krb5p`) is rejected; `mount=`
+never silently falls back to AUTH_SYS. To use Kerberos, configure the server
+and remote root explicitly with `auth="krb5"` or `auth="krb5i"`, as shown
+above. This establishes an independent GSS context using the process's
+Kerberos credentials, not the kernel mount's context. RPCSEC_GSS privacy
+(`krb5p`) is not currently supported by nfs4fs.
+
+Discovery happens during construction. All operations, pooled connections,
+and reconnects use the same pinned remote configuration. `fs.mount` exposes
+the resolved local directory and `fs.read_only` reports its write restriction.
+The client uses direct NFS for all operations, with its own caches and open
+state. It does not share or invalidate the mounted kernel client's caches.
 
 `root` is a client-side path prefix, not a security boundary. A relative
 symlink inside it can resolve elsewhere in the same NFS export. Configure a

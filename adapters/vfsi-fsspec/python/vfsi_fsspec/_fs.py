@@ -1793,6 +1793,7 @@ class VfsiFileSystem(AbstractFileSystem):
         auth=None,
         service_principal=None,
         connection_pool_size=1,
+        _mount_config=None,
         **kwargs,
     ):
         if backend not in self._supported_backends:
@@ -1901,27 +1902,30 @@ class VfsiFileSystem(AbstractFileSystem):
         self.directory_max_path_bytes = directory_max_path_bytes
         self.walk_max_depth = walk_max_depth
         self._root = root.strip("/")
+        factory_args = (
+            host,
+            backend,
+            dummy_root,
+            compound_size_limit,
+            minor_version,
+            share,
+            username,
+            password,
+            domain,
+            self.connect_timeout,
+            self.request_timeout,
+            self.read_all_max_total_bytes,
+            self.directory_max_entries,
+            self.directory_max_path_bytes,
+            self.walk_max_depth,
+            self.auth,
+            self.service_principal,
+        )
+        if _mount_config is not None:
+            factory_args += (_mount_config,)
         self._client = _ClientPool(
             native_module,
-            (
-                host,
-                backend,
-                dummy_root,
-                compound_size_limit,
-                minor_version,
-                share,
-                username,
-                password,
-                domain,
-                self.connect_timeout,
-                self.request_timeout,
-                self.read_all_max_total_bytes,
-                self.directory_max_entries,
-                self.directory_max_path_bytes,
-                self.walk_max_depth,
-                self.auth,
-                self.service_principal,
-            ),
+            factory_args,
             size=self.connection_pool_size,
             auto_reconnect=self.auto_reconnect,
         )

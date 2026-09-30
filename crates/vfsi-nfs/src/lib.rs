@@ -6,6 +6,8 @@ pub mod client;
 pub mod compound;
 #[cfg(feature = "ffi")]
 mod identity;
+#[cfg(all(feature = "ffi", target_os = "linux"))]
+pub mod mount;
 #[cfg(feature = "ffi")]
 pub mod nfs;
 #[cfg(feature = "ffi")]

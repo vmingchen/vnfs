@@ -582,14 +582,20 @@ jobs:
         run: |
           sudo mkdir -p /mnt/vnfs-ci-auto
           sudo mount -t nfs4 -o vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049 127.0.0.1:/ /mnt/vnfs-ci-auto
+          sudo mkdir -p /mnt/vnfs-ci-discovery-ro
+          sudo mount -t nfs4 -o ro,vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049 127.0.0.1:/ /mnt/vnfs-ci-discovery-ro
           bind_target=/mnt/vnfs-ci-auto/.vnfs-auto-bind
           bind_source=$(mktemp)
-          trap 'sudo umount "$bind_target" 2>/dev/null || true; rm -f "$bind_target" "$bind_source"; sudo umount /mnt/vnfs-ci-auto' EXIT
+          trap 'sudo umount "$bind_target" 2>/dev/null || true; rm -f "$bind_target" "$bind_source"; sudo umount /mnt/vnfs-ci-discovery-ro; sudo umount /mnt/vnfs-ci-auto' EXIT
           printf 'underlying NFS\n' > "$bind_target"
           printf 'bind source\n' > "$bind_source"
           sudo mount --bind "$bind_source" "$bind_target"
           VFSI_AUTO_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_AUTO_TEST_BIND="$bind_target" \
             cargo test -p vnfs --lib auto::tests::live_ -- --nocapture
+          VFSI_NFS_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_NFS_TEST_MOUNT_RO=/mnt/vnfs-ci-discovery-ro \
+            cargo test -p vnfs --lib native_nfs::mount_tests -- --nocapture --test-threads=1
+          VFSI_NFS_TEST_MOUNT_RO=/mnt/vnfs-ci-discovery-ro \
+            cargo test -p vfsi-nfs --lib nfs::tests::live_read_only_mount -- --nocapture
       - name: Run NFS integration suite
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}
@@ -661,6 +667,12 @@ jobs:
           .venv/bin/pip install -e adapters/vfsi-fsspec
           cd adapters/nfs4fs
           ../../.venv/bin/maturin develop
+          sudo mkdir -p /mnt/vnfs-ci-python-mount /mnt/vnfs-ci-python-mount-ro
+          sudo mount -t nfs4 -o vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049 127.0.0.1:/ /mnt/vnfs-ci-python-mount
+          sudo mount -t nfs4 -o ro,vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049 127.0.0.1:/ /mnt/vnfs-ci-python-mount-ro
+          trap 'sudo umount /mnt/vnfs-ci-python-mount-ro; sudo umount /mnt/vnfs-ci-python-mount' EXIT
+          VFSI_NFS_TEST_MOUNT=/mnt/vnfs-ci-python-mount VFSI_NFS_TEST_MOUNT_RO=/mnt/vnfs-ci-python-mount-ro \
+            ../../.venv/bin/python -m pytest tests/test_mount_discovery.py
           ../../.venv/bin/python -m pytest \
             tests/test_nfs_integration.py \
             tests/test_behavior_parity.py \
