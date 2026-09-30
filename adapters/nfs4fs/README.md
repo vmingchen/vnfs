@@ -292,7 +292,10 @@ entries are reused without source validation until `expiry_time`, so that mode
 is appropriate only when external clients use immutable or versioned paths.
 Mutations made through the same nfs4fs target invalidate registered persistent
 block-cache generations automatically, including renamed or recursively
-deleted subtrees. Already-open handles retain their per-handle cached blocks.
+deleted subtrees. Already-open handles retain their per-handle cached blocks;
+new persistent generations use separate backing files so refreshes cannot
+truncate an active mmap. Retired files are unlinked, with their storage released
+when existing handles close.
 `cache_check` controls how often local cache metadata is reloaded and does not
 validate the server. `invalidate_cache()` controls directory listings; use
 `pop_from_cache()` to evict persistent file data explicitly.
@@ -302,7 +305,9 @@ miss reads the same aligned range from a bounded group of sibling descriptors
 through one VFSI vector operation. A requested whole-file read keeps its fast
 path for the default read-ahead cache; `cache_type="blockcache"` fills its
 bounded LRU block-by-block. Speculative siblings are capped to one block (which
-may contain a whole small file). Set `vectorized_buffering=False` to disable
+may contain a whole small file). Retained group prefetch is also bounded by
+the smaller of `max_batch_bytes` and `read_all_max_total_bytes`; older speculative
+entries are evicted when necessary. Set `vectorized_buffering=False` to disable
 this adaptive fan-out. The persistent `blockcache` wrapper participates in the
 same coordinator: it validates source identities in a metadata batch, serves
 complete hits locally, and fills sparse misses with vector reads.
@@ -317,6 +322,10 @@ one block from each file per vector operation. Explicit `flush()` always sends
 that file's staged data to the server. Update modes containing `+` retain the
 unbuffered seekable implementation, and fsspec transactions retain their
 existing disk-spooled commit behavior.
+
+A failed buffered flush makes the writer unusable, including semantic errors
+such as a full server. Close it to release its descriptor; `close()` reports the
+failed writer without replaying any bytes that might already have been written.
 
 ## Directory listing cache
 

@@ -5,6 +5,7 @@ import errno
 import hashlib
 import io
 import math
+import operator
 import os
 import posixpath
 import shutil
@@ -12,6 +13,7 @@ import tempfile
 import threading
 import uuid
 import weakref
+from collections import OrderedDict
 from contextlib import ExitStack
 from glob import has_magic
 from urllib.parse import unquote, urlsplit
@@ -142,6 +144,18 @@ def _allocation_error(path, requested, limit):
         f"read would allocate {requested} bytes, exceeding the {limit}-byte limit",
         path,
     )
+
+
+def _write_fully(file, data, callback=None):
+    """Finish a chunk without treating a valid short write as completion."""
+    offset = 0
+    while offset < len(data):
+        written = file.write(data[offset:])
+        if written <= 0 or written > len(data) - offset:
+            raise OSError(errno.EIO, "invalid progress during streamed write")
+        offset += written
+        if callback is not None:
+            callback.relative_update(written)
 
 
 class _ResilientClient:
@@ -685,14 +699,18 @@ class _RawVfsiFile(io.RawIOBase):
             raise ValueError("I/O operation on closed file")
         if not self._readable:
             raise io.UnsupportedOperation("not readable")
-        if len(b) == 0:
+        view = memoryview(b)
+        if view.readonly:
+            raise TypeError("readinto() requires a writable buffer")
+        view = view.cast("B")
+        if len(view) == 0:
             return 0
-        length = min(len(b), self._MAX_READ)
+        length = min(len(view), self._MAX_READ)
         self.fs._check_read_allocation(length, self.path)
         data = self._pread(length)
         n = len(data)
         if n:
-            b[:n] = data
+            view[:n] = data
             self._pos += n
         return n
 
@@ -769,6 +787,8 @@ class _RawVfsiFile(io.RawIOBase):
     def seek(self, offset, whence=0):
         if self.closed:
             raise ValueError("I/O operation on closed file")
+        offset = operator.index(offset)
+        whence = operator.index(whence)
         if whence == 0:
             new = offset
         elif whence == 1:
@@ -870,6 +890,7 @@ class VfsiFile(AbstractBufferedFile):
         self._write_spool = None
         self._spool_read_offset = 0
         self._write_failed = False
+        self._write_failure_errno = None
         self._buffer_size = size
         self._requested_read_end = None
         self.cache_type = cache_type
@@ -983,6 +1004,12 @@ class VfsiFile(AbstractBufferedFile):
         # descriptor is opened, preserving POSIX open-time errors.
         return None
 
+    def _raise_write_failure(self):
+        message = "buffered writer is unusable after a failed flush"
+        if self._write_failure_errno is not None:
+            raise OSError(self._write_failure_errno, message, self.path)
+        raise ConnectionError(message)
+
     def _upload_chunk(self, final=False):
         data = self.buffer.getvalue()
         offset = 0
@@ -992,8 +1019,11 @@ class VfsiFile(AbstractBufferedFile):
                 if written <= 0:
                     raise OSError(errno.EIO, "short buffered write", self.path)
                 offset += written
-        except ConnectionError:
+        except BaseException as error:
             self._write_failed = True
+            if isinstance(error, OSError) and not isinstance(error, ConnectionError):
+                self._write_failure_errno = error.errno
+            self._raw._broken = True
             raise
         return True
 
@@ -1067,7 +1097,7 @@ class VfsiFile(AbstractBufferedFile):
         if isinstance(data, str):
             raise TypeError("a bytes-like object is required, not 'str'")
         if self._write_failed:
-            raise ConnectionError("buffered writer is unusable after a failed flush")
+            self._raise_write_failure()
         if self._buffer_group is None:
             written = self.buffer.write(data)
             self.loc += written
@@ -1099,7 +1129,8 @@ class VfsiFile(AbstractBufferedFile):
         return written
 
     def seek(self, offset, whence=0):
-        requested = int(offset)
+        requested = operator.index(offset)
+        whence = operator.index(whence)
         if whence == 0:
             position = requested
         elif whence == 1:
@@ -1135,7 +1166,7 @@ class VfsiFile(AbstractBufferedFile):
         if self._buffered_read:
             return None
         if self._write_failed:
-            raise ConnectionError("buffered writer is unusable after a failed flush")
+            self._raise_write_failure()
         if self._buffer_group is None:
             if force:
                 return super().flush(force=True)
@@ -1178,13 +1209,13 @@ class VfsiFile(AbstractBufferedFile):
             if group is not None and not group._group_closed:
                 group.request_close(self)
             return
-        if self._write_failed and self._raw._fd is None:
-            # An ambiguous direct write already invalidated its descriptor, so
-            # there is no cleanup ownership left to retain. Make close final
-            # while still surfacing the original unusable-writer state.
+        if self._write_failed and self._buffer_group is None:
+            # A failed upload may have committed a prefix. Release any remaining
+            # descriptor without flushing or replaying its buffered bytes.
+            # If CLOSE fails, retain ownership so cleanup is still retryable.
             self._raw.close()
             self._closed = True
-            raise ConnectionError("buffered writer is unusable after a failed flush")
+            self._raise_write_failure()
         group = self._buffer_group
         if group is not None:
             if self._buffered_write:
@@ -1236,10 +1267,34 @@ class _BufferGroup:
         self._lock = threading.RLock()
         self._ranges = {}
         self._whole_files = {}
+        self._speculative_order = OrderedDict()
+        self._speculative_bytes = 0
         self._close_requested = set()
         self._group_closed = False
         for file in self.files:
             file._attach_group(self)
+
+    def _take_speculative(self, whole, key):
+        store = self._whole_files if whole else self._ranges
+        value = store.pop(key, None)
+        if value is not None:
+            self._speculative_bytes -= len(value)
+            self._speculative_order.pop((whole, key), None)
+        return value
+
+    def _store_speculative(self, whole, key, value):
+        # Bound retained prefetch across all waves, not just each vector RPC.
+        budget = min(self.fs.max_batch_bytes, self.fs.read_all_max_total_bytes)
+        self._take_speculative(whole, key)
+        if not value or len(value) > budget:
+            return
+        while self._speculative_bytes + len(value) > budget:
+            oldest = next(iter(self._speculative_order))
+            self._take_speculative(*oldest)
+        store = self._whole_files if whole else self._ranges
+        store[key] = value
+        self._speculative_order[(whole, key)] = None
+        self._speculative_bytes += len(value)
 
     def _active_readers(self, current):
         current_cache = getattr(current, "cache", None)
@@ -1317,7 +1372,7 @@ class _BufferGroup:
     def fetch(self, current, start, end):
         with self._lock:
             key = (id(current), start, end)
-            prefetched = self._ranges.pop(key, None)
+            prefetched = self._take_speculative(False, key)
             if prefetched is not None:
                 return prefetched
             # Persistent mmap fills must cover the fetcher's complete range
@@ -1338,7 +1393,7 @@ class _BufferGroup:
                     and cached_start <= start
                     and cached_end >= coverage_end
                 ):
-                    del self._ranges[cached_key]
+                    self._take_speculative(False, cached_key)
                     offset = start - cached_start
                     if coverage_end == end:
                         return value[offset : offset + end - start]
@@ -1384,7 +1439,9 @@ class _BufferGroup:
                 if file is current:
                     current_data = value
                 else:
-                    self._ranges[(id(file), start, start + length)] = value
+                    self._store_speculative(
+                        False, (id(file), start, start + length), value
+                    )
             if current_data is None:
                 raise OSError(errno.EIO, "buffered read returned no data", current.path)
             return current_data
@@ -1392,14 +1449,18 @@ class _BufferGroup:
     def read_all(self, current):
         with self._lock:
             self.fs._check_read_allocation(current.size, current.path)
-            prefetched = self._whole_files.pop(id(current), None)
+            # Buffered readers use their open-time size snapshot. Empty files
+            # need neither a READ nor a speculative entry to remember EOF.
+            if current.size == 0:
+                return b""
+            prefetched = self._take_speculative(True, id(current))
             if prefetched is not None:
                 return prefetched
             # A whole-file read supersedes a speculative prefix left for this
             # handle. Drop it instead of retaining stale group memory.
             identity = id(current)
             for key in [key for key in self._ranges if key[0] == identity]:
-                del self._ranges[key]
+                self._take_speculative(False, key)
             files = []
             lengths = []
             total = 0
@@ -1409,6 +1470,8 @@ class _BufferGroup:
                 length = (
                     file.size if file is current else min(file.size, file.blocksize)
                 )
+                if length == 0:
+                    continue
                 if len(files) >= self.fs.batch_size:
                     continue
                 allocation_budget = min(
@@ -1430,9 +1493,9 @@ class _BufferGroup:
                 if file is current:
                     current_data = value
                 elif len(value) == file.size:
-                    self._whole_files[id(file)] = value
+                    self._store_speculative(True, id(file), value)
                 else:
-                    self._ranges[(id(file), 0, len(value))] = value
+                    self._store_speculative(False, (id(file), 0, len(value)), value)
             if current_data is None:
                 raise OSError(errno.EIO, "buffered read returned no data", current.path)
             return current_data
@@ -1543,6 +1606,8 @@ class _BufferGroup:
                 member._finish_group_close()
             self._ranges.clear()
             self._whole_files.clear()
+            self._speculative_order.clear()
+            self._speculative_bytes = 0
 
 
 class _DeferredWriteFile:
@@ -2771,11 +2836,11 @@ class VfsiFileSystem(AbstractFileSystem):
         view = memoryview(value)
         with VfsiFile(self, internal, "wb") as remote:
             for offset in range(0, len(view), self.transfer_chunk_size):
-                written = remote.write(
-                    bytes(view[offset : offset + self.transfer_chunk_size])
+                _write_fully(
+                    remote,
+                    bytes(view[offset : offset + self.transfer_chunk_size]),
+                    callback=callback,
                 )
-                if callback is not None:
-                    callback.relative_update(written)
 
     def _write_one_exclusive(self, path, value, callback=None):
         """Atomically create one path with O_EXCL and bounded writes."""
@@ -2830,7 +2895,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 chunk = spool.read(self.transfer_chunk_size)
                 if not chunk:
                     break
-                remote.write(chunk)
+                _write_fully(remote, chunk)
 
     def _copy_remote_to_fileobj(self, path, output, callback=None):
         """Stream one remote file into a writable local file object."""
@@ -3091,8 +3156,7 @@ class VfsiFileSystem(AbstractFileSystem):
                         )
                         if not chunk:
                             break
-                        remote.write(chunk)
-                        child.relative_update(len(chunk))
+                        _write_fully(remote, chunk, callback=child)
             callback.relative_update()
 
         def upload_batched(items):

@@ -10,6 +10,7 @@ import fcntl
 import os
 import threading
 import time
+import uuid
 import weakref
 from contextlib import contextmanager
 
@@ -158,6 +159,7 @@ def _reset_stale_generation(cache_fs, path):
     replacement = writable_detail.copy()
     replacement.update(
         {
+            "fn": f"vfsi-{uuid.uuid4().hex}",
             "blocks": set(),
             "size": info["size"],
             "time": time.time(),
@@ -168,8 +170,13 @@ def _reset_stale_generation(cache_fs, path):
     replacement.pop("blocksize", None)
     cache_fs._metadata.cached_files[-1][path] = replacement
     _save_writable_metadata(cache_fs)
-    with open(backing_file, "wb") as file:
+    with open(_backing_path(cache_fs, replacement), "wb") as file:
         file.truncate(info["size"])
+    # Unlinking is safe for existing descriptors/mappings; truncating is not.
+    try:
+        os.remove(backing_file)
+    except FileNotFoundError:
+        pass
 
 
 def _mark_compatible_cache(cache_fs, path, file):
@@ -462,9 +469,14 @@ def _prepare_cache_records(cache_fs, paths):
             records[index]["info"] = info
 
     replacements = []
+    prepared = {}
     writable_cache = cache_fs._metadata.cached_files[-1]
     now = time.time()
     for path, record in zip(paths, records):
+        if path in prepared:
+            record.update(prepared[path])
+            continue
+        prepared[path] = record
         detail = record["detail"]
         valid = detail is not None and record["compatible"] and not record["expired"]
         if valid and cache_fs.check_files:
@@ -487,6 +499,7 @@ def _prepare_cache_records(cache_fs, paths):
         info = record["info"]
         existing = writable_cache.get(path)
         if existing is not None:
+            record["old_filename"] = _backing_path(cache_fs, existing)
             replacement = existing.copy()
         else:
             replacement = {
@@ -495,6 +508,7 @@ def _prepare_cache_records(cache_fs, paths):
             }
         replacement.update(
             {
+                "fn": f"vfsi-{uuid.uuid4().hex}",
                 "blocks": set(),
                 "size": info["size"],
                 "time": now,
@@ -509,12 +523,20 @@ def _prepare_cache_records(cache_fs, paths):
         replacements.append(record)
 
     if replacements:
-        # Persist the empty generation before touching a reused sparse file,
-        # so a crash cannot expose old blocks as belonging to the new uid.
+        # Every generation owns a distinct inode. Persist its empty metadata
+        # before filling it, then unlink retired inodes without truncating mmap
+        # storage that may still be held by another reader or process.
         _save_writable_metadata(cache_fs)
         for record in replacements:
             with open(record["filename"], "wb") as file:
                 file.truncate(record["detail"]["size"])
+        for path, record in zip(paths, records):
+            raw = record.get("old_filename")
+            if raw is not None and raw != record["filename"]:
+                try:
+                    os.remove(raw)
+                except FileNotFoundError:
+                    pass
     return records
 
 

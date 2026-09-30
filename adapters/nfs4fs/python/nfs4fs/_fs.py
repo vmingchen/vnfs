@@ -1,6 +1,7 @@
 """NFS-specific facade over the shared VFSI fsspec engine."""
 
 import inspect
+import operator
 import os
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -98,6 +99,26 @@ class Nfs4FileSystem(_VfsiFileSystem):
             raise TypeError("on_chunk must be callable")
         if workers is None:
             workers = min(3, self.connection_pool_size)
+        limits = {}
+        for name, value in (
+            ("workers", workers),
+            ("chunk_size", chunk_size),
+            ("max_in_flight", max_in_flight),
+            ("max_buffered_bytes", max_buffered_bytes),
+        ):
+            try:
+                if isinstance(value, bool):
+                    raise TypeError
+                value = operator.index(value)
+            except TypeError:
+                raise ValueError(f"{name} must be a positive integer") from None
+            if value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+            limits[name] = value
+        workers = limits["workers"]
+        chunk_size = limits["chunk_size"]
+        max_in_flight = limits["max_in_flight"]
+        max_buffered_bytes = limits["max_buffered_bytes"]
         if workers < 1 or workers > self.connection_pool_size:
             raise ValueError("workers must be between 1 and connection_pool_size")
         if not 0 < chunk_size <= min(1 << 20, self.read_all_max_total_bytes):
