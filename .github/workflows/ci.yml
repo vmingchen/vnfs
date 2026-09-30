@@ -594,7 +594,7 @@ jobs:
             cargo test -p vnfs --lib auto::tests::live_ -- --nocapture
           VFSI_NFS_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_NFS_TEST_MOUNT_RO=/mnt/vnfs-ci-discovery-ro \
             cargo test -p vnfs --lib native_nfs::mount_tests -- --nocapture --test-threads=1
-          VFSI_NFS_TEST_MOUNT_RO=/mnt/vnfs-ci-discovery-ro \
+          VFSI_NFS_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_NFS_TEST_MOUNT_RO=/mnt/vnfs-ci-discovery-ro \
             cargo test -p vfsi-nfs --lib nfs::tests::live_read_only_mount -- --nocapture
       - name: Run NFS integration suite
         env:

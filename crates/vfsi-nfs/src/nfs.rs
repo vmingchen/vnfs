@@ -5537,7 +5537,12 @@ mod tests {
         let Ok(mount) = std::env::var("VFSI_NFS_TEST_MOUNT_RO") else {
             return;
         };
-        let mut backend = NfsClientBuilder::from_mount(&mount)
+        let rw_mount = std::env::var("VFSI_NFS_TEST_MOUNT")
+            .expect("read-only test needs a writable fixture mount");
+        let name = format!(".vfsi-reconnect-read-only-{}", std::process::id());
+        let fixture = Path::new(&rw_mount).join(&name);
+        std::fs::create_dir(&fixture).unwrap();
+        let mut backend = NfsClientBuilder::from_mount(Path::new(&mount).join(&name))
             .unwrap()
             .connect()
             .unwrap();
@@ -5557,6 +5562,8 @@ mod tests {
                 .err_no(),
             libc::EROFS as u32
         );
+        drop(backend);
+        std::fs::remove_dir(fixture).unwrap();
     }
 
     #[test]
