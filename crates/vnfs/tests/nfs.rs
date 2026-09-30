@@ -196,7 +196,7 @@ fn shared_suite_on_nfs() {
 fn builder_root_confines_absolute_and_parent_paths() {
     let mut admin = client();
     let root = setup_dir("builder_root");
-    let mut confined = NfsVecFs::builder("127.0.0.1")
+    let mut confined = NfsVecFs::builder(test_host())
         .root(&root)
         .max_compound_bytes(128 * 1024)
         .connect()
@@ -260,7 +260,7 @@ fn builder_observer_receives_lifecycle_events() {
     }
 
     let observer = std::sync::Arc::new(Observer::default());
-    let filesystem = NfsVecFs::builder("127.0.0.1")
+    let filesystem = NfsVecFs::builder(test_host())
         .observer(observer.clone())
         .connect()
         .unwrap();
@@ -416,6 +416,10 @@ fn rust_native_client_pool_uses_independent_sessions() {
     first.remove_dir_all(&dir).unwrap();
 }
 
+fn test_host() -> String {
+    std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into())
+}
+
 fn client() -> NfsVecFs {
     // CI servers normally register NFS with rpcbind. Local test daemons often
     // listen directly on 2049 without registration, so allow an explicit
@@ -494,7 +498,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
     let expected: Vec<u8> = (0usize..(3 * 1024 * 1024 + 173))
         .map(|index| (index.wrapping_mul(31) % 251) as u8)
         .collect();
-    let client = Nfs::connect("127.0.0.1").expect("connect NFS client");
+    let client = Nfs::connect(test_host()).expect("connect NFS client");
     client.write(&path, &expected).expect("write fixture");
 
     let options = NfsReadPoolOptions::new()
@@ -502,7 +506,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
         .chunk_size(64 * 1024)
         .max_in_flight(5)
         .max_buffered_bytes(5 * 64 * 1024);
-    let mut pool = Nfs::builder("127.0.0.1")
+    let mut pool = Nfs::builder(test_host())
         .connect_read_pool(options)
         .expect("connect read pool");
 
@@ -2921,7 +2925,7 @@ fn dupv_copies_extent() {
 
     // ExtentPair length None copies to end-of-file.
     let whole = format!("{}/whole.bin", dir);
-    let mut c42 = NfsVecFs::connect_minor("127.0.0.1", 2).expect("connect with NFSv4.2");
+    let mut c42 = NfsVecFs::connect_minor(&test_host(), 2).expect("connect with NFSv4.2");
     c42.copyv(&[ExtentPair::new(&src, 2, &whole, 0, None)])
         .expect("copyv whole file");
     assert_eq!(read_all(&mut c42, Path::new(&whole)), b"cdefghij");
@@ -2930,7 +2934,7 @@ fn dupv_copies_extent() {
 #[test]
 fn copyv_batches_nfs42_server_copies_or_falls_back() {
     let dir = setup_dir("copyv42");
-    let mut c = NfsVecFs::connect_minor("127.0.0.1", 2).expect("connect with NFSv4.2");
+    let mut c = NfsVecFs::connect_minor(&test_host(), 2).expect("connect with NFSv4.2");
     let mut pairs = Vec::new();
     // More than two internal eight-file batches proves that COPY batching
     // continues correctly across compound boundaries.
@@ -2985,7 +2989,7 @@ fn copyv_batches_nfs42_server_copies_or_falls_back() {
 #[test]
 fn copyv_extent_semantics_and_server_telemetry() {
     let dir = setup_dir("copyv_extents");
-    let mut c = NfsVecFs::connect_minor("127.0.0.1", 2).expect("connect with NFSv4.2");
+    let mut c = NfsVecFs::connect_minor(&test_host(), 2).expect("connect with NFSv4.2");
 
     let digits = format!("{dir}/digits");
     write_file(&mut c, Path::new(&digits), b"0123456789");
@@ -3095,7 +3099,7 @@ fn copyv_falls_back_on_nfs41() {
     let dir = setup_dir("copyv41");
     let src = format!("{}/src", dir);
     let dst = format!("{}/dst", dir);
-    let mut c = NfsVecFs::connect_minor("127.0.0.1", 1).expect("connect with NFSv4.1");
+    let mut c = NfsVecFs::connect_minor(&test_host(), 1).expect("connect with NFSv4.1");
     assert_eq!(c.minorversion(), 1);
     assert!(!c.server_copy_enabled());
     write_file(&mut c, Path::new(&src), b"client-side-fallback");
@@ -3112,7 +3116,7 @@ fn client_side_copy_closes_source_when_destination_open_fails() {
     // The destination parent resolves, but opening the directory itself for
     // write fails after the source OPEN has succeeded.
     let dst = dir.clone();
-    let mut client = NfsVecFs::connect_minor("127.0.0.1", 1).unwrap();
+    let mut client = NfsVecFs::connect_minor(&test_host(), 1).unwrap();
     write_file(&mut client, Path::new(&src), b"source");
     let before = client.test_confirmed_path_closes();
     let error = client
@@ -3129,7 +3133,7 @@ fn client_side_copy_surfaces_close_failure_and_continues_cleanup() {
     let dir = setup_dir("copy_close_failure");
     let src = format!("{dir}/src");
     let dst = format!("{dir}/dst");
-    let mut client = NfsVecFs::connect_minor("127.0.0.1", 1).unwrap();
+    let mut client = NfsVecFs::connect_minor(&test_host(), 1).unwrap();
     write_file(&mut client, Path::new(&src), b"source");
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforePathClose,

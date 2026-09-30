@@ -154,6 +154,7 @@ pub mod faults {
         BeforeCleanup { index: usize },
         BeforeCloseDispatch { index: usize },
         AfterWriteChunk { chunk: usize },
+        BeforeReadRepair { index: usize },
         BeforeSetPermissions { index: usize },
         BeforeRemoveType { index: usize },
         BeforeOpenChunk { chunk: usize },

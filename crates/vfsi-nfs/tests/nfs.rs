@@ -19,6 +19,652 @@ fn required() -> bool {
     std::env::var("VFSI_NFS_REQUIRED").as_deref() == Ok("1")
 }
 
+#[cfg(feature = "test-faults")]
+fn assert_same_file_scatter_is_batched(write_all: bool, short: bool) {
+    let Some(mut backend) = connect() else { return };
+    backend.set_max_compound_bytes(64 * 1024);
+    if short {
+        backend.test_short_write_once(7);
+    }
+    let fs = vfsi_sync::FsClient::new(backend);
+    let path = format!("/vfsi-scatter-{}-{write_all}-{short}", std::process::id());
+    let mut file = fs.create(&path).unwrap();
+    // Nonmonotonic offsets exercise overlap checks in both directions, with
+    // holes between ranges to distinguish positional writes from appends.
+    let indices = [7, 0, 15, 3, 11, 1, 9, 4, 14, 2, 10, 5, 13, 6, 12, 8];
+    let pieces: Vec<_> = indices
+        .iter()
+        .map(|&index| vec![index as u8 + 1; 32])
+        .collect();
+    let requests: Vec<_> = indices
+        .iter()
+        .zip(&pieces)
+        .map(|(&index, data)| file.write_request_at(index * 64, data))
+        .collect();
+    let _ = vfsi_nfs::compound::thread_compound_stats();
+    let results = if write_all {
+        fs.write_allv(&requests).unwrap()
+    } else {
+        fs.writev(&requests).unwrap()
+    };
+    let compounds = vfsi_nfs::compound::thread_compound_stats().0;
+    let cursor = file.seek_native(std::io::SeekFrom::Current(0)).unwrap();
+    file.close().unwrap();
+    let observed = fs.read(&path).unwrap();
+    fs.remove_file(&path).unwrap();
+    let mut expected = vec![0; 15 * 64 + 32];
+    for (&index, data) in indices.iter().zip(&pieces) {
+        let start = index as usize * 64;
+        expected[start..start + data.len()].copy_from_slice(data);
+    }
+    assert_eq!(
+        compounds,
+        if short { 2 } else { 1 },
+        "write_all={write_all}, short={short}"
+    );
+    assert_eq!(cursor, 0, "positional scatter writes changed the cursor");
+    assert!(results.iter().all(|result| result.written == 32));
+    assert_eq!(observed, expected);
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn same_file_scatter_writev_uses_one_compound() {
+    assert_same_file_scatter_is_batched(false, false);
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn same_file_scatter_write_allv_uses_one_compound() {
+    assert_same_file_scatter_is_batched(true, false);
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn same_file_scatter_short_write_repairs_only_the_missing_suffix() {
+    for write_all in [false, true] {
+        assert_same_file_scatter_is_batched(write_all, true);
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn same_file_dependent_writes_remain_serialized() {
+    use vfsi_sync::VfOffset::{At, Cur, End};
+    for kind in 0..4 {
+        for short in [false, true] {
+            let Some(mut fs) = connect() else { return };
+            let path = format!("/vfsi-dependent-{}-{kind}-{short}", std::process::id());
+            let append = kind == 3;
+            let flags = libc::O_CREAT
+                | libc::O_RDWR
+                | libc::O_TRUNC
+                | if append { libc::O_APPEND } else { 0 };
+            let files = fs.openv_simple(&[Path::new(&path)], flags, 0o600).unwrap();
+            let (first, second) = match kind {
+                0 => (At(0), At(2)),
+                1 => (Cur, Cur),
+                2 => (End, End),
+                _ => (At(0), At(4096)),
+            };
+            let script = Arc::new(FaultScript::new([]));
+            fs.set_fault_injector(script.clone());
+            if short {
+                fs.test_short_write_once(2);
+            }
+            let _ = vfsi_nfs::compound::thread_compound_stats();
+            let results = fs
+                .writev(&[
+                    vfsi_sync::WriteOp::new(files[0].clone(), first, b"abcd".to_vec()),
+                    vfsi_sync::WriteOp::new(files[0].clone(), second, b"XY".to_vec()),
+                ])
+                .unwrap();
+            let compounds = vfsi_nfs::compound::thread_compound_stats().0;
+            let waves = script
+                .visited()
+                .iter()
+                .filter(|point| matches!(point, OpenFaultPoint::AfterWriteChunk { .. }))
+                .count();
+            let cursor = fs.fseek(&files[0], 0, vfsi_sync::SeekFrom::Cur).unwrap();
+            let contents = fs
+                .readv(&[vfsi_sync::ReadOp::at(files[0].clone(), 0, 16)])
+                .unwrap();
+            fs.closev(&files).unwrap();
+            fs.removev(&[vfsi_sync::VfFile::from_path(&path)]).unwrap();
+            // End and append also perform the two eager size validations and
+            // refresh the second request's position after the first finishes.
+            assert_eq!(compounds, if kind < 2 { 2 } else { 5 } + u64::from(short));
+            assert_eq!(waves, if short { 3 } else { 2 });
+            assert_eq!(results[1].offset, if kind == 0 { 2 } else { 4 });
+            assert_eq!(cursor, if kind == 1 { 6 } else { 0 });
+            assert_eq!(
+                contents[0].data,
+                if kind == 0 {
+                    b"abXY".as_slice()
+                } else {
+                    b"abcdXY".as_slice()
+                }
+            );
+        }
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn short_read_recovery_preserves_every_cursor_and_range() {
+    for into in [false, true] {
+        for recover in [false, true] {
+            let Some(mut fs) = connect() else { return };
+            fs.set_auto_reconnect(recover);
+            let paths = [
+                format!(
+                    "/vfsi-repair-recovery-{}-{into}-{recover}-first",
+                    std::process::id()
+                ),
+                format!(
+                    "/vfsi-repair-recovery-{}-{into}-{recover}-second",
+                    std::process::id()
+                ),
+            ];
+            for (path, data) in paths.iter().zip([b"abcdefgh", b"ijklmnop"]) {
+                fs.writev(&[vfsi_sync::WriteOp::from_path(
+                    path,
+                    vfsi_sync::VfOffset::At(0),
+                    data.to_vec(),
+                )
+                .with_creation()
+                .with_truncate()])
+                    .unwrap();
+            }
+            let files = fs
+                .openv_simple(
+                    &[Path::new(&paths[0]), Path::new(&paths[1])],
+                    libc::O_RDONLY,
+                    0,
+                )
+                .unwrap();
+            let script = Arc::new(FaultScript::one(
+                OpenFaultPoint::BeforeReadRepair { index: 1 },
+                VfError::transport(None, "injected failure repairing the second READ"),
+            ));
+            fs.set_fault_injector(script.clone());
+            fs.test_short_read_for_request_once(1, 2);
+            let reads: Vec<_> = files
+                .iter()
+                .map(|file| vfsi_sync::ReadOp::new(file.clone(), vfsi_sync::VfOffset::Cur, 4))
+                .collect();
+            let outcome = if into {
+                let mut first = [0; 4];
+                let mut second = [0; 4];
+                fs.readv_into(&reads, &mut [&mut first, &mut second])
+                    .map(|result| {
+                        (
+                            vec![first.to_vec(), second.to_vec()],
+                            result.iter().map(|item| item.offset).collect::<Vec<_>>(),
+                        )
+                    })
+            } else {
+                fs.readv(&reads).map(|result| {
+                    (
+                        result
+                            .iter()
+                            .map(|item| item.data.clone())
+                            .collect::<Vec<_>>(),
+                        result.iter().map(|item| item.offset).collect::<Vec<_>>(),
+                    )
+                })
+            };
+            let cursors: Vec<_> = files
+                .iter()
+                .map(|file| fs.fseek(file, 0, vfsi_sync::SeekFrom::Cur).unwrap())
+                .collect();
+            fs.closev(&files).unwrap();
+            fs.removev(
+                &paths
+                    .iter()
+                    .map(|path| vfsi_sync::VfFile::from_path(path))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert!(script.is_consumed());
+            if recover {
+                let (observed, offsets) = outcome.unwrap();
+                assert_eq!(
+                    observed,
+                    vec![b"abcd".to_vec(), b"ijkl".to_vec()],
+                    "into={into}"
+                );
+                assert_eq!(offsets, vec![0, 0], "into={into}");
+                assert_eq!(cursors, vec![4, 4], "into={into}");
+            } else {
+                assert!(outcome.unwrap_err().is_transport());
+                assert_eq!(
+                    cursors,
+                    vec![0, 0],
+                    "failed vector changed cursors: into={into}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn short_write_failure_does_not_dispatch_a_later_file() {
+    for transport in [false, true] {
+        let Some(mut fs) = connect() else { return };
+        fs.set_max_compound_bytes(64 * 1024);
+        let paths = [
+            format!("/vfsi-wave-order-{}-{transport}-first", std::process::id()),
+            format!("/vfsi-wave-order-{}-{transport}-second", std::process::id()),
+        ];
+        let files = fs
+            .openv_simple(
+                &[Path::new(&paths[0]), Path::new(&paths[1])],
+                libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
+                0o600,
+            )
+            .unwrap();
+        let per = fs.test_io_chunk_bytes();
+        let payload = vec![b'a'; per * 2 + 17];
+        // A half-completed first chunk leaves room for the second file in the
+        // repair wave, but not for the next full chunk of the first request.
+        fs.test_short_write_once(per / 2);
+        let script = Arc::new(FaultScript::one(
+            OpenFaultPoint::AfterWriteChunk { chunk: 1 },
+            if transport {
+                VfError::transport(None, "injected lost reply after the repair wave")
+            } else {
+                VfError::client(0, libc::ENOSPC as u32)
+            },
+        ));
+        fs.set_fault_injector(script.clone());
+        let error = fs
+            .writev(&[
+                vfsi_sync::WriteOp::new(files[0].clone(), vfsi_sync::VfOffset::Cur, payload),
+                vfsi_sync::WriteOp::at(files[1].clone(), 0, b"must not execute".to_vec()),
+            ])
+            .unwrap_err();
+        let first_cursor = fs.fseek(&files[0], 0, vfsi_sync::SeekFrom::Cur).unwrap();
+        let later = fs
+            .readv(&[vfsi_sync::ReadOp::at(files[1].clone(), 0, 32)])
+            .unwrap();
+        fs.closev(&files).unwrap();
+        fs.removev(
+            &paths
+                .iter()
+                .map(|path| vfsi_sync::VfFile::from_path(path))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(script.is_consumed());
+        if transport {
+            assert!(error.is_transport());
+            assert_eq!(error.index_opt(), None);
+        } else {
+            assert_eq!(error.err_no(), libc::ENOSPC as u32);
+            assert_eq!(error.index_opt(), Some(0));
+        }
+        assert_eq!(first_cursor, per as i64);
+        assert!(
+            later[0].data.is_empty(),
+            "a later file was modified before the earlier request finished"
+        );
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn ordered_write_waves_still_batch_independent_small_files() {
+    let Some(mut fs) = connect() else { return };
+    fs.set_max_compound_bytes(64 * 1024);
+    let paths: Vec<_> = (0..16)
+        .map(|index| format!("/vfsi-small-wave-{}-{index}", std::process::id()))
+        .collect();
+    let refs: Vec<_> = paths.iter().map(Path::new).collect();
+    let files = fs
+        .openv_simple(&refs, libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC, 0o600)
+        .unwrap();
+    let script = Arc::new(FaultScript::new([]));
+    fs.set_fault_injector(script.clone());
+    let writes: Vec<_> = files
+        .iter()
+        .map(|file| vfsi_sync::WriteOp::at(file.clone(), 0, b"batched".to_vec()))
+        .collect();
+    let _ = vfsi_nfs::compound::thread_compound_stats();
+    let results = fs.writev(&writes).unwrap();
+    let compounds = vfsi_nfs::compound::thread_compound_stats().0;
+    let waves = script
+        .visited()
+        .iter()
+        .filter(|point| matches!(point, OpenFaultPoint::AfterWriteChunk { .. }))
+        .count();
+    let reads: Vec<_> = files
+        .iter()
+        .map(|file| vfsi_sync::ReadOp::at(file.clone(), 0, 7))
+        .collect();
+    let contents = fs.readv(&reads).unwrap();
+    fs.closev(&files).unwrap();
+    fs.removev(
+        &paths
+            .iter()
+            .map(|path| vfsi_sync::VfFile::from_path(path))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    assert_eq!(waves, 1, "small independent writes must remain vectorized");
+    assert_eq!(
+        compounds, 1,
+        "small independent writes must use one real compound"
+    );
+    assert!(results.iter().all(|result| result.written == 7));
+    assert!(contents.iter().all(|result| result.data == b"batched"));
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn descriptor_short_reads_preserve_contiguous_contents() {
+    for into in [false, true] {
+        let Some(mut fs) = connect() else { return };
+        let path = format!("/vfsi-short-read-{}-{into}", std::process::id());
+        let size = fs.test_io_chunk_bytes() * 2 + 17;
+        let payload: Vec<_> = (0..size).map(|index| (index % 251) as u8).collect();
+        fs.writev(&[vfsi_sync::WriteOp::from_path(
+            &path,
+            vfsi_sync::VfOffset::At(0),
+            payload.clone(),
+        )
+        .with_creation()
+        .with_truncate()])
+            .unwrap();
+        let files = fs
+            .openv_simple(&[Path::new(&path)], libc::O_RDONLY, 0)
+            .unwrap();
+        fs.test_short_read_once(7);
+        let request = vfsi_sync::ReadOp::at(files[0].clone(), 0, size);
+        let observed = if into {
+            let mut buffer = vec![0; size];
+            let result = fs.readv_into(&[request], &mut [&mut buffer]).unwrap();
+            buffer.truncate(result[0].read);
+            buffer
+        } else {
+            fs.readv(&[request]).unwrap().remove(0).data
+        };
+        fs.closev(&files).unwrap();
+        fs.removev(&[vfsi_sync::VfFile::from_path(&path)]).unwrap();
+        assert_eq!(
+            observed.len(),
+            payload.len(),
+            "short reply must be filled: into={into}"
+        );
+        assert!(
+            observed == payload,
+            "split READ must not skip a gap: into={into}"
+        );
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn descriptor_short_writes_preserve_contiguous_contents() {
+    let Some(mut backend) = connect() else { return };
+    let path = format!("/vfsi-short-write-{}", std::process::id());
+    let size = backend.test_io_chunk_bytes() * 2 + 17;
+    let payload: Vec<_> = (0..size).map(|index| (index % 251) as u8).collect();
+    backend.test_short_write_once(7);
+    let fs = vfsi_sync::FsClient::new(backend);
+    let file = fs.create(&path).unwrap();
+    let results = fs
+        .write_allv(&[file.write_request_at(0, &payload)])
+        .unwrap();
+    assert_eq!(results[0].written, size);
+    file.close().unwrap();
+    let observed = fs.read(&path).unwrap();
+    fs.remove_file(&path).unwrap();
+    assert!(
+        observed == payload,
+        "successful write_allv must leave no unwritten gaps"
+    );
+}
+
+#[test]
+fn descriptor_positional_io_preserves_sequential_cursor() {
+    let Some(backend) = connect() else { return };
+    let fs = vfsi_sync::FsClient::new(backend);
+    let path = format!("/vfsi-positional-cursor-{}", std::process::id());
+    fs.write(&path, b"abcdefgh").unwrap();
+    let mut file = fs
+        .open_with(vfsi_sync::OpenRequest::new(
+            &path,
+            vfsi_sync::OpenFlags::READ | vfsi_sync::OpenFlags::WRITE,
+        ))
+        .unwrap();
+    for kind in 0..5 {
+        file.seek_native(std::io::SeekFrom::Start(0)).unwrap();
+        let mut buffer = [0; 2];
+        match kind {
+            0 => {
+                file.read_at(&mut buffer, 4).unwrap();
+            }
+            1 => {
+                fs.readv(&[file.read_request_at(4, 2)]).unwrap();
+            }
+            2 => {
+                fs.readv_into(&mut [file.read_request_at_into(4, &mut buffer)])
+                    .unwrap();
+            }
+            3 => {
+                file.write_at(b"XY", 4).unwrap();
+            }
+            _ => {
+                fs.writev(&[file.write_request_at(4, b"XY")]).unwrap();
+            }
+        }
+        let cursor = file.seek_native(std::io::SeekFrom::Current(0)).unwrap();
+        assert_eq!(cursor, 0, "positional operation {kind} changed cursor");
+        assert_eq!(file.read_native(&mut buffer).unwrap(), 2);
+        assert_eq!(&buffer, b"ab");
+    }
+    file.close().unwrap();
+    fs.remove_file(&path).unwrap();
+}
+
+#[test]
+fn reconnect_rejects_replacement_of_an_open_file() {
+    let Some(mut fs) = connect() else { return };
+    let path = format!("/vfsi-reconnect-identity-{}", std::process::id());
+    let saved = format!("{path}-original");
+    fs.writev(&[vfsi_sync::WriteOp::from_path(
+        &path,
+        vfsi_sync::VfOffset::At(0),
+        b"original".to_vec(),
+    )
+    .with_creation()
+    .with_truncate()])
+        .unwrap();
+    let files = fs
+        .openv_simple(&[Path::new(&path)], libc::O_RDWR, 0)
+        .unwrap();
+    // Also exercise the successful unchanged-identity recovery path.
+    fs.reconnect().unwrap();
+    fs.renamev(&[(
+        vfsi_sync::VfFile::from_path(&path),
+        vfsi_sync::VfFile::from_path(&saved),
+    )])
+    .unwrap();
+    fs.writev(&[vfsi_sync::WriteOp::from_path(
+        &path,
+        vfsi_sync::VfOffset::At(0),
+        b"replaced".to_vec(),
+    )
+    .with_creation()
+    .with_truncate()])
+        .unwrap();
+    let result = fs.reconnect();
+    let old_contents = fs
+        .readv(&[vfsi_sync::ReadOp::at(files[0].clone(), 0, 8)])
+        .unwrap();
+    fs.closev(&files).unwrap();
+    fs.removev(&[
+        vfsi_sync::VfFile::from_path(&path),
+        vfsi_sync::VfFile::from_path(&saved),
+    ])
+    .unwrap();
+    assert_eq!(result.unwrap_err().err_no(), libc::ESTALE as u32);
+    assert_eq!(
+        old_contents[0].data, b"original",
+        "failed recovery must leave old handles intact"
+    );
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn short_writes_do_not_reorder_overlapping_or_cursor_requests() {
+    for cursor in [false, true] {
+        let Some(mut fs) = connect() else { return };
+        fs.set_max_compound_bytes(64 * 1024);
+        let path = format!("/vfsi-short-order-{}-{cursor}", std::process::id());
+        let length = fs.test_io_chunk_bytes() * 2 + 17;
+        let first = vec![b'a'; length];
+        let second = vec![b'b'; length / 2];
+        let files = fs
+            .openv_simple(
+                &[Path::new(&path)],
+                libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
+                0o600,
+            )
+            .unwrap();
+        fs.test_short_write_once(7);
+        let offset = if cursor {
+            vfsi_sync::VfOffset::Cur
+        } else {
+            vfsi_sync::VfOffset::At(0)
+        };
+        let results = fs
+            .writev(&[
+                vfsi_sync::WriteOp::new(files[0].clone(), offset, first.clone()),
+                vfsi_sync::WriteOp::new(files[0].clone(), offset, second.clone()),
+            ])
+            .unwrap();
+        assert_eq!(results[0].written, first.len());
+        assert_eq!(results[1].written, second.len());
+        assert_eq!(results[1].offset, if cursor { length as u64 } else { 0 });
+        let position = fs.fseek(&files[0], 0, vfsi_sync::SeekFrom::Cur).unwrap();
+        assert_eq!(
+            position,
+            if cursor {
+                (length + second.len()) as i64
+            } else {
+                0
+            }
+        );
+        fs.closev(&files).unwrap();
+        let observed = fs
+            .read_allv(&[vfsi_sync::VfFile::from_path(&path)])
+            .unwrap();
+        let expected = if cursor {
+            [first, second].concat()
+        } else {
+            [second.clone(), first[second.len()..].to_vec()].concat()
+        };
+        fs.removev(&[vfsi_sync::VfFile::from_path(&path)]).unwrap();
+        assert!(
+            observed[0] == expected,
+            "short writes reordered a later request: cursor={cursor}"
+        );
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn descriptor_zero_progress_is_an_error_not_a_retry_loop() {
+    for read in [false, true] {
+        for into in [false, true] {
+            let Some(mut fs) = connect() else { return };
+            let path = format!("/vfsi-no-progress-{}-{read}-{into}", std::process::id());
+            fs.writev(&[vfsi_sync::WriteOp::from_path(
+                &path,
+                vfsi_sync::VfOffset::At(0),
+                b"contents".to_vec(),
+            )
+            .with_creation()
+            .with_truncate()])
+                .unwrap();
+            let files = fs
+                .openv_simple(&[Path::new(&path)], libc::O_RDWR, 0)
+                .unwrap();
+            let result = if read {
+                fs.test_short_read_once(0);
+                let request = vfsi_sync::ReadOp::new(files[0].clone(), vfsi_sync::VfOffset::Cur, 4);
+                if into {
+                    fs.readv_into(&[request], &mut [&mut [0; 4]]).map(|_| ())
+                } else {
+                    fs.readv(&[request]).map(|_| ())
+                }
+            } else {
+                fs.test_short_write_once(0);
+                fs.writev(&[vfsi_sync::WriteOp::new(
+                    files[0].clone(),
+                    vfsi_sync::VfOffset::Cur,
+                    b"new".to_vec(),
+                )])
+                .map(|_| ())
+            };
+            assert_eq!(result.unwrap_err().err_no(), libc::EIO as u32);
+            assert_eq!(fs.fseek(&files[0], 0, vfsi_sync::SeekFrom::Cur).unwrap(), 0);
+            fs.closev(&files).unwrap();
+            assert_eq!(
+                fs.read_allv(&[vfsi_sync::VfFile::from_path(&path)])
+                    .unwrap()[0],
+                b"contents"
+            );
+            fs.removev(&[vfsi_sync::VfFile::from_path(&path)]).unwrap();
+        }
+    }
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn short_reads_handle_eof_and_requests_beyond_the_file() {
+    for (into, small) in [(false, false), (true, false), (false, true), (true, true)] {
+        let Some(mut fs) = connect() else { return };
+        fs.set_max_compound_bytes(64 * 1024);
+        let path = format!("/vfsi-short-eof-{}-{into}-{small}", std::process::id());
+        let size = if small {
+            6
+        } else {
+            fs.test_io_chunk_bytes() + 17
+        };
+        let payload = vec![b'x'; size];
+        fs.writev(&[vfsi_sync::WriteOp::from_path(
+            &path,
+            vfsi_sync::VfOffset::At(0),
+            payload.clone(),
+        )
+        .with_creation()
+        .with_truncate()])
+            .unwrap();
+        let files = fs
+            .openv_simple(&[Path::new(&path)], libc::O_RDONLY, 0)
+            .unwrap();
+        fs.test_short_read_once(if small { 2 } else { 7 });
+        let request = vfsi_sync::ReadOp::at(files[0].clone(), 0, size * 2);
+        let (observed, eof) = if into {
+            let mut buffer = vec![0; size * 2];
+            let result = fs.readv_into(&[request], &mut [&mut buffer]).unwrap();
+            buffer.truncate(result[0].read);
+            (buffer, result[0].eof)
+        } else {
+            let result = fs.readv(&[request]).unwrap().remove(0);
+            (result.data, result.eof)
+        };
+        fs.closev(&files).unwrap();
+        fs.removev(&[vfsi_sync::VfFile::from_path(&path)]).unwrap();
+        assert!(observed == payload);
+        assert!(eof);
+    }
+}
+
 fn connect() -> Option<NfsVecFs> {
     let server = match std::env::var("VFSI_NFS_SERVER") {
         Ok(server) => server,

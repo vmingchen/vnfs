@@ -460,10 +460,10 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         .unwrap();
     let got = fs.read(&VfFile::from_path(&app), 0, 8).unwrap();
     assert_eq!(got, b"abcd", "O_APPEND appends regardless of offset");
-    // The reported offsets and tracked position reflect the real append
-    // positions, not the requested (ignored) offsets.
+    // Cursor-based append reports and advances to the real append position,
+    // independently of the initial cursor value.
     let w0 = fs
-        .writev(&[WriteOp::new(afd.clone(), VfOffset::At(0), b"e".to_vec())])
+        .writev(&[WriteOp::new(afd.clone(), VfOffset::Cur, b"e".to_vec())])
         .unwrap();
     assert_eq!(w0[0].offset, 4, "append write reports the real offset");
     assert_eq!(fs.fseek(&afd, 0, SeekFrom::Cur).unwrap(), 5);
