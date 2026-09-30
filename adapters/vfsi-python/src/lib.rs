@@ -492,32 +492,54 @@ struct MountConfiguration {
 #[pymethods]
 impl MountConfiguration {
     #[getter]
-    fn host(&self) -> &str { self.spec.host() }
+    fn host(&self) -> &str {
+        self.spec.host()
+    }
     #[getter]
-    fn root(&self) -> PathBuf { self.spec.root().to_path_buf() }
+    fn root(&self) -> PathBuf {
+        self.spec.root().to_path_buf()
+    }
     #[getter]
-    fn local_path(&self) -> PathBuf { self.spec.local_path().to_path_buf() }
+    fn local_path(&self) -> PathBuf {
+        self.spec.local_path().to_path_buf()
+    }
     #[getter]
-    fn minor_version(&self) -> u32 { self.spec.minor_version() }
+    fn minor_version(&self) -> u32 {
+        self.spec.minor_version()
+    }
     #[getter]
-    fn read_only(&self) -> bool { self.spec.read_only() }
+    fn read_only(&self) -> bool {
+        self.spec.read_only()
+    }
 }
 
 #[cfg(feature = "nfs")]
 #[pyfunction]
 fn discover_mount(py: Python<'_>, path: PathBuf) -> PyResult<MountConfiguration> {
     #[cfg(all(feature = "nfs", target_os = "linux"))]
-    { py.detach(|| vfsi_nfs::mount::NfsMount::discover(&path)
-        .map(|spec| MountConfiguration { spec })
-        .map_err(|error| mount_error(error, &path))) }
+    {
+        py.detach(|| {
+            vfsi_nfs::mount::NfsMount::discover(&path)
+                .map(|spec| MountConfiguration { spec })
+                .map_err(|error| mount_error(error, &path))
+        })
+    }
     #[cfg(not(all(feature = "nfs", target_os = "linux")))]
-    { let _ = (py, path); Err(PyNotImplementedError::new_err("NFS mount discovery requires Linux and the NFS backend")) }
+    {
+        let _ = (py, path);
+        Err(PyNotImplementedError::new_err(
+            "NFS mount discovery requires Linux and the NFS backend",
+        ))
+    }
 }
 
 #[cfg(all(feature = "nfs", target_os = "linux"))]
 fn mount_error(error: VfError, path: &Path) -> PyErr {
-    if error.is_transport() { to_py_err(error, Some(path)) }
-    else { PyOSError::new_err((error.err_no(), error.to_string(), path.to_path_buf())) }
+    if error.is_transport() {
+        to_py_err(error, Some(path))
+    } else {
+        PyOSError::new_err((error.err_no(), error.to_string(), path.to_path_buf()))
+    }
 }
 
 /// One vectorized filesystem client behind a mutex.
@@ -579,7 +601,9 @@ impl NfsClient {
     ) -> PyResult<Self> {
         let mount_config = mount_config.map(|config| config.borrow(py).clone());
         if mount_config.is_some() && (backend != "nfs" || root.is_some()) {
-            return Err(PyValueError::new_err("mount configuration requires backend='nfs' and no native root override"));
+            return Err(PyValueError::new_err(
+                "mount configuration requires backend='nfs' and no native root override",
+            ));
         }
         let connect_timeout = Duration::try_from_secs_f64(connect_timeout)
             .map_err(|_| PyValueError::new_err("connect_timeout must be finite and positive"))?;
@@ -641,11 +665,15 @@ impl NfsClient {
                     #[cfg(target_os = "linux")]
                     let base = if let Some(config) = &mount_config {
                         if host != config.spec.host() {
-                            return Err(PyValueError::new_err("host conflicts with discovered mount"));
+                            return Err(PyValueError::new_err(
+                                "host conflicts with discovered mount",
+                            ));
                         }
                         NfsClientBuilder::from_mount_config(config.spec.clone())
                             .map_err(|error| mount_error(error, config.spec.local_path()))?
-                    } else { NfsClientBuilder::new(host) };
+                    } else {
+                        NfsClientBuilder::new(host)
+                    };
                     #[cfg(not(target_os = "linux"))]
                     let base = NfsClientBuilder::new(host);
                     let mut builder = base
@@ -656,13 +684,13 @@ impl NfsClient {
                     if let Some(limit) = compound_size_limit {
                         builder = builder.max_compound_bytes(limit);
                     }
-                    let nfs = builder
-                        .connect()
-                        .map_err(|e| {
-                            #[cfg(target_os = "linux")]
-                            if let Some(config) = &mount_config { return mount_error(e, config.spec.local_path()); }
-                            to_py_err(e, Some(Path::new(host)))
-                        })?;
+                    let nfs = builder.connect().map_err(|e| {
+                        #[cfg(target_os = "linux")]
+                        if let Some(config) = &mount_config {
+                            return mount_error(e, config.spec.local_path());
+                        }
+                        to_py_err(e, Some(Path::new(host)))
+                    })?;
                     Box::new(nfs) as Box<dyn VecFs + Send>
                 }
                 #[cfg(feature = "smb")]

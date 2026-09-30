@@ -233,6 +233,11 @@ mod mount_tests {
             fs.read_files(&["/marker"]).unwrap(),
             [b"unchanged".to_vec()]
         );
-        std::fs::remove_dir_all(fixture).unwrap();
+        assert!(fs.metadata("/child").unwrap().is_dir());
+        // The fixture has a known shape. Teardown need not exercise kernel
+        // recursive READDIR, unrelated to mount discovery/read-only policy.
+        std::fs::remove_file(fixture.join("marker")).unwrap();
+        std::fs::remove_dir(fixture.join("child")).unwrap();
+        std::fs::remove_dir(fixture).unwrap();
     }
 }
