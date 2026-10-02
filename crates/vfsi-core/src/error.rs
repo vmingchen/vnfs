@@ -5,6 +5,18 @@ use std::fmt;
 /// NFS4 status used for transport-level failures (there is no NFS status).
 pub const STATUS_TRANSPORT: u32 = u32::MAX;
 
+/// Transport provenance, not a guarantee that an operation is safe to retry.
+/// Unknown failures remain `Other`; messages are never parsed to classify them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TransportKind {
+    Timeout,
+    Connection,
+    InvalidReply,
+    Authentication,
+    Other,
+}
+
 /// An error from the low-level client: either an NFS4ERR_* status reported by
 /// the server for a compound operation, or a transport/RPC-level failure.
 ///
@@ -25,6 +37,8 @@ pub struct RpcError {
     pub status: u32,
     /// Human-readable context.
     pub message: String,
+    /// Present only for transport/RPC failures.
+    pub transport_kind: Option<TransportKind>,
 }
 
 impl RpcError {
@@ -34,16 +48,37 @@ impl RpcError {
             op_index,
             status,
             message: String::new(),
+            transport_kind: None,
         }
     }
 
     /// A transport / RPC-level failure (no NFS status available).
     pub fn transport(message: impl Into<String>) -> RpcError {
+        Self::transport_with_kind(TransportKind::Other, message)
+    }
+
+    pub fn transport_with_kind(kind: TransportKind, message: impl Into<String>) -> RpcError {
         RpcError {
             op_index: 0,
             status: STATUS_TRANSPORT,
             message: message.into(),
+            transport_kind: Some(kind),
         }
+    }
+
+    /// Preserve classification at an I/O boundary without inspecting its text.
+    pub fn from_io(error: std::io::Error) -> Self {
+        use std::io::ErrorKind as K;
+        let kind = match error.kind() {
+            K::TimedOut => TransportKind::Timeout,
+            K::ConnectionRefused
+            | K::ConnectionReset
+            | K::ConnectionAborted
+            | K::NotConnected
+            | K::BrokenPipe => TransportKind::Connection,
+            _ => TransportKind::Other,
+        };
+        Self::transport_with_kind(kind, error.to_string())
     }
 
     /// Whether this is a transport failure rather than an NFS status.

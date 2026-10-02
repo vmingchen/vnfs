@@ -133,6 +133,11 @@ Local paths, SMB/CIFS mounts, Kerberos mounts, and mounts it cannot safely
 identify continue through the kernel. The chosen route is observable on each
 opened file:
 
+`Auto` opts into a **separate NFS client**, not a transparent kernel-cache
+acceleration. Direct reads/writes do not share or invalidate kernel caches.
+Use `Mounted` when the same objects are also accessed through the kernel and
+you need its cache/coherency semantics, including access through aliases.
+
 ```rust,no_run
 use vnfs::{Auto, OpenFlags, OpenRequest};
 
@@ -140,14 +145,14 @@ fn main() -> vnfs::Result<()> {
     let fs = Auto::new("/")?;
     let paths = ["/mnt/nfs/file-1", "/mnt/nfs/file-2"];
     let requests = paths.map(|p| OpenRequest::new(p, OpenFlags::READ));
-    let files = fs.openv(&requests)?;
+    let mut files = fs.openv(&requests)?;
     println!("route: {:?}", files[0].route());
     let contents = fs.readv(&[
         files[0].read_request_at(0, 5),
         files[1].read_request_at(0, 5),
     ])?;
     assert_eq!(contents.len(), 2);
-    fs.closev(files)?;
+    fs.try_closev(&mut files)?;
     Ok(())
 }
 ```
@@ -161,9 +166,9 @@ configures the same client resource policy as `NfsBuilder::limits`;
 file `Read` calls
 are chunked to 1 MiB.
 
-The direct connection has its own NFS client state, separate from the mounted
-kernel client's caches. If the same files are also accessed through the
-kernel mount, normal NFS cache/close-to-open caveats apply. `Auto` captures
+Mixing direct and kernel I/O can expose stale reads or delayed kernel writes;
+even selecting a different pathname can reach the same underlying object.
+Open-handle route pinning does not coordinate those caches. `Auto` captures
 AUTH_SYS credentials per direct connection and rejects use of a direct file
 after that thread's filesystem identity changes. Prefer `Mounted` where exact
 kernel mount semantics or warm page-cache hits are more important than
@@ -245,10 +250,10 @@ use vnfs::prelude::*;
 
 fn main() -> vnfs::Result<()> {
     let client = Nfs::connect("nfs.example.com")?;
-    let file = client.open("/file-1")?;
+    let mut file = client.open("/file-1")?;
     let mut contents = vec![0; client.metadata("/file-1")?.len() as usize];
     file.read_at(&mut contents, 0)?;
-    file.close()?;
+    file.try_close()?;
     Ok(())
 }
 ```
@@ -393,6 +398,12 @@ is 16 MiB, shared by scalar whole-file reads and aggregate vector reads. Explici
 per-call options override these defaults. Limits bound logical data/path bytes,
 not allocator rounding, result metadata, RPC envelopes, or all process memory.
 Read pools have their own explicit concurrency/buffer options.
+`max_read_bytes` is a collection/batch policy, not a cap on all reads or
+process memory. In particular, standard `Read::read_to_end` can keep growing
+its caller-owned buffer. For an already-open file, use
+`file.read_to_end_with_limit(bytes)` to collect from its current cursor with
+an explicit bound. At the limit it may consume one extra EOF-probe byte;
+failure does not roll back the cursor or return the partial buffer.
 Changing Auto limits also updates cached connections; existing Auto handles
 use the current policy for grouped reads. Directory path-byte limits apply to
 the public Auto paths, including mount prefixes.
@@ -410,6 +421,10 @@ the whole tree; callbacks may reenter the client. It does not follow symlinks.
 Backends without native paging may retain one bounded directory snapshot.
 The visitor finishes that directory's pages before descending into children,
 so snapshots cannot accumulate across ancestors.
+Directory visitors accept `Ok(ControlFlow::Continue(()))` or
+`Ok(ControlFlow::Break(()))`; a break stops the entire visit/walk, not one
+subtree. Both return `TraversalCompletion::Complete` or `Stopped`. Callback
+errors propagate, and even breaking on the last entry reports `Stopped`.
 Use collecting `walk` when multi-directory batching is more important than
 incremental delivery. `FsDir::try_close` retains ownership after a failed close,
 as `FsFile::try_close` does. Dropping either handle may block on the client lock
@@ -434,10 +449,16 @@ chunks before a later semantic failure. Error status alone therefore provides
 no retry-safety or "not applied" guarantee. `Error::kind()` supplies a portable
 category; `status()` and `domain()` retain native protocol details. Standard
 `io::Error` adapters retain the original `Error` as their source.
+`transport_kind()` distinguishes known timeout, connection, invalid-reply,
+and authentication failures. Unknown causes remain `Other`; these categories
+describe provenance, not whether retrying is safe. `err_no()` is a raw
+compatibility value, not a portable errno for every backend.
 `closev` consumes its handles and attempts best-effort cleanup on failure.
 `try_closev(&mut files)` preserves them after an error so the caller can
 reconcile uncertain close status explicitly; a confirmed successful call
 disarms every handle.
+An armed handle after a failed close only retains local cleanup ownership:
+it does not prove that the server still considers the handle open.
 
 Low-level compound, RPC, and session construction is isolated under
 `vnfs::backend`; it is not part of the recommended application API.
@@ -476,9 +497,9 @@ For privileged or attacker-influenced paths, root the removal at an
 already-open directory instead of a path:
 
 ```rust
-let dir = client.open_dir_handle("/attacker/controlled")?;
+let mut dir = client.open_dir_handle("/attacker/controlled")?;
 dir.remove_contents()?; // rooted at the resolved directory handle
-dir.close()?;           // Drop also releases it on other paths
+dir.try_close()?;       // Retains cleanup ownership if explicit close fails
 ```
 
 `open_dir_handle` rejects backends without a genuine handle and does not follow

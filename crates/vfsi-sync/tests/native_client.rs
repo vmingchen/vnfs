@@ -118,6 +118,42 @@ struct ScalarOnly {
     directory_page_sizes: Arc<Mutex<Vec<usize>>>,
 }
 
+#[test]
+fn opened_file_read_to_end_has_explicit_limits_and_cursor_semantics() {
+    for limit in [0, 3, 6, 7] {
+        let client = FsClient::new(ScalarOnly {
+            data: b"abcdef".to_vec(),
+            ..Default::default()
+        })
+        .with_limits(vfsi_sync::ResourceLimits {
+            max_read_bytes: 1,
+            ..Default::default()
+        });
+        let mut file = client.open("/file").unwrap();
+        let result = file.read_to_end_with_limit(limit);
+        if limit < 6 {
+            let error = result.unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
+            assert_eq!(error.operation(), Some("read_to_end_with_limit"));
+            assert_eq!(
+                file.seek_native(SeekFrom::Current(0)).unwrap(),
+                (limit + 1) as u64
+            );
+        } else {
+            assert_eq!(result.unwrap(), b"abcdef");
+            assert_eq!(file.seek_native(SeekFrom::Current(0)).unwrap(), 6);
+        }
+        file.seek_native(SeekFrom::Start(3)).unwrap();
+        assert_eq!(file.read_to_end_with_limit(3).unwrap(), b"def");
+        assert_eq!(file.read_to_end_with_limit(0).unwrap(), b"");
+        file.try_close().unwrap();
+        assert_eq!(
+            file.read_to_end_with_limit(0).unwrap_err().err_no(),
+            libc::EBADF as u32
+        );
+    }
+}
+
 impl VectorFileSystem for ScalarOnly {
     fn open_many(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>> {
         if self.transport_failure {
@@ -854,7 +890,12 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
         directory_page_sizes: Arc::clone(&page_sizes),
         ..ScalarOnly::default()
     });
-    client.visit_dir("/tree", |_| Ok(false)).unwrap();
+    assert_eq!(
+        client
+            .visit_dir("/tree", |_| Ok(std::ops::ControlFlow::Break(())))
+            .unwrap(),
+        vfsi_sync::TraversalCompletion::Stopped
+    );
     assert_eq!(*page_sizes.lock().unwrap(), [1]);
 
     page_sizes.lock().unwrap().clear();
@@ -862,7 +903,7 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
     let error = client
         .visit_dir_with_options("/tree", ReadDirOptions::new().max_entries(3), |_| {
             seen += 1;
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap_err();
     assert_eq!(seen, 3);
@@ -871,14 +912,32 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
 
     page_sizes.lock().unwrap().clear();
     let mut seen = 0;
-    client
+    let completion = client
         .visit_dir("/tree", |_| {
             seen += 1;
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap();
+    assert_eq!(completion, vfsi_sync::TraversalCompletion::Complete);
     assert_eq!(seen, 2_100);
     assert_eq!(*page_sizes.lock().unwrap(), [1, 1024, 1024, 1024]);
+    let empty = FsClient::new(ScalarOnly::default());
+    assert_eq!(
+        empty
+            .visit_dir("/empty", |_| panic!("empty directory has no entry"))
+            .unwrap(),
+        vfsi_sync::TraversalCompletion::Complete
+    );
+    let single = FsClient::new(ScalarOnly {
+        directory_entries: 1,
+        ..Default::default()
+    });
+    assert_eq!(
+        single
+            .visit_dir("/single", |_| Ok(std::ops::ControlFlow::Break(())))
+            .unwrap(),
+        vfsi_sync::TraversalCompletion::Stopped
+    );
 }
 
 #[test]

@@ -26,6 +26,18 @@ POSIX/C compatibility surface.
 
 ## Application and backend boundary
 
+Application paths are relative to the client's namespace root, including
+paths beginning with `/`. For example, `NfsBuilder::root("/export/project")`
+maps `/a` to the NFS-visible `/export/project/a`; `Mounted::new("/work")`
+maps `/a` to the host path `/work/a`. A mount-derived client rooted at
+`/mnt/nfs/project` maps `/a` into that remote project directory. Namespace
+rooting is not a race-resistant security sandbox.
+
+`Auto` and mount-derived direct NFS connections are independent clients:
+they neither share nor invalidate the kernel NFS client's caches. Mixing
+direct and kernel accesses, including through aliases, can expose stale reads
+or delayed writes. Use `Mounted` when kernel cache coordination is required.
+
 On Linux, `Nfs::from_mount(path)` constructs the same concrete `NfsClient`
 from an existing NFS-mounted directory. `NfsBuilder::from_mount(path)` supports
 additional tuning. Shared discovery in `vfsi-nfs::mount` also serves nfs4fs's
@@ -88,6 +100,16 @@ response leaves dispatched mutations indeterminate; they are not replayed.
 `vnfs::Error` exposes a portable `kind()`, native status/domain, optional logical
 request `index()`, and operation/path context. It does not infer completion
 certainty or retry safety from status codes.
+`transport_kind()` preserves known timeout, connection, invalid-reply, and
+authentication categories. Unclassified causes remain `Other`, without
+guessing from message text. `err_no()` is a raw compatibility accessor;
+prefer `kind()` and `status()` for interpretation.
+
+Prefer `try_close()` and `try_closev(&mut files)` when cleanup errors matter.
+They retain ownership on failure. `is_closed() == false` only means local
+cleanup ownership remains, not that a remotely ambiguous close failed to take
+effect. Consuming `close`/`closev` perform best-effort cleanup on error, and
+`Drop` can block and discards cleanup errors.
 
 Native client and file methods retain `vnfs::Error`. Only the standard-library
 `Read`, `Write`, and `Seek` adapters translate failures to `std::io::Error`.
@@ -117,6 +139,12 @@ are bounded by that caller-supplied length. Reads into caller-owned buffers are
 bounded by the buffer. Applications processing larger or untrusted files
 should stream through `FsFile`, `Read`, `read_streamv`, or repeated positional
 reads instead of raising a whole-file allocation limit without bound.
+These limits bound logical payloads, not process RSS or arbitrary
+`std::io::Read::read_to_end` calls. For an already-open file, use
+`read_to_end_with_limit(max_bytes)`: it reads from the current cursor without
+reopening the path. An overflow returns an error and discards the collected
+buffer; the cursor can advance, including a one-byte EOF probe. It is not a
+cursor-rollback operation.
 
 Allocating directory APIs are bounded for the same reason. `FsClient::read_dir`
 uses finite entry and combined-path-byte defaults; `read_dir_with_options` and
@@ -135,6 +163,10 @@ directory iterator. Other backends take one bounded listing snapshot rather
 than re-enumerating for each page. Directory mutation during iteration does
 not provide a snapshot and can invalidate continuation or change which entries
 are observed.
+Directory visitors return `TraversalCompletion::Complete` on exhaustion and
+`Stopped` when their callback returns `ControlFlow::Break(())`, even for the
+last entry. `ControlFlow::Continue(())` requests another entry; callback
+errors propagate. This replaces the previous boolean directory callbacks.
 
 For recursive removal, `FsClient::remove_dir_all` is fail-fast and
 `remove_dir_all_with_options`, `remove_dir_contents_with_options`, and

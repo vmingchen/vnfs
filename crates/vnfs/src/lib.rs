@@ -85,7 +85,9 @@ pub mod prelude {
     pub use crate::MetadataFields;
     #[cfg(all(feature = "auto", target_os = "linux"))]
     pub use crate::{Auto, Mounted};
-    pub use crate::{Client, FileHandle, ResourceLimits, StreamCompletion, TraversalCompletion};
+    pub use crate::{
+        Client, ControlFlow, FileHandle, ResourceLimits, StreamCompletion, TraversalCompletion,
+    };
     #[cfg(feature = "nfs")]
     pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile, NfsVersion};
     pub use vfsi_core::{OpenFlags, OpenRequest, RemoveOptions};
@@ -93,12 +95,13 @@ pub mod prelude {
 }
 
 pub use std::io::ErrorKind;
+pub use std::ops::ControlFlow;
 /// Attribute selection for metadata queries, directory listings, and walks.
 pub use vfsi_core::AttrMask as MetadataFields;
 pub use vfsi_core::VfType as FileType;
 pub use vfsi_core::{
     Capabilities, DirEntry, ErrorDomain, Metadata, OpenFlags, OpenRequest, Permissions,
-    RemoveOptions, StatusCode,
+    RemoveOptions, StatusCode, TransportKind,
 };
 pub use vfsi_sync::{
     DirectoryListing, FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite, OpenOptions,

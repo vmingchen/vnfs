@@ -153,14 +153,14 @@ fn connect_explicit_endpoint(
     }
     let addresses = match endpoint.to_socket_addrs() {
         Ok(addresses) => addresses,
-        Err(error) => return Some(Err(RpcError::transport(error.to_string()))),
+        Err(error) => return Some(Err(RpcError::from_io(error))),
     };
     let mut last_error = None;
     for address in addresses {
         let stream = match TcpStream::connect_timeout(&address, connect_timeout) {
             Ok(stream) => stream,
             Err(error) => {
-                last_error = Some(error.to_string());
+                last_error = Some(RpcError::from_io(error));
                 continue;
             }
         };
@@ -175,7 +175,7 @@ fn connect_explicit_endpoint(
             )
         } != 0
         {
-            last_error = Some(std::io::Error::last_os_error().to_string());
+            last_error = Some(RpcError::from_io(std::io::Error::last_os_error()));
             continue;
         }
         let remote = netbuf {
@@ -195,7 +195,7 @@ fn connect_explicit_endpoint(
             )
         };
         if clnt.is_null() {
-            last_error = Some("clnt_vc_ncreatef returned NULL".to_string());
+            last_error = Some(RpcError::transport("clnt_vc_ncreatef returned NULL"));
             continue;
         }
         let closes_fd = unsafe {
@@ -205,15 +205,17 @@ fn connect_explicit_endpoint(
         };
         if !closes_fd {
             unsafe { destroy_client(clnt) };
-            last_error = Some("failed to transfer TCP stream ownership to libntirpc".to_string());
+            last_error = Some(RpcError::transport(
+                "failed to transfer TCP stream ownership to libntirpc",
+            ));
             continue;
         }
         let _ = stream.into_raw_fd();
         return Some(Ok(clnt));
     }
-    Some(Err(RpcError::transport(last_error.unwrap_or_else(|| {
-        format!("no addresses resolved for {endpoint}")
-    }))))
+    Some(Err(last_error.unwrap_or_else(|| {
+        RpcError::transport(format!("no addresses resolved for {endpoint}"))
+    })))
 }
 
 /// A connected RPC client on a single TCP transport.
@@ -426,10 +428,10 @@ impl RpcClient {
             if stat != clnt_stat_RPC_SUCCESS {
                 clnt_req_release(reqp);
                 std::mem::forget(req);
-                return Err(RpcError::transport(format!(
-                    "clnt_req_setup failed: {}",
-                    stat
-                )));
+                return Err(RpcError::transport_with_kind(
+                    rpc_transport_kind(stat),
+                    format!("clnt_req_setup failed: {}", stat),
+                ));
             }
             (*reqp).cc_refreshes = 1;
             let status = clnt_req_wait_reply(reqp);
@@ -439,13 +441,51 @@ impl RpcClient {
             // prevent the compiler from dropping it a second time.
             std::mem::forget(req);
             if status != clnt_stat_RPC_SUCCESS {
-                return Err(RpcError::transport(format!(
-                    "RPC call failed: stat={}, rpc_err.status={}",
-                    status, err.re_status
-                )));
+                return Err(RpcError::transport_with_kind(
+                    rpc_transport_kind(status),
+                    format!(
+                        "RPC call failed: stat={}, rpc_err.status={}",
+                        status, err.re_status
+                    ),
+                ));
             }
             Ok(())
         }
+    }
+}
+
+fn rpc_transport_kind(status: clnt_stat) -> vfsi_core::TransportKind {
+    use vfsi_core::TransportKind as K;
+    match status {
+        value if value == clnt_stat_RPC_TIMEDOUT => K::Timeout,
+        value if value == clnt_stat_RPC_CANTSEND || value == clnt_stat_RPC_CANTRECV => {
+            K::Connection
+        }
+        value if value == clnt_stat_RPC_CANTDECODERES => K::InvalidReply,
+        value if value == clnt_stat_RPC_AUTHERROR => K::Authentication,
+        _ => K::Other,
+    }
+}
+
+#[cfg(test)]
+mod transport_kind_tests {
+    use super::*;
+    #[test]
+    fn rpc_classification_uses_status_not_message_text() {
+        use vfsi_core::TransportKind as K;
+        assert_eq!(rpc_transport_kind(clnt_stat_RPC_TIMEDOUT), K::Timeout);
+        assert_eq!(
+            rpc_transport_kind(clnt_stat_RPC_CANTDECODERES),
+            K::InvalidReply
+        );
+        assert_eq!(rpc_transport_kind(clnt_stat_RPC_CANTSEND), K::Connection);
+        assert_eq!(rpc_transport_kind(clnt_stat_RPC_CANTRECV), K::Connection);
+        assert_eq!(
+            rpc_transport_kind(clnt_stat_RPC_AUTHERROR),
+            K::Authentication
+        );
+        assert_eq!(rpc_transport_kind(clnt_stat_RPC_CANTENCODEARGS), K::Other);
+        assert_eq!(rpc_transport_kind(clnt_stat_RPC_PROGVERSMISMATCH), K::Other);
     }
 }
 

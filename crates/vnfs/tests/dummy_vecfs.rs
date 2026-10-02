@@ -10,6 +10,24 @@ use vnfs::backend::DummyVecFs;
 use vnfs::backend::{VecFs, VecFsExt, VfOffset};
 
 #[test]
+fn bounded_open_file_collection_keeps_identity_across_rename_and_replacement() {
+    let client = vnfs::FsClient::new(dummy());
+    client.write("/original", b"opened").unwrap();
+    let mut file = client.open("/original").unwrap();
+    client.rename("/original", "/moved").unwrap();
+    client.write("/original", b"replacement").unwrap();
+    assert_eq!(file.read_to_end_with_limit(6).unwrap(), b"opened");
+    assert_eq!(file.read_to_end_with_limit(0).unwrap(), b"");
+    file.seek_native(std::io::SeekFrom::Start(0)).unwrap();
+    assert_eq!(
+        file.read_to_end_with_limit(5).unwrap_err().kind(),
+        vnfs::ErrorKind::FileTooLarge
+    );
+    file.try_close().unwrap();
+    assert_eq!(client.read("/original").unwrap(), b"replacement");
+}
+
+#[test]
 fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
     use vnfs::{FsClient, ResourceLimits, TraversalCompletion, WalkOptions};
     let client = FsClient::new(dummy()).with_limits(ResourceLimits {
@@ -26,7 +44,7 @@ fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
         .visit_walk("/tree", |entry| {
             clone.symlink_metadata(entry.path()).unwrap();
             seen.push(entry.path().to_path_buf());
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap_err();
     assert_eq!(error.kind(), vnfs::ErrorKind::FileTooLarge);
@@ -37,7 +55,7 @@ fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
         client
             .visit_walk_with_options("/tree", options, |entry| {
                 seen.push(entry.path().to_path_buf());
-                Ok(true)
+                Ok(std::ops::ControlFlow::Continue(()))
             })
             .unwrap(),
         TraversalCompletion::Complete
@@ -59,13 +77,15 @@ fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
     assert_eq!(seen, expected);
     assert_eq!(
         client
-            .visit_walk_with_options("/tree", options, |_| Ok(false))
+            .visit_walk_with_options("/tree", options, |_| Ok(std::ops::ControlFlow::Break(())))
             .unwrap(),
         TraversalCompletion::Stopped
     );
     assert_eq!(
         client
-            .visit_walk_with_options("/tree", options.max_depth(0), |_| Ok(true))
+            .visit_walk_with_options("/tree", options.max_depth(0), |_| Ok(
+                std::ops::ControlFlow::Continue(())
+            ))
             .unwrap_err()
             .kind(),
         vnfs::ErrorKind::FileTooLarge
@@ -84,7 +104,7 @@ fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
             .visit_walk_with_options(
                 "/tree",
                 options.max_depth(0).truncate_at_max_depth(true),
-                |_| Ok(true)
+                |_| Ok(std::ops::ControlFlow::Continue(()))
             )
             .unwrap(),
         TraversalCompletion::Complete
@@ -1221,7 +1241,7 @@ fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
                 drop(file);
             }
             seen += 1;
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         });
         sender.send((result, seen)).unwrap();
     });
@@ -1253,7 +1273,7 @@ fn directory_visitor_supports_limits_early_stop_and_callback_errors() {
     let error = client
         .visit_dir_with_options("/tree", ReadDirOptions::new().max_entries(3), |_| {
             seen += 1;
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap_err();
     assert_eq!(seen, 3);
@@ -1263,7 +1283,7 @@ fn directory_visitor_supports_limits_early_stop_and_callback_errors() {
     client
         .visit_dir_with_options("/tree", ReadDirOptions::unlimited(), |entry| {
             first = Some(entry.path().to_path_buf());
-            Ok(false)
+            Ok(std::ops::ControlFlow::Break(()))
         })
         .unwrap();
     assert!(first.unwrap().starts_with("/tree"));
@@ -1272,7 +1292,7 @@ fn directory_visitor_supports_limits_early_stop_and_callback_errors() {
     client
         .visit_dir_with_options("/tree", ReadDirOptions::unlimited(), |entry| {
             all.push(entry.path().to_path_buf());
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap();
     assert_eq!(all.len(), 8);

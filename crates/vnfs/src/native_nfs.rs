@@ -80,6 +80,9 @@ impl Nfs {
     /// Connect directly using the configuration of a Linux NFS-mounted directory.
     /// Operations use the remote directory as their root, without sharing the
     /// kernel client's cache or falling back to mounted filesystem operations.
+    /// For mount path `/mnt/nfs/project`, application `/a` names `project/a`
+    /// remotely, not host `/a`. Do not mix direct and kernel access assuming
+    /// cache coherence. This namespace root is not a security sandbox.
     pub fn from_mount(path: impl AsRef<Path>) -> VfResult<NfsClient> {
         NfsBuilder::from_mount(path)?.connect()
     }
@@ -120,6 +123,10 @@ impl NfsBuilder {
         }
     }
 
+    /// Select an NFS-visible namespace directory, not a host-local directory.
+    /// With root `/export/project`, application `/a` addresses `/export/project/a`
+    /// remotely. Leading `/` in application paths means this configured root,
+    /// not the server's namespace root. Rooting is not security confinement.
     pub fn root(mut self, root: impl Into<PathBuf>) -> Self {
         self.inner = self.inner.root(root);
         self
@@ -144,6 +151,9 @@ impl NfsBuilder {
         self
     }
 
+    /// Select RPC authentication explicitly. Default AUTH_SYS conveys Unix
+    /// identity but provides no cryptographic peer authentication or encryption.
+    /// An explicitly requested secure mode must succeed or fail; no downgrade.
     pub fn auth(mut self, auth: NfsAuthentication) -> Self {
         self.inner = self.inner.authentication(auth);
         self

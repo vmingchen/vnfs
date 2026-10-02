@@ -7,5 +7,5 @@ pub mod internal;
 pub mod path;
 mod types;
 
-pub use error::{RpcError, RpcResult, STATUS_TRANSPORT};
+pub use error::{RpcError, RpcResult, STATUS_TRANSPORT, TransportKind};
 pub use types::*;

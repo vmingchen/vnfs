@@ -81,10 +81,17 @@ pub enum TraversalCompletion {
 /// Byte limits bound logical payload, not allocator capacity or RPC overhead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceLimits {
+    /// Maximum collected scalar payload or aggregate vector read buffers.
+    /// Not a process-memory cap; standard `Read::read_to_end` and explicit
+    /// positional file reads remain caller-managed.
     pub max_read_bytes: usize,
+    /// Default request size for client `read_stream`, not file `Read` or pools.
     pub stream_chunk_bytes: usize,
+    /// Aggregate entries delivered/collected by a directory call or tree walk.
     pub max_directory_entries: usize,
+    /// Aggregate logical path bytes, excluding allocator and metadata overhead.
     pub max_directory_path_bytes: usize,
+    /// Maximum descent depth; the starting directory is depth zero.
     pub max_walk_depth: usize,
 }
 
@@ -131,8 +138,9 @@ fn poisoned() -> VfError {
 }
 
 fn wrong_result_count(operation: &str, expected: usize, actual: usize) -> VfError {
-    VfError::transport(
+    VfError::transport_with_kind(
         None,
+        crate::TransportKind::InvalidReply,
         format!("{operation} backend returned {actual} results for {expected} requests"),
     )
 }
@@ -397,13 +405,14 @@ impl<F: DirectoryFileSystem> FsClient<F> {
         self.lock()?.read_dir_one(path.as_ref(), options)
     }
 
-    /// Visit one directory one bounded page at a time. The callback runs
-    /// without the backend lock and may use this client or drop its files.
+    /// Visit one directory one bounded page at a time. `Continue(())` requests
+    /// the next entry; `Break(())` stops the entire visit successfully.
+    /// The callback runs without the lock and may reenter or drop its files.
     pub fn visit_dir(
         &self,
         path: impl AsRef<Path>,
-        callback: impl FnMut(DirEntry) -> VfResult<bool>,
-    ) -> VfResult<()> {
+        callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
+    ) -> VfResult<TraversalCompletion> {
         self.visit_dir_with_options(path, self.limits.directory_options(), callback)
     }
 
@@ -412,8 +421,8 @@ impl<F: DirectoryFileSystem> FsClient<F> {
         &self,
         path: impl AsRef<Path>,
         options: ReadDirOptions,
-        mut callback: impl FnMut(DirEntry) -> VfResult<bool>,
-    ) -> VfResult<()> {
+        mut callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
+    ) -> VfResult<TraversalCompletion> {
         const PAGE_SIZE: usize = 1024;
         let path = path.as_ref();
         let mut cursor = None;
@@ -461,13 +470,13 @@ impl<F: DirectoryFileSystem> FsClient<F> {
                     );
                 }
                 count += 1;
-                if !callback(entry)? {
-                    return Ok(());
+                if callback(entry)?.is_break() {
+                    return Ok(TraversalCompletion::Stopped);
                 }
             }
             match next {
                 Some(value) => cursor = Some(value),
-                None => return Ok(()),
+                None => return Ok(TraversalCompletion::Complete),
             }
         }
     }
@@ -566,11 +575,12 @@ impl<F: VecFs> FsClient<F> {
     /// for bounded incremental delivery. A backend without native paging
     /// may retain one bounded listing; finish its pages before descending,
     /// so snapshots never accumulate across ancestor directories.
-    /// `false` stops successfully.
+    /// `ControlFlow::Break(())` stops the entire walk successfully, not merely
+    /// the current subtree. Directory order is backend-defined.
     pub fn visit_walk(
         &self,
         root: impl AsRef<Path>,
-        callback: impl FnMut(&DirEntry) -> VfResult<bool>,
+        callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
     ) -> VfResult<TraversalCompletion> {
         self.visit_walk_with_options(root, self.limits.walk_options(), callback)
     }
@@ -579,7 +589,7 @@ impl<F: VecFs> FsClient<F> {
         &self,
         root: impl AsRef<Path>,
         options: crate::WalkOptions,
-        callback: impl FnMut(&DirEntry) -> VfResult<bool>,
+        callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
     ) -> VfResult<TraversalCompletion> {
         let root = root.as_ref();
         if !self.symlink_metadata(root)?.is_dir() {
@@ -613,7 +623,7 @@ fn visit_walk_pages(
         usize,
         usize,
     ) -> VfResult<DirectoryPage>,
-    mut callback: impl FnMut(&DirEntry) -> VfResult<bool>,
+    mut callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
 ) -> VfResult<TraversalCompletion> {
     let mut pending = vec![(root.to_path_buf(), 0usize)];
     let mut count = 0usize;
@@ -646,7 +656,7 @@ fn visit_walk_pages(
                         VfError::client(0, libc::EFBIG as u32).with_context("visit_walk", &path)
                     );
                 }
-                if !callback(&entry)? {
+                if callback(&entry)?.is_break() {
                     return Ok(TraversalCompletion::Stopped);
                 }
                 if entry.metadata().is_dir() {
@@ -1776,6 +1786,40 @@ impl<F: FileSystem> FsFile<F> {
         self.read_into(buffer, VfOffset::Cur)
     }
 
+    /// Collect the remaining bytes from this opened object, starting at its
+    /// cursor, with an explicit logical payload limit. This does not reopen
+    /// its path. Unlike standard `Read::read_to_end`, allocation is bounded.
+    ///
+    /// An exact-limit read uses at most a one-byte EOF probe. On overflow or
+    /// I/O failure no buffer is returned and the cursor may have advanced,
+    /// including the probe byte; this operation does not restore the cursor.
+    pub fn read_to_end_with_limit(&mut self, max_bytes: usize) -> VfResult<Vec<u8>> {
+        let mut data = Vec::new();
+        loop {
+            let remaining = max_bytes - data.len();
+            if remaining == 0 {
+                let mut probe = [0_u8; 1];
+                if self.read_native(&mut probe)? == 0 {
+                    return Ok(data);
+                }
+                return Err(VfError::client(0, libc::EFBIG as u32)
+                    .with_context("read_to_end_with_limit", &self.path));
+            }
+            let chunk = remaining.min(crate::DEFAULT_READ_STREAM_CHUNK_BYTES);
+            data.try_reserve(chunk).map_err(|_| {
+                VfError::client(0, libc::ENOMEM as u32)
+                    .with_context("read_to_end_with_limit", &self.path)
+            })?;
+            let start = data.len();
+            data.resize(start + chunk, 0);
+            let count = self.read_native(&mut data[start..])?;
+            data.truncate(start + count);
+            if count == 0 {
+                return Ok(data);
+            }
+        }
+    }
+
     pub fn write_native(&mut self, buffer: &[u8]) -> VfResult<usize> {
         self.write_from(buffer, VfOffset::Cur)
     }
@@ -1834,7 +1878,10 @@ impl<F: FileSystem> FsFile<F> {
     }
 
     /// Attempt to close without consuming the handle. A failed close leaves
-    /// the handle armed so the caller can reconcile or retry it explicitly.
+    /// the handle armed so the caller can reconcile or retry cleanup explicitly.
+    /// After an ambiguous close failure, remote state is unknown: do not resume
+    /// data I/O just because `is_closed()` is false. This is local ownership,
+    /// not proof that the server still has the descriptor open.
     pub fn try_close(&mut self) -> VfResult<()> {
         let Some(file) = self.file.as_ref() else {
             return Ok(());
@@ -1986,7 +2033,7 @@ mod traversal_tests {
             snapshot_pages(Arc::clone(&live), Arc::clone(&peak)),
             |_| {
                 seen += 1;
-                Ok(true)
+                Ok(std::ops::ControlFlow::Continue(()))
             },
         )
         .unwrap();
@@ -2005,9 +2052,9 @@ mod traversal_tests {
                 crate::WalkOptions::new().max_entries(if outcome == 2 { 2 } else { 1000 }),
                 snapshot_pages(Arc::clone(&live), peak),
                 |_| match outcome {
-                    0 => Ok(false),
+                    0 => Ok(std::ops::ControlFlow::Break(())),
                     1 => Err(VfError::client(0, libc::EIO as u32)),
-                    _ => Ok(true),
+                    _ => Ok(std::ops::ControlFlow::Continue(())),
                 },
             );
             match outcome {

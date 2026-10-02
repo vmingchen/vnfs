@@ -102,7 +102,7 @@ fn native_directory_visitor_reenters_client_across_snapshot_pages() {
         .visit_dir(&remote_dir, |entry| {
             assert_eq!(client.metadata(entry.path())?.len(), 1);
             seen.push(entry.path().to_path_buf());
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap();
     assert_eq!(seen.len(), 3);

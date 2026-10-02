@@ -37,6 +37,9 @@ const READ_CHUNK: usize = 1024 * 1024;
 pub struct Mounted(FsClient<DummyVecFs>);
 
 impl Mounted {
+    /// Use the kernel for all operations under this host namespace directory.
+    /// Root `/work` plus application `/a` addresses host `/work/a`. This is not
+    /// a race-resistant security sandbox; use OS confinement for that purpose.
     pub fn new(root: impl AsRef<Path>) -> VfResult<Self> {
         let root = root.as_ref();
         if !root.is_dir() {
@@ -55,12 +58,21 @@ impl std::ops::Deref for Mounted {
     }
 }
 
-/// Construct a mount-aware client. Unlike [`Mounted`], eligible NFSv4
-/// AUTH_SYS mounts are accessed via direct, vectorized NFS COMPOUNDs.
+/// Opt into mount-aware direct NFS acceleration. Unlike [`Mounted`], eligible
+/// NFSv4 AUTH_SYS mounts use a separate client and vectorized COMPOUNDs.
+///
+/// # Consistency
+/// Direct operations do not share or invalidate the kernel client's caches.
+/// Mixing them with kernel I/O on the same objects (including path aliases)
+/// can expose stale data or delayed writes. This is not a transparent caching
+/// acceleration. Use `Mounted` when kernel coherency semantics are required.
 #[derive(Debug)]
 pub struct Auto(AutoClient);
 
 impl Auto {
+    /// Root all application paths at this existing host directory. For example,
+    /// root `/work` plus application `/a` addresses host `/work/a`.
+    /// The root is a namespace convention, not a security sandbox.
     pub fn new(root: impl AsRef<Path>) -> VfResult<Self> {
         let root = fs::canonicalize(root.as_ref())
             .map_err(|e| VfError::client(0, e.raw_os_error().unwrap_or(libc::EIO) as u32))?;
@@ -629,8 +641,8 @@ impl AutoClient {
     pub fn visit_dir(
         &self,
         path: impl AsRef<Path>,
-        callback: impl FnMut(DirEntry) -> VfResult<bool>,
-    ) -> VfResult<()> {
+        callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
+    ) -> VfResult<crate::TraversalCompletion> {
         self.visit_dir_with_options(path, self.limits.directory_options(), callback)
     }
 
@@ -638,8 +650,8 @@ impl AutoClient {
         &self,
         path: impl AsRef<Path>,
         options: ReadDirOptions,
-        mut callback: impl FnMut(DirEntry) -> VfResult<bool>,
-    ) -> VfResult<()> {
+        mut callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
+    ) -> VfResult<crate::TraversalCompletion> {
         let route = self.resolve(path.as_ref(), &read_mounts(false));
         match route.route {
             Route::Mounted => self
@@ -661,7 +673,7 @@ impl AutoClient {
     pub fn visit_walk(
         &self,
         path: impl AsRef<Path>,
-        callback: impl FnMut(&DirEntry) -> VfResult<bool>,
+        callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
     ) -> VfResult<crate::TraversalCompletion> {
         self.visit_walk_with_options(path, self.limits.walk_options(), callback)
     }
@@ -670,7 +682,7 @@ impl AutoClient {
         &self,
         path: impl AsRef<Path>,
         options: crate::WalkOptions,
-        mut callback: impl FnMut(&DirEntry) -> VfResult<bool>,
+        mut callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
     ) -> VfResult<crate::TraversalCompletion> {
         let route = self.resolve_tree(path.as_ref());
         match route.route {
@@ -1787,6 +1799,17 @@ impl AutoFile {
             AutoFileInner::Nfs(file) => file.read_native(buffer),
         }
     }
+    /// Bounded cursor-based collection from the already-opened object.
+    /// On failure the cursor can advance, including a one-byte EOF probe.
+    pub fn read_to_end_with_limit(&mut self, max_bytes: usize) -> VfResult<Vec<u8>> {
+        self.check_credentials()?;
+        match &mut self.inner {
+            AutoFileInner::Mounted(file) => file.read_to_end_with_limit(max_bytes),
+            AutoFileInner::Nfs(file) => file.read_to_end_with_limit(max_bytes),
+        }
+        .map_err(|error| error.with_context("read_to_end_with_limit", &self.path))
+    }
+
     pub fn write_native(&mut self, buffer: &[u8]) -> VfResult<usize> {
         self.check_credentials()?;
         match &mut self.inner {
@@ -2495,7 +2518,7 @@ mod tests {
             ReadDirOptions::new().max_path_bytes(backend_entries),
             |entry| {
                 dir_bytes += entry.path().as_os_str().len();
-                Ok(true)
+                Ok(std::ops::ControlFlow::Continue(()))
             },
         );
         let mut tree_bytes = root.as_os_str().len();
@@ -2504,7 +2527,7 @@ mod tests {
             crate::WalkOptions::new().max_path_bytes(backend_total),
             |entry| {
                 tree_bytes += entry.path().as_os_str().len();
-                Ok(true)
+                Ok(std::ops::ControlFlow::Continue(()))
             },
         );
         // Exact public budgets remain usable, including both callbacks.
@@ -2522,7 +2545,7 @@ mod tests {
                 .visit_dir_with_options(
                     &root,
                     ReadDirOptions::new().max_path_bytes(public_entries),
-                    |_| Ok(true)
+                    |_| Ok(std::ops::ControlFlow::Continue(()))
                 )
                 .is_ok()
         );
@@ -2531,7 +2554,7 @@ mod tests {
                 .visit_walk_with_options(
                     &root,
                     crate::WalkOptions::new().max_path_bytes(public_total),
-                    |_| Ok(true)
+                    |_| Ok(std::ops::ControlFlow::Continue(()))
                 )
                 .unwrap(),
             crate::TraversalCompletion::Complete

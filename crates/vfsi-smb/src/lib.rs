@@ -2564,6 +2564,7 @@ fn smb_error(error: SmbError, index: usize) -> VfError {
             Some(status) => VfError::smb(index, status.0),
             None => VfError::Transport {
                 index: Some(index),
+                kind: vfsi_core::TransportKind::Other,
                 message: error.to_string(),
                 operation: None,
                 path: None,

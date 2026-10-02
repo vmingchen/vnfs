@@ -129,7 +129,9 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         vnfs::StreamCompletion::Stopped { next_offset: 2 }
     );
     assert_eq!(
-        client.visit_walk("/sub", |_| Ok(true)).unwrap(),
+        client
+            .visit_walk("/sub", |_| Ok(std::ops::ControlFlow::Continue(())))
+            .unwrap(),
         vnfs::TraversalCompletion::Complete
     );
     assert_eq!(client.walk("/sub").unwrap()[0].entries.len(), 2);
@@ -262,6 +264,8 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
             files[1].read_request_at_into(0, &mut second),
         ])?;
         assert!(result.iter().all(|result| result.read == 3 && result.eof));
+        files[0].seek_native(std::io::SeekFrom::Start(0))?;
+        assert_eq!(files[0].read_to_end_with_limit(3)?, b"abc");
         files[0].try_close()?;
         client.try_closev(&mut files)?;
         client.try_closev(&mut files)?;
@@ -271,6 +275,15 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
             [b"abc".to_vec(), b"abc".to_vec()]
         );
         assert_eq!(client.read_dirs(&[prefix])?[0].entries.len(), 2);
+        let mut visited = 0;
+        assert_eq!(
+            client.visit_dir_with_options(prefix, vnfs::ReadDirOptions::default(), |_| {
+                visited += 1;
+                Ok(vnfs::ControlFlow::Continue(()))
+            })?,
+            vnfs::TraversalCompletion::Complete
+        );
+        assert_eq!(visited, 2);
         client.remove_dir_all(prefix)
     }
     // Compile the identical function against direct NFS without connecting.

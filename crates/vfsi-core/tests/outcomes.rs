@@ -1,6 +1,49 @@
 use std::path::Path;
 
-use vfsi_core::{AttrMask, ErrorDomain, Metadata, StatusCode, VfAttrs, VfError};
+use vfsi_core::{
+    AttrMask, ErrorDomain, Metadata, RpcError, StatusCode, TransportKind, VfAttrs, VfError,
+};
+
+#[test]
+fn transport_categories_survive_attribution_context_and_io_conversion() {
+    use std::io::ErrorKind as K;
+    for (transport, portable) in [
+        (TransportKind::Timeout, K::TimedOut),
+        (TransportKind::Connection, K::Other),
+        (TransportKind::InvalidReply, K::InvalidData),
+        (TransportKind::Authentication, K::PermissionDenied),
+        (TransportKind::Other, K::Other),
+    ] {
+        let error = VfError::from_rpc(
+            RpcError::transport_with_kind(transport, "opaque backend message"),
+            None,
+        )
+        .with_index(3)
+        .with_context("readv", "/file");
+        assert_eq!(error.transport_kind(), Some(transport));
+        assert_eq!(error.index(), Some(3));
+        assert_eq!(error.status(), None);
+        assert_eq!(error.kind(), portable);
+        let io: std::io::Error = error.clone().into();
+        assert_eq!(io.kind(), portable);
+        assert_eq!(
+            io.get_ref().unwrap().downcast_ref::<VfError>(),
+            Some(&error)
+        );
+    }
+    let unknown = VfError::transport(None, "timeout: connection refused: invalid reply");
+    assert_eq!(unknown.transport_kind(), Some(TransportKind::Other));
+    assert_eq!(unknown.kind(), K::Other);
+    assert_eq!(VfError::nfs(0, 2).transport_kind(), None);
+    assert_eq!(
+        RpcError::from_io(std::io::Error::from(K::TimedOut)).transport_kind,
+        Some(TransportKind::Timeout)
+    );
+    assert_eq!(
+        RpcError::from_io(std::io::Error::from(K::ConnectionRefused)).transport_kind,
+        Some(TransportKind::Connection)
+    );
+}
 
 #[test]
 fn transport_failure_is_ambiguous_and_requires_reconciliation() {

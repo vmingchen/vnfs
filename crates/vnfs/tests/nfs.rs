@@ -330,7 +330,7 @@ fn rust_native_client_workflow_on_nfs() {
             assert_eq!(client.metadata(entry.path())?.len(), 3);
             drop(held_during_visit.take());
             visited.push(entry.path().to_path_buf());
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap();
     assert_eq!(visited.len(), 2);
@@ -338,7 +338,7 @@ fn rust_native_client_workflow_on_nfs() {
     client
         .visit_dir(&nested, |_| {
             early_count += 1;
-            Ok(false)
+            Ok(std::ops::ControlFlow::Break(()))
         })
         .unwrap();
     assert_eq!(early_count, 1);
@@ -2037,7 +2037,7 @@ fn directory_visit_continuation_reuses_resolved_nfs_handle() {
     visitor
         .visit_dir(&dir, |_| {
             native_count += 1;
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap();
     let native_compounds = vnfs::backend::compound::thread_compound_stats().0;
@@ -2077,7 +2077,7 @@ fn directory_visit_recovers_if_reply_is_lost_before_first_entry() {
     visitor
         .visit_dir(&dir, |entry| {
             seen.push(entry.path().to_path_buf());
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .expect("read-only directory visit should reconnect before delivering entries");
     proxy.wait_for_drop();
@@ -2117,7 +2117,7 @@ fn directory_visit_does_not_replay_after_delivering_an_entry() {
             if delivered == 1 {
                 proxy.arm();
             }
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap_err();
     proxy.wait_for_drop();

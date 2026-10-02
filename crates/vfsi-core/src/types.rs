@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::RpcError;
+use crate::error::{RpcError, TransportKind};
 #[cfg(unix)]
 use crate::path::path_from_bytes;
 
@@ -82,6 +82,7 @@ pub enum VfError {
     /// attributed to any operation.
     Transport {
         index: Option<usize>,
+        kind: TransportKind,
         message: String,
         operation: Option<&'static str>,
         path: Option<PathBuf>,
@@ -155,8 +156,17 @@ impl VfError {
     /// A transport / client-side failure. `index` is best-effort; pass `None`
     /// when the failure cannot be attributed to a specific operation.
     pub fn transport(index: impl Into<Option<usize>>, message: impl Into<String>) -> VfError {
+        Self::transport_with_kind(index, TransportKind::Other, message)
+    }
+
+    pub fn transport_with_kind(
+        index: impl Into<Option<usize>>,
+        kind: TransportKind,
+        message: impl Into<String>,
+    ) -> VfError {
         VfError::Transport {
             index: index.into(),
+            kind,
             message: message.into(),
             operation: None,
             path: None,
@@ -178,7 +188,9 @@ impl VfError {
         }
     }
 
-    /// The filesystem status code, or [`VF_ERR_RPC`] for transport failures.
+    /// Raw compatibility code: errno, NFS status, SMB status, or [`VF_ERR_RPC`].
+    /// Application code should use [`kind`](Self::kind) or typed
+    /// [`status`](Self::status), not compare this value to errno constants.
     pub fn err_no(&self) -> u32 {
         match self {
             VfError::Op { err_no, .. } | VfError::OpUnattributed { err_no, .. } => *err_no,
@@ -192,6 +204,14 @@ impl VfError {
         matches!(self, VfError::Transport { .. })
     }
 
+    /// Transport provenance only; this never authorizes mutation replay.
+    pub fn transport_kind(&self) -> Option<TransportKind> {
+        match self {
+            Self::Transport { kind, .. } => Some(*kind),
+            _ => None,
+        }
+    }
+
     /// Convert a low-level [`RpcError`] into a `VfError`, attributing the
     /// failure to `index` in the caller's operation array. `index` is the
     /// caller's operation index, which may differ from the compound-internal
@@ -201,6 +221,7 @@ impl VfError {
         if e.is_transport() {
             VfError::Transport {
                 index: index.into(),
+                kind: e.transport_kind.unwrap_or(TransportKind::Other),
                 message: e.message,
                 operation: None,
                 path: None,
@@ -261,12 +282,14 @@ impl VfError {
                 path,
             },
             VfError::Transport {
+                kind,
                 message,
                 operation,
                 path,
                 ..
             } => VfError::Transport {
                 index: Some(index),
+                kind,
                 message,
                 operation,
                 path,
@@ -399,6 +422,7 @@ impl std::fmt::Display for VfError {
                 message,
                 operation,
                 path,
+                ..
             } => {
                 write!(f, "op {index}")?;
                 if let Some(operation) = operation {
@@ -414,6 +438,7 @@ impl std::fmt::Display for VfError {
                 message,
                 operation,
                 path,
+                ..
             } => {
                 if let Some(operation) = operation {
                     write!(f, "{operation} ")?;
@@ -448,6 +473,17 @@ impl VfError {
     /// before replaying a mutation unless its idempotence is established.
     pub fn kind(&self) -> std::io::ErrorKind {
         use std::io::ErrorKind as K;
+        // A general Connection failure does not identify a specific I/O
+        // errno; retain Other rather than fabricate Refused/Reset/Aborted.
+        if self.transport_kind() == Some(TransportKind::Timeout) {
+            return K::TimedOut;
+        }
+        if self.transport_kind() == Some(TransportKind::InvalidReply) {
+            return K::InvalidData;
+        }
+        if self.transport_kind() == Some(TransportKind::Authentication) {
+            return K::PermissionDenied;
+        }
         if matches!(
             self.status(),
             Some(StatusCode::Errno(VF_ERR_UNSUPPORTED) | StatusCode::Client(VF_ERR_UNSUPPORTED))
