@@ -2615,7 +2615,7 @@ mod tests {
             match (base.checked_add(delta), checked_offset(base, delta, index)) {
                 (Some(expected), Ok(actual)) => prop_assert_eq!(actual, expected),
                 (None, Err(error)) => {
-                    prop_assert_eq!(error.index_opt(), Some(index));
+                    prop_assert_eq!(error.index(), Some(index));
                     prop_assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
                 }
                 (expected, actual) => prop_assert!(false, "expected {expected:?}, got {actual:?}"),
@@ -2666,7 +2666,7 @@ mod tests {
     #[test]
     fn checked_offsets_preserve_request_index_on_overflow() {
         let error = checked_offset(u64::MAX, 1, 7).unwrap_err();
-        assert_eq!(error.index_opt(), Some(7));
+        assert_eq!(error.index(), Some(7));
         assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
     }
 
@@ -2679,7 +2679,7 @@ mod tests {
     #[test]
     fn smb_transport_failures_preserve_the_message() {
         let error = smb_error(SmbError::Disconnected, 3);
-        assert_eq!(error.index_opt(), Some(3));
+        assert_eq!(error.index(), Some(3));
         assert_eq!(error.err_no(), crate::vecfs::VF_ERR_RPC);
         assert!(error.to_string().contains("Disconnected"));
     }
@@ -2695,7 +2695,7 @@ mod tests {
             2,
         );
         assert!(!error.is_transport());
-        assert_eq!(error.index_opt(), Some(2));
+        assert_eq!(error.index(), Some(2));
         assert_eq!(
             error.status(),
             Some(crate::vecfs::StatusCode::Smb(status.0))

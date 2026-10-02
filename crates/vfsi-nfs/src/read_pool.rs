@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vfsi_core::{VfError, VfResult};
-use vfsi_sync::{FsClient, FsFile};
+use vfsi_sync::{FsClient, FsFile, StreamCompletion};
 
 use super::{NfsClientBuilder, NfsVecFs};
 
@@ -253,7 +253,7 @@ impl NfsReadPool {
         &mut self,
         path: impl AsRef<Path>,
         mut callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
-    ) -> VfResult<()> {
+    ) -> VfResult<StreamCompletion> {
         let path = path.as_ref().to_path_buf();
         let stream_id = self.next_stream_id;
         self.next_stream_id = self.next_stream_id.wrapping_add(1).max(1);
@@ -556,7 +556,15 @@ impl NfsReadPool {
         if let Some(error) = callback_error {
             return Err(error);
         }
-        close_error
+        close_error.map(|()| {
+            if cancelled {
+                StreamCompletion::Stopped {
+                    next_offset: next_delivery.saturating_mul(chunk_size as u64).min(size),
+                }
+            } else {
+                StreamCompletion::Complete
+            }
+        })
     }
 
     fn finish_stream(&mut self, stream_id: u64, active_workers: &[usize]) -> VfResult<()> {

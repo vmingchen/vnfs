@@ -9,6 +9,89 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use vnfs::backend::DummyVecFs;
 use vnfs::backend::{VecFs, VecFsExt, VfOffset};
 
+#[test]
+fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
+    use vnfs::{FsClient, ResourceLimits, TraversalCompletion, WalkOptions};
+    let client = FsClient::new(dummy()).with_limits(ResourceLimits {
+        max_directory_entries: 3,
+        ..Default::default()
+    });
+    client.create_dir_all("/tree/sub").unwrap();
+    client.write("/tree/a", b"a").unwrap();
+    client.write("/tree/sub/b", b"b").unwrap();
+    client.symlink("sub", "/tree/link").unwrap();
+    let mut seen = Vec::new();
+    let clone = client.clone();
+    let error = client
+        .visit_walk("/tree", |entry| {
+            clone.symlink_metadata(entry.path()).unwrap();
+            seen.push(entry.path().to_path_buf());
+            Ok(true)
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), vnfs::ErrorKind::FileTooLarge);
+    assert_eq!(seen.len(), 3);
+    seen.clear();
+    let options = WalkOptions::new().max_entries(10);
+    assert_eq!(
+        client
+            .visit_walk_with_options("/tree", options, |entry| {
+                seen.push(entry.path().to_path_buf());
+                Ok(true)
+            })
+            .unwrap(),
+        TraversalCompletion::Complete
+    );
+    assert_eq!(seen.len(), 4);
+    let mut expected: Vec<_> = client
+        .walk_with_options("/tree", vnfs::MetadataFields::stat(), options)
+        .unwrap()
+        .into_iter()
+        .flat_map(|listing| {
+            listing
+                .entries
+                .into_iter()
+                .map(|entry| entry.path().to_path_buf())
+        })
+        .collect();
+    expected.sort();
+    seen.sort();
+    assert_eq!(seen, expected);
+    assert_eq!(
+        client
+            .visit_walk_with_options("/tree", options, |_| Ok(false))
+            .unwrap(),
+        TraversalCompletion::Stopped
+    );
+    assert_eq!(
+        client
+            .visit_walk_with_options("/tree", options.max_depth(0), |_| Ok(true))
+            .unwrap_err()
+            .kind(),
+        vnfs::ErrorKind::FileTooLarge
+    );
+    assert_eq!(
+        client
+            .visit_walk_with_options("/tree", options.max_path_bytes(1), |_| panic!(
+                "budget exhausted before callback"
+            ))
+            .unwrap_err()
+            .kind(),
+        vnfs::ErrorKind::FileTooLarge
+    );
+    assert_eq!(
+        client
+            .visit_walk_with_options(
+                "/tree",
+                options.max_depth(0).truncate_at_max_depth(true),
+                |_| Ok(true)
+            )
+            .unwrap(),
+        TraversalCompletion::Complete
+    );
+    client.remove_dir_all("/tree").unwrap();
+}
+
 #[cfg(feature = "test-faults")]
 use std::sync::Arc;
 #[cfg(feature = "test-faults")]
@@ -78,7 +161,7 @@ fn one_shot_file_vectors_handle_empty_batches_and_replace_files() {
             ("/file", b"second".as_slice()),
         ])
         .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert_eq!(error.path(), Some(Path::new("/file")));
     assert_eq!(client.read_files(&["/file"]).unwrap(), vec![b"x".to_vec()]);
 }
@@ -117,7 +200,7 @@ fn application_directory_vectors_preserve_fields_and_limits() {
     let error = client
         .read_dirs_with_options(&["/a", "/a"], fields, ReadDirOptions::new().max_entries(1))
         .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
 
     let tree = client
         .walk_with_options("/", fields, WalkOptions::new())
@@ -180,7 +263,7 @@ fn application_directory_cohorts_preserve_global_error_index() {
     let error = client
         .read_dirs_with_options(&paths, MetadataFields::MODE, ReadDirOptions::new())
         .unwrap_err();
-    assert_eq!(error.index_opt(), Some(33));
+    assert_eq!(error.index(), Some(33));
 }
 
 #[test]
@@ -216,7 +299,7 @@ fn dummy_write_read_roundtrip() {
 
 #[test]
 fn single_file_stream_is_bounded_ordered_and_cancellable() {
-    use vnfs::{FsClient, ReadStreamOptions, VfError};
+    use vnfs::{Error as VfError, FsClient, ReadStreamOptions};
 
     let client = FsClient::new(dummy());
     let payload: Vec<u8> = (0..(2 * 1024 * 1024 + 37))
@@ -309,7 +392,7 @@ fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
         .unwrap();
 
     let error = fs.read_allv(&[path]).unwrap_err();
-    assert_eq!(error.index_opt(), Some(0));
+    assert_eq!(error.index(), Some(0));
     assert_eq!(error.err_no(), libc::EFBIG as u32);
 
     assert_eq!(DEFAULT_READ_MAX_BYTES, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES);
@@ -328,7 +411,7 @@ fn dummy_errors_on_missing_file() {
     let res = fs.readv(&[ReadOp::from_path("/data/missing", VfOffset::At(0), 8)]);
     match res {
         Err(e) => {
-            assert_eq!(e.index_opt(), Some(0));
+            assert_eq!(e.index(), Some(0));
             assert_eq!(e.err_no(), 2, "ENOENT");
         }
         Ok(_) => panic!("readv of missing file must fail"),
@@ -391,7 +474,7 @@ fn path_extension_accepts_strings() {
     let mut fs = dummy();
     fs.mkdir_path("/x", 0o755).unwrap();
     assert!(fs.exists_path("/x").unwrap());
-    assert_eq!(fs.stat_path("/x").unwrap().ftype, vnfs::VfType::Directory);
+    assert_eq!(fs.stat_path("/x").unwrap().ftype, vnfs::FileType::Directory);
     fs.chdir_path("/x").unwrap();
     fs.symlink_path("missing", "dangling").unwrap();
     assert!(fs.exists_path("dangling").unwrap());
@@ -695,7 +778,10 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
             second.read_request_at_into(0, &mut two_buffer),
         ])
         .unwrap();
-    assert_eq!(lengths, [3, 3]);
+    assert_eq!(
+        lengths.iter().map(|result| result.read).collect::<Vec<_>>(),
+        [3, 3]
+    );
     assert_eq!(&one_buffer, b"one");
     assert_eq!(&two_buffer, b"two");
     let other_client = FsClient::new(dummy());
@@ -722,7 +808,7 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
 
 #[test]
 fn native_client_covers_idiomatic_file_and_namespace_workflows() {
-    use vnfs::{FsClient, VfType};
+    use vnfs::{FileType as VfType, FsClient};
 
     let client = FsClient::new(dummy());
     client.create_dir_all("/tree/nested").unwrap();
@@ -846,7 +932,7 @@ fn native_vector_operations_are_composable() {
         .read(true)
         .openv(&["/present", "/missing", "/later"])
         .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
 }
 
 #[cfg(feature = "test-faults")]
@@ -855,7 +941,7 @@ fn openv_fault_before_dispatch_has_no_effects_or_handles() {
     let mut fs = dummy();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeDispatch { chunk: 0 },
-        vnfs::VfError::transport(None, "injected pre-dispatch failure"),
+        vnfs::Error::transport(None, "injected pre-dispatch failure"),
     ));
     fs.set_fault_injector(script.clone());
     let error = VecFs::openv(
@@ -866,7 +952,7 @@ fn openv_fault_before_dispatch_has_no_effects_or_handles() {
     )
     .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.index(), None);
     assert!(
         script.is_consumed(),
         "unused faults: {:?}",
@@ -883,7 +969,7 @@ fn openv_fault_injection_closes_the_successful_prefix() {
     let mut fs = dummy();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeRegister { index: 2 },
-        vnfs::VfError::transport(None, "injected registration failure"),
+        vnfs::Error::transport(None, "injected registration failure"),
     ));
     fs.set_fault_injector(script.clone());
     let error = VecFs::openv(
@@ -893,7 +979,7 @@ fn openv_fault_injection_closes_the_successful_prefix() {
         &[0o644; 3],
     )
     .unwrap_err();
-    assert_eq!(error.index_opt(), Some(2));
+    assert_eq!(error.index(), Some(2));
     assert!(
         script.is_consumed(),
         "unused faults: {:?}",
@@ -908,7 +994,7 @@ fn openv_fault_after_registration_closes_the_injected_handle() {
     let mut fs = dummy();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::AfterRegister { index: 1 },
-        vnfs::VfError::transport(None, "injected post-registration failure"),
+        vnfs::Error::transport(None, "injected post-registration failure"),
     ));
     fs.set_fault_injector(script.clone());
     let error = VecFs::openv(
@@ -918,7 +1004,7 @@ fn openv_fault_after_registration_closes_the_injected_handle() {
         &[0o644; 3],
     )
     .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert!(
         script.is_consumed(),
         "unused faults: {:?}",
@@ -940,7 +1026,7 @@ fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
         .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeCleanup { index: 0 },
-        vnfs::VfError::transport(None, "injected cleanup failure"),
+        vnfs::Error::transport(None, "injected cleanup failure"),
     ));
     fs.set_fault_injector(script.clone());
     let error = VecFs::openv(
@@ -950,7 +1036,7 @@ fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
         &[0o644; 2],
     )
     .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EEXIST as u32);
     assert!(
         script.is_consumed(),
@@ -971,7 +1057,7 @@ fn recursive_remove_propagates_type_lookup_failure_without_unlinking() {
     .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeRemoveType { index: 0 },
-        vnfs::VfError::transport(None, "injected type lookup failure"),
+        vnfs::Error::transport(None, "injected type lookup failure"),
     ));
     fs.set_fault_injector(script.clone());
     let error = fs.rm(&[Path::new("/kept")], true).unwrap_err();
@@ -986,7 +1072,7 @@ fn create_mode_failure_is_reported_instead_of_ignored() {
     let mut fs = dummy();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeSetPermissions { index: 0 },
-        vnfs::VfError::failure(0, libc::EPERM as u32),
+        vnfs::Error::failure(0, libc::EPERM as u32),
     ));
     fs.set_fault_injector(script.clone());
     let error = fs
@@ -1003,7 +1089,7 @@ fn mkdir_mode_failure_is_reported_instead_of_ignored() {
     let mut fs = dummy();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeSetPermissions { index: 0 },
-        vnfs::VfError::failure(0, libc::EPERM as u32),
+        vnfs::Error::failure(0, libc::EPERM as u32),
     ));
     fs.set_fault_injector(script.clone());
     let error = fs.mkdir(Path::new("/created-dir"), 0o700).unwrap_err();
@@ -1028,7 +1114,7 @@ fn strict_vectors_report_failure_index_without_rollback() {
             VfFile::from_path("/third"),
         ])
         .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert!(!fs.exists_path("/first").unwrap());
     assert!(fs.exists_path("/third").unwrap());
 }
@@ -1150,7 +1236,7 @@ fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
 #[test]
 fn directory_visitor_supports_limits_early_stop_and_callback_errors() {
     use vnfs::backend::WriteOp;
-    use vnfs::{FsClient, ReadDirOptions, VfError};
+    use vnfs::{Error as VfError, FsClient, ReadDirOptions};
 
     let mut fs = dummy();
     fs.ensure_dir(Path::new("/tree"), 0o755).unwrap();

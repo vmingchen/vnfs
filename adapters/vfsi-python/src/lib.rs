@@ -69,7 +69,7 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> PyErr {
 
 /// Map a `VfError` onto the Python exception class that matches its errno.
 fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
-    let index = e.index_opt();
+    let index = e.index();
     let what = path
         .map(|p| format!(": '{}'", p.display()))
         .unwrap_or_default();
@@ -111,7 +111,7 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
 /// Attach the failing operation's path to an error from a batched call.
 fn map_err_with_path(e: VfError, paths: &[PathBuf]) -> PyErr {
     let path = e
-        .index_opt()
+        .index()
         .and_then(|index| paths.get(index))
         .map(PathBuf::as_path);
     to_py_err(e, path)
@@ -373,7 +373,7 @@ fn attrs_many_impl(
                 if e.is_transport() {
                     return Err(e);
                 }
-                let Some(bi) = e.index_opt() else {
+                let Some(bi) = e.index() else {
                     return Err(e);
                 };
                 if bi >= remaining.len() {
@@ -415,7 +415,7 @@ fn read_allv_impl(
                 if e.is_transport() {
                     return Err(e);
                 }
-                let Some(bi) = e.index_opt() else {
+                let Some(bi) = e.index() else {
                     return Err(e);
                 };
                 if bi >= remaining.len() {
@@ -1000,7 +1000,7 @@ impl NfsClient {
                         if error.is_transport() {
                             return Err(to_py_err(error, None));
                         }
-                        let Some(batch_index) = error.index_opt() else {
+                        let Some(batch_index) = error.index() else {
                             return Err(to_py_err(error, None));
                         };
                         if batch_index >= remaining.len() {
@@ -1323,7 +1323,7 @@ impl NfsClient {
                         break;
                     }
                     Err(e) => {
-                        let Some(bi) = e.index_opt() else {
+                        let Some(bi) = e.index() else {
                             return Err(to_py_err(e, None));
                         };
                         if bi >= remaining.len() {
@@ -1594,7 +1594,7 @@ impl NfsClient {
         self.with_fs(py, move |fs| {
             fs.renamev(&files).map_err(|e| {
                 let path = e
-                    .index_opt()
+                    .index()
                     .and_then(|index| pairs.get(index))
                     .map(|(source, _)| source.as_path());
                 to_py_err(e, path)
@@ -1746,7 +1746,7 @@ impl NfsClient {
                         if error.is_transport() {
                             return Err(to_py_err(error, None));
                         }
-                        let Some(batch_index) = error.index_opt() else {
+                        let Some(batch_index) = error.index() else {
                             return Err(to_py_err(error, None));
                         };
                         if batch_index >= write_remaining.len() {
@@ -1861,7 +1861,7 @@ impl NfsClient {
                         if e.is_transport() {
                             return Err(to_py_err(e, None));
                         }
-                        let Some(bi) = e.index_opt() else {
+                        let Some(bi) = e.index() else {
                             return Err(to_py_err(e, None));
                         };
                         if bi >= remaining.len() {

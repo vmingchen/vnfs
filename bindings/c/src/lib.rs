@@ -361,7 +361,7 @@ fn confirmed_close_prefix(error: &VfError, count: usize) -> usize {
     if error.is_transport() {
         0
     } else {
-        error.index_opt().unwrap_or(0).min(count)
+        error.index().unwrap_or(0).min(count)
     }
 }
 
@@ -2112,7 +2112,7 @@ mod tests {
         // its real errno through the scalar helpers and stay a filesystem
         // error, not be downgraded to EIO/transport.
         let error = VfError::from_rpc(vnfs::backend::RpcError::op(0, 10005), None);
-        assert_eq!(error.index_opt(), None);
+        assert_eq!(error.index(), None);
         assert_eq!(vf_code(&error), 10005);
         let failure = vfsi_result::from_error(error);
         assert_eq!(failure.index, C_INDEX_UNKNOWN);

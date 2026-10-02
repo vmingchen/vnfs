@@ -78,7 +78,7 @@ Already have the directory mounted on Linux? Discover its connection:
 ```rust,no_run
 let client = vnfs::Nfs::from_mount("/mnt/data/git/some/tree")?;
 let files = client.read_files(&["/file-1", "/file-2"])?;
-# Ok::<(), vnfs::VfError>(())
+# Ok::<(), vnfs::Error>(())
 ```
 
 The mount path must be absolute; the selected directory becomes the remote root.
@@ -156,8 +156,9 @@ Use `Mounted::new("/")?` to **always** use the kernel client, or
 `Nfs::builder(server).root(export).connect()?` for a fully explicit direct
 connection. `Auto` selects a backend before dispatch; it never replays a
 possibly completed write through a different backend. Open handles remain
-pinned to their selected backend. `Auto::with_readv_limit` adjusts the default
-16 MiB total allocation limit for an `Auto::readv` call; file `Read` calls
+pinned to their selected backend. `Auto::with_limits(ResourceLimits { .. })`
+configures the same client resource policy as `NfsBuilder::limits`;
+file `Read` calls
 are chunked to 1 MiB.
 
 The direct connection has its own NFS client state, separate from the mounted
@@ -242,7 +243,7 @@ must be observed before close.
 ```rust,no_run
 use vnfs::prelude::*;
 
-fn main() -> vnfs::VfResult<()> {
+fn main() -> vnfs::Result<()> {
     let client = Nfs::connect("nfs.example.com")?;
     let file = client.open("/file-1")?;
     let mut contents = vec![0; client.metadata("/file-1")?.len() as usize];
@@ -366,12 +367,73 @@ their runtime's blocking-task API.
 
 ## Failure and recovery semantics
 
+The application surface uses `vnfs::Result`, `Error`, `ErrorKind`, `FileType`,
+and owned file handles. `NfsRead`, `NfsReadInto`, and `NfsWrite` let application
+helpers name borrowed request types without importing backend crates. Vector
+results are in request order and carry data/count, resolved offset, and EOF or
+durability information; they do not expose backend descriptors. `readv_into`
+returns a `ReadIntoResult` for each caller-owned buffer, including EOF.
+For reusable application helpers, use the `Client` and `FileHandle` traits
+instead of backend traits. The same generic code can use a direct `NfsClient`,
+`Mounted`, or `Auto`. These traits delegate to the native vector implementations
+without boxing, additional copies, or scalar-loop fallbacks.
+
+```rust,no_run
+fn read_inputs<C: vnfs::Client>(client: &C) -> vnfs::Result<Vec<Vec<u8>>> {
+    client.read_files(&["/file-1", "/file-2"])
+}
+```
+
+`read(path)` and `read_files(&[path])` use the same optimized whole-file backend
+algorithm. Scalar reads keep an opened object across renames and therefore add
+OPEN/CLOSE overhead compared with stateless path vectors. Configure client-wide
+defaults with `NfsBuilder::limits(ResourceLimits)`
+or `Auto::with_limits(ResourceLimits)`. The default maximum owned read payload
+is 16 MiB, shared by scalar whole-file reads and aggregate vector reads. Explicit
+per-call options override these defaults. Limits bound logical data/path bytes,
+not allocator rounding, result metadata, RPC envelopes, or all process memory.
+Read pools have their own explicit concurrency/buffer options.
+Changing Auto limits also updates cached connections; existing Auto handles
+use the current policy for grouped reads. Directory path-byte limits apply to
+the public Auto paths, including mount prefixes.
+
+Cloning a client shares one synchronized connection; it does not parallelize
+RPCs. Use `connect_pool` for independent application workers, or
+`connect_read_pool` for ordered read-ahead on a stable large file.
+`read_stream` returns `StreamCompletion::Complete` at EOF or
+`Stopped { next_offset }` after the callback requests a stop. A pooled stop
+waits for outstanding reads to finish and then closes the worker handles.
+Neither streaming path promises a snapshot of a concurrently modified file.
+
+`visit_walk` incrementally delivers bounded directory pages without retaining
+the whole tree; callbacks may reenter the client. It does not follow symlinks.
+Backends without native paging may retain one bounded directory snapshot.
+The visitor finishes that directory's pages before descending into children,
+so snapshots cannot accumulate across ancestors.
+Use collecting `walk` when multi-directory batching is more important than
+incremental delivery. `FsDir::try_close` retains ownership after a failed close,
+as `FsFile::try_close` does. Dropping either handle may block on the client lock
+and a network cleanup operation, and discards cleanup errors. Close explicitly
+when errors matter. `Write::flush` requests backend durability (`sync_data`),
+not merely flushing a user-space buffer, and may cost a network round trip.
+
+`diagnostics::take_and_reset` drains **process-wide** counters; diagnostic
+consumers must coordinate. The independently sampled fields are not an atomic
+snapshot under concurrent activity. `compound_bytes` is `None` unless exact
+byte telemetry was enabled with `VNFS_STATS=1` before the first compound.
+
 An NFS COMPOUND is ordered but **not transactional**. If operation `i` fails,
 the server stops processing that compound: the prefix before `i` may already
 have succeeded and the suffix was not executed. Public vector methods return
-all values on success or one indexed `VfError` on failure; they never promise
+all values on success or one `Error` on failure; they never promise
 rollback. A transport failure may have an unknown index and ambiguous effects,
 which callers must reconcile before retrying a mutation.
+`Error::index()` returns `Option<usize>` and identifies a logical request, not
+a guaranteed completion boundary. That request may itself have completed some
+chunks before a later semantic failure. Error status alone therefore provides
+no retry-safety or "not applied" guarantee. `Error::kind()` supplies a portable
+category; `status()` and `domain()` retain native protocol details. Standard
+`io::Error` adapters retain the original `Error` as their source.
 `closev` consumes its handles and attempts best-effort cleanup on failure.
 `try_closev(&mut files)` preserves them after an error so the caller can
 reconcile uncertain close status explicitly; a confirmed successful call

@@ -10,6 +10,9 @@ pub type Result<T> = vfsi_core::VfResult<T>;
 /// Application-facing error type for the Rust-native API.
 pub type Error = vfsi_core::VfError;
 
+mod application;
+pub use application::{Client, FileHandle};
+
 /// Backend implementer and protocol-construction APIs. Most applications
 /// need only the crate root; these are also available from the `vfsi-*` crates.
 pub mod backend {
@@ -37,22 +40,30 @@ pub mod diagnostics {
     /// Snapshot of process-wide NFS compound and RPC activity.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Snapshot {
+        /// Compounds whose RPC call returned successfully; lost replies and
+        /// other transport failures are not included.
         pub compounds: u64,
         pub operations: u64,
-        pub compound_bytes: u64,
+        /// None unless VNFS_STATS=1 was set before the first compound.
+        /// Counts encoded NFS requests, not full transport records.
+        pub compound_bytes: Option<u64>,
         pub max_operations: u64,
         pub rpc_calls: u64,
         pub rpc_micros: u64,
     }
 
-    pub fn snapshot() -> Snapshot {
+    /// Drain process-wide counters. Consumers must coordinate: another call
+    /// drains the same counters. Fields are sampled independently, so
+    /// concurrent activity can straddle measurement windows.
+    pub fn take_and_reset() -> Snapshot {
         let (compounds, operations, compound_bytes, max_operations) =
             vfsi_nfs::compound::compound_stats();
         let (rpc_calls, rpc_micros) = vfsi_nfs::compound::rpc_stats();
         Snapshot {
             compounds,
             operations,
-            compound_bytes,
+            compound_bytes: vfsi_nfs::compound::compound_byte_stats_enabled()
+                .then_some(compound_bytes),
             max_operations,
             rpc_calls,
             rpc_micros,
@@ -64,33 +75,45 @@ pub mod diagnostics {
 #[cfg(all(feature = "auto", target_os = "linux"))]
 mod auto;
 #[cfg(all(feature = "auto", target_os = "linux"))]
-pub use auto::{Auto, AutoClient, AutoFile, AutoRead, AutoRoute, AutoWrite, Mounted};
+pub use auto::{
+    Auto, AutoClient, AutoDir, AutoFile, AutoOpenOptions, AutoRead, AutoReadInto, AutoRoute,
+    AutoSetMetadata, AutoWrite, Mounted,
+};
 
 /// Common application imports.
 pub mod prelude {
     pub use crate::MetadataFields;
     #[cfg(all(feature = "auto", target_os = "linux"))]
     pub use crate::{Auto, Mounted};
+    pub use crate::{Client, FileHandle, ResourceLimits, StreamCompletion, TraversalCompletion};
     #[cfg(feature = "nfs")]
-    pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile};
+    pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile, NfsVersion};
     pub use vfsi_core::{OpenFlags, OpenRequest, RemoveOptions};
     pub use vfsi_sync::{ReadAllOptions, ReadDirOptions, ReadStreamOptions, WalkOptions};
 }
 
+pub use std::io::ErrorKind;
 /// Attribute selection for metadata queries, directory listings, and walks.
 pub use vfsi_core::AttrMask as MetadataFields;
+pub use vfsi_core::VfType as FileType;
 pub use vfsi_core::{
-    Capabilities, DirEntry, Metadata, OpenFlags, OpenRequest, Permissions, ReadResult,
-    RemoveOptions, VfError, VfResult, VfType, WriteResult,
+    Capabilities, DirEntry, ErrorDomain, Metadata, OpenFlags, OpenRequest, Permissions,
+    RemoveOptions, StatusCode,
 };
 pub use vfsi_sync::{
-    DirectoryListing, FsClient, FsDir, FsFile, OpenOptions, ReadAllOptions, ReadDirOptions,
-    ReadStreamOptions, WalkOptions,
+    DirectoryListing, FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite, OpenOptions,
+    ReadAllOptions, ReadDirOptions, ReadStreamOptions, ResourceLimits, SetMetadata,
+    StreamCompletion, TraversalCompletion, WalkOptions,
+};
+pub use vfsi_sync::{
+    FsReadIntoResult as ReadIntoResult, FsReadResult as ReadResult, FsWriteResult as WriteResult,
 };
 #[cfg(feature = "nfs")]
 mod native_nfs;
 #[cfg(feature = "nfs")]
-pub use native_nfs::{Nfs, NfsBuilder, NfsClient, NfsClientPool, NfsFile};
+pub use native_nfs::{
+    Nfs, NfsBuilder, NfsClient, NfsClientPool, NfsFile, NfsRead, NfsReadInto, NfsVersion, NfsWrite,
+};
 #[cfg(all(feature = "nfs", feature = "rpcsec-gss"))]
 pub use vfsi_nfs::RpcsecGssProtection;
 #[cfg(feature = "nfs")]

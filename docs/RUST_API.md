@@ -81,13 +81,15 @@ perform ordered batches without promising transactionality.
 NFS requests `FILE_SYNC4`; SMB issues `FLUSH`; the local backend calls the
 corresponding `std::fs::File` method.
 
-Semantic compound errors prove that a prefix completed and the suffix was not
-attempted. A lost transport response leaves dispatched mutations indeterminate;
-they are not replayed. `VfError` exposes its status domain, optional request
-index and operation/path context, completion certainty, and retry class without
-requiring string parsing.
+An NFS semantic compound error stops that compound, but a logical request can
+span several compounds and have already made progress. Other backends can also
+finish later requests before reporting a strict-vector error. A lost transport
+response leaves dispatched mutations indeterminate; they are not replayed.
+`vnfs::Error` exposes a portable `kind()`, native status/domain, optional logical
+request `index()`, and operation/path context. It does not infer completion
+certainty or retry safety from status codes.
 
-Native client and file methods retain `VfError`. Only the standard-library
+Native client and file methods retain `vnfs::Error`. Only the standard-library
 `Read`, `Write`, and `Seek` adapters translate failures to `std::io::Error`.
 
 The asynchronous facet is deliberately deferred to a separate future crate;
@@ -100,6 +102,15 @@ must impose a finite default allocation limit and expose an explicit override.
 `FsClient::read`, `FsClient::read_to_string`, and `VecFs::read_allv` therefore
 default to `DEFAULT_READ_MAX_BYTES` (16 MiB). Callers may select another bound
 with `read_with_limit`, `read_to_string_with_limit`, or `ReadAllOptions`.
+`ResourceLimits` sets client defaults through `NfsBuilder::limits`,
+`FsClient::with_limits`, or `Auto::with_limits`. Existing clones retain their
+configured policy. Scalar and vector whole-file reads share the optimized
+backend path. `readv_into` returns counts, offsets and EOF, and also enforces
+the aggregate policy because a backend may use an owned-buffer fallback.
+`readv_into_with_limit` provides an explicit per-call buffer budget. Auto
+updates cached connection policies when its limits change and uses its current
+policy even for previously opened handles. Auto traversal quotas count paths
+after translation into the public namespace, including mount prefixes.
 
 Reads whose size is explicit in the request (`readv`, `read_at`, and `pread`)
 are bounded by that caller-supplied length. Reads into caller-owned buffers are

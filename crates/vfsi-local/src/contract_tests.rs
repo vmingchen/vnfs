@@ -27,7 +27,7 @@ mod tests {
             match (base.checked_add(delta), checked_offset(base, delta, index)) {
                 (Some(expected), Ok(actual)) => prop_assert_eq!(actual, expected),
                 (None, Err(error)) => {
-                    prop_assert_eq!(error.index_opt(), Some(index));
+                    prop_assert_eq!(error.index(), Some(index));
                     prop_assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
                 }
                 (expected, actual) => prop_assert!(false, "expected {expected:?}, got {actual:?}"),
@@ -106,36 +106,33 @@ mod tests {
     fn vf_error_preserves_transport_message() {
         let e = VfError::from_rpc(RpcError::transport("connection refused"), 3);
         assert!(e.is_transport());
-        assert_eq!(e.index_opt(), Some(3));
-        assert_eq!(e.index_opt(), Some(3));
+        assert_eq!(e.index(), Some(3));
+        assert_eq!(e.index(), Some(3));
         assert_eq!(e.err_no(), VF_ERR_RPC);
         assert!(e.to_string().contains("connection refused"));
 
         // An unattributable transport failure has no op index.
         let e = VfError::from_rpc(RpcError::transport("server gone"), None);
         assert!(e.is_transport());
-        assert_eq!(e.index_opt(), None);
+        assert_eq!(e.index(), None);
         assert!(!e.to_string().contains("op "));
 
         // Server status errors stay Op errors with the caller-supplied index.
         let e = VfError::from_rpc(RpcError::op(4, ERR_NOENT), 1);
         assert!(!e.is_transport());
-        assert_eq!(e.index_opt(), Some(1));
-        assert_eq!(e.index_opt(), Some(1));
+        assert_eq!(e.index(), Some(1));
+        assert_eq!(e.index(), Some(1));
         assert_eq!(e.err_no(), ERR_NOENT);
     }
 
     #[test]
     fn vf_error_indexed_and_remap() {
         let e = VfError::from_rpc_indexed(RpcError::op(4, ERR_EXIST));
-        assert_eq!((e.index_opt(), e.err_no()), (Some(4), ERR_EXIST));
-        assert_eq!(e.index_opt(), Some(4));
-        assert_eq!(e.with_index(9).index_opt(), Some(9));
-        assert_eq!(
-            VfError::transport(2, "boom").with_index(5).index_opt(),
-            Some(5)
-        );
-        assert_eq!(VfError::transport(None, "boom").index_opt(), None);
+        assert_eq!((e.index(), e.err_no()), (Some(4), ERR_EXIST));
+        assert_eq!(e.index(), Some(4));
+        assert_eq!(e.with_index(9).index(), Some(9));
+        assert_eq!(VfError::transport(2, "boom").with_index(5).index(), Some(5));
+        assert_eq!(VfError::transport(None, "boom").index(), None);
     }
 
     // ------------------------------------------------------------------
@@ -913,7 +910,7 @@ mod tests {
             &[0o644],
         )
         .unwrap_err();
-        assert_eq!((e.index_opt(), e.err_no()), (Some(0), ERR_INVAL));
+        assert_eq!((e.index(), e.err_no()), (Some(0), ERR_INVAL));
     }
 
     #[test]

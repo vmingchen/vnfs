@@ -11,6 +11,90 @@ use vfsi_sync::{
     WriteResult,
 };
 
+#[test]
+fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
+    let backend = ScalarOnly {
+        data: b"abcdef".to_vec(),
+        ..ScalarOnly::default()
+    };
+    let read_calls = Arc::clone(&backend.read_calls);
+    let client = FsClient::new(backend).with_limits(vfsi_sync::ResourceLimits {
+        max_read_bytes: 3,
+        stream_chunk_bytes: 2,
+        ..vfsi_sync::ResourceLimits::default()
+    });
+    assert_eq!(client.clone().limits(), client.limits());
+    assert_eq!(client.capabilities().unwrap(), Capabilities::empty());
+    assert_eq!(
+        client.read("/file").unwrap_err().kind(),
+        std::io::ErrorKind::FileTooLarge
+    );
+    assert_eq!(client.read_with_limit("/file", 6).unwrap(), b"abcdef");
+    let file = client.open("/file").unwrap();
+    let before = read_calls.load(Ordering::SeqCst);
+    assert!(client.readv(&[file.read_request_at(0, 4)]).is_err());
+    let mut buffer = [0; 4];
+    assert!(
+        client
+            .readv_into(&mut [file.read_request_at_into(0, &mut buffer)])
+            .is_err()
+    );
+    assert_eq!(read_calls.load(Ordering::SeqCst), before);
+    let result = client
+        .readv_into_with_limit(&mut [file.read_request_at_into(0, &mut buffer)], 4)
+        .unwrap();
+    assert_eq!(result[0].read, 4);
+    assert_eq!(&buffer, b"abcd");
+    buffer.fill(0xff);
+    let before = read_calls.load(Ordering::SeqCst);
+    assert!(
+        client
+            .readv_into_with_limit(&mut [file.read_request_at_into(0, &mut buffer)], 3)
+            .is_err()
+    );
+    assert_eq!(read_calls.load(Ordering::SeqCst), before);
+    assert_eq!(buffer, [0xff; 4]);
+    let mut offsets = Vec::new();
+    let result = client
+        .read_stream("/file", |offset, bytes| {
+            offsets.push((offset, bytes.len()));
+            Ok(offset == 0)
+        })
+        .unwrap();
+    assert_eq!(offsets, [(0, 2), (2, 2)]);
+    assert_eq!(
+        result,
+        vfsi_sync::StreamCompletion::Stopped { next_offset: 4 }
+    );
+    assert_eq!(
+        client.read_stream("/file", |_, _| Ok(true)).unwrap(),
+        vfsi_sync::StreamCompletion::Complete
+    );
+}
+
+#[test]
+fn optimized_scalar_read_preserves_cleanup_retry_and_primary_error() {
+    for read_failure in [false, true] {
+        let client = FsClient::new(ScalarOnly {
+            data: b"data".to_vec(),
+            close_failures_remaining: 1,
+            read_failure,
+            ..ScalarOnly::default()
+        });
+        let error = client.read("/file").unwrap_err();
+        if read_failure {
+            assert!(!error.is_transport());
+            assert_eq!(error.operation(), Some("read"));
+        } else {
+            assert!(error.is_transport());
+            assert_eq!(error.operation(), Some("close"));
+        }
+        let backend = client.into_inner().unwrap();
+        assert_eq!(backend.close_calls, 2);
+        assert!(!backend.open);
+    }
+}
+
 #[derive(Default)]
 struct ScalarOnly {
     data: Vec<u8>,
@@ -395,7 +479,7 @@ fn vector_transport_failure_does_not_invent_request_zero_context() {
         ])
         .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.index(), None);
     assert_eq!(error.path(), None);
 }
 
@@ -412,7 +496,7 @@ fn openv_rejects_wrong_result_count_and_cleans_returned_handles() {
         ])
         .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.index(), None);
     assert!(error.to_string().contains("1 results for 2 requests"));
     assert!(!client.into_inner().unwrap().open);
 }
@@ -437,7 +521,7 @@ fn readv_and_writev_reject_wrong_result_counts() {
         ])
         .unwrap_err();
     assert!(read_error.is_transport());
-    assert_eq!(read_error.index_opt(), None);
+    assert_eq!(read_error.index(), None);
 
     let write_error = client
         .writev(&[
@@ -446,7 +530,7 @@ fn readv_and_writev_reject_wrong_result_counts() {
         ])
         .unwrap_err();
     assert!(write_error.is_transport());
-    assert_eq!(write_error.index_opt(), None);
+    assert_eq!(write_error.index(), None);
 
     client.closev(files).unwrap();
 }
@@ -463,7 +547,7 @@ fn owned_vector_reads_reject_oversized_batches_before_backend_io() {
     let error = client
         .readv_with_limit(&[file.read_request_at(0, 3), file.read_request_at(3, 3)], 5)
         .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EFBIG as u32);
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
     assert_eq!(read_calls.load(Ordering::SeqCst), 0);
@@ -571,7 +655,7 @@ fn write_allv_rejects_zero_progress() {
         .write_allv(&[file.write_request_at(0, b"data")])
         .unwrap_err();
     assert_eq!(error.err_no(), vfsi_sync::ERR_IO);
-    assert_eq!(error.index_opt(), Some(0));
+    assert_eq!(error.index(), Some(0));
 }
 
 #[test]
@@ -594,7 +678,7 @@ fn write_allv_validates_every_request_before_writing_a_prefix() {
             foreign_file.write_request_at(0, b"invalid"),
         ])
         .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert_eq!(write_calls.load(Ordering::SeqCst), 0);
 }
 
@@ -618,7 +702,7 @@ fn vector_results_must_match_their_requests_and_io_limits() {
         let file = client.open("/file").unwrap();
         let error = client.readv(&[file.read_request_at(0, 1)]).unwrap_err();
         assert!(error.is_transport());
-        assert_eq!(error.index_opt(), Some(0));
+        assert_eq!(error.index(), Some(0));
         assert_eq!(error.operation(), Some("readv"));
         drop(file);
     }
@@ -634,7 +718,7 @@ fn vector_results_must_match_their_requests_and_io_limits() {
         .writev(&[file.write_request_at(0, b"x")])
         .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index_opt(), Some(0));
+    assert_eq!(error.index(), Some(0));
     assert_eq!(error.operation(), Some("writev"));
 }
 
@@ -815,7 +899,19 @@ fn native_read_into_dispatches_without_owned_read_results() {
             file.read_request_at_into(3, &mut second),
         ])
         .unwrap();
-    assert_eq!(lengths, [3, 3]);
+    assert_eq!(
+        lengths.iter().map(|result| result.read).collect::<Vec<_>>(),
+        [3, 3]
+    );
+    assert_eq!(
+        lengths
+            .iter()
+            .map(|result| result.offset)
+            .collect::<Vec<_>>(),
+        [0, 3]
+    );
+    assert!(!lengths[0].eof);
+    assert!(lengths[1].eof);
     assert_eq!(&first, b"abc");
     assert_eq!(&second, b"def");
     let mut scalar = [0u8; 2];
@@ -838,7 +934,7 @@ fn native_read_into_rejects_malformed_backend_results() {
         .readv_into(&mut [file.read_request_at_into(0, &mut buffer)])
         .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index_opt(), Some(0));
+    assert_eq!(error.index(), Some(0));
 
     let backend = ScalarOnly {
         data: b"abc".to_vec(),
@@ -853,5 +949,5 @@ fn native_read_into_rejects_malformed_backend_results() {
         .readv_into(&mut [file.read_request_at_into(0, &mut buffer)])
         .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.index(), None);
 }

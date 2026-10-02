@@ -272,13 +272,12 @@ fn builder_observer_receives_lifecycle_events() {
 fn rust_native_client_workflow_on_nfs() {
     let dir = setup_dir("rust_native_client");
     let host = std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());
-    let builder = vnfs::Nfs::builder(&host).minor_version(
-        match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => Some(1),
-            Ok("2") => Some(2),
-            _ => None,
-        },
-    );
+    let builder =
+        vnfs::Nfs::builder(&host).version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => vnfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::NfsVersion::V4_2,
+            _ => vnfs::NfsVersion::Auto,
+        });
     let client = builder.connect().unwrap();
     let nested = format!("{dir}/nested");
     client.create_dir_all(&nested).unwrap();
@@ -314,7 +313,10 @@ fn rust_native_client_workflow_on_nfs() {
             files[1].read_request_at_into(0, &mut second),
         ])
         .unwrap();
-    assert_eq!(lengths, [3, 3]);
+    assert_eq!(
+        lengths.iter().map(|result| result.read).collect::<Vec<_>>(),
+        [3, 3]
+    );
     assert_eq!(&first[..3], b"one");
     assert_eq!(&second[..3], b"two");
     assert_eq!(vnfs::backend::compound::thread_compound_stats().0, 1);
@@ -369,14 +371,59 @@ fn rust_native_client_workflow_on_nfs() {
 }
 
 #[test]
+fn scalar_and_single_vector_whole_file_reads_share_the_compound_path() {
+    let dir = setup_dir("scalar_vector_read_parity");
+    let host = std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let version = match std::env::var("VNFS_TEST_MINOR").as_deref() {
+        Ok("1") => vnfs::NfsVersion::V4_1,
+        Ok("2") => vnfs::NfsVersion::V4_2,
+        _ => vnfs::NfsVersion::Auto,
+    };
+    const BYTES: usize = 1024 * 1024 + 17;
+    let client = Nfs::builder(host)
+        .version(version)
+        .limits(vnfs::ResourceLimits {
+            max_read_bytes: BYTES,
+            ..Default::default()
+        })
+        .connect()
+        .unwrap();
+    let path = format!("{dir}/file");
+    let data = vec![b'x'; BYTES];
+    client.write(&path, &data).unwrap();
+    vnfs::backend::compound::thread_compound_stats();
+    client.open(&path).unwrap().close().unwrap();
+    let lifecycle = vnfs::backend::compound::thread_compound_stats().0;
+    assert_eq!(client.read(&path).unwrap(), data);
+    let scalar = vnfs::backend::compound::thread_compound_stats().0;
+    assert_eq!(client.read_files(&[&path]).unwrap(), [data]);
+    let vector = vnfs::backend::compound::thread_compound_stats().0;
+    assert!(scalar > 0);
+    // The scalar convenience keeps one open object; OPEN/CLOSE are constant
+    // overhead, not one READ RPC for each old 64 KiB window.
+    assert!(
+        scalar <= vector + lifecycle,
+        "scalar={scalar}, vector={vector}, lifecycle={lifecycle}"
+    );
+    assert_eq!(
+        client.read_with_limit(&path, BYTES - 1).unwrap_err().kind(),
+        vnfs::ErrorKind::FileTooLarge
+    );
+    let mut dir_handle = client.open_dir_handle(&dir).unwrap();
+    dir_handle.try_close().unwrap();
+    dir_handle.try_close().unwrap();
+    client.remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn rust_native_client_pool_uses_independent_sessions() {
     let dir = setup_dir("rust_native_client_pool");
     let host = std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let pool = Nfs::builder(host)
-        .minor_version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => Some(1),
-            Ok("2") => Some(2),
-            _ => None,
+        .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => vnfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::NfsVersion::V4_2,
+            _ => vnfs::NfsVersion::Auto,
         })
         .client_owner(b"vnfs-integration-pool".to_vec())
         .connect_pool(2)
@@ -512,25 +559,34 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
 
     let mut actual = Vec::with_capacity(expected.len());
     let mut next_offset = 0u64;
-    pool.read_stream(&path, |offset, data| {
-        assert_eq!(offset, next_offset, "callbacks are delivered in order");
-        next_offset += data.len() as u64;
-        actual.extend_from_slice(data);
-        Ok(true)
-    })
-    .expect("stream complete file");
+    let completion = pool
+        .read_stream(&path, |offset, data| {
+            assert_eq!(offset, next_offset, "callbacks are delivered in order");
+            next_offset += data.len() as u64;
+            actual.extend_from_slice(data);
+            Ok(true)
+        })
+        .expect("stream complete file");
+    assert_eq!(completion, vnfs::StreamCompletion::Complete);
     assert_eq!(actual, expected);
 
     let mut callbacks = 0;
-    pool.read_stream(&path, |_, _| {
-        callbacks += 1;
-        Ok(false)
-    })
-    .expect("cancel stream");
+    let completion = pool
+        .read_stream(&path, |_, _| {
+            callbacks += 1;
+            Ok(false)
+        })
+        .expect("cancel stream");
+    assert_eq!(
+        completion,
+        vnfs::StreamCompletion::Stopped {
+            next_offset: 64 * 1024
+        }
+    );
     assert_eq!(callbacks, 1);
 
     let callback_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = pool.read_stream(&path, |_, _| -> vnfs::VfResult<bool> {
+        let _ = pool.read_stream(&path, |_, _| -> vnfs::Result<bool> {
             panic!("injected callback panic")
         });
     }));
@@ -1573,7 +1629,7 @@ fn writev_partial_failure_reports_failing_index() {
         ])
         .unwrap_err();
     assert_eq!(
-        e.index_opt(),
+        e.index(),
         Some(1),
         "failure must be attributed to the missing file"
     );
@@ -1598,11 +1654,7 @@ fn openv_partial_failure_resumes_from_failing_index() {
     let flags = [libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 3];
     let modes = [0o644; 3];
     let e = VecFs::openv(&mut c, &refs, &flags, &modes).unwrap_err();
-    assert_eq!(
-        e.index_opt(),
-        Some(1),
-        "resume must fail at the missing parent"
-    );
+    assert_eq!(e.index(), Some(1), "resume must fail at the missing parent");
     assert_eq!(
         e.status(),
         Some(StatusCode::Nfs(e.err_no())),
@@ -1638,7 +1690,7 @@ fn openv_injected_registration_failure_closes_every_confirmed_handle() {
         &[0o644; 3],
     )
     .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert!(
         script.is_consumed(),
         "unused faults: {:?}",
@@ -1700,7 +1752,7 @@ fn closev_semantic_failure_removes_only_confirmed_prefix() {
     ));
     client.set_fault_injector(script.clone());
     let error = client.closev(&files).unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert!(script.is_consumed());
     assert_eq!(client.test_open_handle_count(), 2);
     client.closev(&files[1..]).unwrap();
@@ -1807,7 +1859,7 @@ fn openv_injected_post_reply_transport_failure_has_no_fabricated_index() {
     )
     .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.index(), None);
     assert!(
         client.exists(Path::new(&paths[0])).unwrap(),
         "the completed mutating open must not be replayed"
@@ -1846,7 +1898,7 @@ fn openv_later_chunk_failure_closes_confirmed_earlier_opens() {
     )
     .unwrap_err();
     assert!(error.is_transport(), "unexpected error: {error:?}");
-    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.index(), None);
     assert!(script.is_consumed());
     assert!(
         client.test_confirmed_path_closes() > 0,
@@ -1936,7 +1988,7 @@ fn openv_does_not_replay_exclusive_create_after_real_reply_loss() {
     proxy.wait_for_drop();
 
     assert!(error.is_transport(), "unexpected replay result: {error}");
-    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.index(), None);
     assert_eq!(proxied.test_open_handle_count(), 0);
     let mut admin = client();
     assert!(admin.exists(Path::new(&paths[0])).unwrap());
@@ -2012,10 +2064,10 @@ fn directory_visit_recovers_if_reply_is_lost_before_first_entry() {
 
     let proxy = DropReplyProxy::start(reply_loss_target());
     let visitor = Nfs::builder(proxy.endpoint())
-        .minor_version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => Some(1),
-            Ok("2") => Some(2),
-            _ => None,
+        .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => vnfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::NfsVersion::V4_2,
+            _ => vnfs::NfsVersion::Auto,
         })
         .request_timeout(Duration::from_millis(500))
         .connect()
@@ -2047,10 +2099,10 @@ fn directory_visit_does_not_replay_after_delivering_an_entry() {
 
     let proxy = DropReplyProxy::start(reply_loss_target());
     let visitor = Nfs::builder(proxy.endpoint())
-        .minor_version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => Some(1),
-            Ok("2") => Some(2),
-            _ => None,
+        .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => vnfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::NfsVersion::V4_2,
+            _ => vnfs::NfsVersion::Auto,
         })
         .request_timeout(Duration::from_millis(500))
         .max_compound_bytes(8 * 1024)
@@ -2132,11 +2184,7 @@ fn removev_partial_failure_resumes_from_failing_index() {
         .map(|p| VfFile::from_path(p))
         .collect();
     let e = c.removev(&files).unwrap_err();
-    assert_eq!(
-        e.index_opt(),
-        Some(1),
-        "resume must fail at the missing path"
-    );
+    assert_eq!(e.index(), Some(1), "resume must fail at the missing path");
     assert!(!c.exists(Path::new(&f0)).unwrap(), "prefix was removed");
     assert!(
         c.exists(Path::new(&f2)).unwrap(),
@@ -2222,7 +2270,7 @@ fn native_read_dirs_batches_and_reports_bounded_errors() {
     let error = client
         .read_dirs_with_options(&missing, MetadataFields::MODE, ReadDirOptions::new())
         .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
 }
 
 #[test]
@@ -2354,11 +2402,7 @@ fn mkdirv_partial_failure_applies_prefix_modes() {
         })
         .collect();
     let e = c.mkdirv(&attrs).unwrap_err();
-    assert_eq!(
-        e.index_opt(),
-        Some(1),
-        "EEXIST on the pre-created directory"
-    );
+    assert_eq!(e.index(), Some(1), "EEXIST on the pre-created directory");
     assert_eq!(
         c.stat(Path::new(&d0)).unwrap().mode & 0o777,
         0o711,
@@ -3089,7 +3133,7 @@ fn copyv_reports_mid_batch_failure_index() {
             ExtentPair::new(&src2, 0, &dst2, 0, None),
         ])
         .expect_err("missing middle source must fail");
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::ENOENT as u32);
     assert!(!c.exists(Path::new(&dst2)).unwrap());
 }

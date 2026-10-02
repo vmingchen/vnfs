@@ -69,7 +69,7 @@ pub enum VfError {
     /// A filesystem / protocol status that cannot be attributed to a specific
     /// operation index (for example a compound-level failure with no per-op
     /// result). Unlike [`Op`](VfError::Op), it does not pretend the failure is
-    /// operation 0. [`index_opt`](VfError::index_opt) reports `None`.
+    /// operation 0. [`index`](VfError::index) reports `None`.
     OpUnattributed {
         err_no: u32,
         domain: ErrorDomain,
@@ -167,20 +167,10 @@ impl VfError {
         VfError::failure(index, VF_ERR_UNSUPPORTED)
     }
 
-    /// The operation index this error refers to (best-effort for transport
-    /// failures; 0 when unknown).
-    #[deprecated(note = "use index_opt(); an unknown transport location is not request zero")]
-    pub fn index(&self) -> usize {
-        match self {
-            VfError::Op { index, .. } => *index,
-            VfError::OpUnattributed { .. } => 0,
-            VfError::Transport { index, .. } => index.unwrap_or(0),
-        }
-    }
-
-    /// The operation index as an `Option`; `None` only for a transport
-    /// failure that cannot be attributed to any operation.
-    pub fn index_opt(&self) -> Option<usize> {
+    /// Logical request index, or `None` when a failure cannot be attributed.
+    /// An index is not a completion boundary: this item can itself contain
+    /// completed chunks, and other requests can already have changed state.
+    pub fn index(&self) -> Option<usize> {
         match self {
             VfError::Op { index, .. } => Some(*index),
             VfError::OpUnattributed { .. } => None,
@@ -287,7 +277,7 @@ impl VfError {
     /// Transform a known request index while preserving an unattributable
     /// transport failure as `None`.
     pub fn map_index(self, map: impl FnOnce(usize) -> usize) -> VfError {
-        match self.index_opt() {
+        match self.index() {
             Some(index) => self.with_index(map(index)),
             None => self,
         }
@@ -374,7 +364,13 @@ impl std::fmt::Display for VfError {
                 if let Some(path) = path {
                     write!(f, " for {}", path.display())?;
                 }
-                write!(f, " failed: {}", err_no)
+                write!(
+                    f,
+                    " failed: {} ({:?} status {})",
+                    std::io::Error::from(self.kind()),
+                    self.domain(),
+                    err_no
+                )
             }
             VfError::OpUnattributed {
                 err_no,
@@ -390,7 +386,13 @@ impl std::fmt::Display for VfError {
                 if let Some(path) = path {
                     write!(f, " for {}", path.display())?;
                 }
-                write!(f, " failed: {} (operation index unknown)", err_no)
+                write!(
+                    f,
+                    " failed: {} ({:?} status {}; operation index unknown)",
+                    std::io::Error::from(self.kind()),
+                    self.domain(),
+                    err_no
+                )
             }
             VfError::Transport {
                 index: Some(index),
@@ -410,8 +412,15 @@ impl std::fmt::Display for VfError {
             VfError::Transport {
                 index: None,
                 message,
-                ..
+                operation,
+                path,
             } => {
+                if let Some(operation) = operation {
+                    write!(f, "{operation} ")?;
+                }
+                if let Some(path) = path {
+                    write!(f, "for {} ", path.display())?;
+                }
                 write!(f, "transport error: {}", message)
             }
         }
@@ -422,16 +431,7 @@ impl std::error::Error for VfError {}
 
 impl From<VfError> for std::io::Error {
     fn from(error: VfError) -> Self {
-        let kind = match error.err_no() {
-            ERR_NOENT => std::io::ErrorKind::NotFound,
-            ERR_EXIST => std::io::ErrorKind::AlreadyExists,
-            ERR_ACCES => std::io::ErrorKind::PermissionDenied,
-            ERR_NOTDIR => std::io::ErrorKind::NotADirectory,
-            ERR_ISDIR => std::io::ErrorKind::IsADirectory,
-            ERR_INVAL | ERR_EBADF => std::io::ErrorKind::InvalidInput,
-            _ => std::io::ErrorKind::Other,
-        };
-        std::io::Error::new(kind, error)
+        std::io::Error::new(error.kind(), error)
     }
 }
 
@@ -440,70 +440,54 @@ pub type VfResult<T> = Result<T, VfError>;
 /// error of the first failing operation.
 pub type VfRes = VfResult<()>;
 
-/// Whether the caller can know if a failed operation changed remote state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum OutcomeCertainty {
-    /// The operation completed and its result is known.
-    Known,
-    /// The server rejected the operation before it took effect.
-    KnownNotApplied,
-    /// A transport failure happened after dispatch, so reconciliation is
-    /// required before retrying a mutation.
-    Indeterminate,
-}
-
-/// Whether retrying an operation is safe without first reconciling state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum RetryClass {
-    Safe,
-    ReconcileFirst,
-    Never,
-}
-
 impl VfError {
-    /// Completion certainty for the *failed item* in a vector operation.
+    /// Portable category; [`Self::status`] retains the original status.
     ///
-    /// This deliberately says nothing about earlier items in the same
-    /// vector: VFSI is ordered but non-transactional, so a successful prefix
-    /// may already have changed filesystem state.
-    pub fn failed_item_certainty(&self) -> OutcomeCertainty {
-        if self.is_transport() {
-            OutcomeCertainty::Indeterminate
-        } else {
-            OutcomeCertainty::KnownNotApplied
+    /// This is deliberately not retry guidance. Even a semantic failure can
+    /// follow successful chunks of the same logical mutation. Reconcile state
+    /// before replaying a mutation unless its idempotence is established.
+    pub fn kind(&self) -> std::io::ErrorKind {
+        use std::io::ErrorKind as K;
+        if matches!(
+            self.status(),
+            Some(StatusCode::Errno(VF_ERR_UNSUPPORTED) | StatusCode::Client(VF_ERR_UNSUPPORTED))
+        ) {
+            return K::Unsupported;
         }
-    }
-
-    /// Retry guidance for the *failed item*, not for the entire vector call.
-    /// Retrying a whole mutation vector can repeat its completed prefix.
-    pub fn failed_item_retry_class(&self) -> RetryClass {
-        if self.is_transport() {
-            RetryClass::ReconcileFirst
-        } else if self.err_no() == VF_ERR_UNSUPPORTED {
-            RetryClass::Never
-        } else {
-            RetryClass::Safe
+        match self.status() {
+            Some(StatusCode::Errno(code) | StatusCode::Client(code)) => {
+                std::io::Error::from_raw_os_error(code as i32).kind()
+            }
+            Some(StatusCode::Nfs(code)) => match code {
+                1 | 13 => K::PermissionDenied,
+                2 => K::NotFound,
+                17 => K::AlreadyExists,
+                20 => K::NotADirectory,
+                21 => K::IsADirectory,
+                22 => K::InvalidInput,
+                27 => K::FileTooLarge,
+                28 => K::StorageFull,
+                30 => K::ReadOnlyFilesystem,
+                63 => K::InvalidFilename,
+                66 => K::DirectoryNotEmpty,
+                10004 => K::Unsupported,
+                10008 => K::WouldBlock,
+                _ => K::Other,
+            },
+            Some(StatusCode::Smb(code)) => match code {
+                0xc000_0022 => K::PermissionDenied,
+                0xc000_0034 | 0xc000_003a => K::NotFound,
+                0xc000_0035 => K::AlreadyExists,
+                0xc000_000d => K::InvalidInput,
+                0xc000_007f => K::StorageFull,
+                0xc000_00bb => K::Unsupported,
+                0xc000_0101 => K::DirectoryNotEmpty,
+                0xc000_0103 => K::NotADirectory,
+                0xc000_00ba => K::IsADirectory,
+                _ => K::Other,
+            },
+            None => K::Other,
         }
-    }
-
-    /// Deprecated ambiguous spelling; use [`Self::failed_item_certainty`].
-    #[deprecated(
-        since = "0.2.0",
-        note = "this describes only the failed item; use failed_item_certainty"
-    )]
-    pub fn certainty(&self) -> OutcomeCertainty {
-        self.failed_item_certainty()
-    }
-
-    /// Deprecated ambiguous spelling; use [`Self::failed_item_retry_class`].
-    #[deprecated(
-        since = "0.2.0",
-        note = "this describes only the failed item; use failed_item_retry_class"
-    )]
-    pub fn retry_class(&self) -> RetryClass {
-        self.failed_item_retry_class()
     }
 }
 
@@ -857,8 +841,8 @@ pub struct ReadResult {
     /// sentinels).
     pub offset: u64,
     pub data: Vec<u8>,
-    /// True if the read reached end-of-file (the backend's EOF signal, or a
-    /// nonzero-length read that returned fewer bytes than requested). A
+    /// True if the backend determined that the read reached end-of-file. A
+    /// short read alone does not imply EOF. A
     /// backend with a server EOF flag (e.g. NFS) may report `true` even when
     /// the requested length was returned exactly, because the read ended at
     /// EOF. Always false for zero-length reads.

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::{FsClient, FsFile, VfResult};
+use crate::{FsClient, FsFile, ResourceLimits, Result as VfResult};
 use vfsi_nfs::{
     NfsAuthentication, NfsClientBuilder, NfsObserver, NfsReadPool, NfsReadPoolOptions,
     NfsRecoveryPolicy, NfsVecFs,
@@ -13,6 +13,30 @@ use vfsi_nfs::{
 
 pub type NfsClient = FsClient<NfsVecFs>;
 pub type NfsFile = FsFile<NfsVecFs>;
+pub type NfsRead<'a> = vfsi_sync::FsRead<'a, NfsVecFs>;
+pub type NfsReadInto<'a> = vfsi_sync::FsReadInto<'a, NfsVecFs>;
+pub type NfsWrite<'a> = vfsi_sync::FsWrite<'a, NfsVecFs>;
+
+/// Supported NFS protocol selection. Auto negotiates v4.2 then v4.1.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NfsVersion {
+    #[default]
+    Auto,
+    V4_1,
+    V4_2,
+}
+
+impl TryFrom<Option<u32>> for NfsVersion {
+    type Error = crate::Error;
+    fn try_from(value: Option<u32>) -> crate::Result<Self> {
+        match value {
+            None => Ok(Self::Auto),
+            Some(1) => Ok(Self::V4_1),
+            Some(2) => Ok(Self::V4_2),
+            _ => Err(crate::Error::client(0, libc::EINVAL as u32)),
+        }
+    }
+}
 
 /// Independent NFS sessions for caller-distributed parallel workloads.
 /// Cloning a single [`NfsClient`] shares one lock; pool members do not.
@@ -63,6 +87,7 @@ impl Nfs {
     pub fn builder(host: impl Into<String>) -> NfsBuilder {
         NfsBuilder {
             inner: NfsClientBuilder::new(host),
+            limits: ResourceLimits::default(),
         }
     }
 
@@ -75,6 +100,7 @@ impl Nfs {
 #[derive(Debug, Clone)]
 pub struct NfsBuilder {
     inner: NfsClientBuilder,
+    limits: ResourceLimits,
 }
 
 impl NfsBuilder {
@@ -84,11 +110,12 @@ impl NfsBuilder {
         {
             Ok(Self {
                 inner: NfsClientBuilder::from_mount(path)?,
+                limits: ResourceLimits::default(),
             })
         }
         #[cfg(not(target_os = "linux"))]
         {
-            Err(crate::VfError::client(0, libc::EOPNOTSUPP as u32)
+            Err(crate::Error::client(0, libc::EOPNOTSUPP as u32)
                 .with_context("from_mount requires Linux", path.as_ref()))
         }
     }
@@ -98,8 +125,12 @@ impl NfsBuilder {
         self
     }
 
-    pub fn minor_version(mut self, version: Option<u32>) -> Self {
-        self.inner = self.inner.minor_version(version);
+    pub fn version(mut self, version: NfsVersion) -> Self {
+        self.inner = self.inner.minor_version(match version {
+            NfsVersion::Auto => None,
+            NfsVersion::V4_1 => Some(1),
+            NfsVersion::V4_2 => Some(2),
+        });
         self
     }
 
@@ -144,11 +175,20 @@ impl NfsBuilder {
     }
 
     pub fn connect(self) -> VfResult<NfsClient> {
-        self.inner.connect().map(FsClient::new)
+        self.inner
+            .connect()
+            .map(|backend| FsClient::new(backend).with_limits(self.limits))
     }
 
     pub fn connect_backend(self) -> VfResult<NfsVecFs> {
         self.inner.connect()
+    }
+
+    /// Defaults for connected clients. Read pools instead use their supplied
+    /// `NfsReadPoolOptions`, which bound concurrency and outstanding buffers.
+    pub fn limits(mut self, limits: ResourceLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Connect 1–64 independent clients. Distribute separate vector cohorts
@@ -158,7 +198,7 @@ impl NfsBuilder {
             .inner
             .connect_pool(size)?
             .into_iter()
-            .map(FsClient::new)
+            .map(|backend| FsClient::new(backend).with_limits(self.limits))
             .collect();
         Ok(NfsClientPool {
             inner: Arc::new(NfsClientPoolInner {

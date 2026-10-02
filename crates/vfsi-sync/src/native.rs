@@ -9,6 +9,35 @@ use crate::*;
 /// Core synchronous scalar filesystem operations.
 pub trait FileSystem {
     fn capabilities(&self) -> Capabilities;
+    /// Read a complete opened file with a logical payload limit. Specialized backends
+    /// override this to share their optimized vector whole-file path.
+    fn read_file(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
+        let mut output = Vec::new();
+        loop {
+            let remaining = max_bytes.saturating_sub(output.len());
+            let request = ReadOp::new(
+                file.clone(),
+                VfOffset::At(output.len() as u64),
+                remaining.clamp(1, 1024 * 1024),
+            );
+            let result = self.read_one(&request)?;
+            validate_read_results(
+                "read_file",
+                std::slice::from_ref(&request),
+                std::slice::from_ref(&result),
+            )?;
+            if result.data.len() > remaining {
+                return Err(VfError::client(0, libc::EFBIG as u32));
+            }
+            if result.data.is_empty() && !result.eof {
+                return Err(VfError::client(0, ERR_IO));
+            }
+            output.extend_from_slice(&result.data);
+            if result.eof {
+                return Ok(output);
+            }
+        }
+    }
     fn open_one(&mut self, request: &OpenRequest) -> VfResult<VfFile>;
     fn close_one(&mut self, file: &VfFile) -> VfResult<()>;
     fn sync_data(&mut self, file: &VfFile) -> VfResult<()>;
@@ -190,6 +219,26 @@ fn metadata_mask() -> AttrMask {
 impl<T: VecFs + ?Sized> FileSystem for T {
     fn capabilities(&self) -> Capabilities {
         self.typed_capabilities()
+    }
+
+    fn read_file(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
+        self.read_allv_with_options(
+            std::slice::from_ref(file),
+            ReadAllOptions::new().max_total_bytes(max_bytes),
+        )
+        .and_then(|mut results| {
+            if results.len() != 1 {
+                return Err(VfError::transport(
+                    None,
+                    "read_file backend returned an invalid result count",
+                ));
+            }
+            let data = results.pop().expect("validated result count");
+            if data.len() > max_bytes {
+                return Err(VfError::client(0, libc::EFBIG as u32));
+            }
+            Ok(data)
+        })
     }
 
     fn open_one(&mut self, request: &OpenRequest) -> VfResult<VfFile> {
@@ -524,6 +573,6 @@ mod tests {
             OpenRequest::new("/invalid", OpenFlags::empty()),
         ])
         .unwrap_err();
-        assert_eq!(error.index_opt(), Some(1));
+        assert_eq!(error.index(), Some(1));
     }
 }

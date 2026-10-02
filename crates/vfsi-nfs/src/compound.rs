@@ -1233,6 +1233,13 @@ pub static COMPOUND_MAX_OPS: AtomicU64 = AtomicU64::new(0);
 pub static RPC_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static RPC_TIME_US: AtomicU64 = AtomicU64::new(0);
 
+static BYTE_STATS_ENABLED: OnceLock<bool> = OnceLock::new();
+
+/// Whether exact byte telemetry was enabled before the first compound.
+pub fn compound_byte_stats_enabled() -> bool {
+    BYTE_STATS_ENABLED.get().copied().unwrap_or(false)
+}
+
 fn compound_stats_record(args: &COMPOUND4args) {
     let ops = args.argarray.argarray_len as u64;
     COMPOUND_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -1261,7 +1268,6 @@ fn compound_stats_record(args: &COMPOUND4args) {
     // Exact size accounting requires a second XDR encode. Keep that expensive
     // diagnostic out of the normal I/O path; VNFS_STATS is an opt-in process
     // setting and must be present before the first compound is sent.
-    static BYTE_STATS_ENABLED: OnceLock<bool> = OnceLock::new();
     let byte_stats_enabled =
         *BYTE_STATS_ENABLED.get_or_init(|| std::env::var("VNFS_STATS").as_deref() == Ok("1"));
     if !byte_stats_enabled {

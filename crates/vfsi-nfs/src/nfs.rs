@@ -542,7 +542,7 @@ enum MergedIoMode {
 }
 
 fn remap_descriptor_chunk_error(error: VfError, start: usize, owners: &[usize]) -> VfError {
-    error.index_opt().map_or(error.clone(), |local_index| {
+    error.index().map_or(error.clone(), |local_index| {
         let chunk_index = start.saturating_add(local_index);
         let index = owners.get(chunk_index).copied().unwrap_or(chunk_index);
         error.with_index(index)
@@ -550,11 +550,7 @@ fn remap_descriptor_chunk_error(error: VfError, start: usize, owners: &[usize]) 
 }
 
 fn remap_active_error(error: VfError, active: &[usize]) -> VfError {
-    match error
-        .index_opt()
-        .and_then(|index| active.get(index))
-        .copied()
-    {
+    match error.index().and_then(|index| active.get(index)).copied() {
         Some(original) => error.with_index(original),
         None => error,
     }
@@ -5985,16 +5981,16 @@ mod tests {
         // belongs to caller 0, rather than caller 1.
         let owners = [0, 0, 1];
         let error = remap_descriptor_chunk_error(VfError::failure(1, ERR_EBADF), 0, &owners);
-        assert_eq!(error.index_opt(), Some(0));
+        assert_eq!(error.index(), Some(0));
     }
 
     #[test]
     fn read_all_round_remaps_failures_and_rejects_zero_progress() {
         let active = [2, 5];
         let remapped = remap_active_error(VfError::failure(0, ERR_IO), &active);
-        assert_eq!(remapped.index_opt(), Some(2));
+        assert_eq!(remapped.index(), Some(2));
         let remapped = remap_active_error(VfError::failure(1, ERR_IO), &active);
-        assert_eq!(remapped.index_opt(), Some(5));
+        assert_eq!(remapped.index(), Some(5));
 
         let mut out = vec![Vec::new(); 6];
         let mut offsets = vec![0; 6];
@@ -6008,7 +6004,7 @@ mod tests {
             merge_read_allv_round(&[5], &stalled, &mut out, &mut offsets, &mut 0, usize::MAX)
                 .unwrap_err();
         assert!(error.is_transport());
-        assert_eq!(error.index_opt(), Some(5));
+        assert_eq!(error.index(), Some(5));
     }
 
     #[test]
@@ -6131,10 +6127,10 @@ mod tests {
     fn adb_offset_overflow_preserves_request_index() {
         let pattern = Adb::blocknum_only("/overflow", u64::MAX, 2, 2, 0, 0);
         let error = adb_block_base(&pattern, 1, 4).unwrap_err();
-        assert_eq!(error.index_opt(), Some(4));
+        assert_eq!(error.index(), Some(4));
         assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
         let error = adb_field_offset(u64::MAX, 1, 5).unwrap_err();
-        assert_eq!(error.index_opt(), Some(5));
+        assert_eq!(error.index(), Some(5));
     }
 
     #[test]

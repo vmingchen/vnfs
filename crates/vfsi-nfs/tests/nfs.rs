@@ -300,10 +300,10 @@ fn short_write_failure_does_not_dispatch_a_later_file() {
         assert!(script.is_consumed());
         if transport {
             assert!(error.is_transport());
-            assert_eq!(error.index_opt(), None);
+            assert_eq!(error.index(), None);
         } else {
             assert_eq!(error.err_no(), libc::ENOSPC as u32);
-            assert_eq!(error.index_opt(), Some(0));
+            assert_eq!(error.index(), Some(0));
         }
         assert_eq!(first_cursor, per as i64);
         assert!(

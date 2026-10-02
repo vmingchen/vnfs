@@ -795,7 +795,7 @@ pub trait VecFs {
                 budget -= length;
             }
             let results = self.readv(&reads).map_err(|error| {
-                error.index_opt().map_or(error.clone(), |local_index| {
+                error.index().map_or(error.clone(), |local_index| {
                     batch_indices
                         .get(local_index)
                         .copied()
@@ -803,7 +803,7 @@ pub trait VecFs {
                 })
             })?;
             validate_read_results("read_streamv", &reads, &results).map_err(|error| {
-                error.index_opt().map_or(error.clone(), |local_index| {
+                error.index().map_or(error.clone(), |local_index| {
                     batch_indices
                         .get(local_index)
                         .copied()

@@ -19,6 +19,102 @@ use crate::{
 /// Default aggregate payload limit for owned vector reads.
 pub const DEFAULT_READV_MAX_TOTAL_BYTES: usize = DEFAULT_READ_MAX_BYTES;
 
+/// Application result for one positional vector read, in request order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FsReadResult {
+    pub offset: u64,
+    pub data: Vec<u8>,
+    pub eof: bool,
+}
+
+impl From<ReadResult> for FsReadResult {
+    fn from(result: ReadResult) -> Self {
+        Self {
+            offset: result.offset,
+            data: result.data,
+            eof: result.eof,
+        }
+    }
+}
+
+/// Application result for one read into caller storage, in request order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsReadIntoResult {
+    pub offset: u64,
+    pub read: usize,
+    pub eof: bool,
+}
+
+/// Application result for one positional vector write, in request order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FsWriteResult {
+    pub offset: u64,
+    pub written: usize,
+    pub stable: bool,
+}
+
+impl From<WriteResult> for FsWriteResult {
+    fn from(result: WriteResult) -> Self {
+        Self {
+            offset: result.offset,
+            written: result.written,
+            stable: result.stable,
+        }
+    }
+}
+
+/// Completion of a streaming read. Stopping does not mean EOF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamCompletion {
+    Complete,
+    Stopped { next_offset: u64 },
+}
+
+/// Completion of a callback-based directory traversal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraversalCompletion {
+    Complete,
+    Stopped,
+}
+
+/// Default resource policy for a client. Per-call options override it.
+/// Byte limits bound logical payload, not allocator capacity or RPC overhead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResourceLimits {
+    pub max_read_bytes: usize,
+    pub stream_chunk_bytes: usize,
+    pub max_directory_entries: usize,
+    pub max_directory_path_bytes: usize,
+    pub max_walk_depth: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self {
+            max_read_bytes: DEFAULT_READ_MAX_BYTES,
+            stream_chunk_bytes: crate::DEFAULT_READ_STREAM_CHUNK_BYTES,
+            max_directory_entries: crate::DEFAULT_DIRECTORY_MAX_ENTRIES,
+            max_directory_path_bytes: crate::DEFAULT_DIRECTORY_MAX_PATH_BYTES,
+            max_walk_depth: crate::DEFAULT_WALK_MAX_DEPTH,
+        }
+    }
+}
+
+impl ResourceLimits {
+    pub fn directory_options(self) -> ReadDirOptions {
+        ReadDirOptions::new()
+            .max_entries(self.max_directory_entries)
+            .max_path_bytes(self.max_directory_path_bytes)
+    }
+
+    pub fn walk_options(self) -> crate::WalkOptions {
+        crate::WalkOptions::new()
+            .max_entries(self.max_directory_entries)
+            .max_path_bytes(self.max_directory_path_bytes)
+            .max_depth(self.max_walk_depth)
+    }
+}
+
 /// One directory and its entries, with attributes fetched during enumeration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DirectoryListing {
@@ -42,14 +138,18 @@ fn wrong_result_count(operation: &str, expected: usize, actual: usize) -> VfErro
 }
 
 /// Cloneable owner of one synchronous backend connection.
+/// Clones share a mutex and serialize backend calls; use separate connections
+/// for parallel RPCs. Explicitly close handles to observe cleanup failures.
 pub struct FsClient<F> {
     inner: Arc<Mutex<F>>,
+    limits: ResourceLimits,
 }
 
 impl<F> Clone for FsClient<F> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            limits: self.limits,
         }
     }
 }
@@ -64,7 +164,19 @@ impl<F> FsClient<F> {
     pub fn new(filesystem: F) -> Self {
         Self {
             inner: Arc::new(Mutex::new(filesystem)),
+            limits: ResourceLimits::default(),
         }
+    }
+
+    /// Configure this client view and its future clones. Existing clones keep
+    /// their policy; all views still share the same connection and ownership.
+    pub fn with_limits(mut self, limits: ResourceLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    pub fn limits(&self) -> ResourceLimits {
+        self.limits
     }
 
     fn lock(&self) -> VfResult<std::sync::MutexGuard<'_, F>> {
@@ -77,12 +189,18 @@ impl<F> FsClient<F> {
                 Ok(filesystem) => Ok(filesystem),
                 Err(poisoned) => Ok(poisoned.into_inner()),
             },
-            Err(inner) => Err(Self { inner }),
+            Err(inner) => Err(Self {
+                inner,
+                limits: self.limits,
+            }),
         }
     }
 }
 
 impl<F: FileSystem> FsClient<F> {
+    pub fn capabilities(&self) -> VfResult<Capabilities> {
+        Ok(self.lock()?.capabilities())
+    }
     /// Open a path read-only.
     pub fn open(&self, path: impl AsRef<Path>) -> VfResult<FsFile<F>> {
         self.open_with(OpenRequest::new(path.as_ref(), OpenFlags::READ))
@@ -109,7 +227,7 @@ impl<F: FileSystem> FsClient<F> {
     }
 
     pub fn read(&self, path: impl AsRef<Path>) -> VfResult<Vec<u8>> {
-        self.read_with_limit(path, DEFAULT_READ_MAX_BYTES)
+        self.read_with_limit(path, self.limits.max_read_bytes)
     }
 
     /// Read one complete file while limiting the returned allocation.
@@ -118,31 +236,26 @@ impl<F: FileSystem> FsClient<F> {
     /// should not be held in one allocation.
     pub fn read_with_limit(&self, path: impl AsRef<Path>, max_bytes: usize) -> VfResult<Vec<u8>> {
         let path = path.as_ref();
-        let mut file = self.open(path)?;
-        let mut output = Vec::new();
-        let mut chunk = vec![0; 64 * 1024];
-        loop {
-            let remaining = max_bytes.saturating_sub(output.len());
-            let request = if remaining == 0 {
-                1
-            } else {
-                remaining.min(chunk.len())
-            };
-            let read = file.read_native(&mut chunk[..request])?;
-            if read == 0 {
-                break;
-            }
-            if read > remaining {
-                return Err(VfError::failure(0, libc::EFBIG as u32).with_context("read", path));
-            }
-            output.extend_from_slice(&chunk[..read]);
-        }
-        file.close()?;
-        Ok(output)
+        let file = self.open(path)?;
+        let operation = self
+            .lock()?
+            .read_file(file.raw()?, max_bytes)
+            .map_err(|error| error.with_context("read", path))
+            .and_then(|data| {
+                if data.len() > max_bytes {
+                    Err(VfError::client(0, libc::EFBIG as u32).with_context("read", path))
+                } else {
+                    Ok(data)
+                }
+            });
+        // Owned cleanup retries once through Drop on close failure, and keeps
+        // the read error primary when both read and close fail.
+        let cleanup = file.close();
+        operation.and_then(|data| cleanup.map(|()| data))
     }
 
     pub fn read_to_string(&self, path: impl AsRef<Path>) -> VfResult<String> {
-        self.read_to_string_with_limit(path, DEFAULT_READ_MAX_BYTES)
+        self.read_to_string_with_limit(path, self.limits.max_read_bytes)
     }
 
     /// Read one complete UTF-8 file with a caller-selected allocation limit.
@@ -183,8 +296,12 @@ impl<F: FileSystem> FsClient<F> {
         &self,
         path: impl AsRef<Path>,
         callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
-    ) -> VfResult<()> {
-        self.read_stream_with_options(path, ReadStreamOptions::default(), callback)
+    ) -> VfResult<StreamCompletion> {
+        self.read_stream_with_options(
+            path,
+            ReadStreamOptions::new().chunk_size(self.limits.stream_chunk_bytes),
+            callback,
+        )
     }
 
     /// Stream one file using an explicit maximum chunk size.
@@ -193,7 +310,7 @@ impl<F: FileSystem> FsClient<F> {
         path: impl AsRef<Path>,
         options: ReadStreamOptions,
         mut callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
-    ) -> VfResult<()> {
+    ) -> VfResult<StreamCompletion> {
         let chunk_size = options.chunk_size_bytes();
         if chunk_size == 0 {
             return Err(VfError::failure(0, crate::ERR_INVAL));
@@ -201,7 +318,7 @@ impl<F: FileSystem> FsClient<F> {
 
         let file = self.open(path)?;
         let raw_file = file.raw()?.clone();
-        let operation = (|| -> VfResult<()> {
+        let operation = (|| -> VfResult<StreamCompletion> {
             let mut offset = 0u64;
             loop {
                 let request = ReadOp::at(raw_file.clone(), offset, chunk_size);
@@ -217,10 +334,14 @@ impl<F: FileSystem> FsClient<F> {
                 };
                 let length = result.data.len();
                 if !result.data.is_empty() && !callback(offset, &result.data)? {
-                    return Ok(());
+                    return Ok(StreamCompletion::Stopped {
+                        next_offset: offset
+                            .checked_add(length as u64)
+                            .ok_or_else(|| VfError::client(0, crate::ERR_INVAL))?,
+                    });
                 }
                 if result.eof {
-                    return Ok(());
+                    return Ok(StreamCompletion::Complete);
                 }
                 offset = offset
                     .checked_add(length as u64)
@@ -230,7 +351,7 @@ impl<F: FileSystem> FsClient<F> {
         let close = file.close();
         match operation {
             Err(error) => Err(error),
-            Ok(()) => close,
+            Ok(completion) => close.map(|()| completion),
         }
     }
 }
@@ -264,7 +385,7 @@ impl<F: DirectoryFileSystem> FsClient<F> {
     }
 
     pub fn read_dir(&self, path: impl AsRef<Path>) -> VfResult<Vec<DirEntry>> {
-        self.read_dir_with_options(path, ReadDirOptions::default())
+        self.read_dir_with_options(path, self.limits.directory_options())
     }
 
     /// Read one directory with explicit entry and path-storage limits.
@@ -283,7 +404,7 @@ impl<F: DirectoryFileSystem> FsClient<F> {
         path: impl AsRef<Path>,
         callback: impl FnMut(DirEntry) -> VfResult<bool>,
     ) -> VfResult<()> {
-        self.visit_dir_with_options(path, ReadDirOptions::default(), callback)
+        self.visit_dir_with_options(path, self.limits.directory_options(), callback)
     }
 
     /// Visit entries with explicit entry and cumulative path-byte limits.
@@ -439,16 +560,121 @@ impl<F: NamespaceFileSystem + MetadataFileSystem> FsClient<F> {
 }
 
 impl<F: VecFs> FsClient<F> {
+    /// Visit a tree using bounded directory pages,
+    /// never follows symlinks, and invokes the callback outside the backend
+    /// lock. Unlike collecting `walk`, this trades multi-directory batching
+    /// for bounded incremental delivery. A backend without native paging
+    /// may retain one bounded listing; finish its pages before descending,
+    /// so snapshots never accumulate across ancestor directories.
+    /// `false` stops successfully.
+    pub fn visit_walk(
+        &self,
+        root: impl AsRef<Path>,
+        callback: impl FnMut(&DirEntry) -> VfResult<bool>,
+    ) -> VfResult<TraversalCompletion> {
+        self.visit_walk_with_options(root, self.limits.walk_options(), callback)
+    }
+
+    pub fn visit_walk_with_options(
+        &self,
+        root: impl AsRef<Path>,
+        options: crate::WalkOptions,
+        callback: impl FnMut(&DirEntry) -> VfResult<bool>,
+    ) -> VfResult<TraversalCompletion> {
+        let root = root.as_ref();
+        if !self.symlink_metadata(root)?.is_dir() {
+            return Err(VfError::client(0, crate::ERR_NOTDIR).with_context("visit_walk", root));
+        }
+        visit_walk_pages(
+            root,
+            options,
+            |path, cursor, page_size, max_entries| {
+                self.lock()?
+                    .read_dir_page(path, cursor, page_size, max_entries)
+            },
+            callback,
+        )
+    }
     /// List several directories with common stat attributes and finite
     /// allocation limits. Use `read_dirs_with_options` for richer fields.
     pub fn read_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<DirectoryListing>> {
-        self.read_dirs_with_options(paths, AttrMask::stat(), ReadDirOptions::default())
+        self.read_dirs_with_options(paths, AttrMask::stat(), self.limits.directory_options())
     }
+}
 
+type DirectoryPage = (Vec<DirEntry>, Option<crate::DirPageCursor>);
+
+fn visit_walk_pages(
+    root: &Path,
+    options: crate::WalkOptions,
+    mut read_page: impl FnMut(
+        &Path,
+        Option<crate::DirPageCursor>,
+        usize,
+        usize,
+    ) -> VfResult<DirectoryPage>,
+    mut callback: impl FnMut(&DirEntry) -> VfResult<bool>,
+) -> VfResult<TraversalCompletion> {
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    let mut count = 0usize;
+    let mut path_bytes = root.as_os_str().len();
+    if path_bytes > options.path_byte_limit() {
+        return Err(VfError::client(0, libc::EFBIG as u32));
+    }
+    while let Some((path, depth)) = pending.pop() {
+        let mut cursor = None;
+        let mut children = Vec::new();
+        loop {
+            let requested = options
+                .entry_limit()
+                .saturating_sub(count)
+                .saturating_add(1);
+            let (entries, next) = read_page(&path, cursor, requested.min(128), requested)?;
+            if entries.is_empty() && next.is_some() {
+                return Err(VfError::transport(None, "directory page made no progress")
+                    .with_context("visit_walk", &path));
+            }
+            for entry in entries {
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| VfError::client(0, libc::EFBIG as u32))?;
+                path_bytes = path_bytes
+                    .checked_add(entry.path().as_os_str().len())
+                    .ok_or_else(|| VfError::client(0, libc::EFBIG as u32))?;
+                if count > options.entry_limit() || path_bytes > options.path_byte_limit() {
+                    return Err(
+                        VfError::client(0, libc::EFBIG as u32).with_context("visit_walk", &path)
+                    );
+                }
+                if !callback(&entry)? {
+                    return Ok(TraversalCompletion::Stopped);
+                }
+                if entry.metadata().is_dir() {
+                    if depth >= options.depth_limit() {
+                        if !options.truncates_at_depth_limit() {
+                            return Err(VfError::client(0, libc::EFBIG as u32)
+                                .with_context("visit_walk", entry.path()));
+                        }
+                    } else {
+                        children.push((entry.path().to_path_buf(), depth + 1));
+                    }
+                }
+            }
+            cursor = next;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        pending.extend(children.into_iter().rev());
+    }
+    Ok(TraversalCompletion::Complete)
+}
+
+impl<F: VecFs> FsClient<F> {
     /// Recursively enumerate a bounded tree with common stat attributes.
     /// Use `walk_with_options` to select fields or change limits.
     pub fn walk(&self, root: impl AsRef<Path>) -> VfResult<Vec<DirectoryListing>> {
-        self.walk_with_options(root, AttrMask::stat(), crate::WalkOptions::default())
+        self.walk_with_options(root, AttrMask::stat(), self.limits.walk_options())
     }
 
     /// Create `path` if missing, otherwise empty it. Errors if it exists and is
@@ -506,23 +732,6 @@ impl<F: VecFs> FsClient<F> {
             path: path.to_path_buf(),
         })
     }
-
-    /// Open a low-level directory token. Only `VfDir::Descriptor` is
-    /// handle-rooted; path-only backends return `VfDir::Path`. Prefer
-    /// [`open_dir_handle`](Self::open_dir_handle) when safety matters.
-    pub fn open_dir(&self, path: impl AsRef<Path>) -> VfResult<VfDir> {
-        self.lock()?.open_dir(path.as_ref())
-    }
-
-    /// Remove the contents of a directory handle, keeping the directory.
-    pub fn remove_dir_contents_handle(&self, dir: &VfDir) -> VfResult<()> {
-        self.lock()?.rm_dir_contents(dir)
-    }
-
-    /// Release a handle from [`open_dir`](Self::open_dir).
-    pub fn close_dir(&self, dir: &VfDir) -> VfResult<()> {
-        self.lock()?.close_dir(dir)
-    }
 }
 
 /// Owned, handle-rooted directory. Dropping it releases backend state;
@@ -543,6 +752,10 @@ impl<F: VecFs> fmt::Debug for FsDir<F> {
 }
 
 impl<F: VecFs> FsDir<F> {
+    pub fn is_closed(&self) -> bool {
+        self.dir.is_none()
+    }
+    /// Name used at open, retained for diagnostics; not updated after rename.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -564,10 +777,14 @@ impl<F: VecFs> FsDir<F> {
     }
 
     pub fn close(mut self) -> VfResult<()> {
-        let dir = self
-            .dir
-            .as_ref()
-            .ok_or_else(|| VfError::client(0, crate::ERR_EBADF))?;
+        self.try_close()
+    }
+
+    /// Keep cleanup ownership on failure so the caller can retry explicitly.
+    pub fn try_close(&mut self) -> VfResult<()> {
+        let Some(dir) = self.dir.as_ref() else {
+            return Ok(());
+        };
         self.inner.lock().map_err(|_| poisoned())?.close_dir(dir)?;
         self.dir = None;
         Ok(())
@@ -799,7 +1016,7 @@ impl<F: VecFs> FsClient<F> {
             .collect();
         self.lock()?.copyv(&extents).map_err(|error| {
             error
-                .index_opt()
+                .index()
                 .and_then(|index| pairs.get(index))
                 .map_or(error.clone(), |(_, to)| {
                     error.with_context("copy_files", to.as_ref())
@@ -825,7 +1042,7 @@ impl<F: VecFs> FsClient<F> {
             .rm_with_options(&paths, recursive, options)
             .map_err(|error| {
                 error
-                    .index_opt()
+                    .index()
                     .and_then(|index| paths.get(index))
                     .map_or(error.clone(), |path| {
                         error.with_context("remove_paths", path)
@@ -846,7 +1063,7 @@ impl<F: VecFs> FsClient<F> {
             .collect();
         self.lock()?.lgetattrsv(&mut attrs).map_err(|error| {
             error
-                .index_opt()
+                .index()
                 .and_then(|index| paths.get(index))
                 .map_or(error.clone(), |path| {
                     error.with_context("symlink_metadatav", path)
@@ -866,7 +1083,7 @@ impl<F: VectorFileSystem> FsClient<F> {
         let mut filesystem = self.lock()?;
         let files = filesystem.open_many(requests).map_err(|error| {
             error
-                .index_opt()
+                .index()
                 .and_then(|index| requests.get(index))
                 .map_or(error.clone(), |request| {
                     error.with_context("openv", &request.path)
@@ -894,9 +1111,22 @@ impl<F: VectorFileSystem> FsClient<F> {
     /// Try to close a group through one vector operation without consuming
     /// the handles. On failure, all handles remain armed: the backend may
     /// have closed a prefix, so callers must reconcile before retrying.
-    pub fn try_closev(&self, files: &mut [FsFile<F>]) -> VfResult<()> {
+    pub fn try_closev<'a>(&self, files: impl IntoIterator<Item = &'a mut FsFile<F>>) -> VfResult<()>
+    where
+        F: 'a,
+    {
+        let mut files: Vec<_> = files.into_iter().collect();
         for (index, file) in files.iter().enumerate() {
             self.validate_owner(file, index)?;
+        }
+        let positions: Vec<_> = files
+            .iter()
+            .enumerate()
+            .filter_map(|(index, file)| (!file.is_closed()).then_some(index))
+            .collect();
+        files.retain(|file| !file.is_closed());
+        if files.is_empty() {
+            return Ok(());
         }
         let descriptors: Vec<VfFile> = files
             .iter()
@@ -904,13 +1134,14 @@ impl<F: VectorFileSystem> FsClient<F> {
             .collect::<VfResult<_>>()?;
         self.lock()?.close_many(&descriptors).map_err(|error| {
             error
-                .index_opt()
+                .index()
                 .and_then(|index| files.get(index))
                 .map_or(error.clone(), |file| {
                     error.with_context("closev", file.path())
                 })
+                .map_index(|index| positions.get(index).copied().unwrap_or(index))
         })?;
-        for file in files.iter_mut() {
+        for file in &mut files {
             file.file = None;
         }
         Ok(())
@@ -928,8 +1159,8 @@ impl<F: VectorFileSystem> FsClient<F> {
     /// Read an ordered vector with a 16 MiB aggregate request limit.
     /// Use [`readv_with_limit`](Self::readv_with_limit) to tune the limit or
     /// [`readv_into`](Self::readv_into) to provide bounded caller-owned buffers.
-    pub fn readv(&self, requests: &[FsRead<'_, F>]) -> VfResult<Vec<ReadResult>> {
-        self.readv_with_limit(requests, DEFAULT_READV_MAX_TOTAL_BYTES)
+    pub fn readv(&self, requests: &[FsRead<'_, F>]) -> VfResult<Vec<FsReadResult>> {
+        self.readv_with_limit(requests, self.limits.max_read_bytes)
     }
 
     /// Read an ordered vector with an explicit aggregate request limit.
@@ -937,7 +1168,7 @@ impl<F: VectorFileSystem> FsClient<F> {
         &self,
         requests: &[FsRead<'_, F>],
         max_total_bytes: usize,
-    ) -> VfResult<Vec<ReadResult>> {
+    ) -> VfResult<Vec<FsReadResult>> {
         let mut requested = 0usize;
         for (index, request) in requests.iter().enumerate() {
             requested = requested
@@ -951,7 +1182,7 @@ impl<F: VectorFileSystem> FsClient<F> {
         let reads = self.read_ops(requests)?;
         let results = self.lock()?.read_many(&reads).map_err(|error| {
             error
-                .index_opt()
+                .index()
                 .and_then(|index| requests.get(index))
                 .map_or(error.clone(), |request| {
                     error.with_context("readv", request.file.path())
@@ -962,13 +1193,13 @@ impl<F: VectorFileSystem> FsClient<F> {
         }
         validate_read_results("readv", &reads, &results).map_err(|error| {
             error
-                .index_opt()
+                .index()
                 .and_then(|index| requests.get(index))
                 .map_or(error.clone(), |request| {
                     error.with_context("readv", request.file.path())
                 })
         })?;
-        Ok(results)
+        Ok(results.into_iter().map(FsReadResult::from).collect())
     }
 
     fn read_ops(&self, requests: &[FsRead<'_, F>]) -> VfResult<Vec<ReadOp>> {
@@ -984,10 +1215,30 @@ impl<F: VectorFileSystem> FsClient<F> {
         Ok(reads)
     }
 
-    pub fn readv_into(&self, requests: &mut [FsReadInto<'_, F>]) -> VfResult<Vec<usize>> {
+    pub fn readv_into(
+        &self,
+        requests: &mut [FsReadInto<'_, F>],
+    ) -> VfResult<Vec<FsReadIntoResult>> {
+        self.readv_into_with_limit(requests, self.limits.max_read_bytes)
+    }
+
+    /// Read into caller storage with an explicit aggregate buffer budget.
+    /// This also bounds allocation in copying fallback implementations.
+    pub fn readv_into_with_limit(
+        &self,
+        requests: &mut [FsReadInto<'_, F>],
+        max_bytes: usize,
+    ) -> VfResult<Vec<FsReadIntoResult>> {
+        let mut requested = 0usize;
         let mut reads = Vec::with_capacity(requests.len());
         for (index, request) in requests.iter().enumerate() {
             self.validate_owner(request.file, index)?;
+            requested = requested
+                .checked_add(request.buffer.len())
+                .ok_or_else(|| VfError::client(index, libc::EFBIG as u32))?;
+            if requested > max_bytes {
+                return Err(VfError::client(index, libc::EFBIG as u32));
+            }
             reads.push(ReadOp::new(
                 request.file.raw()?.clone(),
                 request.offset,
@@ -1003,7 +1254,7 @@ impl<F: VectorFileSystem> FsClient<F> {
         }
         .map_err(|error| {
             error
-                .index_opt()
+                .index()
                 .and_then(|index| requests.get(index))
                 .map_or(error.clone(), |request| {
                     error.with_context("readv_into", request.file.path())
@@ -1011,20 +1262,27 @@ impl<F: VectorFileSystem> FsClient<F> {
         })?;
         validate_read_into_results("readv_into", &reads, &results).map_err(|error| {
             error
-                .index_opt()
+                .index()
                 .and_then(|index| requests.get(index))
                 .map_or(error.clone(), |request| {
                     error.with_context("readv_into", request.file.path())
                 })
         })?;
-        Ok(results.into_iter().map(|result| result.read).collect())
+        Ok(results
+            .into_iter()
+            .map(|result| FsReadIntoResult {
+                offset: result.offset,
+                read: result.read,
+                eof: result.eof,
+            })
+            .collect())
     }
 
-    pub fn writev(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<WriteResult>> {
+    pub fn writev(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
         let writes = self.write_ops(requests)?;
         let results = self.lock()?.write_many(&writes).map_err(|error| {
             error
-                .index_opt()
+                .index()
                 .and_then(|index| requests.get(index))
                 .map_or(error.clone(), |request| {
                     error.with_context("writev", request.file.path())
@@ -1035,13 +1293,13 @@ impl<F: VectorFileSystem> FsClient<F> {
         }
         validate_write_results("writev", &writes, &results).map_err(|error| {
             error
-                .index_opt()
+                .index()
                 .and_then(|index| requests.get(index))
                 .map_or(error.clone(), |request| {
                     error.with_context("writev", request.file.path())
                 })
         })?;
-        Ok(results)
+        Ok(results.into_iter().map(FsWriteResult::from).collect())
     }
 
     /// Write every byte in each positional request, retrying short writes in
@@ -1049,7 +1307,7 @@ impl<F: VectorFileSystem> FsClient<F> {
     /// follow a successfully written prefix. Overlapping requests through the
     /// same path complete in input order; different paths are presumed
     /// independent (including hard-link aliases).
-    pub fn write_allv(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<WriteResult>> {
+    pub fn write_allv(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
         // Validate the entire batch before writing any prefix. In particular,
         // empty requests must not conceal a foreign or already-closed file.
         let mut prior_by_path: HashMap<&Path, Vec<(usize, u64, u64)>> = HashMap::new();
@@ -1133,8 +1391,7 @@ impl<F: VectorFileSystem> FsClient<F> {
                     return Err(VfError::client(index, crate::ERR_INVAL)
                         .with_context("write_allv", request.file.path()));
                 };
-                Ok(WriteResult {
-                    file: request.file.raw()?.clone(),
+                Ok(FsWriteResult {
                     offset,
                     written: totals[index],
                     stable: stable[index],
@@ -1173,7 +1430,10 @@ impl<F: VectorFileSystem + VecFs> FsClient<F> {
     /// different limit, or stream large files instead. This is not a snapshot
     /// or an atomic operation across files.
     pub fn read_files<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<Vec<u8>>> {
-        self.read_files_with_options(paths, ReadAllOptions::default())
+        self.read_files_with_options(
+            paths,
+            ReadAllOptions::new().max_total_bytes(self.limits.max_read_bytes),
+        )
     }
 
     /// Read several complete files with an explicit aggregate allocation limit.
@@ -1191,7 +1451,7 @@ impl<F: VectorFileSystem + VecFs> FsClient<F> {
             .read_allv_with_options(&files, options)
             .map_err(|error| {
                 error
-                    .index_opt()
+                    .index()
                     .and_then(|index| paths.get(index))
                     .map_or(error.clone(), |path| {
                         error.with_context("read_files", path.as_ref())
@@ -1415,6 +1675,10 @@ impl<F: FileSystem> fmt::Debug for FsFile<F> {
 }
 
 impl<F: FileSystem> FsFile<F> {
+    /// Whether explicit close has completed successfully on this handle.
+    pub fn is_closed(&self) -> bool {
+        self.file.is_none()
+    }
     fn raw(&self) -> VfResult<&VfFile> {
         self.file
             .as_ref()
@@ -1439,6 +1703,9 @@ impl<F: FileSystem> FsFile<F> {
         }
     }
 
+    /// Name used at open, retained for diagnostics; not a current namespace
+    /// lookup or proof of identity. Handle operations continue to use the
+    /// opened object even if its pathname changes.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -1646,6 +1913,109 @@ impl<F: FileSystem> Drop for FsFile<F> {
             && let Ok(mut filesystem) = self.inner.lock()
         {
             let _ = filesystem.close_one(&file);
+        }
+    }
+}
+
+#[cfg(test)]
+mod traversal_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // The generic listdir_page fallback's cursor owns the full unconsumed
+    // listing, not just its next page. Count these retained allocations.
+    struct Snapshot {
+        remaining: std::vec::IntoIter<DirEntry>,
+        live: Arc<AtomicUsize>,
+    }
+    impl Drop for Snapshot {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    fn snapshot_pages(
+        live: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    ) -> impl FnMut(&Path, Option<crate::DirPageCursor>, usize, usize) -> VfResult<DirectoryPage>
+    {
+        move |path, cursor, page_size, max_entries| {
+            let mut snapshot = match cursor {
+                Some(cursor) => cursor.into_state::<Snapshot>()?,
+                None => {
+                    let depth = path.components().count();
+                    let entries = (0..129)
+                        .take(max_entries)
+                        .map(|index| {
+                            let path = path.join(format!("entry-{index}"));
+                            let attrs = crate::VfAttrs {
+                                file: VfFile::from_os_path(&path),
+                                ftype: if index == 0 && depth < 5 {
+                                    crate::VfType::Directory
+                                } else {
+                                    crate::VfType::Regular
+                                },
+                                ..Default::default()
+                            };
+                            DirEntry::new(path, attrs.into())
+                        })
+                        .collect::<Vec<_>>();
+                    peak.fetch_max(live.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    Snapshot {
+                        remaining: entries.into_iter(),
+                        live: Arc::clone(&live),
+                    }
+                }
+            };
+            let entries = snapshot.remaining.by_ref().take(page_size).collect();
+            let next = if snapshot.remaining.len() == 0 {
+                None
+            } else {
+                Some(crate::DirPageCursor::new(snapshot))
+            };
+            Ok((entries, next))
+        }
+    }
+    #[test]
+    fn traversal_never_retains_multiple_fallback_snapshots() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut seen = 0;
+        let completion = visit_walk_pages(
+            Path::new("/tree"),
+            crate::WalkOptions::new().max_entries(1000),
+            snapshot_pages(Arc::clone(&live), Arc::clone(&peak)),
+            |_| {
+                seen += 1;
+                Ok(true)
+            },
+        )
+        .unwrap();
+        assert_eq!(completion, TraversalCompletion::Complete);
+        assert_eq!(seen, 4 * 129);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+    }
+    #[test]
+    fn traversal_drops_fallback_snapshot_on_stop_error_and_limit() {
+        for outcome in 0..3 {
+            let live = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let result = visit_walk_pages(
+                Path::new("/tree"),
+                crate::WalkOptions::new().max_entries(if outcome == 2 { 2 } else { 1000 }),
+                snapshot_pages(Arc::clone(&live), peak),
+                |_| match outcome {
+                    0 => Ok(false),
+                    1 => Err(VfError::client(0, libc::EIO as u32)),
+                    _ => Ok(true),
+                },
+            );
+            match outcome {
+                0 => assert_eq!(result.unwrap(), TraversalCompletion::Stopped),
+                1 => assert_eq!(result.unwrap_err().err_no(), libc::EIO as u32),
+                _ => assert_eq!(result.unwrap_err().err_no(), libc::EFBIG as u32),
+            }
+            assert_eq!(live.load(Ordering::SeqCst), 0);
         }
     }
 }

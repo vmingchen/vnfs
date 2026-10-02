@@ -150,7 +150,7 @@ fn main() -> Result<()> {
     let args = parse()?;
     let client = Nfs::builder(args.host.clone())
         .root(args.root.clone())
-        .minor_version(args.minor_version)
+        .version(vnfs::NfsVersion::try_from(args.minor_version)?)
         .connect()?;
 
     println!("streaming {} without retaining contents", args.path);
@@ -185,7 +185,7 @@ fn main() -> Result<()> {
             let setup_started = Instant::now();
             let mut pool = Nfs::builder(args.host.clone())
                 .root(args.root.clone())
-                .minor_version(args.minor_version)
+                .version(vnfs::NfsVersion::try_from(args.minor_version)?)
                 .connect_read_pool(
                     NfsReadPoolOptions::new()
                         .worker_count(worker_count)

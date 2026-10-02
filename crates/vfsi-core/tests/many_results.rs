@@ -20,7 +20,7 @@ fn vector_position_overrides_a_stale_backend_error_index() {
         vec![Ok(10), Err(VfError::failure(99, libc::EACCES as u32))],
     );
     let error = results.try_collect().unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EACCES as u32);
 }
 
@@ -30,7 +30,7 @@ fn short_success_prefix_is_a_transport_contract_error() {
         .try_collect()
         .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.index(), None);
 }
 
 #[test]
@@ -39,7 +39,7 @@ fn overlong_backend_result_is_a_contract_error_not_a_panic() {
         .try_collect()
         .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.index(), None);
     assert!(error.to_string().contains("2 results for 1 requests"));
 }
 
@@ -53,7 +53,7 @@ fn overlong_open_result_cleans_every_returned_handle() {
         })
         .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.index(), None);
     assert_eq!(closed, [(0, 10), (1, 20)]);
 }
 
@@ -67,7 +67,7 @@ fn backend_cannot_override_the_callers_request_count() {
         })
         .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.index(), None);
     assert!(
         error
             .to_string()
@@ -93,7 +93,7 @@ fn strict_open_policy_cleans_successful_prefix_on_failure() {
             Ok(())
         })
         .unwrap_err();
-    assert_eq!(error.index_opt(), Some(2));
+    assert_eq!(error.index(), Some(2));
     assert_eq!(closed, [10, 20]);
 }
 
@@ -116,7 +116,7 @@ fn strict_open_policy_cleans_successes_after_concurrent_failure() {
             Ok(())
         })
         .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert_eq!(closed, [10, 30, 40]);
 }
 
@@ -139,7 +139,7 @@ fn concurrent_failures_report_the_lowest_request_position() {
             Ok(())
         })
         .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EACCES as u32);
     assert_eq!(closed, [(0, 10), (2, 30), (4, 50)]);
 }
@@ -153,7 +153,7 @@ fn cleanup_failure_does_not_mask_primary_error() {
     let error = results
         .try_collect_with_cleanup(2, |_, _| Err(VfError::transport(None, "close failed")))
         .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::ENOENT as u32);
 }
 
@@ -168,7 +168,7 @@ fn short_success_prefix_is_cleaned_before_contract_error() {
         })
         .unwrap_err();
     assert!(error.is_transport());
-    assert_eq!(error.index_opt(), None);
+    assert_eq!(error.index(), None);
     assert_eq!(closed, [10, 20]);
 }
 
@@ -207,7 +207,7 @@ proptest! {
                 Ok(())
             })
             .unwrap_err();
-        prop_assert_eq!(error.index_opt(), Some(failed));
+        prop_assert_eq!(error.index(), Some(failed));
         prop_assert_eq!(closed, (0..failed).collect::<Vec<_>>());
     }
 
@@ -234,7 +234,7 @@ proptest! {
             })
             .unwrap_err();
         let expected: Vec<_> = (0..requested).filter(|index| *index != failed).collect();
-        prop_assert_eq!(error.index_opt(), Some(failed));
+        prop_assert_eq!(error.index(), Some(failed));
         prop_assert_eq!(closed, expected);
     }
 }

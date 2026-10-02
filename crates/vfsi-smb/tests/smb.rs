@@ -284,7 +284,7 @@ fn smb_openv_injected_registration_failure_closes_all_successes() {
         &[0o644; 3],
     )
     .unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert!(
         script.is_consumed(),
         "unused faults: {:?}",
@@ -394,7 +394,7 @@ fn smb_closev_removes_successes_on_both_sides_of_a_failure() {
     ));
     fs.set_fault_injector(script.clone());
     let error = fs.closev(&files).unwrap_err();
-    assert_eq!(error.index_opt(), Some(1));
+    assert_eq!(error.index(), Some(1));
     assert!(script.is_consumed());
     assert_eq!(fs.test_open_handle_count(), 1);
     fs.close(&files[1]).unwrap();

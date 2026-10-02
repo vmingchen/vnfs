@@ -53,13 +53,17 @@ The input position is the authoritative vector index. Backend-local protocol
 operation numbers and chunk offsets must be translated before an error crosses
 the public boundary.
 
-`VfError::index_opt()` returns:
+`vnfs::Error::index()` returns:
 
 - `Some(n)` when the failure is attributable to request `n`;
 - `None` when a transport or client failure cannot be attributed reliably.
 
-Code must not interpret an unknown index as request zero. The compatibility
-`index()` accessor is retained temporarily, but new code uses `index_opt()`.
+Code must not interpret an unknown index as request zero. There is no accessor
+that synthesizes zero for an unattributable failure. An index identifies a
+logical request, not its completed byte count. A semantic failure can follow
+successful chunks within that same request. Status-only retry/"not applied"
+helpers have been removed: mutations require operation-specific reconciliation
+or an independently established idempotence guarantee.
 
 ## OPEN resource ownership
 
@@ -109,7 +113,7 @@ fault was consumed. Timing sleeps are not valid synchronization.
 Required assertions include:
 
 - every semantic failure position is reported exactly;
-- unattributable transport failures retain `index_opt() == None`;
+- unattributable failures retain `index() == None`;
 - no partial handle vector escapes;
 - all confirmed successful handles are cleaned exactly once;
 - cleanup failure does not mask the primary error;

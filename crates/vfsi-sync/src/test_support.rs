@@ -51,7 +51,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         .read_allv_with_options(&whole_files, ReadAllOptions::new().max_total_bytes(5))
         .unwrap_err();
     assert_eq!(
-        (error.index_opt(), error.err_no()),
+        (error.index(), error.err_no()),
         (Some(1), libc::EFBIG as u32)
     );
     assert_eq!(
@@ -320,7 +320,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
             ReadOp::new(bad, VfOffset::At(0), 1),
         ])
         .unwrap_err();
-    assert_eq!((e.index_opt(), e.err_no()), (Some(1), ERR_EBADF));
+    assert_eq!((e.index(), e.err_no()), (Some(1), ERR_EBADF));
 
     // readlink/hardlink error paths.
     assert!(
