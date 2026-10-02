@@ -27,13 +27,11 @@ pub struct FsReadResult {
     pub eof: bool,
 }
 
-impl From<ReadResult> for FsReadResult {
-    fn from(result: ReadResult) -> Self {
-        Self {
-            offset: result.offset,
-            data: result.data,
-            eof: result.eof,
-        }
+fn read_result(result: ReadResult) -> FsReadResult {
+    FsReadResult {
+        offset: result.offset,
+        data: result.data,
+        eof: result.eof,
     }
 }
 
@@ -53,13 +51,11 @@ pub struct FsWriteResult {
     pub stable: bool,
 }
 
-impl From<WriteResult> for FsWriteResult {
-    fn from(result: WriteResult) -> Self {
-        Self {
-            offset: result.offset,
-            written: result.written,
-            stable: result.stable,
-        }
+fn write_result(result: WriteResult) -> FsWriteResult {
+    FsWriteResult {
+        offset: result.offset,
+        written: result.written,
+        stable: result.stable,
     }
 }
 
@@ -848,7 +844,7 @@ impl<F: VecFs> FsClient<F> {
         self.lock()?
             .lgetattrsv(std::slice::from_mut(&mut attrs))
             .map_err(|error| error.with_context("symlink_metadata", path))?;
-        Ok(attrs.into())
+        Ok(vfsi_core::metadata_from_attrs(attrs))
     }
 
     /// List multiple directories in a vector call. The limits apply to the
@@ -947,9 +943,10 @@ impl<F: VecFs> FsClient<F> {
                             );
                             return false;
                         }
-                        listings[index]
-                            .entries
-                            .push(DirEntry::new(path.to_path_buf(), attributes.clone().into()));
+                        listings[index].entries.push(DirEntry::new(
+                            path.to_path_buf(),
+                            vfsi_core::metadata_from_attrs(attributes.clone()),
+                        ));
                     }
                     true
                 },
@@ -1004,7 +1001,10 @@ impl<F: VecFs> FsClient<F> {
                                 )
                             })?
                             .to_path_buf();
-                        Ok(DirEntry::new(path, attributes.into()))
+                        Ok(DirEntry::new(
+                            path,
+                            vfsi_core::metadata_from_attrs(attributes),
+                        ))
                     })
                     .collect::<VfResult<Vec<_>>>()?;
                 Ok(DirectoryListing {
@@ -1079,7 +1079,10 @@ impl<F: VecFs> FsClient<F> {
                     error.with_context("symlink_metadatav", path)
                 })
         })?;
-        Ok(attrs.into_iter().map(Metadata::from).collect())
+        Ok(attrs
+            .into_iter()
+            .map(vfsi_core::metadata_from_attrs)
+            .collect())
     }
 }
 
@@ -1179,8 +1182,22 @@ impl<F: VectorFileSystem> FsClient<F> {
         requests: &[FsRead<'_, F>],
         max_total_bytes: usize,
     ) -> VfResult<Vec<FsReadResult>> {
+        self.readv_with_limit_projected(requests, max_total_bytes, |request| request)
+    }
+
+    /// Backend adapter for opaque application requests; projection does not allocate.
+    /// The projection must return the same embedded request on every invocation.
+    pub fn readv_with_limit_projected<'b, T>(
+        &self,
+        requests: &[T],
+        max_total_bytes: usize,
+        project: impl for<'r> Fn(&'r T) -> &'r FsRead<'b, F>,
+    ) -> VfResult<Vec<FsReadResult>>
+    where
+        F: 'b,
+    {
         let mut requested = 0usize;
-        for (index, request) in requests.iter().enumerate() {
+        for (index, request) in requests.iter().map(&project).enumerate() {
             requested = requested
                 .checked_add(request.length)
                 .ok_or_else(|| VfError::client(index, libc::EFBIG as u32))?;
@@ -1189,11 +1206,11 @@ impl<F: VectorFileSystem> FsClient<F> {
                     .with_context("readv", request.file.path()));
             }
         }
-        let reads = self.read_ops(requests)?;
+        let reads = self.read_ops(requests, &project)?;
         let results = self.lock()?.read_many(&reads).map_err(|error| {
             error
                 .index()
-                .and_then(|index| requests.get(index))
+                .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
                     error.with_context("readv", request.file.path())
                 })
@@ -1204,17 +1221,24 @@ impl<F: VectorFileSystem> FsClient<F> {
         validate_read_results("readv", &reads, &results).map_err(|error| {
             error
                 .index()
-                .and_then(|index| requests.get(index))
+                .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
                     error.with_context("readv", request.file.path())
                 })
         })?;
-        Ok(results.into_iter().map(FsReadResult::from).collect())
+        Ok(results.into_iter().map(read_result).collect())
     }
 
-    fn read_ops(&self, requests: &[FsRead<'_, F>]) -> VfResult<Vec<ReadOp>> {
+    fn read_ops<'b, T>(
+        &self,
+        requests: &[T],
+        project: impl for<'r> Fn(&'r T) -> &'r FsRead<'b, F>,
+    ) -> VfResult<Vec<ReadOp>>
+    where
+        F: 'b,
+    {
         let mut reads = Vec::with_capacity(requests.len());
-        for (index, request) in requests.iter().enumerate() {
+        for (index, request) in requests.iter().map(&project).enumerate() {
             self.validate_owner(request.file, index)?;
             reads.push(ReadOp::new(
                 request.file.raw()?.clone(),
@@ -1239,9 +1263,30 @@ impl<F: VectorFileSystem> FsClient<F> {
         requests: &mut [FsReadInto<'_, F>],
         max_bytes: usize,
     ) -> VfResult<Vec<FsReadIntoResult>> {
+        self.readv_into_with_limit_projected(
+            requests,
+            max_bytes,
+            |request| request,
+            |request| request,
+        )
+    }
+
+    /// Project borrowed buffers without an intermediate request allocation.
+    /// Both projections must identify the same embedded request, and remain
+    /// stable across preflight, dispatch, and result validation.
+    pub fn readv_into_with_limit_projected<'b, T>(
+        &self,
+        requests: &mut [T],
+        max_bytes: usize,
+        project: impl for<'r> Fn(&'r T) -> &'r FsReadInto<'b, F>,
+        mut project_mut: impl for<'r> FnMut(&'r mut T) -> &'r mut FsReadInto<'b, F>,
+    ) -> VfResult<Vec<FsReadIntoResult>>
+    where
+        F: 'b,
+    {
         let mut requested = 0usize;
         let mut reads = Vec::with_capacity(requests.len());
-        for (index, request) in requests.iter().enumerate() {
+        for (index, request) in requests.iter().map(&project).enumerate() {
             self.validate_owner(request.file, index)?;
             requested = requested
                 .checked_add(request.buffer.len())
@@ -1258,6 +1303,7 @@ impl<F: VectorFileSystem> FsClient<F> {
         let results = {
             let mut buffers: Vec<&mut [u8]> = requests
                 .iter_mut()
+                .map(&mut project_mut)
                 .map(|request| &mut *request.buffer)
                 .collect();
             self.lock()?.read_many_into(&reads, &mut buffers)
@@ -1265,7 +1311,7 @@ impl<F: VectorFileSystem> FsClient<F> {
         .map_err(|error| {
             error
                 .index()
-                .and_then(|index| requests.get(index))
+                .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
                     error.with_context("readv_into", request.file.path())
                 })
@@ -1273,7 +1319,7 @@ impl<F: VectorFileSystem> FsClient<F> {
         validate_read_into_results("readv_into", &reads, &results).map_err(|error| {
             error
                 .index()
-                .and_then(|index| requests.get(index))
+                .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
                     error.with_context("readv_into", request.file.path())
                 })
@@ -1289,11 +1335,24 @@ impl<F: VectorFileSystem> FsClient<F> {
     }
 
     pub fn writev(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
-        let writes = self.write_ops(requests)?;
+        self.writev_projected(requests, |request| request)
+    }
+
+    /// Backend adapter for opaque application requests, preserving borrowed payloads.
+    /// The projection must return the same embedded request on every invocation.
+    pub fn writev_projected<'b, T>(
+        &self,
+        requests: &[T],
+        project: impl for<'r> Fn(&'r T) -> &'r FsWrite<'b, F>,
+    ) -> VfResult<Vec<FsWriteResult>>
+    where
+        F: 'b,
+    {
+        let writes = self.write_ops(requests, &project)?;
         let results = self.lock()?.write_many(&writes).map_err(|error| {
             error
                 .index()
-                .and_then(|index| requests.get(index))
+                .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
                     error.with_context("writev", request.file.path())
                 })
@@ -1304,12 +1363,12 @@ impl<F: VectorFileSystem> FsClient<F> {
         validate_write_results("writev", &writes, &results).map_err(|error| {
             error
                 .index()
-                .and_then(|index| requests.get(index))
+                .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
                     error.with_context("writev", request.file.path())
                 })
         })?;
-        Ok(results.into_iter().map(FsWriteResult::from).collect())
+        Ok(results.into_iter().map(write_result).collect())
     }
 
     /// Write every byte in each positional request, retrying short writes in
@@ -1318,11 +1377,24 @@ impl<F: VectorFileSystem> FsClient<F> {
     /// same path complete in input order; different paths are presumed
     /// independent (including hard-link aliases).
     pub fn write_allv(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
+        self.write_allv_projected(requests, |request| request)
+    }
+
+    /// Complete projected requests with the same preflight and dependency waves.
+    /// The projection must return the same embedded request on every invocation.
+    pub fn write_allv_projected<'b, T>(
+        &self,
+        requests: &[T],
+        project: impl for<'r> Fn(&'r T) -> &'r FsWrite<'b, F>,
+    ) -> VfResult<Vec<FsWriteResult>>
+    where
+        F: 'b,
+    {
         // Validate the entire batch before writing any prefix. In particular,
         // empty requests must not conceal a foreign or already-closed file.
         let mut prior_by_path: HashMap<&Path, Vec<(usize, u64, u64)>> = HashMap::new();
         let mut blocked_by = vec![Vec::new(); requests.len()];
-        for (index, request) in requests.iter().enumerate() {
+        for (index, request) in requests.iter().map(&project).enumerate() {
             self.validate_owner(request.file, index)?;
             request.file.raw()?;
             let VfOffset::At(offset) = request.offset else {
@@ -1349,7 +1421,7 @@ impl<F: VectorFileSystem> FsClient<F> {
         let mut totals = vec![0usize; requests.len()];
         let mut stable = vec![true; requests.len()];
         let mut pending: Vec<usize> = (0..requests.len())
-            .filter(|&index| !requests[index].data.is_empty())
+            .filter(|&index| !project(&requests[index]).data.is_empty())
             .collect();
         while !pending.is_empty() {
             let wave_indices: Vec<usize> = pending
@@ -1358,13 +1430,13 @@ impl<F: VectorFileSystem> FsClient<F> {
                 .filter(|&index| {
                     blocked_by[index]
                         .iter()
-                        .all(|&earlier| totals[earlier] == requests[earlier].data.len())
+                        .all(|&earlier| totals[earlier] == project(&requests[earlier]).data.len())
                 })
                 .collect();
             let wave: Vec<_> = wave_indices
                 .iter()
                 .map(|&index| {
-                    let request = &requests[index];
+                    let request = project(&requests[index]);
                     let VfOffset::At(offset) = request.offset else {
                         return Err(VfError::client(index, crate::ERR_INVAL)
                             .with_context("write_allv", request.file.path()));
@@ -1386,15 +1458,16 @@ impl<F: VectorFileSystem> FsClient<F> {
             for (&index, result) in wave_indices.iter().zip(results) {
                 if result.written == 0 {
                     return Err(VfError::client(index, crate::ERR_IO)
-                        .with_context("write_allv", requests[index].file.path()));
+                        .with_context("write_allv", project(&requests[index]).file.path()));
                 }
                 totals[index] += result.written;
                 stable[index] &= result.stable;
             }
-            pending.retain(|&index| totals[index] < requests[index].data.len());
+            pending.retain(|&index| totals[index] < project(&requests[index]).data.len());
         }
         requests
             .iter()
+            .map(&project)
             .enumerate()
             .map(|(index, request)| {
                 let VfOffset::At(offset) = request.offset else {
@@ -1410,9 +1483,17 @@ impl<F: VectorFileSystem> FsClient<F> {
             .collect()
     }
 
-    fn write_ops<'a>(&self, requests: &'a [FsWrite<'a, F>]) -> VfResult<Vec<WriteOpRef<'a>>> {
+    fn write_ops<'a, 'b, T>(
+        &self,
+        requests: &'a [T],
+        project: impl for<'r> Fn(&'r T) -> &'r FsWrite<'b, F>,
+    ) -> VfResult<Vec<WriteOpRef<'a>>>
+    where
+        F: 'b,
+        'b: 'a,
+    {
         let mut writes = Vec::with_capacity(requests.len());
-        for (index, request) in requests.iter().enumerate() {
+        for (index, request) in requests.iter().map(&project).enumerate() {
             self.validate_owner(request.file, index)?;
             writes.push(WriteOpRef::new(
                 request.file.raw()?,
@@ -1736,7 +1817,7 @@ impl<F: FileSystem> FsFile<F> {
             .lock()
             .map_err(|_| poisoned())?
             .metadata(MetadataQuery::new(self.raw()?.clone(), attributes))
-            .map(Metadata::from)
+            .map(vfsi_core::metadata_from_attrs)
             .map_err(|error| error.with_context("metadata", &self.path))
     }
 
@@ -2003,7 +2084,7 @@ mod traversal_tests {
                                 },
                                 ..Default::default()
                             };
-                            DirEntry::new(path, attrs.into())
+                            DirEntry::new(path, vfsi_core::metadata_from_attrs(attrs))
                         })
                         .collect::<Vec<_>>();
                     peak.fetch_max(live.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);

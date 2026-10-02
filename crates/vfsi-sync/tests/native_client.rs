@@ -873,7 +873,7 @@ impl DirectoryFileSystem for ScalarOnly {
             .map(|index| {
                 DirEntry::new(
                     format!("/tree/item-{index:04}").into(),
-                    VfAttrs::default().into(),
+                    vfsi_core::metadata_from_attrs(VfAttrs::default()),
                 )
             })
             .collect();

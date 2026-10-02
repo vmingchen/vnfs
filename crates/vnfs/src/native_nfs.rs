@@ -5,17 +5,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use crate::{FsClient, FsFile, ResourceLimits, Result as VfResult};
+use crate::{NfsClient, ResourceLimits, Result as VfResult};
 use vfsi_nfs::{
     NfsAuthentication, NfsClientBuilder, NfsObserver, NfsReadPool, NfsReadPoolOptions,
-    NfsRecoveryPolicy, NfsVecFs,
+    NfsRecoveryPolicy,
 };
-
-pub type NfsClient = FsClient<NfsVecFs>;
-pub type NfsFile = FsFile<NfsVecFs>;
-pub type NfsRead<'a> = vfsi_sync::FsRead<'a, NfsVecFs>;
-pub type NfsReadInto<'a> = vfsi_sync::FsReadInto<'a, NfsVecFs>;
-pub type NfsWrite<'a> = vfsi_sync::FsWrite<'a, NfsVecFs>;
+use vfsi_sync::FsClient;
 
 /// Supported NFS protocol selection. Auto negotiates v4.2 then v4.1.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -73,6 +68,7 @@ impl NfsClientPool {
 }
 
 /// Entry point for the Rust-native NFS API.
+#[doc = include_str!("api_boundary.md")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Nfs;
 
@@ -185,13 +181,9 @@ impl NfsBuilder {
     }
 
     pub fn connect(self) -> VfResult<NfsClient> {
-        self.inner
-            .connect()
-            .map(|backend| FsClient::new(backend).with_limits(self.limits))
-    }
-
-    pub fn connect_backend(self) -> VfResult<NfsVecFs> {
-        self.inner.connect()
+        self.inner.connect().map(|backend| NfsClient {
+            inner: FsClient::new(backend).with_limits(self.limits),
+        })
     }
 
     /// Defaults for connected clients. Read pools instead use their supplied
@@ -208,7 +200,9 @@ impl NfsBuilder {
             .inner
             .connect_pool(size)?
             .into_iter()
-            .map(|backend| FsClient::new(backend).with_limits(self.limits))
+            .map(|backend| NfsClient {
+                inner: FsClient::new(backend).with_limits(self.limits),
+            })
             .collect();
         Ok(NfsClientPool {
             inner: Arc::new(NfsClientPoolInner {

@@ -815,11 +815,11 @@ impl NfsVecFs {
         let close_result = self
             .nfs
             .close_many(&closes)
-            .map_err(VfError::from_rpc_indexed);
+            .map_err(vfsi_core::error_from_rpc_indexed);
         let shutdown_result = self
             .nfs
             .shutdown()
-            .map_err(|error| VfError::from_rpc(error, None));
+            .map_err(|error| vfsi_core::error_from_rpc(error, None));
         let result = close_result.and(shutdown_result);
         if let Some(observer) = observer {
             observer.on_event(&NfsEvent::Shutdown {
@@ -958,7 +958,7 @@ impl NfsVecFs {
             let results = self
                 .nfs
                 .lookup_getattr_many(&ops)
-                .map_err(|e| VfError::from_rpc(e, None))?;
+                .map_err(|e| vfsi_core::error_from_rpc(e, None))?;
             for ((i, _), r) in entries.iter().zip(results) {
                 match r {
                     Ok((fh, ftype)) => {
@@ -1072,7 +1072,7 @@ impl NfsVecFs {
                 }
                 Ok(())
             }
-            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, None)),
+            Err(error) if error.is_transport() => Err(vfsi_core::error_from_rpc(error, None)),
             Err(_) => self.setattrsv_phased(attrs, follow),
         }
     }
@@ -1131,7 +1131,7 @@ impl NfsVecFs {
         }
         self.nfs
             .setattr_many(&ops)
-            .map_err(VfError::from_rpc_indexed)
+            .map_err(vfsi_core::error_from_rpc_indexed)
     }
 
     /// The merged (single-compound) getattrsv: resolve each parent once,
@@ -1212,7 +1212,7 @@ impl NfsVecFs {
                 }
                 Ok(())
             }
-            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, None)),
+            Err(error) if error.is_transport() => Err(vfsi_core::error_from_rpc(error, None)),
             Err(_) => self.getattrsv_phased(attrs, follow),
         }
     }
@@ -1245,7 +1245,7 @@ impl NfsVecFs {
         let results = self
             .nfs
             .getattr_many(&ops)
-            .map_err(VfError::from_rpc_indexed)?;
+            .map_err(vfsi_core::error_from_rpc_indexed)?;
         for ((a, ids), list) in attrs.iter_mut().zip(ids_list).zip(results) {
             let v = parse_attr_list(&ids, &list)?;
             apply_attrs(a, &v);
@@ -1265,7 +1265,7 @@ impl NfsVecFs {
         let list = self
             .nfs
             .getattr(&fh, &ids)
-            .map_err(|e| VfError::from_rpc(e, index))?;
+            .map_err(|e| vfsi_core::error_from_rpc(e, index))?;
         let v = parse_attr_list(&ids, &list)?;
         apply_attrs(a, &v);
         Ok(())
@@ -1299,7 +1299,7 @@ impl NfsVecFs {
             .then_some((a.mtime_sec, a.mtime_nsec));
         self.nfs
             .setattr_values(&fh, mode, size, atime, mtime)
-            .map_err(|e| VfError::from_rpc(e, index))
+            .map_err(|e| vfsi_core::error_from_rpc(e, index))
     }
 
     /// Connect to the NFS server at `host` and resolve the export root.
@@ -1386,7 +1386,7 @@ impl NfsVecFs {
                 Some(connection.client_verifier),
             ),
         }
-        .map_err(|e| VfError::from_rpc(e, 0))
+        .map_err(|e| vfsi_core::error_from_rpc(e, 0))
     }
 
     fn from_client(nfs: NfsClient, connection: ConnectionConfig) -> NfsVecFs {
@@ -1643,7 +1643,7 @@ impl NfsVecFs {
                 };
                 self.deferred_descriptor_closes
                     .extend(pending.into_iter().skip(first_unconfirmed));
-                Err(VfError::from_rpc(error, None))
+                Err(vfsi_core::error_from_rpc(error, None))
             }
         }
     }
@@ -1671,14 +1671,14 @@ impl NfsVecFs {
                     let t = self
                         .nfs
                         .getattr(&fh, &[FATTR4_TYPE])
-                        .map_err(|e| VfError::from_rpc(e, 0))?;
+                        .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
                     if !type_is_symlink(&t)? {
                         return Ok(fh);
                     }
                     let target = self
                         .nfs
                         .readlink(&fh)
-                        .map_err(|e| VfError::from_rpc(e, 0))?;
+                        .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
                     path = self.resolve_target(&path, &target);
                     hops += 1;
                 }
@@ -1687,7 +1687,7 @@ impl NfsVecFs {
                     // by component, following each link we encounter.
                     let comps = components_bytes(&path);
                     if comps.is_empty() {
-                        return Err(VfError::from_rpc(e, 0));
+                        return Err(vfsi_core::error_from_rpc(e, 0));
                     }
                     let mut cur_fh = self.nfs.root().clone();
                     let mut consumed: Vec<u8> = Vec::new();
@@ -1697,13 +1697,13 @@ impl NfsVecFs {
                         let (child, ftype) = self
                             .nfs
                             .lookup_getattr(&cur_fh, comp)
-                            .map_err(|e| VfError::from_rpc(e, 0))?;
+                            .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
                         let full_comp = join_path_bytes(&consumed, comp);
                         if ftype == nfs_ftype4_NF4LNK && (follow_final || !is_last) {
                             let target = self
                                 .nfs
                                 .readlink(&child)
-                                .map_err(|e| VfError::from_rpc(e, 0))?;
+                                .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
                             let mut rest = Vec::new();
                             for (j, r) in comps.iter().enumerate().skip(i + 1) {
                                 if j > i + 1 {
@@ -1727,11 +1727,11 @@ impl NfsVecFs {
                         consumed = full_comp;
                     }
                     if !followed {
-                        return Err(VfError::from_rpc(e, 0));
+                        return Err(vfsi_core::error_from_rpc(e, 0));
                     }
                     hops += 1;
                 }
-                Err(e) => return Err(VfError::from_rpc(e, 0)),
+                Err(e) => return Err(vfsi_core::error_from_rpc(e, 0)),
             }
         }
     }
@@ -1764,7 +1764,7 @@ impl NfsVecFs {
         };
         self.nfs
             .open(&dirfh, name, access, mode)
-            .map_err(|e| VfError::from_rpc(e, 0))
+            .map_err(|e| vfsi_core::error_from_rpc(e, 0))
     }
 
     /// The merged (single-compound) openv: resolve each parent once, then
@@ -1802,7 +1802,7 @@ impl NfsVecFs {
         let mut outcome = self
             .nfs
             .openv_path_compound(&ops)
-            .map_err(|e| VfError::from_rpc(e, None))?;
+            .map_err(|e| vfsi_core::error_from_rpc(e, None))?;
         #[cfg(feature = "test-faults")]
         if let Err(error) = self.inject_open_fault(OpenFaultPoint::AfterReply { chunk: 0 }) {
             let closes: Vec<crate::client::CloseOp> = outcome
@@ -1822,7 +1822,7 @@ impl NfsVecFs {
             let Some((fh, stateid)) = outcome.opened[index].take() else {
                 if let Some((failed_index, status)) = failed {
                     debug_assert_eq!(index, failed_index);
-                    results.push(Err(VfError::from_rpc(
+                    results.push(Err(vfsi_core::error_from_rpc(
                         RpcError::op(index, status),
                         Some(index),
                     )));
@@ -1943,7 +1943,7 @@ impl NfsVecFs {
         let results = self
             .nfs
             .lookup_getattr_many(&probe)
-            .map_err(|e| VfError::from_rpc(e, None))?;
+            .map_err(|e| vfsi_core::error_from_rpc(e, None))?;
         let access = if for_write {
             OPEN4_SHARE_ACCESS_BOTH
         } else {
@@ -1973,7 +1973,7 @@ impl NfsVecFs {
                             }
                             crate::client::OpenCreate::Guarded
                         }
-                        Err(e) => return Err(VfError::from_rpc(e, *orig)),
+                        Err(e) => return Err(vfsi_core::error_from_rpc(e, *orig)),
                     };
                     opens.push((
                         *orig,
@@ -2029,7 +2029,7 @@ impl NfsVecFs {
             })
             .collect();
         let results = self.nfs.open_many_path(&open_ops).map_err(|e| {
-            let e = VfError::from_rpc_indexed(e);
+            let e = vfsi_core::error_from_rpc_indexed(e);
             // open_many's index is relative to the path-only subset.
             e.map_index(|relative| subset.get(relative).copied().unwrap_or(relative))
         })?;
@@ -2048,7 +2048,7 @@ impl NfsVecFs {
         }
         if !setattr_ops.is_empty() {
             self.nfs.setattr_many(&setattr_ops).map_err(|e| {
-                let e = VfError::from_rpc_indexed(e);
+                let e = vfsi_core::error_from_rpc_indexed(e);
                 e.map_index(|relative| subset.get(relative).copied().unwrap_or(relative))
             })?;
         }
@@ -2116,7 +2116,7 @@ impl NfsVecFs {
             let mut result = self
                 .nfs
                 .readv(&[retry])
-                .map_err(|error| VfError::from_rpc_indexed(error).with_index(index))?;
+                .map_err(|error| vfsi_core::error_from_rpc_indexed(error).with_index(index))?;
             if result.len() != 1 {
                 return Err(VfError::transport(
                     Some(index),
@@ -2199,7 +2199,7 @@ impl NfsVecFs {
             }
             #[allow(unused_mut)]
             let mut r = self.nfs.readv(&ops[start..end]).map_err(|error| {
-                let error = VfError::from_rpc_indexed(error);
+                let error = vfsi_core::error_from_rpc_indexed(error);
                 remap_descriptor_chunk_error(error, start, &owner)
             })?;
             #[cfg(feature = "test-faults")]
@@ -2357,7 +2357,7 @@ impl NfsVecFs {
                     Ok(())
                 })
                 .map_err(|error| {
-                    let error = VfError::from_rpc_indexed(error);
+                    let error = vfsi_core::error_from_rpc_indexed(error);
                     remap_descriptor_chunk_error(error, cursor, &owners)
                 })?;
             for (wire_index, (_count, eof)) in (cursor..end).zip(chunk) {
@@ -2593,7 +2593,7 @@ impl NfsVecFs {
                 wire_ops
             };
             let results = self.nfs.writev(&wire_ops).map_err(|error| {
-                let error = VfError::from_rpc_indexed(error);
+                let error = vfsi_core::error_from_rpc_indexed(error);
                 error.map_index(|index| owners.get(index).copied().unwrap_or(index))
             })?;
             if results.len() != selected.len() {
@@ -2653,7 +2653,7 @@ impl NfsVecFs {
         let list = self
             .nfs
             .getattr(fh, &[FATTR4_SIZE])
-            .map_err(|e| VfError::from_rpc(e, 0))?;
+            .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
         let mut off = 0;
         read_u64(&list, &mut off)
     }
@@ -2756,7 +2756,7 @@ impl NfsVecFs {
                 let entries = self
                     .nfs
                     .readdir(&dirfh, cookie, &ids)
-                    .map_err(|e| VfError::from_rpc(e, 0))?;
+                    .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
                 if entries.is_empty() {
                     break;
                 }
@@ -2813,7 +2813,7 @@ impl NfsVecFs {
                 OPEN4_SHARE_ACCESS_READ,
                 crate::client::OpenCreate::NoCreate,
             )
-            .map_err(|e| VfError::from_rpc(e, 0))?;
+            .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
         // Kernel nfsd rejects CREATE_GUARDED on an existing file, so open the
         // destination without create and fall back to create only on NOENT.
         let (dfh, dsid) = match self
@@ -2824,7 +2824,7 @@ impl NfsVecFs {
                 OPEN4_SHARE_ACCESS_WRITE,
                 crate::client::OpenCreate::NoCreate,
             )
-            .map_err(|e| VfError::from_rpc(e, 0))
+            .map_err(|e| vfsi_core::error_from_rpc(e, 0))
         {
             Ok(x) => x,
             Err(e) if e.err_no() == ERR_NOENT => self
@@ -2835,7 +2835,7 @@ impl NfsVecFs {
                     OPEN4_SHARE_ACCESS_WRITE,
                     crate::client::OpenCreate::Guarded,
                 )
-                .map_err(|e| VfError::from_rpc(e, 0))?,
+                .map_err(|e| vfsi_core::error_from_rpc(e, 0))?,
             Err(e) => {
                 let _ = self.nfs.close_path(&sfh, &ssid);
                 return Err(e);
@@ -2855,14 +2855,14 @@ impl NfsVecFs {
             let chunk_len = remaining.min(1 << 20) as u32;
             let chunk = match self.nfs.read(&sfh, &ssid, so, chunk_len) {
                 Ok((c, _)) => c,
-                Err(e) => break Err(VfError::from_rpc(e, 0)),
+                Err(e) => break Err(vfsi_core::error_from_rpc(e, 0)),
             };
             if chunk.is_empty() {
                 break Ok(()); // EOF
             }
             let n = match self.nfs.write(&dfh, &dsid, doff, &chunk) {
                 Ok((n, _)) => n as u64,
-                Err(e) => break Err(VfError::from_rpc(e, 0)),
+                Err(e) => break Err(vfsi_core::error_from_rpc(e, 0)),
             };
             so = so
                 .checked_add(n)
@@ -2878,18 +2878,18 @@ impl NfsVecFs {
             // Truncate any stale tail beyond what was copied (cp semantics).
             self.nfs
                 .setattr(&dfh, None, Some(doff))
-                .map_err(|e| VfError::from_rpc(e, 0))
+                .map_err(|e| vfsi_core::error_from_rpc(e, 0))
         } else {
             result
         };
         let source_close = self
             .nfs
             .close_path(&sfh, &ssid)
-            .map_err(|e| VfError::from_rpc(e, 0));
+            .map_err(|e| vfsi_core::error_from_rpc(e, 0));
         let destination_close = self
             .nfs
             .close_path(&dfh, &dsid)
-            .map_err(|e| VfError::from_rpc(e, 0));
+            .map_err(|e| vfsi_core::error_from_rpc(e, 0));
         result.and(source_close).and(destination_close)
     }
 
@@ -2989,7 +2989,7 @@ impl NfsVecFs {
                 self.server_copy_stats.requests += 1;
                 let counts = self.nfs.copy_many(&active).map_err(|e| {
                     let original = pending.get(e.op_index).copied().unwrap_or(0);
-                    VfError::from_rpc_indexed(e.with_op_index(original))
+                    vfsi_core::error_from_rpc_indexed(e.with_op_index(original))
                 })?;
                 self.server_copy_stats.operations += counts.len() as u64;
                 let mut next = Vec::new();
@@ -3035,7 +3035,7 @@ impl NfsVecFs {
             }
             self.nfs
                 .setattr_many(&attrs)
-                .map_err(VfError::from_rpc_indexed)
+                .map_err(vfsi_core::error_from_rpc_indexed)
         })();
         self.close_tmp(&src_tmp);
         self.close_tmp(&dst_tmp);
@@ -3126,7 +3126,7 @@ impl NfsVecFs {
                 self.close_path_opens(&outcome.opened);
                 Ok(self.assemble_reads(reads, offsets, &outcome.data, &outcome.eof))
             }
-            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, None)),
+            Err(error) if error.is_transport() => Err(vfsi_core::error_from_rpc(error, None)),
             Err(_) => self.readv_path_fallback(reads),
         }
     }
@@ -3168,7 +3168,7 @@ impl NfsVecFs {
                 }
                 Ok(self.assemble_reads(reads, offsets, &outcome.data, &outcome.eof))
             }
-            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, None)),
+            Err(error) if error.is_transport() => Err(vfsi_core::error_from_rpc(error, None)),
             Err(_) => self.readv_path_fallback(reads),
         }
     }
@@ -3270,7 +3270,7 @@ impl NfsVecFs {
                 self.close_path_opens(&outcome.opened);
                 Ok(self.assemble_writes(writes, offsets, &outcome.counts, &outcome.committed))
             }
-            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, None)),
+            Err(error) if error.is_transport() => Err(vfsi_core::error_from_rpc(error, None)),
             Err(_) => self.writev_path_fallback(writes),
         }
     }
@@ -3308,7 +3308,7 @@ impl NfsVecFs {
                 }
                 Ok(self.assemble_writes(writes, offsets, &outcome.counts, &outcome.committed))
             }
-            Err(error) if error.is_transport() => Err(VfError::from_rpc(error, None)),
+            Err(error) if error.is_transport() => Err(vfsi_core::error_from_rpc(error, None)),
             Err(_) => self.writev_path_fallback(writes),
         }
     }
@@ -3390,7 +3390,7 @@ impl NfsVecFs {
         }
         self.nfs
             .rename_many(&ops)
-            .map_err(VfError::from_rpc_indexed)
+            .map_err(vfsi_core::error_from_rpc_indexed)
     }
 
     /// The legacy phased removev (grouped per parent + remove_many).
@@ -3410,7 +3410,7 @@ impl NfsVecFs {
                 .map_err(|e| e.with_index(0))?;
             self.nfs
                 .remove_many(&dirfh, names)
-                .map_err(VfError::from_rpc_indexed)?;
+                .map_err(vfsi_core::error_from_rpc_indexed)?;
         }
         Ok(())
     }
@@ -3458,7 +3458,7 @@ impl NfsVecFs {
             self.nfs.setattr_many(&setattrs).map_err(|e| {
                 let rel = e.op_index;
                 let orig = indices.get(rel).copied().unwrap_or(0);
-                VfError::from_rpc_indexed(e.with_op_index(orig))
+                vfsi_core::error_from_rpc_indexed(e.with_op_index(orig))
             })?;
         }
         Ok(())
@@ -3592,7 +3592,9 @@ impl NfsVecFs {
         loop {
             match self.nfs.remove_many(parent, std::slice::from_ref(&owned)) {
                 Ok(()) => return Ok(()),
-                Err(error) if error.is_transport() => return Err(VfError::from_rpc(error, root)),
+                Err(error) if error.is_transport() => {
+                    return Err(vfsi_core::error_from_rpc(error, root));
+                }
                 Err(error) if error.status == nfsstat4_NFS4ERR_NOENT => return Ok(()),
                 Err(error) if error.status == nfsstat4_NFS4ERR_NOTEMPTY => {
                     if expand {
@@ -3608,10 +3610,14 @@ impl NfsVecFs {
                                 pass_changed: false,
                             }),
                             Err(lookup) if lookup.is_transport() => {
-                                return Err(VfError::from_rpc(lookup, root));
+                                return Err(vfsi_core::error_from_rpc(lookup, root));
                             }
                             Err(lookup) => {
-                                note_error(first_error, VfError::from_rpc(lookup, root), options)?;
+                                note_error(
+                                    first_error,
+                                    vfsi_core::error_from_rpc(lookup, root),
+                                    options,
+                                )?;
                             }
                         }
                     } else {
@@ -3626,7 +3632,7 @@ impl NfsVecFs {
                     std::thread::sleep(remove_backoff(attempts));
                 }
                 Err(error) => {
-                    note_error(first_error, VfError::from_rpc(error, root), options)?;
+                    note_error(first_error, vfsi_core::error_from_rpc(error, root), options)?;
                     return Ok(());
                 }
             }
@@ -3690,7 +3696,7 @@ impl NfsVecFs {
                 }
                 return Ok(());
             }
-            Err(error) => return Err(VfError::from_rpc(error, dir.root)),
+            Err(error) => return Err(vfsi_core::error_from_rpc(error, dir.root)),
         };
 
         if entries.is_empty() {
@@ -3775,7 +3781,9 @@ impl NfsVecFs {
                     removed = true;
                     start += take;
                 }
-                Err(error) if error.is_transport() => return Err(VfError::from_rpc(error, root)),
+                Err(error) if error.is_transport() => {
+                    return Err(vfsi_core::error_from_rpc(error, root));
+                }
                 Err(error) if resource_status(error.status) && take > 1 => {
                     // REMOVE is ordered: only retry the suffix after the
                     // server-confirmed successful prefix.
@@ -3797,7 +3805,7 @@ impl NfsVecFs {
                         removed |=
                             self.retry_remove_name(dir, &name, root, first_error, options)?;
                     } else {
-                        note_error(first_error, VfError::from_rpc(error, root), options)?;
+                        note_error(first_error, vfsi_core::error_from_rpc(error, root), options)?;
                     }
                     start += index + 1;
                 }
@@ -3831,7 +3839,7 @@ impl NfsVecFs {
                     start += take;
                 }
                 Err(error) if error.is_transport() => {
-                    return Err(VfError::from_rpc(error, chunk[0].1));
+                    return Err(vfsi_core::error_from_rpc(error, chunk[0].1));
                 }
                 Err(error) if resource_status(error.status) && take > 1 => {
                     let prefix = error.op_index.min(take.saturating_sub(1));
@@ -3852,7 +3860,7 @@ impl NfsVecFs {
                     } else {
                         // A non-empty directory here means a concurrent actor
                         // added entries; record it and move on.
-                        note_error(first_error, VfError::from_rpc(error, root), options)?;
+                        note_error(first_error, vfsi_core::error_from_rpc(error, root), options)?;
                     }
                     start += index + 1;
                 }
@@ -3906,10 +3914,12 @@ impl NfsVecFs {
                     }
                     start += take;
                 }
-                Err(error) if error.is_transport() => return Err(VfError::from_rpc(error, root)),
+                Err(error) if error.is_transport() => {
+                    return Err(vfsi_core::error_from_rpc(error, root));
+                }
                 Err(error) if resource_status(error.status) && take > 1 => {}
                 Err(error) => {
-                    note_error(first_error, VfError::from_rpc(error, root), options)?;
+                    note_error(first_error, vfsi_core::error_from_rpc(error, root), options)?;
                     start += take;
                 }
             }
@@ -3932,7 +3942,9 @@ impl NfsVecFs {
         loop {
             match self.nfs.remove_many(dir, std::slice::from_ref(&owned)) {
                 Ok(()) => return Ok(true),
-                Err(error) if error.is_transport() => return Err(VfError::from_rpc(error, root)),
+                Err(error) if error.is_transport() => {
+                    return Err(vfsi_core::error_from_rpc(error, root));
+                }
                 Err(error) if error.status == nfsstat4_NFS4ERR_NOENT => return Ok(true),
                 Err(error)
                     if remove_status_is_retryable(error.status) && attempts < options.retries =>
@@ -3941,7 +3953,7 @@ impl NfsVecFs {
                     std::thread::sleep(remove_backoff(attempts));
                 }
                 Err(error) => {
-                    note_error(first_error, VfError::from_rpc(error, root), options)?;
+                    note_error(first_error, vfsi_core::error_from_rpc(error, root), options)?;
                     return Ok(false);
                 }
             }
@@ -4003,7 +4015,7 @@ impl VecFs for NfsVecFs {
                 match self.nfs.resolve(path_bytes(&full)) {
                     Ok(_) => false,
                     Err(e) if e.status == nfsstat4_NFS4ERR_NOENT => true,
-                    Err(e) => return Err(VfError::from_rpc(e, 0)),
+                    Err(e) => return Err(vfsi_core::error_from_rpc(e, 0)),
                 }
             }
         } else {
@@ -4016,12 +4028,12 @@ impl VecFs for NfsVecFs {
             if created {
                 self.nfs
                     .setattr(&fh, Some(mode & 0o7777), None)
-                    .map_err(|e| VfError::from_rpc(e, 0))?;
+                    .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
             }
             if flags & O_TRUNC != 0 {
                 self.nfs
                     .setattr(&fh, None, Some(0))
-                    .map_err(|e| VfError::from_rpc(e, 0))?;
+                    .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
             }
             #[cfg(feature = "test-faults")]
             self.inject_open_fault(OpenFaultPoint::BeforeRegister { index: 0 })?;
@@ -4097,7 +4109,7 @@ impl VecFs for NfsVecFs {
             Ok(()) => Ok(()),
             Err(error) => {
                 self.deferred_descriptor_closes.push(open);
-                Err(VfError::from_rpc(error, 0))
+                Err(vfsi_core::error_from_rpc(error, 0))
             }
         }
     }
@@ -4140,7 +4152,7 @@ impl VecFs for NfsVecFs {
                 if index > 0 {
                     self.nfs
                         .close_many(&ops[..index])
-                        .map_err(VfError::from_rpc_indexed)?;
+                        .map_err(vfsi_core::error_from_rpc_indexed)?;
                     for fd in fds.iter().take(index) {
                         self.open_files.remove(fd);
                     }
@@ -4161,7 +4173,7 @@ impl VecFs for NfsVecFs {
                         self.open_files.remove(fd);
                     }
                 }
-                Err(VfError::from_rpc_indexed(error))
+                Err(vfsi_core::error_from_rpc_indexed(error))
             }
         }
     }
@@ -4562,7 +4574,7 @@ impl VecFs for NfsVecFs {
             let page = self
                 .nfs
                 .readdir(&state.fh, state.cookie, &ids)
-                .map_err(|error| VfError::from_rpc(error, 0))?;
+                .map_err(|error| vfsi_core::error_from_rpc(error, 0))?;
             if page.is_empty() {
                 return Ok((Vec::new(), None));
             }
@@ -4633,7 +4645,7 @@ impl VecFs for NfsVecFs {
             let page = self
                 .nfs
                 .readdir(&fh, cookie, &ids)
-                .map_err(|error| VfError::from_rpc(error, 0))?;
+                .map_err(|error| vfsi_core::error_from_rpc(error, 0))?;
             for entry in &page {
                 if max_entries != 0 && count >= max_entries {
                     return Ok(());
@@ -4710,7 +4722,7 @@ impl VecFs for NfsVecFs {
             let ops: Vec<(FileHandle, u64)> =
                 level.iter().map(|(fh, _, _)| (fh.clone(), 0)).collect();
             let results = self.nfs.readdir_pages(&ops, &ids).map_err(|error| {
-                remap_active_error(VfError::from_rpc_indexed(error), &level_owners)
+                remap_active_error(vfsi_core::error_from_rpc_indexed(error), &level_owners)
             })?;
             if results.len() != level.len() {
                 return Err(VfError::transport(
@@ -4771,7 +4783,7 @@ impl VecFs for NfsVecFs {
                 let pending_owners: Vec<usize> =
                     pending.iter().map(|(idx, _, _)| level[*idx].2).collect();
                 let cont = self.nfs.readdir_pages(&cont_ops, &ids).map_err(|error| {
-                    remap_active_error(VfError::from_rpc_indexed(error), &pending_owners)
+                    remap_active_error(vfsi_core::error_from_rpc_indexed(error), &pending_owners)
                 })?;
                 if cont.len() != pending.len() {
                     return Err(VfError::transport(
@@ -4828,7 +4840,7 @@ impl VecFs for NfsVecFs {
             let page = self
                 .nfs
                 .readdir(&root_fh, cookie, &ids)
-                .map_err(|error| VfError::from_rpc(error, 0))?;
+                .map_err(|error| vfsi_core::error_from_rpc(error, 0))?;
             append_bounded_walk_page(
                 root,
                 root,
@@ -4876,7 +4888,7 @@ impl VecFs for NfsVecFs {
             let results = self
                 .nfs
                 .readdir_children(&operations, &ids)
-                .map_err(VfError::from_rpc_indexed)?;
+                .map_err(vfsi_core::error_from_rpc_indexed)?;
             let mut level_attrs: Vec<Vec<VfAttrs>> =
                 (0..results.len()).map(|_| Vec::new()).collect();
             let mut pending = Vec::new();
@@ -4905,7 +4917,7 @@ impl VecFs for NfsVecFs {
                 let pages = self
                     .nfs
                     .readdir_pages(&operations, &ids)
-                    .map_err(VfError::from_rpc_indexed)?;
+                    .map_err(vfsi_core::error_from_rpc_indexed)?;
                 let mut next_pending = Vec::new();
                 for ((index, handle, _), (page, cookie)) in pending.iter().zip(pages) {
                     append_bounded_walk_page(
@@ -4987,7 +4999,7 @@ impl VecFs for NfsVecFs {
         let outcome = self
             .nfs
             .renamev_path_compound(&prs)
-            .map_err(|e| VfError::from_rpc(e, None))?;
+            .map_err(|e| vfsi_core::error_from_rpc(e, None))?;
         match outcome.failed {
             Some((i, _st)) => {
                 // Prefix [0..i) renamed; retry [i..] via the phased path,
@@ -5015,7 +5027,7 @@ impl VecFs for NfsVecFs {
         let outcome = self
             .nfs
             .removev_path_compound(&paths)
-            .map_err(|e| VfError::from_rpc(e, None))?;
+            .map_err(|e| vfsi_core::error_from_rpc(e, None))?;
         match outcome.failed {
             Some((i, _st)) => {
                 // Prefix [0..i) removed; retry [i..] via the phased path.
@@ -5067,7 +5079,7 @@ impl VecFs for NfsVecFs {
             if i > 0 {
                 let _ = self.apply_dir_modes(&dirs[..i]);
             }
-            return Err(VfError::from_rpc_indexed(e));
+            return Err(vfsi_core::error_from_rpc_indexed(e));
         }
         self.apply_dir_modes(dirs)
     }
@@ -5107,7 +5119,7 @@ impl VecFs for NfsVecFs {
         }
         self.nfs
             .create_many(&ops)
-            .map_err(VfError::from_rpc_indexed)
+            .map_err(vfsi_core::error_from_rpc_indexed)
     }
 
     fn readlinkv(&mut self, paths: &[&Path]) -> VfResult<Vec<Vec<u8>>> {
@@ -5131,7 +5143,7 @@ impl VecFs for NfsVecFs {
         }
         self.nfs
             .readlink_many(&ops)
-            .map_err(VfError::from_rpc_indexed)
+            .map_err(vfsi_core::error_from_rpc_indexed)
     }
 
     fn hardlinkv(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
@@ -5182,7 +5194,9 @@ impl VecFs for NfsVecFs {
                 (_, Err(status)) => return Err(VfError::nfs(i, *status)),
             }
         }
-        self.nfs.link_many(&ops).map_err(VfError::from_rpc_indexed)
+        self.nfs
+            .link_many(&ops)
+            .map_err(vfsi_core::error_from_rpc_indexed)
     }
 
     fn dupv(&mut self, pairs: &[ExtentPair]) -> VfRes {
@@ -5305,7 +5319,7 @@ impl VecFs for NfsVecFs {
                     OPEN4_SHARE_ACCESS_WRITE,
                     crate::client::OpenCreate::Guarded,
                 )
-                .map_err(|e| VfError::from_rpc(e, 0))
+                .map_err(|e| vfsi_core::error_from_rpc(e, 0))
             {
                 Ok(x) => x,
                 Err(e) => return Err(e.with_index(i)),
@@ -5316,7 +5330,7 @@ impl VecFs for NfsVecFs {
                 if let Some(offset) = number_offset {
                     let adbn = block_number.to_be_bytes();
                     if let Err(e) = self.nfs.write(&fh, &sid, offset, &adbn) {
-                        failed = Some(VfError::from_rpc(e, i));
+                        failed = Some(vfsi_core::error_from_rpc(e, i));
                         break;
                     }
                 }
@@ -5324,7 +5338,7 @@ impl VecFs for NfsVecFs {
                     && !p.adb_pattern_data.is_empty()
                     && let Err(e) = self.nfs.write(&fh, &sid, offset, &p.adb_pattern_data)
                 {
-                    failed = Some(VfError::from_rpc(e, i));
+                    failed = Some(vfsi_core::error_from_rpc(e, i));
                     break;
                 }
                 written += 1;
@@ -5384,7 +5398,7 @@ impl VecFs for NfsVecFs {
             let (fh, ftype) = self
                 .nfs
                 .lookup_getattr(&parent, &name)
-                .map_err(|error| VfError::from_rpc(error, 0))?;
+                .map_err(|error| vfsi_core::error_from_rpc(error, 0))?;
             if ftype != nfs_ftype4_NF4DIR {
                 return Err(VfError::failure(0, ERR_NOTDIR));
             }
@@ -5660,12 +5674,15 @@ fn s_ifmt(ftype: u32) -> u32 {
 /// Fill `a` from parsed values where the mask requests the attribute. `mode`
 /// is the permission bits plus the `S_IFMT` bits derived from `ftype`.
 fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
-    a.ftype = v.ftype.map(VfType::from_nfs).unwrap_or(VfType::Regular);
+    a.ftype = v
+        .ftype
+        .map(vfsi_core::file_type_from_nfs)
+        .unwrap_or(VfType::Regular);
     a.returned = AttrMask::empty();
     if a.masks.contains(AttrMask::MODE)
         && let Some(mode) = v.mode
     {
-        a.mode = mode | s_ifmt(a.ftype.as_nfs());
+        a.mode = mode | s_ifmt(vfsi_core::file_type_to_nfs(&a.ftype));
         a.returned.insert(AttrMask::MODE);
     }
     if a.masks.contains(AttrMask::SIZE)

@@ -1,14 +1,34 @@
 # Rust API architecture
 
-The Rust-native VFSI API is intentionally separated from the historical
-POSIX/C compatibility surface.
+The Rust-native VFSI application API is intentionally separated from backend
+implementation contracts and the historical POSIX/C compatibility surface.
+
+## Application boundary and migration
+
+`NfsClient`, `NfsFile`, `NfsDir`, and their borrowed vector requests are opaque
+application handles. `Mounted` provides the corresponding local/kernel-backed
+handles. Clients do not dereference to backend owners, expose locks, accept raw
+backends, or provide backend extraction. Builder operations return application
+clients, not protocol implementations. Cloning remains cheap and shares the
+connection; files retain their existing ownership, cleanup, and error semantics.
+
+Custom backend implementers explicitly import `vnfs::backend::FsClient`,
+`FsFile`, `FsDir`, and backend traits. Construct and extract backend owners there
+instead of using `connect_backend` or extracting an application client. Protocol
+conversion helpers also live in that namespace, not on application metadata,
+flags, results, or errors. There are no historical root aliases: applications use
+`Error`, `Result`, and `FileType`. This is a pre-1.0 Rust source change; the C ABI
+is unchanged.
+
+The following backend contracts describe implementation responsibilities;
+ordinary applications use the concrete client methods instead:
 
 - `FileSystem` is the descriptor I/O contract. `MetadataFileSystem`,
   `DirectoryFileSystem`, `NamespaceFileSystem`, `LinkFileSystem`, and
   `CopyFileSystem` add focused capabilities; `NativeFileSystem` is their
   convenient aggregate bound.
 - `VectorFileSystem` adds optimized ordered batches.
-- `FsClient` owns and shares a backend; `FsFile` owns a remote handle without
+- `NfsClient` owns and shares a connection; `NfsFile` owns a remote handle without
   borrowing the entire client.
 - `NfsExtensions` and `SmbExtensions` contain protocol-only negotiated state.
 - `OpenRequest`, `MetadataQuery`, and `SetAttributes` replace raw flags and
@@ -61,7 +81,7 @@ use vnfs::prelude::*;
 ```
 
 The native owned-file API never exposes its backend descriptor. Vector
-requests made through `FsClient` verify that every file belongs to that same
+requests made through `NfsClient` verify that every file belongs to that same
 client, preventing accidental cross-session descriptor use.
 
 Application code should connect through `Nfs::builder`, which directly
@@ -121,11 +141,11 @@ the synchronous core does not depend on Tokio.
 
 An API that discovers the amount of data itself and returns an owned buffer
 must impose a finite default allocation limit and expose an explicit override.
-`FsClient::read`, `FsClient::read_to_string`, and `VecFs::read_allv` therefore
+`NfsClient::read`, `NfsClient::read_to_string`, and `VecFs::read_allv` therefore
 default to `DEFAULT_READ_MAX_BYTES` (16 MiB). Callers may select another bound
 with `read_with_limit`, `read_to_string_with_limit`, or `ReadAllOptions`.
 `ResourceLimits` sets client defaults through `NfsBuilder::limits`,
-`FsClient::with_limits`, or `Auto::with_limits`. Existing clones retain their
+`NfsClient::with_limits`, or `Auto::with_limits`. Existing clones retain their
 configured policy. Scalar and vector whole-file reads share the optimized
 backend path. `readv_into` returns counts, offsets and EOF, and also enforces
 the aggregate policy because a backend may use an owned-buffer fallback.
@@ -137,7 +157,7 @@ after translation into the public namespace, including mount prefixes.
 Reads whose size is explicit in the request (`readv`, `read_at`, and `pread`)
 are bounded by that caller-supplied length. Reads into caller-owned buffers are
 bounded by the buffer. Applications processing larger or untrusted files
-should stream through `FsFile`, `Read`, `read_streamv`, or repeated positional
+should stream through `NfsFile`, `Read`, `read_streamv`, or repeated positional
 reads instead of raising a whole-file allocation limit without bound.
 These limits bound logical payloads, not process RSS or arbitrary
 `std::io::Read::read_to_end` calls. For an already-open file, use
@@ -146,11 +166,11 @@ reopening the path. An overflow returns an error and discards the collected
 buffer; the cursor can advance, including a one-byte EOF probe. It is not a
 cursor-rollback operation.
 
-Allocating directory APIs are bounded for the same reason. `FsClient::read_dir`
+Allocating directory APIs are bounded for the same reason. `NfsClient::read_dir`
 uses finite entry and combined-path-byte defaults; `read_dir_with_options` and
 `ReadDirOptions` select tighter limits or explicitly opt into unlimited
 collection. `read_dirs_with_options` applies these limits across the entire
-returned vector. Recursive `FsClient::walk_with_options` additionally has a
+returned vector. Recursive `NfsClient::walk_with_options` additionally has a
 default depth limit and accepts `WalkOptions`. NFS multi-directory listing
 delivers each bounded READDIR page before requesting continuation pages, so
 early-stop callbacks no longer retain the whole remote listing. Applications
@@ -168,10 +188,10 @@ Directory visitors return `TraversalCompletion::Complete` on exhaustion and
 last entry. `ControlFlow::Continue(())` requests another entry; callback
 errors propagate. This replaces the previous boolean directory callbacks.
 
-For recursive removal, `FsClient::remove_dir_all` is fail-fast and
+For recursive removal, `NfsClient::remove_dir_all` is fail-fast and
 `remove_dir_all_with_options`, `remove_dir_contents_with_options`, and
 `remove_paths_with_options` expose `RemoveOptions` at the application layer.
-`FsClient::open_dir_handle` returns an owned `FsDir` only when the backend has
+`NfsClient::open_dir_handle` returns an owned `NfsDir` only when the backend has
 a genuine directory descriptor; its `remove_contents` methods stay rooted at
 that handle and `Drop` closes it. Backends that only offer path tokens return
 `Unsupported` instead of implying handle safety. The NFS remover processes

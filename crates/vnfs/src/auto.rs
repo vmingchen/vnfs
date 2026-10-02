@@ -10,10 +10,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    DirEntry, Error as VfError, FsClient, FsFile, Nfs, NfsClient, NfsFile, OpenFlags, OpenRequest,
-    ReadDirOptions, ReadIntoResult, ReadResult, ResourceLimits, Result as VfResult, WriteResult,
+    DirEntry, Error as VfError, Mounted, Nfs, OpenFlags, OpenRequest, ReadDirOptions,
+    ReadIntoResult, ReadResult, ResourceLimits, Result as VfResult, WriteResult,
 };
 use vfsi_local::DummyVecFs;
+use vfsi_sync::{FsClient, FsFile};
+type NfsClient = FsClient<vfsi_nfs::NfsVecFs>;
+type NfsFile = FsFile<vfsi_nfs::NfsVecFs>;
 #[cfg(test)]
 use vfsi_sync::DEFAULT_READ_ALLV_MAX_TOTAL_BYTES;
 
@@ -30,33 +33,6 @@ macro_rules! routed_path_method {
 }
 
 const READ_CHUNK: usize = 1024 * 1024;
-
-/// Explicitly use Linux's mounted filesystem tree. This includes local,
-/// NFS, SMB/CIFS, and other mounted filesystems without a second connection.
-#[derive(Debug, Clone)]
-pub struct Mounted(FsClient<DummyVecFs>);
-
-impl Mounted {
-    /// Use the kernel for all operations under this host namespace directory.
-    /// Root `/work` plus application `/a` addresses host `/work/a`. This is not
-    /// a race-resistant security sandbox; use OS confinement for that purpose.
-    pub fn new(root: impl AsRef<Path>) -> VfResult<Self> {
-        let root = root.as_ref();
-        if !root.is_dir() {
-            return Err(VfError::client(0, libc::ENOTDIR as u32).with_context("mounted", root));
-        }
-        DummyVecFs::try_new(root.to_path_buf())
-            .map(FsClient::new)
-            .map(Self)
-    }
-}
-
-impl std::ops::Deref for Mounted {
-    type Target = FsClient<DummyVecFs>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 
 /// Opt into mount-aware direct NFS acceleration. Unlike [`Mounted`], eligible
 /// NFSv4 AUTH_SYS mounts use a separate client and vectorized COMPOUNDs.
@@ -80,7 +56,7 @@ impl Auto {
             return Err(VfError::client(0, libc::ENOTDIR as u32));
         }
         Ok(Self(AutoClient {
-            mounted: Mounted::new(&root)?.0,
+            mounted: Mounted::new(&root)?.inner,
             root,
             connections: Mutex::new(HashMap::new()),
             owner: Arc::new(()),
@@ -888,7 +864,8 @@ impl AutoClient {
             .version(crate::NfsVersion::try_from(Some(spec.minor)).ok()?)
             .connect()
             .ok()?
-            .with_limits(self.limits);
+            .with_limits(self.limits)
+            .inner;
         let kernel_id = fs::metadata(&spec.mount_point).ok()?.ino();
         if client.metadata("/").ok()?.file_id() != Some(kernel_id) {
             return None;
@@ -1608,8 +1585,8 @@ impl AutoSetMetadata<'_> {
 }
 
 enum AutoDirInner {
-    Mounted(crate::FsDir<DummyVecFs>),
-    Nfs(crate::FsDir<vfsi_nfs::NfsVecFs>),
+    Mounted(vfsi_sync::FsDir<DummyVecFs>),
+    Nfs(vfsi_sync::FsDir<vfsi_nfs::NfsVecFs>),
 }
 
 /// Owned handle-rooted directory. Path-only backends fail at open rather than

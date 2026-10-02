@@ -41,3 +41,7 @@ vfsi-sync = { workspace = true, features = ["test-support"] }
 [[test]]
 name = "dummy_vecfs"
 required-features = ["dummy"]
+
+[[test]]
+name = "application_boundary"
+required-features = ["auto"]

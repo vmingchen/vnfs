@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn vf_error_preserves_transport_message() {
-        let e = VfError::from_rpc(RpcError::transport("connection refused"), 3);
+        let e = vfsi_core::error_from_rpc(RpcError::transport("connection refused"), 3);
         assert!(e.is_transport());
         assert_eq!(e.index(), Some(3));
         assert_eq!(e.index(), Some(3));
@@ -112,13 +112,13 @@ mod tests {
         assert!(e.to_string().contains("connection refused"));
 
         // An unattributable transport failure has no op index.
-        let e = VfError::from_rpc(RpcError::transport("server gone"), None);
+        let e = vfsi_core::error_from_rpc(RpcError::transport("server gone"), None);
         assert!(e.is_transport());
         assert_eq!(e.index(), None);
         assert!(!e.to_string().contains("op "));
 
         // Server status errors stay Op errors with the caller-supplied index.
-        let e = VfError::from_rpc(RpcError::op(4, ERR_NOENT), 1);
+        let e = vfsi_core::error_from_rpc(RpcError::op(4, ERR_NOENT), 1);
         assert!(!e.is_transport());
         assert_eq!(e.index(), Some(1));
         assert_eq!(e.index(), Some(1));
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn vf_error_indexed_and_remap() {
-        let e = VfError::from_rpc_indexed(RpcError::op(4, ERR_EXIST));
+        let e = vfsi_core::error_from_rpc_indexed(RpcError::op(4, ERR_EXIST));
         assert_eq!((e.index(), e.err_no()), (Some(4), ERR_EXIST));
         assert_eq!(e.index(), Some(4));
         assert_eq!(e.with_index(9).index(), Some(9));

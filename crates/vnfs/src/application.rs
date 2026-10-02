@@ -272,20 +272,20 @@ macro_rules! file_methods {
     };
 }
 
-impl<F: vfsi_sync::FileSystem> FileHandle for crate::FsFile<F> {
+impl<F: vfsi_sync::FileSystem> FileHandle for vfsi_sync::FsFile<F> {
     type ReadRequest<'a>
-        = crate::FsRead<'a, F>
+        = vfsi_sync::FsRead<'a, F>
     where
         Self: 'a;
     type ReadIntoRequest<'a>
-        = crate::FsReadInto<'a, F>
+        = vfsi_sync::FsReadInto<'a, F>
     where
         Self: 'a;
     type WriteRequest<'a>
-        = crate::FsWrite<'a, F>
+        = vfsi_sync::FsWrite<'a, F>
     where
         Self: 'a;
-    file_methods!(crate::FsFile<F>);
+    file_methods!(vfsi_sync::FsFile<F>);
 }
 
 macro_rules! client_methods {
@@ -455,10 +455,23 @@ macro_rules! client_methods {
 }
 
 impl<F: vfsi_sync::NativeFileSystem + vfsi_sync::VectorFileSystem + vfsi_sync::VecFs + 'static>
-    Client for crate::FsClient<F>
+    Client for vfsi_sync::FsClient<F>
 {
-    type File = crate::FsFile<F>;
-    client_methods!(crate::FsClient<F>, std::convert::identity);
+    type File = vfsi_sync::FsFile<F>;
+    client_methods!(vfsi_sync::FsClient<F>, std::convert::identity);
+}
+
+#[cfg(feature = "nfs")]
+impl FileHandle for crate::NfsFile {
+    type ReadRequest<'a> = crate::NfsRead<'a>;
+    type ReadIntoRequest<'a> = crate::NfsReadInto<'a>;
+    type WriteRequest<'a> = crate::NfsWrite<'a>;
+    file_methods!(crate::NfsFile);
+}
+#[cfg(feature = "nfs")]
+impl Client for crate::NfsClient {
+    type File = crate::NfsFile;
+    client_methods!(crate::NfsClient, std::convert::identity);
 }
 
 #[cfg(all(feature = "auto", target_os = "linux"))]
@@ -479,10 +492,13 @@ mod routed {
         client_methods!(crate::AutoClient, std::ops::Deref::deref);
     }
     impl Client for crate::Mounted {
-        type File = crate::FsFile<vfsi_local::DummyVecFs>;
-        client_methods!(
-            crate::FsClient<vfsi_local::DummyVecFs>,
-            std::ops::Deref::deref
-        );
+        type File = crate::MountedFile;
+        client_methods!(crate::Mounted, std::convert::identity);
+    }
+    impl FileHandle for crate::MountedFile {
+        type ReadRequest<'a> = crate::MountedRead<'a>;
+        type ReadIntoRequest<'a> = crate::MountedReadInto<'a>;
+        type WriteRequest<'a> = crate::MountedWrite<'a>;
+        file_methods!(crate::MountedFile);
     }
 }

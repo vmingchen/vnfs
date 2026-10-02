@@ -363,7 +363,7 @@ fn main() -> vnfs::Result<()> {
 ```
 
 One backend connection serializes access to its stateful NFS session, while
-`FsClient::readv` and `writev` preserve useful compound batching.
+`NfsClient::readv` and `writev` preserve useful compound batching.
 Clone a client to share that same connection; use `Nfs::builder(host).connect_pool(4)?`
 when separate vector cohorts need parallel network requests. `next_client()`
 distributes cohorts round-robin across independent sessions; it does not split
@@ -426,8 +426,8 @@ Directory visitors accept `Ok(ControlFlow::Continue(()))` or
 subtree. Both return `TraversalCompletion::Complete` or `Stopped`. Callback
 errors propagate, and even breaking on the last entry reports `Stopped`.
 Use collecting `walk` when multi-directory batching is more important than
-incremental delivery. `FsDir::try_close` retains ownership after a failed close,
-as `FsFile::try_close` does. Dropping either handle may block on the client lock
+incremental delivery. `NfsDir::try_close` retains ownership after a failed close,
+as `NfsFile::try_close` does. Dropping either handle may block on the client lock
 and a network cleanup operation, and discards cleanup errors. Close explicitly
 when errors matter. `Write::flush` requests backend durability (`sync_data`),
 not merely flushing a user-space buffer, and may cost a network round trip.

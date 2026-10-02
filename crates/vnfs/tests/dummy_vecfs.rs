@@ -11,7 +11,7 @@ use vnfs::backend::{VecFs, VecFsExt, VfOffset};
 
 #[test]
 fn bounded_open_file_collection_keeps_identity_across_rename_and_replacement() {
-    let client = vnfs::FsClient::new(dummy());
+    let client = vnfs::backend::FsClient::new(dummy());
     client.write("/original", b"opened").unwrap();
     let mut file = client.open("/original").unwrap();
     client.rename("/original", "/moved").unwrap();
@@ -29,7 +29,8 @@ fn bounded_open_file_collection_keeps_identity_across_rename_and_replacement() {
 
 #[test]
 fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
-    use vnfs::{FsClient, ResourceLimits, TraversalCompletion, WalkOptions};
+    use vnfs::backend::FsClient;
+    use vnfs::{ResourceLimits, TraversalCompletion, WalkOptions};
     let client = FsClient::new(dummy()).with_limits(ResourceLimits {
         max_directory_entries: 3,
         ..Default::default()
@@ -134,7 +135,8 @@ fn dummy() -> DummyVecFs {
 
 #[test]
 fn one_shot_file_vectors_roundtrip_and_limit_allocations() {
-    use vnfs::{FsClient, ReadAllOptions};
+    use vnfs::ReadAllOptions;
+    use vnfs::backend::FsClient;
 
     let client = FsClient::new(dummy());
     client
@@ -164,7 +166,7 @@ fn one_shot_file_vectors_roundtrip_and_limit_allocations() {
 
 #[test]
 fn one_shot_file_vectors_handle_empty_batches_and_replace_files() {
-    use vnfs::FsClient;
+    use vnfs::backend::FsClient;
 
     let client = FsClient::new(dummy());
     client.write_files::<&str, &[u8]>(&[]).unwrap();
@@ -188,7 +190,8 @@ fn one_shot_file_vectors_handle_empty_batches_and_replace_files() {
 
 #[test]
 fn application_directory_vectors_preserve_fields_and_limits() {
-    use vnfs::{FsClient, MetadataFields, ReadDirOptions, WalkOptions};
+    use vnfs::backend::FsClient;
+    use vnfs::{MetadataFields, ReadDirOptions, WalkOptions};
 
     let client = FsClient::new(dummy());
     client.create_dir("/a").unwrap();
@@ -241,7 +244,8 @@ fn application_directory_vectors_preserve_fields_and_limits() {
 
 #[test]
 fn application_metadata_and_batch_mutations() {
-    use vnfs::{FsClient, MetadataFields};
+    use vnfs::MetadataFields;
+    use vnfs::backend::FsClient;
 
     let client = FsClient::new(dummy());
     client.write("/source-1", b"abc").unwrap();
@@ -265,7 +269,8 @@ fn application_metadata_and_batch_mutations() {
 
 #[test]
 fn application_directory_cohorts_preserve_global_error_index() {
-    use vnfs::{FsClient, MetadataFields, ReadDirOptions};
+    use vnfs::backend::FsClient;
+    use vnfs::{MetadataFields, ReadDirOptions};
 
     let client = FsClient::new(dummy());
     let mut paths = Vec::new();
@@ -319,7 +324,8 @@ fn dummy_write_read_roundtrip() {
 
 #[test]
 fn single_file_stream_is_bounded_ordered_and_cancellable() {
-    use vnfs::{Error as VfError, FsClient, ReadStreamOptions};
+    use vnfs::backend::FsClient;
+    use vnfs::{Error as VfError, ReadStreamOptions};
 
     let client = FsClient::new(dummy());
     let payload: Vec<u8> = (0..(2 * 1024 * 1024 + 37))
@@ -396,7 +402,7 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
 
 #[test]
 fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
-    use vnfs::FsClient;
+    use vnfs::backend::FsClient;
     use vnfs::backend::{
         DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, VecFs, VfFile, VfOffset, WriteOp,
     };
@@ -634,7 +640,8 @@ fn open_dir_handle_empties_contents() {
 
 #[test]
 fn owned_directory_handle_refuses_path_only_backend() {
-    use vnfs::{FsClient, RemoveOptions};
+    use vnfs::RemoveOptions;
+    use vnfs::backend::FsClient;
 
     let client = FsClient::new(dummy());
     client.create_dir("/d").unwrap();
@@ -770,7 +777,8 @@ fn standard_open_options_validate_access_modes() {
 #[test]
 fn owned_client_supports_multiple_live_files_and_typed_requests() {
     use std::io::{Read, Seek, SeekFrom, Write};
-    use vnfs::{FsClient, OpenFlags, OpenRequest};
+    use vnfs::backend::FsClient;
+    use vnfs::{OpenFlags, OpenRequest};
 
     let client = FsClient::new(dummy());
     let flags = OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
@@ -828,7 +836,8 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
 
 #[test]
 fn native_client_covers_idiomatic_file_and_namespace_workflows() {
-    use vnfs::{FileType as VfType, FsClient};
+    use vnfs::FileType as VfType;
+    use vnfs::backend::FsClient;
 
     let client = FsClient::new(dummy());
     client.create_dir_all("/tree/nested").unwrap();
@@ -914,7 +923,7 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
 
 #[test]
 fn native_vector_operations_are_composable() {
-    use vnfs::FsClient;
+    use vnfs::backend::FsClient;
 
     let client = FsClient::new(dummy());
     let files = client
@@ -1170,8 +1179,9 @@ fn native_scalar_contract_separates_metadata_query_from_update() {
 
 #[test]
 fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
+    use vnfs::backend::FsClient;
     use vnfs::backend::{AttrMask, WriteOp};
-    use vnfs::{FsClient, ReadDirOptions, WalkOptions};
+    use vnfs::{ReadDirOptions, WalkOptions};
 
     let mut fs = dummy();
     fs.ensure_dir(Path::new("/tree/sub"), 0o755).unwrap();
@@ -1219,7 +1229,7 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
 fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
     use std::sync::mpsc;
     use std::time::Duration;
-    use vnfs::FsClient;
+    use vnfs::backend::FsClient;
 
     let client = FsClient::new(dummy());
     client.create_dir("/tree").unwrap();
@@ -1255,8 +1265,9 @@ fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
 
 #[test]
 fn directory_visitor_supports_limits_early_stop_and_callback_errors() {
+    use vnfs::backend::FsClient;
     use vnfs::backend::WriteOp;
-    use vnfs::{Error as VfError, FsClient, ReadDirOptions};
+    use vnfs::{Error as VfError, ReadDirOptions};
 
     let mut fs = dummy();
     fs.ensure_dir(Path::new("/tree"), 0o755).unwrap();

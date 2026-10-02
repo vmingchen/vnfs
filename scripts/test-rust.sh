@@ -15,6 +15,8 @@ cargo test -p nfsv41-sys
 cargo test -p vnfs --lib
 cargo test -p vnfs --features dummy --test dummy_vecfs
 cargo test -p vnfs --test public_api
+cargo test -p vnfs --test application_boundary
+cargo test -p vnfs --doc
 cargo test -p vfsi-c --lib
 
 # Python extension crates are intentionally detached Cargo workspaces so their

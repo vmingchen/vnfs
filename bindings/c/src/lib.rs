@@ -221,7 +221,7 @@ impl vfsi_attrs {
         vfsi_attrs {
             struct_size: std::mem::size_of::<vfsi_attrs>() as u32,
             abi_version: VFSI_ABI_VERSION,
-            ftype: a.ftype.as_nfs(),
+            ftype: vnfs::backend::file_type_to_nfs(&a.ftype),
             mode: a.mode,
             size: a.size,
             nlink: a.nlink,
@@ -2111,7 +2111,7 @@ mod tests {
         // A compound-level NFS status with no per-op index must still surface
         // its real errno through the scalar helpers and stay a filesystem
         // error, not be downgraded to EIO/transport.
-        let error = VfError::from_rpc(vnfs::backend::RpcError::op(0, 10005), None);
+        let error = vnfs::backend::error_from_rpc(vnfs::backend::RpcError::op(0, 10005), None);
         assert_eq!(error.index(), None);
         assert_eq!(vf_code(&error), 10005);
         let failure = vfsi_result::from_error(error);

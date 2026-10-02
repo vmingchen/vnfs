@@ -1,8 +1,6 @@
 use std::path::Path;
 
-use vfsi_core::{
-    AttrMask, ErrorDomain, Metadata, RpcError, StatusCode, TransportKind, VfAttrs, VfError,
-};
+use vfsi_core::{AttrMask, ErrorDomain, RpcError, StatusCode, TransportKind, VfAttrs, VfError};
 
 #[test]
 fn transport_categories_survive_attribution_context_and_io_conversion() {
@@ -14,7 +12,7 @@ fn transport_categories_survive_attribution_context_and_io_conversion() {
         (TransportKind::Authentication, K::PermissionDenied),
         (TransportKind::Other, K::Other),
     ] {
-        let error = VfError::from_rpc(
+        let error = vfsi_core::error_from_rpc(
             RpcError::transport_with_kind(transport, "opaque backend message"),
             None,
         )
@@ -89,7 +87,8 @@ fn portable_error_kinds_preserve_protocol_status_and_source() {
 
 #[test]
 fn rpc_transport_placeholder_is_not_exposed_as_request_zero() {
-    let error = VfError::from_rpc_indexed(vfsi_core::RpcError::transport("connection reset"));
+    let error =
+        vfsi_core::error_from_rpc_indexed(vfsi_core::RpcError::transport("connection reset"));
     assert!(error.is_transport());
     assert_eq!(error.index(), None);
 }
@@ -105,7 +104,7 @@ fn index_mapping_preserves_unknown_transport_location() {
 
 #[test]
 fn nfs_status_is_not_conflated_with_errno() {
-    let error = VfError::from_rpc(vfsi_core::RpcError::op(3, 10044), Some(7));
+    let error = vfsi_core::error_from_rpc(vfsi_core::RpcError::op(3, 10044), Some(7));
     assert_eq!(error.domain(), ErrorDomain::Nfs);
     assert_eq!(error.status(), Some(StatusCode::Nfs(10044)));
     assert_eq!(error.index(), Some(7));
@@ -116,7 +115,7 @@ fn status_without_a_known_index_is_not_reported_as_operation_zero() {
     // A compound-level status (for example NFS4ERR_MINOR_VERS_MISMATCH) has no
     // per-operation result, so `None` must stay unattributed rather than
     // silently becoming operation 0.
-    let error = VfError::from_rpc(vfsi_core::RpcError::op(0, 10021), None);
+    let error = vfsi_core::error_from_rpc(vfsi_core::RpcError::op(0, 10021), None);
     assert!(!error.is_transport());
     assert_eq!(error.index(), None);
     assert_eq!(error.domain(), ErrorDomain::Nfs);
@@ -129,7 +128,7 @@ fn status_without_a_known_index_is_not_reported_as_operation_zero() {
     assert_eq!(attributed.status(), Some(StatusCode::Nfs(10021)));
 
     // An explicitly indexed status is still attributed directly.
-    let indexed = VfError::from_rpc(vfsi_core::RpcError::op(0, 10021), Some(0));
+    let indexed = vfsi_core::error_from_rpc(vfsi_core::RpcError::op(0, 10021), Some(0));
     assert_eq!(indexed.index(), Some(0));
 }
 
@@ -141,7 +140,7 @@ fn metadata_converts_fractional_pre_epoch_timestamps() {
         atime_nsec: 500_000_000,
         ..VfAttrs::default()
     };
-    let metadata = Metadata::from(attributes);
+    let metadata = vfsi_core::metadata_from_attrs(attributes);
     assert_eq!(
         metadata.accessed(),
         Some(std::time::UNIX_EPOCH - std::time::Duration::from_millis(500))
@@ -150,13 +149,13 @@ fn metadata_converts_fractional_pre_epoch_timestamps() {
 
 #[test]
 fn metadata_distinguishes_unavailable_fields_from_zero_and_false() {
-    let absent = Metadata::from(VfAttrs::default());
+    let absent = vfsi_core::metadata_from_attrs(VfAttrs::default());
     assert_eq!(absent.mode(), None);
     assert_eq!(absent.blocks(), None);
     assert_eq!(absent.device_id(), None);
     assert_eq!(absent.has_named_attributes(), None);
 
-    let present = Metadata::from(VfAttrs {
+    let present = vfsi_core::metadata_from_attrs(VfAttrs {
         returned: AttrMask::MODE | AttrMask::BLOCKS | AttrMask::RDEV | AttrMask::NAMED_ATTR,
         mode: libc::S_IFREG,
         blocks: 0,

@@ -244,7 +244,7 @@ impl<T: VecFs + ?Sized> FileSystem for T {
     fn open_one(&mut self, request: &OpenRequest) -> VfResult<VfFile> {
         self.open(
             request.path.as_path(),
-            request.flags.to_libc()?,
+            vfsi_core::open_flags_to_libc(request.flags)?,
             request.mode,
         )
         .map_err(|error| error.with_context("open", &request.path))
@@ -339,7 +339,7 @@ impl<T: VecFs + ?Sized> MetadataFileSystem for T {
         };
         result
             .map_err(|error| error.with_context("metadata", path))
-            .map(|()| attributes.into())
+            .map(|()| vfsi_core::metadata_from_attrs(attributes))
     }
 
     fn set_metadata_path(
@@ -421,7 +421,10 @@ impl<T: VecFs + ?Sized> DirectoryFileSystem for T {
                         VfError::failure(index, libc::EFBIG as u32).with_context("read_dir", path)
                     );
                 }
-                Ok(DirEntry::new(entry_path, attributes.into()))
+                Ok(DirEntry::new(
+                    entry_path,
+                    vfsi_core::metadata_from_attrs(attributes),
+                ))
             })
             .collect()
     }
@@ -453,7 +456,10 @@ impl<T: VecFs + ?Sized> DirectoryFileSystem for T {
                     .ok_or_else(|| {
                         VfError::client(index, ERR_IO).with_context("visit_dir", path)
                     })?;
-                Ok(DirEntry::new(entry_path, attributes.into()))
+                Ok(DirEntry::new(
+                    entry_path,
+                    vfsi_core::metadata_from_attrs(attributes),
+                ))
             })
             .collect::<VfResult<Vec<_>>>()?;
         Ok((entries, next))
@@ -554,10 +560,7 @@ fn translate_open_flags(requests: &[OpenRequest]) -> VfResult<Vec<i32>> {
         .iter()
         .enumerate()
         .map(|(index, request)| {
-            request
-                .flags
-                .to_libc()
-                .map_err(|error| error.with_index(index))
+            vfsi_core::open_flags_to_libc(request.flags).map_err(|error| error.with_index(index))
         })
         .collect()
 }

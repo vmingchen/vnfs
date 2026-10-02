@@ -2234,7 +2234,7 @@ fn native_read_dirs_batches_and_reports_bounded_errors() {
             .unwrap();
         write_file(&mut backend, Path::new(&format!("{dir}/d{i}/f")), b"x");
     }
-    let client = vnfs::FsClient::new(backend);
+    let client = vnfs::backend::FsClient::new(backend);
     let directories: Vec<String> = (0..10).map(|i| format!("{dir}/d{i}")).collect();
     let _ = vnfs::backend::compound::thread_compound_stats();
     let listings = client
@@ -2733,7 +2733,8 @@ fn open_dir_accepts_namespace_root() {
 
 #[test]
 fn owned_directory_handle_survives_rename_and_exposes_options() {
-    use vnfs::{FsClient, RemoveOptions};
+    use vnfs::RemoveOptions;
+    use vnfs::backend::FsClient;
 
     let root = setup_dir("owned_remove_dir");
     let original = format!("{root}/original");
@@ -2764,7 +2765,8 @@ fn owned_directory_handle_survives_rename_and_exposes_options() {
 
 #[test]
 fn recursive_removal_drains_large_directory_and_nested_children() {
-    use vnfs::{FsClient, RemoveOptions};
+    use vnfs::RemoveOptions;
+    use vnfs::backend::FsClient;
 
     let root = setup_dir("paged_remove_dir");
     let c = FsClient::new(client());

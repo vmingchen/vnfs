@@ -12,6 +12,17 @@ pub type Error = vfsi_core::VfError;
 
 mod application;
 pub use application::{Client, FileHandle};
+#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
+mod facade;
+#[cfg(all(feature = "auto", target_os = "linux"))]
+pub use facade::{
+    Mounted, MountedDir, MountedFile, MountedOpenOptions, MountedRead, MountedReadInto,
+    MountedSetMetadata, MountedWrite,
+};
+#[cfg(feature = "nfs")]
+pub use facade::{
+    NfsClient, NfsDir, NfsFile, NfsOpenOptions, NfsRead, NfsReadInto, NfsSetMetadata, NfsWrite,
+};
 
 /// Backend implementer and protocol-construction APIs. Most applications
 /// need only the crate root; these are also available from the `vfsi-*` crates.
@@ -21,9 +32,9 @@ pub mod backend {
         CopyFileSystem, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
         DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
         DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DirPageCursor, DirectoryFileSystem,
-        FileSystem, FsRead, FsReadInto, FsWrite, LinkFileSystem, MetadataFileSystem,
-        NamespaceFileSystem, NativeFileSystem, SetMetadata, VecFs, VecFsExt, VectorFileSystem,
-        VfFileHandle, VfOpenOptions, rm_recursive,
+        FileSystem, FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite, LinkFileSystem,
+        MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions, SetMetadata, VecFs,
+        VecFsExt, VectorFileSystem, VfFileHandle, VfOpenOptions, rm_recursive,
     };
 
     #[cfg(feature = "dummy")]
@@ -39,6 +50,7 @@ pub mod backend {
 pub mod diagnostics {
     /// Snapshot of process-wide NFS compound and RPC activity.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[non_exhaustive]
     pub struct Snapshot {
         /// Compounds whose RPC call returned successfully; lost replies and
         /// other transport failures are not included.
@@ -77,7 +89,7 @@ mod auto;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub use auto::{
     Auto, AutoClient, AutoDir, AutoFile, AutoOpenOptions, AutoRead, AutoReadInto, AutoRoute,
-    AutoSetMetadata, AutoWrite, Mounted,
+    AutoSetMetadata, AutoWrite,
 };
 
 /// Common application imports.
@@ -104,8 +116,7 @@ pub use vfsi_core::{
     RemoveOptions, StatusCode, TransportKind,
 };
 pub use vfsi_sync::{
-    DirectoryListing, FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite, OpenOptions,
-    ReadAllOptions, ReadDirOptions, ReadStreamOptions, ResourceLimits, SetMetadata,
+    DirectoryListing, ReadAllOptions, ReadDirOptions, ReadStreamOptions, ResourceLimits,
     StreamCompletion, TraversalCompletion, WalkOptions,
 };
 pub use vfsi_sync::{
@@ -114,9 +125,7 @@ pub use vfsi_sync::{
 #[cfg(feature = "nfs")]
 mod native_nfs;
 #[cfg(feature = "nfs")]
-pub use native_nfs::{
-    Nfs, NfsBuilder, NfsClient, NfsClientPool, NfsFile, NfsRead, NfsReadInto, NfsVersion, NfsWrite,
-};
+pub use native_nfs::{Nfs, NfsBuilder, NfsClientPool, NfsVersion};
 #[cfg(all(feature = "nfs", feature = "rpcsec-gss"))]
 pub use vfsi_nfs::RpcsecGssProtection;
 #[cfg(feature = "nfs")]

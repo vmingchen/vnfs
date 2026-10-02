@@ -212,53 +212,6 @@ impl VfError {
         }
     }
 
-    /// Convert a low-level [`RpcError`] into a `VfError`, attributing the
-    /// failure to `index` in the caller's operation array. `index` is the
-    /// caller's operation index, which may differ from the compound-internal
-    /// op index; for transport failures the index is best-effort. The
-    /// transport message (if any) is preserved.
-    pub fn from_rpc(e: RpcError, index: impl Into<Option<usize>>) -> VfError {
-        if e.is_transport() {
-            VfError::Transport {
-                index: index.into(),
-                kind: e.transport_kind.unwrap_or(TransportKind::Other),
-                message: e.message,
-                operation: None,
-                path: None,
-            }
-        } else {
-            match index.into() {
-                Some(index) => VfError::Op {
-                    index,
-                    err_no: e.status,
-                    domain: ErrorDomain::Nfs,
-                    operation: None,
-                    path: None,
-                },
-                // A status with no known operation index must not masquerade
-                // as operation 0. Preserve it as unattributed.
-                None => VfError::OpUnattributed {
-                    err_no: e.status,
-                    domain: ErrorDomain::Nfs,
-                    operation: None,
-                    path: None,
-                },
-            }
-        }
-    }
-
-    /// Like [`from_rpc`](VfError::from_rpc), but trusts `e.op_index` as the
-    /// caller-relative operation index for a server status. Transport errors
-    /// keep an unknown index because [`RpcError`] uses zero only as a wire/API
-    /// placeholder in that case.
-    pub fn from_rpc_indexed(e: RpcError) -> VfError {
-        if e.is_transport() {
-            return VfError::from_rpc(e, None);
-        }
-        let idx = e.op_index;
-        VfError::from_rpc(e, Some(idx))
-    }
-
     /// Re-attribute this error to a different operation index.
     pub fn with_index(self, index: usize) -> VfError {
         match self {
@@ -454,6 +407,52 @@ impl std::fmt::Display for VfError {
 
 impl std::error::Error for VfError {}
 
+/// Convert an RPC error using an explicitly chosen logical request index.
+/// `None` keeps the failure unattributed; it never invents index zero.
+/// Transport errors retain their transport category rather than becoming a
+/// filesystem status. The RPC's wire-operation index is not used here.
+pub fn error_from_rpc(e: RpcError, index: impl Into<Option<usize>>) -> VfError {
+    if e.is_transport() {
+        VfError::Transport {
+            index: index.into(),
+            kind: e.transport_kind.unwrap_or(TransportKind::Other),
+            message: e.message,
+            operation: None,
+            path: None,
+        }
+    } else {
+        match index.into() {
+            Some(index) => VfError::Op {
+                index,
+                err_no: e.status,
+                domain: ErrorDomain::Nfs,
+                operation: None,
+                path: None,
+            },
+            // A status with no known operation index must not masquerade
+            // as operation 0. Preserve it as unattributed.
+            None => VfError::OpUnattributed {
+                err_no: e.status,
+                domain: ErrorDomain::Nfs,
+                operation: None,
+                path: None,
+            },
+        }
+    }
+}
+
+/// Convert a semantic RPC failure using its wire-operation index.
+/// Transport failures have no trustworthy operation index and remain
+/// unattributed. Callers mapping compound operations to logical requests
+/// should instead use `error_from_rpc` with their mapped index.
+pub fn error_from_rpc_indexed(e: RpcError) -> VfError {
+    if e.is_transport() {
+        return crate::error_from_rpc(e, None);
+    }
+    let idx = e.op_index;
+    crate::error_from_rpc(e, Some(idx))
+}
+
 impl From<VfError> for std::io::Error {
     fn from(error: VfError) -> Self {
         std::io::Error::new(error.kind(), error)
@@ -567,36 +566,34 @@ bitflags::bitflags! {
     }
 }
 
-impl OpenFlags {
-    /// Translate the typed flags for compatibility backends.
-    pub fn to_libc(self) -> VfResult<i32> {
-        let writable = self.intersects(Self::WRITE | Self::APPEND);
-        let mut raw = match (self.contains(Self::READ), writable) {
-            (true, true) => libc::O_RDWR,
-            (true, false) => libc::O_RDONLY,
-            (false, true) => libc::O_WRONLY,
-            (false, false) => return Err(VfError::failure(0, ERR_INVAL)),
-        };
-        if self.contains(Self::TRUNCATE) && !writable {
-            return Err(VfError::failure(0, ERR_INVAL));
-        }
-        if self.intersects(Self::CREATE | Self::CREATE_NEW) && !writable {
-            return Err(VfError::failure(0, ERR_INVAL));
-        }
-        if self.contains(Self::APPEND) {
-            raw |= libc::O_APPEND;
-        }
-        if self.contains(Self::TRUNCATE) {
-            raw |= libc::O_TRUNC;
-        }
-        if self.intersects(Self::CREATE | Self::CREATE_NEW) {
-            raw |= libc::O_CREAT;
-        }
-        if self.contains(Self::CREATE_NEW) {
-            raw |= libc::O_EXCL;
-        }
-        Ok(raw)
+/// Translate the typed flags for compatibility backends.
+pub fn open_flags_to_libc(flags: OpenFlags) -> VfResult<i32> {
+    let writable = flags.intersects(OpenFlags::WRITE | OpenFlags::APPEND);
+    let mut raw = match (flags.contains(OpenFlags::READ), writable) {
+        (true, true) => libc::O_RDWR,
+        (true, false) => libc::O_RDONLY,
+        (false, true) => libc::O_WRONLY,
+        (false, false) => return Err(VfError::failure(0, ERR_INVAL)),
+    };
+    if flags.contains(OpenFlags::TRUNCATE) && !writable {
+        return Err(VfError::failure(0, ERR_INVAL));
     }
+    if flags.intersects(OpenFlags::CREATE | OpenFlags::CREATE_NEW) && !writable {
+        return Err(VfError::failure(0, ERR_INVAL));
+    }
+    if flags.contains(OpenFlags::APPEND) {
+        raw |= libc::O_APPEND;
+    }
+    if flags.contains(OpenFlags::TRUNCATE) {
+        raw |= libc::O_TRUNC;
+    }
+    if flags.intersects(OpenFlags::CREATE | OpenFlags::CREATE_NEW) {
+        raw |= libc::O_CREAT;
+    }
+    if flags.contains(OpenFlags::CREATE_NEW) {
+        raw |= libc::O_EXCL;
+    }
+    Ok(raw)
 }
 
 /// One complete open request. This replaces three error-prone parallel
@@ -778,32 +775,30 @@ pub enum VfType {
     Other(u32),
 }
 
-impl VfType {
-    pub fn from_nfs(code: u32) -> VfType {
-        match code {
-            NF4REG => VfType::Regular,
-            NF4DIR => VfType::Directory,
-            NF4LNK => VfType::Symlink,
-            NF4BLK => VfType::BlockDevice,
-            NF4CHR => VfType::CharDevice,
-            NF4FIFO => VfType::Fifo,
-            NF4SOCK => VfType::Socket,
-            other => VfType::Other(other),
-        }
+pub fn file_type_from_nfs(code: u32) -> VfType {
+    match code {
+        NF4REG => VfType::Regular,
+        NF4DIR => VfType::Directory,
+        NF4LNK => VfType::Symlink,
+        NF4BLK => VfType::BlockDevice,
+        NF4CHR => VfType::CharDevice,
+        NF4FIFO => VfType::Fifo,
+        NF4SOCK => VfType::Socket,
+        other => VfType::Other(other),
     }
+}
 
-    /// The NFSv4 wire type code.
-    pub fn as_nfs(&self) -> u32 {
-        match self {
-            VfType::Regular => NF4REG,
-            VfType::Directory => NF4DIR,
-            VfType::Symlink => NF4LNK,
-            VfType::BlockDevice => NF4BLK,
-            VfType::CharDevice => NF4CHR,
-            VfType::Fifo => NF4FIFO,
-            VfType::Socket => NF4SOCK,
-            VfType::Other(code) => *code,
-        }
+/// The NFSv4 wire type code.
+pub fn file_type_to_nfs(file_type: &VfType) -> u32 {
+    match file_type {
+        VfType::Regular => NF4REG,
+        VfType::Directory => NF4DIR,
+        VfType::Symlink => NF4LNK,
+        VfType::BlockDevice => NF4BLK,
+        VfType::CharDevice => NF4CHR,
+        VfType::Fifo => NF4FIFO,
+        VfType::Socket => NF4SOCK,
+        VfType::Other(code) => *code,
     }
 }
 
@@ -1336,45 +1331,44 @@ fn system_time(seconds: i64, nanos: u32) -> Option<std::time::SystemTime> {
     }
 }
 
-impl From<VfAttrs> for Metadata {
-    fn from(attributes: VfAttrs) -> Self {
-        let returned = attributes.returned;
-        Self {
-            file_type: attributes.ftype,
-            len: attributes.size,
-            permissions: Permissions::from_mode(attributes.mode),
-            mode: returned.contains(AttrMask::MODE).then_some(attributes.mode),
-            blocks: returned
-                .contains(AttrMask::BLOCKS)
-                .then_some(attributes.blocks),
-            device_id: returned.contains(AttrMask::RDEV).then_some(attributes.rdev),
-            has_named_attributes: returned
-                .contains(AttrMask::NAMED_ATTR)
-                .then_some(attributes.has_named_attr),
-            modified: returned
-                .contains(AttrMask::MTIME)
-                .then(|| system_time(attributes.mtime_sec, attributes.mtime_nsec))
-                .flatten(),
-            accessed: returned
-                .contains(AttrMask::ATIME)
-                .then(|| system_time(attributes.atime_sec, attributes.atime_nsec))
-                .flatten(),
-            changed: returned
-                .contains(AttrMask::CTIME)
-                .then(|| system_time(attributes.ctime_sec, attributes.ctime_nsec))
-                .flatten(),
-            nlink: returned
-                .contains(AttrMask::NLINK)
-                .then_some(attributes.nlink),
-            file_id: returned
-                .contains(AttrMask::FILEID)
-                .then_some(attributes.fileid),
-            change_id: returned
-                .contains(AttrMask::CHANGE)
-                .then_some(attributes.change),
-            uid: returned.contains(AttrMask::UID).then_some(attributes.uid),
-            gid: returned.contains(AttrMask::GID).then_some(attributes.gid),
-        }
+/// Backend attribute conversion; absent fields remain absent.
+pub fn metadata_from_attrs(attributes: VfAttrs) -> Metadata {
+    let returned = attributes.returned;
+    Metadata {
+        file_type: attributes.ftype,
+        len: attributes.size,
+        permissions: Permissions::from_mode(attributes.mode),
+        mode: returned.contains(AttrMask::MODE).then_some(attributes.mode),
+        blocks: returned
+            .contains(AttrMask::BLOCKS)
+            .then_some(attributes.blocks),
+        device_id: returned.contains(AttrMask::RDEV).then_some(attributes.rdev),
+        has_named_attributes: returned
+            .contains(AttrMask::NAMED_ATTR)
+            .then_some(attributes.has_named_attr),
+        modified: returned
+            .contains(AttrMask::MTIME)
+            .then(|| system_time(attributes.mtime_sec, attributes.mtime_nsec))
+            .flatten(),
+        accessed: returned
+            .contains(AttrMask::ATIME)
+            .then(|| system_time(attributes.atime_sec, attributes.atime_nsec))
+            .flatten(),
+        changed: returned
+            .contains(AttrMask::CTIME)
+            .then(|| system_time(attributes.ctime_sec, attributes.ctime_nsec))
+            .flatten(),
+        nlink: returned
+            .contains(AttrMask::NLINK)
+            .then_some(attributes.nlink),
+        file_id: returned
+            .contains(AttrMask::FILEID)
+            .then_some(attributes.fileid),
+        change_id: returned
+            .contains(AttrMask::CHANGE)
+            .then_some(attributes.change),
+        uid: returned.contains(AttrMask::UID).then_some(attributes.uid),
+        gid: returned.contains(AttrMask::GID).then_some(attributes.gid),
     }
 }
 
