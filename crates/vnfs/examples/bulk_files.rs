@@ -1,7 +1,7 @@
-use vnfs::{Client, Nfs};
+use vnfs::{Fs, FsExt, Nfs};
 
 // The parent must exist. Never delete an existing directory to make room.
-pub fn run(fs: &impl Client, fresh_root: &str) -> vnfs::Result<Vec<Vec<u8>>> {
+pub fn run(fs: &impl Fs, fresh_root: &str) -> vnfs::Result<Vec<Vec<u8>>> {
     fs.create_dir(fresh_root)?; // Cleanup starts only after exclusive creation succeeds.
     let result = (|| {
         let paths = [
@@ -12,7 +12,13 @@ pub fn run(fs: &impl Client, fresh_root: &str) -> vnfs::Result<Vec<Vec<u8>>> {
             (&paths[0], b"hello".as_slice()),
             (&paths[1], b"world".as_slice()),
         ])?;
-        fs.read_files(&paths) // Default aggregate returned-data budget: 16 MiB.
+        let requests: Vec<_> = paths.iter().map(vnfs::ReadOp::whole).collect();
+        fs.readv(requests).map(|results| {
+            results
+                .into_iter()
+                .map(|result| result.data.unwrap())
+                .collect()
+        })
     })();
     let cleanup = fs.remove_dir_all(fresh_root);
     // Preserve an operation error, but report cleanup failure after successful I/O.

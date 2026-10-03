@@ -2,6 +2,7 @@
 #![cfg(target_os = "linux")]
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use vnfs::FsExt;
 use vnfs::{Mounted, OpenFlags, OpenRequest};
 
 thread_local! {
@@ -47,6 +48,57 @@ fn measured<T>(f: impl FnOnce() -> T) -> (T, (usize, usize)) {
 }
 
 #[test]
+fn auto_range_only_reads_keep_the_legacy_routing_allocation_cost() {
+    let root = tempfile::tempdir().unwrap();
+    let auto = vnfs::Auto::new(root.path()).unwrap();
+    let mounted = Mounted::new(root.path()).unwrap();
+    mounted
+        .write_files(&[("/a", b"abc"), ("/b", b"def")])
+        .unwrap();
+    let paths = ["/a", "/b"];
+    let auto_files = auto.open_options().read(true).openv(&paths).unwrap();
+    let files = mounted.open_options().read(true).openv(&paths).unwrap();
+    let auto_reads: Vec<_> = auto_files
+        .iter()
+        .map(|file| vnfs::ReadOp::range(file, 0, 3))
+        .collect();
+    let reads: Vec<_> = files
+        .iter()
+        .map(|file| vnfs::ReadOp::range(file, 0, 3))
+        .collect();
+    let (actual, cost) = measured(|| auto.readv(auto_reads).unwrap());
+    let (expected, baseline) = measured(|| mounted.readv(reads).unwrap());
+    assert_eq!(actual, expected);
+    // Legacy Auto routing needs only a result vector and one backend request
+    // vector beyond Mounted. Partition/index/scatter vectors are unnecessary.
+    let routing_bytes = paths.len()
+        * (std::mem::size_of::<vnfs::ReadResult>()
+            + std::mem::size_of::<vnfs::backend::FsRead<'_, vnfs::backend::DummyVecFs>>());
+    assert_eq!(cost.0, baseline.0 + 2);
+    assert!(cost.1 <= baseline.1 + routing_bytes);
+}
+
+#[test]
+fn unified_operation_construction_does_not_allocate() {
+    let temp = tempfile::tempdir().unwrap();
+    let fs = Mounted::new(temp.path()).unwrap();
+    fs.write("/a", b"abc").unwrap();
+    let file = fs.open("/a").unwrap();
+    let mut buffer = [0; 1];
+    let (ops, cost) = measured(|| {
+        [
+            vnfs::ReadOp::whole("/a"),
+            vnfs::ReadOp::range(&file, 0, 1),
+            vnfs::ReadOp::into(&file, 0, &mut buffer),
+        ]
+    });
+    assert_eq!(cost, (0, 0));
+    let results = fs.readv(ops).unwrap();
+    assert_eq!(results[2].data, None);
+    assert_eq!(&buffer, b"a");
+}
+
+#[test]
 fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     use vnfs::backend::{DummyVecFs, FsClient};
     let root = tempfile::TempDir::new().unwrap();
@@ -66,10 +118,13 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
         open_cost, raw_open_cost,
         "opaque OPEN must reuse the result allocation"
     );
-    let reads: Vec<_> = files.iter().map(|f| f.read_request_at(0, 7)).collect();
-    let raw_reads: Vec<_> = raw_files.iter().map(|f| f.read_request_at(0, 7)).collect();
-    let (results, cost) = measured(|| mounted.readv(&reads).unwrap());
-    let (expected, raw_cost) = measured(|| raw.readv(&raw_reads).unwrap());
+    let reads: Vec<_> = files.iter().map(|f| vnfs::ReadOp::range(f, 0, 7)).collect();
+    let raw_reads: Vec<_> = raw_files
+        .iter()
+        .map(|f| vnfs::ReadOp::range(f, 0, 7))
+        .collect();
+    let (results, cost) = measured(|| mounted.readv(reads).unwrap());
+    let (expected, raw_cost) = measured(|| vnfs::Fs::readv(&raw, raw_reads).unwrap());
     assert_eq!(results, expected);
     assert_eq!(
         cost, raw_cost,
@@ -77,7 +132,7 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     );
     let writes: Vec<_> = files
         .iter()
-        .map(|f| f.write_request_at(0, b"payload"))
+        .map(|f| vnfs::WriteOp::at(f, 0, b"payload"))
         .collect();
     let raw_writes: Vec<_> = raw_files
         .iter()
@@ -92,8 +147,7 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     );
     drop(writes);
     drop(raw_writes);
-    drop(reads);
-    drop(raw_reads);
+
     let ((), cost) = measured(|| mounted.try_closev(&mut files).unwrap());
     let ((), raw_cost) = measured(|| raw.try_closev(&mut raw_files).unwrap());
     assert_eq!(cost, raw_cost);
@@ -102,25 +156,23 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     let mut raw_buffers = [[0; 7]; 3];
     let reopened = mounted.openv(&requests).unwrap();
     let raw_reopened = raw.openv(&requests).unwrap();
-    let mut requests: Vec<_> = reopened
+    let requests: Vec<_> = reopened
         .iter()
         .zip(&mut buffers)
-        .map(|(file, buffer)| file.read_request_at_into(0, buffer))
+        .map(|(file, buffer)| vnfs::ReadOp::into(file, 0, buffer))
         .collect();
-    let mut raw_requests: Vec<_> = raw_reopened
+    let raw_requests: Vec<_> = raw_reopened
         .iter()
         .zip(&mut raw_buffers)
-        .map(|(file, buffer)| file.read_request_at_into(0, buffer))
+        .map(|(file, buffer)| vnfs::ReadOp::into(file, 0, buffer))
         .collect();
-    let (results, cost) = measured(|| mounted.readv_into(&mut requests).unwrap());
-    let (expected, raw_cost) = measured(|| raw.readv_into(&mut raw_requests).unwrap());
+    let (results, cost) = measured(|| mounted.readv(requests).unwrap());
+    let (expected, raw_cost) = measured(|| vnfs::Fs::readv(&raw, raw_requests).unwrap());
     assert_eq!(results, expected);
     assert_eq!(
         cost, raw_cost,
         "READ_INTO projection must not allocate another request vector"
     );
-    drop(requests);
-    drop(raw_requests);
     assert!(buffers.iter().all(|buffer| buffer == b"payload"));
     mounted.closev(reopened).unwrap();
     raw.closev(raw_reopened).unwrap();
@@ -139,10 +191,18 @@ fn opaque_requests_preserve_owner_preflight_and_error_sources() {
         .write(true)
         .open("/a")
         .unwrap();
-    let (request, allocations) = measured(|| file.write_request_at(0, b"changed"));
+    let (request, allocations) = measured(|| vnfs::WriteOp::at(&file, 0, b"changed"));
     assert_eq!(allocations, (0, 0));
     assert!(other.writev(&[request]).is_err());
-    assert_eq!(owner.read("/a").unwrap(), b"original");
+    assert_eq!(
+        owner
+            .readv_with_options([vnfs::ReadOp::whole("/a")], vnfs::ReadOptions::default())
+            .unwrap()[0]
+            .data
+            .as_deref()
+            .unwrap(),
+        b"original"
+    );
     assert!(other.try_closev([&mut file]).is_err());
     assert!(!file.is_closed());
     owner.try_closev([&mut file]).unwrap();

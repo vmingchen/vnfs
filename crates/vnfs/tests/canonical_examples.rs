@@ -13,6 +13,7 @@ mod open_handles;
 #[path = "../examples/stream_file.rs"]
 mod stream_file;
 
+use vnfs::FsExt;
 use vnfs::{Mounted, Result};
 
 #[test]
@@ -36,7 +37,16 @@ fn bulk_roundtrip_cleanup_and_existing_directory_protection() -> Result<()> {
     fs.create_dir("/existing")?;
     fs.write("/existing/precious", b"keep")?;
     assert!(bulk_files::run(&fs, "/existing").is_err());
-    assert_eq!(fs.read("/existing/precious")?, b"keep");
+    assert_eq!(
+        fs.readv_with_options(
+            [vnfs::ReadOp::whole("/existing/precious")],
+            vnfs::ReadOptions::default()
+        )?[0]
+            .data
+            .as_deref()
+            .unwrap(),
+        b"keep"
+    );
     let bounded = fs.clone().with_limits(vnfs::ResourceLimits {
         max_read_bytes: 3,
         ..Default::default()
@@ -137,6 +147,25 @@ fn canonical_workflows_on_nfsv41_and_nfsv42() -> Result<()> {
                 [vec![37; 4096], vec![], b"hello".to_vec()]
             );
             assert_eq!(stream_file::run(&fs, &paths[0])?, bytes as u64);
+            let file = fs.open(&paths[0])?;
+            let mut buffer = [0; 4];
+            let mixed = fs.readv_with_options(
+                [
+                    vnfs::ReadOp::whole(&paths[2]),
+                    vnfs::ReadOp::range(&file, 10, 3),
+                    vnfs::ReadOp::whole(&paths[1]),
+                    vnfs::ReadOp::into(&file, 20, &mut buffer),
+                ],
+                vnfs::ReadOptions::new().max_total_bytes(12),
+            )?;
+            assert_eq!(mixed[0].data.as_deref().unwrap(), b"hello");
+            assert_eq!(mixed[1].offset, 10);
+            assert_eq!(mixed[1].data.as_deref().unwrap(), [37; 3]);
+            assert!(mixed[2].data.as_ref().unwrap().is_empty() && mixed[2].eof);
+            assert_eq!(mixed[3].data, None);
+            assert_eq!(mixed[3].read, 4);
+            assert_eq!(buffer, [37; 4]);
+            file.close()?;
             assert_eq!(
                 directories::run(&fs, &[root.clone(), format!("{root}/sub")], &root)?,
                 4

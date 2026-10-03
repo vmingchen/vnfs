@@ -1,5 +1,6 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
 
+use vnfs::FsExt;
 use vnfs::{ErrorKind, Mounted, helpers::TreeBuilder};
 
 #[test]
@@ -22,7 +23,19 @@ fn duplicate_directories_do_not_consume_planned_entry_slots() {
         .add_file("a/file", "payload")
         .create(&client, "/with-file")
         .unwrap();
-    assert_eq!(client.read("/with-file/a/file").unwrap(), b"payload");
+    assert_eq!(
+        client
+            .readv_with_options(
+                [vnfs::ReadOp::whole("/with-file/a/file")],
+                vnfs::ReadOptions::default()
+            )
+            .unwrap()
+            .remove(0)
+            .data
+            .as_deref()
+            .unwrap(),
+        b"payload"
+    );
 }
 
 #[test]
@@ -88,11 +101,43 @@ fn builds_nested_binary_empty_and_directory_entries_without_implicit_cleanup() {
         .unwrap();
     assert_eq!(tree.root(), std::path::Path::new("/fixture"));
     assert_eq!(
-        client.read("/fixture/config/app.conf").unwrap(),
+        client
+            .readv_with_options(
+                [vnfs::ReadOp::whole("/fixture/config/app.conf")],
+                vnfs::ReadOptions::default()
+            )
+            .unwrap()
+            .remove(0)
+            .data
+            .as_deref()
+            .unwrap(),
         b"host = localhost"
     );
-    assert_eq!(client.read("/fixture/data/blob").unwrap(), [0, 255, 10]);
-    assert!(client.read("/fixture/logs/app.log").unwrap().is_empty());
+    assert_eq!(
+        client
+            .readv_with_options(
+                [vnfs::ReadOp::whole("/fixture/data/blob")],
+                vnfs::ReadOptions::default()
+            )
+            .unwrap()
+            .remove(0)
+            .data
+            .as_deref()
+            .unwrap(),
+        [0, 255, 10]
+    );
+    assert!(
+        client
+            .readv_with_options(
+                [vnfs::ReadOp::whole("/fixture/logs/app.log")],
+                vnfs::ReadOptions::default()
+            )
+            .unwrap()
+            .remove(0)
+            .data
+            .unwrap()
+            .is_empty()
+    );
     assert!(client.metadata("/fixture/data/raw").unwrap().is_dir());
     drop(tree);
     assert!(temp.path().join("fixture/config/app.conf").exists());
@@ -156,7 +201,19 @@ fn budgets_include_implicit_directories_payloads_and_planned_path_bytes() {
         .add_file("f", "123")
         .create(&client, "/fixture")
         .unwrap();
-    assert_eq!(client.read("/fixture/f").unwrap(), b"123");
+    assert_eq!(
+        client
+            .readv_with_options(
+                [vnfs::ReadOp::whole("/fixture/f")],
+                vnfs::ReadOptions::default()
+            )
+            .unwrap()
+            .remove(0)
+            .data
+            .as_deref()
+            .unwrap(),
+        b"123"
+    );
 }
 
 #[test]
@@ -174,7 +231,19 @@ fn existing_root_is_not_overwritten_or_cleaned_up_even_if_it_is_a_symlink() {
                 .create(&client, root)
                 .is_err()
         );
-        assert_eq!(client.read("/existing/keep").unwrap(), b"original");
+        assert_eq!(
+            client
+                .readv_with_options(
+                    [vnfs::ReadOp::whole("/existing/keep")],
+                    vnfs::ReadOptions::default()
+                )
+                .unwrap()
+                .remove(0)
+                .data
+                .as_deref()
+                .unwrap(),
+            b"original"
+        );
     }
 }
 
@@ -221,8 +290,17 @@ fn routed_client_supports_the_same_builder_and_directory_preflight() {
         .unwrap();
     assert_eq!(
         client
-            .read_files(&["/fixture/a/file", "/fixture/b/file"])
-            .unwrap(),
+            .readv_with_options(
+                [
+                    vnfs::ReadOp::whole("/fixture/a/file"),
+                    vnfs::ReadOp::whole("/fixture/b/file")
+                ],
+                vnfs::ReadOptions::default()
+            )
+            .unwrap()
+            .into_iter()
+            .map(|r| r.data.unwrap())
+            .collect::<Vec<_>>(),
         [b"a".to_vec(), b"b".to_vec()]
     );
     assert!(client.create_dirs(&["/duplicate", "/duplicate"]).is_err());

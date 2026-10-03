@@ -11,6 +11,7 @@ use nfsv41_sys::nfsstat4_NFS4ERR_EXIST;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+use vnfs::FsExt;
 use vnfs::backend::NfsVecFs;
 use vnfs::backend::nfs::*;
 use vnfs::{Nfs, NfsReadPoolOptions};
@@ -314,25 +315,28 @@ fn rust_native_client_workflow_on_nfs() {
         .unwrap();
     client
         .writev(&[
-            files[0].write_request_at(0, b"one"),
-            files[1].write_request_at(0, b"two"),
+            vnfs::WriteOp::at(&files[0], 0, b"one"),
+            vnfs::WriteOp::at(&files[1], 0, b"two"),
         ])
         .unwrap();
     let values = client
-        .readv(&[
-            files[0].read_request_at(0, 3),
-            files[1].read_request_at(0, 3),
-        ])
+        .readv_with_options(
+            [
+                vnfs::ReadOp::range(&files[0], 0, 3),
+                vnfs::ReadOp::range(&files[1], 0, 3),
+            ],
+            vnfs::ReadOptions::default(),
+        )
         .unwrap();
-    assert_eq!(values[0].data, b"one");
-    assert_eq!(values[1].data, b"two");
+    assert_eq!(values[0].data.as_deref().unwrap(), b"one");
+    assert_eq!(values[1].data.as_deref().unwrap(), b"two");
     let mut first = [0u8; 8];
     let mut second = [0u8; 8];
     let _ = vnfs::backend::compound::thread_compound_stats();
     let lengths = client
-        .readv_into(&mut [
-            files[0].read_request_at_into(0, &mut first),
-            files[1].read_request_at_into(0, &mut second),
+        .readv([
+            vnfs::ReadOp::into(&files[0], 0, &mut first),
+            vnfs::ReadOp::into(&files[1], 0, &mut second),
         ])
         .unwrap();
     assert_eq!(
@@ -341,6 +345,7 @@ fn rust_native_client_workflow_on_nfs() {
     );
     assert_eq!(&first[..3], b"one");
     assert_eq!(&second[..3], b"two");
+    assert!(lengths.iter().all(|result| result.data.is_none()));
     assert_eq!(vnfs::backend::compound::thread_compound_stats().0, 1);
     assert_eq!(client.metadata(&paths[0]).unwrap().len(), 3);
     assert_eq!(client.read_dir(&nested).unwrap().len(), 2);
@@ -389,12 +394,47 @@ fn rust_native_client_workflow_on_nfs() {
         1,
         "small path-based whole-file reads should share one compound"
     );
+
+    for follow in [true, false] {
+        let _ = vnfs::backend::compound::thread_compound_stats();
+        let attrs = client
+            .metadatav_with_options(
+                &paths,
+                vnfs::MetadataOptions::new()
+                    .fields(vnfs::MetadataFields::MODE | vnfs::MetadataFields::SIZE)
+                    .follow_symlinks(follow),
+            )
+            .unwrap();
+        assert_eq!(attrs.iter().map(|m| m.len()).collect::<Vec<_>>(), [5, 6]);
+        assert_eq!(
+            vnfs::backend::compound::thread_compound_stats().0,
+            1,
+            "metadata must remain one vector compound"
+        );
+    }
+    let link = format!("{nested}/link");
+    let dangling = format!("{nested}/dangling");
+    let mut backend = self::client();
+    backend.symlink(Path::new("one"), Path::new(&link)).unwrap();
+    backend
+        .symlink(Path::new("missing"), Path::new(&dangling))
+        .unwrap();
+    assert!(client.metadata(&link).unwrap().is_file());
+    assert!(client.symlink_metadata(&link).unwrap().is_symlink());
+    assert!(client.symlink_metadata(&dangling).unwrap().is_symlink());
+    assert_eq!(
+        client
+            .metadatav(&[paths[0].as_str(), dangling.as_str()])
+            .unwrap_err()
+            .index(),
+        Some(1)
+    );
     client.remove_dir_all(&dir).unwrap();
 }
 
 #[test]
-fn scalar_and_single_vector_whole_file_reads_share_the_compound_path() {
-    let dir = setup_dir("scalar_vector_read_parity");
+fn whole_file_readv_honors_the_client_budget() {
+    let dir = setup_dir("whole_file_readv_budget");
     let host = std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let version = match std::env::var("VNFS_TEST_MINOR").as_deref() {
         Ok("1") => vnfs::NfsVersion::V4_1,
@@ -413,22 +453,23 @@ fn scalar_and_single_vector_whole_file_reads_share_the_compound_path() {
     let path = format!("{dir}/file");
     let data = vec![b'x'; BYTES];
     client.write(&path, &data).unwrap();
-    vnfs::backend::compound::thread_compound_stats();
-    client.open(&path).unwrap().close().unwrap();
-    let lifecycle = vnfs::backend::compound::thread_compound_stats().0;
-    assert_eq!(client.read(&path).unwrap(), data);
-    let scalar = vnfs::backend::compound::thread_compound_stats().0;
-    assert_eq!(client.read_files(&[&path]).unwrap(), [data]);
-    let vector = vnfs::backend::compound::thread_compound_stats().0;
-    assert!(scalar > 0);
-    // The scalar convenience keeps one open object; OPEN/CLOSE are constant
-    // overhead, not one READ RPC for each old 64 KiB window.
-    assert!(
-        scalar <= vector + lifecycle,
-        "scalar={scalar}, vector={vector}, lifecycle={lifecycle}"
+    assert_eq!(
+        client
+            .readv_with_options([vnfs::ReadOp::whole(&path)], vnfs::ReadOptions::default())
+            .unwrap()[0]
+            .data
+            .as_deref()
+            .unwrap(),
+        data
     );
     assert_eq!(
-        client.read_with_limit(&path, BYTES - 1).unwrap_err().kind(),
+        client
+            .readv_with_options(
+                [vnfs::ReadOp::whole(&path)],
+                vnfs::ReadOptions::new().max_total_bytes(BYTES - 1)
+            )
+            .unwrap_err()
+            .kind(),
         vnfs::ErrorKind::FileTooLarge
     );
     let mut dir_handle = client.open_dir_handle(&dir).unwrap();
@@ -1538,6 +1579,47 @@ fn path_writev_follows_final_symlink() {
         .readv(&[ReadOp::at(VfFile::from_path(&link), 0, 8)])
         .unwrap();
     assert_eq!(r[0].data, b"via-link");
+}
+
+#[test]
+fn scalar_write_follows_final_symlink_chains_and_creates_dangling_targets() {
+    let dir = setup_dir("scalar_wrsymlink");
+    let mut backend = self::client();
+    let fs = Nfs::builder(test_host())
+        .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => vnfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::NfsVersion::V4_2,
+            _ => vnfs::NfsVersion::Auto,
+        })
+        .connect()
+        .unwrap();
+    let target = format!("{dir}/target");
+    let link = format!("{dir}/link");
+    let chain = format!("{dir}/chain");
+    let dangling = format!("{dir}/dangling");
+    let missing = format!("{dir}/missing");
+    fs.write(&target, b"old contents longer than replacement")
+        .unwrap();
+    backend
+        .symlink(Path::new("target"), Path::new(&link))
+        .unwrap();
+    backend
+        .symlink(Path::new("link"), Path::new(&chain))
+        .unwrap();
+    backend
+        .symlink(Path::new("missing"), Path::new(&dangling))
+        .unwrap();
+
+    fs.write(&chain, b"new").unwrap();
+    assert_eq!(fs.read_files(&[&target]).unwrap(), [b"new".to_vec()]);
+    fs.write(&dangling, b"created").unwrap();
+    assert_eq!(fs.read_files(&[&missing]).unwrap(), [b"created".to_vec()]);
+    fs.write(&link, b"").unwrap();
+    assert_eq!(fs.metadata(&target).unwrap().len(), 0);
+    for path in [&link, &chain, &dangling] {
+        assert!(fs.symlink_metadata(path).unwrap().is_symlink());
+    }
+    fs.remove_dir_all(&dir).unwrap();
 }
 
 #[test]

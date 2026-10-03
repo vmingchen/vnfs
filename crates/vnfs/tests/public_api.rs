@@ -1,7 +1,7 @@
 //! Compile-time coverage for the application-facing NFS API and the explicit
 //! low-level backend namespace. No live server is needed.
 
-use vnfs::{Nfs, NfsAuthentication, NfsBuilder, OpenFlags, OpenRequest, ReadAllOptions};
+use vnfs::{FsExt, Nfs, NfsAuthentication, NfsBuilder, OpenFlags, OpenRequest, ReadOptions};
 
 #[test]
 fn application_surface_is_small_and_typed() {
@@ -9,7 +9,11 @@ fn application_surface_is_small_and_typed() {
         .root("/export")
         .auth(NfsAuthentication::AuthSys);
     let _ = OpenRequest::new("/file", OpenFlags::READ);
-    assert_eq!(ReadAllOptions::new().total_byte_limit(), 16 * 1024 * 1024);
+    assert_eq!(ReadOptions::new().total_byte_limit(), None);
+    assert_eq!(
+        ReadOptions::new().max_total_bytes(42).total_byte_limit(),
+        Some(42)
+    );
     let _: Option<vnfs::NfsClient> = None;
     let _: Option<vnfs::NfsFile> = None;
     let _: Option<vnfs::Result<()>> = None;
@@ -17,16 +21,17 @@ fn application_surface_is_small_and_typed() {
 
 #[test]
 fn application_requests_results_and_errors_are_root_types() {
-    fn request(file: &vnfs::NfsFile) -> vnfs::NfsRead<'_> {
-        file.read_request_at(0, 1)
+    fn request(file: &vnfs::NfsFile) -> vnfs::ReadOp<'_, vnfs::NfsFile> {
+        vnfs::ReadOp::range(file, 0, 1)
     }
     let _ = request;
     let result = vnfs::ReadResult {
         offset: 0,
-        data: vec![1],
+        read: 1,
+        data: Some(vec![1]),
         eof: false,
     };
-    assert_eq!(result.data, [1]);
+    assert_eq!(result.data.as_deref(), Some([1].as_slice()));
     let into = vnfs::ReadIntoResult {
         offset: 7,
         read: 1,
@@ -88,14 +93,22 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         .write_files(&[("/sub/a", b"abc"), ("/sub/b", b"def")])
         .unwrap();
     assert_eq!(
-        client.read_files(&["/sub/a", "/sub/b"]).unwrap(),
+        client
+            .readv_with_options(
+                [vnfs::ReadOp::whole("/sub/a"), vnfs::ReadOp::whole("/sub/b")],
+                vnfs::ReadOptions::default()
+            )
+            .unwrap()
+            .into_iter()
+            .map(|result| result.data.unwrap())
+            .collect::<Vec<_>>(),
         [b"abc".to_vec(), b"def".to_vec()]
     );
     assert!(
         client
-            .read_files_with_options(
-                &["/sub/a", "/sub/b"],
-                vnfs::ReadAllOptions::new().max_total_bytes(5)
+            .readv_with_options(
+                [vnfs::ReadOp::whole("/sub/a"), vnfs::ReadOp::whole("/sub/b")],
+                vnfs::ReadOptions::new().max_total_bytes(5)
             )
             .is_err()
     );
@@ -109,9 +122,9 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     let mut a = [0; 4];
     let mut b = [0; 2];
     let result = client
-        .readv_into(&mut [
-            files[0].read_request_at_into(0, &mut a),
-            files[1].read_request_at_into(1, &mut b),
+        .readv([
+            vnfs::ReadOp::into(&files[0], 0, &mut a),
+            vnfs::ReadOp::into(&files[1], 1, &mut b),
         ])
         .unwrap();
     assert_eq!(result[0].read, 3);
@@ -119,11 +132,22 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     assert_eq!(&b, b"ef");
     client
         .write_allv(&[
-            files[0].write_request_at(1, b"XY"),
-            files[1].write_request_at(0, b"UV"),
+            vnfs::WriteOp::at(&files[0], 1, b"XY"),
+            vnfs::WriteOp::at(&files[1], 0, b"UV"),
         ])
         .unwrap();
-    assert_eq!(client.read("/sub/a").unwrap(), b"aXY");
+    assert_eq!(
+        client
+            .readv_with_options(
+                [vnfs::ReadOp::whole("/sub/a")],
+                vnfs::ReadOptions::default()
+            )
+            .unwrap()[0]
+            .data
+            .as_deref()
+            .unwrap(),
+        b"aXY"
+    );
     assert_eq!(
         client.read_stream("/sub/a", |_, _| Ok(false)).unwrap(),
         vnfs::StreamCompletion::Stopped { next_offset: 2 }
@@ -143,7 +167,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     let file = client.open("/sub/a").unwrap();
     assert!(
         foreign
-            .write_allv(&[file.write_request_at(0, b"wrong")])
+            .write_allv(&[vnfs::WriteOp::at(&file, 0, b"wrong")])
             .is_err()
     );
     file.close().unwrap();
@@ -221,8 +245,8 @@ fn tempfile_root() -> std::path::PathBuf {
 #[cfg(all(feature = "auto", target_os = "linux"))]
 #[test]
 fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types() {
-    use vnfs::{Client, FileHandle};
-    fn workflow<C: Client>(client: &C, prefix: &str) -> vnfs::Result<()> {
+    use vnfs::{FileHandle, Fs, FsExt};
+    fn workflow<C: Fs>(client: &C, prefix: &str) -> vnfs::Result<()> {
         client.create_dir_all(prefix)?;
         let paths = [format!("{prefix}/a"), format!("{prefix}/b")];
         let requests: Vec<_> = paths
@@ -237,7 +261,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
         let mut files = client.openv(&requests)?;
         let writes: Vec<_> = files
             .iter()
-            .map(|file| file.write_request_at(0, b"abc"))
+            .map(|file| vnfs::WriteOp::at(file, 0, b"abc"))
             .collect();
         assert!(
             client
@@ -248,20 +272,20 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
         drop(writes);
         let reads: Vec<_> = files
             .iter()
-            .map(|file| file.read_request_at(0, 4))
+            .map(|file| vnfs::ReadOp::range(file, 0, 4))
             .collect();
         assert!(
             client
-                .readv(&reads)?
+                .readv(reads)?
                 .iter()
-                .all(|result| result.data == b"abc" && result.eof)
+                .all(|result| result.data.as_deref() == Some(b"abc".as_slice()) && result.eof)
         );
-        drop(reads);
+
         let mut first = [0; 4];
         let mut second = [0; 4];
-        let result = client.readv_into(&mut [
-            files[0].read_request_at_into(0, &mut first),
-            files[1].read_request_at_into(0, &mut second),
+        let result = client.readv([
+            vnfs::ReadOp::into(&files[0], 0, &mut first),
+            vnfs::ReadOp::into(&files[1], 0, &mut second),
         ])?;
         assert!(result.iter().all(|result| result.read == 3 && result.eof));
         files[0].seek_native(std::io::SeekFrom::Start(0))?;
@@ -271,7 +295,14 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
         client.try_closev(&mut files)?;
         assert!(files.iter().all(|file| file.is_closed()));
         assert_eq!(
-            client.read_files(&paths)?,
+            client
+                .readv_with_options(
+                    paths.iter().map(vnfs::ReadOp::whole).collect::<Vec<_>>(),
+                    vnfs::ReadOptions::default()
+                )?
+                .into_iter()
+                .map(|result| result.data.unwrap())
+                .collect::<Vec<_>>(),
             [b"abc".to_vec(), b"abc".to_vec()]
         );
         assert_eq!(client.read_dirs(&[prefix])?[0].entries.len(), 2);

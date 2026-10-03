@@ -72,9 +72,26 @@ fn descriptor(file: &vnfs::NfsFile) { let _ = file.descriptor(); }
 
 ```compile_fail,E0505
 fn borrowed(file: vnfs::NfsFile) {
-    let request = file.read_request_at(0, 1);
+    let request = vnfs::ReadOp::range(&file, 0, 1);
     drop(file);
     drop(request);
+}
+```
+
+```compile_fail,E0382
+fn consumed(client: &vnfs::NfsClient, file: &vnfs::NfsFile) {
+    let ops = [vnfs::ReadOp::range(file, 0, 1)];
+    let _ = client.readv(ops);
+    let _ = client.readv(ops);
+}
+```
+
+```compile_fail
+fn exclusive(file: &vnfs::NfsFile) {
+    let mut buffer = [0; 4];
+    let first = vnfs::ReadOp::into(file, 0, &mut buffer);
+    let second = vnfs::ReadOp::into(file, 4, &mut buffer);
+    drop((first, second));
 }
 ```
 
@@ -87,4 +104,51 @@ let backend = vnfs::backend::NfsVecFs::connect("server")?;
 let client = vnfs::backend::FsClient::new(backend);
 let _ = client.into_inner();
 # Ok::<(), vnfs::Error>(())
+```
+
+## Core versus extension methods
+
+The backend contract remains in `Fs`; importing it alone does not import
+the blanket convenience methods.
+
+```compile_fail
+use vnfs::Fs;
+fn missing_extension(fs: &impl Fs) {
+    let _ = fs.read_files(&["/file-1"]);
+}
+```
+
+```no_run
+use vnfs::{Fs, FsExt};
+fn convenience(fs: &impl Fs) -> vnfs::Result<Vec<Vec<u8>>> {
+    fs.read_files(&["/file-1", "/file-2"])
+}
+```
+
+Portable writes retain their handle/payload borrows and do not expose backend
+request types or a write-request associated type.
+
+```compile_fail,E0505
+use vnfs::{Fs, FsExt, WriteOp};
+fn borrowed(fs: &impl Fs) {
+    let file = fs.create("/output").unwrap();
+    let ops = [WriteOp::at(&file, 0, b"hello")];
+    drop(file);
+    let _ = fs.writev(&ops);
+}
+```
+
+```compile_fail,E0432
+use vnfs::{NfsWrite, MountedWrite, AutoWrite};
+```
+
+The filesystem traits are named `Fs` and `FsExt`; no historical client-trait
+aliases are exported.
+
+```compile_fail,E0432
+use vnfs::Client;
+```
+
+```compile_fail,E0432
+use vnfs::ClientExt;
 ```

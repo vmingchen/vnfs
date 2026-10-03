@@ -173,8 +173,8 @@ fn dummy() -> (TempDir, DummyVecFs) {
 
 #[test]
 fn one_shot_file_vectors_roundtrip_and_bound_returned_bytes() {
-    use vnfs::ReadAllOptions;
     use vnfs::backend::FsClient;
+    use vnfs::backend::ReadAllOptions;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);

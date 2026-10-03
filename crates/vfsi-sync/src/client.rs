@@ -1119,8 +1119,47 @@ impl<F: VecFs> FsClient<F> {
             })
     }
 
-    /// Fetch no-follow metadata for many paths using the backend's vector
-    /// operation. Useful for routing without one metadata RPC per path.
+    /// Vector metadata query with explicit fields and final-symlink handling.
+    /// Ancestor symlinks follow the backend's normal namespace semantics.
+    pub fn metadata_many<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        fields: AttrMask,
+        follow: bool,
+    ) -> VfResult<Vec<Metadata>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut attrs: Vec<_> = paths
+            .iter()
+            .map(|path| crate::VfAttrs {
+                file: VfFile::from_os_path(path.as_ref()),
+                masks: fields | AttrMask::MODE,
+                ..crate::VfAttrs::default()
+            })
+            .collect();
+        let result = {
+            let mut backend = self.lock()?;
+            if follow {
+                backend.getattrsv(&mut attrs)
+            } else {
+                backend.lgetattrsv(&mut attrs)
+            }
+        };
+        result.map_err(|error| match error.index() {
+            Some(index) if index < paths.len() => {
+                error.with_context("metadatav", paths[index].as_ref())
+            }
+            Some(_) => VfError::transport(None, "metadata backend returned an invalid error index"),
+            None => error,
+        })?;
+        Ok(attrs
+            .into_iter()
+            .map(vfsi_core::metadata_from_attrs)
+            .collect())
+    }
+
+    /// Fetch no-follow metadata for many paths using the backend vector operation.
     pub fn symlink_metadatav(&self, paths: &[&Path]) -> VfResult<Vec<Metadata>> {
         let mut attrs: Vec<_> = paths
             .iter()
@@ -1407,6 +1446,27 @@ impl<F: VectorFileSystem> FsClient<F> {
     where
         F: 'b,
     {
+        self.writev_mapped(requests, |item| {
+            let request = project(item);
+            FsWrite {
+                file: request.file,
+                offset: request.offset,
+                data: request.data,
+            }
+        })
+    }
+
+    /// Adapter constructing cheap borrowed requests without a temporary vector.
+    /// The mapper must return the same file, offset, and payload on each call.
+    #[doc(hidden)]
+    pub fn writev_mapped<'b, T>(
+        &self,
+        requests: &[T],
+        project: impl Fn(&T) -> FsWrite<'b, F>,
+    ) -> VfResult<Vec<FsWriteResult>>
+    where
+        F: 'b,
+    {
         let writes = self.write_ops(requests, &project)?;
         let results = self.lock()?.write_many(&writes).map_err(|error| {
             error
@@ -1449,13 +1509,38 @@ impl<F: VectorFileSystem> FsClient<F> {
     where
         F: 'b,
     {
+        self.write_allv_mapped(requests, |item| {
+            let request = project(item);
+            FsWrite {
+                file: request.file,
+                offset: request.offset,
+                data: request.data,
+            }
+        })
+    }
+
+    /// Complete mapped writes with whole-batch preflight and dependency waves.
+    /// The mapper must return the same file, offset, and payload on each call.
+    #[doc(hidden)]
+    pub fn write_allv_mapped<'b, T>(
+        &self,
+        requests: &[T],
+        project: impl Fn(&T) -> FsWrite<'b, F>,
+    ) -> VfResult<Vec<FsWriteResult>>
+    where
+        F: 'b,
+    {
         // Validate the entire batch before writing any prefix. In particular,
         // empty requests must not conceal a foreign or already-closed file.
         let mut prior_by_path: HashMap<&Path, Vec<(usize, u64, u64)>> = HashMap::new();
         let mut blocked_by = vec![Vec::new(); requests.len()];
         for (index, request) in requests.iter().map(&project).enumerate() {
             self.validate_owner(request.file, index)?;
-            request.file.raw()?;
+            request.file.raw().map_err(|error| {
+                error
+                    .with_index(index)
+                    .with_context("write_allv", request.file.path())
+            })?;
             let VfOffset::At(offset) = request.offset else {
                 return Err(VfError::client(index, crate::ERR_INVAL)
                     .with_context("write_allv", request.file.path()));
@@ -1545,7 +1630,7 @@ impl<F: VectorFileSystem> FsClient<F> {
     fn write_ops<'a, 'b, T>(
         &self,
         requests: &'a [T],
-        project: impl for<'r> Fn(&'r T) -> &'r FsWrite<'b, F>,
+        project: impl Fn(&T) -> FsWrite<'b, F>,
     ) -> VfResult<Vec<WriteOpRef<'a>>>
     where
         F: 'b,
@@ -1555,7 +1640,10 @@ impl<F: VectorFileSystem> FsClient<F> {
         for (index, request) in requests.iter().map(&project).enumerate() {
             self.validate_owner(request.file, index)?;
             writes.push(WriteOpRef::new(
-                request.file.raw()?,
+                request
+                    .file
+                    .raw()
+                    .map_err(|error| error.with_index(index))?,
                 request.offset,
                 request.data,
             ));

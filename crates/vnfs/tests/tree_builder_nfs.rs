@@ -41,7 +41,13 @@ fn tree_creation_batches_compounds_on_nfsv41_and_nfsv42() {
             stats.compounds
         );
         let paths: Vec<_> = (0..16).map(|i| format!("{root}/dir-{i}/file")).collect();
-        let contents = client.read_files(&paths);
+        let requests: Vec<_> = paths.iter().map(vnfs::ReadOp::whole).collect();
+        let contents = client.readv(requests).map(|results| {
+            results
+                .into_iter()
+                .map(|result| result.data.unwrap())
+                .collect::<Vec<_>>()
+        });
         // Clean the successfully created fixture before assertions, including
         // when verification failed. Never remove a root we failed to create.
         let cleanup = client.remove_dir_all(tree.root());

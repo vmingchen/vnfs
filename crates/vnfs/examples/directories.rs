@@ -1,6 +1,6 @@
-use vnfs::{Client, ControlFlow, MetadataFields, Nfs, ReadDirOptions, WalkOptions};
+use vnfs::{ControlFlow, Fs, MetadataFields, Nfs, ReadDirOptions, WalkOptions};
 
-pub fn run(fs: &impl Client, paths: &[String], tree: &str) -> vnfs::Result<usize> {
+pub fn run(fs: &impl Fs, paths: &[String], tree: &str) -> vnfs::Result<usize> {
     // Attributes arrive with the listings, avoiding a scalar stat per entry.
     // Bound each cohort; walk the tree once, not once per listing batch.
     for cohort in paths.chunks(64) {

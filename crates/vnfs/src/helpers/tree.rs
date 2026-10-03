@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use crate::{Client, Error, FileHandle, OpenFlags, OpenRequest, Result};
+use crate::{Error, Fs, OpenFlags, OpenRequest, Result, WriteOp};
 
 /// A successfully created tree. Dropping this value does not delete files.
 /// Use the owning client's `remove_dir_all(tree.root())` for explicit cleanup.
@@ -41,8 +41,8 @@ struct Entry {
 /// symlinks in the root's ancestors are not sandboxed by this helper.
 ///
 /// ```no_run
-/// use vnfs::{Client, helpers::TreeBuilder};
-/// # fn example(client: &impl Client) -> vnfs::Result<()> {
+/// use vnfs::{Fs, helpers::TreeBuilder};
+/// # fn example(client: &impl Fs) -> vnfs::Result<()> {
 /// let tree = TreeBuilder::new()
 ///     .add_file("config/app.conf", "host = localhost")
 ///     .add_empty_file("logs/app.log")
@@ -173,7 +173,7 @@ impl TreeBuilder {
     /// path; entry indices refer to the original declarations (inferred parents
     /// use the first declaration requiring them), not to vector batch positions.
     /// Root-creation errors identify the root, not an entry declaration.
-    pub fn create<C: Client>(self, client: &C, root: impl AsRef<Path>) -> Result<Tree> {
+    pub fn create<C: Fs>(self, client: &C, root: impl AsRef<Path>) -> Result<Tree> {
         let root = root.as_ref();
         if let Some(error) = self.error {
             return Err(error);
@@ -266,7 +266,7 @@ impl TreeBuilder {
                 .iter()
                 .zip(batch)
                 .map(|(file, (_, index))| {
-                    file.write_request_at(0, self.entries[*index].data.as_deref().unwrap())
+                    WriteOp::at(file, 0, self.entries[*index].data.as_deref().unwrap())
                 })
                 .collect();
             let write = client
@@ -402,3 +402,4 @@ mod tests {
         assert!(!root.path().join("fixture/b/file").exists());
     }
 }
+use crate::FsExt;

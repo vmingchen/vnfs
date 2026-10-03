@@ -668,7 +668,7 @@ impl DummyVecFs {
         let n = file
             .read_at(buffer, off)
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
-        if descriptor {
+        if descriptor && matches!(op.offset, VfOffset::Cur) {
             let next = checked_offset(off, n as u64, 0)?;
             self.advance_offset(&op.file, next);
         }
@@ -735,7 +735,7 @@ impl DummyVecFs {
         checked_offset(off, requested, 0)?;
         file.write_all_at(op.data, off)
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
-        if descriptor {
+        if descriptor && !matches!(op.offset, VfOffset::At(_)) {
             let next = checked_offset(off, op.data.len() as u64, 0)?;
             self.advance_offset(op.file, next);
         }

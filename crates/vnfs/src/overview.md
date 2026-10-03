@@ -11,7 +11,7 @@ You do not need to construct protocol operations yourself.
 ```no_run
 # #[cfg(feature = "nfs")]
 # fn main() -> vnfs::Result<()> {
-use vnfs::Nfs;
+use vnfs::{FsExt, Nfs, ReadOp};
 
 let fs = Nfs::builder("nfs.example.com")
     .root("/export/application")
@@ -21,8 +21,12 @@ fs.write_files(&[
     ("/file-1", b"hello".as_slice()),
     ("/file-2", b"world".as_slice()),
 ])?;
-let contents = fs.read_files(&["/file-1", "/file-2"])?;
-assert_eq!(contents, [b"hello".to_vec(), b"world".to_vec()]);
+let results = fs.readv([
+    ReadOp::whole("/file-1"),
+    ReadOp::whole("/file-2"),
+])?;
+assert_eq!(results[0].data.as_deref(), Some(b"hello".as_slice()));
+assert_eq!(results[1].data.as_deref(), Some(b"world".as_slice()));
 # Ok(())
 # }
 # #[cfg(not(feature = "nfs"))]
@@ -44,14 +48,18 @@ are in the [package README](https://github.com/vmingchen/vnfs/tree/main/crates/v
 
 | Task | Recommended API | Example |
 | --- | --- | --- |
-| Many complete small files | `NfsClient::read_files`, `NfsClient::write_files` | [Bulk files](examples::bulk_files) |
-| Repeated or positional I/O | `NfsClient::openv`, `NfsClient::readv_into`, `NfsClient::write_allv` | [Open handles](examples::open_handles) |
+| Many complete small files | `NfsClient::readv`, `FsExt::write_files` | [Bulk files](examples::bulk_files) |
+| Repeated or positional I/O | `NfsClient::openv`, `NfsClient::readv`, `NfsClient::write_allv` | [Open handles](examples::open_handles) |
 | One large file | `NfsClient::read_stream_with_options` | [Bounded streaming](examples::stream_file) |
 | Many directory listings with attributes | `NfsClient::read_dirs_with_options` | [Directories](examples::directories) |
-| Large trees without collecting everything | `NfsClient::visit_walk`, `NfsClient::walk_events_with_options` | [Directories](examples::directories) |
+| Large trees without collecting everything | `FsExt::visit_walk`, `FsExt::walk_events_with_options` | [Directories](examples::directories) |
 | Declarative fresh directory tree | `helpers::TreeBuilder` | [Builder example](helpers::TreeBuilder) |
 | Existing Linux NFS mount | `Nfs::from_mount`, `NfsBuilder::from_mount` | [Mount discovery](Nfs::from_mount) |
-| Backend-independent application code | `Client`, `FileHandle` | [Generic workflows](examples) |
+| Backend-independent application code | `Fs`, `FsExt`, `FileHandle` | [Generic workflows](examples) |
+
+`Fs` contains backend execution primitives. `FsExt` supplies blanket
+convenience helpers (`read_files`, `write_files`, scalar open, and default-option
+listing/streaming) without scalarizing vectors. Import both with `vnfs::prelude::*`.
 
 ## API map
 
@@ -73,12 +81,13 @@ are in the [package README](https://github.com/vmingchen/vnfs/tree/main/crates/v
   completed mutations. Its input index is not a committed-prefix count; do not
   blindly replay writes after an ambiguous transport failure. Inspect `Error`
   using [`error`] and preserve it when reporting failures.
-- `read` and `read_files` default to a 16 MiB returned-data budget (aggregate
-  across files for `read_files`). Adjust [`ResourceLimits`] or [`ReadAllOptions`],
+- `readv` defaults to the client’s 16 MiB aggregate byte budget.
+  Adjust [`ResourceLimits`] or [`ReadOptions`],
   or stream instead. Directory collection and traversal have separate budgets.
   These are not a process-wide peak-memory cap. Standard `std::io::Read::read_to_end`
   does not inherit an allocation limit.
-- `readv` and `writev` may return short progress. Use `write_allv` to complete
+- `readv` range requests and `writev` may return short progress. Whole-file
+  requests complete or fail; they never silently truncate. Use `write_allv` to complete
   successful short writes; do not mistake a short read without EOF for completion.
   Positional requests preserve the file cursor.
 - Files close best-effort on drop. Use explicit `closev` to surface cleanup

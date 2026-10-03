@@ -2,6 +2,8 @@
 //! promoted to a separate direct NFS connection; everything else stays on
 //! the kernel-mounted path.
 
+#[cfg(test)]
+use crate::FsExt as _;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -10,8 +12,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    DirEntry, Error as VfError, Mounted, Nfs, OpenFlags, OpenRequest, ReadDirOptions,
-    ReadIntoResult, ReadResult, ResourceLimits, Result as VfResult, WriteResult,
+    DirEntry, Error as VfError, Mounted, Nfs, OpenFlags, OpenRequest,
+    OwnedReadResult as ReadResult, ReadDirOptions, ReadIntoResult, ResourceLimits,
+    Result as VfResult, WriteResult,
 };
 use vfsi_local::DummyVecFs;
 use vfsi_sync::{FsClient, FsFile};
@@ -229,7 +232,6 @@ impl AutoClient {
             inner,
         })
     }
-    routed_path_method!(symlink_metadata, crate::Metadata);
     routed_path_method!(create_dir_all, ());
     routed_path_method!(remove_dir, ());
     routed_path_method!(read_link, PathBuf);
@@ -269,27 +271,15 @@ impl AutoClient {
         }
     }
 
-    pub fn symlink_metadata_with_fields(
+    pub fn metadatav_with_options<P: AsRef<Path>>(
         &self,
-        path: impl AsRef<Path>,
-        fields: crate::MetadataFields,
-    ) -> VfResult<crate::Metadata> {
-        let route = self.resolve(path.as_ref(), &read_mounts(false));
-        match route.route {
-            Route::Mounted => self
-                .mounted
-                .symlink_metadata_with_fields(&route.path, fields),
-            Route::Nfs(connection) => connection
-                .client
-                .symlink_metadata_with_fields(&route.path, fields),
-        }
-    }
-
-    pub fn symlink_metadatav(&self, paths: &[&Path]) -> VfResult<Vec<crate::Metadata>> {
+        paths: &[P],
+        options: crate::MetadataOptions,
+    ) -> VfResult<Vec<crate::Metadata>> {
         let mounts = read_mounts(false);
         let resolved: Vec<_> = paths
             .iter()
-            .map(|path| self.resolve(path, &mounts))
+            .map(|path| self.resolve(path.as_ref(), &mounts))
             .collect();
         let mut output = Vec::with_capacity(paths.len());
         let mut start = 0;
@@ -301,8 +291,16 @@ impl AutoClient {
                 .collect();
             output.extend(
                 match &resolved[start].route {
-                    Route::Mounted => self.mounted.symlink_metadatav(&batch),
-                    Route::Nfs(connection) => connection.client.symlink_metadatav(&batch),
+                    Route::Mounted => self.mounted.metadata_many(
+                        &batch,
+                        options.requested_fields(),
+                        options.follows_symlinks(),
+                    ),
+                    Route::Nfs(connection) => connection.client.metadata_many(
+                        &batch,
+                        options.requested_fields(),
+                        options.follows_symlinks(),
+                    ),
                 }
                 .map_err(|error| indexed(error, start))?,
             );
@@ -445,14 +443,6 @@ impl AutoClient {
         Ok(())
     }
 
-    pub fn read_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<crate::DirectoryListing>> {
-        self.read_dirs_with_options(
-            paths,
-            crate::MetadataFields::stat(),
-            self.limits.directory_options(),
-        )
-    }
-
     pub fn read_dirs_with_options<P: AsRef<Path>>(
         &self,
         paths: &[P],
@@ -522,14 +512,7 @@ impl AutoClient {
         }
     }
 
-    pub fn read_files<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<Vec<u8>>> {
-        self.read_files_with_options(
-            paths,
-            crate::ReadAllOptions::new().max_total_bytes(self.limits.max_read_bytes),
-        )
-    }
-
-    pub fn read_files_with_options<P: AsRef<Path>>(
+    pub(crate) fn read_files_with_options<P: AsRef<Path>>(
         &self,
         paths: &[P],
         options: crate::ReadAllOptions,
@@ -570,61 +553,6 @@ impl AutoClient {
         Ok(output)
     }
 
-    pub fn write_files<P: AsRef<Path>, B: AsRef<[u8]>>(&self, entries: &[(P, B)]) -> VfResult<()> {
-        let mut seen = HashSet::new();
-        for (index, (path, _)) in entries.iter().enumerate() {
-            if !seen.insert(path.as_ref()) {
-                return Err(VfError::client(index, libc::EINVAL as u32));
-            }
-        }
-        let requests: Vec<_> = entries
-            .iter()
-            .map(|(path, _)| {
-                OpenRequest::new(
-                    path.as_ref(),
-                    OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
-                )
-            })
-            .collect();
-        let files = self.openv(&requests)?;
-        let writes: Vec<_> = files
-            .iter()
-            .zip(entries)
-            .map(|(file, (_, data))| file.write_request_at(0, data.as_ref()))
-            .collect();
-        let result = self.write_allv(&writes);
-        drop(writes);
-        let cleanup = self.closev(files);
-        result?;
-        cleanup
-    }
-
-    pub fn read_to_string(&self, path: impl AsRef<Path>) -> VfResult<String> {
-        self.read_to_string_with_limit(path, self.limits.max_read_bytes)
-    }
-
-    pub fn read_to_string_with_limit(
-        &self,
-        path: impl AsRef<Path>,
-        bytes: usize,
-    ) -> VfResult<String> {
-        String::from_utf8(self.read_with_limit(path.as_ref(), bytes)?).map_err(|_| {
-            VfError::client(0, libc::EINVAL as u32).with_context("read_to_string", path.as_ref())
-        })
-    }
-
-    pub fn read_stream(
-        &self,
-        path: impl AsRef<Path>,
-        callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
-    ) -> VfResult<crate::StreamCompletion> {
-        self.read_stream_with_options(
-            path,
-            crate::ReadStreamOptions::new().chunk_size(self.limits.stream_chunk_bytes),
-            callback,
-        )
-    }
-
     pub fn read_stream_with_options(
         &self,
         path: impl AsRef<Path>,
@@ -655,14 +583,6 @@ impl AutoClient {
         Ok(Path::new("/").join(relative))
     }
 
-    pub fn visit_dir(
-        &self,
-        path: impl AsRef<Path>,
-        callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
-    ) -> VfResult<crate::TraversalCompletion> {
-        self.visit_dir_with_options(path, self.limits.directory_options(), callback)
-    }
-
     pub fn visit_dir_with_options(
         &self,
         path: impl AsRef<Path>,
@@ -685,14 +605,6 @@ impl AutoClient {
                     })
             }
         }
-    }
-
-    pub fn visit_walk(
-        &self,
-        path: impl AsRef<Path>,
-        callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
-    ) -> VfResult<crate::TraversalCompletion> {
-        self.visit_walk_with_options(path, self.limits.walk_options(), callback)
     }
 
     pub fn visit_walk_with_options(
@@ -718,14 +630,6 @@ impl AutoClient {
                     })
             }
         }
-    }
-
-    pub fn walk(&self, path: impl AsRef<Path>) -> VfResult<Vec<crate::DirectoryListing>> {
-        self.walk_with_options(
-            path,
-            crate::MetadataFields::stat(),
-            self.limits.walk_options(),
-        )
     }
 
     pub fn walk_with_options(
@@ -1027,23 +931,12 @@ impl AutoClient {
         resolved
     }
 
-    pub fn open(&self, path: impl AsRef<Path>) -> VfResult<AutoFile> {
-        self.open_with(OpenRequest::new(path.as_ref(), OpenFlags::READ))
-    }
-
-    pub fn create(&self, path: impl AsRef<Path>) -> VfResult<AutoFile> {
-        self.open_with(OpenRequest::new(
-            path.as_ref(),
-            OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
-        ))
-    }
-
+    /// Preserve request order, including the completed-prefix semantics of
+    /// strict vector operations. Consecutive requests to one mount batch.
     pub fn open_with(&self, request: OpenRequest) -> VfResult<AutoFile> {
         self.openv(&[request]).map(|mut files| files.remove(0))
     }
 
-    /// Preserve request order, including the completed-prefix semantics of
-    /// strict vector operations. Consecutive requests to one mount batch.
     pub fn openv(&self, requests: &[OpenRequest]) -> VfResult<Vec<AutoFile>> {
         let mounts = read_mounts(true);
         let resolved = self.resolve_open_batch(requests, &mounts);
@@ -1102,17 +995,57 @@ impl AutoClient {
             .map_err(|error| error.with_index(index))
     }
 
-    pub fn readv(&self, requests: &[AutoRead<'_>]) -> VfResult<Vec<ReadResult>> {
-        self.readv_with_limit(requests, self.limits.max_read_bytes)
+    pub fn readv<'a>(
+        &self,
+        ops: impl IntoIterator<Item = crate::ReadOp<'a, AutoFile>>,
+    ) -> VfResult<Vec<crate::ReadResult>> {
+        self.readv_with_options(ops, crate::ReadOptions::default())
+    }
+    /// Consume a batch with an explicit aggregate read budget.
+    pub fn readv_with_options<'a>(
+        &self,
+        ops: impl IntoIterator<Item = crate::ReadOp<'a, AutoFile>>,
+        options: crate::ReadOptions,
+    ) -> VfResult<Vec<crate::ReadResult>> {
+        crate::read::consume_ops(
+            ops,
+            options.limit_or(self.limits.max_read_bytes),
+            |requests, options| self.readv_owned(requests, options),
+            |requests, bytes| self.readv_into_with_limit(requests, bytes),
+        )
+    }
+    pub(crate) fn readv_owned(
+        &self,
+        requests: &[crate::ReadRequest<'_, AutoRead<'_>>],
+        options: crate::ReadOptions,
+    ) -> VfResult<Vec<ReadResult>> {
+        let budget = options.limit_or(self.limits.max_read_bytes);
+        if requests.iter().all(|request| request.range_ref().is_some()) {
+            return self.readv_with_limit_projected(requests, budget, |request| {
+                request.range_ref().expect("checked range requests")
+            });
+        }
+        crate::read::read_batch(
+            requests,
+            budget,
+            |ranges, bytes| self.readv_with_limit_projected(ranges, bytes, |request| request),
+            |paths, bytes| {
+                self.read_files_with_options(
+                    paths,
+                    crate::ReadAllOptions::new().max_total_bytes(bytes),
+                )
+            },
+        )
     }
 
-    pub fn readv_with_limit(
+    fn readv_with_limit_projected<'a, T>(
         &self,
-        requests: &[AutoRead<'_>],
+        requests: &[T],
         max_bytes: usize,
+        project: impl for<'r> Fn(&'r T) -> &'r AutoRead<'a>,
     ) -> VfResult<Vec<ReadResult>> {
         let mut requested = 0usize;
-        for (index, request) in requests.iter().enumerate() {
+        for (index, request) in requests.iter().map(&project).enumerate() {
             self.check_owner(request.file, index)?;
             requested = requested
                 .checked_add(request.length)
@@ -1126,17 +1059,18 @@ impl AutoClient {
         while start < requests.len() {
             let mut end = start + 1;
             while end < requests.len()
-                && requests[start]
+                && project(&requests[start])
                     .file
                     .route
-                    .same_backend(&requests[end].file.route)
+                    .same_backend(&project(&requests[end]).file.route)
             {
                 end += 1;
             }
-            match &requests[start].file.route {
+            match &project(&requests[start]).file.route {
                 Route::Mounted => {
                     let batch: Vec<_> = requests[start..end]
                         .iter()
+                        .map(&project)
                         .map(|request| {
                             let AutoFileInner::Mounted(file) = &request.file.inner else {
                                 unreachable!()
@@ -1153,6 +1087,7 @@ impl AutoClient {
                 Route::Nfs(connection) => {
                     let batch: Vec<_> = requests[start..end]
                         .iter()
+                        .map(&project)
                         .map(|request| {
                             let AutoFileInner::Nfs(file) = &request.file.inner else {
                                 unreachable!()
@@ -1173,14 +1108,18 @@ impl AutoClient {
         Ok(output)
     }
 
-    pub fn readv_into(&self, requests: &mut [AutoReadInto<'_>]) -> VfResult<Vec<ReadIntoResult>> {
+    fn readv_into_with_limit(
+        &self,
+        requests: &mut [AutoReadInto<'_>],
+        max_bytes: usize,
+    ) -> VfResult<Vec<ReadIntoResult>> {
         let mut requested = 0usize;
         for (index, request) in requests.iter().enumerate() {
             self.check_owner(request.file, index)?;
             requested = requested
                 .checked_add(request.buffer.len())
                 .ok_or_else(|| VfError::client(index, libc::EFBIG as u32))?;
-            if requested > self.limits.max_read_bytes {
+            if requested > max_bytes {
                 return Err(VfError::client(index, libc::EFBIG as u32));
             }
         }
@@ -1205,7 +1144,7 @@ impl AutoClient {
                         .collect();
                     output.extend(
                         self.mounted
-                            .readv_into_with_limit(&mut batch, self.limits.max_read_bytes)
+                            .readv_into_with_limit(&mut batch, max_bytes)
                             .map_err(|error| indexed(error, start))?,
                     );
                 }
@@ -1222,7 +1161,7 @@ impl AutoClient {
                     output.extend(
                         connection
                             .client
-                            .readv_into_with_limit(&mut batch, self.limits.max_read_bytes)
+                            .readv_into_with_limit(&mut batch, max_bytes)
                             .map_err(|error| indexed(error, start))?,
                     );
                 }
@@ -1232,7 +1171,7 @@ impl AutoClient {
         Ok(output)
     }
 
-    pub fn writev(&self, requests: &[AutoWrite<'_>]) -> VfResult<Vec<WriteResult>> {
+    pub fn writev(&self, requests: &[crate::WriteOp<'_, AutoFile>]) -> VfResult<Vec<WriteResult>> {
         self.write_vector(requests, false)
     }
 
@@ -1240,31 +1179,34 @@ impl AutoClient {
     /// Validate ownership, live handles, and positional ranges across the
     /// entire batch before dispatching any backend cohort. Server-side errors
     /// may still follow completed writes; this is not an atomic operation.
-    pub fn write_allv(&self, requests: &[AutoWrite<'_>]) -> VfResult<Vec<WriteResult>> {
+    pub fn write_allv(
+        &self,
+        requests: &[crate::WriteOp<'_, AutoFile>],
+    ) -> VfResult<Vec<WriteResult>> {
         self.write_vector(requests, true)
     }
 
     fn write_vector(
         &self,
-        requests: &[AutoWrite<'_>],
+        requests: &[crate::WriteOp<'_, AutoFile>],
         complete: bool,
     ) -> VfResult<Vec<WriteResult>> {
         for (index, request) in requests.iter().enumerate() {
-            self.check_owner(request.file, index)?;
+            self.check_owner(request.file(), index)?;
             if complete {
                 // This is preflight, not transactional rollback: reject all
                 // locally detectable invalid requests before any cohort writes.
                 // Validate empty requests too, matching FsClient::write_allv.
-                if request.file.is_closed() {
+                if request.file().is_closed() {
                     return Err(VfError::client(index, libc::EBADF as u32)
-                        .with_context("write_allv", request.file.path()));
+                        .with_context("write_allv", request.file().path()));
                 }
                 request
-                    .offset
-                    .checked_add(request.data.len() as u64)
+                    .offset()
+                    .checked_add(request.data().len() as u64)
                     .ok_or_else(|| {
                         VfError::client(index, libc::EOVERFLOW as u32)
-                            .with_context("write_allv", request.file.path())
+                            .with_context("write_allv", request.file().path())
                     })?;
             }
         }
@@ -1274,21 +1216,21 @@ impl AutoClient {
             let mut end = start + 1;
             while end < requests.len()
                 && requests[start]
-                    .file
+                    .file()
                     .route
-                    .same_backend(&requests[end].file.route)
+                    .same_backend(&requests[end].file().route)
             {
                 end += 1;
             }
-            match &requests[start].file.route {
+            match &requests[start].file().route {
                 Route::Mounted => {
                     let batch: Vec<_> = requests[start..end]
                         .iter()
                         .map(|request| {
-                            let AutoFileInner::Mounted(file) = &request.file.inner else {
+                            let AutoFileInner::Mounted(file) = &request.file().inner else {
                                 unreachable!()
                             };
-                            file.write_request_at(request.offset, request.data)
+                            file.write_request_at(request.offset(), request.data())
                         })
                         .collect();
                     let result = if complete {
@@ -1302,10 +1244,10 @@ impl AutoClient {
                     let batch: Vec<_> = requests[start..end]
                         .iter()
                         .map(|request| {
-                            let AutoFileInner::Nfs(file) = &request.file.inner else {
+                            let AutoFileInner::Nfs(file) = &request.file().inner else {
                                 unreachable!()
                             };
-                            file.write_request_at(request.offset, request.data)
+                            file.write_request_at(request.offset(), request.data())
                         })
                         .collect();
                     let result = if complete {
@@ -1319,60 +1261,6 @@ impl AutoClient {
             start = end;
         }
         Ok(output)
-    }
-
-    /// Close all handles, using a vector CLOSE for each contiguous backend
-    /// cohort. Remaining handles are still dropped if one cohort fails.
-    pub fn closev(&self, files: Vec<AutoFile>) -> VfResult<()> {
-        for (index, file) in files.iter().enumerate() {
-            self.check_owner(file, index)?;
-        }
-        let mut files = files.into_iter().peekable();
-        let mut start = 0;
-        while let Some(first) = files.next() {
-            let route = first.route.clone();
-            match first.inner {
-                AutoFileInner::Mounted(file) => {
-                    let mut group = vec![file];
-                    while files
-                        .peek()
-                        .is_some_and(|next| route.same_backend(&next.route))
-                    {
-                        let next = files.next().expect("peeked");
-                        let AutoFileInner::Mounted(file) = next.inner else {
-                            unreachable!()
-                        };
-                        group.push(file);
-                    }
-                    let count = group.len();
-                    self.mounted.closev(group).map_err(|e| indexed(e, start))?;
-                    start += count;
-                }
-                AutoFileInner::Nfs(file) => {
-                    let mut group = vec![file];
-                    while files
-                        .peek()
-                        .is_some_and(|next| route.same_backend(&next.route))
-                    {
-                        let next = files.next().expect("peeked");
-                        let AutoFileInner::Nfs(file) = next.inner else {
-                            unreachable!()
-                        };
-                        group.push(file);
-                    }
-                    let count = group.len();
-                    let Route::Nfs(connection) = route else {
-                        unreachable!()
-                    };
-                    connection
-                        .client
-                        .closev(group)
-                        .map_err(|e| indexed(e, start))?;
-                    start += count;
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Retain every handle on cohort failure. Already completed cohorts are
@@ -1425,50 +1313,24 @@ impl AutoClient {
         Ok(())
     }
 
-    pub fn metadata(&self, path: impl AsRef<Path>) -> VfResult<crate::Metadata> {
-        let mounts = read_mounts(false);
-        let route = self.resolve(path.as_ref(), &mounts);
-        match route.route {
-            Route::Mounted => self.mounted.metadata(&route.path),
-            Route::Nfs(connection) => connection.client.metadata(&route.path),
-        }
-    }
-
     /// Read a complete file with the same default allocation limit as
     /// `FsClient::read`; use `AutoFile` for streaming larger files.
-    pub fn read(&self, path: impl AsRef<Path>) -> VfResult<Vec<u8>> {
+    #[cfg(test)]
+    pub(crate) fn read(&self, path: impl AsRef<Path>) -> VfResult<Vec<u8>> {
         self.read_with_limit(path, self.limits.max_read_bytes)
     }
 
-    pub fn read_with_limit(&self, path: impl AsRef<Path>, limit: usize) -> VfResult<Vec<u8>> {
+    #[cfg(test)]
+    pub(crate) fn read_with_limit(
+        &self,
+        path: impl AsRef<Path>,
+        limit: usize,
+    ) -> VfResult<Vec<u8>> {
         let path = path.as_ref();
         let route = self.resolve(path, &read_mounts(false));
         match route.route {
             Route::Mounted => self.mounted.read_with_limit(&route.path, limit),
             Route::Nfs(connection) => connection.client.read_with_limit(&route.path, limit),
-        }
-    }
-
-    pub fn write(&self, path: impl AsRef<Path>, data: &[u8]) -> VfResult<()> {
-        let path = path.as_ref();
-        let mut file = self.create(path)?;
-        let mut written = 0;
-        while written < data.len() {
-            let count = file.write_native(&data[written..])?;
-            if count == 0 {
-                return Err(VfError::client(0, libc::EIO as u32));
-            }
-            written += count;
-        }
-        file.close()
-    }
-
-    pub fn create_dir(&self, path: impl AsRef<Path>) -> VfResult<()> {
-        let path = path.as_ref();
-        let route = self.resolve(path, &read_mounts(false));
-        match route.route {
-            Route::Mounted => self.mounted.create_dir(&route.path),
-            Route::Nfs(connection) => connection.client.create_dir(&route.path),
         }
     }
 
@@ -1492,57 +1354,6 @@ impl AutoClient {
                 a.client.rename(&source.path, &destination.path)
             }
             _ => self.mounted.rename(from, to),
-        }
-    }
-
-    pub fn copy(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> VfResult<()> {
-        let from = from.as_ref();
-        let to = to.as_ref();
-        let mounts = read_mounts(false);
-        let source = self.resolve(from, &mounts);
-        let destination = self.resolve(to, &mounts);
-        match (&source.route, &destination.route) {
-            (Route::Nfs(a), Route::Nfs(_)) if source.route.same_backend(&destination.route) => {
-                a.client.copy(&source.path, &destination.path)
-            }
-            _ => self.mounted.copy(from, to),
-        }
-    }
-
-    pub fn read_dir(&self, path: impl AsRef<Path>) -> VfResult<Vec<DirEntry>> {
-        self.read_dir_with_options(path, self.limits.directory_options())
-    }
-
-    pub fn read_dir_with_options(
-        &self,
-        path: impl AsRef<Path>,
-        options: ReadDirOptions,
-    ) -> VfResult<Vec<DirEntry>> {
-        let route = self.resolve(path.as_ref(), &read_mounts(false));
-        match route.route {
-            Route::Mounted => self.mounted.read_dir_with_options(&route.path, options),
-            Route::Nfs(connection) => {
-                let entries = connection
-                    .client
-                    .read_dir_with_options(&route.path, options)?;
-                entries
-                    .into_iter()
-                    .map(|entry| {
-                        let suffix = entry
-                            .path()
-                            .strip_prefix("/")
-                            .map_err(|_| VfError::client(0, libc::EIO as u32))?;
-                        let host = connection.spec.mount_point.join(suffix);
-                        let relative = host
-                            .strip_prefix(&self.root)
-                            .map_err(|_| VfError::client(0, libc::EIO as u32))?;
-                        Ok(DirEntry::new(
-                            Path::new("/").join(relative),
-                            entry.metadata().clone(),
-                        ))
-                    })
-                    .collect()
-            }
         }
     }
 }
@@ -1774,14 +1585,14 @@ impl AutoFile {
         self.route.public()
     }
 
-    pub fn read_request_at(&self, offset: u64, length: usize) -> AutoRead<'_> {
+    pub(crate) fn read_request_at(&self, offset: u64, length: usize) -> AutoRead<'_> {
         AutoRead {
             file: self,
             offset,
             length,
         }
     }
-    pub fn read_request_at_into<'a>(
+    pub(crate) fn read_request_at_into<'a>(
         &'a self,
         offset: u64,
         buffer: &'a mut [u8],
@@ -1790,13 +1601,6 @@ impl AutoFile {
             file: self,
             offset,
             buffer,
-        }
-    }
-    pub fn write_request_at<'a>(&'a self, offset: u64, data: &'a [u8]) -> AutoWrite<'a> {
-        AutoWrite {
-            file: self,
-            offset,
-            data,
         }
     }
     pub fn read_at(&self, buffer: &mut [u8], offset: u64) -> VfResult<usize> {
@@ -1941,17 +1745,11 @@ pub struct AutoRead<'a> {
     offset: u64,
     length: usize,
 }
-/// Positional read into caller storage for [`AutoClient::readv_into`].
+/// Internal borrowed-buffer representation used by [`crate::ReadOp::into`].
 pub struct AutoReadInto<'a> {
     file: &'a AutoFile,
     offset: u64,
     buffer: &'a mut [u8],
-}
-/// Positional write request for [`AutoClient::writev`].
-pub struct AutoWrite<'a> {
-    file: &'a AutoFile,
-    offset: u64,
-    data: &'a [u8],
 }
 
 fn read_mounts(include_covering_mounts: bool) -> MountTable {
@@ -2123,18 +1921,21 @@ mod tests {
             .unwrap();
         client
             .writev(&[
-                files[0].write_request_at(0, b"one"),
-                files[1].write_request_at(0, b"two"),
+                crate::WriteOp::at(&files[0], 0, b"one"),
+                crate::WriteOp::at(&files[1], 0, b"two"),
             ])
             .unwrap();
         let reads = client
-            .readv(&[
-                files[0].read_request_at(0, 3),
-                files[1].read_request_at(0, 3),
-            ])
+            .readv_with_options(
+                [
+                    crate::ReadOp::range(&files[0], 0, 3),
+                    crate::ReadOp::range(&files[1], 0, 3),
+                ],
+                crate::ReadOptions::default(),
+            )
             .unwrap();
-        assert_eq!(reads[0].data, b"one");
-        assert_eq!(reads[1].data, b"two");
+        assert_eq!(reads[0].data.as_deref().unwrap(), b"one");
+        assert_eq!(reads[1].data.as_deref().unwrap(), b"two");
         std::os::unix::fs::symlink("one", root.join("link")).unwrap();
         let metadata = client
             .mounted
@@ -2152,15 +1953,34 @@ mod tests {
             ..ResourceLimits::default()
         });
         let tiny_file = tiny.open("/one").unwrap();
-        let error = tiny.readv(&[tiny_file.read_request_at(0, 6)]).unwrap_err();
+        let error = tiny
+            .readv_with_options(
+                [crate::ReadOp::range(&tiny_file, 0, 6)],
+                crate::ReadOptions::default(),
+            )
+            .unwrap_err();
         assert_eq!(error.err_no(), libc::EFBIG as u32);
         assert_eq!(
-            tiny.readv(&[tiny_file.read_request_at(0, 3)]).unwrap()[0].data,
+            tiny.readv_with_options(
+                [crate::ReadOp::range(&tiny_file, 0, 3)],
+                crate::ReadOptions::default()
+            )
+            .unwrap()[0]
+                .data
+                .as_deref()
+                .unwrap(),
             b"one"
         );
         tiny_file.close().unwrap();
         let error = client
-            .readv(&[files[0].read_request_at(0, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES + 1)])
+            .readv_with_options(
+                [crate::ReadOp::range(
+                    &files[0],
+                    0,
+                    DEFAULT_READ_ALLV_MAX_TOTAL_BYTES + 1,
+                )],
+                crate::ReadOptions::default(),
+            )
             .unwrap_err();
         assert_eq!(error.err_no(), libc::EFBIG as u32);
         client.closev(files).unwrap();
@@ -2190,8 +2010,9 @@ mod tests {
             }
             let error = client
                 .write_allv(&[
-                    files[0].write_request_at(0, b"changed"),
-                    files[1].write_request_at(
+                    crate::WriteOp::at(&files[0], 0, b"changed"),
+                    crate::WriteOp::at(
+                        &files[1],
                         if closed { 0 } else { u64::MAX },
                         if closed { b"" } else { b"XX" },
                     ),
@@ -2255,28 +2076,31 @@ mod tests {
         assert_eq!(files[2].route(), AutoRoute::Mounted);
         client
             .writev(&[
-                files[0].write_request_at(0, b"first"),
-                files[1].write_request_at(0, b"second"),
-                files[2].write_request_at(0, b"local"),
+                crate::WriteOp::at(&files[0], 0, b"first"),
+                crate::WriteOp::at(&files[1], 0, b"second"),
+                crate::WriteOp::at(&files[2], 0, b"local"),
             ])
             .unwrap();
         let reads = client
-            .readv(&[
-                files[0].read_request_at(0, 5),
-                files[1].read_request_at(0, 6),
-                files[2].read_request_at(0, 5),
-            ])
+            .readv_with_options(
+                [
+                    crate::ReadOp::range(&files[0], 0, 5),
+                    crate::ReadOp::range(&files[1], 0, 6),
+                    crate::ReadOp::range(&files[2], 0, 5),
+                ],
+                crate::ReadOptions::default(),
+            )
             .unwrap();
-        assert_eq!(reads[0].data, b"first");
-        assert_eq!(reads[1].data, b"second");
-        assert_eq!(reads[2].data, b"local");
+        assert_eq!(reads[0].data.as_deref().unwrap(), b"first");
+        assert_eq!(reads[1].data.as_deref().unwrap(), b"second");
+        assert_eq!(reads[2].data.as_deref().unwrap(), b"local");
         let mut buffers = [[0_u8; 8]; 3];
         let [first_buffer, second_buffer, local_buffer] = &mut buffers;
         let reads = client
-            .readv_into(&mut [
-                files[0].read_request_at_into(0, first_buffer),
-                files[1].read_request_at_into(0, second_buffer),
-                files[2].read_request_at_into(0, local_buffer),
+            .readv([
+                crate::ReadOp::into(&files[0], 0, first_buffer),
+                crate::ReadOp::into(&files[1], 0, second_buffer),
+                crate::ReadOp::into(&files[2], 0, local_buffer),
             ])
             .unwrap();
         assert_eq!(
@@ -2289,9 +2113,9 @@ mod tests {
         assert_eq!(&buffers[2][..5], b"local");
         client
             .write_allv(&[
-                files[0].write_request_at(0, b"FIRST"),
-                files[1].write_request_at(0, b"SECOND"),
-                files[2].write_request_at(0, b"LOCAL"),
+                crate::WriteOp::at(&files[0], 0, b"FIRST"),
+                crate::WriteOp::at(&files[1], 0, b"SECOND"),
+                crate::WriteOp::at(&files[2], 0, b"LOCAL"),
             ])
             .unwrap();
         let mut files = files;
@@ -2305,7 +2129,7 @@ mod tests {
         );
         assert!(
             client
-                .read_files_with_options(&paths, crate::ReadAllOptions::new().max_total_bytes(15))
+                .read_files_with_options(&paths, crate::ReadOptions::new().max_total_bytes(15))
                 .is_err()
         );
         let existing = client
@@ -2380,7 +2204,7 @@ mod tests {
             let mut buffer = [0; 6];
             outcomes.push(
                 client
-                    .readv_into(&mut [file.read_request_at_into(0, &mut buffer)])
+                    .readv([crate::ReadOp::into(&file, 0, &mut buffer)])
                     .map(|results| {
                         assert_eq!(results[0].read, 6);
                         assert_eq!(&buffer, b"abcdef");
@@ -2393,7 +2217,7 @@ mod tests {
             buffer.fill(0xff);
             assert_eq!(
                 client
-                    .readv_into(&mut [file.read_request_at_into(0, &mut buffer)])
+                    .readv([crate::ReadOp::into(&file, 0, &mut buffer)])
                     .unwrap_err()
                     .kind(),
                 crate::ErrorKind::FileTooLarge
@@ -2457,8 +2281,12 @@ mod tests {
                 let payload: &[u8] = if invalid == 2 { b"" } else { b"XX" };
                 let error = client
                     .write_allv(&[
-                        files[0].write_request_at(0, b"changed"),
-                        files[1].write_request_at(if invalid == 0 { u64::MAX } else { 0 }, payload),
+                        crate::WriteOp::at(&files[0], 0, b"changed"),
+                        crate::WriteOp::at(
+                            &files[1],
+                            if invalid == 0 { u64::MAX } else { 0 },
+                            payload,
+                        ),
                     ])
                     .unwrap_err();
                 let mut first = [0; 8];

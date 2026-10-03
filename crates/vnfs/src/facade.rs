@@ -2,24 +2,20 @@
 use crate::*;
 
 macro_rules! owned_client {
-    ($client:ident, $file:ident, $dir:ident, $open:ident, $set:ident, $read:ident, $into:ident, $write:ident, $backend:ty) => {
+    ($client:ident, $file:ident, $dir:ident, $open:ident, $set:ident, $read:ident, $into:ident, $backend:ty) => {
         /// Owned application client. Clones share one connection and its lock.
         #[derive(Debug, Clone)]
         pub struct $client {
             pub(crate) inner: vfsi_sync::FsClient<$backend>,
         }
         impl $client {
-            /// Incremental no-follow tree events; prune before fetching contents.
-            pub fn walk_events_with_options(
+            /// Vector metadata with selected attributes and final-symlink handling.
+            pub fn metadatav_with_options<P: AsRef<Path>>(
                 &self,
-                root: impl AsRef<Path>,
-                fields: MetadataFields,
-                options: WalkOptions,
-                sort_by_name: bool,
-                callback: impl FnMut(&WalkEvent) -> Result<WalkControl>,
-            ) -> Result<TraversalCompletion> {
-                self.inner
-                    .walk_events_with_options(root, fields, options, sort_by_name, callback)
+                paths: &[P],
+                options: MetadataOptions,
+            ) -> Result<Vec<Metadata>> {
+                crate::metadata::metadata_backend(&self.inner, paths, options)
             }
             /// Return this client's allocation and traversal limits.
             pub fn limits(&self) -> ResourceLimits {
@@ -36,51 +32,6 @@ macro_rules! owned_client {
             pub fn capabilities(&self) -> Result<Capabilities> {
                 self.inner.capabilities()
             }
-            /// Read an entire file within this client's configured byte budget.
-            pub fn read(&self, path: impl AsRef<Path>) -> Result<Vec<u8>> {
-                self.inner.read(path)
-            }
-            /// Read one complete file while limiting the returned allocation.
-            ///
-            /// Use `owned file::read_native` or `std::io::Read` to stream files that
-            /// should not be held in one allocation.
-            pub fn read_with_limit(
-                &self,
-                path: impl AsRef<Path>,
-                max_bytes: usize,
-            ) -> Result<Vec<u8>> {
-                self.inner.read_with_limit(path, max_bytes)
-            }
-            /// Read a UTF-8 file within this client's byte limit.
-            pub fn read_to_string(&self, path: impl AsRef<Path>) -> Result<String> {
-                self.inner.read_to_string(path)
-            }
-            /// Read one complete UTF-8 file with a caller-selected allocation limit.
-            pub fn read_to_string_with_limit(
-                &self,
-                path: impl AsRef<Path>,
-                max_bytes: usize,
-            ) -> Result<String> {
-                self.inner.read_to_string_with_limit(path, max_bytes)
-            }
-            /// Create or truncate a file and write all supplied bytes; not atomic.
-            pub fn write(&self, path: impl AsRef<Path>, data: &[u8]) -> Result<()> {
-                self.inner.write(path, data)
-            }
-            /// Stream one file from offset zero in bounded chunks.
-            ///
-            /// The callback runs without holding the backend lock, so it may use this
-            /// client or drop other files owned by it. Return `Ok(false)` to stop
-            /// successfully. Callback errors
-            /// are propagated. The file is closed on success, cancellation, callback
-            /// error, or read error. At most one requested chunk is buffered at once.
-            pub fn read_stream(
-                &self,
-                path: impl AsRef<Path>,
-                callback: impl FnMut(u64, &[u8]) -> Result<bool>,
-            ) -> Result<StreamCompletion> {
-                self.inner.read_stream(path, callback)
-            }
             /// Stream one file using an explicit maximum chunk size.
             pub fn read_stream_with_options(
                 &self,
@@ -90,18 +41,6 @@ macro_rules! owned_client {
             ) -> Result<StreamCompletion> {
                 self.inner.read_stream_with_options(path, options, callback)
             }
-            /// Query metadata for the open object without resolving its path again.
-            pub fn metadata(&self, path: impl AsRef<Path>) -> Result<Metadata> {
-                self.inner.metadata(path)
-            }
-            /// Query metadata without following a final symlink.
-            pub fn symlink_metadata(&self, path: impl AsRef<Path>) -> Result<Metadata> {
-                self.inner.symlink_metadata(path)
-            }
-            /// Create one directory using the default permission mode.
-            pub fn create_dir(&self, path: impl AsRef<Path>) -> Result<()> {
-                self.inner.create_dir(path)
-            }
             /// Create directories in vector phases; parents must exist.
             /// An error can follow partially completed mutations.
             pub fn create_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {
@@ -110,28 +49,6 @@ macro_rules! owned_client {
             /// Create one directory with explicit Unix permission bits.
             pub fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> Result<()> {
                 self.inner.create_dir_with_mode(path, mode)
-            }
-            /// List one directory within the configured entry and path-byte limits.
-            pub fn read_dir(&self, path: impl AsRef<Path>) -> Result<Vec<DirEntry>> {
-                self.inner.read_dir(path)
-            }
-            /// Read one directory with explicit entry and path-storage limits.
-            pub fn read_dir_with_options(
-                &self,
-                path: impl AsRef<Path>,
-                options: ReadDirOptions,
-            ) -> Result<Vec<DirEntry>> {
-                self.inner.read_dir_with_options(path, options)
-            }
-            /// Visit one directory one bounded page at a time. `Continue(())` requests
-            /// the next entry; `Break(())` stops the entire visit successfully.
-            /// The callback runs without the lock and may reenter or drop its files.
-            pub fn visit_dir(
-                &self,
-                path: impl AsRef<Path>,
-                callback: impl FnMut(DirEntry) -> Result<std::ops::ControlFlow<()>>,
-            ) -> Result<TraversalCompletion> {
-                self.inner.visit_dir(path, callback)
             }
             /// Visit entries with explicit entry and cumulative path-byte limits.
             pub fn visit_dir_with_options(
@@ -166,21 +83,6 @@ macro_rules! owned_client {
             pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
                 self.inner.rename(from, to)
             }
-            /// Visit a tree using bounded directory pages,
-            /// never follows symlinks, and invokes the callback outside the backend
-            /// lock. Unlike collecting `walk`, this trades multi-directory batching
-            /// for bounded incremental delivery. A backend without native paging
-            /// may retain one bounded listing; finish its pages before descending,
-            /// so snapshots never accumulate across ancestor directories.
-            /// `ControlFlow::Break(())` stops the entire walk successfully, not merely
-            /// the current subtree. Directory order is backend-defined.
-            pub fn visit_walk(
-                &self,
-                root: impl AsRef<Path>,
-                callback: impl FnMut(&DirEntry) -> Result<std::ops::ControlFlow<()>>,
-            ) -> Result<TraversalCompletion> {
-                self.inner.visit_walk(root, callback)
-            }
             /// Visit a tree incrementally with explicit traversal limits.
             pub fn visit_walk_with_options(
                 &self,
@@ -189,16 +91,6 @@ macro_rules! owned_client {
                 callback: impl FnMut(&DirEntry) -> Result<std::ops::ControlFlow<()>>,
             ) -> Result<TraversalCompletion> {
                 self.inner.visit_walk_with_options(root, options, callback)
-            }
-            /// List several directories with common stat attributes and finite
-            /// allocation limits. Use `read_dirs_with_options` for richer fields.
-            pub fn read_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<DirectoryListing>> {
-                self.inner.read_dirs(paths)
-            }
-            /// Recursively enumerate a bounded tree with common stat attributes.
-            /// Use `walk_with_options` to select fields or change limits.
-            pub fn walk(&self, root: impl AsRef<Path>) -> Result<Vec<DirectoryListing>> {
-                self.inner.walk(root)
             }
             /// Create `path` if missing, otherwise empty it. Errors if it exists and is
             /// not a directory (a symlink to a directory is not a directory here).
@@ -236,23 +128,6 @@ macro_rules! owned_client {
             /// Read the target of a symbolic link.
             pub fn read_link(&self, path: impl AsRef<Path>) -> Result<PathBuf> {
                 self.inner.read_link(path)
-            }
-            /// Copy one file and return the number of bytes copied.
-            pub fn copy(
-                &self,
-                source: impl AsRef<Path>,
-                destination: impl AsRef<Path>,
-            ) -> Result<()> {
-                self.inner.copy(source, destination)
-            }
-            /// Fetch selected metadata for one path without following its final symlink.
-            /// Unavailable fields remain `None` on `Metadata`.
-            pub fn symlink_metadata_with_fields(
-                &self,
-                path: impl AsRef<Path>,
-                fields: MetadataFields,
-            ) -> Result<Metadata> {
-                self.inner.symlink_metadata_with_fields(path, fields)
             }
             /// List multiple directories in a vector call. The limits apply to the
             /// aggregate returned entries and stored path bytes. Streaming backends
@@ -302,49 +177,7 @@ macro_rules! owned_client {
                 self.inner
                     .remove_paths_with_options(paths, recursive, options)
             }
-            /// Fetch no-follow metadata for many paths using the backend's vector
-            /// operation. Useful for routing without one metadata RPC per path.
-            pub fn symlink_metadatav(&self, paths: &[&Path]) -> Result<Vec<Metadata>> {
-                self.inner.symlink_metadatav(paths)
-            }
-            /// Read several complete files by path using vector READ operations.
-            ///
-            /// The aggregate returned data is limited to 16 MiB by default. Use
-            /// `read_files_with_options` to choose a
-            /// different limit, or stream large files instead. This is not a snapshot
-            /// or an atomic operation across files.
-            pub fn read_files<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<Vec<u8>>> {
-                self.inner.read_files(paths)
-            }
-            /// Read several complete files with an explicit aggregate allocation limit.
-            pub fn read_files_with_options<P: AsRef<Path>>(
-                &self,
-                paths: &[P],
-                options: ReadAllOptions,
-            ) -> Result<Vec<Vec<u8>>> {
-                self.inner.read_files_with_options(paths, options)
-            }
-            /// Replace several files from borrowed buffers using vector OPEN, WRITE,
-            /// and CLOSE phases. Identical path spellings are rejected before opening
-            /// anything; aliases such as hard links are still the caller's responsibility.
-            /// The batch is not transactional: an error may follow files already
-            /// created or written. Large inputs should be chunked by the caller rather
-            /// than held in memory solely for this convenience method.
-            pub fn write_files<P: AsRef<Path>, B: AsRef<[u8]>>(
-                &self,
-                entries: &[(P, B)],
-            ) -> Result<()> {
-                self.inner.write_files(entries)
-            }
-            /// Open a path read-only.
-            pub fn open(&self, path: impl AsRef<std::path::Path>) -> Result<$file> {
-                self.inner.open(path).map(|inner| $file { inner })
-            }
-            /// Create or truncate a file and open it for writing.
-            pub fn create(&self, path: impl AsRef<std::path::Path>) -> Result<$file> {
-                self.inner.create(path).map(|inner| $file { inner })
-            }
-            /// Open a file using an explicit request.
+            /// Open one handle with explicit flags using backend-specific state handling.
             pub fn open_with(&self, request: OpenRequest) -> Result<$file> {
                 self.inner.open_with(request).map(|inner| $file { inner })
             }
@@ -386,36 +219,59 @@ macro_rules! owned_client {
                 self.inner
                     .try_closev(files.into_iter().map(|file| &mut file.inner))
             }
-            /// Close a group of files through one vector operation.
-            ///
-            /// On failure, the handles are dropped and the backend receives
-            /// best-effort scalar cleanup attempts. Use `try_closev`
-            /// to retain the handles after an error.
-            pub fn closev(&self, mut files: Vec<$file>) -> Result<()> {
-                self.try_closev(&mut files)
-            }
-            /// Read an ordered vector with a 16 MiB aggregate request limit.
-            /// Use `readv_with_limit` to tune the limit or
-            /// `readv_into` to provide bounded caller-owned buffers.
-            pub fn readv(&self, requests: &[$read<'_>]) -> Result<Vec<ReadResult>> {
-                self.readv_with_limit(requests, self.inner.limits().max_read_bytes)
-            }
-            /// Read an ordered vector with an explicit aggregate request limit.
-            pub fn readv_with_limit(
+            /// Read whole-file paths and positional ranges in input order.
+            /// The default budget comes from this client's resource limits.
+            /// Whole files complete or fail; ranges may return short progress.
+            /// See [`Fs::readv`] for examples. Use `ReadOp::into` for caller storage.
+            pub fn readv<'a>(
                 &self,
-                requests: &[$read<'_>],
-                bytes: usize,
+                ops: impl IntoIterator<Item = ReadOp<'a, $file>>,
             ) -> Result<Vec<ReadResult>> {
-                self.inner
-                    .readv_with_limit_projected(requests, bytes, |r| &r.inner)
+                self.readv_with_options(ops, ReadOptions::default())
+            }
+            /// Read with an explicit aggregate byte budget. See [`Fs::readv_with_options`].
+            pub fn readv_with_options<'a>(
+                &self,
+                ops: impl IntoIterator<Item = ReadOp<'a, $file>>,
+                options: ReadOptions,
+            ) -> Result<Vec<ReadResult>> {
+                crate::read::consume_ops(
+                    ops,
+                    options.limit_or(self.limits().max_read_bytes),
+                    |requests, options| self.readv_owned(requests, options),
+                    |requests, bytes| self.readv_into_with_limit(requests, bytes),
+                )
+            }
+            pub(crate) fn readv_owned(
+                &self,
+                requests: &[ReadRequest<'_, $read<'_>>],
+                options: ReadOptions,
+            ) -> Result<Vec<OwnedReadResult>> {
+                let budget = options.limit_or(self.inner.limits().max_read_bytes);
+                if requests.iter().all(|request| request.range_ref().is_some()) {
+                    return self
+                        .inner
+                        .readv_with_limit_projected(requests, budget, |request| {
+                            &request.range_ref().expect("checked range requests").inner
+                        });
+                }
+                crate::read::read_batch(
+                    requests,
+                    budget,
+                    |ranges, bytes| {
+                        self.inner
+                            .readv_with_limit_projected(ranges, bytes, |request| &request.inner)
+                    },
+                    |paths, bytes| {
+                        self.inner.read_files_with_options(
+                            paths,
+                            ReadAllOptions::new().max_total_bytes(bytes),
+                        )
+                    },
+                )
             }
             /// Read ordered positional ranges into caller-owned buffers, within this client's budget.
-            pub fn readv_into(&self, requests: &mut [$into<'_>]) -> Result<Vec<ReadIntoResult>> {
-                self.readv_into_with_limit(requests, self.inner.limits().max_read_bytes)
-            }
-            /// Read into caller storage with an explicit aggregate buffer budget.
-            /// This also bounds allocation in copying fallback implementations.
-            pub fn readv_into_with_limit(
+            pub(crate) fn readv_into_with_limit(
                 &self,
                 requests: &mut [$into<'_>],
                 bytes: usize,
@@ -428,16 +284,20 @@ macro_rules! owned_client {
                 )
             }
             /// Write ordered positional ranges; short writes are reported and effects are not atomic.
-            pub fn writev(&self, requests: &[$write<'_>]) -> Result<Vec<WriteResult>> {
-                self.inner.writev_projected(requests, |r| &r.inner)
+            pub fn writev(&self, requests: &[WriteOp<'_, $file>]) -> Result<Vec<WriteResult>> {
+                self.inner.writev_mapped(requests, |op| {
+                    op.file().inner.write_request_at(op.offset(), op.data())
+                })
             }
             /// Write every byte in each positional request, retrying short writes in
             /// vector waves. Like `writev`, this is not transactional: an error may
             /// follow a successfully written prefix. Overlapping requests through the
             /// same path complete in input order; different paths are presumed
             /// independent (including hard-link aliases).
-            pub fn write_allv(&self, requests: &[$write<'_>]) -> Result<Vec<WriteResult>> {
-                self.inner.write_allv_projected(requests, |r| &r.inner)
+            pub fn write_allv(&self, requests: &[WriteOp<'_, $file>]) -> Result<Vec<WriteResult>> {
+                self.inner.write_allv_mapped(requests, |op| {
+                    op.file().inner.write_request_at(op.offset(), op.data())
+                })
             }
         }
         /// Opened object with private backend ownership; closes best-effort on Drop.
@@ -514,25 +374,19 @@ macro_rules! owned_client {
                 self.inner.close()
             }
             /// Borrow this handle for a positional vector read; the cursor is unchanged.
-            pub fn read_request_at(&self, offset: u64, length: usize) -> $read<'_> {
+            pub(crate) fn read_request_at(&self, offset: u64, length: usize) -> $read<'_> {
                 $read {
                     inner: self.inner.read_request_at(offset, length),
                 }
             }
             /// Borrow this handle and caller storage for a positional vector read.
-            pub fn read_request_at_into<'a>(
+            pub(crate) fn read_request_at_into<'a>(
                 &'a self,
                 offset: u64,
                 buffer: &'a mut [u8],
             ) -> $into<'a> {
                 $into {
                     inner: self.inner.read_request_at_into(offset, buffer),
-                }
-            }
-            /// Borrow this handle and payload for a positional vector write.
-            pub fn write_request_at<'a>(&'a self, offset: u64, data: &'a [u8]) -> $write<'a> {
-                $write {
-                    inner: self.inner.write_request_at(offset, data),
                 }
             }
         }
@@ -561,10 +415,6 @@ macro_rules! owned_client {
         /// Borrowed positional request into caller storage.
         pub struct $into<'a> {
             inner: vfsi_sync::FsReadInto<'a, $backend>,
-        }
-        /// Borrowed positional write request; payload is not copied.
-        pub struct $write<'a> {
-            inner: vfsi_sync::FsWrite<'a, $backend>,
         }
         /// An opened directory, never a publicly extractable backend token.
         #[derive(Debug)]
@@ -690,7 +540,6 @@ mod nfs {
         NfsSetMetadata,
         NfsRead,
         NfsReadInto,
-        NfsWrite,
         vfsi_nfs::NfsVecFs
     );
 }
@@ -708,7 +557,6 @@ mod mounted {
         MountedSetMetadata,
         MountedRead,
         MountedReadInto,
-        MountedWrite,
         vfsi_local::DummyVecFs
     );
     impl Mounted {

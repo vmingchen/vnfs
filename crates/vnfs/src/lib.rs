@@ -19,7 +19,7 @@ pub mod nfs {
     pub use crate::{
         Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsClientPool, NfsDir, NfsEvent, NfsFile,
         NfsObserver, NfsOpenOptions, NfsRead, NfsReadInto, NfsReadPool, NfsReadPoolOptions,
-        NfsRecoveryPolicy, NfsSetMetadata, NfsVersion, NfsWrite,
+        NfsRecoveryPolicy, NfsSetMetadata, NfsVersion,
     };
 }
 
@@ -31,8 +31,8 @@ pub mod mounted {
     #[doc(inline)]
     pub use crate::{
         Auto, AutoClient, AutoDir, AutoFile, AutoOpenOptions, AutoRead, AutoReadInto, AutoRoute,
-        AutoSetMetadata, AutoWrite, Mounted, MountedDir, MountedFile, MountedOpenOptions,
-        MountedRead, MountedReadInto, MountedSetMetadata, MountedWrite,
+        AutoSetMetadata, Mounted, MountedDir, MountedFile, MountedOpenOptions, MountedRead,
+        MountedReadInto, MountedSetMetadata,
     };
 }
 
@@ -40,8 +40,9 @@ pub mod mounted {
 pub mod files {
     #[doc(inline)]
     pub use crate::{
-        Capabilities, Client, FileHandle, OpenFlags, OpenRequest, ReadAllOptions, ReadIntoResult,
-        ReadResult, ReadStreamOptions, ResourceLimits, StreamCompletion, WriteResult,
+        Capabilities, FileHandle, Fs, FsExt, OpenFlags, OpenRequest, ReadIntoResult, ReadOp,
+        ReadOptions, ReadResult, ReadStreamOptions, ResourceLimits, StreamCompletion, WriteOp,
+        WriteResult,
     };
 }
 
@@ -49,9 +50,9 @@ pub mod files {
 pub mod directory {
     #[doc(inline)]
     pub use crate::{
-        ControlFlow, DirEntry, DirectoryListing, FileType, Metadata, MetadataFields, Permissions,
-        ReadDirOptions, RemoveOptions, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
-        WalkOptions,
+        ControlFlow, DirEntry, DirectoryListing, FileType, Metadata, MetadataFields,
+        MetadataOptions, Permissions, ReadDirOptions, RemoveOptions, TraversalCompletion,
+        WalkControl, WalkEvent, WalkEventKind, WalkOptions,
     };
 }
 
@@ -88,7 +89,16 @@ pub type Result<T> = vfsi_core::VfResult<T>;
 pub type Error = vfsi_core::VfError;
 
 mod application;
-pub use application::{Client, FileHandle};
+pub use application::{FileHandle, Fs, FsExt};
+mod metadata;
+mod read;
+mod write;
+pub use metadata::MetadataOptions;
+#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
+pub(crate) use read::ReadRequest;
+pub use read::{ReadOp, ReadOptions, ReadResult};
+pub(crate) use vfsi_sync::FsReadResult as OwnedReadResult;
+pub use write::WriteOp;
 
 // Keep negative API-contract doctests without presenting unsupported calls
 // as introductory documentation on the Nfs constructor.
@@ -97,6 +107,12 @@ pub use application::{Client, FileHandle};
 #[doc = include_str!("api_boundary.md")]
 mod api_contract {}
 
+// Compile the published README examples without duplicating them in rustdoc.
+#[cfg(feature = "nfs")]
+#[doc(hidden)]
+#[doc = include_str!("../README.md")]
+mod readme_examples {}
+
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod facade;
 /// High-level filesystem workflows built on the application API.
@@ -104,11 +120,11 @@ pub mod helpers;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub use facade::{
     Mounted, MountedDir, MountedFile, MountedOpenOptions, MountedRead, MountedReadInto,
-    MountedSetMetadata, MountedWrite,
+    MountedSetMetadata,
 };
 #[cfg(feature = "nfs")]
 pub use facade::{
-    NfsClient, NfsDir, NfsFile, NfsOpenOptions, NfsRead, NfsReadInto, NfsSetMetadata, NfsWrite,
+    NfsClient, NfsDir, NfsFile, NfsOpenOptions, NfsRead, NfsReadInto, NfsSetMetadata,
 };
 
 /// Backend implementer and protocol-construction APIs. Most applications
@@ -122,8 +138,8 @@ pub mod backend {
         DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
         DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DirPageCursor, DirectoryFileSystem,
         FileSystem, FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite, LinkFileSystem,
-        MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions, SetMetadata, VecFs,
-        VecFsExt, VectorFileSystem, VfFileHandle, VfOpenOptions, rm_recursive,
+        MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadAllOptions,
+        SetMetadata, VecFs, VecFsExt, VectorFileSystem, VfFileHandle, VfOpenOptions, rm_recursive,
     };
 
     #[cfg(feature = "dummy")]
@@ -178,7 +194,7 @@ mod auto;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub use auto::{
     Auto, AutoClient, AutoDir, AutoFile, AutoOpenOptions, AutoRead, AutoReadInto, AutoRoute,
-    AutoSetMetadata, AutoWrite,
+    AutoSetMetadata,
 };
 
 /// Common application imports.
@@ -187,12 +203,13 @@ pub mod prelude {
     #[cfg(all(feature = "auto", target_os = "linux"))]
     pub use crate::{Auto, Mounted};
     pub use crate::{
-        Client, ControlFlow, FileHandle, ResourceLimits, StreamCompletion, TraversalCompletion,
+        ControlFlow, FileHandle, Fs, FsExt, MetadataOptions, ReadOp, ReadOptions, ReadResult,
+        ResourceLimits, StreamCompletion, TraversalCompletion, WriteOp,
     };
     #[cfg(feature = "nfs")]
     pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile, NfsVersion};
     pub use vfsi_core::{OpenFlags, OpenRequest, RemoveOptions};
-    pub use vfsi_sync::{ReadAllOptions, ReadDirOptions, ReadStreamOptions, WalkOptions};
+    pub use vfsi_sync::{ReadDirOptions, ReadStreamOptions, WalkOptions};
 }
 
 pub use std::io::ErrorKind;
@@ -204,13 +221,12 @@ pub use vfsi_core::{
     Capabilities, DirEntry, ErrorDomain, Metadata, OpenFlags, OpenRequest, Permissions,
     RemoveOptions, StatusCode, TransportKind,
 };
+pub(crate) use vfsi_sync::ReadAllOptions;
 pub use vfsi_sync::{
-    DirectoryListing, ReadAllOptions, ReadDirOptions, ReadStreamOptions, ResourceLimits,
-    StreamCompletion, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
+    DirectoryListing, ReadDirOptions, ReadStreamOptions, ResourceLimits, StreamCompletion,
+    TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
 };
-pub use vfsi_sync::{
-    FsReadIntoResult as ReadIntoResult, FsReadResult as ReadResult, FsWriteResult as WriteResult,
-};
+pub use vfsi_sync::{FsReadIntoResult as ReadIntoResult, FsWriteResult as WriteResult};
 #[cfg(feature = "nfs")]
 mod native_nfs;
 #[cfg(all(feature = "nfs", target_os = "linux"))]

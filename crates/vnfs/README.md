@@ -45,8 +45,12 @@ sudo apt-get install libkrb5-dev
 For complete, compiled workflows, see the
 [canonical examples](examples/README.md) and the
 [task-oriented API documentation](https://docs.rs/vnfs/latest/vnfs/).
-Start with `read_files`/`write_files` for small files, `openv`/`readv_into` for
+Start with `readv`/`write_files` for small files, `openv`/`readv` with `ReadOp::into` for
 repeated positional I/O, or `read_stream_with_options` for large files.
+`Fs` owns backend execution; `FsExt` supplies blanket convenience methods.
+`metadatav_with_options` batches metadata with selected fields and explicit
+final-symlink behavior through `MetadataOptions`.
+
 The API is grouped into `nfs`, `files`, `directory`, `error`, and `helpers`;
 common application types are also available at the crate root.
 
@@ -64,19 +68,23 @@ fn main() -> vnfs::Result<()> {
         ("/file-1", b"hello".as_slice()),
         ("/file-2", b"world".as_slice()),
     ])?;
-    let contents = client.read_files(&["/file-1", "/file-2"])?;
-    assert_eq!(contents, [b"hello".to_vec(), b"world".to_vec()]);
+    let results = client.readv([
+        ReadOp::whole("/file-1"),
+        ReadOp::whole("/file-2"),
+    ])?;
+    assert_eq!(results[0].data.as_deref(), Some(b"hello".as_slice()));
+    assert_eq!(results[1].data.as_deref(), Some(b"world".as_slice()));
     Ok(())
 }
 ```
 
-`write_files` performs vector OPEN, WRITE, and CLOSE phases. `read_files`
+`write_files` performs vector OPEN, WRITE, and CLOSE phases. `readv`
 reads directly by path, so small files can share one READ COMPOUND without
 remote OPEN/CLOSE phases when the server's negotiated limits permit.
 `write_files` retries short
 writes through `write_allv`; it is not transactional, so a failed call may have
-modified a prefix of files. `read_files` limits the combined returned data to
-16 MiB by default; use `read_files_with_options` to adjust the limit, or stream
+modified a prefix of files. `readv` limits the combined returned data to
+16 MiB by default; use `ReadOptions::max_total_bytes` to adjust the limit, or stream
 large files. A scalar POSIX-style loop pays latency for each file operation.
 Larger vectors are packed into as few
 compounds as the server's negotiated operation, request, and response-size
@@ -86,7 +94,10 @@ Already have the directory mounted on Linux? Discover its connection:
 
 ```rust,no_run
 let client = vnfs::Nfs::from_mount("/mnt/data/git/some/tree")?;
-let files = client.read_files(&["/file-1", "/file-2"])?;
+let files = client.readv([
+    vnfs::ReadOp::whole("/file-1"),
+    vnfs::ReadOp::whole("/file-2"),
+])?;
 # Ok::<(), vnfs::Error>(())
 ```
 
@@ -128,9 +139,10 @@ large listings continue page by page. The aggregate entry and path-byte
 limits prevent an accidental unbounded result. `read_dir_with_options` handles
 one directory, while `walk_with_options` handles a bounded recursive tree.
 
-Owned `NfsClient::readv` results are limited to 16 MiB of requested data per
-call. Use `readv_with_limit` to choose another aggregate limit or `readv_into`
-to supply your own buffers. The limit is checked before sending any reads.
+Owned `NfsClient::readv` results inherit the client's 16 MiB aggregate budget.
+Use `ReadOptions::new().max_total_bytes(bytes)` to override it or `readv` with `ReadOp::into`
+to supply your own buffers. Range lengths are checked before dispatch; whole
+files are collected within the remaining budget and fail rather than truncate.
 
 ## Use existing Linux mounts
 
@@ -148,22 +160,25 @@ Use `Mounted` when the same objects are also accessed through the kernel and
 you need its cache/coherency semantics, including access through aliases.
 
 ```rust,no_run
-use vnfs::{Auto, OpenFlags, OpenRequest};
+# #[cfg(all(feature = "auto", target_os = "linux"))]
+# fn main() -> vnfs::Result<()> {
+use vnfs::{Auto, FsExt, OpenFlags, OpenRequest};
 
-fn main() -> vnfs::Result<()> {
     let fs = Auto::new("/")?;
     let paths = ["/mnt/nfs/file-1", "/mnt/nfs/file-2"];
     let requests = paths.map(|p| OpenRequest::new(p, OpenFlags::READ));
     let mut files = fs.openv(&requests)?;
     println!("route: {:?}", files[0].route());
-    let contents = fs.readv(&[
-        files[0].read_request_at(0, 5),
-        files[1].read_request_at(0, 5),
+    let contents = fs.readv([
+        vnfs::ReadOp::range(&files[0], 0, 5),
+        vnfs::ReadOp::range(&files[1], 0, 5),
     ])?;
     assert_eq!(contents.len(), 2);
     fs.try_closev(&mut files)?;
     Ok(())
 }
+# #[cfg(not(all(feature = "auto", target_os = "linux")))]
+# fn main() {}
 ```
 
 Use `Mounted::new("/")?` to **always** use the kernel client, or
@@ -197,7 +212,7 @@ The repository includes a [Rust benchmark driver][benchmark] that compares
 same NFS-Ganesha 15.3 NFSv4.2 export. Linux `netem` added 500 microseconds to
 each loopback traversal, producing approximately 1 ms of added network RTT.
 
-For 20 independent 4 KiB files, the following are medians of 30 trials. Client
+For 20 independent 4 KiB files, the following are medians of 30 trials. Fs
 connection setup is excluded, client order alternates each trial, and cold
 trials use fresh paths:
 
@@ -356,7 +371,7 @@ use vnfs::prelude::*;
 fn main() -> vnfs::Result<()> {
     let mut pool = Nfs::builder("nfs.example.com").root("/export")
         .connect_read_pool(
-            NfsReadPoolOptions::new()
+            vnfs::NfsReadPoolOptions::new()
                 .worker_count(4)
                 .chunk_size(1024 * 1024)
                 .max_in_flight(8)
@@ -382,25 +397,36 @@ their runtime's blocking-task API.
 ## Failure and recovery semantics
 
 The application surface uses `vnfs::Result`, `Error`, `ErrorKind`, `FileType`,
-and owned file handles. `NfsRead`, `NfsReadInto`, and `NfsWrite` let application
-helpers name borrowed request types without importing backend crates. Vector
+and owned file handles. `ReadOp::whole`, `ReadOp::range`, and `ReadOp::into` construct
+read operations without I/O; the consuming `readv` accepts arrays, vectors,
+or iterators. `readv_with_options` overrides the aggregate budget.
+`WriteOp::at(&file, offset, data)` prepares a portable positional write without
+copying the payload or importing backend crates. `writev` reports short progress;
+`write_allv` completes successful short writes without replaying ambiguous failures. Vector
 results are in request order and carry data/count, resolved offset, and EOF or
-durability information; they do not expose backend descriptors. `readv_into`
-returns a `ReadIntoResult` for each caller-owned buffer, including EOF.
-For reusable application helpers, use the `Client` and `FileHandle` traits
+durability information; they do not expose backend descriptors. `readv` with `ReadOp::into`
+returns one `ReadResult` per operation with offset, byte count, EOF, and
+optional owned data. `data` is `None` for caller buffers, whose borrows end
+when the call returns—even on error.
+For reusable application helpers, use a `Fs` bound and import `FsExt`
+(or `vnfs::prelude::*`) for convenience methods such as `read_files`, `write_files`,
+scalar opens, metadata wrappers, and default-option directory/streaming operations. `FsExt` is
+blanket-implemented for every client and preserves batching and resource limits.
+Use `FileHandle` for generic handle operations
 instead of backend traits. The same generic code can use a direct `NfsClient`,
 `Mounted`, or `Auto`. These traits delegate to the native vector implementations
 without boxing, additional copies, or scalar-loop fallbacks.
 
 ```rust,no_run
-fn read_inputs<C: vnfs::Client>(client: &C) -> vnfs::Result<Vec<Vec<u8>>> {
-    client.read_files(&["/file-1", "/file-2"])
+fn read_inputs<C: vnfs::Fs>(client: &C) -> vnfs::Result<Vec<Vec<u8>>> {
+    Ok(client.readv([vnfs::ReadOp::whole("/file-1"), vnfs::ReadOp::whole("/file-2")])?.into_iter().map(|r| r.data.unwrap()).collect())
 }
 ```
 
-`read(path)` and `read_files(&[path])` use the same optimized whole-file backend
-algorithm. Scalar reads keep an opened object across renames and therefore add
-OPEN/CLOSE overhead compared with stateless path vectors. Configure client-wide
+`readv` accepts whole-file paths, positional handle ranges, or a mix. Whole-file
+paths use the optimized backend algorithm without a scalar OPEN/CLOSE loop.
+Range requests keep their opened object across renames and preserve its cursor.
+Complete files fail rather than truncate when the shared budget is exceeded. Configure client-wide
 defaults with `NfsBuilder::limits(ResourceLimits)`
 or `Auto::with_limits(ResourceLimits)`. The default maximum owned read payload
 is 16 MiB, shared by scalar whole-file reads and aggregate vector reads. Explicit
@@ -527,10 +553,13 @@ guarantee; do not treat `VfDir::Path` as a secure directory handle.
 For privileged or attacker-influenced paths, root the removal at an
 already-open directory instead of a path:
 
-```rust
+```rust,no_run
+# fn example(client: &vnfs::NfsClient) -> vnfs::Result<()> {
 let mut dir = client.open_dir_handle("/attacker/controlled")?;
 dir.remove_contents()?; // rooted at the resolved directory handle
 dir.try_close()?;       // Retains cleanup ownership if explicit close fails
+# Ok(())
+# }
 ```
 
 `open_dir_handle` rejects backends without a genuine handle and does not follow
@@ -591,9 +620,10 @@ with `kinit`) and does not accept or retain passwords. Integrity protection is
 the recommended baseline.
 
 ```rust,no_run
+# #[cfg(feature = "rpcsec-gss")]
+# fn main() -> vnfs::Result<()> {
 use vnfs::{Nfs, NfsAuthentication, RpcsecGssProtection};
 
-fn main() -> vnfs::Result<()> {
     let client = Nfs::builder("nfs.example.com")
         .root("/export/application")
         .auth(NfsAuthentication::RpcsecGss {
@@ -605,6 +635,8 @@ fn main() -> vnfs::Result<()> {
     drop(client);
     Ok(())
 }
+# #[cfg(not(feature = "rpcsec-gss"))]
+# fn main() {}
 ```
 
 `Authentication` and `Integrity` correspond to server export security flavors

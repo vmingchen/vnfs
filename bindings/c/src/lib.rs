@@ -2314,7 +2314,7 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
             let files: Vec<VfFile> = vpaths.iter().map(|p| VfFile::from_os_path(p)).collect();
             let datas = lock_or_io(&fs.fs)?.read_allv_with_options(
                 &files,
-                vnfs::ReadAllOptions::new().max_total_bytes(max_bytes),
+                vnfs::backend::ReadAllOptions::new().max_total_bytes(max_bytes),
             )?;
             let c_cb = cb;
             for (i, data) in datas.iter().enumerate() {

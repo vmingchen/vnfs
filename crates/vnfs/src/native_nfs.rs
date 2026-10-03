@@ -273,7 +273,17 @@ mod mount_tests {
         ])
         .unwrap();
         assert_eq!(
-            fs.read_files(&["/file-1", "/file-2"]).unwrap(),
+            fs.readv_with_options(
+                ["/file-1", "/file-2"]
+                    .iter()
+                    .map(crate::ReadOp::whole)
+                    .collect::<Vec<_>>(),
+                crate::ReadOptions::default()
+            )
+            .unwrap()
+            .into_iter()
+            .map(|r| r.data.unwrap())
+            .collect::<Vec<_>>(),
             [b"hello".to_vec(), b"world".to_vec()]
         );
         fs.remove_file("/file-1").unwrap();
@@ -307,7 +317,17 @@ mod mount_tests {
             assert_eq!(result.unwrap_err().err_no(), libc::EROFS as u32);
         }
         assert_eq!(
-            fs.read_files(&["/marker"]).unwrap(),
+            fs.readv_with_options(
+                ["/marker"]
+                    .iter()
+                    .map(crate::ReadOp::whole)
+                    .collect::<Vec<_>>(),
+                crate::ReadOptions::default()
+            )
+            .unwrap()
+            .into_iter()
+            .map(|r| r.data.unwrap())
+            .collect::<Vec<_>>(),
             [b"unchanged".to_vec()]
         );
         assert!(fs.metadata("/child").unwrap().is_dir());
@@ -318,3 +338,5 @@ mod mount_tests {
         std::fs::remove_dir(fixture).unwrap();
     }
 }
+#[cfg(test)]
+use crate::FsExt;
