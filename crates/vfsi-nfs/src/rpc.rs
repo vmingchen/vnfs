@@ -223,7 +223,7 @@ pub struct RpcClient {
     clnt: *mut CLIENT,
     auth: *mut AUTH,
     request_timeout: timespec,
-    #[cfg(feature = "rpcsec-gss")]
+    #[cfg(all(feature = "rpcsec-gss", not(libntirpc_native_reply_verifier)))]
     reply_verifier_fix_installed: bool,
 }
 
@@ -309,9 +309,12 @@ impl RpcClient {
             } => {
                 use libntirpc_sys::rpcsec_gss::RpcGssSec;
 
+                // Older published bindings need this compatibility shim.
+                // Source-built ntirpc validates reply verifiers natively.
                 // Install before the first RPC: libntirpc dispatches xp_ops
                 // without a lock, so the shim must be in place before the
                 // transport can process any request.
+                #[cfg(not(libntirpc_native_reply_verifier))]
                 if !unsafe { vfsi_libntirpc_install_reply_verifier_fix(clnt) } {
                     unsafe { destroy_client(clnt) };
                     return Err(RpcError::transport(
@@ -324,6 +327,7 @@ impl RpcClient {
                     .unwrap_or_else(|| default_service_principal(host));
                 let principal = std::ffi::CString::new(principal).map_err(|error| {
                     unsafe {
+                        #[cfg(not(libntirpc_native_reply_verifier))]
                         vfsi_libntirpc_uninstall_reply_verifier_fix(clnt);
                         destroy_client(clnt);
                     }
@@ -347,7 +351,7 @@ impl RpcClient {
         };
         if auth.is_null() {
             unsafe {
-                #[cfg(feature = "rpcsec-gss")]
+                #[cfg(all(feature = "rpcsec-gss", not(libntirpc_native_reply_verifier)))]
                 if matches!(authentication, NfsAuthentication::RpcsecGss { .. }) {
                     vfsi_libntirpc_uninstall_reply_verifier_fix(clnt);
                 }
@@ -365,7 +369,7 @@ impl RpcClient {
             let status = unsafe { (*auth).ah_error.re_status };
             unsafe {
                 destroy_auth(auth);
-                #[cfg(feature = "rpcsec-gss")]
+                #[cfg(all(feature = "rpcsec-gss", not(libntirpc_native_reply_verifier)))]
                 if matches!(authentication, NfsAuthentication::RpcsecGss { .. }) {
                     vfsi_libntirpc_uninstall_reply_verifier_fix(clnt);
                 }
@@ -382,7 +386,7 @@ impl RpcClient {
                 tv_sec: request_timeout.as_secs().min(i64::MAX as u64) as _,
                 tv_nsec: request_timeout.subsec_nanos() as _,
             },
-            #[cfg(feature = "rpcsec-gss")]
+            #[cfg(all(feature = "rpcsec-gss", not(libntirpc_native_reply_verifier)))]
             reply_verifier_fix_installed: matches!(
                 authentication,
                 NfsAuthentication::RpcsecGss { .. }
@@ -570,7 +574,7 @@ impl Drop for RpcClient {
             // RPCSEC_GSS destruction sends its context-destroy request over
             // the client transport, so authentication must be released first.
             destroy_auth(self.auth);
-            #[cfg(feature = "rpcsec-gss")]
+            #[cfg(all(feature = "rpcsec-gss", not(libntirpc_native_reply_verifier)))]
             if self.reply_verifier_fix_installed {
                 vfsi_libntirpc_uninstall_reply_verifier_fix(self.clnt);
             }

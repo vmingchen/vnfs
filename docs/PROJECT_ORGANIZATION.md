@@ -85,13 +85,28 @@ adapters/
   vsmbfs/               fsspec facade over vsmb
 protocols/
   nfsv4/                protocol source material
-third-party/
-  libntirpc-sys/        pinned, patched build dependency
 ecosystem/
   ports.toml            registered and tested external repositories
 docs/                   architecture and compatibility policy
 ci/                     integration servers and ecosystem tests
 ```
+
+### Native RPC dependency ownership
+
+`libntirpc-sys` is maintained independently in
+[`vmingchen/libntirpc-sys`](https://github.com/vmingchen/libntirpc-sys).
+VFSI consumes its published crates.io release; no maintained source copy lives
+in this repository. For coordinated local development on the VM, use an
+explicit Cargo override:
+
+```sh
+cargo --config 'patch.crates-io.libntirpc-sys.path="/home/ubuntu/gh/libntirpc-sys"' test -p vfsi-nfs --lib --all-features
+```
+
+The repository's `scripts/test-libntirpc.sh` also tests an isolated, temporary
+copy of the resolved dependency, retaining native ABI and fuzzing unit coverage
+without modifying the registry cache. Release libntirpc-sys changes from its own
+repository before updating VFSI's dependency version and lockfiles.
 
 The dependency direction is deliberately one-way:
 

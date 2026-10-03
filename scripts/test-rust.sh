@@ -14,7 +14,7 @@ cargo test -p vfsi-local --features test-faults
 cargo test -p vfsi-nfs --lib --all-features
 cargo test -p vfsi-smb --lib
 cargo test -p nfsv41-sys
-cargo test -p libntirpc-sys
+./scripts/test-libntirpc.sh
 cargo test -p vnfs --lib
 cargo test -p vnfs --features "dummy test-faults" --test dummy_vecfs
 cargo test -p vnfs --test public_api

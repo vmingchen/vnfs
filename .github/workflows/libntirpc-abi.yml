@@ -78,7 +78,7 @@ jobs:
         run: pkg-config --modversion libntirpc
       - name: Test the crate against the newer libntirpc
         run: |
-          cargo test -p libntirpc-sys --all-features
+          ./scripts/test-libntirpc.sh
           cargo build -p vfsi-nfs --features rpcsec-gss
       - name: Negotiate RPCSEC_GSS with the newer client library
         # The NFS server is the distribution's Ganesha (libntirpc 6.3); the

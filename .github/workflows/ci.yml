@@ -85,7 +85,6 @@ jobs:
         run: |
           package_list=$(mktemp)
           cat >"$package_list" <<'PACKAGES'
-          libntirpc-sys third-party/libntirpc-sys/Cargo.toml
           vfsi-core crates/vfsi-core/Cargo.toml
           vfsi-sync crates/vfsi-sync/Cargo.toml
           vfsi-local crates/vfsi-local/Cargo.toml
