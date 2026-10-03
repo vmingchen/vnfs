@@ -101,13 +101,27 @@ mod test {
     use super::*;
 
     #[test]
-    fn test_basic() {
-        assert!(unsafe {
-            xdr_void(
-                std::ptr::null_mut::<rpc_xdr>(),
-                std::ptr::null_mut::<std::os::raw::c_void>(),
-            )
-        });
+    fn memory_xdr_encodes_decodes_and_frees_a_string() {
+        unsafe {
+            let input = std::ffi::CString::new("abc").unwrap();
+            let mut pointer = input.as_ptr() as *mut std::os::raw::c_char;
+            // xdrmem_ncreate requires four-byte-aligned backing storage.
+            let mut storage = [0_u32; 2];
+            let bytes = std::slice::from_raw_parts_mut(storage.as_mut_ptr().cast::<u8>(), 8);
+            let mut stream: XDR = std::mem::zeroed();
+            xdrmem_ncreate(&mut stream, bytes.as_mut_ptr().cast(), 8, xdr_op_XDR_ENCODE);
+            assert!(xdr_wrapstring(&mut stream, &mut pointer));
+            assert_eq!(bytes, &[0, 0, 0, 3, b'a', b'b', b'c', 0]);
+            xdrmem_ncreate(&mut stream, bytes.as_mut_ptr().cast(), 8, xdr_op_XDR_DECODE);
+            let mut decoded = std::ptr::null_mut();
+            assert!(xdr_wrapstring(&mut stream, &mut decoded));
+            assert_eq!(std::ffi::CStr::from_ptr(decoded), input.as_c_str());
+            assert!(xdr_wrapstring(&raw mut xdr_free_null_stream, &mut decoded));
+            assert!(
+                decoded.is_null(),
+                "XDR_FREE must release and clear the allocation"
+            );
+        }
     }
 
     /// The bindgen invocation and the C shims must compile `SVCXPRT` with the

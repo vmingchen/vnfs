@@ -49,10 +49,9 @@ fn measured<T>(f: impl FnOnce() -> T) -> (T, (usize, usize)) {
 #[test]
 fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     use vnfs::backend::{DummyVecFs, FsClient};
-    let root = std::env::temp_dir().join(format!("vnfs-boundary-{}", std::process::id()));
-    std::fs::create_dir(&root).unwrap();
-    let mounted = Mounted::new(&root).unwrap();
-    let raw = FsClient::new(DummyVecFs::try_new(root.clone()).unwrap());
+    let root = tempfile::TempDir::new().unwrap();
+    let mounted = Mounted::new(root.path()).unwrap();
+    let raw = FsClient::new(DummyVecFs::try_new(root.path().to_path_buf()).unwrap());
     let paths = ["/a", "/b", "/c"];
     mounted
         .write_files(&paths.map(|path| (path, b"payload")))
@@ -126,15 +125,13 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     mounted.closev(reopened).unwrap();
     raw.closev(raw_reopened).unwrap();
     mounted.remove_paths(&paths, false).unwrap();
-    std::fs::remove_dir(root).unwrap();
 }
 
 #[test]
 fn opaque_requests_preserve_owner_preflight_and_error_sources() {
-    let root = std::env::temp_dir().join(format!("vnfs-boundary-owner-{}", std::process::id()));
-    std::fs::create_dir(&root).unwrap();
-    let owner = Mounted::new(&root).unwrap();
-    let other = Mounted::new(&root).unwrap();
+    let root = tempfile::TempDir::new().unwrap();
+    let owner = Mounted::new(root.path()).unwrap();
+    let other = Mounted::new(root.path()).unwrap();
     owner.write("/a", b"original").unwrap();
     let mut file = owner
         .open_options()
@@ -159,7 +156,6 @@ fn opaque_requests_preserve_owner_preflight_and_error_sources() {
             .is_some()
     );
     owner.remove_file("/a").unwrap();
-    std::fs::remove_dir(root).unwrap();
 }
 
 #[test]
@@ -173,6 +169,17 @@ fn handles_remain_send_sync_and_clients_remain_cheaply_cloneable() {
     send_sync::<vnfs::MountedFile>();
     cloneable::<vnfs::NfsClient>();
     cloneable::<vnfs::Mounted>();
+    let root = tempfile::TempDir::new().unwrap();
+    let client = Mounted::new(root.path()).unwrap();
+    let (clone, allocations) = measured(|| client.clone());
+    assert_eq!(allocations, (0, 0), "client clone must share its backend");
+    client.write("/shared", b"data").unwrap();
+    let mut file = client.open("/shared").unwrap();
+    clone.try_closev([&mut file]).unwrap();
+    assert!(
+        file.is_closed(),
+        "clones must retain the same ownership identity"
+    );
     assert_eq!(
         std::mem::size_of::<vnfs::NfsFile>(),
         std::mem::size_of::<vnfs::backend::FsFile<vnfs::backend::NfsVecFs>>()

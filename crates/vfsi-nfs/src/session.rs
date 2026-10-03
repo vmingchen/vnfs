@@ -479,9 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn session_connect_negotiates_like_the_nfs_client() {
-        // Regression: Session::connect used to pin minor version 1 while the
-        // NfsClient handshake negotiated 4.2 then 4.1.
+    fn negotiation_stops_after_the_preferred_version_succeeds() {
         let mut attempts = Vec::new();
         negotiate_minor(|minor| {
             attempts.push(minor);

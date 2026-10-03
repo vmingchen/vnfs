@@ -829,6 +829,19 @@ impl NfsClient {
         );
     }
 
+    /// Lower the operation ceiling for deterministic compound-splitting tests.
+    #[cfg(feature = "test-faults")]
+    #[doc(hidden)]
+    pub fn test_limit_compound_operations(&mut self, limit: usize) -> usize {
+        assert!(
+            limit >= 8,
+            "test ceiling must allow individual path operations"
+        );
+        self.max_ops = self.max_ops.min(limit);
+        self.compound_limits = AdaptiveCompoundLimits::new(self.max_ops);
+        self.max_ops
+    }
+
     /// Per-op data cap: no single READ/WRITE op may carry more than the
     /// server's per-op limit (bounded by the compound cap as well).
     pub fn per_op_bytes(&self) -> usize {
@@ -1442,6 +1455,21 @@ impl NfsClient {
                 .remove_batch_capacity()
                 .min(max_items)
                 .min(names.len() - start);
+            // Earlier chunks are confirmed; this chunk has not been sent.
+            #[cfg(feature = "test-faults")]
+            if let Some(injector) = &self.fault_injector {
+                injector
+                    .check(&OpenFaultPoint::BeforeRemoveChunk {
+                        first_name: names[start].clone(),
+                    })
+                    .map_err(|error| {
+                        if error.is_transport() {
+                            RpcError::transport(error.to_string())
+                        } else {
+                            RpcError::op(start, error.err_no())
+                        }
+                    })?;
+            }
             let mut c = Compound::new();
             c.tag(b"removev");
             c.putfh(&dir.as_nfs_fh());

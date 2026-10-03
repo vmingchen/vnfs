@@ -586,20 +586,25 @@ jobs:
           sudo mount -t nfs4 -o ro,vers=4.${{ matrix.minor-version }},proto=tcp,sec=sys,port=2049 127.0.0.1:/ /mnt/vnfs-ci-discovery-ro
           bind_target=/mnt/vnfs-ci-auto/.vnfs-auto-bind
           bind_source=$(mktemp)
-          trap 'sudo umount "$bind_target" 2>/dev/null || true; rm -f "$bind_target" "$bind_source"; sudo umount /mnt/vnfs-ci-discovery-ro; sudo umount /mnt/vnfs-ci-auto' EXIT
+          nested_root=/mnt/vnfs-ci-auto/.vnfs-auto-nested
+          nested_source=$(mktemp -d)
+          trap 'sudo umount "$nested_root/child" 2>/dev/null || true; rm -f "$nested_root/child/hidden"; rmdir "$nested_root/child" "$nested_root" "$nested_source" 2>/dev/null || true; sudo umount "$bind_target" 2>/dev/null || true; rm -f "$bind_target" "$bind_source"; sudo umount /mnt/vnfs-ci-discovery-ro; sudo umount /mnt/vnfs-ci-auto' EXIT
           printf 'underlying NFS\n' > "$bind_target"
           printf 'bind source\n' > "$bind_source"
           sudo mount --bind "$bind_source" "$bind_target"
-          VFSI_AUTO_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_AUTO_TEST_BIND="$bind_target" \
-            cargo test -p vnfs --lib auto::tests::live_ -- --nocapture
+          mkdir "$nested_root" "$nested_root/child"
+          printf 'preserve\n' > "$nested_root/child/hidden"
+          sudo mount --bind "$nested_source" "$nested_root/child"
+          VFSI_AUTO_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_AUTO_TEST_BIND="$bind_target" VFSI_AUTO_TEST_NESTED_ROOT="$nested_root" \
+            cargo test -p vnfs --lib auto::tests::live_ -- --ignored --nocapture
           VFSI_NFS_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_NFS_TEST_MOUNT_RO=/mnt/vnfs-ci-discovery-ro \
-            cargo test -p vnfs --lib native_nfs::mount_tests -- --nocapture --test-threads=1
+            cargo test -p vnfs --lib native_nfs::mount_tests -- --ignored --nocapture --test-threads=1
           VFSI_NFS_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_NFS_TEST_MOUNT_RO=/mnt/vnfs-ci-discovery-ro \
-            cargo test -p vfsi-nfs --lib nfs::tests::live_read_only_mount -- --nocapture
+            cargo test -p vfsi-nfs --lib nfs::tests::live_read_only_mount -- --ignored --nocapture
       - name: Run NFS integration suite
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}
-        run: cargo test -p vnfs --features test-faults --test nfs
+        run: cargo test -p vnfs --features "test-faults rpcsec-gss" --test nfs
       - name: Run vfsi-nfs directly against NFS
         env:
           VFSI_NFS_REQUIRED: 1
@@ -612,7 +617,7 @@ jobs:
         run: |
           control_dir=$(mktemp -d)
           VNFS_RECOVERY_CONTROL_DIR="$control_dir" \
-            cargo test -p vnfs --test nfs_recovery -- --nocapture --test-threads=1 &
+            cargo test -p vnfs --test nfs_recovery -- --ignored --nocapture --test-threads=1 &
           test_pid=$!
           trap 'touch "$control_dir/continue"; kill "$test_pid" 2>/dev/null || true' EXIT
           for attempt in $(seq 1 120); do
@@ -801,7 +806,7 @@ jobs:
         env:
           VNFS_TEST_MINOR: 2
           VNFS_TEST_REQUIRE_SERVER_COPY: 1
-        run: cargo test -p vnfs --features test-faults --test nfs
+        run: cargo test -p vnfs --features "test-faults rpcsec-gss" --test nfs
       - name: Run vfsi-nfs directly against patched NFSv4.2
         env:
           VFSI_NFS_REQUIRED: 1

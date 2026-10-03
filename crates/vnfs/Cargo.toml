@@ -36,6 +36,7 @@ vfsi-nfs = { workspace = true, optional = true }
 vfsi-sync = { workspace = true }
 
 [dev-dependencies]
+tempfile = "3"
 vfsi-sync = { workspace = true, features = ["test-support"] }
 
 [[test]]

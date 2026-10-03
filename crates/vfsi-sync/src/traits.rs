@@ -1512,6 +1512,15 @@ pub fn rm_recursive(fs: &mut impl VecFs, dir: &Path) -> VfRes {
 mod contract_tests {
     use super::*;
 
+    fn assert_contract_error(error: VfError, index: Option<usize>, detail: &str) {
+        assert_eq!(error.domain(), vfsi_core::ErrorDomain::Transport);
+        assert_eq!(error.index(), index);
+        assert_eq!(error.status(), None);
+        let message = error.to_string();
+        assert!(message.contains("backend contract violation"), "{message}");
+        assert!(message.contains(detail), "{message}");
+    }
+
     fn request() -> ReadOp {
         ReadOp::at(VfFile::from_path("/file"), 0, 1)
     }
@@ -1528,13 +1537,44 @@ mod contract_tests {
     #[test]
     fn read_result_cardinality_is_checked_before_indexing() {
         let requests = [request(), request()];
-        assert!(validate_read_results("test", &requests, &[result()]).is_err());
-        assert!(validate_read_results("test", &requests[..1], &[result(), result()]).is_err());
+        validate_read_results("test", &requests, &[result(), result()]).unwrap();
+        validate_read_results("test", &[], &[]).unwrap();
+        assert_contract_error(
+            validate_read_results("test", &requests, &[result()]).unwrap_err(),
+            None,
+            "returned 1 results for 2 requests",
+        );
+        assert_contract_error(
+            validate_read_results("test", &requests[..1], &[result(), result()]).unwrap_err(),
+            None,
+            "returned 2 results for 1 requests",
+        );
     }
 
     #[test]
     fn read_result_identity_offset_progress_and_size_are_checked() {
         let request = request();
+        validate_read_results("test", std::slice::from_ref(&request), &[result()]).unwrap();
+        let larger = ReadOp::at(VfFile::from_path("/file"), 0, 4);
+        validate_read_results(
+            "test",
+            &[larger],
+            &[ReadResult {
+                eof: false,
+                ..result()
+            }],
+        )
+        .unwrap();
+        validate_read_results(
+            "test",
+            std::slice::from_ref(&request),
+            &[ReadResult {
+                data: Vec::new(),
+                eof: true,
+                ..result()
+            }],
+        )
+        .unwrap();
         for malformed in [
             ReadResult {
                 file: VfFile::from_path("/other"),
@@ -1554,9 +1594,17 @@ mod contract_tests {
                 ..result()
             },
         ] {
-            assert!(
-                validate_read_results("test", std::slice::from_ref(&request), &[malformed])
-                    .is_err()
+            // Keep a valid prefix so attribution must identify the second
+            // request rather than always returning request zero.
+            assert_contract_error(
+                validate_read_results(
+                    "test",
+                    &[request.clone(), request.clone()],
+                    &[result(), malformed],
+                )
+                .unwrap_err(),
+                Some(1),
+                "test",
             );
         }
     }
@@ -1571,7 +1619,30 @@ mod contract_tests {
             written: 1,
             stable: true,
         };
-        assert!(validate_write_results("test", &[request], &[]).is_err());
+        validate_write_results("test", &[request], std::slice::from_ref(&valid)).unwrap();
+        // Partial/zero progress is a valid backend result; write_allv owns
+        // the policy for completing it or rejecting a no-progress loop.
+        validate_write_results(
+            "test",
+            &[request],
+            &[WriteResult {
+                written: 0,
+                ..valid.clone()
+            }],
+        )
+        .unwrap();
+        validate_write_results("test", &[], &[]).unwrap();
+        assert_contract_error(
+            validate_write_results("test", &[request], &[]).unwrap_err(),
+            None,
+            "returned 0 results",
+        );
+        assert_contract_error(
+            validate_write_results("test", &[request], &[valid.clone(), valid.clone()])
+                .unwrap_err(),
+            None,
+            "returned 2 results",
+        );
         for malformed in [
             WriteResult {
                 file: VfFile::from_path("/other"),
@@ -1586,14 +1657,27 @@ mod contract_tests {
                 ..valid.clone()
             },
         ] {
-            assert!(validate_write_results("test", &[request], &[malformed]).is_err());
+            assert_contract_error(
+                validate_write_results("test", &[request, request], &[valid.clone(), malformed])
+                    .unwrap_err(),
+                Some(1),
+                "test",
+            );
         }
     }
 
     #[test]
     fn scalar_result_cardinality_is_checked_without_panicking() {
-        assert!(take_single_result::<u8>("readlink", Vec::new()).is_err());
-        assert!(take_single_result("readlink", vec![1u8, 2]).is_err());
+        assert_contract_error(
+            take_single_result::<u8>("readlink", Vec::new()).unwrap_err(),
+            None,
+            "readlink",
+        );
+        assert_contract_error(
+            take_single_result("readlink", vec![1u8, 2]).unwrap_err(),
+            None,
+            "readlink",
+        );
         assert_eq!(take_single_result("readlink", vec![7u8]).unwrap(), 7);
     }
 }

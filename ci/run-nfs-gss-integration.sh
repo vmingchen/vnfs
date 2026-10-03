@@ -118,7 +118,7 @@ VNFS_GSS_HOST="$gss_host" \
 VNFS_GSS_SERVICE=nfs@localhost. \
 KRB5_TRACE="$state_dir/client-krb5.trace" \
 MALLOC_PERTURB_=165 \
-cargo test -p vnfs --test nfs_gss --features rpcsec-gss -- --test-threads=1
+cargo test -p vnfs --test nfs_gss --features rpcsec-gss -- --ignored --skip renewable_ticket_allows_reconnect_after_ticket_expiry --test-threads=1
 
 # Verify renewal and reconnect when the original TGT is expired but renewable.
 expiry_ccache="FILE:$state_dir/expiry.ccache"
@@ -130,7 +130,7 @@ VNFS_GSS_EXPIRY_INTEGRATION=1 \
 KRB5CCNAME="$expiry_ccache" \
 KRB5_TRACE="$state_dir/expiry-krb5.trace" \
 cargo test -p vnfs --test nfs_gss --features rpcsec-gss \
-    renewable_ticket_allows_reconnect_after_ticket_expiry -- --exact --test-threads=1
+    renewable_ticket_allows_reconnect_after_ticket_expiry -- --ignored --exact --test-threads=1
 fi
 
 # The Python/maturin coverage is skipped by the scheduled libntirpc-abi job,

@@ -6,14 +6,17 @@ cd "$repo_root"
 
 # Keep this list explicit: several published packages need different feature
 # sets, and the live NFS/SMB integration suites run in their dedicated jobs.
-cargo test -p vfsi-core
-cargo test -p vfsi-sync
-cargo test -p vfsi-local
+# Enable deterministic fault injection in the fast suites too; otherwise
+# cfg(feature = "test-faults") regressions are silently omitted.
+cargo test -p vfsi-core --features test-faults
+cargo test -p vfsi-sync --features "test-faults test-support"
+cargo test -p vfsi-local --features test-faults
 cargo test -p vfsi-nfs --lib --all-features
 cargo test -p vfsi-smb --lib
 cargo test -p nfsv41-sys
+cargo test -p libntirpc-sys
 cargo test -p vnfs --lib
-cargo test -p vnfs --features dummy --test dummy_vecfs
+cargo test -p vnfs --features "dummy test-faults" --test dummy_vecfs
 cargo test -p vnfs --test public_api
 cargo test -p vnfs --test application_boundary
 cargo test -p vnfs --doc

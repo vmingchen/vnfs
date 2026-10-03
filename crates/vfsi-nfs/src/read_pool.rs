@@ -840,7 +840,9 @@ mod tests {
         let thread = spawn_worker_thread(2, events, || panic!("injected worker panic"))
             .expect("spawn test worker");
         assert!(matches!(
-            received.recv().expect("worker termination event"),
+            received
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("worker must emit its terminal event within five seconds"),
             WorkerEvent::Stopped { worker: 2 }
         ));
         thread.join().expect("panic is contained by worker wrapper");

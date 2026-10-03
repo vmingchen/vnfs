@@ -269,8 +269,8 @@ run_nfs() {
   prepare_python
   for minor in 1 2; do
     export VNFS_TEST_MINOR=$minor VFSI_NFS_MINOR=$minor
-    cargo test -p vnfs --features test-faults --test nfs
-    cargo test -p vfsi-nfs --features server-copy --test nfs -- --test-threads=1
+    cargo test -p vnfs --features "test-faults rpcsec-gss" --test nfs
+    cargo test -p vfsi-nfs --features "server-copy test-faults" --test nfs -- --test-threads=1
     "$python_bin" -m pytest \
       adapters/nfs4fs/tests/test_nfs_integration.py \
       adapters/nfs4fs/tests/test_behavior_parity.py \

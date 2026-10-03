@@ -19,6 +19,186 @@ fn required() -> bool {
     std::env::var("VFSI_NFS_REQUIRED").as_deref() == Ok("1")
 }
 
+#[test]
+fn session_connect_uses_the_highest_supported_minor_and_initializes_limits() {
+    let host = match std::env::var("VFSI_NFS_SERVER") {
+        Ok(host) => host,
+        Err(_) => {
+            assert!(!required(), "VFSI_NFS_SERVER is required");
+            return;
+        }
+    };
+    use vfsi_nfs::session::Session;
+    let expected = match Session::connect_minor(&host, 2) {
+        Ok(_) => 2,
+        Err(error) => {
+            assert_eq!(
+                error.status,
+                nfsv41_sys::nfsstat4_NFS4ERR_MINOR_VERS_MISMATCH
+            );
+            1
+        }
+    };
+    let session = Session::connect(&host).expect("automatic session negotiation");
+    assert_eq!(session.minorversion, expected);
+    assert!(session.max_operations > 0);
+    assert!(session.max_requestsize > 1024);
+    assert!(session.max_responsesize > 1024);
+    assert_ne!(session.sessionid, [0; 16]);
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn recursive_remove_does_not_restart_each_page_after_a_persistent_entry_failure() {
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use vfsi_core::internal::faults::FaultInjector;
+    struct PersistentFailure {
+        attempts: AtomicUsize,
+        cookies: Mutex<Vec<u64>>,
+    }
+    impl FaultInjector for PersistentFailure {
+        fn check(&self, point: &OpenFaultPoint) -> vfsi_core::VfResult<()> {
+            match point {
+                OpenFaultPoint::BeforeRemovePage { cookie } => {
+                    self.cookies.lock().unwrap().push(*cookie)
+                }
+                OpenFaultPoint::BeforeRemoveChunk { first_name } if first_name == b"blocked" => {
+                    self.attempts.fetch_add(1, Ordering::Relaxed);
+                    return Err(VfError::nfs(0, nfsv41_sys::nfsstat4_NFS4ERR_ACCESS));
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+    let Some(mut fs) = connect() else { return };
+    let root = format!("/vfsi-remove-pages-{}", std::process::id());
+    fs.ensure_dir(Path::new(&root), 0o755).unwrap();
+    // Enough entries for multiple 32-KiB READDIR pages. One-item REMOVE
+    // batches fail only `blocked`, without fabricating a successful prefix.
+    let paths: Vec<_> = std::iter::once(format!("{root}/blocked"))
+        .chain((0..1500).map(|index| format!("{root}/file-{index:04}")))
+        .collect();
+    fs.writev(
+        &paths
+            .iter()
+            .map(|path| {
+                vfsi_sync::WriteOp::at(vfsi_sync::VfFile::from_path(path), 0, b"x".to_vec())
+                    .with_creation()
+            })
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let failure = Arc::new(PersistentFailure {
+        attempts: AtomicUsize::new(0),
+        cookies: Mutex::new(Vec::new()),
+    });
+    fs.set_fault_injector(failure.clone());
+    let error = fs
+        .rm_with_options(
+            &[Path::new(&root)],
+            true,
+            vfsi_sync::RemoveOptions::new()
+                .batch(1)
+                .continue_on_error(true),
+        )
+        .unwrap_err();
+    let attempts = failure.attempts.load(Ordering::Relaxed);
+    let cookies = failure.cookies.lock().unwrap().clone();
+    fs.set_fault_injector(Arc::new(FaultScript::new([])));
+    // Clean up before assertions, even when the operation's behavior regresses.
+    let remaining: Vec<_> = fs
+        .listdir(Path::new(&root), vfsi_sync::AttrMask::empty(), 2, false)
+        .unwrap()
+        .into_iter()
+        .map(|attrs| attrs.file.path().unwrap().to_path_buf())
+        .collect();
+    fs.rm(&[Path::new(&root)], true).unwrap();
+    assert_eq!(
+        error.status(),
+        Some(vfsi_core::StatusCode::Nfs(
+            nfsv41_sys::nfsstat4_NFS4ERR_ACCESS
+        ))
+    );
+    assert_eq!(error.index(), Some(0));
+    assert!(
+        cookies.iter().any(|cookie| *cookie != 0),
+        "fixture must exercise continuation pages: {cookies:?}"
+    );
+    assert_eq!(
+        attempts, 2,
+        "failed entry should be tried once per complete pass, not once per page: {cookies:?}"
+    );
+    assert_eq!(
+        remaining,
+        [std::path::PathBuf::from(format!("{root}/blocked"))]
+    );
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn recursive_remove_retries_a_transient_entry_only_when_configured() {
+    let Some(mut fs) = connect() else { return };
+    for (retries, failures) in [(0u32, 1usize), (0, 2), (1, 1), (1, 2)] {
+        let root = format!(
+            "/vfsi-remove-retry-{}-{retries}-{failures}",
+            std::process::id()
+        );
+        let path = format!("{root}/transient");
+        fs.ensure_dir(Path::new(&root), 0o755).unwrap();
+        fs.writev(&[
+            vfsi_sync::WriteOp::at(vfsi_sync::VfFile::from_path(&path), 0, b"x".to_vec())
+                .with_creation(),
+        ])
+        .unwrap();
+        let point = OpenFaultPoint::BeforeRemoveChunk {
+            first_name: b"transient".to_vec(),
+        };
+        let script = Arc::new(FaultScript::new((0..failures).map(|_| {
+            (
+                point.clone(),
+                VfError::nfs(0, nfsv41_sys::nfsstat4_NFS4ERR_DELAY),
+            )
+        })));
+        fs.set_fault_injector(script.clone());
+        let result = fs.rm_with_options(
+            &[Path::new(&root)],
+            true,
+            vfsi_sync::RemoveOptions::new().batch(1).retries(retries),
+        );
+        let exists = fs.exists(Path::new(&path)).unwrap();
+        fs.set_fault_injector(Arc::new(FaultScript::new([])));
+        if exists {
+            fs.rm(&[Path::new(&root)], true).unwrap();
+        }
+        let attempts = retries as usize + 1;
+        assert_eq!(script.remaining().len(), failures.saturating_sub(attempts));
+        assert_eq!(
+            script
+                .visited()
+                .iter()
+                .filter(|visited| **visited == point)
+                .count(),
+            attempts,
+        );
+        if failures > retries as usize {
+            assert!(exists);
+            assert_eq!(
+                result.unwrap_err().status(),
+                Some(vfsi_core::StatusCode::Nfs(
+                    nfsv41_sys::nfsstat4_NFS4ERR_DELAY
+                ))
+            );
+        } else {
+            result.unwrap();
+            assert!(!exists);
+        }
+    }
+}
+
 #[cfg(feature = "test-faults")]
 fn assert_same_file_scatter_is_batched(write_all: bool, short: bool) {
     let Some(mut backend) = connect() else { return };

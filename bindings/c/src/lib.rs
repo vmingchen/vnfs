@@ -2085,14 +2085,10 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
-    fn temp_root() -> CString {
-        CString::new(
-            std::env::temp_dir()
-                .join(format!("vfsi_c_{}", std::process::id()))
-                .to_string_lossy()
-                .into_owned(),
-        )
-        .unwrap()
+    fn temp_root() -> (tempfile::TempDir, CString) {
+        let root = tempfile::TempDir::new().unwrap();
+        let path = CString::new(root.path().as_os_str().as_encoded_bytes()).unwrap();
+        (root, path)
     }
 
     #[test]
@@ -2186,7 +2182,7 @@ mod tests {
 
     #[test]
     fn dummy_backend_read_write_list() {
-        let root = temp_root();
+        let (_root, root) = temp_root();
         let mut fs: *mut vfsi_fs = std::ptr::null_mut();
         assert_eq!(unsafe { vfsi_dummy_open(root.as_ptr(), &mut fs) }, 0);
         assert!(!fs.is_null());
@@ -2250,7 +2246,7 @@ mod tests {
 
     #[test]
     fn dummy_backend_listdirv_maps_dirs_to_entries() {
-        let root = temp_root();
+        let (_root, root) = temp_root();
         let mut fs: *mut vfsi_fs = std::ptr::null_mut();
         assert_eq!(unsafe { vfsi_dummy_open(root.as_ptr(), &mut fs) }, 0);
         assert!(!fs.is_null());
@@ -2354,7 +2350,12 @@ mod tests {
 
     #[test]
     fn listdirv_callback_can_reenter_filesystem() {
-        let root = temp_root();
+        if vfsi_sync::test_support::supervise_with_deadline(
+            "tests::listdirv_callback_can_reenter_filesystem",
+        ) {
+            return;
+        }
+        let (_root, root) = temp_root();
         let mut fs: *mut vfsi_fs = std::ptr::null_mut();
         assert_eq!(unsafe { vfsi_dummy_open(root.as_ptr(), &mut fs) }, 0);
         let dir = CString::new("/reentrant").unwrap();
@@ -2407,7 +2408,7 @@ mod tests {
 
     #[test]
     fn poisoned_backend_mutex_returns_eio() {
-        let root = temp_root();
+        let (_root, root) = temp_root();
         let mut fs: *mut vfsi_fs = std::ptr::null_mut();
         assert_eq!(unsafe { vfsi_dummy_open(root.as_ptr(), &mut fs) }, 0);
         let handle = unsafe { &*fs };
@@ -2427,7 +2428,7 @@ mod tests {
 
     #[test]
     fn dummy_open_mount_accepts_kernel_paths() {
-        let root = temp_root();
+        let (_root, root) = temp_root();
         let mut fs: *mut vfsi_fs = std::ptr::null_mut();
         assert_eq!(
             unsafe { vfsi_dummy_open_mount(root.as_ptr(), root.as_ptr(), &mut fs) },
@@ -2461,7 +2462,7 @@ mod tests {
 
     #[test]
     fn mount_mapping_includes_backend_root_and_rejects_escape() {
-        let root = temp_root();
+        let (_root, root) = temp_root();
         let backend = Box::new(DummyVecFs::new(PathBuf::from(
             root.to_string_lossy().into_owned(),
         ))) as Box<dyn vnfs::backend::VecFs>;
@@ -2483,7 +2484,7 @@ mod tests {
 
     #[test]
     fn read_paths_batches_full_file_contents() {
-        let root = temp_root();
+        let (_root, root) = temp_root();
         let mut fs: *mut vfsi_fs = std::ptr::null_mut();
         assert_eq!(
             unsafe { vfsi_dummy_open_mount(root.as_ptr(), root.as_ptr(), &mut fs) },
@@ -2573,7 +2574,7 @@ mod tests {
 
     #[test]
     fn abi_v3_vector_io_and_bounded_streaming() {
-        let root = temp_root();
+        let (_root, root) = temp_root();
         let mut fs: *mut vfsi_fs = std::ptr::null_mut();
         assert_eq!(unsafe { vfsi_dummy_open(root.as_ptr(), &mut fs) }, 0);
         let mut item_results = [vfsi_result::panic(); 2];

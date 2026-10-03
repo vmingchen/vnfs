@@ -15,6 +15,39 @@ use vnfs::backend::NfsVecFs;
 use vnfs::backend::nfs::*;
 use vnfs::{Nfs, NfsReadPoolOptions};
 
+#[cfg(feature = "rpcsec-gss")]
+#[test]
+fn failed_gss_negotiation_does_not_fall_back_to_a_working_auth_sys_export() {
+    // Establish that a downgrade could actually succeed on this fixture.
+    let mut ordinary = client();
+    assert!(ordinary.exists(Path::new("/")).unwrap());
+    let error = NfsVecFs::builder(test_host())
+        .minor_version(
+            std::env::var("VNFS_TEST_MINOR")
+                .ok()
+                .map(|minor| minor.parse().unwrap()),
+        )
+        .connect_timeout(std::time::Duration::from_secs(2))
+        .request_timeout(std::time::Duration::from_secs(2))
+        .authentication(vnfs::NfsAuthentication::RpcsecGss {
+            service_principal: Some("nfs@vnfs-nonexistent-service.invalid".into()),
+            protection: vnfs::RpcsecGssProtection::Integrity,
+        })
+        .connect()
+        .err()
+        .expect("failed GSS must not silently connect with AUTH_SYS");
+    assert!(
+        error.is_transport(),
+        "authentication setup must fail: {error}"
+    );
+    assert_eq!(error.status(), None);
+    let message = error.to_string();
+    assert!(
+        message.contains("RPCSEC_GSS") || message.contains("RPC authentication setup failed"),
+        "{message}"
+    );
+}
+
 #[cfg(feature = "test-faults")]
 use std::io::{self, Read, Write};
 #[cfg(feature = "test-faults")]
@@ -30,8 +63,6 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 #[cfg(feature = "test-faults")]
 use vnfs::backend::internal::faults::{FaultScript, OpenFaultPoint};
-
-use vfsi_sync::test_support as common;
 
 /// Test-only ONC-RPC record proxy. It forwards complete TCP records until
 /// armed, then consumes and drops exactly one server reply before closing the
@@ -181,15 +212,6 @@ fn forward_rpc_replies(
             return;
         }
     }
-}
-
-#[test]
-fn shared_suite_on_nfs() {
-    // The same assertions that run against the std::fs DummyVecFs must pass
-    // on the NFS backend.
-    let mut c = client();
-    let dir = workdir("core");
-    common::run_suite(&mut c, &dir);
 }
 
 #[test]
@@ -2811,18 +2833,30 @@ fn rm_is_fail_fast_but_explicit_best_effort_continues() {
 fn rm_with_options_honors_batch_size() {
     let dir = setup_dir("rm_options");
     let mut c = client();
-    c.ensure_dir(Path::new(&format!("{}/a/b/c", dir)), 0o755)
+    for batch in [1, 2, 8] {
+        let root = format!("{dir}/batch-{batch}");
+        c.ensure_dir(Path::new(&root), 0o755).unwrap();
+        for index in 0..17 {
+            write_file(&mut c, Path::new(&format!("{root}/f{index}")), b"x");
+        }
+        let _ = vnfs::backend::compound::thread_compound_stats();
+        c.rm_with_options(
+            &[Path::new(&root)],
+            true,
+            vnfs::backend::RemoveOptions::new().batch(batch),
+        )
         .unwrap();
-    for rel in ["a/one", "a/b/two", "a/b/c/three"] {
-        write_file(&mut c, Path::new(&format!("{dir}/{rel}")), b"x");
+        let (compounds, _, _, max_ops) = vnfs::backend::compound::thread_compound_stats();
+        // A flat directory costs SEQUENCE + PUTFH + up to `batch`
+        // REMOVEs. Lookup/READDIR compounds have at most six operations.
+        assert!(
+            max_ops <= (batch + 2).max(6) as u64,
+            "batch={batch}, max_ops={max_ops}"
+        );
+        assert!(compounds >= 17usize.div_ceil(batch) as u64);
+        assert!(!c.exists(Path::new(&root)).unwrap());
     }
-    c.rm_with_options(
-        &[Path::new(&dir)],
-        true,
-        vnfs::backend::RemoveOptions::new().batch(2).retries(1),
-    )
-    .unwrap();
-    assert!(!c.exists(Path::new(&dir)).unwrap());
+    c.rm(&[Path::new(&dir)], true).unwrap();
 }
 
 #[test]
@@ -3405,37 +3439,45 @@ fn batched_unlinkv() {
     }
 }
 
+#[cfg(feature = "test-faults")]
 #[test]
 fn batch_exceeds_compound_op_limit() {
-    // 10 files: getattrsv / setattrsv / openv / readv / writev / closev all
-    // batch, and 10 ops must be split across multiple compounds (the server
-    // grants ca_maxoperations=16, and each file costs 2-3 ops + SEQUENCE).
+    // Force a deterministic ceiling below the negotiated server maximum;
+    // do not assume the fixture server grants exactly sixteen operations.
     let dir = setup_dir("batch_many");
     let mut c = client();
+    let limit = c.test_limit_compound_operations(8);
     let n = 10u8;
-    let mut paths = Vec::new();
-    let mut files = Vec::new();
-    for i in 0..n {
-        let p = format!("{}/f{}.txt", dir, i);
-        let tf = c
-            .open(Path::new(&p), libc::O_CREAT | libc::O_RDWR, 0o600)
-            .expect("open");
-        paths.push(p);
-        files.push(tf);
-    }
+    let paths: Vec<_> = (0..n).map(|index| format!("{dir}/f{index}.txt")).collect();
+    let _ = vnfs::backend::compound::thread_compound_stats();
+    let files = c
+        .openv_simple(
+            &paths.iter().map(Path::new).collect::<Vec<_>>(),
+            libc::O_CREAT | libc::O_RDWR,
+            0o600,
+        )
+        .unwrap();
+    let (count, _, _, max_ops) = vnfs::backend::compound::thread_compound_stats();
+    assert!(count > 1, "OPEN must split across compounds");
+    assert!(max_ops <= limit as u64);
 
     // Batched writev across all 10 open files.
     let writes: Vec<WriteOp> = files
         .iter()
-        .map(|tf| {
+        .enumerate()
+        .map(|(index, tf)| {
             WriteOp::from_fd(
                 tf.fd().unwrap(),
                 VfOffset::At(0),
-                vec![b'a' + (tf.fd().unwrap() - 1) as u8; 2],
+                vec![b'a' + index as u8; 2],
             )
         })
         .collect();
+    let _ = vnfs::backend::compound::thread_compound_stats();
     c.writev(&writes).expect("batched writev (10 files)");
+    let (count, _, _, max_ops) = vnfs::backend::compound::thread_compound_stats();
+    assert!(count > 1, "WRITE must split across compounds");
+    assert!(max_ops <= limit as u64);
 
     // Batched getattrsv / setattrsv on all 10 paths.
     let mut attrs: Vec<VfAttrs> = paths
@@ -3446,6 +3488,7 @@ fn batch_exceeds_compound_op_limit() {
             ..VfAttrs::default()
         })
         .collect();
+    let _ = vnfs::backend::compound::thread_compound_stats();
     c.getattrsv(&mut attrs).expect("getattrsv (10 files)");
     for a in &attrs {
         assert_eq!(a.size, 2);
@@ -3465,6 +3508,11 @@ fn batch_exceeds_compound_op_limit() {
 
     // Batched closev.
     c.closev(&files).expect("closev (10 files)");
+    let (_, _, _, max_ops) = vnfs::backend::compound::thread_compound_stats();
+    assert!(
+        max_ops <= limit as u64,
+        "metadata/READ/CLOSE exceeded ceiling"
+    );
     c.unlinkv(&paths.iter().map(Path::new).collect::<Vec<_>>())
         .expect("unlinkv (10 files)");
 }

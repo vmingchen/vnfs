@@ -3,6 +3,36 @@ use std::path::Path;
 use vfsi_core::{AttrMask, ErrorDomain, RpcError, StatusCode, TransportKind, VfAttrs, VfError};
 
 #[test]
+fn rpc_conversion_preserves_messages_and_explicit_or_protocol_indices() {
+    let transport = vfsi_core::error_from_rpc(RpcError::transport("connection refused"), 3);
+    assert!(transport.is_transport());
+    assert_eq!(transport.err_no(), vfsi_core::VF_ERR_RPC);
+    assert_eq!(transport.index(), Some(3));
+    assert!(transport.to_string().contains("connection refused"));
+    let unknown = vfsi_core::error_from_rpc(RpcError::transport("server gone"), None);
+    assert_eq!(unknown.index(), None);
+    assert!(!unknown.to_string().contains("op "));
+    let explicit = vfsi_core::error_from_rpc(RpcError::op(4, 2), 1);
+    assert_eq!(explicit.index(), Some(1));
+    assert_eq!(explicit.status(), Some(StatusCode::Nfs(2)));
+    let indexed = vfsi_core::error_from_rpc_indexed(RpcError::op(4, 17));
+    assert_eq!(indexed.index(), Some(4));
+    assert_eq!(indexed.status(), Some(StatusCode::Nfs(17)));
+    assert_eq!(indexed.with_index(9).index(), Some(9));
+    assert_eq!(transport.with_index(5).index(), Some(5));
+}
+
+#[test]
+fn descriptor_allocator_wraps_without_replacing_a_live_descriptor() {
+    let mut next = i32::MAX;
+    let mut files = std::collections::HashMap::from([(1, "live")]);
+    let fd = vfsi_core::insert_fd(&mut next, &mut files, "new").unwrap();
+    assert_eq!(fd, 2);
+    assert_eq!(files.get(&1), Some(&"live"));
+    assert_eq!(files.get(&2), Some(&"new"));
+}
+
+#[test]
 fn transport_categories_survive_attribution_context_and_io_conversion() {
     use std::io::ErrorKind as K;
     for (transport, portable) in [

@@ -1190,7 +1190,9 @@ dependencies = [
  "cbindgen",
  "libc",
  "libntirpc-sys",
+ "tempfile",
  "vfsi-smb",
+ "vfsi-sync",
  "vnfs",
 ]
 
@@ -1252,6 +1254,7 @@ version = "0.0.15"
 dependencies = [
  "libc",
  "nfsv41-sys",
+ "tempfile",
  "vfsi-core",
  "vfsi-local",
  "vfsi-nfs",

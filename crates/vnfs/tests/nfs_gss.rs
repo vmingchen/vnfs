@@ -23,11 +23,13 @@ fn options(protection: RpcsecGssProtection) -> NfsConnectOptions {
 }
 
 #[test]
+#[ignore = "requires the Kerberos/GSS-only export fixture"]
 fn supported_rpcsec_gss_protection_levels_access_the_export() {
-    if std::env::var_os("VNFS_GSS_INTEGRATION").is_none() {
-        eprintln!("set VNFS_GSS_INTEGRATION=1 to run against a Kerberos export");
-        return;
-    }
+    assert_eq!(
+        std::env::var("VNFS_GSS_INTEGRATION").as_deref(),
+        Ok("1"),
+        "VNFS_GSS_INTEGRATION=1 is required"
+    );
 
     let host = std::env::var("VNFS_GSS_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let protection_levels = [
@@ -56,11 +58,13 @@ fn supported_rpcsec_gss_protection_levels_access_the_export() {
 }
 
 #[test]
-fn auth_sys_is_not_silently_upgraded_or_used_as_a_gss_fallback() {
-    if std::env::var_os("VNFS_GSS_INTEGRATION").is_none() {
-        eprintln!("set VNFS_GSS_INTEGRATION=1 to run against a Kerberos export");
-        return;
-    }
+#[ignore = "requires the Kerberos/GSS-only export fixture"]
+fn gss_only_export_rejects_auth_sys() {
+    assert_eq!(
+        std::env::var("VNFS_GSS_INTEGRATION").as_deref(),
+        Ok("1"),
+        "VNFS_GSS_INTEGRATION=1 is required"
+    );
 
     let host = std::env::var("VNFS_GSS_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let error = NfsVecFs::connect_with_options(
@@ -79,11 +83,13 @@ fn auth_sys_is_not_silently_upgraded_or_used_as_a_gss_fallback() {
 }
 
 #[test]
+#[ignore = "requires a one-minute renewable Kerberos ticket"]
 fn renewable_ticket_allows_reconnect_after_ticket_expiry() {
-    if std::env::var_os("VNFS_GSS_EXPIRY_INTEGRATION").is_none() {
-        eprintln!("set VNFS_GSS_EXPIRY_INTEGRATION=1 to run the ticket-expiry integration test");
-        return;
-    }
+    assert_eq!(
+        std::env::var("VNFS_GSS_EXPIRY_INTEGRATION").as_deref(),
+        Ok("1"),
+        "VNFS_GSS_EXPIRY_INTEGRATION=1 is required"
+    );
 
     let host = std::env::var("VNFS_GSS_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let mut fs = NfsVecFs::connect_with_options(&host, options(RpcsecGssProtection::Integrity))

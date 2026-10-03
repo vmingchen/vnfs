@@ -7,6 +7,45 @@
 use crate::*;
 use std::path::{Path, PathBuf};
 
+/// Run a potentially deadlocking test in an isolated test-harness process.
+/// Return `true` in the supervising parent and `false` in the child, which
+/// must execute the actual test body. Killing a timed-out child avoids leaving
+/// a stuck thread behind in the parent harness.
+pub fn supervise_with_deadline(test: &str) -> bool {
+    const CHILD: &str = "VFSI_DEADLINE_TEST_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok(test) {
+        return false;
+    }
+    let executable = std::env::current_exe().unwrap();
+    let inventory = std::process::Command::new(&executable)
+        .args(["--exact", test, "--list"])
+        .output()
+        .expect("validate isolated test name");
+    let output = String::from_utf8(inventory.stdout).unwrap();
+    assert!(
+        inventory.status.success() && output.lines().any(|line| line == format!("{test}: test")),
+        "isolated test {test} was not found: {output}"
+    );
+    let mut child = std::process::Command::new(executable)
+        .args(["--exact", test, "--nocapture", "--test-threads=1"])
+        .env(CHILD, test)
+        .spawn()
+        .expect("spawn isolated regression test");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        if let Some(status) = child.try_wait().expect("poll regression test") {
+            assert!(status.success(), "isolated test {test} failed: {status}");
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("test {test} exceeded its 30-second deadline (possible deadlock)");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// Run a broad set of vectorized-filesystem assertions against `fs`, using
 /// paths under `base` (which must be unique per caller).
 pub fn run_suite(fs: &mut impl VecFs, base: &str) {

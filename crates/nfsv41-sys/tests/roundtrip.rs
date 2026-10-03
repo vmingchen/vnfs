@@ -6,44 +6,8 @@
 use nfsv41_sys::*;
 use std::os::raw::c_char;
 
-const BUF_SIZE: usize = 4096;
-
-unsafe fn encode_compound(args: &mut COMPOUND4args) -> Vec<u8> {
-    let mut xdr: XDR = std::mem::zeroed();
-    let mut buf = vec![0u8; BUF_SIZE];
-    xdrmem_ncreate(
-        &mut xdr,
-        buf.as_mut_ptr() as *mut c_char,
-        BUF_SIZE as u32,
-        xdr_op_XDR_ENCODE,
-    );
-    let ok = xdr_wrap_COMPOUND4args(&mut xdr, args);
-    assert!(ok, "xdr_COMPOUND4args encode failed");
-
-    // xdrmem's put path advances XDR.x_data; vio_base is the buffer start.
-    let len = xdr.x_data.offset_from(xdr.x_v.vio_base) as usize;
-    assert!(len > 0 && len <= BUF_SIZE);
-    buf.truncate(len);
-    buf
-}
-
-unsafe fn encode_res(res: &mut COMPOUND4res) -> Vec<u8> {
-    let mut xdr: XDR = std::mem::zeroed();
-    let mut buf = vec![0u8; BUF_SIZE];
-    xdrmem_ncreate(
-        &mut xdr,
-        buf.as_mut_ptr() as *mut c_char,
-        BUF_SIZE as u32,
-        xdr_op_XDR_ENCODE,
-    );
-    let ok = xdr_wrap_COMPOUND4res(&mut xdr, res);
-    assert!(ok, "xdr_COMPOUND4res encode failed");
-
-    let len = xdr.x_data.offset_from(xdr.x_v.vio_base) as usize;
-    assert!(len > 0 && len <= BUF_SIZE);
-    buf.truncate(len);
-    buf
-}
+mod support;
+use support::{encode_compound, encode_res};
 
 #[test]
 fn compound_putfh_args_roundtrip() {

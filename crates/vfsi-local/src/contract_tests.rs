@@ -36,7 +36,6 @@ mod tests {
     }
     use crate::DummyVecFs;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use vfsi_core::RpcError;
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -86,53 +85,6 @@ mod tests {
     fn write(fs: &mut DummyVecFs, path: &str, data: &[u8]) {
         fs.writev(&[WriteOp::at(VfFile::from_path(path), 0, data.to_vec()).with_creation()])
             .expect("write");
-    }
-
-    // ------------------------------------------------------------------
-    // VfError
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn descriptor_allocator_wraps_and_skips_live_entries() {
-        let mut next = i32::MAX;
-        let mut files = std::collections::HashMap::from([(1, "live")]);
-        let fd = insert_fd(&mut next, &mut files, "new").unwrap();
-        assert_eq!(fd, 2);
-        assert_eq!(files.get(&1), Some(&"live"));
-        assert_eq!(files.get(&2), Some(&"new"));
-    }
-
-    #[test]
-    fn vf_error_preserves_transport_message() {
-        let e = vfsi_core::error_from_rpc(RpcError::transport("connection refused"), 3);
-        assert!(e.is_transport());
-        assert_eq!(e.index(), Some(3));
-        assert_eq!(e.index(), Some(3));
-        assert_eq!(e.err_no(), VF_ERR_RPC);
-        assert!(e.to_string().contains("connection refused"));
-
-        // An unattributable transport failure has no op index.
-        let e = vfsi_core::error_from_rpc(RpcError::transport("server gone"), None);
-        assert!(e.is_transport());
-        assert_eq!(e.index(), None);
-        assert!(!e.to_string().contains("op "));
-
-        // Server status errors stay Op errors with the caller-supplied index.
-        let e = vfsi_core::error_from_rpc(RpcError::op(4, ERR_NOENT), 1);
-        assert!(!e.is_transport());
-        assert_eq!(e.index(), Some(1));
-        assert_eq!(e.index(), Some(1));
-        assert_eq!(e.err_no(), ERR_NOENT);
-    }
-
-    #[test]
-    fn vf_error_indexed_and_remap() {
-        let e = vfsi_core::error_from_rpc_indexed(RpcError::op(4, ERR_EXIST));
-        assert_eq!((e.index(), e.err_no()), (Some(4), ERR_EXIST));
-        assert_eq!(e.index(), Some(4));
-        assert_eq!(e.with_index(9).index(), Some(9));
-        assert_eq!(VfError::transport(2, "boom").with_index(5).index(), Some(5));
-        assert_eq!(VfError::transport(None, "boom").index(), None);
     }
 
     // ------------------------------------------------------------------

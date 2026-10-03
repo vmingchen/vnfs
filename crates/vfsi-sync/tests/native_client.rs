@@ -820,6 +820,12 @@ fn successfully_closed_handle_returns_ebadf_instead_of_panicking() {
 
 #[test]
 fn stream_callback_can_reenter_client_and_drop_another_file() {
+    #[cfg(feature = "test-support")]
+    if vfsi_sync::test_support::supervise_with_deadline(
+        "stream_callback_can_reenter_client_and_drop_another_file",
+    ) {
+        return;
+    }
     let client = FsClient::new(ScalarOnly {
         data: b"abcdef".to_vec(),
         ..ScalarOnly::default()

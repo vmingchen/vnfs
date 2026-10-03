@@ -2154,10 +2154,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires configured NFS mount fixtures"]
     fn live_nfs_mount_uses_direct_connection() {
-        let Ok(mount) = std::env::var("VFSI_AUTO_TEST_MOUNT") else {
-            return;
-        };
+        let mount = std::env::var("VFSI_AUTO_TEST_MOUNT")
+            .expect("VFSI_AUTO_TEST_MOUNT is required for this ignored integration test");
         let client = Auto::new("/").unwrap();
         let mount = PathBuf::from(mount);
         let mut route = client.route_for(&mount);
@@ -2291,10 +2291,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires configured NFS mount fixtures"]
     fn live_changed_auto_limits_apply_to_cached_connections_and_open_handles() {
-        let Ok(mount) = std::env::var("VFSI_AUTO_TEST_MOUNT") else {
-            return;
-        };
+        let mount = std::env::var("VFSI_AUTO_TEST_MOUNT")
+            .expect("VFSI_AUTO_TEST_MOUNT is required for this ignored integration test");
         let path = Path::new(&mount).join(format!(
             "auto-limits-{}-{:?}",
             std::process::id(),
@@ -2351,10 +2351,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires configured NFS mount fixtures"]
     fn live_write_allv_preflights_invalid_later_requests_across_routes() {
-        let Ok(mount) = std::env::var("VFSI_AUTO_TEST_MOUNT") else {
-            return;
-        };
+        let mount = std::env::var("VFSI_AUTO_TEST_MOUNT")
+            .expect("VFSI_AUTO_TEST_MOUNT is required for this ignored integration test");
         let unique = format!(
             "auto-write-preflight-{}-{:?}",
             std::process::id(),
@@ -2436,10 +2436,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires configured NFS mount fixtures"]
     fn live_auto_traversal_charges_public_path_bytes() {
-        let Ok(mount) = std::env::var("VFSI_AUTO_TEST_MOUNT") else {
-            return;
-        };
+        let mount = std::env::var("VFSI_AUTO_TEST_MOUNT")
+            .expect("VFSI_AUTO_TEST_MOUNT is required for this ignored integration test");
         let root = Path::new(&mount).join(format!(
             "auto-quota-{}-{:?}",
             std::process::id(),
@@ -2545,12 +2545,12 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires configured NFS mount fixtures"]
     fn live_ensure_empty_dir_respects_nested_mounts() {
         // The fixture is an NFS directory with a separately mounted child.
         // Its remote child contains hidden data that kernel routing cannot see.
-        let Ok(root) = std::env::var("VFSI_AUTO_TEST_NESTED_ROOT") else {
-            return;
-        };
+        let root = std::env::var("VFSI_AUTO_TEST_NESTED_ROOT")
+            .expect("VFSI_AUTO_TEST_NESTED_ROOT is required for this ignored integration test");
         let client = Auto::new("/").unwrap();
         let route = client.resolve(Path::new(&root), &read_mounts(false));
         let Route::Nfs(connection) = route.route else {
@@ -2568,10 +2568,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires configured NFS mount fixtures"]
     fn live_file_bind_mount_uses_covering_mount() {
-        let Ok(path) = std::env::var("VFSI_AUTO_TEST_BIND") else {
-            return;
-        };
+        let path = std::env::var("VFSI_AUTO_TEST_BIND")
+            .expect("VFSI_AUTO_TEST_BIND is required for this ignored integration test");
         let client = Auto::new("/").unwrap();
         let mut file = client.open(&path).unwrap();
         assert_eq!(file.route(), AutoRoute::Mounted);

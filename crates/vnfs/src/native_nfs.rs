@@ -223,10 +223,10 @@ mod mount_tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires configured NFS mount fixtures"]
     fn live_mount_constructor_roots_vector_io_at_a_subdirectory() {
-        let Ok(mount) = std::env::var("VFSI_NFS_TEST_MOUNT") else {
-            return;
-        };
+        let mount = std::env::var("VFSI_NFS_TEST_MOUNT")
+            .expect("VFSI_NFS_TEST_MOUNT is required for this ignored integration test");
         let directory = Path::new(&mount).join(format!(".vnfs-from-mount-{}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
         let fs = NfsBuilder::from_mount(&directory)
@@ -249,10 +249,10 @@ mod mount_tests {
     }
 
     #[test]
+    #[ignore = "requires configured NFS mount fixtures"]
     fn live_read_only_mount_rejects_mutations_before_dispatch() {
-        let Ok(mount) = std::env::var("VFSI_NFS_TEST_MOUNT_RO") else {
-            return;
-        };
+        let mount = std::env::var("VFSI_NFS_TEST_MOUNT_RO")
+            .expect("VFSI_NFS_TEST_MOUNT_RO is required for this ignored integration test");
         let rw_mount = std::env::var("VFSI_NFS_TEST_MOUNT")
             .expect("read-only test needs a writable fixture mount");
         let name = format!(".vnfs-read-only-{}", std::process::id());

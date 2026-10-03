@@ -157,6 +157,8 @@ pub mod faults {
         BeforeReadRepair { index: usize },
         BeforeSetPermissions { index: usize },
         BeforeRemoveType { index: usize },
+        BeforeRemoveChunk { first_name: Vec<u8> },
+        BeforeRemovePage { cookie: u64 },
         BeforeOpenChunk { chunk: usize },
         BeforeCloseItem { index: usize },
         BeforePathClose,

@@ -34,11 +34,11 @@ fn wait_for(path: &Path) {
 }
 
 #[test]
+#[ignore = "requires the coordinated server-restart fixture"]
 fn read_recovers_after_server_restart_and_reopens_live_descriptor() {
-    let Some(control) = std::env::var_os("VNFS_RECOVERY_CONTROL_DIR").map(PathBuf::from) else {
-        eprintln!("skipping restart coordination; VNFS_RECOVERY_CONTROL_DIR is unset");
-        return;
-    };
+    let control = std::env::var_os("VNFS_RECOVERY_CONTROL_DIR")
+        .map(PathBuf::from)
+        .expect("VNFS_RECOVERY_CONTROL_DIR is required for this ignored integration test");
 
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
