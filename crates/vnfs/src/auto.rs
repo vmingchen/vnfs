@@ -1952,6 +1952,23 @@ fn parse_mount(line: &[u8]) -> Option<MountSpec> {
 mod tests {
     use super::*;
 
+    fn require_live_direct_route(client: &Auto, path: &Path) {
+        // Ganesha/kernel mount setup can briefly return EREMOTEIO. Retry only
+        // the read-only eligibility probe, never an application mutation.
+        let mut route = client.route_for(path);
+        for delay_ms in [5, 20, 100] {
+            if matches!(route, AutoRoute::DirectNfs { .. }) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            route = client.route_for(path);
+        }
+        assert!(
+            matches!(route, AutoRoute::DirectNfs { .. }),
+            "expected direct NFS for {path:?}, got {route:?}"
+        );
+    }
+
     #[test]
     fn public_path_budget_checks_exact_bounds_and_overflow_before_delivery() {
         let mut budget = PathByteBudget::new(6);
@@ -2373,6 +2390,7 @@ mod tests {
                 let local = std::env::temp_dir().join(&case);
                 fs::write(&remote, b"original").unwrap();
                 fs::write(&local, b"original").unwrap();
+                require_live_direct_route(&client, &remote);
                 let paths = if remote_first {
                     [&remote, &local]
                 } else {
@@ -2452,6 +2470,7 @@ mod tests {
         fs::write(root.join("a"), b"a").unwrap();
         fs::write(root.join("b"), b"b").unwrap();
         let client = Auto::new("/").unwrap();
+        require_live_direct_route(&client, &root);
         let route = client.resolve(&root, &read_mounts(false));
         let Route::Nfs(connection) = &route.route else {
             panic!("expected direct NFS");
@@ -2557,6 +2576,7 @@ mod tests {
         let root = std::env::var("VFSI_AUTO_TEST_NESTED_ROOT")
             .expect("VFSI_AUTO_TEST_NESTED_ROOT is required for this ignored integration test");
         let client = Auto::new("/").unwrap();
+        require_live_direct_route(&client, Path::new(&root));
         let route = client.resolve(Path::new(&root), &read_mounts(false));
         let Route::Nfs(connection) = route.route else {
             panic!("expected parent direct route");
