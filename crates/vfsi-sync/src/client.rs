@@ -565,6 +565,35 @@ impl<F: NamespaceFileSystem + MetadataFileSystem> FsClient<F> {
 }
 
 impl<F: VecFs> FsClient<F> {
+    /// Lazy between directories, with selective no-follow metadata and pruning.
+    /// Enter runs before any listing; Leave follows even a pruned directory.
+    /// Sorting buffers one bounded directory, not the whole tree. The callback
+    /// runs outside the backend lock. Limits include the starting object.
+    pub fn walk_events_with_options(
+        &self,
+        root: impl AsRef<Path>,
+        fields: AttrMask,
+        options: crate::WalkOptions,
+        sort_by_name: bool,
+        callback: impl FnMut(&crate::WalkEvent) -> VfResult<crate::WalkControl>,
+    ) -> VfResult<TraversalCompletion> {
+        let root = root.as_ref();
+        let metadata = self.symlink_metadata_with_fields(root, fields | AttrMask::MODE)?;
+        crate::walk_events(
+            DirEntry::new(root.to_path_buf(), metadata),
+            options,
+            sort_by_name,
+            |path, limits| {
+                let mut listings =
+                    self.read_dirs_with_options(&[path], fields | AttrMask::MODE, limits)?;
+                if listings.len() != 1 {
+                    return Err(VfError::transport(None, "invalid directory result count"));
+                }
+                Ok(listings.remove(0).entries)
+            },
+            callback,
+        )
+    }
     /// Visit a tree using bounded directory pages,
     /// never follows symlinks, and invokes the callback outside the backend
     /// lock. Unlike collecting `walk`, this trades multi-directory batching

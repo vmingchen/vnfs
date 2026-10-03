@@ -416,6 +416,28 @@ RPCs. Use `connect_pool` for independent application workers, or
 waits for outstanding reads to finish and then closes the worker handles.
 Neither streaming path promises a snapshot of a concurrently modified file.
 
+`walk_events_with_options(root, fields, limits, sort_by_name, callback)` adds
+selective metadata and depth-first `Enter`, `Entry`, and `Leave` events.
+Return `WalkControl::SkipSubtree` from `Enter` to avoid reading that directory;
+`Stop` ends the entire traversal. A pruned directory still receives `Leave`.
+Errors or stopping can leave the remaining events undelivered. Never replay
+side-effectful callbacks through another backend after a partial traversal.
+The root is depth zero and counts toward the aggregate entry/path budget.
+This traversal is lazy between directories; each directory is bounded before
+optional sorting, and only its active frontier is retained. Use collecting
+`walk` when eager multi-directory batching matters more than pruning.
+
+`Nfs::discover_mount(path)` inspects a supported Linux mount without opening
+a network connection. Its opaque result exposes the host, export root,
+mountpoint and canonical local directory for grouping application operands.
+Use `Nfs::from_mount` to connect; discovery does not establish cache coherence.
+
+After building the application ports and C adapter, run
+`VFSI_PORTS_ROOT=/path/to/ports VFSI_LIBRARY=/path/to/libvfsi_c.so bash scripts/test-port-listing-overflow.sh`
+from the development repository to check exact-limit and overflow behavior
+with a test-only legacy adapter, including rsync deletion safety. The fixture
+streams synthetic entries without creating 200,001 files on disk.
+
 `visit_walk` incrementally delivers bounded directory pages without retaining
 the whole tree; callbacks may reenter the client. It does not follow symlinks.
 Backends without native paging may retain one bounded directory snapshot.

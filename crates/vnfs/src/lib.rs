@@ -28,6 +28,8 @@ pub use facade::{
 /// need only the crate root; these are also available from the `vfsi-*` crates.
 pub mod backend {
     pub use vfsi_core::*;
+    #[doc(hidden)]
+    pub use vfsi_sync::walk_events;
     pub use vfsi_sync::{
         CopyFileSystem, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
         DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
@@ -117,13 +119,15 @@ pub use vfsi_core::{
 };
 pub use vfsi_sync::{
     DirectoryListing, ReadAllOptions, ReadDirOptions, ReadStreamOptions, ResourceLimits,
-    StreamCompletion, TraversalCompletion, WalkOptions,
+    StreamCompletion, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
 };
 pub use vfsi_sync::{
     FsReadIntoResult as ReadIntoResult, FsReadResult as ReadResult, FsWriteResult as WriteResult,
 };
 #[cfg(feature = "nfs")]
 mod native_nfs;
+#[cfg(all(feature = "nfs", target_os = "linux"))]
+pub use native_nfs::NfsMount;
 #[cfg(feature = "nfs")]
 pub use native_nfs::{Nfs, NfsBuilder, NfsClientPool, NfsVersion};
 #[cfg(all(feature = "nfs", feature = "rpcsec-gss"))]

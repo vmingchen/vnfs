@@ -81,6 +81,12 @@ impl NfsMount {
     pub fn local_path(&self) -> &Path {
         &self.local_path
     }
+    pub fn mount_point(&self) -> &Path {
+        &self.info.mount_point
+    }
+    pub fn export_root(&self) -> &Path {
+        &self.info.export
+    }
     pub fn minor_version(&self) -> u32 {
         self.info.minor
     }

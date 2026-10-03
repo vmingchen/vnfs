@@ -23,11 +23,13 @@ pub use traits::{
 mod io;
 pub use io::{VfFileHandle, VfOpenOptions};
 mod client;
+mod traversal;
 pub use client::{
     DEFAULT_READV_MAX_TOTAL_BYTES, DirectoryListing, FsClient, FsDir, FsFile, FsRead, FsReadInto,
     FsReadIntoResult, FsReadResult, FsWrite, FsWriteResult, OpenOptions, ResourceLimits,
     SetMetadata, StreamCompletion, TraversalCompletion,
 };
+pub use traversal::{WalkControl, WalkEvent, WalkEventKind, walk_events};
 mod native;
 pub use native::{
     CopyFileSystem, DirectoryFileSystem, FileSystem, LinkFileSystem, MetadataFileSystem,

@@ -9,6 +9,18 @@ macro_rules! owned_client {
             pub(crate) inner: vfsi_sync::FsClient<$backend>,
         }
         impl $client {
+            /// Incremental no-follow tree events; prune before fetching contents.
+            pub fn walk_events_with_options(
+                &self,
+                root: impl AsRef<Path>,
+                fields: MetadataFields,
+                options: WalkOptions,
+                sort_by_name: bool,
+                callback: impl FnMut(&WalkEvent) -> Result<WalkControl>,
+            ) -> Result<TraversalCompletion> {
+                self.inner
+                    .walk_events_with_options(root, fields, options, sort_by_name, callback)
+            }
             /// Return this client's allocation and traversal limits.
             pub fn limits(&self) -> ResourceLimits {
                 self.inner.limits()

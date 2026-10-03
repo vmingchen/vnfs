@@ -73,6 +73,14 @@ impl NfsClientPool {
 pub struct Nfs;
 
 impl Nfs {
+    /// Inspect a supported Linux NFS mount without connecting. Applications
+    /// can group operands and translate paths without parsing /proc themselves.
+    #[cfg(target_os = "linux")]
+    pub fn discover_mount(path: impl AsRef<Path>) -> VfResult<NfsMount> {
+        Ok(NfsMount {
+            inner: vfsi_nfs::mount::NfsMount::discover(path)?,
+        })
+    }
     /// Connect directly using the configuration of a Linux NFS-mounted directory.
     /// Operations use the remote directory as their root, without sharing the
     /// kernel client's cache or falling back to mounted filesystem operations.
@@ -92,6 +100,28 @@ impl Nfs {
 
     pub fn connect(host: impl Into<String>) -> VfResult<NfsClient> {
         Self::builder(host).connect()
+    }
+}
+
+/// Opaque discovered mount configuration; no backend extraction or credentials.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+pub struct NfsMount {
+    inner: vfsi_nfs::mount::NfsMount,
+}
+#[cfg(target_os = "linux")]
+impl NfsMount {
+    pub fn host(&self) -> &str {
+        self.inner.host()
+    }
+    pub fn mount_point(&self) -> &Path {
+        self.inner.mount_point()
+    }
+    pub fn export_root(&self) -> &Path {
+        self.inner.export_root()
+    }
+    pub fn local_path(&self) -> &Path {
+        self.inner.local_path()
     }
 }
 

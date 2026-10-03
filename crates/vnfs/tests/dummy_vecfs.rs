@@ -10,6 +10,47 @@ use vnfs::backend::DummyVecFs;
 use vnfs::backend::{VecFs, VecFsExt, VfOffset};
 
 #[test]
+fn application_walk_prunes_before_io_selects_metadata_and_allows_reentry() {
+    if common::supervise_with_deadline(
+        "application_walk_prunes_before_io_selects_metadata_and_allows_reentry",
+    ) {
+        return;
+    }
+    let (_root, backend) = dummy();
+    let client = vnfs::backend::FsClient::new(backend);
+    client.create_dir_all("/blocked").unwrap();
+    client.write("/blocked/hidden", b"hidden").unwrap();
+    client.write("/a", b"hello").unwrap();
+    let mut visited = Vec::new();
+    client
+        .walk_events_with_options(
+            "/",
+            vnfs::MetadataFields::MODE,
+            vnfs::WalkOptions::default(),
+            true,
+            |event| {
+                visited.push(event.entry.path().to_path_buf());
+                assert!(event.entry.metadata().uid().is_none());
+                assert!(event.entry.metadata().modified().is_none());
+                client.metadata("/a").unwrap();
+                if event.kind == vnfs::WalkEventKind::Enter
+                    && event.entry.path() == Path::new("/blocked")
+                {
+                    client.remove_dir_all("/blocked").unwrap();
+                    Ok(vnfs::WalkControl::SkipSubtree)
+                } else {
+                    Ok(vnfs::WalkControl::Continue)
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        visited,
+        ["/", "/a", "/blocked", "/blocked", "/"].map(std::path::PathBuf::from)
+    );
+}
+
+#[test]
 fn bounded_open_file_collection_keeps_identity_across_rename_and_replacement() {
     let (_root, backend) = dummy();
     let client = vnfs::backend::FsClient::new(backend);

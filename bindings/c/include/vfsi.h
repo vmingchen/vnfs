@@ -111,6 +111,18 @@
 typedef struct vfsi_fs vfsi_fs;
 
 /**
+ * Resource policy for an incremental tree traversal. Zero is a zero limit,
+ * not unlimited. Set SIZE_MAX explicitly to opt out of a limit.
+ */
+typedef struct vfsi_walk_options {
+  size_t max_entries;
+  size_t max_path_bytes;
+  size_t max_depth;
+  uint32_t attributes;
+  bool sort_by_name;
+} vfsi_walk_options;
+
+/**
  * Attributes returned by [`vfsi_stat`] and passed to listdir callbacks.
  */
 typedef struct vfsi_attrs {
@@ -137,6 +149,12 @@ typedef struct vfsi_attrs {
   int64_t ctime_sec;
   uint32_t ctime_nsec;
 } vfsi_attrs;
+
+/**
+ * Event kinds: 0=enter directory, 1=entry, 2=leave directory.
+ * Return 0=continue, 1=prune directory, 2=stop. Arguments are borrowed.
+ */
+typedef uint32_t (*vfsi_walk_cb)(const char*, uint32_t, size_t, const struct vfsi_attrs*, void*);
 
 /**
  * Uniform ABI-v3 result for scalar and vector operations.
@@ -286,6 +304,25 @@ int vfsi_nfs_open_minor(const char *host, uint32_t minorversion, struct vfsi_fs 
  * path) as the vfsi root. Callers can then pass ordinary kernel paths.
  */
 int vfsi_nfs_open_mount(const char *host, const char *mountpoint, struct vfsi_fs **out);
+
+/**
+ * Discover a Linux NFS mount and inherit its version, port and security.
+ * `path` must be an absolute directory. Ordinary paths beneath it are mapped
+ * to the corresponding remote directory. No AUTH_SYS downgrade or kernel
+ * fallback is performed; direct access does not share the kernel cache.
+ */
+int vfsi_nfs_from_mount(const char *path, struct vfsi_fs **out);
+
+/**
+ * Incremental no-follow traversal. Callbacks run outside the filesystem lock.
+ * Pruned directories are never listed. Errors can follow delivered events;
+ * callers must not replay side-effectful callbacks through another backend.
+ */
+int vfsi_walk(struct vfsi_fs *fs,
+              const char *root,
+              const struct vfsi_walk_options *options,
+              vfsi_walk_cb cb,
+              void *userdata);
 
 /**
  * Connect to an NFSv4.1 server, mapping a local kernel `mountpoint` to the
@@ -488,6 +525,17 @@ struct vfsi_result vfsi_read_streamv(struct vfsi_fs *fs,
 int vfsi_listdir(struct vfsi_fs *fs, const char *dir, vfsi_listdir_cb cb, void *userdata);
 
 /**
+ * One bounded directory listing. Zero permits only an empty directory.
+ * Callbacks run outside the filesystem lock.
+ */
+int vfsi_listdir_with_limits(struct vfsi_fs *fs,
+                             const char *dir,
+                             size_t max_entries,
+                             size_t max_path_bytes,
+                             vfsi_listdir_cb cb,
+                             void *userdata);
+
+/**
  * List several directories in one vectorized batch, calling `cb` for each
  * entry with the directory the entry came from.
  */
@@ -508,6 +556,17 @@ int vfsi_read_paths(struct vfsi_fs *fs,
                     size_t count,
                     vfsi_read_paths_cb cb,
                     void *userdata);
+
+/**
+ * Whole-file vector with an explicit aggregate payload budget. Oversized
+ * results are an error, never successful truncation. Zero is a zero budget.
+ */
+int vfsi_read_paths_with_limit(struct vfsi_fs *fs,
+                               const char *const *paths,
+                               size_t count,
+                               size_t max_bytes,
+                               vfsi_read_paths_cb cb,
+                               void *userdata);
 
 #ifdef __cplusplus
 }  // extern "C"

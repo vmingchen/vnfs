@@ -470,6 +470,47 @@ fn mask() -> AttrMask {
         | AttrMask::CTIME
 }
 
+fn bounded_listdir(
+    fs: &vfsi_fs,
+    path: &Path,
+    fields: AttrMask,
+    max_entries: usize,
+    max_path_bytes: usize,
+) -> Result<Vec<VfAttrs>, VfError> {
+    let probe = if max_entries == usize::MAX {
+        0
+    } else {
+        max_entries.saturating_add(1)
+    };
+    collect_bounded_entries(max_entries, max_path_bytes, |cb| {
+        lock_or_io(&fs.fs)?.visit_dir(path, fields, probe, cb)
+    })
+}
+
+fn collect_bounded_entries(
+    max_entries: usize,
+    max_path_bytes: usize,
+    visit: impl FnOnce(&mut dyn FnMut(&VfAttrs) -> bool) -> Result<(), VfError>,
+) -> Result<Vec<VfAttrs>, VfError> {
+    let mut entries = Vec::new();
+    let mut bytes = 0usize;
+    let mut overflow = false;
+    visit(&mut |entry| {
+        let next = bytes.checked_add(entry.file.path().map_or(0, |p| p.as_os_str().len()));
+        if entries.len() >= max_entries || next.is_none_or(|n| n > max_path_bytes) {
+            overflow = true;
+            return false;
+        }
+        bytes = next.unwrap_or_default();
+        entries.push(entry.clone());
+        true
+    })?;
+    if overflow {
+        return Err(VfError::client(0, libc::EFBIG as u32));
+    }
+    Ok(entries)
+}
+
 fn vf_code(e: &VfError) -> c_int {
     match e {
         VfError::Op { err_no, .. } | VfError::OpUnattributed { err_no, .. } => *err_no as c_int,
@@ -672,6 +713,177 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount(
     ffi_guard!(libc::EIO, {
         unsafe { vfsi_nfs_open_mount_export(host, c"/".as_ptr(), mountpoint, out) }
     })
+}
+
+/// Discover a Linux NFS mount and inherit its version, port and security.
+/// `path` must be an absolute directory. Ordinary paths beneath it are mapped
+/// to the corresponding remote directory. No AUTH_SYS downgrade or kernel
+/// fallback is performed; direct access does not share the kernel cache.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_nfs_from_mount(path: *const c_char, out: *mut *mut vfsi_fs) -> c_int {
+    ffi_guard!(libc::EIO, {
+        if out.is_null() {
+            return libc::EINVAL;
+        }
+        *out = std::ptr::null_mut();
+        let Some(path) = cstr_path(path) else {
+            return libc::EINVAL;
+        };
+        match vnfs::backend::nfs::NfsClientBuilder::from_mount(&path)
+            .and_then(|builder| builder.connect())
+        {
+            Ok(backend) => {
+                *out = make_fs(Box::new(backend), path, PathBuf::from("/"));
+                0
+            }
+            Err(error) => vf_code(&error),
+        }
+    })
+}
+
+/// Resource policy for an incremental tree traversal. Zero is a zero limit,
+/// not unlimited. Set SIZE_MAX explicitly to opt out of a limit.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct vfsi_walk_options {
+    pub max_entries: usize,
+    pub max_path_bytes: usize,
+    pub max_depth: usize,
+    pub attributes: u32,
+    pub sort_by_name: bool,
+}
+/// Event kinds: 0=enter directory, 1=entry, 2=leave directory.
+/// Return 0=continue, 1=prune directory, 2=stop. Arguments are borrowed.
+pub type vfsi_walk_cb =
+    Option<unsafe extern "C" fn(*const c_char, u32, usize, *const vfsi_attrs, *mut c_void) -> u32>;
+
+/// Incremental no-follow traversal. Callbacks run outside the filesystem lock.
+/// Pruned directories are never listed. Errors can follow delivered events;
+/// callers must not replay side-effectful callbacks through another backend.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_walk(
+    fs: *mut vfsi_fs,
+    root: *const c_char,
+    options: *const vfsi_walk_options,
+    cb: vfsi_walk_cb,
+    userdata: *mut c_void,
+) -> c_int {
+    ffi_guard!(libc::EIO, {
+        let (Some(fs), Some(root), Some(options), Some(cb)) =
+            (fs.as_ref(), cstr_path(root), options.as_ref(), cb)
+        else {
+            return libc::EINVAL;
+        };
+        let Some(fields) = AttrMask::from_bits(options.attributes) else {
+            return libc::EINVAL;
+        };
+        let fields = fields | AttrMask::MODE;
+        let result = (|| -> Result<(), VfError> {
+            let path = vpath_for(fs, &root)?;
+            let root_attrs = lock_or_io(&fs.fs)?.lstat(&path)?;
+            let metadata = vnfs::backend::metadata_from_attrs(root_attrs);
+            let walk_options = vnfs::WalkOptions::new()
+                .max_entries(options.max_entries)
+                .max_path_bytes(options.max_path_bytes)
+                .max_depth(options.max_depth);
+            vnfs::backend::walk_events(
+                vnfs::DirEntry::new(path, metadata),
+                walk_options,
+                options.sort_by_name,
+                |path, limits| {
+                    let entries = bounded_listdir(
+                        fs,
+                        path,
+                        fields,
+                        limits.entry_limit(),
+                        limits.path_byte_limit(),
+                    )?;
+                    entries
+                        .into_iter()
+                        .map(|attrs| {
+                            let path = attrs
+                                .file
+                                .path()
+                                .ok_or_else(|| VfError::client(0, libc::EIO as u32))?
+                                .to_path_buf();
+                            Ok(vnfs::DirEntry::new(
+                                path,
+                                vnfs::backend::metadata_from_attrs(attrs),
+                            ))
+                        })
+                        .collect()
+                },
+                |event| {
+                    let relative = event
+                        .entry
+                        .path()
+                        .strip_prefix(&fs.backend_root)
+                        .map_err(|_| VfError::client(0, libc::EINVAL as u32))?;
+                    let path = CString::new(fs.mountpoint.join(relative).as_os_str().as_bytes())
+                        .map_err(|_| VfError::client(0, libc::EINVAL as u32))?;
+                    let attrs = attrs_from_metadata(event.entry.metadata());
+                    let kind = match event.kind {
+                        vnfs::WalkEventKind::Enter => 0,
+                        vnfs::WalkEventKind::Entry => 1,
+                        vnfs::WalkEventKind::Leave => 2,
+                    };
+                    match cb(path.as_ptr(), kind, event.depth, &attrs, userdata) {
+                        0 => Ok(vnfs::WalkControl::Continue),
+                        1 => Ok(vnfs::WalkControl::SkipSubtree),
+                        2 => Ok(vnfs::WalkControl::Stop),
+                        _ => Err(VfError::client(0, libc::EINVAL as u32)),
+                    }
+                },
+            )?;
+            Ok(())
+        })();
+        result.map_or_else(|error| vf_code(&error), |_| 0)
+    })
+}
+
+fn attrs_from_metadata(metadata: &vnfs::Metadata) -> vfsi_attrs {
+    fn time(value: Option<std::time::SystemTime>) -> (i64, u32) {
+        value
+            .and_then(|v| match v.duration_since(std::time::UNIX_EPOCH) {
+                Ok(d) => i64::try_from(d.as_secs())
+                    .ok()
+                    .map(|s| (s, d.subsec_nanos())),
+                Err(e) => {
+                    let d = e.duration();
+                    i64::try_from(d.as_secs()).ok().and_then(|s| {
+                        if d.subsec_nanos() == 0 {
+                            s.checked_neg().map(|s| (s, 0))
+                        } else {
+                            s.checked_neg()
+                                .and_then(|s| s.checked_sub(1))
+                                .map(|s| (s, 1_000_000_000 - d.subsec_nanos()))
+                        }
+                    })
+                }
+            })
+            .unwrap_or_default()
+    }
+    let (atime_sec, atime_nsec) = time(metadata.accessed());
+    let (mtime_sec, mtime_nsec) = time(metadata.modified());
+    let (ctime_sec, ctime_nsec) = time(metadata.changed());
+    vfsi_attrs {
+        struct_size: std::mem::size_of::<vfsi_attrs>() as u32,
+        abi_version: VFSI_ABI_VERSION,
+        ftype: vnfs::backend::file_type_to_nfs(&metadata.file_type()),
+        mode: metadata.mode().unwrap_or_default() & 0o7777,
+        size: metadata.len(),
+        nlink: metadata.nlink().unwrap_or_default(),
+        fileid: metadata.file_id().unwrap_or_default(),
+        blocks: metadata.blocks().unwrap_or_default(),
+        uid: metadata.uid().unwrap_or_default(),
+        gid: metadata.gid().unwrap_or_default(),
+        atime_sec,
+        atime_nsec,
+        mtime_sec,
+        mtime_nsec,
+        ctime_sec,
+        ctime_nsec,
+    }
 }
 
 /// Connect to an NFSv4.1 server, mapping a local kernel `mountpoint` to the
@@ -1907,6 +2119,27 @@ pub unsafe extern "C" fn vfsi_listdir(
     cb: vfsi_listdir_cb,
     userdata: *mut c_void,
 ) -> c_int {
+    vfsi_listdir_with_limits(
+        fs,
+        dir,
+        vnfs::backend::DEFAULT_DIRECTORY_MAX_ENTRIES,
+        vnfs::backend::DEFAULT_DIRECTORY_MAX_PATH_BYTES,
+        cb,
+        userdata,
+    )
+}
+
+/// One bounded directory listing. Zero permits only an empty directory.
+/// Callbacks run outside the filesystem lock.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_listdir_with_limits(
+    fs: *mut vfsi_fs,
+    dir: *const c_char,
+    max_entries: usize,
+    max_path_bytes: usize,
+    cb: vfsi_listdir_cb,
+    userdata: *mut c_void,
+) -> c_int {
     ffi_guard!(libc::EIO, {
         let (Some(fs), Some(dir)) = (fs.as_ref(), cstr_path(dir)) else {
             return libc::EINVAL;
@@ -1916,7 +2149,7 @@ pub unsafe extern "C" fn vfsi_listdir(
         };
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let dir = vpath_for(fs, &dir)?;
-            let entries = lock_or_io(&fs.fs)?.listdir(&dir, mask(), 0, false)?;
+            let entries = bounded_listdir(fs, &dir, mask(), max_entries, max_path_bytes)?;
             for a in entries {
                 let name = a
                     .file
@@ -2037,6 +2270,27 @@ pub unsafe extern "C" fn vfsi_read_paths(
     cb: vfsi_read_paths_cb,
     userdata: *mut c_void,
 ) -> c_int {
+    vfsi_read_paths_with_limit(
+        fs,
+        paths,
+        count,
+        vnfs::backend::DEFAULT_READ_ALLV_MAX_TOTAL_BYTES,
+        cb,
+        userdata,
+    )
+}
+
+/// Whole-file vector with an explicit aggregate payload budget. Oversized
+/// results are an error, never successful truncation. Zero is a zero budget.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_read_paths_with_limit(
+    fs: *mut vfsi_fs,
+    paths: *const *const c_char,
+    count: usize,
+    max_bytes: usize,
+    cb: vfsi_read_paths_cb,
+    userdata: *mut c_void,
+) -> c_int {
     ffi_guard!(libc::EIO, {
         let (Some(fs), false, false) = (fs.as_ref(), paths.is_null(), cb.is_none()) else {
             return libc::EINVAL;
@@ -2058,7 +2312,10 @@ pub unsafe extern "C" fn vfsi_read_paths(
                 kernel_paths.iter().map(|p| vpath_for(fs, p)).collect();
             let vpaths = vpaths?;
             let files: Vec<VfFile> = vpaths.iter().map(|p| VfFile::from_os_path(p)).collect();
-            let datas = lock_or_io(&fs.fs)?.read_allv(&files)?;
+            let datas = lock_or_io(&fs.fs)?.read_allv_with_options(
+                &files,
+                vnfs::ReadAllOptions::new().max_total_bytes(max_bytes),
+            )?;
             let c_cb = cb;
             for (i, data) in datas.iter().enumerate() {
                 let Some(path) = cstr_from_os(kernel_paths[i].as_os_str().as_bytes()) else {
@@ -2084,6 +2341,174 @@ pub unsafe extern "C" fn vfsi_read_paths(
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    #[test]
+    fn directory_byte_overflow_stops_before_retaining_or_visiting_more_entries() {
+        for max_entries in [100, usize::MAX] {
+            let mut visited = 0;
+            let error = collect_bounded_entries(max_entries, 1, |cb| {
+                for _ in 0..100 {
+                    visited += 1;
+                    if !cb(&VfAttrs {
+                        file: VfFile::from_path("/long-name"),
+                        ..Default::default()
+                    }) {
+                        break;
+                    }
+                }
+                Ok(())
+            })
+            .unwrap_err();
+            assert_eq!(error.err_no(), libc::EFBIG as u32);
+            assert_eq!(
+                visited, 1,
+                "overflow must stop enumeration at the first oversized entry"
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_directory_accepts_exact_limits_and_rejects_only_the_probe() {
+        let entry = VfAttrs {
+            file: VfFile::from_path("/a"),
+            ..Default::default()
+        };
+        let exact = collect_bounded_entries(1, 2, |cb| {
+            assert!(cb(&entry));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(exact.len(), 1);
+        for (count, bytes) in [(0, 2), (1, 1), (1, 4)] {
+            let mut visited = 0;
+            let error = collect_bounded_entries(count, bytes, |cb| {
+                for _ in 0..3 {
+                    visited += 1;
+                    if !cb(&entry) {
+                        break;
+                    }
+                }
+                Ok(())
+            })
+            .unwrap_err();
+            assert_eq!(error.err_no(), libc::EFBIG as u32);
+            assert_eq!(visited, if count == 1 && bytes == 4 { 2 } else { 1 });
+        }
+        let error = collect_bounded_entries(10, 100, |cb| {
+            assert!(cb(&entry));
+            Err(VfError::client(0, libc::EIO as u32))
+        })
+        .unwrap_err();
+        assert_eq!(
+            error.err_no(),
+            libc::EIO as u32,
+            "backend errors must not become successful prefixes"
+        );
+    }
+
+    #[test]
+    fn bounded_c_adapters_prune_before_io_and_preserve_error_limits() {
+        unsafe extern "C" fn walk(
+            path: *const c_char,
+            kind: u32,
+            _depth: usize,
+            _attrs: *const vfsi_attrs,
+            data: *mut c_void,
+        ) -> u32 {
+            let (fs, visited) = &mut *(data as *mut (*mut vfsi_fs, Vec<String>));
+            let path = CStr::from_ptr(path).to_string_lossy().into_owned();
+            assert!(!path.ends_with("hidden"));
+            assert_ne!(
+                vfsi_capabilities(*fs),
+                0,
+                "callback must run without the backend lock"
+            );
+            visited.push(path.clone());
+            if kind == 0 && path.ends_with("blocked") {
+                1
+            } else {
+                0
+            }
+        }
+        unsafe extern "C" fn listing(
+            _name: *const c_char,
+            _attrs: *const vfsi_attrs,
+            data: *mut c_void,
+        ) -> bool {
+            *(data as *mut usize) += 1;
+            true
+        }
+        unsafe extern "C" fn read(
+            _path: *const c_char,
+            _data: *const u8,
+            _len: usize,
+            data: *mut c_void,
+        ) -> bool {
+            *(data as *mut usize) += 1;
+            true
+        }
+        let (root, path) = temp_root();
+        std::fs::create_dir(root.path().join("blocked")).unwrap();
+        std::fs::write(root.path().join("blocked/hidden"), b"hidden").unwrap();
+        std::fs::write(root.path().join("a"), b"abc").unwrap();
+        unsafe {
+            let mut fs = std::ptr::null_mut();
+            assert_eq!(
+                vfsi_dummy_open_mount(path.as_ptr(), path.as_ptr(), &mut fs),
+                0
+            );
+            let mut context = (fs, Vec::<String>::new());
+            let options = vfsi_walk_options {
+                max_entries: 3,
+                max_path_bytes: 1024,
+                max_depth: 10,
+                attributes: VFSI_ATTR_MODE,
+                sort_by_name: true,
+            };
+            assert_eq!(
+                vfsi_walk(
+                    fs,
+                    path.as_ptr(),
+                    &options,
+                    Some(walk),
+                    (&mut context as *mut (*mut vfsi_fs, Vec<String>)).cast()
+                ),
+                0
+            );
+            assert_eq!(context.1.len(), 5);
+            let mut calls = 0usize;
+            assert_eq!(
+                vfsi_listdir_with_limits(
+                    fs,
+                    path.as_ptr(),
+                    1,
+                    1024,
+                    Some(listing),
+                    (&mut calls as *mut usize).cast()
+                ),
+                libc::EFBIG
+            );
+            let file = CString::new(root.path().join("a").as_os_str().as_bytes()).unwrap();
+            assert_eq!(
+                vfsi_read_paths_with_limit(
+                    fs,
+                    &file.as_ptr(),
+                    1,
+                    1,
+                    Some(read),
+                    (&mut calls as *mut usize).cast()
+                ),
+                libc::EFBIG
+            );
+            assert_eq!(calls, 0);
+            vfsi_free(fs);
+            assert_eq!(
+                vfsi_nfs_from_mount(c"relative".as_ptr(), &mut fs),
+                libc::EINVAL
+            );
+            assert!(fs.is_null());
+        }
+    }
 
     fn temp_root() -> (tempfile::TempDir, CString) {
         let root = tempfile::TempDir::new().unwrap();

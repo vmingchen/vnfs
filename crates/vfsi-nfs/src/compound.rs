@@ -18,6 +18,32 @@ thread_local! {
     static SIZE_SCRATCH: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
 
+#[cfg(test)]
+#[test]
+fn compound_preflight_survives_late_thread_local_client_cleanup() {
+    struct LateClient;
+    impl Drop for LateClient {
+        fn drop(&mut self) {
+            assert!(
+                SIZE_SCRATCH.try_with(|_| ()).is_err(),
+                "exercise destroyed scratch"
+            );
+            let mut compound = Compound::new();
+            compound.putrootfh();
+            assert!(compound.encoded_len_up_to(1024).unwrap().is_some());
+            compound_stats_record(&compound.args);
+        }
+    }
+    thread_local! { static CLIENT: RefCell<Option<LateClient>> = const { RefCell::new(None) }; }
+    std::thread::spawn(|| {
+        CLIENT.with(|value| *value.borrow_mut() = Some(LateClient));
+        SIZE_SCRATCH.with(|value| value.borrow_mut().resize(1024, 0));
+        STATS_XDR_BUFFER.with(|value| value.borrow_mut().resize(1024, 0));
+    })
+    .join()
+    .unwrap();
+}
+
 /// XDR size of the mandatory SEQUENCE argop: op number, session ID, three
 /// u32 fields, and the cache-this flag. This is added before Session inserts
 /// the operation so builders can preflight without mutating their compound.
@@ -117,8 +143,7 @@ impl Compound {
                 argarray_val: self.ops.as_ptr() as *mut nfs_argop4,
             },
         };
-        let result = SIZE_SCRATCH.with(|scratch| {
-            let mut scratch = scratch.borrow_mut();
+        let mut encode = |scratch: &mut Vec<u32>| {
             let payload = self
                 .keep
                 .iter()
@@ -148,7 +173,13 @@ impl Compound {
                 }
                 capacity = capacity.saturating_mul(2).min(limit);
             }
-        })?;
+        };
+        // A client held in application TLS may close after our scratch buffer
+        // was destroyed. Mandatory preflight still runs with local storage.
+        let result = match SIZE_SCRATCH.try_with(|scratch| encode(&mut scratch.borrow_mut())) {
+            Ok(result) => result?,
+            Err(_) => encode(&mut Vec::new())?,
+        };
         self.size_check.set(Some((limit, result)));
         Ok(result)
     }
@@ -1273,7 +1304,9 @@ fn compound_stats_record(args: &COMPOUND4args) {
     if !byte_stats_enabled {
         return;
     }
-    STATS_XDR_BUFFER.with(|scratch| {
+    // Teardown can send DESTROY_SESSION after this optional TLS buffer has
+    // gone away. Never let diagnostics abort otherwise valid cleanup.
+    let _ = STATS_XDR_BUFFER.try_with(|scratch| {
         let mut buf = scratch.borrow_mut();
         if buf.is_empty() {
             buf.resize(4 * 1024 * 1024, 0);

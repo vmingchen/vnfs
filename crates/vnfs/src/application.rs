@@ -74,6 +74,37 @@ pub trait FileHandle: Read + Write + Seek {
 /// This uses borrowed request GATs, so it is for static generic dispatch, not
 /// `dyn Client`. It adds no boxing, data copies or serial-loop fallbacks.
 pub trait Client {
+    /// Incremental no-follow traversal with enter/leave events and pruning.
+    /// Listings are bounded by the remaining aggregate budget; the callback
+    /// runs before entering each directory, so pruning avoids its listing.
+    fn walk_events_with_options(
+        &self,
+        root: impl AsRef<Path>,
+        fields: crate::MetadataFields,
+        options: crate::WalkOptions,
+        sort_by_name: bool,
+        callback: impl FnMut(&crate::WalkEvent) -> Result<crate::WalkControl>,
+    ) -> Result<crate::TraversalCompletion> {
+        let root = root.as_ref();
+        let fields = fields | crate::MetadataFields::MODE;
+        let metadata = self.symlink_metadata_with_fields(root, fields)?;
+        vfsi_sync::walk_events(
+            crate::DirEntry::new(root.to_path_buf(), metadata),
+            options,
+            sort_by_name,
+            |path, limits| {
+                let mut listings = self.read_dirs_with_options(&[path], fields, limits)?;
+                if listings.len() != 1 {
+                    return Err(crate::Error::transport(
+                        None,
+                        "invalid directory result count",
+                    ));
+                }
+                Ok(listings.remove(0).entries)
+            },
+            callback,
+        )
+    }
     /// Owned handle; vectors must contain handles belonging to this client.
     type File: FileHandle + 'static;
     /// Collection/batch defaults, not a process memory cap or file-reader cap.
