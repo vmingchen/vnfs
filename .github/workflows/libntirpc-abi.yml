@@ -1,11 +1,5 @@
-name: libntirpc ABI
+name: Bundled ntirpc
 
-# The main CI runs against Ubuntu 24.04's libntirpc 6.3 only, so the
-# version-gated ABI paths (legacy_free_cb = 0, rdma_call_expires) and the
-# client-side RPCSEC_GSS reply-verifier shim are never exercised there. This
-# workflow builds a pinned newer libntirpc from source, links the Rust client
-# against it, and negotiates RPCSEC_GSS at runtime. It is scheduled/manual so a
-# bad upstream pin cannot block pull requests.
 on:
   schedule:
     - cron: "43 4 * * 1"
@@ -16,76 +10,31 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  NTIRPC_REVISION: v15.3
 
 jobs:
-  newer-libntirpc:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+  source-built-client:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # stable
-      - name: Install host build and RPCSEC_GSS runtime dependencies
+      - name: Install build dependencies without system ntirpc headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            clang libclang-dev pkg-config \
-            libgssglue-dev libkrb5-dev liburcu-dev \
-            krb5-admin-server krb5-kdc krb5-user \
-            nfs-ganesha nfs-ganesha-vfs rpcbind
-      - name: Build the libntirpc build image
-        run: docker build --tag vnfs-libntirpc-build:ci ci/libntirpc
-      - name: Fetch the pinned libntirpc source
-        run: |
-          git clone --depth=1 --branch "$NTIRPC_REVISION" \
-            --recurse-submodules --shallow-submodules \
-            https://github.com/nfs-ganesha/ntirpc.git target/ntirpc-src
-      - name: Build and install the newer libntirpc
-        run: |
-          prefix="$PWD/target/ntirpc-prefix"
-          mkdir -p "$prefix"
-          # Mount the install prefix at its own host path so the generated
-          # libntirpc.pc records a prefix that exists when Cargo runs on the
-          # host afterwards.
-          docker run --rm \
-            --volume "$PWD/target/ntirpc-src:/src:ro" \
-            --volume "$prefix:$prefix" \
-            --workdir /tmp \
-            vnfs-libntirpc-build:ci \
-            bash -c "cp -a /src /tmp/src \
-                     && cmake -S /tmp/src -B /tmp/build \
-                       -DCMAKE_BUILD_TYPE=Release \
-                       -DCMAKE_INSTALL_PREFIX=\"$prefix\" \
-                       -DUSE_LTTNG=Off \
-                       -DUSE_MONITORING=Off \
-                     && cmake --build /tmp/build --target ntirpc --parallel \
-                     && cmake --install /tmp/build"
-          pc=$(find "$prefix" -name libntirpc.pc -print -quit)
-          test -n "$pc"
-          echo "PKG_CONFIG_PATH=$(dirname "$pc")" >>"$GITHUB_ENV"
-          # v15.3's generated config.h includes <ntirpc/version.h>, which
-          # needs the parent include directory for every native consumer.
-          echo "CPATH=$prefix/include" >>"$GITHUB_ENV"
-          # The upstream .pc file omits a usable link search path for this
-          # custom prefix. Make both the build-script ABI probe and Rust's
-          # linker resolve the same freshly built library.
-          echo "LIBRARY_PATH=$prefix/lib" >>"$GITHUB_ENV"
-          echo "RUSTFLAGS=-Lnative=$prefix/lib" >>"$GITHUB_ENV"
-          # The client must load the custom library at test runtime, not the
-          # distribution's libntirpc.
-          echo "LD_LIBRARY_PATH=$(dirname "$(dirname "$pc")")" >>"$GITHUB_ENV"
-      - name: Report the detected libntirpc version
-        run: pkg-config --modversion libntirpc
-      - name: Test the crate against the newer libntirpc
+          sudo apt-get install -y cmake clang libclang-dev pkg-config libkrb5-dev liburcu-dev
+          test ! -e /usr/include/ntirpc/rpc/rpc.h
+      - name: Verify packaged ntirpc and NFS codecs
         run: |
           ./scripts/test-libntirpc.sh
-          cargo build -p vfsi-nfs --features rpcsec-gss
-      - name: Negotiate RPCSEC_GSS with the newer client library
-        # The NFS server is the distribution's Ganesha (libntirpc 6.3); the
-        # client under test links the custom library via PKG_CONFIG_PATH and
-        # LD_LIBRARY_PATH, so this exercises the v15.3 client-side
-        # reply-verifier shim, rdma_call_expires layout and allocator hook
-        # against a live KDC.
+          cargo test -p nfsv41-sys
+          cargo test -p vfsi-nfs --lib --all-features
+      - name: Install independent NFS and Kerberos servers
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get install -y krb5-admin-server krb5-kdc krb5-user \
+            nfs-ganesha nfs-ganesha-vfs rpcbind
+      - name: Exercise the source-built client with RPCSEC_GSS
         env:
           VNFS_GSS_SKIP_PYTHON: "1"
         run: ci/run-nfs-gss-integration.sh

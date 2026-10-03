@@ -11,11 +11,39 @@ Usage: check-wheel-bundling.py <wheel> [wheel...]
 
 import sys
 import zipfile
+import subprocess
+import tempfile
+from pathlib import Path
 
 # Library-name stems that must be present in the wheel's bundled libraries.
-# auditwheel may mangle the filename (for example ``libntirpc-<hash>.so.6.3``),
+# auditwheel may mangle the filename,
 # so match on a substring rather than an exact name.
-REQUIRED = ("libntirpc", "libgssapi_krb5", "liburcu")
+REQUIRED = ("libgssapi_krb5", "liburcu")
+
+
+def has_dynamic_ntirpc(wheel):
+    """Inspect ELF dependency tags, not symbol names or archive substrings."""
+    with zipfile.ZipFile(wheel) as archive, tempfile.TemporaryDirectory() as temp:
+        for index, name in enumerate(archive.namelist()):
+            basename = name.rsplit("/", 1)[-1]
+            if not (basename.endswith(".so") or ".so." in basename):
+                continue
+            # Do not extract an archive-supplied path into the filesystem.
+            path = Path(temp) / f"library-{index}.so"
+            path.write_bytes(archive.read(name))
+            result = subprocess.run(
+                ["readelf", "--dynamic", str(path)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            if any(
+                "(NEEDED)" in line and "libntirpc" in line
+                for line in result.stdout.splitlines()
+            ):
+                print(f"ERROR: {name} dynamically links libntirpc", file=sys.stderr)
+                return True
+    return False
 
 
 def bundled_libraries(wheel):
@@ -36,7 +64,10 @@ def check(wheel):
     missing = [stem for stem in REQUIRED if not any(stem in name for name in basenames)]
     for stem in missing:
         print(f"ERROR: {wheel} does not bundle {stem}*", file=sys.stderr)
-    return not missing
+    unexpected = any("libntirpc" in name for name in basenames)
+    if unexpected:
+        print(f"ERROR: {wheel} bundles a second libntirpc", file=sys.stderr)
+    return not missing and not unexpected and not has_dynamic_ntirpc(wheel)
 
 
 def main(argv):

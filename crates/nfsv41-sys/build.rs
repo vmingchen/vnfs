@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=DOCS_RS");
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let src_dir = manifest_dir.join("src");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -18,8 +19,8 @@ fn main() {
     // Include directory provided by libntirpc-sys (via its `links` metadata).
     let ntirpc_inc = env::var("DEP_NTIRPC_INCLUDE")
         .expect("DEP_NTIRPC_INCLUDE not set; libntirpc-sys must be a dependency");
-    // The installed config.h includes "ntirpc/version.h", resolvable only
-    // from the libntirpc build tree (DEP_NTIRPC_INCLUDE2).
+    // The installed config.h includes "ntirpc/version.h", resolved through
+    // the bundled installation's parent include directory.
     let ntirpc_build_inc = env::var("DEP_NTIRPC_INCLUDE2").unwrap_or_default();
 
     // Compile the wrappers around the nfsv41.h static inline codecs.
@@ -56,13 +57,8 @@ fn main() {
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=nfsv41");
-    // wrapper.o references symbols in the administrator-provided system
-    // libntirpc selected by libntirpc-sys.
-    println!("cargo:rustc-link-lib=dylib=ntirpc");
-    println!("cargo:rustc-link-lib=dylib=gssapi_krb5");
-    println!("cargo:rustc-link-lib=dylib=urcu-bp");
-    println!("cargo:rustc-link-lib=dylib=pthread");
-    println!("cargo:rustc-link-lib=dylib=dl");
+    // libntirpc-sys owns linkage of the packaged static archive and its
+    // feature-dependent system dependencies. Never select a second ntirpc.
     println!("cargo:rerun-if-changed=src/wrapper.c");
     println!("cargo:rerun-if-changed=src/wrapper.h");
     println!("cargo:rerun-if-changed=src/nfsv41.h");

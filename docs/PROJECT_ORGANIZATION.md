@@ -200,8 +200,10 @@ smoke, typing, and supported-version checks before release workflows may
 publish the artifacts.
 The facade must never be published with a dependency version that is not
 already available from crates.io. The NFS implementation uses an `ffi` feature;
-docs.rs disables that feature because its offline builder cannot fetch and
-compile the pinned native libntirpc source.
+docs.rs uses checked-in FFI declarations and skips native compilation. Normal
+builds compile the pinned source packaged in the independently maintained
+`libntirpc-sys` crate without downloading native source or selecting a system
+libntirpc.
 
 The `Promote VFSI mirror` workflow requires an explicit canonical commit, a
 successful CI run for that commit, and approval through the `vfsi-publish`

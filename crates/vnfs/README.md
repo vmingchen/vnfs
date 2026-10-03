@@ -35,8 +35,9 @@ vnfs = "0.0.15"
 On Ubuntu 24.04 or newer, install the native build dependencies once:
 
 ```console
-sudo apt-get install clang libclang-dev pkg-config libntirpc-dev \
-  libkrb5-dev libgssglue-dev liburcu-dev
+sudo apt-get install build-essential cmake clang libclang-dev pkg-config liburcu-dev
+# Optional rpcsec-gss feature:
+sudo apt-get install libkrb5-dev
 ```
 
 ## Rust-native example
@@ -536,8 +537,9 @@ generic remover reject non-default options rather than silently ignoring them.
 ## Platform and build requirements
 
 The supported native target is Linux. The minimum supported Rust version is
-1.88. Normal builds use the system `libntirpc` (4.3 or newer) and do not clone
-or download native source from `build.rs`. After Cargo dependencies have been
+1.88. Normal builds compile the pinned, packaged ntirpc source into a static
+archive; no system libntirpc is required and `build.rs` does not clone
+or download native source. After Cargo dependencies have been
 fetched, the native build can run without network access. docs.rs uses
 checked-in FFI declarations and does not require the native development
 packages. NFS servers must expose an NFSv4 pseudo-root reachable by the

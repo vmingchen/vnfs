@@ -57,8 +57,6 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - name: Build the portable wheel
-        env:
-          RUSTFLAGS: "-L native=/usr/local/lib"
         uses: PyO3/maturin-action@423a6347767a8b16e65c2a7a7042e4a921528da8 # v1
         with:
           command: build
@@ -71,23 +69,8 @@ jobs:
             dnf install -y epel-release
             /usr/bin/crb enable
             dnf install -y clang clang-devel cmake curl krb5-devel make pkgconf-pkg-config userspace-rcu-devel
-            ntirpc_revision=24a7d5fca4c2e3e3cc8bb94bc301d8c2a40677a8
-            curl --fail --location --silent --show-error \
-              --output /tmp/ntirpc.tar.gz \
-              "https://github.com/nfs-ganesha/ntirpc/archive/${ntirpc_revision}.tar.gz"
-            echo "819beb7dad10fc0c76032847c23c54212877d0fe37af666e8ef60ddc02471046  /tmp/ntirpc.tar.gz" | sha256sum --check
-            tar -xzf /tmp/ntirpc.tar.gz -C /tmp
-            cmake \
-              -S "/tmp/ntirpc-${ntirpc_revision}" \
-              -B /tmp/ntirpc-build \
-              -DUSE_LTTNG=OFF \
-              -DUSE_MONITORING=OFF \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_INSTALL_PREFIX=/usr/local \
-              -DCMAKE_INSTALL_LIBDIR=lib
-            cmake --build /tmp/ntirpc-build --target ntirpc --parallel
-            cmake --install /tmp/ntirpc-build
-            ldconfig
+            # libntirpc-sys builds its packaged static source; no second
+            # native download, pin, or system library installation is needed.
           args: --release --locked --compatibility pypi --out dist ${{ matrix.extra-args }}
       - name: Test the repaired wheel in its manylinux container
         env:

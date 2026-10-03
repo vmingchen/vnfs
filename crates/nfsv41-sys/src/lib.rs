@@ -14,11 +14,8 @@
 // Rust 1.98's new runtime-symbol lint cannot see that ABI equivalence.
 #![allow(suspicious_runtime_symbol_definitions)]
 
-// The codec wrappers in wrapper.c (compiled into this crate's rlib)
-// reference libntirpc.so symbols directly, so any binary that uses this
-// crate must also link the dynamic library. `#[link]` ensures rustc
-// re-emits -lntirpc at final link time whenever this rlib is pulled in.
-#[link(name = "ntirpc", kind = "dylib")]
-unsafe extern "C" {}
+// Keep the native dependency's static archive and linkage metadata attached
+// even when a consumer uses only our C codec wrappers.
+use libntirpc_sys as _;
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));

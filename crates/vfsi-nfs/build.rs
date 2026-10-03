@@ -1,12 +1,9 @@
 fn main() {
-    println!("cargo:rustc-check-cfg=cfg(libntirpc_native_reply_verifier)");
-    if std::env::var_os("DEP_NTIRPC_NATIVE_REPLY_VERIFIER").as_deref()
-        == Some(std::ffi::OsStr::new("1"))
-    {
-        println!("cargo:rustc-cfg=libntirpc_native_reply_verifier");
-    }
-    println!("cargo:rustc-check-cfg=cfg(libntirpc_legacy_free_cb)");
-    if std::env::var_os("DEP_NTIRPC_LEGACY_FREE_CB").as_deref() == Some(std::ffi::OsStr::new("1")) {
-        println!("cargo:rustc-cfg=libntirpc_legacy_free_cb");
+    if std::env::var_os("CARGO_FEATURE_FFI").is_some() && std::env::var_os("DOCS_RS").is_none() {
+        assert_eq!(
+            std::env::var("DEP_NTIRPC_NATIVE_REPLY_VERIFIER").as_deref(),
+            Ok("1"),
+            "vfsi-nfs requires source-built libntirpc-sys with native reply verification"
+        );
     }
 }

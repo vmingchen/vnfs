@@ -24,7 +24,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev liburcu-dev
       - name: AddressSanitizer NFS parser and response tests
         env:
           ASAN_OPTIONS: detect_leaks=0
@@ -61,7 +61,8 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev liburcu-dev
+          test ! -e /usr/include/ntirpc/rpc/rpc.h
       - run: cargo fmt --all --check
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
@@ -263,7 +264,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev liburcu-dev
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: python-${{ matrix.python-version }}
@@ -299,7 +300,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev liburcu-dev
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: python-package
@@ -318,7 +319,9 @@ jobs:
           python -m twine check \
             dist/* ../vfsi-fsspec/dist/* ../vsmb/dist/* ../vsmbfs/dist/*
       - name: Verify the nfs4fs wheel bundles the native NFS libraries
-        run: python3 ci/check-wheel-bundling.py adapters/nfs4fs/dist/*.whl
+        run: |
+          python3 ci/test-wheel-bundling.py
+          python3 ci/check-wheel-bundling.py adapters/nfs4fs/dist/*.whl
       - name: Install wheel and test entry-point discovery outside the source tree
         run: |
           python -m venv .wheel-vfsi-fsspec
@@ -540,7 +543,7 @@ jobs:
       - name: Install NFS-Ganesha and build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config iproute2 libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev nfs-ganesha nfs-ganesha-vfs
+          sudo apt-get install -y clang libclang-dev cmake pkg-config iproute2 libkrb5-dev liburcu-dev nfs-ganesha nfs-ganesha-vfs
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: nfs-${{ matrix.minor-version }}
@@ -791,7 +794,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev cmake pkg-config \
-            libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev \
+            libkrb5-dev liburcu-dev \
             krb5-admin-server krb5-kdc krb5-user \
             nfs-ganesha nfs-ganesha-vfs rpcbind
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
@@ -812,7 +815,7 @@ jobs:
       - name: Install native build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev liburcu-dev
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: nfs-server-copy
@@ -931,7 +934,7 @@ jobs:
       - name: Install Samba and build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev samba smbclient
+          sudo apt-get install -y clang libclang-dev cmake pkg-config libkrb5-dev liburcu-dev samba smbclient
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
         with:
           key: smb-${{ matrix.name }}

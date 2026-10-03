@@ -15,17 +15,19 @@ Published wheels use CPython's stable ABI and support standard CPython 3.9 and
 newer on Linux x86-64 and AArch64. A separate CPython 3.14 free-threaded wheel
 is built and tested on x86-64.
 
-A source build additionally requires Rust, Clang, `pkg-config`, libntirpc 4.3
-or newer, Kerberos/GSS development headers, and userspace-RCU development
-headers. Source and editable builds link the administrator-provided system
-`libntirpc` dynamically, so that shared library must be present at runtime.
+A source build additionally requires Rust, CMake, a C compiler, Clang,
+`pkg-config`, Kerberos/GSS development headers, and userspace-RCU development
+headers. Source and editable builds compile the pinned ntirpc source packaged
+in `libntirpc-sys` into a position-independent static archive. A system
+libntirpc is not required at build or runtime.
 
-Release wheels are self-contained. They are built against a checksum-pinned
-libntirpc source revision, and `auditwheel` copies `libntirpc` plus its
+Release wheels are self-contained. They statically include the pinned ntirpc
+source revision, and `auditwheel` copies its
 Kerberos (`libgssapi_krb5`/`libkrb5`) and userspace-RCU (`liburcu`)
 dependencies into the wheel's `.libs/` directory, rewriting RPATH so the
-package imports without a system `libntirpc`. CI fails a release whose wheel
-does not bundle those libraries.
+package imports without system native dependencies. CI verifies those bundled
+libraries and rejects any wheel that dynamically links or bundles a second
+libntirpc.
 
 The package installs `fsspec.specs` entry points for both `nfs4` and `vfsi`, so
 normal use does not require `import nfs4fs` before calling `fsspec`.
@@ -419,8 +421,8 @@ visible when the TTL expires or when the caller requests a refresh. Use
 On Ubuntu/Debian:
 
 ```sh
-sudo apt-get install clang libclang-dev pkg-config libntirpc-dev \
-  libkrb5-dev libgssglue-dev
+sudo apt-get install build-essential cmake clang libclang-dev pkg-config \
+  libkrb5-dev liburcu-dev
 python -m venv .venv
 .venv/bin/pip install hypothesis maturin fsspec pytest
 cd adapters/nfs4fs
