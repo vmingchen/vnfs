@@ -565,6 +565,36 @@ impl<F: NamespaceFileSystem + MetadataFileSystem> FsClient<F> {
 }
 
 impl<F: VecFs> FsClient<F> {
+    /// Create directories in input order using vector MKDIR. Parents must
+    /// already exist. This is not transactional: failure may leave a prefix.
+    pub fn create_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
+        let mut seen = HashSet::with_capacity(paths.len());
+        for (index, path) in paths.iter().enumerate() {
+            if !seen.insert(path.as_ref()) {
+                return Err(VfError::client(index, crate::ERR_INVAL)
+                    .with_context("create_dirs", path.as_ref()));
+            }
+        }
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let dirs: Vec<_> = paths
+            .iter()
+            .map(|path| crate::VfAttrs {
+                file: VfFile::from_os_path(path.as_ref()),
+                masks: AttrMask::MODE,
+                mode: 0o777,
+                ..Default::default()
+            })
+            .collect();
+        self.lock()?.mkdirv(&dirs).map_err(|error| {
+            match error.index().and_then(|index| paths.get(index)) {
+                Some(path) => error.with_context("create_dirs", path.as_ref()),
+                None => error,
+            }
+        })
+    }
+
     /// Lazy between directories, with selective no-follow metadata and pruning.
     /// Enter runs before any listing; Leave follows even a pruned directory.
     /// Sorting buffers one bounded directory, not the whole tree. The callback

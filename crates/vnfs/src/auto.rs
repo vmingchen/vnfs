@@ -311,6 +311,47 @@ impl AutoClient {
         Ok(output)
     }
 
+    /// Create directories in bounded backend cohorts, retaining input order.
+    /// Parents must exist; this does not promise transactional rollback.
+    pub fn create_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let mut seen = std::collections::HashSet::with_capacity(paths.len());
+        for (index, path) in paths.iter().enumerate() {
+            if !seen.insert(path.as_ref()) {
+                return Err(VfError::client(index, libc::EINVAL as u32)
+                    .with_context("create_dirs", path.as_ref()));
+            }
+        }
+        let mounts = read_mounts(true);
+        let resolved: Vec<_> = paths
+            .iter()
+            .map(|path| self.resolve(path.as_ref(), &mounts))
+            .collect();
+        let mut start = 0;
+        while start < paths.len() {
+            let end = cohort_end(&resolved, start);
+            let batch: Vec<_> = resolved[start..end]
+                .iter()
+                .map(|route| route.path.as_path())
+                .collect();
+            let result = match &resolved[start].route {
+                Route::Mounted => self.mounted.create_dirs(&batch),
+                Route::Nfs(connection) => connection.client.create_dirs(&batch),
+            };
+            result.map_err(|error| {
+                let error = indexed(error, start);
+                match error.index().and_then(|index| paths.get(index)) {
+                    Some(path) => error.with_context("create_dirs", path.as_ref()),
+                    None => error,
+                }
+            })?;
+            start = end;
+        }
+        Ok(())
+    }
+
     pub fn remove_paths<P: AsRef<Path>>(&self, paths: &[P], recursive: bool) -> VfResult<()> {
         self.remove_paths_with_options(paths, recursive, crate::RemoveOptions::default())
     }

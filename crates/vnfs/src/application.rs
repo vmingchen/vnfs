@@ -172,6 +172,9 @@ pub trait Client {
     fn symlink_metadata(&self, path: impl AsRef<Path>) -> Result<Metadata>;
     /// Create one directory; its parent must exist.
     fn create_dir(&self, path: impl AsRef<Path>) -> Result<()>;
+    /// Strict vector directory creation. Parents must already exist; errors
+    /// can follow completed mutations, and do not imply rollback.
+    fn create_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()>;
     /// Create missing parents; an error can leave some directories created.
     fn create_dir_all(&self, path: impl AsRef<Path>) -> Result<()>;
     /// Remove one file or symlink, not the symlink target.
@@ -396,6 +399,9 @@ macro_rules! client_methods {
         }
         fn create_dir(&self, path: impl AsRef<Path>) -> Result<()> {
             <$client>::create_dir($receiver(self), path)
+        }
+        fn create_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {
+            <$client>::create_dirs($receiver(self), paths)
         }
         fn create_dir_all(&self, path: impl AsRef<Path>) -> Result<()> {
             <$client>::create_dir_all($receiver(self), path)

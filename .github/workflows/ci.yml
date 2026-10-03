@@ -610,6 +610,12 @@ jobs:
           VFSI_NFS_SERVER: 127.0.0.1
           VFSI_NFS_MINOR: ${{ matrix.minor-version }}
         run: cargo test -p vfsi-nfs --features "server-copy test-faults" --test nfs -- --test-threads=1
+      - name: Verify high-level tree building and compound batching
+        env:
+          VFSI_NFS_REQUIRED: 1
+          VFSI_NFS_SERVER: 127.0.0.1:2049
+          VFSI_NFS_MINOR: ${{ matrix.minor-version }}
+        run: cargo test -p vnfs --test tree_builder_nfs -- --nocapture --test-threads=1
       - name: Recover read-only work across an NFS server restart
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}

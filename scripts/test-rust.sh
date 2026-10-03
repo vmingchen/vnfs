@@ -15,10 +15,11 @@ cargo test -p vfsi-nfs --lib --all-features
 cargo test -p vfsi-smb --lib
 cargo test -p nfsv41-sys
 ./scripts/test-libntirpc.sh
-cargo test -p vnfs --lib
+cargo test -p vnfs --features test-faults --lib
 cargo test -p vnfs --features "dummy test-faults" --test dummy_vecfs
 cargo test -p vnfs --test public_api
 cargo test -p vnfs --test application_boundary
+cargo test -p vnfs --test tree_builder
 cargo test -p vnfs --doc
 cargo test -p vfsi-c --lib
 

@@ -102,6 +102,11 @@ macro_rules! owned_client {
             pub fn create_dir(&self, path: impl AsRef<Path>) -> Result<()> {
                 self.inner.create_dir(path)
             }
+            /// Create directories in vector phases; parents must exist.
+            /// An error can follow partially completed mutations.
+            pub fn create_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {
+                self.inner.create_dirs(paths)
+            }
             /// Create one directory with explicit Unix permission bits.
             pub fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> Result<()> {
                 self.inner.create_dir_with_mode(path, mode)

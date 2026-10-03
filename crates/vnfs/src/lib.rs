@@ -12,8 +12,11 @@ pub type Error = vfsi_core::VfError;
 
 mod application;
 pub use application::{Client, FileHandle};
+
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod facade;
+/// High-level filesystem workflows built on the application API.
+pub mod helpers;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub use facade::{
     Mounted, MountedDir, MountedFile, MountedOpenOptions, MountedRead, MountedReadInto,
