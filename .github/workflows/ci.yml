@@ -77,7 +77,7 @@ jobs:
           DOCS_RS=1 RUSTDOCFLAGS="-D warnings" \
             cargo doc -p vnfs -p vfsi-nfs --all-features --no-deps
           test -f target/doc/vnfs/struct.Nfs.html
-          test -f target/doc/vnfs/type.NfsClient.html
+          test -f target/doc/vnfs/struct.NfsClient.html
           test -f target/doc/vfsi_nfs/nfs/struct.NfsVecFs.html
       - name: Run the repository Rust test suite
         run: ./scripts/test-rust.sh
@@ -596,7 +596,7 @@ jobs:
           printf 'preserve\n' > "$nested_root/child/hidden"
           sudo mount --bind "$nested_source" "$nested_root/child"
           VFSI_AUTO_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_AUTO_TEST_BIND="$bind_target" VFSI_AUTO_TEST_NESTED_ROOT="$nested_root" \
-            cargo test -p vnfs --lib auto::tests::live_ -- --ignored --nocapture
+            cargo test -p vnfs --lib auto::tests::live_ -- --ignored --nocapture --test-threads=1
           VFSI_NFS_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_NFS_TEST_MOUNT_RO=/mnt/vnfs-ci-discovery-ro \
             cargo test -p vnfs --lib native_nfs::mount_tests -- --ignored --nocapture --test-threads=1
           VFSI_NFS_TEST_MOUNT=/mnt/vnfs-ci-auto VFSI_NFS_TEST_MOUNT_RO=/mnt/vnfs-ci-discovery-ro \

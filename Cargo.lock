@@ -537,7 +537,7 @@ dependencies = [
 
 [[package]]
 name = "libntirpc-sys"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "bindgen",
  "libc",
@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "nfsv41-sys"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "bindgen",
  "libntirpc-sys",
@@ -1185,7 +1185,7 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "vfsi-c"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "cbindgen",
  "libc",
@@ -1198,7 +1198,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bitflags",
  "libc",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-local"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "libc",
  "proptest",
@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-nfs"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "libc",
  "libntirpc-sys",
@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-smb"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "futures-util",
  "libc",
@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-sync"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "libc",
  "vfsi-core",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "vnfs"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "libc",
  "nfsv41-sys",

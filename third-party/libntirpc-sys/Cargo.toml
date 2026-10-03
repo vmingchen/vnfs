@@ -3,7 +3,7 @@
 # Keep the published crate and the vendored copy in sync.
 [package]
 name = "libntirpc-sys"
-version = "0.2.6"
+version = "0.2.7"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Ming Chen <v.mingchen@gmail.com>"]

@@ -2360,14 +2360,17 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         );
-        let remote = Path::new(&mount).join(&unique);
-        let local = std::env::temp_dir().join(&unique);
         let client = Auto::new("/").unwrap();
         let mut observations = Vec::new();
         for remote_first in [false, true] {
             // Cover overflow, a closed nonempty request, and a closed empty
             // request. An empty payload must not bypass handle validation.
             for invalid in 0..3 {
+                // Do not reuse a pathname removed through the kernel while a
+                // direct NFS client still caches its former filehandle.
+                let case = format!("{unique}-{remote_first}-{invalid}");
+                let remote = Path::new(&mount).join(&case);
+                let local = std::env::temp_dir().join(&case);
                 fs::write(&remote, b"original").unwrap();
                 fs::write(&local, b"original").unwrap();
                 let paths = if remote_first {
@@ -2402,13 +2405,20 @@ mod tests {
                 let mut first = [0; 8];
                 assert_eq!(files[0].read_at(&mut first, 0).unwrap(), first.len());
                 let second = client.read(paths[1]).unwrap();
-                observations.push((remote_first, invalid, error, first, second));
+                observations.push((
+                    remote_first,
+                    invalid,
+                    error,
+                    first,
+                    second,
+                    paths[1].to_path_buf(),
+                ));
                 client.try_closev(&mut files).unwrap();
                 fs::remove_file(&remote).unwrap();
                 fs::remove_file(&local).unwrap();
             }
         }
-        for (remote_first, invalid, error, first, second) in observations {
+        for (remote_first, invalid, error, first, second, failed_path) in observations {
             assert_eq!(
                 &first, b"original",
                 "earlier cohort changed: remote_first={remote_first}, invalid={invalid}"
@@ -2424,14 +2434,7 @@ mod tests {
                 } as u32
             );
             assert_eq!(error.operation(), Some("write_allv"));
-            assert_eq!(
-                error.path(),
-                Some(if remote_first {
-                    local.as_path()
-                } else {
-                    remote.as_path()
-                })
-            );
+            assert_eq!(error.path(), Some(failed_path.as_path()));
         }
     }
 
@@ -2536,7 +2539,9 @@ mod tests {
                 .unwrap(),
             crate::TraversalCompletion::Complete
         );
-        fs::remove_dir_all(&root).unwrap();
+        // Clean up through the client that traversed this directory instead
+        // of mixing its direct NFS view with kernel directory caches.
+        client.remove_dir_all(&root).unwrap();
         assert!(
             walk.is_err() && dir.is_err() && tree.is_err(),
             "walk={walk:?}; dir={dir:?}; tree={tree:?}"

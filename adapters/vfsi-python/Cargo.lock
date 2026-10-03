@@ -71,7 +71,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "shlex",
- "syn 3.0.6",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "libntirpc-sys"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "bindgen",
  "pkg-config",
@@ -433,7 +433,7 @@ dependencies = [
 
 [[package]]
 name = "nfsv41-sys"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "bindgen",
  "libntirpc-sys",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bitflags",
  "libc",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-local"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "libc",
  "vfsi-core",
@@ -884,7 +884,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-nfs"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "libc",
  "libntirpc-sys",
@@ -895,7 +895,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-python-native"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "pyo3",
@@ -908,7 +908,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-smb"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "futures-util",
  "libc",
@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-sync"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "libc",
  "vfsi-core",

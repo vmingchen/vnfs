@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "libntirpc-sys"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "bindgen",
  "pkg-config",
@@ -110,7 +110,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "nfs4fs-python"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "libc",
  "libntirpc-sys",
@@ -120,7 +120,7 @@ dependencies = [
 
 [[package]]
 name = "nfsv41-sys"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "bindgen",
  "libntirpc-sys",
@@ -295,7 +295,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "vfsi-core"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "bitflags",
  "libc",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-local"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "libc",
  "vfsi-core",
@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-nfs"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "libc",
  "libntirpc-sys",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-python-native"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "pyo3",
@@ -335,7 +335,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-sync"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "libc",
  "vfsi-core",

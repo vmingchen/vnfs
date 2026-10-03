@@ -5,6 +5,23 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## Coordinated patch release - 2026-10-02
+
+- Rust: vnfs 0.0.16, vfsi-core 0.1.4, vfsi-sync 0.1.5,
+  vfsi-local 0.1.4, vfsi-nfs 0.1.4, vfsi-smb 0.1.3,
+  nfsv41-sys 0.1.8, libntirpc-sys 0.2.7, and vfsi-c 0.3.2.
+- Python: nfs4fs 0.3.4, vfsi-fsspec 0.1.4, vsmb 0.1.1, and vsmbfs 0.1.1.
+- Added bounded pruning-aware traversal with selective metadata, shared Linux
+  mount discovery, and bounded C directory and whole-file adapters. Fixed
+  late thread-local NFS client cleanup while retaining compound byte checks.
+- Application ports now avoid eager subtree scans and unbounded object
+  prefetch. Overflow is never treated as a complete Git/rsync listing;
+  legacy rsync adapters use POSIX enumeration to preserve deletion safety.
+- Dependency floors advance together so published adapters resolve the new
+  high-level API rather than historical incompatible implementations.
+
+## Previous unreleased changes
+
 ### Changed
 
 - nfs4fs now requires an explicit `auth=` selection at construction. Use
