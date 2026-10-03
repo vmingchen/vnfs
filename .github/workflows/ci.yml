@@ -84,6 +84,12 @@ jobs:
             cargo doc -p vnfs -p vfsi-nfs --all-features --no-deps
           test -f target/doc/vnfs/struct.Nfs.html
           test -f target/doc/vnfs/struct.NfsClient.html
+          for module in nfs files directory error examples; do
+            test -f "target/doc/vnfs/$module/index.html"
+          done
+          for example in bulk_files open_handles stream_file directories; do
+            test -f "target/doc/vnfs/examples/$example/index.html"
+          done
           test -f target/doc/vfsi_nfs/nfs/struct.NfsVecFs.html
       - name: Run the repository Rust test suite
         run: ./scripts/test-rust.sh
@@ -644,8 +650,11 @@ jobs:
         env:
           VFSI_NFS_REQUIRED: 1
           VFSI_NFS_SERVER: 127.0.0.1:2049
+          VFSI_NFS_EXPORT: /
           VFSI_NFS_MINOR: ${{ matrix.minor-version }}
-        run: cargo test -p vnfs --test tree_builder_nfs -- --nocapture --test-threads=1
+        run: |
+          cargo test -p vnfs --test tree_builder_nfs -- --nocapture --test-threads=1
+          cargo test -p vnfs --test canonical_examples canonical_workflows_on_nfsv41_and_nfsv42 -- --ignored --nocapture --test-threads=1
       - name: Recover read-only work across an NFS server restart
         env:
           VNFS_TEST_MINOR: ${{ matrix.minor-version }}

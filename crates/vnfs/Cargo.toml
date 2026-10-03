@@ -46,3 +46,31 @@ required-features = ["dummy"]
 [[test]]
 name = "application_boundary"
 required-features = ["auto"]
+
+[[example]]
+name = "demo"
+required-features = ["nfs"]
+
+[[example]]
+name = "bulk_files"
+required-features = ["nfs"]
+
+[[example]]
+name = "open_handles"
+required-features = ["nfs"]
+
+[[example]]
+name = "stream_file"
+required-features = ["nfs"]
+
+[[example]]
+name = "directories"
+required-features = ["nfs"]
+
+[[example]]
+name = "small_files_benchmark"
+required-features = ["nfs"]
+
+[[example]]
+name = "large_file_read_benchmark"
+required-features = ["nfs"]

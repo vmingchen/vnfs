@@ -68,7 +68,10 @@ impl NfsClientPool {
 }
 
 /// Entry point for the Rust-native NFS API.
-#[doc = include_str!("api_boundary.md")]
+///
+/// Use [`Nfs::builder`] to configure a direct connection, or
+/// [`Nfs::from_mount`] to discover an existing Linux NFS-mounted directory.
+/// See [`crate::examples`] for complete application workflows.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Nfs;
 

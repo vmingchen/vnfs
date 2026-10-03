@@ -1,8 +1,85 @@
-//! Vectorized, synchronous NFSv4 for Rust applications.
-//!
-//! Start with `Nfs::connect` or `Nfs::builder`, then use scalar methods or
-//! vector calls such as `NfsClient::openv`, `NfsClient::read_files`, and
-//! `NfsClient::write_files`. Protocol internals live in [`backend`].
+#![cfg_attr(feature = "nfs", doc = include_str!("overview.md"))]
+#![cfg_attr(
+    not(feature = "nfs"),
+    doc = "Backend-independent filesystem traits and helpers. Enable the `nfs` feature (enabled by default) for the direct NFS client and canonical examples. See [`files`], [`directory`], [`error`], and [`helpers`]."
+)]
+
+/// Direct NFSv4 connections, authentication, tuning, and owned handles.
+/// Start with [`Nfs::builder`] for a server or [`Nfs::from_mount`] for an
+/// existing Linux NFS mount. Mount discovery still uses a direct connection,
+/// not the kernel client's cache.
+#[cfg(feature = "nfs")]
+pub mod nfs {
+    #[doc(inline)]
+    #[cfg(target_os = "linux")]
+    pub use crate::NfsMount;
+    #[cfg(feature = "rpcsec-gss")]
+    pub use crate::RpcsecGssProtection;
+    #[doc(inline)]
+    pub use crate::{
+        Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsClientPool, NfsDir, NfsEvent, NfsFile,
+        NfsObserver, NfsOpenOptions, NfsRead, NfsReadInto, NfsReadPool, NfsReadPoolOptions,
+        NfsRecoveryPolicy, NfsSetMetadata, NfsVersion, NfsWrite,
+    };
+}
+
+/// Linux-mounted paths and opt-in automatic direct NFS routing.
+/// [`Mounted`] always uses the kernel. [`Auto`] can use a separate direct NFS
+/// client; it does **not** provide cache coherence with kernel access.
+#[cfg(all(feature = "auto", target_os = "linux"))]
+pub mod mounted {
+    #[doc(inline)]
+    pub use crate::{
+        Auto, AutoClient, AutoDir, AutoFile, AutoOpenOptions, AutoRead, AutoReadInto, AutoRoute,
+        AutoSetMetadata, AutoWrite, Mounted, MountedDir, MountedFile, MountedOpenOptions,
+        MountedRead, MountedReadInto, MountedSetMetadata, MountedWrite,
+    };
+}
+
+/// Backend-independent file I/O, allocation budgets, and vector result types.
+pub mod files {
+    #[doc(inline)]
+    pub use crate::{
+        Capabilities, Client, FileHandle, OpenFlags, OpenRequest, ReadAllOptions, ReadIntoResult,
+        ReadResult, ReadStreamOptions, ResourceLimits, StreamCompletion, WriteResult,
+    };
+}
+
+/// Metadata, bounded directory listings, traversal, and removal policies.
+pub mod directory {
+    #[doc(inline)]
+    pub use crate::{
+        ControlFlow, DirEntry, DirectoryListing, FileType, Metadata, MetadataFields, Permissions,
+        ReadDirOptions, RemoveOptions, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
+        WalkOptions,
+    };
+}
+
+/// Error classification without losing protocol status or the failing input index.
+pub mod error {
+    #[doc(inline)]
+    pub use crate::{Error, ErrorDomain, ErrorKind, Result, StatusCode, TransportKind};
+}
+
+/// Canonical, runnable application examples. Each listing is compiled as a
+/// doctest and as a Cargo example; workflows are also tested on mounted files.
+/// None requires importing [`crate::backend`]. See the repository's
+/// `crates/vnfs/examples/README.md` for commands and benchmark programs.
+#[cfg(feature = "nfs")]
+pub mod examples {
+    /// Batch complete small files, with explicit fresh-directory ownership.
+    #[doc = concat!("```no_run\n", include_str!("../examples/bulk_files.rs"), "\n```")]
+    pub mod bulk_files {}
+    /// Read ranges into caller-owned buffers and explicitly close handles.
+    #[doc = concat!("```no_run\n", include_str!("../examples/open_handles.rs"), "\n```")]
+    pub mod open_handles {}
+    /// Process a large file with bounded memory rather than collecting it.
+    #[doc = concat!("```no_run\n", include_str!("../examples/stream_file.rs"), "\n```")]
+    pub mod stream_file {}
+    /// Batch directory metadata or visit a tree incrementally.
+    #[doc = concat!("```no_run\n", include_str!("../examples/directories.rs"), "\n```")]
+    pub mod directories {}
+}
 
 /// Application-facing result type for the Rust-native API.
 pub type Result<T> = vfsi_core::VfResult<T>;
@@ -12,6 +89,13 @@ pub type Error = vfsi_core::VfError;
 
 mod application;
 pub use application::{Client, FileHandle};
+
+// Keep negative API-contract doctests without presenting unsupported calls
+// as introductory documentation on the Nfs constructor.
+#[cfg(feature = "nfs")]
+#[doc(hidden)]
+#[doc = include_str!("api_boundary.md")]
+mod api_contract {}
 
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod facade;

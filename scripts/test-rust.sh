@@ -30,7 +30,7 @@ run cargo test -p nfsv41-sys
 run ./scripts/test-libntirpc.sh
 run cargo test -p vnfs --features test-faults --lib
 run cargo test -p vnfs --features "dummy test-faults" --test dummy_vecfs
-run cargo test -p vnfs --test public_api --test application_boundary --test tree_builder
+run cargo test -p vnfs --test public_api --test application_boundary --test tree_builder --test canonical_examples
 run cargo test -p vnfs --doc
 run cargo test -p vfsi-c --lib
 

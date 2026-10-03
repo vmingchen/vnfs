@@ -29,7 +29,7 @@ is required. Add the crate:
 
 ```toml
 [dependencies]
-vnfs = "0.0.15"
+vnfs = "0.0.16"
 ```
 
 On Ubuntu 24.04 or newer, install the native build dependencies once:
@@ -41,6 +41,14 @@ sudo apt-get install libkrb5-dev
 ```
 
 ## Rust-native example
+
+For complete, compiled workflows, see the
+[canonical examples](examples/README.md) and the
+[task-oriented API documentation](https://docs.rs/vnfs/latest/vnfs/).
+Start with `read_files`/`write_files` for small files, `openv`/`readv_into` for
+repeated positional I/O, or `read_stream_with_options` for large files.
+The API is grouped into `nfs`, `files`, `directory`, `error`, and `helpers`;
+common application types are also available at the crate root.
 
 Write two independent files, then read them back. The convenience methods
 batch each phase across both files:
