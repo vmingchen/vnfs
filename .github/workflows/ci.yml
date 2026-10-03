@@ -9,6 +9,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
 jobs:
   nfs-adversarial:
@@ -62,6 +63,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
       - run: cargo fmt --all --check
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          cache-workspace-crates: true
+          cache-directories: target/native-tests
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Check the detached Python native crate
         run: |
@@ -81,6 +86,15 @@ jobs:
           test -f target/doc/vfsi_nfs/nfs/struct.NfsVecFs.html
       - name: Run the repository Rust test suite
         run: ./scripts/test-rust.sh
+      - name: Report test command timings
+        if: always()
+        run: |
+          if test -f target/test-timings.tsv; then
+            echo '### Rust test command timings (seconds)' >> "$GITHUB_STEP_SUMMARY"
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            cat target/test-timings.tsv >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Verify every published Rust package from coordinated crate archives
         run: |
           package_list=$(mktemp)
@@ -158,9 +172,9 @@ jobs:
               cargo "${patches[@]}" build --locked --offline --manifest-path "$archive/Cargo.toml"
               cc -Wall -Wextra -Werror \
                 -I "$archive/include" "$archive/tests/smoke.c" \
-                -L "$archive/target/debug" -lvfsi_c \
+                -L "$CARGO_TARGET_DIR/debug" -lvfsi_c \
                 -o /tmp/vfsi-packaged-c-smoke
-              LD_LIBRARY_PATH="$archive/target/debug" \
+              LD_LIBRARY_PATH="$CARGO_TARGET_DIR/debug" \
                 /tmp/vfsi-packaged-c-smoke /tmp/vfsi-packaged-c-root
             fi
           done <"$package_list"
@@ -250,7 +264,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: python-${{ matrix.python-version }}
       - name: Build the current native extension before tests
+        # The matrix still builds/tests each Python ABI independently.
         run: |
           if test ! -x .venv/bin/python; then python -m venv .venv; fi
           .venv/bin/pip install --upgrade pip
@@ -282,6 +300,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: python-package
       - name: Build and inspect wheel and source distribution
         run: |
           python -m pip install --upgrade pip build maturin patchelf twine
@@ -420,6 +441,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # stable
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: security-audit-0.22.2-deny-0.20.2-cyclonedx-0.5.9
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
@@ -517,6 +541,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev cmake pkg-config iproute2 libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev nfs-ganesha nfs-ganesha-vfs
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: nfs-${{ matrix.minor-version }}
       - name: Start local NFSv4 server
         run: |
           sudo systemctl stop nfs-ganesha.service || true
@@ -767,6 +794,9 @@ jobs:
             libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev \
             krb5-admin-server krb5-kdc krb5-user \
             nfs-ganesha nfs-ganesha-vfs rpcbind
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: nfs-gss
       - name: Exercise supported RPCSEC_GSS levels against a private test realm
         run: ci/run-nfs-gss-integration.sh
 
@@ -783,6 +813,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: nfs-server-copy
       - name: Build patched NFS-Ganesha image
         run: docker build --tag vnfs-ganesha-copy:ci ci/nfs-ganesha
       - name: Start patched NFSv4.2 server
@@ -899,6 +932,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y clang libclang-dev cmake pkg-config libntirpc-dev libkrb5-dev libgssglue-dev liburcu-dev samba smbclient
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
+        with:
+          key: smb-${{ matrix.name }}
       - name: Start a loopback-only test share
         env:
           SMB_MIN_PROTOCOL: ${{ matrix.min_protocol }}

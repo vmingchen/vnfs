@@ -9,7 +9,9 @@ usage() {
   cat <<'HELP'
 Usage: scripts/test-ci-local.sh [--managed-nfs] [--managed-smb] JOB [JOB ...]
 
-Jobs: rust, python, nfs, smb, quick (rust + python), all (all four)
+Jobs: fast, check, rust, python, nfs, smb, quick (rust + python), all/full
+fast: server-independent Rust tests; check: formatting and Clippy.
+rust: check + fast. all/full: rust + python + nfs + smb.
 
 The managed server flags are opt-in. Without them, nfs needs a server at
 VFSI_NFS_SERVER (default 127.0.0.1), and smb needs VFSI_SMB_SERVER and
@@ -36,9 +38,9 @@ while (($#)); do
     --managed-nfs) managed_nfs=1 ;;
     --managed-smb) managed_smb=1 ;;
     -h|--help) usage; exit 0 ;;
-    rust|python|nfs|smb) jobs+=("$1") ;;
+    fast|check|rust|python|nfs|smb) jobs+=("$1") ;;
     quick) jobs+=(rust python) ;;
-    all) jobs+=(rust python nfs smb) ;;
+    all|full) jobs+=(rust python nfs smb) ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
   shift
@@ -50,6 +52,11 @@ fi
 
 declare -A selected=()
 for job in "${jobs[@]}"; do selected["$job"]=1; done
+if [[ -v selected[rust] ]]; then
+  selected[check]=1
+  selected[fast]=1
+fi
+export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$repo_root/target}
 if ((managed_nfs)) && [[ ! -v selected[nfs] ]]; then
   echo '--managed-nfs requires the nfs job' >&2
   exit 2
@@ -236,13 +243,18 @@ prepare_smb_python() {
   "$python_bin" -m pip install --no-deps -e adapters/vfsi-fsspec -q
 }
 
-run_rust() {
+run_check() {
   cargo fmt --all --check
   cargo clippy --workspace --all-targets --all-features -- -D warnings
   cargo fmt --manifest-path adapters/vfsi-python/Cargo.toml --check
   cargo clippy --manifest-path adapters/vfsi-python/Cargo.toml --all-features --all-targets -- -D warnings
-  ./scripts/test-rust.sh
+  cargo fmt --manifest-path adapters/nfs4fs/Cargo.toml --check
+  cargo clippy --manifest-path adapters/nfs4fs/Cargo.toml --locked --all-targets -- -D warnings
+  cargo fmt --manifest-path adapters/vsmb/Cargo.toml --check
+  cargo clippy --manifest-path adapters/vsmb/Cargo.toml --locked --all-targets -- -D warnings
 }
+
+run_fast() { ./scripts/test-rust.sh; }
 
 run_python() {
   prepare_python
@@ -288,9 +300,11 @@ run_smb() {
   "$python_bin" -m pytest adapters/vsmb/tests adapters/vsmbfs/tests
 }
 
-for job in rust python nfs smb; do
+for job in check fast python nfs smb; do
   if [[ -v selected[$job] ]]; then
     echo "==> Running local CI job: $job"
+    started=$SECONDS
     "run_$job"
+    echo "==> $job completed in $((SECONDS - started)) seconds"
   fi
 done
