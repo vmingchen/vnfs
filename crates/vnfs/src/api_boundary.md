@@ -52,7 +52,7 @@ fn conversion(attrs: vnfs::backend::VfAttrs) -> vnfs::Metadata { attrs.into() }
 fn conversion(result: vnfs::backend::ReadResult) -> vnfs::ReadResult { result.into() }
 ```
 
-```compile_fail,E0277
+```compile_fail,E0308
 fn coercion(file: &vnfs::NfsFile) -> &vnfs::backend::FsFile<vnfs::backend::NfsVecFs> { file }
 ```
 
