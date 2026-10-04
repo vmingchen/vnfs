@@ -654,6 +654,7 @@ jobs:
           VFSI_NFS_MINOR: ${{ matrix.minor-version }}
         run: |
           cargo test -p vnfs --test tree_builder_nfs -- --nocapture --test-threads=1
+          cargo test -p vnfs --test transfer_helpers_nfs -- --nocapture --test-threads=1
           cargo test -p vnfs --test canonical_examples canonical_workflows_on_nfsv41_and_nfsv42 -- --ignored --nocapture --test-threads=1
       - name: Recover read-only work across an NFS server restart
         env:

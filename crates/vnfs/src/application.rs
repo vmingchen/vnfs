@@ -56,6 +56,9 @@ macro_rules! file_methods {
         fn sync_all(&self) -> Result<()> {
             <$file>::sync_all(self)
         }
+        fn set_permissions(&self, permissions: crate::Permissions) -> Result<()> {
+            <$file>::set_permissions(self, permissions)
+        }
         fn try_close(&mut self) -> Result<()> {
             <$file>::try_close(self)
         }

@@ -55,3 +55,63 @@ VFSI_NFS_SERVER=127.0.0.1:2049 VFSI_NFS_REQUIRED=1 \
 
 Set `VFSI_NFS_MINOR=1` or `2` to test just one minor version. CI exercises both
 in its existing NFS integration matrix.
+
+## Copy, move, and tree statistics
+
+```rust,no_run
+use vnfs::{Nfs, VisitOptions, helpers::{copy_items, tree_stats, CopyOptions}};
+
+let fs = Nfs::connect("server.example.com")?;
+let result = copy_items(&fs, &["/input/images", "/input/config"], "/output",
+    CopyOptions::new().batch_size(64).chunk_bytes(1024 * 1024))?;
+println!("copied {} files", result.files_copied);
+let stats = tree_stats(&fs, "/output", VisitOptions::new())?;
+println!("{} files, {} logical bytes", stats.files, stats.file_bytes);
+# Ok::<(), vnfs::Error>(())
+```
+
+`copy_items` accepts mixed file/directory roots and defaults to placing their
+basenames under the destination directory. `CopyLayout::Contents` places each
+directory's children directly there; regular files still keep their basenames.
+`copy_tree` maps one directory to an exact destination root. Destination parents
+must exist. Directory pages are consumed lazily, with bounded OPEN/READ/WRITE/
+CLOSE vectors. Read storage is bounded by the client's `max_read_bytes`, chunks
+and batch size; entry/path/depth limits bound traversal. There is no eager size
+prewalk. Relative paths start at the client's root, not the process's working
+directory; `..`, lexical overlaps and duplicate container destinations are rejected.
+
+Files default to exclusive creation (`Existing::Error`). `Existing::Skip` retains
+existing files; its destination reservations are necessarily scalar because a
+failed strict vector OPEN cannot identify which files it created. `Existing::Replace`
+unlinks existing regular files before exclusive creation, protecting unrelated
+hard links from truncation. It selects native vector COPY when neither progress
+nor permission preservation is requested. Native COPY has no portable byte-count
+result, so `bytes_copied` is `None`, not an estimate. Links and special objects
+are rejected unless explicitly skipped. New files initially use mode 0600;
+`preserve_permissions(true)` applies source file permission bits after completion
+and fails if the backend cannot supply/apply them. It does not preserve directory
+modes, ownership, timestamps, ACLs, sparse layout or hard-link topology.
+
+`copy_items_with_progress` and `copy_tree_with_progress` accept a synchronous,
+fallible callback returning `ControlFlow`. Byte progress counts accepted writes,
+not durability; directory events have zero file sizes/bytes. Stop takes effect
+after the current vector wave, so sibling writes may already have completed.
+Descriptor copies stop at the initially observed file size; growth is ignored.
+
+`move_items` and its progress variant delete a root only after copying and
+explicit CLOSE succeed, without skips or cancellation. `Container + Replace`
+without progress or depth overrides can rename an absent destination; only an
+explicit cross-device error enables copy/delete fallback. Other modes copy
+first, preserving exclusive conflict checks. Failure, cancellation, or skipped
+entries retains the source (which can leave two copies). No ambiguous write or
+rename is replayed by these helpers.
+
+These are nontransactional workflows over **trusted, stable namespaces**. They
+do not sandbox ancestor symlinks or concurrent namespace changes, snapshot files,
+rollback output, or guarantee durability. Replacement failures can leave missing
+or partial destinations. Use quiescent source trees, particularly for moves.
+
+`tree_stats` folds recursive directory pages without materializing the tree or
+issuing per-child stats. It reports logical bytes, counts hard links per name,
+does not follow symlinks, and includes the root directory. VisitOptions controls
+its depth/entry/path budgets; explicitly truncated depth reports only that portion.
