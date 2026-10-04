@@ -15,10 +15,10 @@ pub mod path {
 
 mod traits;
 pub use traits::{
-    DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
+    BackendDirectoryPage, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
     DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
-    DEFAULT_WALK_MAX_DEPTH, DirPageCursor, ReadAllOptions, ReadDirOptions, ReadStreamOptions,
-    VecFs, VecFsExt, WalkOptions, rm_recursive,
+    DEFAULT_WALK_MAX_DEPTH, DirPageCursor, DirectoryPage, ReadAllOptions, ReadDirOptions,
+    ReadStreamOptions, VecFs, VecFsExt, WalkOptions, rm_recursive,
 };
 mod io;
 pub use io::{VfFileHandle, VfOpenOptions};

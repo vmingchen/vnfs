@@ -859,6 +859,85 @@ impl<F: VecFs> FsClient<F> {
             callback,
         )
     }
+    /// Maximum safe cohort size for incremental directory paging.
+    pub fn directory_page_batch_size(&self) -> VfResult<usize> {
+        Ok(self.lock()?.directory_page_batch_size().clamp(1, 32))
+    }
+    /// Fetch a bounded vector of directory pages, retaining backend cursors.
+    pub fn read_dir_pages_with_fields(
+        &self,
+        paths: &[&Path],
+        fields: AttrMask,
+        cursors: Vec<Option<crate::DirPageCursor>>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<Vec<crate::DirectoryPage>> {
+        let pages = self.lock()?.listdir_pages(
+            paths,
+            fields | AttrMask::MODE | AttrMask::SIZE,
+            cursors,
+            page_size,
+            max_entries,
+        )?;
+        if pages.len() != paths.len() {
+            return Err(VfError::transport(
+                None,
+                "directory pages returned an invalid result count",
+            ));
+        }
+        pages
+            .into_iter()
+            .zip(paths)
+            .enumerate()
+            .map(|(index, ((attrs, next, children), path))| {
+                if children.len() != attrs.len()
+                    || attrs.len() > page_size
+                    || (attrs.is_empty() && next.is_some())
+                {
+                    return Err(VfError::transport(
+                        Some(index),
+                        "invalid directory page progress",
+                    ));
+                }
+                let mut seeds = Vec::new();
+                let entries = attrs
+                    .into_iter()
+                    .zip(children)
+                    .map(|(attrs, child)| {
+                        let entry_path = attrs
+                            .file
+                            .path()
+                            .ok_or_else(|| {
+                                VfError::transport(Some(index), "directory entry has no path")
+                            })?
+                            .to_path_buf();
+                        if entry_path.parent() != Some(*path) {
+                            return Err(VfError::transport(
+                                Some(index),
+                                "directory entry is outside its parent",
+                            ));
+                        }
+                        if let Some(child) = child {
+                            seeds.push((entry_path.clone(), child));
+                        }
+                        Ok(DirEntry::new(
+                            entry_path,
+                            vfsi_core::metadata_from_attrs(attrs),
+                        ))
+                    })
+                    .collect::<VfResult<Vec<_>>>()?;
+                Ok((
+                    DirectoryListing {
+                        path: path.to_path_buf(),
+                        entries,
+                    },
+                    next,
+                    seeds,
+                ))
+            })
+            .collect()
+    }
+
     /// List several directories with common stat attributes and finite
     /// allocation limits. Use `read_dirs_with_options` for richer fields.
     pub fn read_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<DirectoryListing>> {

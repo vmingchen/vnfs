@@ -14,8 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::{
     DirEntry, Error as VfError, Mounted, Nfs, OpenFlags, OpenRequest,
-    OwnedReadResult as ReadResult, ReadDirOptions, ReadIntoResult, ResourceLimits,
-    Result as VfResult, WriteResult,
+    OwnedReadResult as ReadResult, ReadIntoResult, ResourceLimits, Result as VfResult, WriteResult,
 };
 use vfsi_local::DummyVecFs;
 use vfsi_sync::{FsClient, FsFile};
@@ -155,30 +154,19 @@ impl Route {
     }
 }
 
+struct RoutedDirectoryCursor {
+    route: Route,
+    backend_path: PathBuf,
+    public_path: PathBuf,
+    owner: Arc<()>,
+    cursor: vfsi_sync::DirPageCursor,
+}
+
+struct RoutedChildDirectoryCursor(RoutedDirectoryCursor);
+
 struct Resolved {
     route: Route,
     path: PathBuf,
-}
-
-/// Account for paths in the public namespace before allocating/handing off
-/// remapped entries. Backend-relative accounting alone omits mount prefixes.
-struct PathByteBudget {
-    used: usize,
-    limit: usize,
-}
-
-impl PathByteBudget {
-    fn new(limit: usize) -> Self {
-        Self { used: 0, limit }
-    }
-    fn charge(&mut self, path: &Path, operation: &'static str) -> VfResult<()> {
-        self.used = self
-            .used
-            .checked_add(path.as_os_str().len())
-            .filter(|bytes| *bytes <= self.limit)
-            .ok_or_else(|| VfError::client(0, libc::EFBIG as u32).with_context(operation, path))?;
-        Ok(())
-    }
 }
 
 /// Mount-aware client with lazily established per-mount NFS connections.
@@ -203,21 +191,8 @@ impl crate::application::NativeHooks for AutoClient {
     fn open_native(&self, request: OpenRequest) -> VfResult<Self::File> {
         self.open_native_impl(request)
     }
-    fn list_native<P: AsRef<Path>>(
-        &self,
-        paths: &[P],
-        fields: crate::MetadataFields,
-        options: ReadDirOptions,
-    ) -> VfResult<Vec<crate::DirectoryListing>> {
-        self.list_native_impl(paths, fields, options)
-    }
-    fn walk_native(
-        &self,
-        root: impl AsRef<Path>,
-        fields: crate::MetadataFields,
-        options: crate::WalkOptions,
-    ) -> VfResult<Vec<crate::DirectoryListing>> {
-        self.walk_native_impl(root, fields, options)
+    fn page_capacity(&self, paths: &[&Path]) -> VfResult<usize> {
+        self.directory_page_batch_size(paths)
     }
     fn stream_native(
         &self,
@@ -493,73 +468,168 @@ impl AutoClient {
         Ok(())
     }
 
-    pub(crate) fn list_native_impl<P: AsRef<Path>>(
-        &self,
-        paths: &[P],
-        fields: crate::MetadataFields,
-        options: ReadDirOptions,
-    ) -> VfResult<Vec<crate::DirectoryListing>> {
+    pub(crate) fn directory_page_batch_size(&self, paths: &[&Path]) -> VfResult<usize> {
+        if paths.is_empty() {
+            return Ok(1);
+        }
         let mounts = read_mounts(false);
-        let resolved: Vec<_> = paths
+        let routes: Vec<_> = paths
             .iter()
-            .map(|path| self.resolve(path.as_ref(), &mounts))
+            .map(|path| self.resolve(path, &mounts))
             .collect();
-        let mut output = Vec::with_capacity(paths.len());
-        let mut entries = 0usize;
-        let mut bytes = 0usize;
+        match &routes[0].route {
+            Route::Mounted => Ok(1),
+            Route::Nfs(connection) => {
+                Ok(cohort_end(&routes, 0).min(connection.client.directory_page_batch_size()?))
+            }
+        }
+    }
+    pub(crate) fn read_dir_pages_with_fields(
+        &self,
+        paths: &[&Path],
+        fields: crate::MetadataFields,
+        cursors: Vec<Option<vfsi_sync::DirPageCursor>>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<Vec<vfsi_sync::DirectoryPage>> {
+        if paths.len() != cursors.len() {
+            return Err(VfError::client(0, libc::EINVAL as u32));
+        }
+        let mounts = if cursors.iter().any(|cursor| {
+            cursor
+                .as_ref()
+                .is_none_or(|cursor| cursor.is::<RoutedChildDirectoryCursor>())
+        }) {
+            read_mounts(false)
+        } else {
+            MountTable::default()
+        };
+        let mut states = Vec::new();
+        for (index, (path, cursor)) in paths.iter().zip(cursors).enumerate() {
+            let state = match cursor {
+                Some(cursor) => {
+                    let child = cursor.is::<RoutedChildDirectoryCursor>();
+                    let saved = if child {
+                        cursor
+                            .into_state::<RoutedChildDirectoryCursor>()
+                            .map_err(|error| indexed(error, index))?
+                            .0
+                    } else {
+                        cursor
+                            .into_state::<RoutedDirectoryCursor>()
+                            .map_err(|error| indexed(error, index))?
+                    };
+                    if !Arc::ptr_eq(&saved.owner, &self.owner) || saved.public_path != *path {
+                        return Err(VfError::client(index, libc::EINVAL as u32));
+                    }
+                    if child {
+                        // Recheck the mount/identity before descent, but retain
+                        // anchored lookup when the child still uses this backend.
+                        let resolved = self.resolve(path, &mounts);
+                        if saved.route.same_backend(&resolved.route)
+                            && saved.backend_path == resolved.path
+                        {
+                            (saved.route, saved.backend_path, Some(saved.cursor))
+                        } else {
+                            (resolved.route, resolved.path, None)
+                        }
+                    } else {
+                        (saved.route, saved.backend_path, Some(saved.cursor))
+                    }
+                }
+                None => {
+                    let resolved = self.resolve(path, &mounts);
+                    (resolved.route, resolved.path, None)
+                }
+            };
+            states.push(state);
+        }
+        let mut output = Vec::new();
         let mut start = 0;
-        while start < paths.len() {
-            let end = cohort_end(&resolved, start);
-            let batch: Vec<_> = resolved[start..end]
-                .iter()
-                .map(|route| route.path.as_path())
+        while start < states.len() {
+            let mut end = start + 1;
+            if matches!(states[start].0, Route::Nfs(_)) {
+                while end < states.len() && states[start].0.same_backend(&states[end].0) {
+                    end += 1;
+                }
+            }
+            let cursors = states[start..end]
+                .iter_mut()
+                .map(|state| state.2.take())
                 .collect();
-            let remaining = ReadDirOptions::new()
-                .max_entries(options.entry_limit().saturating_sub(entries))
-                .max_path_bytes(options.path_byte_limit().saturating_sub(bytes));
-            let mut listings = match &resolved[start].route {
-                Route::Mounted => self
-                    .mounted
-                    .read_dirs_with_options(&batch, fields, remaining),
-                Route::Nfs(connection) => connection
-                    .client
-                    .read_dirs_with_options(&batch, fields, remaining),
+            let batch: Vec<_> = states[start..end]
+                .iter()
+                .map(|state| state.1.as_path())
+                .collect();
+            let pages = match &states[start].0 {
+                Route::Mounted => self.mounted.read_dir_pages_with_fields(
+                    &batch,
+                    fields,
+                    cursors,
+                    page_size,
+                    max_entries,
+                ),
+                Route::Nfs(connection) => connection.client.read_dir_pages_with_fields(
+                    &batch,
+                    fields,
+                    cursors,
+                    page_size,
+                    max_entries,
+                ),
             }
             .map_err(|error| indexed(error, start))?;
-            for (relative_index, listing) in listings.iter_mut().enumerate() {
-                listing.path = paths[start + relative_index].as_ref().to_path_buf();
-                for entry in &mut listing.entries {
-                    if let Route::Nfs(connection) = &resolved[start].route {
+            if pages.len() != end - start {
+                return Err(VfError::transport(
+                    Some(start),
+                    "invalid routed directory page count",
+                ));
+            }
+            for (relative, (mut listing, next, children)) in pages.into_iter().enumerate() {
+                let index = start + relative;
+                listing.path = paths[index].to_path_buf();
+                if let Route::Nfs(connection) = &states[index].0 {
+                    for entry in &mut listing.entries {
                         *entry = DirEntry::new(
                             self.public_path(connection, entry.path())?,
                             entry.metadata().clone(),
                         );
                     }
-                    entries = entries.checked_add(1).ok_or_else(|| {
-                        VfError::client(start + relative_index, libc::EFBIG as u32)
-                    })?;
-                    bytes = bytes
-                        .checked_add(entry.path().as_os_str().len())
-                        .ok_or_else(|| {
-                            VfError::client(start + relative_index, libc::EFBIG as u32)
-                        })?;
-                    if entries > options.entry_limit() || bytes > options.path_byte_limit() {
-                        return Err(VfError::client(start + relative_index, libc::EFBIG as u32));
-                    }
                 }
+                let next = next.map(|cursor| {
+                    vfsi_sync::DirPageCursor::new(RoutedDirectoryCursor {
+                        route: states[index].0.clone(),
+                        backend_path: states[index].1.clone(),
+                        public_path: paths[index].to_path_buf(),
+                        owner: self.owner.clone(),
+                        cursor,
+                    })
+                });
+                let children = children
+                    .into_iter()
+                    .map(|(backend_path, cursor)| {
+                        let public_path = match &states[index].0 {
+                            Route::Mounted => backend_path.clone(),
+                            Route::Nfs(connection) => {
+                                self.public_path(connection, &backend_path)?
+                            }
+                        };
+                        let seed = vfsi_sync::DirPageCursor::new(RoutedChildDirectoryCursor(
+                            RoutedDirectoryCursor {
+                                route: states[index].0.clone(),
+                                backend_path,
+                                public_path: public_path.clone(),
+                                owner: self.owner.clone(),
+                                cursor,
+                            },
+                        ));
+                        Ok((public_path, seed))
+                    })
+                    .collect::<VfResult<Vec<_>>>()?;
+                output.push((listing, next, children));
             }
-            output.extend(listings);
             start = end;
         }
         Ok(output)
-    }
-
-    pub fn capabilities_for(&self, path: impl AsRef<Path>) -> VfResult<crate::Capabilities> {
-        let route = self.resolve(path.as_ref(), &read_mounts(false));
-        match route.route {
-            Route::Mounted => self.mounted.capabilities(),
-            Route::Nfs(connection) => connection.client.capabilities(),
-        }
     }
 
     pub(crate) fn read_files_native<P: AsRef<Path>>(
@@ -631,93 +701,6 @@ impl AutoClient {
             .strip_prefix(&self.root)
             .map_err(|_| VfError::client(0, libc::EIO as u32))?;
         Ok(Path::new("/").join(relative))
-    }
-
-    pub(crate) fn visit_dir_with_fields(
-        &self,
-        path: impl AsRef<Path>,
-        fields: crate::MetadataFields,
-        options: ReadDirOptions,
-        mut callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
-    ) -> VfResult<crate::TraversalCompletion> {
-        let route = self.resolve(path.as_ref(), &read_mounts(false));
-        match route.route {
-            Route::Mounted => {
-                self.mounted
-                    .visit_dir_with_fields(&route.path, fields, options, callback)
-            }
-            Route::Nfs(connection) => {
-                let mut budget = PathByteBudget::new(options.path_byte_limit());
-                connection
-                    .client
-                    .visit_dir_with_fields(&route.path, fields, options, |entry| {
-                        let public = self.public_path(&connection, entry.path())?;
-                        budget.charge(&public, "visit_dir")?;
-                        callback(DirEntry::new(public, entry.metadata().clone()))
-                    })
-            }
-        }
-    }
-
-    pub(crate) fn visit_walk_with_fields(
-        &self,
-        path: impl AsRef<Path>,
-        fields: crate::MetadataFields,
-        options: crate::WalkOptions,
-        mut callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
-    ) -> VfResult<crate::TraversalCompletion> {
-        let route = self.resolve_tree(path.as_ref());
-        match route.route {
-            Route::Mounted => {
-                self.mounted
-                    .visit_walk_with_fields(&route.path, fields, options, callback)
-            }
-            Route::Nfs(connection) => {
-                let mut budget = PathByteBudget::new(options.path_byte_limit());
-                budget.charge(&self.public_path(&connection, &route.path)?, "visit_walk")?;
-                connection
-                    .client
-                    .visit_walk_with_fields(&route.path, fields, options, |entry| {
-                        let public = self.public_path(&connection, entry.path())?;
-                        budget.charge(&public, "visit_walk")?;
-                        callback(&DirEntry::new(public, entry.metadata().clone()))
-                    })
-            }
-        }
-    }
-
-    pub(crate) fn walk_native_impl(
-        &self,
-        path: impl AsRef<Path>,
-        fields: crate::MetadataFields,
-        options: crate::WalkOptions,
-    ) -> VfResult<Vec<crate::DirectoryListing>> {
-        let route = self.resolve_tree(path.as_ref());
-        let mut budget = PathByteBudget::new(options.path_byte_limit());
-        match route.route {
-            Route::Mounted => self.mounted.walk_with_options(&route.path, fields, options),
-            Route::Nfs(connection) => connection
-                .client
-                .walk_with_options(&route.path, fields, options)?
-                .into_iter()
-                .map(|listing| {
-                    let public = self.public_path(&connection, &listing.path)?;
-                    budget.charge(&public, "walk")?;
-                    Ok(crate::DirectoryListing {
-                        path: public,
-                        entries: listing
-                            .entries
-                            .into_iter()
-                            .map(|entry| {
-                                let public = self.public_path(&connection, entry.path())?;
-                                budget.charge(&public, "walk")?;
-                                Ok(DirEntry::new(public, entry.metadata().clone()))
-                            })
-                            .collect::<VfResult<_>>()?,
-                    })
-                })
-                .collect(),
-        }
     }
 
     /// Recursive operations retain kernel routing if another mount appears
@@ -1880,19 +1863,194 @@ mod tests {
     }
 
     #[test]
-    fn public_path_budget_checks_exact_bounds_and_overflow_before_delivery() {
-        let mut budget = PathByteBudget::new(6);
-        budget.charge(Path::new("/a"), "visit_dir").unwrap();
-        budget.charge(Path::new("/bbb"), "visit_dir").unwrap();
-        let error = budget.charge(Path::new("/c"), "visit_dir").unwrap_err();
+    fn child_seeds_recheck_routing_and_keep_owner_validation() {
+        use crate::{FsExt, MetadataFields};
+        let root = tempfile::tempdir().unwrap();
+        let client = Auto::new(root.path()).unwrap();
+        client.create_dir("/dir").unwrap();
+        client.write("/dir/a", b"x").unwrap();
+        client.write("/dir/b", b"x").unwrap();
+        for reroute in [false, true] {
+            let (first, next, _) = client
+                .read_dir_pages_with_fields(
+                    &[Path::new("/dir")],
+                    MetadataFields::MODE,
+                    vec![None],
+                    1,
+                    10,
+                )
+                .unwrap()
+                .remove(0);
+            let mut saved = next.unwrap().into_state::<RoutedDirectoryCursor>().unwrap();
+            if reroute {
+                saved.backend_path = "/obsolete".into();
+            }
+            let seed = vfsi_sync::DirPageCursor::new(RoutedChildDirectoryCursor(saved));
+            let (page, _, _) = client
+                .read_dir_pages_with_fields(
+                    &[Path::new("/dir")],
+                    MetadataFields::MODE,
+                    vec![Some(seed)],
+                    1,
+                    10,
+                )
+                .unwrap()
+                .remove(0);
+            assert_eq!(page.entries.len(), 1);
+            if reroute {
+                assert_eq!(
+                    page.entries, first.entries,
+                    "changed routing must start a fresh page"
+                );
+            } else {
+                assert_ne!(
+                    page.entries, first.entries,
+                    "unchanged routing must preserve the cursor"
+                );
+            }
+        }
+        let (_, next, _) = client
+            .read_dir_pages_with_fields(
+                &[Path::new("/dir")],
+                MetadataFields::MODE,
+                vec![None],
+                1,
+                10,
+            )
+            .unwrap()
+            .remove(0);
+        let saved = next.unwrap().into_state::<RoutedDirectoryCursor>().unwrap();
+        let seed = vfsi_sync::DirPageCursor::new(RoutedChildDirectoryCursor(saved));
+        let other = Auto::new(root.path()).unwrap();
+        assert_eq!(
+            other
+                .read_dir_pages_with_fields(
+                    &[Path::new("/dir")],
+                    MetadataFields::MODE,
+                    vec![Some(seed)],
+                    1,
+                    10
+                )
+                .err()
+                .unwrap()
+                .err_no(),
+            libc::EINVAL as u32
+        );
+    }
+
+    #[test]
+    fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
+        use crate::{FsExt, MetadataFields, VisitOptions};
+        let root = tempfile::tempdir().unwrap();
+        let client = Auto::new(root.path()).unwrap();
+        client.create_dir("/dir").unwrap();
+        client.create_dir("/other").unwrap();
+        client.write("/dir/a", b"x").unwrap();
+        client.write("/dir/b", b"x").unwrap();
+        assert_eq!(
+            client
+                .read_dirs_with_options(&["/dir"], VisitOptions::new().max_path_bytes(12))
+                .unwrap()[0][0]
+                .entries
+                .len(),
+            2
+        );
+        let error = client
+            .read_dirs_with_options(&["/dir"], VisitOptions::new().max_path_bytes(11))
+            .unwrap_err();
         assert_eq!(error.kind(), crate::ErrorKind::FileTooLarge);
-        assert_eq!(error.operation(), Some("visit_dir"));
-        assert_eq!(error.path(), Some(Path::new("/c")));
-        let mut budget = PathByteBudget {
-            used: usize::MAX,
-            limit: usize::MAX,
-        };
-        assert!(budget.charge(Path::new("/a"), "walk").is_err());
+        assert_eq!(error.index(), Some(0));
+        let cursor = client
+            .read_dir_pages_with_fields(
+                &[Path::new("/dir")],
+                MetadataFields::MODE,
+                vec![None],
+                1,
+                10,
+            )
+            .unwrap()
+            .remove(0)
+            .1
+            .unwrap();
+        let other = Auto::new(root.path()).unwrap();
+        assert_eq!(
+            other
+                .read_dir_pages_with_fields(
+                    &[Path::new("/dir")],
+                    MetadataFields::MODE,
+                    vec![Some(cursor)],
+                    1,
+                    10,
+                )
+                .err()
+                .unwrap()
+                .err_no(),
+            libc::EINVAL as u32
+        );
+        let cursor = client
+            .read_dir_pages_with_fields(
+                &[Path::new("/dir")],
+                MetadataFields::MODE,
+                vec![None],
+                1,
+                10,
+            )
+            .unwrap()
+            .remove(0)
+            .1
+            .unwrap();
+        assert_eq!(
+            client
+                .read_dir_pages_with_fields(
+                    &[Path::new("/other")],
+                    MetadataFields::MODE,
+                    vec![Some(cursor)],
+                    1,
+                    10,
+                )
+                .err()
+                .unwrap()
+                .err_no(),
+            libc::EINVAL as u32
+        );
+        let cursor = client
+            .read_dir_pages_with_fields(
+                &[Path::new("/dir")],
+                MetadataFields::MODE,
+                vec![None],
+                1,
+                10,
+            )
+            .unwrap()
+            .remove(0)
+            .1
+            .unwrap();
+        let (page, next, _) = client
+            .read_dir_pages_with_fields(
+                &[Path::new("/dir")],
+                MetadataFields::MODE,
+                vec![Some(cursor)],
+                1,
+                10,
+            )
+            .unwrap()
+            .remove(0);
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].path().parent(), Some(Path::new("/dir")));
+        if let Some(cursor) = next {
+            let (page, next, _) = client
+                .read_dir_pages_with_fields(
+                    &[Path::new("/dir")],
+                    MetadataFields::MODE,
+                    vec![Some(cursor)],
+                    1,
+                    10,
+                )
+                .unwrap()
+                .remove(0);
+            assert!(page.entries.is_empty());
+            assert!(next.is_none());
+        }
     }
 
     #[test]

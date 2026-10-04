@@ -3424,11 +3424,11 @@ impl NfsClient {
         c.readdir(cookie, &zeroverf, dircount, maxcount, attrs);
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
-        Ok(Self::collect_readdir(res.readdir(2)).0)
+        Ok(Self::collect_readdir(res.readdir(2))?.0)
     }
 
     /// Extract the entries and the next cookie from a decoded READDIR reply.
-    fn collect_readdir(ok: &READDIR4resok) -> (Vec<DirEntry>, u64) {
+    fn collect_readdir(ok: &READDIR4resok) -> RpcResult<(Vec<DirEntry>, u64)> {
         let mut out = Vec::new();
         let mut cookie = 0u64;
         let mut e = ok.reply.entries;
@@ -3465,7 +3465,14 @@ impl NfsClient {
             cookie = ent.cookie;
             e = ent.nextentry;
         }
-        (out, cookie)
+        // EOF is authoritative even when this final page contains entries.
+        // Zero is the internal "finished" marker, not a request to restart.
+        if ok.reply.eof == 0 && cookie == 0 {
+            return Err(RpcError::transport(
+                "READDIR page has no continuation progress",
+            ));
+        }
+        Ok((out, if ok.reply.eof != 0 { 0 } else { cookie }))
     }
 
     /// For each `(parent, child_name)` pair, LOOKUP the child, GETFH its
@@ -3476,6 +3483,15 @@ impl NfsClient {
         &mut self,
         ops: &[(FileHandle, Vec<u8>)],
         attrs: &[u32],
+    ) -> RpcResult<Vec<ChildListing>> {
+        self.readdir_children_bounded(ops, attrs, usize::MAX)
+    }
+
+    pub(crate) fn readdir_children_bounded(
+        &mut self,
+        ops: &[(FileHandle, Vec<u8>)],
+        attrs: &[u32],
+        max_page_bytes: usize,
     ) -> RpcResult<Vec<ChildListing>> {
         if ops.is_empty() {
             return Ok(Vec::new());
@@ -3488,6 +3504,8 @@ impl NfsClient {
                 .batch_capacity(4)?;
             let chunk = &ops[out.len()..(out.len() + per_chunk).min(ops.len())];
             let (dircount, maxcount) = self.readdir_limits(chunk.len());
+            let maxcount = maxcount.min(max_page_bytes.max(4096).min(u32::MAX as usize) as u32);
+            let dircount = dircount.min(maxcount / 4).max(1);
             let map = |op_index: usize| {
                 let local = op_index.saturating_sub(1) / 4;
                 chunk.len().saturating_sub(1).min(local)
@@ -3522,7 +3540,7 @@ impl NfsClient {
             })?;
             for (i, _) in chunk.iter().enumerate() {
                 let fh = res.getfh(3 + 4 * i);
-                let (entries, cookie) = Self::collect_readdir(res.readdir(4 + 4 * i));
+                let (entries, cookie) = Self::collect_readdir(res.readdir(4 + 4 * i))?;
                 out.push(ChildListing {
                     fh: FileHandle::from_nfs_fh(fh),
                     entries,
@@ -3541,6 +3559,16 @@ impl NfsClient {
         ops: &[(FileHandle, u64)],
         attrs: &[u32],
     ) -> RpcResult<Vec<(Vec<DirEntry>, u64)>> {
+        self.readdir_pages_bounded(ops, attrs, usize::MAX)
+    }
+
+    /// One bounded wire page per directory; negotiated response limits still apply.
+    pub(crate) fn readdir_pages_bounded(
+        &mut self,
+        ops: &[(FileHandle, u64)],
+        attrs: &[u32],
+        max_page_bytes: usize,
+    ) -> RpcResult<Vec<(Vec<DirEntry>, u64)>> {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
@@ -3550,6 +3578,8 @@ impl NfsClient {
             let per_chunk = self.op_budget_for(b"readdir_pages", 3).batch_capacity(2)?;
             let chunk = &ops[out.len()..(out.len() + per_chunk).min(ops.len())];
             let (dircount, maxcount) = self.readdir_limits(chunk.len());
+            let maxcount = maxcount.min(max_page_bytes.max(4096).min(u32::MAX as usize) as u32);
+            let dircount = dircount.min(maxcount / 4).max(1);
             let map = |op_index: usize| {
                 let local = op_index.saturating_sub(1) / 2;
                 chunk.len().saturating_sub(1).min(local)
@@ -3578,7 +3608,7 @@ impl NfsClient {
                 e.with_op_index(idx)
             })?;
             for (i, _) in chunk.iter().enumerate() {
-                let (entries, cookie) = Self::collect_readdir(res.readdir(2 + 2 * i));
+                let (entries, cookie) = Self::collect_readdir(res.readdir(2 + 2 * i))?;
                 out.push((entries, cookie));
             }
         }
@@ -3707,6 +3737,27 @@ fn make_open_how(create: OpenCreate, verifier: verifier4) -> openflag4 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn directory_page_eof_suppresses_continuation_without_rewriting_entry_cookies() {
+        let mut entry: nfsv41_sys::entry4 = unsafe { std::mem::zeroed() };
+        entry.cookie = 42;
+        let mut reply: nfsv41_sys::READDIR4resok = unsafe { std::mem::zeroed() };
+        reply.reply.entries = &mut entry;
+        reply.reply.eof = 1;
+        let (entries, next) = super::NfsClient::collect_readdir(&reply).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].cookie, 42);
+        assert_eq!(next, 0);
+        reply.reply.eof = 0;
+        assert_eq!(super::NfsClient::collect_readdir(&reply).unwrap().1, 42);
+        reply.reply.entries = std::ptr::null_mut();
+        assert!(
+            super::NfsClient::collect_readdir(&reply)
+                .unwrap_err()
+                .is_transport()
+        );
+    }
+
     use proptest::prelude::*;
 
     use super::*;

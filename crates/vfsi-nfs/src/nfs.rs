@@ -108,6 +108,12 @@ struct NfsDirectoryCursor {
     buffered: VecDeque<crate::client::DirEntry>,
 }
 
+/// A child resolved relative to the observed parent, never by its full path.
+struct NfsChildDirectoryCursor {
+    parent: FileHandle,
+    name: Vec<u8>,
+}
+
 /// A directory held by filehandle during vectorized recursive removal.
 ///
 /// `fh` addresses the directory itself (for READDIR and child LOOKUPs), while
@@ -962,6 +968,9 @@ impl NfsVecFs {
                         fh
                     }
                     Err(e) => {
+                        if e.is_transport() {
+                            return Err(e);
+                        }
                         let err = e.err_no();
                         for (i, _) in &entries {
                             out[*i] = Err(err);
@@ -4679,6 +4688,172 @@ impl VecFs for NfsVecFs {
             None
         };
         Ok((output, next))
+    }
+
+    fn directory_page_batch_size(&self) -> usize {
+        32
+    }
+
+    fn listdir_pages(
+        &mut self,
+        dirs: &[&Path],
+        masks: AttrMask,
+        cursors: Vec<Option<DirPageCursor>>,
+        page_size: usize,
+        _max_entries: usize,
+    ) -> VfResult<Vec<vfsi_sync::BackendDirectoryPage>> {
+        if dirs.len() != cursors.len() || page_size == 0 {
+            return Err(VfError::client(0, ERR_INVAL));
+        }
+        if dirs.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.recovery_in_progress && cursors.iter().all(Option::is_none) {
+            return self.read_with_recovery(|client| {
+                client.listdir_pages(
+                    dirs,
+                    masks,
+                    (0..dirs.len()).map(|_| None).collect(),
+                    page_size,
+                    _max_entries,
+                )
+            });
+        }
+        let fresh: Vec<usize> = cursors
+            .iter()
+            .enumerate()
+            .filter_map(|(i, cursor)| cursor.is_none().then_some(i))
+            .collect();
+        let mut handles = std::collections::HashMap::new();
+        if let [index] = fresh.as_slice() {
+            // Preserve the scalar deep-resolution fast path. READDIR itself
+            // validates that the resolved target is a directory.
+            let fh = self
+                .resolve_path(&self.server_path(dirs[*index]), true)
+                .map_err(|error| error.with_index(*index))?;
+            handles.insert(*index, fh);
+        } else if !fresh.is_empty() {
+            let files: Vec<_> = fresh
+                .iter()
+                .map(|&i| VfFile::from_os_path(dirs[i]))
+                .collect();
+            let refs: Vec<_> = files.iter().collect();
+            let resolved = self
+                .resolve_many_tcfile(&refs, true)
+                .map_err(|error| remap_active_error(error, &fresh))?;
+            for (&index, resolved) in fresh.iter().zip(resolved) {
+                let (fh, kind) = resolved.map_err(|status| VfError::nfs(index, status))?;
+                if kind != nfs_ftype4_NF4DIR {
+                    return Err(VfError::nfs(index, nfsstat4_NFS4ERR_NOTDIR));
+                }
+                handles.insert(index, fh);
+            }
+        }
+        let ids = request_mask_to_attr_list(&masks);
+        let mut states = Vec::with_capacity(dirs.len());
+        let mut children = Vec::new();
+        let mut child_indices = Vec::new();
+        for (index, cursor) in cursors.into_iter().enumerate() {
+            states.push(match cursor {
+                Some(cursor) if cursor.is::<NfsChildDirectoryCursor>() => {
+                    let child = cursor.into_state::<NfsChildDirectoryCursor>()?;
+                    child_indices.push(index);
+                    children.push((child.parent.clone(), child.name));
+                    // Filled by the anchored LOOKUP + READDIR wave below.
+                    NfsDirectoryCursor {
+                        fh: child.parent,
+                        cookie: 0,
+                        buffered: VecDeque::new(),
+                    }
+                }
+                Some(cursor) => cursor
+                    .into_state::<NfsDirectoryCursor>()
+                    .map_err(|error| error.with_index(index))?,
+                None => NfsDirectoryCursor {
+                    fh: handles.remove(&index).expect("resolved fresh directory"),
+                    cookie: 0,
+                    buffered: VecDeque::new(),
+                },
+            });
+        }
+        let child_pages = self
+            .nfs
+            .readdir_children_bounded(&children, &ids, 32 * 1024)
+            .map_err(|error| {
+                remap_active_error(vfsi_core::error_from_rpc_indexed(error), &child_indices)
+            })?;
+        if child_pages.len() != child_indices.len() {
+            return Err(VfError::transport(
+                None,
+                "invalid child directory page count",
+            ));
+        }
+        for (&index, page) in child_indices.iter().zip(child_pages) {
+            states[index] = NfsDirectoryCursor {
+                fh: page.fh,
+                cookie: page.cookie,
+                buffered: page.entries.into(),
+            };
+        }
+        let active: Vec<_> = states
+            .iter()
+            .enumerate()
+            .filter_map(|(i, state)| {
+                (state.buffered.is_empty() && !child_indices.contains(&i)).then_some(i)
+            })
+            .collect();
+        let operations: Vec<_> = active
+            .iter()
+            .map(|&i| (states[i].fh.clone(), states[i].cookie))
+            .collect();
+        let pages = self
+            .nfs
+            .readdir_pages_bounded(&operations, &ids, 32 * 1024)
+            .map_err(|error| {
+                remap_active_error(vfsi_core::error_from_rpc_indexed(error), &active)
+            })?;
+        if pages.len() != active.len() {
+            return Err(VfError::transport(None, "invalid READDIR page count"));
+        }
+        for (&index, (entries, cookie)) in active.iter().zip(pages) {
+            let state = &mut states[index];
+            if cookie != 0 && cookie == state.cookie {
+                return Err(VfError::transport(
+                    Some(index),
+                    "READDIR cookie made no progress",
+                ));
+            }
+            state.cookie = cookie;
+            state.buffered = entries.into();
+        }
+        states
+            .into_iter()
+            .enumerate()
+            .map(|(index, mut state)| {
+                let mut output = Vec::new();
+                let mut seeds = Vec::new();
+                for entry in state.buffered.drain(..state.buffered.len().min(page_size)) {
+                    let mut attrs = VfAttrs {
+                        file: VfFile::from_os_path(&dirs[index].join(path_from_bytes(&entry.name))),
+                        masks,
+                        ..VfAttrs::default()
+                    };
+                    let values = parse_attr_list(&ids, &entry.attrs)
+                        .map_err(|error| error.with_index(index))?;
+                    apply_attrs(&mut attrs, &values);
+                    seeds.push((attrs.ftype == VfType::Directory).then(|| {
+                        DirPageCursor::new(NfsChildDirectoryCursor {
+                            parent: state.fh.clone(),
+                            name: entry.name,
+                        })
+                    }));
+                    output.push(attrs);
+                }
+                let next = (!state.buffered.is_empty() || state.cookie != 0)
+                    .then(|| DirPageCursor::new(state));
+                Ok((output, next, seeds))
+            })
+            .collect()
     }
 
     fn visit_dir(

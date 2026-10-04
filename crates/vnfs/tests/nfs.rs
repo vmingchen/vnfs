@@ -492,7 +492,7 @@ fn native_removal_modes_forward_policy_across_roots() {
 
 #[test]
 fn unified_directory_visits_on_nfs() {
-    use vnfs::{ControlFlow, Fs, MetadataFields, TraversalCompletion, VisitOptions};
+    use vnfs::{ControlFlow, MetadataFields, TraversalCompletion, VisitOptions};
     let dir = setup_dir("unified_directory_visits");
     let client = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
@@ -512,7 +512,7 @@ fn unified_directory_visits_on_nfs() {
     for (recursive, count) in [(false, 1), (true, 2)] {
         let mut seen = 0;
         client
-            .visit_dirs_with_options(&[&dir], options.recursive(recursive), |index, entry| {
+            .visit_entries_with_options(&[&dir], options.recursive(recursive), |index, entry| {
                 assert_eq!(index, 0);
                 if entry.path() == Path::new(&file) {
                     assert_eq!(entry.metadata().len(), 7);
@@ -526,7 +526,7 @@ fn unified_directory_visits_on_nfs() {
     }
     assert_eq!(
         client
-            .visit_dirs_with_options(
+            .visit_entries_with_options(
                 &[dir.as_str(), "/absent-visitor-root"],
                 options.recursive(true),
                 |_, _| Ok(ControlFlow::Break(()))
@@ -539,7 +539,7 @@ fn unified_directory_visits_on_nfs() {
 
 #[test]
 fn application_collection_preserves_native_batching_and_root_groups() {
-    use vnfs::{Fs, MetadataFields, VisitOptions};
+    use vnfs::{MetadataFields, VisitOptions};
     let dir = setup_dir("application_collection_batch");
     let client = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
@@ -2308,9 +2308,9 @@ fn directory_visit_continuation_reuses_resolved_nfs_handle() {
         raw_compounds > 3,
         "fixture must require multiple READDIR pages"
     );
-    assert_eq!(
-        native_compounds, raw_compounds,
-        "native pagination must not re-resolve the directory on each page"
+    assert!(
+        native_compounds <= raw_compounds,
+        "native pagination must not re-resolve directories: native={native_compounds}, raw={raw_compounds}; EOF may avoid a final probe"
     );
     admin.rm(&[Path::new(&dir)], true).unwrap();
 }
@@ -2351,12 +2351,16 @@ fn directory_visit_recovers_if_reply_is_lost_before_first_entry() {
 fn directory_visit_does_not_replay_after_delivering_an_entry() {
     let dir = setup_dir("visit_dir_no_partial_replay");
     let mut admin = client();
-    let names: Vec<_> = (0..80)
+    let names: Vec<_> = (0..300)
         .map(|index| format!("{dir}/entry-{index:03}-{}", "x".repeat(96)))
         .collect();
-    for name in &names {
-        write_file(&mut admin, Path::new(name), b"x");
-    }
+    // Exceed the bounded 32 KiB wire page so the proxy drops an actual
+    // continuation, rather than an unnecessary EOF probe.
+    let writes: Vec<_> = names
+        .iter()
+        .map(|name| WriteOp::at(VfFile::from_path(name), 0, b"x".to_vec()).with_creation())
+        .collect();
+    admin.writev(&writes).unwrap();
 
     let proxy = DropReplyProxy::start(reply_loss_target());
     let visitor = Nfs::builder(proxy.endpoint())
@@ -3837,4 +3841,252 @@ fn deferred_cleanup_reconciles_backend_owned_failed_close() {
     assert_eq!(backend.test_open_handle_count(), 0);
     assert_eq!(backend.test_deferred_descriptor_close_count(), 0);
     backend.rm(&[Path::new(&dir)], true).unwrap();
+}
+
+#[test]
+fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancellation() {
+    use vnfs::{ControlFlow, Fs, VisitOptions};
+    let dir = setup_dir("directory_pages");
+    let fs = Nfs::builder(test_host())
+        .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("2") => vnfs::NfsVersion::V4_2,
+            _ => vnfs::NfsVersion::V4_1,
+        })
+        .connect()
+        .unwrap();
+    let roots: Vec<_> = (0..40).map(|i| format!("{dir}/d{i}")).collect();
+    fs.mkdirv(&roots).unwrap();
+    let files: Vec<_> = roots
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| i % 2 == 0)
+        .map(|(_, path)| (format!("{path}/file"), b"x"))
+        .collect();
+    fs.write_files(&files).unwrap();
+    let _ = vfsi_nfs::compound::thread_compound_stats();
+    let listings = fs
+        .read_dirs_with_options(&roots, VisitOptions::new())
+        .unwrap();
+    let compounds = vfsi_nfs::compound::thread_compound_stats().0;
+    assert!(
+        compounds < 20,
+        "forty directories must use bounded cohorts, got {compounds} compounds"
+    );
+    assert_eq!(listings.len(), roots.len());
+    for (index, tree) in listings.iter().enumerate() {
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].path, Path::new(&roots[index]));
+        assert_eq!(tree[0].entries.len(), usize::from(index % 2 == 0));
+    }
+    let missing = format!("{dir}/missing");
+    assert_eq!(
+        fs.visit_dirs_with_options(
+            &[roots[1].as_str(), missing.as_str()],
+            VisitOptions::new(),
+            |index, page| {
+                assert_eq!(index, 0);
+                assert!(page.entries.is_empty());
+                assert!(fs.metadata(&page.path).unwrap().is_dir());
+                Ok(ControlFlow::Break(()))
+            }
+        )
+        .unwrap(),
+        [vnfs::TraversalCompletion::Stopped]
+    );
+    assert_eq!(
+        fs.read_dirs_with_options(&[roots[1].as_str(), missing.as_str()], VisitOptions::new())
+            .unwrap_err()
+            .index(),
+        Some(1)
+    );
+    let large = &roots[0];
+    let names: Vec<_> = (0..300).map(|i| (format!("{large}/f{i}"), b"x")).collect();
+    fs.write_files(&names).unwrap();
+    let mut counts = Vec::new();
+    fs.visit_dirs_with_options(&[large], VisitOptions::new(), |_, page| {
+        counts.push(page.entries.len());
+        Ok(ControlFlow::Continue(()))
+    })
+    .unwrap();
+    assert_eq!(counts[0], 1);
+    assert!(counts.iter().all(|&n| n <= 128));
+    assert_eq!(counts.iter().sum::<usize>(), 301);
+    fs.remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
+    use vnfs::{ControlFlow, Fs, VisitOptions};
+    let dir = setup_dir("page_child_symlink");
+    let fs = Nfs::builder(test_host())
+        .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
+            vnfs::NfsVersion::V4_2
+        } else {
+            vnfs::NfsVersion::V4_1
+        })
+        .connect()
+        .unwrap();
+    let tree = format!("{dir}/tree");
+    let child = format!("{tree}/child");
+    let saved = format!("{dir}/saved");
+    let target = format!("{dir}/outside");
+    fs.mkdirv(&[&tree, &target]).unwrap();
+    fs.mkdirv(&[&child]).unwrap();
+    fs.write(format!("{target}/secret"), b"must not be traversed")
+        .unwrap();
+    let mut changed = false;
+    let mut escaped = false;
+    let result =
+        fs.visit_dirs_with_options(&[&tree], VisitOptions::new().recursive(true), |_, page| {
+            if page.path == Path::new(&tree) && !changed {
+                assert!(
+                    page.entries
+                        .iter()
+                        .any(|entry| entry.path() == Path::new(&child))
+                );
+                fs.renamev(&[(&child, &saved)])?;
+                fs.symlink("../outside", &child)?;
+                changed = true;
+            }
+            escaped |= page
+                .entries
+                .iter()
+                .any(|entry| entry.path().ends_with("secret"));
+            Ok(ControlFlow::Continue(()))
+        });
+    fs.remove_dir_all(&dir).unwrap();
+    assert!(changed);
+    assert!(!escaped, "recursive paging followed a replacement symlink");
+    let error = result.unwrap_err();
+    assert_eq!(error.index(), Some(0));
+    assert!(
+        matches!(
+            error.err_no(),
+            nfsv41_sys::nfsstat4_NFS4ERR_SYMLINK | nfsv41_sys::nfsstat4_NFS4ERR_NOTDIR
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
+    use vnfs::VisitOptions;
+    let dir = setup_dir("page_deep_tree");
+    let fs = Nfs::builder(test_host())
+        .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
+            vnfs::NfsVersion::V4_2
+        } else {
+            vnfs::NfsVersion::V4_1
+        })
+        .connect()
+        .unwrap();
+    let depth = 32;
+    let mut path = dir.clone();
+    let mut paths = Vec::new();
+    for _ in 0..depth {
+        path.push_str("/d");
+        paths.push(path.clone());
+    }
+    // Parents exist before children are created.
+    for path in &paths {
+        fs.mkdirv(&[path]).unwrap();
+    }
+    fs.write(format!("{path}/leaf"), b"x").unwrap();
+    let _ = vfsi_nfs::compound::thread_compound_stats();
+    let trees = fs
+        .read_dirs_with_options(&[&dir], VisitOptions::new().recursive(true))
+        .unwrap();
+    let compounds = vfsi_nfs::compound::thread_compound_stats().0;
+    fs.remove_dir_all(&dir).unwrap();
+    eprintln!("depth {depth}: {compounds} compounds");
+    assert_eq!(trees[0].len(), depth + 1);
+    assert!(
+        compounds <= (depth + 8) as u64,
+        "descendants must use anchored LOOKUP + READDIR, got {compounds} compounds for depth {depth}"
+    );
+}
+
+#[test]
+fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
+    use vnfs::{ControlFlow, Fs, VisitOptions};
+    let dir = setup_dir("page_parent_rename");
+    let fs = Nfs::builder(test_host())
+        .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
+            vnfs::NfsVersion::V4_2
+        } else {
+            vnfs::NfsVersion::V4_1
+        })
+        .connect()
+        .unwrap();
+    let tree = format!("{dir}/tree");
+    let moved = format!("{dir}/moved");
+    let children: Vec<_> = (0..4).map(|i| format!("{tree}/child{i}")).collect();
+    fs.mkdirv(&[&tree]).unwrap();
+    fs.mkdirv(&children).unwrap();
+    fs.write_files(
+        &children
+            .iter()
+            .map(|child| (format!("{child}/data"), b"x"))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let mut renamed = false;
+    let mut data = 0;
+    let result =
+        fs.visit_dirs_with_options(&[&tree], VisitOptions::new().recursive(true), |_, page| {
+            if page.path == Path::new(&tree) && !renamed {
+                fs.renamev(&[(&tree, &moved)])?;
+                renamed = true;
+            }
+            data += page
+                .entries
+                .iter()
+                .filter(|entry| entry.path().ends_with("data"))
+                .count();
+            Ok(ControlFlow::Continue(()))
+        });
+    fs.remove_dir_all(&dir).unwrap();
+    assert_eq!(result.unwrap(), [vnfs::TraversalCompletion::Complete]);
+    assert!(renamed);
+    assert_eq!(
+        data, 4,
+        "batched children must use the retained parent handle"
+    );
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn recursive_directory_pages_do_not_retry_an_ambiguous_child_reply() {
+    use vnfs::{ControlFlow, Fs, VisitOptions};
+    let dir = setup_dir("page_child_reply_loss");
+    let mut admin = client();
+    let child = format!("{dir}/child");
+    admin.mkdir(Path::new(&child), 0o755).unwrap();
+    write_file(&mut admin, Path::new(&format!("{child}/data")), b"x");
+    let proxy = DropReplyProxy::start(reply_loss_target());
+    let visitor = Nfs::builder(proxy.endpoint())
+        .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
+            vnfs::NfsVersion::V4_2
+        } else {
+            vnfs::NfsVersion::V4_1
+        })
+        .request_timeout(Duration::from_millis(500))
+        .connect()
+        .unwrap();
+    let mut delivered = 0;
+    let result =
+        visitor.visit_dirs_with_options(&[&dir], VisitOptions::new().recursive(true), |_, page| {
+            assert_eq!(
+                page.path,
+                Path::new(&dir),
+                "a child page must not be replayed after the lost reply"
+            );
+            delivered += 1;
+            proxy.arm();
+            Ok(ControlFlow::Continue(()))
+        });
+    proxy.wait_for_drop();
+    admin.rm(&[Path::new(&dir)], true).unwrap();
+    assert!(result.unwrap_err().is_transport());
+    assert_eq!(delivered, 1);
 }

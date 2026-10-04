@@ -51,25 +51,24 @@ macro_rules! owned_client {
             pub fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> Result<()> {
                 self.inner.create_dir_with_mode(path, mode)
             }
-            pub(crate) fn visit_dir_with_fields(
-                &self,
-                path: impl AsRef<Path>,
-                fields: crate::MetadataFields,
-                options: ReadDirOptions,
-                callback: impl FnMut(DirEntry) -> Result<std::ops::ControlFlow<()>>,
-            ) -> Result<TraversalCompletion> {
-                self.inner
-                    .visit_dir_with_fields(path, fields, options, callback)
+            pub(crate) fn directory_page_batch_size(&self, _paths: &[&Path]) -> Result<usize> {
+                self.inner.directory_page_batch_size()
             }
-            pub(crate) fn visit_walk_with_fields(
+            pub(crate) fn read_dir_pages_with_fields(
                 &self,
-                root: impl AsRef<Path>,
+                paths: &[&Path],
                 fields: crate::MetadataFields,
-                options: $crate::WalkOptions,
-                callback: impl FnMut(&DirEntry) -> Result<std::ops::ControlFlow<()>>,
-            ) -> Result<TraversalCompletion> {
-                self.inner
-                    .visit_walk_with_fields(root, fields, options, callback)
+                cursors: Vec<Option<vfsi_sync::DirPageCursor>>,
+                page_size: usize,
+                max_entries: usize,
+            ) -> Result<Vec<vfsi_sync::DirectoryPage>> {
+                self.inner.read_dir_pages_with_fields(
+                    paths,
+                    fields,
+                    cursors,
+                    page_size,
+                    max_entries,
+                )
             }
             /// Create `path` if missing, otherwise empty it. Errors if it exists and is
             /// not a directory (a symlink to a directory is not a directory here).
@@ -259,24 +258,11 @@ macro_rules! owned_client {
             }
         }
         impl crate::application::NativeHooks for $client {
+            fn page_capacity(&self, paths: &[&Path]) -> Result<usize> {
+                self.directory_page_batch_size(paths)
+            }
             fn open_native(&self, request: OpenRequest) -> Result<Self::File> {
                 self.inner.open_with(request).map(|inner| $file { inner })
-            }
-            fn list_native<P: AsRef<Path>>(
-                &self,
-                paths: &[P],
-                fields: MetadataFields,
-                options: ReadDirOptions,
-            ) -> Result<Vec<DirectoryListing>> {
-                self.inner.read_dirs_with_options(paths, fields, options)
-            }
-            fn walk_native(
-                &self,
-                root: impl AsRef<Path>,
-                fields: MetadataFields,
-                options: WalkOptions,
-            ) -> Result<Vec<DirectoryListing>> {
-                self.inner.walk_with_options(root, fields, options)
             }
             fn stream_native(
                 &self,

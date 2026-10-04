@@ -79,7 +79,7 @@ pub trait FileHandle: Read + Write + Seek {
 /// | Complete small files | [`readv`](FsExt::readv), [`write_files`](FsExt::write_files) |
 /// | Repeated/range I/O on owned handles | [`openv`](Self::openv), [`readv`](FsExt::readv), [`writev_with_options`](Self::writev_with_options) |
 /// | A large file without collecting it | [`read_stream_with_options`](FsExt::read_stream_with_options) |
-/// | Metadata for many directories | [`read_dirs_with_options`](Self::read_dirs_with_options) |
+/// | Metadata for many directories | [`read_dirs_with_options`](crate::FsExt::read_dirs_with_options) |
 /// | Incremental traversal or pruning | [`visit_walk_with_options`](FsExt::visit_walk_with_options), [`walk_events_with_options`](FsExt::walk_events_with_options) |
 ///
 /// Generic application code needs an `Fs` bound. Import [`FsExt`] for
@@ -100,7 +100,8 @@ pub trait FileHandle: Read + Write + Seek {
 /// A leading `/` refers to the configured root; this is not security confinement.
 /// Handles in a vector must belong to this client's connection. Successful
 /// vector results match input order; one vector may span several compounds.
-/// Callback cancellation returns a completed/stopped prefix for the vector visitors.
+/// Callback cancellation returns a completed/stopped prefix for vector visitors;
+/// directory-page waves may leave several started roots stopped.
 /// A failed mutation can have partial effects. An error's index identifies an
 /// input when known, **not** a committed-prefix count. Preserve the structured
 /// [`crate::Error`] rather than blindly replaying a failed write.
@@ -260,35 +261,6 @@ pub trait Fs {
     /// # }
     /// ```
     fn mkdirv<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()>;
-    /// Collect shallow directories or recursive trees, grouped by input root.
-    ///
-    /// `results[i]` contains the listings for `paths[i]`. Shallow mode
-    /// returns exactly one listing per root; recursive mode includes the root
-    /// and descendants. Entries and path-byte budgets are shared across roots;
-    /// recursive collection also charges retained directory paths.
-    /// Native directory batching is retained, not rebuilt from visitor callbacks.
-    /// Explicit limits override client defaults. Errors discard collected results;
-    /// this is not a snapshot. Symlink entries are not recursively followed.
-    ///
-    /// ```no_run
-    /// use vnfs::{Fs, MetadataFields, VisitOptions};
-    /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
-    /// let trees = fs.read_dirs_with_options(&["/input", "/output"],
-    ///     VisitOptions::new().recursive(true).fields(MetadataFields::MODE)
-    ///         .max_entries(10_000).max_path_bytes(1024 * 1024))?;
-    /// for tree in trees {
-    ///     for listing in tree {
-    ///         println!("{}: {} entries", listing.path.display(), listing.entries.len());
-    ///     }
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    fn read_dirs_with_options<P: AsRef<Path>>(
-        &self,
-        paths: &[P],
-        options: crate::VisitOptions,
-    ) -> Result<Vec<Vec<DirectoryListing>>>;
     /// Strict file-copy batches; a failed call can have copied earlier files.
     ///
     /// Pairs are `(source, destination)` in this client's namespace. Contents
@@ -341,12 +313,14 @@ pub trait Fs {
 
     /// Visit shallow directories (default) or recursive trees using bounded pages.
     /// Entry/path-byte limits are shared across roots; recursive visits also
-    /// charge root path bytes. Root index accompanies every borrowed entry.
-    /// Callbacks run outside backend locks and may reenter. Break stops the
-    /// whole vector and returns only the completed/stopped prefix.
+    /// charge retained directory path bytes. Root index accompanies every owned directory page, including empty directories.
+    /// Callbacks run outside backend locks and may reenter. Entries for one directory may span several pages. Break stops the
+    /// whole vector. The returned prefix covers every root whose pages reached
+    /// the callback; unfinished roots are Stopped. Pages may interleave between roots.
     ///
     /// Metadata is selected on directory pages, not through per-entry stat
     /// calls. Entry symlinks are never followed during recursive descent.
+    /// Each page owns its entries; collection can transfer them without cloning.
     /// Traversal order is backend-defined; this does not provide a snapshot.
     ///
     /// ```no_run
@@ -354,8 +328,8 @@ pub trait Fs {
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
     /// fs.visit_dirs_with_options(&["/tree-1", "/tree-2"],
     ///     VisitOptions::new().recursive(true).max_depth(8),
-    ///     |index, entry| {
-    ///         println!("{index}: {}", entry.path().display());
+    ///     |index, page| {
+    ///         println!("{index}: {} ({} entries)", page.path.display(), page.entries.len());
     ///         Ok(ControlFlow::Continue(()))
     ///     })?;
     /// # Ok(())
@@ -365,7 +339,7 @@ pub trait Fs {
         &self,
         paths: &[P],
         options: crate::VisitOptions,
-        callback: impl FnMut(usize, &crate::DirEntry) -> Result<std::ops::ControlFlow<()>>,
+        callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<Vec<crate::TraversalCompletion>>;
 
     /// Stream files through bounded chunks without collecting whole contents.
@@ -414,6 +388,76 @@ pub trait Fs {
 /// bounded paging, or recovery semantics. Singular convenience is not a promise
 /// of one RPC, and vector execution is not a promise of atomicity.
 pub trait FsExt: Fs {
+    /// Collect shallow directories or recursive trees, grouped by input root.
+    ///
+    /// `results[i]` contains the listings for `paths[i]`. Shallow mode
+    /// returns exactly one listing per root; recursive mode includes the root
+    /// and descendants. Entries and path-byte budgets are shared across roots;
+    /// recursive collection also charges retained directory paths.
+    /// Collection builds on the batched directory-page visitor.
+    /// Explicit limits override client defaults. Errors discard collected results;
+    /// this is not a snapshot. Symlink entries are not recursively followed.
+    ///
+    /// ```no_run
+    /// use vnfs::{Fs, FsExt, MetadataFields, VisitOptions};
+    /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
+    /// let trees = fs.read_dirs_with_options(&["/input", "/output"],
+    ///     VisitOptions::new().recursive(true).fields(MetadataFields::MODE)
+    ///         .max_entries(10_000).max_path_bytes(1024 * 1024))?;
+    /// for tree in trees {
+    ///     for listing in tree {
+    ///         println!("{}: {} entries", listing.path.display(), listing.entries.len());
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn read_dirs_with_options<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        options: crate::VisitOptions,
+    ) -> Result<Vec<Vec<DirectoryListing>>> {
+        let mut trees: Vec<Vec<DirectoryListing>> = (0..paths.len()).map(|_| Vec::new()).collect();
+        let mut positions: Vec<std::collections::HashMap<std::path::PathBuf, usize>> = (0..paths
+            .len())
+            .map(|_| std::collections::HashMap::new())
+            .collect();
+        self.visit_dirs_with_options(paths, options, |index, page| {
+            let tree = trees
+                .get_mut(index)
+                .ok_or_else(|| crate::Error::transport(None, "invalid visitor root index"))?;
+            let positions = &mut positions[index];
+            let slot = *positions.entry(page.path.clone()).or_insert_with(|| {
+                tree.push(DirectoryListing {
+                    path: page.path.clone(),
+                    entries: Vec::new(),
+                });
+                tree.len() - 1
+            });
+            tree[slot].entries.extend(page.entries);
+            Ok(std::ops::ControlFlow::Continue(()))
+        })?;
+        Ok(trees)
+    }
+
+    /// Visit individual entries using the directory-page primitive.
+    /// Empty directories produce pages but no entry callbacks.
+    fn visit_entries_with_options<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        options: crate::VisitOptions,
+        mut callback: impl FnMut(usize, &crate::DirEntry) -> Result<std::ops::ControlFlow<()>>,
+    ) -> Result<Vec<crate::TraversalCompletion>> {
+        self.visit_dirs_with_options(paths, options, |index, page| {
+            for entry in &page.entries {
+                if callback(index, entry)?.is_break() {
+                    return Ok(std::ops::ControlFlow::Break(()));
+                }
+            }
+            Ok(std::ops::ControlFlow::Continue(()))
+        })
+    }
+
     /// Remove a cohort with default retry/error policy. Prefer this vector
     /// operation over looping over single-target removal helpers.
     ///
@@ -691,7 +735,7 @@ pub trait FsExt: Fs {
         self.renamev(&[(source, destination)])
     }
 
-    /// Single-target convenience. For multiple roots, prefer [`Fs::read_dirs_with_options`] with one aggregate budget.
+    /// Single-target convenience. For multiple roots, prefer [`FsExt::read_dirs_with_options`] with one aggregate budget.
     ///
     /// Collect a bounded tree, without following symlinks; no snapshot promise.
     ///
@@ -763,7 +807,7 @@ pub trait FsExt: Fs {
     ) -> Result<crate::TraversalCompletion> {
         let mut callback = callback;
         single_completion(
-            self.visit_dirs_with_options(&[path], options.recursive(true), |_, entry| {
+            self.visit_entries_with_options(&[path], options.recursive(true), |_, entry| {
                 callback(entry)
             })?,
             "visit_walks",
@@ -800,7 +844,7 @@ pub trait FsExt: Fs {
     ) -> Result<crate::TraversalCompletion> {
         let mut callback = callback;
         single_completion(
-            self.visit_dirs_with_options(&[path], options.recursive(false), |_, entry| {
+            self.visit_entries_with_options(&[path], options.recursive(false), |_, entry| {
                 callback(entry)
             })?,
             "visit_dirs",
@@ -1280,7 +1324,7 @@ pub trait FsExt: Fs {
     /// There is one listing per input directory, in input order; entry order is
     /// backend-defined. Entries include metadata, avoiding a separate scalar
     /// stat per child. The default policy comes from this client's limits.
-    /// Use [`read_dirs_with_options`](Fs::read_dirs_with_options) to select
+    /// Use [`read_dirs_with_options`](FsExt::read_dirs_with_options) to select
     /// attributes, or a visitor instead of collecting large listings.
     ///
     /// ```no_run
@@ -1352,7 +1396,7 @@ pub trait FsExt: Fs {
         })
     }
 
-    /// Single-target convenience. For multiple directories, prefer [`Fs::read_dirs_with_options`] or [`FsExt::read_dirs`].
+    /// Single-target convenience. For multiple directories, prefer [`FsExt::read_dirs_with_options`] or [`FsExt::read_dirs`].
     ///
     /// Collect one directory using the client's entry and path-byte limits.
     ///
@@ -1369,7 +1413,7 @@ pub trait FsExt: Fs {
         self.read_dir_with_options(path, self.limits().directory_options())
     }
 
-    /// Single-target convenience. For multiple directories, prefer [`Fs::read_dirs_with_options`] with one aggregate budget.
+    /// Single-target convenience. For multiple directories, prefer [`FsExt::read_dirs_with_options`] with one aggregate budget.
     ///
     /// Collect one directory with explicit aggregate entry/path-byte limits.
     ///
@@ -1401,7 +1445,7 @@ pub trait FsExt: Fs {
         Ok(listings.remove(0).entries)
     }
 
-    /// Single-target convenience. For multiple roots, prefer [`Fs::read_dirs_with_options`].
+    /// Single-target convenience. For multiple roots, prefer [`FsExt::read_dirs_with_options`].
     ///
     /// Collect a no-follow tree using the client's entry, byte, and depth limits.
     ///
@@ -1632,25 +1676,223 @@ impl<F: vfsi_sync::FileSystem> FileHandle for vfsi_sync::FsFile<F> {
 
 /// Private optimized execution hooks. Public helpers compose Fs instead.
 pub(crate) trait NativeHooks: Fs {
+    fn page_capacity(&self, paths: &[&Path]) -> Result<usize>;
     fn open_native(&self, request: OpenRequest) -> Result<Self::File>;
-    fn list_native<P: AsRef<Path>>(
-        &self,
-        paths: &[P],
-        fields: crate::MetadataFields,
-        options: crate::ReadDirOptions,
-    ) -> Result<Vec<DirectoryListing>>;
-    fn walk_native(
-        &self,
-        root: impl AsRef<Path>,
-        fields: crate::MetadataFields,
-        options: crate::WalkOptions,
-    ) -> Result<Vec<DirectoryListing>>;
     fn stream_native(
         &self,
         path: impl AsRef<Path>,
         options: crate::ReadStreamOptions,
         callback: impl FnMut(u64, &[u8]) -> Result<bool>,
     ) -> Result<crate::StreamCompletion>;
+}
+
+/// Shared bounded page traversal. Fallback backends advertise a cohort of one;
+/// NFS retains at most one wire page per directory in a cohort.
+fn visit_directory_pages<P: AsRef<Path>>(
+    roots: &[P],
+    policy: crate::VisitOptions,
+    limits: ResourceLimits,
+    mut capacity: impl FnMut(&[&Path]) -> Result<usize>,
+    mut validate_root: impl FnMut(&Path) -> Result<()>,
+    mut fetch: impl FnMut(
+        &[&Path],
+        Vec<Option<vfsi_sync::DirPageCursor>>,
+        usize,
+        usize,
+    ) -> Result<Vec<vfsi_sync::DirectoryPage>>,
+    mut callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
+) -> Result<Vec<crate::TraversalCompletion>> {
+    let directory = policy.directory_options(limits);
+    let walk = policy.walk_options(limits);
+    let mut budget = VectorBudget::new(directory.entry_limit(), directory.path_byte_limit());
+    let mut completed = Vec::new();
+    let mut pending = std::collections::VecDeque::new();
+    for (index, root) in roots.iter().enumerate() {
+        pending.push_back((index, root.as_ref().to_path_buf(), 0usize, None));
+    }
+    while !pending.is_empty() {
+        let owner = pending.front().unwrap().0;
+        if policy.is_recursive() && pending.front().unwrap().2 == 0 {
+            validate_root(&pending.front().unwrap().1)
+                .map_err(|error| vector_index(error, owner))?;
+        }
+        // Recursive traversal completes one input root before starting another.
+        let candidate_paths: Vec<_> = pending
+            .iter()
+            .take_while(|state| !policy.is_recursive() || state.0 == owner)
+            .take(32)
+            .map(|state| state.1.as_path())
+            .collect();
+        let capacity = capacity(&candidate_paths)?.clamp(1, 32);
+        let cohort_size = if policy.is_recursive() {
+            pending
+                .iter()
+                .take(capacity)
+                .take_while(|state| state.0 == owner)
+                .count()
+        } else {
+            pending.len().min(capacity)
+        };
+        let mut cohort: Vec<_> = (0..cohort_size)
+            .map(|_| pending.pop_front().unwrap())
+            .collect();
+        let cursors = cohort.iter_mut().map(|state| state.3.take()).collect();
+        let paths: Vec<_> = cohort
+            .iter()
+            .map(|(_, path, _, _)| path.as_path())
+            .collect();
+        let requested = budget.entries.saturating_add(1);
+        let mut deferred_error = None;
+        let pages = match fetch(&paths, cursors, 1, requested) {
+            Ok(pages) => pages,
+            Err(error)
+                if !policy.is_recursive()
+                    && !error.is_transport()
+                    && error.index().is_some_and(|i| i > 0 && i < cohort.len()) =>
+            {
+                // A speculative later root must not hide an earlier callback's
+                // cancellation. Re-fetch only the known successful read-only
+                // prefix; this exceptional path never replays a mutation.
+                let failed = error.index().unwrap();
+                deferred_error = Some(vector_index(error, cohort[failed].0));
+                let prefix = fetch(
+                    &paths[..failed],
+                    (0..failed).map(|_| None).collect(),
+                    1,
+                    requested,
+                )
+                .map_err(|error| error.map_index(|i| cohort.get(i).map_or(i, |state| state.0)))?;
+                cohort.truncate(failed);
+                prefix
+            }
+            Err(error) => return Err(error.map_index(|i| cohort.get(i).map_or(i, |state| state.0))),
+        };
+        if pages.len() != cohort.len() {
+            return Err(crate::Error::transport(
+                None,
+                "invalid directory page result count",
+            ));
+        }
+        let mut children = Vec::new();
+        let mut wave: Vec<_> = cohort
+            .into_iter()
+            .map(|(index, path, depth, _)| (index, path, depth, true))
+            .zip(pages)
+            .collect();
+        while !wave.is_empty() {
+            let mut continuations = Vec::new();
+            for ((index, path, depth, first), (mut page, next, seeds)) in wave {
+                if first && policy.is_recursive() {
+                    budget
+                        .charge_path(&path)
+                        .map_err(|error| vector_index(error, index))?;
+                }
+                if page.path != path || (page.entries.is_empty() && next.is_some()) {
+                    return Err(crate::Error::transport(
+                        Some(index),
+                        "invalid directory page parent or progress",
+                    ));
+                }
+                let mut seeds: std::collections::HashMap<_, _> = seeds.into_iter().collect();
+                let mut page_error = None;
+                let mut accepted = 0;
+                for entry in &page.entries {
+                    if let Err(error) = budget.charge(entry.path()) {
+                        page_error = Some(vector_index(error, index));
+                        break;
+                    }
+                    accepted += 1;
+                    if policy.is_recursive() && entry.metadata().is_dir() {
+                        if depth >= walk.depth_limit() {
+                            if !walk.truncates_at_depth_limit() {
+                                page_error = Some(
+                                    crate::Error::client(index, libc::EFBIG as u32)
+                                        .with_context("visit_dirs", entry.path()),
+                                );
+                                break;
+                            }
+                        } else {
+                            children.push((
+                                index,
+                                entry.path().to_path_buf(),
+                                depth + 1,
+                                seeds.remove(entry.path()),
+                            ));
+                        }
+                    }
+                }
+                if let Some(error) = &page_error {
+                    if accepted == 0 {
+                        return Err(error.clone());
+                    }
+                    page.entries.truncate(accepted);
+                }
+                if !policy.is_recursive() && completed.len() <= index {
+                    completed.resize(index + 1, crate::TraversalCompletion::Stopped);
+                }
+                if callback(index, page)
+                    .map_err(|error| vector_index(error, index))?
+                    .is_break()
+                {
+                    if policy.is_recursive() {
+                        completed.truncate(index);
+                        completed.push(crate::TraversalCompletion::Stopped);
+                    } else {
+                        completed[index] = crate::TraversalCompletion::Stopped;
+                    }
+                    return Ok(completed);
+                }
+                if let Some(error) = page_error {
+                    return Err(error);
+                }
+                match next {
+                    Some(cursor) => continuations.push(((index, path, depth, false), Some(cursor))),
+                    None if !policy.is_recursive() => {
+                        completed[index] = crate::TraversalCompletion::Complete
+                    }
+                    None => {}
+                }
+            }
+            if continuations.is_empty() {
+                break;
+            }
+            let cursors = continuations
+                .iter_mut()
+                .map(|state| state.1.take())
+                .collect();
+            let paths: Vec<_> = continuations
+                .iter()
+                .map(|state| state.0.1.as_path())
+                .collect();
+            let requested = budget.entries.saturating_add(1);
+            let pages = fetch(&paths, cursors, requested.min(128), requested).map_err(|error| {
+                error.map_index(|i| continuations.get(i).map_or(i, |state| state.0.0))
+            })?;
+            if pages.len() != continuations.len() {
+                return Err(crate::Error::transport(
+                    None,
+                    "invalid directory continuation count",
+                ));
+            }
+            wave = continuations
+                .into_iter()
+                .map(|state| state.0)
+                .zip(pages)
+                .collect();
+        }
+        if let Some(error) = deferred_error {
+            return Err(error);
+        }
+        // Do not hold fallback snapshots while descending; all pages above
+        // were consumed and their cursors released before adding the frontier.
+        for child in children.into_iter().rev() {
+            pending.push_front(child);
+        }
+        if policy.is_recursive() && pending.front().is_none_or(|state| state.0 != owner) {
+            completed.push(crate::TraversalCompletion::Complete);
+        }
+    }
+    Ok(completed)
 }
 
 fn single_tree(trees: &mut Vec<Vec<DirectoryListing>>) -> Result<Vec<DirectoryListing>> {
@@ -1707,118 +1949,48 @@ macro_rules! client_methods {
         fn renamev<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
             <$client>::renamev($receiver(self), pairs)
         }
-        fn read_dirs_with_options<P: AsRef<Path>>(
-            &self,
-            roots: &[P],
-            policy: crate::VisitOptions,
-        ) -> Result<Vec<Vec<DirectoryListing>>> {
-            let fields = policy.metadata_fields();
-            if !policy.is_recursive() {
-                let listings = <$client as NativeHooks>::list_native(
-                    $receiver(self),
-                    roots,
-                    fields,
-                    policy.directory_options(self.limits()),
-                )?;
-                if listings.len() != roots.len() {
-                    return Err(crate::Error::transport(
-                        None,
-                        "native directory listing returned an invalid root count",
-                    ));
-                }
-                return Ok(listings.into_iter().map(|listing| vec![listing]).collect());
-            }
-            let options = policy.walk_options(self.limits());
-            if let [root] = roots {
-                // Retain the native single-tree budget semantics and avoid
-                // accounting retained directory paths a second time.
-                return <$client as NativeHooks>::walk_native(
-                    $receiver(self),
-                    root,
-                    fields,
-                    options,
-                )
-                .map(|tree| vec![tree])
-                .map_err(|error| vector_index(error, 0));
-            }
-            let mut budget = VectorBudget::new(options.entry_limit(), options.path_byte_limit());
-            let mut output = Vec::new();
-            for (index, path) in roots.iter().enumerate() {
-                let tree = <$client as NativeHooks>::walk_native(
-                    $receiver(self),
-                    path,
-                    fields,
-                    options
-                        .max_entries(budget.entries)
-                        .max_path_bytes(budget.bytes),
-                )
-                .map_err(|error| vector_index(error, index))?;
-                for listing in &tree {
-                    budget
-                        .charge_path(&listing.path)
-                        .map_err(|error| vector_index(error, index))?;
-                    for entry in &listing.entries {
-                        budget
-                            .charge(entry.path())
-                            .map_err(|error| vector_index(error, index))?;
-                    }
-                }
-                output.push(tree);
-            }
-            Ok(output)
-        }
         fn visit_dirs_with_options<P: AsRef<Path>>(
             &self,
             paths: &[P],
             options: crate::VisitOptions,
-            mut callback: impl FnMut(usize, &crate::DirEntry) -> Result<std::ops::ControlFlow<()>>,
+            callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
         ) -> Result<Vec<crate::TraversalCompletion>> {
-            let directory = options.directory_options(self.limits());
-            let walk = options.walk_options(self.limits());
-            let mut budget =
-                VectorBudget::new(directory.entry_limit(), directory.path_byte_limit());
-            let mut output = Vec::new();
-            for (index, path) in paths.iter().enumerate() {
-                let completion = if options.is_recursive() {
-                    // Reserve roots globally but pass the pre-reservation budget
-                    // to native traversal, which also charges each root once.
-                    let native = walk
-                        .max_entries(budget.entries)
-                        .max_path_bytes(budget.bytes);
-                    budget
-                        .charge_path(path.as_ref())
-                        .map_err(|error| vector_index(error, index))?;
-                    <$client>::visit_walk_with_fields(
+            visit_directory_pages(
+                paths,
+                options,
+                self.limits(),
+                |paths| <$client as NativeHooks>::page_capacity($receiver(self), paths),
+                |path| {
+                    let metadata = self.metadatav_with_options(
+                        &[path],
+                        crate::MetadataOptions::new()
+                            .fields(crate::MetadataFields::MODE)
+                            .follow_symlinks(false),
+                    )?;
+                    if metadata.len() != 1 {
+                        return Err(crate::Error::transport(
+                            None,
+                            "invalid directory root metadata count",
+                        ));
+                    }
+                    if !metadata[0].is_dir() {
+                        return Err(crate::Error::client(0, libc::ENOTDIR as u32)
+                            .with_context("visit_dirs", path));
+                    }
+                    Ok(())
+                },
+                |paths, cursors, page_size, max_entries| {
+                    <$client>::read_dir_pages_with_fields(
                         $receiver(self),
-                        path,
+                        paths,
                         options.metadata_fields(),
-                        native,
-                        |entry| {
-                            budget.charge(entry.path())?;
-                            callback(index, entry)
-                        },
+                        cursors,
+                        page_size,
+                        max_entries,
                     )
-                } else {
-                    <$client>::visit_dir_with_fields(
-                        $receiver(self),
-                        path,
-                        options.metadata_fields(),
-                        directory
-                            .max_entries(budget.entries)
-                            .max_path_bytes(budget.bytes),
-                        |entry| {
-                            budget.charge(entry.path())?;
-                            callback(index, &entry)
-                        },
-                    )
-                }
-                .map_err(|error| vector_index(error, index))?;
-                output.push(completion);
-                if completion == crate::TraversalCompletion::Stopped {
-                    break;
-                }
-            }
-            Ok(output)
+                },
+                callback,
+            )
         }
         fn read_streams_with_options<P: AsRef<Path>>(
             &self,
@@ -1948,21 +2120,8 @@ impl<F: vfsi_sync::NativeFileSystem + vfsi_sync::VectorFileSystem + vfsi_sync::V
     fn open_native(&self, request: OpenRequest) -> Result<Self::File> {
         self.open_with(request)
     }
-    fn list_native<P: AsRef<Path>>(
-        &self,
-        paths: &[P],
-        fields: crate::MetadataFields,
-        options: crate::ReadDirOptions,
-    ) -> Result<Vec<DirectoryListing>> {
-        self.read_dirs_with_options(paths, fields, options)
-    }
-    fn walk_native(
-        &self,
-        root: impl AsRef<Path>,
-        fields: crate::MetadataFields,
-        options: crate::WalkOptions,
-    ) -> Result<Vec<DirectoryListing>> {
-        self.walk_with_options(root, fields, options)
+    fn page_capacity(&self, _paths: &[&Path]) -> Result<usize> {
+        self.directory_page_batch_size()
     }
     fn stream_native(
         &self,
@@ -2020,6 +2179,137 @@ mod routed {
 mod extension_tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
+        use crate::{ControlFlow, ResourceLimits, VisitOptions};
+        for malformed in 0..4 {
+            let mut calls = 0;
+            let result = super::visit_directory_pages(
+                &["/a"],
+                VisitOptions::new(),
+                ResourceLimits::default(),
+                |_| Ok(32),
+                |_| Ok(()),
+                |_, _, _, _| {
+                    calls += 1;
+                    match malformed {
+                        0 => Err(crate::Error::transport(None, "lost reply")),
+                        1 => Ok(Vec::new()),
+                        2 => Ok(vec![(
+                            DirectoryListing {
+                                path: "/wrong".into(),
+                                entries: Vec::new(),
+                            },
+                            None,
+                            Vec::new(),
+                        )]),
+                        _ => Ok(vec![(
+                            DirectoryListing {
+                                path: "/a".into(),
+                                entries: Vec::new(),
+                            },
+                            Some(vfsi_sync::DirPageCursor::new(0usize)),
+                            Vec::new(),
+                        )]),
+                    }
+                },
+                |_, _| panic!("invalid pages must not be delivered"),
+            );
+            assert!(result.unwrap_err().is_transport());
+            assert_eq!(calls, 1);
+        }
+        let mut calls = 0;
+        let result = super::visit_directory_pages(
+            &["/a", "/missing"],
+            VisitOptions::new(),
+            ResourceLimits::default(),
+            |_| Ok(32),
+            |_| Ok(()),
+            |paths, _, _, _| {
+                calls += 1;
+                if paths.len() == 2 {
+                    return Err(crate::Error::client(1, libc::ENOENT as u32));
+                }
+                Ok(vec![(
+                    DirectoryListing {
+                        path: "/a".into(),
+                        entries: Vec::new(),
+                    },
+                    None,
+                    Vec::new(),
+                )])
+            },
+            |index, page| {
+                assert_eq!(index, 0);
+                assert!(page.entries.is_empty());
+                Ok(ControlFlow::Break(()))
+            },
+        )
+        .unwrap();
+        assert_eq!(result, [crate::TraversalCompletion::Stopped]);
+        assert_eq!(calls, 2, "only a known semantic prefix is re-fetched");
+    }
+
+    #[test]
+    fn directory_continuations_run_in_vector_waves_and_cancellation_marks_unfinished_roots() {
+        use crate::{ControlFlow, ResourceLimits, VisitOptions};
+        let temp = tempfile::tempdir().unwrap();
+        let mounted = crate::Mounted::new(temp.path()).unwrap();
+        mounted.write("/f", b"x").unwrap();
+        let metadata = mounted.metadata("/f").unwrap();
+        for stop in [false, true] {
+            let mut widths = Vec::new();
+            let result = super::visit_directory_pages(
+                &["/a", "/b"],
+                VisitOptions::new(),
+                ResourceLimits::default(),
+                |_| Ok(32),
+                |_| Ok(()),
+                |paths, cursors, _, _| {
+                    widths.push(paths.len());
+                    paths
+                        .iter()
+                        .zip(cursors)
+                        .map(|(path, cursor)| {
+                            let step = match cursor {
+                                Some(cursor) => cursor.into_state::<usize>()?,
+                                None => 0,
+                            };
+                            Ok((
+                                DirectoryListing {
+                                    path: path.to_path_buf(),
+                                    entries: vec![crate::DirEntry::new(
+                                        path.join(format!("f{step}")),
+                                        metadata.clone(),
+                                    )],
+                                },
+                                (step < 2).then(|| vfsi_sync::DirPageCursor::new(step + 1)),
+                                Vec::new(),
+                            ))
+                        })
+                        .collect()
+                },
+                |index, page| {
+                    Ok(
+                        if stop && index == 0 && page.entries[0].path().ends_with("f1") {
+                            ControlFlow::Break(())
+                        } else {
+                            ControlFlow::Continue(())
+                        },
+                    )
+                },
+            )
+            .unwrap();
+            if stop {
+                assert_eq!(widths, [2, 2]);
+                assert_eq!(result, [crate::TraversalCompletion::Stopped; 2]);
+            } else {
+                assert_eq!(widths, [2, 2, 2]);
+                assert_eq!(result, [crate::TraversalCompletion::Complete; 2]);
+            }
+        }
+    }
 
     #[test]
     fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
@@ -2112,7 +2402,7 @@ mod extension_tests {
         std::os::unix::fs::symlink(root.path().join("tree/sub"), root.path().join("other/link"))
             .unwrap();
         let mut seen = Vec::new();
-        fs.visit_dirs_with_options(&["/tree"], VisitOptions::new(), |_, entry| {
+        fs.visit_entries_with_options(&["/tree"], VisitOptions::new(), |_, entry| {
             seen.push(entry.path().to_path_buf());
             // Callback may reenter the same filesystem.
             assert!(fs.metadata(entry.path()).is_ok());
@@ -2121,21 +2411,23 @@ mod extension_tests {
         .unwrap();
         assert_eq!(seen, [std::path::PathBuf::from("/tree/sub")]);
         assert!(
-            fs.visit_dirs_with_options(&["/tree"], VisitOptions::new().recursive(true), |_, _| Ok(
-                ControlFlow::Continue(())
-            ))
+            fs.visit_entries_with_options(
+                &["/tree"],
+                VisitOptions::new().recursive(true),
+                |_, _| Ok(ControlFlow::Continue(()))
+            )
             .is_err()
         ); // inherits client budget
         let recursive = VisitOptions::new().recursive(true).max_entries(10);
         assert!(
-            fs.visit_dirs_with_options(&["/tree"], recursive.max_depth(0), |_, _| Ok(
+            fs.visit_entries_with_options(&["/tree"], recursive.max_depth(0), |_, _| Ok(
                 ControlFlow::Continue(())
             ))
             .is_err()
         );
         for (depth, count) in [(0, 1), (1, 3), (2, 3)] {
             let mut seen = Vec::new();
-            fs.visit_dirs_with_options(
+            fs.visit_entries_with_options(
                 &["/tree"],
                 recursive
                     .max_depth(depth)
@@ -2154,21 +2446,21 @@ mod extension_tests {
         }
         // Symlink entries are delivered but never traversed.
         let mut seen = Vec::new();
-        fs.visit_dirs_with_options(&["/other"], recursive, |_, entry| {
+        fs.visit_entries_with_options(&["/other"], recursive, |_, entry| {
             seen.push(entry.path().to_path_buf());
             Ok(ControlFlow::Continue(()))
         })
         .unwrap();
         assert_eq!(seen, [std::path::PathBuf::from("/other/link")]);
         assert_eq!(
-            fs.visit_dirs_with_options(&["/tree", "/missing"], recursive, |_, _| Ok(
+            fs.visit_entries_with_options(&["/tree", "/missing"], recursive, |_, _| Ok(
                 ControlFlow::Break(())
             ))
             .unwrap(),
             [TraversalCompletion::Stopped]
         );
         let error = fs
-            .visit_dirs_with_options(&["/other", "/tree"], recursive, |index, _| {
+            .visit_entries_with_options(&["/other", "/tree"], recursive, |index, _| {
                 if index == 1 {
                     Err(crate::Error::client(0, libc::EIO as u32))
                 } else {
@@ -2178,7 +2470,7 @@ mod extension_tests {
             .unwrap_err();
         assert_eq!(error.index(), Some(1));
         assert!(
-            fs.visit_dirs_with_options::<&str>(&[], recursive, |_, _| panic!("empty vector"))
+            fs.visit_entries_with_options::<&str>(&[], recursive, |_, _| panic!("empty vector"))
                 .unwrap()
                 .is_empty()
         );
@@ -2596,12 +2888,14 @@ mod extension_tests {
         fs.mkdirv(&["/a", "/b"]).unwrap();
         let options = crate::WalkOptions::new().max_entries(0).max_path_bytes(4);
         assert_eq!(
-            fs.visit_dirs_with_options(&["/a", "/b"], options.into(), |_, _| panic!("empty roots"))
-                .unwrap(),
+            fs.visit_entries_with_options(&["/a", "/b"], options.into(), |_, _| panic!(
+                "empty roots"
+            ))
+            .unwrap(),
             [crate::TraversalCompletion::Complete; 2]
         );
         assert_eq!(
-            fs.visit_dirs_with_options(
+            fs.visit_entries_with_options(
                 &["/a", "/b"],
                 options.max_path_bytes(2).into(),
                 |_, _| panic!("empty roots")
@@ -2613,7 +2907,7 @@ mod extension_tests {
         fs.write_files(&[("/a/f", b"x"), ("/b/f", b"y")]).unwrap();
         let options = options.max_entries(2).max_path_bytes(12);
         let mut seen = Vec::new();
-        fs.visit_dirs_with_options(&["/a", "/b"], options.into(), |index, entry| {
+        fs.visit_entries_with_options(&["/a", "/b"], options.into(), |index, entry| {
             seen.push((index, entry.path().to_path_buf()));
             Ok(std::ops::ControlFlow::Continue(()))
         })
@@ -2626,7 +2920,7 @@ mod extension_tests {
             ]
         );
         assert_eq!(
-            fs.visit_dirs_with_options(
+            fs.visit_entries_with_options(
                 &["/a", "/b"],
                 options.max_path_bytes(11).into(),
                 |_, _| Ok(std::ops::ControlFlow::Continue(()))
@@ -2636,7 +2930,7 @@ mod extension_tests {
             Some(1)
         );
         assert_eq!(
-            fs.visit_dirs_with_options(
+            fs.visit_entries_with_options(
                 &["/a", "/missing"],
                 options.max_path_bytes(6).into(),
                 |_, _| Ok(std::ops::ControlFlow::Break(()))
@@ -2657,10 +2951,6 @@ mod extension_tests {
         fs.create_dir_all("/a/sub").unwrap();
         fs.write("/a/f", b"x").unwrap();
         let options = crate::WalkOptions::new().max_depth(0);
-        let native_error =
-            NativeHooks::walk_native(&fs.mounted, "/a", crate::MetadataFields::MODE, options)
-                .unwrap_err();
-        assert_eq!(native_error.index(), Some(2));
         // Concrete method syntax must use the same extension as generic code,
         // not leak the backend's per-entry index.
         assert_eq!(
@@ -2728,7 +3018,7 @@ mod extension_tests {
         }
         let mut seen = Vec::new();
         let completion = fs
-            .visit_dirs_with_options(&roots, crate::VisitOptions::new(), |index, entry| {
+            .visit_entries_with_options(&roots, crate::VisitOptions::new(), |index, entry| {
                 seen.push(index);
                 assert!(fs.metadata(entry.path()).is_ok()); // callbacks can reenter
                 Ok(std::ops::ControlFlow::Break(()))
@@ -2739,7 +3029,7 @@ mod extension_tests {
 
         let mut seen = Vec::new();
         let completion = fs
-            .visit_dirs_with_options(
+            .visit_entries_with_options(
                 &roots,
                 crate::VisitOptions::new().recursive(true),
                 |index, _| {
@@ -2752,7 +3042,7 @@ mod extension_tests {
         assert_eq!(seen, [0]);
 
         let error = fs
-            .visit_dirs_with_options(
+            .visit_entries_with_options(
                 &["/two", "/two"],
                 crate::VisitOptions::new().max_entries(1),
                 |_, _| Ok(std::ops::ControlFlow::Continue(())),
@@ -2760,7 +3050,7 @@ mod extension_tests {
             .unwrap_err();
         assert_eq!(error.index(), Some(1));
         let error = fs
-            .visit_dirs_with_options(
+            .visit_entries_with_options(
                 &["/two", "/two"],
                 crate::VisitOptions::new().max_path_bytes("/two/c".len()),
                 |_, _| Ok(std::ops::ControlFlow::Continue(())),

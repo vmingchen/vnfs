@@ -12,23 +12,29 @@ composed workflows, and conventional scalar conveniences (`open`, `metadata`,
 `Fs` bound and an `FsExt` import; they do not implement extensions separately.
 
 Concrete clients do not duplicate these helpers as inherent methods. Native
-open, collection, walk and streaming execution hooks are private. Method syntax
+open and streaming execution hooks are private; directory collection uses the public page visitor. Method syntax
 and explicit `FsExt` calls therefore share helper semantics, including error
 indices, rather than selecting different implementations based on receiver type.
 
-`Fs::read_dirs_with_options` collects shallow directories or recursive trees
+`FsExt::read_dirs_with_options` collects shallow directories or recursive trees
 with the same `VisitOptions` used for visiting. Results are grouped by input:
 `results[i]` holds the listings for `paths[i]`. Shallow mode has exactly one
-listing per root; recursive mode includes descendants. The allocating path
-retains native directory batching, rather than collecting visitor callbacks.
+listing per root; recursive mode includes descendants. The allocating helper consumes directory pages from the native vector visitor, retaining batching without copying every entry.
 `FsExt::read_dirs` supplies the ordinary flat shallow result for convenience.
 
 `Fs::visit_dirs_with_options` handles both shallow and recursive visits through
 `VisitOptions`. Shallow is the default; `.recursive(true)` enables descent.
 Depth 0 lists root children, and depth 1 also lists immediate subdirectories.
 Recursive depth limits fail on deeper directories unless intentional truncation
-is enabled. Callbacks borrow entries, run outside locks, and can cancel the
-entire vector. Budgets are shared across roots; unspecified limits inherit the
+is enabled. Callbacks receive owned `DirectoryListing` pages, including pages for empty
+directories, run outside locks, and can cancel the entire vector. First pages
+and continuation pages use vector waves; pages may interleave across roots.
+Cancellation reports every started root, marking unfinished roots `Stopped`. A directory
+may produce several pages; each page retains its parent path. The visitor uses
+bounded cohorts (up to 32 directories for NFS) and at most 128 delivered entries
+per page, starting with one entry to preserve early cancellation. Fallback
+backends consume one directory snapshot before starting another.
+`FsExt::visit_entries_with_options` adapts pages to borrowed per-entry callbacks. Budgets are shared across roots; unspecified limits inherit the
 client policy. Metadata selection is pushed into paged enumeration, without
 per-entry stat requests. Recursive traversal does not follow entry symlinks.
 

@@ -124,7 +124,7 @@ listing fetches, and each `DirectoryListing` includes metadata for its entries
 without a separate stat call per file. For example:
 
 ```rust,no_run
-use vnfs::{Fs, MetadataFields, Nfs, VisitOptions};
+use vnfs::{FsExt, MetadataFields, Nfs, VisitOptions};
 
 fn main() -> vnfs::Result<()> {
     let fs = Nfs::connect("nfs.example.com")?;

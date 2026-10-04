@@ -55,6 +55,10 @@ impl DirPageCursor {
         Self(Box::new(state))
     }
 
+    pub fn is<T: std::any::Any + Send>(&self) -> bool {
+        self.0.is::<T>()
+    }
+
     pub fn into_state<T: std::any::Any + Send>(self) -> VfResult<T> {
         self.0
             .downcast::<T>()
@@ -62,6 +66,23 @@ impl DirPageCursor {
             .map_err(|_| VfError::client(0, ERR_INVAL))
     }
 }
+
+/// Backend page plus optional child seeds aligned with its entries.
+/// A seed starts a child's first page relative to its observed parent.
+#[doc(hidden)]
+pub type BackendDirectoryPage = (
+    Vec<VfAttrs>,
+    Option<DirPageCursor>,
+    Vec<Option<DirPageCursor>>,
+);
+
+/// Owned application page and traversal-scoped anchored child seeds.
+#[doc(hidden)]
+pub type DirectoryPage = (
+    crate::DirectoryListing,
+    Option<DirPageCursor>,
+    Vec<(std::path::PathBuf, DirPageCursor)>,
+);
 
 /// Default maximum number of entries returned by allocating directory APIs.
 pub const DEFAULT_DIRECTORY_MAX_ENTRIES: usize = 100_000;
@@ -663,6 +684,37 @@ pub trait VecFs {
             Some(DirPageCursor::new(remaining))
         };
         Ok((page, next))
+    }
+
+    /// Safe cohort size: fallback snapshots must not accumulate across directories.
+    fn directory_page_batch_size(&self) -> usize {
+        1
+    }
+
+    /// Fetch one bounded page per directory in request order.
+    fn listdir_pages(
+        &mut self,
+        dirs: &[&Path],
+        masks: AttrMask,
+        cursors: Vec<Option<DirPageCursor>>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<Vec<BackendDirectoryPage>> {
+        if dirs.len() != cursors.len() || page_size == 0 {
+            return Err(VfError::client(0, ERR_INVAL));
+        }
+        dirs.iter()
+            .zip(cursors)
+            .enumerate()
+            .map(|(index, (dir, cursor))| {
+                self.listdir_page(dir, masks, cursor, page_size, max_entries)
+                    .map(|(entries, next)| {
+                        let children = (0..entries.len()).map(|_| None).collect();
+                        (entries, next, children)
+                    })
+                    .map_err(|error| error.with_index(index))
+            })
+            .collect()
     }
 
     /// Recursively enumerate `root`, returning each directory with its entries.
