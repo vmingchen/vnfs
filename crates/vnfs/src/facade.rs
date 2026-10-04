@@ -42,6 +42,14 @@ macro_rules! owned_client {
             pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
                 self.inner.renamev(pairs)
             }
+            /// Rename with atomic no-replace semantics when the backend supports them.
+            pub fn vrename_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
+                &self,
+                pairs: &[(P, Q)],
+                options: RenameOptions,
+            ) -> Result<()> {
+                self.inner.renamev_with_options(pairs, options)
+            }
             /// Create directories in vector phases; parents must exist.
             /// An error can follow partially completed mutations.
             pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {

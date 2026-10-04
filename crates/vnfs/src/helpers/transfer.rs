@@ -1030,14 +1030,7 @@ fn move_run<P: AsRef<Path>>(
                 && options.layout == CopyLayout::Container
                 && options.existing == Existing::Replace
                 && options.depth.is_none();
-            let missing = can_rename
-                && (task.fresh_destination
-                    || match fs.symlink_metadata(&task.destination) {
-                        Ok(_) => false,
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-                        Err(e) => return Err(mapped(e, std::slice::from_ref(task))),
-                    });
-            if missing {
+            if can_rename {
                 renames.push(task.clone());
             } else {
                 copies.push(task.clone());
@@ -1048,16 +1041,29 @@ fn move_run<P: AsRef<Path>>(
                 .iter()
                 .map(|task| (&task.source, &task.destination))
                 .collect();
-            match fs.vrename(&pairs) {
+            match fs.vrename_with_options(&pairs, crate::RenameOptions::NoReplace) {
                 Ok(()) => summary.roots_renamed += renames.len() as u64,
-                Err(error)
-                    if !error.is_transport()
-                        && error.kind() == std::io::ErrorKind::CrossesDevices =>
-                {
+                Err(error) if !error.is_transport() => {
                     // A strict batch may have renamed a prefix. Do not infer that
                     // prefix from its index or replay any rename. Reconcile paths
                     // before copying the confirmed untouched operands instead.
-                    reconcile_renames(fs, &renames, error, &mut copies, &mut summary)?;
+                    let can_fallback = matches!(
+                        error.kind(),
+                        std::io::ErrorKind::CrossesDevices
+                            | std::io::ErrorKind::AlreadyExists
+                            | std::io::ErrorKind::Unsupported
+                    );
+                    reconcile_renames(
+                        fs,
+                        &renames,
+                        error.clone(),
+                        can_fallback,
+                        &mut copies,
+                        &mut summary,
+                    )?;
+                    if !can_fallback {
+                        return Err(mapped(error, &renames));
+                    }
                 }
                 Err(error) => return Err(mapped(error, &renames)),
             }
@@ -1096,6 +1102,7 @@ fn reconcile_renames(
     fs: &impl Vfsi,
     tasks: &[Task],
     failure: Error,
+    allow_fallback: bool,
     copies: &mut Vec<Task>,
     summary: &mut TransferSummary,
 ) -> Result<()> {
@@ -1106,10 +1113,18 @@ fn reconcile_renames(
                     return Err(invalid(task.root, &task.source));
                 }
                 match fs.symlink_metadata(&task.destination) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound && allow_fallback =>
+                    {
                         copies.push(task.clone())
                     }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(mapped(failure.clone(), tasks));
+                    }
                     Err(error) => return Err(mapped(error, std::slice::from_ref(task))),
+                    Ok(target) if allow_fallback && !same_file(&task.metadata, &target) => {
+                        copies.push(task.clone())
+                    }
                     Ok(_) => return Err(mapped(failure.clone(), tasks)),
                 }
             }

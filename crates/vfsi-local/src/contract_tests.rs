@@ -336,6 +336,78 @@ mod tests {
         assert!(fs.exists(Path::new("/sub/dst2")).unwrap());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn no_replace_empty_vector_is_a_noop() {
+        let (_root, mut fs) = fs("rename-noreplace-empty");
+        assert!(
+            fs.renamev_with_options(&[], vfsi_core::api::RenameOptions::NoReplace)
+                .is_ok()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unsupported_noreplace_flag_is_distinguished_from_invalid_directory_move() {
+        let unsupported = std::io::Error::from_raw_os_error(libc::EINVAL);
+        assert_eq!(
+            crate::noreplace_error_code(
+                &unsupported,
+                false,
+                Path::new("/source"),
+                Path::new("/target")
+            ),
+            VF_ERR_UNSUPPORTED,
+        );
+        assert_eq!(
+            crate::noreplace_error_code(
+                &unsupported,
+                true,
+                Path::new("/source"),
+                Path::new("/source/child"),
+            ),
+            libc::EINVAL as u32,
+        );
+        let unsupported_operation = std::io::Error::from_raw_os_error(libc::EOPNOTSUPP);
+        assert_eq!(
+            crate::noreplace_error_code(
+                &unsupported_operation,
+                false,
+                Path::new("/source"),
+                Path::new("/target"),
+            ),
+            VF_ERR_UNSUPPORTED,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn no_replace_preserves_invalid_self_directory_rename() {
+        let (_root, mut fs) = fs("rename-noreplace-self");
+        fs.mkdir(Path::new("/source"), 0o755).unwrap();
+        fs.mkdir(Path::new("/source/child"), 0o755).unwrap();
+        let error = fs
+            .renamev_with_options(
+                &[(
+                    VfFile::from_path("/source"),
+                    VfFile::from_path("/source/child/moved"),
+                )],
+                vfsi_core::api::RenameOptions::NoReplace,
+            )
+            .unwrap_err();
+        assert_eq!(error.err_no(), libc::EINVAL as u32);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn no_replace_empty_vector_is_a_noop() {
+        let (_root, mut fs) = fs("rename-noreplace-empty");
+        assert!(
+            fs.renamev_with_options(&[], vfsi_core::api::RenameOptions::NoReplace)
+                .is_ok()
+        );
+    }
+
     #[test]
     fn vf_path_rejects_descriptors() {
         let (_root, mut fs) = fs("vf-path");

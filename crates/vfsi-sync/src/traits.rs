@@ -625,6 +625,22 @@ pub trait VecFs {
     /// Rename a list of file pairs, `tc_renamev()`.
     fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes;
 
+    /// Atomic rename policy; third-party backends support ordinary replacement
+    /// unless they override this method with a native no-replace primitive.
+    fn renamev_with_options(
+        &mut self,
+        pairs: &[(VfFile, VfFile)],
+        options: vfsi_core::api::RenameOptions,
+    ) -> VfRes {
+        match options {
+            vfsi_core::api::RenameOptions::Replace => self.renamev(pairs),
+            vfsi_core::api::RenameOptions::NoReplace if pairs.is_empty() => Ok(()),
+            vfsi_core::api::RenameOptions::NoReplace => {
+                Err(VfError::client(0, vfsi_core::VF_ERR_UNSUPPORTED))
+            }
+        }
+    }
+
     /// Remove a list of files (or empty directories), `tc_removev()`.
     fn removev(&mut self, files: &[VfFile]) -> VfRes;
 

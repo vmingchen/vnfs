@@ -348,6 +348,33 @@ pub trait Vfsi {
     /// ```
     fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()>;
 
+    /// Rename pairs with explicit atomic destination behavior. Each `NoReplace`
+    /// pair is atomic, but a vector is not a transaction and a prefix may complete
+    /// before a later pair fails. Backends without a native guarantee return
+    /// Unsupported; they must never emulate it with check-then-rename.
+    ///
+    /// ```no_run
+    /// use vfsi_core::api::{RenameOptions, Vfsi};
+    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// fs.vrename_with_options(&[("/staged", "/published")], RenameOptions::NoReplace)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn vrename_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+        options: crate::api::RenameOptions,
+    ) -> Result<()> {
+        match options {
+            crate::api::RenameOptions::Replace => self.vrename(pairs),
+            crate::api::RenameOptions::NoReplace if pairs.is_empty() => Ok(()),
+            crate::api::RenameOptions::NoReplace => {
+                Err(crate::api::Error::client(0, crate::VF_ERR_UNSUPPORTED)
+                    .with_context("vrename_with_options", pairs[0].0.as_ref()))
+            }
+        }
+    }
+
     /// Visit shallow directories (default) or recursive trees using bounded pages.
     /// Entry/path-byte limits are shared across roots; recursive visits also
     /// charge retained directory path bytes. Root index accompanies every owned directory page, including empty directories.

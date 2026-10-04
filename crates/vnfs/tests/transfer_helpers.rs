@@ -149,6 +149,30 @@ impl Vfsi for Harness {
             _ => self.fs.vrename(p),
         }
     }
+    fn vrename_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        p: &[(P, Q)],
+        options: RenameOptions,
+    ) -> Result<()> {
+        self.calls.borrow_mut().renames += 1;
+        match self.fault.get() {
+            Fault::PartialCrossDevice => {
+                self.fs.vrename(&[(p[0].0.as_ref(), p[0].1.as_ref())])?;
+                Err(Error::client(1, libc::EXDEV as u32))
+            }
+            Fault::LostRename => {
+                self.fs.vrename_with_options(p, options)?;
+                Err(Error::transport_with_kind(
+                    None,
+                    TransportKind::InvalidReply,
+                    "lost rename reply",
+                ))
+            }
+            Fault::CrossDevice => Err(Error::client(0, libc::EXDEV as u32)),
+            Fault::Rename => Err(Error::client(0, libc::EIO as u32)),
+            _ => self.fs.vrename_with_options(p, options),
+        }
+    }
     fn vlistdirs<P: AsRef<Path>>(
         &self,
         p: &[P],
@@ -606,6 +630,39 @@ fn bulk_move_renames_independent_roots_in_one_vector() {
     assert_eq!(calls.renames, 1);
     assert_eq!(calls.copies, 0);
     assert_eq!(calls.removes, 0);
+}
+
+#[test]
+fn no_replace_is_atomic_and_reports_existing_destination() {
+    let t = tempfile::tempdir().unwrap();
+    let fs = Mounted::new(t.path()).unwrap();
+    std::fs::write(t.path().join("source"), b"source").unwrap();
+    std::fs::write(t.path().join("exists"), b"existing").unwrap();
+    let error = fs
+        .vrename_with_options(&[("/source", "/exists")], RenameOptions::NoReplace)
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(t.path().join("source")).unwrap(), b"source");
+    assert_eq!(std::fs::read(t.path().join("exists")).unwrap(), b"existing");
+    fs.vrename_with_options(&[("/source", "/new")], RenameOptions::NoReplace)
+        .unwrap();
+    assert_eq!(std::fs::read(t.path().join("new")).unwrap(), b"source");
+}
+
+#[test]
+fn no_replace_vector_reports_the_failing_pair_after_a_successful_prefix() {
+    let t = tempfile::tempdir().unwrap();
+    let fs = Mounted::new(t.path()).unwrap();
+    std::fs::write(t.path().join("a"), b"a").unwrap();
+    std::fs::write(t.path().join("b"), b"b").unwrap();
+    std::fs::write(t.path().join("exists"), b"old").unwrap();
+    let error = fs
+        .vrename_with_options(&[("/a", "/x"), ("/b", "/exists")], RenameOptions::NoReplace)
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(std::fs::read(t.path().join("x")).unwrap(), b"a");
+    assert_eq!(std::fs::read(t.path().join("b")).unwrap(), b"b");
+    assert_eq!(std::fs::read(t.path().join("exists")).unwrap(), b"old");
 }
 
 #[test]

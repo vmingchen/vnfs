@@ -144,6 +144,13 @@ macro_rules! client_methods {
         fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
             <$client>::$rename($receiver(self), pairs)
         }
+        fn vrename_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
+            &self,
+            pairs: &[(P, Q)],
+            options: crate::RenameOptions,
+        ) -> Result<()> {
+            <$client>::vrename_with_options($receiver(self), pairs, options)
+        }
         fn vlistdirs<P: AsRef<Path>>(
             &self,
             paths: &[P],

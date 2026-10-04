@@ -51,7 +51,7 @@ pub mod directory {
     #[doc(inline)]
     pub use crate::{
         ControlFlow, DepthLimit, DirEntry, DirectoryListing, FileType, Metadata, MetadataFields,
-        MetadataOptions, Permissions, ReadDirOptions, RemoveMode, RemoveOptions,
+        MetadataOptions, Permissions, ReadDirOptions, RemoveMode, RemoveOptions, RenameOptions,
         TraversalCompletion, VisitOptions, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
     };
 }
@@ -100,6 +100,7 @@ mod write;
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 pub(crate) use read::ReadRequest;
 pub use vfsi_core::api::MetadataOptions;
+pub use vfsi_core::api::RenameOptions;
 pub use vfsi_core::api::VisitOptions;
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 pub(crate) use vfsi_core::api::internal::OwnedReadResult;

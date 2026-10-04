@@ -13,6 +13,15 @@ pub use crate::{
     AttrMask as MetadataFields, Capabilities, DirEntry, ErrorDomain, Metadata, OpenFlags,
     OpenRequest, Permissions, RemoveOptions, StatusCode, TransportKind, VfType as FileType,
 };
+/// Atomic destination behavior requested by [`Vfsi::vrename_with_options`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenameOptions {
+    /// Replace a destination according to ordinary filesystem rename semantics.
+    #[default]
+    Replace,
+    /// Fail atomically if the destination already exists.
+    NoReplace,
+}
 pub use std::io::ErrorKind;
 pub use std::ops::ControlFlow;
 mod traits;
@@ -62,7 +71,7 @@ pub mod internal {
 pub mod prelude {
     pub use super::{
         ControlFlow, FileHandle, MetadataFields, MetadataOptions, OpenFlags, OpenRequest, ReadOp,
-        ReadOptions, ReadResult, ReadStreamOptions, RemoveMode, RemoveOptions, ResourceLimits,
-        Vfsi, VfsiExt, VisitOptions, WriteOp, WriteOptions,
+        ReadOptions, ReadResult, ReadStreamOptions, RemoveMode, RemoveOptions, RenameOptions,
+        ResourceLimits, Vfsi, VfsiExt, VisitOptions, WriteOp, WriteOptions,
     };
 }

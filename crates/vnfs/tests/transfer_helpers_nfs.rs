@@ -36,6 +36,11 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 .add_file("a", vec![19; 97])
                 .add_file("b", b"second")
                 .create(&fs, format!("{src}/nested/files"))?;
+            let destination = format!("{root}/no-replace");
+            let error = fs
+                .vrename_with_options(&[(&src, &destination)], RenameOptions::NoReplace)
+                .unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
             // Default conflict-safe copying uses bounded descriptor vectors.
             let s = copy_tree(
                 &fs,

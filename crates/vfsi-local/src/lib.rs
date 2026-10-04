@@ -34,6 +34,28 @@ fn checked_offset(base: u64, delta: u64, index: usize) -> VfResult<u64> {
         .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))
 }
 
+#[cfg(target_os = "linux")]
+fn noreplace_error_code(
+    error: &std::io::Error,
+    source_is_directory: bool,
+    source: &Path,
+    destination: &Path,
+) -> u32 {
+    match error.raw_os_error() {
+        Some(libc::EOPNOTSUPP | libc::ENOSYS) => VF_ERR_UNSUPPORTED,
+        // Linux also uses EINVAL for a directory being moved beneath itself.
+        // The syscall flag is a known-valid constant, so other EINVAL cases
+        // identify a kernel/filesystem without RENAME_NOREPLACE support.
+        Some(libc::EINVAL) if !(source_is_directory && destination.starts_with(source)) => {
+            VF_ERR_UNSUPPORTED
+        }
+        _ => error
+            .raw_os_error()
+            .map(|errno| errno as u32)
+            .unwrap_or(VF_ERR_RPC),
+    }
+}
+
 /// Open state for a descriptor on the local filesystem.
 struct DummyOpen {
     file: File,
@@ -1259,6 +1281,65 @@ impl VecFs for DummyVecFs {
             std::fs::rename(sp, dp).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
         }
         Ok(())
+    }
+
+    fn renamev_with_options(
+        &mut self,
+        pairs: &[(VfFile, VfFile)],
+        options: vfsi_core::api::RenameOptions,
+    ) -> VfRes {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        if options == vfsi_core::api::RenameOptions::Replace {
+            return self.renamev(pairs);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            for (index, (src, dst)) in pairs.iter().enumerate() {
+                let source_path = self.vf_path(src).map_err(|e| e.with_index(index))?;
+                let destination_path = self.vf_path(dst).map_err(|e| e.with_index(index))?;
+                let source = self
+                    .no_follow_path(&self.root.join(&source_path))
+                    .map_err(|e| e.with_index(index))?;
+                let destination = self
+                    .no_follow_path(&self.root.join(&destination_path))
+                    .map_err(|e| e.with_index(index))?;
+                let source_name = cstring_from_bytes(path_bytes(&source))
+                    .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+                let destination_name = cstring_from_bytes(path_bytes(&destination))
+                    .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_renameat2,
+                        libc::AT_FDCWD,
+                        source_name.as_ptr(),
+                        libc::AT_FDCWD,
+                        destination_name.as_ptr(),
+                        libc::RENAME_NOREPLACE,
+                    )
+                };
+                if result < 0 {
+                    let error = std::io::Error::last_os_error();
+                    let source_is_directory = std::fs::symlink_metadata(&source)
+                        .map(|metadata| metadata.is_dir())
+                        .unwrap_or(false);
+                    let errno = noreplace_error_code(
+                        &error,
+                        source_is_directory,
+                        &source_path,
+                        &destination_path,
+                    );
+                    return Err(VfError::failure(index, errno));
+                }
+            }
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = pairs;
+            Err(VfError::failure(0, ERR_UNSUPPORTED))
+        }
     }
 
     fn removev(&mut self, files: &[VfFile]) -> VfRes {

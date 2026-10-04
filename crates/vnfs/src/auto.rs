@@ -1409,6 +1409,30 @@ impl AutoClient {
         }
         Ok(())
     }
+
+    /// Apply atomic no-replace rename only when every pair routes through the
+    /// mounted backend. Direct NFS routing currently has no such protocol op.
+    pub fn vrename_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+        options: crate::RenameOptions,
+    ) -> VfResult<()> {
+        if options == crate::RenameOptions::Replace {
+            return self.vrename(pairs);
+        }
+        let mounts = read_mounts(false);
+        for (index, (source, destination)) in pairs.iter().enumerate() {
+            let a = self.resolve(source.as_ref(), &mounts);
+            let b = self.resolve(destination.as_ref(), &mounts);
+            if !matches!((&a.route, &b.route), (Route::Mounted, Route::Mounted)) {
+                return Err(
+                    vfsi_sync::VfError::client(index, vfsi_core::VF_ERR_UNSUPPORTED)
+                        .with_context("vrename_with_options", source.as_ref()),
+                );
+            }
+        }
+        self.mounted.renamev_with_options(pairs, options)
+    }
 }
 
 fn indexed(error: VfError, start: usize) -> VfError {
