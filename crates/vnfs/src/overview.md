@@ -25,8 +25,8 @@ let results = fs.readv([
     ReadOp::whole("/file-1"),
     ReadOp::whole("/file-2"),
 ])?;
-assert_eq!(results[0].data.as_deref(), Some(b"hello".as_slice()));
-assert_eq!(results[1].data.as_deref(), Some(b"world".as_slice()));
+assert_eq!(results[0].data(), Some(b"hello".as_slice()));
+assert_eq!(results[1].data(), Some(b"world".as_slice()));
 # Ok(())
 # }
 # #[cfg(not(feature = "nfs"))]
@@ -72,8 +72,8 @@ listing/streaming) without scalarizing vectors. Import both with `vnfs::prelude:
   between kernel and direct clients.
 - [`diagnostics`]: optional process-wide compound/RPC counters.
 - [`prelude`]: common imports. Common application types also remain at the root.
-- [`backend`]: advanced backend implementation and protocol construction; ordinary
-  applications should not need this module.
+- Separate `vfsi-*` crates: advanced backend implementation; ordinary
+  applications should not need these implementation crates.
 
 ## Guarantees and operational choices
 

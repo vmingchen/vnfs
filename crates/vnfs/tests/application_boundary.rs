@@ -73,7 +73,7 @@ fn auto_range_only_reads_keep_the_legacy_routing_allocation_cost() {
     // vector beyond Mounted. Partition/index/scatter vectors are unnecessary.
     let routing_bytes = paths.len()
         * (std::mem::size_of::<vnfs::ReadResult>()
-            + std::mem::size_of::<vnfs::backend::FsRead<'_, vnfs::backend::DummyVecFs>>());
+            + std::mem::size_of::<vfsi_sync::FsRead<'_, vfsi_local::DummyVecFs>>());
     assert_eq!(cost.0, baseline.0 + 2);
     assert!(cost.1 <= baseline.1 + routing_bytes);
 }
@@ -94,13 +94,14 @@ fn unified_operation_construction_does_not_allocate() {
     });
     assert_eq!(cost, (0, 0));
     let results = fs.readv(ops).unwrap();
-    assert_eq!(results[2].data, None);
+    assert_eq!(results[2].data(), None);
     assert_eq!(&buffer, b"a");
 }
 
 #[test]
 fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
-    use vnfs::backend::{DummyVecFs, FsClient};
+    use vfsi_local::DummyVecFs;
+    use vfsi_sync::FsClient;
     let root = tempfile::TempDir::new().unwrap();
     let mounted = Mounted::new(root.path()).unwrap();
     let raw = FsClient::new(DummyVecFs::try_new(root.path().to_path_buf()).unwrap());
@@ -202,8 +203,7 @@ fn opaque_requests_preserve_owner_preflight_and_error_sources() {
         owner
             .readv_with_options([vnfs::ReadOp::whole("/a")], vnfs::ReadOptions::default())
             .unwrap()[0]
-            .data
-            .as_deref()
+            .data()
             .unwrap(),
         b"original"
     );
@@ -246,6 +246,6 @@ fn handles_remain_send_sync_and_clients_remain_cheaply_cloneable() {
     );
     assert_eq!(
         std::mem::size_of::<vnfs::NfsFile>(),
-        std::mem::size_of::<vnfs::backend::FsFile<vnfs::backend::NfsVecFs>>()
+        std::mem::size_of::<vfsi_sync::FsFile<vfsi_nfs::NfsVecFs>>()
     );
 }

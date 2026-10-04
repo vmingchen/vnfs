@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom as IoSeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -141,15 +142,146 @@ fn wrong_result_count(operation: &str, expected: usize, actual: usize) -> VfErro
     )
 }
 
+enum CleanupTarget {
+    File(VfFile, PathBuf),
+    Directory(VfDir, PathBuf),
+}
+struct PendingClose<F> {
+    target: CleanupTarget,
+    close: fn(&mut F, &CleanupTarget) -> VfResult<()>,
+}
+
+/// The cleanup queue has a separate short-held lock: handle Drop never waits
+/// for an RPC or for the backend mutex. Final-owner teardown remains synchronous.
+struct SharedBackend<F: FileSystem> {
+    backend: Mutex<Option<F>>,
+    pending: Mutex<Vec<PendingClose<F>>>,
+    has_pending: AtomicBool,
+}
+impl<F: FileSystem> SharedBackend<F> {
+    fn new(backend: F) -> Self {
+        Self {
+            backend: Mutex::new(Some(backend)),
+            pending: Mutex::new(Vec::new()),
+            has_pending: AtomicBool::new(false),
+        }
+    }
+    fn defer(&self, target: CleanupTarget, close: fn(&mut F, &CleanupTarget) -> VfResult<()>) {
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(PendingClose { target, close });
+        self.has_pending.store(true, Ordering::Release);
+    }
+    fn lock_without_cleanup(&self) -> Result<BackendGuard<'_, F>, ()> {
+        self.backend
+            .lock()
+            .map(|guard| BackendGuard {
+                guard: Some(guard),
+                pending: &self.pending,
+                has_pending: &self.has_pending,
+            })
+            .map_err(|_| ())
+    }
+    fn lock(&self) -> Result<BackendGuard<'_, F>, ()> {
+        let mut guard = self.lock_without_cleanup()?;
+        // Ordinary I/O must not lose its result to an unrelated cleanup error.
+        // Retain failures; drain_cleanup is the explicit reporting boundary.
+        let _ = guard.drain_cleanup();
+        Ok(guard)
+    }
+}
+impl<F: FileSystem> Drop for SharedBackend<F> {
+    fn drop(&mut self) {
+        if let Some(backend) = self
+            .backend
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            let pending = self.pending.get_mut().unwrap_or_else(|e| e.into_inner());
+            for close in pending.drain(..) {
+                let _ = (close.close)(backend, &close.target);
+            }
+            let callbacks = backend.take_notifications();
+            for callback in callbacks {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+            }
+        }
+    }
+}
+struct BackendGuard<'a, F: FileSystem> {
+    guard: Option<std::sync::MutexGuard<'a, Option<F>>>,
+    pending: &'a Mutex<Vec<PendingClose<F>>>,
+    has_pending: &'a AtomicBool,
+}
+impl<F: FileSystem> std::ops::Deref for BackendGuard<'_, F> {
+    type Target = F;
+    fn deref(&self) -> &F {
+        self.guard
+            .as_ref()
+            .expect("live guard")
+            .as_ref()
+            .expect("live backend")
+    }
+}
+impl<F: FileSystem> std::ops::DerefMut for BackendGuard<'_, F> {
+    fn deref_mut(&mut self) -> &mut F {
+        self.guard
+            .as_mut()
+            .expect("live guard")
+            .as_mut()
+            .expect("live backend")
+    }
+}
+impl<F: FileSystem> BackendGuard<'_, F> {
+    fn drain_cleanup(&mut self) -> VfResult<()> {
+        if !self.has_pending.swap(false, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let pending = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut failed = Vec::new();
+        let mut first = None;
+        for close in pending {
+            if let Err(error) = (close.close)(self, &close.target) {
+                first.get_or_insert(error);
+                failed.push(close);
+            }
+        }
+        if !failed.is_empty() {
+            self.pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(failed);
+            self.has_pending.store(true, Ordering::Release);
+        }
+        first.map_or(Ok(()), Err)
+    }
+}
+impl<F: FileSystem> Drop for BackendGuard<'_, F> {
+    fn drop(&mut self) {
+        let callbacks = self.take_notifications();
+        drop(self.guard.take());
+        for callback in callbacks {
+            // Observability must not turn successful I/O into a panic or lose
+            // ownership of a newly opened descriptor before its RAII wrapping.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+        }
+    }
+}
+
 /// Cloneable owner of one synchronous backend connection.
 /// Clones share a mutex and serialize backend calls; use separate connections
 /// for parallel RPCs. Explicitly close handles to observe cleanup failures.
-pub struct FsClient<F> {
-    inner: Arc<Mutex<F>>,
+/// Handle Drop queues cleanup, drained before later operations or by
+/// `drain_cleanup`. Dropping the final backend owner performs synchronous
+/// teardown and may wait for pending closes and backend request timeouts.
+pub struct FsClient<F: FileSystem> {
+    inner: Arc<SharedBackend<F>>,
     limits: ResourceLimits,
 }
 
-impl<F> Clone for FsClient<F> {
+impl<F: FileSystem> Clone for FsClient<F> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -158,16 +290,16 @@ impl<F> Clone for FsClient<F> {
     }
 }
 
-impl<F> fmt::Debug for FsClient<F> {
+impl<F: FileSystem> fmt::Debug for FsClient<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("FsClient").finish_non_exhaustive()
     }
 }
 
-impl<F> FsClient<F> {
+impl<F: FileSystem> FsClient<F> {
     pub fn new(filesystem: F) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(filesystem)),
+            inner: Arc::new(SharedBackend::new(filesystem)),
             limits: ResourceLimits::default(),
         }
     }
@@ -183,21 +315,35 @@ impl<F> FsClient<F> {
         self.limits
     }
 
-    fn lock(&self) -> VfResult<std::sync::MutexGuard<'_, F>> {
+    fn lock(&self) -> VfResult<BackendGuard<'_, F>> {
         self.inner.lock().map_err(|_| poisoned())
     }
 
     pub fn into_inner(self) -> Result<F, Self> {
+        if self.drain_cleanup().is_err() {
+            return Err(self);
+        }
         match Arc::try_unwrap(self.inner) {
-            Ok(mutex) => match mutex.into_inner() {
-                Ok(filesystem) => Ok(filesystem),
-                Err(poisoned) => Ok(poisoned.into_inner()),
-            },
+            Ok(mut shared) => Ok(shared
+                .backend
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .expect("owned backend")),
             Err(inner) => Err(Self {
                 inner,
                 limits: self.limits,
             }),
         }
+    }
+
+    /// Drain queued Drop cleanup and report the first failure. Failed targets
+    /// remain owned for later cleanup. No new file operation is replayed.
+    pub fn drain_cleanup(&self) -> VfResult<()> {
+        self.inner
+            .lock_without_cleanup()
+            .map_err(|_| poisoned())?
+            .drain_cleanup()
     }
 }
 
@@ -252,7 +398,7 @@ impl<F: FileSystem> FsClient<F> {
                     Ok(data)
                 }
             });
-        // Owned cleanup retries once through Drop on close failure, and keeps
+        // Owned cleanup queues a retry through Drop on close failure, and keeps
         // the read error primary when both read and close fail.
         let cleanup = file.close();
         operation.and_then(|data| cleanup.map(|()| data))
@@ -852,10 +998,10 @@ impl<F: VecFs> FsClient<F> {
     }
 }
 
-/// Owned, handle-rooted directory. Dropping it releases backend state;
+/// Owned, handle-rooted directory. Dropping it queues backend cleanup;
 /// [`close`](Self::close) reports cleanup errors explicitly.
 pub struct FsDir<F: VecFs> {
-    inner: Arc<Mutex<F>>,
+    inner: Arc<SharedBackend<F>>,
     dir: Option<VfDir>,
     path: PathBuf,
 }
@@ -911,10 +1057,18 @@ impl<F: VecFs> FsDir<F> {
 
 impl<F: VecFs> Drop for FsDir<F> {
     fn drop(&mut self) {
-        if let Some(dir) = self.dir.take()
-            && let Ok(mut backend) = self.inner.lock()
-        {
-            let _ = backend.close_dir(&dir);
+        if let Some(dir) = self.dir.take() {
+            self.inner.defer(
+                CleanupTarget::Directory(dir, std::mem::take(&mut self.path)),
+                |backend, target| {
+                    let CleanupTarget::Directory(dir, path) = target else {
+                        unreachable!()
+                    };
+                    backend
+                        .close_dir(dir)
+                        .map_err(|error| error.with_context("close_dir", path))
+                },
+            );
         }
     }
 }
@@ -1950,7 +2104,7 @@ impl<F: MetadataFileSystem> SetMetadata<'_, F> {
 /// backend mutex and on network I/O; use [`FsFile::try_close`] when the close
 /// result matters or when its timing must be controlled.
 pub struct FsFile<F: FileSystem> {
-    inner: Arc<Mutex<F>>,
+    inner: Arc<SharedBackend<F>>,
     file: Option<VfFile>,
     path: PathBuf,
 }
@@ -2176,8 +2330,9 @@ impl<F: FileSystem> FsFile<F> {
         Ok(())
     }
 
-    /// Consume and close the handle. On failure, `Drop` makes one best-effort
-    /// cleanup attempt; use [`try_close`](Self::try_close) to retain control.
+    /// Consume and close the handle. On failure, `Drop` queues cleanup for
+    /// a later operation or explicit cleanup drain; use
+    /// [`try_close`](Self::try_close) to retain control.
     pub fn close(mut self) -> VfResult<()> {
         self.try_close()
     }
@@ -2237,10 +2392,18 @@ pub struct FsReadInto<'a, F: FileSystem> {
 
 impl<F: FileSystem> Drop for FsFile<F> {
     fn drop(&mut self) {
-        if let Some(file) = self.file.take()
-            && let Ok(mut filesystem) = self.inner.lock()
-        {
-            let _ = filesystem.close_one(&file);
+        if let Some(file) = self.file.take() {
+            self.inner.defer(
+                CleanupTarget::File(file, std::mem::take(&mut self.path)),
+                |backend, target| {
+                    let CleanupTarget::File(file, path) = target else {
+                        unreachable!()
+                    };
+                    backend
+                        .close_deferred(file)
+                        .map_err(|error| error.with_context("close", path))
+                },
+            );
         }
     }
 }

@@ -7,13 +7,17 @@ use std::path::Path;
 
 /// Owned application file. Borrowed requests preserve the file's lifetime;
 /// clients validate connection ownership before dispatching a vector.
+///
+/// External implementations must keep request storage valid for its borrowed
+/// lifetime, validate client ownership before I/O, and report positional progress
+/// without changing the cursor. Request constructors do no I/O. Associated
+/// request types are implementer contracts, not application-facing builders.
+/// A backend must retain ownership of live descriptors through cleanup failures.
 pub trait FileHandle: Read + Write + Seek {
-    #[doc(hidden)]
     /// Borrowed positional read request; constructing it performs no I/O.
     type ReadRequest<'a>
     where
         Self: 'a;
-    #[doc(hidden)]
     /// Borrowed positional request into a caller-owned destination buffer.
     type ReadIntoRequest<'a>
     where
@@ -22,10 +26,8 @@ pub trait FileHandle: Read + Write + Seek {
     fn path(&self) -> &Path;
     /// Query the opened object, even if its original pathname was renamed.
     fn metadata(&self) -> Result<Metadata>;
-    #[doc(hidden)]
     /// Prepare a non-cursor-changing read for this handle's owning client.
     fn read_request_at(&self, offset: u64, length: usize) -> Self::ReadRequest<'_>;
-    #[doc(hidden)]
     /// Borrow both the handle and destination until the vector call completes.
     fn read_request_at_into<'a>(
         &'a self,
@@ -56,7 +58,8 @@ pub trait FileHandle: Read + Write + Seek {
     /// Local close ownership only, not proof of remote liveness after failure.
     fn is_closed(&self) -> bool;
     /// Consuming close: on failure the handle is lost and Drop retries cleanup
-    /// best-effort. Prefer `try_close` when cleanup failures need reconciliation.
+    /// best-effort on a later operation or cleanup drain. Prefer `try_close` when
+    /// cleanup failures need reconciliation.
     fn close(self) -> Result<()>
     where
         Self: Sized;
@@ -107,7 +110,7 @@ pub trait FileHandle: Read + Write + Seek {
 /// Calls are synchronous. Callback methods invoke user code outside the backend
 /// lock and propagate callback errors, but do not provide a filesystem snapshot.
 /// Writes are not automatically durable: use [`FileHandle::sync_data`] or
-/// [`FileHandle::sync_all`] on an open handle when required. Drop closes handles
+/// [`FileHandle::sync_all`] on an open handle when required. Drop queues handle cleanup
 /// best-effort; explicit close methods let applications observe cleanup errors.
 pub trait Fs {
     /// Query metadata in input order with selected fields and final-symlink behavior.
@@ -180,7 +183,7 @@ pub trait Fs {
     ///     [ReadOp::whole("/config")],
     ///     ReadOptions::new().max_total_bytes(1024 * 1024),
     /// )?;
-    /// println!("{} bytes", results[0].read);
+    /// println!("{} bytes", results[0].read());
     /// # Ok(())
     /// # }
     /// ```
@@ -448,8 +451,8 @@ pub trait FsExt: Fs {
     /// let close = file.close();
     /// let results = result?;
     /// close?;
-    /// println!("config: {:?}", results[0].data.as_deref().unwrap());
-    /// println!("buffer: {:?}", &buffer[..results[2].read]);
+    /// println!("config: {:?}", results[0].data().unwrap());
+    /// println!("buffer: {:?}", &buffer[..results[2].read()]);
     /// # Ok(())
     /// # }
     /// ```

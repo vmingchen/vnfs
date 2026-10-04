@@ -406,6 +406,10 @@ impl NfsClientBuilder {
         filesystem.notify(NfsEvent::Connected {
             minor_version: filesystem.minorversion(),
         });
+        // Construction has not installed the backend behind a client lock.
+        for callback in VecFs::take_notifications(&mut filesystem) {
+            callback();
+        }
         Ok(filesystem)
     }
 
@@ -440,6 +444,11 @@ pub enum NfsEvent {
 }
 
 /// Observer hook which does not impose a logging or metrics framework.
+/// Owned clients deliver events after releasing their backend lock, allowing
+/// reentrant client operations. Callbacks run synchronously and should be short.
+/// Owned-client delivery isolates callback panics from filesystem results.
+/// Store weak client references to avoid an observer/client ownership cycle.
+/// Direct backend users must drain `VecFs::take_notifications` outside locks.
 pub trait NfsObserver: Send + Sync + 'static {
     fn on_event(&self, event: &NfsEvent);
 }
@@ -516,6 +525,7 @@ pub struct NfsVecFs {
     #[cfg(target_os = "linux")]
     mount_source: Option<crate::mount::NfsMount>,
     observer: Option<Arc<dyn NfsObserver>>,
+    pending_events: Vec<NfsEvent>,
     #[cfg(feature = "test-faults")]
     fault_injector: Option<Arc<dyn FaultInjector>>,
     #[cfg(feature = "test-faults")]
@@ -807,6 +817,9 @@ impl NfsVecFs {
     /// Close all descriptors and explicitly tear down NFS session state.
     /// `Drop` remains a best-effort fallback when this result is not needed.
     pub fn shutdown(mut self) -> VfResult<()> {
+        for callback in VecFs::take_notifications(&mut self) {
+            callback();
+        }
         let observer = self.observer.clone();
         let closes: Vec<crate::client::CloseOp> = self
             .open_files
@@ -835,9 +848,9 @@ impl NfsVecFs {
         result
     }
 
-    fn notify(&self, event: NfsEvent) {
-        if let Some(observer) = &self.observer {
-            observer.on_event(&event);
+    fn notify(&mut self, event: NfsEvent) {
+        if self.observer.is_some() {
+            self.pending_events.push(event);
         }
     }
 
@@ -1420,6 +1433,7 @@ impl NfsVecFs {
             #[cfg(target_os = "linux")]
             mount_source: None,
             observer: None,
+            pending_events: Vec::new(),
             #[cfg(feature = "test-faults")]
             fault_injector: None,
             #[cfg(feature = "test-faults")]
@@ -1526,6 +1540,9 @@ impl NfsVecFs {
             replacement.open_files = restored;
         }
 
+        // Publish pending lifecycle events with the new session; a failed
+        // reopen must leave them in the old backend for delivery on unlock.
+        replacement.pending_events = std::mem::take(&mut self.pending_events);
         std::mem::swap(self, &mut replacement);
         // `replacement` now owns the dead session and its obsolete open
         // state. Do not turn successful recovery into several close/destroy
@@ -3991,6 +4008,33 @@ impl NfsVecFs {
 }
 
 impl VecFs for NfsVecFs {
+    fn close_deferred(&mut self, file: &VfFile) -> VfResult<()> {
+        let fd = file.fd().ok_or_else(|| VfError::client(0, ERR_INVAL))?;
+        if self.open_files.contains_key(&fd) {
+            self.close(file)
+        } else {
+            // A failed scalar CLOSE already transferred the remote state into
+            // the backend queue and disarmed this descriptor for ordinary I/O.
+            self.drain_deferred_descriptor_closes()
+        }
+    }
+    fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
+        let Some(observer) = &self.observer else {
+            return Vec::new();
+        };
+        let observer = observer.clone();
+        let events = std::mem::take(&mut self.pending_events);
+        if events.is_empty() {
+            return Vec::new();
+        }
+        events
+            .into_iter()
+            .map(|event| {
+                let observer = observer.clone();
+                Box::new(move || observer.on_event(&event)) as Box<dyn FnOnce() + Send>
+            })
+            .collect()
+    }
     fn nfs_minorversion(&self) -> Option<u32> {
         Some(self.minorversion())
     }

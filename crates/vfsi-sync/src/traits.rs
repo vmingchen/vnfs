@@ -415,6 +415,16 @@ pub(crate) fn validate_write_results(
 /// must not silently replay such mutations; callers that retry must first
 /// reconcile state or use application-level idempotency.
 pub trait VecFs {
+    /// Finish cleanup after an owned file is dropped. Backends that retain
+    /// failed CLOSE state internally should complete their deferred cleanup.
+    fn close_deferred(&mut self, file: &VfFile) -> VfResult<()> {
+        self.close(file)
+    }
+    /// Deferred operational notifications. Owned clients deliver these after
+    /// unlocking; direct backend users must drain and run them outside any lock.
+    fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
+        Vec::new()
+    }
     /// Negotiated NFS minor version, or `None` for non-NFS backends.
     #[deprecated(note = "use the NFS backend's NfsExtensions trait")]
     fn nfs_minorversion(&self) -> Option<u32> {

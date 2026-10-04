@@ -24,7 +24,7 @@ pub fn run(fs: &impl Fs, paths: &[String]) -> vnfs::Result<Vec<Vec<u8>>> {
     Ok(buffers
         .iter()
         .zip(results)
-        .map(|(buffer, result)| buffer[..result.read].to_vec())
+        .map(|(buffer, result)| buffer[..result.read()].to_vec())
         .collect())
 }
 

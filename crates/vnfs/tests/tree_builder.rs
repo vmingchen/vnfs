@@ -31,8 +31,7 @@ fn duplicate_directories_do_not_consume_planned_entry_slots() {
             )
             .unwrap()
             .remove(0)
-            .data
-            .as_deref()
+            .data()
             .unwrap(),
         b"payload"
     );
@@ -108,8 +107,7 @@ fn builds_nested_binary_empty_and_directory_entries_without_implicit_cleanup() {
             )
             .unwrap()
             .remove(0)
-            .data
-            .as_deref()
+            .data()
             .unwrap(),
         b"host = localhost"
     );
@@ -121,8 +119,7 @@ fn builds_nested_binary_empty_and_directory_entries_without_implicit_cleanup() {
             )
             .unwrap()
             .remove(0)
-            .data
-            .as_deref()
+            .data()
             .unwrap(),
         [0, 255, 10]
     );
@@ -134,7 +131,7 @@ fn builds_nested_binary_empty_and_directory_entries_without_implicit_cleanup() {
             )
             .unwrap()
             .remove(0)
-            .data
+            .into_data()
             .unwrap()
             .is_empty()
     );
@@ -209,8 +206,7 @@ fn budgets_include_implicit_directories_payloads_and_planned_path_bytes() {
             )
             .unwrap()
             .remove(0)
-            .data
-            .as_deref()
+            .data()
             .unwrap(),
         b"123"
     );
@@ -239,8 +235,7 @@ fn existing_root_is_not_overwritten_or_cleaned_up_even_if_it_is_a_symlink() {
                 )
                 .unwrap()
                 .remove(0)
-                .data
-                .as_deref()
+                .data()
                 .unwrap(),
             b"original"
         );
@@ -297,7 +292,7 @@ fn routed_client_supports_the_same_builder_and_directory_preflight() {
             )
             .unwrap()
             .into_iter()
-            .map(|r| r.data.unwrap())
+            .map(|r| r.into_data().unwrap())
             .collect::<Vec<_>>(),
         [b"a".to_vec(), b"b".to_vec()]
     );

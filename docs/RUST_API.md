@@ -44,10 +44,10 @@ backends, or provide backend extraction. Builder operations return application
 clients, not protocol implementations. Cloning remains cheap and shares the
 connection; files retain their existing ownership, cleanup, and error semantics.
 
-Custom backend implementers explicitly import `vnfs::backend::FsClient`,
-`FsFile`, `FsDir`, and backend traits. Construct and extract backend owners there
+Custom backend implementers depend on `vfsi-sync` for `FsClient`,
+`FsFile`, `FsDir`, and backend traits, plus the corresponding protocol crate. Construct and extract backend owners there
 instead of using `connect_backend` or extracting an application client. Protocol
-conversion helpers also live in that namespace, not on application metadata,
+conversion helpers also live in those implementation crates, not on application metadata,
 flags, results, or errors. There are no historical root aliases: applications use
 `Error`, `Result`, and `FileType`. This is a pre-1.0 Rust source change; the C ABI
 is unchanged.
@@ -105,7 +105,7 @@ share the kernel client's caches.
 
 The `vnfs` crate root exposes the NFS application API. `VecFs`, `VfFile`,
 `Fd`, `VfAttrs`, `VfOpenOptions`, raw libc flags, and NFS protocol modules live
-under `vnfs::backend` or in the corresponding `vfsi-*` crates. New application
+only in the corresponding `vfsi-*` crates; they are not republished by `vnfs`. New application
 code can start with:
 
 ```rust
@@ -161,7 +161,8 @@ Prefer `try_close()` and `try_closev(&mut files)` when cleanup errors matter.
 They retain ownership on failure. `is_closed() == false` only means local
 cleanup ownership remains, not that a remotely ambiguous close failed to take
 effect. Consuming `close`/`closev` perform best-effort cleanup on error, and
-`Drop` can block and discards cleanup errors.
+`Drop` queues cleanup while a client remains alive. Use `drain_cleanup` to
+observe queued failures; final-owner teardown remains synchronous.
 
 Native client and file methods retain `vnfs::Error`. Only the standard-library
 `Read`, `Write`, and `Seek` adapters translate failures to `std::io::Error`.
@@ -229,7 +230,7 @@ For recursive removal, `NfsClient::remove_dir_all` is fail-fast and
 `remove_paths_with_options` expose `RemoveOptions` at the application layer.
 `NfsClient::open_dir_handle` returns an owned `NfsDir` only when the backend has
 a genuine directory descriptor; its `remove_contents` methods stay rooted at
-that handle and `Drop` closes it. Backends that only offer path tokens return
+that handle and `Drop` queues its cleanup. Backends that only offer path tokens return
 `Unsupported` instead of implying handle safety. The NFS remover processes
 one bounded READDIR reply at a time (32 KiB by default), advances through the
 current pass, and verifies from the beginning after a mutating pass. If a server
@@ -239,3 +240,20 @@ The SMB backend exposes `SmbConnectOptions` through
 `SmbVecFs::connect_with_options`. Connect setup and ordinary requests have
 separate deadlines; the request deadline is also applied to sends, response
 waiting, and SMB credit acquisition.
+
+## Lifecycle and read results
+
+File and directory Drop queues cleanup without acquiring the backend mutex or
+issuing RPCs while a client remains alive. Later operations drain the queue;
+`client.drain_cleanup()` explicitly reports failures and retains failed targets.
+Use `try_close`/`try_closev` to observe close failures immediately. Dropping the
+final backend owner still performs synchronous teardown and can wait on request
+timeouts; this is not a cancellation mechanism.
+
+Lifecycle observers are delivered after the backend lock is released. They may
+reenter the client. Keep callbacks short and avoid strong observer/client cycles.
+
+`ReadResult` has private fields. Use `offset()`, `read()`, `eof()`, `data()`,
+`is_buffered()`, and `into_data()`. Backend implementers construct owned results
+with `ReadResult::owned`, which derives the byte count, or use
+`ReadResult::buffered` for caller-owned storage. Results never retain buffer borrows.

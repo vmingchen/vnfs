@@ -218,6 +218,13 @@ fn connect_explicit_endpoint(
 }
 
 /// A connected RPC client on a single TCP transport.
+/// Raw XDR invocation is private to the protocol implementation.
+///
+/// ```compile_fail
+/// fn invalid(client: &vfsi_nfs::rpc::RpcClient) {
+///     let _ = client.call(1, None, std::ptr::null_mut(), None, std::ptr::null_mut());
+/// }
+/// ```
 pub struct RpcClient {
     clnt: *mut CLIENT,
     auth: *mut AUTH,
@@ -366,7 +373,13 @@ impl RpcClient {
     /// Synchronous RPC call: encode `args` with `xargs`, decode the reply with
     /// `xres` into `res`.  `res` must be freed by the caller using the
     /// xdr_free-null-stream idiom.
-    pub fn call(
+    /// # Safety
+    /// `args` and `res` must point to live, suitably aligned storage matching
+    /// `xargs` and `xres`. Their entire reachable pointer graphs must remain
+    /// valid for the synchronous call; the decoder must be allowed to mutate
+    /// `res`. The caller owns decoded allocations and must release them with
+    /// the matching XDR routine, including on failure.
+    pub(crate) unsafe fn call(
         &self,
         proc_: rpcproc_t,
         xargs: xdrproc_t,

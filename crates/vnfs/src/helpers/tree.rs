@@ -327,9 +327,10 @@ fn entry_error(error: Error, batch: &[(PathBuf, usize)], entries: &[Entry]) -> E
 #[cfg(all(test, feature = "test-faults", feature = "auto", target_os = "linux"))]
 mod tests {
     use super::*;
-    use crate::backend::{DummyVecFs, FsClient};
     use std::sync::Arc;
     use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
+    use vfsi_local::DummyVecFs;
+    use vfsi_sync::FsClient;
 
     #[test]
     fn failed_open_preserves_original_index_and_partial_tree_without_replay_or_leaks() {

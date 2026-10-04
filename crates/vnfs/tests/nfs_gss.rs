@@ -4,7 +4,8 @@ use std::time::Duration;
 use std::{process::Command, thread};
 
 use vfsi_nfs::NfsConnectOptions;
-use vnfs::backend::{NfsVecFs, ReadOp, VecFs, VfFile, VfOffset, WriteOp};
+use vfsi_nfs::NfsVecFs;
+use vfsi_sync::{ReadOp, VecFs, VfFile, VfOffset, WriteOp};
 use vnfs::{NfsAuthentication, RpcsecGssProtection};
 
 fn options(protection: RpcsecGssProtection) -> NfsConnectOptions {

@@ -16,7 +16,7 @@ pub fn run(fs: &impl Fs, fresh_root: &str) -> vnfs::Result<Vec<Vec<u8>>> {
         fs.readv(requests).map(|results| {
             results
                 .into_iter()
-                .map(|result| result.data.unwrap())
+                .map(|result| result.into_data().unwrap())
                 .collect()
         })
     })();

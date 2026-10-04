@@ -124,13 +124,53 @@ impl<'a, H: crate::FileHandle + 'a> ReadOp<'a, H> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadResult {
     /// Resolved absolute offset; zero for a complete-file operation.
-    pub offset: u64,
+    pub(crate) offset: u64,
     /// Number of valid bytes in owned data or the caller's buffer.
-    pub read: usize,
+    pub(crate) read: usize,
     /// True when the backend observed end of file.
-    pub eof: bool,
+    pub(crate) eof: bool,
     /// Owned contents for `whole`/`range`; `None` for `into`, including empty reads.
-    pub data: Option<Vec<u8>>,
+    pub(crate) data: Option<Vec<u8>>,
+}
+
+impl ReadResult {
+    /// Owned contents. The byte count is derived, never independently supplied.
+    pub fn owned(offset: u64, data: Vec<u8>, eof: bool) -> Self {
+        Self {
+            offset,
+            read: data.len(),
+            eof,
+            data: Some(data),
+        }
+    }
+    /// Progress in caller storage, for implementing `Fs`. The implementation
+    /// must ensure `read` does not exceed the corresponding destination length.
+    pub const fn buffered(offset: u64, read: usize, eof: bool) -> Self {
+        Self {
+            offset,
+            read,
+            eof,
+            data: None,
+        }
+    }
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+    pub const fn read(&self) -> usize {
+        self.read
+    }
+    pub const fn eof(&self) -> bool {
+        self.eof
+    }
+    pub fn data(&self) -> Option<&[u8]> {
+        self.data.as_deref()
+    }
+    pub fn into_data(self) -> Option<Vec<u8>> {
+        self.data
+    }
+    pub const fn is_buffered(&self) -> bool {
+        self.data.is_none()
+    }
 }
 
 pub(crate) fn consume_ops<'a, H: crate::FileHandle + 'a>(

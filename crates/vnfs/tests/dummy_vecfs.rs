@@ -6,8 +6,8 @@ use vfsi_sync::test_support as common;
 
 use std::path::Path;
 use tempfile::TempDir;
-use vnfs::backend::DummyVecFs;
-use vnfs::backend::{VecFs, VecFsExt, VfOffset};
+use vfsi_local::DummyVecFs;
+use vfsi_sync::{VecFs, VecFsExt, VfOffset};
 
 #[test]
 fn application_walk_prunes_before_io_selects_metadata_and_allows_reentry() {
@@ -17,7 +17,7 @@ fn application_walk_prunes_before_io_selects_metadata_and_allows_reentry() {
         return;
     }
     let (_root, backend) = dummy();
-    let client = vnfs::backend::FsClient::new(backend);
+    let client = vfsi_sync::FsClient::new(backend);
     client.create_dir_all("/blocked").unwrap();
     client.write("/blocked/hidden", b"hidden").unwrap();
     client.write("/a", b"hello").unwrap();
@@ -53,7 +53,7 @@ fn application_walk_prunes_before_io_selects_metadata_and_allows_reentry() {
 #[test]
 fn bounded_open_file_collection_keeps_identity_across_rename_and_replacement() {
     let (_root, backend) = dummy();
-    let client = vnfs::backend::FsClient::new(backend);
+    let client = vfsi_sync::FsClient::new(backend);
     client.write("/original", b"opened").unwrap();
     let mut file = client.open("/original").unwrap();
     client.rename("/original", "/moved").unwrap();
@@ -74,7 +74,7 @@ fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
     if common::supervise_with_deadline("paged_tree_visiting_is_bounded_cancellable_and_reentrant") {
         return;
     }
-    use vnfs::backend::FsClient;
+    use vfsi_sync::FsClient;
     use vnfs::{ResourceLimits, TraversalCompletion, WalkOptions};
     let (_root, backend) = dummy();
     let client = FsClient::new(backend).with_limits(ResourceLimits {
@@ -162,7 +162,7 @@ fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
 #[cfg(feature = "test-faults")]
 use std::sync::Arc;
 #[cfg(feature = "test-faults")]
-use vnfs::backend::internal::faults::{FaultScript, OpenFaultPoint};
+use vfsi_sync::internal::faults::{FaultScript, OpenFaultPoint};
 
 /// A `DummyVecFs` rooted at a fresh unique temp directory.
 fn dummy() -> (TempDir, DummyVecFs) {
@@ -173,8 +173,8 @@ fn dummy() -> (TempDir, DummyVecFs) {
 
 #[test]
 fn one_shot_file_vectors_roundtrip_and_bound_returned_bytes() {
-    use vnfs::backend::FsClient;
-    use vnfs::backend::ReadAllOptions;
+    use vfsi_sync::FsClient;
+    use vfsi_sync::ReadAllOptions;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -205,7 +205,7 @@ fn one_shot_file_vectors_roundtrip_and_bound_returned_bytes() {
 
 #[test]
 fn one_shot_file_vectors_handle_empty_batches_and_replace_files() {
-    use vnfs::backend::FsClient;
+    use vfsi_sync::FsClient;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -230,7 +230,7 @@ fn one_shot_file_vectors_handle_empty_batches_and_replace_files() {
 
 #[test]
 fn application_directory_vectors_preserve_fields_and_limits() {
-    use vnfs::backend::FsClient;
+    use vfsi_sync::FsClient;
     use vnfs::{MetadataFields, ReadDirOptions, WalkOptions};
 
     let (_root, backend) = dummy();
@@ -285,8 +285,8 @@ fn application_directory_vectors_preserve_fields_and_limits() {
 
 #[test]
 fn application_metadata_and_batch_mutations() {
+    use vfsi_sync::FsClient;
     use vnfs::MetadataFields;
-    use vnfs::backend::FsClient;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -311,7 +311,7 @@ fn application_metadata_and_batch_mutations() {
 
 #[test]
 fn application_directory_cohorts_preserve_global_error_index() {
-    use vnfs::backend::FsClient;
+    use vfsi_sync::FsClient;
     use vnfs::{MetadataFields, ReadDirOptions};
 
     let (_root, backend) = dummy();
@@ -351,7 +351,7 @@ fn dummy_getcwd() {
 
 #[test]
 fn single_file_stream_is_bounded_ordered_and_cancellable() {
-    use vnfs::backend::FsClient;
+    use vfsi_sync::FsClient;
     use vnfs::{Error as VfError, ReadStreamOptions};
 
     let (_root, backend) = dummy();
@@ -383,7 +383,7 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     client
         .read_stream("/stream", |offset, chunk| {
             assert_eq!(offset, default_bytes as u64);
-            assert!(chunk.len() <= vnfs::backend::DEFAULT_READ_STREAM_CHUNK_BYTES);
+            assert!(chunk.len() <= vfsi_sync::DEFAULT_READ_STREAM_CHUNK_BYTES);
             default_bytes += chunk.len();
             Ok(true)
         })
@@ -430,8 +430,8 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
 
 #[test]
 fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
-    use vnfs::backend::FsClient;
-    use vnfs::backend::{
+    use vfsi_sync::FsClient;
+    use vfsi_sync::{
         DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, VecFs, VfFile, VfOffset, WriteOp,
     };
 
@@ -458,7 +458,7 @@ fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
 
 #[test]
 fn dummy_errors_on_missing_file() {
-    use vnfs::backend::{ReadOp, VecFs, VfOffset};
+    use vfsi_sync::{ReadOp, VecFs, VfOffset};
 
     let (_root, mut fs) = dummy();
     fs.ensure_dir(Path::new("/data"), 0o755).unwrap();
@@ -498,7 +498,7 @@ fn dummy_stays_under_root() {
 #[test]
 fn non_utf8_filenames_roundtrip() {
     use std::os::unix::ffi::OsStringExt;
-    use vnfs::backend::{ReadOp, VecFs, VfOffset, WriteOp};
+    use vfsi_sync::{ReadOp, VecFs, VfOffset, WriteOp};
 
     let (_root, mut fs) = dummy();
     let raw = b"n\xffb";
@@ -506,7 +506,7 @@ fn non_utf8_filenames_roundtrip() {
     fs.writev(&[WriteOp::from_os_path(&path, VfOffset::At(0), b"data".to_vec()).with_creation()])
         .unwrap();
     let listed = fs
-        .listdir(Path::new("/"), vnfs::backend::AttrMask::stat(), 0, false)
+        .listdir(Path::new("/"), vfsi_sync::AttrMask::stat(), 0, false)
         .unwrap();
     assert_eq!(listed.len(), 1);
     let got = listed[0]
@@ -543,7 +543,7 @@ fn rm_contents_keeps_the_directory() {
     fs.mkdir_path("/keep/sub", 0o755).unwrap();
     for path in ["/keep/a", "/keep/sub/b"] {
         fs.writev(&[
-            vnfs::backend::WriteOp::from_path(path, VfOffset::At(0), b"x".to_vec()).with_creation(),
+            vfsi_sync::WriteOp::from_path(path, VfOffset::At(0), b"x".to_vec()).with_creation(),
         ])
         .unwrap();
     }
@@ -552,7 +552,7 @@ fn rm_contents_keeps_the_directory() {
     assert!(
         fs.listdir(
             std::path::Path::new("/keep"),
-            vnfs::backend::AttrMask::default(),
+            vfsi_sync::AttrMask::default(),
             0,
             false
         )
@@ -567,7 +567,7 @@ fn rm_contents_rejects_a_symlink_to_a_directory() {
     let (_root, mut fs) = dummy();
     fs.mkdir_path("/target", 0o755).unwrap();
     fs.writev(&[
-        vnfs::backend::WriteOp::from_path("/target/keep", VfOffset::At(0), b"k".to_vec())
+        vfsi_sync::WriteOp::from_path("/target/keep", VfOffset::At(0), b"k".to_vec())
             .with_creation(),
     ])
     .unwrap();
@@ -582,7 +582,7 @@ fn recursive_rm_removes_a_symlink_not_its_target() {
     let (_root, mut fs) = dummy();
     fs.mkdir_path("/target", 0o755).unwrap();
     fs.writev(&[
-        vnfs::backend::WriteOp::from_path("/target/keep", VfOffset::At(0), b"k".to_vec())
+        vfsi_sync::WriteOp::from_path("/target/keep", VfOffset::At(0), b"k".to_vec())
             .with_creation(),
     ])
     .unwrap();
@@ -599,36 +599,26 @@ fn ensure_empty_dir_creates_empties_and_rejects_files() {
     fs.ensure_empty_dir_path("/made").unwrap();
     assert!(fs.exists_path("/made").unwrap());
     assert!(
-        fs.listdir(
-            Path::new("/made"),
-            vnfs::backend::AttrMask::default(),
-            0,
-            false
-        )
-        .unwrap()
-        .is_empty()
+        fs.listdir(Path::new("/made"), vfsi_sync::AttrMask::default(), 0, false)
+            .unwrap()
+            .is_empty()
     );
 
     fs.mkdir_path("/full", 0o755).unwrap();
     fs.writev(&[
-        vnfs::backend::WriteOp::from_path("/full/child", VfOffset::At(0), b"x".to_vec())
+        vfsi_sync::WriteOp::from_path("/full/child", VfOffset::At(0), b"x".to_vec())
             .with_creation(),
     ])
     .unwrap();
     fs.ensure_empty_dir_path("/full").unwrap();
     assert!(
-        fs.listdir(
-            Path::new("/full"),
-            vnfs::backend::AttrMask::default(),
-            0,
-            false
-        )
-        .unwrap()
-        .is_empty()
+        fs.listdir(Path::new("/full"), vfsi_sync::AttrMask::default(), 0, false)
+            .unwrap()
+            .is_empty()
     );
 
     fs.writev(&[
-        vnfs::backend::WriteOp::from_path("/afile", VfOffset::At(0), b"f".to_vec()).with_creation(),
+        vfsi_sync::WriteOp::from_path("/afile", VfOffset::At(0), b"f".to_vec()).with_creation(),
     ])
     .unwrap();
     assert!(fs.ensure_empty_dir_path("/afile").is_err());
@@ -641,12 +631,11 @@ fn open_dir_handle_empties_contents() {
     fs.mkdir_path("/d", 0o755).unwrap();
     fs.mkdir_path("/d/sub", 0o755).unwrap();
     fs.writev(&[
-        vnfs::backend::WriteOp::from_path("/d/a", VfOffset::At(0), b"a".to_vec()).with_creation(),
+        vfsi_sync::WriteOp::from_path("/d/a", VfOffset::At(0), b"a".to_vec()).with_creation(),
     ])
     .unwrap();
     fs.writev(&[
-        vnfs::backend::WriteOp::from_path("/d/sub/b", VfOffset::At(0), b"b".to_vec())
-            .with_creation(),
+        vfsi_sync::WriteOp::from_path("/d/sub/b", VfOffset::At(0), b"b".to_vec()).with_creation(),
     ])
     .unwrap();
 
@@ -655,28 +644,23 @@ fn open_dir_handle_empties_contents() {
     fs.close_dir(&handle).unwrap();
     assert!(fs.exists_path("/d").unwrap());
     assert!(
-        fs.listdir(
-            Path::new("/d"),
-            vnfs::backend::AttrMask::default(),
-            0,
-            false
-        )
-        .unwrap()
-        .is_empty()
+        fs.listdir(Path::new("/d"), vfsi_sync::AttrMask::default(), 0, false)
+            .unwrap()
+            .is_empty()
     );
 }
 
 #[test]
 fn owned_directory_handle_refuses_path_only_backend() {
+    use vfsi_sync::FsClient;
     use vnfs::RemoveOptions;
-    use vnfs::backend::FsClient;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
     client.create_dir("/d").unwrap();
     client.write("/d/keep", b"x").unwrap();
     let error = client.open_dir_handle("/d").unwrap_err();
-    assert_eq!(error.err_no(), vnfs::backend::VF_ERR_UNSUPPORTED);
+    assert_eq!(error.err_no(), vfsi_sync::VF_ERR_UNSUPPORTED);
     assert_eq!(client.read("/d/keep").unwrap(), b"x");
 
     let options = RemoveOptions::new().continue_on_error(true);
@@ -702,15 +686,14 @@ fn generic_remover_rejects_options_it_cannot_honor() {
     let (_root, mut fs) = dummy();
     fs.mkdir_path("/d", 0o755).unwrap();
     fs.writev(&[
-        vnfs::backend::WriteOp::from_path("/d/keep", VfOffset::At(0), b"x".to_vec())
-            .with_creation(),
+        vfsi_sync::WriteOp::from_path("/d/keep", VfOffset::At(0), b"x".to_vec()).with_creation(),
     ])
     .unwrap();
     let handle = fs.open_dir(Path::new("/d")).unwrap();
     for options in [
-        vnfs::backend::RemoveOptions::new().continue_on_error(true),
-        vnfs::backend::RemoveOptions::new().batch(2),
-        vnfs::backend::RemoveOptions::new().retries(0),
+        vfsi_sync::RemoveOptions::new().continue_on_error(true),
+        vfsi_sync::RemoveOptions::new().batch(2),
+        vfsi_sync::RemoveOptions::new().retries(0),
     ] {
         assert!(
             fs.rm_with_options(&[Path::new("/d/keep")], false, options)
@@ -732,7 +715,7 @@ fn generic_remover_rejects_options_it_cannot_honor() {
 #[test]
 fn standard_io_handle_is_raii_and_seekable() {
     use std::io::{Read, Seek, SeekFrom, Write};
-    use vnfs::backend::VfOpenOptions;
+    use vfsi_sync::VfOpenOptions;
 
     let (_root, mut fs) = dummy();
     let descriptor;
@@ -756,7 +739,7 @@ fn standard_io_handle_is_raii_and_seekable() {
 #[test]
 fn legacy_handle_try_close_leaves_an_inert_handle() {
     use std::io::{Read, Write};
-    use vnfs::backend::VfOpenOptions;
+    use vfsi_sync::VfOpenOptions;
 
     let (_root, mut fs) = dummy();
     let mut options = VfOpenOptions::new();
@@ -777,7 +760,7 @@ fn legacy_handle_try_close_leaves_an_inert_handle() {
 
 #[test]
 fn standard_open_options_validate_access_modes() {
-    use vnfs::backend::VfOpenOptions;
+    use vfsi_sync::VfOpenOptions;
 
     let (_root, mut fs) = dummy();
     assert_eq!(
@@ -806,7 +789,7 @@ fn standard_open_options_validate_access_modes() {
 #[test]
 fn owned_client_supports_multiple_live_files_and_typed_requests() {
     use std::io::{Read, Seek, SeekFrom, Write};
-    use vnfs::backend::FsClient;
+    use vfsi_sync::FsClient;
     use vnfs::{OpenFlags, OpenRequest};
 
     let (_root, backend) = dummy();
@@ -849,7 +832,7 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
             .readv(&[first.read_request_at(0, 1)])
             .unwrap_err()
             .err_no(),
-        vnfs::backend::ERR_INVAL
+        vfsi_sync::ERR_INVAL
     );
     first.flush().unwrap();
     second.flush().unwrap();
@@ -867,8 +850,8 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
 
 #[test]
 fn native_client_covers_idiomatic_file_and_namespace_workflows() {
+    use vfsi_sync::FsClient;
     use vnfs::FileType as VfType;
-    use vnfs::backend::FsClient;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -944,18 +927,18 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
             .remove_dir("/tree/nested/hardlink")
             .unwrap_err()
             .err_no(),
-        vnfs::backend::ERR_NOTDIR
+        vfsi_sync::ERR_NOTDIR
     );
     assert_eq!(
         client.remove_file("/tree/nested").unwrap_err().err_no(),
-        vnfs::backend::ERR_ISDIR
+        vfsi_sync::ERR_ISDIR
     );
     client.remove_dir_all("/tree").unwrap();
 }
 
 #[test]
 fn native_vector_operations_are_composable() {
-    use vnfs::backend::FsClient;
+    use vfsi_sync::FsClient;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -1079,13 +1062,11 @@ fn openv_fault_after_registration_closes_the_injected_handle() {
 #[test]
 fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
     let (_root, mut fs) = dummy();
-    fs.writev(&[vnfs::backend::WriteOp::from_path(
-        "/exists",
-        VfOffset::At(0),
-        b"existing".to_vec(),
-    )
-    .with_creation()])
-        .unwrap();
+    fs.writev(&[
+        vfsi_sync::WriteOp::from_path("/exists", VfOffset::At(0), b"existing".to_vec())
+            .with_creation(),
+    ])
+    .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeCleanup { index: 0 },
         vnfs::Error::transport(None, "injected cleanup failure"),
@@ -1113,8 +1094,7 @@ fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
 fn recursive_remove_propagates_type_lookup_failure_without_unlinking() {
     let (_root, mut fs) = dummy();
     fs.writev(&[
-        vnfs::backend::WriteOp::from_path("/kept", VfOffset::At(0), b"data".to_vec())
-            .with_creation(),
+        vfsi_sync::WriteOp::from_path("/kept", VfOffset::At(0), b"data".to_vec()).with_creation(),
     ])
     .unwrap();
     let script = Arc::new(FaultScript::one(
@@ -1161,12 +1141,12 @@ fn mkdir_mode_failure_is_reported_instead_of_ignored() {
 
 #[test]
 fn strict_vectors_report_failure_index_without_rollback() {
-    use vnfs::backend::VfFile;
+    use vfsi_sync::VfFile;
 
     let (_root, mut fs) = dummy();
     fs.writev(&[
-        vnfs::backend::WriteOp::from_path("/first", VfOffset::At(0), Vec::new()).with_creation(),
-        vnfs::backend::WriteOp::from_path("/third", VfOffset::At(0), Vec::new()).with_creation(),
+        vfsi_sync::WriteOp::from_path("/first", VfOffset::At(0), Vec::new()).with_creation(),
+        vfsi_sync::WriteOp::from_path("/third", VfOffset::At(0), Vec::new()).with_creation(),
     ])
     .unwrap();
     let error = fs
@@ -1183,7 +1163,7 @@ fn strict_vectors_report_failure_index_without_rollback() {
 
 #[test]
 fn native_scalar_contract_separates_metadata_query_from_update() {
-    use vnfs::backend::{AttrMask, FileSystem, MetadataQuery, SetAttributes, VfFile};
+    use vfsi_sync::{AttrMask, FileSystem, MetadataQuery, SetAttributes, VfFile};
     use vnfs::{OpenFlags, OpenRequest};
 
     let (_root, mut fs) = dummy();
@@ -1212,8 +1192,8 @@ fn native_scalar_contract_separates_metadata_query_from_update() {
 
 #[test]
 fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
-    use vnfs::backend::FsClient;
-    use vnfs::backend::{AttrMask, WriteOp};
+    use vfsi_sync::FsClient;
+    use vfsi_sync::{AttrMask, WriteOp};
     use vnfs::{ReadDirOptions, WalkOptions};
 
     let (_root, mut fs) = dummy();
@@ -1267,7 +1247,7 @@ fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
     }
     use std::sync::mpsc;
     use std::time::Duration;
-    use vnfs::backend::FsClient;
+    use vfsi_sync::FsClient;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -1304,8 +1284,8 @@ fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
 
 #[test]
 fn directory_visitor_supports_limits_early_stop_and_callback_errors() {
-    use vnfs::backend::FsClient;
-    use vnfs::backend::WriteOp;
+    use vfsi_sync::FsClient;
+    use vfsi_sync::WriteOp;
     use vnfs::{Error as VfError, ReadDirOptions};
 
     let (_root, mut fs) = dummy();

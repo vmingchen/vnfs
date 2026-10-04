@@ -45,7 +45,7 @@ fn tree_creation_batches_compounds_on_nfsv41_and_nfsv42() {
         let contents = client.readv(requests).map(|results| {
             results
                 .into_iter()
-                .map(|result| result.data.unwrap())
+                .map(|result| result.into_data().unwrap())
                 .collect::<Vec<_>>()
         });
         // Clean the successfully created fixture before assertions, including

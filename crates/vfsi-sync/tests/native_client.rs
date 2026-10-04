@@ -95,8 +95,13 @@ fn optimized_scalar_read_preserves_cleanup_retry_and_primary_error() {
     }
 }
 
+type Notifications = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
+
 #[derive(Default)]
 struct ScalarOnly {
+    notifications: Notifications,
+    blocked_read: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
+    close_observed: Arc<AtomicUsize>,
     data: Vec<u8>,
     cursor: u64,
     open: bool,
@@ -259,6 +264,9 @@ impl VectorFileSystem for ScalarOnly {
 }
 
 impl FileSystem for ScalarOnly {
+    fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
+        std::mem::take(&mut *self.notifications.lock().unwrap())
+    }
     fn capabilities(&self) -> Capabilities {
         Capabilities::empty()
     }
@@ -270,6 +278,7 @@ impl FileSystem for ScalarOnly {
 
     fn close_one(&mut self, _: &VfFile) -> VfResult<()> {
         self.close_calls += 1;
+        self.close_observed.fetch_add(1, Ordering::SeqCst);
         if self.close_failures_remaining != 0 {
             self.close_failures_remaining -= 1;
             return Err(VfError::transport(None, "injected close failure"));
@@ -285,6 +294,10 @@ impl FileSystem for ScalarOnly {
     }
 
     fn read_one(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
+        if let Some((entered, release)) = self.blocked_read.take() {
+            entered.wait();
+            release.wait();
+        }
         self.read_calls.fetch_add(1, Ordering::SeqCst);
         assert!(!self.direct_into_only, "owned read path must not run");
         if self.read_failure {
@@ -1054,4 +1067,113 @@ fn native_read_into_rejects_malformed_backend_results() {
         .unwrap_err();
     assert!(error.is_transport());
     assert_eq!(error.index(), None);
+}
+
+#[test]
+fn notifications_reenter_and_drop_handles_after_unlock() {
+    let backend = ScalarOnly::default();
+    let notifications = backend.notifications.clone();
+    let observed = backend.close_observed.clone();
+    let client = FsClient::new(backend);
+    let file = client.open("/file").unwrap();
+    let callback_client = client.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    notifications.lock().unwrap().push(Box::new(move || {
+        drop(file);
+        callback_client.capabilities().unwrap();
+        tx.send(()).unwrap();
+    }));
+    let worker = std::thread::spawn(move || {
+        client.capabilities().unwrap();
+        client
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(2))
+        .expect("notification reentry must not deadlock");
+    let client = worker.join().unwrap();
+    client.drain_cleanup().unwrap();
+    assert_eq!(observed.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn file_drop_never_waits_for_an_in_flight_rpc() {
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    let backend = ScalarOnly {
+        data: vec![1],
+        blocked_read: Some((entered.clone(), release.clone())),
+        ..Default::default()
+    };
+    let closes = backend.close_observed.clone();
+    let client = FsClient::new(backend);
+    let mut reading = client.open("/file").unwrap();
+    let dropped = client.open("/other").unwrap();
+    let reader = std::thread::spawn(move || reading.read_native(&mut [0]).unwrap());
+    entered.wait();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let dropper = std::thread::spawn(move || {
+        drop(dropped);
+        tx.send(()).unwrap();
+    });
+    let result = rx.recv_timeout(std::time::Duration::from_secs(1));
+    let before = closes.load(Ordering::SeqCst);
+    release.wait();
+    reader.join().unwrap();
+    dropper.join().unwrap();
+    result.expect("Drop must not wait for the backend mutex");
+    assert_eq!(before, 0, "Drop must not issue a remote close");
+    client.drain_cleanup().unwrap();
+    assert_eq!(closes.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn failed_deferred_close_keeps_ownership_until_drained() {
+    let backend = ScalarOnly {
+        close_failures_remaining: 1,
+        ..Default::default()
+    };
+    let closes = backend.close_observed.clone();
+    let client = FsClient::new(backend);
+    drop(client.open("/file").unwrap());
+    assert_eq!(closes.load(Ordering::SeqCst), 0);
+    let error = client.drain_cleanup().unwrap_err();
+    assert_eq!(error.path(), Some(std::path::Path::new("/file")));
+    assert_eq!(error.operation(), Some("close"));
+    assert_eq!(closes.load(Ordering::SeqCst), 1);
+    client.drain_cleanup().unwrap();
+    client.drain_cleanup().unwrap();
+    assert_eq!(closes.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn observer_panic_does_not_poison_the_backend_mutex() {
+    let backend = ScalarOnly::default();
+    let notifications = backend.notifications.clone();
+    let client = FsClient::new(backend);
+    notifications
+        .lock()
+        .unwrap()
+        .push(Box::new(|| panic!("observer failure")));
+    assert!(client.capabilities().is_ok());
+    assert!(client.capabilities().is_ok());
+}
+
+#[test]
+fn final_owner_drains_deferred_cleanup() {
+    let backend = ScalarOnly::default();
+    let closes = backend.close_observed.clone();
+    let client = FsClient::new(backend);
+    drop(client.open("/file").unwrap());
+    assert_eq!(closes.load(Ordering::SeqCst), 0);
+    drop(client);
+    assert_eq!(closes.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn ordinary_operation_drains_dropped_handles() {
+    let backend = ScalarOnly::default();
+    let closes = backend.close_observed.clone();
+    let client = FsClient::new(backend);
+    drop(client.open("/file").unwrap());
+    client.capabilities().unwrap();
+    assert_eq!(closes.load(Ordering::SeqCst), 1);
 }

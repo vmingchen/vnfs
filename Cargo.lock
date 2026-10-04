@@ -1209,6 +1209,8 @@ dependencies = [
  "libc",
  "libntirpc-sys",
  "tempfile",
+ "vfsi-local",
+ "vfsi-nfs",
  "vfsi-smb",
  "vfsi-sync",
  "vnfs",

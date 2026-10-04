@@ -64,7 +64,7 @@ pub mod error {
 
 /// Canonical, runnable application examples. Each listing is compiled as a
 /// doctest and as a Cargo example; workflows are also tested on mounted files.
-/// None requires importing [`crate::backend`]. See the repository's
+/// None requires importing backend crates. See the repository's
 /// `crates/vnfs/examples/README.md` for commands and benchmark programs.
 #[cfg(feature = "nfs")]
 pub mod examples {
@@ -128,27 +128,6 @@ pub use facade::{
 pub use facade::{
     NfsClient, NfsDir, NfsFile, NfsOpenOptions, NfsRead, NfsReadInto, NfsSetMetadata,
 };
-
-/// Backend implementer and protocol-construction APIs. Most applications
-/// need only the crate root; these are also available from the `vfsi-*` crates.
-pub mod backend {
-    pub use vfsi_core::*;
-    #[doc(hidden)]
-    pub use vfsi_sync::walk_events;
-    pub use vfsi_sync::{
-        CopyFileSystem, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
-        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
-        DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DirPageCursor, DirectoryFileSystem,
-        FileSystem, FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite, LinkFileSystem,
-        MetadataFileSystem, NamespaceFileSystem, NativeFileSystem, OpenOptions, ReadAllOptions,
-        SetMetadata, VecFs, VecFsExt, VectorFileSystem, VfFileHandle, VfOpenOptions, rm_recursive,
-    };
-
-    #[cfg(feature = "dummy")]
-    pub use vfsi_local::DummyVecFs;
-    #[cfg(feature = "nfs")]
-    pub use vfsi_nfs::{NfsVecFs, client, compound, nfs, rpc, session};
-}
 
 /// Aggregate NFS transport counters for optional application diagnostics.
 /// These counters are process-wide, not per client, and may include other

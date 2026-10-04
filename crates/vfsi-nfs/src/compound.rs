@@ -227,7 +227,7 @@ impl Compound {
         self.tag_index.map_or(b"", |index| &self.keep[index])
     }
 
-    pub fn putfh(&mut self, fh: &nfs_fh4) {
+    pub(crate) fn putfh(&mut self, fh: &nfs_fh4) {
         let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
         op.argop = nfs_opnum4_NFS4_OP_PUTFH;
         op.nfs_argop4_u.opputfh = PUTFH4args { object: *fh };
@@ -278,7 +278,7 @@ impl Compound {
         self.push(op);
     }
 
-    pub fn open(&mut self, args: OPEN4args) {
+    pub(crate) fn open(&mut self, args: OPEN4args) {
         let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
         op.argop = nfs_opnum4_NFS4_OP_OPEN;
         op.nfs_argop4_u.opopen = args;
@@ -457,14 +457,14 @@ impl Compound {
         self.push(op);
     }
 
-    pub fn exchange_id(&mut self, args: EXCHANGE_ID4args) {
+    pub(crate) fn exchange_id(&mut self, args: EXCHANGE_ID4args) {
         let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
         op.argop = nfs_opnum4_NFS4_OP_EXCHANGE_ID;
         op.nfs_argop4_u.opexchange_id = args;
         self.push(op);
     }
 
-    pub fn create_session(&mut self, args: CREATE_SESSION4args) {
+    pub(crate) fn create_session(&mut self, args: CREATE_SESSION4args) {
         let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
         op.argop = nfs_opnum4_NFS4_OP_CREATE_SESSION;
         op.nfs_argop4_u.opcreate_session = args;
@@ -742,27 +742,34 @@ impl Compound {
     }
 
     /// Encode and send the compound; returns the decoded reply.
-    pub fn call(&mut self, rpc: &RpcClient) -> RpcResult<CompoundRes> {
+    pub(crate) fn call(&mut self, rpc: &RpcClient) -> RpcResult<CompoundRes> {
         self.args.argarray.argarray_len = self.ops.len() as u_int;
         self.args.argarray.argarray_val = self.ops.as_mut_ptr();
         let mut res: COMPOUND4res = unsafe { std::mem::zeroed() };
         let t0 = std::time::Instant::now();
-        rpc.call(
-            NFSPROC4_COMPOUND,
-            Some(wrap_compound4args),
-            &mut self.args as *mut _ as *mut c_void,
-            Some(wrap_compound4res),
-            &mut res as *mut _ as *mut c_void,
-        )?;
+        // SAFETY: the matching generated XDR routines receive live COMPOUND
+        // structures, and self owns every argument allocation during the call.
+        let result = unsafe {
+            rpc.call(
+                NFSPROC4_COMPOUND,
+                Some(wrap_compound4args),
+                &mut self.args as *mut _ as *mut c_void,
+                Some(wrap_compound4res),
+                &mut res as *mut _ as *mut c_void,
+            )
+        };
+        // Own partially decoded allocations before either error path returns.
+        let response = CompoundRes { res };
+        result?;
         RPC_TIME_US.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
         RPC_CALLS.fetch_add(1, Ordering::Relaxed);
         compound_stats_record(&self.args);
-        validate_response_ops(&self.ops, &res)?;
-        Ok(CompoundRes { res })
+        validate_response_ops(&self.ops, &response.res)?;
+        Ok(response)
     }
 
     /// Access for Session to prepend a SEQUENCE op.
-    pub fn prepend_sequence(&mut self, op: nfs_argop4) {
+    pub(crate) fn prepend_sequence(&mut self, op: nfs_argop4) {
         self.insert0(op);
     }
 }
@@ -974,13 +981,13 @@ impl CompoundRes {
     }
 
     /// The `EXCHANGE_ID4resok` of resop `i`.
-    pub fn exchange_id(&self, i: usize) -> &EXCHANGE_ID4resok {
+    pub(crate) fn exchange_id(&self, i: usize) -> &EXCHANGE_ID4resok {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_EXCHANGE_ID, "EXCHANGE_ID");
         unsafe { &ro.nfs_resop4_u.opexchange_id.EXCHANGE_ID4res_u.eir_resok4 }
     }
 
     /// The `CREATE_SESSION4resok` of resop `i`.
-    pub fn create_session(&self, i: usize) -> &CREATE_SESSION4resok {
+    pub(crate) fn create_session(&self, i: usize) -> &CREATE_SESSION4resok {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_CREATE_SESSION, "CREATE_SESSION");
         unsafe {
             &ro.nfs_resop4_u
@@ -997,7 +1004,7 @@ impl CompoundRes {
     }
 
     /// The `OPEN4resok` of resop `i`.
-    pub fn open(&self, i: usize) -> &OPEN4resok {
+    pub(crate) fn open(&self, i: usize) -> &OPEN4resok {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_OPEN, "OPEN");
         unsafe { &ro.nfs_resop4_u.opopen.OPEN4res_u.resok4 }
     }

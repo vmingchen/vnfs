@@ -8,6 +8,11 @@ use crate::*;
 
 /// Core synchronous scalar filesystem operations.
 pub trait FileSystem {
+    /// Extract callbacks for delivery after the owning client's backend lock
+    /// is released. Implementations must not invoke user callbacks in this hook.
+    fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
+        Vec::new()
+    }
     fn capabilities(&self) -> Capabilities;
     /// Read a complete opened file with a logical payload limit. Specialized backends
     /// override this to share their optimized vector whole-file path.
@@ -40,6 +45,12 @@ pub trait FileSystem {
     }
     fn open_one(&mut self, request: &OpenRequest) -> VfResult<VfFile>;
     fn close_one(&mut self, file: &VfFile) -> VfResult<()>;
+    /// Finish cleanup of a previously owned, dropped handle. A backend that
+    /// transfers ownership into its own queue after CLOSE fails must reconcile
+    /// that queue here rather than repeatedly reporting an invalid descriptor.
+    fn close_deferred(&mut self, file: &VfFile) -> VfResult<()> {
+        self.close_one(file)
+    }
     fn sync_data(&mut self, file: &VfFile) -> VfResult<()>;
     fn sync_all(&mut self, file: &VfFile) -> VfResult<()>;
     fn read_one(&mut self, request: &ReadOp) -> VfResult<ReadResult>;
@@ -231,6 +242,9 @@ pub(crate) fn metadata_mask() -> AttrMask {
 }
 
 impl<T: VecFs + ?Sized> FileSystem for T {
+    fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
+        VecFs::take_notifications(self)
+    }
     fn capabilities(&self) -> Capabilities {
         self.typed_capabilities()
     }
@@ -266,6 +280,9 @@ impl<T: VecFs + ?Sized> FileSystem for T {
 
     fn close_one(&mut self, file: &VfFile) -> VfResult<()> {
         self.close(file)
+    }
+    fn close_deferred(&mut self, file: &VfFile) -> VfResult<()> {
+        VecFs::close_deferred(self, file)
     }
     fn sync_data(&mut self, file: &VfFile) -> VfResult<()> {
         VecFs::sync_data(self, file)

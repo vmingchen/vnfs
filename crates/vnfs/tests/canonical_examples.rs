@@ -42,8 +42,7 @@ fn bulk_roundtrip_cleanup_and_existing_directory_protection() -> Result<()> {
             [vnfs::ReadOp::whole("/existing/precious")],
             vnfs::ReadOptions::default()
         )?[0]
-            .data
-            .as_deref()
+            .data()
             .unwrap(),
         b"keep"
     );
@@ -158,12 +157,12 @@ fn canonical_workflows_on_nfsv41_and_nfsv42() -> Result<()> {
                 ],
                 vnfs::ReadOptions::new().max_total_bytes(12),
             )?;
-            assert_eq!(mixed[0].data.as_deref().unwrap(), b"hello");
-            assert_eq!(mixed[1].offset, 10);
-            assert_eq!(mixed[1].data.as_deref().unwrap(), [37; 3]);
-            assert!(mixed[2].data.as_ref().unwrap().is_empty() && mixed[2].eof);
-            assert_eq!(mixed[3].data, None);
-            assert_eq!(mixed[3].read, 4);
+            assert_eq!(mixed[0].data().unwrap(), b"hello");
+            assert_eq!(mixed[1].offset(), 10);
+            assert_eq!(mixed[1].data().unwrap(), [37; 3]);
+            assert!(mixed[2].data().as_ref().unwrap().is_empty() && mixed[2].eof());
+            assert_eq!(mixed[3].data(), None);
+            assert_eq!(mixed[3].read(), 4);
             assert_eq!(buffer, [37; 4]);
             file.close()?;
             assert_eq!(

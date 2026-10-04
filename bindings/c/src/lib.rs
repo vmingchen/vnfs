@@ -14,10 +14,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
+use vfsi_local::DummyVecFs;
+use vfsi_nfs::nfs::NfsVecFs;
 use vfsi_smb::SmbVecFs;
-use vnfs::backend::nfs::NfsVecFs;
-use vnfs::backend::DummyVecFs;
-use vnfs::backend::{
+use vfsi_sync::{
     AttrMask, ExtentPair, ReadOp, VfAttrs, VfError, VfFile, WriteOp, ERR_EBADF, ERR_NOENT,
     VF_ERR_UNSUPPORTED,
 };
@@ -65,11 +65,11 @@ pub const VFSI_CAP_NON_UTF8_PATHS: u64 = 1 << 4;
 /// The backend implements no-follow metadata operations.
 pub const VFSI_CAP_LSTAT: u64 = 1 << 5;
 
-const _: () = assert!(VFSI_CAP_POSIX_METADATA == vnfs::backend::VF_CAP_POSIX_METADATA);
-const _: () = assert!(VFSI_CAP_SYMLINKS == vnfs::backend::VF_CAP_SYMLINKS);
-const _: () = assert!(VFSI_CAP_HARDLINKS == vnfs::backend::VF_CAP_HARDLINKS);
-const _: () = assert!(VFSI_CAP_NON_UTF8_PATHS == vnfs::backend::VF_CAP_NON_UTF8_PATHS);
-const _: () = assert!(VFSI_CAP_LSTAT == vnfs::backend::VF_CAP_LSTAT);
+const _: () = assert!(VFSI_CAP_POSIX_METADATA == vfsi_sync::VF_CAP_POSIX_METADATA);
+const _: () = assert!(VFSI_CAP_SYMLINKS == vfsi_sync::VF_CAP_SYMLINKS);
+const _: () = assert!(VFSI_CAP_HARDLINKS == vfsi_sync::VF_CAP_HARDLINKS);
+const _: () = assert!(VFSI_CAP_NON_UTF8_PATHS == vfsi_sync::VF_CAP_NON_UTF8_PATHS);
+const _: () = assert!(VFSI_CAP_LSTAT == vfsi_sync::VF_CAP_LSTAT);
 
 macro_rules! ffi_guard {
     ($fallback:expr, $body:block) => {{
@@ -90,7 +90,7 @@ macro_rules! fail_batch {
 
 /// Opaque filesystem handle owned by C.
 pub struct vfsi_fs {
-    fs: Mutex<Box<dyn vnfs::backend::VecFs>>,
+    fs: Mutex<Box<dyn vfsi_sync::VecFs>>,
     files: Mutex<std::collections::HashMap<i32, VfFile>>,
     next_fd: AtomicI32,
     /// Kernel mountpoint used by application-visible paths.
@@ -221,7 +221,7 @@ impl vfsi_attrs {
         vfsi_attrs {
             struct_size: std::mem::size_of::<vfsi_attrs>() as u32,
             abi_version: VFSI_ABI_VERSION,
-            ftype: vnfs::backend::file_type_to_nfs(&a.ftype),
+            ftype: vfsi_sync::file_type_to_nfs(&a.ftype),
             mode: a.mode,
             size: a.size,
             nlink: a.nlink,
@@ -308,7 +308,7 @@ impl vfsi_result {
             VfError::Transport { index, message, .. } => Self::base(
                 index.unwrap_or(C_INDEX_UNKNOWN),
                 VFSI_ERROR_TRANSPORT,
-                vnfs::backend::VF_ERR_RPC,
+                vfsi_sync::VF_ERR_RPC,
                 &message,
             ),
             _ => Self::base(0, VFSI_ERROR_TRANSPORT, libc::EIO as u32, "unknown error"),
@@ -564,7 +564,7 @@ fn path_for(fs: &vfsi_fs, path: &Path) -> Option<PathBuf> {
 }
 
 fn make_fs(
-    fs: Box<dyn vnfs::backend::VecFs>,
+    fs: Box<dyn vfsi_sync::VecFs>,
     mountpoint: PathBuf,
     backend_root: PathBuf,
 ) -> *mut vfsi_fs {
@@ -617,7 +617,7 @@ pub unsafe extern "C" fn vfsi_dummy_open(root: *const c_char, out: *mut *mut vfs
             return libc::EINVAL;
         };
         let fs = match DummyVecFs::try_new(root) {
-            Ok(fs) => Box::new(fs) as Box<dyn vnfs::backend::VecFs>,
+            Ok(fs) => Box::new(fs) as Box<dyn vfsi_sync::VecFs>,
             Err(error) => return error.err_no() as c_int,
         };
         *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
@@ -643,7 +643,7 @@ pub unsafe extern "C" fn vfsi_dummy_open_mount(
             return libc::EINVAL;
         };
         let fs = match DummyVecFs::try_new(root) {
-            Ok(fs) => Box::new(fs) as Box<dyn vnfs::backend::VecFs>,
+            Ok(fs) => Box::new(fs) as Box<dyn vfsi_sync::VecFs>,
             Err(error) => return error.err_no() as c_int,
         };
         *out = make_fs(fs, mountpoint, PathBuf::from("/"));
@@ -663,7 +663,7 @@ pub unsafe extern "C" fn vfsi_nfs_open(host: *const c_char, out: *mut *mut vfsi_
             return libc::EINVAL;
         };
         match NfsVecFs::connect(host)
-            .map(|f| Box::new(f) as Box<dyn vnfs::backend::VecFs>)
+            .map(|f| Box::new(f) as Box<dyn vfsi_sync::VecFs>)
             .map_err(|e| vf_code(&e))
         {
             Ok(fs) => {
@@ -690,7 +690,7 @@ pub unsafe extern "C" fn vfsi_nfs_open_minor(
             return libc::EINVAL;
         };
         match NfsVecFs::connect_minor(host, minorversion)
-            .map(|f| Box::new(f) as Box<dyn vnfs::backend::VecFs>)
+            .map(|f| Box::new(f) as Box<dyn vfsi_sync::VecFs>)
             .map_err(|e| vf_code(&e))
         {
             Ok(fs) => {
@@ -729,7 +729,7 @@ pub unsafe extern "C" fn vfsi_nfs_from_mount(path: *const c_char, out: *mut *mut
         let Some(path) = cstr_path(path) else {
             return libc::EINVAL;
         };
-        match vnfs::backend::nfs::NfsClientBuilder::from_mount(&path)
+        match vfsi_nfs::nfs::NfsClientBuilder::from_mount(&path)
             .and_then(|builder| builder.connect())
         {
             Ok(backend) => {
@@ -781,12 +781,12 @@ pub unsafe extern "C" fn vfsi_walk(
         let result = (|| -> Result<(), VfError> {
             let path = vpath_for(fs, &root)?;
             let root_attrs = lock_or_io(&fs.fs)?.lstat(&path)?;
-            let metadata = vnfs::backend::metadata_from_attrs(root_attrs);
+            let metadata = vfsi_sync::metadata_from_attrs(root_attrs);
             let walk_options = vnfs::WalkOptions::new()
                 .max_entries(options.max_entries)
                 .max_path_bytes(options.max_path_bytes)
                 .max_depth(options.max_depth);
-            vnfs::backend::walk_events(
+            vfsi_sync::walk_events(
                 vnfs::DirEntry::new(path, metadata),
                 walk_options,
                 options.sort_by_name,
@@ -808,7 +808,7 @@ pub unsafe extern "C" fn vfsi_walk(
                                 .to_path_buf();
                             Ok(vnfs::DirEntry::new(
                                 path,
-                                vnfs::backend::metadata_from_attrs(attrs),
+                                vfsi_sync::metadata_from_attrs(attrs),
                             ))
                         })
                         .collect()
@@ -869,7 +869,7 @@ fn attrs_from_metadata(metadata: &vnfs::Metadata) -> vfsi_attrs {
     vfsi_attrs {
         struct_size: std::mem::size_of::<vfsi_attrs>() as u32,
         abi_version: VFSI_ABI_VERSION,
-        ftype: vnfs::backend::file_type_to_nfs(&metadata.file_type()),
+        ftype: vfsi_sync::file_type_to_nfs(&metadata.file_type()),
         mode: metadata.mode().unwrap_or_default() & 0o7777,
         size: metadata.len(),
         nlink: metadata.nlink().unwrap_or_default(),
@@ -916,7 +916,7 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount_export(
             return libc::EINVAL;
         }
         match NfsVecFs::connect(host)
-            .map(|f| Box::new(f) as Box<dyn vnfs::backend::VecFs>)
+            .map(|f| Box::new(f) as Box<dyn vfsi_sync::VecFs>)
             .map_err(|e| vf_code(&e))
         {
             Ok(fs) => {
@@ -955,7 +955,7 @@ pub unsafe extern "C" fn vfsi_smb_open(
         match SmbVecFs::connect(&server, &share, &username, &password, &domain) {
             Ok(backend) => {
                 *out = make_fs(
-                    Box::new(backend) as Box<dyn vnfs::backend::VecFs>,
+                    Box::new(backend) as Box<dyn vfsi_sync::VecFs>,
                     PathBuf::from("/"),
                     PathBuf::from("/"),
                 );
@@ -1009,7 +1009,7 @@ pub unsafe extern "C" fn vfsi_smb_open_mount(
         match SmbVecFs::connect(&server, &share, &username, &password, &domain) {
             Ok(backend) => {
                 *out = make_fs(
-                    Box::new(backend) as Box<dyn vnfs::backend::VecFs>,
+                    Box::new(backend) as Box<dyn vfsi_sync::VecFs>,
                     mountpoint,
                     share_root,
                 );
@@ -1027,7 +1027,7 @@ pub unsafe extern "C" fn vfsi_free(fs: *mut vfsi_fs) {
     ffi_guard!((), {
         if !fs.is_null() {
             if std::env::var("VNFS_STATS").as_deref() == Ok("1") {
-                let (n, ops, bytes, max) = vnfs::backend::compound::compound_stats();
+                let (n, ops, bytes, max) = vfsi_nfs::compound::compound_stats();
                 if n > 0 {
                     eprintln!(
                     "[vfsi] compounds={} avg_ops={:.2} max_ops={} avg_bytes={:.0} total_bytes={}",
@@ -1038,7 +1038,7 @@ pub unsafe extern "C" fn vfsi_free(fs: *mut vfsi_fs) {
                     bytes
                 );
                 }
-                let (calls, us) = vnfs::backend::compound::rpc_stats();
+                let (calls, us) = vfsi_nfs::compound::rpc_stats();
                 if calls > 0 {
                     eprintln!(
                         "[vfsi] rpc_calls={} avg_rpc_ms={:.2} total_rpc_ms={:.1}",
@@ -2122,8 +2122,8 @@ pub unsafe extern "C" fn vfsi_listdir(
     vfsi_listdir_with_limits(
         fs,
         dir,
-        vnfs::backend::DEFAULT_DIRECTORY_MAX_ENTRIES,
-        vnfs::backend::DEFAULT_DIRECTORY_MAX_PATH_BYTES,
+        vfsi_sync::DEFAULT_DIRECTORY_MAX_ENTRIES,
+        vfsi_sync::DEFAULT_DIRECTORY_MAX_PATH_BYTES,
         cb,
         userdata,
     )
@@ -2274,7 +2274,7 @@ pub unsafe extern "C" fn vfsi_read_paths(
         fs,
         paths,
         count,
-        vnfs::backend::DEFAULT_READ_ALLV_MAX_TOTAL_BYTES,
+        vfsi_sync::DEFAULT_READ_ALLV_MAX_TOTAL_BYTES,
         cb,
         userdata,
     )
@@ -2314,7 +2314,7 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
             let files: Vec<VfFile> = vpaths.iter().map(|p| VfFile::from_os_path(p)).collect();
             let datas = lock_or_io(&fs.fs)?.read_allv_with_options(
                 &files,
-                vnfs::backend::ReadAllOptions::new().max_total_bytes(max_bytes),
+                vfsi_sync::ReadAllOptions::new().max_total_bytes(max_bytes),
             )?;
             let c_cb = cb;
             for (i, data) in datas.iter().enumerate() {
@@ -2532,7 +2532,7 @@ mod tests {
         // A compound-level NFS status with no per-op index must still surface
         // its real errno through the scalar helpers and stay a filesystem
         // error, not be downgraded to EIO/transport.
-        let error = vnfs::backend::error_from_rpc(vnfs::backend::RpcError::op(0, 10005), None);
+        let error = vfsi_sync::error_from_rpc(vfsi_sync::RpcError::op(0, 10005), None);
         assert_eq!(error.index(), None);
         assert_eq!(vf_code(&error), 10005);
         let failure = vfsi_result::from_error(error);
@@ -2890,7 +2890,7 @@ mod tests {
         let (_root, root) = temp_root();
         let backend = Box::new(DummyVecFs::new(PathBuf::from(
             root.to_string_lossy().into_owned(),
-        ))) as Box<dyn vnfs::backend::VecFs>;
+        ))) as Box<dyn vfsi_sync::VecFs>;
         let raw = make_fs(
             backend,
             PathBuf::from("/mnt/repos"),

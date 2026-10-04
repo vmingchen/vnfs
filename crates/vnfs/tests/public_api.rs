@@ -68,13 +68,8 @@ fn application_requests_results_and_errors_are_root_types() {
         vnfs::ReadOp::range(file, 0, 1)
     }
     let _ = request;
-    let result = vnfs::ReadResult {
-        offset: 0,
-        read: 1,
-        data: Some(vec![1]),
-        eof: false,
-    };
-    assert_eq!(result.data.as_deref(), Some([1].as_slice()));
+    let result = vnfs::ReadResult::owned(0, vec![1], false);
+    assert_eq!(result.data(), Some([1].as_slice()));
     let into = vnfs::ReadIntoResult {
         offset: 7,
         read: 1,
@@ -114,8 +109,8 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
 }
 
 #[test]
-fn low_level_types_are_under_backend() {
-    use vnfs::backend::{ReadOp, VecFs, VfFile, VfOffset};
+fn backend_implementers_depend_on_lower_level_crates() {
+    use vfsi_sync::{ReadOp, VecFs, VfFile, VfOffset};
 
     let _ = ReadOp::new(VfFile::from_path("/file"), VfOffset::At(0), 1);
     fn accepts_backend<T: VecFs + ?Sized>(_: &mut T) {}
@@ -145,7 +140,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
             )
             .unwrap()
             .into_iter()
-            .map(|result| result.data.unwrap())
+            .map(|result| result.into_data().unwrap())
             .collect::<Vec<_>>(),
         [b"abc".to_vec(), b"def".to_vec()]
     );
@@ -172,8 +167,8 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
             vnfs::ReadOp::into(&files[1], 1, &mut b),
         ])
         .unwrap();
-    assert_eq!(result[0].read, 3);
-    assert!(result[0].eof);
+    assert_eq!(result[0].read(), 3);
+    assert!(result[0].eof());
     assert_eq!(&b, b"ef");
     client
         .writev_with_options(
@@ -191,8 +186,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
                 vnfs::ReadOptions::default()
             )
             .unwrap()[0]
-            .data
-            .as_deref()
+            .data()
             .unwrap(),
         b"aXY"
     );
@@ -329,7 +323,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
             client
                 .readv(reads)?
                 .iter()
-                .all(|result| result.data.as_deref() == Some(b"abc".as_slice()) && result.eof)
+                .all(|result| result.data() == Some(b"abc".as_slice()) && result.eof())
         );
 
         let mut first = [0; 4];
@@ -338,7 +332,11 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
             vnfs::ReadOp::into(&files[0], 0, &mut first),
             vnfs::ReadOp::into(&files[1], 0, &mut second),
         ])?;
-        assert!(result.iter().all(|result| result.read == 3 && result.eof));
+        assert!(
+            result
+                .iter()
+                .all(|result| result.read() == 3 && result.eof())
+        );
         files[0].seek_native(std::io::SeekFrom::Start(0))?;
         assert_eq!(files[0].read_to_end_with_limit(3)?, b"abc");
         files[0].try_close()?;
@@ -352,7 +350,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
                     vnfs::ReadOptions::default()
                 )?
                 .into_iter()
-                .map(|result| result.data.unwrap())
+                .map(|result| result.into_data().unwrap())
                 .collect::<Vec<_>>(),
             [b"abc".to_vec(), b"abc".to_vec()]
         );

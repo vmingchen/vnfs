@@ -78,8 +78,8 @@ fn main() -> vnfs::Result<()> {
         ReadOp::whole("/file-1"),
         ReadOp::whole("/file-2"),
     ])?;
-    assert_eq!(results[0].data.as_deref(), Some(b"hello".as_slice()));
-    assert_eq!(results[1].data.as_deref(), Some(b"world".as_slice()));
+    assert_eq!(results[0].data(), Some(b"hello".as_slice()));
+    assert_eq!(results[1].data(), Some(b"world".as_slice()));
     Ok(())
 }
 ```
@@ -427,7 +427,7 @@ without boxing, additional copies, or scalar-loop fallbacks.
 ```rust,no_run
 use vnfs::FsExt;
 fn read_inputs<C: vnfs::Fs>(client: &C) -> vnfs::Result<Vec<Vec<u8>>> {
-    Ok(client.readv([vnfs::ReadOp::whole("/file-1"), vnfs::ReadOp::whole("/file-2")])?.into_iter().map(|r| r.data.unwrap()).collect())
+    Ok(client.readv([vnfs::ReadOp::whole("/file-1"), vnfs::ReadOp::whole("/file-2")])?.into_iter().map(|r| r.into_data().unwrap()).collect())
 }
 ```
 
@@ -525,8 +525,8 @@ disarms every handle.
 An armed handle after a failed close only retains local cleanup ownership:
 it does not prove that the server still considers the handle open.
 
-Low-level compound, RPC, and session construction is isolated under
-`vnfs::backend`; it is not part of the recommended application API.
+Low-level backend construction belongs to the separate `vfsi-*` crates;
+`vnfs` does not republish protocol construction or backend extraction.
 
 Lost replies to create, write, rename, copy, remove, and other mutations are
 reported as ambiguous and are never replayed automatically; replay could
@@ -595,7 +595,7 @@ currently no RPC-over-TLS, callback/delegation, or asynchronous API.
 ## Package boundary
 
 The `vnfs` crate is the NFS-focused application package in the wider VFSI
-project. Backend implementers can use `vnfs::backend` or depend directly on
+project. Backend implementers depend directly on
 `vfsi-core`, `vfsi-sync`, and `vfsi-nfs`. New protocol backends are
 published as separate `vfsi-*` crates so each backend has an independent
 dependency and release boundary.

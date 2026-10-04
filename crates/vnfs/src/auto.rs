@@ -233,6 +233,26 @@ impl AutoClient {
     pub fn limits(&self) -> ResourceLimits {
         self.limits
     }
+    /// Drain Drop cleanup on mounted and already-connected NFS backends.
+    /// No new connections are created; failed targets retain cleanup ownership.
+    pub fn drain_cleanup(&self) -> VfResult<()> {
+        let clients: Vec<_> = self
+            .connections
+            .lock()
+            .map_err(|_| VfError::client(0, libc::EIO as u32))?
+            .values()
+            .map(|connection| connection.client.clone())
+            .collect();
+        let mut result = self.mounted.drain_cleanup();
+        for client in clients {
+            if let Err(error) = client.drain_cleanup()
+                && result.is_ok()
+            {
+                result = Err(error);
+            }
+        }
+        result
+    }
     pub fn open_options(&self) -> AutoOpenOptions<'_> {
         AutoOpenOptions {
             client: self,

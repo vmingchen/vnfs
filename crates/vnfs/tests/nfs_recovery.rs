@@ -6,7 +6,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use vnfs::backend::{NfsVecFs, ReadOp, SeekFrom, VecFs, VfFile, VfOffset, WriteOp};
+use vfsi_nfs::NfsVecFs;
+use vfsi_sync::{ReadOp, SeekFrom, VecFs, VfFile, VfOffset, WriteOp};
 
 fn client() -> NfsVecFs {
     let minor = match std::env::var("VNFS_TEST_MINOR").as_deref() {

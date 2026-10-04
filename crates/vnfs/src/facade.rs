@@ -21,6 +21,12 @@ macro_rules! owned_client {
             pub fn limits(&self) -> ResourceLimits {
                 self.inner.limits()
             }
+            /// Drain file/directory cleanup queued by Drop. Failed targets
+            /// remain owned; explicit file close avoids this deferred path.
+            /// Last-owner backend teardown can still block on network timeouts.
+            pub fn drain_cleanup(&self) -> Result<()> {
+                self.inner.drain_cleanup()
+            }
             /// Configure this client view and its future clones. Existing clones keep
             /// their policy; all views still share the same connection and ownership.
             pub fn with_limits(self, limits: ResourceLimits) -> Self {
@@ -349,8 +355,8 @@ macro_rules! owned_client {
             pub fn seek_native(&mut self, position: std::io::SeekFrom) -> Result<u64> {
                 self.inner.seek_native(position)
             }
-            /// Consume and close the handle. On failure, `Drop` makes one best-effort
-            /// cleanup attempt; use `try_close` to retain control.
+            /// Consume and close the handle. On failure, `Drop` queues cleanup
+            /// for a later operation or drain; use `try_close` to retain control.
             pub fn close(self) -> Result<()> {
                 self.inner.close()
             }
@@ -421,8 +427,8 @@ macro_rules! owned_client {
             pub fn try_close(&mut self) -> Result<()> {
                 self.inner.try_close()
             }
-            /// Consume and close the handle. On failure, `Drop` makes one best-effort
-            /// cleanup attempt; use `try_close` to retain control.
+            /// Consume and close the handle. On failure, `Drop` queues cleanup
+            /// for a later operation or drain; use `try_close` to retain control.
             pub fn close(mut self) -> Result<()> {
                 self.try_close()
             }

@@ -7,7 +7,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use vnfs::backend::{NfsVecFs, ReadOp, VecFs, VfOffset, WriteOp};
+use vfsi_nfs::NfsVecFs;
+use vfsi_sync::{ReadOp, VecFs, VfOffset, WriteOp};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -131,14 +132,14 @@ fn read_ops(paths: &[String], length: usize) -> Vec<ReadOp> {
 }
 
 fn measure_vnfs_write(client: &mut NfsVecFs, operations: &[WriteOp]) -> Result<Sample> {
-    vnfs::backend::compound::thread_compound_stats();
-    vnfs::backend::compound::rpc_stats();
+    vfsi_nfs::compound::thread_compound_stats();
+    vfsi_nfs::compound::rpc_stats();
     let (milliseconds, result) = elapsed(|| client.writev(operations));
     result?;
     Ok(Sample {
         milliseconds,
-        compounds: vnfs::backend::compound::thread_compound_stats().0,
-        rpcs: vnfs::backend::compound::rpc_stats().0,
+        compounds: vfsi_nfs::compound::thread_compound_stats().0,
+        rpcs: vfsi_nfs::compound::rpc_stats().0,
     })
 }
 
@@ -158,8 +159,8 @@ fn measure_vnfs_read(
     operations: &[ReadOp],
     payload: &[u8],
 ) -> Result<Sample> {
-    vnfs::backend::compound::thread_compound_stats();
-    vnfs::backend::compound::rpc_stats();
+    vfsi_nfs::compound::thread_compound_stats();
+    vfsi_nfs::compound::rpc_stats();
     let (milliseconds, result) = elapsed(|| client.readv(operations));
     let results = result?;
     if results.len() != operations.len() || results.iter().any(|item| item.data != payload) {
@@ -167,8 +168,8 @@ fn measure_vnfs_read(
     }
     Ok(Sample {
         milliseconds,
-        compounds: vnfs::backend::compound::thread_compound_stats().0,
-        rpcs: vnfs::backend::compound::rpc_stats().0,
+        compounds: vfsi_nfs::compound::thread_compound_stats().0,
+        rpcs: vfsi_nfs::compound::rpc_stats().0,
     })
 }
 
@@ -226,9 +227,9 @@ fn run(args: &Args, run_name: &str, direct_run: &Path, mount_run: &Path) -> Resu
         ),
     ];
     let probe_ops = write_ops(&probe_paths, b"probe");
-    vnfs::backend::compound::thread_compound_stats();
+    vfsi_nfs::compound::thread_compound_stats();
     client.writev(&probe_ops)?;
-    let probe_compounds = vnfs::backend::compound::thread_compound_stats().0;
+    let probe_compounds = vfsi_nfs::compound::thread_compound_stats().0;
 
     for round in 0..args.rounds {
         let suffix = if args.reuse_paths {

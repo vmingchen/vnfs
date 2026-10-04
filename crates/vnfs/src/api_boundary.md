@@ -66,7 +66,7 @@ fn extract(client: vnfs::NfsClient) { let _ = client.into_inner(); }
 ```
 
 ```compile_fail,E0599
-fn construct(backend: vnfs::backend::NfsVecFs) { let _ = vnfs::NfsClient::new(backend); }
+fn construct(backend: vfsi_nfs::NfsVecFs) { let _ = vnfs::NfsClient::new(backend); }
 ```
 
 ```compile_fail,E0599
@@ -98,29 +98,29 @@ fn conversion() { let _ = vnfs::FileType::Regular.as_nfs(); }
 ```
 
 ```compile_fail,E0599
-fn conversion(error: vnfs::backend::RpcError) { let _ = vnfs::Error::from_rpc(error, None); }
+fn conversion(error: vfsi_sync::RpcError) { let _ = vnfs::Error::from_rpc(error, None); }
 ```
 
 ```compile_fail,E0277
-fn conversion(attrs: vnfs::backend::VfAttrs) -> vnfs::Metadata { attrs.into() }
+fn conversion(attrs: vfsi_sync::VfAttrs) -> vnfs::Metadata { attrs.into() }
 ```
 
 ```compile_fail,E0277
-fn conversion(result: vnfs::backend::ReadResult) -> vnfs::ReadResult { result.into() }
+fn conversion(result: vfsi_core::ReadResult) -> vnfs::ReadResult { result.into() }
 ```
 
 ```compile_fail,E0308
-fn coercion(file: &vnfs::NfsFile) -> &vnfs::backend::FsFile<vnfs::backend::NfsVecFs> { file }
+fn coercion(file: &vnfs::NfsFile) -> &vfsi_sync::FsFile<vfsi_nfs::NfsVecFs> { file }
 ```
 
 Explicit backend users can still opt into the low-level layer:
 
 ```compile_fail,E0308
-fn coercion(client: &vnfs::NfsClient) -> &vnfs::backend::FsClient<vnfs::backend::NfsVecFs> { client }
+fn coercion(client: &vnfs::NfsClient) -> &vfsi_sync::FsClient<vfsi_nfs::NfsVecFs> { client }
 ```
 
 ```compile_fail,E0277
-fn conversion(result: vnfs::backend::WriteResult) -> vnfs::WriteResult { result.into() }
+fn conversion(result: vfsi_sync::WriteResult) -> vnfs::WriteResult { result.into() }
 ```
 
 ```compile_fail,E0599
@@ -153,12 +153,12 @@ fn exclusive(file: &vnfs::NfsFile) {
 ```
 
 ```compile_fail,E0308
-fn mounted(client: &vnfs::Mounted) -> &vnfs::backend::FsClient<vnfs::backend::DummyVecFs> { client }
+fn mounted(client: &vnfs::Mounted) -> &vfsi_sync::FsClient<vfsi_local::DummyVecFs> { client }
 ```
 
 ```no_run
-let backend = vnfs::backend::NfsVecFs::connect("server")?;
-let client = vnfs::backend::FsClient::new(backend);
+let backend = vfsi_nfs::NfsVecFs::connect("server")?;
+let client = vfsi_sync::FsClient::new(backend);
 let _ = client.into_inner();
 # Ok::<(), vnfs::Error>(())
 ```
@@ -348,4 +348,18 @@ use vnfs::{Fs, ReadOp, ReadOptions};
 fn vector_only(fs: &impl Fs) -> vnfs::Result<Vec<vnfs::ReadResult>> {
     fs.readv_with_options([ReadOp::whole("/file-1"), ReadOp::whole("/file-2")], ReadOptions::new())
 }
+```
+
+
+Backend construction is not republished by the application crate:
+
+```compile_fail
+use vnfs::backend::rpc::RpcClient;
+```
+
+Read-result fields cannot be independently mutated:
+
+```compile_fail
+let mut result = vnfs::ReadResult::owned(0, vec![1], true);
+result.read = 100;
 ```
