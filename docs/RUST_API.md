@@ -68,11 +68,13 @@ is unchanged.
 The following backend contracts describe implementation responsibilities;
 ordinary applications use the concrete client methods instead:
 
-- `FileSystem` is the descriptor I/O contract. `MetadataFileSystem`,
-  `DirectoryFileSystem`, `NamespaceFileSystem`, `LinkFileSystem`, and
-  `CopyFileSystem` add focused capabilities; `NativeFileSystem` is their
-  convenient aggregate bound.
-- `VectorFileSystem` adds optimized ordered batches.
+- `FileSystem` is the minimum owned-handle contract: descriptor I/O, lifecycle,
+  synchronization, and handle-level metadata/statistics. Scalar-only backends
+  do not need namespace or vector operations.
+- `Backend: FileSystem` adds native vectors, paged directories, namespace/link/
+  copy operations, and overridable workflows. Defaults compose shared helpers;
+  native overrides retain batching and identity guarantees. It is object-safe
+  for C and Python adapters, and has no blanket implementation from scalar I/O.
 - `NfsClient` owns and shares a connection; `NfsFile` owns a remote handle without
   borrowing the entire client.
 - `NfsExtensions` and `SmbExtensions` contain protocol-only negotiated state.

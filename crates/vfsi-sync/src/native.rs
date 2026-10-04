@@ -1,9 +1,13 @@
-//! Native synchronous backend contracts. Concrete backends implement these directly.
+//! Native synchronous backend contracts.
+//! `FileSystem` supports owned handles; `Backend` adds native vector engines
+//! and overridable workflows. Shared algorithms live in `backend_helpers`.
 use crate::*;
 use std::path::{Path, PathBuf};
 use vfsi_core::internal::ManyResults;
-/// Scalar native operations and descriptor lifecycle.
-/// Implementing this contract alone does not provide native vector batching.
+
+/// Minimum contract for owned handles and descriptor lifecycle.
+/// This includes handle-level metadata/statistics hooks, but does not require
+/// namespace operations, directory enumeration, or native vector I/O.
 pub trait FileSystem {
     fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<FilesystemStats>> {
         crate::backend_helpers::vstatfs_impl_default(self, files)
@@ -100,10 +104,18 @@ pub trait FileSystem {
     }
 }
 
-/// Native vector I/O and strict opens.
-/// Success preserves request order and cardinality. Errors can follow partial effects;
-/// these operations do not promise rollback or atomicity.
-pub trait VectorFileSystem: FileSystem {
+/// Native vector engines and backend workflow overrides.
+///
+/// Vector replies preserve input order and cardinality. Indexed failures may
+/// follow partial effects; mutations do not promise rollback or safe replay.
+/// Optional operations report `Unsupported` and capability bits conservatively.
+/// Default workflows call shared helpers; native overrides retain batching,
+/// retained identity, resource limits, and protocol recovery behavior.
+///
+/// This trait is object-safe for C/Python dispatch. No blanket implementation
+/// synthesizes a complete backend from scalar methods.
+pub trait Backend: FileSystem {
+    // Vector I/O and strict opens.
     fn vread_impl(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>>;
 
     fn vread_into_impl(
@@ -166,11 +178,8 @@ pub trait VectorFileSystem: FileSystem {
     fn vopen_impl(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>> {
         crate::backend_helpers::vopen_typed_default(self, requests)
     }
-}
 
-/// Path metadata adapters and vector attribute engines.
-/// Following and no-follow engines retain distinct symlink policies.
-pub trait MetadataFileSystem: FileSystem {
+    // Path metadata and vector attribute engines.
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
         let _ = (attrs,);
         Err(VfError::unsupported(0))
@@ -211,18 +220,20 @@ pub trait MetadataFileSystem: FileSystem {
         crate::backend_helpers::file_type_impl_default(self, path)
     }
 
-    fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Metadata>;
+    fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Metadata> {
+        crate::backend_helpers::native_metadata_path_impl_default(self, path, follow)
+    }
 
     fn set_metadata_path_impl(
         &mut self,
         path: &std::path::Path,
         update: MetadataUpdate,
         follow: bool,
-    ) -> VfResult<()>;
-}
+    ) -> VfResult<()> {
+        crate::backend_helpers::native_set_metadata_path_impl_default(self, path, update, follow)
+    }
 
-/// Directory listing and backend-owned continuation pages.
-pub trait DirectoryFileSystem: FileSystem {
+    // Paged directory enumeration.
     fn listdir_impl(
         &mut self,
         dir: &Path,
@@ -274,22 +285,38 @@ pub trait DirectoryFileSystem: FileSystem {
         )
     }
 
-    fn create_dir_impl(&mut self, path: &std::path::Path, mode: u32) -> VfResult<()>;
+    fn create_dir_impl(&mut self, path: &std::path::Path, mode: u32) -> VfResult<()> {
+        crate::backend_helpers::native_create_dir_impl_default(self, path, mode)
+    }
 
     fn read_dir_impl(
         &mut self,
         path: &std::path::Path,
         options: ReadDirOptions,
-    ) -> VfResult<Vec<DirEntry>>;
+    ) -> VfResult<Vec<DirEntry>> {
+        crate::backend_helpers::native_read_dir_impl_default(self, path, options)
+    }
 
+    /// Adapt full-metadata paging through the field-aware hook below.
     fn read_dir_page_impl(
         &mut self,
         path: &std::path::Path,
         cursor: Option<DirPageCursor>,
         page_size: usize,
         max_entries: usize,
-    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)>;
+    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
+        crate::backend_helpers::native_read_dir_page_impl_default(
+            self,
+            path,
+            cursor,
+            page_size,
+            max_entries,
+        )
+    }
 
+    /// Adapt native attribute pages without materializing a full listing.
+    /// Specialized owned-page implementations should override this hook;
+    /// `read_dir_page_impl` forwards here with the full metadata mask.
     fn read_dir_page_with_fields_impl(
         &mut self,
         path: &std::path::Path,
@@ -298,13 +325,17 @@ pub trait DirectoryFileSystem: FileSystem {
         page_size: usize,
         max_entries: usize,
     ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
-        let _ = fields;
-        self.read_dir_page_impl(path, cursor, page_size, max_entries)
+        crate::backend_helpers::native_read_dir_page_with_fields_impl_default(
+            self,
+            path,
+            fields,
+            cursor,
+            page_size,
+            max_entries,
+        )
     }
-}
 
-/// Backend traversal hooks. Shared defaults compose directory and metadata engines.
-pub trait TraversalFileSystem: DirectoryFileSystem + MetadataFileSystem {
+    // Traversal workflows; overrides retain native batches and anchored seeds.
     fn walk_impl(
         &mut self,
         root: &Path,
@@ -351,10 +382,8 @@ pub trait TraversalFileSystem: DirectoryFileSystem + MetadataFileSystem {
     ) -> VfRes {
         crate::backend_helpers::visit_dir_impl_default(self, dir, masks, max_entries, cb)
     }
-}
 
-/// Vector namespace mutations and scalar adapters.
-pub trait NamespaceFileSystem: FileSystem {
+    // Namespace mutations and scalar adapters.
     fn vrename_impl(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
         let _ = (pairs,);
         Err(VfError::unsupported(0))
@@ -401,15 +430,19 @@ pub trait NamespaceFileSystem: FileSystem {
         crate::backend_helpers::ensure_dir_impl_default(self, dir, mode)
     }
 
-    fn remove_impl(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()>;
+    fn remove_impl(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()> {
+        crate::backend_helpers::native_remove_impl_default(self, path, recursive)
+    }
 
-    fn remove_dir_contents_impl(&mut self, path: &std::path::Path) -> VfResult<()>;
+    fn remove_dir_contents_impl(&mut self, path: &std::path::Path) -> VfResult<()> {
+        crate::backend_helpers::native_remove_dir_contents_impl_default(self, path)
+    }
 
-    fn rename_impl(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()>;
-}
+    fn rename_impl(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()> {
+        crate::backend_helpers::native_rename_impl_default(self, from, to)
+    }
 
-/// Vector link engines and scalar adapters.
-pub trait LinkFileSystem: FileSystem {
+    // Links.
     fn vsymlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         let _ = (oldpaths, newpaths);
         Err(VfError::unsupported(0))
@@ -433,15 +466,19 @@ pub trait LinkFileSystem: FileSystem {
         crate::backend_helpers::readlink_raw_impl_default(self, path)
     }
 
-    fn symlink_impl(&mut self, target: &std::path::Path, link: &std::path::Path) -> VfResult<()>;
+    fn symlink_impl(&mut self, target: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
+        crate::backend_helpers::native_symlink_impl_default(self, target, link)
+    }
 
-    fn hard_link_impl(&mut self, source: &std::path::Path, link: &std::path::Path) -> VfResult<()>;
+    fn hard_link_impl(&mut self, source: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
+        crate::backend_helpers::native_hard_link_impl_default(self, source, link)
+    }
 
-    fn read_link_impl(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf>;
-}
+    fn read_link_impl(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf> {
+        crate::backend_helpers::native_read_link_impl_default(self, path)
+    }
 
-/// Extent-copy policy, client-copy engine, and backend tree-copy hook.
-pub trait CopyFileSystem: FileSystem {
+    // Extent and tree copy.
     fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> VfRes {
         let _ = (pairs,);
         Err(VfError::unsupported(0))
@@ -466,12 +503,11 @@ pub trait CopyFileSystem: FileSystem {
         &mut self,
         source: &std::path::Path,
         destination: &std::path::Path,
-    ) -> VfResult<()>;
-}
+    ) -> VfResult<()> {
+        crate::backend_helpers::native_copy_impl_default(self, source, destination)
+    }
 
-/// Whole-file and stream hooks over vector I/O.
-/// Shared defaults retain budgets, EOF rules, cancellation, and original indices.
-pub trait ReadWorkflowFileSystem: VectorFileSystem {
+    // Bounded whole-file reads and streams.
     fn vread_all_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<Vec<u8>>> {
         crate::backend_helpers::vread_all_impl_default(self, files)
     }
@@ -493,11 +529,8 @@ pub trait ReadWorkflowFileSystem: VectorFileSystem {
     ) -> VfRes {
         crate::backend_helpers::vstream_impl_default(self, files, chunk_size, memory_limit, cb)
     }
-}
 
-/// Removal workflows and retained directory identity.
-/// Backend overrides preserve native batches; shared defaults compose the engines.
-pub trait RemovalFileSystem: TraversalFileSystem + NamespaceFileSystem {
+    // Recursive removal and retained directory lifecycle.
     fn before_remove_type(&mut self, _index: usize) -> VfResult<()> {
         crate::backend_helpers::before_remove_type_default(self, _index)
     }
@@ -556,56 +589,12 @@ pub trait RemovalFileSystem: TraversalFileSystem + NamespaceFileSystem {
     fn ensure_empty_dir_impl(&mut self, dir: &Path) -> VfRes {
         crate::backend_helpers::ensure_empty_dir_impl_default(self, dir)
     }
-}
 
-/// Vector application-data pattern writes.
-pub trait ApplicationDataFileSystem: FileSystem {
+    // Optional application-data-block writes.
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let _ = (patterns,);
         Err(VfError::unsupported(0))
     }
-}
-/// Aggregate operation contract for type-erased backend dispatch. Contains no methods.
-pub trait NativeFileSystem:
-    FileSystem
-    + MetadataFileSystem
-    + DirectoryFileSystem
-    + NamespaceFileSystem
-    + LinkFileSystem
-    + CopyFileSystem
-{
-}
-impl<
-    T: FileSystem
-        + MetadataFileSystem
-        + DirectoryFileSystem
-        + NamespaceFileSystem
-        + LinkFileSystem
-        + CopyFileSystem
-        + ?Sized,
-> NativeFileSystem for T
-{
-}
-/// Complete backend used by application clients and ABI adapters. Contains no methods.
-pub trait Backend:
-    NativeFileSystem
-    + VectorFileSystem
-    + ReadWorkflowFileSystem
-    + TraversalFileSystem
-    + RemovalFileSystem
-    + ApplicationDataFileSystem
-{
-}
-impl<
-    T: NativeFileSystem
-        + VectorFileSystem
-        + ReadWorkflowFileSystem
-        + TraversalFileSystem
-        + RemovalFileSystem
-        + ApplicationDataFileSystem
-        + ?Sized,
-> Backend for T
-{
 }
 pub(crate) fn metadata_mask() -> AttrMask {
     AttrMask::MODE

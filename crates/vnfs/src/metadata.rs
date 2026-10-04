@@ -5,7 +5,7 @@ pub(crate) fn metadata_backend<F, P: AsRef<std::path::Path>>(
     options: MetadataOptions,
 ) -> crate::Result<Vec<crate::Metadata>>
 where
-    F: vfsi_sync::NativeFileSystem + vfsi_sync::VectorFileSystem + vfsi_sync::Backend + 'static,
+    F: vfsi_sync::Backend + vfsi_sync::Backend + vfsi_sync::Backend + 'static,
 {
     client.vgetattrs_native(
         paths,

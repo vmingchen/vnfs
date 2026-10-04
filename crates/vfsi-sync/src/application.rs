@@ -557,9 +557,7 @@ macro_rules! client_methods {
     };
 }
 
-impl<F: crate::NativeFileSystem + crate::VectorFileSystem + crate::Backend + 'static> Vfsi
-    for crate::FsClient<F>
-{
+impl<F: crate::Backend + 'static> Vfsi for crate::FsClient<F> {
     type File = crate::FsFile<F>;
     client_methods!(
         crate::FsClient<F>,
@@ -578,9 +576,7 @@ impl<F: crate::NativeFileSystem + crate::VectorFileSystem + crate::Backend + 'st
     );
 }
 
-impl<F: crate::NativeFileSystem + crate::VectorFileSystem + crate::Backend + 'static> NativeHooks
-    for crate::FsClient<F>
-{
+impl<F: crate::Backend + 'static> NativeHooks for crate::FsClient<F> {
     fn open_native(&self, request: OpenRequest) -> Result<Self::File> {
         self.open_with(request)
     }
@@ -597,9 +593,7 @@ impl<F: crate::NativeFileSystem + crate::VectorFileSystem + crate::Backend + 'st
     }
 }
 
-pub(crate) fn read_backend_owned<
-    F: crate::NativeFileSystem + crate::VectorFileSystem + crate::Backend + 'static,
->(
+pub(crate) fn read_backend_owned<F: crate::Backend + 'static>(
     client: &crate::FsClient<F>,
     requests: &[ReadRequest<'_, crate::FsRead<'_, F>>],
     budget: usize,
@@ -619,10 +613,7 @@ pub(crate) fn read_backend_owned<
         },
     )
 }
-pub(crate) fn read_backend<
-    'a,
-    F: crate::NativeFileSystem + crate::VectorFileSystem + crate::Backend + 'static,
->(
+pub(crate) fn read_backend<'a, F: crate::Backend + 'static>(
     client: &crate::FsClient<F>,
     ops: impl IntoIterator<Item = ReadOp<'a, crate::FsFile<F>>>,
     options: ReadOptions,
@@ -652,7 +643,7 @@ pub(crate) fn write_backend<'a, F>(
     ops: &[WriteOp<'a, crate::FsFile<F>>],
 ) -> vfsi_core::api::Result<Vec<vfsi_core::api::WriteResult>>
 where
-    F: crate::NativeFileSystem + crate::VectorFileSystem + crate::Backend + 'static,
+    F: crate::Backend + 'static,
 {
     client.vwrite_mapped_native(ops, |op| op.file().write_request_at(op.offset(), op.data()))
 }
@@ -662,7 +653,7 @@ pub(crate) fn write_backend_all<'a, F>(
     ops: &[WriteOp<'a, crate::FsFile<F>>],
 ) -> vfsi_core::api::Result<Vec<vfsi_core::api::WriteResult>>
 where
-    F: crate::NativeFileSystem + crate::VectorFileSystem + crate::Backend + 'static,
+    F: crate::Backend + 'static,
 {
     client.vwrite_all_mapped_native(ops, |op| op.file().write_request_at(op.offset(), op.data()))
 }
@@ -673,7 +664,7 @@ pub(crate) fn metadata_backend<F, P: AsRef<std::path::Path>>(
     options: MetadataOptions,
 ) -> vfsi_core::api::Result<Vec<crate::Metadata>>
 where
-    F: crate::NativeFileSystem + crate::VectorFileSystem + crate::Backend + 'static,
+    F: crate::Backend + 'static,
 {
     client.vgetattrs_native(
         paths,

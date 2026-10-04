@@ -16,11 +16,10 @@ use vfsi_core::api::{
 
 use crate::traits::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::{
-    AttrMask, Backend, Capabilities, CopyFileSystem, DirEntry, DirectoryFileSystem, FileSystem,
-    LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
-    NamespaceFileSystem, OpenFlags, OpenRequest, Permissions, ReadAllOptions, ReadDirOptions,
-    ReadOp, ReadResult, ReadStreamOptions, RemoveOptions, VectorFileSystem, VfDir, VfError, VfFile,
-    VfOffset, VfResult, WriteOpRef, WriteResult,
+    AttrMask, Backend, Capabilities, DirEntry, FileSystem, Metadata, MetadataQuery, MetadataUpdate,
+    OpenFlags, OpenRequest, Permissions, ReadAllOptions, ReadDirOptions, ReadOp, ReadResult,
+    ReadStreamOptions, RemoveOptions, VfDir, VfError, VfFile, VfOffset, VfResult, WriteOpRef,
+    WriteResult,
 };
 
 fn read_result(result: ReadResult) -> FsReadResult {
@@ -419,7 +418,7 @@ impl<F: FileSystem> FsClient<F> {
     }
 }
 
-impl<F: MetadataFileSystem> FsClient<F> {
+impl<F: Backend> FsClient<F> {
     pub fn metadata(&self, path: impl AsRef<Path>) -> VfResult<Metadata> {
         self.lock()?.metadata_path_impl(path.as_ref(), true)
     }
@@ -438,7 +437,7 @@ impl<F: MetadataFileSystem> FsClient<F> {
     }
 }
 
-impl<F: DirectoryFileSystem> FsClient<F> {
+impl<F: Backend> FsClient<F> {
     pub fn create_dir(&self, path: impl AsRef<Path>) -> VfResult<()> {
         self.create_dir_with_mode(path, 0o777)
     }
@@ -552,7 +551,7 @@ impl<F: DirectoryFileSystem> FsClient<F> {
     }
 }
 
-impl<F: DirectoryFileSystem + MetadataFileSystem> FsClient<F> {
+impl<F: Backend> FsClient<F> {
     pub fn create_dir_all(&self, path: impl AsRef<Path>) -> VfResult<()> {
         let path = path.as_ref();
         let mut current = PathBuf::new();
@@ -589,7 +588,7 @@ impl<F: DirectoryFileSystem + MetadataFileSystem> FsClient<F> {
     }
 }
 
-impl<F: NamespaceFileSystem + MetadataFileSystem> FsClient<F> {
+impl<F: Backend> FsClient<F> {
     fn removal_metadata(&self, path: &Path, operation: &'static str) -> VfResult<Metadata> {
         let mut filesystem = self.lock()?;
         let follow = !filesystem.capabilities().contains(Capabilities::LSTAT);
@@ -1166,7 +1165,7 @@ impl<F: Backend> Drop for FsDir<F> {
     }
 }
 
-impl<F: LinkFileSystem> FsClient<F> {
+impl<F: Backend> FsClient<F> {
     pub fn symlink(&self, target: impl AsRef<Path>, link: impl AsRef<Path>) -> VfResult<()> {
         self.lock()?.symlink_impl(target.as_ref(), link.as_ref())
     }
@@ -1180,7 +1179,7 @@ impl<F: LinkFileSystem> FsClient<F> {
     }
 }
 
-impl<F: CopyFileSystem> FsClient<F> {
+impl<F: Backend> FsClient<F> {
     pub fn copy(&self, source: impl AsRef<Path>, destination: impl AsRef<Path>) -> VfResult<()> {
         self.lock()?
             .copy_impl(source.as_ref(), destination.as_ref())
@@ -1489,7 +1488,7 @@ impl<F: Backend> FsClient<F> {
     }
 }
 
-impl<F: VectorFileSystem> FsClient<F> {
+impl<F: Backend> FsClient<F> {
     /// Open an ordered vector of files.
     ///
     /// Success returns one RAII handle per request. Failure returns no
@@ -1973,7 +1972,7 @@ impl<F: VectorFileSystem> FsClient<F> {
     }
 }
 
-impl<F: VectorFileSystem + Backend> FsClient<F> {
+impl<F: Backend> FsClient<F> {
     /// Read several complete files by path using vector READ operations.
     ///
     /// The aggregate returned data is limited to 16 MiB by default. Use
@@ -2131,7 +2130,7 @@ impl<'a, F: FileSystem> OpenOptions<'a, F> {
     }
 }
 
-impl<F: VectorFileSystem> OpenOptions<'_, F> {
+impl<F: Backend> OpenOptions<'_, F> {
     pub fn vopen<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<FsFile<F>>> {
         let requests: Vec<OpenRequest> = paths
             .iter()
@@ -2142,14 +2141,14 @@ impl<F: VectorFileSystem> OpenOptions<'_, F> {
 }
 
 /// Builder for an atomic metadata update request.
-pub struct SetMetadata<'a, F: MetadataFileSystem> {
+pub struct SetMetadata<'a, F: Backend> {
     client: &'a FsClient<F>,
     path: PathBuf,
     update: MetadataUpdate,
     follow: bool,
 }
 
-impl<F: MetadataFileSystem> Clone for SetMetadata<'_, F> {
+impl<F: Backend> Clone for SetMetadata<'_, F> {
     fn clone(&self) -> Self {
         Self {
             client: self.client,
@@ -2160,7 +2159,7 @@ impl<F: MetadataFileSystem> Clone for SetMetadata<'_, F> {
     }
 }
 
-impl<F: MetadataFileSystem> fmt::Debug for SetMetadata<'_, F> {
+impl<F: Backend> fmt::Debug for SetMetadata<'_, F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SetMetadata")
@@ -2171,7 +2170,7 @@ impl<F: MetadataFileSystem> fmt::Debug for SetMetadata<'_, F> {
     }
 }
 
-impl<F: MetadataFileSystem> SetMetadata<'_, F> {
+impl<F: Backend> SetMetadata<'_, F> {
     pub fn permissions(&mut self, permissions: Permissions) -> &mut Self {
         self.update.permissions = Some(permissions);
         self

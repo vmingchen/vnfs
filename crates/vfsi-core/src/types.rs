@@ -1286,7 +1286,7 @@ impl Metadata {
     }
 }
 
-/// Rust-native metadata changes used by [`MetadataFileSystem`](https://docs.rs/vfsi-sync).
+/// Rust-native metadata changes used by [`Backend`](https://docs.rs/vfsi-sync).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MetadataUpdate {
     pub permissions: Option<Permissions>,

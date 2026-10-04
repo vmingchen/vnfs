@@ -1450,7 +1450,7 @@ impl FileSystem for SmbVecFs {
     }
 }
 
-impl VectorFileSystem for SmbVecFs {
+impl Backend for SmbVecFs {
     fn vopen_outcomes_impl(
         &mut self,
         paths: &[&Path],
@@ -1792,9 +1792,7 @@ impl VectorFileSystem for SmbVecFs {
         }
         Ok(output)
     }
-}
 
-impl MetadataFileSystem for SmbVecFs {
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
         if attrs.len() > 1
             && !self.tree.is_dfs
@@ -1956,9 +1954,7 @@ impl MetadataFileSystem for SmbVecFs {
             self, path, update, follow,
         )
     }
-}
 
-impl DirectoryFileSystem for SmbVecFs {
     fn listdir_impl(
         &mut self,
         dir: &Path,
@@ -2012,11 +2008,7 @@ impl DirectoryFileSystem for SmbVecFs {
             max_entries,
         )
     }
-}
 
-impl TraversalFileSystem for SmbVecFs {}
-
-impl NamespaceFileSystem for SmbVecFs {
     fn vrename_impl(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
         let mut prepared = Vec::with_capacity(pairs.len());
         let mut dependency_paths = Vec::with_capacity(pairs.len() * 2);
@@ -2166,9 +2158,7 @@ impl NamespaceFileSystem for SmbVecFs {
     fn rename_impl(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()> {
         vfsi_sync::backend_helpers::native_rename_impl_default(self, from, to)
     }
-}
 
-impl LinkFileSystem for SmbVecFs {
     fn vsymlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         if oldpaths.len() != newpaths.len() {
             return Err(VfError::failure(0, ERR_INVAL));
@@ -2207,9 +2197,7 @@ impl LinkFileSystem for SmbVecFs {
     fn read_link_impl(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf> {
         vfsi_sync::backend_helpers::native_read_link_impl_default(self, path)
     }
-}
 
-impl CopyFileSystem for SmbVecFs {
     fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> VfRes {
         for (index, pair) in pairs.iter().enumerate() {
             self.copy_client_side(pair)
@@ -2321,13 +2309,7 @@ impl CopyFileSystem for SmbVecFs {
     ) -> VfResult<()> {
         vfsi_sync::backend_helpers::native_copy_impl_default(self, source, destination)
     }
-}
 
-impl ReadWorkflowFileSystem for SmbVecFs {}
-
-impl RemovalFileSystem for SmbVecFs {}
-
-impl ApplicationDataFileSystem for SmbVecFs {
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
         for (index, pattern) in patterns.iter().enumerate() {

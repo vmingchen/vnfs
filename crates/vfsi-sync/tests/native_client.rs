@@ -5,10 +5,9 @@ use std::sync::{
 };
 
 use vfsi_sync::{
-    Capabilities, DirEntry, DirPageCursor, DirectoryFileSystem, FileSystem, FsClient,
-    MetadataQuery, OpenFlags, OpenRequest, ReadDirOptions, ReadIntoResult, ReadOp, ReadResult,
-    SetAttributes, VectorFileSystem, VfAttrs, VfError, VfFile, VfOffset, VfResult, WriteOpRef,
-    WriteResult,
+    Backend, Capabilities, DirEntry, DirPageCursor, FileSystem, FsClient, MetadataQuery, OpenFlags,
+    OpenRequest, ReadDirOptions, ReadIntoResult, ReadOp, ReadResult, SetAttributes, VfAttrs,
+    VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
 };
 
 #[test]
@@ -163,7 +162,7 @@ fn opened_file_read_to_end_has_explicit_limits_and_cursor_semantics() {
     }
 }
 
-impl VectorFileSystem for ScalarOnly {
+impl Backend for ScalarOnly {
     fn vopen_impl(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>> {
         if self.transport_failure {
             return Err(VfError::transport(None, "reply lost"));
@@ -264,6 +263,455 @@ impl VectorFileSystem for ScalarOnly {
         }
         Ok(results)
     }
+
+    fn read_dir_page_with_fields_impl(
+        &mut self,
+        path: &std::path::Path,
+        fields: vfsi_sync::AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
+        self.directory_fields.lock().unwrap().push(fields);
+        self.read_dir_page_impl(path, cursor, page_size, max_entries)
+    }
+    fn create_dir_impl(&mut self, _: &std::path::Path, _: u32) -> VfResult<()> {
+        Ok(())
+    }
+
+    fn read_dir_impl(&mut self, _: &std::path::Path, _: ReadDirOptions) -> VfResult<Vec<DirEntry>> {
+        unreachable!("the visitor must use paged enumeration")
+    }
+
+    fn read_dir_page_impl(
+        &mut self,
+        _: &std::path::Path,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
+        self.directory_page_sizes.lock().unwrap().push(page_size);
+        let start = cursor
+            .map(|cursor| cursor.into_state::<usize>())
+            .transpose()?
+            .unwrap_or(0);
+        let ceiling = if max_entries == 0 {
+            self.directory_entries
+        } else {
+            self.directory_entries.min(max_entries)
+        };
+        let end = start.saturating_add(page_size).min(ceiling);
+        let entries = (start..end)
+            .map(|index| {
+                DirEntry::new(
+                    format!("/tree/item-{index:04}").into(),
+                    vfsi_core::metadata_from_attrs(VfAttrs::default()),
+                )
+            })
+            .collect();
+        let next = (end < ceiling).then(|| DirPageCursor::new(end));
+        Ok((entries, next))
+    }
+}
+
+/// These wrappers exercise the actual minimal contracts, independently of the
+/// full probe's vector/directory overrides.
+#[derive(Default)]
+struct HandleOnly {
+    scalar: ScalarOnly,
+}
+
+#[derive(Default)]
+struct DefaultBackend {
+    scalar: ScalarOnly,
+    vector_reads: usize,
+}
+
+#[derive(Default)]
+struct PagedBackend {
+    scalar: ScalarOnly,
+    page_calls: Arc<Mutex<Vec<(vfsi_sync::AttrMask, usize, usize)>>>,
+}
+
+macro_rules! handle_contract {
+    ($backend:ty) => {
+        impl FileSystem for $backend {
+            fn open_impl(&mut self, request: &OpenRequest) -> VfResult<VfFile> {
+                self.scalar.open_impl(request)
+            }
+            fn open_path_impl(
+                &mut self,
+                base: vfsi_sync::VfPathBase,
+                path: &std::path::Path,
+                flags: i32,
+                mode: u32,
+            ) -> VfResult<VfFile> {
+                let _ = (base, flags, mode);
+                self.open_impl(&OpenRequest::new(path, OpenFlags::READ))
+            }
+            fn close_impl(&mut self, file: &VfFile) -> VfResult<()> {
+                self.scalar.close_impl(file)
+            }
+            fn sync_data(&mut self, file: &VfFile) -> VfResult<()> {
+                self.scalar.sync_data(file)
+            }
+            fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
+                self.scalar.read_impl(request)
+            }
+            fn write_impl(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult> {
+                self.scalar.write_impl(request)
+            }
+            fn seek_impl(&mut self, file: &VfFile, position: SeekFrom) -> VfResult<u64> {
+                self.scalar.seek_impl(file, position)
+            }
+            fn metadata_impl(&mut self, query: MetadataQuery) -> VfResult<VfAttrs> {
+                self.scalar.metadata_impl(query)
+            }
+            fn set_attributes_impl(&mut self, update: SetAttributes) -> VfResult<()> {
+                self.scalar.set_attributes_impl(update)
+            }
+        }
+    };
+}
+
+handle_contract!(HandleOnly);
+handle_contract!(DefaultBackend);
+handle_contract!(PagedBackend);
+
+impl Backend for PagedBackend {
+    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        panic!("directory paging must not issue reads")
+    }
+
+    fn listdir_page_impl(
+        &mut self,
+        dir: &std::path::Path,
+        masks: vfsi_sync::AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
+        self.page_calls
+            .lock()
+            .unwrap()
+            .push((masks, page_size, max_entries));
+        let start = cursor
+            .map(|cursor| cursor.into_state::<usize>())
+            .transpose()?
+            .unwrap_or(0);
+        let count = if max_entries == 0 {
+            3
+        } else {
+            3.min(max_entries)
+        };
+        let end = start.saturating_add(page_size).min(count);
+        let entries = (start..end)
+            .map(|index| VfAttrs {
+                file: VfFile::from_os_path(&dir.join(format!("item-{index}"))),
+                masks,
+                mode: 0o100644,
+                size: index as u64,
+                ..VfAttrs::default()
+            })
+            .collect();
+        Ok((entries, (end < count).then(|| DirPageCursor::new(end))))
+    }
+}
+
+#[test]
+fn minimal_backend_directory_defaults_return_unsupported() {
+    let mut concrete = DefaultBackend::default();
+    let backend: &mut dyn Backend = &mut concrete;
+    let dir = std::path::Path::new("/tree");
+    assert_eq!(
+        backend
+            .read_dir_page_impl(dir, None, 1, 4)
+            .err()
+            .expect("paging is unsupported")
+            .kind(),
+        std::io::ErrorKind::Unsupported,
+    );
+    assert_eq!(
+        backend
+            .read_dir_page_with_fields_impl(dir, vfsi_sync::AttrMask::SIZE, None, 1, 4)
+            .err()
+            .expect("paging is unsupported")
+            .kind(),
+        std::io::ErrorKind::Unsupported,
+    );
+    let client = FsClient::new(concrete);
+    assert_eq!(
+        client
+            .visit_dir(dir, |_| panic!(
+                "unsupported listing must not invoke the visitor"
+            ))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::Unsupported,
+    );
+}
+
+#[test]
+fn default_directory_pages_preserve_cursor_fields_and_bounds() {
+    let mut concrete = PagedBackend::default();
+    let calls = concrete.page_calls.clone();
+    let backend: &mut dyn Backend = &mut concrete;
+    let dir = std::path::Path::new("/tree");
+    let (first, next) = backend.read_dir_page_impl(dir, None, 1, 3).unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].path(), dir.join("item-0"));
+    let (rest, next) = backend
+        .read_dir_page_with_fields_impl(dir, vfsi_sync::AttrMask::SIZE, next, 2, 3)
+        .unwrap();
+    assert_eq!(
+        rest.iter().map(|entry| entry.path()).collect::<Vec<_>>(),
+        [dir.join("item-1"), dir.join("item-2")]
+    );
+    assert!(next.is_none());
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls[0]
+            .0
+            .contains(vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE)
+    );
+    assert_eq!((calls[0].1, calls[0].2), (1, 3));
+    assert_eq!(
+        calls[1],
+        (vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE, 2, 3)
+    );
+}
+
+#[test]
+fn default_directory_visitor_uses_native_pages_without_materializing_a_listing() {
+    // Only the native page engine is implemented; listdir_impl stays unsupported.
+    let concrete = PagedBackend::default();
+    let calls = concrete.page_calls.clone();
+    let client = FsClient::new(concrete);
+    let mut paths = Vec::new();
+    let completion = client
+        .visit_dir_with_fields(
+            "/tree",
+            vfsi_sync::AttrMask::SIZE,
+            ReadDirOptions::new().max_entries(3),
+            |entry| {
+                paths.push(entry.path().to_path_buf());
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
+        .unwrap();
+    assert_eq!(completion, vfsi_sync::TraversalCompletion::Complete);
+    assert_eq!(
+        paths,
+        (0..3)
+            .map(|i| format!("/tree/item-{i}").into())
+            .collect::<Vec<std::path::PathBuf>>()
+    );
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            (vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE, 1, 4),
+            (vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE, 3, 4),
+        ]
+    );
+}
+
+#[derive(Default)]
+struct WorkflowOverride {
+    scalar: ScalarOnly,
+    calls: Vec<&'static str>,
+}
+handle_contract!(WorkflowOverride);
+
+impl Backend for WorkflowOverride {
+    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        panic!("specialized workflows must not fall back to generic vector reads")
+    }
+
+    fn read_dir_page_with_fields_impl(
+        &mut self,
+        _: &std::path::Path,
+        fields: vfsi_sync::AttrMask,
+        _: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
+        assert!(fields.contains(vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE));
+        assert_eq!((page_size, max_entries), (1, 4));
+        self.calls.push("directory");
+        Ok((Vec::new(), None))
+    }
+
+    fn vstream_impl(
+        &mut self,
+        _: &[VfFile],
+        _: usize,
+        _: usize,
+        callback: &mut vfsi_sync::ReadStreamCallback<'_>,
+    ) -> vfsi_sync::VfRes {
+        self.calls.push("stream");
+        callback(0, 0, b"override", true);
+        Ok(())
+    }
+
+    fn walk_with_options_impl(
+        &mut self,
+        _: &std::path::Path,
+        _: vfsi_sync::AttrMask,
+        _: vfsi_sync::WalkOptions,
+        _: &mut dyn FnMut(&std::path::Path, &mut Vec<VfAttrs>),
+    ) -> VfResult<Vec<vfsi_sync::WalkEntry>> {
+        self.calls.push("walk");
+        Ok(Vec::new())
+    }
+
+    fn remove_paths_with_options_impl(
+        &mut self,
+        _: &[&std::path::Path],
+        _: bool,
+        _: vfsi_sync::RemoveOptions,
+    ) -> vfsi_sync::VfRes {
+        self.calls.push("remove");
+        Ok(())
+    }
+
+    fn vcopy_impl(
+        &mut self,
+        _: &[vfsi_sync::ExtentPair],
+        _: vfsi_sync::CopyOption,
+    ) -> vfsi_sync::VfRes {
+        self.calls.push("copy");
+        Ok(())
+    }
+}
+
+#[test]
+fn shared_workflows_keep_dynamic_backend_overrides_reachable() {
+    let mut concrete = WorkflowOverride::default();
+    let backend: &mut dyn Backend = &mut concrete;
+    let files = [VfFile::from_fd(1)];
+    assert_eq!(
+        backend.vread_all_impl(&files).unwrap(),
+        [b"override".to_vec()]
+    );
+    assert!(
+        backend
+            .walk_impl(
+                std::path::Path::new("/tree"),
+                vfsi_sync::AttrMask::default(),
+                &mut |_, _| {},
+            )
+            .unwrap()
+            .is_empty()
+    );
+    backend
+        .remove_impl(std::path::Path::new("/tree"), true)
+        .unwrap();
+    backend
+        .copy_impl(std::path::Path::new("/a"), std::path::Path::new("/b"))
+        .unwrap();
+    let (entries, next) = backend
+        .read_dir_page_impl(std::path::Path::new("/tree"), None, 1, 4)
+        .unwrap();
+    assert!(entries.is_empty());
+    assert!(next.is_none());
+    assert_eq!(
+        concrete.calls,
+        ["stream", "walk", "remove", "copy", "directory"]
+    );
+}
+
+impl Backend for DefaultBackend {
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        self.vector_reads += 1;
+        requests
+            .iter()
+            .map(|request| self.read_impl(request))
+            .collect()
+    }
+}
+
+#[test]
+fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
+    let mut concrete = DefaultBackend {
+        scalar: ScalarOnly {
+            data: b"abcdef".to_vec(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let backend: &mut dyn Backend = &mut concrete;
+    let files = backend
+        .vopen_impl(&[OpenRequest::new("/file", OpenFlags::READ)])
+        .unwrap();
+    let data = backend
+        .vread_all_with_options_impl(&files, vfsi_sync::ReadAllOptions::new().max_total_bytes(6))
+        .unwrap();
+    assert_eq!(data, [b"abcdef".to_vec()]);
+    assert_eq!(
+        backend
+            .vread_all_with_options_impl(
+                &files,
+                vfsi_sync::ReadAllOptions::new().max_total_bytes(3),
+            )
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::FileTooLarge
+    );
+    let mut received = Vec::new();
+    backend
+        .vstream_impl(&files, 2, 4, &mut |index, offset, bytes, eof| {
+            assert_eq!(index, 0);
+            assert_eq!(offset as usize, received.len());
+            assert!(bytes.len() <= 2);
+            received.extend_from_slice(bytes);
+            assert_eq!(eof, received.len() == 6);
+            true
+        })
+        .unwrap();
+    assert_eq!(received, b"abcdef");
+    let mut buffer = [0; 3];
+    let result = backend
+        .vread_into_impl(&[ReadOp::at(files[0].clone(), 2, 3)], &mut [&mut buffer])
+        .unwrap();
+    assert_eq!(buffer, *b"cde");
+    assert_eq!(result[0].read, 3);
+    let paths = [(VfFile::from_path("/source"), VfFile::from_path("/target"))];
+    assert_eq!(
+        backend
+            .rename_impl(
+                std::path::Path::new("/source"),
+                std::path::Path::new("/target")
+            )
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        backend
+            .vrename_with_options_impl(&paths, vfsi_core::api::RenameOptions::NoReplace)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        backend
+            .read_link_impl(std::path::Path::new("/link"))
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        backend
+            .vwrite_impl(&[WriteOpRef::new(&files[0], VfOffset::At(0), b"x")])
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    backend.vclose_impl(&files).unwrap();
+    assert!(!concrete.scalar.open);
+    assert_eq!(concrete.scalar.close_calls, 1);
+    assert!(concrete.vector_reads >= 5);
 }
 
 impl FileSystem for ScalarOnly {
@@ -436,7 +884,9 @@ impl FileSystem for ScalarOnly {
 
 #[test]
 fn owned_client_accepts_a_scalar_only_backend() {
-    let client = FsClient::new(ScalarOnly::default());
+    // This wrapper implements FileSystem only, not Backend. Keeping the vector
+    // probe directly here would fail to guard the narrow handle boundary.
+    let client = FsClient::new(HandleOnly::default());
     let mut file = client
         .open_with(OpenRequest::new(
             "/file",
@@ -876,57 +1326,6 @@ fn stream_callback_can_reenter_client_and_drop_another_file() {
         )
         .unwrap();
     assert_eq!(received, b"abcdef");
-}
-
-impl DirectoryFileSystem for ScalarOnly {
-    fn read_dir_page_with_fields_impl(
-        &mut self,
-        path: &std::path::Path,
-        fields: vfsi_sync::AttrMask,
-        cursor: Option<DirPageCursor>,
-        page_size: usize,
-        max_entries: usize,
-    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
-        self.directory_fields.lock().unwrap().push(fields);
-        self.read_dir_page_impl(path, cursor, page_size, max_entries)
-    }
-    fn create_dir_impl(&mut self, _: &std::path::Path, _: u32) -> VfResult<()> {
-        Ok(())
-    }
-
-    fn read_dir_impl(&mut self, _: &std::path::Path, _: ReadDirOptions) -> VfResult<Vec<DirEntry>> {
-        unreachable!("the visitor must use paged enumeration")
-    }
-
-    fn read_dir_page_impl(
-        &mut self,
-        _: &std::path::Path,
-        cursor: Option<DirPageCursor>,
-        page_size: usize,
-        max_entries: usize,
-    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
-        self.directory_page_sizes.lock().unwrap().push(page_size);
-        let start = cursor
-            .map(|cursor| cursor.into_state::<usize>())
-            .transpose()?
-            .unwrap_or(0);
-        let ceiling = if max_entries == 0 {
-            self.directory_entries
-        } else {
-            self.directory_entries.min(max_entries)
-        };
-        let end = start.saturating_add(page_size).min(ceiling);
-        let entries = (start..end)
-            .map(|index| {
-                DirEntry::new(
-                    format!("/tree/item-{index:04}").into(),
-                    vfsi_core::metadata_from_attrs(VfAttrs::default()),
-                )
-            })
-            .collect();
-        let next = (end < ceiling).then(|| DirPageCursor::new(end));
-        Ok((entries, next))
-    }
 }
 
 #[test]

@@ -1151,7 +1151,7 @@ mod tests {
     fn openv_rejects_mismatched_lengths() {
         let (_root, mut fs) = fs("openv");
         use libc::O_CREAT;
-        let e = VectorFileSystem::vopen_raw_impl(
+        let e = Backend::vopen_raw_impl(
             &mut fs,
             &[Path::new("/a"), Path::new("/b")],
             &[O_CREAT],

@@ -1187,7 +1187,7 @@ impl FileSystem for DummyVecFs {
     }
 }
 
-impl VectorFileSystem for DummyVecFs {
+impl Backend for DummyVecFs {
     fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeCleanup { index: _index })?;
@@ -1276,9 +1276,7 @@ impl VectorFileSystem for DummyVecFs {
         }
         Ok(out)
     }
-}
 
-impl MetadataFileSystem for DummyVecFs {
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
         self.getattrsv_impl(attrs, true)
     }
@@ -1350,9 +1348,7 @@ impl MetadataFileSystem for DummyVecFs {
             self, path, update, follow,
         )
     }
-}
 
-impl DirectoryFileSystem for DummyVecFs {
     fn listdir_impl(
         &mut self,
         dir: &Path,
@@ -1456,9 +1452,7 @@ impl DirectoryFileSystem for DummyVecFs {
             max_entries,
         )
     }
-}
 
-impl TraversalFileSystem for DummyVecFs {
     fn visit_dir_impl(
         &mut self,
         dir: &Path,
@@ -1495,9 +1489,7 @@ impl TraversalFileSystem for DummyVecFs {
         }
         Ok(())
     }
-}
 
-impl NamespaceFileSystem for DummyVecFs {
     fn vrename_impl(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
         for (i, (src, dst)) in pairs.iter().enumerate() {
             let sp = self.vf_path(src).map_err(|e| e.with_index(i))?;
@@ -1620,9 +1612,7 @@ impl NamespaceFileSystem for DummyVecFs {
     fn rename_impl(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()> {
         vfsi_sync::backend_helpers::native_rename_impl_default(self, from, to)
     }
-}
 
-impl LinkFileSystem for DummyVecFs {
     fn vsymlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         if oldpaths.len() != newpaths.len() {
             return Err(VfError::failure(0, ERR_INVAL));
@@ -1673,9 +1663,7 @@ impl LinkFileSystem for DummyVecFs {
     fn read_link_impl(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf> {
         vfsi_sync::backend_helpers::native_read_link_impl_default(self, path)
     }
-}
 
-impl CopyFileSystem for DummyVecFs {
     fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> VfRes {
         for (i, p) in pairs.iter().enumerate() {
             self.copy_extent(p).map_err(|e| e.with_index(i))?;
@@ -1762,19 +1750,13 @@ impl CopyFileSystem for DummyVecFs {
     ) -> VfResult<()> {
         vfsi_sync::backend_helpers::native_copy_impl_default(self, source, destination)
     }
-}
 
-impl ReadWorkflowFileSystem for DummyVecFs {}
-
-impl RemovalFileSystem for DummyVecFs {
     fn before_remove_type(&mut self, _index: usize) -> VfResult<()> {
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: _index })?;
         Ok(())
     }
-}
 
-impl ApplicationDataFileSystem for DummyVecFs {
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
         for (i, p) in patterns.iter().enumerate() {

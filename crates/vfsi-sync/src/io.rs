@@ -2,7 +2,7 @@ use std::io::{self, Read, Seek, SeekFrom as IoSeekFrom, Write};
 use std::path::Path;
 
 use crate::traits::{validate_read_results, validate_write_results};
-use crate::{ReadOp, SeekFrom, VectorFileSystem, VfFile, VfOffset};
+use crate::{Backend, ReadOp, SeekFrom, VfFile, VfOffset};
 
 fn io_error(error: crate::VfError) -> io::Error {
     let kind = match error.err_no() {
@@ -128,7 +128,7 @@ impl VfOpenOptions {
     }
 
     /// Open a file whose lifetime is tied to the mutable filesystem borrow.
-    pub fn open<'a, F: VectorFileSystem + ?Sized>(
+    pub fn open<'a, F: Backend + ?Sized>(
         &self,
         filesystem: &'a mut F,
         path: impl AsRef<Path>,
@@ -147,12 +147,12 @@ impl VfOpenOptions {
 ///
 /// Dropping the handle closes the remote descriptor on a best-effort basis.
 /// Use [`close`](Self::close) when a close error must be observed.
-pub struct VfFileHandle<'a, F: VectorFileSystem + ?Sized> {
+pub struct VfFileHandle<'a, F: Backend + ?Sized> {
     filesystem: &'a mut F,
     file: Option<VfFile>,
 }
 
-impl<F: VectorFileSystem + ?Sized> VfFileHandle<'_, F> {
+impl<F: Backend + ?Sized> VfFileHandle<'_, F> {
     /// Descriptor of an open handle. Use [`try_descriptor`](Self::try_descriptor)
     /// when the handle might already have been closed with `try_close`.
     pub fn descriptor(&self) -> &VfFile {
@@ -182,7 +182,7 @@ impl<F: VectorFileSystem + ?Sized> VfFileHandle<'_, F> {
     }
 }
 
-impl<F: VectorFileSystem + ?Sized> Read for VfFileHandle<'_, F> {
+impl<F: Backend + ?Sized> Read for VfFileHandle<'_, F> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if buffer.is_empty() {
             return Ok(0);
@@ -197,7 +197,7 @@ impl<F: VectorFileSystem + ?Sized> Read for VfFileHandle<'_, F> {
     }
 }
 
-impl<F: VectorFileSystem + ?Sized> Write for VfFileHandle<'_, F> {
+impl<F: Backend + ?Sized> Write for VfFileHandle<'_, F> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         if buffer.is_empty() {
             return Ok(0);
@@ -215,7 +215,7 @@ impl<F: VectorFileSystem + ?Sized> Write for VfFileHandle<'_, F> {
     }
 }
 
-impl<F: VectorFileSystem + ?Sized> Seek for VfFileHandle<'_, F> {
+impl<F: Backend + ?Sized> Seek for VfFileHandle<'_, F> {
     fn seek(&mut self, position: IoSeekFrom) -> io::Result<u64> {
         let file = self.try_descriptor()?.clone();
         let (offset, whence) = match position {
@@ -237,7 +237,7 @@ impl<F: VectorFileSystem + ?Sized> Seek for VfFileHandle<'_, F> {
     }
 }
 
-impl<F: VectorFileSystem + ?Sized> Drop for VfFileHandle<'_, F> {
+impl<F: Backend + ?Sized> Drop for VfFileHandle<'_, F> {
     fn drop(&mut self) {
         if let Some(file) = self.file.take() {
             let _ = self.filesystem.close_impl(&file);

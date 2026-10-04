@@ -1,6 +1,7 @@
-//! Synchronous filesystem interface facets.
+//! Synchronous filesystem contracts.
 //!
-//! Concrete backends implement native facets directly; shared helpers compose workflows.
+//! `FileSystem` supports owned handles. `Backend` adds vector engines and
+//! overridable workflows; shared helpers compose those engines.
 
 pub use vfsi_core::*;
 
@@ -20,30 +21,24 @@ pub use traversal::walk_events;
 #[doc(hidden)]
 pub mod backend_helpers;
 mod native;
-pub use native::{
-    ApplicationDataFileSystem, Backend, CopyFileSystem, DirectoryFileSystem, FileSystem,
-    LinkFileSystem, MetadataFileSystem, NamespaceFileSystem, NativeFileSystem,
-    ReadWorkflowFileSystem, RemovalFileSystem, TraversalFileSystem, VectorFileSystem,
-};
+pub use native::{Backend, FileSystem};
 
 /// Scalar/singular view of the synchronous interface.
 pub mod sfsi {
     pub use crate::{
-        CopyFileSystem, DepthLimit, DirPageCursor, DirectoryFileSystem, FileSystem, FsClient,
-        FsFile, LinkFileSystem, MetadataFileSystem, NamespaceFileSystem, NativeFileSystem,
-        OpenOptions, ReadDirOptions, ReadStreamOptions, WalkOptions,
+        DepthLimit, DirPageCursor, FileSystem, FsClient, FsFile, OpenOptions, ReadDirOptions,
+        ReadStreamOptions, WalkOptions,
     };
     pub use vfsi_core::{Fd, VfAttrs, VfError, VfFile, VfOffset, VfResult, VfType};
 }
 
 /// Vectorized view of the synchronous interface.
 pub mod vfsi {
-    pub use crate::Backend;
     pub use crate::{
-        DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
+        Backend, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
         DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
         DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirPageCursor, ReadAllOptions, ReadDirOptions,
-        ReadStreamOptions, VectorFileSystem, WalkOptions,
+        ReadStreamOptions, WalkOptions,
     };
     pub use vfsi_core::*;
 }

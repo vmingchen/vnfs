@@ -94,9 +94,9 @@ to the vector operation. Shared backend methods add `_impl`, such as
 or `_smb`, such as `vstatfs_nfs`. Scalar backend operations omit `v`, for
 example `open_impl`. Modifiers precede the suffix, as in `vread_into_impl`.
 
-Concrete backends implement the native operation facets directly.
-`NativeFileSystem` and `Backend` are method-free aggregates; `Backend` supports
-object-safe dispatch in bindings. Shared algorithms live in
+Concrete backends implement two native contracts: `FileSystem` for owned
+handles and `Backend: FileSystem` for vector engines and workflow overrides.
+`Backend` supports object-safe dispatch in bindings. Shared algorithms live in
 `vfsi-sync::backend_helpers`. `Vfsi` and `VfsiExt` remain the application APIs.
 Lifecycle/configuration methods keep descriptive names, and protocol internals
 keep their wire vocabulary. `VfsiExt` also provides bulk composed workflows.

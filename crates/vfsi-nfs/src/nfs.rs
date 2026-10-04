@@ -119,7 +119,7 @@ struct NfsChildDirectoryCursor {
 /// `fh` addresses the directory itself (for READDIR and child LOOKUPs), while
 /// `parent`/`name` address its entry in the parent for the final REMOVE. No
 /// path is re-resolved after the operand's parent is resolved once. A `None`
-/// parent keeps the directory (used by [`RemovalFileSystem::remove_dir_contents_path_impl`]).
+/// parent keeps the directory (used by [`Backend::remove_dir_contents_path_impl`]).
 struct RemoveDir {
     fh: WireFileHandle,
     parent: Option<WireFileHandle>,
@@ -1573,8 +1573,7 @@ impl NfsVecFs {
                 .collect();
             let flags: Vec<i32> = snapshots.iter().map(|(_, open, _, _)| open.flags).collect();
             let modes: Vec<u32> = snapshots.iter().map(|(_, open, _, _)| open.mode).collect();
-            let reopened =
-                VectorFileSystem::vopen_raw_impl(&mut replacement, &paths, &flags, &modes)?;
+            let reopened = Backend::vopen_raw_impl(&mut replacement, &paths, &flags, &modes)?;
             // Validate every identity before removing any handle from the
             // replacement's cleanup map or publishing the new session.
             for ((_, recipe, _, original), file) in snapshots.iter().zip(&reopened) {
@@ -4350,7 +4349,7 @@ impl FileSystem for NfsVecFs {
     }
 }
 
-impl VectorFileSystem for NfsVecFs {
+impl Backend for NfsVecFs {
     fn vopen_outcomes_impl(
         &mut self,
         paths: &[&Path],
@@ -4648,9 +4647,7 @@ impl VectorFileSystem for NfsVecFs {
         }
         Ok(out)
     }
-}
 
-impl MetadataFileSystem for NfsVecFs {
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
         if !self.recovery_in_progress {
             return self.read_with_recovery(|client| client.vgetattrs_impl(attrs));
@@ -4687,9 +4684,7 @@ impl MetadataFileSystem for NfsVecFs {
             self, path, update, follow,
         )
     }
-}
 
-impl DirectoryFileSystem for NfsVecFs {
     fn listdir_impl(
         &mut self,
         dir: &Path,
@@ -4979,9 +4974,7 @@ impl DirectoryFileSystem for NfsVecFs {
             max_entries,
         )
     }
-}
 
-impl TraversalFileSystem for NfsVecFs {
     fn visit_dir_impl(
         &mut self,
         dir: &Path,
@@ -5349,9 +5342,7 @@ impl TraversalFileSystem for NfsVecFs {
         }
         Ok(out)
     }
-}
 
-impl NamespaceFileSystem for NfsVecFs {
     fn vrename_impl(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
         self.ensure_writable(pairs.len())?;
         if pairs.is_empty() {
@@ -5468,9 +5459,7 @@ impl NamespaceFileSystem for NfsVecFs {
     fn rename_impl(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()> {
         vfsi_sync::backend_helpers::native_rename_impl_default(self, from, to)
     }
-}
 
-impl LinkFileSystem for NfsVecFs {
     fn vsymlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         self.ensure_writable(newpaths.len())?;
         if oldpaths.len() != newpaths.len() {
@@ -5594,9 +5583,7 @@ impl LinkFileSystem for NfsVecFs {
     fn read_link_impl(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf> {
         vfsi_sync::backend_helpers::native_read_link_impl_default(self, path)
     }
-}
 
-impl CopyFileSystem for NfsVecFs {
     fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> VfRes {
         self.ensure_writable(pairs.len())?;
         for (i, p) in pairs.iter().enumerate() {
@@ -5734,9 +5721,7 @@ impl CopyFileSystem for NfsVecFs {
     ) -> VfResult<()> {
         vfsi_sync::backend_helpers::native_copy_impl_default(self, source, destination)
     }
-}
 
-impl ReadWorkflowFileSystem for NfsVecFs {
     fn vread_all_with_options_impl(
         &mut self,
         files: &[VfFile],
@@ -5791,9 +5776,7 @@ impl ReadWorkflowFileSystem for NfsVecFs {
         }
         Ok(out)
     }
-}
 
-impl RemovalFileSystem for NfsVecFs {
     fn remove_paths_with_options_impl(
         &mut self,
         objs: &[&Path],
@@ -5899,9 +5882,7 @@ impl RemovalFileSystem for NfsVecFs {
         self.run_rm_tasks(stack, &mut first_error, options)?;
         first_error.map_or(Ok(()), Err)
     }
-}
 
-impl ApplicationDataFileSystem for NfsVecFs {
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         self.ensure_writable(patterns.len())?;
         let mut counts = Vec::with_capacity(patterns.len());

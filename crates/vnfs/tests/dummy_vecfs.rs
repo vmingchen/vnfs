@@ -1024,7 +1024,7 @@ fn openv_fault_before_dispatch_has_no_effects_or_handles() {
         vnfs::Error::transport(None, "injected pre-dispatch failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = VectorFileSystem::vopen_raw_impl(
+    let error = Backend::vopen_raw_impl(
         &mut fs,
         &[Path::new("/f0"), Path::new("/f1")],
         &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
@@ -1052,7 +1052,7 @@ fn openv_fault_injection_closes_the_successful_prefix() {
         vnfs::Error::transport(None, "injected registration failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = VectorFileSystem::vopen_raw_impl(
+    let error = Backend::vopen_raw_impl(
         &mut fs,
         &[Path::new("/f0"), Path::new("/f1"), Path::new("/f2")],
         &[libc::O_CREAT | libc::O_RDWR; 3],
@@ -1077,7 +1077,7 @@ fn openv_fault_after_registration_closes_the_injected_handle() {
         vnfs::Error::transport(None, "injected post-registration failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = VectorFileSystem::vopen_raw_impl(
+    let error = Backend::vopen_raw_impl(
         &mut fs,
         &[Path::new("/f0"), Path::new("/f1"), Path::new("/f2")],
         &[libc::O_CREAT | libc::O_RDWR; 3],
@@ -1109,7 +1109,7 @@ fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
         vnfs::Error::transport(None, "injected cleanup failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = VectorFileSystem::vopen_raw_impl(
+    let error = Backend::vopen_raw_impl(
         &mut fs,
         &[Path::new("/created"), Path::new("/exists")],
         &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
