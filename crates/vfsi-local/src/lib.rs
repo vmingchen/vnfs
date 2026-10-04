@@ -113,16 +113,35 @@ impl DummyVecFs {
 
     fn getattrsv_impl(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
         for (i, a) in attrs.iter_mut().enumerate() {
+            if let VfFile::Descriptor(fd) = &a.file {
+                let open = self
+                    .open_files
+                    .get(fd)
+                    .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
+                let md = open
+                    .file
+                    .metadata()
+                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+                self.fill_attrs(a, None, &md);
+                if a.masks.contains(AttrMask::NAMED_ATTR) {
+                    use std::os::fd::AsRawFd;
+                    a.has_named_attr = unsafe {
+                        libc::flistxattr(open.file.as_raw_fd(), std::ptr::null_mut(), 0) > 0
+                    };
+                    a.returned.insert(AttrMask::NAMED_ATTR);
+                }
+                continue;
+            }
             let lexical = self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?;
             if follow {
                 let p = self.real_path(&lexical).map_err(|e| e.with_index(i))?;
                 let md = std::fs::metadata(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-                self.fill_attrs(a, &p, &md);
+                self.fill_attrs(a, Some(&p), &md);
             } else {
                 let p = self.no_follow_path(&lexical).map_err(|e| e.with_index(i))?;
                 let md = std::fs::symlink_metadata(&p)
                     .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-                self.fill_attrs(a, &p, &md);
+                self.fill_attrs(a, Some(&p), &md);
             }
         }
         Ok(())
@@ -485,7 +504,7 @@ impl DummyVecFs {
         }
     }
 
-    fn fill_attrs(&self, a: &mut VfAttrs, path: &AnchoredPath, md: &std::fs::Metadata) {
+    fn fill_attrs(&self, a: &mut VfAttrs, path: Option<&AnchoredPath>, md: &std::fs::Metadata) {
         let ft = md.file_type();
         a.ftype = if ft.is_dir() {
             VfType::Directory
@@ -502,7 +521,7 @@ impl DummyVecFs {
         } else {
             VfType::Regular
         };
-        a.has_named_attr = Self::has_xattr(path);
+        a.has_named_attr = path.is_some_and(Self::has_xattr);
         a.returned = AttrMask::empty();
         if a.masks.contains(AttrMask::MODE) {
             a.mode = md.mode();
@@ -551,24 +570,43 @@ impl DummyVecFs {
             a.ctime_nsec = md.ctime_nsec() as u32;
             a.returned.insert(AttrMask::CTIME);
         }
-        if a.masks.contains(AttrMask::NAMED_ATTR) {
+        if a.masks.contains(AttrMask::NAMED_ATTR)
+            && let Some(path) = path
+        {
             a.has_named_attr = Self::has_xattr(path);
             a.returned.insert(AttrMask::NAMED_ATTR);
         }
     }
 
     fn setattr_one(&mut self, a: &VfAttrs, i: usize) -> VfResult<()> {
-        if let VfFile::Descriptor(fd) = &a.file
-            && a.masks == AttrMask::SIZE
-        {
+        if let VfFile::Descriptor(fd) = &a.file {
             let open = self
                 .open_files
                 .get(fd)
                 .ok_or_else(|| VfError::failure(i, ERR_EBADF))?;
-            return open
-                .file
-                .set_len(a.size)
-                .map_err(|error| VfError::failure(i, Self::errno(&error)));
+            if a.masks.contains(AttrMask::SIZE) {
+                open.file
+                    .set_len(a.size)
+                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            }
+            if a.masks.contains(AttrMask::MODE) {
+                open.file
+                    .set_permissions(std::fs::Permissions::from_mode(a.mode & 0o7777))
+                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            }
+            if a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
+                let mut times = FileTimes::new();
+                if a.masks.contains(AttrMask::ATIME) {
+                    times = times.set_accessed(Self::system_time(a.atime_sec, a.atime_nsec, i)?);
+                }
+                if a.masks.contains(AttrMask::MTIME) {
+                    times = times.set_modified(Self::system_time(a.mtime_sec, a.mtime_nsec, i)?);
+                }
+                open.file
+                    .set_times(times)
+                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            }
+            return Ok(());
         }
         let p = self
             .real_path(&self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?)
@@ -784,7 +822,7 @@ impl DummyVecFs {
                 let metadata = std::fs::symlink_metadata(entry.path())
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 let real = self.no_follow_path(&self.resolve(&path))?;
-                self.fill_attrs(&mut attrs, &real, &metadata);
+                self.fill_attrs(&mut attrs, Some(&real), &metadata);
                 if recursive && attrs.ftype == VfType::Directory {
                     children.push(path);
                 }
@@ -1133,6 +1171,10 @@ impl VecFs for DummyVecFs {
             if !a.masks.difference(SETTABLE).is_empty() {
                 return Err(VfError::unsupported(i));
             }
+            if a.file.is_descriptor() {
+                self.setattr_one(a, i)?;
+                continue;
+            }
             let p = self
                 .no_follow_path(&self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?)
                 .map_err(|e| e.with_index(i))?;
@@ -1203,7 +1245,7 @@ impl VecFs for DummyVecFs {
             let metadata = std::fs::symlink_metadata(entry.path())
                 .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
             let real = self.no_follow_path(&self.resolve(&path))?;
-            self.fill_attrs(&mut attrs, &real, &metadata);
+            self.fill_attrs(&mut attrs, Some(&real), &metadata);
             page.push(attrs);
         }
         Ok((page, Some(DirPageCursor::new(state))))
@@ -1238,7 +1280,7 @@ impl VecFs for DummyVecFs {
             let metadata = std::fs::symlink_metadata(entry.path())
                 .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
             let real = self.no_follow_path(&self.resolve(&path))?;
-            self.fill_attrs(&mut attrs, &real, &metadata);
+            self.fill_attrs(&mut attrs, Some(&real), &metadata);
             if !cb(&attrs) {
                 return Ok(());
             }

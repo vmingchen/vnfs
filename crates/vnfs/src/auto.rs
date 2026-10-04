@@ -362,33 +362,91 @@ impl AutoClient {
         Ok(())
     }
 
-    /// Update route-coherent batches, retaining each original input index.
-    pub fn vsetattrs<P: AsRef<Path>>(
+    /// Update route-coherent batches of paths and open objects.
+    pub fn vsetattrs<P: vfsi_core::MetadataOperand<AutoFile>>(
         &self,
         updates: &[(P, crate::MetadataUpdate)],
         follow_symlinks: bool,
     ) -> VfResult<()> {
+        use vfsi_core::MetadataTarget;
         if updates.is_empty() {
             return Ok(());
         }
         let mounts = read_mounts(false);
-        let resolved: Vec<_> = updates
-            .iter()
-            .map(|(path, _)| self.resolve(path.as_ref(), &mounts))
-            .collect();
+        let mut resolved = Vec::with_capacity(updates.len());
+        for (index, (target, update)) in updates.iter().enumerate() {
+            // Preflight all inputs before any route is allowed to mutate.
+            let route = match target.metadata_target() {
+                MetadataTarget::Path(path) => self.resolve(path, &mounts),
+                MetadataTarget::File(file) => {
+                    self.check_owner(file, index)?;
+                    if file.is_closed() {
+                        return Err(VfError::client(index, libc::EBADF as u32)
+                            .with_context("vsetattrs", &file.path));
+                    }
+                    Resolved {
+                        route: file.route.clone(),
+                        path: file.path.clone(),
+                    }
+                }
+            };
+            for time in [update.accessed, update.modified].into_iter().flatten() {
+                // NFS timestamps are signed seconds, matching the core engine.
+                let duration = time
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_else(|e| e.duration());
+                let seconds = duration.as_secs();
+                if seconds > i64::MAX as u64
+                    || (time < std::time::UNIX_EPOCH
+                        && seconds == i64::MAX as u64
+                        && duration.subsec_nanos() != 0)
+                {
+                    return Err(VfError::client(index, libc::EOVERFLOW as u32)
+                        .with_context("vsetattrs", &route.path));
+                }
+            }
+            resolved.push(route);
+        }
         let mut start = 0;
         while start < updates.len() {
             let end = cohort_end(&resolved, start);
-            let batch: Vec<_> = resolved[start..end]
-                .iter()
-                .zip(&updates[start..end])
-                .map(|(route, (_, update))| (route.path.as_path(), update.clone()))
-                .collect();
-            match &resolved[start].route {
-                Route::Mounted => self.mounted.vsetattrs(&batch, follow_symlinks),
-                Route::Nfs(connection) => connection.client.vsetattrs(&batch, follow_symlinks),
+            macro_rules! batch {
+                ($variant:ident) => {{
+                    (start..end)
+                        .map(|index| {
+                            let target = match updates[index].0.metadata_target() {
+                                MetadataTarget::Path(_) => {
+                                    MetadataTarget::Path(resolved[index].path.as_path())
+                                }
+                                MetadataTarget::File(file) => match &file.inner {
+                                    AutoFileInner::$variant(inner) => MetadataTarget::File(inner),
+                                    _ => unreachable!("validated route"),
+                                },
+                            };
+                            (target, updates[index].1.clone())
+                        })
+                        .collect::<Vec<_>>()
+                }};
             }
-            .map_err(|error| indexed(error, start))?;
+            match &resolved[start].route {
+                Route::Mounted => self.mounted.vsetattrs(&batch!(Mounted), follow_symlinks),
+                Route::Nfs(connection) => {
+                    connection.client.vsetattrs(&batch!(Nfs), follow_symlinks)
+                }
+            }
+            .map_err(|error| {
+                let error = indexed(error, start);
+                match error.index().and_then(|index| updates.get(index)) {
+                    Some((target, _)) => {
+                        let path = match target.metadata_target() {
+                            MetadataTarget::Path(path) => path,
+                            MetadataTarget::File(file) => file.path.as_path(),
+                        };
+                        error.with_context("vsetattrs", path)
+                    }
+                    None => error,
+                }
+            })?;
             start = end;
         }
         Ok(())
@@ -1561,30 +1619,8 @@ impl AutoSetMetadata<'_> {
         self
     }
     pub fn apply(&self) -> VfResult<()> {
-        macro_rules! apply {
-            ($client:expr, $path:expr) => {{
-                let mut builder = $client.set_metadata($path);
-                builder.follow_symlinks(self.follow);
-                if let Some(value) = self.update.permissions {
-                    builder.permissions(value);
-                }
-                if let Some(value) = self.update.len {
-                    builder.len(value);
-                }
-                if let Some(value) = self.update.accessed {
-                    builder.accessed(value);
-                }
-                if let Some(value) = self.update.modified {
-                    builder.modified(value);
-                }
-                builder.apply()
-            }};
-        }
-        let route = self.client.resolve(&self.path, &read_mounts(false));
-        match route.route {
-            Route::Mounted => apply!(self.client.mounted, &route.path),
-            Route::Nfs(connection) => apply!(connection.client, &route.path),
-        }
+        self.client
+            .vsetattrs(&[(&self.path, self.update.clone())], self.follow)
     }
 }
 
@@ -1819,18 +1855,18 @@ impl AutoFile {
             AutoFileInner::Nfs(file) => file.sync_data(),
         }
     }
-    pub fn set_len(&self, len: u64) -> VfResult<()> {
+    pub fn truncate(&self, len: u64) -> VfResult<()> {
         self.check_credentials()?;
         match &self.inner {
-            AutoFileInner::Mounted(file) => file.set_len(len),
-            AutoFileInner::Nfs(file) => file.set_len(len),
+            AutoFileInner::Mounted(file) => file.truncate(len),
+            AutoFileInner::Nfs(file) => file.truncate(len),
         }
     }
-    pub fn set_permissions(&self, permissions: crate::Permissions) -> VfResult<()> {
+    pub fn chmod(&self, permissions: crate::Permissions) -> VfResult<()> {
         self.check_credentials()?;
         match &self.inner {
-            AutoFileInner::Mounted(file) => file.set_permissions(permissions),
-            AutoFileInner::Nfs(file) => file.set_permissions(permissions),
+            AutoFileInner::Mounted(file) => file.chmod(permissions),
+            AutoFileInner::Nfs(file) => file.chmod(permissions),
         }
     }
     pub fn seek_native(&mut self, position: SeekFrom) -> VfResult<u64> {

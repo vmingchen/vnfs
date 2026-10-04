@@ -99,6 +99,47 @@ mod tests {
     }
 
     #[test]
+    fn handle_attributes_survive_unlink_and_scalar_helpers_share_the_engine() {
+        let (root, backend) = fs("unlinked-attrs");
+        let client = FsClient::new(backend);
+        std::fs::write(root.0.join("file"), b"original").unwrap();
+        let file = client
+            .open_options()
+            .read(true)
+            .write(true)
+            .open("/file")
+            .unwrap();
+        std::fs::remove_file(root.0.join("file")).unwrap();
+        std::fs::write(root.0.join("file"), b"replacement").unwrap();
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_001);
+        client
+            .vsetattrs(
+                &[(
+                    vfsi_core::MetadataTarget::File(&file),
+                    MetadataUpdate::new()
+                        .len(3)
+                        .permissions(Permissions::from_mode(0o640))
+                        .modified(modified),
+                )],
+                false,
+            )
+            .unwrap();
+        let attrs = file.metadata().unwrap();
+        assert_eq!(attrs.len(), 3);
+        assert_eq!(attrs.modified(), Some(modified));
+        assert_eq!(attrs.permissions().mode() & 0o7777, 0o640);
+        file.truncate(5).unwrap();
+        file.chmod(Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 5);
+        assert_eq!(
+            file.metadata().unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"replacement");
+        file.close().unwrap();
+    }
+
+    #[test]
     fn try_new_reports_setup_errors_instead_of_panicking() {
         let root = TempRoot::new("try-new-error");
         std::fs::create_dir(&root.0).unwrap();
@@ -712,6 +753,15 @@ mod tests {
         use std::ffi::CString;
         let (root, mut fs) = fs("xattr");
         write(&mut fs, "/f", b"x");
+        let fd = fs.open(Path::new("/f"), libc::O_RDONLY, 0).unwrap();
+        let mut descriptor = VfAttrs {
+            file: fd.clone(),
+            masks: AttrMask::NAMED_ATTR,
+            ..VfAttrs::default()
+        };
+        fs.getattrsv(std::slice::from_mut(&mut descriptor)).unwrap();
+        assert!(!descriptor.has_named_attr);
+        assert!(descriptor.returned.contains(AttrMask::NAMED_ATTR));
         let real = root.0.join("f");
         let real = real.to_string_lossy().into_owned();
         let c = CString::new(real).unwrap();
@@ -736,6 +786,32 @@ mod tests {
         fs.getattrsv(std::slice::from_mut(&mut a)).unwrap();
         assert!(a.has_named_attr);
         assert!(a.returned.contains(AttrMask::NAMED_ATTR));
+        for unlink in [false, true] {
+            if unlink {
+                std::fs::remove_file(root.0.join("moved")).unwrap();
+            } else {
+                std::fs::rename(root.0.join("f"), root.0.join("moved")).unwrap();
+                std::fs::write(root.0.join("f"), b"replacement").unwrap();
+            }
+            // Both metadata variants must inspect the opened object, including
+            // after unlink, rather than the replacement at its diagnostic path.
+            for follow in [true, false] {
+                descriptor.has_named_attr = false;
+                descriptor.returned = AttrMask::empty();
+                if follow {
+                    fs.getattrsv(std::slice::from_mut(&mut descriptor)).unwrap();
+                } else {
+                    fs.lgetattrsv(std::slice::from_mut(&mut descriptor))
+                        .unwrap();
+                }
+                assert!(descriptor.has_named_attr);
+                assert!(descriptor.returned.contains(AttrMask::NAMED_ATTR));
+            }
+            fs.getattrsv(std::slice::from_mut(&mut a)).unwrap();
+            assert!(!a.has_named_attr);
+            assert!(a.returned.contains(AttrMask::NAMED_ATTR));
+        }
+        fs.close(&fd).unwrap();
     }
 
     // ------------------------------------------------------------------

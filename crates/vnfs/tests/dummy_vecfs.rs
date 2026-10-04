@@ -883,9 +883,8 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
     assert_eq!(file.read_at(&mut bytes, 0).unwrap(), 5);
     assert_eq!(&bytes, b"hallo");
     assert_eq!(file.metadata().unwrap().len(), 5);
-    file.set_len(4).unwrap();
-    file.set_permissions(vnfs::Permissions::from_mode(0o600))
-        .unwrap();
+    file.truncate(4).unwrap();
+    file.chmod(vnfs::Permissions::from_mode(0o600)).unwrap();
     let metadata = file.metadata().unwrap();
     assert_eq!(metadata.len(), 4);
     assert_eq!(metadata.permissions().mode(), 0o600);

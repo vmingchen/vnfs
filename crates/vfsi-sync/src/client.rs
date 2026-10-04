@@ -19,8 +19,8 @@ use crate::{
     AttrMask, Capabilities, CopyFileSystem, DirEntry, DirectoryFileSystem, FileSystem,
     LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
     NamespaceFileSystem, OpenFlags, OpenRequest, Permissions, ReadAllOptions, ReadDirOptions,
-    ReadOp, ReadResult, ReadStreamOptions, RemoveOptions, SetAttributes, VecFs, VectorFileSystem,
-    VfDir, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
+    ReadOp, ReadResult, ReadStreamOptions, RemoveOptions, VecFs, VectorFileSystem, VfDir, VfError,
+    VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
 };
 
 fn read_result(result: ReadResult) -> FsReadResult {
@@ -1375,62 +1375,6 @@ impl<F: VecFs> FsClient<F> {
             })
     }
 
-    /// Update many paths in one backend vector, preserving input indices.
-    pub fn vsetattrs<P: AsRef<Path>>(
-        &self,
-        updates: &[(P, MetadataUpdate)],
-        follow_symlinks: bool,
-    ) -> VfResult<()> {
-        if updates.is_empty() {
-            return Ok(());
-        }
-        // Convert the whole vector before I/O, so invalid timestamps cannot
-        // cause a partially dispatched mutation.
-        let attrs: Vec<_> = updates
-            .iter()
-            .enumerate()
-            .map(|(index, (path, update))| {
-                let mut attributes = crate::SetAttributes::new(VfFile::from_os_path(path.as_ref()));
-                attributes.mode = update.permissions.map(crate::Permissions::mode);
-                attributes.size = update.len;
-                attributes.atime = update
-                    .accessed
-                    .map(crate::native::system_time_parts)
-                    .transpose()
-                    .map_err(|error| {
-                        error
-                            .with_index(index)
-                            .with_context("vsetattrs", path.as_ref())
-                    })?;
-                attributes.mtime = update
-                    .modified
-                    .map(crate::native::system_time_parts)
-                    .transpose()
-                    .map_err(|error| {
-                        error
-                            .with_index(index)
-                            .with_context("vsetattrs", path.as_ref())
-                    })?;
-                Ok(attributes.into_legacy())
-            })
-            .collect::<VfResult<_>>()?;
-        let result = {
-            let mut backend = self.lock()?;
-            if follow_symlinks {
-                backend.setattrsv(&attrs)
-            } else {
-                backend.lsetattrsv(&attrs)
-            }
-        };
-        result.map_err(|error| match error.index() {
-            Some(index) if index < updates.len() => {
-                error.with_context("vsetattrs", updates[index].0.as_ref())
-            }
-            Some(_) => VfError::transport(None, "setattrs backend returned an invalid error index"),
-            None => error,
-        })
-    }
-
     /// Vector metadata query with explicit fields and final-symlink handling.
     /// Ancestor symlinks follow the backend's normal namespace semantics.
     pub fn metadata_many<P: AsRef<Path>>(
@@ -2198,8 +2142,7 @@ impl<F: MetadataFileSystem> SetMetadata<'_, F> {
 
     pub fn apply(&self) -> VfResult<()> {
         self.client
-            .lock()?
-            .set_metadata_path(&self.path, self.update.clone(), self.follow)
+            .vsetattrs(&[(&self.path, self.update.clone())], self.follow)
     }
 }
 
@@ -2281,25 +2224,21 @@ impl<F: FileSystem> FsFile<F> {
     }
 
     /// Truncate or extend the open file.
-    pub fn set_len(&self, len: u64) -> VfResult<()> {
-        let mut update = SetAttributes::new(self.raw()?.clone());
-        update.size = Some(len);
-        self.inner
-            .lock()
-            .map_err(|_| poisoned())?
-            .set_attributes(update)
-            .map_err(|error| error.with_context("set_len", &self.path))
+    pub fn truncate(&self, len: u64) -> VfResult<()> {
+        self.set_metadata_update(MetadataUpdate::new().len(len))
     }
 
-    /// Change permissions on the open file.
-    pub fn set_permissions(&self, permissions: Permissions) -> VfResult<()> {
-        let mut update = SetAttributes::new(self.raw()?.clone());
-        update.mode = Some(permissions.mode());
-        self.inner
-            .lock()
-            .map_err(|_| poisoned())?
-            .set_attributes(update)
-            .map_err(|error| error.with_context("set_permissions", &self.path))
+    /// Change permissions on the open file through the shared vector engine.
+    pub fn chmod(&self, permissions: Permissions) -> VfResult<()> {
+        self.set_metadata_update(MetadataUpdate::new().permissions(permissions))
+    }
+
+    fn set_metadata_update(&self, update: MetadataUpdate) -> VfResult<()> {
+        let client = FsClient {
+            inner: Arc::clone(&self.inner),
+            limits: ResourceLimits::default(),
+        };
+        client.vsetattrs(&[(vfsi_core::MetadataTarget::File(self), update)], true)
     }
 
     pub fn write_request_at<'a>(&'a self, offset: u64, data: &'a [u8]) -> FsWrite<'a, F> {
@@ -2510,6 +2449,65 @@ impl<F: FileSystem> Drop for FsFile<F> {
                 },
             );
         }
+    }
+}
+
+impl<F: FileSystem> FsClient<F> {
+    /// Update paths and open objects with one native attribute vector.
+    pub fn vsetattrs<P: vfsi_core::MetadataOperand<FsFile<F>>>(
+        &self,
+        updates: &[(P, MetadataUpdate)],
+        follow_symlinks: bool,
+    ) -> VfResult<()> {
+        use vfsi_core::MetadataTarget;
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mut paths = Vec::with_capacity(updates.len());
+        let mut attrs = Vec::with_capacity(updates.len());
+        for (index, (target, update)) in updates.iter().enumerate() {
+            let (raw, path) = match target.metadata_target() {
+                MetadataTarget::Path(path) => (VfFile::from_os_path(path), path),
+                MetadataTarget::File(file) => {
+                    if !Arc::ptr_eq(&self.inner, &file.inner) {
+                        return Err(VfError::client(index, crate::ERR_INVAL)
+                            .with_context("vsetattrs", &file.path));
+                    }
+                    (
+                        file.raw()
+                            .map_err(|e| e.with_index(index).with_context("vsetattrs", &file.path))?
+                            .clone(),
+                        file.path.as_path(),
+                    )
+                }
+            };
+            paths.push(path);
+            let mut attributes = crate::SetAttributes::new(raw);
+            attributes.mode = update.permissions.map(crate::Permissions::mode);
+            attributes.size = update.len;
+            attributes.atime = update
+                .accessed
+                .map(crate::native::system_time_parts)
+                .transpose()
+                .map_err(|e| e.with_index(index).with_context("vsetattrs", path))?;
+            attributes.mtime = update
+                .modified
+                .map(crate::native::system_time_parts)
+                .transpose()
+                .map_err(|e| e.with_index(index).with_context("vsetattrs", path))?;
+            attrs.push(attributes);
+        }
+        self.lock()?
+            .set_attributes_many(attrs, follow_symlinks)
+            .map_err(|error| match error.index() {
+                Some(index) if index < updates.len() => {
+                    error.with_context("vsetattrs", paths[index])
+                }
+                Some(_) => {
+                    VfError::transport(None, "setattrs backend returned an invalid error index")
+                }
+                None => error,
+            })
     }
 }
 

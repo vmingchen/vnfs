@@ -4120,6 +4120,29 @@ fn vsetattrs_many_nfs_files() {
         .connect()
         .unwrap();
     vsetattrs_support::check_many(&fs, &directory);
+    vsetattrs_support::check_handles(&fs, &directory);
+    let other = Nfs::builder(test_host()).connect().unwrap();
+    vsetattrs_support::check_foreign(&fs, &other, &format!("{directory}/foreign"));
+    // A handle vector must not degrade into one RPC per scalar update.
+    use vnfs::{MetadataTarget, MetadataUpdate, OpenFlags, OpenRequest};
+    let paths: Vec<_> = (0..64).map(|i| format!("{directory}/file-{i}")).collect();
+    let requests: Vec<_> = paths
+        .iter()
+        .map(|path| OpenRequest::new(path, OpenFlags::WRITE))
+        .collect();
+    let mut files = fs.vopen(&requests).unwrap();
+    let updates: Vec<_> = files
+        .iter()
+        .map(|file| (MetadataTarget::File(file), MetadataUpdate::new().len(4)))
+        .collect();
+    let _ = vfsi_nfs::compound::thread_compound_stats();
+    fs.vsetattrs(&updates, true).unwrap();
+    let compounds = vfsi_nfs::compound::thread_compound_stats().0;
+    assert!(
+        compounds < 16,
+        "64 handle updates should be batched; got {compounds} compounds"
+    );
+    fs.vclose(&mut files).unwrap();
     fs.remove_dir_all(&directory).unwrap();
 }
 

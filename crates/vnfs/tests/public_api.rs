@@ -495,8 +495,20 @@ fn vsetattrs_many_local_and_routed_files() {
     std::fs::create_dir(root.path().join("auto")).unwrap();
     let mounted = vnfs::Mounted::new(root.path()).unwrap();
     vsetattrs_support::check_many(&mounted, "/mounted");
+    vsetattrs_support::check_handles(&mounted, "/mounted");
+    vsetattrs_support::check_foreign(
+        &mounted,
+        &vnfs::Mounted::new(root.path()).unwrap(),
+        "/mounted/foreign",
+    );
     let auto = vnfs::Auto::new(root.path()).unwrap();
     vsetattrs_support::check_many(&auto, "/auto");
+    vsetattrs_support::check_handles(&auto, "/auto");
+    vsetattrs_support::check_foreign(
+        &auto,
+        &vnfs::Auto::new(root.path()).unwrap(),
+        "/auto/foreign",
+    );
     std::os::unix::fs::symlink("mounted/file-0", root.path().join("link")).unwrap();
     let updates = [("/link", vnfs::MetadataUpdate::new().len(11))];
     assert!(mounted.vsetattrs(&updates, false).is_err());

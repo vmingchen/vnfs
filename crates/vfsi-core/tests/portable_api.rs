@@ -97,7 +97,7 @@ impl Vfsi for PortableFs {
         panic!("unexpected hardlink")
     }
 
-    fn vsetattrs<P: AsRef<std::path::Path>>(
+    fn vsetattrs<P: vfsi_core::MetadataOperand<Self::File>>(
         &self,
         _: &[(P, vfsi_core::MetadataUpdate)],
         _: bool,

@@ -18,12 +18,26 @@ macro_rules! owned_client {
                 crate::metadata::metadata_backend(&self.inner, paths, options)
             }
             /// Update selected metadata fields for many paths in one backend vector.
-            pub fn vsetattrs<P: AsRef<Path>>(
+            pub fn vsetattrs<P: vfsi_core::MetadataOperand<$file>>(
                 &self,
                 updates: &[(P, MetadataUpdate)],
                 follow_symlinks: bool,
             ) -> Result<()> {
-                self.inner.vsetattrs(updates, follow_symlinks)
+                let updates: Vec<_> = updates
+                    .iter()
+                    .map(|(target, update)| {
+                        let target = match target.metadata_target() {
+                            vfsi_core::MetadataTarget::Path(path) => {
+                                vfsi_core::MetadataTarget::Path(path)
+                            }
+                            vfsi_core::MetadataTarget::File(file) => {
+                                vfsi_core::MetadataTarget::File(&file.inner)
+                            }
+                        };
+                        (target, update.clone())
+                    })
+                    .collect();
+                self.inner.vsetattrs(&updates, follow_symlinks)
             }
             /// Create symbolic links, retaining each target's original text.
             pub fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
@@ -340,12 +354,12 @@ macro_rules! owned_client {
                 self.inner.write_native(buffer)
             }
             /// Truncate or extend the open file.
-            pub fn set_len(&self, len: u64) -> Result<()> {
-                self.inner.set_len(len)
+            pub fn truncate(&self, len: u64) -> Result<()> {
+                self.inner.truncate(len)
             }
             /// Change permissions on the open file.
-            pub fn set_permissions(&self, permissions: Permissions) -> Result<()> {
-                self.inner.set_permissions(permissions)
+            pub fn chmod(&self, permissions: Permissions) -> Result<()> {
+                self.inner.chmod(permissions)
             }
             /// Request durable file data from the backend.
             pub fn sync_data(&self) -> Result<()> {

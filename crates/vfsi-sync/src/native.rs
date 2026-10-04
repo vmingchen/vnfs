@@ -80,6 +80,19 @@ pub trait FileSystem {
     fn seek_one(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64>;
     fn metadata(&mut self, query: MetadataQuery) -> VfResult<VfAttrs>;
     fn set_attributes(&mut self, update: SetAttributes) -> VfResult<()>;
+    /// Execute attribute updates in one native vector. Scalar-only backends may
+    /// support singleton requests; larger vectors must not fall back to loops.
+    fn set_attributes_many(&mut self, updates: Vec<SetAttributes>, follow: bool) -> VfResult<()> {
+        match updates.len() {
+            0 => Ok(()),
+            1 => {
+                let mut update = updates.into_iter().next().expect("singleton");
+                update.follow_symlinks = follow;
+                self.set_attributes(update)
+            }
+            _ => Err(VfError::unsupported(0)),
+        }
+    }
 }
 
 /// Path metadata operations independent of open descriptors.
@@ -340,15 +353,21 @@ impl<T: VecFs + ?Sized> FileSystem for T {
         Ok(attrs)
     }
 
+    fn set_attributes_many(&mut self, updates: Vec<SetAttributes>, follow: bool) -> VfResult<()> {
+        let attrs: Vec<_> = updates
+            .into_iter()
+            .map(SetAttributes::into_legacy)
+            .collect();
+        if follow {
+            self.setattrsv(&attrs)
+        } else {
+            self.lsetattrsv(&attrs)
+        }
+    }
     fn set_attributes(&mut self, update: SetAttributes) -> VfResult<()> {
         let follow = update.follow_symlinks;
-        let attrs = update.into_legacy();
-        let path = attrs.file.path().map(std::path::Path::to_path_buf);
-        let result = if follow {
-            self.setattrsv(&[attrs])
-        } else {
-            self.lsetattrsv(&[attrs])
-        };
+        let path = update.file.path().map(std::path::Path::to_path_buf);
+        let result = self.set_attributes_many(vec![update], follow);
         result.map_err(|error| match path {
             Some(path) => error.with_context("set_attributes", path),
             None => error,

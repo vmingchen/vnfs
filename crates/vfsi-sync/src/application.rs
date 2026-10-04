@@ -459,7 +459,7 @@ macro_rules! client_methods {
         fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
             <$client>::vhardlink($receiver(self), pairs)
         }
-        fn vsetattrs<P: AsRef<Path>>(
+        fn vsetattrs<P: vfsi_core::MetadataOperand<Self::File>>(
             &self,
             updates: &[(P, vfsi_core::MetadataUpdate)],
             follow_symlinks: bool,

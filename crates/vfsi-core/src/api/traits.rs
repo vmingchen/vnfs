@@ -137,9 +137,11 @@ pub trait Vfsi {
         options: crate::api::MetadataOptions,
     ) -> Result<Vec<Metadata>>;
 
-    /// Update selected attributes for many paths using native backend batching.
+    /// Update selected attributes for paths or open handles using native batching.
+    /// Every handle is validated before dispatch, including ownership and closure.
     /// Unspecified fields are unchanged. `follow_symlinks` controls the final
-    /// component; ancestor symlinks retain ordinary backend resolution.
+    /// component of path targets; it does not change open-handle identity.
+    /// Ancestor symlinks retain ordinary backend resolution.
     /// Failure can follow partial mutations, including within one request;
     /// an error index identifies an input, not a committed-prefix count.
     /// Empty vectors succeed without I/O. Do not replay ambiguous failures.
@@ -154,7 +156,19 @@ pub trait Vfsi {
     /// # Ok(())
     /// # }
     /// ```
-    fn vsetattrs<P: AsRef<Path>>(
+    /// Handle targets and paths can share a batch:
+    ///
+    /// ```no_run
+    /// use vfsi_core::api::{Vfsi, MetadataTarget, MetadataUpdate};
+    /// # fn example<F: Vfsi>(fs: &F, file: &F::File) -> vfsi_core::api::Result<()> {
+    /// fs.vsetattrs(&[
+    ///     (MetadataTarget::File(file), MetadataUpdate::new().len(1024)),
+    ///     (MetadataTarget::Path(std::path::Path::new("/other")), MetadataUpdate::new().len(0)),
+    /// ], true)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn vsetattrs<P: crate::api::MetadataOperand<Self::File>>(
         &self,
         updates: &[(P, crate::api::MetadataUpdate)],
         follow_symlinks: bool,
@@ -1311,6 +1325,33 @@ pub trait VfsiExt: Vfsi {
     /// ```
     fn create_dir(&self, path: impl AsRef<Path>) -> Result<()> {
         self.vmkdir(&[(path, 0o777)])
+    }
+
+    /// Truncate or extend one path or opened object using [`Vfsi::vsetattrs`].
+    fn truncate<T: crate::api::MetadataOperand<Self::File>>(
+        &self,
+        target: T,
+        len: u64,
+    ) -> Result<()> {
+        self.vsetattrs(
+            &[(target, crate::api::MetadataUpdate::new().len(len))],
+            true,
+        )
+    }
+
+    /// Change permissions on one path or opened object using [`Vfsi::vsetattrs`].
+    fn chmod<T: crate::api::MetadataOperand<Self::File>>(
+        &self,
+        target: T,
+        permissions: crate::api::Permissions,
+    ) -> Result<()> {
+        self.vsetattrs(
+            &[(
+                target,
+                crate::api::MetadataUpdate::new().permissions(permissions),
+            )],
+            true,
+        )
     }
 
     /// Create one directory with explicit Unix permission bits.
