@@ -53,6 +53,31 @@ impl Harness {
 }
 impl Vfsi for Harness {
     type File = <Mounted as Vfsi>::File;
+    fn capabilities(&self) -> Result<Capabilities> {
+        self.fs.capabilities()
+    }
+    fn vsetattrs<P: MetadataOperand<Self::File>>(
+        &self,
+        targets: &[(P, MetadataUpdate)],
+        follow_symlinks: bool,
+    ) -> Result<()> {
+        self.fs.vsetattrs(targets, follow_symlinks)
+    }
+    fn vstatfs<P: MetadataOperand<Self::File>>(
+        &self,
+        targets: &[P],
+    ) -> Result<Vec<FilesystemStats>> {
+        self.fs.vstatfs(targets)
+    }
+    fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+        self.fs.vsymlink(pairs)
+    }
+    fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<std::path::PathBuf>> {
+        self.fs.vreadlink(paths)
+    }
+    fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+        self.fs.vhardlink(pairs)
+    }
     fn limits(&self) -> ResourceLimits {
         self.fs.limits()
     }
@@ -118,7 +143,7 @@ impl Vfsi for Harness {
         }
         Ok(())
     }
-    fn vmkdir<P: AsRef<Path>>(&self, p: &[P]) -> Result<()> {
+    fn vmkdir<P: AsRef<Path>>(&self, p: &[(P, u32)]) -> Result<()> {
         self.fs.vmkdir(p)
     }
     fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)]) -> Result<()> {

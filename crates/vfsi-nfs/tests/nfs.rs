@@ -3,6 +3,7 @@
 use std::path::Path;
 #[cfg(feature = "test-faults")]
 use std::{path::PathBuf, sync::Arc};
+use vfsi_sync::*;
 
 use vfsi_core::RpcError;
 #[cfg(feature = "test-faults")]
@@ -13,7 +14,7 @@ use vfsi_nfs::NfsVecFs;
 #[cfg(feature = "test-faults")]
 use vfsi_nfs::client::{FileRef, PathOpenOp, PathWriteOp, WriteOp};
 use vfsi_nfs::client::{NfsClient, OpenCreate, ReadOp};
-use vfsi_sync::{VecFs, test_support};
+use vfsi_sync::test_support;
 
 fn required() -> bool {
     std::env::var("VFSI_NFS_REQUIRED").as_deref() == Ok("1")
@@ -76,13 +77,13 @@ fn recursive_remove_does_not_restart_each_page_after_a_persistent_entry_failure(
     }
     let Some(mut fs) = connect() else { return };
     let root = format!("/vfsi-remove-pages-{}", std::process::id());
-    fs.ensure_dir(Path::new(&root), 0o755).unwrap();
+    fs.ensure_dir_impl(Path::new(&root), 0o755).unwrap();
     // Enough entries for multiple 32-KiB READDIR pages. One-item REMOVE
     // batches fail only `blocked`, without fabricating a successful prefix.
     let paths: Vec<_> = std::iter::once(format!("{root}/blocked"))
         .chain((0..1500).map(|index| format!("{root}/file-{index:04}")))
         .collect();
-    fs.writev(
+    fs.vwrite_owned_impl(
         &paths
             .iter()
             .map(|path| {
@@ -98,7 +99,7 @@ fn recursive_remove_does_not_restart_each_page_after_a_persistent_entry_failure(
     });
     fs.set_fault_injector(failure.clone());
     let error = fs
-        .rm_with_options(
+        .remove_paths_with_options_impl(
             &[Path::new(&root)],
             true,
             vfsi_sync::RemoveOptions::new()
@@ -111,12 +112,12 @@ fn recursive_remove_does_not_restart_each_page_after_a_persistent_entry_failure(
     fs.set_fault_injector(Arc::new(FaultScript::new([])));
     // Clean up before assertions, even when the operation's behavior regresses.
     let remaining: Vec<_> = fs
-        .listdir(Path::new(&root), vfsi_sync::AttrMask::empty(), 2, false)
+        .listdir_impl(Path::new(&root), vfsi_sync::AttrMask::empty(), 2, false)
         .unwrap()
         .into_iter()
         .map(|attrs| attrs.file.path().unwrap().to_path_buf())
         .collect();
-    fs.rm(&[Path::new(&root)], true).unwrap();
+    fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
     assert_eq!(
         error.status(),
         Some(vfsi_core::StatusCode::Nfs(
@@ -148,12 +149,14 @@ fn recursive_remove_retries_a_transient_entry_only_when_configured() {
             std::process::id()
         );
         let path = format!("{root}/transient");
-        fs.ensure_dir(Path::new(&root), 0o755).unwrap();
-        fs.writev(&[
-            vfsi_sync::WriteOp::at(vfsi_sync::VfFile::from_path(&path), 0, b"x".to_vec())
-                .with_creation(),
-        ])
-        .unwrap();
+        fs.ensure_dir_impl(Path::new(&root), 0o755).unwrap();
+        fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::at(
+            vfsi_sync::VfFile::from_path(&path),
+            0,
+            b"x".to_vec(),
+        )
+        .with_creation()])
+            .unwrap();
         let point = OpenFaultPoint::BeforeRemoveChunk {
             first_name: b"transient".to_vec(),
         };
@@ -164,15 +167,15 @@ fn recursive_remove_retries_a_transient_entry_only_when_configured() {
             )
         })));
         fs.set_fault_injector(script.clone());
-        let result = fs.rm_with_options(
+        let result = fs.remove_paths_with_options_impl(
             &[Path::new(&root)],
             true,
             vfsi_sync::RemoveOptions::new().batch(1).retries(retries),
         );
-        let exists = fs.exists(Path::new(&path)).unwrap();
+        let exists = fs.exists_impl(Path::new(&path)).unwrap();
         fs.set_fault_injector(Arc::new(FaultScript::new([])));
         if exists {
-            fs.rm(&[Path::new(&root)], true).unwrap();
+            fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
         }
         let attempts = retries as usize + 1;
         assert_eq!(script.remaining().len(), failures.saturating_sub(attempts));
@@ -223,9 +226,9 @@ fn assert_same_file_scatter_is_batched(write_all: bool, short: bool) {
         .collect();
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let results = if write_all {
-        fs.write_allv(&requests).unwrap()
+        fs.vwrite_all_native(&requests).unwrap()
     } else {
-        fs.writev(&requests).unwrap()
+        fs.vwrite_native(&requests).unwrap()
     };
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     let cursor = file.seek_native(std::io::SeekFrom::Current(0)).unwrap();
@@ -280,7 +283,9 @@ fn same_file_dependent_writes_remain_serialized() {
                 | libc::O_RDWR
                 | libc::O_TRUNC
                 | if append { libc::O_APPEND } else { 0 };
-            let files = fs.openv_simple(&[Path::new(&path)], flags, 0o600).unwrap();
+            let files = fs
+                .vopen_raw_simple_impl(&[Path::new(&path)], flags, 0o600)
+                .unwrap();
             let (first, second) = match kind {
                 0 => (At(0), At(2)),
                 1 => (Cur, Cur),
@@ -294,7 +299,7 @@ fn same_file_dependent_writes_remain_serialized() {
             }
             let _ = vfsi_nfs::compound::thread_compound_stats();
             let results = fs
-                .writev(&[
+                .vwrite_owned_impl(&[
                     vfsi_sync::WriteOp::new(files[0].clone(), first, b"abcd".to_vec()),
                     vfsi_sync::WriteOp::new(files[0].clone(), second, b"XY".to_vec()),
                 ])
@@ -305,12 +310,15 @@ fn same_file_dependent_writes_remain_serialized() {
                 .iter()
                 .filter(|point| matches!(point, OpenFaultPoint::AfterWriteChunk { .. }))
                 .count();
-            let cursor = fs.fseek(&files[0], 0, vfsi_sync::SeekFrom::Cur).unwrap();
-            let contents = fs
-                .readv(&[vfsi_sync::ReadOp::at(files[0].clone(), 0, 16)])
+            let cursor = fs
+                .seek_raw_impl(&files[0], 0, vfsi_sync::SeekFrom::Cur)
                 .unwrap();
-            fs.closev(&files).unwrap();
-            fs.removev(&[vfsi_sync::VfFile::from_path(&path)]).unwrap();
+            let contents = fs
+                .vread_impl(&[vfsi_sync::ReadOp::at(files[0].clone(), 0, 16)])
+                .unwrap();
+            fs.vclose_impl(&files).unwrap();
+            fs.vremove_impl(&[vfsi_sync::VfFile::from_path(&path)])
+                .unwrap();
             // End and append also perform the two eager size validations and
             // refresh the second request's position after the first finishes.
             assert_eq!(compounds, if kind < 2 { 2 } else { 5 } + u64::from(short));
@@ -347,7 +355,7 @@ fn short_read_recovery_preserves_every_cursor_and_range() {
                 ),
             ];
             for (path, data) in paths.iter().zip([b"abcdefgh", b"ijklmnop"]) {
-                fs.writev(&[vfsi_sync::WriteOp::from_path(
+                fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
                     path,
                     vfsi_sync::VfOffset::At(0),
                     data.to_vec(),
@@ -357,7 +365,7 @@ fn short_read_recovery_preserves_every_cursor_and_range() {
                     .unwrap();
             }
             let files = fs
-                .openv_simple(
+                .vopen_raw_simple_impl(
                     &[Path::new(&paths[0]), Path::new(&paths[1])],
                     libc::O_RDONLY,
                     0,
@@ -376,7 +384,7 @@ fn short_read_recovery_preserves_every_cursor_and_range() {
             let outcome = if into {
                 let mut first = [0; 4];
                 let mut second = [0; 4];
-                fs.readv_into(&reads, &mut [&mut first, &mut second])
+                fs.vread_into_impl(&reads, &mut [&mut first, &mut second])
                     .map(|result| {
                         (
                             vec![first.to_vec(), second.to_vec()],
@@ -384,7 +392,7 @@ fn short_read_recovery_preserves_every_cursor_and_range() {
                         )
                     })
             } else {
-                fs.readv(&reads).map(|result| {
+                fs.vread_impl(&reads).map(|result| {
                     (
                         result
                             .iter()
@@ -396,10 +404,10 @@ fn short_read_recovery_preserves_every_cursor_and_range() {
             };
             let cursors: Vec<_> = files
                 .iter()
-                .map(|file| fs.fseek(file, 0, vfsi_sync::SeekFrom::Cur).unwrap())
+                .map(|file| fs.seek_raw_impl(file, 0, vfsi_sync::SeekFrom::Cur).unwrap())
                 .collect();
-            fs.closev(&files).unwrap();
-            fs.removev(
+            fs.vclose_impl(&files).unwrap();
+            fs.vremove_impl(
                 &paths
                     .iter()
                     .map(|path| vfsi_sync::VfFile::from_path(path))
@@ -439,7 +447,7 @@ fn short_write_failure_does_not_dispatch_a_later_file() {
             format!("/vfsi-wave-order-{}-{transport}-second", std::process::id()),
         ];
         let files = fs
-            .openv_simple(
+            .vopen_raw_simple_impl(
                 &[Path::new(&paths[0]), Path::new(&paths[1])],
                 libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
                 0o600,
@@ -460,17 +468,19 @@ fn short_write_failure_does_not_dispatch_a_later_file() {
         ));
         fs.set_fault_injector(script.clone());
         let error = fs
-            .writev(&[
+            .vwrite_owned_impl(&[
                 vfsi_sync::WriteOp::new(files[0].clone(), vfsi_sync::VfOffset::Cur, payload),
                 vfsi_sync::WriteOp::at(files[1].clone(), 0, b"must not execute".to_vec()),
             ])
             .unwrap_err();
-        let first_cursor = fs.fseek(&files[0], 0, vfsi_sync::SeekFrom::Cur).unwrap();
-        let later = fs
-            .readv(&[vfsi_sync::ReadOp::at(files[1].clone(), 0, 32)])
+        let first_cursor = fs
+            .seek_raw_impl(&files[0], 0, vfsi_sync::SeekFrom::Cur)
             .unwrap();
-        fs.closev(&files).unwrap();
-        fs.removev(
+        let later = fs
+            .vread_impl(&[vfsi_sync::ReadOp::at(files[1].clone(), 0, 32)])
+            .unwrap();
+        fs.vclose_impl(&files).unwrap();
+        fs.vremove_impl(
             &paths
                 .iter()
                 .map(|path| vfsi_sync::VfFile::from_path(path))
@@ -503,7 +513,7 @@ fn ordered_write_waves_still_batch_independent_small_files() {
         .collect();
     let refs: Vec<_> = paths.iter().map(Path::new).collect();
     let files = fs
-        .openv_simple(&refs, libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC, 0o600)
+        .vopen_raw_simple_impl(&refs, libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC, 0o600)
         .unwrap();
     let script = Arc::new(FaultScript::new([]));
     fs.set_fault_injector(script.clone());
@@ -512,7 +522,7 @@ fn ordered_write_waves_still_batch_independent_small_files() {
         .map(|file| vfsi_sync::WriteOp::at(file.clone(), 0, b"batched".to_vec()))
         .collect();
     let _ = vfsi_nfs::compound::thread_compound_stats();
-    let results = fs.writev(&writes).unwrap();
+    let results = fs.vwrite_owned_impl(&writes).unwrap();
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     let waves = script
         .visited()
@@ -523,9 +533,9 @@ fn ordered_write_waves_still_batch_independent_small_files() {
         .iter()
         .map(|file| vfsi_sync::ReadOp::at(file.clone(), 0, 7))
         .collect();
-    let contents = fs.readv(&reads).unwrap();
-    fs.closev(&files).unwrap();
-    fs.removev(
+    let contents = fs.vread_impl(&reads).unwrap();
+    fs.vclose_impl(&files).unwrap();
+    fs.vremove_impl(
         &paths
             .iter()
             .map(|path| vfsi_sync::VfFile::from_path(path))
@@ -549,7 +559,7 @@ fn descriptor_short_reads_preserve_contiguous_contents() {
         let path = format!("/vfsi-short-read-{}-{into}", std::process::id());
         let size = fs.test_io_chunk_bytes() * 2 + 17;
         let payload: Vec<_> = (0..size).map(|index| (index % 251) as u8).collect();
-        fs.writev(&[vfsi_sync::WriteOp::from_path(
+        fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
             &path,
             vfsi_sync::VfOffset::At(0),
             payload.clone(),
@@ -558,20 +568,21 @@ fn descriptor_short_reads_preserve_contiguous_contents() {
         .with_truncate()])
             .unwrap();
         let files = fs
-            .openv_simple(&[Path::new(&path)], libc::O_RDONLY, 0)
+            .vopen_raw_simple_impl(&[Path::new(&path)], libc::O_RDONLY, 0)
             .unwrap();
         fs.test_short_read_once(7);
         let request = vfsi_sync::ReadOp::at(files[0].clone(), 0, size);
         let observed = if into {
             let mut buffer = vec![0; size];
-            let result = fs.readv_into(&[request], &mut [&mut buffer]).unwrap();
+            let result = fs.vread_into_impl(&[request], &mut [&mut buffer]).unwrap();
             buffer.truncate(result[0].read);
             buffer
         } else {
-            fs.readv(&[request]).unwrap().remove(0).data
+            fs.vread_impl(&[request]).unwrap().remove(0).data
         };
-        fs.closev(&files).unwrap();
-        fs.removev(&[vfsi_sync::VfFile::from_path(&path)]).unwrap();
+        fs.vclose_impl(&files).unwrap();
+        fs.vremove_impl(&[vfsi_sync::VfFile::from_path(&path)])
+            .unwrap();
         assert_eq!(
             observed.len(),
             payload.len(),
@@ -595,7 +606,7 @@ fn descriptor_short_writes_preserve_contiguous_contents() {
     let fs = vfsi_sync::FsClient::new(backend);
     let file = fs.create(&path).unwrap();
     let results = fs
-        .write_allv(&[file.write_request_at(0, &payload)])
+        .vwrite_all_native(&[file.write_request_at(0, &payload)])
         .unwrap();
     assert_eq!(results[0].written, size);
     file.close().unwrap();
@@ -603,7 +614,7 @@ fn descriptor_short_writes_preserve_contiguous_contents() {
     fs.remove_file(&path).unwrap();
     assert!(
         observed == payload,
-        "successful write_allv must leave no unwritten gaps"
+        "successful vwrite_all_native must leave no unwritten gaps"
     );
 }
 
@@ -627,17 +638,18 @@ fn descriptor_positional_io_preserves_sequential_cursor() {
                 file.read_at(&mut buffer, 4).unwrap();
             }
             1 => {
-                fs.readv(&[file.read_request_at(4, 2)]).unwrap();
+                fs.vread_native(&[file.read_request_at(4, 2)]).unwrap();
             }
             2 => {
-                fs.readv_into(&mut [file.read_request_at_into(4, &mut buffer)])
+                fs.vread_into_native(&mut [file.read_request_at_into(4, &mut buffer)])
                     .unwrap();
             }
             3 => {
                 file.write_at(b"XY", 4).unwrap();
             }
             _ => {
-                fs.writev(&[file.write_request_at(4, b"XY")]).unwrap();
+                fs.vwrite_native(&[file.write_request_at(4, b"XY")])
+                    .unwrap();
             }
         }
         let cursor = file.seek_native(std::io::SeekFrom::Current(0)).unwrap();
@@ -654,7 +666,7 @@ fn reconnect_rejects_replacement_of_an_open_file() {
     let Some(mut fs) = connect() else { return };
     let path = format!("/vfsi-reconnect-identity-{}", std::process::id());
     let saved = format!("{path}-original");
-    fs.writev(&[vfsi_sync::WriteOp::from_path(
+    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
         &path,
         vfsi_sync::VfOffset::At(0),
         b"original".to_vec(),
@@ -663,16 +675,16 @@ fn reconnect_rejects_replacement_of_an_open_file() {
     .with_truncate()])
         .unwrap();
     let files = fs
-        .openv_simple(&[Path::new(&path)], libc::O_RDWR, 0)
+        .vopen_raw_simple_impl(&[Path::new(&path)], libc::O_RDWR, 0)
         .unwrap();
     // Also exercise the successful unchanged-identity recovery path.
     fs.reconnect().unwrap();
-    fs.renamev(&[(
+    fs.vrename_impl(&[(
         vfsi_sync::VfFile::from_path(&path),
         vfsi_sync::VfFile::from_path(&saved),
     )])
     .unwrap();
-    fs.writev(&[vfsi_sync::WriteOp::from_path(
+    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
         &path,
         vfsi_sync::VfOffset::At(0),
         b"replaced".to_vec(),
@@ -682,10 +694,10 @@ fn reconnect_rejects_replacement_of_an_open_file() {
         .unwrap();
     let result = fs.reconnect();
     let old_contents = fs
-        .readv(&[vfsi_sync::ReadOp::at(files[0].clone(), 0, 8)])
+        .vread_impl(&[vfsi_sync::ReadOp::at(files[0].clone(), 0, 8)])
         .unwrap();
-    fs.closev(&files).unwrap();
-    fs.removev(&[
+    fs.vclose_impl(&files).unwrap();
+    fs.vremove_impl(&[
         vfsi_sync::VfFile::from_path(&path),
         vfsi_sync::VfFile::from_path(&saved),
     ])
@@ -708,7 +720,7 @@ fn short_writes_do_not_reorder_overlapping_or_cursor_requests() {
         let first = vec![b'a'; length];
         let second = vec![b'b'; length / 2];
         let files = fs
-            .openv_simple(
+            .vopen_raw_simple_impl(
                 &[Path::new(&path)],
                 libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
                 0o600,
@@ -721,7 +733,7 @@ fn short_writes_do_not_reorder_overlapping_or_cursor_requests() {
             vfsi_sync::VfOffset::At(0)
         };
         let results = fs
-            .writev(&[
+            .vwrite_owned_impl(&[
                 vfsi_sync::WriteOp::new(files[0].clone(), offset, first.clone()),
                 vfsi_sync::WriteOp::new(files[0].clone(), offset, second.clone()),
             ])
@@ -729,7 +741,9 @@ fn short_writes_do_not_reorder_overlapping_or_cursor_requests() {
         assert_eq!(results[0].written, first.len());
         assert_eq!(results[1].written, second.len());
         assert_eq!(results[1].offset, if cursor { length as u64 } else { 0 });
-        let position = fs.fseek(&files[0], 0, vfsi_sync::SeekFrom::Cur).unwrap();
+        let position = fs
+            .seek_raw_impl(&files[0], 0, vfsi_sync::SeekFrom::Cur)
+            .unwrap();
         assert_eq!(
             position,
             if cursor {
@@ -738,16 +752,17 @@ fn short_writes_do_not_reorder_overlapping_or_cursor_requests() {
                 0
             }
         );
-        fs.closev(&files).unwrap();
+        fs.vclose_impl(&files).unwrap();
         let observed = fs
-            .read_allv(&[vfsi_sync::VfFile::from_path(&path)])
+            .vread_all_impl(&[vfsi_sync::VfFile::from_path(&path)])
             .unwrap();
         let expected = if cursor {
             [first, second].concat()
         } else {
             [second.clone(), first[second.len()..].to_vec()].concat()
         };
-        fs.removev(&[vfsi_sync::VfFile::from_path(&path)]).unwrap();
+        fs.vremove_impl(&[vfsi_sync::VfFile::from_path(&path)])
+            .unwrap();
         assert!(
             observed[0] == expected,
             "short writes reordered a later request: cursor={cursor}"
@@ -762,7 +777,7 @@ fn descriptor_zero_progress_is_an_error_not_a_retry_loop() {
         for into in [false, true] {
             let Some(mut fs) = connect() else { return };
             let path = format!("/vfsi-no-progress-{}-{read}-{into}", std::process::id());
-            fs.writev(&[vfsi_sync::WriteOp::from_path(
+            fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
                 &path,
                 vfsi_sync::VfOffset::At(0),
                 b"contents".to_vec(),
@@ -771,19 +786,20 @@ fn descriptor_zero_progress_is_an_error_not_a_retry_loop() {
             .with_truncate()])
                 .unwrap();
             let files = fs
-                .openv_simple(&[Path::new(&path)], libc::O_RDWR, 0)
+                .vopen_raw_simple_impl(&[Path::new(&path)], libc::O_RDWR, 0)
                 .unwrap();
             let result = if read {
                 fs.test_short_read_once(0);
                 let request = vfsi_sync::ReadOp::new(files[0].clone(), vfsi_sync::VfOffset::Cur, 4);
                 if into {
-                    fs.readv_into(&[request], &mut [&mut [0; 4]]).map(|_| ())
+                    fs.vread_into_impl(&[request], &mut [&mut [0; 4]])
+                        .map(|_| ())
                 } else {
-                    fs.readv(&[request]).map(|_| ())
+                    fs.vread_impl(&[request]).map(|_| ())
                 }
             } else {
                 fs.test_short_write_once(0);
-                fs.writev(&[vfsi_sync::WriteOp::new(
+                fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::new(
                     files[0].clone(),
                     vfsi_sync::VfOffset::Cur,
                     b"new".to_vec(),
@@ -791,14 +807,19 @@ fn descriptor_zero_progress_is_an_error_not_a_retry_loop() {
                 .map(|_| ())
             };
             assert_eq!(result.unwrap_err().err_no(), libc::EIO as u32);
-            assert_eq!(fs.fseek(&files[0], 0, vfsi_sync::SeekFrom::Cur).unwrap(), 0);
-            fs.closev(&files).unwrap();
             assert_eq!(
-                fs.read_allv(&[vfsi_sync::VfFile::from_path(&path)])
+                fs.seek_raw_impl(&files[0], 0, vfsi_sync::SeekFrom::Cur)
+                    .unwrap(),
+                0
+            );
+            fs.vclose_impl(&files).unwrap();
+            assert_eq!(
+                fs.vread_all_impl(&[vfsi_sync::VfFile::from_path(&path)])
                     .unwrap()[0],
                 b"contents"
             );
-            fs.removev(&[vfsi_sync::VfFile::from_path(&path)]).unwrap();
+            fs.vremove_impl(&[vfsi_sync::VfFile::from_path(&path)])
+                .unwrap();
         }
     }
 }
@@ -816,7 +837,7 @@ fn short_reads_handle_eof_and_requests_beyond_the_file() {
             fs.test_io_chunk_bytes() + 17
         };
         let payload = vec![b'x'; size];
-        fs.writev(&[vfsi_sync::WriteOp::from_path(
+        fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
             &path,
             vfsi_sync::VfOffset::At(0),
             payload.clone(),
@@ -825,21 +846,22 @@ fn short_reads_handle_eof_and_requests_beyond_the_file() {
         .with_truncate()])
             .unwrap();
         let files = fs
-            .openv_simple(&[Path::new(&path)], libc::O_RDONLY, 0)
+            .vopen_raw_simple_impl(&[Path::new(&path)], libc::O_RDONLY, 0)
             .unwrap();
         fs.test_short_read_once(if small { 2 } else { 7 });
         let request = vfsi_sync::ReadOp::at(files[0].clone(), 0, size * 2);
         let (observed, eof) = if into {
             let mut buffer = vec![0; size * 2];
-            let result = fs.readv_into(&[request], &mut [&mut buffer]).unwrap();
+            let result = fs.vread_into_impl(&[request], &mut [&mut buffer]).unwrap();
             buffer.truncate(result[0].read);
             (buffer, result[0].eof)
         } else {
-            let result = fs.readv(&[request]).unwrap().remove(0);
+            let result = fs.vread_impl(&[request]).unwrap().remove(0);
             (result.data, result.eof)
         };
-        fs.closev(&files).unwrap();
-        fs.removev(&[vfsi_sync::VfFile::from_path(&path)]).unwrap();
+        fs.vclose_impl(&files).unwrap();
+        fs.vremove_impl(&[vfsi_sync::VfFile::from_path(&path)])
+            .unwrap();
         assert!(observed == payload);
         assert!(eof);
     }
@@ -872,9 +894,9 @@ fn shared_contract_through_the_published_crate() {
         return;
     };
     let root = format!("/vfsi-nfs-contract-{}", std::process::id());
-    let _ = fs.rm(&[Path::new(&root)], true);
+    let _ = fs.remove_paths_impl(&[Path::new(&root)], true);
     test_support::run_suite(&mut fs, &root);
-    fs.rm(&[Path::new(&root)], true)
+    fs.remove_paths_impl(&[Path::new(&root)], true)
         .expect("remove NFS contract root");
 }
 
@@ -1288,8 +1310,8 @@ fn failed_strict_open_quarantines_an_unconfirmed_cleanup_handle() {
         return;
     };
     let root = PathBuf::from(format!("/vfsi-nfs-cleanup-fault-{}", std::process::id()));
-    let _ = fs.rm(&[root.as_path()], true);
-    fs.mkdir(root.as_path(), 0o755).unwrap();
+    let _ = fs.remove_paths_impl(&[root.as_path()], true);
+    fs.mkdir_raw_impl(root.as_path(), 0o755).unwrap();
     let paths = [root.join("one"), root.join("two")];
     let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
     let script = Arc::new(FaultScript::new([
@@ -1304,7 +1326,7 @@ fn failed_strict_open_quarantines_an_unconfirmed_cleanup_handle() {
     ]));
     fs.set_fault_injector(script.clone());
     assert!(
-        fs.openv(&refs, &[libc::O_CREAT | libc::O_RDWR; 2], &[0o600; 2],)
+        fs.vopen_raw_impl(&refs, &[libc::O_CREAT | libc::O_RDWR; 2], &[0o600; 2],)
             .unwrap_err()
             .is_transport()
     );
@@ -1313,13 +1335,13 @@ fn failed_strict_open_quarantines_an_unconfirmed_cleanup_handle() {
     assert_eq!(fs.test_deferred_descriptor_close_count(), 1);
     let next_path = root.join("next");
     let next = fs
-        .openv(
+        .vopen_raw_impl(
             &[next_path.as_path()],
             &[libc::O_CREAT | libc::O_RDWR],
             &[0o600],
         )
         .unwrap();
     assert_eq!(fs.test_deferred_descriptor_close_count(), 0);
-    fs.closev(&next).unwrap();
-    fs.rm(&[root.as_path()], true).unwrap();
+    fs.vclose_impl(&next).unwrap();
+    fs.remove_paths_impl(&[root.as_path()], true).unwrap();
 }

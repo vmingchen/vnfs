@@ -10,8 +10,9 @@
 pub type Result<T> = crate::VfResult<T>;
 pub type Error = crate::VfError;
 pub use crate::{
-    AttrMask as MetadataFields, Capabilities, DirEntry, ErrorDomain, Metadata, OpenFlags,
-    OpenRequest, Permissions, RemoveOptions, StatusCode, TransportKind, VfType as FileType,
+    AttrMask as MetadataFields, Capabilities, CopyOption, DirEntry, ErrorDomain, FilesystemStats,
+    Metadata, MetadataUpdate, OpenFlags, OpenRequest, Permissions, RemoveOptions, StatusCode,
+    TransportKind, VfType as FileType,
 };
 /// Atomic destination behavior requested by [`Vfsi::vrename_with_options`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -70,8 +71,42 @@ pub mod internal {
 /// Common imports for backend-independent application code.
 pub mod prelude {
     pub use super::{
-        ControlFlow, FileHandle, MetadataFields, MetadataOptions, OpenFlags, OpenRequest, ReadOp,
-        ReadOptions, ReadResult, ReadStreamOptions, RemoveMode, RemoveOptions, RenameOptions,
-        ResourceLimits, Vfsi, VfsiExt, VisitOptions, WriteOp, WriteOptions,
+        ControlFlow, CopyOption, FileHandle, MetadataFields, MetadataOperand, MetadataOptions,
+        MetadataTarget, MetadataUpdate, OpenFlags, OpenRequest, ReadOp, ReadOptions, ReadResult,
+        ReadStreamOptions, RemoveMode, RemoveOptions, RenameOptions, ResourceLimits, Vfsi, VfsiExt,
+        VisitOptions, WriteOp, WriteOptions,
     };
+}
+
+/// A path or an opened object for an attribute update. Handle targets retain
+/// object identity across rename/unlink; `follow_symlinks` applies only to paths.
+pub enum MetadataTarget<'a, F> {
+    Path(&'a std::path::Path),
+    File(&'a F),
+}
+impl<F> MetadataTarget<'_, F> {
+    pub fn path(path: &impl AsRef<std::path::Path>) -> MetadataTarget<'_, F> {
+        MetadataTarget::Path(path.as_ref())
+    }
+    pub fn file(file: &F) -> MetadataTarget<'_, F> {
+        MetadataTarget::File(file)
+    }
+}
+/// Inputs accepted by [`Vfsi::vsetattrs`]. Paths can be passed directly;
+/// use [`MetadataTarget`] to submit handles or mixed path/handle vectors.
+pub trait MetadataOperand<F> {
+    fn metadata_target(&self) -> MetadataTarget<'_, F>;
+}
+impl<F, P: AsRef<std::path::Path>> MetadataOperand<F> for P {
+    fn metadata_target(&self) -> MetadataTarget<'_, F> {
+        MetadataTarget::Path(self.as_ref())
+    }
+}
+impl<F> MetadataOperand<F> for MetadataTarget<'_, F> {
+    fn metadata_target(&self) -> MetadataTarget<'_, F> {
+        match self {
+            Self::Path(path) => MetadataTarget::Path(path),
+            Self::File(file) => MetadataTarget::File(file),
+        }
+    }
 }

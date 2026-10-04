@@ -1,10 +1,6 @@
 //! Synchronous filesystem interface facets.
 //!
-//! The compatibility [`VecFs`] trait remains the optimized vector contract.
-//! Its single-operation helpers form today's scalar facet without introducing
-//! a second, conflicting set of method names.
-
-use std::path::{Path, PathBuf};
+//! Concrete backends implement native facets directly; shared helpers compose workflows.
 
 pub use vfsi_core::*;
 
@@ -14,20 +10,20 @@ pub mod path {
 }
 
 mod traits;
-pub use traits::{
-    BackendDirectoryPage, DirPageCursor, DirectoryPage, ReadAllOptions, VecFs, VecFsExt,
-    rm_recursive,
-};
+pub use traits::{BackendDirectoryPage, DirPageCursor, DirectoryPage, ReadAllOptions};
 mod io;
 pub use io::{VfFileHandle, VfOpenOptions};
 mod client;
 mod traversal;
 pub use client::{FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite, OpenOptions, SetMetadata};
 pub use traversal::walk_events;
+#[doc(hidden)]
+pub mod backend_helpers;
 mod native;
 pub use native::{
-    CopyFileSystem, DirectoryFileSystem, FileSystem, LinkFileSystem, MetadataFileSystem,
-    NamespaceFileSystem, NativeFileSystem, VectorFileSystem,
+    ApplicationDataFileSystem, Backend, CopyFileSystem, DirectoryFileSystem, FileSystem,
+    LinkFileSystem, MetadataFileSystem, NamespaceFileSystem, NativeFileSystem,
+    ReadWorkflowFileSystem, RemovalFileSystem, TraversalFileSystem, VectorFileSystem,
 };
 
 /// Scalar/singular view of the synchronous interface.
@@ -42,11 +38,12 @@ pub mod sfsi {
 
 /// Vectorized view of the synchronous interface.
 pub mod vfsi {
+    pub use crate::Backend;
     pub use crate::{
         DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
         DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
         DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirPageCursor, ReadAllOptions, ReadDirOptions,
-        ReadStreamOptions, VecFs, VecFsExt, VectorFileSystem, WalkOptions, rm_recursive,
+        ReadStreamOptions, VectorFileSystem, WalkOptions,
     };
     pub use vfsi_core::*;
 }

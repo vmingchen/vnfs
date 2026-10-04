@@ -296,6 +296,235 @@ impl AutoClient {
         }
     }
 
+    /// Common routed capabilities. Server-copy acceleration is route-specific
+    /// and is not advertised as a guarantee for the whole namespace.
+    pub fn capabilities(&self) -> VfResult<crate::Capabilities> {
+        self.mounted.capabilities()
+    }
+
+    /// Keep target text unchanged and let the kernel interpret it in the
+    /// mounted namespace, matching the scalar symlink operation.
+    pub fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+        self.mounted.vsymlink(pairs)
+    }
+
+    /// Read link text through the mounted namespace without following links.
+    pub fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<PathBuf>> {
+        self.mounted.vreadlink(paths)
+    }
+
+    /// Route same-backend hard-link pairs together. Cross-route pairs use the
+    /// kernel namespace, which reports cross-filesystem errors when appropriate.
+    pub fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let mounts = read_mounts(false);
+        let mut sources: Vec<_> = pairs
+            .iter()
+            .map(|(source, _)| self.resolve(source.as_ref(), &mounts))
+            .collect();
+        let mut links: Vec<_> = pairs
+            .iter()
+            .map(|(_, link)| self.resolve(link.as_ref(), &mounts))
+            .collect();
+        for (index, (source, link)) in sources.iter_mut().zip(&mut links).enumerate() {
+            if !source.route.same_backend(&link.route) {
+                *source = Resolved {
+                    route: Route::Mounted,
+                    path: pairs[index].0.as_ref().to_path_buf(),
+                };
+                *link = Resolved {
+                    route: Route::Mounted,
+                    path: pairs[index].1.as_ref().to_path_buf(),
+                };
+            }
+        }
+        let mut start = 0;
+        while start < pairs.len() {
+            let end = cohort_end(&sources, start);
+            let batch: Vec<_> = (start..end)
+                .map(|index| (sources[index].path.as_path(), links[index].path.as_path()))
+                .collect();
+            match &sources[start].route {
+                Route::Mounted => self.mounted.vhardlink(&batch),
+                Route::Nfs(connection) => connection.client.vhardlink(&batch),
+            }
+            .map_err(|error| {
+                let error = indexed(error, start);
+                match error.index().and_then(|index| pairs.get(index)) {
+                    Some((_, link)) => error.with_context("vhardlink", link.as_ref()),
+                    None => error,
+                }
+            })?;
+            start = end;
+        }
+        Ok(())
+    }
+
+    /// Query route-coherent batches, preserving each open handle's retained route.
+    pub fn vstatfs<P: vfsi_core::MetadataOperand<AutoFile>>(
+        &self,
+        targets: &[P],
+    ) -> VfResult<Vec<crate::FilesystemStats>> {
+        use vfsi_core::MetadataTarget;
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mounts = read_mounts(false);
+        let mut resolved = Vec::with_capacity(targets.len());
+        for (index, target) in targets.iter().enumerate() {
+            let route = match target.metadata_target() {
+                MetadataTarget::Path(path) => self.resolve(path, &mounts),
+                MetadataTarget::File(file) => {
+                    self.check_owner(file, index)?;
+                    if file.is_closed() {
+                        return Err(VfError::client(index, libc::EBADF as u32)
+                            .with_context("vstatfs", &file.path));
+                    }
+                    Resolved {
+                        route: file.route.clone(),
+                        path: file.path.clone(),
+                    }
+                }
+            };
+            resolved.push(route);
+        }
+        let mut output = Vec::with_capacity(targets.len());
+        let mut start = 0;
+        while start < targets.len() {
+            let end = cohort_end(&resolved, start);
+            macro_rules! batch {
+                ($variant:ident) => {{
+                    (start..end)
+                        .map(|index| match targets[index].metadata_target() {
+                            MetadataTarget::Path(_) => {
+                                MetadataTarget::Path(resolved[index].path.as_path())
+                            }
+                            MetadataTarget::File(file) => match &file.inner {
+                                AutoFileInner::$variant(inner) => MetadataTarget::File(inner),
+                                _ => unreachable!("validated route"),
+                            },
+                        })
+                        .collect::<Vec<_>>()
+                }};
+            }
+            let result = match &resolved[start].route {
+                Route::Mounted => self.mounted.vstatfs(&batch!(Mounted)),
+                Route::Nfs(connection) => connection.client.vstatfs(&batch!(Nfs)),
+            }
+            .map_err(|error| {
+                let error = indexed(error, start);
+                match error.index().and_then(|index| targets.get(index)) {
+                    Some(target) => {
+                        let path = match target.metadata_target() {
+                            MetadataTarget::Path(path) => path,
+                            MetadataTarget::File(file) => file.path.as_path(),
+                        };
+                        error.with_context("vstatfs", path)
+                    }
+                    None => error,
+                }
+            })?;
+            output.extend(result);
+            start = end;
+        }
+        Ok(output)
+    }
+    /// Update route-coherent batches of paths and open objects.
+    pub fn vsetattrs<P: vfsi_core::MetadataOperand<AutoFile>>(
+        &self,
+        updates: &[(P, crate::MetadataUpdate)],
+        follow_symlinks: bool,
+    ) -> VfResult<()> {
+        use vfsi_core::MetadataTarget;
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mounts = read_mounts(false);
+        let mut resolved = Vec::with_capacity(updates.len());
+        for (index, (target, update)) in updates.iter().enumerate() {
+            // Preflight all inputs before any route is allowed to mutate.
+            let route = match target.metadata_target() {
+                MetadataTarget::Path(path) => self.resolve(path, &mounts),
+                MetadataTarget::File(file) => {
+                    self.check_owner(file, index)?;
+                    if file.is_closed() {
+                        return Err(VfError::client(index, libc::EBADF as u32)
+                            .with_context("vsetattrs", &file.path));
+                    }
+                    Resolved {
+                        route: file.route.clone(),
+                        path: file.path.clone(),
+                    }
+                }
+            };
+            if update.uid == Some(u32::MAX) || update.gid == Some(u32::MAX) {
+                return Err(VfError::client(index, libc::EINVAL as u32)
+                    .with_context("vsetattrs", &route.path));
+            }
+            for time in [update.accessed, update.modified].into_iter().flatten() {
+                // NFS timestamps are signed seconds, matching the core engine.
+                let duration = time
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_else(|e| e.duration());
+                let seconds = duration.as_secs();
+                if seconds > i64::MAX as u64
+                    || (time < std::time::UNIX_EPOCH
+                        && seconds == i64::MAX as u64
+                        && duration.subsec_nanos() != 0)
+                {
+                    return Err(VfError::client(index, libc::EOVERFLOW as u32)
+                        .with_context("vsetattrs", &route.path));
+                }
+            }
+            resolved.push(route);
+        }
+        let mut start = 0;
+        while start < updates.len() {
+            let end = cohort_end(&resolved, start);
+            macro_rules! batch {
+                ($variant:ident) => {{
+                    (start..end)
+                        .map(|index| {
+                            let target = match updates[index].0.metadata_target() {
+                                MetadataTarget::Path(_) => {
+                                    MetadataTarget::Path(resolved[index].path.as_path())
+                                }
+                                MetadataTarget::File(file) => match &file.inner {
+                                    AutoFileInner::$variant(inner) => MetadataTarget::File(inner),
+                                    _ => unreachable!("validated route"),
+                                },
+                            };
+                            (target, updates[index].1.clone())
+                        })
+                        .collect::<Vec<_>>()
+                }};
+            }
+            match &resolved[start].route {
+                Route::Mounted => self.mounted.vsetattrs(&batch!(Mounted), follow_symlinks),
+                Route::Nfs(connection) => {
+                    connection.client.vsetattrs(&batch!(Nfs), follow_symlinks)
+                }
+            }
+            .map_err(|error| {
+                let error = indexed(error, start);
+                match error.index().and_then(|index| updates.get(index)) {
+                    Some((target, _)) => {
+                        let path = match target.metadata_target() {
+                            MetadataTarget::Path(path) => path,
+                            MetadataTarget::File(file) => file.path.as_path(),
+                        };
+                        error.with_context("vsetattrs", path)
+                    }
+                    None => error,
+                }
+            })?;
+            start = end;
+        }
+        Ok(())
+    }
+
     pub fn vgetattrs<P: AsRef<Path>>(
         &self,
         paths: &[P],
@@ -316,12 +545,12 @@ impl AutoClient {
                 .collect();
             output.extend(
                 match &resolved[start].route {
-                    Route::Mounted => self.mounted.metadata_many(
+                    Route::Mounted => self.mounted.vgetattrs_native(
                         &batch,
                         options.requested_fields(),
                         options.follows_symlinks(),
                     ),
-                    Route::Nfs(connection) => connection.client.metadata_many(
+                    Route::Nfs(connection) => connection.client.vgetattrs_native(
                         &batch,
                         options.requested_fields(),
                         options.follows_symlinks(),
@@ -336,12 +565,12 @@ impl AutoClient {
 
     /// Create directories in bounded backend cohorts, retaining input order.
     /// Parents must exist; this does not promise transactional rollback.
-    pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
+    pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[(P, u32)]) -> VfResult<()> {
         if paths.is_empty() {
             return Ok(());
         }
         let mut seen = std::collections::HashSet::with_capacity(paths.len());
-        for (index, path) in paths.iter().enumerate() {
+        for (index, (path, _)) in paths.iter().enumerate() {
             if !seen.insert(path.as_ref()) {
                 return Err(VfError::client(index, libc::EINVAL as u32)
                     .with_context("vmkdir", path.as_ref()));
@@ -350,23 +579,24 @@ impl AutoClient {
         let mounts = read_mounts(true);
         let resolved: Vec<_> = paths
             .iter()
-            .map(|path| self.resolve(path.as_ref(), &mounts))
+            .map(|(path, _)| self.resolve(path.as_ref(), &mounts))
             .collect();
         let mut start = 0;
         while start < paths.len() {
             let end = cohort_end(&resolved, start);
             let batch: Vec<_> = resolved[start..end]
                 .iter()
-                .map(|route| route.path.as_path())
+                .zip(&paths[start..end])
+                .map(|(route, (_, mode))| (route.path.as_path(), *mode))
                 .collect();
             let result = match &resolved[start].route {
-                Route::Mounted => self.mounted.mkdirv(&batch),
-                Route::Nfs(connection) => connection.client.mkdirv(&batch),
+                Route::Mounted => self.mounted.vmkdir(&batch),
+                Route::Nfs(connection) => connection.client.vmkdir(&batch),
             };
             result.map_err(|error| {
                 let error = indexed(error, start);
                 match error.index().and_then(|index| paths.get(index)) {
-                    Some(path) => error.with_context("vmkdir", path.as_ref()),
+                    Some((path, _)) => error.with_context("vmkdir", path.as_ref()),
                     None => error,
                 }
             })?;
@@ -375,11 +605,11 @@ impl AutoClient {
         Ok(())
     }
 
-    pub fn remove_paths<P: AsRef<Path>>(&self, paths: &[P], recursive: bool) -> VfResult<()> {
-        self.remove_paths_with_options(paths, recursive, crate::RemoveOptions::default())
+    pub fn vremove_native<P: AsRef<Path>>(&self, paths: &[P], recursive: bool) -> VfResult<()> {
+        self.vremove_with_options_native(paths, recursive, crate::RemoveOptions::default())
     }
 
-    pub fn remove_paths_with_options<P: AsRef<Path>>(
+    pub fn vremove_with_options_native<P: AsRef<Path>>(
         &self,
         paths: &[P],
         recursive: bool,
@@ -417,10 +647,10 @@ impl AutoClient {
             match &resolved[start].route {
                 Route::Mounted => self
                     .mounted
-                    .remove_paths_with_options(&batch, recursive, options),
+                    .vremove_with_options_native(&batch, recursive, options),
                 Route::Nfs(connection) => connection
                     .client
-                    .remove_paths_with_options(&batch, recursive, options),
+                    .vremove_with_options_native(&batch, recursive, options),
             }
             .map_err(|error| indexed(error, start))?;
             start = end;
@@ -459,8 +689,8 @@ impl AutoClient {
                 .map(|(source, destination)| (source.path.as_path(), destination.as_path()))
                 .collect();
             match &pairs[start].0.route {
-                Route::Mounted => self.mounted.copyv(&batch),
-                Route::Nfs(connection) => connection.client.copyv(&batch),
+                Route::Mounted => self.mounted.vcopy(&batch),
+                Route::Nfs(connection) => connection.client.vcopy(&batch),
             }
             .map_err(|error| indexed(error, start))?;
             start = end;
@@ -933,7 +1163,7 @@ impl AutoClient {
                         .iter()
                         .map(|index| resolved[*index].path.as_path())
                         .collect();
-                    match connection.client.symlink_metadatav(&paths) {
+                    match connection.client.vsymlink_metadata_native(&paths) {
                         Ok(metadata) if metadata.len() == checked.len() => {
                             for (index, item) in checked.into_iter().zip(metadata) {
                                 if item.file_type() == crate::FileType::Symlink {
@@ -986,7 +1216,7 @@ impl AutoClient {
             let route = resolved[start].route.clone();
             match &route {
                 Route::Mounted => {
-                    let files = self.mounted.openv(&batch).map_err(|e| indexed(e, start))?;
+                    let files = self.mounted.vopen(&batch).map_err(|e| indexed(e, start))?;
                     for (index, file) in files.into_iter().enumerate() {
                         output.push(AutoFile::new(
                             requests[start + index].path.clone(),
@@ -999,7 +1229,7 @@ impl AutoClient {
                 Route::Nfs(connection) => {
                     let files = connection
                         .client
-                        .openv(&batch)
+                        .vopen(&batch)
                         .map_err(|e| indexed(e, start))?;
                     for (index, file) in files.into_iter().enumerate() {
                         output.push(AutoFile::new(
@@ -1034,7 +1264,7 @@ impl AutoClient {
             ops,
             options.limit_or(self.limits.max_read_bytes),
             |requests, options| self.readv_owned(requests, options),
-            |requests, bytes| self.readv_into_with_limit(requests, bytes),
+            |requests, bytes| self.vread_into_with_limit_native(requests, bytes),
         )
     }
     pub(crate) fn readv_owned(
@@ -1043,21 +1273,23 @@ impl AutoClient {
         budget: usize,
     ) -> VfResult<Vec<ReadResult>> {
         if requests.iter().all(|request| request.range_ref().is_some()) {
-            return self.readv_with_limit_projected(requests, budget, |request| {
+            return self.vread_with_limit_projected_native(requests, budget, |request| {
                 request.range_ref().expect("checked range requests")
             });
         }
         crate::read::read_batch(
             requests,
             budget,
-            |ranges, bytes| self.readv_with_limit_projected(ranges, bytes, |request| request),
+            |ranges, bytes| {
+                self.vread_with_limit_projected_native(ranges, bytes, |request| request)
+            },
             |paths, bytes| {
                 self.read_files_native(paths, crate::ReadAllOptions::new().max_total_bytes(bytes))
             },
         )
     }
 
-    fn readv_with_limit_projected<'a, T>(
+    fn vread_with_limit_projected_native<'a, T>(
         &self,
         requests: &[T],
         max_bytes: usize,
@@ -1099,7 +1331,7 @@ impl AutoClient {
                         .collect();
                     output.extend(
                         self.mounted
-                            .readv_with_limit(&batch, max_bytes)
+                            .vread_with_limit_native(&batch, max_bytes)
                             .map_err(|e| indexed(e, start))?,
                     );
                 }
@@ -1117,7 +1349,7 @@ impl AutoClient {
                     output.extend(
                         connection
                             .client
-                            .readv_with_limit(&batch, max_bytes)
+                            .vread_with_limit_native(&batch, max_bytes)
                             .map_err(|e| indexed(e, start))?,
                     );
                 }
@@ -1127,7 +1359,7 @@ impl AutoClient {
         Ok(output)
     }
 
-    fn readv_into_with_limit(
+    fn vread_into_with_limit_native(
         &self,
         requests: &mut [AutoReadInto<'_>],
         max_bytes: usize,
@@ -1163,7 +1395,7 @@ impl AutoClient {
                         .collect();
                     output.extend(
                         self.mounted
-                            .readv_into_with_limit(&mut batch, max_bytes)
+                            .vread_into_with_limit_native(&mut batch, max_bytes)
                             .map_err(|error| indexed(error, start))?,
                     );
                 }
@@ -1180,7 +1412,7 @@ impl AutoClient {
                     output.extend(
                         connection
                             .client
-                            .readv_into_with_limit(&mut batch, max_bytes)
+                            .vread_into_with_limit_native(&mut batch, max_bytes)
                             .map_err(|error| indexed(error, start))?,
                     );
                 }
@@ -1228,17 +1460,17 @@ impl AutoClient {
             if complete {
                 // This is preflight, not transactional rollback: reject all
                 // locally detectable invalid requests before any cohort writes.
-                // Validate empty requests too, matching FsClient::write_allv.
+                // Validate empty requests too, matching FsClient::vwrite_all_native.
                 if request.file().is_closed() {
                     return Err(VfError::client(index, libc::EBADF as u32)
-                        .with_context("writev", request.file().path()));
+                        .with_context("vwrite_native", request.file().path()));
                 }
                 request
                     .offset()
                     .checked_add(request.data().len() as u64)
                     .ok_or_else(|| {
                         VfError::client(index, libc::EOVERFLOW as u32)
-                            .with_context("writev", request.file().path())
+                            .with_context("vwrite_native", request.file().path())
                     })?;
             }
         }
@@ -1266,9 +1498,9 @@ impl AutoClient {
                         })
                         .collect();
                     let result = if complete {
-                        self.mounted.write_allv(&batch)
+                        self.mounted.vwrite_all_native(&batch)
                     } else {
-                        self.mounted.writev(&batch)
+                        self.mounted.vwrite_native(&batch)
                     };
                     output.extend(result.map_err(|e| indexed(e, start))?);
                 }
@@ -1283,9 +1515,9 @@ impl AutoClient {
                         })
                         .collect();
                     let result = if complete {
-                        connection.client.write_allv(&batch)
+                        connection.client.vwrite_all_native(&batch)
                     } else {
-                        connection.client.writev(&batch)
+                        connection.client.vwrite_native(&batch)
                     };
                     output.extend(result.map_err(|e| indexed(e, start))?);
                 }
@@ -1324,7 +1556,7 @@ impl AutoClient {
                         file
                     });
                     self.mounted
-                        .try_closev(batch)
+                        .vclose(batch)
                         .map_err(|error| indexed(error, start))?;
                 }
                 Route::Nfs(connection) => {
@@ -1336,7 +1568,7 @@ impl AutoClient {
                     });
                     connection
                         .client
-                        .try_closev(batch)
+                        .vclose(batch)
                         .map_err(|error| indexed(error, start))?;
                 }
             }
@@ -1401,8 +1633,8 @@ impl AutoClient {
                 .map(|i| (sources[i].path.as_path(), targets[i].path.as_path()))
                 .collect();
             match &sources[start].route {
-                Route::Mounted => self.mounted.renamev(&batch),
-                Route::Nfs(connection) => connection.client.renamev(&batch),
+                Route::Mounted => self.mounted.vrename(&batch),
+                Route::Nfs(connection) => connection.client.vrename(&batch),
             }
             .map_err(|error| indexed(error, start))?;
             start = end;
@@ -1431,7 +1663,7 @@ impl AutoClient {
                 );
             }
         }
-        self.mounted.renamev_with_options(pairs, options)
+        self.mounted.vrename_with_options(pairs, options)
     }
 }
 
@@ -1479,6 +1711,8 @@ macro_rules! metadata_setter {
 impl AutoSetMetadata<'_> {
     metadata_setter!(permissions, crate::Permissions);
     metadata_setter!(len, u64);
+    metadata_setter!(uid, u32);
+    metadata_setter!(gid, u32);
     metadata_setter!(accessed, std::time::SystemTime);
     metadata_setter!(modified, std::time::SystemTime);
     pub fn follow_symlinks(&mut self, follow: bool) -> &mut Self {
@@ -1486,30 +1720,8 @@ impl AutoSetMetadata<'_> {
         self
     }
     pub fn apply(&self) -> VfResult<()> {
-        macro_rules! apply {
-            ($client:expr, $path:expr) => {{
-                let mut builder = $client.set_metadata($path);
-                builder.follow_symlinks(self.follow);
-                if let Some(value) = self.update.permissions {
-                    builder.permissions(value);
-                }
-                if let Some(value) = self.update.len {
-                    builder.len(value);
-                }
-                if let Some(value) = self.update.accessed {
-                    builder.accessed(value);
-                }
-                if let Some(value) = self.update.modified {
-                    builder.modified(value);
-                }
-                builder.apply()
-            }};
-        }
-        let route = self.client.resolve(&self.path, &read_mounts(false));
-        match route.route {
-            Route::Mounted => apply!(self.client.mounted, &route.path),
-            Route::Nfs(connection) => apply!(connection.client, &route.path),
-        }
+        self.client
+            .vsetattrs(&[(&self.path, self.update.clone())], self.follow)
     }
 }
 
@@ -1744,18 +1956,18 @@ impl AutoFile {
             AutoFileInner::Nfs(file) => file.sync_data(),
         }
     }
-    pub fn set_len(&self, len: u64) -> VfResult<()> {
+    pub fn truncate(&self, len: u64) -> VfResult<()> {
         self.check_credentials()?;
         match &self.inner {
-            AutoFileInner::Mounted(file) => file.set_len(len),
-            AutoFileInner::Nfs(file) => file.set_len(len),
+            AutoFileInner::Mounted(file) => file.truncate(len),
+            AutoFileInner::Nfs(file) => file.truncate(len),
         }
     }
-    pub fn set_permissions(&self, permissions: crate::Permissions) -> VfResult<()> {
+    pub fn chmod(&self, permissions: crate::Permissions) -> VfResult<()> {
         self.check_credentials()?;
         match &self.inner {
-            AutoFileInner::Mounted(file) => file.set_permissions(permissions),
-            AutoFileInner::Nfs(file) => file.set_permissions(permissions),
+            AutoFileInner::Mounted(file) => file.chmod(permissions),
+            AutoFileInner::Nfs(file) => file.chmod(permissions),
         }
     }
     pub fn seek_native(&mut self, position: SeekFrom) -> VfResult<u64> {
@@ -2290,7 +2502,7 @@ mod tests {
                 error.err_no(),
                 if closed { libc::EBADF } else { libc::EOVERFLOW } as u32
             );
-            assert_eq!(error.operation(), Some("writev"));
+            assert_eq!(error.operation(), Some("vwrite_native"));
             assert_eq!(error.path(), Some(Path::new("/second")));
         }
         fs::remove_dir_all(root).unwrap();
@@ -2605,7 +2817,7 @@ mod tests {
                     libc::EBADF
                 } as u32
             );
-            assert_eq!(error.operation(), Some("writev"));
+            assert_eq!(error.operation(), Some("vwrite_native"));
             assert_eq!(error.path(), Some(failed_path.as_path()));
         }
     }

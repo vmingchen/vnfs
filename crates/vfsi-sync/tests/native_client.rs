@@ -32,16 +32,16 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
     assert_eq!(client.read_with_limit("/file", 6).unwrap(), b"abcdef");
     let file = client.open("/file").unwrap();
     let before = read_calls.load(Ordering::SeqCst);
-    assert!(client.readv(&[file.read_request_at(0, 4)]).is_err());
+    assert!(client.vread_native(&[file.read_request_at(0, 4)]).is_err());
     let mut buffer = [0; 4];
     assert!(
         client
-            .readv_into(&mut [file.read_request_at_into(0, &mut buffer)])
+            .vread_into_native(&mut [file.read_request_at_into(0, &mut buffer)])
             .is_err()
     );
     assert_eq!(read_calls.load(Ordering::SeqCst), before);
     let result = client
-        .readv_into_with_limit(&mut [file.read_request_at_into(0, &mut buffer)], 4)
+        .vread_into_with_limit_native(&mut [file.read_request_at_into(0, &mut buffer)], 4)
         .unwrap();
     assert_eq!(result[0].read, 4);
     assert_eq!(&buffer, b"abcd");
@@ -49,7 +49,7 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
     let before = read_calls.load(Ordering::SeqCst);
     assert!(
         client
-            .readv_into_with_limit(&mut [file.read_request_at_into(0, &mut buffer)], 3)
+            .vread_into_with_limit_native(&mut [file.read_request_at_into(0, &mut buffer)], 3)
             .is_err()
     );
     assert_eq!(read_calls.load(Ordering::SeqCst), before);
@@ -99,6 +99,9 @@ type Notifications = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
 
 #[derive(Default)]
 struct ScalarOnly {
+    stats_calls: Arc<AtomicUsize>,
+    stats_result_count: Option<usize>,
+    stats_error_index: Option<usize>,
     notifications: Notifications,
     blocked_read: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
     close_observed: Arc<AtomicUsize>,
@@ -161,7 +164,7 @@ fn opened_file_read_to_end_has_explicit_limits_and_cursor_semantics() {
 }
 
 impl VectorFileSystem for ScalarOnly {
-    fn open_many(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>> {
+    fn vopen_impl(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>> {
         if self.transport_failure {
             return Err(VfError::transport(None, "reply lost"));
         }
@@ -173,18 +176,18 @@ impl VectorFileSystem for ScalarOnly {
         requests
             .iter()
             .take(limit)
-            .map(|request| self.open_one(request))
+            .map(|request| self.open_impl(request))
             .collect()
     }
 
-    fn close_many(&mut self, files: &[VfFile]) -> VfResult<()> {
+    fn vclose_impl(&mut self, files: &[VfFile]) -> VfResult<()> {
         for file in files {
-            self.close_one(file)?;
+            self.close_impl(file)?;
         }
         Ok(())
     }
 
-    fn read_many(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+    fn vread_impl(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         let limit = self
             .vector_result_limit
             .lock()
@@ -193,7 +196,7 @@ impl VectorFileSystem for ScalarOnly {
         let mut results: Vec<_> = requests
             .iter()
             .take(limit)
-            .map(|request| self.read_one(request))
+            .map(|request| self.read_impl(request))
             .collect::<VfResult<_>>()?;
         if let Some(result) = results.first_mut() {
             if self.wrong_result_file {
@@ -206,7 +209,7 @@ impl VectorFileSystem for ScalarOnly {
         Ok(results)
     }
 
-    fn read_many_into(
+    fn vread_into_impl(
         &mut self,
         requests: &[ReadOp],
         buffers: &mut [&mut [u8]],
@@ -225,7 +228,7 @@ impl VectorFileSystem for ScalarOnly {
             .take(limit)
             .enumerate()
             .map(|(index, (request, buffer))| {
-                self.read_one_into(request, buffer)
+                self.read_into_impl(request, buffer)
                     .map_err(|error| error.with_index(index))
             })
             .collect::<VfResult<_>>()?;
@@ -240,7 +243,7 @@ impl VectorFileSystem for ScalarOnly {
         Ok(results)
     }
 
-    fn write_many(&mut self, requests: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_impl(&mut self, requests: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
         let limit = self
             .vector_result_limit
             .lock()
@@ -249,7 +252,7 @@ impl VectorFileSystem for ScalarOnly {
         let mut results: Vec<_> = requests
             .iter()
             .take(limit)
-            .map(|request| self.write_one(*request))
+            .map(|request| self.write_impl(*request))
             .collect::<VfResult<_>>()?;
         if let Some(result) = results.first_mut() {
             if self.wrong_result_file {
@@ -264,6 +267,17 @@ impl VectorFileSystem for ScalarOnly {
 }
 
 impl FileSystem for ScalarOnly {
+    fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<vfsi_sync::FilesystemStats>> {
+        self.stats_calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(index) = self.stats_error_index {
+            return Err(VfError::client(index, libc::ENOENT as u32));
+        }
+        Ok(vec![
+            vfsi_sync::FilesystemStats::default();
+            self.stats_result_count.unwrap_or(files.len())
+        ])
+    }
+
     fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
         std::mem::take(&mut *self.notifications.lock().unwrap())
     }
@@ -271,12 +285,12 @@ impl FileSystem for ScalarOnly {
         Capabilities::empty()
     }
 
-    fn open_one(&mut self, _: &OpenRequest) -> VfResult<VfFile> {
+    fn open_impl(&mut self, _: &OpenRequest) -> VfResult<VfFile> {
         self.open = true;
         Ok(VfFile::from_fd(1))
     }
 
-    fn close_one(&mut self, _: &VfFile) -> VfResult<()> {
+    fn close_impl(&mut self, _: &VfFile) -> VfResult<()> {
         self.close_calls += 1;
         self.close_observed.fetch_add(1, Ordering::SeqCst);
         if self.close_failures_remaining != 0 {
@@ -293,7 +307,7 @@ impl FileSystem for ScalarOnly {
         Ok(())
     }
 
-    fn read_one(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
+    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
         if let Some((entered, release)) = self.blocked_read.take() {
             entered.wait();
             release.wait();
@@ -329,9 +343,9 @@ impl FileSystem for ScalarOnly {
         })
     }
 
-    fn read_one_into(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
+    fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
         if !self.direct_into_only {
-            let result = self.read_one(request)?;
+            let result = self.read_impl(request)?;
             if result.data.len() > buffer.len() {
                 return Err(VfError::client(0, vfsi_sync::ERR_IO));
             }
@@ -366,7 +380,7 @@ impl FileSystem for ScalarOnly {
         })
     }
 
-    fn write_one(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult> {
         self.write_calls.fetch_add(1, Ordering::SeqCst);
         if self.oversized_write_count {
             return Ok(WriteResult {
@@ -398,7 +412,7 @@ impl FileSystem for ScalarOnly {
         })
     }
 
-    fn seek_one(&mut self, _: &VfFile, position: SeekFrom) -> VfResult<u64> {
+    fn seek_impl(&mut self, _: &VfFile, position: SeekFrom) -> VfResult<u64> {
         let next = match position {
             SeekFrom::Start(value) => value as i128,
             SeekFrom::Current(value) => self.cursor as i128 + value as i128,
@@ -411,11 +425,11 @@ impl FileSystem for ScalarOnly {
         Ok(self.cursor)
     }
 
-    fn metadata(&mut self, _: MetadataQuery) -> VfResult<vfsi_sync::VfAttrs> {
+    fn metadata_impl(&mut self, _: MetadataQuery) -> VfResult<vfsi_sync::VfAttrs> {
         Err(VfError::unsupported(0))
     }
 
-    fn set_attributes(&mut self, _: SetAttributes) -> VfResult<()> {
+    fn set_attributes_impl(&mut self, _: SetAttributes) -> VfResult<()> {
         Err(VfError::unsupported(0))
     }
 }
@@ -523,7 +537,7 @@ fn vector_transport_failure_does_not_invent_request_zero_context() {
         ..ScalarOnly::default()
     });
     let error = client
-        .openv(&[
+        .vopen(&[
             OpenRequest::new("/first", OpenFlags::READ),
             OpenRequest::new("/second", OpenFlags::READ),
         ])
@@ -540,7 +554,7 @@ fn openv_rejects_wrong_result_count_and_cleans_returned_handles() {
         ..ScalarOnly::default()
     });
     let error = client
-        .openv(&[
+        .vopen(&[
             OpenRequest::new("/first", OpenFlags::READ),
             OpenRequest::new("/second", OpenFlags::READ),
         ])
@@ -557,7 +571,7 @@ fn readv_and_writev_reject_wrong_result_counts() {
     let vector_result_limit = Arc::clone(&backend.vector_result_limit);
     let client = FsClient::new(backend);
     let files = client
-        .openv(&[
+        .vopen(&[
             OpenRequest::new("/first", OpenFlags::READ | OpenFlags::WRITE),
             OpenRequest::new("/second", OpenFlags::READ | OpenFlags::WRITE),
         ])
@@ -565,7 +579,7 @@ fn readv_and_writev_reject_wrong_result_counts() {
     *vector_result_limit.lock().unwrap() = Some(1);
 
     let read_error = client
-        .readv(&[
+        .vread_native(&[
             files[0].read_request_at(0, 1),
             files[1].read_request_at(0, 1),
         ])
@@ -574,7 +588,7 @@ fn readv_and_writev_reject_wrong_result_counts() {
     assert_eq!(read_error.index(), None);
 
     let write_error = client
-        .writev(&[
+        .vwrite_native(&[
             files[0].write_request_at(0, b"a"),
             files[1].write_request_at(0, b"b"),
         ])
@@ -582,7 +596,7 @@ fn readv_and_writev_reject_wrong_result_counts() {
     assert!(write_error.is_transport());
     assert_eq!(write_error.index(), None);
 
-    client.closev(files).unwrap();
+    client.vclose_owned(files).unwrap();
 }
 
 #[test]
@@ -595,7 +609,7 @@ fn owned_vector_reads_reject_oversized_batches_before_backend_io() {
     });
     let file = client.open("/file").unwrap();
     let error = client
-        .readv_with_limit(&[file.read_request_at(0, 3), file.read_request_at(3, 3)], 5)
+        .vread_with_limit_native(&[file.read_request_at(0, 3), file.read_request_at(3, 3)], 5)
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EFBIG as u32);
@@ -603,13 +617,13 @@ fn owned_vector_reads_reject_oversized_batches_before_backend_io() {
     assert_eq!(read_calls.load(Ordering::SeqCst), 0);
 
     let error = client
-        .readv(&[file.read_request_at(0, vfsi_sync::DEFAULT_READV_MAX_TOTAL_BYTES + 1)])
+        .vread_native(&[file.read_request_at(0, vfsi_sync::DEFAULT_READV_MAX_TOTAL_BYTES + 1)])
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
     assert_eq!(read_calls.load(Ordering::SeqCst), 0);
 
     let results = client
-        .readv_with_limit(&[file.read_request_at(0, 3)], 3)
+        .vread_with_limit_native(&[file.read_request_at(0, 3)], 3)
         .unwrap();
     assert_eq!(results[0].data, b"abc");
 }
@@ -626,7 +640,7 @@ fn write_allv_retries_short_writes_in_vector_waves() {
         .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
         .unwrap();
     let results = client
-        .write_allv(&[
+        .vwrite_all_native(&[
             file.write_request_at(0, b"abcde"),
             file.write_request_at(10, b"VWXYZ"),
         ])
@@ -656,7 +670,7 @@ fn write_allv_preserves_order_for_overlapping_short_writes() {
         .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
         .unwrap();
     let results = client
-        .write_allv(&[
+        .vwrite_all_native(&[
             file.write_request_at(0, b"AAAA"),
             file.write_request_at(2, b"BBBB"),
         ])
@@ -682,7 +696,7 @@ fn write_allv_waits_for_every_earlier_overlapping_request() {
         .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
         .unwrap();
     client
-        .write_allv(&[
+        .vwrite_all_native(&[
             file.write_request_at(0, b"AAAAAA"),
             file.write_request_at(6, b"BB"),
             file.write_request_at(4, b"CCCC"),
@@ -702,7 +716,7 @@ fn write_allv_rejects_zero_progress() {
         .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
         .unwrap();
     let error = client
-        .write_allv(&[file.write_request_at(0, b"data")])
+        .vwrite_all_native(&[file.write_request_at(0, b"data")])
         .unwrap_err();
     assert_eq!(error.err_no(), vfsi_sync::ERR_IO);
     assert_eq!(error.index(), Some(0));
@@ -723,7 +737,7 @@ fn write_allv_validates_every_request_before_writing_a_prefix() {
         .open_with(OpenRequest::new("/foreign", OpenFlags::WRITE))
         .unwrap();
     let error = client
-        .write_allv(&[
+        .vwrite_all_native(&[
             local_file.write_request_at(0, b"would-write"),
             foreign_file.write_request_at(0, b"invalid"),
         ])
@@ -750,10 +764,12 @@ fn vector_results_must_match_their_requests_and_io_limits() {
     ] {
         let client = FsClient::new(backend);
         let file = client.open("/file").unwrap();
-        let error = client.readv(&[file.read_request_at(0, 1)]).unwrap_err();
+        let error = client
+            .vread_native(&[file.read_request_at(0, 1)])
+            .unwrap_err();
         assert!(error.is_transport());
         assert_eq!(error.index(), Some(0));
-        assert_eq!(error.operation(), Some("readv"));
+        assert_eq!(error.operation(), Some("vread_native"));
         drop(file);
     }
 
@@ -765,11 +781,11 @@ fn vector_results_must_match_their_requests_and_io_limits() {
         .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
         .unwrap();
     let error = client
-        .writev(&[file.write_request_at(0, b"x")])
+        .vwrite_native(&[file.write_request_at(0, b"x")])
         .unwrap_err();
     assert!(error.is_transport());
     assert_eq!(error.index(), Some(0));
-    assert_eq!(error.operation(), Some("writev"));
+    assert_eq!(error.operation(), Some("vwrite_native"));
 }
 
 #[test]
@@ -810,9 +826,9 @@ fn failed_try_closev_retains_handles_for_explicit_retry() {
         ..ScalarOnly::default()
     });
     let mut files = vec![client.open("/file").unwrap()];
-    assert!(client.try_closev(&mut files).is_err());
+    assert!(client.vclose(&mut files).is_err());
     assert_eq!(files[0].path(), std::path::Path::new("/file"));
-    client.try_closev(&mut files).unwrap();
+    client.vclose(&mut files).unwrap();
     drop(files);
     let backend = client.into_inner().unwrap();
     assert_eq!(backend.close_calls, 2);
@@ -863,7 +879,7 @@ fn stream_callback_can_reenter_client_and_drop_another_file() {
 }
 
 impl DirectoryFileSystem for ScalarOnly {
-    fn read_dir_page_with_fields(
+    fn read_dir_page_with_fields_impl(
         &mut self,
         path: &std::path::Path,
         fields: vfsi_sync::AttrMask,
@@ -872,17 +888,17 @@ impl DirectoryFileSystem for ScalarOnly {
         max_entries: usize,
     ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
         self.directory_fields.lock().unwrap().push(fields);
-        self.read_dir_page(path, cursor, page_size, max_entries)
+        self.read_dir_page_impl(path, cursor, page_size, max_entries)
     }
-    fn create_dir_one(&mut self, _: &std::path::Path, _: u32) -> VfResult<()> {
+    fn create_dir_impl(&mut self, _: &std::path::Path, _: u32) -> VfResult<()> {
         Ok(())
     }
 
-    fn read_dir_one(&mut self, _: &std::path::Path, _: ReadDirOptions) -> VfResult<Vec<DirEntry>> {
+    fn read_dir_impl(&mut self, _: &std::path::Path, _: ReadDirOptions) -> VfResult<Vec<DirEntry>> {
         unreachable!("the visitor must use paged enumeration")
     }
 
-    fn read_dir_page(
+    fn read_dir_page_impl(
         &mut self,
         _: &std::path::Path,
         cursor: Option<DirPageCursor>,
@@ -1011,7 +1027,7 @@ fn native_read_into_dispatches_without_owned_read_results() {
     let mut first = [0u8; 3];
     let mut second = [0u8; 3];
     let lengths = client
-        .readv_into(&mut [
+        .vread_into_native(&mut [
             file.read_request_at_into(0, &mut first),
             file.read_request_at_into(3, &mut second),
         ])
@@ -1048,7 +1064,7 @@ fn native_read_into_rejects_malformed_backend_results() {
     let file = client.open("/file").unwrap();
     let mut buffer = [0u8; 3];
     let error = client
-        .readv_into(&mut [file.read_request_at_into(0, &mut buffer)])
+        .vread_into_native(&mut [file.read_request_at_into(0, &mut buffer)])
         .unwrap_err();
     assert!(error.is_transport());
     assert_eq!(error.index(), Some(0));
@@ -1063,7 +1079,7 @@ fn native_read_into_rejects_malformed_backend_results() {
     let file = client.open("/file").unwrap();
     *limit.lock().unwrap() = Some(0);
     let error = client
-        .readv_into(&mut [file.read_request_at_into(0, &mut buffer)])
+        .vread_into_native(&mut [file.read_request_at_into(0, &mut buffer)])
         .unwrap_err();
     assert!(error.is_transport());
     assert_eq!(error.index(), None);
@@ -1176,4 +1192,41 @@ fn ordinary_operation_drains_dropped_handles() {
     drop(client.open("/file").unwrap());
     client.capabilities().unwrap();
     assert_eq!(closes.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn filesystem_statistics_validate_backend_shape_and_preflight_all_handles() {
+    for count in [0, 1, 3] {
+        let client = FsClient::new(ScalarOnly {
+            stats_result_count: Some(count),
+            ..Default::default()
+        });
+        assert!(client.vstatfs(&["/a", "/b"]).unwrap_err().is_transport());
+    }
+    let client = FsClient::new(ScalarOnly {
+        stats_error_index: Some(2),
+        ..Default::default()
+    });
+    assert!(client.vstatfs(&["/a", "/b"]).unwrap_err().is_transport());
+    let backend = ScalarOnly::default();
+    let calls = backend.stats_calls.clone();
+    let client = FsClient::new(backend);
+    client.vstatfs::<&str>(&[]).unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let mut file = client.open("/file").unwrap();
+    file.try_close().unwrap();
+    let targets = [
+        vfsi_sync::MetadataTarget::Path(std::path::Path::new("/a")),
+        vfsi_sync::MetadataTarget::File(&file),
+    ];
+    assert_eq!(client.vstatfs(&targets).unwrap_err().index(), Some(1));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let other = FsClient::new(ScalarOnly::default());
+    let foreign = other.open("/foreign").unwrap();
+    let targets = [
+        vfsi_sync::MetadataTarget::Path(std::path::Path::new("/a")),
+        vfsi_sync::MetadataTarget::File(&foreign),
+    ];
+    assert_eq!(client.vstatfs(&targets).unwrap_err().index(), Some(1));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

@@ -85,6 +85,70 @@ print(fs.ls("/"))
 See the [nfs4fs guide](adapters/nfs4fs/) and [vsmbfs guide](adapters/vsmbfs/)
 for protocol-specific configuration.
 
+## Rust operation naming
+
+Frontend vector methods use `v` + operation, such as `Vfsi::vstatfs`.
+Singular helpers in `VfsiExt` omit the prefix, such as `statfs`, and delegate
+to the vector operation. Shared backend methods add `_impl`, such as
+`vstatfs_impl`. Backend-specific helpers, when needed, use `_nfs`, `_local`,
+or `_smb`, such as `vstatfs_nfs`. Scalar backend operations omit `v`, for
+example `open_impl`. Modifiers precede the suffix, as in `vread_into_impl`.
+
+Concrete backends implement the native operation facets directly.
+`NativeFileSystem` and `Backend` are method-free aggregates; `Backend` supports
+object-safe dispatch in bindings. Shared algorithms live in
+`vfsi-sync::backend_helpers`. `Vfsi` and `VfsiExt` remain the application APIs.
+Lifecycle/configuration methods keep descriptive names, and protocol internals
+keep their wire vocabulary. `VfsiExt` also provides bulk composed workflows.
+
+This is a breaking Rust migration: `VecFs`/`VecFsExt` are removed. Strict typed
+opens use `vopen_impl`; indexed partial outcomes use `vopen_outcomes_impl`.
+Borrowed writes use `vwrite_impl`; owned payloads use `vwrite_owned_impl`.
+Typed attribute updates use `vsetattrs_impl`; raw attribute masks use
+`vsetattrs_raw_impl`. C/Python operation names are unchanged. See the
+[migration ledger](docs/backend-migration.md) for the complete mapping.
+
+## Filesystem capacity and limits
+
+`Vfsi::vstatfs` queries paths and open handles in input order. The singular
+`VfsiExt::statfs` helper delegates to that vector operation:
+
+```rust,ignore
+use vnfs::{MetadataTarget, Vfsi, VfsiExt};
+
+let capacities = fs.vstatfs(&["/data", "/archive"])?;
+let file = fs.open("/data/example")?;
+let capacity = fs.statfs(MetadataTarget::File(&file))?;
+println!("available bytes: {:?}", capacity.available_bytes);
+```
+
+`FilesystemStats` reports total, free, and caller-available byte and file
+counts, plus supported limits and flags. Unknown fields are `None`, including
+limits the backend cannot determine. These are observations, not reservations
+or the client's `ResourceLimits` policy. Paths follow final symlinks; handles
+query their retained objects even after rename.
+
+The Linux local backend uses anchored descriptors with `fstatvfs` and
+`fpathconf`. Byte counts use `f_frsize`. `file_size_bits` exposes POSIX
+`_PC_FILESIZEBITS`; it does not assert an exact maximum file size. NFS batches
+GETATTR for SPACE_*, FILES_*, MAXNAME, MAXLINK, and MAXFILESIZE and respects the
+server's returned attribute bitmap. NFS does not report block sizes or mount
+flags; an explicit read-only client mount reports `read_only = Some(true)`.
+Auto dispatches each batch through its retained route. Backends without this
+operation return an unsupported error for nonempty requests.
+
+## Copy options
+
+The shared extent-copy backend entry point is `vcopy_impl(pairs, CopyOption)`.
+`CopyOption::new()` follows final source symlinks and allows server-side copy
+with a client-copy fallback. Use `.follow_source_symlinks(false)` to recreate
+source links with their original text; offsets and length do not apply to links.
+Data-copy destination symlinks keep their existing following behavior. Local
+and NFS support preserving source links; SMB returns an unsupported error for
+that option. Existing whole-file frontend and binding calls retain the default
+following behavior. The former backend `copyv` and `lcopyv` methods are consolidated;
+`dupv` remains the explicit client-copy engine.
+
 ## Project organization
 
 The platform is organized as a modular monorepo: shared contracts, synchronous

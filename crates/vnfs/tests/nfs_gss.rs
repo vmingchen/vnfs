@@ -2,10 +2,11 @@
 
 use std::time::Duration;
 use std::{process::Command, thread};
+use vfsi_sync::*;
 
 use vfsi_nfs::NfsConnectOptions;
 use vfsi_nfs::NfsVecFs;
-use vfsi_sync::{ReadOp, VecFs, VfFile, VfOffset, WriteOp};
+use vfsi_sync::{Backend, ReadOp, VfFile, VfOffset, WriteOp};
 use vnfs::{NfsAuthentication, RpcsecGssProtection};
 
 fn options(protection: RpcsecGssProtection) -> NfsConnectOptions {
@@ -42,17 +43,17 @@ fn supported_rpcsec_gss_protection_levels_access_the_export() {
             .unwrap_or_else(|error| panic!("connect using {name}: {error}"));
         let path = format!("/vnfs-gss-{name}-{}", std::process::id());
         let payload = format!("authenticated with {name}").into_bytes();
-        fs.writev(
+        fs.vwrite_owned_impl(
             &[WriteOp::from_path(&path, VfOffset::At(0), payload.clone())
                 .with_creation()
                 .with_truncate()],
         )
         .unwrap_or_else(|error| panic!("write using {name}: {error}"));
         let result = fs
-            .readv(&[ReadOp::from_path(&path, VfOffset::At(0), payload.len())])
+            .vread_impl(&[ReadOp::from_path(&path, VfOffset::At(0), payload.len())])
             .unwrap_or_else(|error| panic!("read using {name}: {error}"));
         assert_eq!(result[0].data, payload, "payload using {name}");
-        fs.removev(&[VfFile::from_path(&path)])
+        fs.vremove_impl(&[VfFile::from_path(&path)])
             .unwrap_or_else(|error| panic!("remove using {name}: {error}"));
     }
 }
@@ -94,7 +95,7 @@ fn renewable_ticket_allows_reconnect_after_ticket_expiry() {
         .expect("connect while the renewable Kerberos ticket is valid");
     let path = format!("/vnfs-gss-renew-{}", std::process::id());
     let payload = b"ticket renewal and RPCSEC_GSS reconnect";
-    fs.writev(
+    fs.vwrite_owned_impl(
         &[WriteOp::from_path(&path, VfOffset::At(0), payload.to_vec())
             .with_creation()
             .with_truncate()],
@@ -125,9 +126,9 @@ fn renewable_ticket_allows_reconnect_after_ticket_expiry() {
     fs.reconnect()
         .expect("reconnect using renewed GSS credentials");
     let read = fs
-        .readv(&[ReadOp::from_path(&path, VfOffset::At(0), payload.len())])
+        .vread_impl(&[ReadOp::from_path(&path, VfOffset::At(0), payload.len())])
         .expect("read after GSS reconnect");
     assert_eq!(read[0].data, payload);
-    fs.removev(&[VfFile::from_path(&path)])
+    fs.vremove_impl(&[VfFile::from_path(&path)])
         .expect("remove authenticated fixture");
 }

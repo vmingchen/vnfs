@@ -16,11 +16,11 @@ use vfsi_core::api::{
 
 use crate::traits::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::{
-    AttrMask, Capabilities, CopyFileSystem, DirEntry, DirectoryFileSystem, FileSystem,
+    AttrMask, Backend, Capabilities, CopyFileSystem, DirEntry, DirectoryFileSystem, FileSystem,
     LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
     NamespaceFileSystem, OpenFlags, OpenRequest, Permissions, ReadAllOptions, ReadDirOptions,
-    ReadOp, ReadResult, ReadStreamOptions, RemoveOptions, SetAttributes, VecFs, VectorFileSystem,
-    VfDir, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
+    ReadOp, ReadResult, ReadStreamOptions, RemoveOptions, VectorFileSystem, VfDir, VfError, VfFile,
+    VfOffset, VfResult, WriteOpRef, WriteResult,
 };
 
 fn read_result(result: ReadResult) -> FsReadResult {
@@ -270,7 +270,7 @@ impl<F: FileSystem> FsClient<F> {
     }
 
     pub fn open_with(&self, request: OpenRequest) -> VfResult<FsFile<F>> {
-        let file = self.lock()?.open_one(&request)?;
+        let file = self.lock()?.open_impl(&request)?;
         Ok(FsFile {
             inner: Arc::clone(&self.inner),
             file: Some(file),
@@ -302,7 +302,7 @@ impl<F: FileSystem> FsClient<F> {
         let file = self.open(path)?;
         let operation = self
             .lock()?
-            .read_file(file.raw()?, max_bytes)
+            .read_file_impl(file.raw()?, max_bytes)
             .map_err(|error| error.with_context("read", path))
             .and_then(|data| {
                 if data.len() > max_bytes {
@@ -387,7 +387,7 @@ impl<F: FileSystem> FsClient<F> {
                 let request = ReadOp::at(raw_file.clone(), offset, chunk_size);
                 let result = {
                     let mut backend = self.lock()?;
-                    let result = backend.read_one(&request)?;
+                    let result = backend.read_impl(&request)?;
                     validate_read_results(
                         "read_stream",
                         std::slice::from_ref(&request),
@@ -421,11 +421,11 @@ impl<F: FileSystem> FsClient<F> {
 
 impl<F: MetadataFileSystem> FsClient<F> {
     pub fn metadata(&self, path: impl AsRef<Path>) -> VfResult<Metadata> {
-        self.lock()?.metadata_path(path.as_ref(), true)
+        self.lock()?.metadata_path_impl(path.as_ref(), true)
     }
 
     pub fn symlink_metadata(&self, path: impl AsRef<Path>) -> VfResult<Metadata> {
-        self.lock()?.metadata_path(path.as_ref(), false)
+        self.lock()?.metadata_path_impl(path.as_ref(), false)
     }
 
     pub fn set_metadata(&self, path: impl AsRef<Path>) -> SetMetadata<'_, F> {
@@ -444,7 +444,7 @@ impl<F: DirectoryFileSystem> FsClient<F> {
     }
 
     pub fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> VfResult<()> {
-        self.lock()?.create_dir_one(path.as_ref(), mode)
+        self.lock()?.create_dir_impl(path.as_ref(), mode)
     }
 
     pub fn read_dir(&self, path: impl AsRef<Path>) -> VfResult<Vec<DirEntry>> {
@@ -457,7 +457,7 @@ impl<F: DirectoryFileSystem> FsClient<F> {
         path: impl AsRef<Path>,
         options: ReadDirOptions,
     ) -> VfResult<Vec<DirEntry>> {
-        self.lock()?.read_dir_one(path.as_ref(), options)
+        self.lock()?.read_dir_impl(path.as_ref(), options)
     }
 
     /// Visit one directory one bounded page at a time. `Continue(())` requests
@@ -494,7 +494,7 @@ impl<F: DirectoryFileSystem> FsClient<F> {
         let mut count = 0usize;
         let mut path_bytes = 0usize;
         let max_entries = if options.entry_limit() == usize::MAX {
-            0 // VecFs uses zero for an explicitly unlimited listing.
+            0 // Backend uses zero for an explicitly unlimited listing.
         } else {
             options.entry_limit().saturating_add(1)
         };
@@ -512,7 +512,7 @@ impl<F: DirectoryFileSystem> FsClient<F> {
                 )
             };
             let (entries, next) = {
-                self.lock()?.read_dir_page_with_fields(
+                self.lock()?.read_dir_page_with_fields_impl(
                     path,
                     fields,
                     cursor,
@@ -594,7 +594,7 @@ impl<F: NamespaceFileSystem + MetadataFileSystem> FsClient<F> {
         let mut filesystem = self.lock()?;
         let follow = !filesystem.capabilities().contains(Capabilities::LSTAT);
         filesystem
-            .metadata_path(path, follow)
+            .metadata_path_impl(path, follow)
             .map_err(|error| error.with_context(operation, path))
     }
 
@@ -603,7 +603,7 @@ impl<F: NamespaceFileSystem + MetadataFileSystem> FsClient<F> {
         if self.removal_metadata(path, "remove_file")?.is_dir() {
             return Err(VfError::client(0, crate::ERR_ISDIR).with_context("remove_file", path));
         }
-        self.lock()?.remove_one(path, false)
+        self.lock()?.remove_impl(path, false)
     }
 
     pub fn remove_dir(&self, path: impl AsRef<Path>) -> VfResult<()> {
@@ -611,7 +611,7 @@ impl<F: NamespaceFileSystem + MetadataFileSystem> FsClient<F> {
         if !self.removal_metadata(path, "remove_dir")?.is_dir() {
             return Err(VfError::client(0, crate::ERR_NOTDIR).with_context("remove_dir", path));
         }
-        self.lock()?.remove_one(path, false)
+        self.lock()?.remove_impl(path, false)
     }
 
     pub fn remove_dir_all(&self, path: impl AsRef<Path>) -> VfResult<()> {
@@ -619,28 +619,31 @@ impl<F: NamespaceFileSystem + MetadataFileSystem> FsClient<F> {
         if !self.removal_metadata(path, "remove_dir_all")?.is_dir() {
             return Err(VfError::client(0, crate::ERR_NOTDIR).with_context("remove_dir_all", path));
         }
-        self.lock()?.remove_one(path, true)
+        self.lock()?.remove_impl(path, true)
     }
 
     /// Remove the contents of a directory, keeping the directory itself.
-    pub fn remove_dir_contents(&self, path: impl AsRef<Path>) -> VfResult<()> {
+    pub fn remove_dir_contents_impl(&self, path: impl AsRef<Path>) -> VfResult<()> {
         let path = path.as_ref();
-        if !self.removal_metadata(path, "remove_dir_contents")?.is_dir() {
+        if !self
+            .removal_metadata(path, "remove_dir_contents_impl")?
+            .is_dir()
+        {
             return Err(
                 VfError::client(0, crate::ERR_NOTDIR).with_context("remove_dir_contents", path)
             );
         }
-        self.lock()?.remove_dir_contents(path)
+        self.lock()?.remove_dir_contents_impl(path)
     }
 
     pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> VfResult<()> {
-        self.lock()?.rename_one(from.as_ref(), to.as_ref())
+        self.lock()?.rename_impl(from.as_ref(), to.as_ref())
     }
 }
 
-impl<F: VecFs> FsClient<F> {
+impl<F: Backend> FsClient<F> {
     /// Rename independent source/destination pairs in one vector phase.
-    pub fn renamev<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
         if pairs.is_empty() {
             return Ok(());
         }
@@ -654,10 +657,10 @@ impl<F: VecFs> FsClient<F> {
             })
             .collect();
         self.lock()?
-            .renamev(&requests)
+            .vrename_impl(&requests)
             .map_err(|error| match error.index() {
                 Some(index) if index < pairs.len() => {
-                    error.with_context("renamev", pairs[index].0.as_ref())
+                    error.with_context("vrename", pairs[index].0.as_ref())
                 }
                 Some(_) => {
                     VfError::transport(None, "rename backend returned an invalid error index")
@@ -667,7 +670,7 @@ impl<F: VecFs> FsClient<F> {
     }
 
     /// Rename pairs using native atomic no-replace semantics where supported.
-    pub fn renamev_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
+    pub fn vrename_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         pairs: &[(P, Q)],
         options: vfsi_core::api::RenameOptions,
@@ -685,10 +688,10 @@ impl<F: VecFs> FsClient<F> {
             })
             .collect();
         self.lock()?
-            .renamev_with_options(&requests, options)
+            .vrename_with_options_impl(&requests, options)
             .map_err(|error| match error.index() {
                 Some(index) if index < pairs.len() => {
-                    error.with_context("renamev_with_options", pairs[index].0.as_ref())
+                    error.with_context("vrename_with_options", pairs[index].0.as_ref())
                 }
                 Some(_) => {
                     VfError::transport(None, "rename backend returned an invalid error index")
@@ -699,33 +702,89 @@ impl<F: VecFs> FsClient<F> {
 
     /// Create directories in input order using vector MKDIR. Parents must
     /// already exist. This is not transactional: failure may leave a prefix.
-    pub fn mkdirv<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
-        let mut seen = HashSet::with_capacity(paths.len());
-        for (index, path) in paths.iter().enumerate() {
+    pub fn vmkdir_default<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
+        let directories: Vec<_> = paths.iter().map(|path| (path.as_ref(), 0o777)).collect();
+        self.vmkdir(&directories)
+    }
+
+    /// Create directories with per-request Unix permission bits.
+    pub fn vmkdir<P: AsRef<Path>>(&self, directories: &[(P, u32)]) -> VfResult<()> {
+        let mut seen = HashSet::with_capacity(directories.len());
+        for (index, (path, _)) in directories.iter().enumerate() {
             if !seen.insert(path.as_ref()) {
-                return Err(
-                    VfError::client(index, crate::ERR_INVAL).with_context("mkdirv", path.as_ref())
-                );
+                return Err(VfError::client(index, crate::ERR_INVAL)
+                    .with_context("vmkdir_default", path.as_ref()));
             }
         }
-        if paths.is_empty() {
+        if directories.is_empty() {
             return Ok(());
         }
-        let dirs: Vec<_> = paths
+        let dirs: Vec<_> = directories
             .iter()
-            .map(|path| crate::VfAttrs {
+            .map(|(path, mode)| crate::VfAttrs {
                 file: VfFile::from_os_path(path.as_ref()),
                 masks: AttrMask::MODE,
-                mode: 0o777,
+                mode: *mode,
                 ..Default::default()
             })
             .collect();
-        self.lock()?.mkdirv(&dirs).map_err(|error| {
-            match error.index().and_then(|index| paths.get(index)) {
-                Some(path) => error.with_context("mkdirv", path.as_ref()),
+        self.lock()?
+            .vmkdir_impl(&dirs)
+            .map_err(|error| match error.index() {
+                Some(index) if index < directories.len() => {
+                    error.with_context("vmkdir_default", directories[index].0.as_ref())
+                }
+                Some(_) => {
+                    VfError::transport(None, "mkdir backend returned an invalid error index")
+                }
                 None => error,
-            }
-        })
+            })
+    }
+
+    /// Create symbolic links in one native backend vector.
+    pub fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let targets: Vec<_> = pairs.iter().map(|(target, _)| target.as_ref()).collect();
+        let links: Vec<_> = pairs.iter().map(|(_, link)| link.as_ref()).collect();
+        self.lock()?
+            .vsymlink_impl(&targets, &links)
+            .map_err(|error| link_error(error, &links, "vsymlink"))
+    }
+
+    /// Read targets without converting Unix path bytes through UTF-8.
+    pub fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<PathBuf>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let paths: Vec<_> = paths.iter().map(AsRef::as_ref).collect();
+        let targets = self
+            .lock()?
+            .vreadlink_impl(&paths)
+            .map_err(|error| link_error(error, &paths, "vreadlink"))?;
+        if targets.len() != paths.len() {
+            return Err(VfError::transport(
+                None,
+                "readlink backend returned an invalid result count",
+            ));
+        }
+        Ok(targets
+            .into_iter()
+            .map(crate::native::bytes_to_path)
+            .collect())
+    }
+
+    /// Create hard links in one native backend vector.
+    pub fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let sources: Vec<_> = pairs.iter().map(|(source, _)| source.as_ref()).collect();
+        let links: Vec<_> = pairs.iter().map(|(_, link)| link.as_ref()).collect();
+        self.lock()?
+            .vhardlink_impl(&sources, &links)
+            .map_err(|error| link_error(error, &links, "vhardlink"))
     }
 
     /// Lazy between directories, with selective no-follow metadata and pruning.
@@ -797,8 +856,13 @@ impl<F: VecFs> FsClient<F> {
             root,
             options,
             |path, cursor, page_size, max_entries| {
-                self.lock()?
-                    .read_dir_page_with_fields(path, fields, cursor, page_size, max_entries)
+                self.lock()?.read_dir_page_with_fields_impl(
+                    path,
+                    fields,
+                    cursor,
+                    page_size,
+                    max_entries,
+                )
             },
             callback,
         )
@@ -816,7 +880,7 @@ impl<F: VecFs> FsClient<F> {
         page_size: usize,
         max_entries: usize,
     ) -> VfResult<Vec<crate::DirectoryPage>> {
-        let pages = self.lock()?.listdir_pages(
+        let pages = self.lock()?.vlistdir_pages_impl(
             paths,
             fields | AttrMask::MODE | AttrMask::SIZE,
             cursors,
@@ -957,7 +1021,7 @@ fn visit_walk_pages(
     Ok(TraversalCompletion::Complete)
 }
 
-impl<F: VecFs> FsClient<F> {
+impl<F: Backend> FsClient<F> {
     /// Recursively enumerate a bounded tree with common stat attributes.
     /// Use `walk_with_options` to select fields or change limits.
     pub fn walk(&self, root: impl AsRef<Path>) -> VfResult<Vec<DirectoryListing>> {
@@ -967,7 +1031,7 @@ impl<F: VecFs> FsClient<F> {
     /// Create `path` if missing, otherwise empty it. Errors if it exists and is
     /// not a directory (a symlink to a directory is not a directory here).
     pub fn ensure_empty_dir(&self, path: impl AsRef<Path>) -> VfResult<()> {
-        self.lock()?.ensure_empty_dir(path.as_ref())
+        self.lock()?.ensure_empty_dir_impl(path.as_ref())
     }
 
     /// Remove a directory tree with explicit error, batching, and retry policy.
@@ -981,7 +1045,7 @@ impl<F: VecFs> FsClient<F> {
             return Err(VfError::client(0, crate::ERR_NOTDIR).with_context("remove_dir_all", path));
         }
         self.lock()?
-            .rm_with_options(&[path], true, options)
+            .remove_paths_with_options_impl(&[path], true, options)
             .map_err(|error| error.with_context("remove_dir_all", path))
     }
 
@@ -992,13 +1056,16 @@ impl<F: VecFs> FsClient<F> {
         options: RemoveOptions,
     ) -> VfResult<()> {
         let path = path.as_ref();
-        if !self.removal_metadata(path, "remove_dir_contents")?.is_dir() {
+        if !self
+            .removal_metadata(path, "remove_dir_contents_impl")?
+            .is_dir()
+        {
             return Err(
                 VfError::client(0, crate::ERR_NOTDIR).with_context("remove_dir_contents", path)
             );
         }
         self.lock()?
-            .rm_contents_with_options(path, options)
+            .remove_dir_contents_path_with_options_impl(path, options)
             .map_err(|error| error.with_context("remove_dir_contents", path))
     }
 
@@ -1008,9 +1075,9 @@ impl<F: VecFs> FsClient<F> {
     pub fn open_dir_handle(&self, path: impl AsRef<Path>) -> VfResult<FsDir<F>> {
         let path = path.as_ref();
         let mut backend = self.lock()?;
-        let dir = backend.open_dir(path)?;
+        let dir = backend.open_dir_impl(path)?;
         if !matches!(dir, VfDir::Descriptor { .. }) {
-            let _ = backend.close_dir(&dir);
+            let _ = backend.close_dir_impl(&dir);
             return Err(VfError::unsupported(0).with_context("open_dir_handle", path));
         }
         Ok(FsDir {
@@ -1023,13 +1090,13 @@ impl<F: VecFs> FsClient<F> {
 
 /// Owned, handle-rooted directory. Dropping it queues backend cleanup;
 /// [`close`](Self::close) reports cleanup errors explicitly.
-pub struct FsDir<F: VecFs> {
+pub struct FsDir<F: Backend> {
     inner: Arc<SharedBackend<F>>,
     dir: Option<VfDir>,
     path: PathBuf,
 }
 
-impl<F: VecFs> fmt::Debug for FsDir<F> {
+impl<F: Backend> fmt::Debug for FsDir<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("FsDir")
@@ -1038,7 +1105,7 @@ impl<F: VecFs> fmt::Debug for FsDir<F> {
     }
 }
 
-impl<F: VecFs> FsDir<F> {
+impl<F: Backend> FsDir<F> {
     pub fn is_closed(&self) -> bool {
         self.dir.is_none()
     }
@@ -1059,7 +1126,7 @@ impl<F: VecFs> FsDir<F> {
         self.inner
             .lock()
             .map_err(|_| poisoned())?
-            .rm_dir_contents_with_options(dir, options)
+            .remove_dir_contents_handle_with_options_impl(dir, options)
             .map_err(|error| error.with_context("remove_dir_contents", &self.path))
     }
 
@@ -1072,13 +1139,16 @@ impl<F: VecFs> FsDir<F> {
         let Some(dir) = self.dir.as_ref() else {
             return Ok(());
         };
-        self.inner.lock().map_err(|_| poisoned())?.close_dir(dir)?;
+        self.inner
+            .lock()
+            .map_err(|_| poisoned())?
+            .close_dir_impl(dir)?;
         self.dir = None;
         Ok(())
     }
 }
 
-impl<F: VecFs> Drop for FsDir<F> {
+impl<F: Backend> Drop for FsDir<F> {
     fn drop(&mut self) {
         if let Some(dir) = self.dir.take() {
             self.inner.defer(
@@ -1088,7 +1158,7 @@ impl<F: VecFs> Drop for FsDir<F> {
                         unreachable!()
                     };
                     backend
-                        .close_dir(dir)
+                        .close_dir_impl(dir)
                         .map_err(|error| error.with_context("close_dir", path))
                 },
             );
@@ -1098,25 +1168,26 @@ impl<F: VecFs> Drop for FsDir<F> {
 
 impl<F: LinkFileSystem> FsClient<F> {
     pub fn symlink(&self, target: impl AsRef<Path>, link: impl AsRef<Path>) -> VfResult<()> {
-        self.lock()?.symlink_one(target.as_ref(), link.as_ref())
+        self.lock()?.symlink_impl(target.as_ref(), link.as_ref())
     }
 
     pub fn hard_link(&self, source: impl AsRef<Path>, link: impl AsRef<Path>) -> VfResult<()> {
-        self.lock()?.hard_link_one(source.as_ref(), link.as_ref())
+        self.lock()?.hard_link_impl(source.as_ref(), link.as_ref())
     }
 
     pub fn read_link(&self, path: impl AsRef<Path>) -> VfResult<PathBuf> {
-        self.lock()?.read_link_one(path.as_ref())
+        self.lock()?.read_link_impl(path.as_ref())
     }
 }
 
 impl<F: CopyFileSystem> FsClient<F> {
     pub fn copy(&self, source: impl AsRef<Path>, destination: impl AsRef<Path>) -> VfResult<()> {
-        self.lock()?.copy_one(source.as_ref(), destination.as_ref())
+        self.lock()?
+            .copy_impl(source.as_ref(), destination.as_ref())
     }
 }
 
-impl<F: VecFs> FsClient<F> {
+impl<F: Backend> FsClient<F> {
     /// Fetch selected metadata for one path without following its final symlink.
     /// Unavailable fields remain `None` on [`Metadata`].
     pub fn symlink_metadata_with_fields(
@@ -1131,7 +1202,7 @@ impl<F: VecFs> FsClient<F> {
             ..crate::VfAttrs::default()
         };
         self.lock()?
-            .lgetattrsv(std::slice::from_mut(&mut attrs))
+            .vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs))
             .map_err(|error| error.with_context("symlink_metadata", path))?;
         Ok(vfsi_core::metadata_from_attrs(attrs))
     }
@@ -1180,7 +1251,7 @@ impl<F: VecFs> FsClient<F> {
                 .entry_limit()
                 .saturating_sub(entry_count)
                 .saturating_add(1);
-            let result = self.lock()?.listdirv(
+            let result = self.lock()?.vlistdirs_impl(
                 cohort,
                 fields | AttrMask::MODE | AttrMask::SIZE,
                 requested,
@@ -1267,7 +1338,7 @@ impl<F: VecFs> FsClient<F> {
         options: crate::WalkOptions,
     ) -> VfResult<Vec<DirectoryListing>> {
         let root = root.as_ref();
-        let tree = self.lock()?.walk_with_options(
+        let tree = self.lock()?.walk_with_options_impl(
             root,
             fields | AttrMask::MODE | AttrMask::SIZE,
             options,
@@ -1306,31 +1377,33 @@ impl<F: VecFs> FsClient<F> {
 
     /// Copy whole files in request order. A successful prefix may remain if
     /// a later request fails; this operation does not provide atomicity.
-    pub fn copyv<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
         let extents: Vec<_> = pairs
             .iter()
             .map(|(from, to)| {
                 crate::ExtentPair::from_os_paths(from.as_ref(), 0, to.as_ref(), 0, None)
             })
             .collect();
-        self.lock()?.copyv(&extents).map_err(|error| {
-            error
-                .index()
-                .and_then(|index| pairs.get(index))
-                .map_or(error.clone(), |(_, to)| {
-                    error.with_context("copyv", to.as_ref())
-                })
-        })
+        self.lock()?
+            .vcopy_impl(&extents, vfsi_core::CopyOption::new())
+            .map_err(|error| {
+                error
+                    .index()
+                    .and_then(|index| pairs.get(index))
+                    .map_or(error.clone(), |(_, to)| {
+                        error.with_context("vcopy", to.as_ref())
+                    })
+            })
     }
 
     /// Remove paths in request order, optionally recursing into directories.
     /// A successful prefix may remain if a later path fails.
-    pub fn remove_paths<P: AsRef<Path>>(&self, paths: &[P], recursive: bool) -> VfResult<()> {
-        self.remove_paths_with_options(paths, recursive, RemoveOptions::default())
+    pub fn vremove_native<P: AsRef<Path>>(&self, paths: &[P], recursive: bool) -> VfResult<()> {
+        self.vremove_with_options_native(paths, recursive, RemoveOptions::default())
     }
 
     /// Remove paths with explicit error, batching, and retry policy.
-    pub fn remove_paths_with_options<P: AsRef<Path>>(
+    pub fn vremove_with_options_native<P: AsRef<Path>>(
         &self,
         paths: &[P],
         recursive: bool,
@@ -1338,20 +1411,20 @@ impl<F: VecFs> FsClient<F> {
     ) -> VfResult<()> {
         let paths: Vec<&Path> = paths.iter().map(AsRef::as_ref).collect();
         self.lock()?
-            .rm_with_options(&paths, recursive, options)
+            .remove_paths_with_options_impl(&paths, recursive, options)
             .map_err(|error| {
                 error
                     .index()
                     .and_then(|index| paths.get(index))
                     .map_or(error.clone(), |path| {
-                        error.with_context("remove_paths", path)
+                        error.with_context("vremove_native", path)
                     })
             })
     }
 
     /// Vector metadata query with explicit fields and final-symlink handling.
     /// Ancestor symlinks follow the backend's normal namespace semantics.
-    pub fn metadata_many<P: AsRef<Path>>(
+    pub fn vgetattrs_native<P: AsRef<Path>>(
         &self,
         paths: &[P],
         fields: AttrMask,
@@ -1371,9 +1444,9 @@ impl<F: VecFs> FsClient<F> {
         let result = {
             let mut backend = self.lock()?;
             if follow {
-                backend.getattrsv(&mut attrs)
+                backend.vgetattrs_impl(&mut attrs)
             } else {
-                backend.lgetattrsv(&mut attrs)
+                backend.vgetattrs_nofollow_impl(&mut attrs)
             }
         };
         result.map_err(|error| match error.index() {
@@ -1390,7 +1463,7 @@ impl<F: VecFs> FsClient<F> {
     }
 
     /// Fetch no-follow metadata for many paths using the backend vector operation.
-    pub fn symlink_metadatav(&self, paths: &[&Path]) -> VfResult<Vec<Metadata>> {
+    pub fn vsymlink_metadata_native(&self, paths: &[&Path]) -> VfResult<Vec<Metadata>> {
         let mut attrs: Vec<_> = paths
             .iter()
             .map(|path| crate::VfAttrs {
@@ -1399,14 +1472,16 @@ impl<F: VecFs> FsClient<F> {
                 ..crate::VfAttrs::default()
             })
             .collect();
-        self.lock()?.lgetattrsv(&mut attrs).map_err(|error| {
-            error
-                .index()
-                .and_then(|index| paths.get(index))
-                .map_or(error.clone(), |path| {
-                    error.with_context("symlink_metadatav", path)
-                })
-        })?;
+        self.lock()?
+            .vgetattrs_nofollow_impl(&mut attrs)
+            .map_err(|error| {
+                error
+                    .index()
+                    .and_then(|index| paths.get(index))
+                    .map_or(error.clone(), |path| {
+                        error.with_context("vsymlink_metadata_native", path)
+                    })
+            })?;
         Ok(attrs
             .into_iter()
             .map(vfsi_core::metadata_from_attrs)
@@ -1420,20 +1495,20 @@ impl<F: VectorFileSystem> FsClient<F> {
     /// Success returns one RAII handle per request. Failure returns no
     /// handles; VFSI does not promise transactional rollback of other
     /// filesystem effects such as file creation.
-    pub fn openv(&self, requests: &[OpenRequest]) -> VfResult<Vec<FsFile<F>>> {
+    pub fn vopen(&self, requests: &[OpenRequest]) -> VfResult<Vec<FsFile<F>>> {
         let mut filesystem = self.lock()?;
-        let files = filesystem.open_many(requests).map_err(|error| {
+        let files = filesystem.vopen_impl(requests).map_err(|error| {
             error
                 .index()
                 .and_then(|index| requests.get(index))
                 .map_or(error.clone(), |request| {
-                    error.with_context("openv", &request.path)
+                    error.with_context("vopen", &request.path)
                 })
         })?;
         if files.len() != requests.len() {
-            let error = wrong_result_count("openv", requests.len(), files.len());
+            let error = wrong_result_count("vopen", requests.len(), files.len());
             for file in &files {
-                let _ = filesystem.close_one(file);
+                let _ = filesystem.close_impl(file);
             }
             return Err(error);
         }
@@ -1452,7 +1527,7 @@ impl<F: VectorFileSystem> FsClient<F> {
     /// Try to close a group through one vector operation without consuming
     /// the handles. On failure, all handles remain armed: the backend may
     /// have closed a prefix, so callers must reconcile before retrying.
-    pub fn try_closev<'a>(&self, files: impl IntoIterator<Item = &'a mut FsFile<F>>) -> VfResult<()>
+    pub fn vclose<'a>(&self, files: impl IntoIterator<Item = &'a mut FsFile<F>>) -> VfResult<()>
     where
         F: 'a,
     {
@@ -1473,12 +1548,12 @@ impl<F: VectorFileSystem> FsClient<F> {
             .iter()
             .map(|file| file.raw().cloned())
             .collect::<VfResult<_>>()?;
-        self.lock()?.close_many(&descriptors).map_err(|error| {
+        self.lock()?.vclose_impl(&descriptors).map_err(|error| {
             error
                 .index()
                 .and_then(|index| files.get(index))
                 .map_or(error.clone(), |file| {
-                    error.with_context("closev", file.path())
+                    error.with_context("vclose_owned", file.path())
                 })
                 .map_index(|index| positions.get(index).copied().unwrap_or(index))
         })?;
@@ -1491,31 +1566,31 @@ impl<F: VectorFileSystem> FsClient<F> {
     /// Close a group of files through one vector operation.
     ///
     /// On failure, the handles are dropped and the backend receives
-    /// best-effort scalar cleanup attempts. Use [`try_closev`](Self::try_closev)
+    /// best-effort scalar cleanup attempts. Use [`vclose`](Self::vclose)
     /// to retain the handles after an error.
-    pub fn closev(&self, mut files: Vec<FsFile<F>>) -> VfResult<()> {
-        self.try_closev(&mut files)
+    pub fn vclose_owned(&self, mut files: Vec<FsFile<F>>) -> VfResult<()> {
+        self.vclose(&mut files)
     }
 
     /// Read an ordered vector with a 16 MiB aggregate request limit.
-    /// Use [`readv_with_limit`](Self::readv_with_limit) to tune the limit or
-    /// [`readv_into`](Self::readv_into) to provide bounded caller-owned buffers.
-    pub fn readv(&self, requests: &[FsRead<'_, F>]) -> VfResult<Vec<FsReadResult>> {
-        self.readv_with_limit(requests, self.limits.max_read_bytes)
+    /// Use [`vread_with_limit_native`](Self::vread_with_limit_native) to tune the limit or
+    /// [`vread_into_native`](Self::vread_into_native) to provide bounded caller-owned buffers.
+    pub fn vread_native(&self, requests: &[FsRead<'_, F>]) -> VfResult<Vec<FsReadResult>> {
+        self.vread_with_limit_native(requests, self.limits.max_read_bytes)
     }
 
     /// Read an ordered vector with an explicit aggregate request limit.
-    pub fn readv_with_limit(
+    pub fn vread_with_limit_native(
         &self,
         requests: &[FsRead<'_, F>],
         max_total_bytes: usize,
     ) -> VfResult<Vec<FsReadResult>> {
-        self.readv_with_limit_projected(requests, max_total_bytes, |request| request)
+        self.vread_with_limit_projected_native(requests, max_total_bytes, |request| request)
     }
 
     /// Backend adapter for opaque application requests; projection does not allocate.
     /// The projection must return the same embedded request on every invocation.
-    pub fn readv_with_limit_projected<'b, T>(
+    pub fn vread_with_limit_projected_native<'b, T>(
         &self,
         requests: &[T],
         max_total_bytes: usize,
@@ -1531,27 +1606,31 @@ impl<F: VectorFileSystem> FsClient<F> {
                 .ok_or_else(|| VfError::client(index, libc::EFBIG as u32))?;
             if requested > max_total_bytes {
                 return Err(VfError::client(index, libc::EFBIG as u32)
-                    .with_context("readv", request.file.path()));
+                    .with_context("vread_native", request.file.path()));
             }
         }
         let reads = self.read_ops(requests, &project)?;
-        let results = self.lock()?.read_many(&reads).map_err(|error| {
+        let results = self.lock()?.vread_impl(&reads).map_err(|error| {
             error
                 .index()
                 .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
-                    error.with_context("readv", request.file.path())
+                    error.with_context("vread_native", request.file.path())
                 })
         })?;
         if results.len() != requests.len() {
-            return Err(wrong_result_count("readv", requests.len(), results.len()));
+            return Err(wrong_result_count(
+                "vread_native",
+                requests.len(),
+                results.len(),
+            ));
         }
-        validate_read_results("readv", &reads, &results).map_err(|error| {
+        validate_read_results("vread_native", &reads, &results).map_err(|error| {
             error
                 .index()
                 .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
-                    error.with_context("readv", request.file.path())
+                    error.with_context("vread_native", request.file.path())
                 })
         })?;
         Ok(results.into_iter().map(read_result).collect())
@@ -1577,21 +1656,21 @@ impl<F: VectorFileSystem> FsClient<F> {
         Ok(reads)
     }
 
-    pub fn readv_into(
+    pub fn vread_into_native(
         &self,
         requests: &mut [FsReadInto<'_, F>],
     ) -> VfResult<Vec<FsReadIntoResult>> {
-        self.readv_into_with_limit(requests, self.limits.max_read_bytes)
+        self.vread_into_with_limit_native(requests, self.limits.max_read_bytes)
     }
 
     /// Read into caller storage with an explicit aggregate buffer budget.
     /// This also bounds allocation in copying fallback implementations.
-    pub fn readv_into_with_limit(
+    pub fn vread_into_with_limit_native(
         &self,
         requests: &mut [FsReadInto<'_, F>],
         max_bytes: usize,
     ) -> VfResult<Vec<FsReadIntoResult>> {
-        self.readv_into_with_limit_projected(
+        self.vread_into_with_limit_projected_native(
             requests,
             max_bytes,
             |request| request,
@@ -1602,7 +1681,7 @@ impl<F: VectorFileSystem> FsClient<F> {
     /// Project borrowed buffers without an intermediate request allocation.
     /// Both projections must identify the same embedded request, and remain
     /// stable across preflight, dispatch, and result validation.
-    pub fn readv_into_with_limit_projected<'b, T>(
+    pub fn vread_into_with_limit_projected_native<'b, T>(
         &self,
         requests: &mut [T],
         max_bytes: usize,
@@ -1634,22 +1713,22 @@ impl<F: VectorFileSystem> FsClient<F> {
                 .map(&mut project_mut)
                 .map(|request| &mut *request.buffer)
                 .collect();
-            self.lock()?.read_many_into(&reads, &mut buffers)
+            self.lock()?.vread_into_impl(&reads, &mut buffers)
         }
         .map_err(|error| {
             error
                 .index()
                 .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
-                    error.with_context("readv_into", request.file.path())
+                    error.with_context("vread_into_native", request.file.path())
                 })
         })?;
-        validate_read_into_results("readv_into", &reads, &results).map_err(|error| {
+        validate_read_into_results("vread_into_native", &reads, &results).map_err(|error| {
             error
                 .index()
                 .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
-                    error.with_context("readv_into", request.file.path())
+                    error.with_context("vread_into_native", request.file.path())
                 })
         })?;
         Ok(results
@@ -1662,13 +1741,13 @@ impl<F: VectorFileSystem> FsClient<F> {
             .collect())
     }
 
-    pub fn writev(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
-        self.writev_projected(requests, |request| request)
+    pub fn vwrite_native(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
+        self.vwrite_projected_native(requests, |request| request)
     }
 
     /// Backend adapter for opaque application requests, preserving borrowed payloads.
     /// The projection must return the same embedded request on every invocation.
-    pub fn writev_projected<'b, T>(
+    pub fn vwrite_projected_native<'b, T>(
         &self,
         requests: &[T],
         project: impl for<'r> Fn(&'r T) -> &'r FsWrite<'b, F>,
@@ -1676,7 +1755,7 @@ impl<F: VectorFileSystem> FsClient<F> {
     where
         F: 'b,
     {
-        self.writev_mapped(requests, |item| {
+        self.vwrite_mapped_native(requests, |item| {
             let request = project(item);
             FsWrite {
                 file: request.file,
@@ -1689,7 +1768,7 @@ impl<F: VectorFileSystem> FsClient<F> {
     /// Adapter constructing cheap borrowed requests without a temporary vector.
     /// The mapper must return the same file, offset, and payload on each call.
     #[doc(hidden)]
-    pub fn writev_mapped<'b, T>(
+    pub fn vwrite_mapped_native<'b, T>(
         &self,
         requests: &[T],
         project: impl Fn(&T) -> FsWrite<'b, F>,
@@ -1698,40 +1777,44 @@ impl<F: VectorFileSystem> FsClient<F> {
         F: 'b,
     {
         let writes = self.write_ops(requests, &project)?;
-        let results = self.lock()?.write_many(&writes).map_err(|error| {
+        let results = self.lock()?.vwrite_impl(&writes).map_err(|error| {
             error
                 .index()
                 .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
-                    error.with_context("writev", request.file.path())
+                    error.with_context("vwrite_native", request.file.path())
                 })
         })?;
         if results.len() != requests.len() {
-            return Err(wrong_result_count("writev", requests.len(), results.len()));
+            return Err(wrong_result_count(
+                "vwrite_native",
+                requests.len(),
+                results.len(),
+            ));
         }
-        validate_write_results("writev", &writes, &results).map_err(|error| {
+        validate_write_results("vwrite_native", &writes, &results).map_err(|error| {
             error
                 .index()
                 .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
-                    error.with_context("writev", request.file.path())
+                    error.with_context("vwrite_native", request.file.path())
                 })
         })?;
         Ok(results.into_iter().map(write_result).collect())
     }
 
     /// Write every byte in each positional request, retrying short writes in
-    /// vector waves. Like `writev`, this is not transactional: an error may
+    /// vector waves. Like `vwrite_native`, this is not transactional: an error may
     /// follow a successfully written prefix. Overlapping requests through the
     /// same path complete in input order; different paths are presumed
     /// independent (including hard-link aliases).
-    pub fn write_allv(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
-        self.write_allv_projected(requests, |request| request)
+    pub fn vwrite_all_native(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
+        self.vwrite_all_projected_native(requests, |request| request)
     }
 
     /// Complete projected requests with the same preflight and dependency waves.
     /// The projection must return the same embedded request on every invocation.
-    pub fn write_allv_projected<'b, T>(
+    pub fn vwrite_all_projected_native<'b, T>(
         &self,
         requests: &[T],
         project: impl for<'r> Fn(&'r T) -> &'r FsWrite<'b, F>,
@@ -1739,7 +1822,7 @@ impl<F: VectorFileSystem> FsClient<F> {
     where
         F: 'b,
     {
-        self.write_allv_mapped(requests, |item| {
+        self.vwrite_all_mapped_native(requests, |item| {
             let request = project(item);
             FsWrite {
                 file: request.file,
@@ -1752,7 +1835,7 @@ impl<F: VectorFileSystem> FsClient<F> {
     /// Complete mapped writes with whole-batch preflight and dependency waves.
     /// The mapper must return the same file, offset, and payload on each call.
     #[doc(hidden)]
-    pub fn write_allv_mapped<'b, T>(
+    pub fn vwrite_all_mapped_native<'b, T>(
         &self,
         requests: &[T],
         project: impl Fn(&T) -> FsWrite<'b, F>,
@@ -1769,17 +1852,17 @@ impl<F: VectorFileSystem> FsClient<F> {
             request.file.raw().map_err(|error| {
                 error
                     .with_index(index)
-                    .with_context("write_allv", request.file.path())
+                    .with_context("vwrite_all_native", request.file.path())
             })?;
             let VfOffset::At(offset) = request.offset else {
                 return Err(VfError::client(index, crate::ERR_INVAL)
-                    .with_context("write_allv", request.file.path()));
+                    .with_context("vwrite_all_native", request.file.path()));
             };
             let end = offset
                 .checked_add(request.data.len() as u64)
                 .ok_or_else(|| {
                     VfError::client(index, libc::EOVERFLOW as u32)
-                        .with_context("write_allv", request.file.path())
+                        .with_context("vwrite_all_native", request.file.path())
                 })?;
             // Non-overlapping writes commute. An overlapping later request
             // must wait until every earlier conflicting request is complete:
@@ -1813,11 +1896,11 @@ impl<F: VectorFileSystem> FsClient<F> {
                     let request = project(&requests[index]);
                     let VfOffset::At(offset) = request.offset else {
                         return Err(VfError::client(index, crate::ERR_INVAL)
-                            .with_context("write_allv", request.file.path()));
+                            .with_context("vwrite_all_native", request.file.path()));
                     };
                     let offset = offset.checked_add(totals[index] as u64).ok_or_else(|| {
                         VfError::client(index, libc::EOVERFLOW as u32)
-                            .with_context("write_allv", request.file.path())
+                            .with_context("vwrite_all_native", request.file.path())
                     })?;
                     Ok(FsWrite {
                         file: request.file,
@@ -1826,13 +1909,13 @@ impl<F: VectorFileSystem> FsClient<F> {
                     })
                 })
                 .collect::<VfResult<_>>()?;
-            let results = self.writev(&wave).map_err(|error| {
+            let results = self.vwrite_native(&wave).map_err(|error| {
                 error.map_index(|index| wave_indices.get(index).copied().unwrap_or(index))
             })?;
             for (&index, result) in wave_indices.iter().zip(results) {
                 if result.written == 0 {
                     return Err(VfError::client(index, crate::ERR_IO)
-                        .with_context("write_allv", project(&requests[index]).file.path()));
+                        .with_context("vwrite_all_native", project(&requests[index]).file.path()));
                 }
                 totals[index] += result.written;
                 stable[index] &= result.stable;
@@ -1846,7 +1929,7 @@ impl<F: VectorFileSystem> FsClient<F> {
             .map(|(index, request)| {
                 let VfOffset::At(offset) = request.offset else {
                     return Err(VfError::client(index, crate::ERR_INVAL)
-                        .with_context("write_allv", request.file.path()));
+                        .with_context("vwrite_all_native", request.file.path()));
                 };
                 Ok(FsWriteResult {
                     offset,
@@ -1890,7 +1973,7 @@ impl<F: VectorFileSystem> FsClient<F> {
     }
 }
 
-impl<F: VectorFileSystem + VecFs> FsClient<F> {
+impl<F: VectorFileSystem + Backend> FsClient<F> {
     /// Read several complete files by path using vector READ operations.
     ///
     /// The aggregate returned data is limited to 16 MiB by default. Use
@@ -1916,7 +1999,7 @@ impl<F: VectorFileSystem + VecFs> FsClient<F> {
             .collect();
         let result = self
             .lock()?
-            .read_allv_with_options(&files, options)
+            .vread_all_with_options_impl(&files, options)
             .map_err(|error| {
                 error
                     .index()
@@ -1957,15 +2040,15 @@ impl<F: VectorFileSystem + VecFs> FsClient<F> {
                 )
             })
             .collect();
-        let files = self.openv(&requests)?;
+        let files = self.vopen(&requests)?;
         let writes: Vec<_> = files
             .iter()
             .zip(entries)
             .map(|(file, (_, data))| file.write_request_at(0, data.as_ref()))
             .collect();
-        let result = self.write_allv(&writes);
+        let result = self.vwrite_all_native(&writes);
         drop(writes);
-        let close_result = self.closev(files);
+        let close_result = self.vclose_owned(files);
         result?;
         close_result
     }
@@ -2049,12 +2132,12 @@ impl<'a, F: FileSystem> OpenOptions<'a, F> {
 }
 
 impl<F: VectorFileSystem> OpenOptions<'_, F> {
-    pub fn openv<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<FsFile<F>>> {
+    pub fn vopen<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<FsFile<F>>> {
         let requests: Vec<OpenRequest> = paths
             .iter()
             .map(|path| OpenRequest::new(path.as_ref(), self.flags).mode(self.mode))
             .collect();
-        self.client.openv(&requests)
+        self.client.vopen(&requests)
     }
 }
 
@@ -2114,10 +2197,17 @@ impl<F: MetadataFileSystem> SetMetadata<'_, F> {
         self
     }
 
+    pub fn uid(&mut self, uid: u32) -> &mut Self {
+        self.update.uid = Some(uid);
+        self
+    }
+    pub fn gid(&mut self, gid: u32) -> &mut Self {
+        self.update.gid = Some(gid);
+        self
+    }
     pub fn apply(&self) -> VfResult<()> {
         self.client
-            .lock()?
-            .set_metadata_path(&self.path, self.update.clone(), self.follow)
+            .vsetattrs(&[(&self.path, self.update.clone())], self.follow)
     }
 }
 
@@ -2193,31 +2283,27 @@ impl<F: FileSystem> FsFile<F> {
         self.inner
             .lock()
             .map_err(|_| poisoned())?
-            .metadata(MetadataQuery::new(self.raw()?.clone(), attributes))
+            .metadata_impl(MetadataQuery::new(self.raw()?.clone(), attributes))
             .map(vfsi_core::metadata_from_attrs)
             .map_err(|error| error.with_context("metadata", &self.path))
     }
 
     /// Truncate or extend the open file.
-    pub fn set_len(&self, len: u64) -> VfResult<()> {
-        let mut update = SetAttributes::new(self.raw()?.clone());
-        update.size = Some(len);
-        self.inner
-            .lock()
-            .map_err(|_| poisoned())?
-            .set_attributes(update)
-            .map_err(|error| error.with_context("set_len", &self.path))
+    pub fn truncate(&self, len: u64) -> VfResult<()> {
+        self.set_metadata_update(MetadataUpdate::new().len(len))
     }
 
-    /// Change permissions on the open file.
-    pub fn set_permissions(&self, permissions: Permissions) -> VfResult<()> {
-        let mut update = SetAttributes::new(self.raw()?.clone());
-        update.mode = Some(permissions.mode());
-        self.inner
-            .lock()
-            .map_err(|_| poisoned())?
-            .set_attributes(update)
-            .map_err(|error| error.with_context("set_permissions", &self.path))
+    /// Change permissions on the open file through the shared vector engine.
+    pub fn chmod(&self, permissions: Permissions) -> VfResult<()> {
+        self.set_metadata_update(MetadataUpdate::new().permissions(permissions))
+    }
+
+    fn set_metadata_update(&self, update: MetadataUpdate) -> VfResult<()> {
+        let client = FsClient {
+            inner: Arc::clone(&self.inner),
+            limits: ResourceLimits::default(),
+        };
+        client.vsetattrs(&[(vfsi_core::MetadataTarget::File(self), update)], true)
     }
 
     pub fn write_request_at<'a>(&'a self, offset: u64, data: &'a [u8]) -> FsWrite<'a, F> {
@@ -2291,7 +2377,7 @@ impl<F: FileSystem> FsFile<F> {
             .inner
             .lock()
             .map_err(|_| poisoned())?
-            .read_one_into(&request, buffer)
+            .read_into_impl(&request, buffer)
             .map_err(|error| error.with_context("read", &self.path))?;
         validate_read_into_results(
             "read",
@@ -2311,7 +2397,7 @@ impl<F: FileSystem> FsFile<F> {
             .inner
             .lock()
             .map_err(|_| poisoned())?
-            .write_one(WriteOpRef::new(&file, offset, buffer))
+            .write_impl(WriteOpRef::new(&file, offset, buffer))
             .map_err(|error| error.with_context("write", &self.path))?;
         if result.written > buffer.len() {
             return Err(VfError::client(0, crate::ERR_IO).with_context("write", &self.path));
@@ -2347,7 +2433,7 @@ impl<F: FileSystem> FsFile<F> {
         self.inner
             .lock()
             .map_err(|_| poisoned())?
-            .close_one(file)
+            .close_impl(file)
             .map_err(|error| error.with_context("close", &self.path))?;
         self.file = None;
         Ok(())
@@ -2365,7 +2451,7 @@ impl<F: FileSystem> FsFile<F> {
         self.inner
             .lock()
             .map_err(|_| poisoned())?
-            .seek_one(self.raw()?, position)
+            .seek_impl(self.raw()?, position)
             .map_err(|error| error.with_context("seek", &self.path))
     }
 }
@@ -2392,14 +2478,14 @@ impl<F: FileSystem> Seek for FsFile<F> {
     }
 }
 
-/// Typed read request for [`FsClient::readv`].
+/// Typed read request for [`FsClient::vread_native`].
 pub struct FsRead<'a, F: FileSystem> {
     file: &'a FsFile<F>,
     offset: VfOffset,
     length: usize,
 }
 
-/// Typed borrowed write request for [`FsClient::writev`].
+/// Typed borrowed write request for [`FsClient::vwrite_native`].
 pub struct FsWrite<'a, F: FileSystem> {
     file: &'a FsFile<F>,
     offset: VfOffset,
@@ -2428,6 +2514,128 @@ impl<F: FileSystem> Drop for FsFile<F> {
                 },
             );
         }
+    }
+}
+
+impl<F: FileSystem> FsClient<F> {
+    /// Query filesystems using one native vector of paths and retained handles.
+    pub fn vstatfs<P: vfsi_core::MetadataOperand<FsFile<F>>>(
+        &self,
+        targets: &[P],
+    ) -> VfResult<Vec<crate::FilesystemStats>> {
+        use vfsi_core::MetadataTarget;
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut files = Vec::with_capacity(targets.len());
+        let mut paths = Vec::with_capacity(targets.len());
+        for (index, target) in targets.iter().enumerate() {
+            let (raw, path) = match target.metadata_target() {
+                MetadataTarget::Path(path) => (VfFile::from_os_path(path), path),
+                MetadataTarget::File(file) => {
+                    if !Arc::ptr_eq(&self.inner, &file.inner) {
+                        return Err(VfError::client(index, crate::ERR_INVAL)
+                            .with_context("vstatfs", &file.path));
+                    }
+                    (
+                        file.raw()
+                            .map_err(|e| e.with_index(index).with_context("vstatfs", &file.path))?
+                            .clone(),
+                        file.path.as_path(),
+                    )
+                }
+            };
+            files.push(raw);
+            paths.push(path);
+        }
+        let results = self
+            .lock()?
+            .vstatfs_impl(&files)
+            .map_err(|error| match error.index() {
+                Some(index) if index < paths.len() => error.with_context("vstatfs", paths[index]),
+                Some(_) => {
+                    VfError::transport(None, "statfs backend returned an invalid error index")
+                }
+                None => error,
+            })?;
+        if results.len() != targets.len() {
+            return Err(VfError::transport(
+                None,
+                "statfs backend returned an invalid result count",
+            ));
+        }
+        Ok(results)
+    }
+    /// Update paths and open objects with one native attribute vector.
+    pub fn vsetattrs<P: vfsi_core::MetadataOperand<FsFile<F>>>(
+        &self,
+        updates: &[(P, MetadataUpdate)],
+        follow_symlinks: bool,
+    ) -> VfResult<()> {
+        use vfsi_core::MetadataTarget;
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mut paths = Vec::with_capacity(updates.len());
+        let mut attrs = Vec::with_capacity(updates.len());
+        for (index, (target, update)) in updates.iter().enumerate() {
+            let (raw, path) = match target.metadata_target() {
+                MetadataTarget::Path(path) => (VfFile::from_os_path(path), path),
+                MetadataTarget::File(file) => {
+                    if !Arc::ptr_eq(&self.inner, &file.inner) {
+                        return Err(VfError::client(index, crate::ERR_INVAL)
+                            .with_context("vsetattrs", &file.path));
+                    }
+                    (
+                        file.raw()
+                            .map_err(|e| e.with_index(index).with_context("vsetattrs", &file.path))?
+                            .clone(),
+                        file.path.as_path(),
+                    )
+                }
+            };
+            if update.uid == Some(u32::MAX) || update.gid == Some(u32::MAX) {
+                return Err(
+                    VfError::client(index, crate::ERR_INVAL).with_context("vsetattrs", path)
+                );
+            }
+            paths.push(path);
+            let mut attributes = crate::SetAttributes::new(raw);
+            attributes.mode = update.permissions.map(crate::Permissions::mode);
+            attributes.size = update.len;
+            attributes.uid = update.uid;
+            attributes.gid = update.gid;
+            attributes.atime = update
+                .accessed
+                .map(crate::native::system_time_parts)
+                .transpose()
+                .map_err(|e| e.with_index(index).with_context("vsetattrs", path))?;
+            attributes.mtime = update
+                .modified
+                .map(crate::native::system_time_parts)
+                .transpose()
+                .map_err(|e| e.with_index(index).with_context("vsetattrs", path))?;
+            attrs.push(attributes);
+        }
+        self.lock()?
+            .vsetattrs_impl(attrs, follow_symlinks)
+            .map_err(|error| match error.index() {
+                Some(index) if index < updates.len() => {
+                    error.with_context("vsetattrs", paths[index])
+                }
+                Some(_) => {
+                    VfError::transport(None, "setattrs backend returned an invalid error index")
+                }
+                None => error,
+            })
+    }
+}
+
+fn link_error(error: VfError, paths: &[&Path], operation: &'static str) -> VfError {
+    match error.index() {
+        Some(index) if index < paths.len() => error.with_context(operation, paths[index]),
+        Some(_) => VfError::transport(None, "link backend returned an invalid error index"),
+        None => error,
     }
 }
 

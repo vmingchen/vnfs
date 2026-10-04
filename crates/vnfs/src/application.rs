@@ -57,7 +57,7 @@ macro_rules! file_methods {
             <$file>::sync_all(self)
         }
         fn set_permissions(&self, permissions: crate::Permissions) -> Result<()> {
-            <$file>::set_permissions(self, permissions)
+            <$file>::chmod(self, permissions)
         }
         fn try_close(&mut self) -> Result<()> {
             <$file>::try_close(self)
@@ -86,50 +86,50 @@ macro_rules! client_methods {
     ($client:ty, $receiver:path) => {
         client_methods!($client, $receiver, <$client>::vread);
     };
-    ($client:ty, $receiver:path, $readv:expr) => {
-        client_methods!($client, $receiver, $readv, $receiver);
+    ($client:ty, $receiver:path, $vread_native:expr) => {
+        client_methods!($client, $receiver, $vread_native, $receiver);
     };
-    ($client:ty, $receiver:path, $readv:expr, $read_receiver:path) => {
+    ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path) => {
         client_methods!(
             $client,
             $receiver,
-            $readv,
+            $vread_native,
             $read_receiver,
             <$client>::write_partial_native,
             <$client>::write_complete
         );
     };
-    ($client:ty, $receiver:path, $readv:expr, $read_receiver:path, $writev:expr, $write_allv:expr) => {
+    ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path, $vwrite_native:expr, $vwrite_all_native:expr) => {
         client_methods!(
             $client,
             $receiver,
-            $readv,
+            $vread_native,
             $read_receiver,
-            $writev,
-            $write_allv,
+            $vwrite_native,
+            $vwrite_all_native,
             <$client>::vgetattrs
         );
     };
-    ($client:ty, $receiver:path, $readv:expr, $read_receiver:path, $writev:expr, $write_allv:expr, $metadata:expr) => {
+    ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path, $vwrite_native:expr, $vwrite_all_native:expr, $metadata:expr) => {
         client_methods!(
             $client,
             $receiver,
-            $readv,
+            $vread_native,
             $read_receiver,
-            $writev,
-            $write_allv,
+            $vwrite_native,
+            $vwrite_all_native,
             $metadata,
             $receiver
         );
     };
-    ($client:ty, $receiver:path, $readv:expr, $read_receiver:path, $writev:expr, $write_allv:expr, $metadata:expr, $write_receiver:path) => {
+    ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path, $vwrite_native:expr, $vwrite_all_native:expr, $metadata:expr, $write_receiver:path) => {
         client_methods!(
             $client,
             $receiver,
-            $readv,
+            $vread_native,
             $read_receiver,
-            $writev,
-            $write_allv,
+            $vwrite_native,
+            $vwrite_all_native,
             $metadata,
             $write_receiver,
             vrename,
@@ -140,7 +140,7 @@ macro_rules! client_methods {
         );
     };
     // Application clients and backend clients use different native method names.
-    ($client:ty, $receiver:path, $readv:expr, $read_receiver:path, $writev:expr, $write_allv:expr, $metadata:expr, $write_receiver:path, $rename:ident, $mkdir:ident, $copy:ident, $close:ident, $open_batch:ident) => {
+    ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path, $vwrite_native:expr, $vwrite_all_native:expr, $metadata:expr, $write_receiver:path, $rename:ident, $mkdir:ident, $copy:ident, $close:ident, $open_batch:ident) => {
         fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
             <$client>::$rename($receiver(self), pairs)
         }
@@ -216,6 +216,31 @@ macro_rules! client_methods {
             }
             Ok(output)
         }
+        fn capabilities(&self) -> Result<vfsi_core::Capabilities> {
+            <$client>::capabilities($receiver(self))
+        }
+        fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+            <$client>::vsymlink($receiver(self), pairs)
+        }
+        fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<std::path::PathBuf>> {
+            <$client>::vreadlink($receiver(self), paths)
+        }
+        fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+            <$client>::vhardlink($receiver(self), pairs)
+        }
+        fn vstatfs<P: vfsi_core::MetadataOperand<Self::File>>(
+            &self,
+            targets: &[P],
+        ) -> Result<Vec<vfsi_core::FilesystemStats>> {
+            <$client>::vstatfs($receiver(self), targets)
+        }
+        fn vsetattrs<P: vfsi_core::MetadataOperand<Self::File>>(
+            &self,
+            updates: &[(P, vfsi_core::MetadataUpdate)],
+            follow_symlinks: bool,
+        ) -> Result<()> {
+            <$client>::vsetattrs($receiver(self), updates, follow_symlinks)
+        }
         fn vgetattrs<P: AsRef<Path>>(
             &self,
             paths: &[P],
@@ -240,7 +265,7 @@ macro_rules! client_methods {
             ops: impl IntoIterator<Item = crate::ReadOp<'a, Self::File>>,
             options: crate::ReadOptions,
         ) -> Result<Vec<crate::ReadResult>> {
-            ($readv)($read_receiver(self), ops, options)
+            ($vread_native)($read_receiver(self), ops, options)
         }
         fn vwrite<'a>(
             &self,
@@ -248,16 +273,16 @@ macro_rules! client_methods {
             options: crate::WriteOptions,
         ) -> Result<Vec<WriteResult>> {
             let result = if options.writes_all() {
-                ($write_allv)($write_receiver(self), requests)
+                ($vwrite_all_native)($write_receiver(self), requests)
             } else {
-                ($writev)($write_receiver(self), requests)
+                ($vwrite_native)($write_receiver(self), requests)
             };
             result.map_err(crate::write::public_write_error)
         }
         fn vclose(&self, files: &mut [Self::File]) -> Result<()> {
             <$client>::$close($receiver(self), files)
         }
-        fn vmkdir<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {
+        fn vmkdir<P: AsRef<Path>>(&self, paths: &[(P, u32)]) -> Result<()> {
             <$client>::$mkdir($receiver(self), paths)
         }
 
@@ -272,7 +297,7 @@ macro_rules! client_methods {
         ) -> Result<()> {
             match mode {
                 crate::RemoveMode::Entry | crate::RemoveMode::Tree => {
-                    <$client>::remove_paths_with_options(
+                    <$client>::vremove_with_options_native(
                         $receiver(self),
                         paths,
                         mode == crate::RemoveMode::Tree,
@@ -1014,7 +1039,7 @@ mod extension_tests {
             calls: Cell::new(0),
             shape: Cell::new(0),
         };
-        fs.vmkdir(&["/a", "/b"]).unwrap();
+        fs.vmkdir(&[("/a", 0o777), ("/b", 0o777)]).unwrap();
         fs.write_files(&[("/a/f", b"x"), ("/b/f", b"y")]).unwrap();
         let options = crate::WalkOptions::new().max_entries(2);
         let trees = fs
@@ -1071,7 +1096,7 @@ mod extension_tests {
             calls: Cell::new(0),
             shape: Cell::new(0),
         };
-        fs.vmkdir(&["/a", "/b"]).unwrap();
+        fs.vmkdir(&[("/a", 0o777), ("/b", 0o777)]).unwrap();
         let options = crate::WalkOptions::new().max_entries(0).max_path_bytes(4);
         assert_eq!(
             fs.visit_entries_with_options(&["/a", "/b"], options.into(), |_, _| panic!(

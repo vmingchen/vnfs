@@ -1,4 +1,4 @@
-//! SMB2/3 [`VecFs`] backend.
+//! SMB2/3 [`Backend`] backend.
 //!
 //! The backend talks to Samba (or any modern SMB server) with the pure-Rust
 //! `smb2` crate. Path-based stat, rename, delete, and small whole-file I/O use
@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "test-faults")]
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
+use vfsi_sync::*;
 
 use futures_util::future::join_all;
 use smb2::client::{ClientConfig, CompoundOp, Connection, SmbClient, Tree};
@@ -52,8 +53,8 @@ use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
 use crate::path::{normalize_bytes, path_bytes, path_from_bytes};
 use crate::vecfs::{
-    Adb, AttrMask, ERR_ACCES, ERR_EBADF, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT, ERR_NOTDIR,
-    ExtentPair, Fd, ReadOp, ReadResult, SeekFrom, VF_CAP_SERVER_COPY, VecFs, VfAttrs, VfError,
+    Adb, AttrMask, CopyOption, ERR_ACCES, ERR_EBADF, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT,
+    ERR_NOTDIR, ExtentPair, Fd, ReadOp, ReadResult, SeekFrom, VF_CAP_SERVER_COPY, VfAttrs, VfError,
     VfFile, VfOffset, VfPathBase, VfRes, VfResult, VfType, WriteOp, WriteOpRef, WriteResult,
 };
 
@@ -1299,12 +1300,8 @@ impl SmbVecFs {
     }
 }
 
-impl VecFs for SmbVecFs {
-    fn smb_dialect(&self) -> Option<u16> {
-        Some(self.dialect() as u16)
-    }
-
-    fn capabilities(&self) -> u64 {
+impl FileSystem for SmbVecFs {
+    fn capability_bits(&self) -> u64 {
         if self.server_copy_enabled {
             VF_CAP_SERVER_COPY
         } else {
@@ -1321,7 +1318,7 @@ impl VecFs for SmbVecFs {
         path_from_bytes(&normalize_bytes(path_bytes(&root_relative)))
     }
 
-    fn open_by_path(
+    fn open_path_impl(
         &mut self,
         base: VfPathBase,
         pathname: &Path,
@@ -1357,7 +1354,104 @@ impl VecFs for SmbVecFs {
         }
     }
 
-    fn open_many(
+    fn close_impl(&mut self, file: &VfFile) -> VfResult<()> {
+        let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        let open = self
+            .open_files
+            .remove(&fd)
+            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
+        let file_id = open.file_id;
+        #[cfg(feature = "test-faults")]
+        if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })
+        {
+            self.deferred_closes.push(file_id);
+            return Err(error);
+        }
+        match self.raw_close(file_id) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.deferred_closes.push(file_id);
+                Err(error)
+            }
+        }
+    }
+
+    fn sync_data(&mut self, file: &VfFile) -> VfResult<()> {
+        let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        let file_id = self
+            .open_files
+            .get(&fd)
+            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?
+            .file_id;
+        self.raw_flush(file_id)
+    }
+
+    fn chdir(&mut self, path: &Path) -> VfResult<()> {
+        let attrs = self.stat_impl(path)?;
+        if attrs.ftype != VfType::Directory {
+            return Err(VfError::failure(0, ERR_NOTDIR));
+        }
+        self.cwd = self.abs_path(path);
+        Ok(())
+    }
+
+    fn getcwd(&self) -> PathBuf {
+        Path::new("/").join(&self.cwd)
+    }
+
+    fn seek_raw_impl(&mut self, file: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
+        let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        let open = self
+            .open_files
+            .get(&fd)
+            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
+        let base = match whence {
+            SeekFrom::Set => 0i128,
+            SeekFrom::Cur => open.cur_offset as i128,
+            SeekFrom::End => self.query_size(open.file_id)? as i128,
+            _ => return Err(VfError::failure(0, ERR_INVAL)),
+        };
+        let new = base + offset as i128;
+        if !(0..=i64::MAX as i128).contains(&new) {
+            return Err(VfError::failure(0, ERR_INVAL));
+        }
+        self.open_files
+            .get_mut(&fd)
+            .expect("descriptor validated")
+            .cur_offset = new as u64;
+        Ok(new as i64)
+    }
+    fn read_file_impl(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
+        vfsi_sync::backend_helpers::native_read_file_impl_default(self, file, max_bytes)
+    }
+    fn open_impl(&mut self, request: &OpenRequest) -> VfResult<VfFile> {
+        vfsi_sync::backend_helpers::native_open_impl_default(self, request)
+    }
+    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
+        vfsi_sync::backend_helpers::native_read_impl_default(self, request)
+    }
+    fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
+        vfsi_sync::backend_helpers::native_read_into_impl_default(self, request, buffer)
+    }
+    fn write_impl(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult> {
+        vfsi_sync::backend_helpers::native_write_impl_default(self, request)
+    }
+    fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {
+        vfsi_sync::backend_helpers::native_seek_impl_default(self, file, position)
+    }
+    fn metadata_impl(&mut self, query: MetadataQuery) -> VfResult<VfAttrs> {
+        vfsi_sync::backend_helpers::native_metadata_impl_default(self, query)
+    }
+    fn set_attributes_impl(&mut self, update: SetAttributes) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_set_attributes_impl_default(self, update)
+    }
+    fn vsetattrs_impl(&mut self, updates: Vec<SetAttributes>, follow: bool) -> VfResult<()> {
+        vfsi_sync::backend_helpers::vsetattrs_typed_default(self, updates, follow)
+    }
+}
+
+impl VectorFileSystem for SmbVecFs {
+    fn vopen_outcomes_impl(
         &mut self,
         paths: &[&Path],
         flags: &[i32],
@@ -1371,7 +1465,7 @@ impl VecFs for SmbVecFs {
         if paths.len() <= 1 || self.tree.is_dfs || !paths_are_independent(&resolved) {
             let mut results = Vec::with_capacity(paths.len());
             for ((path, flags), mode) in paths.iter().zip(flags).zip(modes) {
-                match self.open(path, *flags, *mode) {
+                match self.open_raw_impl(path, *flags, *mode) {
                     Ok(file) => results.push(Ok(file)),
                     Err(error) => {
                         results.push(Err(error));
@@ -1464,7 +1558,7 @@ impl VecFs for SmbVecFs {
             let file = VfFile::from_fd(fd);
             #[cfg(feature = "test-faults")]
             if let Err(error) = self.inject_open_fault(OpenFaultPoint::AfterRegister { index }) {
-                let _ = self.close(&file);
+                let _ = self.close_impl(&file);
                 output.push(Err(error));
                 continue;
             }
@@ -1479,39 +1573,7 @@ impl VecFs for SmbVecFs {
         Ok(())
     }
 
-    fn close(&mut self, file: &VfFile) -> VfResult<()> {
-        let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
-        let open = self
-            .open_files
-            .remove(&fd)
-            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-        let file_id = open.file_id;
-        #[cfg(feature = "test-faults")]
-        if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeCloseDispatch { index: 0 })
-        {
-            self.deferred_closes.push(file_id);
-            return Err(error);
-        }
-        match self.raw_close(file_id) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                self.deferred_closes.push(file_id);
-                Err(error)
-            }
-        }
-    }
-
-    fn sync_data(&mut self, file: &VfFile) -> VfResult<()> {
-        let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
-        let file_id = self
-            .open_files
-            .get(&fd)
-            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?
-            .file_id;
-        self.raw_flush(file_id)
-    }
-
-    fn closev(&mut self, files: &[VfFile]) -> VfRes {
+    fn vclose_impl(&mut self, files: &[VfFile]) -> VfRes {
         let mut file_ids = Vec::with_capacity(files.len());
         let mut fds = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
@@ -1558,20 +1620,7 @@ impl VecFs for SmbVecFs {
         first_error.map_or(Ok(()), Err)
     }
 
-    fn chdir(&mut self, path: &Path) -> VfResult<()> {
-        let attrs = self.stat(path)?;
-        if attrs.ftype != VfType::Directory {
-            return Err(VfError::failure(0, ERR_NOTDIR));
-        }
-        self.cwd = self.abs_path(path);
-        Ok(())
-    }
-
-    fn getcwd(&self) -> PathBuf {
-        Path::new("/").join(&self.cwd)
-    }
-
-    fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         let max_read = self
             .client
             .params()
@@ -1645,12 +1694,12 @@ impl VecFs for SmbVecFs {
         Ok(output)
     }
 
-    fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_owned_impl(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
         let borrowed: Vec<_> = writes.iter().map(WriteOpRef::from).collect();
-        self.writev_borrowed(&borrowed)
+        self.vwrite_impl(&borrowed)
     }
 
-    fn writev_borrowed(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_impl(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
         #[cfg(feature = "test-faults")]
         {
             self.last_writev_was_concurrent = false;
@@ -1743,31 +1792,10 @@ impl VecFs for SmbVecFs {
         }
         Ok(output)
     }
+}
 
-    fn fseek(&mut self, file: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
-        let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
-        let open = self
-            .open_files
-            .get(&fd)
-            .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-        let base = match whence {
-            SeekFrom::Set => 0i128,
-            SeekFrom::Cur => open.cur_offset as i128,
-            SeekFrom::End => self.query_size(open.file_id)? as i128,
-            _ => return Err(VfError::failure(0, ERR_INVAL)),
-        };
-        let new = base + offset as i128;
-        if !(0..=i64::MAX as i128).contains(&new) {
-            return Err(VfError::failure(0, ERR_INVAL));
-        }
-        self.open_files
-            .get_mut(&fd)
-            .expect("descriptor validated")
-            .cur_offset = new as u64;
-        Ok(new as i64)
-    }
-
-    fn getattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
+impl MetadataFileSystem for SmbVecFs {
+    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
         if attrs.len() > 1
             && !self.tree.is_dfs
             && attrs.iter().all(|attrs| !attrs.file.is_descriptor())
@@ -1824,17 +1852,17 @@ impl VecFs for SmbVecFs {
         Ok(())
     }
 
-    fn lgetattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
+    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
         if attrs.is_empty() {
             Ok(())
         } else {
             // Standard SMB metadata follows reparse points. Reporting it as
-            // lstat data would silently violate VecFs's no-follow contract.
+            // lstat data would silently violate Backend's no-follow contract.
             Err(VfError::unsupported(0))
         }
     }
 
-    fn exists(&mut self, path: &Path) -> VfResult<bool> {
+    fn exists_impl(&mut self, path: &Path) -> VfResult<bool> {
         let path = self.local_path_string(path)?;
         match self.client_stat(&path) {
             Ok(_) => Ok(true),
@@ -1843,7 +1871,7 @@ impl VecFs for SmbVecFs {
         }
     }
 
-    fn file_type(&mut self, path: &Path) -> VfResult<VfType> {
+    fn file_type_impl(&mut self, path: &Path) -> VfResult<VfType> {
         let path = self.local_path_string(path)?;
         let info = self.client_stat(&path)?;
         Ok(if info.is_directory {
@@ -1853,7 +1881,7 @@ impl VecFs for SmbVecFs {
         })
     }
 
-    fn setattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
+    fn vsetattrs_raw_impl(&mut self, attrs: &[VfAttrs]) -> VfRes {
         for (index, attrs) in attrs.iter().enumerate() {
             let settable = AttrMask::SIZE | AttrMask::ATIME | AttrMask::MTIME;
             if !attrs.masks.difference(settable).is_empty() {
@@ -1909,14 +1937,29 @@ impl VecFs for SmbVecFs {
         Ok(())
     }
 
-    fn lsetattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
+    fn vsetattrs_raw_nofollow_impl(&mut self, attrs: &[VfAttrs]) -> VfRes {
         match attrs.iter().position(|attrs| !attrs.masks.is_empty()) {
             Some(index) => Err(VfError::unsupported(index)),
             None => Ok(()),
         }
     }
+    fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Metadata> {
+        vfsi_sync::backend_helpers::native_metadata_path_impl_default(self, path, follow)
+    }
+    fn set_metadata_path_impl(
+        &mut self,
+        path: &std::path::Path,
+        update: MetadataUpdate,
+        follow: bool,
+    ) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_set_metadata_path_impl_default(
+            self, path, update, follow,
+        )
+    }
+}
 
-    fn listdir(
+impl DirectoryFileSystem for SmbVecFs {
+    fn listdir_impl(
         &mut self,
         dir: &Path,
         masks: AttrMask,
@@ -1927,8 +1970,54 @@ impl VecFs for SmbVecFs {
         self.listdir_rec(dir, masks, max_count, recursive, &mut output)?;
         Ok(output)
     }
+    fn create_dir_impl(&mut self, path: &std::path::Path, mode: u32) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_create_dir_impl_default(self, path, mode)
+    }
+    fn read_dir_impl(
+        &mut self,
+        path: &std::path::Path,
+        options: ReadDirOptions,
+    ) -> VfResult<Vec<DirEntry>> {
+        vfsi_sync::backend_helpers::native_read_dir_impl_default(self, path, options)
+    }
+    fn read_dir_page_impl(
+        &mut self,
+        path: &std::path::Path,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
+        vfsi_sync::backend_helpers::native_read_dir_page_impl_default(
+            self,
+            path,
+            cursor,
+            page_size,
+            max_entries,
+        )
+    }
+    fn read_dir_page_with_fields_impl(
+        &mut self,
+        path: &std::path::Path,
+        fields: AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
+        vfsi_sync::backend_helpers::native_read_dir_page_with_fields_impl_default(
+            self,
+            path,
+            fields,
+            cursor,
+            page_size,
+            max_entries,
+        )
+    }
+}
 
-    fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
+impl TraversalFileSystem for SmbVecFs {}
+
+impl NamespaceFileSystem for SmbVecFs {
+    fn vrename_impl(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
         let mut prepared = Vec::with_capacity(pairs.len());
         let mut dependency_paths = Vec::with_capacity(pairs.len() * 2);
         for (index, (source, destination)) in pairs.iter().enumerate() {
@@ -1972,7 +2061,7 @@ impl VecFs for SmbVecFs {
         Ok(())
     }
 
-    fn removev(&mut self, files: &[VfFile]) -> VfRes {
+    fn vremove_impl(&mut self, files: &[VfFile]) -> VfRes {
         let mut prepared = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
             let path = self.file_path(file).map_err(|e| e.with_index(index))?;
@@ -2033,7 +2122,7 @@ impl VecFs for SmbVecFs {
         Ok(())
     }
 
-    fn mkdirv(&mut self, dirs: &[VfAttrs]) -> VfRes {
+    fn vmkdir_impl(&mut self, dirs: &[VfAttrs]) -> VfRes {
         let mut prepared = Vec::with_capacity(dirs.len());
         for (index, attrs) in dirs.iter().enumerate() {
             let path = self
@@ -2068,8 +2157,19 @@ impl VecFs for SmbVecFs {
         }
         Ok(())
     }
+    fn remove_impl(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_remove_impl_default(self, path, recursive)
+    }
+    fn remove_dir_contents_impl(&mut self, path: &std::path::Path) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_remove_dir_contents_impl_default(self, path)
+    }
+    fn rename_impl(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_rename_impl_default(self, from, to)
+    }
+}
 
-    fn symlinkv(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
+impl LinkFileSystem for SmbVecFs {
+    fn vsymlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         if oldpaths.len() != newpaths.len() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
@@ -2080,7 +2180,7 @@ impl VecFs for SmbVecFs {
         }
     }
 
-    fn readlinkv(&mut self, paths: &[&Path]) -> VfResult<Vec<Vec<u8>>> {
+    fn vreadlink_impl(&mut self, paths: &[&Path]) -> VfResult<Vec<Vec<u8>>> {
         if paths.is_empty() {
             Ok(Vec::new())
         } else {
@@ -2088,7 +2188,7 @@ impl VecFs for SmbVecFs {
         }
     }
 
-    fn hardlinkv(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
+    fn vhardlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         if oldpaths.len() != newpaths.len() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
@@ -2098,8 +2198,19 @@ impl VecFs for SmbVecFs {
             Err(VfError::unsupported(0))
         }
     }
+    fn symlink_impl(&mut self, target: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_symlink_impl_default(self, target, link)
+    }
+    fn hard_link_impl(&mut self, source: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_hard_link_impl_default(self, source, link)
+    }
+    fn read_link_impl(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf> {
+        vfsi_sync::backend_helpers::native_read_link_impl_default(self, path)
+    }
+}
 
-    fn dupv(&mut self, pairs: &[ExtentPair]) -> VfRes {
+impl CopyFileSystem for SmbVecFs {
+    fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> VfRes {
         for (index, pair) in pairs.iter().enumerate() {
             self.copy_client_side(pair)
                 .map_err(|e| e.with_index(index))?;
@@ -2107,13 +2218,15 @@ impl VecFs for SmbVecFs {
         Ok(())
     }
 
-    fn lcopyv(&mut self, pairs: &[ExtentPair]) -> VfRes {
-        self.dupv(pairs)
-    }
-
-    fn copyv(&mut self, pairs: &[ExtentPair]) -> VfRes {
+    fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOption) -> VfRes {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        if !options.follows_source_symlinks() {
+            return Err(VfError::unsupported(0));
+        }
         if !self.server_copy_enabled {
-            return self.dupv(pairs);
+            return self.vcopy_data_impl(pairs);
         }
         for (index, pair) in pairs.iter().enumerate() {
             let source = self
@@ -2150,7 +2263,7 @@ impl VecFs for SmbVecFs {
                 Err(error) if error.kind() == SmbErrorKind::Unsupported => {
                     self.server_copy_enabled = false;
                     return self
-                        .dupv(&pairs[index..])
+                        .vcopy_data_impl(&pairs[index..])
                         .map_err(|e| e.map_index(|relative| index + relative));
                 }
                 Err(error) => return Err(smb_error(error, index)),
@@ -2159,7 +2272,63 @@ impl VecFs for SmbVecFs {
         Ok(())
     }
 
-    fn write_adb(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
+    fn copy_tree_impl(
+        &mut self,
+        source: &Path,
+        destination: &Path,
+        _symlinks: bool,
+        use_server_side_copy: bool,
+    ) -> VfRes {
+        if !self.exists_impl(destination)? {
+            self.ensure_dir_impl(destination, 0o755)?;
+        }
+        let masks = AttrMask::MODE | AttrMask::SIZE;
+        let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
+        while let Some((source_dir, destination_dir)) = pending.pop() {
+            let entries = self.listdir_impl(&source_dir, masks, 0, false)?;
+            let mut directories = Vec::new();
+            for entry in entries {
+                let name = entry
+                    .file
+                    .path()
+                    .and_then(Path::file_name)
+                    .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+                let source_child = source_dir.join(name);
+                let destination_child = destination_dir.join(name);
+                if entry.ftype == VfType::Directory {
+                    self.ensure_dir_impl(&destination_child, 0o755)?;
+                    directories.push((source_child, destination_child));
+                } else {
+                    let pair =
+                        ExtentPair::from_os_paths(&source_child, 0, &destination_child, 0, None);
+                    if use_server_side_copy {
+                        self.vcopy_impl(&[pair], vfsi_core::CopyOption::new())?;
+                    } else {
+                        self.vcopy_data_impl(&[pair])?;
+                    }
+                }
+            }
+            for directory in directories.into_iter().rev() {
+                pending.push(directory);
+            }
+        }
+        Ok(())
+    }
+    fn copy_impl(
+        &mut self,
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_copy_impl_default(self, source, destination)
+    }
+}
+
+impl ReadWorkflowFileSystem for SmbVecFs {}
+
+impl RemovalFileSystem for SmbVecFs {}
+
+impl ApplicationDataFileSystem for SmbVecFs {
+    fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
         for (index, pattern) in patterns.iter().enumerate() {
             let mut layout = Vec::with_capacity(pattern.adb_block_count);
@@ -2193,69 +2362,26 @@ impl VecFs for SmbVecFs {
                 layout.push((block_number, number_offset, pattern_offset));
             }
             let file = self
-                .open(&pattern.path, libc::O_WRONLY | libc::O_CREAT, 0o666)
+                .open_raw_impl(&pattern.path, libc::O_WRONLY | libc::O_CREAT, 0o666)
                 .map_err(|e| e.with_index(index))?;
             let result = (|| {
                 for (block_number, number_offset, pattern_offset) in layout {
                     if let Some(offset) = number_offset {
-                        self.write(&file, offset, &block_number.to_be_bytes())?;
+                        self.write_raw_impl(&file, offset, &block_number.to_be_bytes())?;
                     }
                     if let Some(offset) = pattern_offset
                         && !pattern.adb_pattern_data.is_empty()
                     {
-                        self.write(&file, offset, &pattern.adb_pattern_data)?;
+                        self.write_raw_impl(&file, offset, &pattern.adb_pattern_data)?;
                     }
                 }
                 Ok::<_, VfError>(pattern.adb_block_count)
             })();
-            let close = self.close(&file);
+            let close = self.close_impl(&file);
             counts.push(result.map_err(|e| e.with_index(index))?);
             close.map_err(|e| e.with_index(index))?;
         }
         Ok(counts)
-    }
-
-    fn cp_recursive(
-        &mut self,
-        source: &Path,
-        destination: &Path,
-        _symlinks: bool,
-        use_server_side_copy: bool,
-    ) -> VfRes {
-        if !self.exists(destination)? {
-            self.ensure_dir(destination, 0o755)?;
-        }
-        let masks = AttrMask::MODE | AttrMask::SIZE;
-        let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
-        while let Some((source_dir, destination_dir)) = pending.pop() {
-            let entries = self.listdir(&source_dir, masks, 0, false)?;
-            let mut directories = Vec::new();
-            for entry in entries {
-                let name = entry
-                    .file
-                    .path()
-                    .and_then(Path::file_name)
-                    .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
-                let source_child = source_dir.join(name);
-                let destination_child = destination_dir.join(name);
-                if entry.ftype == VfType::Directory {
-                    self.ensure_dir(&destination_child, 0o755)?;
-                    directories.push((source_child, destination_child));
-                } else {
-                    let pair =
-                        ExtentPair::from_os_paths(&source_child, 0, &destination_child, 0, None);
-                    if use_server_side_copy {
-                        self.copyv(&[pair])?;
-                    } else {
-                        self.dupv(&[pair])?;
-                    }
-                }
-            }
-            for directory in directories.into_iter().rev() {
-                pending.push(directory);
-            }
-        }
-        Ok(())
     }
 }
 

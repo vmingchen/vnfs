@@ -84,6 +84,37 @@ struct PortableFs {
     shape: Cell<u8>,
 }
 impl Vfsi for PortableFs {
+    fn capabilities(&self) -> Result<vfsi_core::Capabilities> {
+        Ok(vfsi_core::Capabilities::empty())
+    }
+    fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, _: &[(P, Q)]) -> Result<()> {
+        panic!("unexpected symlink")
+    }
+    fn vreadlink<P: AsRef<Path>>(&self, _: &[P]) -> Result<Vec<std::path::PathBuf>> {
+        panic!("unexpected readlink")
+    }
+    fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, _: &[(P, Q)]) -> Result<()> {
+        panic!("unexpected hardlink")
+    }
+
+    fn vstatfs<P: vfsi_core::MetadataOperand<Self::File>>(
+        &self,
+        targets: &[P],
+    ) -> vfsi_core::api::Result<Vec<vfsi_core::FilesystemStats>> {
+        if targets.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(vfsi_core::VfError::unsupported(0))
+        }
+    }
+    fn vsetattrs<P: vfsi_core::MetadataOperand<Self::File>>(
+        &self,
+        _: &[(P, vfsi_core::MetadataUpdate)],
+        _: bool,
+    ) -> vfsi_core::api::Result<()> {
+        Ok(())
+    }
+
     type File = TestFile;
     fn limits(&self) -> ResourceLimits {
         ResourceLimits::default()
@@ -132,7 +163,7 @@ impl Vfsi for PortableFs {
     fn vclose(&self, _: &mut [TestFile]) -> Result<()> {
         Ok(())
     }
-    fn vmkdir<P: AsRef<Path>>(&self, _: &[P]) -> Result<()> {
+    fn vmkdir<P: AsRef<Path>>(&self, _: &[(P, u32)]) -> Result<()> {
         panic!("unexpected mkdir")
     }
     fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, _: &[(P, Q)]) -> Result<()> {

@@ -132,7 +132,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("invalid readv backend error index")
+                .contains("invalid vread_native backend error index")
         );
     }
     #[test]

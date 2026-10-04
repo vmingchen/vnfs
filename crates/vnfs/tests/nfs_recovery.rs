@@ -5,9 +5,10 @@
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use vfsi_sync::*;
 
 use vfsi_nfs::NfsVecFs;
-use vfsi_sync::{ReadOp, SeekFrom, VecFs, VfFile, VfOffset, WriteOp};
+use vfsi_sync::{ReadOp, SeekFrom, VfFile, VfOffset, WriteOp};
 
 fn client() -> NfsVecFs {
     let minor = match std::env::var("VNFS_TEST_MINOR").as_deref() {
@@ -49,9 +50,9 @@ fn read_recovers_after_server_restart_and_reopens_live_descriptor() {
     let first_path = format!("{dir}/first");
     let second_path = format!("{dir}/second");
     let mut fs = client();
-    fs.mkdir(Path::new(&dir), 0o755)
+    fs.mkdir_raw_impl(Path::new(&dir), 0o755)
         .expect("create recovery directory");
-    fs.writev(&[
+    fs.vwrite_owned_impl(&[
         WriteOp::from_path(&first_path, VfOffset::At(0), b"abcdef".to_vec())
             .with_creation()
             .with_truncate(),
@@ -61,15 +62,15 @@ fn read_recovers_after_server_restart_and_reopens_live_descriptor() {
     ])
     .expect("create recovery files");
     let files = fs
-        .openv_simple(
+        .vopen_raw_simple_impl(
             &[Path::new(&first_path), Path::new(&second_path)],
             libc::O_RDONLY,
             0,
         )
         .expect("open recovery files");
-    fs.fseek(&files[0], 2, SeekFrom::Set)
+    fs.seek_raw_impl(&files[0], 2, SeekFrom::Set)
         .expect("position first descriptor");
-    fs.fseek(&files[1], 1, SeekFrom::Set)
+    fs.seek_raw_impl(&files[1], 1, SeekFrom::Set)
         .expect("position second descriptor");
 
     std::fs::write(control.join("ready"), b"").expect("signal ready");
@@ -80,7 +81,7 @@ fn read_recovers_after_server_restart_and_reopens_live_descriptor() {
     // flags, preserve their numeric identities and cursors, and retry this
     // side-effect-free vector read.
     let result = fs
-        .readv(&[
+        .vread_impl(&[
             ReadOp::new(files[0].clone(), VfOffset::Cur, 3),
             ReadOp::new(files[1].clone(), VfOffset::Cur, 4),
         ])
@@ -88,24 +89,24 @@ fn read_recovers_after_server_restart_and_reopens_live_descriptor() {
     assert_eq!(result[0].data, b"cde");
     assert_eq!(result[1].data, b"vwxy");
     assert_eq!(
-        fs.stat(Path::new(&first_path))
+        fs.stat_impl(Path::new(&first_path))
             .expect("stat recovered file")
             .size,
         6
     );
     assert_eq!(
-        fs.stat(Path::new(&second_path))
+        fs.stat_impl(Path::new(&second_path))
             .expect("stat recovered file")
             .size,
         6
     );
 
-    fs.closev(&files).expect("close recovered descriptors");
-    fs.removev(&[
+    fs.vclose_impl(&files).expect("close recovered descriptors");
+    fs.vremove_impl(&[
         VfFile::from_path(&first_path),
         VfFile::from_path(&second_path),
     ])
     .expect("remove recovery files");
-    fs.removev(&[VfFile::from_path(&dir)])
+    fs.vremove_impl(&[VfFile::from_path(&dir)])
         .expect("remove recovery directory");
 }

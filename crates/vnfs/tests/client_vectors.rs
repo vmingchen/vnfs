@@ -86,7 +86,7 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(fs.read_files(&["/a"]).unwrap(), [b"keep".to_vec()]);
-    assert_eq!(error.operation(), Some("writev"));
+    assert_eq!(error.operation(), Some("vwrite_native"));
     assert_eq!(error.path(), Some(std::path::Path::new("/a")));
     assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
     let mut closed = fs.create("/closed").unwrap();

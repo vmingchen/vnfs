@@ -114,7 +114,7 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
         .unwrap();
     let requests = paths.map(|path| OpenRequest::new(path, OpenFlags::READ | OpenFlags::WRITE));
     let (mut files, open_cost) = measured(|| mounted.vopen(&requests).unwrap());
-    let (mut raw_files, raw_open_cost) = measured(|| raw.openv(&requests).unwrap());
+    let (mut raw_files, raw_open_cost) = measured(|| raw.vopen(&requests).unwrap());
     assert_eq!(
         open_cost, raw_open_cost,
         "opaque OPEN must reuse the result allocation"
@@ -145,7 +145,7 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
             .vwrite(&writes, vnfs::WriteOptions::new().write_all(true))
             .unwrap()
     });
-    let (expected, raw_cost) = measured(|| raw.write_allv(&raw_writes).unwrap());
+    let (expected, raw_cost) = measured(|| raw.vwrite_all_native(&raw_writes).unwrap());
     assert_eq!(results, expected);
     assert_eq!(
         cost, raw_cost,
@@ -155,13 +155,13 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     drop(raw_writes);
 
     let ((), cost) = measured(|| mounted.vclose(&mut files).unwrap());
-    let ((), raw_cost) = measured(|| raw.try_closev(&mut raw_files).unwrap());
+    let ((), raw_cost) = measured(|| raw.vclose(&mut raw_files).unwrap());
     assert_eq!(cost, raw_cost);
     assert!(files.iter().all(|file| file.is_closed()));
     let mut buffers = [[0; 7]; 3];
     let mut raw_buffers = [[0; 7]; 3];
     let reopened = mounted.vopen(&requests).unwrap();
-    let raw_reopened = raw.openv(&requests).unwrap();
+    let raw_reopened = raw.vopen(&requests).unwrap();
     let requests: Vec<_> = reopened
         .iter()
         .zip(&mut buffers)
@@ -182,8 +182,8 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     );
     assert!(buffers.iter().all(|buffer| buffer == b"payload"));
     mounted.close_files(reopened).unwrap();
-    raw.closev(raw_reopened).unwrap();
-    mounted.remove_paths(&paths, false).unwrap();
+    raw.vclose_owned(raw_reopened).unwrap();
+    mounted.vremove_native(&paths, false).unwrap();
 }
 
 #[test]

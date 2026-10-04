@@ -122,6 +122,13 @@ pub trait FileHandle: Read + Write + Seek {
 /// [`FileHandle::sync_all`] on an open handle when required. Drop queues handle cleanup
 /// best-effort; explicit close methods let applications observe cleanup errors.
 pub trait Vfsi {
+    /// Query filesystems for paths (following symlinks) and retained open handles.
+    /// Results preserve input order. Unsupported fields are `None`.
+    fn vstatfs<P: crate::MetadataOperand<Self::File>>(
+        &self,
+        targets: &[P],
+    ) -> Result<Vec<crate::FilesystemStats>>;
+
     /// Query metadata in input order with selected fields and final-symlink behavior.
     /// Backend execution must preserve vector batching. Ancestor symlinks use
     /// ordinary namespace resolution; this is not a snapshot or confinement API.
@@ -141,6 +148,62 @@ pub trait Vfsi {
         paths: &[P],
         options: crate::api::MetadataOptions,
     ) -> Result<Vec<Metadata>>;
+
+    /// Update selected attributes for paths or open handles using native batching.
+    /// Every handle is validated before dispatch, including ownership and closure.
+    /// Unspecified fields are unchanged. `follow_symlinks` controls the final
+    /// component of path targets; it does not change open-handle identity.
+    /// Ancestor symlinks retain ordinary backend resolution.
+    /// Failure can follow partial mutations, including within one request;
+    /// an error index identifies an input, not a committed-prefix count.
+    /// Empty vectors succeed without I/O. Do not replay ambiguous failures.
+    ///
+    /// ```no_run
+    /// use vfsi_core::api::{Vfsi, MetadataUpdate, Permissions};
+    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// fs.vsetattrs(&[
+    ///     ("/file-1", MetadataUpdate::new().permissions(Permissions::from_mode(0o640)).len(1024)),
+    ///     ("/file-2", MetadataUpdate::new().len(0)),
+    /// ], true)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    /// Handle targets and paths can share a batch:
+    ///
+    /// ```no_run
+    /// use vfsi_core::api::{Vfsi, MetadataTarget, MetadataUpdate};
+    /// # fn example<F: Vfsi>(fs: &F, file: &F::File) -> vfsi_core::api::Result<()> {
+    /// fs.vsetattrs(&[
+    ///     (MetadataTarget::File(file), MetadataUpdate::new().len(1024)),
+    ///     (MetadataTarget::Path(std::path::Path::new("/other")), MetadataUpdate::new().len(0)),
+    /// ], true)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn vsetattrs<P: crate::api::MetadataOperand<Self::File>>(
+        &self,
+        updates: &[(P, crate::api::MetadataUpdate)],
+        follow_symlinks: bool,
+    ) -> Result<()>;
+
+    /// Capabilities supported by this client. Routed clients report capabilities
+    /// common to their routes; support does not imply authorization for a path.
+    fn capabilities(&self) -> Result<crate::api::Capabilities>;
+
+    /// Create symbolic links from `(target text, link path)` pairs.
+    /// Targets are stored verbatim, including relative or dangling targets.
+    /// Parents must exist. Errors may follow partial creation; no rollback.
+    fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()>;
+
+    /// Read symbolic link targets in input order without following final links.
+    /// Returns their original path bytes, including non-UTF-8 names on Unix.
+    /// An error identifies the input when known and discards collected results.
+    fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<std::path::PathBuf>>;
+
+    /// Create hard links from `(existing source, new link path)` pairs.
+    /// Sources are not followed when the final component is a symlink.
+    /// Cross-filesystem links can fail. Errors may follow partial creation.
+    fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()>;
 
     /// Owned handle; vectors must contain handles belonging to this client.
     type File: FileHandle + 'static;
@@ -293,11 +356,14 @@ pub trait Vfsi {
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.create_dir_all("/workspace")?;
-    /// fs.vmkdir(&["/workspace/input", "/workspace/output"])?;
+    /// fs.vmkdir(&[("/workspace/input", 0o750), ("/workspace/output", 0o700)])?;
     /// # Ok(())
     /// # }
     /// ```
-    fn vmkdir<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()>;
+    /// Each `(path, mode)` supplies Unix permission bits; backends apply the
+    /// requested mode rather than relying on the process umask. Unsupported
+    /// permission semantics are reported by the backend.
+    fn vmkdir<P: AsRef<Path>>(&self, directories: &[(P, u32)]) -> Result<()>;
     /// Strict file-copy batches; a failed call can have copied earlier files.
     ///
     /// Pairs are `(source, destination)` in this client's namespace. Contents
@@ -462,6 +528,21 @@ pub trait Vfsi {
 /// bounded paging, or recovery semantics. Singular convenience is not a promise
 /// of one RPC, and vector execution is not a promise of atomicity.
 pub trait VfsiExt: Vfsi {
+    /// Query one target through the vector filesystem-statistics engine.
+    fn statfs<P: crate::MetadataOperand<Self::File>>(
+        &self,
+        target: P,
+    ) -> Result<crate::FilesystemStats> {
+        let mut results = self.vstatfs(&[target])?;
+        if results.len() != 1 {
+            return Err(crate::VfError::transport(
+                None,
+                "statfs backend returned an invalid result count",
+            ));
+        }
+        Ok(results.remove(0))
+    }
+
     // Open and close
     /// Single-target convenience. For multiple files, prefer [`Vfsi::vopen`] to expose batching opportunities.
     ///
@@ -607,7 +688,7 @@ pub trait VfsiExt: Vfsi {
         if results.len() != paths.len() {
             return Err(crate::api::Error::transport(
                 None,
-                "readv returned an invalid result count",
+                "vread_native returned an invalid result count",
             ));
         }
         results
@@ -615,12 +696,15 @@ pub trait VfsiExt: Vfsi {
             .enumerate()
             .map(|(index, result)| {
                 let data = result.data.ok_or_else(|| {
-                    crate::api::Error::transport(Some(index), "whole-file readv omitted owned data")
+                    crate::api::Error::transport(
+                        Some(index),
+                        "whole-file vread_native omitted owned data",
+                    )
                 })?;
                 if data.len() != result.read || result.offset != 0 || !result.eof {
                     return Err(crate::api::Error::transport(
                         Some(index),
-                        "whole-file readv returned incomplete or invalid data",
+                        "whole-file vread_native returned incomplete or invalid data",
                     ));
                 }
                 Ok(data)
@@ -1297,7 +1381,76 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn create_dir(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.vmkdir(&[path])
+        self.vmkdir(&[(path, 0o777)])
+    }
+
+    /// Truncate or extend one path or opened object using [`Vfsi::vsetattrs`].
+    fn truncate<T: crate::api::MetadataOperand<Self::File>>(
+        &self,
+        target: T,
+        len: u64,
+    ) -> Result<()> {
+        self.vsetattrs(
+            &[(target, crate::api::MetadataUpdate::new().len(len))],
+            true,
+        )
+    }
+
+    /// Change permissions on one path or opened object using [`Vfsi::vsetattrs`].
+    fn chmod<T: crate::api::MetadataOperand<Self::File>>(
+        &self,
+        target: T,
+        permissions: crate::api::Permissions,
+    ) -> Result<()> {
+        self.vsetattrs(
+            &[(
+                target,
+                crate::api::MetadataUpdate::new().permissions(permissions),
+            )],
+            true,
+        )
+    }
+
+    /// Change ownership of one path or opened object through [`Vfsi::vsetattrs`].
+    /// `None` leaves the corresponding owner/group unchanged. Use the vector
+    /// with `follow_symlinks = false` to change a symlink itself.
+    fn chown<T: crate::api::MetadataOperand<Self::File>>(
+        &self,
+        target: T,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> Result<()> {
+        let mut update = crate::api::MetadataUpdate::new();
+        update.uid = uid;
+        update.gid = gid;
+        self.vsetattrs(&[(target, update)], true)
+    }
+
+    /// Create one directory with explicit Unix permission bits.
+    fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> Result<()> {
+        self.vmkdir(&[(path, mode)])
+    }
+
+    /// Create one symbolic link; submit multiple pairs with [`Vfsi::vsymlink`].
+    fn symlink(&self, target: impl AsRef<Path>, link: impl AsRef<Path>) -> Result<()> {
+        self.vsymlink(&[(target, link)])
+    }
+
+    /// Read one symlink target; submit multiple paths with [`Vfsi::vreadlink`].
+    fn read_link(&self, path: impl AsRef<Path>) -> Result<std::path::PathBuf> {
+        let mut targets = self.vreadlink(&[path])?;
+        if targets.len() != 1 {
+            return Err(crate::api::Error::transport(
+                None,
+                "invalid readlink result count",
+            ));
+        }
+        Ok(targets.pop().expect("validated readlink count"))
+    }
+
+    /// Create one hard link; submit multiple pairs with [`Vfsi::vhardlink`].
+    fn hard_link(&self, source: impl AsRef<Path>, link: impl AsRef<Path>) -> Result<()> {
+        self.vhardlink(&[(source, link)])
     }
 
     /// Single-target convenience. For multiple directory creations, prefer [`Vfsi::vmkdir`]; plan missing parents before their children.
@@ -1333,7 +1486,7 @@ pub trait VfsiExt: Vfsi {
                     return Err(crate::api::Error::client(0, crate::ERR_INVAL));
                 }
             }
-            match self.vmkdir(&[&current]) {
+            match self.vmkdir(&[(&current, 0o777)]) {
                 Ok(()) => {}
                 Err(error) if error.err_no() == crate::ERR_EXIST => {
                     if !self.metadata(&current)?.is_dir() {

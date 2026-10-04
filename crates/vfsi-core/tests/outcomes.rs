@@ -47,7 +47,7 @@ fn transport_categories_survive_attribution_context_and_io_conversion() {
             None,
         )
         .with_index(3)
-        .with_context("readv", "/file");
+        .with_context("vread_native", "/file");
         assert_eq!(error.transport_kind(), Some(transport));
         assert_eq!(error.index(), Some(3));
         assert_eq!(error.status(), None);
@@ -108,9 +108,9 @@ fn portable_error_kinds_preserve_protocol_status_and_source() {
         );
     }
     let display = VfError::nfs(2, 28)
-        .with_context("writev", "/file")
+        .with_context("vwrite_native", "/file")
         .to_string();
-    for context in ["writev", "/file", "Nfs", "28"] {
+    for context in ["vwrite_native", "/file", "Nfs", "28"] {
         assert!(display.contains(context));
     }
 }

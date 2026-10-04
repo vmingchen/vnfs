@@ -400,7 +400,7 @@ fn ensure_dirs(fs: &impl Vfsi, tasks: &mut [Task]) -> Result<()> {
     if tasks.is_empty() {
         return Ok(());
     }
-    let paths: Vec<_> = tasks.iter().map(|t| &t.destination).collect();
+    let paths: Vec<_> = tasks.iter().map(|t| (&t.destination, 0o777)).collect();
     match fs.vmkdir(&paths) {
         Ok(()) => {
             for task in tasks {
@@ -418,7 +418,7 @@ fn ensure_dirs(fs: &impl Vfsi, tasks: &mut [Task]) -> Result<()> {
                     }
                     Ok(_) => return Err(invalid(task.root, &task.destination)),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        fs.vmkdir(&[&task.destination])
+                        fs.vmkdir(&[(&task.destination, 0o777)])
                             .map_err(|e| mapped(e, std::slice::from_ref(task)))?;
                         task.fresh_destination = true;
                     }
