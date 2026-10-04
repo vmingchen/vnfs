@@ -21,7 +21,7 @@ For code changes:
 The boundaries between platform crates, backends, adapters, application ports,
 and infrastructure are defined in
 [docs/PROJECT_ORGANIZATION.md](docs/PROJECT_ORGANIZATION.md). Application-port
-changes belong in the corresponding `vfsi/port-*` repository; this repository
+changes belong in the corresponding `vfsi/vfsi-port-*` repository; this repository
 records only the revisions covered by compatibility CI.
 
 The full CI suite requires Linux native build dependencies and starts local

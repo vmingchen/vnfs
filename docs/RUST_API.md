@@ -16,7 +16,7 @@ from the legacy backend operation types at the core crate root.
 `Vfsi` owns options-aware native vector execution. `VfsiExt` is blanket implemented
 for every `Vfsi` and supplies composed workflows and conventional scalar conveniences (`open`, `metadata`,
 `read_dir`, etc.). Generic applications need an
-`Vfsi` bound and an `VfsiExt` import; they do not implement extensions separately.
+`Vfsi` bound and a `VfsiExt` import; they do not implement extensions separately.
 
 Concrete clients do not duplicate these helpers as inherent methods. Native
 open and streaming execution hooks are private; directory collection uses the public page visitor. Method syntax
@@ -80,9 +80,10 @@ ordinary applications use the concrete client methods instead:
 - `NfsExtensions` and `SmbExtensions` contain protocol-only negotiated state.
 - `OpenRequest`, `MetadataQuery`, and `SetAttributes` replace raw flags and
   overloaded metadata masks.
-- Public `*v` methods return all values or one indexed `VfError`. They do not
-  promise rollback; a transport failure is never presented as an ordinary
-  filesystem status.
+- Public `v*` operations return ordered results on success or one `vnfs::Error`
+  with an optional input index. They do not promise rollback; an unattributable
+  transport failure is never assigned a fabricated request index or presented
+  as an ordinary filesystem status.
 - `Capabilities` is a typed bitset. Integer `VF_CAP_*` constants remain for
   source and C ABI compatibility.
 - `NfsClientBuilder` configures namespace root, protocol version, timeouts,
@@ -118,10 +119,11 @@ roots containing nested mounts return an explicit error. Discovery adds no
 per-operation mount lookups to the resulting direct NFS client and does not
 share the kernel client's caches.
 
-The `vnfs` crate root exposes the NFS application API. `VecFs`, `VfFile`,
-`Fd`, `VfAttrs`, `VfOpenOptions`, raw libc flags, and NFS protocol modules live
-only in the corresponding `vfsi-*` crates; they are not republished by `vnfs`. New application
-code can start with:
+The `vnfs` crate root exposes the NFS application API. Native `FileSystem` and
+`Backend` contracts, `VfFile`, `Fd`, `VfAttrs`, `VfOpenOptions`, raw libc flags,
+and NFS protocol modules live in the corresponding `vfsi-*` crates; they are
+not republished by `vnfs`. The former `VecFs` trait has been removed. New
+application code can start with:
 
 ```rust
 use vnfs::prelude::*;
@@ -135,8 +137,9 @@ Application code should connect through `Nfs::builder`, which directly
 returns the concrete `NfsClient` alias. `NfsVecFs` and `NfsClientBuilder`
 remain available in `vfsi-nfs` for backend embedding. `NfsClient::open_options`
 mirrors `std::fs::OpenOptions`; direct `read_at` and `write_at` perform
-positional I/O, while explicitly named `read_request_at` and
-`write_request_at` values compose vector calls. `read_files` performs bounded
+positional I/O. Prepare vector requests without issuing I/O using
+`ReadOp::range(&file, offset, length)`, `ReadOp::into(&file, offset, &mut buffer)`,
+and `WriteOp::at(&file, offset, data)`. `read_files` performs bounded
 path-based vector reads without remote OPEN/CLOSE phases; `write_files` batches
 OPEN, WRITE, and CLOSE phases across files. `read_files` has a 16 MiB aggregate allocation limit by
 default. `close_files` consumes a group
@@ -144,7 +147,7 @@ of handles and closes them with the vector backend rather than serializing
 one close per dropped handle.
 
 Real application ports also need metadata-rich traversal and namespace
-operations without constructing `VfAttrs` or calling `VecFs` directly.
+operations without constructing `VfAttrs` or calling backend traits directly.
 `MetadataFields` selects only needed attributes; `Metadata` reports optional
 fields such as allocated blocks, device ID, full mode, and named-attribute
 presence as `Option` so an absent value is not confused with zero. Use
@@ -152,7 +155,7 @@ presence as `Option` so an absent value is not confused with zero. Use
 `vlistdirs` to visit pages for several directory operands, with
 `VisitOptions::recursive(true)` for bounded recursive trees. Use the
 `VfsiExt::read_dirs_with_options` collector only when retained listings are needed. `DirectoryListing` carries
-paths and already-fetched entry metadata. `vcopy` and `remove_paths`
+paths and already-fetched entry metadata. `vcopy` and `vremove`
 perform ordered batches without promising transactionality.
 
 ## Durability and failure rules
@@ -190,23 +193,28 @@ the synchronous core does not depend on Tokio.
 
 An API that discovers the amount of data itself and returns an owned buffer
 must impose a finite default allocation limit and expose an explicit override.
-`NfsClient::read`, `NfsClient::read_to_string`, and `VecFs::read_allv` therefore
-default to `DEFAULT_READ_MAX_BYTES` (16 MiB). Callers may select another bound
-with `read_with_limit`, `read_to_string_with_options`, or `ReadAllOptions`.
+`Vfsi::vread` with whole-file `ReadOp::whole` requests, `VfsiExt::read_files`,
+and `VfsiExt::read_to_string` therefore inherit a 16 MiB client budget.
+Callers may select another bound with `ReadOptions` on `vread`,
+`read_files_with_options`, or `read_to_string_with_options`. A
+`ReadOptions::max_total_bytes(Some(NonZeroUsize))` override must be nonzero;
+`None` inherits the client default. Native backend whole-file collection uses
+the separate `ReadAllOptions` type on `Backend::vread_all_with_options_impl`.
 `ResourceLimits` sets client defaults through `NfsBuilder::limits`,
 `NfsClient::with_limits`, or `Auto::with_limits`. Existing clones retain their
 configured policy. Scalar and vector whole-file reads share the optimized
-backend path. `readv_into` returns counts, offsets and EOF, and also enforces
-the aggregate policy because a backend may use an owned-buffer fallback.
-`readv_into_with_limit` provides an explicit per-call buffer budget. Auto
+backend path. `vread` with `ReadOp::into` returns byte counts, offsets and EOF,
+with no owned data in those results, and also enforces the aggregate policy
+because a backend may use an owned-buffer fallback. The same `ReadOptions`
+selects an explicit per-call buffer budget. Auto
 updates cached connection policies when its limits change and uses its current
 policy even for previously opened handles. Auto traversal quotas count paths
 after translation into the public namespace, including mount prefixes.
 
-Reads whose size is explicit in the request (`readv`, `read_at`, and `pread`)
-are bounded by that caller-supplied length. Reads into caller-owned buffers are
-bounded by the buffer. Applications processing larger or untrusted files
-should stream through `NfsFile`, `Read`, `read_streamv`, or repeated positional
+`vread` range requests are bounded by their caller-supplied lengths and the
+aggregate budget. Scalar `NfsFile::read_at` is bounded by the caller's buffer.
+Applications processing larger or untrusted files
+should use `Vfsi::vstream`, `VfsiExt::read_stream`, a file's `Read` adapter, or repeated positional
 reads instead of raising a whole-file allocation limit without bound.
 These limits bound logical payloads, not process RSS or arbitrary
 `std::io::Read::read_to_end` calls. For an already-open file, use
@@ -227,8 +235,8 @@ needing to consume one directory incrementally can use `visit_dir_with_options`
 with `VisitOptions`; set `recursive(true)` to visit a recursive root. The
 options-aware helper respects the supplied traversal scope, metadata, and budgets.
 `visit_dir` and `visit_walk` select shallow and recursive defaults respectively. `vgetattrs` accepts any `AsRef<Path>` inputs,
-including strings and `PathBuf`, consistently with `vgetattrs`.
-The client starts with one entry, then fetches at most 1024 entries per page
+including strings and `PathBuf`, consistently with the other path vectors.
+The application visitor starts with one entry, then delivers at most 128 entries per page
 and releases its backend lock before invoking the application callback, which
 may safely reenter the same client or drop its files. NFS retains a resolved
 directory handle and READDIR continuation; the local backend retains its
@@ -243,7 +251,7 @@ errors propagate. This replaces the previous boolean directory callbacks.
 
 For recursive removal, `NfsClient::remove_dir_all` is fail-fast and
 `remove_dir_all_with_options`, `remove_dir_contents_with_options`, and
-`remove_paths_with_options` expose `RemoveOptions` at the application layer.
+`Vfsi::vremove(paths, mode, options)` expose `RemoveOptions` at the application layer.
 `NfsClient::open_dir_handle` returns an owned `NfsDir` only when the backend has
 a genuine directory descriptor; its `remove_contents` methods stay rooted at
 that handle and `Drop` queues its cleanup. Backends that only offer path tokens return

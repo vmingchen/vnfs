@@ -290,7 +290,8 @@ int vfsi_dummy_open(const char *root, struct vfsi_fs **out);
 int vfsi_dummy_open_mount(const char *root, const char *mountpoint, struct vfsi_fs **out);
 
 /**
- * Connect to an NFSv4.1 server at `host` and open the export root.
+ * Connect to an NFSv4 server at `host` and open the export root.
+ * Negotiate NFSv4.2, falling back to NFSv4.1.
  */
 int vfsi_nfs_open(const char *host, struct vfsi_fs **out);
 
@@ -300,7 +301,7 @@ int vfsi_nfs_open(const char *host, struct vfsi_fs **out);
 int vfsi_nfs_open_minor(const char *host, uint32_t minorversion, struct vfsi_fs **out);
 
 /**
- * Connect to an NFSv4.1 server and treat `mountpoint` (a local kernel mount
+ * Connect to an NFSv4.1/4.2 server and treat `mountpoint` (a local kernel mount
  * path) as the vfsi root. Callers can then pass ordinary kernel paths.
  */
 int vfsi_nfs_open_mount(const char *host, const char *mountpoint, struct vfsi_fs **out);
@@ -325,7 +326,7 @@ int vfsi_walk(struct vfsi_fs *fs,
               void *userdata);
 
 /**
- * Connect to an NFSv4.1 server, mapping a local kernel `mountpoint` to the
+ * Connect to an NFSv4.1/4.2 server, mapping a local kernel `mountpoint` to the
  * server-side `export_root` beneath the NFSv4 pseudo-root.
  */
 int vfsi_nfs_open_mount_export(const char *host,

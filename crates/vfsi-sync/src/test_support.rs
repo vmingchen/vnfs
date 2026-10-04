@@ -58,7 +58,7 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
         .expect("ensure_dir");
     let f = format!("{}/f.txt", dir);
 
-    // writev / readv via paths.
+    // vwrite_owned_impl / vread_impl via paths.
     let payload = b"the quick brown fox jumps over the lazy dog".to_vec();
     let mut w = WriteOp::from_path(&f, VfOffset::At(0), payload.clone());
     w.creation = true;
@@ -239,7 +239,7 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
     assert!(fs.exists_impl(Path::new(&renamed)).unwrap());
     assert!(!fs.exists_impl(Path::new(&f)).unwrap());
 
-    // openv / closev.
+    // Strict vopen_raw_impl / vclose_impl.
     let more = format!("{}/more", dir);
     fs.ensure_dir_impl(Path::new(&more), 0o755).unwrap();
     let paths = [
@@ -268,7 +268,7 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
             .any(|e| e.file.path().unwrap().ends_with("sub"))
     );
 
-    // listdirv callback.
+    // vlistdirs_impl callback.
     let mut seen = 0usize;
     let mut cb = |_: &VfAttrs, _: &Path| {
         seen += 1;
@@ -590,7 +590,7 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
         "close of a closed descriptor"
     );
 
-    // open_by_path with an Abs base and a relative-looking path is
+    // open_path_impl with an Abs base and a relative-looking path is
     // root-relative in both backends.
     let abs_rel = format!("{}/absrel.txt", base.trim_start_matches('/'));
     let f2 = fs

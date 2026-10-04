@@ -6,7 +6,8 @@
 
 use crate::{VfError, VfResult};
 
-/// Ordered results produced by a backend `*_many` implementation.
+/// Ordered partial results produced by a native backend outcome hook, such as
+/// `vfsi_sync::Backend::vopen_outcomes_impl`.
 ///
 /// Entry `n` always corresponds to request `n`. The vector may be shorter
 /// than `requested` when an ordered protocol stopped after a failure.

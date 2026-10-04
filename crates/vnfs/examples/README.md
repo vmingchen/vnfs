@@ -43,7 +43,8 @@ client does not create independent sessions.
 
 ## Verify the examples
 
-The fast Rust CI script runs the local workflow tests and all example doctests.
+`./scripts/test-rust.sh` runs the local workflow tests and example doctests.
+Its `--quick` subset includes the local canonical workflows but skips doctests.
 The NFS integration CI matrix runs the same example functions on NFSv4.1 and
 v4.2. To run that test directly (without needing rpcbind discovery):
 

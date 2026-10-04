@@ -12,9 +12,11 @@ cargo +nightly fuzz run libntirpc_rpc_xdr
 ```
 
 `libntirpc_rpc_xdr` drives `libntirpc`'s `xdr_ncallmsg`, `xdr_nreplymsg`, and
-`xdr_wrapstring` decoders. The linked system `libntirpc` is not compiled with
-sanitizer coverage, so libFuzzer only instruments the thin Rust boundary; seed
-the corpus with well-formed messages for a deeper campaign.
+`xdr_wrapstring` decoders in the packaged ntirpc source built by `libntirpc-sys`.
+Normal native builds produce a static Release archive and do not automatically
+inherit cargo-fuzz's C sanitizer-coverage instrumentation. The Rust boundary
+is instrumented; a deeper native campaign needs an explicitly instrumented
+ntirpc build and a corpus seeded with well-formed messages.
 
 CI runs a bounded smoke campaign. Longer local campaigns can add
 `-- -max_total_time=600` (or another libFuzzer option). Corpus and crash

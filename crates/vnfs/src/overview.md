@@ -96,7 +96,7 @@ helpers, not core execution methods. Import both with `vnfs::prelude::*`.
   with `WriteOptions::new().write_all(true)` to complete
   successful short writes; do not mistake a short read without EOF for completion.
   Positional requests preserve the file cursor.
-- Files close best-effort on drop. Use explicit `vclose_owned` to surface cleanup
+- Files close best-effort on drop. Use explicit `VfsiExt::close_files` to surface cleanup
   failures or `vclose` to retain local cleanup ownership on failure. Writes
   are not automatically durable; use a file's `sync_data` or `sync_all` as needed.
 - Cloning a client shares its session and lock, not independent parallelism.

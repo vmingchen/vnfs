@@ -10,10 +10,10 @@ fn main() {
         .expect("generate vfsi.h")
         .write_to_file(out);
 
-    // Keep the cdylib relocatable: collect libntirpc's shared objects beside
-    // the final library and add an origin-relative RUNPATH. Consumers can
-    // deploy libvfsi_c.so together with the vfsi-libs directory without
-    // knowing Cargo's nested build directory.
+    // Retain a relocatable layout for any shared ntirpc objects supplied by
+    // a dependency override. Normal libntirpc-sys builds link ntirpc statically;
+    // their vfsi-libs directory need not be deployed. Shared overrides can use
+    // the origin-relative RUNPATH without exposing Cargo's nested build path.
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "linux" || target_os == "macos" {
         let ntirpc_include = std::path::PathBuf::from(

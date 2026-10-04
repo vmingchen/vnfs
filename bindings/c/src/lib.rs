@@ -651,7 +651,8 @@ pub unsafe extern "C" fn vfsi_dummy_open_mount(
     })
 }
 
-/// Connect to an NFSv4.1 server at `host` and open the export root.
+/// Connect to an NFSv4 server at `host` and open the export root.
+/// Negotiate NFSv4.2, falling back to NFSv4.1.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_nfs_open(host: *const c_char, out: *mut *mut vfsi_fs) -> c_int {
     ffi_guard!(libc::EIO, {
@@ -702,7 +703,7 @@ pub unsafe extern "C" fn vfsi_nfs_open_minor(
     })
 }
 
-/// Connect to an NFSv4.1 server and treat `mountpoint` (a local kernel mount
+/// Connect to an NFSv4.1/4.2 server and treat `mountpoint` (a local kernel mount
 /// path) as the vfsi root. Callers can then pass ordinary kernel paths.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_nfs_open_mount(
@@ -886,7 +887,7 @@ fn attrs_from_metadata(metadata: &vnfs::Metadata) -> vfsi_attrs {
     }
 }
 
-/// Connect to an NFSv4.1 server, mapping a local kernel `mountpoint` to the
+/// Connect to an NFSv4.1/4.2 server, mapping a local kernel `mountpoint` to the
 /// server-side `export_root` beneath the NFSv4 pseudo-root.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_nfs_open_mount_export(

@@ -8,8 +8,12 @@ performed. Atomic commit and rollback belong to the future TFSI interface.
 
 The application-facing Rust API uses the conventional strict shape:
 
-```rust,ignore
-fn openv(requests: &[OpenRequest]) -> Result<Vec<File>, VfError>;
+```rust,no_run
+use vnfs::{OpenRequest, Result, Vfsi};
+
+fn open_group<C: Vfsi>(fs: &C, requests: &[OpenRequest]) -> Result<Vec<C::File>> {
+    fs.vopen(requests)
+}
 ```
 
 `Ok` contains one value per input in input order. `Err` contains the first
@@ -18,20 +22,22 @@ claim that earlier or concurrently dispatched operations were undone.
 
 ## Public and backend boundaries
 
-Public vector methods use the `*v` vocabulary:
+Public vector methods use the `v` + operation vocabulary on `Vfsi`:
 
-- `openv`
-- `readv`
-- `writev`
-- `closev`
-- `removev`
-- `renamev`
+- `vopen`
+- `vread`
+- `vwrite`
+- `vclose`
+- `vremove`
+- `vrename`
 
-Backends use `*_many` internally while planning compounds, concurrent SMB
-requests, and local loops. The open implementation seam is:
+Native backends implement `Backend: FileSystem` in `vfsi-sync` and use
+`*_impl` operation hooks. Protocol internals can retain their wire-oriented
+names. The indexed open-outcome seam is:
 
 ```rust,ignore
-fn open_many(
+fn vopen_outcomes_impl(
+    &mut self,
     paths: &[&Path],
     flags: &[i32],
     modes: &[u32],
@@ -67,9 +73,10 @@ or an independently established idempotence guarantee.
 
 ## OPEN resource ownership
 
-`openv` has an additional ownership rule: if any request fails, every
-confirmed successful handle is closed before the error returns. The original
-open error remains primary if cleanup itself fails.
+`vopen` has an additional ownership rule: if any request fails, cleanup is
+attempted for every confirmed successful handle before the error returns.
+The original open error remains primary if cleanup itself fails; failed
+cleanup retains ownership for later draining rather than leaking the handle.
 
 This is resource cleanup, not transaction rollback. `O_CREAT` may already
 have created files, and an ambiguous lost reply may leave effects that the
@@ -88,8 +95,8 @@ operation and byte limits preserves global request positions.
 ### SMB
 
 Independent SMB requests may complete concurrently and out of order. The
-backend stores their results in original request order. If public `openv`
-observes any failure, it closes all handles from successful requests,
+backend stores their results in original request order. If public `vopen`
+observes any failure, it attempts cleanup of all handles from successful requests,
 including requests that completed after the failing request.
 
 ### Local
@@ -131,7 +138,8 @@ batch is not replayed and remains unattributed to a fabricated request index.
 
 ## Migration
 
-`open_many` is backend-only; the application facade exposes `openv` without a
-public alias. Per-item outcome APIs are removed from the Rust-native API. The
-same public-`*v`/internal-`*_many` split applies to the other native vector
-operations.
+The former `open_many` hook is now `Backend::vopen_outcomes_impl`; its partial
+outcomes remain backend-only. `Backend::vopen_impl` is the strict typed native
+boundary, and applications use `Vfsi::vopen`. Per-item outcome APIs are not
+exposed by the Rust application facade. Other native vector engines likewise
+use `*_impl` hooks; the migration mappings are in [backend-migration.md](backend-migration.md).

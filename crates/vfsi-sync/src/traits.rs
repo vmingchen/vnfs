@@ -362,7 +362,7 @@ mod contract_tests {
             stable: true,
         };
         validate_write_results("test", &[request], std::slice::from_ref(&valid)).unwrap();
-        // Partial/zero progress is a valid backend result; write_allv owns
+        // Partial/zero progress is a valid backend result; vwrite_all_native owns
         // the policy for completing it or rejecting a no-progress loop.
         validate_write_results(
             "test",

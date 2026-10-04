@@ -2335,7 +2335,7 @@ impl NfsVecFs {
     }
 
     /// Descriptor READs decoded directly from NFS reply storage into caller
-    /// buffers. The same compound packing and offset rules as `readv_batch`
+    /// buffers. The same compound packing and offset rules as `vread_batch_nfs`
     /// apply; no per-result `Vec<u8>` or aggregate read buffer is created.
     fn vread_batch_into_nfs(
         &mut self,
@@ -3087,7 +3087,7 @@ impl NfsVecFs {
                         .checked_add(n)
                         .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
                     // A zero-byte continuation means EOF. For an explicit
-                    // count this matches dupv's short-at-EOF behavior; for a
+                    // count this matches vcopy_data_impl's short-at-EOF behavior; for a
                     // count of zero it confirms that a possibly partial COPY
                     // has reached EOF.
                     if n != 0
@@ -3502,7 +3502,7 @@ impl NfsVecFs {
     }
 
     /// Apply the requested modes of `dirs` in one batched resolve + SETATTR.
-    /// Used by mkdirv after creation (NFSv4 CREATE cannot carry mode attrs).
+    /// Used by vmkdir_impl after creation (NFSv4 CREATE cannot carry mode attrs).
     fn apply_dir_modes(&mut self, dirs: &[VfAttrs]) -> VfRes {
         let mut paths: Vec<PathBuf> = Vec::with_capacity(dirs.len());
         let mut indices = Vec::with_capacity(dirs.len());
@@ -5043,8 +5043,8 @@ impl Backend for NfsVecFs {
 
     /// List many directories in a few compounds: the directories are
     /// resolved in one batched lookup, then their first READDIR pages (and
-    /// any continuation pages) are drained in batched compounds — mirroring
-    /// the txn-compound client's 64-READDIRs-per-compound listdirv.
+    /// any continuation pages) are drained in batched compounds within the
+    /// session's negotiated operation, request, and response limits.
     fn vlistdirs_impl(
         &mut self,
         dirs: &[&Path],

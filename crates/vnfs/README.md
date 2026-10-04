@@ -29,7 +29,7 @@ is required. Add the crate:
 
 ```toml
 [dependencies]
-vnfs = "0.0.16"
+vnfs = "0.0.17"
 ```
 
 On Ubuntu 24.04 or newer, install the native build dependencies once:
@@ -217,7 +217,8 @@ can take the direct path without following a pre-existing symlink. The
 ## Small-file benchmark
 
 The repository includes a [Rust benchmark driver][benchmark] that compares
-`NfsVecFs::writev` and `NfsVecFs::readv` with scalar `std::fs::write` and
+the native `Backend::vwrite_owned_impl` and `Backend::vread_impl` operations on
+`NfsVecFs` with scalar `std::fs::write` and
 `std::fs::read` calls through a Linux kernel NFS mount. Both paths reach the
 same NFS-Ganesha 15.3 NFSv4.2 export. Linux `netem` added 500 microseconds to
 each loopback traversal, producing approximately 1 ms of added network RTT.
@@ -581,8 +582,8 @@ dir.try_close()?;       // Retains cleanup ownership if explicit close fails
 `open_dir_handle` rejects backends without a genuine handle and does not follow
 a final symlink. It empties the directory while keeping that directory itself.
 `remove_dir_all_with_options`, `remove_dir_contents_with_options`, and
-`remove_paths_with_options` accept a `RemoveOptions` value choosing best-effort vs
-fail-fast removal (`continue_on_error`, defaulting to fail-fast), the starting vector batch size
+`Vfsi::vremove(paths, mode, options)` accept a `RemoveOptions` value choosing best-effort vs
+fail-fast removal (`continue_on_error`, defaulting to fail-fast), a vector batch-size cap
 (`batch`), and the retry count for transient per-entry statuses (`retries`).
 These tuning options are implemented by the NFS backend. Backends using the
 generic remover reject non-default options rather than silently ignoring them.

@@ -87,7 +87,7 @@ pub trait FileHandle: Read + Write + Seek {
 /// | Directory pages with entry metadata | [`vlistdirs`](Self::vlistdirs) |
 /// | Recursive directory pages | [`vlistdirs`](Self::vlistdirs) with [`VisitOptions::recursive`](crate::api::VisitOptions::recursive) |
 ///
-/// Generic application code needs an `Vfsi` bound. Import [`VfsiExt`] for
+/// Generic application code needs a `Vfsi` bound. Import [`VfsiExt`] for
 /// convenience operations such as `read_files`, `write_files`, and scalar open.
 /// [`VfsiExt::read_dirs_with_options`] collects directory pages into vectors;
 /// [`VfsiExt::read_stream_with_options`] adapts streaming to a single path.

@@ -2,7 +2,8 @@
 
 `vfsi-c` is a C API for the vectorized filesystem interface (`vfsi`). The
 functions expose the byte-oriented Unix path API to C consumers (e.g. `git`)
-while keeping the implementation in the Rust `vnfs` crate.
+using the Rust `vfsi-sync` contracts and NFS, SMB, and local backend crates.
+It shares portable application workflows with `vnfs` where needed.
 
 The public header is checked in at `include/vfsi.h`. A build generates the
 same header under Cargo's `OUT_DIR`; it never modifies the source tree. Build
@@ -86,9 +87,11 @@ Run the same smoke test against a guest-accessible SMB share with:
 /tmp/vfsi_smoke --smb 127.0.0.1 vfsi-test
 ```
 
-The dynamic build places its libntirpc runtime libraries in
-`target/<profile>/vfsi-libs` and gives `libvfsi_c.so` an origin-relative
-RUNPATH to that directory. Deploy the shared library together with the
-adjacent `vfsi-libs` directory; no Cargo-specific `LD_LIBRARY_PATH` is needed.
-Static-library consumers must link libntirpc and its platform dependencies
-themselves.
+Normal builds statically include the packaged ntirpc archive from
+`libntirpc-sys`; no system ntirpc or adjacent ntirpc shared library is needed.
+The dynamic library still depends on platform libraries such as liburcu and,
+when enabled, Kerberos. The build retains an origin-relative RUNPATH to
+`target/<profile>/vfsi-libs` for shared ntirpc objects from compatible dependency
+overrides; deploy that directory only if your override requires it.
+Static-library consumers must link the remaining platform dependencies.
+Use `cargo rustc -p vfsi-c --lib -- --print native-static-libs` to inspect them.

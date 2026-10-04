@@ -588,8 +588,8 @@ fn samba_round_trip_and_copy() {
         VF_ERR_UNSUPPORTED
     );
 
-    // Exceed Samba's usual single-request limit so writev chunks the write
-    // and read_allv falls back to the crate's pipelined whole-file reader.
+    // Exceed Samba's usual single-request limit so vwrite_owned_impl chunks
+    // the write and vread_all_impl uses the bounded whole-file reader.
     let large = root.join("large.bin");
     let large_data = vec![b'L'; 10 * 1024 * 1024 + 123];
     fs.vwrite_owned_impl(&[

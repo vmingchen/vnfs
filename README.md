@@ -146,8 +146,8 @@ source links with their original text; offsets and length do not apply to links.
 Data-copy destination symlinks keep their existing following behavior. Local
 and NFS support preserving source links; SMB returns an unsupported error for
 that option. Existing whole-file frontend and binding calls retain the default
-following behavior. The former backend `copyv` and `lcopyv` methods are consolidated;
-`dupv` remains the explicit client-copy engine.
+following behavior. The former backend `copyv` and `lcopyv` methods are consolidated
+into `vcopy_impl`; `vcopy_data_impl` (formerly `dupv`) is the explicit client-copy engine.
 
 ## Project organization
 

@@ -34,8 +34,8 @@ pub struct Session {
     /// compound, since READ payloads travel in the reply).
     pub max_responsesize: usize,
     pub max_operations: usize,
-    /// The open owner for user-visible descriptors (`open_by_path` /
-    /// `openv`).
+    /// The open owner for user-visible descriptors (`open_path_impl` /
+    /// `vopen_impl`).
     pub open_owner: OpenOwner,
     /// A separate open owner for implicit opens made by path-based
     /// operations, so closing an internal open never revokes a stateid the

@@ -8,7 +8,7 @@ removed in a deliberate breaking Rust migration. Concrete types `DummyVecFs`,
 family traits and methodless aggregates were consolidated; no blanket
 implementation synthesizes a backend from scalar I/O.
 
-Shared defaults are free functions in `vfsi-sync/src/backend_helpers/`,
+Shared defaults are free functions in `crates/vfsi-sync/src/backend_helpers/`,
 grouped into handle, I/O, metadata, directory, namespace, link, copy, read, and
 removal modules. They are generic over `FileSystem` or `Backend`, including
 `?Sized` for dynamic dispatch. Trait defaults delegate to those functions;
@@ -121,9 +121,10 @@ its operation engines directly.
 vectors and namespace workflows. `VfFileHandle` uses `Backend`. Scalar-only
 clients remain usable through `FileSystem`; they do not need `Backend`.
 
-Concrete frontend vectors use `vopen`, `vclose`, `vrename`, `vmkdir`, and `vcopy`.
-`vmkdir` accepts `(path, mode)` pairs. The default-mode paths-only helper is
-`vmkdir_default`; consuming close is `vclose_owned`. Structured internal I/O
+Application vectors use `vopen`, `vclose`, `vrename`, `vmkdir`, and `vcopy`.
+`vmkdir` accepts `(path, mode)` pairs; `VfsiExt::close_files` consumes handles.
+The native `FsClient` also has `vmkdir_default` and `vclose_owned` compatibility
+helpers; these are not re-exported as application methods by `vnfs`. Structured internal I/O
 adapters use `vread_native`/`vwrite_native` and corresponding semantic variants
 to avoid shadowing portable `Vfsi` methods with different operands.
 

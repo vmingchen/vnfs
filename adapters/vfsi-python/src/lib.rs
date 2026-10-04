@@ -1349,8 +1349,9 @@ impl NfsClient {
         })
     }
 
-    /// Write files at offset 0 (creating them), one writev batch; with
-    /// `truncate=True` each file is truncated to zero in the same compound.
+    /// Write files at offset 0 (creating them) through `Backend::vwrite_owned_impl`;
+    /// with `truncate=True` each file is truncated before its data is written.
+    /// A vector batch may span multiple protocol requests.
     /// Returns the number of bytes written per file.
     #[pyo3(signature = (paths, datas, truncate=true))]
     fn write_many(
@@ -1401,7 +1402,7 @@ impl NfsClient {
         })
     }
 
-    /// Create directories in one mkdirv batch.
+    /// Create directories through one `Backend::vmkdir_impl` vector batch.
     fn mkdir_many(&self, py: Python<'_>, paths: Vec<PathBuf>, mode: u32) -> PyResult<()> {
         let attrs: Vec<VfAttrs> = paths
             .iter()
@@ -1418,7 +1419,7 @@ impl NfsClient {
         })
     }
 
-    /// Open many files in one openv batch; returns descriptors.
+    /// Open many files through `Backend::vopen_raw_impl`; returns descriptors.
     fn open_many(
         &self,
         py: Python<'_>,
@@ -1451,7 +1452,7 @@ impl NfsClient {
         })
     }
 
-    /// Close many descriptors in one closev batch.
+    /// Close many descriptors through `Backend::vclose_impl`.
     fn close_many(&self, py: Python<'_>, fds: Vec<i64>) -> PyResult<()> {
         let files: Vec<VfFile> = fds.iter().map(|&fd| VfFile::from_fd(fd as i32)).collect();
         self.with_fs(py, move |fs| {
@@ -1578,7 +1579,8 @@ impl NfsClient {
         Ok(out)
     }
 
-    /// Remove paths in batches (one removev compound per parent directory).
+    /// Remove paths through `Backend::vremove_impl`. NFS groups siblings by
+    /// parent and splits compounds to respect negotiated limits.
     fn remove_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<()> {
         let files: Vec<VfFile> = paths
             .iter()
@@ -1590,7 +1592,7 @@ impl NfsClient {
         })
     }
 
-    /// Rename pairs in one renamev batch.
+    /// Rename pairs through one `Backend::vrename_impl` vector batch.
     fn rename_many(&self, py: Python<'_>, pairs: Vec<(PathBuf, PathBuf)>) -> PyResult<()> {
         let files: Vec<(VfFile, VfFile)> = pairs
             .iter()
@@ -1607,8 +1609,8 @@ impl NfsClient {
         })
     }
 
-    /// Copy whole files through copyv in bounded 16 MiB extents. NFSv4.2 and
-    /// SMB use server-side copy; other backends use copyv's streaming fallback.
+    /// Copy whole files through `Backend::vcopy_impl` in bounded 16 MiB extents.
+    /// NFSv4.2 and SMB can use server-side copy, with client-copy fallback.
     /// Returns `(copied_bytes, errors)`.
     fn copy_many(
         &self,

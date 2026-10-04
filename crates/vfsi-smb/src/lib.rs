@@ -2392,7 +2392,7 @@ fn identities_are_independent(identities: &[u64]) -> bool {
 
 /// Return the server's stable file index for an existing path without
 /// changing it. Hard links and paths reached through reparse aliases report
-/// the same index, allowing `writev` to avoid racing writes to one object.
+/// the same index, allowing `vwrite_impl` to avoid racing writes to one object.
 async fn concurrent_file_identity(
     connection: Connection,
     tree_id: TreeId,

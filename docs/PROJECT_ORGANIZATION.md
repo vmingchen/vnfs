@@ -104,7 +104,7 @@ explicit Cargo override:
 cargo --config 'patch.crates-io.libntirpc-sys.path="/home/ubuntu/gh/libntirpc-sys"' test -p vfsi-nfs --lib --all-features
 ```
 
-The repository's `scripts/test-libntirpc.sh` also tests an isolated, temporary
+The repository's `scripts/test-libntirpc.sh` also tests an isolated, source-keyed cached
 copy of the resolved dependency, retaining native ABI and fuzzing unit coverage
 without modifying the registry cache. Release libntirpc-sys changes from its own
 repository before updating VFSI's dependency version and lockfiles.
