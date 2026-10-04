@@ -296,6 +296,38 @@ impl AutoClient {
         }
     }
 
+    /// Update route-coherent batches, retaining each original input index.
+    pub fn vsetattrs<P: AsRef<Path>>(
+        &self,
+        updates: &[(P, crate::MetadataUpdate)],
+        follow_symlinks: bool,
+    ) -> VfResult<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mounts = read_mounts(false);
+        let resolved: Vec<_> = updates
+            .iter()
+            .map(|(path, _)| self.resolve(path.as_ref(), &mounts))
+            .collect();
+        let mut start = 0;
+        while start < updates.len() {
+            let end = cohort_end(&resolved, start);
+            let batch: Vec<_> = resolved[start..end]
+                .iter()
+                .zip(&updates[start..end])
+                .map(|(route, (_, update))| (route.path.as_path(), update.clone()))
+                .collect();
+            match &resolved[start].route {
+                Route::Mounted => self.mounted.vsetattrs(&batch, follow_symlinks),
+                Route::Nfs(connection) => connection.client.vsetattrs(&batch, follow_symlinks),
+            }
+            .map_err(|error| indexed(error, start))?;
+            start = end;
+        }
+        Ok(())
+    }
+
     pub fn vgetattrs<P: AsRef<Path>>(
         &self,
         paths: &[P],

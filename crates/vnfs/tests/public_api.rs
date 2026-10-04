@@ -482,3 +482,35 @@ fn portable_traits_and_options_are_reexports_not_parallel_contracts() {
     let core: vfsi_core::api::VisitOptions = vnfs::VisitOptions::new();
     let _: vnfs::VisitOptions = core;
 }
+
+#[cfg(all(feature = "auto", target_os = "linux"))]
+#[path = "support/vsetattrs.rs"]
+mod vsetattrs_support;
+
+#[cfg(all(feature = "auto", target_os = "linux"))]
+#[test]
+fn vsetattrs_many_local_and_routed_files() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("mounted")).unwrap();
+    std::fs::create_dir(root.path().join("auto")).unwrap();
+    let mounted = vnfs::Mounted::new(root.path()).unwrap();
+    vsetattrs_support::check_many(&mounted, "/mounted");
+    let auto = vnfs::Auto::new(root.path()).unwrap();
+    vsetattrs_support::check_many(&auto, "/auto");
+    std::os::unix::fs::symlink("mounted/file-0", root.path().join("link")).unwrap();
+    let updates = [("/link", vnfs::MetadataUpdate::new().len(11))];
+    assert!(mounted.vsetattrs(&updates, false).is_err());
+    assert_eq!(
+        std::fs::metadata(root.path().join("mounted/file-0"))
+            .unwrap()
+            .len(),
+        7
+    );
+    mounted.vsetattrs(&updates, true).unwrap();
+    assert_eq!(
+        std::fs::metadata(root.path().join("mounted/file-0"))
+            .unwrap()
+            .len(),
+        11
+    );
+}

@@ -17,6 +17,14 @@ macro_rules! owned_client {
             ) -> Result<Vec<Metadata>> {
                 crate::metadata::metadata_backend(&self.inner, paths, options)
             }
+            /// Update selected metadata fields for many paths in one backend vector.
+            pub fn vsetattrs<P: AsRef<Path>>(
+                &self,
+                updates: &[(P, MetadataUpdate)],
+                follow_symlinks: bool,
+            ) -> Result<()> {
+                self.inner.vsetattrs(updates, follow_symlinks)
+            }
             /// Return this client's allocation and traversal limits.
             pub fn limits(&self) -> ResourceLimits {
                 self.inner.limits()

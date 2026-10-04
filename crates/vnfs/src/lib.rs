@@ -51,7 +51,7 @@ pub mod directory {
     #[doc(inline)]
     pub use crate::{
         ControlFlow, DepthLimit, DirEntry, DirectoryListing, FileType, Metadata, MetadataFields,
-        MetadataOptions, Permissions, ReadDirOptions, RemoveMode, RemoveOptions,
+        MetadataOptions, MetadataUpdate, Permissions, ReadDirOptions, RemoveMode, RemoveOptions,
         TraversalCompletion, VisitOptions, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
     };
 }
@@ -210,8 +210,8 @@ pub use vfsi_core::api::{
 };
 pub use vfsi_core::api::{ReadIntoResult, WriteResult};
 pub use vfsi_core::{
-    Capabilities, DirEntry, ErrorDomain, Metadata, OpenFlags, OpenRequest, Permissions,
-    RemoveOptions, StatusCode, TransportKind,
+    Capabilities, DirEntry, ErrorDomain, Metadata, MetadataUpdate, OpenFlags, OpenRequest,
+    Permissions, RemoveOptions, StatusCode, TransportKind,
 };
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 pub(crate) use vfsi_sync::ReadAllOptions;

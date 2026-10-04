@@ -1318,6 +1318,62 @@ impl<F: VecFs> FsClient<F> {
             })
     }
 
+    /// Update many paths in one backend vector, preserving input indices.
+    pub fn vsetattrs<P: AsRef<Path>>(
+        &self,
+        updates: &[(P, MetadataUpdate)],
+        follow_symlinks: bool,
+    ) -> VfResult<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        // Convert the whole vector before I/O, so invalid timestamps cannot
+        // cause a partially dispatched mutation.
+        let attrs: Vec<_> = updates
+            .iter()
+            .enumerate()
+            .map(|(index, (path, update))| {
+                let mut attributes = crate::SetAttributes::new(VfFile::from_os_path(path.as_ref()));
+                attributes.mode = update.permissions.map(crate::Permissions::mode);
+                attributes.size = update.len;
+                attributes.atime = update
+                    .accessed
+                    .map(crate::native::system_time_parts)
+                    .transpose()
+                    .map_err(|error| {
+                        error
+                            .with_index(index)
+                            .with_context("vsetattrs", path.as_ref())
+                    })?;
+                attributes.mtime = update
+                    .modified
+                    .map(crate::native::system_time_parts)
+                    .transpose()
+                    .map_err(|error| {
+                        error
+                            .with_index(index)
+                            .with_context("vsetattrs", path.as_ref())
+                    })?;
+                Ok(attributes.into_legacy())
+            })
+            .collect::<VfResult<_>>()?;
+        let result = {
+            let mut backend = self.lock()?;
+            if follow_symlinks {
+                backend.setattrsv(&attrs)
+            } else {
+                backend.lsetattrsv(&attrs)
+            }
+        };
+        result.map_err(|error| match error.index() {
+            Some(index) if index < updates.len() => {
+                error.with_context("vsetattrs", updates[index].0.as_ref())
+            }
+            Some(_) => VfError::transport(None, "setattrs backend returned an invalid error index"),
+            None => error,
+        })
+    }
+
     /// Vector metadata query with explicit fields and final-symlink handling.
     /// Ancestor symlinks follow the backend's normal namespace semantics.
     pub fn metadata_many<P: AsRef<Path>>(

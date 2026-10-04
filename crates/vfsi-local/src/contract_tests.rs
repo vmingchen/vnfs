@@ -70,6 +70,35 @@ mod tests {
     }
 
     #[test]
+    fn vfsi_vsetattrs_batches_permissions_and_sizes() {
+        let (root, backend) = fs("vsetattrs-many");
+        let client = FsClient::new(backend);
+        let paths: Vec<_> = (0..64).map(|i| format!("/file-{i}")).collect();
+        for path in &paths {
+            std::fs::write(root.0.join(path.trim_start_matches('/')), b"original").unwrap();
+        }
+        let updates: Vec<_> = paths
+            .iter()
+            .enumerate()
+            .map(|(i, path)| {
+                (
+                    path,
+                    MetadataUpdate::new()
+                        .permissions(Permissions::from_mode(0o640))
+                        .len(i as u64),
+                )
+            })
+            .collect();
+        vfsi_core::Vfsi::vsetattrs(&client, &updates, true).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        for (i, path) in paths.iter().enumerate() {
+            let metadata = std::fs::metadata(root.0.join(path.trim_start_matches('/'))).unwrap();
+            assert_eq!(metadata.len(), i as u64);
+            assert_eq!(metadata.mode() & 0o7777, 0o640);
+        }
+    }
+
+    #[test]
     fn try_new_reports_setup_errors_instead_of_panicking() {
         let root = TempRoot::new("try-new-error");
         std::fs::create_dir(&root.0).unwrap();

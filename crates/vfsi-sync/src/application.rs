@@ -447,6 +447,13 @@ macro_rules! client_methods {
             }
             Ok(output)
         }
+        fn vsetattrs<P: AsRef<Path>>(
+            &self,
+            updates: &[(P, vfsi_core::MetadataUpdate)],
+            follow_symlinks: bool,
+        ) -> Result<()> {
+            <$client>::vsetattrs($receiver(self), updates, follow_symlinks)
+        }
         fn vgetattrs<P: AsRef<Path>>(
             &self,
             paths: &[P],

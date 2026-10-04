@@ -137,6 +137,29 @@ pub trait Vfsi {
         options: crate::api::MetadataOptions,
     ) -> Result<Vec<Metadata>>;
 
+    /// Update selected attributes for many paths using native backend batching.
+    /// Unspecified fields are unchanged. `follow_symlinks` controls the final
+    /// component; ancestor symlinks retain ordinary backend resolution.
+    /// Failure can follow partial mutations, including within one request;
+    /// an error index identifies an input, not a committed-prefix count.
+    /// Empty vectors succeed without I/O. Do not replay ambiguous failures.
+    ///
+    /// ```no_run
+    /// use vfsi_core::api::{Vfsi, MetadataUpdate, Permissions};
+    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
+    /// fs.vsetattrs(&[
+    ///     ("/file-1", MetadataUpdate::new().permissions(Permissions::from_mode(0o640)).len(1024)),
+    ///     ("/file-2", MetadataUpdate::new().len(0)),
+    /// ], true)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn vsetattrs<P: AsRef<Path>>(
+        &self,
+        updates: &[(P, crate::api::MetadataUpdate)],
+        follow_symlinks: bool,
+    ) -> Result<()>;
+
     /// Owned handle; vectors must contain handles belonging to this client.
     type File: FileHandle + 'static;
 

@@ -4095,3 +4095,21 @@ fn recursive_directory_pages_do_not_retry_an_ambiguous_child_reply() {
     assert!(result.unwrap_err().is_transport());
     assert_eq!(delivered, 1);
 }
+
+#[path = "support/vsetattrs.rs"]
+mod vsetattrs_support;
+
+#[test]
+fn vsetattrs_many_nfs_files() {
+    let directory = setup_dir("vsetattrs-many");
+    let fs = Nfs::builder(test_host())
+        .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => vnfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::NfsVersion::V4_2,
+            _ => vnfs::NfsVersion::Auto,
+        })
+        .connect()
+        .unwrap();
+    vsetattrs_support::check_many(&fs, &directory);
+    fs.remove_dir_all(&directory).unwrap();
+}

@@ -84,6 +84,14 @@ struct PortableFs {
     shape: Cell<u8>,
 }
 impl Vfsi for PortableFs {
+    fn vsetattrs<P: AsRef<std::path::Path>>(
+        &self,
+        _: &[(P, vfsi_core::MetadataUpdate)],
+        _: bool,
+    ) -> vfsi_core::api::Result<()> {
+        Ok(())
+    }
+
     type File = TestFile;
     fn limits(&self) -> ResourceLimits {
         ResourceLimits::default()
