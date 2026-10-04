@@ -64,14 +64,25 @@ const FILE_BASIC_INFORMATION: u8 = 4;
 const FILE_INTERNAL_INFORMATION: u8 = 6;
 const FILE_END_OF_FILE_INFORMATION: u8 = 20;
 
+#[bitfields::bitfield(u8)]
+#[derive(PartialEq, Eq)]
+struct SmbConnectFlags {
+    #[bits(default = true)]
+    auto_reconnect: bool,
+    #[bits(default = true)]
+    compression: bool,
+    #[bits(default = true)]
+    dfs_enabled: bool,
+    #[bits(5)]
+    _reserved: u8,
+}
+
 /// Connection and per-request deadlines for [`SmbVecFs`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SmbConnectOptions {
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
-    pub auto_reconnect: bool,
-    pub compression: bool,
-    pub dfs_enabled: bool,
+    flags: SmbConnectFlags,
 }
 
 impl Default for SmbConnectOptions {
@@ -79,10 +90,35 @@ impl Default for SmbConnectOptions {
         Self {
             connect_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(30),
-            auto_reconnect: true,
-            compression: true,
-            dfs_enabled: true,
+            flags: SmbConnectFlags::new(),
         }
+    }
+}
+
+impl SmbConnectOptions {
+    /// Enable read-only recovery after transport failures.
+    pub fn auto_reconnect(mut self, value: bool) -> Self {
+        self.flags.set_auto_reconnect(value);
+        self
+    }
+    /// Enable negotiated SMB compression.
+    pub fn compression(mut self, value: bool) -> Self {
+        self.flags.set_compression(value);
+        self
+    }
+    /// Enable SMB DFS support.
+    pub fn dfs_enabled(mut self, value: bool) -> Self {
+        self.flags.set_dfs_enabled(value);
+        self
+    }
+    pub const fn reconnects_automatically(self) -> bool {
+        self.flags.auto_reconnect()
+    }
+    pub const fn uses_compression(self) -> bool {
+        self.flags.compression()
+    }
+    pub const fn uses_dfs(self) -> bool {
+        self.flags.dfs_enabled()
     }
 }
 
@@ -181,9 +217,9 @@ impl SmbVecFs {
             username: username.to_owned(),
             password: password.to_owned(),
             domain: domain.to_owned(),
-            auto_reconnect: options.auto_reconnect,
-            compression: options.compression,
-            dfs_enabled: options.dfs_enabled,
+            auto_reconnect: options.reconnects_automatically(),
+            compression: options.uses_compression(),
+            dfs_enabled: options.uses_dfs(),
             dfs_target_overrides: HashMap::new(),
             connect_options: None,
         };
@@ -2701,5 +2737,29 @@ mod tests {
             error.status(),
             Some(crate::vecfs::StatusCode::Smb(status.0))
         );
+    }
+}
+
+#[cfg(test)]
+mod option_layout_tests {
+    use super::*;
+    #[test]
+    fn packed_smb_options_keep_defaults_and_flags_independent() {
+        assert_eq!(std::mem::size_of::<SmbConnectFlags>(), 1);
+        let default = SmbConnectOptions::default();
+        assert!(
+            default.reconnects_automatically() && default.uses_compression() && default.uses_dfs()
+        );
+        for bits in 0..8 {
+            let options = default
+                .auto_reconnect(bits & 1 != 0)
+                .compression(bits & 2 != 0)
+                .dfs_enabled(bits & 4 != 0);
+            assert_eq!(options.reconnects_automatically(), bits & 1 != 0);
+            assert_eq!(options.uses_compression(), bits & 2 != 0);
+            assert_eq!(options.uses_dfs(), bits & 4 != 0);
+            assert_eq!(options.connect_timeout, default.connect_timeout);
+            assert_eq!(options.request_timeout, default.request_timeout);
+        }
     }
 }

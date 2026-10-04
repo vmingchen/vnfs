@@ -144,7 +144,7 @@ limits prevent an accidental unbounded result. `read_dir_with_options` handles
 one directory, while `walk_with_options` handles a bounded recursive tree.
 
 Owned `NfsClient::readv` results inherit the client's 16 MiB aggregate budget.
-Use `ReadOptions::new().max_total_bytes(bytes)` to override it or `readv` with `ReadOp::into`
+Use `ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(bytes))` to override it or `readv` with `ReadOp::into`
 to supply your own buffers. Range lengths are checked before dispatch; whole
 files are collected within the remaining budget and fail rather than truncate.
 

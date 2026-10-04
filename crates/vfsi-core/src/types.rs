@@ -1523,6 +1523,14 @@ bitflags::bitflags! {
     }
 }
 
+#[bitfields::bitfield(u8)]
+#[derive(PartialEq, Eq)]
+struct RemoveFlags {
+    continue_on_error: bool,
+    #[bits(7)]
+    _reserved: u8,
+}
+
 /// Options controlling recursive removal.
 ///
 /// The `continue_on_error`/`retries` behavior was previously hardcoded in the
@@ -1533,7 +1541,7 @@ bitflags::bitflags! {
 pub struct RemoveOptions {
     /// Keep removing after a per-entry failure and report the first error at
     /// the end. When `false`, the first failure aborts.
-    pub continue_on_error: bool,
+    flags: RemoveFlags,
     /// Maximum batch size for vectorized removals; `0` lets the backend learn
     /// a safe size from useful work, starting at a conservative default.
     pub batch: usize,
@@ -1544,7 +1552,7 @@ pub struct RemoveOptions {
 impl Default for RemoveOptions {
     fn default() -> Self {
         Self {
-            continue_on_error: false,
+            flags: RemoveFlags::new(),
             batch: 0,
             retries: 4,
         }
@@ -1557,8 +1565,13 @@ impl RemoveOptions {
     }
 
     pub fn continue_on_error(mut self, value: bool) -> Self {
-        self.continue_on_error = value;
+        self.flags.set_continue_on_error(value);
         self
+    }
+
+    /// Whether removal continues after semantic per-entry failures.
+    pub const fn continues_on_error(self) -> bool {
+        self.flags.continue_on_error()
     }
 
     pub fn batch(mut self, value: usize) -> Self {

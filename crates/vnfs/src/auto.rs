@@ -1040,9 +1040,8 @@ impl AutoClient {
     pub(crate) fn readv_owned(
         &self,
         requests: &[crate::ReadRequest<'_, AutoRead<'_>>],
-        options: crate::ReadOptions,
+        budget: usize,
     ) -> VfResult<Vec<ReadResult>> {
-        let budget = options.limit_or(self.limits.max_read_bytes);
         if requests.iter().all(|request| request.range_ref().is_some()) {
             return self.readv_with_limit_projected(requests, budget, |request| {
                 request.range_ref().expect("checked range requests")
@@ -2364,7 +2363,10 @@ mod tests {
         );
         assert!(
             client
-                .read_files_with_options(&paths, crate::ReadOptions::new().max_total_bytes(15))
+                .read_files_with_options(
+                    &paths,
+                    crate::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(15))
+                )
                 .is_err()
         );
         let existing = client

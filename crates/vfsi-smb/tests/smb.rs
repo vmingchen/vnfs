@@ -122,11 +122,9 @@ fn configurable_deadlines_connect_to_samba() {
     let username = std::env::var("VFSI_SMB_USERNAME").unwrap_or_default();
     let password = std::env::var("VFSI_SMB_PASSWORD").unwrap_or_default();
     let domain = std::env::var("VFSI_SMB_DOMAIN").unwrap_or_default();
-    let options = SmbConnectOptions {
-        connect_timeout: std::time::Duration::from_secs(5),
-        request_timeout: std::time::Duration::from_secs(5),
-        ..SmbConnectOptions::default()
-    };
+    let mut options = SmbConnectOptions::default();
+    options.connect_timeout = std::time::Duration::from_secs(5);
+    options.request_timeout = std::time::Duration::from_secs(5);
     SmbVecFs::connect_with_options(&server, &share, &username, &password, &domain, options)
         .expect("connect with explicit SMB deadlines")
         .shutdown()

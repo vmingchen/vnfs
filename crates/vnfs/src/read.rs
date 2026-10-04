@@ -6,9 +6,8 @@ pub(crate) fn read_backend_owned<
 >(
     client: &vfsi_sync::FsClient<F>,
     requests: &[ReadRequest<'_, vfsi_sync::FsRead<'_, F>>],
-    options: ReadOptions,
+    budget: usize,
 ) -> Result<Vec<OwnedReadResult>> {
-    let budget = options.limit_or(client.limits().max_read_bytes);
     if requests.iter().all(|request| request.range_ref().is_some()) {
         return client.readv_with_limit_projected(requests, budget, |request| {
             request.range_ref().expect("checked ranges")
@@ -176,10 +175,7 @@ impl ReadResult {
 pub(crate) fn consume_ops<'a, H: crate::FileHandle + 'a>(
     ops: impl IntoIterator<Item = ReadOp<'a, H>>,
     budget: usize,
-    owned: impl FnOnce(
-        &[ReadRequest<'a, H::ReadRequest<'a>>],
-        ReadOptions,
-    ) -> Result<Vec<OwnedReadResult>>,
+    owned: impl FnOnce(&[ReadRequest<'a, H::ReadRequest<'a>>], usize) -> Result<Vec<OwnedReadResult>>,
     buffers: impl FnOnce(&mut [H::ReadIntoRequest<'a>], usize) -> Result<Vec<crate::ReadIntoResult>>,
 ) -> Result<Vec<ReadResult>> {
     let mut owned_ops = Vec::new();
@@ -236,8 +232,7 @@ pub(crate) fn consume_ops<'a, H: crate::FileHandle + 'a>(
     let allocated = if owned_ops.is_empty() {
         Vec::new()
     } else {
-        owned(&owned_ops, ReadOptions::new().max_total_bytes(remaining))
-            .map_err(|e| remap(e, &owned_indices))?
+        owned(&owned_ops, remaining).map_err(|e| remap(e, &owned_indices))?
     };
     if allocated.len() != owned_indices.len() {
         return Err(Error::transport(None, "invalid readv owned result count"));
@@ -308,7 +303,7 @@ impl<'a, R> From<R> for ReadRequest<'a, R> {
 /// files share the remaining returned-data budget and fail rather than truncate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadOptions {
-    max_total_bytes: Option<usize>,
+    max_total_bytes: Option<std::num::NonZeroUsize>,
 }
 impl ReadOptions {
     /// Inherit the client's aggregate read budget.
@@ -317,18 +312,20 @@ impl ReadOptions {
             max_total_bytes: None,
         }
     }
-    /// Override the aggregate budget for this call. Stream larger files instead
+    /// Override the aggregate budget for this call; `None` restores inheritance.
+    /// Only nonzero overrides are representable. Stream larger files instead
     /// of raising this when bounded memory is required.
-    pub const fn max_total_bytes(mut self, bytes: usize) -> Self {
-        self.max_total_bytes = Some(bytes);
+    pub const fn max_total_bytes(mut self, bytes: Option<std::num::NonZeroUsize>) -> Self {
+        self.max_total_bytes = bytes;
         self
     }
     /// None inherits the client's configured read budget.
-    pub const fn total_byte_limit(self) -> Option<usize> {
+    pub const fn total_byte_limit(self) -> Option<std::num::NonZeroUsize> {
         self.max_total_bytes
     }
     pub(crate) fn limit_or(self, default: usize) -> usize {
-        self.max_total_bytes.unwrap_or(default)
+        self.max_total_bytes
+            .map_or(default, std::num::NonZeroUsize::get)
     }
 }
 
@@ -554,6 +551,35 @@ mod tests {
             )
             .unwrap()
             .is_empty()
+        );
+    }
+}
+
+#[cfg(test)]
+mod option_layout_tests {
+    use super::ReadOptions;
+    use std::num::NonZeroUsize;
+    #[test]
+    fn read_options_are_one_word_and_keep_inheritance_distinct() {
+        assert_eq!(
+            std::mem::size_of::<ReadOptions>(),
+            std::mem::size_of::<usize>()
+        );
+        let mut options = ReadOptions::new();
+        assert_eq!(options.limit_or(7), 7);
+        for bytes in [1, 42, usize::MAX] {
+            let limit = NonZeroUsize::new(bytes);
+            options = options.max_total_bytes(limit);
+            assert_eq!(options.total_byte_limit(), limit);
+            assert_eq!(options.limit_or(7), bytes);
+        }
+        options = options.max_total_bytes(None);
+        assert_eq!(options.total_byte_limit(), None);
+        assert_eq!(options.limit_or(7), 7);
+        assert_eq!(
+            options.limit_or(0),
+            0,
+            "an inherited zero policy must not become unlimited"
         );
     }
 }

@@ -11,8 +11,10 @@ fn application_surface_is_small_and_typed() {
     let _ = OpenRequest::new("/file", OpenFlags::READ);
     assert_eq!(ReadOptions::new().total_byte_limit(), None);
     assert_eq!(
-        ReadOptions::new().max_total_bytes(42).total_byte_limit(),
-        Some(42)
+        ReadOptions::new()
+            .max_total_bytes(std::num::NonZeroUsize::new(42))
+            .total_byte_limit(),
+        std::num::NonZeroUsize::new(42)
     );
     let _: Option<vnfs::NfsClient> = None;
     let _: Option<vnfs::NfsFile> = None;
@@ -39,7 +41,10 @@ fn concrete_and_extension_directory_visitors_borrow_entries_consistently() {
     let concrete: &vnfs::AutoClient = &auto;
     assert_eq!(
         concrete
-            .read_files_with_options(&["/file"], vnfs::ReadOptions::new().max_total_bytes(4))
+            .read_files_with_options(
+                &["/file"],
+                vnfs::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(4))
+            )
             .unwrap(),
         [b"data".to_vec()]
     );
@@ -148,7 +153,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         client
             .readv_with_options(
                 [vnfs::ReadOp::whole("/sub/a"), vnfs::ReadOp::whole("/sub/b")],
-                vnfs::ReadOptions::new().max_total_bytes(5)
+                vnfs::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(5))
             )
             .is_err()
     );
@@ -374,4 +379,66 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
     let auto = vnfs::Auto::new(&root).unwrap();
     workflow(&auto, "/auto").unwrap();
     std::fs::remove_dir(root).unwrap();
+}
+
+#[test]
+fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
+    use vnfs::{MetadataFields, ResourceLimits, VisitOptions, WalkOptions};
+    let root = tempfile::tempdir().unwrap();
+    let fs = vnfs::Mounted::new(root.path()).unwrap();
+    fs.create_dir_all("/tree/child").unwrap();
+    fs.write("/tree/child/file", b"x").unwrap();
+    for depth in [201, 254, 255, 256, 500, usize::MAX - 1, usize::MAX] {
+        let walk = WalkOptions::new().max_depth(depth);
+        assert_eq!(walk.depth_limit(), usize::MAX);
+        let converted = VisitOptions::from(walk);
+        assert!(converted.is_recursive());
+        let explicit = fs
+            .walk_with_options("/tree", MetadataFields::MODE, walk)
+            .unwrap();
+        let direct = fs
+            .read_dirs_with_options(
+                &["/tree"],
+                VisitOptions::new().recursive(true).max_depth(depth),
+            )
+            .unwrap();
+        assert_eq!(explicit.len(), 2);
+        assert_eq!(direct[0].len(), 2);
+        let inherited = vnfs::Mounted::new(root.path())
+            .unwrap()
+            .with_limits(ResourceLimits {
+                max_walk_depth: depth,
+                ..ResourceLimits::default()
+            });
+        assert_eq!(inherited.walk("/tree").unwrap().len(), 2);
+    }
+    assert!(
+        fs.walk_with_options(
+            "/tree",
+            MetadataFields::MODE,
+            WalkOptions::new().max_depth(0)
+        )
+        .is_err()
+    );
+    assert_eq!(
+        fs.walk_with_options(
+            "/tree",
+            MetadataFields::MODE,
+            WalkOptions::new().max_depth(0).truncate_at_max_depth(true)
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    assert_eq!(
+        fs.walk_with_options(
+            "/tree",
+            MetadataFields::MODE,
+            WalkOptions::new().max_depth(1)
+        )
+        .unwrap()
+        .len(),
+        2
+    );
+    assert_eq!(WalkOptions::new().max_depth(200).depth_limit(), 200);
 }

@@ -1,16 +1,27 @@
-use crate::{MetadataFields, ReadDirOptions, ResourceLimits, WalkOptions};
+use crate::{DepthLimit, MetadataFields, ReadDirOptions, ResourceLimits, WalkOptions};
+use std::num::NonZeroUsize;
+
+#[bitfields::bitfield(u8)]
+#[derive(PartialEq, Eq)]
+struct VisitFlags {
+    recursive: bool,
+    truncate: bool,
+    entries_unlimited: bool,
+    bytes_unlimited: bool,
+    #[bits(4)]
+    _reserved: u8,
+}
 
 /// Shared directory traversal policy for collection and paged visiting.
 /// Defaults to immediate children only. Collection retains native batching;
-/// visiting delivers borrowed entries incrementally through callbacks.
+/// visiting delivers owned directory pages incrementally through callbacks.
 /// Unspecified budgets inherit the client's resource limits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VisitOptions {
-    recursive: bool,
-    entries: Option<usize>,
-    bytes: Option<usize>,
-    depth: Option<usize>,
-    truncate: bool,
+    flags: VisitFlags,
+    entries: Option<NonZeroUsize>,
+    bytes: Option<NonZeroUsize>,
+    depth: Option<DepthLimit>,
     fields: Option<MetadataFields>,
 }
 
@@ -18,51 +29,62 @@ impl VisitOptions {
     /// Explicitly disable entry, path-byte and depth limits. This can permit
     /// unbounded collection or traversal; prefer finite application budgets.
     pub const fn unlimited() -> Self {
+        let mut flags = VisitFlags::new();
+        flags.set_entries_unlimited(true);
+        flags.set_bytes_unlimited(true);
         Self {
-            recursive: false,
-            entries: Some(usize::MAX),
-            bytes: Some(usize::MAX),
-            depth: Some(usize::MAX),
-            truncate: false,
+            flags,
+            entries: None,
+            bytes: None,
+            depth: Some(DepthLimit::unlimited()),
             fields: None,
         }
     }
     pub const fn new() -> Self {
         Self {
-            recursive: false,
+            flags: VisitFlags::new(),
             entries: None,
             bytes: None,
             depth: None,
-            truncate: false,
             fields: None,
         }
     }
     /// Descend into directories, without following entry symlinks.
     pub const fn recursive(mut self, value: bool) -> Self {
-        self.recursive = value;
+        self.flags.set_recursive(value);
         self
     }
     /// Shared entry budget across every input root.
     pub const fn max_entries(mut self, value: usize) -> Self {
-        self.entries = Some(value);
+        self.entries = match value.checked_add(1) {
+            Some(encoded) => NonZeroUsize::new(encoded),
+            None => None,
+        };
+        self.flags.set_entries_unlimited(value == usize::MAX);
         self
     }
     /// Shared path-byte budget. Recursive visiting also charges root paths.
     pub const fn max_path_bytes(mut self, value: usize) -> Self {
-        self.bytes = Some(value);
+        self.bytes = match value.checked_add(1) {
+            Some(encoded) => NonZeroUsize::new(encoded),
+            None => None,
+        };
+        self.flags.set_bytes_unlimited(value == usize::MAX);
         self
     }
     /// Root listing is depth 0; depth 1 also lists immediate subdirectories.
     /// In recursive mode, encountering a directory beyond this limit is an
     /// error unless `truncate_at_max_depth(true)` is selected. Shallow mode
     /// ignores depth settings and intentionally visits only immediate children.
+    /// Finite depths range from 0 through 200; any larger value disables
+    /// the depth limit. Entry and path-byte budgets remain in effect.
     pub const fn max_depth(mut self, value: usize) -> Self {
-        self.depth = Some(value);
+        self.depth = Some(DepthLimit::new(value));
         self
     }
     /// Intentionally stop descending at the depth limit instead of failing.
     pub const fn truncate_at_max_depth(mut self, value: bool) -> Self {
-        self.truncate = value;
+        self.flags.set_truncate(value);
         self
     }
     /// Select metadata returned with directory pages, without per-entry stat
@@ -73,7 +95,7 @@ impl VisitOptions {
         self
     }
     pub const fn is_recursive(self) -> bool {
-        self.recursive
+        self.flags.recursive()
     }
     pub fn metadata_fields(self) -> MetadataFields {
         self.fields.unwrap_or_else(|| {
@@ -88,24 +110,32 @@ impl VisitOptions {
     }
     pub(crate) fn walk_options(self, limits: ResourceLimits) -> WalkOptions {
         let mut options = limits.walk_options();
-        if let Some(v) = self.entries {
-            options = options.max_entries(v);
+        if self.flags.entries_unlimited() {
+            options = options.max_entries(usize::MAX);
+        } else if let Some(encoded) = self.entries {
+            options = options.max_entries(encoded.get() - 1);
         }
-        if let Some(v) = self.bytes {
-            options = options.max_path_bytes(v);
+        if self.flags.bytes_unlimited() {
+            options = options.max_path_bytes(usize::MAX);
+        } else if let Some(encoded) = self.bytes {
+            options = options.max_path_bytes(encoded.get() - 1);
         }
-        if let Some(v) = self.depth {
-            options = options.max_depth(v);
+        if let Some(depth) = self.depth {
+            options = options.max_depth(depth.get());
         }
-        options.truncate_at_max_depth(self.truncate)
+        options.truncate_at_max_depth(self.flags.truncate())
     }
     pub(crate) fn directory_options(self, limits: ResourceLimits) -> ReadDirOptions {
         let mut options = limits.directory_options();
-        if let Some(v) = self.entries {
-            options = options.max_entries(v);
+        if self.flags.entries_unlimited() {
+            options = options.max_entries(usize::MAX);
+        } else if let Some(encoded) = self.entries {
+            options = options.max_entries(encoded.get() - 1);
         }
-        if let Some(v) = self.bytes {
-            options = options.max_path_bytes(v);
+        if self.flags.bytes_unlimited() {
+            options = options.max_path_bytes(usize::MAX);
+        } else if let Some(encoded) = self.bytes {
+            options = options.max_path_bytes(encoded.get() - 1);
         }
         options
     }
@@ -126,5 +156,64 @@ impl From<WalkOptions> for VisitOptions {
             .max_path_bytes(options.path_byte_limit())
             .max_depth(options.depth_limit())
             .truncate_at_max_depth(options.truncates_at_depth_limit())
+    }
+}
+
+#[cfg(test)]
+mod option_layout_tests {
+    use super::*;
+    #[allow(dead_code)]
+    struct PreviousLayout {
+        recursive: bool,
+        entries: Option<usize>,
+        bytes: Option<usize>,
+        depth: Option<usize>,
+        truncate: bool,
+        fields: Option<MetadataFields>,
+    }
+    #[test]
+    fn compact_traversal_options_preserve_zero_overrides_and_independent_bits() {
+        assert_eq!(std::mem::size_of::<VisitFlags>(), 1);
+        assert!(std::mem::size_of::<VisitOptions>() < std::mem::size_of::<PreviousLayout>());
+        let limits = ResourceLimits::default();
+        let inherited = VisitOptions::new().walk_options(limits);
+        assert_eq!(inherited.entry_limit(), limits.walk_options().entry_limit());
+        assert_eq!(inherited.depth_limit(), limits.walk_options().depth_limit());
+        for value in [0, 1, 200, usize::MAX] {
+            let options = VisitOptions::new()
+                .max_entries(value)
+                .max_path_bytes(value)
+                .max_depth(value)
+                .recursive(true)
+                .truncate_at_max_depth(true)
+                .fields(MetadataFields::SIZE);
+            let walk = options.walk_options(limits);
+            assert_eq!(walk.entry_limit(), value);
+            assert_eq!(walk.path_byte_limit(), value);
+            assert_eq!(walk.depth_limit(), value);
+            assert!(walk.truncates_at_depth_limit());
+            assert!(options.is_recursive());
+            assert_eq!(
+                options.metadata_fields(),
+                MetadataFields::SIZE | MetadataFields::MODE
+            );
+            let changed = options.recursive(false).truncate_at_max_depth(false);
+            assert!(!changed.is_recursive());
+            assert!(!changed.walk_options(limits).truncates_at_depth_limit());
+            assert_eq!(changed.directory_options(limits).entry_limit(), value);
+            let zero = changed.max_entries(0).max_path_bytes(0).max_depth(0);
+            assert_eq!(zero.walk_options(limits).entry_limit(), 0);
+            assert_eq!(zero.walk_options(limits).path_byte_limit(), 0);
+            assert_eq!(zero.walk_options(limits).depth_limit(), 0);
+        }
+        assert_eq!(
+            VisitOptions::unlimited().walk_options(limits).depth_limit(),
+            usize::MAX
+        );
+        eprintln!(
+            "VisitOptions: {} -> {} bytes",
+            std::mem::size_of::<PreviousLayout>(),
+            std::mem::size_of::<VisitOptions>()
+        );
     }
 }

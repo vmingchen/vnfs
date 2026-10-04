@@ -9,7 +9,8 @@ usage() {
   cat <<'HELP'
 Usage: scripts/test-ci-local.sh [--managed-nfs] [--managed-smb] JOB [JOB ...]
 
-Jobs: fast, check, rust, python, nfs, smb, quick (rust + python), all/full
+Jobs: smoke, fast, check, rust, python, nfs, smb, quick (rust + python), all/full
+smoke: small server-independent Rust subset for iteration (not full CI).
 fast: server-independent Rust tests; check: formatting and Clippy.
 rust: check + fast. all/full: rust + python + nfs + smb.
 
@@ -38,7 +39,7 @@ while (($#)); do
     --managed-nfs) managed_nfs=1 ;;
     --managed-smb) managed_smb=1 ;;
     -h|--help) usage; exit 0 ;;
-    fast|check|rust|python|nfs|smb) jobs+=("$1") ;;
+    smoke|fast|check|rust|python|nfs|smb) jobs+=("$1") ;;
     quick) jobs+=(rust python) ;;
     all|full) jobs+=(rust python nfs smb) ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -255,6 +256,7 @@ run_check() {
 }
 
 run_fast() { ./scripts/test-rust.sh; }
+run_smoke() { ./scripts/test-rust.sh --quick; }
 
 run_python() {
   prepare_python
@@ -301,7 +303,7 @@ run_smb() {
   "$python_bin" -m pytest adapters/vsmb/tests adapters/vsmbfs/tests
 }
 
-for job in check fast python nfs smb; do
+for job in check smoke fast python nfs smb; do
   if [[ -v selected[$job] ]]; then
     echo "==> Running local CI job: $job"
     started=$SECONDS

@@ -182,7 +182,7 @@ pub trait Fs {
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
     /// let results = fs.readv_with_options(
     ///     [ReadOp::whole("/config")],
-    ///     ReadOptions::new().max_total_bytes(1024 * 1024),
+    ///     ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024)),
     /// )?;
     /// println!("{} bytes", results[0].read());
     /// # Ok(())
@@ -1010,7 +1010,7 @@ pub trait FsExt: Fs {
     /// use vnfs::{Fs, FsExt, ReadOptions, WriteOp};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
     /// let files = fs.read_files_with_options(&["/config"],
-    ///     ReadOptions::new().max_total_bytes(1024 * 1024))?;
+    ///     ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024)))?;
     /// # let _ = files;
     /// # Ok(())
     /// # }
@@ -1366,12 +1366,17 @@ pub trait FsExt: Fs {
     /// # }
     /// ```
     fn read_to_string(&self, path: impl AsRef<Path>) -> Result<String> {
-        self.read_to_string_with_limit(path, self.limits().max_read_bytes)
+        let path = path.as_ref();
+        let mut files = self.read_files(&[path])?;
+        String::from_utf8(files.remove(0)).map_err(|_| {
+            crate::Error::client(0, vfsi_core::ERR_INVAL).with_context("read_to_string", path)
+        })
     }
 
     /// Single-target convenience. For multiple files, prefer [`Fs::readv_with_options`] with an aggregate byte budget, then decode UTF-8.
     ///
-    /// Read a complete UTF-8 file with an explicit payload budget.
+    /// Read a complete UTF-8 file with an explicit, nonzero payload budget.
+    /// A zero-byte override returns an invalid-input error.
     ///
     /// ```no_run
     /// use vnfs::{Fs, FsExt, WriteOp};
@@ -1387,9 +1392,12 @@ pub trait FsExt: Fs {
         max_bytes: usize,
     ) -> Result<String> {
         let path = path.as_ref();
+        let max_bytes = std::num::NonZeroUsize::new(max_bytes).ok_or_else(|| {
+            crate::Error::client(0, vfsi_core::ERR_INVAL).with_context("read_to_string", path)
+        })?;
         let mut files = self.read_files_with_options(
             &[path],
-            crate::ReadOptions::new().max_total_bytes(max_bytes),
+            crate::ReadOptions::new().max_total_bytes(Some(max_bytes)),
         )?;
         String::from_utf8(files.remove(0)).map_err(|_| {
             crate::Error::client(0, vfsi_core::ERR_INVAL).with_context("read_to_string", path)
@@ -2086,7 +2094,7 @@ macro_rules! client_methods {
                             options,
                         ) {
                             let error = vector_index(error, index);
-                            if error.is_transport() || !options.continue_on_error {
+                            if error.is_transport() || !options.continues_on_error() {
                                 return Err(error);
                             }
                             first_error.get_or_insert(error);
@@ -2627,7 +2635,7 @@ mod extension_tests {
         assert_eq!(
             fs.read_files_with_options(
                 &["/a", "/b", "/a"],
-                crate::ReadOptions::new().max_total_bytes(8)
+                crate::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(8))
             )
             .unwrap()
             .len(),

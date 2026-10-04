@@ -141,20 +141,59 @@ impl Default for ReadDirOptions {
     }
 }
 
+#[bitfields::bitfield(u8)]
+#[derive(PartialEq, Eq)]
+struct WalkFlags {
+    truncate: bool,
+    #[bits(7)]
+    _reserved: u8,
+}
+
+/// Compact traversal depth: 0 through 200 are finite, larger inputs are unlimited.
+/// The root has depth zero. Unlimited depth does not disable entry/byte budgets.
+/// Both this type and `Option<DepthLimit>` occupy one byte.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DepthLimit(std::num::NonZeroU8);
+
+impl DepthLimit {
+    /// Normalize a requested depth. Every value above 200 means unlimited.
+    pub const fn new(depth: usize) -> Self {
+        let encoded = if depth <= 200 { (depth + 1) as u8 } else { 202 };
+        Self(std::num::NonZeroU8::new(encoded).expect("depth encoding is nonzero"))
+    }
+    /// Disable the depth limit while retaining other traversal budgets.
+    pub const fn unlimited() -> Self {
+        Self::new(usize::MAX)
+    }
+    /// Effective finite limit, or `usize::MAX` for unlimited traversal.
+    pub const fn get(self) -> usize {
+        if self.is_unlimited() {
+            usize::MAX
+        } else {
+            self.0.get() as usize - 1
+        }
+    }
+    /// Whether traversal has no depth limit.
+    pub const fn is_unlimited(self) -> bool {
+        self.0.get() == 202
+    }
+}
+
 /// Resource limits for an allocating recursive directory walk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WalkOptions {
     directory: ReadDirOptions,
-    max_depth: usize,
-    truncate_at_max_depth: bool,
+    max_depth: DepthLimit,
+    flags: WalkFlags,
 }
 
 impl WalkOptions {
     pub const fn new() -> Self {
         Self {
             directory: ReadDirOptions::new(),
-            max_depth: DEFAULT_WALK_MAX_DEPTH,
-            truncate_at_max_depth: false,
+            max_depth: DepthLimit::new(DEFAULT_WALK_MAX_DEPTH),
+            flags: WalkFlags::new(),
         }
     }
 
@@ -162,8 +201,8 @@ impl WalkOptions {
     pub const fn unlimited() -> Self {
         Self {
             directory: ReadDirOptions::unlimited(),
-            max_depth: usize::MAX,
-            truncate_at_max_depth: false,
+            max_depth: DepthLimit::unlimited(),
+            flags: WalkFlags::new(),
         }
     }
 
@@ -177,15 +216,17 @@ impl WalkOptions {
         self
     }
 
+    /// Root depth is zero. Values from 0 through 200 are finite limits;
+    /// any larger value disables the depth limit (other budgets still apply).
     pub const fn max_depth(mut self, depth: usize) -> Self {
-        self.max_depth = depth;
+        self.max_depth = DepthLimit::new(depth);
         self
     }
 
     /// Stop descending at `max_depth` instead of treating a deeper subtree
     /// as a safety-limit violation. Intended for caller-requested shallow walks.
     pub const fn truncate_at_max_depth(mut self, truncate: bool) -> Self {
-        self.truncate_at_max_depth = truncate;
+        self.flags.set_truncate(truncate);
         self
     }
 
@@ -197,12 +238,13 @@ impl WalkOptions {
         self.directory.path_byte_limit()
     }
 
+    /// Effective depth limit, or `usize::MAX` when unlimited.
     pub const fn depth_limit(self) -> usize {
-        self.max_depth
+        self.max_depth.get()
     }
 
     pub const fn truncates_at_depth_limit(self) -> bool {
-        self.truncate_at_max_depth
+        self.flags.truncate()
     }
 }
 
@@ -1741,5 +1783,50 @@ mod contract_tests {
             "readlink",
         );
         assert_eq!(take_single_result("readlink", vec![7u8]).unwrap(), 7);
+    }
+}
+
+#[cfg(test)]
+mod walk_depth_tests {
+    use super::{DepthLimit, WalkOptions};
+    #[test]
+    fn depth_limit_is_one_byte_and_preserves_optional_inheritance() {
+        const UNLIMITED: DepthLimit = DepthLimit::new(201);
+        assert_eq!(std::mem::size_of::<DepthLimit>(), 1);
+        assert_eq!(std::mem::size_of::<Option<DepthLimit>>(), 1);
+        assert!(UNLIMITED.is_unlimited());
+        for depth in 0..=200 {
+            let limit = DepthLimit::new(depth);
+            assert!(!limit.is_unlimited());
+            assert_eq!(limit.get(), depth);
+        }
+        for depth in [201, 255, 256, 500, usize::MAX - 1, usize::MAX] {
+            assert_eq!(DepthLimit::new(depth), DepthLimit::unlimited());
+        }
+        assert_ne!(None, Some(DepthLimit::new(0)));
+        assert_ne!(None, Some(DepthLimit::unlimited()));
+    }
+    #[test]
+    fn depth_limits_normalize_without_wrapping_and_keep_other_options() {
+        const UNLIMITED: WalkOptions = WalkOptions::new().max_depth(201);
+        assert_eq!(UNLIMITED.depth_limit(), usize::MAX);
+        for depth in 0..=200 {
+            let options = WalkOptions::new()
+                .max_depth(depth)
+                .max_entries(7)
+                .max_path_bytes(11)
+                .truncate_at_max_depth(true);
+            assert_eq!(options.depth_limit(), depth);
+            assert_eq!(options.entry_limit(), 7);
+            assert_eq!(options.path_byte_limit(), 11);
+            assert!(options.truncates_at_depth_limit());
+        }
+        for depth in [201, 254, 255, 256, 500, usize::MAX - 1, usize::MAX] {
+            let options = WalkOptions::new().max_depth(depth);
+            assert_eq!(options.depth_limit(), usize::MAX);
+            assert_eq!(options.max_depth(0).depth_limit(), 0);
+            assert_eq!(options.max_depth(200).depth_limit(), 200);
+        }
+        assert_eq!(WalkOptions::unlimited().depth_limit(), usize::MAX);
     }
 }

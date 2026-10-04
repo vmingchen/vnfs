@@ -50,7 +50,7 @@ pub mod files {
 pub mod directory {
     #[doc(inline)]
     pub use crate::{
-        ControlFlow, DirEntry, DirectoryListing, FileType, Metadata, MetadataFields,
+        ControlFlow, DepthLimit, DirEntry, DirectoryListing, FileType, Metadata, MetadataFields,
         MetadataOptions, Permissions, ReadDirOptions, RemoveMode, RemoveOptions,
         TraversalCompletion, VisitOptions, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
     };
@@ -191,7 +191,7 @@ pub mod prelude {
     #[cfg(feature = "nfs")]
     pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile, NfsVersion};
     pub use vfsi_core::{OpenFlags, OpenRequest, RemoveOptions};
-    pub use vfsi_sync::{ReadDirOptions, ReadStreamOptions, WalkOptions};
+    pub use vfsi_sync::{DepthLimit, ReadDirOptions, ReadStreamOptions, WalkOptions};
 }
 
 pub use std::io::ErrorKind;
@@ -217,8 +217,8 @@ pub use vfsi_core::{
 };
 pub(crate) use vfsi_sync::ReadAllOptions;
 pub use vfsi_sync::{
-    DirectoryListing, ReadDirOptions, ReadStreamOptions, ResourceLimits, StreamCompletion,
-    TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
+    DepthLimit, DirectoryListing, ReadDirOptions, ReadStreamOptions, ResourceLimits,
+    StreamCompletion, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
 };
 pub use vfsi_sync::{FsReadIntoResult as ReadIntoResult, FsWriteResult as WriteResult};
 #[cfg(feature = "nfs")]

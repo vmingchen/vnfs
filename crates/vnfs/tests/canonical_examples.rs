@@ -155,7 +155,7 @@ fn canonical_workflows_on_nfsv41_and_nfsv42() -> Result<()> {
                     vnfs::ReadOp::whole(&paths[1]),
                     vnfs::ReadOp::into(&file, 20, &mut buffer),
                 ],
-                vnfs::ReadOptions::new().max_total_bytes(12),
+                vnfs::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(12)),
             )?;
             assert_eq!(mixed[0].data().unwrap(), b"hello");
             assert_eq!(mixed[1].offset(), 10);

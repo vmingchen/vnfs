@@ -14,5 +14,6 @@ test-support = []
 test-faults = ["vfsi-core/test-faults"]
 
 [dependencies]
+bitfields = { workspace = true }
 libc = { workspace = true }
 vfsi-core = { workspace = true }

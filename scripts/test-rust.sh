@@ -4,6 +4,21 @@ set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
+quick=0
+case "${1:-}" in
+  "") ;;
+  --quick) quick=1; shift ;;
+  -h|--help)
+    echo 'Usage: scripts/test-rust.sh [--quick]'
+    echo '--quick: core unit/fault tests and public API regressions; not a full CI substitute.'
+    exit 0 ;;
+  *) echo "Unknown argument: $1" >&2; exit 2 ;;
+esac
+if (($#)); then
+  echo 'Unexpected extra arguments' >&2
+  exit 2
+fi
+
 timings=${VFSI_TEST_TIMINGS:-$repo_root/target/test-timings.tsv}
 mkdir -p "$(dirname "$timings")"
 printf 'command\tseconds\tstatus\n' > "$timings"
@@ -17,6 +32,17 @@ run() {
 # dependency artifacts. Cargo still fingerprints features and build settings.
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$repo_root/target}
 run python3 scripts/test-ci-scripts.py
+
+if ((quick)); then
+  # Keep deterministic fault coverage and public API contract tests. Skip live
+  # servers, backend-wide suites, doctests, FFI and detached Python workspaces.
+  run cargo test -p vfsi-core -p vfsi-sync -p vfsi-local --lib \
+    --features "vfsi-core/test-faults vfsi-sync/test-faults vfsi-sync/test-support vfsi-local/test-faults"
+  run cargo test -p vnfs --features "dummy test-faults" --lib \
+    --test public_api --test application_boundary --test tree_builder \
+    --test canonical_examples --test readv --test client_vectors
+  exit 0
+fi
 
 # Keep this list explicit: several published packages need different feature
 # sets, and the live NFS/SMB integration suites run in their dedicated jobs.

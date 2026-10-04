@@ -9,18 +9,17 @@ use vfsi_sync::{ReadOp, VecFs, VfFile, VfOffset, WriteOp};
 use vnfs::{NfsAuthentication, RpcsecGssProtection};
 
 fn options(protection: RpcsecGssProtection) -> NfsConnectOptions {
-    NfsConnectOptions {
-        minorversion: Some(1),
-        connect_timeout: Duration::from_secs(5),
-        request_timeout: Duration::from_secs(5),
-        authentication: NfsAuthentication::RpcsecGss {
-            service_principal: Some(
-                std::env::var("VNFS_GSS_SERVICE").unwrap_or_else(|_| "nfs@localhost".into()),
-            ),
-            protection,
-        },
-        ..NfsConnectOptions::default()
-    }
+    let mut options = NfsConnectOptions::default();
+    options.minorversion = Some(1);
+    options.connect_timeout = Duration::from_secs(5);
+    options.request_timeout = Duration::from_secs(5);
+    options.authentication = NfsAuthentication::RpcsecGss {
+        service_principal: Some(
+            std::env::var("VNFS_GSS_SERVICE").unwrap_or_else(|_| "nfs@localhost".into()),
+        ),
+        protection,
+    };
+    options
 }
 
 #[test]
@@ -68,13 +67,11 @@ fn gss_only_export_rejects_auth_sys() {
     );
 
     let host = std::env::var("VNFS_GSS_HOST").unwrap_or_else(|_| "127.0.0.1".into());
-    let error = NfsVecFs::connect_with_options(
-        &host,
-        NfsConnectOptions {
-            minorversion: Some(1),
-            ..NfsConnectOptions::default()
-        },
-    )
+    let error = NfsVecFs::connect_with_options(&host, {
+        let mut options = NfsConnectOptions::default();
+        options.minorversion = Some(1);
+        options
+    })
     .err()
     .expect("a GSS-only export must reject AUTH_SYS");
     assert!(

@@ -17,27 +17,30 @@ fn io_error(error: crate::VfError) -> io::Error {
     io::Error::new(kind, error)
 }
 
-/// Idiomatic Rust open options for a VFSI filesystem.
-#[derive(Clone, Debug)]
-pub struct VfOpenOptions {
+#[bitfields::bitfield(u8)]
+#[derive(PartialEq, Eq)]
+struct VfOpenFlags {
     read: bool,
     write: bool,
     append: bool,
     truncate: bool,
     create: bool,
     create_new: bool,
+    #[bits(2)]
+    _reserved: u8,
+}
+
+/// Idiomatic Rust open options for a VFSI filesystem.
+#[derive(Clone, Debug)]
+pub struct VfOpenOptions {
+    flags: VfOpenFlags,
     mode: u32,
 }
 
 impl Default for VfOpenOptions {
     fn default() -> Self {
         Self {
-            read: false,
-            write: false,
-            append: false,
-            truncate: false,
-            create: false,
-            create_new: false,
+            flags: VfOpenFlags::new(),
             mode: 0o666,
         }
     }
@@ -49,32 +52,32 @@ impl VfOpenOptions {
     }
 
     pub fn read(&mut self, value: bool) -> &mut Self {
-        self.read = value;
+        self.flags.set_read(value);
         self
     }
 
     pub fn write(&mut self, value: bool) -> &mut Self {
-        self.write = value;
+        self.flags.set_write(value);
         self
     }
 
     pub fn append(&mut self, value: bool) -> &mut Self {
-        self.append = value;
+        self.flags.set_append(value);
         self
     }
 
     pub fn truncate(&mut self, value: bool) -> &mut Self {
-        self.truncate = value;
+        self.flags.set_truncate(value);
         self
     }
 
     pub fn create(&mut self, value: bool) -> &mut Self {
-        self.create = value;
+        self.flags.set_create(value);
         self
     }
 
     pub fn create_new(&mut self, value: bool) -> &mut Self {
-        self.create_new = value;
+        self.flags.set_create_new(value);
         self
     }
 
@@ -85,8 +88,8 @@ impl VfOpenOptions {
     }
 
     fn flags(&self) -> io::Result<i32> {
-        let writable = self.write || self.append;
-        let mut flags = match (self.read, writable) {
+        let writable = self.flags.write() || self.flags.append();
+        let mut flags = match (self.flags.read(), writable) {
             (true, true) => libc::O_RDWR,
             (false, true) => libc::O_WRONLY,
             (true, false) => libc::O_RDONLY,
@@ -97,28 +100,28 @@ impl VfOpenOptions {
                 ));
             }
         };
-        if self.truncate && !writable {
+        if self.flags.truncate() && !writable {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "truncate requires write or append access",
             ));
         }
-        if (self.create || self.create_new) && !writable {
+        if (self.flags.create() || self.flags.create_new()) && !writable {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "create requires write or append access",
             ));
         }
-        if self.append {
+        if self.flags.append() {
             flags |= libc::O_APPEND;
         }
-        if self.truncate {
+        if self.flags.truncate() {
             flags |= libc::O_TRUNC;
         }
-        if self.create || self.create_new {
+        if self.flags.create() || self.flags.create_new() {
             flags |= libc::O_CREAT;
         }
-        if self.create_new {
+        if self.flags.create_new() {
             flags |= libc::O_EXCL;
         }
         Ok(flags)
@@ -241,6 +244,64 @@ impl<F: VecFs + ?Sized> Drop for VfFileHandle<'_, F> {
     fn drop(&mut self) {
         if let Some(file) = self.file.take() {
             let _ = self.filesystem.close(&file);
+        }
+    }
+}
+
+#[cfg(test)]
+mod option_layout_tests {
+    use super::*;
+    #[test]
+    fn packed_open_flags_match_all_access_and_creation_combinations() {
+        assert_eq!(std::mem::size_of::<VfOpenFlags>(), 1);
+        assert_eq!(std::mem::size_of::<VfOpenOptions>(), 8);
+        for bits in 0..64 {
+            let [read, write, append, truncate, create, exclusive] =
+                [0, 1, 2, 3, 4, 5].map(|bit| bits & (1 << bit) != 0);
+            let mut options = VfOpenOptions::new();
+            options
+                .read(read)
+                .write(write)
+                .append(append)
+                .truncate(truncate)
+                .create(create)
+                .create_new(exclusive);
+            let writable = write || append;
+            let invalid = (!read && !writable) || ((truncate || create || exclusive) && !writable);
+            let result = options.flags();
+            if invalid {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+                continue;
+            }
+            let mut expected = match (read, writable) {
+                (true, true) => libc::O_RDWR,
+                (false, true) => libc::O_WRONLY,
+                _ => libc::O_RDONLY,
+            };
+            if append {
+                expected |= libc::O_APPEND;
+            }
+            if truncate {
+                expected |= libc::O_TRUNC;
+            }
+            if create || exclusive {
+                expected |= libc::O_CREAT;
+            }
+            if exclusive {
+                expected |= libc::O_EXCL;
+            }
+            assert_eq!(result.unwrap(), expected);
+            options
+                .read(true)
+                .append(false)
+                .truncate(false)
+                .create(false)
+                .create_new(false);
+            assert_eq!(
+                options.flags().unwrap()
+                    & (libc::O_APPEND | libc::O_TRUNC | libc::O_CREAT | libc::O_EXCL),
+                0
+            );
         }
     }
 }

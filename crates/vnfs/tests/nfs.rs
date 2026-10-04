@@ -623,7 +623,7 @@ fn whole_file_readv_honors_the_client_budget() {
         client
             .readv_with_options(
                 [vnfs::ReadOp::whole(&path)],
-                vnfs::ReadOptions::new().max_total_bytes(BYTES - 1)
+                vnfs::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(BYTES - 1))
             )
             .unwrap_err()
             .kind(),
@@ -2221,19 +2221,16 @@ fn openv_does_not_replay_exclusive_create_after_real_reply_loss() {
     let dir = setup_dir("openv_proxy_reply_loss");
     let proxy = DropReplyProxy::start(reply_loss_target());
     let endpoint = proxy.endpoint();
-    let mut proxied = NfsVecFs::connect_with_options(
-        &endpoint,
-        NfsConnectOptions {
-            minorversion: match std::env::var("VNFS_TEST_MINOR").as_deref() {
-                Ok("1") => Some(1),
-                Ok("2") => Some(2),
-                _ => None,
-            },
-            request_timeout: Duration::from_millis(500),
-            auto_reconnect: false,
-            ..NfsConnectOptions::default()
-        },
-    )
+    let mut proxied = NfsVecFs::connect_with_options(&endpoint, {
+        let mut options = NfsConnectOptions::default().auto_reconnect(false);
+        options.minorversion = match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => Some(1),
+            Ok("2") => Some(2),
+            _ => None,
+        };
+        options.request_timeout = Duration::from_millis(500);
+        options
+    })
     .expect("connect through NFS reply-loss proxy");
     let paths = [format!("{dir}/f0"), format!("{dir}/f1")];
     let refs: Vec<&Path> = paths.iter().map(Path::new).collect();

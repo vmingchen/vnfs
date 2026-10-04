@@ -28,6 +28,7 @@ test-faults = [
 ]
 
 [dependencies]
+bitfields = { workspace = true }
 libc = { workspace = true }
 nfsv41-sys = { workspace = true, optional = true }
 vfsi-core = { workspace = true }

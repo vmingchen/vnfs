@@ -78,7 +78,7 @@ pub struct NfsClient {
     pub max_ops: usize,
     compound_limits: AdaptiveCompoundLimits,
     server_max_request_bytes: usize,
-    configured_max_request_bytes: Option<usize>,
+    configured_max_request_bytes: Option<std::num::NonZeroUsize>,
     rpc_envelope_reserve: usize,
     deferred_path_closes: Vec<CloseOp>,
     #[cfg(feature = "test-faults")]
@@ -278,8 +278,8 @@ impl CompoundBudget {
     }
 }
 
-fn effective_request_limit(server: usize, configured: Option<usize>) -> usize {
-    configured.map_or(server, |limit| limit.min(server))
+fn effective_request_limit(server: usize, configured: Option<std::num::NonZeroUsize>) -> usize {
+    configured.map_or(server, |limit| limit.get().min(server))
 }
 
 fn response_payload_budget(negotiated: usize) -> usize {
@@ -778,7 +778,7 @@ impl NfsClient {
             client_verifier,
         )?;
         let root = session_mount_root(&mut session)?;
-        let configured_max_request_bytes = Some(DEFAULT_MAX_COMPOUND_BYTES);
+        let configured_max_request_bytes = std::num::NonZeroUsize::new(DEFAULT_MAX_COMPOUND_BYTES);
         let max_compound_bytes =
             effective_request_limit(session.max_requestsize, configured_max_request_bytes);
         let max_response_bytes = session.max_responsesize.min(DEFAULT_MAX_COMPOUND_BYTES);
@@ -822,7 +822,7 @@ impl NfsClient {
     /// Set the configured per-compound payload cap. Zero restores the
     /// negotiated server maximum; callers can never exceed that maximum.
     pub fn set_max_compound_bytes(&mut self, bytes: usize) {
-        self.configured_max_request_bytes = (bytes != 0).then_some(bytes);
+        self.configured_max_request_bytes = std::num::NonZeroUsize::new(bytes);
         self.max_compound_bytes = effective_request_limit(
             self.server_max_request_bytes,
             self.configured_max_request_bytes,
@@ -3823,7 +3823,7 @@ mod tests {
         let below_floor = 32 * 1024;
         assert_eq!(effective_request_limit(below_floor, None), below_floor);
         assert_eq!(
-            effective_request_limit(below_floor, Some(4 * 1024 * 1024)),
+            effective_request_limit(below_floor, std::num::NonZeroUsize::new(4 * 1024 * 1024)),
             below_floor
         );
         assert_eq!(response_payload_budget(below_floor), 24 * 1024);
@@ -3834,11 +3834,11 @@ mod tests {
         let negotiated = 48 * 1024;
         assert_eq!(effective_request_limit(negotiated, None), negotiated);
         assert_eq!(
-            effective_request_limit(negotiated, Some(96 * 1024)),
+            effective_request_limit(negotiated, std::num::NonZeroUsize::new(96 * 1024)),
             negotiated
         );
         assert_eq!(
-            effective_request_limit(negotiated, Some(16 * 1024)),
+            effective_request_limit(negotiated, std::num::NonZeroUsize::new(16 * 1024)),
             16 * 1024
         );
     }

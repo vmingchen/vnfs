@@ -208,7 +208,7 @@ fn record_error(slot: &mut Option<VfError>, error: VfError) {
 /// Record a per-entry error, or abort immediately when the caller asked for
 /// fail-fast removal.
 fn note_error(slot: &mut Option<VfError>, error: VfError, options: RemoveOptions) -> VfResult<()> {
-    if options.continue_on_error {
+    if options.continues_on_error() {
         record_error(slot, error);
         Ok(())
     } else {
@@ -230,6 +230,15 @@ struct ConnectionConfig {
     client_verifier: verifier4,
 }
 
+#[bitfields::bitfield(u8)]
+#[derive(PartialEq, Eq)]
+struct ConnectFlags {
+    #[bits(default = true)]
+    auto_reconnect: bool,
+    #[bits(7)]
+    _reserved: u8,
+}
+
 /// Options for establishing an NFSv4 connection.
 ///
 /// The default uses automatic NFSv4.2-to-v4.1 negotiation, ten seconds for
@@ -247,9 +256,9 @@ pub struct NfsConnectOptions {
     /// active clients using the same server and credential.
     pub client_owner: Option<Vec<u8>>,
     pub recovery_policy: NfsRecoveryPolicy,
-    pub auto_reconnect: bool,
-    /// Client-side compound payload cap; zero uses the negotiated server cap.
-    pub max_compound_bytes: usize,
+    flags: ConnectFlags,
+    /// Client-side compound payload cap; None retains the conservative default.
+    pub max_compound_bytes: Option<std::num::NonZeroUsize>,
 }
 
 impl Default for NfsConnectOptions {
@@ -262,9 +271,20 @@ impl Default for NfsConnectOptions {
             authentication: NfsAuthentication::AuthSys,
             client_owner: None,
             recovery_policy: NfsRecoveryPolicy::default(),
-            auto_reconnect: true,
-            max_compound_bytes: 0,
+            flags: ConnectFlags::new(),
+            max_compound_bytes: None,
         }
+    }
+}
+
+impl NfsConnectOptions {
+    /// Configure automatic read-only recovery.
+    pub fn auto_reconnect(mut self, enabled: bool) -> Self {
+        self.flags.set_auto_reconnect(enabled);
+        self
+    }
+    pub const fn reconnects_automatically(&self) -> bool {
+        self.flags.auto_reconnect()
     }
 }
 
@@ -353,12 +373,12 @@ impl NfsClientBuilder {
     }
 
     pub fn auto_reconnect(mut self, enabled: bool) -> Self {
-        self.options.auto_reconnect = enabled;
+        self.options.flags.set_auto_reconnect(enabled);
         self
     }
 
     pub fn max_compound_bytes(mut self, bytes: usize) -> Self {
-        self.options.max_compound_bytes = bytes;
+        self.options.max_compound_bytes = std::num::NonZeroUsize::new(bytes);
         self
     }
 
@@ -1379,9 +1399,9 @@ impl NfsVecFs {
         let nfs = Self::connect_client(&connection)?;
         let mut filesystem = Self::from_client(nfs, connection);
         filesystem.recovery_policy = options.recovery_policy;
-        filesystem.auto_reconnect = options.auto_reconnect;
-        if options.max_compound_bytes != 0 {
-            filesystem.set_max_compound_bytes(options.max_compound_bytes);
+        filesystem.auto_reconnect = options.flags.auto_reconnect();
+        if let Some(bytes) = options.max_compound_bytes {
+            filesystem.set_max_compound_bytes(bytes.get());
         }
         // The protocol handshake already resolved the pseudo-root. Only a
         // configured sub-root needs an eager lookup and type check.
@@ -6433,8 +6453,8 @@ mod tests {
         assert_eq!(options.request_timeout, Duration::from_secs(5));
         assert_eq!(options.authentication, NfsAuthentication::AuthSys);
         assert_eq!(options.root, Path::new("/"));
-        assert!(options.auto_reconnect);
-        assert_eq!(options.max_compound_bytes, 0);
+        assert!(options.reconnects_automatically());
+        assert_eq!(options.max_compound_bytes, None);
     }
 
     #[test]
@@ -6460,8 +6480,11 @@ mod tests {
         );
         assert_eq!(builder.options.request_timeout, Duration::from_secs(7));
         assert_eq!(builder.options.recovery_policy, policy);
-        assert!(!builder.options.auto_reconnect);
-        assert_eq!(builder.options.max_compound_bytes, 64 * 1024);
+        assert!(!builder.options.reconnects_automatically());
+        assert_eq!(
+            builder.options.max_compound_bytes,
+            std::num::NonZeroUsize::new(64 * 1024)
+        );
     }
 
     #[test]

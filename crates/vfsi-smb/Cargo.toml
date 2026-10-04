@@ -13,6 +13,7 @@ server-copy = []
 test-faults = ["vfsi-core/test-faults", "vfsi-sync/test-faults"]
 
 [dependencies]
+bitfields = { workspace = true }
 futures-util = "0.3"
 libc = { workspace = true }
 smb2 = "0.26.0"

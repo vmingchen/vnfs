@@ -13,6 +13,7 @@ default = []
 test-faults = []
 
 [dependencies]
+bitfields = { workspace = true }
 bitflags = "2.6"
 libc = { workspace = true }
 

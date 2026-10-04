@@ -18,6 +18,7 @@ test-faults = ["vfsi-core/test-faults", "vfsi-sync/test-faults"]
 fuzzing = ["ffi"]
 
 [dependencies]
+bitfields = { workspace = true }
 libc = { workspace = true, optional = true }
 libntirpc-sys = { workspace = true, optional = true }
 nfsv41-sys = { workspace = true, optional = true }

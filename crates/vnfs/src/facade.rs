@@ -181,9 +181,8 @@ macro_rules! owned_client {
             pub(crate) fn readv_owned(
                 &self,
                 requests: &[ReadRequest<'_, $read<'_>>],
-                options: ReadOptions,
+                budget: usize,
             ) -> Result<Vec<OwnedReadResult>> {
-                let budget = options.limit_or(self.inner.limits().max_read_bytes);
                 if requests.iter().all(|request| request.range_ref().is_some()) {
                     return self
                         .inner

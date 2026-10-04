@@ -18,7 +18,7 @@ fn mixed<C: Fs>(fs: &C) {
                 ReadOp::into(&file, 5, &mut buffer),
                 ReadOp::whole("/empty"),
             ],
-            ReadOptions::new().max_total_bytes(9),
+            ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(9)),
         )
         .unwrap();
     assert_eq!(results[0].data(), Some(b"xyz".as_slice()));
@@ -65,7 +65,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
     assert_eq!(
         fs.readv_with_options(
             [ReadOp::whole("/a"), ReadOp::whole("/b")],
-            ReadOptions::new().max_total_bytes(6)
+            ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(6))
         )
         .unwrap()
         .len(),
@@ -87,7 +87,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
     assert_eq!(error.index(), Some(0));
     assert_eq!(&buffer, b"abc"); // Reads are not atomic; earlier buffers may be filled.
     assert!(
-        fs.readv_with_options([], ReadOptions::new().max_total_bytes(0))
+        fs.readv_with_options([], ReadOptions::new().max_total_bytes(None))
             .unwrap()
             .is_empty()
     );
@@ -183,4 +183,51 @@ fn result_constructors_preserve_storage_invariants_without_retaining_borrows() {
     assert_eq!(borrowed.data(), None);
     assert_eq!(borrowed.into_data(), None);
     assert_eq!(vnfs::ReadResult::owned(0, Vec::new(), true).read(), 0);
+}
+
+#[test]
+fn an_exhausted_internal_budget_never_restores_the_default() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Mounted::new(root.path())
+        .unwrap()
+        .with_limits(vnfs::ResourceLimits {
+            max_read_bytes: 3,
+            ..vnfs::ResourceLimits::default()
+        });
+    fs.write("/a", b"abc").unwrap();
+    fs.write("/empty", b"").unwrap();
+    fs.write("/extra", b"x").unwrap();
+    let file = fs.open("/a").unwrap();
+    let mut buffer = [0; 3];
+    let results = fs
+        .readv([ReadOp::into(&file, 0, &mut buffer), ReadOp::whole("/empty")])
+        .unwrap();
+    assert_eq!(&buffer, b"abc");
+    assert_eq!(results[1].data(), Some(&b""[..]));
+    let error = fs
+        .readv([ReadOp::into(&file, 0, &mut buffer), ReadOp::whole("/extra")])
+        .unwrap_err();
+    assert_eq!(error.kind(), vnfs::ErrorKind::FileTooLarge);
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(&buffer, b"abc");
+    let fs = fs.with_limits(vnfs::ResourceLimits {
+        max_read_bytes: 0,
+        ..vnfs::ResourceLimits::default()
+    });
+    assert_eq!(fs.read_files(&["/empty"]).unwrap(), vec![Vec::<u8>::new()]);
+    assert_eq!(
+        fs.read_files(&["/extra"]).unwrap_err().kind(),
+        vnfs::ErrorKind::FileTooLarge
+    );
+    assert_eq!(fs.read_to_string("/empty").unwrap(), "");
+    assert_eq!(
+        fs.read_to_string("/a").unwrap_err().kind(),
+        vnfs::ErrorKind::FileTooLarge
+    );
+    assert_eq!(
+        fs.read_to_string_with_limit("/empty", 0)
+            .unwrap_err()
+            .kind(),
+        vnfs::ErrorKind::InvalidInput
+    );
 }
