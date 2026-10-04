@@ -62,7 +62,7 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
         }
         let _ = client.symlink_metadata_with_fields_one("/a/link", fields)?;
         let _ = client.walk_with_options_one("/a", fields, vnfs::WalkOptions::new())?;
-        client.copy_files(&[("/a/source", "/a/copy")])?;
+        client.copyv(&[("/a/source", "/a/copy")])?;
         client.remove_paths(&["/a/copy"], false)
     }
     let _ = app as fn(&vnfs::NfsClient) -> vnfs::Result<()>;
@@ -131,10 +131,13 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     assert!(result[0].eof);
     assert_eq!(&b, b"ef");
     client
-        .write_allv(&[
-            vnfs::WriteOp::at(&files[0], 1, b"XY"),
-            vnfs::WriteOp::at(&files[1], 0, b"UV"),
-        ])
+        .writev_with_options(
+            &[
+                vnfs::WriteOp::at(&files[0], 1, b"XY"),
+                vnfs::WriteOp::at(&files[1], 0, b"UV"),
+            ],
+            vnfs::WriteOptions::new().write_all(true),
+        )
         .unwrap();
     assert_eq!(
         client
@@ -167,7 +170,10 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     let file = client.open_one("/sub/a").unwrap();
     assert!(
         foreign
-            .write_allv(&[vnfs::WriteOp::at(&file, 0, b"wrong")])
+            .writev_with_options(
+                &[vnfs::WriteOp::at(&file, 0, b"wrong")],
+                vnfs::WriteOptions::new().write_all(true)
+            )
             .is_err()
     );
     file.close().unwrap();
@@ -180,7 +186,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     assert_eq!(client.metadata_one("/sub/a").unwrap().len(), 2);
     client.create_dir_with_mode("/copies", 0o700).unwrap();
     client
-        .copy_files(&[("/sub/a", "/copies/a"), ("/sub/b", "/copies/b")])
+        .copyv(&[("/sub/a", "/copies/a"), ("/sub/b", "/copies/b")])
         .unwrap();
     client.hard_link("/sub/a", "/copies/hard").unwrap();
     client.symlink("a", "/sub/link").unwrap();
@@ -270,7 +276,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
             .collect();
         assert!(
             client
-                .write_allv(&writes)?
+                .writev_with_options(&writes, vnfs::WriteOptions::new().write_all(true))?
                 .iter()
                 .all(|result| result.written == 3)
         );

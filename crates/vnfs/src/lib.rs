@@ -42,7 +42,7 @@ pub mod files {
     pub use crate::{
         Capabilities, FileHandle, Fs, FsExt, OpenFlags, OpenRequest, ReadIntoResult, ReadOp,
         ReadOptions, ReadResult, ReadStreamOptions, ResourceLimits, StreamCompletion, WriteOp,
-        WriteResult,
+        WriteOptions, WriteResult,
     };
 }
 
@@ -51,8 +51,8 @@ pub mod directory {
     #[doc(inline)]
     pub use crate::{
         ControlFlow, DirEntry, DirectoryListing, FileType, Metadata, MetadataFields,
-        MetadataOptions, Permissions, ReadDirOptions, RemoveOptions, TraversalCompletion,
-        WalkControl, WalkEvent, WalkEventKind, WalkOptions,
+        MetadataOptions, Permissions, ReadDirOptions, RemoveMode, RemoveOptions,
+        TraversalCompletion, VisitOptions, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
     };
 }
 
@@ -92,13 +92,15 @@ mod application;
 pub use application::{FileHandle, Fs, FsExt};
 mod metadata;
 mod read;
+mod visit;
 mod write;
 pub use metadata::MetadataOptions;
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 pub(crate) use read::ReadRequest;
 pub use read::{ReadOp, ReadOptions, ReadResult};
 pub(crate) use vfsi_sync::FsReadResult as OwnedReadResult;
-pub use write::WriteOp;
+pub use visit::VisitOptions;
+pub use write::{WriteOp, WriteOptions};
 
 // Keep negative API-contract doctests without presenting unsupported calls
 // as introductory documentation on the Nfs constructor.
@@ -204,7 +206,8 @@ pub mod prelude {
     pub use crate::{Auto, Mounted};
     pub use crate::{
         ControlFlow, FileHandle, Fs, FsExt, MetadataOptions, ReadOp, ReadOptions, ReadResult,
-        ResourceLimits, StreamCompletion, TraversalCompletion, WriteOp,
+        RemoveMode, ResourceLimits, StreamCompletion, TraversalCompletion, VisitOptions, WriteOp,
+        WriteOptions,
     };
     #[cfg(feature = "nfs")]
     pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile, NfsVersion};
@@ -214,6 +217,18 @@ pub mod prelude {
 
 pub use std::io::ErrorKind;
 pub use std::ops::ControlFlow;
+/// What each input to [`Fs::removev_with_options`] removes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemoveMode {
+    /// Remove a file, symlink, or empty directory; do not traverse directories.
+    #[default]
+    Entry,
+    /// Remove the entry and, for directories, its descendants.
+    Tree,
+    /// Remove descendants while retaining the directory root. Final symlinks
+    /// are not followed; execution uses the backend's anchored removal path.
+    Contents,
+}
 /// Attribute selection for metadata queries, directory listings, and walks.
 pub use vfsi_core::AttrMask as MetadataFields;
 pub use vfsi_core::VfType as FileType;

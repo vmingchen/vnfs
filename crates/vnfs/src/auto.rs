@@ -311,7 +311,7 @@ impl AutoClient {
 
     /// Create directories in bounded backend cohorts, retaining input order.
     /// Parents must exist; this does not promise transactional rollback.
-    pub fn create_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
+    pub fn mkdirv<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
         if paths.is_empty() {
             return Ok(());
         }
@@ -319,7 +319,7 @@ impl AutoClient {
         for (index, path) in paths.iter().enumerate() {
             if !seen.insert(path.as_ref()) {
                 return Err(VfError::client(index, libc::EINVAL as u32)
-                    .with_context("create_dirs", path.as_ref()));
+                    .with_context("mkdirv", path.as_ref()));
             }
         }
         let mounts = read_mounts(true);
@@ -335,13 +335,13 @@ impl AutoClient {
                 .map(|route| route.path.as_path())
                 .collect();
             let result = match &resolved[start].route {
-                Route::Mounted => self.mounted.create_dirs(&batch),
-                Route::Nfs(connection) => connection.client.create_dirs(&batch),
+                Route::Mounted => self.mounted.mkdirv(&batch),
+                Route::Nfs(connection) => connection.client.mkdirv(&batch),
             };
             result.map_err(|error| {
                 let error = indexed(error, start);
                 match error.index().and_then(|index| paths.get(index)) {
-                    Some(path) => error.with_context("create_dirs", path.as_ref()),
+                    Some(path) => error.with_context("mkdirv", path.as_ref()),
                     None => error,
                 }
             })?;
@@ -403,7 +403,7 @@ impl AutoClient {
         Ok(())
     }
 
-    pub fn copy_files<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub fn copyv<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
         let mounts = read_mounts(false);
         let pairs: Vec<_> = pairs
             .iter()
@@ -434,8 +434,8 @@ impl AutoClient {
                 .map(|(source, destination)| (source.path.as_path(), destination.as_path()))
                 .collect();
             match &pairs[start].0.route {
-                Route::Mounted => self.mounted.copy_files(&batch),
-                Route::Nfs(connection) => connection.client.copy_files(&batch),
+                Route::Mounted => self.mounted.copyv(&batch),
+                Route::Nfs(connection) => connection.client.copyv(&batch),
             }
             .map_err(|error| indexed(error, start))?;
             start = end;
@@ -587,18 +587,34 @@ impl AutoClient {
         &self,
         path: impl AsRef<Path>,
         options: ReadDirOptions,
+        callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
+    ) -> VfResult<crate::TraversalCompletion> {
+        self.visit_dir_with_fields(
+            path,
+            crate::VisitOptions::new().metadata_fields(),
+            options,
+            callback,
+        )
+    }
+
+    pub(crate) fn visit_dir_with_fields(
+        &self,
+        path: impl AsRef<Path>,
+        fields: crate::MetadataFields,
+        options: ReadDirOptions,
         mut callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
     ) -> VfResult<crate::TraversalCompletion> {
         let route = self.resolve(path.as_ref(), &read_mounts(false));
         match route.route {
-            Route::Mounted => self
-                .mounted
-                .visit_dir_with_options(&route.path, options, callback),
+            Route::Mounted => {
+                self.mounted
+                    .visit_dir_with_fields(&route.path, fields, options, callback)
+            }
             Route::Nfs(connection) => {
                 let mut budget = PathByteBudget::new(options.path_byte_limit());
                 connection
                     .client
-                    .visit_dir_with_options(&route.path, options, |entry| {
+                    .visit_dir_with_fields(&route.path, fields, options, |entry| {
                         let public = self.public_path(&connection, entry.path())?;
                         budget.charge(&public, "visit_dir")?;
                         callback(DirEntry::new(public, entry.metadata().clone()))
@@ -611,19 +627,35 @@ impl AutoClient {
         &self,
         path: impl AsRef<Path>,
         options: crate::WalkOptions,
+        callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
+    ) -> VfResult<crate::TraversalCompletion> {
+        self.visit_walk_with_fields(
+            path,
+            crate::VisitOptions::new().metadata_fields(),
+            options,
+            callback,
+        )
+    }
+
+    pub(crate) fn visit_walk_with_fields(
+        &self,
+        path: impl AsRef<Path>,
+        fields: crate::MetadataFields,
+        options: crate::WalkOptions,
         mut callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
     ) -> VfResult<crate::TraversalCompletion> {
         let route = self.resolve_tree(path.as_ref());
         match route.route {
-            Route::Mounted => self
-                .mounted
-                .visit_walk_with_options(&route.path, options, callback),
+            Route::Mounted => {
+                self.mounted
+                    .visit_walk_with_fields(&route.path, fields, options, callback)
+            }
             Route::Nfs(connection) => {
                 let mut budget = PathByteBudget::new(options.path_byte_limit());
                 budget.charge(&self.public_path(&connection, &route.path)?, "visit_walk")?;
                 connection
                     .client
-                    .visit_walk_with_options(&route.path, options, |entry| {
+                    .visit_walk_with_fields(&route.path, fields, options, |entry| {
                         let public = self.public_path(&connection, entry.path())?;
                         budget.charge(&public, "visit_walk")?;
                         callback(&DirEntry::new(public, entry.metadata().clone()))
@@ -1175,11 +1207,21 @@ impl AutoClient {
         self.write_vector(requests, false)
     }
 
-    /// Complete short writes without replaying failed or ambiguous mutations.
-    /// Validate ownership, live handles, and positional ranges across the
-    /// entire batch before dispatching any backend cohort. Server-side errors
+    /// Select short-write reporting (default) or completion with `write_all(true)`.
+    /// Completion validates ownership, live handles, and positional ranges across
+    /// the entire batch before dispatching any backend cohort. Failed or ambiguous
+    /// mutations are never replayed. Server-side errors
     /// may still follow completed writes; this is not an atomic operation.
-    pub fn write_allv(
+    pub fn writev_with_options(
+        &self,
+        requests: &[crate::WriteOp<'_, AutoFile>],
+        options: crate::WriteOptions,
+    ) -> VfResult<Vec<WriteResult>> {
+        self.write_vector(requests, options.writes_all())
+            .map_err(crate::write::public_write_error)
+    }
+
+    pub(crate) fn write_complete(
         &self,
         requests: &[crate::WriteOp<'_, AutoFile>],
     ) -> VfResult<Vec<WriteResult>> {
@@ -1199,14 +1241,14 @@ impl AutoClient {
                 // Validate empty requests too, matching FsClient::write_allv.
                 if request.file().is_closed() {
                     return Err(VfError::client(index, libc::EBADF as u32)
-                        .with_context("write_allv", request.file().path()));
+                        .with_context("writev", request.file().path()));
                 }
                 request
                     .offset()
                     .checked_add(request.data().len() as u64)
                     .ok_or_else(|| {
                         VfError::client(index, libc::EOVERFLOW as u32)
-                            .with_context("write_allv", request.file().path())
+                            .with_context("writev", request.file().path())
                     })?;
             }
         }
@@ -1358,7 +1400,7 @@ impl AutoClient {
     }
 
     /// Rename adjacent pairs on the same backend as a vector, preserving order.
-    pub fn rename_files<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub fn renamev<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
         if pairs.is_empty() {
             return Ok(());
         }
@@ -1392,8 +1434,8 @@ impl AutoClient {
                 .map(|i| (sources[i].path.as_path(), targets[i].path.as_path()))
                 .collect();
             match &sources[start].route {
-                Route::Mounted => self.mounted.rename_files(&batch),
-                Route::Nfs(connection) => connection.client.rename_files(&batch),
+                Route::Mounted => self.mounted.renamev(&batch),
+                Route::Nfs(connection) => connection.client.renamev(&batch),
             }
             .map_err(|error| indexed(error, start))?;
             start = end;
@@ -2053,14 +2095,17 @@ mod tests {
                 files[1].try_close().unwrap();
             }
             let error = client
-                .write_allv(&[
-                    crate::WriteOp::at(&files[0], 0, b"changed"),
-                    crate::WriteOp::at(
-                        &files[1],
-                        if closed { 0 } else { u64::MAX },
-                        if closed { b"" } else { b"XX" },
-                    ),
-                ])
+                .writev_with_options(
+                    &[
+                        crate::WriteOp::at(&files[0], 0, b"changed"),
+                        crate::WriteOp::at(
+                            &files[1],
+                            if closed { 0 } else { u64::MAX },
+                            if closed { b"" } else { b"XX" },
+                        ),
+                    ],
+                    crate::WriteOptions::new().write_all(true),
+                )
                 .unwrap_err();
             let first = client.read("/first").unwrap();
             client.try_closev(&mut files).unwrap();
@@ -2070,7 +2115,7 @@ mod tests {
                 error.err_no(),
                 if closed { libc::EBADF } else { libc::EOVERFLOW } as u32
             );
-            assert_eq!(error.operation(), Some("write_allv"));
+            assert_eq!(error.operation(), Some("writev"));
             assert_eq!(error.path(), Some(Path::new("/second")));
         }
         fs::remove_dir_all(root).unwrap();
@@ -2156,11 +2201,14 @@ mod tests {
         assert_eq!(&buffers[1][..6], b"second");
         assert_eq!(&buffers[2][..5], b"local");
         client
-            .write_allv(&[
-                crate::WriteOp::at(&files[0], 0, b"FIRST"),
-                crate::WriteOp::at(&files[1], 0, b"SECOND"),
-                crate::WriteOp::at(&files[2], 0, b"LOCAL"),
-            ])
+            .writev_with_options(
+                &[
+                    crate::WriteOp::at(&files[0], 0, b"FIRST"),
+                    crate::WriteOp::at(&files[1], 0, b"SECOND"),
+                    crate::WriteOp::at(&files[2], 0, b"LOCAL"),
+                ],
+                crate::WriteOptions::new().write_all(true),
+            )
             .unwrap();
         let mut files = files;
         client.try_closev(&mut files).unwrap();
@@ -2324,14 +2372,17 @@ mod tests {
                 }
                 let payload: &[u8] = if invalid == 2 { b"" } else { b"XX" };
                 let error = client
-                    .write_allv(&[
-                        crate::WriteOp::at(&files[0], 0, b"changed"),
-                        crate::WriteOp::at(
-                            &files[1],
-                            if invalid == 0 { u64::MAX } else { 0 },
-                            payload,
-                        ),
-                    ])
+                    .writev_with_options(
+                        &[
+                            crate::WriteOp::at(&files[0], 0, b"changed"),
+                            crate::WriteOp::at(
+                                &files[1],
+                                if invalid == 0 { u64::MAX } else { 0 },
+                                payload,
+                            ),
+                        ],
+                        crate::WriteOptions::new().write_all(true),
+                    )
                     .unwrap_err();
                 let mut first = [0; 8];
                 assert_eq!(files[0].read_at(&mut first, 0).unwrap(), first.len());
@@ -2364,7 +2415,7 @@ mod tests {
                     libc::EBADF
                 } as u32
             );
-            assert_eq!(error.operation(), Some("write_allv"));
+            assert_eq!(error.operation(), Some("writev"));
             assert_eq!(error.path(), Some(failed_path.as_path()));
         }
     }

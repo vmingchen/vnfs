@@ -88,7 +88,7 @@ fn main() -> vnfs::Result<()> {
 reads directly by path, so small files can share one READ COMPOUND without
 remote OPEN/CLOSE phases when the server's negotiated limits permit.
 `write_files` retries short
-writes through `write_allv`; it is not transactional, so a failed call may have
+writes through `writev_with_options`; it is not transactional, so a failed call may have
 modified a prefix of files. `readv` limits the combined returned data to
 16 MiB by default; use `ReadOptions::max_total_bytes` to adjust the limit, or stream
 large files. A scalar POSIX-style loop pays latency for each file operation.
@@ -117,7 +117,7 @@ discovered mount; every operation uses the direct NFS client with its own
 caches and state. Mount discovery requires no per-file probing during I/O.
 
 The same model applies to `openv`, `readv`, `writev`, and high-level
-`read_dirs_with_options`, `copy_files`, and `remove_paths`. For tools such as
+`read_dirs_with_options`, `copyv`, and `remove_paths`. For tools such as
 `ls`, `du`, and `find`, `MetadataFields` chooses which attributes a directory
 listing fetches, and each `DirectoryListing` includes metadata for its entries
 without a separate stat call per file. For example:
@@ -408,7 +408,9 @@ read operations without I/O; the consuming `readv` accepts arrays, vectors,
 or iterators. `readv_with_options` overrides the aggregate budget.
 `WriteOp::at(&file, offset, data)` prepares a portable positional write without
 copying the payload or importing backend crates. `writev` reports short progress;
-`write_allv` completes successful short writes without replaying ambiguous failures. Vector
+`writev` and default `writev_with_options` report short writes. Select
+`WriteOptions::new().write_all(true)` to complete successful short writes without
+replaying failed or ambiguous requests. Completion does not guarantee durability. Vector
 results are in request order and carry data/count, resolved offset, and EOF or
 durability information; they do not expose backend descriptors. `readv` with `ReadOp::into`
 returns one `ReadResult` per operation with offset, byte count, EOF, and
@@ -425,6 +427,7 @@ instead of backend traits. The same generic code can use a direct `NfsClient`,
 without boxing, additional copies, or scalar-loop fallbacks.
 
 ```rust,no_run
+use vnfs::FsExt;
 fn read_inputs<C: vnfs::Fs>(client: &C) -> vnfs::Result<Vec<Vec<u8>>> {
     Ok(client.readv([vnfs::ReadOp::whole("/file-1"), vnfs::ReadOp::whole("/file-2")])?.into_iter().map(|r| r.data.unwrap()).collect())
 }

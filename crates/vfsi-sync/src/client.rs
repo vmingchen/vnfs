@@ -417,6 +417,16 @@ impl<F: DirectoryFileSystem> FsClient<F> {
         &self,
         path: impl AsRef<Path>,
         options: ReadDirOptions,
+        callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
+    ) -> VfResult<TraversalCompletion> {
+        self.visit_dir_with_fields(path, crate::native::metadata_mask(), options, callback)
+    }
+
+    pub fn visit_dir_with_fields(
+        &self,
+        path: impl AsRef<Path>,
+        fields: AttrMask,
+        options: ReadDirOptions,
         mut callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
     ) -> VfResult<TraversalCompletion> {
         const PAGE_SIZE: usize = 1024;
@@ -443,8 +453,13 @@ impl<F: DirectoryFileSystem> FsClient<F> {
                 )
             };
             let (entries, next) = {
-                self.lock()?
-                    .read_dir_page(path, cursor, page_size, max_entries)?
+                self.lock()?.read_dir_page_with_fields(
+                    path,
+                    fields,
+                    cursor,
+                    page_size,
+                    max_entries,
+                )?
             };
             if entries.is_empty() && next.is_some() {
                 return Err(VfError::transport(None, "directory page made no progress"));
@@ -566,7 +581,7 @@ impl<F: NamespaceFileSystem + MetadataFileSystem> FsClient<F> {
 
 impl<F: VecFs> FsClient<F> {
     /// Rename independent source/destination pairs in one vector phase.
-    pub fn rename_files<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub fn renamev<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
         if pairs.is_empty() {
             return Ok(());
         }
@@ -583,7 +598,7 @@ impl<F: VecFs> FsClient<F> {
             .renamev(&requests)
             .map_err(|error| match error.index() {
                 Some(index) if index < pairs.len() => {
-                    error.with_context("rename_files", pairs[index].0.as_ref())
+                    error.with_context("renamev", pairs[index].0.as_ref())
                 }
                 Some(_) => {
                     VfError::transport(None, "rename backend returned an invalid error index")
@@ -594,12 +609,13 @@ impl<F: VecFs> FsClient<F> {
 
     /// Create directories in input order using vector MKDIR. Parents must
     /// already exist. This is not transactional: failure may leave a prefix.
-    pub fn create_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
+    pub fn mkdirv<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
         let mut seen = HashSet::with_capacity(paths.len());
         for (index, path) in paths.iter().enumerate() {
             if !seen.insert(path.as_ref()) {
-                return Err(VfError::client(index, crate::ERR_INVAL)
-                    .with_context("create_dirs", path.as_ref()));
+                return Err(
+                    VfError::client(index, crate::ERR_INVAL).with_context("mkdirv", path.as_ref())
+                );
             }
         }
         if paths.is_empty() {
@@ -616,7 +632,7 @@ impl<F: VecFs> FsClient<F> {
             .collect();
         self.lock()?.mkdirv(&dirs).map_err(|error| {
             match error.index().and_then(|index| paths.get(index)) {
-                Some(path) => error.with_context("create_dirs", path.as_ref()),
+                Some(path) => error.with_context("mkdirv", path.as_ref()),
                 None => error,
             }
         })
@@ -673,6 +689,16 @@ impl<F: VecFs> FsClient<F> {
         options: crate::WalkOptions,
         callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
     ) -> VfResult<TraversalCompletion> {
+        self.visit_walk_with_fields(root, crate::native::metadata_mask(), options, callback)
+    }
+
+    pub fn visit_walk_with_fields(
+        &self,
+        root: impl AsRef<Path>,
+        fields: AttrMask,
+        options: crate::WalkOptions,
+        callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
+    ) -> VfResult<TraversalCompletion> {
         let root = root.as_ref();
         if !self.symlink_metadata(root)?.is_dir() {
             return Err(VfError::client(0, crate::ERR_NOTDIR).with_context("visit_walk", root));
@@ -682,7 +708,7 @@ impl<F: VecFs> FsClient<F> {
             options,
             |path, cursor, page_size, max_entries| {
                 self.lock()?
-                    .read_dir_page(path, cursor, page_size, max_entries)
+                    .read_dir_page_with_fields(path, fields, cursor, page_size, max_entries)
             },
             callback,
         )
@@ -1103,7 +1129,7 @@ impl<F: VecFs> FsClient<F> {
 
     /// Copy whole files in request order. A successful prefix may remain if
     /// a later request fails; this operation does not provide atomicity.
-    pub fn copy_files<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub fn copyv<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
         let extents: Vec<_> = pairs
             .iter()
             .map(|(from, to)| {
@@ -1115,7 +1141,7 @@ impl<F: VecFs> FsClient<F> {
                 .index()
                 .and_then(|index| pairs.get(index))
                 .map_or(error.clone(), |(_, to)| {
-                    error.with_context("copy_files", to.as_ref())
+                    error.with_context("copyv", to.as_ref())
                 })
         })
     }

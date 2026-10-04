@@ -434,7 +434,7 @@ fn rust_native_client_workflow_on_nfs() {
         format!("{nested}/renamed-two"),
     ];
     let _ = vnfs::backend::compound::thread_compound_stats();
-    vnfs::Fs::rename_files(
+    vnfs::Fs::renamev(
         &client,
         &[(&paths[0], &renamed[0]), (&paths[1], &renamed[1])],
     )
@@ -447,6 +447,89 @@ fn rust_native_client_workflow_on_nfs() {
     assert_eq!(
         client.read_files(&renamed).unwrap(),
         [b"first".to_vec(), b"second".to_vec()]
+    );
+    client.remove_dir_all_one(&dir).unwrap();
+}
+
+#[test]
+fn native_removal_modes_forward_policy_across_roots() {
+    use vnfs::{Fs, RemoveMode, RemoveOptions};
+    let dir = setup_dir("native_removal_modes");
+    let client = Nfs::builder(test_host())
+        .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => vnfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::NfsVersion::V4_2,
+            _ => vnfs::NfsVersion::Auto,
+        })
+        .connect()
+        .unwrap();
+    let keep = format!("{dir}/keep");
+    let file = format!("{keep}/file");
+    let missing = format!("{dir}/missing");
+    client.create_dir_all_one(&keep).unwrap();
+    client.write_one(&file, b"payload").unwrap();
+    let roots = [missing.as_str(), keep.as_str()];
+    let error = client
+        .removev_with_options(&roots, RemoveMode::Contents, RemoveOptions::new())
+        .unwrap_err();
+    assert_eq!(error.index(), Some(0));
+    assert!(client.metadata_one(&file).is_ok());
+    let error = client
+        .removev_with_options(
+            &roots,
+            RemoveMode::Contents,
+            RemoveOptions::new().continue_on_error(true),
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), Some(0));
+    assert!(client.read_dir_one(&keep).unwrap().is_empty());
+    assert!(client.metadata_one(&keep).unwrap().is_dir());
+    client.removev(&[&dir], RemoveMode::Tree).unwrap();
+}
+
+#[test]
+fn unified_directory_visits_on_nfs() {
+    use vnfs::{ControlFlow, Fs, MetadataFields, TraversalCompletion, VisitOptions};
+    let dir = setup_dir("unified_directory_visits");
+    let client = Nfs::builder(test_host())
+        .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => vnfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::NfsVersion::V4_2,
+            _ => vnfs::NfsVersion::Auto,
+        })
+        .connect()
+        .unwrap();
+    let sub = format!("{dir}/sub");
+    let file = format!("{sub}/file");
+    client.create_dir_all_one(&sub).unwrap();
+    client.write_one(&file, b"payload").unwrap();
+    let options = VisitOptions::new()
+        .fields(MetadataFields::SIZE)
+        .max_entries(2);
+    for (recursive, count) in [(false, 1), (true, 2)] {
+        let mut seen = 0;
+        client
+            .visit_dirs_with_options(&[&dir], options.recursive(recursive), |index, entry| {
+                assert_eq!(index, 0);
+                if entry.path() == Path::new(&file) {
+                    assert_eq!(entry.metadata().len(), 7);
+                }
+                seen += 1;
+                assert!(client.metadata_one(entry.path()).is_ok());
+                Ok(ControlFlow::Continue(()))
+            })
+            .unwrap();
+        assert_eq!(seen, count);
+    }
+    assert_eq!(
+        client
+            .visit_dirs_with_options(
+                &[dir.as_str(), "/absent-visitor-root"],
+                options.recursive(true),
+                |_, _| Ok(ControlFlow::Break(()))
+            )
+            .unwrap(),
+        [TraversalCompletion::Stopped]
     );
     client.remove_dir_all_one(&dir).unwrap();
 }

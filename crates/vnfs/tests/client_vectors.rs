@@ -22,13 +22,20 @@ fn writes<C: Fs>(fs: &C) {
         [(3, 7), (0, 3)]
     );
     assert_eq!(std::io::Seek::stream_position(&mut files[0]).unwrap(), 0);
-    fs.write_allv(&[
-        WriteOp::at(&files[1], 0, b"first"),
-        WriteOp::at(&files[1], 2, b"XX"),
-    ])
+    fs.writev_with_options(
+        &[
+            WriteOp::at(&files[1], 0, b"first"),
+            WriteOp::at(&files[1], 2, b"XX"),
+        ],
+        vnfs::WriteOptions::new().write_all(true),
+    )
     .unwrap();
     assert_eq!(fs.read_files(&["/b"]).unwrap(), [b"fiXXt".to_vec()]);
-    fs.write_allv(&[WriteOp::at(&files[0], 0, b"")]).unwrap();
+    fs.writev_with_options(
+        &[WriteOp::at(&files[0], 0, b"")],
+        vnfs::WriteOptions::new().write_all(true),
+    )
+    .unwrap();
     fs.closev(files).unwrap();
 }
 
@@ -50,29 +57,45 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
     let fs = vnfs::Mounted::new(root.path()).unwrap();
     let other = vnfs::Mounted::new(root.path()).unwrap();
     let file = fs.create_one("/a").unwrap();
-    fs.write_allv(&[WriteOp::at(&file, 0, b"keep")]).unwrap();
+    fs.writev_with_options(
+        &[WriteOp::at(&file, 0, b"keep")],
+        vnfs::WriteOptions::new().write_all(true),
+    )
+    .unwrap();
     let foreign = other.create_one("/b").unwrap();
     let error = fs
-        .write_allv(&[
-            WriteOp::at(&file, 0, b"bad!"),
-            WriteOp::at(&foreign, 0, b""),
-        ])
+        .writev_with_options(
+            &[
+                WriteOp::at(&file, 0, b"bad!"),
+                WriteOp::at(&foreign, 0, b""),
+            ],
+            vnfs::WriteOptions::new().write_all(true),
+        )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     let error = fs
-        .write_allv(&[
-            WriteOp::at(&file, 0, b"bad!"),
-            WriteOp::at(&file, u64::MAX, b"xx"),
-        ])
+        .writev_with_options(
+            &[
+                WriteOp::at(&file, 0, b"bad!"),
+                WriteOp::at(&file, u64::MAX, b"xx"),
+            ],
+            vnfs::WriteOptions::new().write_all(true),
+        )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(fs.read_files(&["/a"]).unwrap(), [b"keep".to_vec()]);
+    assert_eq!(error.operation(), Some("writev"));
+    assert_eq!(error.path(), Some(std::path::Path::new("/a")));
+    assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
     let mut closed = fs.create_one("/closed").unwrap();
     closed.try_close().unwrap();
     assert_eq!(
-        fs.write_allv(&[WriteOp::at(&file, 0, b"bad!"), WriteOp::at(&closed, 0, b"")])
-            .unwrap_err()
-            .index(),
+        fs.writev_with_options(
+            &[WriteOp::at(&file, 0, b"bad!"), WriteOp::at(&closed, 0, b"")],
+            vnfs::WriteOptions::new().write_all(true)
+        )
+        .unwrap_err()
+        .index(),
         Some(1)
     );
     assert_eq!(fs.read_files(&["/a"]).unwrap(), [b"keep".to_vec()]);

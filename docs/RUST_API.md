@@ -5,6 +5,25 @@ implementation contracts and the historical POSIX/C compatibility surface.
 
 ## Application boundary and migration
 
+`Fs` owns options-aware native vector execution. `FsExt` is blanket implemented
+for every `Fs` and supplies default-policy `readv`, `writev`, and `removev`,
+composed workflows, and `_one` conveniences. Generic applications need an
+`Fs` bound and an `FsExt` import; they do not implement extensions separately.
+
+`Fs::visit_dirs_with_options` handles both shallow and recursive visits through
+`VisitOptions`. Shallow is the default; `.recursive(true)` enables descent.
+Depth 0 lists root children, and depth 1 also lists immediate subdirectories.
+Recursive depth limits fail on deeper directories unless intentional truncation
+is enabled. Callbacks borrow entries, run outside locks, and can cancel the
+entire vector. Budgets are shared across roots; unspecified limits inherit the
+client policy. Metadata selection is pushed into paged enumeration, without
+per-entry stat requests. Recursive traversal does not follow entry symlinks.
+
+Removal uses `removev_with_options(paths, mode, options)`, with explicit
+`RemoveMode::Entry`, `Tree`, or `Contents`. Contents mode retains roots and
+delegates to native anchored removal, never a list-then-delete extension loop.
+The vector call preserves indexed failures and may leave partial mutations.
+
 `NfsClient`, `NfsFile`, `NfsDir`, and their borrowed vector requests are opaque
 application handles. `Mounted` provides the corresponding local/kernel-backed
 handles. Clients do not dereference to backend owners, expose locks, accept raw
@@ -104,7 +123,7 @@ presence as `Option` so an absent value is not confused with zero. Use
 `symlink_metadata_with_fields` for a no-follow query,
 `read_dirs_with_options` to batch several directory operands, and
 `walk_with_options` for a bounded recursive tree. `DirectoryListing` carries
-paths and already-fetched entry metadata. `copy_files` and `remove_paths`
+paths and already-fetched entry metadata. `copyv` and `remove_paths`
 perform ordered batches without promising transactionality.
 
 ## Durability and failure rules

@@ -100,6 +100,20 @@ pub trait DirectoryFileSystem: FileSystem {
         page_size: usize,
         max_entries: usize,
     ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)>;
+
+    /// Selected metadata on one bounded page. Implementations may return a
+    /// superset; the default uses the backend's ordinary paged enumeration.
+    fn read_dir_page_with_fields(
+        &mut self,
+        path: &std::path::Path,
+        fields: AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
+        let _ = fields;
+        self.read_dir_page(path, cursor, page_size, max_entries)
+    }
 }
 
 /// Namespace mutations shared by files and directories.
@@ -203,7 +217,7 @@ pub trait VectorFileSystem: FileSystem {
     fn write_many(&mut self, requests: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>>;
 }
 
-fn metadata_mask() -> AttrMask {
+pub(crate) fn metadata_mask() -> AttrMask {
     AttrMask::MODE
         | AttrMask::SIZE
         | AttrMask::NLINK
@@ -436,8 +450,25 @@ impl<T: VecFs + ?Sized> DirectoryFileSystem for T {
         page_size: usize,
         max_entries: usize,
     ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
+        self.read_dir_page_with_fields(path, metadata_mask(), cursor, page_size, max_entries)
+    }
+
+    fn read_dir_page_with_fields(
+        &mut self,
+        path: &std::path::Path,
+        fields: AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
         let (attributes, next) = self
-            .listdir_page(path, metadata_mask(), cursor, page_size, max_entries)
+            .listdir_page(
+                path,
+                fields | AttrMask::MODE,
+                cursor,
+                page_size,
+                max_entries,
+            )
             .map_err(|error| error.with_context("visit_dir", path))?;
         if attributes.len() > page_size {
             return Err(VfError::transport(

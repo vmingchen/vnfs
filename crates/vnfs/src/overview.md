@@ -49,7 +49,7 @@ are in the [package README](https://github.com/vmingchen/vnfs/tree/main/crates/v
 | Task | Recommended API | Example |
 | --- | --- | --- |
 | Many complete small files | `NfsClient::readv`, `FsExt::write_files` | [Bulk files](examples::bulk_files) |
-| Repeated or positional I/O | `NfsClient::openv`, `NfsClient::readv`, `NfsClient::write_allv` | [Open handles](examples::open_handles) |
+| Repeated or positional I/O | `NfsClient::openv`, `NfsClient::readv`, `NfsClient::writev_with_options` | [Open handles](examples::open_handles) |
 | One large file | `FsExt::read_stream_with_options_one` | [Bounded streaming](examples::stream_file) |
 | Many directory listings with attributes | `NfsClient::read_dirs_with_options` | [Directories](examples::directories) |
 | Large trees without collecting everything | `FsExt::visit_walk_one`, `FsExt::walk_events_with_options_one` | [Directories](examples::directories) |
@@ -87,7 +87,8 @@ listing/streaming) without scalarizing vectors. Import both with `vnfs::prelude:
   These are not a process-wide peak-memory cap. Standard `std::io::Read::read_to_end`
   does not inherit an allocation limit.
 - `readv` range requests and `writev` may return short progress. Whole-file
-  requests complete or fail; they never silently truncate. Use `write_allv` to complete
+  requests complete or fail; they never silently truncate. Use `writev_with_options`
+  with `WriteOptions::new().write_all(true)` to complete
   successful short writes; do not mistake a short read without EOF for completion.
   Positional requests preserve the file cursor.
 - Files close best-effort on drop. Use explicit `closev` to surface cleanup

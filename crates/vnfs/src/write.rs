@@ -1,6 +1,30 @@
 //! Portable borrowed positional writes.
 use crate::FileHandle;
 
+/// Policy for positional vector writes. Defaults to reporting short writes.
+/// Completion is not atomicity, durability, or permission to replay failed RPCs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WriteOptions {
+    write_all: bool,
+}
+impl WriteOptions {
+    /// Report each request's accepted byte count without completing short writes.
+    pub const fn new() -> Self {
+        Self { write_all: false }
+    }
+    /// Complete successful short writes at their remaining offsets when true.
+    /// Stop on any error, including ambiguous transport failures; never replay it.
+    /// This does not flush data to stable storage or make the batch atomic.
+    pub const fn write_all(mut self, complete: bool) -> Self {
+        self.write_all = complete;
+        self
+    }
+    /// Whether successful short writes should be completed.
+    pub const fn writes_all(self) -> bool {
+        self.write_all
+    }
+}
+
 /// A positional write borrowing its handle and payload without copying either.
 /// Construction performs no I/O or allocation. Does not change the file cursor.
 pub struct WriteOp<'a, H: FileHandle + 'a> {
@@ -29,7 +53,7 @@ impl<'a, H: FileHandle> WriteOp<'a, H> {
     /// use vnfs::{Fs, FsExt, WriteOp};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
     /// let file = fs.create_one("/output")?;
-    /// let result = fs.write_allv(&[WriteOp::at(&file, 0, b"hello")]);
+    /// let result = fs.writev_with_options(&[WriteOp::at(&file, 0, b"hello")], vnfs::WriteOptions::new().write_all(true));
     /// let close = fs.closev(vec![file]);
     /// result?;
     /// close?;
@@ -50,6 +74,18 @@ impl<'a, H: FileHandle> WriteOp<'a, H> {
     /// Borrowed payload; no ownership transfer or copy occurs.
     pub fn data(&self) -> &'a [u8] {
         self.data
+    }
+}
+
+// Keep low-level completion machinery private without leaking its historical
+// operation name through application errors. Preserve status, index, and path.
+pub(crate) fn public_write_error(error: crate::Error) -> crate::Error {
+    if error.operation() == Some("write_allv")
+        && let Some(path) = error.path().map(std::path::Path::to_path_buf)
+    {
+        error.with_context("writev", path)
+    } else {
+        error
     }
 }
 

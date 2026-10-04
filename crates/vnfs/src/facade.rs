@@ -42,16 +42,13 @@ macro_rules! owned_client {
                 self.inner.read_stream_with_options(path, options, callback)
             }
             /// Rename source/destination pairs without scalarizing the native vector.
-            pub fn rename_files<P: AsRef<Path>, Q: AsRef<Path>>(
-                &self,
-                pairs: &[(P, Q)],
-            ) -> Result<()> {
-                self.inner.rename_files(pairs)
+            pub fn renamev<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+                self.inner.renamev(pairs)
             }
             /// Create directories in vector phases; parents must exist.
             /// An error can follow partially completed mutations.
-            pub fn create_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {
-                self.inner.create_dirs(paths)
+            pub fn mkdirv<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {
+                self.inner.mkdirv(paths)
             }
             /// Create one directory with explicit Unix permission bits.
             pub fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> Result<()> {
@@ -65,6 +62,16 @@ macro_rules! owned_client {
                 callback: impl FnMut(DirEntry) -> Result<std::ops::ControlFlow<()>>,
             ) -> Result<TraversalCompletion> {
                 self.inner.visit_dir_with_options(path, options, callback)
+            }
+            pub(crate) fn visit_dir_with_fields(
+                &self,
+                path: impl AsRef<Path>,
+                fields: crate::MetadataFields,
+                options: ReadDirOptions,
+                callback: impl FnMut(DirEntry) -> Result<std::ops::ControlFlow<()>>,
+            ) -> Result<TraversalCompletion> {
+                self.inner
+                    .visit_dir_with_fields(path, fields, options, callback)
             }
             /// Create missing parents and the requested directory.
             pub fn create_dir_all(&self, path: impl AsRef<Path>) -> Result<()> {
@@ -98,6 +105,16 @@ macro_rules! owned_client {
                 callback: impl FnMut(&DirEntry) -> Result<std::ops::ControlFlow<()>>,
             ) -> Result<TraversalCompletion> {
                 self.inner.visit_walk_with_options(root, options, callback)
+            }
+            pub(crate) fn visit_walk_with_fields(
+                &self,
+                root: impl AsRef<Path>,
+                fields: crate::MetadataFields,
+                options: $crate::WalkOptions,
+                callback: impl FnMut(&DirEntry) -> Result<std::ops::ControlFlow<()>>,
+            ) -> Result<TraversalCompletion> {
+                self.inner
+                    .visit_walk_with_fields(root, fields, options, callback)
             }
             /// Create `path` if missing, otherwise empty it. Errors if it exists and is
             /// not a directory (a symlink to a directory is not a directory here).
@@ -163,11 +180,8 @@ macro_rules! owned_client {
             }
             /// Copy whole files in request order. A successful prefix may remain if
             /// a later request fails; this operation does not provide atomicity.
-            pub fn copy_files<P: AsRef<Path>, Q: AsRef<Path>>(
-                &self,
-                pairs: &[(P, Q)],
-            ) -> Result<()> {
-                self.inner.copy_files(pairs)
+            pub fn copyv<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+                self.inner.copyv(pairs)
             }
             /// Remove paths in request order, optionally recursing into directories.
             /// A successful prefix may remain if a later path fails.
@@ -229,7 +243,7 @@ macro_rules! owned_client {
             /// Read whole-file paths and positional ranges in input order.
             /// The default budget comes from this client's resource limits.
             /// Whole files complete or fail; ranges may return short progress.
-            /// See [`Fs::readv`] for examples. Use `ReadOp::into` for caller storage.
+            /// See [`FsExt::readv`] for examples. Use `ReadOp::into` for caller storage.
             pub fn readv<'a>(
                 &self,
                 ops: impl IntoIterator<Item = ReadOp<'a, $file>>,
@@ -296,12 +310,30 @@ macro_rules! owned_client {
                     op.file().inner.write_request_at(op.offset(), op.data())
                 })
             }
+            /// Select short-write reporting or completion of successful short writes.
+            /// Completion performs whole-batch local preflight, but errors may
+            /// follow mutations. Failed or ambiguous writes are never replayed.
+            pub fn writev_with_options(
+                &self,
+                requests: &[WriteOp<'_, $file>],
+                options: $crate::WriteOptions,
+            ) -> Result<Vec<WriteResult>> {
+                let result = if options.writes_all() {
+                    self.write_complete(requests)
+                } else {
+                    self.writev(requests)
+                };
+                result.map_err($crate::write::public_write_error)
+            }
             /// Write every byte in each positional request, retrying short writes in
             /// vector waves. Like `writev`, this is not transactional: an error may
             /// follow a successfully written prefix. Overlapping requests through the
             /// same path complete in input order; different paths are presumed
             /// independent (including hard-link aliases).
-            pub fn write_allv(&self, requests: &[WriteOp<'_, $file>]) -> Result<Vec<WriteResult>> {
+            pub(crate) fn write_complete(
+                &self,
+                requests: &[WriteOp<'_, $file>],
+            ) -> Result<Vec<WriteResult>> {
                 self.inner.write_allv_mapped(requests, |op| {
                     op.file().inner.write_request_at(op.offset(), op.data())
                 })

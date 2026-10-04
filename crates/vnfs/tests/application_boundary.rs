@@ -124,7 +124,7 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
         .map(|f| vnfs::ReadOp::range(f, 0, 7))
         .collect();
     let (results, cost) = measured(|| mounted.readv(reads).unwrap());
-    let (expected, raw_cost) = measured(|| vnfs::Fs::readv(&raw, raw_reads).unwrap());
+    let (expected, raw_cost) = measured(|| vnfs::FsExt::readv(&raw, raw_reads).unwrap());
     assert_eq!(results, expected);
     assert_eq!(
         cost, raw_cost,
@@ -138,7 +138,11 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
         .iter()
         .map(|f| f.write_request_at(0, b"payload"))
         .collect();
-    let (results, cost) = measured(|| mounted.write_allv(&writes).unwrap());
+    let (results, cost) = measured(|| {
+        mounted
+            .writev_with_options(&writes, vnfs::WriteOptions::new().write_all(true))
+            .unwrap()
+    });
     let (expected, raw_cost) = measured(|| raw.write_allv(&raw_writes).unwrap());
     assert_eq!(results, expected);
     assert_eq!(
@@ -167,7 +171,7 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
         .map(|(file, buffer)| vnfs::ReadOp::into(file, 0, buffer))
         .collect();
     let (results, cost) = measured(|| mounted.readv(requests).unwrap());
-    let (expected, raw_cost) = measured(|| vnfs::Fs::readv(&raw, raw_requests).unwrap());
+    let (expected, raw_cost) = measured(|| vnfs::FsExt::readv(&raw, raw_requests).unwrap());
     assert_eq!(results, expected);
     assert_eq!(
         cost, raw_cost,

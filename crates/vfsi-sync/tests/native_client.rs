@@ -116,6 +116,7 @@ struct ScalarOnly {
     max_write_once: Option<usize>,
     directory_entries: usize,
     directory_page_sizes: Arc<Mutex<Vec<usize>>>,
+    directory_fields: Arc<Mutex<Vec<vfsi_sync::AttrMask>>>,
 }
 
 #[test]
@@ -849,6 +850,17 @@ fn stream_callback_can_reenter_client_and_drop_another_file() {
 }
 
 impl DirectoryFileSystem for ScalarOnly {
+    fn read_dir_page_with_fields(
+        &mut self,
+        path: &std::path::Path,
+        fields: vfsi_sync::AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
+        self.directory_fields.lock().unwrap().push(fields);
+        self.read_dir_page(path, cursor, page_size, max_entries)
+    }
     fn create_dir_one(&mut self, _: &std::path::Path, _: u32) -> VfResult<()> {
         Ok(())
     }
@@ -944,6 +956,33 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
             .unwrap(),
         vfsi_sync::TraversalCompletion::Stopped
     );
+}
+
+#[test]
+fn visitor_field_selection_is_forwarded_to_each_page() {
+    let fields = Arc::new(Mutex::new(Vec::new()));
+    let pages = Arc::new(Mutex::new(Vec::new()));
+    let client = FsClient::new(ScalarOnly {
+        directory_entries: 3,
+        directory_fields: fields.clone(),
+        directory_page_sizes: pages.clone(),
+        ..Default::default()
+    });
+    let mut seen = 0;
+    client
+        .visit_dir_with_fields(
+            "/tree",
+            vfsi_sync::AttrMask::SIZE,
+            ReadDirOptions::new(),
+            |_| {
+                seen += 1;
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
+        .unwrap();
+    assert_eq!(seen, 3);
+    assert_eq!(*fields.lock().unwrap(), [vfsi_sync::AttrMask::SIZE; 2]);
+    assert_eq!(*pages.lock().unwrap(), [1, 1024]);
 }
 
 #[test]

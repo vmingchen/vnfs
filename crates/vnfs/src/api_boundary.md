@@ -1,5 +1,35 @@
 ## Application boundary
 
+Shallow and recursive visits share one primitive, with borrowed entries:
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn old_walk(fs: &impl Fs) {
+    let _ = fs.visit_walks_with_options(&["/tree"], vnfs::WalkOptions::new(),
+        |_, _| Ok(vnfs::ControlFlow::Continue(())));
+}
+```
+
+Default-policy read/write helpers belong to `FsExt`, not the backend contract.
+Generic callers import the extension explicitly:
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn read(fs: &impl Fs) { let _ = fs.readv([vnfs::ReadOp::whole("/file")]); }
+```
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn write(fs: &impl Fs) { let _ = fs.writev(&[]); }
+```
+
+Removal uses one explicit-mode vector primitive, not separate trait methods:
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn remove(fs: &impl Fs) { let _ = fs.remove_dirs_contents(&["/dir"]); }
+```
+
 Application clients and their handles are opaque. Backend construction and
 protocol conversions live under `vnfs::backend` or in the backend crates.
 There is no public backend extraction, lock access, or representation coercion.
@@ -107,6 +137,37 @@ let _ = client.into_inner();
 ```
 
 ## Core versus extension methods
+
+Write completion is selected by `WriteOptions`, not a separate public method.
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn old_complete(fs: &impl Fs) {
+    let _ = fs.write_allv(&[]);
+}
+```
+
+```compile_fail,E0599
+fn old_concrete_complete(fs: &vnfs::NfsClient) { let _ = fs.write_allv(&[]); }
+```
+
+Namespace vectors use `renamev`, `copyv`, and `mkdirv`; historical descriptive
+names are not retained as aliases.
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn old_rename(fs: &impl Fs) { let _ = fs.rename_files(&[("/a", "/b")]); }
+```
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn old_copy(fs: &impl Fs) { let _ = fs.copy_files(&[("/a", "/b")]); }
+```
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn old_mkdir(fs: &impl Fs) { let _ = fs.create_dirs(&["/a", "/b"]); }
+```
 
 `Fs` contains vectorized filesystem operations and policy inspection.
 Import `FsExt` to use scalar operations and convenience workflows. Its blanket
@@ -254,8 +315,8 @@ fn read_stream_with_options(fs: &impl Fs) {
 Vector-only generic code needs no extension trait:
 
 ```no_run
-use vnfs::{Fs, ReadOp};
+use vnfs::{Fs, ReadOp, ReadOptions};
 fn vector_only(fs: &impl Fs) -> vnfs::Result<Vec<vnfs::ReadResult>> {
-    fs.readv([ReadOp::whole("/file-1"), ReadOp::whole("/file-2")])
+    fs.readv_with_options([ReadOp::whole("/file-1"), ReadOp::whole("/file-2")], ReadOptions::new())
 }
 ```

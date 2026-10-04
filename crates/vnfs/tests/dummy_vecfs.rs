@@ -301,7 +301,7 @@ fn application_metadata_and_batch_mutations() {
     assert_eq!(metadata.device_id(), None);
 
     client
-        .copy_files(&[("/source-1", "/copy-1"), ("/source-2", "/copy-2")])
+        .copyv(&[("/source-1", "/copy-1"), ("/source-2", "/copy-2")])
         .unwrap();
     assert_eq!(client.read("/copy-1").unwrap(), b"abc");
     assert_eq!(client.read("/copy-2").unwrap(), b"defg");
