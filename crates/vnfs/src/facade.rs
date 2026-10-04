@@ -162,7 +162,7 @@ macro_rules! owned_client {
                 self.inner
                     .try_closev(files.into_iter().map(|file| &mut file.inner))
             }
-            /// Read with an explicit aggregate byte budget. See [`Fs::vread`].
+            /// Read with an explicit aggregate byte budget. See [`Vfsi::vread`].
             pub fn vread<'a>(
                 &self,
                 ops: impl IntoIterator<Item = ReadOp<'a, $file>>,

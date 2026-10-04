@@ -1,18 +1,40 @@
 ## Application boundary
 
+Metadata vectors use the canonical options-aware primitive; former aliases
+are not retained, even when the extension trait is imported:
+
+```compile_fail,E0599
+use vnfs::{Vfsi, VfsiExt};
+fn old_metadata(fs: &impl Vfsi) { let _ = fs.metadatav(&["/file"]); }
+```
+
+```compile_fail,E0599
+use vnfs::{Vfsi, VfsiExt};
+fn old_symlink_metadata(fs: &impl Vfsi) { let _ = fs.symlink_metadatav(&["/link"]); }
+```
+
+Consuming cleanup is named `close_files`, distinct from borrowing `vclose`:
+
+```compile_fail,E0599
+use vnfs::{Vfsi, VfsiExt};
+fn old_close<C: Vfsi>(fs: &C, files: Vec<C::File>) {
+    let _ = fs.closev(files);
+}
+```
+
 Collection and visiting share `VisitOptions`; separate recursive collection
 and concrete-client helper entry points are not retained:
 
 ```compile_fail,E0599
-use vnfs::{Fs, FsExt};
-fn old_collect(fs: &impl Fs) {
+use vnfs::{Vfsi, VfsiExt};
+fn old_collect(fs: &impl Vfsi) {
     let _ = fs.walks_with_options(&["/tree"], vnfs::MetadataFields::MODE, vnfs::WalkOptions::new());
 }
 ```
 
 ```compile_fail,E0599
 fn inherent_open(client: &vnfs::NfsClient) {
-    // Without FsExt in scope there is no separate inherent implementation.
+    // Without VfsiExt in scope there is no separate inherent implementation.
     let _ = client.open_with(vnfs::OpenRequest::new("/file", vnfs::OpenFlags::READ));
 }
 ```
@@ -30,31 +52,36 @@ use vnfs::application::NativeHooks;
 Shallow and recursive visits share one primitive, with borrowed entries:
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn old_walk(fs: &impl Fs) {
+use vnfs::Vfsi;
+fn old_walk(fs: &impl Vfsi) {
     let _ = fs.visit_walks_with_options(&["/tree"], vnfs::WalkOptions::new(),
         |_, _| Ok(vnfs::ControlFlow::Continue(())));
 }
 ```
 
-Default-policy read/write helpers belong to `FsExt`, not the backend contract.
-Generic callers import the extension explicitly:
+Vector reads, writes, and removal have one canonical options-aware entry point.
+The former default-options aliases are not retained, even with `VfsiExt` in scope:
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn read(fs: &impl Fs) { let _ = fs.readv([vnfs::ReadOp::whole("/file")]); }
+use vnfs::{Vfsi, VfsiExt};
+fn read(fs: &impl Vfsi) { let _ = fs.readv([vnfs::ReadOp::whole("/file")]); }
 ```
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn write(fs: &impl Fs) { let _ = fs.writev(&[]); }
+use vnfs::{Vfsi, VfsiExt};
+fn write(fs: &impl Vfsi) { let _ = fs.writev(&[]); }
+```
+
+```compile_fail,E0599
+use vnfs::{Vfsi, VfsiExt, RemoveMode};
+fn remove(fs: &impl Vfsi) { let _ = fs.removev(&["/tree"], RemoveMode::Tree); }
 ```
 
 Removal uses one explicit-mode vector primitive, not separate trait methods:
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn remove(fs: &impl Fs) { let _ = fs.remove_dirs_contents(&["/dir"]); }
+use vnfs::Vfsi;
+fn remove(fs: &impl Vfsi) { let _ = fs.remove_dirs_contents(&["/dir"]); }
 ```
 
 Application clients and their handles are opaque. Backend construction and
@@ -138,8 +165,8 @@ fn borrowed(file: vnfs::NfsFile) {
 ```compile_fail,E0382
 fn consumed(client: &vnfs::NfsClient, file: &vnfs::NfsFile) {
     let ops = [vnfs::ReadOp::range(file, 0, 1)];
-    let _ = client.readv(ops);
-    let _ = client.readv(ops);
+    let _ = client.vread(ops, Default::default());
+    let _ = client.vread(ops, Default::default());
 }
 ```
 
@@ -168,8 +195,8 @@ let _ = client.into_inner();
 Write completion is selected by `WriteOptions`, not a separate public method.
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn old_complete(fs: &impl Fs) {
+use vnfs::Vfsi;
+fn old_complete(fs: &impl Vfsi) {
     let _ = fs.write_allv(&[]);
 }
 ```
@@ -182,54 +209,54 @@ Namespace vectors use `vrename`, `vcopy`, and `vmkdir`; historical descriptive
 names are not retained as aliases.
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn old_rename(fs: &impl Fs) { let _ = fs.rename_files(&[("/a", "/b")]); }
+use vnfs::Vfsi;
+fn old_rename(fs: &impl Vfsi) { let _ = fs.rename_files(&[("/a", "/b")]); }
 ```
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn old_copy(fs: &impl Fs) { let _ = fs.copy_files(&[("/a", "/b")]); }
+use vnfs::Vfsi;
+fn old_copy(fs: &impl Vfsi) { let _ = fs.copy_files(&[("/a", "/b")]); }
 ```
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn old_mkdir(fs: &impl Fs) { let _ = fs.create_dirs(&["/a", "/b"]); }
+use vnfs::Vfsi;
+fn old_mkdir(fs: &impl Vfsi) { let _ = fs.create_dirs(&["/a", "/b"]); }
 ```
 
-`Fs` contains vectorized filesystem operations and policy inspection.
-Import `FsExt` to use scalar operations and convenience workflows. Its blanket
-implementation applies to every `Fs`: generic code still needs only an `Fs` bound.
+`Vfsi` contains vectorized filesystem operations and policy inspection.
+Import `VfsiExt` to use scalar operations and convenience workflows. Its blanket
+implementation applies to every `Vfsi`: generic code still needs only an `Vfsi` bound.
 
 Single-target helpers use conventional names; prefer their vector counterparts for cohorts.
 
 The previous suffixed application names are not retained as aliases:
 
 ```compile_fail,E0599
-use vnfs::{Fs, FsExt};
-fn old_open(fs: &impl Fs) { let _ = fs.open_one("/file"); }
+use vnfs::{Vfsi, VfsiExt};
+fn old_open(fs: &impl Vfsi) { let _ = fs.open_one("/file"); }
 ```
-Conventional scalar names are extensions requiring only an `Fs` bound:
+Conventional scalar names are extensions requiring only an `Vfsi` bound:
 
 ```no_run
-use vnfs::{Fs, FsExt};
-fn scalar_workflow(fs: &impl Fs) -> vnfs::Result<()> {
+use vnfs::{Vfsi, VfsiExt};
+fn scalar_workflow(fs: &impl Vfsi) -> vnfs::Result<()> {
     fs.write("/file", b"data")?;
     let file = fs.open("/file")?;
     let _ = fs.read_dir("/")?;
-    fs.closev(vec![file])
+    fs.close_files(vec![file])
 }
 ```
 
 ```compile_fail
-use vnfs::Fs;
-fn missing_extension(fs: &impl Fs) {
+use vnfs::Vfsi;
+fn missing_extension(fs: &impl Vfsi) {
     let _ = fs.read_files(&["/file-1"]);
 }
 ```
 
 ```no_run
-use vnfs::{Fs, FsExt};
-fn convenience(fs: &impl Fs) -> vnfs::Result<Vec<Vec<u8>>> {
+use vnfs::{Vfsi, VfsiExt};
+fn convenience(fs: &impl Vfsi) -> vnfs::Result<Vec<Vec<u8>>> {
     fs.read_files(&["/file-1", "/file-2"])
 }
 ```
@@ -238,12 +265,12 @@ Portable writes retain their handle/payload borrows and do not expose backend
 request types or a write-request associated type.
 
 ```compile_fail,E0505
-use vnfs::{Fs, FsExt, WriteOp};
-fn borrowed(fs: &impl Fs) {
+use vnfs::{Vfsi, VfsiExt, WriteOp};
+fn borrowed(fs: &impl Vfsi) {
     let file = fs.create("/output").unwrap();
     let ops = [WriteOp::at(&file, 0, b"hello")];
     drop(file);
-    let _ = fs.writev(&ops);
+    let _ = fs.vwrite(&ops, Default::default());
 }
 ```
 
@@ -251,7 +278,7 @@ fn borrowed(fs: &impl Fs) {
 use vnfs::{NfsWrite, MountedWrite, AutoWrite};
 ```
 
-The filesystem traits are named `Fs` and `FsExt`; no historical client-trait
+The filesystem traits are named `Vfsi` and `VfsiExt`; no historical client-trait
 aliases are exported.
 
 ```compile_fail,E0432
@@ -262,81 +289,81 @@ use vnfs::Client;
 use vnfs::ClientExt;
 ```
 
-Each single-target execution method belongs to `FsExt`, not `Fs`.
+Each single-target execution method belongs to `VfsiExt`, not `Vfsi`.
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn open_with(fs: &impl Fs) {
+use vnfs::Vfsi;
+fn open_with(fs: &impl Vfsi) {
     let _ = fs.open_with(vnfs::OpenRequest::new("/file", vnfs::OpenFlags::READ));
 }
 ```
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn create_dir_all(fs: &impl Fs) {
+use vnfs::Vfsi;
+fn create_dir_all(fs: &impl Vfsi) {
     let _ = fs.create_dir_all("/dir");
 }
 ```
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn remove_file(fs: &impl Fs) {
+use vnfs::Vfsi;
+fn remove_file(fs: &impl Vfsi) {
     let _ = fs.remove_file("/file");
 }
 ```
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn remove_dir(fs: &impl Fs) {
+use vnfs::Vfsi;
+fn remove_dir(fs: &impl Vfsi) {
     let _ = fs.remove_dir("/dir");
 }
 ```
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn remove_dir_all(fs: &impl Fs) {
+use vnfs::Vfsi;
+fn remove_dir_all(fs: &impl Vfsi) {
     let _ = fs.remove_dir_all("/dir");
 }
 ```
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn remove_dir_contents(fs: &impl Fs) {
+use vnfs::Vfsi;
+fn remove_dir_contents(fs: &impl Vfsi) {
     let _ = fs.remove_dir_contents("/dir");
 }
 ```
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn rename(fs: &impl Fs) {
+use vnfs::Vfsi;
+fn rename(fs: &impl Vfsi) {
     let _ = fs.rename("/old", "/new");
 }
 ```
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn walk_with_options(fs: &impl Fs) {
-    let _ = fs.walk_with_options("/", vnfs::MetadataFields::MODE, vnfs::WalkOptions::new());
+use vnfs::Vfsi;
+fn walk_with_options(fs: &impl Vfsi) {
+    let _ = fs.walk_with_options("/", vnfs::VisitOptions::from(vnfs::WalkOptions::new()).fields(vnfs::MetadataFields::MODE));
 }
 ```
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn visit_walk_with_options(fs: &impl Fs) {
+use vnfs::{Vfsi, VfsiExt};
+fn visit_walk_with_options(fs: &impl Vfsi) {
     let _ = fs.visit_walk_with_options("/", vnfs::VisitOptions::new(), |_| Ok(std::ops::ControlFlow::Continue(())));
 }
 ```
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn visit_dir_with_options(fs: &impl Fs) {
+use vnfs::Vfsi;
+fn visit_dir_with_options(fs: &impl Vfsi) {
     let _ = fs.visit_dir_with_options("/", vnfs::VisitOptions::new(), |_| Ok(std::ops::ControlFlow::Continue(())));
 }
 ```
 
 ```compile_fail,E0599
-use vnfs::Fs;
-fn read_stream_with_options(fs: &impl Fs) {
+use vnfs::Vfsi;
+fn read_stream_with_options(fs: &impl Vfsi) {
     let _ = fs.read_stream_with_options("/file", vnfs::ReadStreamOptions::new(), |_, _| Ok(true));
 }
 ```
@@ -344,8 +371,8 @@ fn read_stream_with_options(fs: &impl Fs) {
 Vector-only generic code needs no extension trait:
 
 ```no_run
-use vnfs::{Fs, ReadOp, ReadOptions};
-fn vector_only(fs: &impl Fs) -> vnfs::Result<Vec<vnfs::ReadResult>> {
+use vnfs::{Vfsi, ReadOp, ReadOptions};
+fn vector_only(fs: &impl Vfsi) -> vnfs::Result<Vec<vnfs::ReadResult>> {
     fs.vread([ReadOp::whole("/file-1"), ReadOp::whole("/file-2")], ReadOptions::new())
 }
 ```

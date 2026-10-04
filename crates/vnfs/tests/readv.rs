@@ -1,7 +1,7 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
-use vnfs::{ErrorKind, FileHandle, Fs, FsExt, Mounted, ReadOp, ReadOptions, ResourceLimits};
+use vnfs::{ErrorKind, FileHandle, Mounted, ReadOp, ReadOptions, ResourceLimits, Vfsi, VfsiExt};
 
-fn mixed<C: Fs>(fs: &C) {
+fn mixed<C: Vfsi>(fs: &C) {
     fs.write_files(&[
         ("/a", b"abcdef".as_slice()),
         ("/b", b"xyz"),
@@ -57,9 +57,12 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
         });
     fs.write_files(&[("/a", b"abc"), ("/b", b"xyz")]).unwrap();
     assert_eq!(
-        fs.readv([ReadOp::whole("/a"), ReadOp::whole("/b")])
-            .unwrap_err()
-            .kind(),
+        fs.vread(
+            [ReadOp::whole("/a"), ReadOp::whole("/b")],
+            Default::default()
+        )
+        .unwrap_err()
+        .kind(),
         ErrorKind::FileTooLarge
     );
     assert_eq!(
@@ -74,15 +77,21 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
     let file = fs.open("/a").unwrap();
     let mut buffer = [0xaa; 3];
     let error = fs
-        .readv([
-            ReadOp::into(&file, 0, &mut buffer),
-            ReadOp::range(&file, 0, 2),
-        ])
+        .vread(
+            [
+                ReadOp::into(&file, 0, &mut buffer),
+                ReadOp::range(&file, 0, 2),
+            ],
+            Default::default(),
+        )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(buffer, [0xaa; 3]);
     let error = fs
-        .readv([ReadOp::whole("/b"), ReadOp::into(&file, 0, &mut buffer)])
+        .vread(
+            [ReadOp::whole("/b"), ReadOp::into(&file, 0, &mut buffer)],
+            Default::default(),
+        )
         .unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert_eq!(&buffer, b"abc"); // Reads are not atomic; earlier buffers may be filled.
@@ -100,11 +109,14 @@ fn failure_indices_and_buffer_borrows_survive_consumption() {
     let file = fs.open("/a").unwrap();
     let mut buffer = [0; 1];
     let error = fs
-        .readv([
-            ReadOp::whole("/a"),
-            ReadOp::into(&file, 0, &mut buffer),
-            ReadOp::whole("/missing"),
-        ])
+        .vread(
+            [
+                ReadOp::whole("/a"),
+                ReadOp::into(&file, 0, &mut buffer),
+                ReadOp::whole("/missing"),
+            ],
+            Default::default(),
+        )
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::NotFound);
     assert_eq!(error.index(), Some(2));
@@ -112,10 +124,13 @@ fn failure_indices_and_buffer_borrows_survive_consumption() {
     let other = Mounted::new(temp.path()).unwrap();
     let foreign = other.open("/a").unwrap();
     let error = fs
-        .readv([
-            ReadOp::whole("/missing"),
-            ReadOp::into(&foreign, 0, &mut buffer),
-        ])
+        .vread(
+            [
+                ReadOp::whole("/missing"),
+                ReadOp::into(&foreign, 0, &mut buffer),
+            ],
+            Default::default(),
+        )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(buffer, [7]);
@@ -127,7 +142,10 @@ fn zero_length_buffers_and_owned_reads_keep_distinct_data_ownership() {
     fs.write("/a", b"abc").unwrap();
     let file = fs.open("/a").unwrap();
     let results = fs
-        .readv([ReadOp::range(&file, 0, 0), ReadOp::into(&file, 0, &mut [])])
+        .vread(
+            [ReadOp::range(&file, 0, 0), ReadOp::into(&file, 0, &mut [])],
+            Default::default(),
+        )
         .unwrap();
     assert_eq!(results[0].data(), Some([].as_slice()));
     assert_eq!(results[1].data(), None);
@@ -140,11 +158,17 @@ fn path_conversions_and_iterators_construct_whole_file_operations() {
     let fs = Mounted::new(temp.path()).unwrap();
     fs.write_files(&[("/a", b"abc"), ("/b", b"xyz")]).unwrap();
     let results = fs
-        .readv(["/a".into(), std::path::Path::new("/b").into()])
+        .vread(
+            ["/a".into(), std::path::Path::new("/b").into()],
+            Default::default(),
+        )
         .unwrap();
     assert_eq!(results.iter().map(|r| r.read()).collect::<Vec<_>>(), [3, 3]);
     let results = fs
-        .readv(["/a", "/b"].into_iter().map(ReadOp::whole))
+        .vread(
+            ["/a", "/b"].into_iter().map(ReadOp::whole),
+            Default::default(),
+        )
         .unwrap();
     assert_eq!(results[0].data(), Some(b"abc".as_slice()));
     assert_eq!(results[1].data(), Some(b"xyz".as_slice()));
@@ -200,12 +224,18 @@ fn an_exhausted_internal_budget_never_restores_the_default() {
     let file = fs.open("/a").unwrap();
     let mut buffer = [0; 3];
     let results = fs
-        .readv([ReadOp::into(&file, 0, &mut buffer), ReadOp::whole("/empty")])
+        .vread(
+            [ReadOp::into(&file, 0, &mut buffer), ReadOp::whole("/empty")],
+            Default::default(),
+        )
         .unwrap();
     assert_eq!(&buffer, b"abc");
     assert_eq!(results[1].data(), Some(&b""[..]));
     let error = fs
-        .readv([ReadOp::into(&file, 0, &mut buffer), ReadOp::whole("/extra")])
+        .vread(
+            [ReadOp::into(&file, 0, &mut buffer), ReadOp::whole("/extra")],
+            Default::default(),
+        )
         .unwrap_err();
     assert_eq!(error.kind(), vnfs::ErrorKind::FileTooLarge);
     assert_eq!(error.index(), Some(1));
@@ -225,7 +255,36 @@ fn an_exhausted_internal_budget_never_restores_the_default() {
         vnfs::ErrorKind::FileTooLarge
     );
     assert_eq!(
-        fs.read_to_string_with_limit("/empty", 0)
+        fs.read_to_string_with_options("/empty", ReadOptions::default())
+            .unwrap(),
+        ""
+    );
+}
+
+#[test]
+fn text_options_inherit_or_override_budgets_and_preserve_utf8_errors() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = vnfs::Mounted::new(root.path())
+        .unwrap()
+        .with_limits(vnfs::ResourceLimits {
+            max_read_bytes: 2,
+            ..Default::default()
+        });
+    fs.write("/text", b"hello").unwrap();
+    fs.write("/invalid", &[0xff]).unwrap();
+    assert_eq!(
+        fs.read_to_string_with_options("/text", ReadOptions::default())
+            .unwrap_err()
+            .kind(),
+        vnfs::ErrorKind::FileTooLarge
+    );
+    let options = ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(5));
+    assert_eq!(
+        fs.read_to_string_with_options("/text", options).unwrap(),
+        "hello"
+    );
+    assert_eq!(
+        fs.read_to_string_with_options("/invalid", options)
             .unwrap_err()
             .kind(),
         vnfs::ErrorKind::InvalidInput

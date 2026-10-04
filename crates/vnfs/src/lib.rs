@@ -40,8 +40,8 @@ pub mod mounted {
 pub mod files {
     #[doc(inline)]
     pub use crate::{
-        Capabilities, FileHandle, Fs, FsExt, OpenFlags, OpenRequest, ReadIntoResult, ReadOp,
-        ReadOptions, ReadResult, ReadStreamOptions, ResourceLimits, StreamCompletion, WriteOp,
+        Capabilities, FileHandle, OpenFlags, OpenRequest, ReadIntoResult, ReadOp, ReadOptions,
+        ReadResult, ReadStreamOptions, ResourceLimits, StreamCompletion, Vfsi, VfsiExt, WriteOp,
         WriteOptions, WriteResult,
     };
 }
@@ -88,19 +88,23 @@ pub type Result<T> = vfsi_core::VfResult<T>;
 /// Application-facing error type for the Rust-native API.
 pub type Error = vfsi_core::VfError;
 
+#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod application;
-pub use application::{FileHandle, Fs, FsExt};
+pub use vfsi_core::{FileHandle, Vfsi, VfsiExt};
+#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod metadata;
+#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod read;
-mod visit;
+#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod write;
-pub use metadata::MetadataOptions;
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 pub(crate) use read::ReadRequest;
-pub use read::{ReadOp, ReadOptions, ReadResult};
-pub(crate) use vfsi_sync::FsReadResult as OwnedReadResult;
-pub use visit::VisitOptions;
-pub use write::{WriteOp, WriteOptions};
+pub use vfsi_core::api::MetadataOptions;
+pub use vfsi_core::api::VisitOptions;
+#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
+pub(crate) use vfsi_core::api::internal::OwnedReadResult;
+pub use vfsi_core::api::{ReadOp, ReadOptions, ReadResult};
+pub use vfsi_core::api::{WriteOp, WriteOptions};
 
 // Keep negative API-contract doctests without presenting unsupported calls
 // as introductory documentation on the Nfs constructor.
@@ -184,9 +188,9 @@ pub mod prelude {
     #[cfg(all(feature = "auto", target_os = "linux"))]
     pub use crate::{Auto, Mounted};
     pub use crate::{
-        ControlFlow, FileHandle, Fs, FsExt, MetadataOptions, ReadOp, ReadOptions, ReadResult,
-        RemoveMode, ResourceLimits, StreamCompletion, TraversalCompletion, VisitOptions, WriteOp,
-        WriteOptions,
+        ControlFlow, FileHandle, MetadataOptions, ReadOp, ReadOptions, ReadResult, RemoveMode,
+        ResourceLimits, StreamCompletion, TraversalCompletion, Vfsi, VfsiExt, VisitOptions,
+        WriteOp, WriteOptions,
     };
     #[cfg(feature = "nfs")]
     pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile, NfsVersion};
@@ -196,31 +200,21 @@ pub mod prelude {
 
 pub use std::io::ErrorKind;
 pub use std::ops::ControlFlow;
-/// What each input to [`Fs::vremove`] removes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RemoveMode {
-    /// Remove a file, symlink, or empty directory; do not traverse directories.
-    #[default]
-    Entry,
-    /// Remove the entry and, for directories, its descendants.
-    Tree,
-    /// Remove descendants while retaining the directory root. Final symlinks
-    /// are not followed; execution uses the backend's anchored removal path.
-    Contents,
-}
 /// Attribute selection for metadata queries, directory listings, and walks.
 pub use vfsi_core::AttrMask as MetadataFields;
 pub use vfsi_core::VfType as FileType;
+pub use vfsi_core::api::RemoveMode;
+pub use vfsi_core::api::{
+    DepthLimit, DirectoryListing, ReadDirOptions, ReadStreamOptions, ResourceLimits,
+    StreamCompletion, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
+};
+pub use vfsi_core::api::{ReadIntoResult, WriteResult};
 pub use vfsi_core::{
     Capabilities, DirEntry, ErrorDomain, Metadata, OpenFlags, OpenRequest, Permissions,
     RemoveOptions, StatusCode, TransportKind,
 };
+#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 pub(crate) use vfsi_sync::ReadAllOptions;
-pub use vfsi_sync::{
-    DepthLimit, DirectoryListing, ReadDirOptions, ReadStreamOptions, ResourceLimits,
-    StreamCompletion, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
-};
-pub use vfsi_sync::{FsReadIntoResult as ReadIntoResult, FsWriteResult as WriteResult};
 #[cfg(feature = "nfs")]
 mod native_nfs;
 #[cfg(all(feature = "nfs", target_os = "linux"))]

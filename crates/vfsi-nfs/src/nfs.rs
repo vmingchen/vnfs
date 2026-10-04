@@ -20,7 +20,7 @@ use vfsi_core::internal::ManyResults;
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
-use crate::client::{FileHandle, NfsClient, OpenCreate};
+use crate::client::{FileHandle as WireFileHandle, NfsClient, OpenCreate};
 use crate::path::{
     components_bytes, join_path_bytes, normalize_bytes, path_bytes, path_from_bytes,
     split_path_bytes,
@@ -40,7 +40,7 @@ pub use crate::vecfs::*;
 /// `O_APPEND` (writes then always go to the end of the file).
 #[derive(Debug, Clone)]
 struct OpenFile {
-    fh: FileHandle,
+    fh: WireFileHandle,
     stateid: stateid4,
     cur_offset: u64,
     append: bool,
@@ -103,14 +103,14 @@ struct ReopenFile {
 
 /// READDIR continuation retained across unlocked application callbacks.
 struct NfsDirectoryCursor {
-    fh: FileHandle,
+    fh: WireFileHandle,
     cookie: u64,
     buffered: VecDeque<crate::client::DirEntry>,
 }
 
 /// A child resolved relative to the observed parent, never by its full path.
 struct NfsChildDirectoryCursor {
-    parent: FileHandle,
+    parent: WireFileHandle,
     name: Vec<u8>,
 }
 
@@ -121,8 +121,8 @@ struct NfsChildDirectoryCursor {
 /// path is re-resolved after the operand's parent is resolved once. A `None`
 /// parent keeps the directory (used by [`VecFs::rm_contents`]).
 struct RemoveDir {
-    fh: FileHandle,
-    parent: Option<FileHandle>,
+    fh: WireFileHandle,
+    parent: Option<WireFileHandle>,
     name: Vec<u8>,
     /// Operand index this directory belongs to, for error attribution.
     root: usize,
@@ -133,7 +133,7 @@ enum RmTask {
     /// REMOVE `name` from `parent`. When `expand` is set and the entry turns
     /// out to be a non-empty directory, resolve it and enter it instead.
     RemoveOrEnter {
-        parent: FileHandle,
+        parent: WireFileHandle,
         name: Vec<u8>,
         root: usize,
         expand: bool,
@@ -534,7 +534,7 @@ pub struct NfsVecFs {
     /// Canonical open-file state, keyed by the client-assigned descriptor.
     open_files: std::collections::HashMap<i32, OpenFile>,
     /// Directory handles returned by `open_dir`, keyed by client-assigned id.
-    open_dirs: std::collections::HashMap<i32, FileHandle>,
+    open_dirs: std::collections::HashMap<i32, WireFileHandle>,
     /// Distinguishes directory descriptors from those of another client.
     dir_owner: u64,
     /// Handles no longer visible to callers whose CLOSE was not confirmed.
@@ -952,11 +952,11 @@ impl NfsVecFs {
         &mut self,
         files: &[&VfFile],
         follow: bool,
-    ) -> VfResult<Vec<Result<(FileHandle, u32), u32>>> {
+    ) -> VfResult<Vec<Result<(WireFileHandle, u32), u32>>> {
         use std::collections::{BTreeMap, HashMap};
         // Group by parent directory.
         let mut groups: BTreeMap<Vec<u8>, Vec<(usize, Vec<u8>)>> = BTreeMap::new();
-        let mut out: Vec<Result<(FileHandle, u32), u32>> =
+        let mut out: Vec<Result<(WireFileHandle, u32), u32>> =
             vec![Err(nfsstat4_NFS4ERR_NOENT); files.len()];
         for (i, f) in files.iter().enumerate() {
             if f.is_descriptor() {
@@ -978,7 +978,7 @@ impl NfsVecFs {
                 split_path_bytes(path_bytes).map_err(|_| VfError::failure(i, ERR_NOENT))?;
             groups.entry(dir).or_default().push((i, name));
         }
-        let mut dir_cache: HashMap<Vec<u8>, FileHandle> = HashMap::new();
+        let mut dir_cache: HashMap<Vec<u8>, WireFileHandle> = HashMap::new();
         for (dir, entries) in groups {
             let dirfh = match dir_cache.get(&dir) {
                 Some(fh) => fh.clone(),
@@ -999,7 +999,7 @@ impl NfsVecFs {
                     }
                 },
             };
-            let ops: Vec<(FileHandle, Vec<u8>)> = entries
+            let ops: Vec<(WireFileHandle, Vec<u8>)> = entries
                 .iter()
                 .map(|(_, name)| (dirfh.clone(), name.clone()))
                 .collect();
@@ -1491,7 +1491,7 @@ impl NfsVecFs {
         if let Some(mount) = &self.mount_source {
             mount.check_local()?;
         }
-        let snapshots: Vec<(i32, ReopenFile, u64, FileHandle)> = self
+        let snapshots: Vec<(i32, ReopenFile, u64, WireFileHandle)> = self
             .open_files
             .iter()
             .map(|(&fd, open)| {
@@ -1708,7 +1708,7 @@ impl NfsVecFs {
     /// reports `NFS4ERR_SYMLINK` mid-path, resolution falls back to a
     /// component-wise walk that follows each symlink with READLINK, splicing
     /// its target into the remaining path (hop-capped at 40).
-    fn resolve_path(&mut self, root_rel: &Path, follow_final: bool) -> VfResult<FileHandle> {
+    fn resolve_path(&mut self, root_rel: &Path, follow_final: bool) -> VfResult<WireFileHandle> {
         let mut path = normalize_bytes(path_bytes(root_rel));
         let mut hops = 0usize;
         loop {
@@ -1807,7 +1807,7 @@ impl NfsVecFs {
         access: u32,
         create: bool,
         excl: bool,
-    ) -> VfResult<(FileHandle, stateid4)> {
+    ) -> VfResult<(WireFileHandle, stateid4)> {
         let dirfh = self.resolve_path(dir, true).map_err(|e| e.with_index(0))?;
         let mode = match (create, excl) {
             (false, _) => OpenCreate::NoCreate,
@@ -1956,9 +1956,9 @@ impl NfsVecFs {
         // Resolve each parent directory once per distinct dir, then look up
         // every final component in one tolerant batch (which also reports the
         // type, so symlinks can be followed only when actually present).
-        let mut dir_cache: std::collections::HashMap<Vec<u8>, FileHandle> =
+        let mut dir_cache: std::collections::HashMap<Vec<u8>, WireFileHandle> =
             std::collections::HashMap::new();
-        let mut lookups: Vec<(usize, FileHandle, Vec<u8>)> = Vec::new();
+        let mut lookups: Vec<(usize, WireFileHandle, Vec<u8>)> = Vec::new();
         for (i, f) in files.iter().enumerate() {
             if f.is_descriptor() {
                 continue;
@@ -1988,7 +1988,7 @@ impl NfsVecFs {
         if lookups.is_empty() {
             return Ok(vec![None; files.len()]);
         }
-        let probe: Vec<(FileHandle, Vec<u8>)> = lookups
+        let probe: Vec<(WireFileHandle, Vec<u8>)> = lookups
             .iter()
             .map(|(_, dir, name)| (dir.clone(), name.clone()))
             .collect();
@@ -2701,7 +2701,7 @@ impl NfsVecFs {
     }
 
     /// The size in bytes of `fh`.
-    fn file_size(&mut self, fh: &FileHandle) -> VfResult<u64> {
+    fn file_size(&mut self, fh: &WireFileHandle) -> VfResult<u64> {
         let list = self
             .nfs
             .getattr(fh, &[FATTR4_SIZE])
@@ -2710,7 +2710,7 @@ impl NfsVecFs {
         read_u64(&list, &mut off)
     }
 
-    fn resolve_tcfile(&mut self, f: &VfFile, follow: bool) -> VfResult<FileHandle> {
+    fn resolve_tcfile(&mut self, f: &VfFile, follow: bool) -> VfResult<WireFileHandle> {
         match f {
             VfFile::Descriptor(fd) => self
                 .open_files
@@ -2781,7 +2781,7 @@ impl NfsVecFs {
         }
     }
 
-    fn resolve_follow(&mut self, path: &Path) -> VfResult<FileHandle> {
+    fn resolve_follow(&mut self, path: &Path) -> VfResult<WireFileHandle> {
         self.resolve_path(path, true)
     }
 
@@ -3385,7 +3385,7 @@ impl NfsVecFs {
     }
 
     /// Best-effort close of stateids opened by a merged path compound.
-    fn close_path_opens(&mut self, opens: &[(crate::client::FileHandle, stateid4)]) {
+    fn close_path_opens(&mut self, opens: &[(WireFileHandle, stateid4)]) {
         if opens.is_empty() {
             return;
         }
@@ -3401,9 +3401,9 @@ impl NfsVecFs {
 
     /// The legacy phased renamev (cached parent resolution + rename_many).
     fn renamev_phased(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
-        let mut src_cache: std::collections::HashMap<Vec<u8>, FileHandle> =
+        let mut src_cache: std::collections::HashMap<Vec<u8>, WireFileHandle> =
             std::collections::HashMap::new();
-        let mut dst_cache: std::collections::HashMap<Vec<u8>, FileHandle> =
+        let mut dst_cache: std::collections::HashMap<Vec<u8>, WireFileHandle> =
             std::collections::HashMap::new();
         let mut ops = Vec::with_capacity(pairs.len());
         for (i, (src, dst)) in pairs.iter().enumerate() {
@@ -3530,7 +3530,7 @@ impl NfsVecFs {
     }
 
     /// Resolve a path operand to its parent handle and final component name.
-    fn remove_parent_handle(&mut self, path: &Path) -> VfResult<(FileHandle, Vec<u8>)> {
+    fn remove_parent_handle(&mut self, path: &Path) -> VfResult<(WireFileHandle, Vec<u8>)> {
         let full = self.server_vf_path(&VfFile::from_os_path(path))?;
         let (dir, name) =
             split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(0, ERR_NOENT))?;
@@ -3548,7 +3548,7 @@ impl NfsVecFs {
         first_error: &mut Option<VfError>,
         options: RemoveOptions,
     ) -> VfResult<()> {
-        let mut ready: std::collections::HashMap<FileHandle, Vec<(Vec<u8>, usize)>> =
+        let mut ready: std::collections::HashMap<WireFileHandle, Vec<(Vec<u8>, usize)>> =
             std::collections::HashMap::new();
         let mut changed_parents = std::collections::HashSet::new();
         while let Some(task) = stack.pop() {
@@ -3631,7 +3631,7 @@ impl NfsVecFs {
     #[allow(clippy::too_many_arguments)]
     fn remove_or_enter(
         &mut self,
-        parent: &FileHandle,
+        parent: &WireFileHandle,
         name: &[u8],
         root: usize,
         expand: bool,
@@ -3695,7 +3695,7 @@ impl NfsVecFs {
     /// descended into without an extra lookup while files are removed directly.
     fn readdir_typed(
         &mut self,
-        fh: &FileHandle,
+        fh: &WireFileHandle,
         cookie: u64,
     ) -> Result<Vec<crate::client::DirEntry>, RpcError> {
         const REMOVE_READDIR_MAX_BYTES: usize = 32 * 1024;
@@ -3724,7 +3724,7 @@ impl NfsVecFs {
         cookie: u64,
         pass_changed: bool,
         stack: &mut Vec<RmTask>,
-        changed_parents: &mut std::collections::HashSet<FileHandle>,
+        changed_parents: &mut std::collections::HashSet<WireFileHandle>,
         first_error: &mut Option<VfError>,
         options: RemoveOptions,
     ) -> VfResult<()> {
@@ -3825,7 +3825,7 @@ impl NfsVecFs {
     /// per-entry failures are recorded and skipped; transport errors abort.
     fn remove_names(
         &mut self,
-        dir: &FileHandle,
+        dir: &WireFileHandle,
         names: &[Vec<u8>],
         root: usize,
         first_error: &mut Option<VfError>,
@@ -3882,7 +3882,7 @@ impl NfsVecFs {
     /// directories are known to be empty. Errors are recorded and skipped.
     fn remove_list(
         &mut self,
-        parent: &FileHandle,
+        parent: &WireFileHandle,
         entries: &[(Vec<u8>, usize)],
         first_error: &mut Option<VfError>,
         options: RemoveOptions,
@@ -3943,12 +3943,12 @@ impl NfsVecFs {
     /// (removed concurrently) are skipped; transport errors abort.
     fn lookup_children(
         &mut self,
-        dir: &FileHandle,
+        dir: &WireFileHandle,
         names: &[Vec<u8>],
         root: usize,
         first_error: &mut Option<VfError>,
         options: RemoveOptions,
-    ) -> VfResult<Vec<(FileHandle, Vec<u8>)>> {
+    ) -> VfResult<Vec<(WireFileHandle, Vec<u8>)>> {
         let mut children = Vec::new();
         let mut start = 0;
         while start < names.len() {
@@ -3958,7 +3958,7 @@ impl NfsVecFs {
                 options.batch,
             );
             let chunk = &names[start..start + take];
-            let ops: Vec<(FileHandle, Vec<u8>)> = chunk
+            let ops: Vec<(WireFileHandle, Vec<u8>)> = chunk
                 .iter()
                 .map(|name| (dir.clone(), name.clone()))
                 .collect();
@@ -4001,7 +4001,7 @@ impl NfsVecFs {
     /// persists. Transport errors abort because the outcome is ambiguous.
     fn retry_remove_name(
         &mut self,
-        dir: &FileHandle,
+        dir: &WireFileHandle,
         name: &[u8],
         root: usize,
         first_error: &mut Option<VfError>,
@@ -4972,7 +4972,7 @@ impl VecFs for NfsVecFs {
                 .collect();
             let refs: Vec<&VfFile> = files.iter().collect();
             let resolved = self.resolve_many_tcfile(&refs, true)?;
-            let mut level: Vec<(FileHandle, PathBuf, usize)> =
+            let mut level: Vec<(WireFileHandle, PathBuf, usize)> =
                 Vec::with_capacity(level_paths.len());
             for (i, r) in resolved.iter().enumerate() {
                 let owner = level_owners[i];
@@ -4987,7 +4987,7 @@ impl VecFs for NfsVecFs {
                 }
             }
             // First pages for all directories in one compound.
-            let ops: Vec<(FileHandle, u64)> =
+            let ops: Vec<(WireFileHandle, u64)> =
                 level.iter().map(|(fh, _, _)| (fh.clone(), 0)).collect();
             let results = self.nfs.readdir_pages(&ops, &ids).map_err(|error| {
                 remap_active_error(vfsi_core::error_from_rpc_indexed(error), &level_owners)
@@ -5044,7 +5044,7 @@ impl VecFs for NfsVecFs {
                 }
             }
             while !pending.is_empty() {
-                let cont_ops: Vec<(FileHandle, u64)> = pending
+                let cont_ops: Vec<(WireFileHandle, u64)> = pending
                     .iter()
                     .map(|(_, fh, cookie)| (fh.clone(), *cookie))
                     .collect();
@@ -5129,7 +5129,7 @@ impl VecFs for NfsVecFs {
 
         // Preserve the parent filehandle so resolving and reading each child
         // directory can share one compound instead of re-walking full paths.
-        let mut frontier: Vec<(FileHandle, PathBuf)> = root_attrs
+        let mut frontier: Vec<(WireFileHandle, PathBuf)> = root_attrs
             .iter()
             .filter(|entry| entry.ftype == VfType::Directory)
             .filter_map(|entry| {
@@ -5142,7 +5142,7 @@ impl VecFs for NfsVecFs {
         collected.insert(root.to_path_buf(), root_attrs);
 
         while !frontier.is_empty() {
-            let operations: Vec<(FileHandle, Vec<u8>)> = frontier
+            let operations: Vec<(WireFileHandle, Vec<u8>)> = frontier
                 .iter()
                 .map(|(parent, path)| {
                     (
@@ -5178,7 +5178,7 @@ impl VecFs for NfsVecFs {
             }
 
             while !pending.is_empty() {
-                let operations: Vec<(FileHandle, u64)> = pending
+                let operations: Vec<(WireFileHandle, u64)> = pending
                     .iter()
                     .map(|(_, handle, cookie)| (handle.clone(), *cookie))
                     .collect();

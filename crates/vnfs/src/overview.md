@@ -11,7 +11,7 @@ You do not need to construct protocol operations yourself.
 ```no_run
 # #[cfg(feature = "nfs")]
 # fn main() -> vnfs::Result<()> {
-use vnfs::{FsExt, Nfs, ReadOp};
+use vnfs::{VfsiExt, Nfs, ReadOp};
 
 let fs = Nfs::builder("nfs.example.com")
     .root("/export/application")
@@ -21,10 +21,10 @@ fs.write_files(&[
     ("/file-1", b"hello".as_slice()),
     ("/file-2", b"world".as_slice()),
 ])?;
-let results = fs.readv([
+let results = fs.vread([
     ReadOp::whole("/file-1"),
     ReadOp::whole("/file-2"),
-])?;
+], Default::default())?;
 assert_eq!(results[0].data(), Some(b"hello".as_slice()));
 assert_eq!(results[1].data(), Some(b"world".as_slice()));
 # Ok(())
@@ -48,20 +48,22 @@ are in the [package README](https://github.com/vmingchen/vnfs/tree/main/crates/v
 
 | Task | Recommended API | Example |
 | --- | --- | --- |
-| Many complete small files | [`Fs::vread`], [`FsExt::write_files`] | [Bulk files](examples::bulk_files) |
-| Repeated or positional I/O | [`Fs::vopen`], [`Fs::vread`], [`Fs::vwrite`] | [Open handles](examples::open_handles) |
-| One large file | [`Fs::vstream`] | [Bounded streaming](examples::stream_file) |
-| Many directory listings with attributes | [`Fs::vlistdirs`] | [Directories](examples::directories) |
-| Large trees without collecting everything | [`Fs::vlistdirs`] with [`VisitOptions::recursive`] | [Directories](examples::directories) |
+| Many complete small files | [`Vfsi::vread`], [`VfsiExt::write_files`] | [Bulk files](examples::bulk_files) |
+| Repeated or positional I/O | [`Vfsi::vopen`], [`Vfsi::vread`], [`Vfsi::vwrite`] | [Open handles](examples::open_handles) |
+| One large file | [`Vfsi::vstream`] | [Bounded streaming](examples::stream_file) |
+| Many directory listings with attributes | [`Vfsi::vlistdirs`] | [Directories](examples::directories) |
+| Large trees without collecting everything | [`Vfsi::vlistdirs`] with [`VisitOptions::recursive`] | [Directories](examples::directories) |
 | Declarative fresh directory tree | `helpers::TreeBuilder` | [Builder example](helpers::TreeBuilder) |
 | Existing Linux NFS mount | `Nfs::from_mount`, `NfsBuilder::from_mount` | [Mount discovery](Nfs::from_mount) |
-| Backend-independent application code | `Fs`, `FsExt`, `FileHandle` | [Generic workflows](examples) |
+| Backend-independent application code | `Vfsi`, `VfsiExt`, `FileHandle` | [Generic workflows](examples) |
 
-`Fs` contains vectorized execution primitives. `FsExt` supplies scalar operations and
+`Vfsi` and `VfsiExt` are defined in `vfsi-core` and re-exported here;
+applications using `vnfs` need no additional dependency or import path.
+`Vfsi` contains vectorized execution primitives. `VfsiExt` supplies scalar operations and
 convenience helpers (`read_files`, `write_files`, scalar open, and default-option
-listing/streaming) without scalarizing vectors. `FsExt::read_dirs_with_options`
-collects pages returned by `Fs::vlistdirs`; `FsExt::read_stream_with_options`
-is the single-path adapter for `Fs::vstream`. These remain valid extension
+listing/streaming) without scalarizing vectors. `VfsiExt::read_dirs_with_options`
+collects pages returned by `Vfsi::vlistdirs`; `VfsiExt::read_stream_with_options`
+is the single-path adapter for `Vfsi::vstream`. These remain valid extension
 helpers, not core execution methods. Import both with `vnfs::prelude::*`.
 
 ## API map

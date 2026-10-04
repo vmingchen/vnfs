@@ -282,7 +282,7 @@ mod mount_tests {
             )
             .unwrap()
             .into_iter()
-            .map(|r| r.data.unwrap())
+            .map(|r| r.into_data().unwrap())
             .collect::<Vec<_>>(),
             [b"hello".to_vec(), b"world".to_vec()]
         );
@@ -326,7 +326,7 @@ mod mount_tests {
             )
             .unwrap()
             .into_iter()
-            .map(|r| r.data.unwrap())
+            .map(|r| r.into_data().unwrap())
             .collect::<Vec<_>>(),
             [b"unchanged".to_vec()]
         );
@@ -339,4 +339,4 @@ mod mount_tests {
     }
 }
 #[cfg(test)]
-use crate::FsExt;
+use crate::VfsiExt;

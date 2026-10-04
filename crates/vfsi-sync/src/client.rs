@@ -8,25 +8,20 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use vfsi_core::api::internal::OwnedReadResult as FsReadResult;
+use vfsi_core::api::{
+    DirectoryListing, ReadIntoResult as FsReadIntoResult, ResourceLimits, StreamCompletion,
+    TraversalCompletion, WriteResult as FsWriteResult,
+};
+
 use crate::traits::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::{
-    AttrMask, Capabilities, CopyFileSystem, DEFAULT_READ_MAX_BYTES, DirEntry, DirectoryFileSystem,
-    FileSystem, LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
+    AttrMask, Capabilities, CopyFileSystem, DirEntry, DirectoryFileSystem, FileSystem,
+    LinkFileSystem, Metadata, MetadataFileSystem, MetadataQuery, MetadataUpdate,
     NamespaceFileSystem, OpenFlags, OpenRequest, Permissions, ReadAllOptions, ReadDirOptions,
     ReadOp, ReadResult, ReadStreamOptions, RemoveOptions, SetAttributes, VecFs, VectorFileSystem,
     VfDir, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
 };
-
-/// Default aggregate payload limit for owned vector reads.
-pub const DEFAULT_READV_MAX_TOTAL_BYTES: usize = DEFAULT_READ_MAX_BYTES;
-
-/// Application result for one positional vector read, in request order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FsReadResult {
-    pub offset: u64,
-    pub data: Vec<u8>,
-    pub eof: bool,
-}
 
 fn read_result(result: ReadResult) -> FsReadResult {
     FsReadResult {
@@ -36,94 +31,12 @@ fn read_result(result: ReadResult) -> FsReadResult {
     }
 }
 
-/// Application result for one read into caller storage, in request order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FsReadIntoResult {
-    pub offset: u64,
-    pub read: usize,
-    pub eof: bool,
-}
-
-/// Application result for one positional vector write, in request order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FsWriteResult {
-    pub offset: u64,
-    pub written: usize,
-    pub stable: bool,
-}
-
 fn write_result(result: WriteResult) -> FsWriteResult {
     FsWriteResult {
         offset: result.offset,
         written: result.written,
         stable: result.stable,
     }
-}
-
-/// Completion of a streaming read. Stopping does not mean EOF.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamCompletion {
-    Complete,
-    Stopped { next_offset: u64 },
-}
-
-/// Completion of a callback-based directory traversal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TraversalCompletion {
-    Complete,
-    Stopped,
-}
-
-/// Default resource policy for a client. Per-call options override it.
-/// Byte limits bound logical payload, not allocator capacity or RPC overhead.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResourceLimits {
-    /// Maximum collected scalar payload or aggregate vector read buffers.
-    /// Not a process-memory cap; standard `Read::read_to_end` and explicit
-    /// positional file reads remain caller-managed.
-    pub max_read_bytes: usize,
-    /// Default request size for client `read_stream`, not file `Read` or pools.
-    pub stream_chunk_bytes: usize,
-    /// Aggregate entries delivered/collected by a directory call or tree walk.
-    pub max_directory_entries: usize,
-    /// Aggregate logical path bytes, excluding allocator and metadata overhead.
-    pub max_directory_path_bytes: usize,
-    /// Maximum descent depth; the starting directory is depth zero.
-    pub max_walk_depth: usize,
-}
-
-impl Default for ResourceLimits {
-    fn default() -> Self {
-        Self {
-            max_read_bytes: DEFAULT_READ_MAX_BYTES,
-            stream_chunk_bytes: crate::DEFAULT_READ_STREAM_CHUNK_BYTES,
-            max_directory_entries: crate::DEFAULT_DIRECTORY_MAX_ENTRIES,
-            max_directory_path_bytes: crate::DEFAULT_DIRECTORY_MAX_PATH_BYTES,
-            max_walk_depth: crate::DEFAULT_WALK_MAX_DEPTH,
-        }
-    }
-}
-
-impl ResourceLimits {
-    pub fn directory_options(self) -> ReadDirOptions {
-        ReadDirOptions::new()
-            .max_entries(self.max_directory_entries)
-            .max_path_bytes(self.max_directory_path_bytes)
-    }
-
-    pub fn walk_options(self) -> crate::WalkOptions {
-        crate::WalkOptions::new()
-            .max_entries(self.max_directory_entries)
-            .max_path_bytes(self.max_directory_path_bytes)
-            .max_depth(self.max_walk_depth)
-    }
-}
-
-/// One directory and its entries, with attributes fetched during enumeration.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DirectoryListing {
-    pub path: PathBuf,
-    pub entries: Vec<DirEntry>,
 }
 
 fn io_error(error: VfError) -> io::Error {

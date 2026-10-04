@@ -2,7 +2,7 @@
 #![cfg(target_os = "linux")]
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use vnfs::FsExt;
+use vnfs::VfsiExt;
 use vnfs::{Mounted, OpenFlags, OpenRequest};
 
 thread_local! {
@@ -66,8 +66,8 @@ fn auto_range_only_reads_keep_the_legacy_routing_allocation_cost() {
         .iter()
         .map(|file| vnfs::ReadOp::range(file, 0, 3))
         .collect();
-    let (actual, cost) = measured(|| auto.readv(auto_reads).unwrap());
-    let (expected, baseline) = measured(|| mounted.readv(reads).unwrap());
+    let (actual, cost) = measured(|| auto.vread(auto_reads, Default::default()).unwrap());
+    let (expected, baseline) = measured(|| mounted.vread(reads, Default::default()).unwrap());
     assert_eq!(actual, expected);
     // Legacy Auto routing needs only a result vector and one backend request
     // vector beyond Mounted. Partition/index/scatter vectors are unnecessary.
@@ -93,7 +93,7 @@ fn unified_operation_construction_does_not_allocate() {
         ]
     });
     assert_eq!(cost, (0, 0));
-    let results = fs.readv(ops).unwrap();
+    let results = fs.vread(ops, Default::default()).unwrap();
     assert_eq!(results[2].data(), None);
     assert_eq!(&buffer, b"a");
 }
@@ -124,8 +124,9 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
         .iter()
         .map(|f| vnfs::ReadOp::range(f, 0, 7))
         .collect();
-    let (results, cost) = measured(|| mounted.readv(reads).unwrap());
-    let (expected, raw_cost) = measured(|| vnfs::FsExt::readv(&raw, raw_reads).unwrap());
+    let (results, cost) = measured(|| mounted.vread(reads, Default::default()).unwrap());
+    let (expected, raw_cost) =
+        measured(|| vnfs::Vfsi::vread(&raw, raw_reads, Default::default()).unwrap());
     assert_eq!(results, expected);
     assert_eq!(
         cost, raw_cost,
@@ -171,15 +172,16 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
         .zip(&mut raw_buffers)
         .map(|(file, buffer)| vnfs::ReadOp::into(file, 0, buffer))
         .collect();
-    let (results, cost) = measured(|| mounted.readv(requests).unwrap());
-    let (expected, raw_cost) = measured(|| vnfs::FsExt::readv(&raw, raw_requests).unwrap());
+    let (results, cost) = measured(|| mounted.vread(requests, Default::default()).unwrap());
+    let (expected, raw_cost) =
+        measured(|| vnfs::Vfsi::vread(&raw, raw_requests, Default::default()).unwrap());
     assert_eq!(results, expected);
     assert_eq!(
         cost, raw_cost,
         "READ_INTO projection must not allocate another request vector"
     );
     assert!(buffers.iter().all(|buffer| buffer == b"payload"));
-    mounted.closev(reopened).unwrap();
+    mounted.close_files(reopened).unwrap();
     raw.closev(raw_reopened).unwrap();
     mounted.remove_paths(&paths, false).unwrap();
 }
@@ -198,7 +200,7 @@ fn opaque_requests_preserve_owner_preflight_and_error_sources() {
         .unwrap();
     let (request, allocations) = measured(|| vnfs::WriteOp::at(&file, 0, b"changed"));
     assert_eq!(allocations, (0, 0));
-    assert!(other.writev(&[request]).is_err());
+    assert!(other.vwrite(&[request], Default::default()).is_err());
     assert_eq!(
         owner
             .vread([vnfs::ReadOp::whole("/a")], vnfs::ReadOptions::default())

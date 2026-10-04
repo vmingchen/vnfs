@@ -1,6 +1,6 @@
-use vnfs::{Fs, Nfs, ReadStreamOptions};
+use vnfs::{Nfs, ReadStreamOptions, Vfsi};
 
-pub fn run(fs: &impl Fs, path: &str) -> vnfs::Result<u64> {
+pub fn run(fs: &impl Vfsi, path: &str) -> vnfs::Result<u64> {
     let mut bytes = 0_u64;
     fs.vstream(
         &[path],

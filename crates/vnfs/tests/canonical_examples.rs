@@ -13,7 +13,7 @@ mod open_handles;
 #[path = "../examples/stream_file.rs"]
 mod stream_file;
 
-use vnfs::FsExt;
+use vnfs::VfsiExt;
 use vnfs::{Mounted, Result};
 
 #[test]

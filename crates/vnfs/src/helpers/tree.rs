@@ -41,8 +41,8 @@ struct Entry {
 /// symlinks in the root's ancestors are not sandboxed by this helper.
 ///
 /// ```no_run
-/// use vnfs::{Fs, FsExt, helpers::TreeBuilder};
-/// # fn example(client: &impl Fs) -> vnfs::Result<()> {
+/// use vnfs::{Vfsi, VfsiExt, helpers::TreeBuilder};
+/// # fn example(client: &impl Vfsi) -> vnfs::Result<()> {
 /// let tree = TreeBuilder::new()
 ///     .add_file("config/app.conf", "host = localhost")
 ///     .add_empty_file("logs/app.log")
@@ -173,7 +173,7 @@ impl TreeBuilder {
     /// path; entry indices refer to the original declarations (inferred parents
     /// use the first declaration requiring them), not to vector batch positions.
     /// Root-creation errors identify the root, not an entry declaration.
-    pub fn create<C: Fs>(self, client: &C, root: impl AsRef<Path>) -> Result<Tree> {
+    pub fn create<C: Vfsi>(self, client: &C, root: impl AsRef<Path>) -> Result<Tree> {
         let root = root.as_ref();
         if let Some(error) = self.error {
             return Err(error);
@@ -256,7 +256,7 @@ impl TreeBuilder {
                 .vopen(&requests)
                 .map_err(|e| entry_error(e, batch, &self.entries))?;
             if handles.len() != batch.len() {
-                let _ = client.closev(handles);
+                let _ = client.close_files(handles);
                 return Err(
                     Error::transport(None, "create_tree: invalid OPEN result count")
                         .with_context("create_tree", root),
@@ -275,7 +275,7 @@ impl TreeBuilder {
                 .map_err(|e| entry_error(e, batch, &self.entries));
             drop(writes);
             let close = client
-                .closev(handles)
+                .close_files(handles)
                 .map_err(|e| entry_error(e, batch, &self.entries));
             write?;
             close?;
@@ -403,4 +403,4 @@ mod tests {
         assert!(!root.path().join("fixture/b/file").exists());
     }
 }
-use crate::{Fs, FsExt};
+use crate::{Vfsi, VfsiExt};

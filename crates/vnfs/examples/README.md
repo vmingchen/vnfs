@@ -31,7 +31,7 @@ documentation example. For mount discovery, use
 `vnfs::Nfs::from_mount("/absolute/mount/project")?`; this opens a separate
 direct NFS connection, not a cache-coherent kernel handle. `Mounted` always
 uses the kernel; `Auto` may bypass it. Generic example functions accept
-`impl Fs` to share application logic across client types.
+`impl Vfsi` to share application logic across client types.
 
 ## Performance experiments, not introductory examples
 

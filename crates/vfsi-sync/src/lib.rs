@@ -15,21 +15,15 @@ pub mod path {
 
 mod traits;
 pub use traits::{
-    BackendDirectoryPage, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
-    DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
-    DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirPageCursor, DirectoryPage, ReadAllOptions,
-    ReadDirOptions, ReadStreamOptions, VecFs, VecFsExt, WalkOptions, rm_recursive,
+    BackendDirectoryPage, DirPageCursor, DirectoryPage, ReadAllOptions, VecFs, VecFsExt,
+    rm_recursive,
 };
 mod io;
 pub use io::{VfFileHandle, VfOpenOptions};
 mod client;
 mod traversal;
-pub use client::{
-    DEFAULT_READV_MAX_TOTAL_BYTES, DirectoryListing, FsClient, FsDir, FsFile, FsRead, FsReadInto,
-    FsReadIntoResult, FsReadResult, FsWrite, FsWriteResult, OpenOptions, ResourceLimits,
-    SetMetadata, StreamCompletion, TraversalCompletion,
-};
-pub use traversal::{WalkControl, WalkEvent, WalkEventKind, walk_events};
+pub use client::{FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite, OpenOptions, SetMetadata};
+pub use traversal::walk_events;
 mod native;
 pub use native::{
     CopyFileSystem, DirectoryFileSystem, FileSystem, LinkFileSystem, MetadataFileSystem,
@@ -60,3 +54,18 @@ pub mod vfsi {
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod test_support;
+
+// Preserve backend-facing paths while the canonical portable types live in core.
+pub use vfsi_core::api::{
+    DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
+    DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
+    DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirectoryListing,
+    ReadDirOptions, ReadIntoResult as FsReadIntoResult, ReadStreamOptions, ResourceLimits,
+    StreamCompletion, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
+    WriteResult as FsWriteResult,
+};
+
+#[doc(hidden)]
+pub mod application;
+
+pub use vfsi_core::api::internal::OwnedReadResult as FsReadResult;

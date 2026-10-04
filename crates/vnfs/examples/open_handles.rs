@@ -1,8 +1,8 @@
-use vnfs::{Fs, FsExt, Nfs, OpenFlags, OpenRequest};
+use vnfs::{Nfs, OpenFlags, OpenRequest, Vfsi, VfsiExt};
 
 // A range read may be short: exact reads must advance by actual progress
 // until their target length or EOF is reached.
-pub fn run(fs: &impl Fs, paths: &[String]) -> vnfs::Result<Vec<Vec<u8>>> {
+pub fn run(fs: &impl Vfsi, paths: &[String]) -> vnfs::Result<Vec<Vec<u8>>> {
     let requests: Vec<_> = paths
         .iter()
         .map(|path| OpenRequest::new(path, OpenFlags::READ))
@@ -15,10 +15,10 @@ pub fn run(fs: &impl Fs, paths: &[String]) -> vnfs::Result<Vec<Vec<u8>>> {
             .zip(&mut buffers)
             .map(|(file, buffer)| vnfs::ReadOp::into(file, 0, buffer))
             .collect();
-        fs.readv(reads)
+        fs.vread(reads, Default::default())
     };
     // Explicit close surfaces errors; dropping handles is best-effort only.
-    let close = fs.closev(files);
+    let close = fs.close_files(files);
     let results = result?;
     close?;
     Ok(buffers

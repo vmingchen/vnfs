@@ -5,24 +5,31 @@ implementation contracts and the historical POSIX/C compatibility surface.
 
 ## Application boundary and migration
 
-`Fs` owns options-aware native vector execution. `FsExt` is blanket implemented
-for every `Fs` and supplies default-policy `readv`, `writev`, and `removev`,
-composed workflows, and conventional scalar conveniences (`open`, `metadata`,
+`vfsi-core::api` owns `Vfsi`, `VfsiExt`, `FileHandle`, and their portable
+requests, results, options, and traversal helpers. It depends on no backend,
+RPC library, or async runtime. `vnfs` re-exports these same types; its concrete
+NFS and mounted clients implement the core contract. `vfsi-sync` implements
+that contract for its generic backend client and owns optimized execution
+machinery. Application read/write types are under `vfsi-core::api`, separate
+from the legacy backend operation types at the core crate root.
+
+`Vfsi` owns options-aware native vector execution. `VfsiExt` is blanket implemented
+for every `Vfsi` and supplies composed workflows and conventional scalar conveniences (`open`, `metadata`,
 `read_dir`, etc.). Generic applications need an
-`Fs` bound and an `FsExt` import; they do not implement extensions separately.
+`Vfsi` bound and an `VfsiExt` import; they do not implement extensions separately.
 
 Concrete clients do not duplicate these helpers as inherent methods. Native
 open and streaming execution hooks are private; directory collection uses the public page visitor. Method syntax
-and explicit `FsExt` calls therefore share helper semantics, including error
+and explicit `VfsiExt` calls therefore share helper semantics, including error
 indices, rather than selecting different implementations based on receiver type.
 
-`FsExt::read_dirs_with_options` collects shallow directories or recursive trees
+`VfsiExt::read_dirs_with_options` collects shallow directories or recursive trees
 with the same `VisitOptions` used for visiting. Results are grouped by input:
 `results[i]` holds the listings for `paths[i]`. Shallow mode has exactly one
 listing per root; recursive mode includes descendants. The allocating helper consumes directory pages from the native vector visitor, retaining batching without copying every entry.
-`FsExt::read_dirs` supplies the ordinary flat shallow result for convenience.
+`VfsiExt::read_dirs` supplies the ordinary flat shallow result for convenience.
 
-`Fs::vlistdirs` handles both shallow and recursive visits through
+`Vfsi::vlistdirs` handles both shallow and recursive visits through
 `VisitOptions`. Shallow is the default; `.recursive(true)` enables descent.
 Depth 0 lists root children, and depth 1 also lists immediate subdirectories.
 Recursive depth limits fail on deeper directories unless intentional truncation
@@ -34,7 +41,7 @@ may produce several pages; each page retains its parent path. The visitor uses
 bounded cohorts (up to 32 directories for NFS) and at most 128 delivered entries
 per page, starting with one entry to preserve early cancellation. Fallback
 backends consume one directory snapshot before starting another.
-`FsExt::visit_entries_with_options` adapts pages to borrowed per-entry callbacks. Budgets are shared across roots; unspecified limits inherit the
+`VfsiExt::visit_entries_with_options` adapts pages to borrowed per-entry callbacks. Budgets are shared across roots; unspecified limits inherit the
 client policy. Metadata selection is pushed into paged enumeration, without
 per-entry stat requests. Recursive traversal does not follow entry symlinks.
 
@@ -130,7 +137,7 @@ positional I/O, while explicitly named `read_request_at` and
 `write_request_at` values compose vector calls. `read_files` performs bounded
 path-based vector reads without remote OPEN/CLOSE phases; `write_files` batches
 OPEN, WRITE, and CLOSE phases across files. `read_files` has a 16 MiB aggregate allocation limit by
-default. `closev` consumes a group
+default. `close_files` consumes a group
 of handles and closes them with the vector backend rather than serializing
 one close per dropped handle.
 
@@ -139,10 +146,10 @@ operations without constructing `VfAttrs` or calling `VecFs` directly.
 `MetadataFields` selects only needed attributes; `Metadata` reports optional
 fields such as allocated blocks, device ID, full mode, and named-attribute
 presence as `Option` so an absent value is not confused with zero. Use
-`symlink_metadata_with_fields` for a no-follow query,
+`metadata_with_options` with `MetadataOptions::follow_symlinks(false)` for a no-follow query,
 `vlistdirs` to visit pages for several directory operands, with
 `VisitOptions::recursive(true)` for bounded recursive trees. Use the
-`FsExt::read_dirs_with_options` collector only when retained listings are needed. `DirectoryListing` carries
+`VfsiExt::read_dirs_with_options` collector only when retained listings are needed. `DirectoryListing` carries
 paths and already-fetched entry metadata. `vcopy` and `remove_paths`
 perform ordered batches without promising transactionality.
 
@@ -167,7 +174,7 @@ prefer `kind()` and `status()` for interpretation.
 Prefer `try_close()` and `vclose(&mut files)` when cleanup errors matter.
 They retain ownership on failure. `is_closed() == false` only means local
 cleanup ownership remains, not that a remotely ambiguous close failed to take
-effect. Consuming `close`/`closev` perform best-effort cleanup on error, and
+effect. Consuming `close`/`close_files` perform best-effort cleanup on error, and
 `Drop` queues cleanup while a client remains alive. Use `drain_cleanup` to
 observe queued failures; final-owner teardown remains synchronous.
 
@@ -183,7 +190,7 @@ An API that discovers the amount of data itself and returns an owned buffer
 must impose a finite default allocation limit and expose an explicit override.
 `NfsClient::read`, `NfsClient::read_to_string`, and `VecFs::read_allv` therefore
 default to `DEFAULT_READ_MAX_BYTES` (16 MiB). Callers may select another bound
-with `read_with_limit`, `read_to_string_with_limit`, or `ReadAllOptions`.
+with `read_with_limit`, `read_to_string_with_options`, or `ReadAllOptions`.
 `ResourceLimits` sets client defaults through `NfsBuilder::limits`,
 `NfsClient::with_limits`, or `Auto::with_limits`. Existing clones retain their
 configured policy. Scalar and vector whole-file reads share the optimized
@@ -215,10 +222,10 @@ default depth limit and accepts `WalkOptions`. NFS multi-directory listing
 delivers each bounded READDIR page before requesting continuation pages, so
 early-stop callbacks no longer retain the whole remote listing. Applications
 needing to consume one directory incrementally can use `visit_dir_with_options`
-with `VisitOptions`, or `visit_walk_with_options` for a recursive root. These
-scalar helpers force the scope indicated by their names while retaining selected
-metadata and budget settings. `symlink_metadatav` accepts any `AsRef<Path>` inputs,
-including strings and `PathBuf`, consistently with `metadatav`.
+with `VisitOptions`; set `recursive(true)` to visit a recursive root. The
+options-aware helper respects the supplied traversal scope, metadata, and budgets.
+`visit_dir` and `visit_walk` select shallow and recursive defaults respectively. `vgetattrs` accepts any `AsRef<Path>` inputs,
+including strings and `PathBuf`, consistently with `vgetattrs`.
 The client starts with one entry, then fetches at most 1024 entries per page
 and releases its backend lock before invoking the application callback, which
 may safely reenter the same client or drop its files. NFS retains a resolved

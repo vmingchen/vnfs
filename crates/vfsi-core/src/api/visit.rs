@@ -1,4 +1,4 @@
-use crate::{DepthLimit, MetadataFields, ReadDirOptions, ResourceLimits, WalkOptions};
+use crate::api::{DepthLimit, MetadataFields, ReadDirOptions, ResourceLimits, WalkOptions};
 use std::num::NonZeroUsize;
 
 #[bitfields::bitfield(u8)]
@@ -108,7 +108,8 @@ impl VisitOptions {
                 | MetadataFields::CHANGE
         }) | MetadataFields::MODE
     }
-    pub(crate) fn walk_options(self, limits: ResourceLimits) -> WalkOptions {
+    /// Resolve recursive traversal limits against the client's defaults.
+    pub fn walk_options(self, limits: ResourceLimits) -> WalkOptions {
         let mut options = limits.walk_options();
         if self.flags.entries_unlimited() {
             options = options.max_entries(usize::MAX);
@@ -125,7 +126,8 @@ impl VisitOptions {
         }
         options.truncate_at_max_depth(self.flags.truncate())
     }
-    pub(crate) fn directory_options(self, limits: ResourceLimits) -> ReadDirOptions {
+    /// Resolve shallow listing limits against the client's defaults.
+    pub fn directory_options(self, limits: ResourceLimits) -> ReadDirOptions {
         let mut options = limits.directory_options();
         if self.flags.entries_unlimited() {
             options = options.max_entries(usize::MAX);

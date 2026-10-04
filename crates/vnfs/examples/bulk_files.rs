@@ -1,7 +1,7 @@
-use vnfs::{Fs, FsExt, Nfs};
+use vnfs::{Nfs, Vfsi, VfsiExt};
 
 // The parent must exist. Never delete an existing directory to make room.
-pub fn run(fs: &impl Fs, fresh_root: &str) -> vnfs::Result<Vec<Vec<u8>>> {
+pub fn run(fs: &impl Vfsi, fresh_root: &str) -> vnfs::Result<Vec<Vec<u8>>> {
     fs.create_dir(fresh_root)?; // Cleanup starts only after exclusive creation succeeds.
     let result = (|| {
         let paths = [
@@ -13,7 +13,7 @@ pub fn run(fs: &impl Fs, fresh_root: &str) -> vnfs::Result<Vec<Vec<u8>>> {
             (&paths[1], b"world".as_slice()),
         ])?;
         let requests: Vec<_> = paths.iter().map(vnfs::ReadOp::whole).collect();
-        fs.readv(requests).map(|results| {
+        fs.vread(requests, Default::default()).map(|results| {
             results
                 .into_iter()
                 .map(|result| result.into_data().unwrap())

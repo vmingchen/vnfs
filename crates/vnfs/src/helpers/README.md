@@ -1,12 +1,12 @@
 # Rust workflow helpers
 
-`vnfs::helpers` contains high-level workflows built only on the public `Fs`
+`vnfs::helpers` contains high-level workflows built only on the public `Vfsi`
 and `FileHandle` contracts. It is part of `vnfs`, not a separate dependency.
 
 ## TreeBuilder
 
 ```rust,no_run
-use vnfs::{FsExt, Nfs, helpers::TreeBuilder};
+use vnfs::{VfsiExt, Nfs, helpers::TreeBuilder};
 
 let client = Nfs::connect("server.example.com")?;
 let tree = TreeBuilder::new()
@@ -20,7 +20,7 @@ client.remove_dir_all(tree.root())?;
 # Ok::<(), vnfs::Error>(())
 ```
 
-The same builder accepts mounted/routed clients through `Fs`. Paths are
+The same builder accepts mounted/routed clients through `Vfsi`. Paths are
 relative to the tree root in that client's namespace. The root's parent must
 exist; the root itself must not. Entries cannot escape lexically through `..`
 or absolute paths. This is not protection against concurrent namespace changes

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use vfsi_nfs::NfsVecFs;
 use vfsi_nfs::nfs::*;
-use vnfs::FsExt;
+use vnfs::VfsiExt;
 use vnfs::{Nfs, NfsReadPoolOptions};
 
 #[cfg(feature = "rpcsec-gss")]
@@ -314,10 +314,13 @@ fn rust_native_client_workflow_on_nfs() {
         .vopen(&paths)
         .unwrap();
     client
-        .writev(&[
-            vnfs::WriteOp::at(&files[0], 0, b"one"),
-            vnfs::WriteOp::at(&files[1], 0, b"two"),
-        ])
+        .vwrite(
+            &[
+                vnfs::WriteOp::at(&files[0], 0, b"one"),
+                vnfs::WriteOp::at(&files[1], 0, b"two"),
+            ],
+            Default::default(),
+        )
         .unwrap();
     let values = client
         .vread(
@@ -334,10 +337,13 @@ fn rust_native_client_workflow_on_nfs() {
     let mut second = [0u8; 8];
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let lengths = client
-        .readv([
-            vnfs::ReadOp::into(&files[0], 0, &mut first),
-            vnfs::ReadOp::into(&files[1], 0, &mut second),
-        ])
+        .vread(
+            [
+                vnfs::ReadOp::into(&files[0], 0, &mut first),
+                vnfs::ReadOp::into(&files[1], 0, &mut second),
+            ],
+            Default::default(),
+        )
         .unwrap();
     assert_eq!(
         lengths
@@ -378,7 +384,7 @@ fn rust_native_client_workflow_on_nfs() {
     let read = files[0].read_at(&mut large_buffer, 0).unwrap();
     assert_eq!(read, large.len());
     assert_eq!(&large_buffer[..read], large);
-    client.closev(files).unwrap();
+    client.close_files(files).unwrap();
 
     // The short application API must work through the same native NFS backend.
     client
@@ -427,7 +433,10 @@ fn rust_native_client_workflow_on_nfs() {
     assert!(client.symlink_metadata(&dangling).unwrap().is_symlink());
     assert_eq!(
         client
-            .metadatav(&[paths[0].as_str(), dangling.as_str()])
+            .vgetattrs(
+                &[paths[0].as_str(), dangling.as_str()],
+                vnfs::MetadataOptions::new()
+            )
             .unwrap_err()
             .index(),
         Some(1)
@@ -437,7 +446,7 @@ fn rust_native_client_workflow_on_nfs() {
         format!("{nested}/renamed-two"),
     ];
     let _ = vfsi_nfs::compound::thread_compound_stats();
-    vnfs::Fs::vrename(
+    vnfs::Vfsi::vrename(
         &client,
         &[(&paths[0], &renamed[0]), (&paths[1], &renamed[1])],
     )
@@ -456,7 +465,7 @@ fn rust_native_client_workflow_on_nfs() {
 
 #[test]
 fn native_removal_modes_forward_policy_across_roots() {
-    use vnfs::{Fs, RemoveMode, RemoveOptions};
+    use vnfs::{RemoveMode, RemoveOptions, Vfsi};
     let dir = setup_dir("native_removal_modes");
     let client = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
@@ -487,7 +496,9 @@ fn native_removal_modes_forward_policy_across_roots() {
     assert_eq!(error.index(), Some(0));
     assert!(client.read_dir(&keep).unwrap().is_empty());
     assert!(client.metadata(&keep).unwrap().is_dir());
-    client.removev(&[&dir], RemoveMode::Tree).unwrap();
+    client
+        .vremove(&[&dir], RemoveMode::Tree, Default::default())
+        .unwrap();
 }
 
 #[test]
@@ -3842,7 +3853,7 @@ fn deferred_cleanup_reconciles_backend_owned_failed_close() {
 
 #[test]
 fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancellation() {
-    use vnfs::{ControlFlow, Fs, VisitOptions};
+    use vnfs::{ControlFlow, Vfsi, VisitOptions};
     let dir = setup_dir("directory_pages");
     let fs = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
@@ -3913,7 +3924,7 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
 
 #[test]
 fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
-    use vnfs::{ControlFlow, Fs, VisitOptions};
+    use vnfs::{ControlFlow, Vfsi, VisitOptions};
     let dir = setup_dir("page_child_symlink");
     let fs = Nfs::builder(test_host())
         .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
@@ -4004,7 +4015,7 @@ fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
 
 #[test]
 fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
-    use vnfs::{ControlFlow, Fs, VisitOptions};
+    use vnfs::{ControlFlow, Vfsi, VisitOptions};
     let dir = setup_dir("page_parent_rename");
     let fs = Nfs::builder(test_host())
         .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
@@ -4052,7 +4063,7 @@ fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
 #[cfg(feature = "test-faults")]
 #[test]
 fn recursive_directory_pages_do_not_retry_an_ambiguous_child_reply() {
-    use vnfs::{ControlFlow, Fs, VisitOptions};
+    use vnfs::{ControlFlow, Vfsi, VisitOptions};
     let dir = setup_dir("page_child_reply_loss");
     let mut admin = client();
     let child = format!("{dir}/child");

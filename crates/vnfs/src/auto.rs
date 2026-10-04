@@ -2,7 +2,7 @@
 //! promoted to a separate direct NFS connection; everything else stays on
 //! the kernel-mounted path.
 
-use crate::FsExt as _;
+use crate::VfsiExt as _;
 #[cfg(test)]
 use crate::VisitOptions;
 use std::collections::{HashMap, HashSet};
@@ -1792,7 +1792,7 @@ impl Seek for AutoFile {
     }
 }
 
-/// Positional read request for [`crate::FsExt::readv`].
+/// Positional read request for [`crate::Vfsi::vread`].
 pub struct AutoRead<'a> {
     file: &'a AutoFile,
     offset: u64,
@@ -1843,6 +1843,7 @@ fn parse_mount(line: &[u8]) -> Option<MountSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Vfsi;
 
     fn require_live_direct_route(client: &Auto, path: &Path) {
         // Ganesha/kernel mount setup can briefly return EREMOTEIO. Retry only
@@ -1863,7 +1864,7 @@ mod tests {
 
     #[test]
     fn child_seeds_recheck_routing_and_keep_owner_validation() {
-        use crate::{FsExt, MetadataFields};
+        use crate::{MetadataFields, VfsiExt};
         let root = tempfile::tempdir().unwrap();
         let client = Auto::new(root.path()).unwrap();
         client.create_dir("/dir").unwrap();
@@ -1939,7 +1940,7 @@ mod tests {
 
     #[test]
     fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
-        use crate::{FsExt, MetadataFields, VisitOptions};
+        use crate::{MetadataFields, VfsiExt, VisitOptions};
         let root = tempfile::tempdir().unwrap();
         let client = Auto::new(root.path()).unwrap();
         client.create_dir("/dir").unwrap();
@@ -2148,10 +2149,13 @@ mod tests {
             ])
             .unwrap();
         client
-            .writev(&[
-                crate::WriteOp::at(&files[0], 0, b"one"),
-                crate::WriteOp::at(&files[1], 0, b"two"),
-            ])
+            .vwrite(
+                &[
+                    crate::WriteOp::at(&files[0], 0, b"one"),
+                    crate::WriteOp::at(&files[1], 0, b"two"),
+                ],
+                Default::default(),
+            )
             .unwrap();
         let reads = client
             .vread(
@@ -2162,18 +2166,24 @@ mod tests {
                 crate::ReadOptions::default(),
             )
             .unwrap();
-        assert_eq!(reads[0].data.as_deref().unwrap(), b"one");
-        assert_eq!(reads[1].data.as_deref().unwrap(), b"two");
+        assert_eq!(reads[0].data().unwrap(), b"one");
+        assert_eq!(reads[1].data().unwrap(), b"two");
         std::os::unix::fs::symlink("one", root.join("link")).unwrap();
         let metadata = client
             .mounted
-            .symlink_metadatav(&[Path::new("/one"), Path::new("/link")])
+            .vgetattrs(
+                &[Path::new("/one"), Path::new("/link")],
+                crate::MetadataOptions::new().follow_symlinks(false),
+            )
             .unwrap();
         assert_eq!(metadata[0].file_type(), crate::FileType::Regular);
         assert_eq!(metadata[1].file_type(), crate::FileType::Symlink);
         let error = client
             .mounted
-            .symlink_metadatav(&[Path::new("/one"), Path::new("/missing")])
+            .vgetattrs(
+                &[Path::new("/one"), Path::new("/missing")],
+                crate::MetadataOptions::new().follow_symlinks(false),
+            )
             .unwrap_err();
         assert_eq!(error.index(), Some(1));
         let tiny = Auto::new(&root).unwrap().with_limits(ResourceLimits {
@@ -2194,8 +2204,7 @@ mod tests {
                 crate::ReadOptions::default()
             )
             .unwrap()[0]
-                .data
-                .as_deref()
+                .data()
                 .unwrap(),
             b"one"
         );
@@ -2211,7 +2220,7 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.err_no(), libc::EFBIG as u32);
-        client.closev(files).unwrap();
+        client.close_files(files).unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2306,11 +2315,14 @@ mod tests {
         assert!(matches!(files[1].route(), AutoRoute::DirectNfs { .. }));
         assert_eq!(files[2].route(), AutoRoute::Mounted);
         client
-            .writev(&[
-                crate::WriteOp::at(&files[0], 0, b"first"),
-                crate::WriteOp::at(&files[1], 0, b"second"),
-                crate::WriteOp::at(&files[2], 0, b"local"),
-            ])
+            .vwrite(
+                &[
+                    crate::WriteOp::at(&files[0], 0, b"first"),
+                    crate::WriteOp::at(&files[1], 0, b"second"),
+                    crate::WriteOp::at(&files[2], 0, b"local"),
+                ],
+                Default::default(),
+            )
             .unwrap();
         let reads = client
             .vread(
@@ -2322,23 +2334,26 @@ mod tests {
                 crate::ReadOptions::default(),
             )
             .unwrap();
-        assert_eq!(reads[0].data.as_deref().unwrap(), b"first");
-        assert_eq!(reads[1].data.as_deref().unwrap(), b"second");
-        assert_eq!(reads[2].data.as_deref().unwrap(), b"local");
+        assert_eq!(reads[0].data().unwrap(), b"first");
+        assert_eq!(reads[1].data().unwrap(), b"second");
+        assert_eq!(reads[2].data().unwrap(), b"local");
         let mut buffers = [[0_u8; 8]; 3];
         let [first_buffer, second_buffer, local_buffer] = &mut buffers;
         let reads = client
-            .readv([
-                crate::ReadOp::into(&files[0], 0, first_buffer),
-                crate::ReadOp::into(&files[1], 0, second_buffer),
-                crate::ReadOp::into(&files[2], 0, local_buffer),
-            ])
+            .vread(
+                [
+                    crate::ReadOp::into(&files[0], 0, first_buffer),
+                    crate::ReadOp::into(&files[1], 0, second_buffer),
+                    crate::ReadOp::into(&files[2], 0, local_buffer),
+                ],
+                Default::default(),
+            )
             .unwrap();
         assert_eq!(
-            reads.iter().map(|read| read.read).collect::<Vec<_>>(),
+            reads.iter().map(|read| read.read()).collect::<Vec<_>>(),
             [5, 6, 5]
         );
-        assert!(reads.iter().all(|read| read.eof));
+        assert!(reads.iter().all(|read| read.eof()));
         assert_eq!(&buffers[0][..5], b"first");
         assert_eq!(&buffers[1][..6], b"second");
         assert_eq!(&buffers[2][..5], b"local");
@@ -2386,7 +2401,7 @@ mod tests {
                 .iter()
                 .all(|file| matches!(file.route(), AutoRoute::DirectNfs { .. }))
         );
-        client.closev(existing).unwrap();
+        client.close_files(existing).unwrap();
         let missing = std::env::temp_dir().join(format!("{unique}-missing"));
         let error = client
             .vopen(&[
@@ -2441,9 +2456,12 @@ mod tests {
             let mut buffer = [0; 6];
             outcomes.push(
                 client
-                    .readv([crate::ReadOp::into(&file, 0, &mut buffer)])
+                    .vread(
+                        [crate::ReadOp::into(&file, 0, &mut buffer)],
+                        Default::default(),
+                    )
                     .map(|results| {
-                        assert_eq!(results[0].read, 6);
+                        assert_eq!(results[0].read(), 6);
                         assert_eq!(&buffer, b"abcdef");
                     }),
             );
@@ -2454,7 +2472,10 @@ mod tests {
             buffer.fill(0xff);
             assert_eq!(
                 client
-                    .readv([crate::ReadOp::into(&file, 0, &mut buffer)])
+                    .vread(
+                        [crate::ReadOp::into(&file, 0, &mut buffer)],
+                        Default::default()
+                    )
                     .unwrap_err()
                     .kind(),
                 crate::ErrorKind::FileTooLarge
@@ -2617,8 +2638,8 @@ mod tests {
         assert!(public_entries > backend_entries && public_total > backend_total);
         let walk = client.walk_with_options(
             &root,
-            crate::MetadataFields::stat(),
-            crate::WalkOptions::new().max_path_bytes(backend_total),
+            crate::VisitOptions::from(crate::WalkOptions::new().max_path_bytes(backend_total))
+                .fields(crate::MetadataFields::stat()),
         );
         let mut dir_bytes = 0;
         let dir = client.visit_dir_with_options(
@@ -2630,9 +2651,11 @@ mod tests {
             },
         );
         let mut tree_bytes = root.as_os_str().len();
-        let tree = client.visit_walk_with_options(
+        let tree = client.visit_dir_with_options(
             &root,
-            crate::VisitOptions::new().max_path_bytes(backend_total),
+            crate::VisitOptions::new()
+                .recursive(true)
+                .max_path_bytes(backend_total),
             |entry| {
                 tree_bytes += entry.path().as_os_str().len();
                 Ok(std::ops::ControlFlow::Continue(()))
@@ -2643,8 +2666,10 @@ mod tests {
             client
                 .walk_with_options(
                     &root,
-                    crate::MetadataFields::stat(),
-                    crate::WalkOptions::new().max_path_bytes(public_total)
+                    crate::VisitOptions::from(
+                        crate::WalkOptions::new().max_path_bytes(public_total)
+                    )
+                    .fields(crate::MetadataFields::stat())
                 )
                 .is_ok()
         );
@@ -2659,9 +2684,11 @@ mod tests {
         );
         assert_eq!(
             client
-                .visit_walk_with_options(
+                .visit_dir_with_options(
                     &root,
-                    crate::VisitOptions::new().max_path_bytes(public_total),
+                    crate::VisitOptions::new()
+                        .recursive(true)
+                        .max_path_bytes(public_total),
                     |_| Ok(std::ops::ControlFlow::Continue(()))
                 )
                 .unwrap(),

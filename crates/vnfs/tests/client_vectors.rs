@@ -1,7 +1,7 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
-use vnfs::{Fs, FsExt, MetadataFields, MetadataOptions, OpenFlags, OpenRequest, WriteOp};
+use vnfs::{MetadataFields, MetadataOptions, OpenFlags, OpenRequest, Vfsi, VfsiExt, WriteOp};
 
-fn writes<C: Fs>(fs: &C) {
+fn writes<C: Vfsi>(fs: &C) {
     let mut files = fs
         .vopen(&[
             OpenRequest::new("/a", OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE),
@@ -13,7 +13,9 @@ fn writes<C: Fs>(fs: &C) {
     assert!(std::ptr::eq(op.file(), &files[0]));
     assert_eq!(op.data().as_ptr(), payload.as_ptr());
     assert_eq!(op.offset(), 3);
-    let results = fs.writev(&[op, WriteOp::at(&files[1], 0, b"abc")]).unwrap();
+    let results = fs
+        .vwrite(&[op, WriteOp::at(&files[1], 0, b"abc")], Default::default())
+        .unwrap();
     assert_eq!(
         results
             .iter()
@@ -36,7 +38,7 @@ fn writes<C: Fs>(fs: &C) {
         vnfs::WriteOptions::new().write_all(true),
     )
     .unwrap();
-    fs.closev(files).unwrap();
+    fs.close_files(files).unwrap();
 }
 
 #[test]
@@ -101,8 +103,25 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
     assert_eq!(fs.read_files(&["/a"]).unwrap(), [b"keep".to_vec()]);
 }
 
-fn metadata<C: Fs>(fs: &C) {
-    let follow = fs.metadatav(&["/link", "/a"]).unwrap();
+fn metadata<C: Vfsi>(fs: &C) {
+    assert!(
+        fs.metadata_with_options("/link", MetadataOptions::new())
+            .unwrap()
+            .is_file()
+    );
+    assert!(
+        fs.metadata_with_options("/link", MetadataOptions::new().follow_symlinks(false))
+            .unwrap()
+            .is_symlink()
+    );
+    let scalar = fs
+        .metadata_with_options("/a", MetadataOptions::new().fields(MetadataFields::FILEID))
+        .unwrap();
+    assert!(scalar.file_id().is_some());
+    assert_eq!(scalar.len(), 0);
+    let follow = fs
+        .vgetattrs(&["/link", "/a"], vnfs::MetadataOptions::new())
+        .unwrap();
     assert!(follow.iter().all(|m| m.is_file() && m.len() == 3));
     let links = fs
         .vgetattrs(
@@ -129,18 +148,31 @@ fn metadata<C: Fs>(fs: &C) {
         "unrequested size must remain absent/default"
     );
     assert_eq!(
-        fs.metadatav(&["/a", "/missing"]).unwrap_err().index(),
+        fs.vgetattrs(&["/a", "/missing"], vnfs::MetadataOptions::new())
+            .unwrap_err()
+            .index(),
         Some(1)
     );
     assert_eq!(
-        fs.metadatav(&["/a", "/dangling"]).unwrap_err().index(),
+        fs.vgetattrs(&["/a", "/dangling"], vnfs::MetadataOptions::new())
+            .unwrap_err()
+            .index(),
         Some(1)
     );
-    assert!(fs.metadatav::<&str>(&[]).unwrap().is_empty());
     assert!(
-        fs.symlink_metadata_with_fields("/link", MetadataFields::MODE)
+        fs.vgetattrs::<&str>(&[], MetadataOptions::default())
             .unwrap()
-            .is_symlink()
+            .is_empty()
+    );
+    assert!(
+        fs.metadata_with_options(
+            "/link",
+            vnfs::MetadataOptions::new()
+                .fields(MetadataFields::MODE)
+                .follow_symlinks(false)
+        )
+        .unwrap()
+        .is_symlink()
     );
 }
 

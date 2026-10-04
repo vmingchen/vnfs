@@ -1,6 +1,6 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
 
-use vnfs::FsExt;
+use vnfs::VfsiExt;
 use vnfs::{ErrorKind, Mounted, helpers::TreeBuilder};
 
 #[test]

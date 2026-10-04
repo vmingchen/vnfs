@@ -4,7 +4,7 @@ version = "0.1.4"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-description = "Shared types, errors, paths, and capabilities for VFSI"
+description = "Portable vectorized filesystem API, shared types, errors, and capabilities for VFSI"
 repository = "https://github.com/vmingchen/vnfs"
 keywords = ["filesystem", "vectorized", "vfsi"]
 

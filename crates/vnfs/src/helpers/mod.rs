@@ -1,4 +1,4 @@
-//! High-level, protocol-independent workflows using [`crate::Fs`].
+//! High-level, protocol-independent workflows using [`crate::Vfsi`].
 //!
 //! Helpers plan work locally and preserve vector operations where possible.
 //! They do not provide transactions, rollback, or a security sandbox.
