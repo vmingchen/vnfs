@@ -303,7 +303,7 @@ fn rust_native_client_workflow_on_nfs() {
         });
     let client = builder.connect().unwrap();
     let nested = format!("{dir}/nested");
-    client.create_dir_all(&nested).unwrap();
+    client.create_dir_all_one(&nested).unwrap();
     let paths = [format!("{nested}/one"), format!("{nested}/two")];
     let files = client
         .open_options()
@@ -347,14 +347,14 @@ fn rust_native_client_workflow_on_nfs() {
     assert_eq!(&second[..3], b"two");
     assert!(lengths.iter().all(|result| result.data.is_none()));
     assert_eq!(vnfs::backend::compound::thread_compound_stats().0, 1);
-    assert_eq!(client.metadata(&paths[0]).unwrap().len(), 3);
-    assert_eq!(client.read_dir(&nested).unwrap().len(), 2);
+    assert_eq!(client.metadata_one(&paths[0]).unwrap().len(), 3);
+    assert_eq!(client.read_dir_one(&nested).unwrap().len(), 2);
     let mut visited = Vec::new();
-    let mut held_during_visit = Some(client.open(&paths[0]).unwrap());
+    let mut held_during_visit = Some(client.open_one(&paths[0]).unwrap());
     client
-        .visit_dir(&nested, |entry| {
+        .visit_dir_one(&nested, |entry| {
             // The application callback must run outside the NFS session lock.
-            assert_eq!(client.metadata(entry.path())?.len(), 3);
+            assert_eq!(client.metadata_one(entry.path())?.len(), 3);
             drop(held_during_visit.take());
             visited.push(entry.path().to_path_buf());
             Ok(std::ops::ControlFlow::Continue(()))
@@ -363,7 +363,7 @@ fn rust_native_client_workflow_on_nfs() {
     assert_eq!(visited.len(), 2);
     let mut early_count = 0;
     client
-        .visit_dir(&nested, |_| {
+        .visit_dir_one(&nested, |_| {
             early_count += 1;
             Ok(std::ops::ControlFlow::Break(()))
         })
@@ -419,9 +419,9 @@ fn rust_native_client_workflow_on_nfs() {
     backend
         .symlink(Path::new("missing"), Path::new(&dangling))
         .unwrap();
-    assert!(client.metadata(&link).unwrap().is_file());
-    assert!(client.symlink_metadata(&link).unwrap().is_symlink());
-    assert!(client.symlink_metadata(&dangling).unwrap().is_symlink());
+    assert!(client.metadata_one(&link).unwrap().is_file());
+    assert!(client.symlink_metadata_one(&link).unwrap().is_symlink());
+    assert!(client.symlink_metadata_one(&dangling).unwrap().is_symlink());
     assert_eq!(
         client
             .metadatav(&[paths[0].as_str(), dangling.as_str()])
@@ -429,7 +429,26 @@ fn rust_native_client_workflow_on_nfs() {
             .index(),
         Some(1)
     );
-    client.remove_dir_all(&dir).unwrap();
+    let renamed = [
+        format!("{nested}/renamed-one"),
+        format!("{nested}/renamed-two"),
+    ];
+    let _ = vnfs::backend::compound::thread_compound_stats();
+    vnfs::Fs::rename_files(
+        &client,
+        &[(&paths[0], &renamed[0]), (&paths[1], &renamed[1])],
+    )
+    .unwrap();
+    assert_eq!(
+        vnfs::backend::compound::thread_compound_stats().0,
+        1,
+        "the new rename vector must not become a scalar loop"
+    );
+    assert_eq!(
+        client.read_files(&renamed).unwrap(),
+        [b"first".to_vec(), b"second".to_vec()]
+    );
+    client.remove_dir_all_one(&dir).unwrap();
 }
 
 #[test]
@@ -452,7 +471,7 @@ fn whole_file_readv_honors_the_client_budget() {
         .unwrap();
     let path = format!("{dir}/file");
     let data = vec![b'x'; BYTES];
-    client.write(&path, &data).unwrap();
+    client.write_one(&path, &data).unwrap();
     assert_eq!(
         client
             .readv_with_options([vnfs::ReadOp::whole(&path)], vnfs::ReadOptions::default())
@@ -475,7 +494,7 @@ fn whole_file_readv_honors_the_client_budget() {
     let mut dir_handle = client.open_dir_handle(&dir).unwrap();
     dir_handle.try_close().unwrap();
     dir_handle.try_close().unwrap();
-    client.remove_dir_all(&dir).unwrap();
+    client.remove_dir_all_one(&dir).unwrap();
 }
 
 #[test]
@@ -513,7 +532,7 @@ fn rust_native_client_pool_uses_independent_sessions() {
         .map(|path| {
             let client = pool.next_client();
             std::thread::spawn(move || {
-                let file = client.open(&path).unwrap();
+                let file = client.open_one(&path).unwrap();
                 let mut bytes = [0; 4];
                 assert_eq!(file.read_at(&mut bytes, 0).unwrap(), 4);
                 assert_eq!(&bytes, b"pool");
@@ -609,7 +628,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
         .map(|index| (index.wrapping_mul(31) % 251) as u8)
         .collect();
     let client = Nfs::connect(test_host()).expect("connect NFS client");
-    client.write(&path, &expected).expect("write fixture");
+    client.write_one(&path, &expected).expect("write fixture");
 
     let options = NfsReadPoolOptions::new()
         .worker_count(3)
@@ -667,7 +686,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
     })
     .expect("reuse pool after cancellation");
     assert_eq!(reread, expected);
-    client.remove_file(&path).expect("remove fixture");
+    client.remove_file_one(&path).expect("remove fixture");
 }
 
 // ---------------------------------------------------------------------------
@@ -1598,7 +1617,7 @@ fn scalar_write_follows_final_symlink_chains_and_creates_dangling_targets() {
     let chain = format!("{dir}/chain");
     let dangling = format!("{dir}/dangling");
     let missing = format!("{dir}/missing");
-    fs.write(&target, b"old contents longer than replacement")
+    fs.write_one(&target, b"old contents longer than replacement")
         .unwrap();
     backend
         .symlink(Path::new("target"), Path::new(&link))
@@ -1610,16 +1629,16 @@ fn scalar_write_follows_final_symlink_chains_and_creates_dangling_targets() {
         .symlink(Path::new("missing"), Path::new(&dangling))
         .unwrap();
 
-    fs.write(&chain, b"new").unwrap();
+    fs.write_one(&chain, b"new").unwrap();
     assert_eq!(fs.read_files(&[&target]).unwrap(), [b"new".to_vec()]);
-    fs.write(&dangling, b"created").unwrap();
+    fs.write_one(&dangling, b"created").unwrap();
     assert_eq!(fs.read_files(&[&missing]).unwrap(), [b"created".to_vec()]);
-    fs.write(&link, b"").unwrap();
-    assert_eq!(fs.metadata(&target).unwrap().len(), 0);
+    fs.write_one(&link, b"").unwrap();
+    assert_eq!(fs.metadata_one(&target).unwrap().len(), 0);
     for path in [&link, &chain, &dangling] {
-        assert!(fs.symlink_metadata(path).unwrap().is_symlink());
+        assert!(fs.symlink_metadata_one(path).unwrap().is_symlink());
     }
-    fs.remove_dir_all(&dir).unwrap();
+    fs.remove_dir_all_one(&dir).unwrap();
 }
 
 #[test]
@@ -2139,7 +2158,7 @@ fn directory_visit_continuation_reuses_resolved_nfs_handle() {
     let _ = vnfs::backend::compound::thread_compound_stats();
     let mut native_count = 0;
     visitor
-        .visit_dir(&dir, |_| {
+        .visit_dir_one(&dir, |_| {
             native_count += 1;
             Ok(std::ops::ControlFlow::Continue(()))
         })
@@ -2179,7 +2198,7 @@ fn directory_visit_recovers_if_reply_is_lost_before_first_entry() {
     proxy.arm();
     let mut seen = Vec::new();
     visitor
-        .visit_dir(&dir, |entry| {
+        .visit_dir_one(&dir, |entry| {
             seen.push(entry.path().to_path_buf());
             Ok(std::ops::ControlFlow::Continue(()))
         })
@@ -2215,7 +2234,7 @@ fn directory_visit_does_not_replay_after_delivering_an_entry() {
     let mut delivered = 0;
     let mut unique = std::collections::HashSet::new();
     let error = visitor
-        .visit_dir(&dir, |entry| {
+        .visit_dir_one(&dir, |entry| {
             delivered += 1;
             assert!(unique.insert(entry.path().to_path_buf()), "entry replayed");
             if delivered == 1 {

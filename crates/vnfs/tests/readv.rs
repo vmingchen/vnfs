@@ -8,7 +8,7 @@ fn mixed<C: Fs>(fs: &C) {
         ("/empty", b""),
     ])
     .unwrap();
-    let file = fs.open("/a").unwrap();
+    let file = fs.open_one("/a").unwrap();
     let mut buffer = [0xcc; 4];
     let results = fs
         .readv_with_options(
@@ -71,7 +71,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
         .len(),
         2
     );
-    let file = fs.open("/a").unwrap();
+    let file = fs.open_one("/a").unwrap();
     let mut buffer = [0xaa; 3];
     let error = fs
         .readv([
@@ -96,8 +96,8 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
 fn failure_indices_and_buffer_borrows_survive_consumption() {
     let temp = tempfile::tempdir().unwrap();
     let fs = Mounted::new(temp.path()).unwrap();
-    fs.write("/a", b"abc").unwrap();
-    let file = fs.open("/a").unwrap();
+    fs.write_one("/a", b"abc").unwrap();
+    let file = fs.open_one("/a").unwrap();
     let mut buffer = [0; 1];
     let error = fs
         .readv([
@@ -110,7 +110,7 @@ fn failure_indices_and_buffer_borrows_survive_consumption() {
     assert_eq!(error.index(), Some(2));
     buffer.fill(7);
     let other = Mounted::new(temp.path()).unwrap();
-    let foreign = other.open("/a").unwrap();
+    let foreign = other.open_one("/a").unwrap();
     let error = fs
         .readv([
             ReadOp::whole("/missing"),
@@ -124,8 +124,8 @@ fn failure_indices_and_buffer_borrows_survive_consumption() {
 fn zero_length_buffers_and_owned_reads_keep_distinct_data_ownership() {
     let temp = tempfile::tempdir().unwrap();
     let fs = Mounted::new(temp.path()).unwrap();
-    fs.write("/a", b"abc").unwrap();
-    let file = fs.open("/a").unwrap();
+    fs.write_one("/a", b"abc").unwrap();
+    let file = fs.open_one("/a").unwrap();
     let results = fs
         .readv([ReadOp::range(&file, 0, 0), ReadOp::into(&file, 0, &mut [])])
         .unwrap();
@@ -153,8 +153,8 @@ fn path_conversions_and_iterators_construct_whole_file_operations() {
 fn external_clients_can_inspect_sources_without_private_fields() {
     let temp = tempfile::tempdir().unwrap();
     let fs = Mounted::new(temp.path()).unwrap();
-    fs.write("/a", b"abc").unwrap();
-    let file = fs.open("/a").unwrap();
+    fs.write_one("/a", b"abc").unwrap();
+    let file = fs.open_one("/a").unwrap();
     let whole: ReadOp<'_, vnfs::MountedFile> = ReadOp::whole("/a");
     assert_eq!(whole.whole_file_path(), Some(std::path::Path::new("/a")));
     assert!(whole.range_ref().is_none());

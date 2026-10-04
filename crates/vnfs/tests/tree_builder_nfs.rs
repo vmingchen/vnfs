@@ -1,6 +1,6 @@
 #![cfg(feature = "nfs")]
 
-use vnfs::{Nfs, NfsVersion, helpers::TreeBuilder};
+use vnfs::{FsExt, Nfs, NfsVersion, helpers::TreeBuilder};
 
 /// Optional live coverage; set VFSI_NFS_SERVER and VFSI_NFS_EXPORT. CI can
 /// require it with VFSI_NFS_REQUIRED=1, matching the backend integration suite.
@@ -50,7 +50,7 @@ fn tree_creation_batches_compounds_on_nfsv41_and_nfsv42() {
         });
         // Clean the successfully created fixture before assertions, including
         // when verification failed. Never remove a root we failed to create.
-        let cleanup = client.remove_dir_all(tree.root());
+        let cleanup = client.remove_dir_all_one(tree.root());
         assert_eq!(
             contents.unwrap(),
             (0..16)
@@ -66,7 +66,7 @@ fn tree_creation_batches_compounds_on_nfsv41_and_nfsv42() {
         vnfs::diagnostics::take_and_reset();
         let tree = serial.create(&client, &serial_root).unwrap();
         let serial_stats = vnfs::diagnostics::take_and_reset();
-        client.remove_dir_all(tree.root()).unwrap();
+        client.remove_dir_all_one(tree.root()).unwrap();
         eprintln!(
             "{version:?}: {} compounds with batch_size=1",
             serial_stats.compounds

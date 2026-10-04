@@ -1356,6 +1356,50 @@ impl AutoClient {
             _ => self.mounted.rename(from, to),
         }
     }
+
+    /// Rename adjacent pairs on the same backend as a vector, preserving order.
+    pub fn rename_files<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let mounts = read_mounts(false);
+        let sources: Vec<_> = pairs
+            .iter()
+            .map(|(from, _)| self.resolve(from.as_ref(), &mounts))
+            .collect();
+        let targets: Vec<_> = pairs
+            .iter()
+            .map(|(_, to)| self.resolve(to.as_ref(), &mounts))
+            .collect();
+        let mut start = 0;
+        while start < pairs.len() {
+            if !sources[start].route.same_backend(&targets[start].route) {
+                // Let the kernel report EXDEV or apply its ordinary mount semantics.
+                self.mounted
+                    .rename(pairs[start].0.as_ref(), pairs[start].1.as_ref())
+                    .map_err(|error| indexed(error, start))?;
+                start += 1;
+                continue;
+            }
+            let mut end = start + 1;
+            while end < pairs.len()
+                && sources[start].route.same_backend(&sources[end].route)
+                && sources[start].route.same_backend(&targets[end].route)
+            {
+                end += 1;
+            }
+            let batch: Vec<_> = (start..end)
+                .map(|i| (sources[i].path.as_path(), targets[i].path.as_path()))
+                .collect();
+            match &sources[start].route {
+                Route::Mounted => self.mounted.rename_files(&batch),
+                Route::Nfs(connection) => connection.client.rename_files(&batch),
+            }
+            .map_err(|error| indexed(error, start))?;
+            start = end;
+        }
+        Ok(())
+    }
 }
 
 fn indexed(error: VfError, start: usize) -> VfError {
@@ -1952,7 +1996,7 @@ mod tests {
             max_read_bytes: 5,
             ..ResourceLimits::default()
         });
-        let tiny_file = tiny.open("/one").unwrap();
+        let tiny_file = tiny.open_one("/one").unwrap();
         let error = tiny
             .readv_with_options(
                 [crate::ReadOp::range(&tiny_file, 0, 6)],
@@ -1997,8 +2041,8 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let client = Auto::new(&root).unwrap();
         for closed in [false, true] {
-            client.write("/first", b"original").unwrap();
-            client.write("/second", b"original").unwrap();
+            client.write_one("/first", b"original").unwrap();
+            client.write_one("/second", b"original").unwrap();
             let mut files = client
                 .openv(
                     &["/first", "/second"]
@@ -2054,7 +2098,7 @@ mod tests {
             matches!(&route, AutoRoute::DirectNfs { .. }),
             "Auto chose {route:?}"
         );
-        assert!(client.metadata(&mount).unwrap().is_dir());
+        assert!(client.metadata_one(&mount).unwrap().is_dir());
         let unique = format!(
             "vnfs-auto-{}-{:?}",
             std::process::id(),
@@ -2161,15 +2205,15 @@ mod tests {
         assert_eq!(error.index(), Some(2));
         let link = mount.join(format!("{unique}-symlink"));
         std::os::unix::fs::symlink(&local, &link).unwrap();
-        let linked = client.open(&link).unwrap();
+        let linked = client.open_one(&link).unwrap();
         assert_eq!(linked.route(), AutoRoute::Mounted);
         linked.close().unwrap();
-        let entries = client.read_dir(&mount).unwrap();
+        let entries = client.read_dir_one(&mount).unwrap();
         assert!(entries.iter().any(|entry| entry.path() == first));
-        client.remove_file(&link).unwrap();
-        client.remove_file(&first).unwrap();
-        client.remove_file(&second).unwrap();
-        client.remove_file(&local).unwrap();
+        client.remove_file_one(&link).unwrap();
+        client.remove_file_one(&first).unwrap();
+        client.remove_file_one(&second).unwrap();
+        client.remove_file_one(&local).unwrap();
     }
 
     #[test]
@@ -2189,7 +2233,7 @@ mod tests {
                 max_read_bytes: 4,
                 ..Default::default()
             });
-            let file = client.open(&path).unwrap();
+            let file = client.open_one(&path).unwrap();
             assert!(matches!(file.route(), AutoRoute::DirectNfs { .. }));
             let client = client.with_limits(ResourceLimits {
                 max_read_bytes: 8,
@@ -2197,7 +2241,7 @@ mod tests {
             });
             let file = if reopen {
                 file.close().unwrap();
-                client.open(&path).unwrap()
+                client.open_one(&path).unwrap()
             } else {
                 file
             };
@@ -2346,7 +2390,7 @@ mod tests {
         };
         let listings = connection
             .client
-            .walk_with_options(
+            .walk_with_options_one(
                 &route.path,
                 crate::MetadataFields::stat(),
                 crate::WalkOptions::unlimited(),
@@ -2375,13 +2419,13 @@ mod tests {
             .sum();
         let public_total = public_entries + root.as_os_str().len();
         assert!(public_entries > backend_entries && public_total > backend_total);
-        let walk = client.walk_with_options(
+        let walk = client.walk_with_options_one(
             &root,
             crate::MetadataFields::stat(),
             crate::WalkOptions::new().max_path_bytes(backend_total),
         );
         let mut dir_bytes = 0;
-        let dir = client.visit_dir_with_options(
+        let dir = client.visit_dir_with_options_one(
             &root,
             ReadDirOptions::new().max_path_bytes(backend_entries),
             |entry| {
@@ -2390,7 +2434,7 @@ mod tests {
             },
         );
         let mut tree_bytes = root.as_os_str().len();
-        let tree = client.visit_walk_with_options(
+        let tree = client.visit_walk_with_options_one(
             &root,
             crate::WalkOptions::new().max_path_bytes(backend_total),
             |entry| {
@@ -2401,7 +2445,7 @@ mod tests {
         // Exact public budgets remain usable, including both callbacks.
         assert!(
             client
-                .walk_with_options(
+                .walk_with_options_one(
                     &root,
                     crate::MetadataFields::stat(),
                     crate::WalkOptions::new().max_path_bytes(public_total)
@@ -2410,7 +2454,7 @@ mod tests {
         );
         assert!(
             client
-                .visit_dir_with_options(
+                .visit_dir_with_options_one(
                     &root,
                     ReadDirOptions::new().max_path_bytes(public_entries),
                     |_| Ok(std::ops::ControlFlow::Continue(()))
@@ -2419,7 +2463,7 @@ mod tests {
         );
         assert_eq!(
             client
-                .visit_walk_with_options(
+                .visit_walk_with_options_one(
                     &root,
                     crate::WalkOptions::new().max_path_bytes(public_total),
                     |_| Ok(std::ops::ControlFlow::Continue(()))
@@ -2429,7 +2473,7 @@ mod tests {
         );
         // Clean up through the client that traversed this directory instead
         // of mixing its direct NFS view with kernel directory caches.
-        client.remove_dir_all(&root).unwrap();
+        client.remove_dir_all_one(&root).unwrap();
         assert!(
             walk.is_err() && dir.is_err() && tree.is_err(),
             "walk={walk:?}; dir={dir:?}; tree={tree:?}"
@@ -2467,7 +2511,7 @@ mod tests {
         let path = std::env::var("VFSI_AUTO_TEST_BIND")
             .expect("VFSI_AUTO_TEST_BIND is required for this ignored integration test");
         let client = Auto::new("/").unwrap();
-        let mut file = client.open(&path).unwrap();
+        let mut file = client.open_one(&path).unwrap();
         assert_eq!(file.route(), AutoRoute::Mounted);
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();

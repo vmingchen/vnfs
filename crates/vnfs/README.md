@@ -46,8 +46,14 @@ For complete, compiled workflows, see the
 [canonical examples](examples/README.md) and the
 [task-oriented API documentation](https://docs.rs/vnfs/latest/vnfs/).
 Start with `readv`/`write_files` for small files, `openv`/`readv` with `ReadOp::into` for
-repeated positional I/O, or `read_stream_with_options` for large files.
-`Fs` owns backend execution; `FsExt` supplies blanket convenience methods.
+repeated positional I/O, or `read_stream_with_options_one` for one large file.
+`Fs` contains vectorized operations; `FsExt` adds scalar operations and
+convenience workflows, preserving their native backend execution.
+
+Single-target `FsExt` helpers end in `_one`, such as `open_one`, `write_one`,
+`metadata_one`, and `read_dir_one`. Prefer vector operations for independent
+work on multiple files or directories: `openv`, `readv`, `write_files`, and
+`read_dirs_with_options` let the backend batch requests.
 `metadatav_with_options` batches metadata with selected fields and explicit
 final-symlink behavior through `MetadataOptions`.
 
@@ -274,8 +280,8 @@ use vnfs::prelude::*;
 
 fn main() -> vnfs::Result<()> {
     let client = Nfs::connect("nfs.example.com")?;
-    let mut file = client.open("/file-1")?;
-    let mut contents = vec![0; client.metadata("/file-1")?.len() as usize];
+    let mut file = client.open_one("/file-1")?;
+    let mut contents = vec![0; client.metadata_one("/file-1")?.len() as usize];
     file.read_at(&mut contents, 0)?;
     file.try_close()?;
     Ok(())
@@ -309,7 +315,7 @@ use vnfs::prelude::*;
 fn main() -> vnfs::Result<()> {
     let client = Nfs::connect("nfs.example.com")?;
     let mut bytes_seen = 0u64;
-    client.read_stream_with_options(
+    client.read_stream_with_options_one(
         "/dataset/large.bin",
         ReadStreamOptions::new().chunk_size(4 * 1024 * 1024),
         |offset, chunk| {
@@ -408,10 +414,11 @@ durability information; they do not expose backend descriptors. `readv` with `Re
 returns one `ReadResult` per operation with offset, byte count, EOF, and
 optional owned data. `data` is `None` for caller buffers, whose borrows end
 when the call returns—even on error.
-For reusable application helpers, use a `Fs` bound and import `FsExt`
+For reusable vector-only helpers, use an `Fs` bound. Use `FsExt`
 (or `vnfs::prelude::*`) for convenience methods such as `read_files`, `write_files`,
 scalar opens, metadata wrappers, and default-option directory/streaming operations. `FsExt` is
-blanket-implemented for every client and preserves batching and resource limits.
+blanket-implemented for every `Fs` and preserves batching and resource limits.
+Custom backends implement only `Fs`; `FsExt` derives its methods from those vector primitives.
 Use `FileHandle` for generic handle operations
 instead of backend traits. The same generic code can use a direct `NfsClient`,
 `Mounted`, or `Auto`. These traits delegate to the native vector implementations
@@ -451,7 +458,7 @@ RPCs. Use `connect_pool` for independent application workers, or
 waits for outstanding reads to finish and then closes the worker handles.
 Neither streaming path promises a snapshot of a concurrently modified file.
 
-`walk_events_with_options(root, fields, limits, sort_by_name, callback)` adds
+`walk_events_with_options_one(root, fields, limits, sort_by_name, callback)` adds
 selective metadata and depth-first `Enter`, `Entry`, and `Leave` events.
 Return `WalkControl::SkipSubtree` from `Enter` to avoid reading that directory;
 `Stop` ends the entire traversal. A pruned directory still receives `Leave`.

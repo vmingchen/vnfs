@@ -41,6 +41,13 @@ macro_rules! owned_client {
             ) -> Result<StreamCompletion> {
                 self.inner.read_stream_with_options(path, options, callback)
             }
+            /// Rename source/destination pairs without scalarizing the native vector.
+            pub fn rename_files<P: AsRef<Path>, Q: AsRef<Path>>(
+                &self,
+                pairs: &[(P, Q)],
+            ) -> Result<()> {
+                self.inner.rename_files(pairs)
+            }
             /// Create directories in vector phases; parents must exist.
             /// An error can follow partially completed mutations.
             pub fn create_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {

@@ -286,8 +286,8 @@ mod mount_tests {
             .collect::<Vec<_>>(),
             [b"hello".to_vec(), b"world".to_vec()]
         );
-        fs.remove_file("/file-1").unwrap();
-        fs.remove_file("/file-2").unwrap();
+        fs.remove_file_one("/file-1").unwrap();
+        fs.remove_file_one("/file-2").unwrap();
         std::fs::remove_dir(directory).unwrap();
     }
 
@@ -304,14 +304,14 @@ mod mount_tests {
         std::fs::write(fixture.join("marker"), b"unchanged").unwrap();
         std::fs::create_dir(fixture.join("child")).unwrap();
         let fs = Nfs::from_mount(Path::new(&mount).join(&name)).unwrap();
-        assert!(fs.metadata("/").unwrap().is_dir());
+        assert!(fs.metadata_one("/").unwrap().is_dir());
         let results = [
-            fs.create("/.mount-forbidden").map(|_| ()),
+            fs.create_one("/.mount-forbidden").map(|_| ()),
             fs.write_files(&[("/.mount-forbidden", b"forbidden")]),
-            fs.create_dir("/.mount-forbidden"),
-            fs.remove_file("/marker"),
-            fs.remove_dir_all("/child"),
-            fs.rename("/marker", "/.other-forbidden"),
+            fs.create_dir_one("/.mount-forbidden"),
+            fs.remove_file_one("/marker"),
+            fs.remove_dir_all_one("/child"),
+            fs.rename_one("/marker", "/.other-forbidden"),
         ];
         for result in results {
             assert_eq!(result.unwrap_err().err_no(), libc::EROFS as u32);
@@ -330,7 +330,7 @@ mod mount_tests {
             .collect::<Vec<_>>(),
             [b"unchanged".to_vec()]
         );
-        assert!(fs.metadata("/child").unwrap().is_dir());
+        assert!(fs.metadata_one("/child").unwrap().is_dir());
         // The fixture has a known shape. Teardown need not exercise kernel
         // recursive READDIR, unrelated to mount discovery/read-only policy.
         std::fs::remove_file(fixture.join("marker")).unwrap();

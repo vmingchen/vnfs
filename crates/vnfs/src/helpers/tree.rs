@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use crate::{Error, Fs, OpenFlags, OpenRequest, Result, WriteOp};
+use crate::{Error, OpenFlags, OpenRequest, Result, WriteOp};
 
 /// A successfully created tree. Dropping this value does not delete files.
 /// Use the owning client's `remove_dir_all(tree.root())` for explicit cleanup.
@@ -41,7 +41,7 @@ struct Entry {
 /// symlinks in the root's ancestors are not sandboxed by this helper.
 ///
 /// ```no_run
-/// use vnfs::{Fs, helpers::TreeBuilder};
+/// use vnfs::{Fs, FsExt, helpers::TreeBuilder};
 /// # fn example(client: &impl Fs) -> vnfs::Result<()> {
 /// let tree = TreeBuilder::new()
 ///     .add_file("config/app.conf", "host = localhost")
@@ -49,7 +49,7 @@ struct Entry {
 ///     .add_directory("data/raw")
 ///     .create(client, "/new-workspace")?;
 /// // Explicit cleanup when appropriate:
-/// client.remove_dir_all(tree.root())?;
+/// client.remove_dir_all_one(tree.root())?;
 /// # Ok(())
 /// # }
 /// ```
@@ -237,7 +237,7 @@ impl TreeBuilder {
             }
         }
         client
-            .create_dir(root)
+            .create_dir_one(root)
             .map_err(|e| e.with_context("create_tree", root))?;
         for level in directories.values() {
             for batch in level.chunks(self.batch_size) {
@@ -402,4 +402,4 @@ mod tests {
         assert!(!root.path().join("fixture/b/file").exists());
     }
 }
-use crate::FsExt;
+use crate::{Fs, FsExt};

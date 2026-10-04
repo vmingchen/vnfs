@@ -108,8 +108,27 @@ let _ = client.into_inner();
 
 ## Core versus extension methods
 
-The backend contract remains in `Fs`; importing it alone does not import
-the blanket convenience methods.
+`Fs` contains vectorized filesystem operations and policy inspection.
+Import `FsExt` to use scalar operations and convenience workflows. Its blanket
+implementation applies to every `Fs`: generic code still needs only an `Fs` bound.
+
+Single-target helpers use `_one`; prefer their vector counterparts for cohorts.
+The historical unsuffixed scalar names are not extension methods.
+
+```compile_fail,E0599
+use vnfs::{Fs, FsExt};
+fn old_open(fs: &impl Fs) { let _ = fs.open("/file"); }
+```
+
+```compile_fail,E0599
+use vnfs::{Fs, FsExt};
+fn old_listing(fs: &impl Fs) { let _ = fs.read_dir("/dir"); }
+```
+
+```compile_fail,E0599
+use vnfs::{Fs, FsExt};
+fn old_write(fs: &impl Fs) { let _ = fs.write("/file", b"data"); }
+```
 
 ```compile_fail
 use vnfs::Fs;
@@ -131,7 +150,7 @@ request types or a write-request associated type.
 ```compile_fail,E0505
 use vnfs::{Fs, FsExt, WriteOp};
 fn borrowed(fs: &impl Fs) {
-    let file = fs.create("/output").unwrap();
+    let file = fs.create_one("/output").unwrap();
     let ops = [WriteOp::at(&file, 0, b"hello")];
     drop(file);
     let _ = fs.writev(&ops);
@@ -151,4 +170,92 @@ use vnfs::Client;
 
 ```compile_fail,E0432
 use vnfs::ClientExt;
+```
+
+Each single-target execution method belongs to `FsExt`, not `Fs`.
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn open_with(fs: &impl Fs) {
+    let _ = fs.open_with_one(vnfs::OpenRequest::new("/file", vnfs::OpenFlags::READ));
+}
+```
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn create_dir_all(fs: &impl Fs) {
+    let _ = fs.create_dir_all_one("/dir");
+}
+```
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn remove_file(fs: &impl Fs) {
+    let _ = fs.remove_file_one("/file");
+}
+```
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn remove_dir(fs: &impl Fs) {
+    let _ = fs.remove_dir_one("/dir");
+}
+```
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn remove_dir_all(fs: &impl Fs) {
+    let _ = fs.remove_dir_all_one("/dir");
+}
+```
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn remove_dir_contents(fs: &impl Fs) {
+    let _ = fs.remove_dir_contents_one("/dir");
+}
+```
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn rename(fs: &impl Fs) {
+    let _ = fs.rename_one("/old", "/new");
+}
+```
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn walk_with_options(fs: &impl Fs) {
+    let _ = fs.walk_with_options_one("/", vnfs::MetadataFields::MODE, vnfs::WalkOptions::new());
+}
+```
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn visit_walk_with_options(fs: &impl Fs) {
+    let _ = fs.visit_walk_with_options_one("/", vnfs::WalkOptions::new(), |_| Ok(std::ops::ControlFlow::Continue(())));
+}
+```
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn visit_dir_with_options(fs: &impl Fs) {
+    let _ = fs.visit_dir_with_options_one("/", vnfs::ReadDirOptions::new(), |_| Ok(std::ops::ControlFlow::Continue(())));
+}
+```
+
+```compile_fail,E0599
+use vnfs::Fs;
+fn read_stream_with_options(fs: &impl Fs) {
+    let _ = fs.read_stream_with_options_one("/file", vnfs::ReadStreamOptions::new(), |_, _| Ok(true));
+}
+```
+
+Vector-only generic code needs no extension trait:
+
+```no_run
+use vnfs::{Fs, ReadOp};
+fn vector_only(fs: &impl Fs) -> vnfs::Result<Vec<vnfs::ReadResult>> {
+    fs.readv([ReadOp::whole("/file-1"), ReadOp::whole("/file-2")])
+}
 ```

@@ -28,7 +28,7 @@ impl<'a, H: FileHandle> WriteOp<'a, H> {
     /// ```no_run
     /// use vnfs::{Fs, FsExt, WriteOp};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
-    /// let file = fs.create("/output")?;
+    /// let file = fs.create_one("/output")?;
     /// let result = fs.write_allv(&[WriteOp::at(&file, 0, b"hello")]);
     /// let close = fs.closev(vec![file]);
     /// result?;

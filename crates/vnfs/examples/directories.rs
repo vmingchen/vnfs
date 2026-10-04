@@ -1,4 +1,4 @@
-use vnfs::{ControlFlow, Fs, MetadataFields, Nfs, ReadDirOptions, WalkOptions};
+use vnfs::{ControlFlow, Fs, FsExt, MetadataFields, Nfs, ReadDirOptions, WalkOptions};
 
 pub fn run(fs: &impl Fs, paths: &[String], tree: &str) -> vnfs::Result<usize> {
     // Attributes arrive with the listings, avoiding a scalar stat per entry.
@@ -18,7 +18,7 @@ pub fn run(fs: &impl Fs, paths: &[String], tree: &str) -> vnfs::Result<usize> {
     // Visit bounded pages instead of collecting a large tree.
     // Symlinks are not followed; iteration order is backend-defined.
     let mut entries = 0;
-    fs.visit_walk_with_options(tree, WalkOptions::new(), |_| {
+    fs.visit_walk_with_options_one(tree, WalkOptions::new(), |_| {
         entries += 1;
         Ok(ControlFlow::Continue(()))
     })?;

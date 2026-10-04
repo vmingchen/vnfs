@@ -565,6 +565,33 @@ impl<F: NamespaceFileSystem + MetadataFileSystem> FsClient<F> {
 }
 
 impl<F: VecFs> FsClient<F> {
+    /// Rename independent source/destination pairs in one vector phase.
+    pub fn rename_files<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let requests: Vec<_> = pairs
+            .iter()
+            .map(|(from, to)| {
+                (
+                    VfFile::from_os_path(from.as_ref()),
+                    VfFile::from_os_path(to.as_ref()),
+                )
+            })
+            .collect();
+        self.lock()?
+            .renamev(&requests)
+            .map_err(|error| match error.index() {
+                Some(index) if index < pairs.len() => {
+                    error.with_context("rename_files", pairs[index].0.as_ref())
+                }
+                Some(_) => {
+                    VfError::transport(None, "rename backend returned an invalid error index")
+                }
+                None => error,
+            })
+    }
+
     /// Create directories in input order using vector MKDIR. Parents must
     /// already exist. This is not transactional: failure may leave a prefix.
     pub fn create_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {

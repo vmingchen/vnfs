@@ -1,7 +1,7 @@
 //! Compile-time coverage for the application-facing NFS API and the explicit
 //! low-level backend namespace. No live server is needed.
 
-use vnfs::{FsExt, Nfs, NfsAuthentication, NfsBuilder, OpenFlags, OpenRequest, ReadOptions};
+use vnfs::{Fs, FsExt, Nfs, NfsAuthentication, NfsBuilder, OpenFlags, OpenRequest, ReadOptions};
 
 #[test]
 fn application_surface_is_small_and_typed() {
@@ -60,8 +60,8 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
                 let _ = (entry.path(), entry.metadata().blocks());
             }
         }
-        let _ = client.symlink_metadata_with_fields("/a/link", fields)?;
-        let _ = client.walk_with_options("/a", fields, vnfs::WalkOptions::new())?;
+        let _ = client.symlink_metadata_with_fields_one("/a/link", fields)?;
+        let _ = client.walk_with_options_one("/a", fields, vnfs::WalkOptions::new())?;
         client.copy_files(&[("/a/source", "/a/copy")])?;
         client.remove_paths(&["/a/copy"], false)
     }
@@ -88,7 +88,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
             stream_chunk_bytes: 2,
             ..Default::default()
         });
-    client.create_dir_all("/sub").unwrap();
+    client.create_dir_all_one("/sub").unwrap();
     client
         .write_files(&[("/sub/a", b"abc"), ("/sub/b", b"def")])
         .unwrap();
@@ -112,7 +112,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
             )
             .is_err()
     );
-    assert_eq!(client.read_to_string("/sub/a").unwrap(), "abc");
+    assert_eq!(client.read_to_string_one("/sub/a").unwrap(), "abc");
     let mut files = client
         .open_options()
         .read(true)
@@ -149,22 +149,22 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         b"aXY"
     );
     assert_eq!(
-        client.read_stream("/sub/a", |_, _| Ok(false)).unwrap(),
+        client.read_stream_one("/sub/a", |_, _| Ok(false)).unwrap(),
         vnfs::StreamCompletion::Stopped { next_offset: 2 }
     );
     assert_eq!(
         client
-            .visit_walk("/sub", |_| Ok(std::ops::ControlFlow::Continue(())))
+            .visit_walk_one("/sub", |_| Ok(std::ops::ControlFlow::Continue(())))
             .unwrap(),
         vnfs::TraversalCompletion::Complete
     );
-    assert_eq!(client.walk("/sub").unwrap()[0].entries.len(), 2);
+    assert_eq!(client.walk_one("/sub").unwrap()[0].entries.len(), 2);
     client.try_closev(&mut files).unwrap();
     assert!(files.iter().all(|file| file.is_closed()));
     client.try_closev(&mut files).unwrap();
     assert!(files[0].read_at(&mut a, 0).is_err());
     let foreign = vnfs::Auto::new(&root).unwrap();
-    let file = client.open("/sub/a").unwrap();
+    let file = client.open_one("/sub/a").unwrap();
     assert!(
         foreign
             .write_allv(&[vnfs::WriteOp::at(&file, 0, b"wrong")])
@@ -177,7 +177,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         .permissions(vnfs::Permissions::from_mode(0o600))
         .apply()
         .unwrap();
-    assert_eq!(client.metadata("/sub/a").unwrap().len(), 2);
+    assert_eq!(client.metadata_one("/sub/a").unwrap().len(), 2);
     client.create_dir_with_mode("/copies", 0o700).unwrap();
     client
         .copy_files(&[("/sub/a", "/copies/a"), ("/sub/b", "/copies/b")])
@@ -188,7 +188,12 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         client.read_link("/sub/link").unwrap(),
         std::path::Path::new("a")
     );
-    assert!(client.symlink_metadata("/sub/link").unwrap().is_symlink());
+    assert!(
+        client
+            .symlink_metadata_one("/sub/link")
+            .unwrap()
+            .is_symlink()
+    );
     let metadata = client
         .symlink_metadatav(&[
             std::path::Path::new("/sub/a"),
@@ -222,9 +227,9 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         .remove_paths(&["/copies/a", "/copies/b", "/copies/hard"], false)
         .unwrap();
     client.ensure_empty_dir("/copies").unwrap();
-    client.remove_dir_all("/copies").unwrap();
-    client.remove_dir_contents("/sub").unwrap();
-    client.remove_dir("/sub").unwrap();
+    client.remove_dir_all_one("/copies").unwrap();
+    client.remove_dir_contents_one("/sub").unwrap();
+    client.remove_dir_one("/sub").unwrap();
     std::fs::remove_dir(&root).unwrap();
 }
 
@@ -247,7 +252,7 @@ fn tempfile_root() -> std::path::PathBuf {
 fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types() {
     use vnfs::{FileHandle, Fs, FsExt};
     fn workflow<C: Fs>(client: &C, prefix: &str) -> vnfs::Result<()> {
-        client.create_dir_all(prefix)?;
+        client.create_dir_all_one(prefix)?;
         let paths = [format!("{prefix}/a"), format!("{prefix}/b")];
         let requests: Vec<_> = paths
             .iter()
@@ -308,14 +313,14 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
         assert_eq!(client.read_dirs(&[prefix])?[0].entries.len(), 2);
         let mut visited = 0;
         assert_eq!(
-            client.visit_dir_with_options(prefix, vnfs::ReadDirOptions::default(), |_| {
+            client.visit_dir_with_options_one(prefix, vnfs::ReadDirOptions::default(), |_| {
                 visited += 1;
                 Ok(vnfs::ControlFlow::Continue(()))
             })?,
             vnfs::TraversalCompletion::Complete
         );
         assert_eq!(visited, 2);
-        client.remove_dir_all(prefix)
+        client.remove_dir_all_one(prefix)
     }
     // Compile the identical function against direct NFS without connecting.
     let _ = workflow::<vnfs::NfsClient>;

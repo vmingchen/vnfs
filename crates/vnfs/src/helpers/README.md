@@ -6,7 +6,7 @@ and `FileHandle` contracts. It is part of `vnfs`, not a separate dependency.
 ## TreeBuilder
 
 ```rust,no_run
-use vnfs::{Nfs, helpers::TreeBuilder};
+use vnfs::{FsExt, Nfs, helpers::TreeBuilder};
 
 let client = Nfs::connect("server.example.com")?;
 let tree = TreeBuilder::new()
@@ -16,7 +16,8 @@ let tree = TreeBuilder::new()
     .create(&client, "/new-workspace")?;
 
 // Optional, explicit cleanup. Dropping `tree` does not delete anything.
-client.remove_dir_all(tree.root())?;
+client.remove_dir_all_one(tree.root())?;
+# Ok::<(), vnfs::Error>(())
 ```
 
 The same builder accepts mounted/routed clients through `Fs`. Paths are
