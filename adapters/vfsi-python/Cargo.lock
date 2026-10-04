@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bitfields",
  "bitflags",
@@ -1018,7 +1018,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-nfs"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bitfields",
  "libc",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-sync"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "bitfields",
  "libc",
