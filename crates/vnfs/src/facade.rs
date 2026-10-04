@@ -523,6 +523,14 @@ macro_rules! owned_client {
                 self.inner.accessed(accessed);
                 self
             }
+            pub fn uid(&mut self, uid: u32) -> &mut Self {
+                self.inner.uid(uid);
+                self
+            }
+            pub fn gid(&mut self, gid: u32) -> &mut Self {
+                self.inner.gid(gid);
+                self
+            }
             pub fn modified(&mut self, modified: std::time::SystemTime) -> &mut Self {
                 self.inner.modified(modified);
                 self

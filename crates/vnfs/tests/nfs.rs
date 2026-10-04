@@ -4121,6 +4121,7 @@ fn vsetattrs_many_nfs_files() {
         .unwrap();
     vsetattrs_support::check_many(&fs, &directory);
     vsetattrs_support::check_handles(&fs, &directory);
+    vsetattrs_support::check_ownership(&fs, &directory);
     let other = Nfs::builder(test_host()).connect().unwrap();
     vsetattrs_support::check_foreign(&fs, &other, &format!("{directory}/foreign"));
     // A handle vector must not degrade into one RPC per scalar update.
@@ -4133,7 +4134,15 @@ fn vsetattrs_many_nfs_files() {
     let mut files = fs.vopen(&requests).unwrap();
     let updates: Vec<_> = files
         .iter()
-        .map(|file| (MetadataTarget::File(file), MetadataUpdate::new().len(4)))
+        .map(|file| {
+            (
+                MetadataTarget::File(file),
+                MetadataUpdate::new()
+                    .len(4)
+                    .uid(unsafe { libc::geteuid() })
+                    .gid(unsafe { libc::getegid() }),
+            )
+        })
         .collect();
     let _ = vfsi_nfs::compound::thread_compound_stats();
     fs.vsetattrs(&updates, true).unwrap();

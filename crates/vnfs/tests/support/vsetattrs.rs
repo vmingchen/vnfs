@@ -184,3 +184,134 @@ pub fn check_foreign<F: Vfsi>(fs: &F, other: &F, path: &str) {
     own.try_close().unwrap();
     foreign.try_close().unwrap();
 }
+
+pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
+    use vnfs::{FileHandle, MetadataTarget, OpenFlags, OpenRequest};
+    let paths: Vec<_> = (0..64).map(|i| format!("{directory}/owner-{i}")).collect();
+    fs.write_files(
+        &paths
+            .iter()
+            .map(|p| (p, b"ownership".as_slice()))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let options = MetadataOptions::new()
+        .fields(MetadataFields::stat() | MetadataFields::UID | MetadataFields::GID);
+    let metadata = |path: &str, follow: bool| {
+        fs.metadata_with_options(path, options.follow_symlinks(follow))
+            .unwrap()
+    };
+    let original = metadata(&paths[0], true);
+    let (uid, gid) = (original.uid().unwrap(), original.gid().unwrap());
+    let privileged = unsafe { libc::geteuid() } == 0;
+    let new_uid = if privileged { 10001 } else { uid };
+    let new_gid = if privileged { 10002 } else { gid };
+    let updates: Vec<_> = paths
+        .iter()
+        .map(|p| (p, MetadataUpdate::new().uid(new_uid)))
+        .collect();
+    fs.vsetattrs(&updates, true).unwrap();
+    for attrs in fs.vgetattrs(&paths, options).unwrap() {
+        assert_eq!(attrs.uid(), Some(new_uid));
+        assert_eq!(attrs.gid(), Some(gid));
+        assert_eq!(attrs.len(), 9);
+    }
+    fs.vsetattrs(
+        &paths
+            .iter()
+            .map(|p| (p, MetadataUpdate::new().gid(new_gid)))
+            .collect::<Vec<_>>(),
+        true,
+    )
+    .unwrap();
+    for attrs in fs.vgetattrs(&paths, options).unwrap() {
+        assert_eq!(attrs.uid(), Some(new_uid));
+        assert_eq!(attrs.gid(), Some(new_gid));
+    }
+    let mut files = fs
+        .vopen(
+            &paths
+                .iter()
+                .map(|p| OpenRequest::new(p, OpenFlags::READ | OpenFlags::WRITE))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    let moved = format!("{directory}/owner-moved");
+    fs.vrename(&[(&paths[0], &moved)]).unwrap();
+    fs.write_files(&[(&paths[0], b"replacement".as_slice())])
+        .unwrap();
+    let updates: Vec<_> = files
+        .iter()
+        .map(|file| {
+            (
+                MetadataTarget::File(file),
+                MetadataUpdate::new()
+                    .uid(uid)
+                    .gid(gid)
+                    .permissions(Permissions::from_mode(0o640)),
+            )
+        })
+        .collect();
+    fs.vsetattrs(&updates, false).unwrap();
+    for file in &files {
+        let attrs = file.metadata().unwrap();
+        assert_eq!(attrs.uid(), Some(uid));
+        assert_eq!(attrs.gid(), Some(gid));
+        assert_eq!(attrs.permissions().mode() & 0o7777, 0o640);
+    }
+    fs.chown(MetadataTarget::File(&files[0]), Some(new_uid), None)
+        .unwrap();
+    assert_eq!(files[0].metadata().unwrap().uid(), Some(new_uid));
+    assert_eq!(files[0].metadata().unwrap().gid(), Some(gid));
+    fs.chown(&paths[0], None, Some(new_gid)).unwrap();
+    assert_eq!(metadata(&paths[0], true).uid(), Some(uid));
+    assert_eq!(metadata(&paths[0], true).gid(), Some(new_gid));
+    let link = format!("{directory}/owner-link");
+    fs.symlink("owner-1", &link).unwrap();
+    fs.vsetattrs(
+        &[(&link, MetadataUpdate::new().uid(new_uid).gid(new_gid))],
+        false,
+    )
+    .unwrap();
+    assert_eq!(metadata(&link, false).uid(), Some(new_uid));
+    assert_eq!(metadata(&paths[1], true).uid(), Some(uid));
+    // Following chown must change the target without changing link ownership.
+    fs.chown(&link, Some(uid), Some(gid)).unwrap();
+    assert_eq!(metadata(&link, false).uid(), Some(new_uid));
+    let error = fs
+        .vsetattrs(
+            &[
+                (
+                    MetadataTarget::File(&files[0]),
+                    MetadataUpdate::new().len(2),
+                ),
+                (
+                    MetadataTarget::Path(std::path::Path::new(&paths[0])),
+                    MetadataUpdate::new().uid(u32::MAX),
+                ),
+            ],
+            true,
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.err_no(), libc::EINVAL as u32);
+    assert_eq!(files[0].metadata().unwrap().len(), 9);
+    let missing = format!("{directory}/owner-missing");
+    let error = fs
+        .vsetattrs(
+            &[
+                (&paths[0], MetadataUpdate::new().uid(uid)),
+                (&missing, MetadataUpdate::new().gid(gid)),
+            ],
+            true,
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.err_no(), libc::ENOENT as u32);
+    if !privileged {
+        let error = fs.chown(&paths[0], Some(0), None).unwrap_err();
+        assert_eq!(error.index(), Some(0));
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+    fs.vclose(&mut files).unwrap();
+}

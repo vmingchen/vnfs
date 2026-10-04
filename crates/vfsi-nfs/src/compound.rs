@@ -581,6 +581,19 @@ impl Compound {
         mtime: Option<(i64, u32)>,
         stateid: &stateid4,
     ) {
+        self.setattr_ownership(mode, size, (None, None), atime, mtime, stateid);
+    }
+
+    /// SETATTR including numeric owner and group identities.
+    pub fn setattr_ownership(
+        &mut self,
+        mode: Option<u32>,
+        size: Option<u64>,
+        ownership: (Option<u32>, Option<u32>),
+        atime: Option<(i64, u32)>,
+        mtime: Option<(i64, u32)>,
+        stateid: &stateid4,
+    ) {
         let mut map = [0u32; 3];
         let mut vals: Vec<u8> = Vec::new();
         // Attribute values must be encoded in ascending attribute-number
@@ -592,6 +605,18 @@ impl Compound {
         if let Some(m) = mode {
             map[1] |= 1 << (FATTR4_MODE % 32);
             vals.extend_from_slice(&m.to_be_bytes());
+        }
+        for (attribute, identity) in [
+            (FATTR4_OWNER, ownership.0),
+            (FATTR4_OWNER_GROUP, ownership.1),
+        ] {
+            if let Some(identity) = identity {
+                map[(attribute / 32) as usize] |= 1 << (attribute % 32);
+                let text = identity.to_string();
+                vals.extend_from_slice(&(text.len() as u32).to_be_bytes());
+                vals.extend_from_slice(text.as_bytes());
+                vals.resize((vals.len() + 3) & !3, 0);
+            }
         }
         if let Some((seconds, nanoseconds)) = atime {
             map[1] |= 1 << (FATTR4_TIME_ACCESS_SET % 32);
@@ -1378,6 +1403,41 @@ pub fn rpc_stats() -> (u64, u64) {
 #[cfg(test)]
 mod request_size_tests {
     use super::*;
+
+    #[test]
+    fn ownership_setattr_encodes_numeric_ids_in_attribute_order() {
+        let mut compound = Compound::new();
+        compound.setattr_ownership(
+            Some(0o640),
+            Some(9),
+            (Some(10001), Some(42)),
+            None,
+            None,
+            &stateid4 {
+                seqid: 0,
+                other: [0; 12],
+            },
+        );
+        let args = unsafe { compound.ops[0].nfs_argop4_u.opsetattr };
+        assert_eq!(args.obj_attributes.attrmask.bitmap4_len, 2);
+        assert_eq!(args.obj_attributes.attrmask.map[0], 1 << (FATTR4_SIZE % 32));
+        assert_eq!(
+            args.obj_attributes.attrmask.map[1],
+            (1 << (FATTR4_MODE % 32))
+                | (1 << (FATTR4_OWNER % 32))
+                | (1 << (FATTR4_OWNER_GROUP % 32))
+        );
+        let vals = unsafe {
+            std::slice::from_raw_parts(
+                args.obj_attributes.attr_vals.attrlist4_val.cast::<u8>(),
+                args.obj_attributes.attr_vals.attrlist4_len as usize,
+            )
+        };
+        let mut expected = 9u64.to_be_bytes().to_vec();
+        expected.extend_from_slice(&0o640u32.to_be_bytes());
+        expected.extend_from_slice(b"\x00\x00\x00\x0510001\x00\x00\x00\x00\x00\x00\x0242\x00\x00");
+        assert_eq!(vals, expected);
+    }
 
     #[test]
     fn bounded_xdr_size_counts_variable_payload_and_sequence() {

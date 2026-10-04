@@ -402,6 +402,8 @@ impl<T: VecFs + ?Sized> MetadataFileSystem for T {
         attributes.follow_symlinks = follow;
         attributes.mode = update.permissions.map(Permissions::mode);
         attributes.size = update.len;
+        attributes.uid = update.uid;
+        attributes.gid = update.gid;
         attributes.atime = update.accessed.map(system_time_parts).transpose()?;
         attributes.mtime = update.modified.map(system_time_parts).transpose()?;
         self.set_attributes(attributes)

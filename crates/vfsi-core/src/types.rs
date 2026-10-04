@@ -1290,6 +1290,8 @@ impl Metadata {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MetadataUpdate {
     pub permissions: Option<Permissions>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
     pub len: Option<u64>,
     pub accessed: Option<std::time::SystemTime>,
     pub modified: Option<std::time::SystemTime>,
@@ -1302,6 +1304,20 @@ impl MetadataUpdate {
 
     pub fn permissions(mut self, permissions: Permissions) -> Self {
         self.permissions = Some(permissions);
+        self
+    }
+
+    /// Change the owner; an unspecified owner is unchanged.
+    /// `u32::MAX` is reserved by Unix and rejected by the application API.
+    pub fn uid(mut self, uid: u32) -> Self {
+        self.uid = Some(uid);
+        self
+    }
+
+    /// Change the group; an unspecified group is unchanged.
+    /// `u32::MAX` is reserved by Unix and rejected by the application API.
+    pub fn gid(mut self, gid: u32) -> Self {
+        self.gid = Some(gid);
         self
     }
 
@@ -1431,6 +1447,8 @@ impl MetadataQuery {
 pub struct SetAttributes {
     pub file: VfFile,
     pub mode: Option<u32>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
     pub size: Option<u64>,
     pub atime: Option<(i64, u32)>,
     pub mtime: Option<(i64, u32)>,
@@ -1442,6 +1460,8 @@ impl SetAttributes {
         Self {
             file,
             mode: None,
+            uid: None,
+            gid: None,
             size: None,
             atime: None,
             mtime: None,
@@ -1462,6 +1482,14 @@ impl SetAttributes {
         if let Some(mode) = self.mode {
             attrs.masks |= AttrMask::MODE;
             attrs.mode = mode;
+        }
+        if let Some(uid) = self.uid {
+            attrs.masks |= AttrMask::UID;
+            attrs.uid = uid;
+        }
+        if let Some(gid) = self.gid {
+            attrs.masks |= AttrMask::GID;
+            attrs.gid = gid;
         }
         if let Some(size) = self.size {
             attrs.masks |= AttrMask::SIZE;

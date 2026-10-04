@@ -578,6 +578,59 @@ impl DummyVecFs {
         }
     }
 
+    fn ownership_ids(a: &VfAttrs, index: usize) -> VfResult<(libc::uid_t, libc::gid_t)> {
+        let uid = if a.masks.contains(AttrMask::UID) {
+            a.uid
+        } else {
+            u32::MAX
+        };
+        let gid = if a.masks.contains(AttrMask::GID) {
+            a.gid
+        } else {
+            u32::MAX
+        };
+        if (a.masks.contains(AttrMask::UID) && uid == u32::MAX)
+            || (a.masks.contains(AttrMask::GID) && gid == u32::MAX)
+        {
+            return Err(VfError::failure(index, ERR_INVAL));
+        }
+        Ok((uid, gid))
+    }
+
+    fn ownership_result(rc: libc::c_int, index: usize) -> VfResult<()> {
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(VfError::failure(
+                index,
+                Self::errno(&std::io::Error::last_os_error()),
+            ))
+        }
+    }
+
+    fn chown_path(a: &VfAttrs, path: &AnchoredPath, follow: bool, index: usize) -> VfResult<()> {
+        if !a.masks.intersects(AttrMask::UID | AttrMask::GID) {
+            return Ok(());
+        }
+        // A following ownership change requires an existing, resolved target.
+        // The missing-leaf fallback only pins its parent; following that leaf
+        // would permit a concurrently inserted symlink to escape the root.
+        if follow && path.nofollow_on_open {
+            return Err(VfError::failure(index, ERR_NOENT));
+        }
+        let (uid, gid) = Self::ownership_ids(a, index)?;
+        let path = cstring_from_bytes(path_bytes(path.as_ref()))
+            .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+        let rc = unsafe {
+            if follow {
+                libc::chown(path.as_ptr(), uid, gid)
+            } else {
+                libc::lchown(path.as_ptr(), uid, gid)
+            }
+        };
+        Self::ownership_result(rc, index)
+    }
+
     fn setattr_one(&mut self, a: &VfAttrs, i: usize) -> VfResult<()> {
         if let VfFile::Descriptor(fd) = &a.file {
             let open = self
@@ -588,6 +641,12 @@ impl DummyVecFs {
                 open.file
                     .set_len(a.size)
                     .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            }
+            if a.masks.intersects(AttrMask::UID | AttrMask::GID) {
+                use std::os::fd::AsRawFd;
+                let (uid, gid) = Self::ownership_ids(a, i)?;
+                let rc = unsafe { libc::fchown(open.file.as_raw_fd(), uid, gid) };
+                Self::ownership_result(rc, i)?;
             }
             if a.masks.contains(AttrMask::MODE) {
                 open.file
@@ -620,6 +679,9 @@ impl DummyVecFs {
                 .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             f.set_len(a.size)
                 .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+        }
+        if a.masks.intersects(AttrMask::UID | AttrMask::GID) {
+            Self::chown_path(a, &p, true, i)?;
         }
         // Apply permissions last so a combined truncate+chmod cannot revoke
         // the write access needed by its own size update.
@@ -1152,7 +1214,9 @@ impl VecFs for DummyVecFs {
         const SETTABLE: AttrMask = AttrMask::MODE
             .union(AttrMask::SIZE)
             .union(AttrMask::ATIME)
-            .union(AttrMask::MTIME);
+            .union(AttrMask::MTIME)
+            .union(AttrMask::UID)
+            .union(AttrMask::GID);
         for (i, a) in attrs.iter().enumerate() {
             if !a.masks.difference(SETTABLE).is_empty() {
                 return Err(VfError::unsupported(i));
@@ -1166,7 +1230,9 @@ impl VecFs for DummyVecFs {
         const SETTABLE: AttrMask = AttrMask::MODE
             .union(AttrMask::SIZE)
             .union(AttrMask::ATIME)
-            .union(AttrMask::MTIME);
+            .union(AttrMask::MTIME)
+            .union(AttrMask::UID)
+            .union(AttrMask::GID);
         for (i, a) in attrs.iter().enumerate() {
             if !a.masks.difference(SETTABLE).is_empty() {
                 return Err(VfError::unsupported(i));
@@ -1178,6 +1244,12 @@ impl VecFs for DummyVecFs {
             let p = self
                 .no_follow_path(&self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?)
                 .map_err(|e| e.with_index(i))?;
+            if a.masks.intersects(AttrMask::UID | AttrMask::GID)
+                && a.masks.difference(AttrMask::UID | AttrMask::GID).is_empty()
+            {
+                Self::chown_path(a, &p, false, i)?;
+                continue;
+            }
             let md =
                 std::fs::symlink_metadata(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             if md.file_type().is_symlink() {

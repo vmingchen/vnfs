@@ -2140,6 +2140,14 @@ impl<F: MetadataFileSystem> SetMetadata<'_, F> {
         self
     }
 
+    pub fn uid(&mut self, uid: u32) -> &mut Self {
+        self.update.uid = Some(uid);
+        self
+    }
+    pub fn gid(&mut self, gid: u32) -> &mut Self {
+        self.update.gid = Some(gid);
+        self
+    }
     pub fn apply(&self) -> VfResult<()> {
         self.client
             .vsetattrs(&[(&self.path, self.update.clone())], self.follow)
@@ -2481,10 +2489,17 @@ impl<F: FileSystem> FsClient<F> {
                     )
                 }
             };
+            if update.uid == Some(u32::MAX) || update.gid == Some(u32::MAX) {
+                return Err(
+                    VfError::client(index, crate::ERR_INVAL).with_context("vsetattrs", path)
+                );
+            }
             paths.push(path);
             let mut attributes = crate::SetAttributes::new(raw);
             attributes.mode = update.permissions.map(crate::Permissions::mode);
             attributes.size = update.len;
+            attributes.uid = update.uid;
+            attributes.gid = update.gid;
             attributes.atime = update
                 .accessed
                 .map(crate::native::system_time_parts)

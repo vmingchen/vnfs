@@ -390,6 +390,10 @@ impl AutoClient {
                     }
                 }
             };
+            if update.uid == Some(u32::MAX) || update.gid == Some(u32::MAX) {
+                return Err(VfError::client(index, libc::EINVAL as u32)
+                    .with_context("vsetattrs", &route.path));
+            }
             for time in [update.accessed, update.modified].into_iter().flatten() {
                 // NFS timestamps are signed seconds, matching the core engine.
                 let duration = time
@@ -1612,6 +1616,8 @@ macro_rules! metadata_setter {
 impl AutoSetMetadata<'_> {
     metadata_setter!(permissions, crate::Permissions);
     metadata_setter!(len, u64);
+    metadata_setter!(uid, u32);
+    metadata_setter!(gid, u32);
     metadata_setter!(accessed, std::time::SystemTime);
     metadata_setter!(modified, std::time::SystemTime);
     pub fn follow_symlinks(&mut self, follow: bool) -> &mut Self {

@@ -1035,7 +1035,9 @@ impl NfsVecFs {
         const SETTABLE: AttrMask = AttrMask::MODE
             .union(AttrMask::SIZE)
             .union(AttrMask::ATIME)
-            .union(AttrMask::MTIME);
+            .union(AttrMask::MTIME)
+            .union(AttrMask::UID)
+            .union(AttrMask::GID);
         if attrs.is_empty() {
             return Ok(());
         }
@@ -1044,6 +1046,12 @@ impl NfsVecFs {
             if !unsupported.is_empty() {
                 return Err(VfError::unsupported(i));
             }
+        }
+        if attrs
+            .iter()
+            .any(|a| a.masks.intersects(AttrMask::UID | AttrMask::GID))
+        {
+            return self.setattrsv_phased(attrs, follow);
         }
         let mut ops = Vec::with_capacity(attrs.len());
         for (i, a) in attrs.iter().enumerate() {
@@ -1083,6 +1091,8 @@ impl NfsVecFs {
             ops.push(crate::client::PathSetattrOp {
                 file,
                 mode,
+                uid: a.masks.contains(AttrMask::UID).then_some(a.uid),
+                gid: a.masks.contains(AttrMask::GID).then_some(a.gid),
                 size,
                 atime,
                 mtime,
@@ -1130,7 +1140,9 @@ impl NfsVecFs {
         const SETTABLE: AttrMask = AttrMask::MODE
             .union(AttrMask::SIZE)
             .union(AttrMask::ATIME)
-            .union(AttrMask::MTIME);
+            .union(AttrMask::MTIME)
+            .union(AttrMask::UID)
+            .union(AttrMask::GID);
         for (i, a) in attrs.iter().enumerate() {
             let unsupported = a.masks.difference(SETTABLE);
             if !unsupported.is_empty() {
@@ -1145,7 +1157,10 @@ impl NfsVecFs {
                 Ok(x) => x.clone(),
                 Err(status) => return Err(VfError::nfs(i, *status)),
             };
-            if !follow && ftype == nfs_ftype4_NF4LNK {
+            if !follow
+                && ftype == nfs_ftype4_NF4LNK
+                && !a.masks.difference(AttrMask::UID | AttrMask::GID).is_empty()
+            {
                 // NFSv4 has no non-following mode/size setter for symlinks;
                 // refuse like the `std::fs` backend instead of pretending the
                 // SETATTR applied to the link.
@@ -1172,6 +1187,8 @@ impl NfsVecFs {
             ops.push(crate::client::SetattrOp {
                 fh,
                 mode,
+                uid: a.masks.contains(AttrMask::UID).then_some(a.uid),
+                gid: a.masks.contains(AttrMask::GID).then_some(a.gid),
                 size,
                 atime,
                 mtime,
@@ -1346,7 +1363,17 @@ impl NfsVecFs {
             .contains(AttrMask::MTIME)
             .then_some((a.mtime_sec, a.mtime_nsec));
         self.nfs
-            .setattr_values(&fh, mode, size, atime, mtime)
+            .setattr_ownership(
+                &fh,
+                mode,
+                size,
+                (
+                    a.masks.contains(AttrMask::UID).then_some(a.uid),
+                    a.masks.contains(AttrMask::GID).then_some(a.gid),
+                ),
+                atime,
+                mtime,
+            )
             .map_err(|e| vfsi_core::error_from_rpc(e, index))
     }
 
@@ -2092,6 +2119,8 @@ impl NfsVecFs {
                 setattr_ops.push(crate::client::SetattrOp {
                     fh: fh.clone(),
                     mode: None,
+                    uid: None,
+                    gid: None,
                     size: Some(0),
                     atime: None,
                     mtime: None,
@@ -3080,6 +3109,8 @@ impl NfsVecFs {
                 attrs.push(crate::client::SetattrOp {
                     fh: copies[i].dst_fh.clone(),
                     mode: None,
+                    uid: None,
+                    gid: None,
                     size: Some(size),
                     atime: None,
                     mtime: None,
@@ -3499,6 +3530,8 @@ impl NfsVecFs {
                 Ok((fh, _)) => setattrs.push(crate::client::SetattrOp {
                     fh: fh.clone(),
                     mode: Some(dirs[indices[k]].mode & 0o7777),
+                    uid: None,
+                    gid: None,
                     size: None,
                     atime: None,
                     mtime: None,

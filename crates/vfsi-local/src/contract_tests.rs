@@ -630,6 +630,73 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn following_chown_rejects_a_missing_leaf_replaced_by_an_escaping_symlink() {
+        use std::os::unix::fs::MetadataExt;
+        let (root, fs) = fs("chown-missing-leaf-race");
+        let outside = TempRoot::new("chown-outside");
+        std::fs::create_dir_all(&outside.0).unwrap();
+        let victim = outside.0.join("victim");
+        std::fs::write(&victim, b"outside").unwrap();
+        let before = std::fs::metadata(&victim).unwrap();
+        let uid = if unsafe { libc::geteuid() } == 0 {
+            10001
+        } else {
+            before.uid()
+        };
+        let update = VfAttrs {
+            masks: AttrMask::UID,
+            uid,
+            ..VfAttrs::default()
+        };
+        let missing = root.0.join("missing");
+        let anchored = fs.real_path(&missing).unwrap();
+        assert!(anchored.nofollow_on_open);
+        // Insert the leaf after resolution; the host kernel would follow this
+        // absolute target outside the configured client root.
+        std::os::unix::fs::symlink(&victim, &missing).unwrap();
+        let error = DummyVecFs::chown_path(&update, &anchored, true, 3).unwrap_err();
+        assert_eq!(error.err_no(), ERR_NOENT);
+        assert_eq!(error.index(), Some(3));
+        let after = std::fs::metadata(&victim).unwrap();
+        assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
+        assert_eq!(std::fs::read(&victim).unwrap(), b"outside");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn following_chown_keeps_an_existing_target_pinned_after_replacement() {
+        use std::os::unix::fs::MetadataExt;
+        let (root, fs) = fs("chown-existing-leaf-race");
+        let outside = TempRoot::new("chown-existing-outside");
+        std::fs::create_dir_all(&outside.0).unwrap();
+        let victim = outside.0.join("victim");
+        std::fs::write(&victim, b"outside").unwrap();
+        let before = std::fs::metadata(&victim).unwrap();
+        let uid = if unsafe { libc::geteuid() } == 0 {
+            10001
+        } else {
+            before.uid()
+        };
+        let update = VfAttrs {
+            masks: AttrMask::UID,
+            uid,
+            ..VfAttrs::default()
+        };
+        let original = root.0.join("file");
+        let moved = root.0.join("moved");
+        std::fs::write(&original, b"inside").unwrap();
+        let anchored = fs.real_path(&original).unwrap();
+        assert!(!anchored.nofollow_on_open);
+        std::fs::rename(&original, &moved).unwrap();
+        std::os::unix::fs::symlink(&victim, &original).unwrap();
+        DummyVecFs::chown_path(&update, &anchored, true, 0).unwrap();
+        assert_eq!(std::fs::metadata(&moved).unwrap().uid(), uid);
+        let after = std::fs::metadata(&victim).unwrap();
+        assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn anchored_create_cannot_be_redirected_after_resolution() {
         let (root, fs) = fs("sandbox-create-race");
         let outside = TempRoot::new("sandbox-create-outside");

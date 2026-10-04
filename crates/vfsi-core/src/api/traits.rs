@@ -1354,6 +1354,21 @@ pub trait VfsiExt: Vfsi {
         )
     }
 
+    /// Change ownership of one path or opened object through [`Vfsi::vsetattrs`].
+    /// `None` leaves the corresponding owner/group unchanged. Use the vector
+    /// with `follow_symlinks = false` to change a symlink itself.
+    fn chown<T: crate::api::MetadataOperand<Self::File>>(
+        &self,
+        target: T,
+        uid: Option<u32>,
+        gid: Option<u32>,
+    ) -> Result<()> {
+        let mut update = crate::api::MetadataUpdate::new();
+        update.uid = uid;
+        update.gid = gid;
+        self.vsetattrs(&[(target, update)], true)
+    }
+
     /// Create one directory with explicit Unix permission bits.
     fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> Result<()> {
         self.vmkdir(&[(path, mode)])

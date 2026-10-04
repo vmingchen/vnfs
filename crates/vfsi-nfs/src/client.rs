@@ -163,6 +163,8 @@ pub struct GetattrOp {
 pub struct SetattrOp {
     pub fh: FileHandle,
     pub mode: Option<u32>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
     pub size: Option<u64>,
     pub atime: Option<(i64, u32)>,
     pub mtime: Option<(i64, u32)>,
@@ -388,6 +390,8 @@ pub struct PathGetattrOutcome {
 pub struct PathSetattrOp {
     pub file: FileRef,
     pub mode: Option<u32>,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
     pub size: Option<u64>,
     pub atime: Option<(i64, u32)>,
     pub mtime: Option<(i64, u32)>,
@@ -1713,9 +1717,10 @@ impl NfsClient {
             ops,
             |c, op, _| {
                 c.putfh(&op.fh.as_nfs_fh());
-                c.setattr_values(
+                c.setattr_ownership(
                     op.mode,
                     op.size,
+                    (op.uid, op.gid),
                     op.atime,
                     op.mtime,
                     &stateid4 {
@@ -2710,9 +2715,10 @@ impl NfsClient {
                     c.getattr(&[FATTR4_TYPE]);
                     map.note_ops(1);
                 }
-                c.setattr_values(
+                c.setattr_ownership(
                     op.mode,
                     op.size,
+                    (op.uid, op.gid),
                     op.atime,
                     op.mtime,
                     &stateid4 {
@@ -3379,6 +3385,35 @@ impl NfsClient {
         c.setattr_values(
             mode,
             size,
+            atime,
+            mtime,
+            &stateid4 {
+                seqid: 0,
+                other: [0; 12],
+            },
+        );
+        let res = self.call_compound(&mut c)?;
+        self.session.expect_all_ok(&res)?;
+        Ok(())
+    }
+
+    /// SETATTR including numeric owner/group IDs.
+    pub fn setattr_ownership(
+        &mut self,
+        fh: &FileHandle,
+        mode: Option<u32>,
+        size: Option<u64>,
+        ownership: (Option<u32>, Option<u32>),
+        atime: Option<(i64, u32)>,
+        mtime: Option<(i64, u32)>,
+    ) -> RpcResult<()> {
+        let mut c = Compound::new();
+        c.tag(b"setattr-ownership");
+        c.putfh(&fh.as_nfs_fh());
+        c.setattr_ownership(
+            mode,
+            size,
+            ownership,
             atime,
             mtime,
             &stateid4 {
