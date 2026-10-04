@@ -7,8 +7,21 @@ implementation contracts and the historical POSIX/C compatibility surface.
 
 `Fs` owns options-aware native vector execution. `FsExt` is blanket implemented
 for every `Fs` and supplies default-policy `readv`, `writev`, and `removev`,
-composed workflows, and `_one` conveniences. Generic applications need an
+composed workflows, and conventional scalar conveniences (`open`, `metadata`,
+`read_dir`, etc.). Generic applications need an
 `Fs` bound and an `FsExt` import; they do not implement extensions separately.
+
+Concrete clients do not duplicate these helpers as inherent methods. Native
+open, collection, walk and streaming execution hooks are private. Method syntax
+and explicit `FsExt` calls therefore share helper semantics, including error
+indices, rather than selecting different implementations based on receiver type.
+
+`Fs::read_dirs_with_options` collects shallow directories or recursive trees
+with the same `VisitOptions` used for visiting. Results are grouped by input:
+`results[i]` holds the listings for `paths[i]`. Shallow mode has exactly one
+listing per root; recursive mode includes descendants. The allocating path
+retains native directory batching, rather than collecting visitor callbacks.
+`FsExt::read_dirs` supplies the ordinary flat shallow result for convenience.
 
 `Fs::visit_dirs_with_options` handles both shallow and recursive visits through
 `VisitOptions`. Shallow is the default; `.recursive(true)` enables descent.
@@ -193,7 +206,11 @@ returned vector. Recursive `NfsClient::walk_with_options` additionally has a
 default depth limit and accepts `WalkOptions`. NFS multi-directory listing
 delivers each bounded READDIR page before requesting continuation pages, so
 early-stop callbacks no longer retain the whole remote listing. Applications
-needing to consume one directory incrementally can use `visit_dir_with_options`.
+needing to consume one directory incrementally can use `visit_dir_with_options`
+with `VisitOptions`, or `visit_walk_with_options` for a recursive root. These
+scalar helpers force the scope indicated by their names while retaining selected
+metadata and budget settings. `symlink_metadatav` accepts any `AsRef<Path>` inputs,
+including strings and `PathBuf`, consistently with `metadatav`.
 The client starts with one entry, then fetches at most 1024 entries per page
 and releases its backend lock before invoking the application callback, which
 may safely reenter the same client or drop its files. NFS retains a resolved

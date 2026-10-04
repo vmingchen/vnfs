@@ -2,8 +2,9 @@
 //! promoted to a separate direct NFS connection; everything else stays on
 //! the kernel-mounted path.
 
-#[cfg(test)]
 use crate::FsExt as _;
+#[cfg(test)]
+use crate::VisitOptions;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -198,6 +199,36 @@ impl std::fmt::Debug for AutoClient {
     }
 }
 
+impl crate::application::NativeHooks for AutoClient {
+    fn open_native(&self, request: OpenRequest) -> VfResult<Self::File> {
+        self.open_native_impl(request)
+    }
+    fn list_native<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        fields: crate::MetadataFields,
+        options: ReadDirOptions,
+    ) -> VfResult<Vec<crate::DirectoryListing>> {
+        self.list_native_impl(paths, fields, options)
+    }
+    fn walk_native(
+        &self,
+        root: impl AsRef<Path>,
+        fields: crate::MetadataFields,
+        options: crate::WalkOptions,
+    ) -> VfResult<Vec<crate::DirectoryListing>> {
+        self.walk_native_impl(root, fields, options)
+    }
+    fn stream_native(
+        &self,
+        path: impl AsRef<Path>,
+        options: crate::ReadStreamOptions,
+        callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
+    ) -> VfResult<crate::StreamCompletion> {
+        self.stream_native_impl(path, options, callback)
+    }
+}
+
 impl AutoClient {
     pub fn limits(&self) -> ResourceLimits {
         self.limits
@@ -232,8 +263,7 @@ impl AutoClient {
             inner,
         })
     }
-    routed_path_method!(create_dir_all, ());
-    routed_path_method!(remove_dir, ());
+
     routed_path_method!(read_link, PathBuf);
     pub fn ensure_empty_dir(&self, path: impl AsRef<Path>) -> VfResult<()> {
         let route = self.resolve_tree(path.as_ref());
@@ -443,7 +473,7 @@ impl AutoClient {
         Ok(())
     }
 
-    pub fn read_dirs_with_options<P: AsRef<Path>>(
+    pub(crate) fn list_native_impl<P: AsRef<Path>>(
         &self,
         paths: &[P],
         fields: crate::MetadataFields,
@@ -512,7 +542,7 @@ impl AutoClient {
         }
     }
 
-    pub(crate) fn read_files_with_options<P: AsRef<Path>>(
+    pub(crate) fn read_files_native<P: AsRef<Path>>(
         &self,
         paths: &[P],
         options: crate::ReadAllOptions,
@@ -553,7 +583,7 @@ impl AutoClient {
         Ok(output)
     }
 
-    pub fn read_stream_with_options(
+    pub(crate) fn stream_native_impl(
         &self,
         path: impl AsRef<Path>,
         options: crate::ReadStreamOptions,
@@ -583,20 +613,6 @@ impl AutoClient {
         Ok(Path::new("/").join(relative))
     }
 
-    pub fn visit_dir_with_options(
-        &self,
-        path: impl AsRef<Path>,
-        options: ReadDirOptions,
-        callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
-    ) -> VfResult<crate::TraversalCompletion> {
-        self.visit_dir_with_fields(
-            path,
-            crate::VisitOptions::new().metadata_fields(),
-            options,
-            callback,
-        )
-    }
-
     pub(crate) fn visit_dir_with_fields(
         &self,
         path: impl AsRef<Path>,
@@ -621,20 +637,6 @@ impl AutoClient {
                     })
             }
         }
-    }
-
-    pub fn visit_walk_with_options(
-        &self,
-        path: impl AsRef<Path>,
-        options: crate::WalkOptions,
-        callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
-    ) -> VfResult<crate::TraversalCompletion> {
-        self.visit_walk_with_fields(
-            path,
-            crate::VisitOptions::new().metadata_fields(),
-            options,
-            callback,
-        )
     }
 
     pub(crate) fn visit_walk_with_fields(
@@ -664,7 +666,7 @@ impl AutoClient {
         }
     }
 
-    pub fn walk_with_options(
+    pub(crate) fn walk_native_impl(
         &self,
         path: impl AsRef<Path>,
         fields: crate::MetadataFields,
@@ -716,10 +718,6 @@ impl AutoClient {
         self.resolve(path, &mounts)
     }
 
-    pub fn remove_dir_all(&self, path: impl AsRef<Path>) -> VfResult<()> {
-        self.remove_dir_all_with_options(path, crate::RemoveOptions::default())
-    }
-
     pub fn remove_dir_all_with_options(
         &self,
         path: impl AsRef<Path>,
@@ -734,10 +732,6 @@ impl AutoClient {
                 .client
                 .remove_dir_all_with_options(&route.path, options),
         }
-    }
-
-    pub fn remove_dir_contents(&self, path: impl AsRef<Path>) -> VfResult<()> {
-        self.remove_dir_contents_with_options(path, crate::RemoveOptions::default())
     }
 
     pub fn remove_dir_contents_with_options(
@@ -965,7 +959,7 @@ impl AutoClient {
 
     /// Preserve request order, including the completed-prefix semantics of
     /// strict vector operations. Consecutive requests to one mount batch.
-    pub fn open_with(&self, request: OpenRequest) -> VfResult<AutoFile> {
+    pub(crate) fn open_native_impl(&self, request: OpenRequest) -> VfResult<AutoFile> {
         self.openv(&[request]).map(|mut files| files.remove(0))
     }
 
@@ -1027,12 +1021,6 @@ impl AutoClient {
             .map_err(|error| error.with_index(index))
     }
 
-    pub fn readv<'a>(
-        &self,
-        ops: impl IntoIterator<Item = crate::ReadOp<'a, AutoFile>>,
-    ) -> VfResult<Vec<crate::ReadResult>> {
-        self.readv_with_options(ops, crate::ReadOptions::default())
-    }
     /// Consume a batch with an explicit aggregate read budget.
     pub fn readv_with_options<'a>(
         &self,
@@ -1062,10 +1050,7 @@ impl AutoClient {
             budget,
             |ranges, bytes| self.readv_with_limit_projected(ranges, bytes, |request| request),
             |paths, bytes| {
-                self.read_files_with_options(
-                    paths,
-                    crate::ReadAllOptions::new().max_total_bytes(bytes),
-                )
+                self.read_files_native(paths, crate::ReadAllOptions::new().max_total_bytes(bytes))
             },
         )
     }
@@ -1203,7 +1188,10 @@ impl AutoClient {
         Ok(output)
     }
 
-    pub fn writev(&self, requests: &[crate::WriteOp<'_, AutoFile>]) -> VfResult<Vec<WriteResult>> {
+    pub(crate) fn write_partial_native(
+        &self,
+        requests: &[crate::WriteOp<'_, AutoFile>],
+    ) -> VfResult<Vec<WriteResult>> {
         self.write_vector(requests, false)
     }
 
@@ -1373,29 +1361,6 @@ impl AutoClient {
         match route.route {
             Route::Mounted => self.mounted.read_with_limit(&route.path, limit),
             Route::Nfs(connection) => connection.client.read_with_limit(&route.path, limit),
-        }
-    }
-
-    pub fn remove_file(&self, path: impl AsRef<Path>) -> VfResult<()> {
-        let path = path.as_ref();
-        let route = self.resolve(path, &read_mounts(false));
-        match route.route {
-            Route::Mounted => self.mounted.remove_file(&route.path),
-            Route::Nfs(connection) => connection.client.remove_file(&route.path),
-        }
-    }
-
-    pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> VfResult<()> {
-        let from = from.as_ref();
-        let to = to.as_ref();
-        let mounts = read_mounts(false);
-        let source = self.resolve(from, &mounts);
-        let destination = self.resolve(to, &mounts);
-        match (&source.route, &destination.route) {
-            (Route::Nfs(a), Route::Nfs(_)) if source.route.same_backend(&destination.route) => {
-                a.client.rename(&source.path, &destination.path)
-            }
-            _ => self.mounted.rename(from, to),
         }
     }
 
@@ -1825,7 +1790,7 @@ impl Seek for AutoFile {
     }
 }
 
-/// Positional read request for [`AutoClient::readv`].
+/// Positional read request for [`crate::FsExt::readv`].
 pub struct AutoRead<'a> {
     file: &'a AutoFile,
     offset: u64,
@@ -2038,7 +2003,7 @@ mod tests {
             max_read_bytes: 5,
             ..ResourceLimits::default()
         });
-        let tiny_file = tiny.open_one("/one").unwrap();
+        let tiny_file = tiny.open("/one").unwrap();
         let error = tiny
             .readv_with_options(
                 [crate::ReadOp::range(&tiny_file, 0, 6)],
@@ -2083,8 +2048,8 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let client = Auto::new(&root).unwrap();
         for closed in [false, true] {
-            client.write_one("/first", b"original").unwrap();
-            client.write_one("/second", b"original").unwrap();
+            client.write("/first", b"original").unwrap();
+            client.write("/second", b"original").unwrap();
             let mut files = client
                 .openv(
                     &["/first", "/second"]
@@ -2143,7 +2108,7 @@ mod tests {
             matches!(&route, AutoRoute::DirectNfs { .. }),
             "Auto chose {route:?}"
         );
-        assert!(client.metadata_one(&mount).unwrap().is_dir());
+        assert!(client.metadata(&mount).unwrap().is_dir());
         let unique = format!(
             "vnfs-auto-{}-{:?}",
             std::process::id(),
@@ -2253,15 +2218,15 @@ mod tests {
         assert_eq!(error.index(), Some(2));
         let link = mount.join(format!("{unique}-symlink"));
         std::os::unix::fs::symlink(&local, &link).unwrap();
-        let linked = client.open_one(&link).unwrap();
+        let linked = client.open(&link).unwrap();
         assert_eq!(linked.route(), AutoRoute::Mounted);
         linked.close().unwrap();
-        let entries = client.read_dir_one(&mount).unwrap();
+        let entries = client.read_dir(&mount).unwrap();
         assert!(entries.iter().any(|entry| entry.path() == first));
-        client.remove_file_one(&link).unwrap();
-        client.remove_file_one(&first).unwrap();
-        client.remove_file_one(&second).unwrap();
-        client.remove_file_one(&local).unwrap();
+        client.remove_file(&link).unwrap();
+        client.remove_file(&first).unwrap();
+        client.remove_file(&second).unwrap();
+        client.remove_file(&local).unwrap();
     }
 
     #[test]
@@ -2281,7 +2246,7 @@ mod tests {
                 max_read_bytes: 4,
                 ..Default::default()
             });
-            let file = client.open_one(&path).unwrap();
+            let file = client.open(&path).unwrap();
             assert!(matches!(file.route(), AutoRoute::DirectNfs { .. }));
             let client = client.with_limits(ResourceLimits {
                 max_read_bytes: 8,
@@ -2289,7 +2254,7 @@ mod tests {
             });
             let file = if reopen {
                 file.close().unwrap();
-                client.open_one(&path).unwrap()
+                client.open(&path).unwrap()
             } else {
                 file
             };
@@ -2441,7 +2406,7 @@ mod tests {
         };
         let listings = connection
             .client
-            .walk_with_options_one(
+            .walk_with_options(
                 &route.path,
                 crate::MetadataFields::stat(),
                 crate::WalkOptions::unlimited(),
@@ -2470,24 +2435,24 @@ mod tests {
             .sum();
         let public_total = public_entries + root.as_os_str().len();
         assert!(public_entries > backend_entries && public_total > backend_total);
-        let walk = client.walk_with_options_one(
+        let walk = client.walk_with_options(
             &root,
             crate::MetadataFields::stat(),
             crate::WalkOptions::new().max_path_bytes(backend_total),
         );
         let mut dir_bytes = 0;
-        let dir = client.visit_dir_with_options_one(
+        let dir = client.visit_dir_with_options(
             &root,
-            ReadDirOptions::new().max_path_bytes(backend_entries),
+            VisitOptions::new().max_path_bytes(backend_entries),
             |entry| {
                 dir_bytes += entry.path().as_os_str().len();
                 Ok(std::ops::ControlFlow::Continue(()))
             },
         );
         let mut tree_bytes = root.as_os_str().len();
-        let tree = client.visit_walk_with_options_one(
+        let tree = client.visit_walk_with_options(
             &root,
-            crate::WalkOptions::new().max_path_bytes(backend_total),
+            crate::VisitOptions::new().max_path_bytes(backend_total),
             |entry| {
                 tree_bytes += entry.path().as_os_str().len();
                 Ok(std::ops::ControlFlow::Continue(()))
@@ -2496,7 +2461,7 @@ mod tests {
         // Exact public budgets remain usable, including both callbacks.
         assert!(
             client
-                .walk_with_options_one(
+                .walk_with_options(
                     &root,
                     crate::MetadataFields::stat(),
                     crate::WalkOptions::new().max_path_bytes(public_total)
@@ -2505,18 +2470,18 @@ mod tests {
         );
         assert!(
             client
-                .visit_dir_with_options_one(
+                .visit_dir_with_options(
                     &root,
-                    ReadDirOptions::new().max_path_bytes(public_entries),
+                    VisitOptions::new().max_path_bytes(public_entries),
                     |_| Ok(std::ops::ControlFlow::Continue(()))
                 )
                 .is_ok()
         );
         assert_eq!(
             client
-                .visit_walk_with_options_one(
+                .visit_walk_with_options(
                     &root,
-                    crate::WalkOptions::new().max_path_bytes(public_total),
+                    crate::VisitOptions::new().max_path_bytes(public_total),
                     |_| Ok(std::ops::ControlFlow::Continue(()))
                 )
                 .unwrap(),
@@ -2524,7 +2489,7 @@ mod tests {
         );
         // Clean up through the client that traversed this directory instead
         // of mixing its direct NFS view with kernel directory caches.
-        client.remove_dir_all_one(&root).unwrap();
+        client.remove_dir_all(&root).unwrap();
         assert!(
             walk.is_err() && dir.is_err() && tree.is_err(),
             "walk={walk:?}; dir={dir:?}; tree={tree:?}"
@@ -2562,7 +2527,7 @@ mod tests {
         let path = std::env::var("VFSI_AUTO_TEST_BIND")
             .expect("VFSI_AUTO_TEST_BIND is required for this ignored integration test");
         let client = Auto::new("/").unwrap();
-        let mut file = client.open_one(&path).unwrap();
+        let mut file = client.open(&path).unwrap();
         assert_eq!(file.route(), AutoRoute::Mounted);
         let mut contents = String::new();
         file.read_to_string(&mut contents).unwrap();

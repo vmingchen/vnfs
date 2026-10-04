@@ -1,4 +1,4 @@
-use vnfs::{ControlFlow, Fs, FsExt, MetadataFields, Nfs, ReadDirOptions, WalkOptions};
+use vnfs::{ControlFlow, Fs, FsExt, MetadataFields, Nfs, VisitOptions};
 
 pub fn run(fs: &impl Fs, paths: &[String], tree: &str) -> vnfs::Result<usize> {
     // Attributes arrive with the listings, avoiding a scalar stat per entry.
@@ -6,10 +6,9 @@ pub fn run(fs: &impl Fs, paths: &[String], tree: &str) -> vnfs::Result<usize> {
     for cohort in paths.chunks(64) {
         let listings = fs.read_dirs_with_options(
             cohort,
-            MetadataFields::MODE | MetadataFields::SIZE,
-            ReadDirOptions::new(),
+            VisitOptions::new().fields(MetadataFields::MODE | MetadataFields::SIZE),
         )?;
-        for listing in listings {
+        for listing in listings.into_iter().flatten() {
             for entry in listing.entries {
                 println!("{:?}: {} bytes", entry.path(), entry.metadata().len());
             }
@@ -18,7 +17,7 @@ pub fn run(fs: &impl Fs, paths: &[String], tree: &str) -> vnfs::Result<usize> {
     // Visit bounded pages instead of collecting a large tree.
     // Symlinks are not followed; iteration order is backend-defined.
     let mut entries = 0;
-    fs.visit_walk_with_options_one(tree, WalkOptions::new(), |_| {
+    fs.visit_walk_with_options(tree, VisitOptions::new(), |_| {
         entries += 1;
         Ok(ControlFlow::Continue(()))
     })?;

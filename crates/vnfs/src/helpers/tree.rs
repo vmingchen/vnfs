@@ -49,7 +49,7 @@ struct Entry {
 ///     .add_directory("data/raw")
 ///     .create(client, "/new-workspace")?;
 /// // Explicit cleanup when appropriate:
-/// client.remove_dir_all_one(tree.root())?;
+/// client.remove_dir_all(tree.root())?;
 /// # Ok(())
 /// # }
 /// ```
@@ -237,7 +237,7 @@ impl TreeBuilder {
             }
         }
         client
-            .create_dir_one(root)
+            .create_dir(root)
             .map_err(|e| e.with_context("create_tree", root))?;
         for level in directories.values() {
             for batch in level.chunks(self.batch_size) {

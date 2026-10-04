@@ -34,8 +34,8 @@ fn bulk_roundtrip_cleanup_and_existing_directory_protection() -> Result<()> {
         [b"hello".to_vec(), b"world".to_vec()]
     );
     assert!(!root.path().join("fresh").exists());
-    fs.create_dir_one("/existing")?;
-    fs.write_one("/existing/precious", b"keep")?;
+    fs.create_dir("/existing")?;
+    fs.write("/existing/precious", b"keep")?;
     assert!(bulk_files::run(&fs, "/existing").is_err());
     assert_eq!(
         fs.readv_with_options(
@@ -80,8 +80,8 @@ fn stream_multiple_chunks_and_empty_file() -> Result<()> {
     let root = tempfile::tempdir().unwrap();
     let fs = Mounted::new(root.path())?;
     let bytes = 2 * 1024 * 1024 + 7;
-    fs.write_one("/large", &vec![37; bytes])?;
-    fs.write_one("/empty", &[])?;
+    fs.write("/large", &vec![37; bytes])?;
+    fs.write("/empty", &[])?;
     assert_eq!(stream_file::run(&fs, "/large")?, bytes as u64);
     assert_eq!(stream_file::run(&fs, "/empty")?, 0);
     assert!(stream_file::run(&fs, "/missing").is_err());
@@ -92,10 +92,10 @@ fn stream_multiple_chunks_and_empty_file() -> Result<()> {
 fn directory_batches_and_no_follow_walk() -> Result<()> {
     let root = tempfile::tempdir().unwrap();
     let fs = Mounted::new(root.path())?;
-    fs.create_dir_all_one("/tree/sub")?;
-    fs.write_one("/tree/sub/file", b"data")?;
-    fs.create_dir_one("/outside")?;
-    fs.write_one("/outside/hidden", b"outside")?;
+    fs.create_dir_all("/tree/sub")?;
+    fs.write("/tree/sub/file", b"data")?;
+    fs.create_dir("/outside")?;
+    fs.write("/outside/hidden", b"outside")?;
     std::os::unix::fs::symlink(root.path().join("outside"), root.path().join("tree/link")).unwrap();
     assert_eq!(
         directories::run(&fs, &["/tree".into(), "/tree/sub".into()], "/tree")?,
@@ -147,7 +147,7 @@ fn canonical_workflows_on_nfsv41_and_nfsv42() -> Result<()> {
                 [vec![37; 4096], vec![], b"hello".to_vec()]
             );
             assert_eq!(stream_file::run(&fs, &paths[0])?, bytes as u64);
-            let file = fs.open_one(&paths[0])?;
+            let file = fs.open(&paths[0])?;
             let mut buffer = [0; 4];
             let mixed = fs.readv_with_options(
                 [
@@ -172,7 +172,7 @@ fn canonical_workflows_on_nfsv41_and_nfsv42() -> Result<()> {
             );
             Ok(())
         })();
-        let cleanup = fs.remove_dir_all_one(tree.root());
+        let cleanup = fs.remove_dir_all(tree.root());
         result?;
         cleanup?;
     }

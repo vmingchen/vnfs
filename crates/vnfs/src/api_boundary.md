@@ -1,5 +1,32 @@
 ## Application boundary
 
+Collection and visiting share `VisitOptions`; separate recursive collection
+and concrete-client helper entry points are not retained:
+
+```compile_fail,E0599
+use vnfs::{Fs, FsExt};
+fn old_collect(fs: &impl Fs) {
+    let _ = fs.walks_with_options(&["/tree"], vnfs::MetadataFields::MODE, vnfs::WalkOptions::new());
+}
+```
+
+```compile_fail,E0599
+fn inherent_open(client: &vnfs::NfsClient) {
+    // Without FsExt in scope there is no separate inherent implementation.
+    let _ = client.open_with(vnfs::OpenRequest::new("/file", vnfs::OpenFlags::READ));
+}
+```
+
+```compile_fail,E0599
+fn inherent_read(client: &vnfs::NfsClient) {
+    let _ = client.readv([vnfs::ReadOp::whole("/file")]);
+}
+```
+
+```compile_fail
+use vnfs::application::NativeHooks;
+```
+
 Shallow and recursive visits share one primitive, with borrowed entries:
 
 ```compile_fail,E0599
@@ -173,22 +200,24 @@ fn old_mkdir(fs: &impl Fs) { let _ = fs.create_dirs(&["/a", "/b"]); }
 Import `FsExt` to use scalar operations and convenience workflows. Its blanket
 implementation applies to every `Fs`: generic code still needs only an `Fs` bound.
 
-Single-target helpers use `_one`; prefer their vector counterparts for cohorts.
-The historical unsuffixed scalar names are not extension methods.
+Single-target helpers use conventional names; prefer their vector counterparts for cohorts.
+
+The previous suffixed application names are not retained as aliases:
 
 ```compile_fail,E0599
 use vnfs::{Fs, FsExt};
-fn old_open(fs: &impl Fs) { let _ = fs.open("/file"); }
+fn old_open(fs: &impl Fs) { let _ = fs.open_one("/file"); }
 ```
+Conventional scalar names are extensions requiring only an `Fs` bound:
 
-```compile_fail,E0599
+```no_run
 use vnfs::{Fs, FsExt};
-fn old_listing(fs: &impl Fs) { let _ = fs.read_dir("/dir"); }
-```
-
-```compile_fail,E0599
-use vnfs::{Fs, FsExt};
-fn old_write(fs: &impl Fs) { let _ = fs.write("/file", b"data"); }
+fn scalar_workflow(fs: &impl Fs) -> vnfs::Result<()> {
+    fs.write("/file", b"data")?;
+    let file = fs.open("/file")?;
+    let _ = fs.read_dir("/")?;
+    fs.closev(vec![file])
+}
 ```
 
 ```compile_fail
@@ -211,7 +240,7 @@ request types or a write-request associated type.
 ```compile_fail,E0505
 use vnfs::{Fs, FsExt, WriteOp};
 fn borrowed(fs: &impl Fs) {
-    let file = fs.create_one("/output").unwrap();
+    let file = fs.create("/output").unwrap();
     let ops = [WriteOp::at(&file, 0, b"hello")];
     drop(file);
     let _ = fs.writev(&ops);
@@ -238,77 +267,77 @@ Each single-target execution method belongs to `FsExt`, not `Fs`.
 ```compile_fail,E0599
 use vnfs::Fs;
 fn open_with(fs: &impl Fs) {
-    let _ = fs.open_with_one(vnfs::OpenRequest::new("/file", vnfs::OpenFlags::READ));
+    let _ = fs.open_with(vnfs::OpenRequest::new("/file", vnfs::OpenFlags::READ));
 }
 ```
 
 ```compile_fail,E0599
 use vnfs::Fs;
 fn create_dir_all(fs: &impl Fs) {
-    let _ = fs.create_dir_all_one("/dir");
+    let _ = fs.create_dir_all("/dir");
 }
 ```
 
 ```compile_fail,E0599
 use vnfs::Fs;
 fn remove_file(fs: &impl Fs) {
-    let _ = fs.remove_file_one("/file");
+    let _ = fs.remove_file("/file");
 }
 ```
 
 ```compile_fail,E0599
 use vnfs::Fs;
 fn remove_dir(fs: &impl Fs) {
-    let _ = fs.remove_dir_one("/dir");
+    let _ = fs.remove_dir("/dir");
 }
 ```
 
 ```compile_fail,E0599
 use vnfs::Fs;
 fn remove_dir_all(fs: &impl Fs) {
-    let _ = fs.remove_dir_all_one("/dir");
+    let _ = fs.remove_dir_all("/dir");
 }
 ```
 
 ```compile_fail,E0599
 use vnfs::Fs;
 fn remove_dir_contents(fs: &impl Fs) {
-    let _ = fs.remove_dir_contents_one("/dir");
+    let _ = fs.remove_dir_contents("/dir");
 }
 ```
 
 ```compile_fail,E0599
 use vnfs::Fs;
 fn rename(fs: &impl Fs) {
-    let _ = fs.rename_one("/old", "/new");
+    let _ = fs.rename("/old", "/new");
 }
 ```
 
 ```compile_fail,E0599
 use vnfs::Fs;
 fn walk_with_options(fs: &impl Fs) {
-    let _ = fs.walk_with_options_one("/", vnfs::MetadataFields::MODE, vnfs::WalkOptions::new());
+    let _ = fs.walk_with_options("/", vnfs::MetadataFields::MODE, vnfs::WalkOptions::new());
 }
 ```
 
 ```compile_fail,E0599
 use vnfs::Fs;
 fn visit_walk_with_options(fs: &impl Fs) {
-    let _ = fs.visit_walk_with_options_one("/", vnfs::WalkOptions::new(), |_| Ok(std::ops::ControlFlow::Continue(())));
+    let _ = fs.visit_walk_with_options("/", vnfs::VisitOptions::new(), |_| Ok(std::ops::ControlFlow::Continue(())));
 }
 ```
 
 ```compile_fail,E0599
 use vnfs::Fs;
 fn visit_dir_with_options(fs: &impl Fs) {
-    let _ = fs.visit_dir_with_options_one("/", vnfs::ReadDirOptions::new(), |_| Ok(std::ops::ControlFlow::Continue(())));
+    let _ = fs.visit_dir_with_options("/", vnfs::VisitOptions::new(), |_| Ok(std::ops::ControlFlow::Continue(())));
 }
 ```
 
 ```compile_fail,E0599
 use vnfs::Fs;
 fn read_stream_with_options(fs: &impl Fs) {
-    let _ = fs.read_stream_with_options_one("/file", vnfs::ReadStreamOptions::new(), |_, _| Ok(true));
+    let _ = fs.read_stream_with_options("/file", vnfs::ReadStreamOptions::new(), |_, _| Ok(true));
 }
 ```
 

@@ -56,13 +56,13 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
     let root = tempfile::tempdir().unwrap();
     let fs = vnfs::Mounted::new(root.path()).unwrap();
     let other = vnfs::Mounted::new(root.path()).unwrap();
-    let file = fs.create_one("/a").unwrap();
+    let file = fs.create("/a").unwrap();
     fs.writev_with_options(
         &[WriteOp::at(&file, 0, b"keep")],
         vnfs::WriteOptions::new().write_all(true),
     )
     .unwrap();
-    let foreign = other.create_one("/b").unwrap();
+    let foreign = other.create("/b").unwrap();
     let error = fs
         .writev_with_options(
             &[
@@ -87,7 +87,7 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
     assert_eq!(error.operation(), Some("writev"));
     assert_eq!(error.path(), Some(std::path::Path::new("/a")));
     assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
-    let mut closed = fs.create_one("/closed").unwrap();
+    let mut closed = fs.create("/closed").unwrap();
     closed.try_close().unwrap();
     assert_eq!(
         fs.writev_with_options(
@@ -113,9 +113,9 @@ fn metadata<C: Fs>(fs: &C) {
     assert!(links[0].is_file());
     assert!(links[1].is_symlink());
     assert!(links[2].is_symlink());
-    assert!(fs.metadata_one("/link").unwrap().is_file());
-    assert!(fs.symlink_metadata_one("/link").unwrap().is_symlink());
-    assert!(fs.metadata_one("/dangling").is_err());
+    assert!(fs.metadata("/link").unwrap().is_file());
+    assert!(fs.symlink_metadata("/link").unwrap().is_symlink());
+    assert!(fs.metadata("/dangling").is_err());
     let partial = fs
         .metadatav_with_options(
             &["/a"],
@@ -138,7 +138,7 @@ fn metadata<C: Fs>(fs: &C) {
     );
     assert!(fs.metadatav::<&str>(&[]).unwrap().is_empty());
     assert!(
-        fs.symlink_metadata_with_fields_one("/link", MetadataFields::MODE)
+        fs.symlink_metadata_with_fields("/link", MetadataFields::MODE)
             .unwrap()
             .is_symlink()
     );

@@ -1,6 +1,8 @@
 use crate::{MetadataFields, ReadDirOptions, ResourceLimits, WalkOptions};
 
-/// Bounded, paged directory visiting. Defaults to immediate children only.
+/// Shared directory traversal policy for collection and paged visiting.
+/// Defaults to immediate children only. Collection retains native batching;
+/// visiting delivers borrowed entries incrementally through callbacks.
 /// Unspecified budgets inherit the client's resource limits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VisitOptions {
@@ -13,6 +15,18 @@ pub struct VisitOptions {
 }
 
 impl VisitOptions {
+    /// Explicitly disable entry, path-byte and depth limits. This can permit
+    /// unbounded collection or traversal; prefer finite application budgets.
+    pub const fn unlimited() -> Self {
+        Self {
+            recursive: false,
+            entries: Some(usize::MAX),
+            bytes: Some(usize::MAX),
+            depth: Some(usize::MAX),
+            truncate: false,
+            fields: None,
+        }
+    }
     pub const fn new() -> Self {
         Self {
             recursive: false,

@@ -16,7 +16,7 @@ let tree = TreeBuilder::new()
     .create(&client, "/new-workspace")?;
 
 // Optional, explicit cleanup. Dropping `tree` does not delete anything.
-client.remove_dir_all_one(tree.root())?;
+client.remove_dir_all(tree.root())?;
 # Ok::<(), vnfs::Error>(())
 ```
 

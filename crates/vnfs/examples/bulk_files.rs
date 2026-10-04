@@ -2,7 +2,7 @@ use vnfs::{Fs, FsExt, Nfs};
 
 // The parent must exist. Never delete an existing directory to make room.
 pub fn run(fs: &impl Fs, fresh_root: &str) -> vnfs::Result<Vec<Vec<u8>>> {
-    fs.create_dir_one(fresh_root)?; // Cleanup starts only after exclusive creation succeeds.
+    fs.create_dir(fresh_root)?; // Cleanup starts only after exclusive creation succeeds.
     let result = (|| {
         let paths = [
             format!("{fresh_root}/file-1"),
@@ -20,7 +20,7 @@ pub fn run(fs: &impl Fs, fresh_root: &str) -> vnfs::Result<Vec<Vec<u8>>> {
                 .collect()
         })
     })();
-    let cleanup = fs.remove_dir_all_one(fresh_root);
+    let cleanup = fs.remove_dir_all(fresh_root);
     // Preserve an operation error, but report cleanup failure after successful I/O.
     let contents = result?;
     cleanup?;

@@ -50,9 +50,9 @@ are in the [package README](https://github.com/vmingchen/vnfs/tree/main/crates/v
 | --- | --- | --- |
 | Many complete small files | `NfsClient::readv`, `FsExt::write_files` | [Bulk files](examples::bulk_files) |
 | Repeated or positional I/O | `NfsClient::openv`, `NfsClient::readv`, `NfsClient::writev_with_options` | [Open handles](examples::open_handles) |
-| One large file | `FsExt::read_stream_with_options_one` | [Bounded streaming](examples::stream_file) |
+| One large file | `FsExt::read_stream_with_options` | [Bounded streaming](examples::stream_file) |
 | Many directory listings with attributes | `NfsClient::read_dirs_with_options` | [Directories](examples::directories) |
-| Large trees without collecting everything | `FsExt::visit_walk_one`, `FsExt::walk_events_with_options_one` | [Directories](examples::directories) |
+| Large trees without collecting everything | `FsExt::visit_walk`, `FsExt::walk_events_with_options` | [Directories](examples::directories) |
 | Declarative fresh directory tree | `helpers::TreeBuilder` | [Builder example](helpers::TreeBuilder) |
 | Existing Linux NFS mount | `Nfs::from_mount`, `NfsBuilder::from_mount` | [Mount discovery](Nfs::from_mount) |
 | Backend-independent application code | `Fs`, `FsExt`, `FileHandle` | [Generic workflows](examples) |

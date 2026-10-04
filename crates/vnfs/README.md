@@ -46,12 +46,12 @@ For complete, compiled workflows, see the
 [canonical examples](examples/README.md) and the
 [task-oriented API documentation](https://docs.rs/vnfs/latest/vnfs/).
 Start with `readv`/`write_files` for small files, `openv`/`readv` with `ReadOp::into` for
-repeated positional I/O, or `read_stream_with_options_one` for one large file.
+repeated positional I/O, or `read_stream_with_options` for one large file.
 `Fs` contains vectorized operations; `FsExt` adds scalar operations and
 convenience workflows, preserving their native backend execution.
 
-Single-target `FsExt` helpers end in `_one`, such as `open_one`, `write_one`,
-`metadata_one`, and `read_dir_one`. Prefer vector operations for independent
+Single-target `FsExt` helpers use conventional names such as `open`, `write`,
+`metadata`, and `read_dir`. Prefer vector operations for independent
 work on multiple files or directories: `openv`, `readv`, `write_files`, and
 `read_dirs_with_options` let the backend batch requests.
 `metadatav_with_options` batches metadata with selected fields and explicit
@@ -99,6 +99,7 @@ limits allow; oversized vectors are split automatically.
 Already have the directory mounted on Linux? Discover its connection:
 
 ```rust,no_run
+use vnfs::FsExt;
 let client = vnfs::Nfs::from_mount("/mnt/data/git/some/tree")?;
 let files = client.readv([
     vnfs::ReadOp::whole("/file-1"),
@@ -123,17 +124,14 @@ listing fetches, and each `DirectoryListing` includes metadata for its entries
 without a separate stat call per file. For example:
 
 ```rust,no_run
-use vnfs::{MetadataFields, Nfs, ReadDirOptions};
+use vnfs::{Fs, MetadataFields, Nfs, VisitOptions};
 
 fn main() -> vnfs::Result<()> {
     let fs = Nfs::connect("nfs.example.com")?;
     let directories = ["/export/a", "/export/b"];
-    let listings = fs.read_dirs_with_options(
-        &directories,
-        MetadataFields::MODE | MetadataFields::SIZE | MetadataFields::BLOCKS,
-        ReadDirOptions::new(),
-    )?;
-    for directory in listings {
+    let listings = fs.read_dirs_with_options(&directories,
+        VisitOptions::new().fields(MetadataFields::MODE | MetadataFields::SIZE | MetadataFields::BLOCKS))?;
+    for directory in listings.into_iter().flatten() {
         println!("{}: {} entries", directory.path.display(), directory.entries.len());
     }
     Ok(())
@@ -280,8 +278,8 @@ use vnfs::prelude::*;
 
 fn main() -> vnfs::Result<()> {
     let client = Nfs::connect("nfs.example.com")?;
-    let mut file = client.open_one("/file-1")?;
-    let mut contents = vec![0; client.metadata_one("/file-1")?.len() as usize];
+    let mut file = client.open("/file-1")?;
+    let mut contents = vec![0; client.metadata("/file-1")?.len() as usize];
     file.read_at(&mut contents, 0)?;
     file.try_close()?;
     Ok(())
@@ -315,7 +313,7 @@ use vnfs::prelude::*;
 fn main() -> vnfs::Result<()> {
     let client = Nfs::connect("nfs.example.com")?;
     let mut bytes_seen = 0u64;
-    client.read_stream_with_options_one(
+    client.read_stream_with_options(
         "/dataset/large.bin",
         ReadStreamOptions::new().chunk_size(4 * 1024 * 1024),
         |offset, chunk| {
@@ -461,7 +459,7 @@ RPCs. Use `connect_pool` for independent application workers, or
 waits for outstanding reads to finish and then closes the worker handles.
 Neither streaming path promises a snapshot of a concurrently modified file.
 
-`walk_events_with_options_one(root, fields, limits, sort_by_name, callback)` adds
+`walk_events_with_options(root, fields, limits, sort_by_name, callback)` adds
 selective metadata and depth-first `Enter`, `Entry`, and `Leave` events.
 Return `WalkControl::SkipSubtree` from `Enter` to avoid reading that directory;
 `Stop` ends the entire traversal. A pruned directory still receives `Leave`.

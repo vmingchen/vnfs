@@ -2,7 +2,7 @@ use vnfs::{Fs, FsExt, Nfs, ReadStreamOptions};
 
 pub fn run(fs: &impl Fs, path: &str) -> vnfs::Result<u64> {
     let mut bytes = 0_u64;
-    fs.read_stream_with_options_one(
+    fs.read_stream_with_options(
         path,
         ReadStreamOptions::new().chunk_size(1024 * 1024),
         |offset, chunk| {

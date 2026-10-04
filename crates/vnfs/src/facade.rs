@@ -32,15 +32,6 @@ macro_rules! owned_client {
             pub fn capabilities(&self) -> Result<Capabilities> {
                 self.inner.capabilities()
             }
-            /// Stream one file using an explicit maximum chunk size.
-            pub fn read_stream_with_options(
-                &self,
-                path: impl AsRef<Path>,
-                options: ReadStreamOptions,
-                callback: impl FnMut(u64, &[u8]) -> Result<bool>,
-            ) -> Result<StreamCompletion> {
-                self.inner.read_stream_with_options(path, options, callback)
-            }
             /// Rename source/destination pairs without scalarizing the native vector.
             pub fn renamev<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
                 self.inner.renamev(pairs)
@@ -54,15 +45,6 @@ macro_rules! owned_client {
             pub fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> Result<()> {
                 self.inner.create_dir_with_mode(path, mode)
             }
-            /// Visit entries with explicit entry and cumulative path-byte limits.
-            pub fn visit_dir_with_options(
-                &self,
-                path: impl AsRef<Path>,
-                options: ReadDirOptions,
-                callback: impl FnMut(DirEntry) -> Result<std::ops::ControlFlow<()>>,
-            ) -> Result<TraversalCompletion> {
-                self.inner.visit_dir_with_options(path, options, callback)
-            }
             pub(crate) fn visit_dir_with_fields(
                 &self,
                 path: impl AsRef<Path>,
@@ -72,39 +54,6 @@ macro_rules! owned_client {
             ) -> Result<TraversalCompletion> {
                 self.inner
                     .visit_dir_with_fields(path, fields, options, callback)
-            }
-            /// Create missing parents and the requested directory.
-            pub fn create_dir_all(&self, path: impl AsRef<Path>) -> Result<()> {
-                self.inner.create_dir_all(path)
-            }
-            /// Remove a non-directory entry; symbolic links are not followed.
-            pub fn remove_file(&self, path: impl AsRef<Path>) -> Result<()> {
-                self.inner.remove_file(path)
-            }
-            /// Remove an empty directory.
-            pub fn remove_dir(&self, path: impl AsRef<Path>) -> Result<()> {
-                self.inner.remove_dir(path)
-            }
-            /// Remove a directory tree without following symbolic links; not atomic.
-            pub fn remove_dir_all(&self, path: impl AsRef<Path>) -> Result<()> {
-                self.inner.remove_dir_all(path)
-            }
-            /// Remove the contents of a directory, keeping the directory itself.
-            pub fn remove_dir_contents(&self, path: impl AsRef<Path>) -> Result<()> {
-                self.inner.remove_dir_contents(path)
-            }
-            /// Rename one entry within this client's namespace.
-            pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<()> {
-                self.inner.rename(from, to)
-            }
-            /// Visit a tree incrementally with explicit traversal limits.
-            pub fn visit_walk_with_options(
-                &self,
-                root: impl AsRef<Path>,
-                options: $crate::WalkOptions,
-                callback: impl FnMut(&DirEntry) -> Result<std::ops::ControlFlow<()>>,
-            ) -> Result<TraversalCompletion> {
-                self.inner.visit_walk_with_options(root, options, callback)
             }
             pub(crate) fn visit_walk_with_fields(
                 &self,
@@ -153,31 +102,6 @@ macro_rules! owned_client {
             pub fn read_link(&self, path: impl AsRef<Path>) -> Result<PathBuf> {
                 self.inner.read_link(path)
             }
-            /// List multiple directories in a vector call. The limits apply to the
-            /// aggregate returned entries and stored path bytes. Streaming backends
-            /// apply these limits before collecting a full listing; a backend using
-            /// the compatibility `visit_dir` fallback may buffer one directory first.
-            /// An error discards the collected prefix; callers may retry individual
-            /// directories if desired.
-            pub fn read_dirs_with_options<P: AsRef<Path>>(
-                &self,
-                paths: &[P],
-                fields: MetadataFields,
-                options: ReadDirOptions,
-            ) -> Result<Vec<DirectoryListing>> {
-                self.inner.read_dirs_with_options(paths, fields, options)
-            }
-            /// Recursively enumerate directories with selected entry attributes.
-            /// The walk is bounded by `options`; sorting and presentation remain the
-            /// application's responsibility.
-            pub fn walk_with_options(
-                &self,
-                root: impl AsRef<Path>,
-                fields: MetadataFields,
-                options: $crate::WalkOptions,
-            ) -> Result<Vec<DirectoryListing>> {
-                self.inner.walk_with_options(root, fields, options)
-            }
             /// Copy whole files in request order. A successful prefix may remain if
             /// a later request fails; this operation does not provide atomicity.
             pub fn copyv<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
@@ -197,10 +121,6 @@ macro_rules! owned_client {
             ) -> Result<()> {
                 self.inner
                     .remove_paths_with_options(paths, recursive, options)
-            }
-            /// Open one handle with explicit flags using backend-specific state handling.
-            pub fn open_with(&self, request: OpenRequest) -> Result<$file> {
-                self.inner.open_with(request).map(|inner| $file { inner })
             }
             /// Open an ordered vector of files.
             ///
@@ -239,16 +159,6 @@ macro_rules! owned_client {
             ) -> Result<()> {
                 self.inner
                     .try_closev(files.into_iter().map(|file| &mut file.inner))
-            }
-            /// Read whole-file paths and positional ranges in input order.
-            /// The default budget comes from this client's resource limits.
-            /// Whole files complete or fail; ranges may return short progress.
-            /// See [`FsExt::readv`] for examples. Use `ReadOp::into` for caller storage.
-            pub fn readv<'a>(
-                &self,
-                ops: impl IntoIterator<Item = ReadOp<'a, $file>>,
-            ) -> Result<Vec<ReadResult>> {
-                self.readv_with_options(ops, ReadOptions::default())
             }
             /// Read with an explicit aggregate byte budget. See [`Fs::readv_with_options`].
             pub fn readv_with_options<'a>(
@@ -305,7 +215,10 @@ macro_rules! owned_client {
                 )
             }
             /// Write ordered positional ranges; short writes are reported and effects are not atomic.
-            pub fn writev(&self, requests: &[WriteOp<'_, $file>]) -> Result<Vec<WriteResult>> {
+            pub(crate) fn write_partial_native(
+                &self,
+                requests: &[WriteOp<'_, $file>],
+            ) -> Result<Vec<WriteResult>> {
                 self.inner.writev_mapped(requests, |op| {
                     op.file().inner.write_request_at(op.offset(), op.data())
                 })
@@ -321,7 +234,7 @@ macro_rules! owned_client {
                 let result = if options.writes_all() {
                     self.write_complete(requests)
                 } else {
-                    self.writev(requests)
+                    self.write_partial_native(requests)
                 };
                 result.map_err($crate::write::public_write_error)
             }
@@ -337,6 +250,35 @@ macro_rules! owned_client {
                 self.inner.write_allv_mapped(requests, |op| {
                     op.file().inner.write_request_at(op.offset(), op.data())
                 })
+            }
+        }
+        impl crate::application::NativeHooks for $client {
+            fn open_native(&self, request: OpenRequest) -> Result<Self::File> {
+                self.inner.open_with(request).map(|inner| $file { inner })
+            }
+            fn list_native<P: AsRef<Path>>(
+                &self,
+                paths: &[P],
+                fields: MetadataFields,
+                options: ReadDirOptions,
+            ) -> Result<Vec<DirectoryListing>> {
+                self.inner.read_dirs_with_options(paths, fields, options)
+            }
+            fn walk_native(
+                &self,
+                root: impl AsRef<Path>,
+                fields: MetadataFields,
+                options: WalkOptions,
+            ) -> Result<Vec<DirectoryListing>> {
+                self.inner.walk_with_options(root, fields, options)
+            }
+            fn stream_native(
+                &self,
+                path: impl AsRef<Path>,
+                options: ReadStreamOptions,
+                callback: impl FnMut(u64, &[u8]) -> Result<bool>,
+            ) -> Result<StreamCompletion> {
+                self.inner.read_stream_with_options(path, options, callback)
             }
         }
         /// Opened object with private backend ownership; closes best-effort on Drop.

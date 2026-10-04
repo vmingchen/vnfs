@@ -8,7 +8,7 @@ use std::error::Error;
 use std::io;
 use std::time::{Duration, Instant};
 
-use vnfs::{Nfs, NfsReadPool, NfsReadPoolOptions, ReadStreamOptions};
+use vnfs::{FsExt, Nfs, NfsReadPool, NfsReadPoolOptions, ReadStreamOptions};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 

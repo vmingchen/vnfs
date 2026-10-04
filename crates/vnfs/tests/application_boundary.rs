@@ -82,8 +82,8 @@ fn auto_range_only_reads_keep_the_legacy_routing_allocation_cost() {
 fn unified_operation_construction_does_not_allocate() {
     let temp = tempfile::tempdir().unwrap();
     let fs = Mounted::new(temp.path()).unwrap();
-    fs.write_one("/a", b"abc").unwrap();
-    let file = fs.open_one("/a").unwrap();
+    fs.write("/a", b"abc").unwrap();
+    let file = fs.open("/a").unwrap();
     let mut buffer = [0; 1];
     let (ops, cost) = measured(|| {
         [
@@ -188,7 +188,7 @@ fn opaque_requests_preserve_owner_preflight_and_error_sources() {
     let root = tempfile::TempDir::new().unwrap();
     let owner = Mounted::new(root.path()).unwrap();
     let other = Mounted::new(root.path()).unwrap();
-    owner.write_one("/a", b"original").unwrap();
+    owner.write("/a", b"original").unwrap();
     let mut file = owner
         .open_options()
         .read(true)
@@ -219,7 +219,7 @@ fn opaque_requests_preserve_owner_preflight_and_error_sources() {
             .downcast_ref::<vnfs::Error>()
             .is_some()
     );
-    owner.remove_file_one("/a").unwrap();
+    owner.remove_file("/a").unwrap();
 }
 
 #[test]
@@ -237,8 +237,8 @@ fn handles_remain_send_sync_and_clients_remain_cheaply_cloneable() {
     let client = Mounted::new(root.path()).unwrap();
     let (clone, allocations) = measured(|| client.clone());
     assert_eq!(allocations, (0, 0), "client clone must share its backend");
-    client.write_one("/shared", b"data").unwrap();
-    let mut file = client.open_one("/shared").unwrap();
+    client.write("/shared", b"data").unwrap();
+    let mut file = client.open("/shared").unwrap();
     clone.try_closev([&mut file]).unwrap();
     assert!(
         file.is_closed(),
