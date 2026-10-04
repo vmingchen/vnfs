@@ -29,7 +29,7 @@ or symlinks in the root's ancestors: use trusted parents.
 Planning performs no I/O. It validates all entries and infers each parent once.
 Creation batches directories by depth, then files through vector OPEN,
 WRITE-all, and CLOSE. File contents remain borrowed from the plan during writes.
-`mkdirv` is also available directly on clients for bulk directory creation
+`vmkdir` is also available directly on clients for bulk directory creation
 when the parents already exist.
 
 Defaults: 64 entries per batch, 10,000 entries (including inferred parents),

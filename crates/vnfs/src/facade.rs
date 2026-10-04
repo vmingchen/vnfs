@@ -10,7 +10,7 @@ macro_rules! owned_client {
         }
         impl $client {
             /// Vector metadata with selected attributes and final-symlink handling.
-            pub fn metadatav_with_options<P: AsRef<Path>>(
+            pub fn vgetattrs<P: AsRef<Path>>(
                 &self,
                 paths: &[P],
                 options: MetadataOptions,
@@ -39,12 +39,12 @@ macro_rules! owned_client {
                 self.inner.capabilities()
             }
             /// Rename source/destination pairs without scalarizing the native vector.
-            pub fn renamev<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+            pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
                 self.inner.renamev(pairs)
             }
             /// Create directories in vector phases; parents must exist.
             /// An error can follow partially completed mutations.
-            pub fn mkdirv<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {
+            pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {
                 self.inner.mkdirv(paths)
             }
             /// Create one directory with explicit Unix permission bits.
@@ -109,7 +109,7 @@ macro_rules! owned_client {
             }
             /// Copy whole files in request order. A successful prefix may remain if
             /// a later request fails; this operation does not provide atomicity.
-            pub fn copyv<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+            pub fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
                 self.inner.copyv(pairs)
             }
             /// Remove paths in request order, optionally recursing into directories.
@@ -132,7 +132,7 @@ macro_rules! owned_client {
             /// Success returns one RAII handle per request. Failure returns no
             /// handles; VFSI does not promise transactional rollback of other
             /// filesystem effects such as file creation.
-            pub fn openv(&self, requests: &[OpenRequest]) -> Result<Vec<$file>> {
+            pub fn vopen(&self, requests: &[OpenRequest]) -> Result<Vec<$file>> {
                 self.inner
                     .openv(requests)
                     .map(|files| files.into_iter().map(|inner| $file { inner }).collect())
@@ -158,15 +158,12 @@ macro_rules! owned_client {
             /// Try to close a group through one vector operation without consuming
             /// the handles. On failure, all handles remain armed: the backend may
             /// have closed a prefix, so callers must reconcile before retrying.
-            pub fn try_closev<'a>(
-                &self,
-                files: impl IntoIterator<Item = &'a mut $file>,
-            ) -> Result<()> {
+            pub fn vclose<'a>(&self, files: impl IntoIterator<Item = &'a mut $file>) -> Result<()> {
                 self.inner
                     .try_closev(files.into_iter().map(|file| &mut file.inner))
             }
-            /// Read with an explicit aggregate byte budget. See [`Fs::readv_with_options`].
-            pub fn readv_with_options<'a>(
+            /// Read with an explicit aggregate byte budget. See [`Fs::vread`].
+            pub fn vread<'a>(
                 &self,
                 ops: impl IntoIterator<Item = ReadOp<'a, $file>>,
                 options: ReadOptions,
@@ -230,7 +227,7 @@ macro_rules! owned_client {
             /// Select short-write reporting or completion of successful short writes.
             /// Completion performs whole-batch local preflight, but errors may
             /// follow mutations. Failed or ambiguous writes are never replayed.
-            pub fn writev_with_options(
+            pub fn vwrite(
                 &self,
                 requests: &[WriteOp<'_, $file>],
                 options: $crate::WriteOptions,
@@ -463,7 +460,7 @@ macro_rules! owned_client {
             /// Success returns one RAII handle per request. Failure returns no
             /// handles; VFSI does not promise transactional rollback of other
             /// filesystem effects such as file creation.
-            pub fn openv<P: AsRef<std::path::Path>>(&self, paths: &[P]) -> Result<Vec<$file>> {
+            pub fn vopen<P: AsRef<std::path::Path>>(&self, paths: &[P]) -> Result<Vec<$file>> {
                 self.inner
                     .openv(paths)
                     .map(|files| files.into_iter().map(|inner| $file { inner }).collect())

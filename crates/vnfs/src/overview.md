@@ -48,18 +48,21 @@ are in the [package README](https://github.com/vmingchen/vnfs/tree/main/crates/v
 
 | Task | Recommended API | Example |
 | --- | --- | --- |
-| Many complete small files | `NfsClient::readv`, `FsExt::write_files` | [Bulk files](examples::bulk_files) |
-| Repeated or positional I/O | `NfsClient::openv`, `NfsClient::readv`, `NfsClient::writev_with_options` | [Open handles](examples::open_handles) |
-| One large file | `FsExt::read_stream_with_options` | [Bounded streaming](examples::stream_file) |
-| Many directory listings with attributes | `NfsClient::read_dirs_with_options` | [Directories](examples::directories) |
-| Large trees without collecting everything | `FsExt::visit_walk`, `FsExt::walk_events_with_options` | [Directories](examples::directories) |
+| Many complete small files | [`Fs::vread`], [`FsExt::write_files`] | [Bulk files](examples::bulk_files) |
+| Repeated or positional I/O | [`Fs::vopen`], [`Fs::vread`], [`Fs::vwrite`] | [Open handles](examples::open_handles) |
+| One large file | [`Fs::vstream`] | [Bounded streaming](examples::stream_file) |
+| Many directory listings with attributes | [`Fs::vlistdirs`] | [Directories](examples::directories) |
+| Large trees without collecting everything | [`Fs::vlistdirs`] with [`VisitOptions::recursive`] | [Directories](examples::directories) |
 | Declarative fresh directory tree | `helpers::TreeBuilder` | [Builder example](helpers::TreeBuilder) |
 | Existing Linux NFS mount | `Nfs::from_mount`, `NfsBuilder::from_mount` | [Mount discovery](Nfs::from_mount) |
 | Backend-independent application code | `Fs`, `FsExt`, `FileHandle` | [Generic workflows](examples) |
 
 `Fs` contains vectorized execution primitives. `FsExt` supplies scalar operations and
 convenience helpers (`read_files`, `write_files`, scalar open, and default-option
-listing/streaming) without scalarizing vectors. Import both with `vnfs::prelude::*`.
+listing/streaming) without scalarizing vectors. `FsExt::read_dirs_with_options`
+collects pages returned by `Fs::vlistdirs`; `FsExt::read_stream_with_options`
+is the single-path adapter for `Fs::vstream`. These remain valid extension
+helpers, not core execution methods. Import both with `vnfs::prelude::*`.
 
 ## API map
 
@@ -87,12 +90,12 @@ listing/streaming) without scalarizing vectors. Import both with `vnfs::prelude:
   These are not a process-wide peak-memory cap. Standard `std::io::Read::read_to_end`
   does not inherit an allocation limit.
 - `readv` range requests and `writev` may return short progress. Whole-file
-  requests complete or fail; they never silently truncate. Use `writev_with_options`
+  requests complete or fail; they never silently truncate. Use `vwrite`
   with `WriteOptions::new().write_all(true)` to complete
   successful short writes; do not mistake a short read without EOF for completion.
   Positional requests preserve the file cursor.
 - Files close best-effort on drop. Use explicit `closev` to surface cleanup
-  failures or `try_closev` to retain local cleanup ownership on failure. Writes
+  failures or `vclose` to retain local cleanup ownership on failure. Writes
   are not automatically durable; use a file's `sync_data` or `sync_all` as needed.
 - Cloning a client shares its session and lock, not independent parallelism.
   [`NfsClientPool`] distributes workloads across independent sessions;

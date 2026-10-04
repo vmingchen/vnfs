@@ -22,7 +22,7 @@ with the same `VisitOptions` used for visiting. Results are grouped by input:
 listing per root; recursive mode includes descendants. The allocating helper consumes directory pages from the native vector visitor, retaining batching without copying every entry.
 `FsExt::read_dirs` supplies the ordinary flat shallow result for convenience.
 
-`Fs::visit_dirs_with_options` handles both shallow and recursive visits through
+`Fs::vlistdirs` handles both shallow and recursive visits through
 `VisitOptions`. Shallow is the default; `.recursive(true)` enables descent.
 Depth 0 lists root children, and depth 1 also lists immediate subdirectories.
 Recursive depth limits fail on deeper directories unless intentional truncation
@@ -38,7 +38,7 @@ backends consume one directory snapshot before starting another.
 client policy. Metadata selection is pushed into paged enumeration, without
 per-entry stat requests. Recursive traversal does not follow entry symlinks.
 
-Removal uses `removev_with_options(paths, mode, options)`, with explicit
+Removal uses `vremove(paths, mode, options)`, with explicit
 `RemoveMode::Entry`, `Tree`, or `Contents`. Contents mode retains roots and
 delegates to native anchored removal, never a list-then-delete extension loop.
 The vector call preserves indexed failures and may leave partial mutations.
@@ -140,9 +140,10 @@ operations without constructing `VfAttrs` or calling `VecFs` directly.
 fields such as allocated blocks, device ID, full mode, and named-attribute
 presence as `Option` so an absent value is not confused with zero. Use
 `symlink_metadata_with_fields` for a no-follow query,
-`read_dirs_with_options` to batch several directory operands, and
-`walk_with_options` for a bounded recursive tree. `DirectoryListing` carries
-paths and already-fetched entry metadata. `copyv` and `remove_paths`
+`vlistdirs` to visit pages for several directory operands, with
+`VisitOptions::recursive(true)` for bounded recursive trees. Use the
+`FsExt::read_dirs_with_options` collector only when retained listings are needed. `DirectoryListing` carries
+paths and already-fetched entry metadata. `vcopy` and `remove_paths`
 perform ordered batches without promising transactionality.
 
 ## Durability and failure rules
@@ -163,7 +164,7 @@ authentication categories. Unclassified causes remain `Other`, without
 guessing from message text. `err_no()` is a raw compatibility accessor;
 prefer `kind()` and `status()` for interpretation.
 
-Prefer `try_close()` and `try_closev(&mut files)` when cleanup errors matter.
+Prefer `try_close()` and `vclose(&mut files)` when cleanup errors matter.
 They retain ownership on failure. `is_closed() == false` only means local
 cleanup ownership remains, not that a remotely ambiguous close failed to take
 effect. Consuming `close`/`closev` perform best-effort cleanup on error, and
@@ -252,7 +253,7 @@ waiting, and SMB credit acquisition.
 File and directory Drop queues cleanup without acquiring the backend mutex or
 issuing RPCs while a client remains alive. Later operations drain the queue;
 `client.drain_cleanup()` explicitly reports failures and retains failed targets.
-Use `try_close`/`try_closev` to observe close failures immediately. Dropping the
+Use `try_close`/`vclose` to observe close failures immediately. Dropping the
 final backend owner still performs synchronous teardown and can wait on request
 timeouts; this is not a cancellation mechanism.
 

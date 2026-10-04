@@ -38,7 +38,7 @@ fn page_delivery_is_bounded_reentrant_and_reports_empty_directory_cancellation()
     let fs = Mounted::new(root.path()).unwrap();
     fs.create_dir("/empty").unwrap();
     assert_eq!(
-        fs.visit_dirs_with_options(
+        fs.vlistdirs(
             &["/empty", "/missing"],
             VisitOptions::new(),
             |index, page| {
@@ -55,7 +55,7 @@ fn page_delivery_is_bounded_reentrant_and_reports_empty_directory_cancellation()
         fs.write(format!("/empty/f{i}"), b"x").unwrap();
     }
     let mut sizes = Vec::new();
-    fs.visit_dirs_with_options(&["/empty"], VisitOptions::new(), |_, page| {
+    fs.vlistdirs(&["/empty"], VisitOptions::new(), |_, page| {
         sizes.push(page.entries.len());
         assert_eq!(page.path, Path::new("/empty"));
         assert!(fs.metadata(&page.path).unwrap().is_dir());

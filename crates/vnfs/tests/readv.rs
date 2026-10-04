@@ -11,7 +11,7 @@ fn mixed<C: Fs>(fs: &C) {
     let file = fs.open("/a").unwrap();
     let mut buffer = [0xcc; 4];
     let results = fs
-        .readv_with_options(
+        .vread(
             [
                 ReadOp::whole("/b"),
                 ReadOp::range(&file, 2, 2),
@@ -63,7 +63,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
         ErrorKind::FileTooLarge
     );
     assert_eq!(
-        fs.readv_with_options(
+        fs.vread(
             [ReadOp::whole("/a"), ReadOp::whole("/b")],
             ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(6))
         )
@@ -87,7 +87,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
     assert_eq!(error.index(), Some(0));
     assert_eq!(&buffer, b"abc"); // Reads are not atomic; earlier buffers may be filled.
     assert!(
-        fs.readv_with_options([], ReadOptions::new().max_total_bytes(None))
+        fs.vread([], ReadOptions::new().max_total_bytes(None))
             .unwrap()
             .is_empty()
     );

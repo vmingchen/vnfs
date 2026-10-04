@@ -178,7 +178,7 @@ fn old_complete(fs: &impl Fs) {
 fn old_concrete_complete(fs: &vnfs::NfsClient) { let _ = fs.write_allv(&[]); }
 ```
 
-Namespace vectors use `renamev`, `copyv`, and `mkdirv`; historical descriptive
+Namespace vectors use `vrename`, `vcopy`, and `vmkdir`; historical descriptive
 names are not retained as aliases.
 
 ```compile_fail,E0599
@@ -346,7 +346,7 @@ Vector-only generic code needs no extension trait:
 ```no_run
 use vnfs::{Fs, ReadOp, ReadOptions};
 fn vector_only(fs: &impl Fs) -> vnfs::Result<Vec<vnfs::ReadResult>> {
-    fs.readv_with_options([ReadOp::whole("/file-1"), ReadOp::whole("/file-2")], ReadOptions::new())
+    fs.vread([ReadOp::whole("/file-1"), ReadOp::whole("/file-2")], ReadOptions::new())
 }
 ```
 

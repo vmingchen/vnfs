@@ -107,7 +107,7 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
         }
         let _ = client.symlink_metadata_with_fields("/a/link", fields)?;
         let _ = client.walk_with_options("/a", fields, vnfs::WalkOptions::new())?;
-        client.copyv(&[("/a/source", "/a/copy")])?;
+        client.vcopy(&[("/a/source", "/a/copy")])?;
         client.remove_paths(&["/a/copy"], false)
     }
     let _ = app as fn(&vnfs::NfsClient) -> vnfs::Result<()>;
@@ -139,7 +139,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         .unwrap();
     assert_eq!(
         client
-            .readv_with_options(
+            .vread(
                 [vnfs::ReadOp::whole("/sub/a"), vnfs::ReadOp::whole("/sub/b")],
                 vnfs::ReadOptions::default()
             )
@@ -151,7 +151,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     );
     assert!(
         client
-            .readv_with_options(
+            .vread(
                 [vnfs::ReadOp::whole("/sub/a"), vnfs::ReadOp::whole("/sub/b")],
                 vnfs::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(5))
             )
@@ -162,7 +162,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         .open_options()
         .read(true)
         .write(true)
-        .openv(&["/sub/a", "/sub/b"])
+        .vopen(&["/sub/a", "/sub/b"])
         .unwrap();
     let mut a = [0; 4];
     let mut b = [0; 2];
@@ -176,7 +176,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     assert!(result[0].eof());
     assert_eq!(&b, b"ef");
     client
-        .writev_with_options(
+        .vwrite(
             &[
                 vnfs::WriteOp::at(&files[0], 1, b"XY"),
                 vnfs::WriteOp::at(&files[1], 0, b"UV"),
@@ -186,7 +186,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         .unwrap();
     assert_eq!(
         client
-            .readv_with_options(
+            .vread(
                 [vnfs::ReadOp::whole("/sub/a")],
                 vnfs::ReadOptions::default()
             )
@@ -206,15 +206,15 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         vnfs::TraversalCompletion::Complete
     );
     assert_eq!(client.walk("/sub").unwrap()[0].entries.len(), 2);
-    client.try_closev(&mut files).unwrap();
+    client.vclose(&mut files).unwrap();
     assert!(files.iter().all(|file| file.is_closed()));
-    client.try_closev(&mut files).unwrap();
+    client.vclose(&mut files).unwrap();
     assert!(files[0].read_at(&mut a, 0).is_err());
     let foreign = vnfs::Auto::new(&root).unwrap();
     let file = client.open("/sub/a").unwrap();
     assert!(
         foreign
-            .writev_with_options(
+            .vwrite(
                 &[vnfs::WriteOp::at(&file, 0, b"wrong")],
                 vnfs::WriteOptions::new().write_all(true)
             )
@@ -230,7 +230,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     assert_eq!(client.metadata("/sub/a").unwrap().len(), 2);
     client.create_dir_with_mode("/copies", 0o700).unwrap();
     client
-        .copyv(&[("/sub/a", "/copies/a"), ("/sub/b", "/copies/b")])
+        .vcopy(&[("/sub/a", "/copies/a"), ("/sub/b", "/copies/b")])
         .unwrap();
     client.hard_link("/sub/a", "/copies/hard").unwrap();
     client.symlink("a", "/sub/link").unwrap();
@@ -308,14 +308,14 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
                 )
             })
             .collect();
-        let mut files = client.openv(&requests)?;
+        let mut files = client.vopen(&requests)?;
         let writes: Vec<_> = files
             .iter()
             .map(|file| vnfs::WriteOp::at(file, 0, b"abc"))
             .collect();
         assert!(
             client
-                .writev_with_options(&writes, vnfs::WriteOptions::new().write_all(true))?
+                .vwrite(&writes, vnfs::WriteOptions::new().write_all(true))?
                 .iter()
                 .all(|result| result.written == 3)
         );
@@ -345,12 +345,12 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
         files[0].seek_native(std::io::SeekFrom::Start(0))?;
         assert_eq!(files[0].read_to_end_with_limit(3)?, b"abc");
         files[0].try_close()?;
-        client.try_closev(&mut files)?;
-        client.try_closev(&mut files)?;
+        client.vclose(&mut files)?;
+        client.vclose(&mut files)?;
         assert!(files.iter().all(|file| file.is_closed()));
         assert_eq!(
             client
-                .readv_with_options(
+                .vread(
                     paths.iter().map(vnfs::ReadOp::whole).collect::<Vec<_>>(),
                     vnfs::ReadOptions::default()
                 )?

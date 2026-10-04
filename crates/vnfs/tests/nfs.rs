@@ -311,7 +311,7 @@ fn rust_native_client_workflow_on_nfs() {
         .write(true)
         .create(true)
         .truncate(true)
-        .openv(&paths)
+        .vopen(&paths)
         .unwrap();
     client
         .writev(&[
@@ -320,7 +320,7 @@ fn rust_native_client_workflow_on_nfs() {
         ])
         .unwrap();
     let values = client
-        .readv_with_options(
+        .vread(
             [
                 vnfs::ReadOp::range(&files[0], 0, 3),
                 vnfs::ReadOp::range(&files[1], 0, 3),
@@ -401,7 +401,7 @@ fn rust_native_client_workflow_on_nfs() {
     for follow in [true, false] {
         let _ = vfsi_nfs::compound::thread_compound_stats();
         let attrs = client
-            .metadatav_with_options(
+            .vgetattrs(
                 &paths,
                 vnfs::MetadataOptions::new()
                     .fields(vnfs::MetadataFields::MODE | vnfs::MetadataFields::SIZE)
@@ -437,7 +437,7 @@ fn rust_native_client_workflow_on_nfs() {
         format!("{nested}/renamed-two"),
     ];
     let _ = vfsi_nfs::compound::thread_compound_stats();
-    vnfs::Fs::renamev(
+    vnfs::Fs::vrename(
         &client,
         &[(&paths[0], &renamed[0]), (&paths[1], &renamed[1])],
     )
@@ -473,12 +473,12 @@ fn native_removal_modes_forward_policy_across_roots() {
     client.write(&file, b"payload").unwrap();
     let roots = [missing.as_str(), keep.as_str()];
     let error = client
-        .removev_with_options(&roots, RemoveMode::Contents, RemoveOptions::new())
+        .vremove(&roots, RemoveMode::Contents, RemoveOptions::new())
         .unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert!(client.metadata(&file).is_ok());
     let error = client
-        .removev_with_options(
+        .vremove(
             &roots,
             RemoveMode::Contents,
             RemoveOptions::new().continue_on_error(true),
@@ -550,7 +550,7 @@ fn application_collection_preserves_native_batching_and_root_groups() {
         .connect()
         .unwrap();
     let roots: Vec<_> = (0..10).map(|index| format!("{dir}/d{index}")).collect();
-    client.mkdirv(&roots).unwrap();
+    client.vmkdir(&roots).unwrap();
     let files: Vec<_> = roots
         .iter()
         .map(|root| (format!("{root}/file"), b"data"))
@@ -613,7 +613,7 @@ fn whole_file_readv_honors_the_client_budget() {
     client.write(&path, &data).unwrap();
     assert_eq!(
         client
-            .readv_with_options([vnfs::ReadOp::whole(&path)], vnfs::ReadOptions::default())
+            .vread([vnfs::ReadOp::whole(&path)], vnfs::ReadOptions::default())
             .unwrap()[0]
             .data()
             .unwrap(),
@@ -621,7 +621,7 @@ fn whole_file_readv_honors_the_client_budget() {
     );
     assert_eq!(
         client
-            .readv_with_options(
+            .vread(
                 [vnfs::ReadOp::whole(&path)],
                 vnfs::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(BYTES - 1))
             )
@@ -3852,7 +3852,7 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
         .connect()
         .unwrap();
     let roots: Vec<_> = (0..40).map(|i| format!("{dir}/d{i}")).collect();
-    fs.mkdirv(&roots).unwrap();
+    fs.vmkdir(&roots).unwrap();
     let files: Vec<_> = roots
         .iter()
         .enumerate()
@@ -3877,7 +3877,7 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
     }
     let missing = format!("{dir}/missing");
     assert_eq!(
-        fs.visit_dirs_with_options(
+        fs.vlistdirs(
             &[roots[1].as_str(), missing.as_str()],
             VisitOptions::new(),
             |index, page| {
@@ -3900,7 +3900,7 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
     let names: Vec<_> = (0..300).map(|i| (format!("{large}/f{i}"), b"x")).collect();
     fs.write_files(&names).unwrap();
     let mut counts = Vec::new();
-    fs.visit_dirs_with_options(&[large], VisitOptions::new(), |_, page| {
+    fs.vlistdirs(&[large], VisitOptions::new(), |_, page| {
         counts.push(page.entries.len());
         Ok(ControlFlow::Continue(()))
     })
@@ -3927,30 +3927,29 @@ fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
     let child = format!("{tree}/child");
     let saved = format!("{dir}/saved");
     let target = format!("{dir}/outside");
-    fs.mkdirv(&[&tree, &target]).unwrap();
-    fs.mkdirv(&[&child]).unwrap();
+    fs.vmkdir(&[&tree, &target]).unwrap();
+    fs.vmkdir(&[&child]).unwrap();
     fs.write(format!("{target}/secret"), b"must not be traversed")
         .unwrap();
     let mut changed = false;
     let mut escaped = false;
-    let result =
-        fs.visit_dirs_with_options(&[&tree], VisitOptions::new().recursive(true), |_, page| {
-            if page.path == Path::new(&tree) && !changed {
-                assert!(
-                    page.entries
-                        .iter()
-                        .any(|entry| entry.path() == Path::new(&child))
-                );
-                fs.renamev(&[(&child, &saved)])?;
-                fs.symlink("../outside", &child)?;
-                changed = true;
-            }
-            escaped |= page
-                .entries
-                .iter()
-                .any(|entry| entry.path().ends_with("secret"));
-            Ok(ControlFlow::Continue(()))
-        });
+    let result = fs.vlistdirs(&[&tree], VisitOptions::new().recursive(true), |_, page| {
+        if page.path == Path::new(&tree) && !changed {
+            assert!(
+                page.entries
+                    .iter()
+                    .any(|entry| entry.path() == Path::new(&child))
+            );
+            fs.vrename(&[(&child, &saved)])?;
+            fs.symlink("../outside", &child)?;
+            changed = true;
+        }
+        escaped |= page
+            .entries
+            .iter()
+            .any(|entry| entry.path().ends_with("secret"));
+        Ok(ControlFlow::Continue(()))
+    });
     fs.remove_dir_all(&dir).unwrap();
     assert!(changed);
     assert!(!escaped, "recursive paging followed a replacement symlink");
@@ -3986,7 +3985,7 @@ fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
     }
     // Parents exist before children are created.
     for path in &paths {
-        fs.mkdirv(&[path]).unwrap();
+        fs.vmkdir(&[path]).unwrap();
     }
     fs.write(format!("{path}/leaf"), b"x").unwrap();
     let _ = vfsi_nfs::compound::thread_compound_stats();
@@ -4018,8 +4017,8 @@ fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
     let tree = format!("{dir}/tree");
     let moved = format!("{dir}/moved");
     let children: Vec<_> = (0..4).map(|i| format!("{tree}/child{i}")).collect();
-    fs.mkdirv(&[&tree]).unwrap();
-    fs.mkdirv(&children).unwrap();
+    fs.vmkdir(&[&tree]).unwrap();
+    fs.vmkdir(&children).unwrap();
     fs.write_files(
         &children
             .iter()
@@ -4029,19 +4028,18 @@ fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
     .unwrap();
     let mut renamed = false;
     let mut data = 0;
-    let result =
-        fs.visit_dirs_with_options(&[&tree], VisitOptions::new().recursive(true), |_, page| {
-            if page.path == Path::new(&tree) && !renamed {
-                fs.renamev(&[(&tree, &moved)])?;
-                renamed = true;
-            }
-            data += page
-                .entries
-                .iter()
-                .filter(|entry| entry.path().ends_with("data"))
-                .count();
-            Ok(ControlFlow::Continue(()))
-        });
+    let result = fs.vlistdirs(&[&tree], VisitOptions::new().recursive(true), |_, page| {
+        if page.path == Path::new(&tree) && !renamed {
+            fs.vrename(&[(&tree, &moved)])?;
+            renamed = true;
+        }
+        data += page
+            .entries
+            .iter()
+            .filter(|entry| entry.path().ends_with("data"))
+            .count();
+        Ok(ControlFlow::Continue(()))
+    });
     fs.remove_dir_all(&dir).unwrap();
     assert_eq!(result.unwrap(), [vnfs::TraversalCompletion::Complete]);
     assert!(renamed);
@@ -4071,17 +4069,16 @@ fn recursive_directory_pages_do_not_retry_an_ambiguous_child_reply() {
         .connect()
         .unwrap();
     let mut delivered = 0;
-    let result =
-        visitor.visit_dirs_with_options(&[&dir], VisitOptions::new().recursive(true), |_, page| {
-            assert_eq!(
-                page.path,
-                Path::new(&dir),
-                "a child page must not be replayed after the lost reply"
-            );
-            delivered += 1;
-            proxy.arm();
-            Ok(ControlFlow::Continue(()))
-        });
+    let result = visitor.vlistdirs(&[&dir], VisitOptions::new().recursive(true), |_, page| {
+        assert_eq!(
+            page.path,
+            Path::new(&dir),
+            "a child page must not be replayed after the lost reply"
+        );
+        delivered += 1;
+        proxy.arm();
+        Ok(ControlFlow::Continue(()))
+    });
     proxy.wait_for_drop();
     admin.rm(&[Path::new(&dir)], true).unwrap();
     assert!(result.unwrap_err().is_transport());

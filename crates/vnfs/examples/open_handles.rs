@@ -7,7 +7,7 @@ pub fn run(fs: &impl Fs, paths: &[String]) -> vnfs::Result<Vec<Vec<u8>>> {
         .iter()
         .map(|path| OpenRequest::new(path, OpenFlags::READ))
         .collect();
-    let files = fs.openv(&requests)?;
+    let files = fs.vopen(&requests)?;
     let mut buffers = vec![[0_u8; 4096]; files.len()];
     let result = {
         let reads: Vec<_> = files

@@ -45,16 +45,16 @@ sudo apt-get install libkrb5-dev
 For complete, compiled workflows, see the
 [canonical examples](examples/README.md) and the
 [task-oriented API documentation](https://docs.rs/vnfs/latest/vnfs/).
-Start with `readv`/`write_files` for small files, `openv`/`readv` with `ReadOp::into` for
-repeated positional I/O, or `read_stream_with_options` for one large file.
+Start with `readv`/`write_files` for small files, `vopen`/`readv` with `ReadOp::into` for
+repeated positional I/O, or `vstream` for bounded large-file reads.
 `Fs` contains vectorized operations; `FsExt` adds scalar operations and
 convenience workflows, preserving their native backend execution.
 
 Single-target `FsExt` helpers use conventional names such as `open`, `write`,
 `metadata`, and `read_dir`. Prefer vector operations for independent
-work on multiple files or directories: `openv`, `readv`, `write_files`, and
-`read_dirs_with_options` let the backend batch requests.
-`metadatav_with_options` batches metadata with selected fields and explicit
+work on multiple files or directories: `vopen`, `readv`, `write_files`, and
+`vlistdirs` let the backend batch requests.
+`vgetattrs` batches metadata with selected fields and explicit
 final-symlink behavior through `MetadataOptions`.
 
 The API is grouped into `nfs`, `files`, `directory`, `error`, and `helpers`;
@@ -88,7 +88,7 @@ fn main() -> vnfs::Result<()> {
 reads directly by path, so small files can share one READ COMPOUND without
 remote OPEN/CLOSE phases when the server's negotiated limits permit.
 `write_files` retries short
-writes through `writev_with_options`; it is not transactional, so a failed call may have
+writes through `vwrite`; it is not transactional, so a failed call may have
 modified a prefix of files. `readv` limits the combined returned data to
 16 MiB by default; use `ReadOptions::max_total_bytes` to adjust the limit, or stream
 large files. A scalar POSIX-style loop pays latency for each file operation.
@@ -117,31 +117,34 @@ other tuning before connecting. The configuration remains pinned to the
 discovered mount; every operation uses the direct NFS client with its own
 caches and state. Mount discovery requires no per-file probing during I/O.
 
-The same model applies to `openv`, `readv`, `writev`, and high-level
-`read_dirs_with_options`, `copyv`, and `remove_paths`. For tools such as
+The same model applies to `vopen`, `readv`, `writev`, and high-level
+`vlistdirs`, `vcopy`, and `vremove`. For tools such as
 `ls`, `du`, and `find`, `MetadataFields` chooses which attributes a directory
 listing fetches, and each `DirectoryListing` includes metadata for its entries
 without a separate stat call per file. For example:
 
 ```rust,no_run
-use vnfs::{FsExt, MetadataFields, Nfs, VisitOptions};
+use vnfs::{ControlFlow, Fs, MetadataFields, Nfs, VisitOptions};
 
 fn main() -> vnfs::Result<()> {
     let fs = Nfs::connect("nfs.example.com")?;
     let directories = ["/export/a", "/export/b"];
-    let listings = fs.read_dirs_with_options(&directories,
-        VisitOptions::new().fields(MetadataFields::MODE | MetadataFields::SIZE | MetadataFields::BLOCKS))?;
-    for directory in listings.into_iter().flatten() {
-        println!("{}: {} entries", directory.path.display(), directory.entries.len());
-    }
+    fs.vlistdirs(&directories,
+        VisitOptions::new().fields(MetadataFields::MODE | MetadataFields::SIZE | MetadataFields::BLOCKS),
+        |index, page| {
+            println!("{}: {} entries in this page (input {index})", page.path.display(), page.entries.len());
+            Ok(ControlFlow::Continue(()))
+        })?;
     Ok(())
 }
 ```
 
 The NFS backend batches directory lookups and READDIR pages into compounds;
 large listings continue page by page. The aggregate entry and path-byte
-limits prevent an accidental unbounded result. `read_dir_with_options` handles
-one directory, while `walk_with_options` handles a bounded recursive tree.
+limits bound traversal work. Pages are delivered incrementally without retaining
+an entire listing. Set `VisitOptions::recursive(true)` to visit a tree.
+For collected results, `FsExt::read_dirs_with_options` builds on `vlistdirs`;
+`FsExt::read_dir_with_options` handles one directory.
 
 Owned `NfsClient::readv` results inherit the client's 16 MiB aggregate budget.
 Use `ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(bytes))` to override it or `readv` with `ReadOp::into`
@@ -171,14 +174,14 @@ use vnfs::{Auto, FsExt, OpenFlags, OpenRequest};
     let fs = Auto::new("/")?;
     let paths = ["/mnt/nfs/file-1", "/mnt/nfs/file-2"];
     let requests = paths.map(|p| OpenRequest::new(p, OpenFlags::READ));
-    let mut files = fs.openv(&requests)?;
+    let mut files = fs.vopen(&requests)?;
     println!("route: {:?}", files[0].route());
     let contents = fs.readv([
         vnfs::ReadOp::range(&files[0], 0, 5),
         vnfs::ReadOp::range(&files[1], 0, 5),
     ])?;
     assert_eq!(contents.len(), 2);
-    fs.try_closev(&mut files)?;
+    fs.vclose(&mut files)?;
     Ok(())
 }
 # #[cfg(not(all(feature = "auto", target_os = "linux")))]
@@ -203,7 +206,7 @@ kernel mount semantics or warm page-cache hits are more important than
 cross-file vectorization.
 
 `Auto::route_for(path)` reports a candidate route, not a promise about every
-operation on that path. For example, `openv` leaves final symlinks and
+operation on that path. For example, `vopen` leaves final symlinks and
 ambiguous create-if-missing paths on the kernel route; `CREATE_NEW` requests
 can take the direct path without following a pre-existing symlink. The
 `AutoFile::route()` value is the definitive choice for an open handle.
@@ -313,10 +316,11 @@ use vnfs::prelude::*;
 fn main() -> vnfs::Result<()> {
     let client = Nfs::connect("nfs.example.com")?;
     let mut bytes_seen = 0u64;
-    client.read_stream_with_options(
-        "/dataset/large.bin",
+    client.vstream(
+        &["/dataset/large.bin"],
         ReadStreamOptions::new().chunk_size(4 * 1024 * 1024),
-        |offset, chunk| {
+        |index, offset, chunk| {
+            assert_eq!(index, 0);
             assert_eq!(offset, bytes_seen);
             // Consume/process this chunk here; do not retain it to keep memory bounded.
             bytes_seen += chunk.len() as u64;
@@ -403,10 +407,10 @@ their runtime's blocking-task API.
 The application surface uses `vnfs::Result`, `Error`, `ErrorKind`, `FileType`,
 and owned file handles. `ReadOp::whole`, `ReadOp::range`, and `ReadOp::into` construct
 read operations without I/O; the consuming `readv` accepts arrays, vectors,
-or iterators. `readv_with_options` overrides the aggregate budget.
+or iterators. `vread` overrides the aggregate budget.
 `WriteOp::at(&file, offset, data)` prepares a portable positional write without
 copying the payload or importing backend crates. `writev` reports short progress;
-`writev` and default `writev_with_options` report short writes. Select
+`writev` and default `vwrite` report short writes. Select
 `WriteOptions::new().write_all(true)` to complete successful short writes without
 replaying failed or ambiguous requests. Completion does not guarantee durability. Vector
 results are in request order and carry data/count, resolved offset, and EOF or
@@ -519,7 +523,7 @@ and authentication failures. Unknown causes remain `Other`; these categories
 describe provenance, not whether retrying is safe. `err_no()` is a raw
 compatibility value, not a portable errno for every backend.
 `closev` consumes its handles and attempts best-effort cleanup on failure.
-`try_closev(&mut files)` preserves them after an error so the caller can
+`vclose(&mut files)` preserves them after an error so the caller can
 reconcile uncertain close status explicitly; a confirmed successful call
 disarms every handle.
 An armed handle after a failed close only retains local cleanup ownership:

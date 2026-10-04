@@ -273,7 +273,7 @@ mod mount_tests {
         ])
         .unwrap();
         assert_eq!(
-            fs.readv_with_options(
+            fs.vread(
                 ["/file-1", "/file-2"]
                     .iter()
                     .map(crate::ReadOp::whole)
@@ -317,7 +317,7 @@ mod mount_tests {
             assert_eq!(result.unwrap_err().err_no(), libc::EROFS as u32);
         }
         assert_eq!(
-            fs.readv_with_options(
+            fs.vread(
                 ["/marker"]
                     .iter()
                     .map(crate::ReadOp::whole)

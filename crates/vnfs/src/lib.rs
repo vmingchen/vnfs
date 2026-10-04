@@ -196,7 +196,7 @@ pub mod prelude {
 
 pub use std::io::ErrorKind;
 pub use std::ops::ControlFlow;
-/// What each input to [`Fs::removev_with_options`] removes.
+/// What each input to [`Fs::vremove`] removes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RemoveMode {
     /// Remove a file, symlink, or empty directory; do not traverse directories.

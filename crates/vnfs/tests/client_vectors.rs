@@ -3,7 +3,7 @@ use vnfs::{Fs, FsExt, MetadataFields, MetadataOptions, OpenFlags, OpenRequest, W
 
 fn writes<C: Fs>(fs: &C) {
     let mut files = fs
-        .openv(&[
+        .vopen(&[
             OpenRequest::new("/a", OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE),
             OpenRequest::new("/b", OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE),
         ])
@@ -22,7 +22,7 @@ fn writes<C: Fs>(fs: &C) {
         [(3, 7), (0, 3)]
     );
     assert_eq!(std::io::Seek::stream_position(&mut files[0]).unwrap(), 0);
-    fs.writev_with_options(
+    fs.vwrite(
         &[
             WriteOp::at(&files[1], 0, b"first"),
             WriteOp::at(&files[1], 2, b"XX"),
@@ -31,7 +31,7 @@ fn writes<C: Fs>(fs: &C) {
     )
     .unwrap();
     assert_eq!(fs.read_files(&["/b"]).unwrap(), [b"fiXXt".to_vec()]);
-    fs.writev_with_options(
+    fs.vwrite(
         &[WriteOp::at(&files[0], 0, b"")],
         vnfs::WriteOptions::new().write_all(true),
     )
@@ -57,14 +57,14 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
     let fs = vnfs::Mounted::new(root.path()).unwrap();
     let other = vnfs::Mounted::new(root.path()).unwrap();
     let file = fs.create("/a").unwrap();
-    fs.writev_with_options(
+    fs.vwrite(
         &[WriteOp::at(&file, 0, b"keep")],
         vnfs::WriteOptions::new().write_all(true),
     )
     .unwrap();
     let foreign = other.create("/b").unwrap();
     let error = fs
-        .writev_with_options(
+        .vwrite(
             &[
                 WriteOp::at(&file, 0, b"bad!"),
                 WriteOp::at(&foreign, 0, b""),
@@ -74,7 +74,7 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     let error = fs
-        .writev_with_options(
+        .vwrite(
             &[
                 WriteOp::at(&file, 0, b"bad!"),
                 WriteOp::at(&file, u64::MAX, b"xx"),
@@ -90,7 +90,7 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
     let mut closed = fs.create("/closed").unwrap();
     closed.try_close().unwrap();
     assert_eq!(
-        fs.writev_with_options(
+        fs.vwrite(
             &[WriteOp::at(&file, 0, b"bad!"), WriteOp::at(&closed, 0, b"")],
             vnfs::WriteOptions::new().write_all(true)
         )
@@ -105,7 +105,7 @@ fn metadata<C: Fs>(fs: &C) {
     let follow = fs.metadatav(&["/link", "/a"]).unwrap();
     assert!(follow.iter().all(|m| m.is_file() && m.len() == 3));
     let links = fs
-        .metadatav_with_options(
+        .vgetattrs(
             &["/a", "/link", "/dangling"],
             MetadataOptions::new().follow_symlinks(false),
         )
@@ -117,7 +117,7 @@ fn metadata<C: Fs>(fs: &C) {
     assert!(fs.symlink_metadata("/link").unwrap().is_symlink());
     assert!(fs.metadata("/dangling").is_err());
     let partial = fs
-        .metadatav_with_options(
+        .vgetattrs(
             &["/a"],
             MetadataOptions::new().fields(MetadataFields::FILEID),
         )

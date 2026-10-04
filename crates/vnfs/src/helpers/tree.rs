@@ -243,7 +243,7 @@ impl TreeBuilder {
             for batch in level.chunks(self.batch_size) {
                 let paths: Vec<_> = batch.iter().map(|(path, _)| path).collect();
                 client
-                    .mkdirv(&paths)
+                    .vmkdir(&paths)
                     .map_err(|e| entry_error(e, batch, &self.entries))?;
             }
         }
@@ -253,7 +253,7 @@ impl TreeBuilder {
                 .map(|(path, _)| OpenRequest::new(path, OpenFlags::WRITE | OpenFlags::CREATE_NEW))
                 .collect();
             let handles = client
-                .openv(&requests)
+                .vopen(&requests)
                 .map_err(|e| entry_error(e, batch, &self.entries))?;
             if handles.len() != batch.len() {
                 let _ = client.closev(handles);
@@ -270,7 +270,7 @@ impl TreeBuilder {
                 })
                 .collect();
             let write = client
-                .writev_with_options(&writes, crate::WriteOptions::new().write_all(true))
+                .vwrite(&writes, crate::WriteOptions::new().write_all(true))
                 .map(|_| ())
                 .map_err(|e| entry_error(e, batch, &self.entries));
             drop(writes);

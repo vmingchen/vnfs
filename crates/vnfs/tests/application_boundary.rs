@@ -56,8 +56,8 @@ fn auto_range_only_reads_keep_the_legacy_routing_allocation_cost() {
         .write_files(&[("/a", b"abc"), ("/b", b"def")])
         .unwrap();
     let paths = ["/a", "/b"];
-    let auto_files = auto.open_options().read(true).openv(&paths).unwrap();
-    let files = mounted.open_options().read(true).openv(&paths).unwrap();
+    let auto_files = auto.open_options().read(true).vopen(&paths).unwrap();
+    let files = mounted.open_options().read(true).vopen(&paths).unwrap();
     let auto_reads: Vec<_> = auto_files
         .iter()
         .map(|file| vnfs::ReadOp::range(file, 0, 3))
@@ -113,7 +113,7 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     raw.write_files(&paths.map(|path| (path, b"payload")))
         .unwrap();
     let requests = paths.map(|path| OpenRequest::new(path, OpenFlags::READ | OpenFlags::WRITE));
-    let (mut files, open_cost) = measured(|| mounted.openv(&requests).unwrap());
+    let (mut files, open_cost) = measured(|| mounted.vopen(&requests).unwrap());
     let (mut raw_files, raw_open_cost) = measured(|| raw.openv(&requests).unwrap());
     assert_eq!(
         open_cost, raw_open_cost,
@@ -141,7 +141,7 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
         .collect();
     let (results, cost) = measured(|| {
         mounted
-            .writev_with_options(&writes, vnfs::WriteOptions::new().write_all(true))
+            .vwrite(&writes, vnfs::WriteOptions::new().write_all(true))
             .unwrap()
     });
     let (expected, raw_cost) = measured(|| raw.write_allv(&raw_writes).unwrap());
@@ -153,13 +153,13 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     drop(writes);
     drop(raw_writes);
 
-    let ((), cost) = measured(|| mounted.try_closev(&mut files).unwrap());
+    let ((), cost) = measured(|| mounted.vclose(&mut files).unwrap());
     let ((), raw_cost) = measured(|| raw.try_closev(&mut raw_files).unwrap());
     assert_eq!(cost, raw_cost);
     assert!(files.iter().all(|file| file.is_closed()));
     let mut buffers = [[0; 7]; 3];
     let mut raw_buffers = [[0; 7]; 3];
-    let reopened = mounted.openv(&requests).unwrap();
+    let reopened = mounted.vopen(&requests).unwrap();
     let raw_reopened = raw.openv(&requests).unwrap();
     let requests: Vec<_> = reopened
         .iter()
@@ -201,15 +201,15 @@ fn opaque_requests_preserve_owner_preflight_and_error_sources() {
     assert!(other.writev(&[request]).is_err());
     assert_eq!(
         owner
-            .readv_with_options([vnfs::ReadOp::whole("/a")], vnfs::ReadOptions::default())
+            .vread([vnfs::ReadOp::whole("/a")], vnfs::ReadOptions::default())
             .unwrap()[0]
             .data()
             .unwrap(),
         b"original"
     );
-    assert!(other.try_closev([&mut file]).is_err());
+    assert!(other.vclose([&mut file]).is_err());
     assert!(!file.is_closed());
-    owner.try_closev([&mut file]).unwrap();
+    owner.vclose([&mut file]).unwrap();
     assert!(file.is_closed());
     let error = std::io::Read::read(&mut file, &mut [0; 1]).unwrap_err();
     assert!(
@@ -239,7 +239,7 @@ fn handles_remain_send_sync_and_clients_remain_cheaply_cloneable() {
     assert_eq!(allocations, (0, 0), "client clone must share its backend");
     client.write("/shared", b"data").unwrap();
     let mut file = client.open("/shared").unwrap();
-    clone.try_closev([&mut file]).unwrap();
+    clone.vclose([&mut file]).unwrap();
     assert!(
         file.is_closed(),
         "clones must retain the same ownership identity"

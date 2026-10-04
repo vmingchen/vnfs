@@ -296,7 +296,7 @@ impl AutoClient {
         }
     }
 
-    pub fn metadatav_with_options<P: AsRef<Path>>(
+    pub fn vgetattrs<P: AsRef<Path>>(
         &self,
         paths: &[P],
         options: crate::MetadataOptions,
@@ -336,7 +336,7 @@ impl AutoClient {
 
     /// Create directories in bounded backend cohorts, retaining input order.
     /// Parents must exist; this does not promise transactional rollback.
-    pub fn mkdirv<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
+    pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
         if paths.is_empty() {
             return Ok(());
         }
@@ -344,7 +344,7 @@ impl AutoClient {
         for (index, path) in paths.iter().enumerate() {
             if !seen.insert(path.as_ref()) {
                 return Err(VfError::client(index, libc::EINVAL as u32)
-                    .with_context("mkdirv", path.as_ref()));
+                    .with_context("vmkdir", path.as_ref()));
             }
         }
         let mounts = read_mounts(true);
@@ -366,7 +366,7 @@ impl AutoClient {
             result.map_err(|error| {
                 let error = indexed(error, start);
                 match error.index().and_then(|index| paths.get(index)) {
-                    Some(path) => error.with_context("mkdirv", path.as_ref()),
+                    Some(path) => error.with_context("vmkdir", path.as_ref()),
                     None => error,
                 }
             })?;
@@ -428,7 +428,7 @@ impl AutoClient {
         Ok(())
     }
 
-    pub fn copyv<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
         let mounts = read_mounts(false);
         let pairs: Vec<_> = pairs
             .iter()
@@ -963,10 +963,10 @@ impl AutoClient {
     /// Preserve request order, including the completed-prefix semantics of
     /// strict vector operations. Consecutive requests to one mount batch.
     pub(crate) fn open_native_impl(&self, request: OpenRequest) -> VfResult<AutoFile> {
-        self.openv(&[request]).map(|mut files| files.remove(0))
+        self.vopen(&[request]).map(|mut files| files.remove(0))
     }
 
-    pub fn openv(&self, requests: &[OpenRequest]) -> VfResult<Vec<AutoFile>> {
+    pub fn vopen(&self, requests: &[OpenRequest]) -> VfResult<Vec<AutoFile>> {
         let mounts = read_mounts(true);
         let resolved = self.resolve_open_batch(requests, &mounts);
         let mut output = Vec::with_capacity(requests.len());
@@ -1025,7 +1025,7 @@ impl AutoClient {
     }
 
     /// Consume a batch with an explicit aggregate read budget.
-    pub fn readv_with_options<'a>(
+    pub fn vread<'a>(
         &self,
         ops: impl IntoIterator<Item = crate::ReadOp<'a, AutoFile>>,
         options: crate::ReadOptions,
@@ -1202,7 +1202,7 @@ impl AutoClient {
     /// the entire batch before dispatching any backend cohort. Failed or ambiguous
     /// mutations are never replayed. Server-side errors
     /// may still follow completed writes; this is not an atomic operation.
-    pub fn writev_with_options(
+    pub fn vwrite(
         &self,
         requests: &[crate::WriteOp<'_, AutoFile>],
         options: crate::WriteOptions,
@@ -1297,7 +1297,7 @@ impl AutoClient {
 
     /// Retain every handle on cohort failure. Already completed cohorts are
     /// closed; a failing cohort may have a server-side completed prefix.
-    pub fn try_closev(&self, files: &mut [AutoFile]) -> VfResult<()> {
+    pub fn vclose(&self, files: &mut [AutoFile]) -> VfResult<()> {
         for (index, file) in files.iter().enumerate() {
             self.check_owner(file, index)?;
         }
@@ -1367,7 +1367,7 @@ impl AutoClient {
     }
 
     /// Rename adjacent pairs on the same backend as a vector, preserving order.
-    pub fn renamev<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
         if pairs.is_empty() {
             return Ok(());
         }
@@ -1571,8 +1571,8 @@ impl AutoOpenOptions<'_> {
         self.client
             .open_with(OpenRequest::new(path.as_ref(), self.flags).mode(self.mode))
     }
-    pub fn openv<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<AutoFile>> {
-        self.client.openv(
+    pub fn vopen<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<AutoFile>> {
+        self.client.vopen(
             &paths
                 .iter()
                 .map(|path| OpenRequest::new(path.as_ref(), self.flags).mode(self.mode))
@@ -2136,7 +2136,7 @@ mod tests {
         let client = Auto::new(&root).unwrap();
         assert_eq!(client.route_for("/file"), AutoRoute::Mounted);
         let files = client
-            .openv(&[
+            .vopen(&[
                 OpenRequest::new(
                     "/one",
                     OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE,
@@ -2154,7 +2154,7 @@ mod tests {
             ])
             .unwrap();
         let reads = client
-            .readv_with_options(
+            .vread(
                 [
                     crate::ReadOp::range(&files[0], 0, 3),
                     crate::ReadOp::range(&files[1], 0, 3),
@@ -2182,14 +2182,14 @@ mod tests {
         });
         let tiny_file = tiny.open("/one").unwrap();
         let error = tiny
-            .readv_with_options(
+            .vread(
                 [crate::ReadOp::range(&tiny_file, 0, 6)],
                 crate::ReadOptions::default(),
             )
             .unwrap_err();
         assert_eq!(error.err_no(), libc::EFBIG as u32);
         assert_eq!(
-            tiny.readv_with_options(
+            tiny.vread(
                 [crate::ReadOp::range(&tiny_file, 0, 3)],
                 crate::ReadOptions::default()
             )
@@ -2201,7 +2201,7 @@ mod tests {
         );
         tiny_file.close().unwrap();
         let error = client
-            .readv_with_options(
+            .vread(
                 [crate::ReadOp::range(
                     &files[0],
                     0,
@@ -2228,7 +2228,7 @@ mod tests {
             client.write("/first", b"original").unwrap();
             client.write("/second", b"original").unwrap();
             let mut files = client
-                .openv(
+                .vopen(
                     &["/first", "/second"]
                         .map(|path| OpenRequest::new(path, OpenFlags::READ | OpenFlags::WRITE)),
                 )
@@ -2237,7 +2237,7 @@ mod tests {
                 files[1].try_close().unwrap();
             }
             let error = client
-                .writev_with_options(
+                .vwrite(
                     &[
                         crate::WriteOp::at(&files[0], 0, b"changed"),
                         crate::WriteOp::at(
@@ -2250,7 +2250,7 @@ mod tests {
                 )
                 .unwrap_err();
             let first = client.read("/first").unwrap();
-            client.try_closev(&mut files).unwrap();
+            client.vclose(&mut files).unwrap();
             assert_eq!(first, b"original");
             assert_eq!(error.index(), Some(1));
             assert_eq!(
@@ -2301,7 +2301,7 @@ mod tests {
                 OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE_NEW,
             )
         });
-        let files = client.openv(&requests).unwrap();
+        let files = client.vopen(&requests).unwrap();
         assert!(matches!(files[0].route(), AutoRoute::DirectNfs { .. }));
         assert!(matches!(files[1].route(), AutoRoute::DirectNfs { .. }));
         assert_eq!(files[2].route(), AutoRoute::Mounted);
@@ -2313,7 +2313,7 @@ mod tests {
             ])
             .unwrap();
         let reads = client
-            .readv_with_options(
+            .vread(
                 [
                     crate::ReadOp::range(&files[0], 0, 5),
                     crate::ReadOp::range(&files[1], 0, 6),
@@ -2343,7 +2343,7 @@ mod tests {
         assert_eq!(&buffers[1][..6], b"second");
         assert_eq!(&buffers[2][..5], b"local");
         client
-            .writev_with_options(
+            .vwrite(
                 &[
                     crate::WriteOp::at(&files[0], 0, b"FIRST"),
                     crate::WriteOp::at(&files[1], 0, b"SECOND"),
@@ -2353,8 +2353,8 @@ mod tests {
             )
             .unwrap();
         let mut files = files;
-        client.try_closev(&mut files).unwrap();
-        client.try_closev(&mut files).unwrap();
+        client.vclose(&mut files).unwrap();
+        client.vclose(&mut files).unwrap();
         assert!(files.iter().all(AutoFile::is_closed));
         let paths = [first.as_path(), second.as_path(), local.as_path()];
         assert_eq!(
@@ -2370,7 +2370,7 @@ mod tests {
                 .is_err()
         );
         let existing = client
-            .openv(&[
+            .vopen(&[
                 OpenRequest::new(
                     &first,
                     OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE,
@@ -2389,7 +2389,7 @@ mod tests {
         client.closev(existing).unwrap();
         let missing = std::env::temp_dir().join(format!("{unique}-missing"));
         let error = client
-            .openv(&[
+            .vopen(&[
                 OpenRequest::new(&first, OpenFlags::READ),
                 OpenRequest::new(&second, OpenFlags::READ),
                 OpenRequest::new(&missing, OpenFlags::READ),
@@ -2499,7 +2499,7 @@ mod tests {
                     [&local, &remote]
                 };
                 let mut files = client
-                    .openv(
+                    .vopen(
                         &paths
                             .map(|path| OpenRequest::new(path, OpenFlags::READ | OpenFlags::WRITE)),
                     )
@@ -2517,7 +2517,7 @@ mod tests {
                 }
                 let payload: &[u8] = if invalid == 2 { b"" } else { b"XX" };
                 let error = client
-                    .writev_with_options(
+                    .vwrite(
                         &[
                             crate::WriteOp::at(&files[0], 0, b"changed"),
                             crate::WriteOp::at(
@@ -2540,7 +2540,7 @@ mod tests {
                     second,
                     paths[1].to_path_buf(),
                 ));
-                client.try_closev(&mut files).unwrap();
+                client.vclose(&mut files).unwrap();
                 fs::remove_file(&remote).unwrap();
                 fs::remove_file(&local).unwrap();
             }

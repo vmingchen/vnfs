@@ -76,14 +76,17 @@ pub trait FileHandle: Read + Write + Seek {
 ///
 /// | Task | Start with |
 /// | --- | --- |
-/// | Complete small files | [`readv`](FsExt::readv), [`write_files`](FsExt::write_files) |
-/// | Repeated/range I/O on owned handles | [`openv`](Self::openv), [`readv`](FsExt::readv), [`writev_with_options`](Self::writev_with_options) |
-/// | A large file without collecting it | [`read_stream_with_options`](FsExt::read_stream_with_options) |
-/// | Metadata for many directories | [`read_dirs_with_options`](crate::FsExt::read_dirs_with_options) |
-/// | Incremental traversal or pruning | [`visit_walk_with_options`](FsExt::visit_walk_with_options), [`walk_events_with_options`](FsExt::walk_events_with_options) |
+/// | Complete small files | [`vread`](Self::vread), [`write_files`](FsExt::write_files) |
+/// | Repeated/range I/O on owned handles | [`vopen`](Self::vopen), [`vread`](Self::vread), [`vwrite`](Self::vwrite) |
+/// | Large files without collecting them | [`vstream`](Self::vstream) |
+/// | Directory pages with entry metadata | [`vlistdirs`](Self::vlistdirs) |
+/// | Recursive directory pages | [`vlistdirs`](Self::vlistdirs) with [`VisitOptions::recursive`](crate::VisitOptions::recursive) |
 ///
 /// Generic application code needs an `Fs` bound. Import [`FsExt`] for
 /// convenience operations such as `read_files`, `write_files`, and scalar open.
+/// [`FsExt::read_dirs_with_options`] collects directory pages into vectors;
+/// [`FsExt::read_stream_with_options`] adapts streaming to a single path.
+/// Use the core vector operations above to submit multiple targets together.
 /// Extension helpers compose vectors; backend-specific execution stays
 /// here so batching, paging, and recovery do not become scalar-loop fallbacks:
 ///
@@ -121,14 +124,14 @@ pub trait Fs {
     /// ```no_run
     /// use vnfs::{Fs, FsExt, MetadataOptions, MetadataFields, WriteOp};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
-    /// let entries = fs.metadatav_with_options(&["/file-1", "/link"],
+    /// let entries = fs.vgetattrs(&["/file-1", "/link"],
     ///     MetadataOptions::new().fields(MetadataFields::MODE | MetadataFields::SIZE)
     ///         .follow_symlinks(false))?;
     /// # let _ = entries;
     /// # Ok(())
     /// # }
     /// ```
-    fn metadatav_with_options<P: AsRef<Path>>(
+    fn vgetattrs<P: AsRef<Path>>(
         &self,
         paths: &[P],
         options: crate::MetadataOptions,
@@ -162,7 +165,7 @@ pub trait Fs {
     /// ```no_run
     /// use vnfs::{Fs, FsExt, OpenFlags, OpenRequest, WriteOp};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
-    /// let files = fs.openv(&[
+    /// let files = fs.vopen(&[
     ///     OpenRequest::new("/file-1", OpenFlags::READ),
     ///     OpenRequest::new("/file-2", OpenFlags::READ),
     /// ])?;
@@ -171,7 +174,7 @@ pub trait Fs {
     /// # Ok(())
     /// # }
     /// ```
-    fn openv(&self, requests: &[OpenRequest]) -> Result<Vec<Self::File>>;
+    fn vopen(&self, requests: &[OpenRequest]) -> Result<Vec<Self::File>>;
     /// Consume a read batch with an explicit aggregate logical-byte budget.
     /// Large files should usually be streamed instead of increasing the budget.
     /// Ordering, partial-progress and buffer-validity rules are the same as
@@ -180,7 +183,7 @@ pub trait Fs {
     /// ```no_run
     /// use vnfs::{Fs, FsExt, ReadOp, ReadOptions, WriteOp};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
-    /// let results = fs.readv_with_options(
+    /// let results = fs.vread(
     ///     [ReadOp::whole("/config")],
     ///     ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024)),
     /// )?;
@@ -188,7 +191,7 @@ pub trait Fs {
     /// # Ok(())
     /// # }
     /// ```
-    fn readv_with_options<'a>(
+    fn vread<'a>(
         &self,
         ops: impl IntoIterator<Item = crate::ReadOp<'a, Self::File>>,
         options: crate::ReadOptions,
@@ -206,11 +209,11 @@ pub trait Fs {
     /// ```no_run
     /// use vnfs::{Fs, FsExt, FileHandle, OpenFlags, OpenRequest, WriteOp};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
-    /// let files = fs.openv(&[
+    /// let files = fs.vopen(&[
     ///     OpenRequest::new("/file-1", OpenFlags::WRITE),
     ///     OpenRequest::new("/file-2", OpenFlags::WRITE),
     /// ])?;
-    /// let result = fs.writev_with_options(&[
+    /// let result = fs.vwrite(&[
     ///     WriteOp::at(&files[0], 0, b"hello"),
     ///     WriteOp::at(&files[1], 4096, b"world"),
     /// ], vnfs::WriteOptions::new().write_all(true));
@@ -220,7 +223,7 @@ pub trait Fs {
     /// # Ok(())
     /// # }
     /// ```
-    fn writev_with_options<'a>(
+    fn vwrite<'a>(
         &self,
         requests: &[crate::WriteOp<'a, Self::File>],
         options: crate::WriteOptions,
@@ -235,8 +238,8 @@ pub trait Fs {
     /// ```no_run
     /// use vnfs::{Fs, FsExt, FileHandle, OpenFlags, OpenRequest, WriteOp};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
-    /// let mut files = fs.openv(&[OpenRequest::new("/file-1", OpenFlags::READ)])?;
-    /// if let Err(error) = fs.try_closev(&mut files) {
+    /// let mut files = fs.vopen(&[OpenRequest::new("/file-1", OpenFlags::READ)])?;
+    /// if let Err(error) = fs.vclose(&mut files) {
     ///     let retained = files.iter().filter(|file| !file.is_closed()).count();
     ///     eprintln!("{retained} handles retain cleanup ownership: {error}");
     ///     return Err(error); // Drop performs best-effort cleanup, not reconciliation.
@@ -244,7 +247,7 @@ pub trait Fs {
     /// # Ok(())
     /// # }
     /// ```
-    fn try_closev(&self, files: &mut [Self::File]) -> Result<()>;
+    fn vclose(&self, files: &mut [Self::File]) -> Result<()>;
     /// Strict vector directory creation. Parents must already exist; errors
     /// can follow completed mutations, and do not imply rollback.
     ///
@@ -256,11 +259,11 @@ pub trait Fs {
     /// use vnfs::{Fs, FsExt, WriteOp};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
     /// fs.create_dir_all("/workspace")?;
-    /// fs.mkdirv(&["/workspace/input", "/workspace/output"])?;
+    /// fs.vmkdir(&["/workspace/input", "/workspace/output"])?;
     /// # Ok(())
     /// # }
     /// ```
-    fn mkdirv<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()>;
+    fn vmkdir<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()>;
     /// Strict file-copy batches; a failed call can have copied earlier files.
     ///
     /// Pairs are `(source, destination)` in this client's namespace. Contents
@@ -271,14 +274,14 @@ pub trait Fs {
     /// ```no_run
     /// use vnfs::{Fs, FsExt, WriteOp};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
-    /// fs.copyv(&[
+    /// fs.vcopy(&[
     ///     ("/input/file-1", "/output/file-1"),
     ///     ("/input/file-2", "/output/file-2"),
     /// ])?;
     /// # Ok(())
     /// # }
     /// ```
-    fn copyv<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()>;
+    fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()>;
     /// Remove entries, recursive trees, or directory contents with explicit policy.
     ///
     /// Contents mode retains each root and uses native anchored removal without
@@ -288,12 +291,12 @@ pub trait Fs {
     /// ```no_run
     /// use vnfs::{Fs, RemoveMode, RemoveOptions};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
-    /// fs.removev_with_options(&["/scratch-1", "/scratch-2"],
+    /// fs.vremove(&["/scratch-1", "/scratch-2"],
     ///     RemoveMode::Contents, RemoveOptions::new())?;
     /// # Ok(())
     /// # }
     /// ```
-    fn removev_with_options<P: AsRef<Path>>(
+    fn vremove<P: AsRef<Path>>(
         &self,
         paths: &[P],
         mode: crate::RemoveMode,
@@ -305,11 +308,11 @@ pub trait Fs {
     /// ```no_run
     /// use vnfs::Fs;
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
-    /// fs.renamev(&[("/old-1", "/new-1"), ("/old-2", "/new-2")])?;
+    /// fs.vrename(&[("/old-1", "/new-1"), ("/old-2", "/new-2")])?;
     /// # Ok(())
     /// # }
     /// ```
-    fn renamev<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()>;
+    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()>;
 
     /// Visit shallow directories (default) or recursive trees using bounded pages.
     /// Entry/path-byte limits are shared across roots; recursive visits also
@@ -326,7 +329,7 @@ pub trait Fs {
     /// ```no_run
     /// use vnfs::{Fs, VisitOptions, ControlFlow};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
-    /// fs.visit_dirs_with_options(&["/tree-1", "/tree-2"],
+    /// fs.vlistdirs(&["/tree-1", "/tree-2"],
     ///     VisitOptions::new().recursive(true).max_depth(8),
     ///     |index, page| {
     ///         println!("{index}: {} ({} entries)", page.path.display(), page.entries.len());
@@ -335,7 +338,7 @@ pub trait Fs {
     /// # Ok(())
     /// # }
     /// ```
-    fn visit_dirs_with_options<P: AsRef<Path>>(
+    fn vlistdirs<P: AsRef<Path>>(
         &self,
         paths: &[P],
         options: crate::VisitOptions,
@@ -350,7 +353,7 @@ pub trait Fs {
     /// ```no_run
     /// use vnfs::{Fs, ReadStreamOptions};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
-    /// fs.read_streams_with_options(&["/large-1", "/large-2"],
+    /// fs.vstream(&["/large-1", "/large-2"],
     ///     ReadStreamOptions::new().chunk_size(1024 * 1024), |index, offset, data| {
     ///         println!("{index}: {} bytes at {offset}", data.len());
     ///         Ok(true)
@@ -358,7 +361,7 @@ pub trait Fs {
     /// # Ok(())
     /// # }
     /// ```
-    fn read_streams_with_options<P: AsRef<Path>>(
+    fn vstream<P: AsRef<Path>>(
         &self,
         paths: &[P],
         options: crate::ReadStreamOptions,
@@ -380,7 +383,7 @@ pub trait Fs {
 ///
 /// | Contract | Responsibility | Examples |
 /// | --- | --- | --- |
-/// | [`Fs`] | Native vector execution, paging, and policy inspection | `openv`, `readv_with_options`, `visit_dirs_with_options`, `limits` |
+/// | [`Fs`] | Native vector execution, paging, and policy inspection | `vopen`, `vread`, `vlistdirs`, `limits` |
 /// | `FsExt` | Default-policy vectors, scalar adapters, and composed workflows | `readv`, `open`, `read_files`, `create_dir_all` |
 ///
 /// Implement only `Fs`; this extension is blanket implemented. A helper belongs
@@ -422,7 +425,7 @@ pub trait FsExt: Fs {
             .len())
             .map(|_| std::collections::HashMap::new())
             .collect();
-        self.visit_dirs_with_options(paths, options, |index, page| {
+        self.vlistdirs(paths, options, |index, page| {
             let tree = trees
                 .get_mut(index)
                 .ok_or_else(|| crate::Error::transport(None, "invalid visitor root index"))?;
@@ -448,7 +451,7 @@ pub trait FsExt: Fs {
         options: crate::VisitOptions,
         mut callback: impl FnMut(usize, &crate::DirEntry) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<Vec<crate::TraversalCompletion>> {
-        self.visit_dirs_with_options(paths, options, |index, page| {
+        self.vlistdirs(paths, options, |index, page| {
             for entry in &page.entries {
                 if callback(index, entry)?.is_break() {
                     return Ok(std::ops::ControlFlow::Break(()));
@@ -469,7 +472,7 @@ pub trait FsExt: Fs {
     /// # }
     /// ```
     fn removev<P: AsRef<Path>>(&self, paths: &[P], mode: crate::RemoveMode) -> Result<()> {
-        self.removev_with_options(paths, mode, crate::RemoveOptions::default())
+        self.vremove(paths, mode, crate::RemoveOptions::default())
     }
     /// Consume whole-file, allocating-range, and caller-buffer operations.
     ///
@@ -504,14 +507,14 @@ pub trait FsExt: Fs {
         &self,
         ops: impl IntoIterator<Item = crate::ReadOp<'a, Self::File>>,
     ) -> Result<Vec<crate::ReadResult>> {
-        self.readv_with_options(ops, crate::ReadOptions::default())
+        self.vread(ops, crate::ReadOptions::default())
     }
     /// Possibly short writes in input order on success. Failure can follow
     /// partial mutations; neither a rollback nor an automatic retry is promised.
     ///
     /// Requests borrow payloads and preserve each handle's cursor. Inspect
     /// `written` rather than assuming the full payload was accepted. Use
-    /// [`writev_with_options`](Fs::writev_with_options) with `write_all(true)`
+    /// [`vwrite`](Fs::vwrite) with `write_all(true)`
     /// for complete writes across the cohort.
     ///
     /// ```no_run
@@ -527,16 +530,16 @@ pub trait FsExt: Fs {
     /// # }
     /// ```
     fn writev<'a>(&self, requests: &[crate::WriteOp<'a, Self::File>]) -> Result<Vec<WriteResult>> {
-        self.writev_with_options(requests, crate::WriteOptions::default())
+        self.vwrite(requests, crate::WriteOptions::default())
     }
 
-    /// Single-target convenience. For multiple requests, prefer [`Fs::openv`] with per-file flags and modes.
+    /// Single-target convenience. For multiple requests, prefer [`Fs::vopen`] with per-file flags and modes.
     ///
     /// Open with an explicit access/create/truncate request; effects are eager.
     ///
     /// Creation/truncation occurs at open, not on the first write. `CREATE_NEW`
     /// rejects an existing path. This does not create missing parents.
-    /// Delegates to singleton `Fs::openv`. Backends must preserve scalar final-
+    /// Delegates to singleton `Fs::vopen`. Backends must preserve scalar final-
     /// symlink resolution and independently opened handles for singleton vectors.
     ///
     /// ```no_run
@@ -550,17 +553,17 @@ pub trait FsExt: Fs {
     /// # }
     /// ```
     fn open_with(&self, request: OpenRequest) -> Result<Self::File> {
-        let mut files = self.openv(&[request])?;
+        let mut files = self.vopen(&[request])?;
         if files.len() != 1 {
             return Err(crate::Error::transport(
                 None,
-                "openv returned an invalid result count",
+                "vopen returned an invalid result count",
             ));
         }
         Ok(files.remove(0))
     }
 
-    /// Single-target convenience. For multiple directory creations, prefer [`Fs::mkdirv`]; plan missing parents before their children.
+    /// Single-target convenience. For multiple directory creations, prefer [`Fs::vmkdir`]; plan missing parents before their children.
     ///
     /// Create missing parents; an error can leave some directories created.
     ///
@@ -593,7 +596,7 @@ pub trait FsExt: Fs {
                     return Err(crate::Error::client(0, vfsi_core::ERR_INVAL));
                 }
             }
-            match self.mkdirv(&[&current]) {
+            match self.vmkdir(&[&current]) {
                 Ok(()) => {}
                 Err(error) if error.err_no() == vfsi_core::ERR_EXIST => {
                     if !self.metadata(&current)?.is_dir() {
@@ -607,7 +610,7 @@ pub trait FsExt: Fs {
         Ok(())
     }
 
-    /// Single-target convenience. For multiple paths, prefer [`Fs::removev_with_options`]. That vector API accepts both files and directories.
+    /// Single-target convenience. For multiple paths, prefer [`Fs::vremove`]. That vector API accepts both files and directories.
     ///
     /// Remove one file or symlink, not the symlink target.
     ///
@@ -632,14 +635,14 @@ pub trait FsExt: Fs {
                 crate::Error::client(0, vfsi_core::ERR_ISDIR).with_context("remove_file", path)
             );
         }
-        self.removev_with_options(
+        self.vremove(
             &[path],
             crate::RemoveMode::Entry,
             crate::RemoveOptions::new(),
         )
     }
 
-    /// Single-target convenience. For multiple paths, prefer [`Fs::removev_with_options`]. That vector API does not enforce directory-only inputs.
+    /// Single-target convenience. For multiple paths, prefer [`Fs::vremove`]. That vector API does not enforce directory-only inputs.
     ///
     /// Remove one empty directory; not a recursive operation.
     ///
@@ -657,14 +660,14 @@ pub trait FsExt: Fs {
     fn remove_dir(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         require_directory(self, path, "remove_dir")?;
-        self.removev_with_options(
+        self.vremove(
             &[path],
             crate::RemoveMode::Entry,
             crate::RemoveOptions::new(),
         )
     }
 
-    /// Single-target convenience. For multiple trees, prefer [`Fs::removev_with_options`] with `RemoveMode::Tree`.
+    /// Single-target convenience. For multiple trees, prefer [`Fs::vremove`] with `RemoveMode::Tree`.
     ///
     /// Recursively remove a tree without following directory symlinks.
     /// Path-based removal is not a security sandbox or an atomic transaction.
@@ -685,14 +688,14 @@ pub trait FsExt: Fs {
     fn remove_dir_all(&self, path: impl AsRef<Path>) -> Result<()> {
         let path = path.as_ref();
         require_directory(self, path, "remove_dir_all")?;
-        self.removev_with_options(
+        self.vremove(
             &[path],
             crate::RemoveMode::Tree,
             crate::RemoveOptions::new(),
         )
     }
 
-    /// Single-target convenience. For multiple directory roots, prefer [`Fs::removev_with_options`].
+    /// Single-target convenience. For multiple directory roots, prefer [`Fs::vremove`].
     ///
     /// Recursively empty a directory while keeping its root.
     ///
@@ -709,14 +712,14 @@ pub trait FsExt: Fs {
     /// # }
     /// ```
     fn remove_dir_contents(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.removev_with_options(
+        self.vremove(
             &[path],
             crate::RemoveMode::Contents,
             crate::RemoveOptions::new(),
         )
     }
 
-    /// Single-target convenience. For multiple source/destination pairs, prefer [`Fs::renamev`].
+    /// Single-target convenience. For multiple source/destination pairs, prefer [`Fs::vrename`].
     ///
     /// Rename within supported namespaces; cross-filesystem moves can fail.
     ///
@@ -732,7 +735,7 @@ pub trait FsExt: Fs {
     /// # }
     /// ```
     fn rename(&self, source: impl AsRef<Path>, destination: impl AsRef<Path>) -> Result<()> {
-        self.renamev(&[(source, destination)])
+        self.vrename(&[(source, destination)])
     }
 
     /// Single-target convenience. For multiple roots, prefer [`FsExt::read_dirs_with_options`] with one aggregate budget.
@@ -773,7 +776,7 @@ pub trait FsExt: Fs {
         Ok(trees.remove(0))
     }
 
-    /// Single-target convenience. For multiple roots, prefer [`Fs::visit_dirs_with_options`].
+    /// Single-target convenience. For multiple roots, prefer [`Fs::vlistdirs`].
     ///
     /// Visit bounded directory pages outside the backend lock. `Break(())`
     /// stops the entire walk, not one subtree. Order is backend-defined.
@@ -814,7 +817,7 @@ pub trait FsExt: Fs {
         )
     }
 
-    /// Single-target convenience. For multiple directories, prefer [`Fs::visit_dirs_with_options`].
+    /// Single-target convenience. For multiple directories, prefer [`Fs::vlistdirs`].
     ///
     /// Visit one directory; `Break(())` returns Stopped, exhaustion returns
     /// Complete, and callback errors propagate. The callback may reenter.
@@ -851,7 +854,7 @@ pub trait FsExt: Fs {
         )
     }
 
-    /// Single-target convenience. For multiple files, prefer [`Fs::read_streams_with_options`]. Backends may process streams sequentially.
+    /// Single-target convenience. For multiple files, prefer [`Fs::vstream`]. Backends may process streams sequentially.
     ///
     /// Stream from offset zero outside the backend lock. `false` stops after
     /// the delivered chunk; completion reports the next offset. Not a snapshot.
@@ -890,14 +893,12 @@ pub trait FsExt: Fs {
     ) -> Result<crate::StreamCompletion> {
         let mut callback = callback;
         single_completion(
-            self.read_streams_with_options(&[path], options, |_, offset, data| {
-                callback(offset, data)
-            })?,
+            self.vstream(&[path], options, |_, offset, data| callback(offset, data))?,
             "read_streams",
         )
     }
 
-    /// Single-target convenience. For multiple paths, prefer [`Fs::metadatav_with_options`].
+    /// Single-target convenience. For multiple paths, prefer [`Fs::vgetattrs`].
     ///
     /// Query a path following its final symlink; unavailable fields remain None.
     ///
@@ -916,7 +917,7 @@ pub trait FsExt: Fs {
         metadata(self, path, crate::MetadataOptions::new())
     }
 
-    /// Single-target convenience. For multiple paths, prefer [`Fs::metadatav_with_options`] with selected fields and follow_symlinks(false).
+    /// Single-target convenience. For multiple paths, prefer [`Fs::vgetattrs`] with selected fields and follow_symlinks(false).
     ///
     /// No-follow metadata with explicit fields; absent values remain None.
     ///
@@ -969,7 +970,7 @@ pub trait FsExt: Fs {
     /// # }
     /// ```
     fn symlink_metadatav<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<Metadata>> {
-        self.metadatav_with_options(paths, crate::MetadataOptions::new().follow_symlinks(false))
+        self.vgetattrs(paths, crate::MetadataOptions::new().follow_symlinks(false))
     }
 
     /// Fetch standard metadata for a vector of paths, following final symlinks.
@@ -983,7 +984,7 @@ pub trait FsExt: Fs {
     /// # }
     /// ```
     fn metadatav<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<Metadata>> {
-        self.metadatav_with_options(paths, crate::MetadataOptions::new())
+        self.vgetattrs(paths, crate::MetadataOptions::new())
     }
 
     /// Read complete files in input order using vectorized whole-file reads.
@@ -1020,7 +1021,7 @@ pub trait FsExt: Fs {
         paths: &[P],
         options: crate::ReadOptions,
     ) -> Result<Vec<Vec<u8>>> {
-        let results = self.readv_with_options(
+        let results = self.vread(
             paths.iter().map(|path| crate::ReadOp::whole(path.as_ref())),
             options,
         )?;
@@ -1048,7 +1049,7 @@ pub trait FsExt: Fs {
             .collect()
     }
 
-    /// Single-target convenience. For multiple roots without enter/leave events or subtree pruning, prefer [`Fs::visit_dirs_with_options`]. Keep this helper when those event semantics are required.
+    /// Single-target convenience. For multiple roots without enter/leave events or subtree pruning, prefer [`Fs::vlistdirs`]. Keep this helper when those event semantics are required.
     ///
     /// Incremental no-follow traversal with enter/leave events and pruning.
     /// Listings are bounded by the remaining aggregate budget; the callback
@@ -1112,12 +1113,12 @@ pub trait FsExt: Fs {
             callback,
         )
     }
-    /// Single-target convenience. For multiple files, prefer [`Fs::openv`] to expose batching opportunities.
+    /// Single-target convenience. For multiple files, prefer [`Fs::vopen`] to expose batching opportunities.
     ///
     /// Open read-only. Paths are relative to this client's configured namespace.
     ///
     /// Use [`open_with`](FsExt::open_with) for write/create flags, or
-    /// [`openv`](Fs::openv) to batch many opens. The returned handle implements
+    /// [`vopen`](Fs::vopen) to batch many opens. The returned handle implements
     /// `std::io::Read`/`Write`/`Seek`; use native methods to retain structured errors.
     ///
     /// ```no_run
@@ -1137,7 +1138,7 @@ pub trait FsExt: Fs {
         self.open_with(OpenRequest::new(path.as_ref(), crate::OpenFlags::READ))
     }
 
-    /// Single-target convenience. For multiple creations, prefer [`Fs::openv`] with CREATE/TRUNCATE flags.
+    /// Single-target convenience. For multiple creations, prefer [`Fs::vopen`] with CREATE/TRUNCATE flags.
     ///
     /// Create or truncate a file and open for writing; does not create parents.
     ///
@@ -1148,7 +1149,7 @@ pub trait FsExt: Fs {
     /// use vnfs::{Fs, FsExt, FileHandle, WriteOp};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
     /// let file = fs.create("/output")?;
-    /// let result = fs.writev_with_options(&[WriteOp::at(&file, 0, b"complete contents")], vnfs::WriteOptions::new().write_all(true));
+    /// let result = fs.vwrite(&[WriteOp::at(&file, 0, b"complete contents")], vnfs::WriteOptions::new().write_all(true));
     /// let close = file.close();
     /// result?;
     /// close?;
@@ -1163,7 +1164,7 @@ pub trait FsExt: Fs {
     }
 
     /// Consume all handles. Errors cannot return cleanup ownership; Drop is
-    /// best-effort. Prefer `try_closev` when close errors require reconciliation.
+    /// best-effort. Prefer `vclose` when close errors require reconciliation.
     ///
     /// This releases all local handles even on failure; it does not promise
     /// every remote CLOSE succeeded. Closing alone is not a durability barrier.
@@ -1171,16 +1172,16 @@ pub trait FsExt: Fs {
     /// ```no_run
     /// use vnfs::{Fs, FsExt, OpenFlags, OpenRequest, WriteOp};
     /// # fn example(fs: &impl Fs) -> vnfs::Result<()> {
-    /// let files = fs.openv(&[OpenRequest::new("/config", OpenFlags::READ)])?;
+    /// let files = fs.vopen(&[OpenRequest::new("/config", OpenFlags::READ)])?;
     /// fs.closev(files)?; // Observe a close error instead of discarding it in Drop.
     /// # Ok(())
     /// # }
     /// ```
     fn closev(&self, mut files: Vec<Self::File>) -> Result<()> {
-        self.try_closev(&mut files)
+        self.vclose(&mut files)
     }
 
-    /// Single-target convenience. For multiple complete files, prefer [`FsExt::write_files`]; for opened handles, prefer [`Fs::writev_with_options`].
+    /// Single-target convenience. For multiple complete files, prefer [`FsExt::write_files`]; for opened handles, prefer [`Fs::vwrite`].
     ///
     /// Replace a file completely, creating/truncating eagerly; not atomic replace.
     ///
@@ -1199,7 +1200,7 @@ pub trait FsExt: Fs {
         // Scalar open preserves backend-specific final-symlink resolution.
         // Always attempt close, but retain the write error if both fail.
         let file = self.create(path)?;
-        let result = self.writev_with_options(
+        let result = self.vwrite(
             &[crate::WriteOp::at(&file, 0, data)],
             crate::WriteOptions::new().write_all(true),
         );
@@ -1242,11 +1243,11 @@ pub trait FsExt: Fs {
                 )
             })
             .collect();
-        let files = self.openv(&requests)?;
+        let files = self.vopen(&requests)?;
         if files.len() != entries.len() {
             return Err(crate::Error::transport(
                 None,
-                "openv returned an invalid result count",
+                "vopen returned an invalid result count",
             ));
         }
         let writes: Vec<_> = files
@@ -1254,14 +1255,14 @@ pub trait FsExt: Fs {
             .zip(entries)
             .map(|(file, (_, data))| crate::WriteOp::at(file, 0, data.as_ref()))
             .collect();
-        let result = self.writev_with_options(&writes, crate::WriteOptions::new().write_all(true));
+        let result = self.vwrite(&writes, crate::WriteOptions::new().write_all(true));
         drop(writes);
         let close_result = self.closev(files);
         result?;
         close_result
     }
 
-    /// Single-target convenience. For multiple paths, prefer [`FsExt::symlink_metadatav`] or [`Fs::metadatav_with_options`] with follow_symlinks(false).
+    /// Single-target convenience. For multiple paths, prefer [`FsExt::symlink_metadatav`] or [`Fs::vgetattrs`] with follow_symlinks(false).
     ///
     /// Query the final symlink itself instead of following it.
     ///
@@ -1280,13 +1281,13 @@ pub trait FsExt: Fs {
         self.symlink_metadata_with_fields(path, crate::MetadataFields::stat())
     }
 
-    /// Single-target convenience. For multiple independent directories, prefer [`Fs::mkdirv`].
+    /// Single-target convenience. For multiple independent directories, prefer [`Fs::vmkdir`].
     ///
     /// Create one directory; its parent must exist.
     ///
     /// An existing entry is an error, even if already a directory. Use
     /// [`create_dir_all`](FsExt::create_dir_all) for missing parents/idempotent
-    /// directory setup, or [`mkdirv`](Fs::mkdirv) for independent siblings.
+    /// directory setup, or [`vmkdir`](Fs::vmkdir) for independent siblings.
     ///
     /// ```no_run
     /// use vnfs::{Fs, FsExt, WriteOp};
@@ -1296,10 +1297,10 @@ pub trait FsExt: Fs {
     /// # }
     /// ```
     fn create_dir(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.mkdirv(&[path])
+        self.vmkdir(&[path])
     }
 
-    /// Single-target convenience. For multiple file pairs, prefer [`Fs::copyv`].
+    /// Single-target convenience. For multiple file pairs, prefer [`Fs::vcopy`].
     ///
     /// Copy a file's contents; this is not recursive tree copying.
     ///
@@ -1316,7 +1317,7 @@ pub trait FsExt: Fs {
     /// # }
     /// ```
     fn copy(&self, source: impl AsRef<Path>, destination: impl AsRef<Path>) -> Result<()> {
-        self.copyv(&[(source, destination)])
+        self.vcopy(&[(source, destination)])
     }
 
     /// Collect directory listings under one aggregate entry/path-byte policy.
@@ -1373,7 +1374,7 @@ pub trait FsExt: Fs {
         })
     }
 
-    /// Single-target convenience. For multiple files, prefer [`Fs::readv_with_options`] with an aggregate byte budget, then decode UTF-8.
+    /// Single-target convenience. For multiple files, prefer [`Fs::vread`] with an aggregate byte budget, then decode UTF-8.
     ///
     /// Read a complete UTF-8 file with an explicit, nonzero payload budget.
     /// A zero-byte override returns an invalid-input error.
@@ -1474,7 +1475,7 @@ pub trait FsExt: Fs {
         )
     }
 
-    /// Single-target convenience. For multiple directories, prefer [`Fs::visit_dirs_with_options`].
+    /// Single-target convenience. For multiple directories, prefer [`Fs::vlistdirs`].
     ///
     /// Visit a directory incrementally using the client's allocation limits.
     /// The callback runs outside the backend lock.
@@ -1497,7 +1498,7 @@ pub trait FsExt: Fs {
         self.visit_dir_with_options(path, crate::VisitOptions::new(), callback)
     }
 
-    /// Single-target convenience. For multiple roots, prefer [`Fs::visit_dirs_with_options`].
+    /// Single-target convenience. For multiple roots, prefer [`Fs::vlistdirs`].
     ///
     /// Visit a no-follow tree incrementally using the client's traversal limits.
     /// The callback runs outside the backend lock.
@@ -1520,7 +1521,7 @@ pub trait FsExt: Fs {
         self.visit_walk_with_options(root, crate::VisitOptions::new(), callback)
     }
 
-    /// Single-target convenience. For multiple files, prefer [`Fs::read_streams_with_options`]. Backends may process streams sequentially.
+    /// Single-target convenience. For multiple files, prefer [`Fs::vstream`]. Backends may process streams sequentially.
     ///
     /// Stream a file using the client's bounded chunk size instead of collecting it.
     /// Return `Ok(false)` to stop successfully; the callback runs outside the lock.
@@ -1606,7 +1607,7 @@ fn metadata<C: Fs + ?Sized>(
     path: impl AsRef<Path>,
     options: crate::MetadataOptions,
 ) -> Result<Metadata> {
-    let mut results = client.metadatav_with_options(&[path], options)?;
+    let mut results = client.vgetattrs(&[path], options)?;
     if results.len() != 1 {
         return Err(crate::Error::transport(
             None,
@@ -1915,7 +1916,7 @@ fn single_tree(trees: &mut Vec<Vec<DirectoryListing>>) -> Result<Vec<DirectoryLi
 
 macro_rules! client_methods {
     ($client:ty, $receiver:path) => {
-        client_methods!($client, $receiver, <$client>::readv_with_options);
+        client_methods!($client, $receiver, <$client>::vread);
     };
     ($client:ty, $receiver:path, $readv:expr) => {
         client_methods!($client, $receiver, $readv, $receiver);
@@ -1938,7 +1939,7 @@ macro_rules! client_methods {
             $read_receiver,
             $writev,
             $write_allv,
-            <$client>::metadatav_with_options
+            <$client>::vgetattrs
         );
     };
     ($client:ty, $receiver:path, $readv:expr, $read_receiver:path, $writev:expr, $write_allv:expr, $metadata:expr) => {
@@ -1954,10 +1955,28 @@ macro_rules! client_methods {
         );
     };
     ($client:ty, $receiver:path, $readv:expr, $read_receiver:path, $writev:expr, $write_allv:expr, $metadata:expr, $write_receiver:path) => {
-        fn renamev<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-            <$client>::renamev($receiver(self), pairs)
+        client_methods!(
+            $client,
+            $receiver,
+            $readv,
+            $read_receiver,
+            $writev,
+            $write_allv,
+            $metadata,
+            $write_receiver,
+            vrename,
+            vmkdir,
+            vcopy,
+            vclose,
+            vopen
+        );
+    };
+    // Application clients and backend clients use different native method names.
+    ($client:ty, $receiver:path, $readv:expr, $read_receiver:path, $writev:expr, $write_allv:expr, $metadata:expr, $write_receiver:path, $rename:ident, $mkdir:ident, $copy:ident, $close:ident, $open_batch:ident) => {
+        fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+            <$client>::$rename($receiver(self), pairs)
         }
-        fn visit_dirs_with_options<P: AsRef<Path>>(
+        fn vlistdirs<P: AsRef<Path>>(
             &self,
             paths: &[P],
             options: crate::VisitOptions,
@@ -1969,7 +1988,7 @@ macro_rules! client_methods {
                 self.limits(),
                 |paths| <$client as NativeHooks>::page_capacity($receiver(self), paths),
                 |path| {
-                    let metadata = self.metadatav_with_options(
+                    let metadata = self.vgetattrs(
                         &[path],
                         crate::MetadataOptions::new()
                             .fields(crate::MetadataFields::MODE)
@@ -2000,7 +2019,7 @@ macro_rules! client_methods {
                 callback,
             )
         }
-        fn read_streams_with_options<P: AsRef<Path>>(
+        fn vstream<P: AsRef<Path>>(
             &self,
             paths: &[P],
             options: crate::ReadStreamOptions,
@@ -2022,7 +2041,7 @@ macro_rules! client_methods {
             }
             Ok(output)
         }
-        fn metadatav_with_options<P: AsRef<Path>>(
+        fn vgetattrs<P: AsRef<Path>>(
             &self,
             paths: &[P],
             options: crate::MetadataOptions,
@@ -2033,22 +2052,22 @@ macro_rules! client_methods {
             <$client>::limits($receiver(self))
         }
 
-        fn openv(&self, requests: &[OpenRequest]) -> Result<Vec<Self::File>> {
+        fn vopen(&self, requests: &[OpenRequest]) -> Result<Vec<Self::File>> {
             if requests.len() == 1 {
                 // Preserve native symlink resolution and independent-handle state.
                 return <$client as NativeHooks>::open_native($receiver(self), requests[0].clone())
                     .map(|file| vec![file]);
             }
-            <$client>::openv($receiver(self), requests)
+            <$client>::$open_batch($receiver(self), requests)
         }
-        fn readv_with_options<'a>(
+        fn vread<'a>(
             &self,
             ops: impl IntoIterator<Item = crate::ReadOp<'a, Self::File>>,
             options: crate::ReadOptions,
         ) -> Result<Vec<crate::ReadResult>> {
             ($readv)($read_receiver(self), ops, options)
         }
-        fn writev_with_options<'a>(
+        fn vwrite<'a>(
             &self,
             requests: &[crate::WriteOp<'a, Self::File>],
             options: crate::WriteOptions,
@@ -2060,17 +2079,17 @@ macro_rules! client_methods {
             };
             result.map_err(crate::write::public_write_error)
         }
-        fn try_closev(&self, files: &mut [Self::File]) -> Result<()> {
-            <$client>::try_closev($receiver(self), files)
+        fn vclose(&self, files: &mut [Self::File]) -> Result<()> {
+            <$client>::$close($receiver(self), files)
         }
-        fn mkdirv<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {
-            <$client>::mkdirv($receiver(self), paths)
+        fn vmkdir<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {
+            <$client>::$mkdir($receiver(self), paths)
         }
 
-        fn copyv<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-            <$client>::copyv($receiver(self), pairs)
+        fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+            <$client>::$copy($receiver(self), pairs)
         }
-        fn removev_with_options<P: AsRef<Path>>(
+        fn vremove<P: AsRef<Path>>(
             &self,
             paths: &[P],
             mode: crate::RemoveMode,
@@ -2118,7 +2137,13 @@ impl<F: vfsi_sync::NativeFileSystem + vfsi_sync::VectorFileSystem + vfsi_sync::V
         std::convert::identity,
         crate::write::write_backend::<F>,
         crate::write::write_backend_all::<F>,
-        crate::metadata::metadata_backend::<F, _>
+        crate::metadata::metadata_backend::<F, _>,
+        std::convert::identity,
+        renamev,
+        mkdirv,
+        copyv,
+        try_closev,
+        openv
     );
 }
 
@@ -2524,15 +2549,14 @@ mod extension_tests {
         fs.removev(&["/tree"], RemoveMode::Entry).unwrap();
 
         for mode in [RemoveMode::Entry, RemoveMode::Tree, RemoveMode::Contents] {
-            fs.removev_with_options::<&str>(&[], mode, RemoveOptions::new())
-                .unwrap();
+            fs.vremove::<&str>(&[], mode, RemoveOptions::new()).unwrap();
         }
         std::fs::create_dir(root.path().join("policy")).unwrap();
         std::fs::write(root.path().join("policy/file"), b"unchanged").unwrap();
         // The mounted generic remover rejects unsupported custom policy. Contents
         // must forward it rather than silently falling back to default options.
         assert!(
-            fs.removev_with_options(
+            fs.vremove(
                 &["/policy"],
                 RemoveMode::Contents,
                 RemoveOptions::new().retries(0)
@@ -2563,7 +2587,7 @@ mod extension_tests {
             if self.shape.get() == 6 {
                 return Err(crate::Error::transport(None, "lost reply"));
             }
-            let mut results = self.mounted.readv_with_options(ops, options)?;
+            let mut results = self.mounted.vread(ops, options)?;
             match self.shape.get() {
                 1 => {
                     results.pop();
@@ -2667,7 +2691,7 @@ mod extension_tests {
         assert_eq!(fs.read_files(&["/copy"]).unwrap(), [b"de".to_vec()]);
         let mut file = fs.create("/created").unwrap();
         assert!(!file.is_closed());
-        fs.try_closev(std::slice::from_mut(&mut file)).unwrap();
+        fs.vclose(std::slice::from_mut(&mut file)).unwrap();
         assert!(file.is_closed());
         fs.closev(vec![file]).unwrap();
     }
@@ -2709,7 +2733,7 @@ mod extension_tests {
                 return Err(crate::Error::transport(None, "injected lost write reply"));
             }
             self.mounted
-                .writev_with_options(ops, crate::WriteOptions::new().write_all(true))
+                .vwrite(ops, crate::WriteOptions::new().write_all(true))
         }
     }
     impl Fs for WritePolicyProbe {
@@ -2717,11 +2741,11 @@ mod extension_tests {
         client_methods!(
             crate::Mounted,
             WritePolicyProbe::inner,
-            crate::Mounted::readv_with_options,
+            crate::Mounted::vread,
             WritePolicyProbe::inner,
             WritePolicyProbe::partial,
             WritePolicyProbe::complete,
-            crate::Mounted::metadatav_with_options,
+            crate::Mounted::vgetattrs,
             std::convert::identity
         );
     }
@@ -2743,23 +2767,20 @@ mod extension_tests {
             crate::WriteOptions::new(),
             crate::WriteOptions::new().write_all(true).write_all(false),
         ] {
-            assert_eq!(fs.writev_with_options(&ops, options).unwrap()[0].written, 2);
+            assert_eq!(fs.vwrite(&ops, options).unwrap()[0].written, 2);
         }
         assert_eq!(fs.partial_calls.get(), 3);
         assert_eq!(fs.complete_calls.get(), 0);
         assert_eq!(fs.read_files(&["/file"]).unwrap(), [b"ab".to_vec()]);
         let complete = crate::WriteOptions::new().write_all(true);
-        assert_eq!(
-            fs.writev_with_options(&ops, complete).unwrap()[0].written,
-            6
-        );
+        assert_eq!(fs.vwrite(&ops, complete).unwrap()[0].written, 6);
         assert_eq!(fs.partial_calls.get(), 3);
         assert_eq!(fs.complete_calls.get(), 1);
         assert_eq!(fs.read_files(&["/file"]).unwrap(), [b"abcdef".to_vec()]);
 
         fs.lose_reply.set(true);
         let error = fs
-            .writev_with_options(&[crate::WriteOp::at(&file, 0, b"UVWXYZ")], complete)
+            .vwrite(&[crate::WriteOp::at(&file, 0, b"UVWXYZ")], complete)
             .unwrap_err();
         assert!(error.is_transport());
         assert_eq!(error.index(), None);
@@ -2836,7 +2857,7 @@ mod extension_tests {
             calls: Cell::new(0),
             shape: Cell::new(0),
         };
-        fs.mkdirv(&["/a", "/b"]).unwrap();
+        fs.vmkdir(&["/a", "/b"]).unwrap();
         fs.write_files(&[("/a/f", b"x"), ("/b/f", b"y")]).unwrap();
         let options = crate::WalkOptions::new().max_entries(2);
         let trees = fs
@@ -2893,7 +2914,7 @@ mod extension_tests {
             calls: Cell::new(0),
             shape: Cell::new(0),
         };
-        fs.mkdirv(&["/a", "/b"]).unwrap();
+        fs.vmkdir(&["/a", "/b"]).unwrap();
         let options = crate::WalkOptions::new().max_entries(0).max_path_bytes(4);
         assert_eq!(
             fs.visit_entries_with_options(&["/a", "/b"], options.into(), |_, _| panic!(
@@ -2996,10 +3017,10 @@ mod extension_tests {
             fs.rename("/one/a", "/one/renamed").unwrap();
         }
         scalar(&fs);
-        fs.renamev(&[("/one/renamed", "/one/a"), ("/two/b", "/two/c")])
+        fs.vrename(&[("/one/renamed", "/one/a"), ("/two/b", "/two/c")])
             .unwrap();
         let error = fs
-            .renamev(&[("/one/a", "/one/moved"), ("/absent", "/two/moved")])
+            .vrename(&[("/one/a", "/one/moved"), ("/absent", "/two/moved")])
             .unwrap_err();
         assert_eq!(error.index(), Some(1));
         assert!(root.path().join("one/moved").exists());
@@ -3076,7 +3097,7 @@ mod extension_tests {
 
         let mut seen = Vec::new();
         let completion = fs
-            .read_streams_with_options(
+            .vstream(
                 &["/one/moved", "/absent"],
                 crate::ReadStreamOptions::new().chunk_size(2),
                 |index, offset, data| {
@@ -3093,7 +3114,7 @@ mod extension_tests {
         );
         assert_eq!(seen, [0]);
         let error = fs
-            .read_streams_with_options(
+            .vstream(
                 &["/one/moved", "/absent"],
                 crate::ReadStreamOptions::new(),
                 |_, _, _| Ok(true),
@@ -3102,7 +3123,7 @@ mod extension_tests {
         assert_eq!(error.index(), Some(1));
         assert!(fs.remove_file("/one").is_err());
         assert!(fs.remove_dir("/one/moved").is_err());
-        fs.removev_with_options(
+        fs.vremove(
             &roots,
             crate::RemoveMode::Contents,
             crate::RemoveOptions::new(),
