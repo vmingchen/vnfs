@@ -97,6 +97,16 @@ impl Vfsi for PortableFs {
         panic!("unexpected hardlink")
     }
 
+    fn vstatfs<P: vfsi_core::MetadataOperand<Self::File>>(
+        &self,
+        targets: &[P],
+    ) -> vfsi_core::api::Result<Vec<vfsi_core::FilesystemStats>> {
+        if targets.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(vfsi_core::VfError::unsupported(0))
+        }
+    }
     fn vsetattrs<P: vfsi_core::MetadataOperand<Self::File>>(
         &self,
         _: &[(P, vfsi_core::MetadataUpdate)],

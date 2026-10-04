@@ -362,6 +362,75 @@ impl AutoClient {
         Ok(())
     }
 
+    /// Query route-coherent batches, preserving each open handle's retained route.
+    pub fn vstatfs<P: vfsi_core::MetadataOperand<AutoFile>>(
+        &self,
+        targets: &[P],
+    ) -> VfResult<Vec<crate::FilesystemStats>> {
+        use vfsi_core::MetadataTarget;
+        if targets.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mounts = read_mounts(false);
+        let mut resolved = Vec::with_capacity(targets.len());
+        for (index, target) in targets.iter().enumerate() {
+            let route = match target.metadata_target() {
+                MetadataTarget::Path(path) => self.resolve(path, &mounts),
+                MetadataTarget::File(file) => {
+                    self.check_owner(file, index)?;
+                    if file.is_closed() {
+                        return Err(VfError::client(index, libc::EBADF as u32)
+                            .with_context("vstatfs", &file.path));
+                    }
+                    Resolved {
+                        route: file.route.clone(),
+                        path: file.path.clone(),
+                    }
+                }
+            };
+            resolved.push(route);
+        }
+        let mut output = Vec::with_capacity(targets.len());
+        let mut start = 0;
+        while start < targets.len() {
+            let end = cohort_end(&resolved, start);
+            macro_rules! batch {
+                ($variant:ident) => {{
+                    (start..end)
+                        .map(|index| match targets[index].metadata_target() {
+                            MetadataTarget::Path(_) => {
+                                MetadataTarget::Path(resolved[index].path.as_path())
+                            }
+                            MetadataTarget::File(file) => match &file.inner {
+                                AutoFileInner::$variant(inner) => MetadataTarget::File(inner),
+                                _ => unreachable!("validated route"),
+                            },
+                        })
+                        .collect::<Vec<_>>()
+                }};
+            }
+            let result = match &resolved[start].route {
+                Route::Mounted => self.mounted.vstatfs(&batch!(Mounted)),
+                Route::Nfs(connection) => connection.client.vstatfs(&batch!(Nfs)),
+            }
+            .map_err(|error| {
+                let error = indexed(error, start);
+                match error.index().and_then(|index| targets.get(index)) {
+                    Some(target) => {
+                        let path = match target.metadata_target() {
+                            MetadataTarget::Path(path) => path,
+                            MetadataTarget::File(file) => file.path.as_path(),
+                        };
+                        error.with_context("vstatfs", path)
+                    }
+                    None => error,
+                }
+            })?;
+            output.extend(result);
+            start = end;
+        }
+        Ok(output)
+    }
     /// Update route-coherent batches of paths and open objects.
     pub fn vsetattrs<P: vfsi_core::MetadataOperand<AutoFile>>(
         &self,
@@ -476,12 +545,12 @@ impl AutoClient {
                 .collect();
             output.extend(
                 match &resolved[start].route {
-                    Route::Mounted => self.mounted.metadata_many(
+                    Route::Mounted => self.mounted.vgetattrs_native(
                         &batch,
                         options.requested_fields(),
                         options.follows_symlinks(),
                     ),
-                    Route::Nfs(connection) => connection.client.metadata_many(
+                    Route::Nfs(connection) => connection.client.vgetattrs_native(
                         &batch,
                         options.requested_fields(),
                         options.follows_symlinks(),
@@ -521,8 +590,8 @@ impl AutoClient {
                 .map(|(route, (_, mode))| (route.path.as_path(), *mode))
                 .collect();
             let result = match &resolved[start].route {
-                Route::Mounted => self.mounted.mkdirv_with_modes(&batch),
-                Route::Nfs(connection) => connection.client.mkdirv_with_modes(&batch),
+                Route::Mounted => self.mounted.vmkdir(&batch),
+                Route::Nfs(connection) => connection.client.vmkdir(&batch),
             };
             result.map_err(|error| {
                 let error = indexed(error, start);
@@ -536,11 +605,11 @@ impl AutoClient {
         Ok(())
     }
 
-    pub fn remove_paths<P: AsRef<Path>>(&self, paths: &[P], recursive: bool) -> VfResult<()> {
-        self.remove_paths_with_options(paths, recursive, crate::RemoveOptions::default())
+    pub fn vremove_native<P: AsRef<Path>>(&self, paths: &[P], recursive: bool) -> VfResult<()> {
+        self.vremove_with_options_native(paths, recursive, crate::RemoveOptions::default())
     }
 
-    pub fn remove_paths_with_options<P: AsRef<Path>>(
+    pub fn vremove_with_options_native<P: AsRef<Path>>(
         &self,
         paths: &[P],
         recursive: bool,
@@ -578,10 +647,10 @@ impl AutoClient {
             match &resolved[start].route {
                 Route::Mounted => self
                     .mounted
-                    .remove_paths_with_options(&batch, recursive, options),
+                    .vremove_with_options_native(&batch, recursive, options),
                 Route::Nfs(connection) => connection
                     .client
-                    .remove_paths_with_options(&batch, recursive, options),
+                    .vremove_with_options_native(&batch, recursive, options),
             }
             .map_err(|error| indexed(error, start))?;
             start = end;
@@ -620,8 +689,8 @@ impl AutoClient {
                 .map(|(source, destination)| (source.path.as_path(), destination.as_path()))
                 .collect();
             match &pairs[start].0.route {
-                Route::Mounted => self.mounted.copyv(&batch),
-                Route::Nfs(connection) => connection.client.copyv(&batch),
+                Route::Mounted => self.mounted.vcopy(&batch),
+                Route::Nfs(connection) => connection.client.vcopy(&batch),
             }
             .map_err(|error| indexed(error, start))?;
             start = end;
@@ -1094,7 +1163,7 @@ impl AutoClient {
                         .iter()
                         .map(|index| resolved[*index].path.as_path())
                         .collect();
-                    match connection.client.symlink_metadatav(&paths) {
+                    match connection.client.vsymlink_metadata_native(&paths) {
                         Ok(metadata) if metadata.len() == checked.len() => {
                             for (index, item) in checked.into_iter().zip(metadata) {
                                 if item.file_type() == crate::FileType::Symlink {
@@ -1147,7 +1216,7 @@ impl AutoClient {
             let route = resolved[start].route.clone();
             match &route {
                 Route::Mounted => {
-                    let files = self.mounted.openv(&batch).map_err(|e| indexed(e, start))?;
+                    let files = self.mounted.vopen(&batch).map_err(|e| indexed(e, start))?;
                     for (index, file) in files.into_iter().enumerate() {
                         output.push(AutoFile::new(
                             requests[start + index].path.clone(),
@@ -1160,7 +1229,7 @@ impl AutoClient {
                 Route::Nfs(connection) => {
                     let files = connection
                         .client
-                        .openv(&batch)
+                        .vopen(&batch)
                         .map_err(|e| indexed(e, start))?;
                     for (index, file) in files.into_iter().enumerate() {
                         output.push(AutoFile::new(
@@ -1195,7 +1264,7 @@ impl AutoClient {
             ops,
             options.limit_or(self.limits.max_read_bytes),
             |requests, options| self.readv_owned(requests, options),
-            |requests, bytes| self.readv_into_with_limit(requests, bytes),
+            |requests, bytes| self.vread_into_with_limit_native(requests, bytes),
         )
     }
     pub(crate) fn readv_owned(
@@ -1204,21 +1273,23 @@ impl AutoClient {
         budget: usize,
     ) -> VfResult<Vec<ReadResult>> {
         if requests.iter().all(|request| request.range_ref().is_some()) {
-            return self.readv_with_limit_projected(requests, budget, |request| {
+            return self.vread_with_limit_projected_native(requests, budget, |request| {
                 request.range_ref().expect("checked range requests")
             });
         }
         crate::read::read_batch(
             requests,
             budget,
-            |ranges, bytes| self.readv_with_limit_projected(ranges, bytes, |request| request),
+            |ranges, bytes| {
+                self.vread_with_limit_projected_native(ranges, bytes, |request| request)
+            },
             |paths, bytes| {
                 self.read_files_native(paths, crate::ReadAllOptions::new().max_total_bytes(bytes))
             },
         )
     }
 
-    fn readv_with_limit_projected<'a, T>(
+    fn vread_with_limit_projected_native<'a, T>(
         &self,
         requests: &[T],
         max_bytes: usize,
@@ -1260,7 +1331,7 @@ impl AutoClient {
                         .collect();
                     output.extend(
                         self.mounted
-                            .readv_with_limit(&batch, max_bytes)
+                            .vread_with_limit_native(&batch, max_bytes)
                             .map_err(|e| indexed(e, start))?,
                     );
                 }
@@ -1278,7 +1349,7 @@ impl AutoClient {
                     output.extend(
                         connection
                             .client
-                            .readv_with_limit(&batch, max_bytes)
+                            .vread_with_limit_native(&batch, max_bytes)
                             .map_err(|e| indexed(e, start))?,
                     );
                 }
@@ -1288,7 +1359,7 @@ impl AutoClient {
         Ok(output)
     }
 
-    fn readv_into_with_limit(
+    fn vread_into_with_limit_native(
         &self,
         requests: &mut [AutoReadInto<'_>],
         max_bytes: usize,
@@ -1324,7 +1395,7 @@ impl AutoClient {
                         .collect();
                     output.extend(
                         self.mounted
-                            .readv_into_with_limit(&mut batch, max_bytes)
+                            .vread_into_with_limit_native(&mut batch, max_bytes)
                             .map_err(|error| indexed(error, start))?,
                     );
                 }
@@ -1341,7 +1412,7 @@ impl AutoClient {
                     output.extend(
                         connection
                             .client
-                            .readv_into_with_limit(&mut batch, max_bytes)
+                            .vread_into_with_limit_native(&mut batch, max_bytes)
                             .map_err(|error| indexed(error, start))?,
                     );
                 }
@@ -1389,17 +1460,17 @@ impl AutoClient {
             if complete {
                 // This is preflight, not transactional rollback: reject all
                 // locally detectable invalid requests before any cohort writes.
-                // Validate empty requests too, matching FsClient::write_allv.
+                // Validate empty requests too, matching FsClient::vwrite_all_native.
                 if request.file().is_closed() {
                     return Err(VfError::client(index, libc::EBADF as u32)
-                        .with_context("writev", request.file().path()));
+                        .with_context("vwrite_native", request.file().path()));
                 }
                 request
                     .offset()
                     .checked_add(request.data().len() as u64)
                     .ok_or_else(|| {
                         VfError::client(index, libc::EOVERFLOW as u32)
-                            .with_context("writev", request.file().path())
+                            .with_context("vwrite_native", request.file().path())
                     })?;
             }
         }
@@ -1427,9 +1498,9 @@ impl AutoClient {
                         })
                         .collect();
                     let result = if complete {
-                        self.mounted.write_allv(&batch)
+                        self.mounted.vwrite_all_native(&batch)
                     } else {
-                        self.mounted.writev(&batch)
+                        self.mounted.vwrite_native(&batch)
                     };
                     output.extend(result.map_err(|e| indexed(e, start))?);
                 }
@@ -1444,9 +1515,9 @@ impl AutoClient {
                         })
                         .collect();
                     let result = if complete {
-                        connection.client.write_allv(&batch)
+                        connection.client.vwrite_all_native(&batch)
                     } else {
-                        connection.client.writev(&batch)
+                        connection.client.vwrite_native(&batch)
                     };
                     output.extend(result.map_err(|e| indexed(e, start))?);
                 }
@@ -1485,7 +1556,7 @@ impl AutoClient {
                         file
                     });
                     self.mounted
-                        .try_closev(batch)
+                        .vclose(batch)
                         .map_err(|error| indexed(error, start))?;
                 }
                 Route::Nfs(connection) => {
@@ -1497,7 +1568,7 @@ impl AutoClient {
                     });
                     connection
                         .client
-                        .try_closev(batch)
+                        .vclose(batch)
                         .map_err(|error| indexed(error, start))?;
                 }
             }
@@ -1562,8 +1633,8 @@ impl AutoClient {
                 .map(|i| (sources[i].path.as_path(), targets[i].path.as_path()))
                 .collect();
             match &sources[start].route {
-                Route::Mounted => self.mounted.renamev(&batch),
-                Route::Nfs(connection) => connection.client.renamev(&batch),
+                Route::Mounted => self.mounted.vrename(&batch),
+                Route::Nfs(connection) => connection.client.vrename(&batch),
             }
             .map_err(|error| indexed(error, start))?;
             start = end;
@@ -2407,7 +2478,7 @@ mod tests {
                 error.err_no(),
                 if closed { libc::EBADF } else { libc::EOVERFLOW } as u32
             );
-            assert_eq!(error.operation(), Some("writev"));
+            assert_eq!(error.operation(), Some("vwrite_native"));
             assert_eq!(error.path(), Some(Path::new("/second")));
         }
         fs::remove_dir_all(root).unwrap();
@@ -2722,7 +2793,7 @@ mod tests {
                     libc::EBADF
                 } as u32
             );
-            assert_eq!(error.operation(), Some("writev"));
+            assert_eq!(error.operation(), Some("vwrite_native"));
             assert_eq!(error.path(), Some(failed_path.as_path()));
         }
     }

@@ -119,18 +119,18 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
             vnfs::VisitOptions::from(vnfs::WalkOptions::new()).fields(fields),
         )?;
         client.vcopy(&[("/a/source", "/a/copy")])?;
-        client.remove_paths(&["/a/copy"], false)
+        client.vremove_native(&["/a/copy"], false)
     }
     let _ = app as fn(&vnfs::NfsClient) -> vnfs::Result<()>;
 }
 
 #[test]
 fn backend_implementers_depend_on_lower_level_crates() {
-    use vfsi_sync::{ReadOp, VecFs, VfFile, VfOffset};
+    use vfsi_sync::{Backend, ReadOp, VfFile, VfOffset};
 
     let _ = ReadOp::new(VfFile::from_path("/file"), VfOffset::At(0), 1);
-    fn accepts_backend<T: VecFs + ?Sized>(_: &mut T) {}
-    let _ = accepts_backend::<dyn VecFs>;
+    fn accepts_backend<T: Backend + ?Sized>(_: &mut T) {}
+    let _ = accepts_backend::<dyn Backend>;
 }
 
 #[cfg(all(feature = "auto", target_os = "linux"))]
@@ -286,7 +286,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         vnfs::ErrorKind::Unsupported
     );
     client
-        .remove_paths(&["/copies/a", "/copies/b", "/copies/hard"], false)
+        .vremove_native(&["/copies/a", "/copies/b", "/copies/hard"], false)
         .unwrap();
     client.ensure_empty_dir("/copies").unwrap();
     client.remove_dir_all("/copies").unwrap();
@@ -547,4 +547,51 @@ fn vector_links_modes_and_capabilities_work_generically_on_local_and_auto() {
         vnfs::Vfsi::capabilities(&auto).unwrap(),
         vnfs::Vfsi::capabilities(&mounted).unwrap()
     );
+}
+
+#[path = "support/statfs.rs"]
+mod statfs_support;
+
+#[cfg(all(feature = "auto", target_os = "linux"))]
+#[test]
+fn filesystem_stats_local_and_routed_handles() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("local")).unwrap();
+    std::fs::create_dir(root.path().join("auto")).unwrap();
+    let mounted = vnfs::Mounted::new(root.path()).unwrap();
+    let other = vnfs::Mounted::new(root.path()).unwrap();
+    statfs_support::check(&mounted, &other, "/local");
+    let auto = vnfs::Auto::new(root.path()).unwrap();
+    statfs_support::check(&auto, &vnfs::Auto::new(root.path()).unwrap(), "/auto");
+    let stats = mounted.statfs("/").unwrap();
+    assert!(stats.fragment_size.unwrap() > 0);
+    assert!(stats.block_size.unwrap() > 0);
+    assert_eq!(stats.read_only, Some(false));
+    assert!(stats.max_path_len.unwrap() > 0);
+    assert!(stats.file_size_bits.unwrap() > 0);
+    assert!(stats.max_file_size.is_none());
+    // Direct fd identity remains valid after unlink, without pathname lookup.
+    use vnfs::MetadataTarget;
+    let file = mounted.open("/local/renamed").unwrap();
+    mounted.remove_file("/local/renamed").unwrap();
+    assert_eq!(
+        mounted
+            .statfs(MetadataTarget::File(&file))
+            .unwrap()
+            .total_bytes,
+        stats.total_bytes
+    );
+    file.close().unwrap();
+    std::os::unix::fs::symlink("local/stats-1", root.path().join("symlink")).unwrap();
+    assert_eq!(
+        mounted.statfs("/symlink").unwrap().total_bytes,
+        stats.total_bytes
+    );
+    // Compare static values against the POSIX source independently.
+    use std::os::fd::AsRawFd;
+    let fd = std::fs::File::open(root.path()).unwrap();
+    let mut raw: libc::statvfs = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::fstatvfs(fd.as_raw_fd(), &mut raw) }, 0);
+    assert_eq!(stats.total_bytes, raw.f_blocks.checked_mul(raw.f_frsize));
+    assert_eq!(stats.fragment_size, Some(raw.f_frsize));
 }

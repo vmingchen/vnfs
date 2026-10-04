@@ -90,7 +90,7 @@ macro_rules! fail_batch {
 
 /// Opaque filesystem handle owned by C.
 pub struct vfsi_fs {
-    fs: Mutex<Box<dyn vfsi_sync::VecFs>>,
+    fs: Mutex<Box<dyn BindingBackend>>,
     files: Mutex<std::collections::HashMap<i32, VfFile>>,
     next_fd: AtomicI32,
     /// Kernel mountpoint used by application-visible paths.
@@ -452,7 +452,7 @@ pub unsafe extern "C" fn vfsi_capabilities(fs: *const vfsi_fs) -> u64 {
         };
         fs.fs
             .lock()
-            .map(|backend| backend.capabilities())
+            .map(|backend| backend.capability_bits())
             .unwrap_or(0)
     })
 }
@@ -483,7 +483,7 @@ fn bounded_listdir(
         max_entries.saturating_add(1)
     };
     collect_bounded_entries(max_entries, max_path_bytes, |cb| {
-        lock_or_io(&fs.fs)?.visit_dir(path, fields, probe, cb)
+        lock_or_io(&fs.fs)?.visit_dir_impl(path, fields, probe, cb)
     })
 }
 
@@ -564,7 +564,7 @@ fn path_for(fs: &vfsi_fs, path: &Path) -> Option<PathBuf> {
 }
 
 fn make_fs(
-    fs: Box<dyn vfsi_sync::VecFs>,
+    fs: Box<dyn BindingBackend>,
     mountpoint: PathBuf,
     backend_root: PathBuf,
 ) -> *mut vfsi_fs {
@@ -617,7 +617,7 @@ pub unsafe extern "C" fn vfsi_dummy_open(root: *const c_char, out: *mut *mut vfs
             return libc::EINVAL;
         };
         let fs = match DummyVecFs::try_new(root) {
-            Ok(fs) => Box::new(fs) as Box<dyn vfsi_sync::VecFs>,
+            Ok(fs) => Box::new(fs) as Box<dyn BindingBackend>,
             Err(error) => return error.err_no() as c_int,
         };
         *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
@@ -643,7 +643,7 @@ pub unsafe extern "C" fn vfsi_dummy_open_mount(
             return libc::EINVAL;
         };
         let fs = match DummyVecFs::try_new(root) {
-            Ok(fs) => Box::new(fs) as Box<dyn vfsi_sync::VecFs>,
+            Ok(fs) => Box::new(fs) as Box<dyn BindingBackend>,
             Err(error) => return error.err_no() as c_int,
         };
         *out = make_fs(fs, mountpoint, PathBuf::from("/"));
@@ -663,7 +663,7 @@ pub unsafe extern "C" fn vfsi_nfs_open(host: *const c_char, out: *mut *mut vfsi_
             return libc::EINVAL;
         };
         match NfsVecFs::connect(host)
-            .map(|f| Box::new(f) as Box<dyn vfsi_sync::VecFs>)
+            .map(|f| Box::new(f) as Box<dyn BindingBackend>)
             .map_err(|e| vf_code(&e))
         {
             Ok(fs) => {
@@ -690,7 +690,7 @@ pub unsafe extern "C" fn vfsi_nfs_open_minor(
             return libc::EINVAL;
         };
         match NfsVecFs::connect_minor(host, minorversion)
-            .map(|f| Box::new(f) as Box<dyn vfsi_sync::VecFs>)
+            .map(|f| Box::new(f) as Box<dyn BindingBackend>)
             .map_err(|e| vf_code(&e))
         {
             Ok(fs) => {
@@ -780,7 +780,7 @@ pub unsafe extern "C" fn vfsi_walk(
         let fields = fields | AttrMask::MODE;
         let result = (|| -> Result<(), VfError> {
             let path = vpath_for(fs, &root)?;
-            let root_attrs = lock_or_io(&fs.fs)?.lstat(&path)?;
+            let root_attrs = lock_or_io(&fs.fs)?.lstat_impl(&path)?;
             let metadata = vfsi_sync::metadata_from_attrs(root_attrs);
             let walk_options = vnfs::WalkOptions::new()
                 .max_entries(options.max_entries)
@@ -916,7 +916,7 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount_export(
             return libc::EINVAL;
         }
         match NfsVecFs::connect(host)
-            .map(|f| Box::new(f) as Box<dyn vfsi_sync::VecFs>)
+            .map(|f| Box::new(f) as Box<dyn BindingBackend>)
             .map_err(|e| vf_code(&e))
         {
             Ok(fs) => {
@@ -955,7 +955,7 @@ pub unsafe extern "C" fn vfsi_smb_open(
         match SmbVecFs::connect(&server, &share, &username, &password, &domain) {
             Ok(backend) => {
                 *out = make_fs(
-                    Box::new(backend) as Box<dyn vfsi_sync::VecFs>,
+                    Box::new(backend) as Box<dyn BindingBackend>,
                     PathBuf::from("/"),
                     PathBuf::from("/"),
                 );
@@ -1009,7 +1009,7 @@ pub unsafe extern "C" fn vfsi_smb_open_mount(
         match SmbVecFs::connect(&server, &share, &username, &password, &domain) {
             Ok(backend) => {
                 *out = make_fs(
-                    Box::new(backend) as Box<dyn vfsi_sync::VecFs>,
+                    Box::new(backend) as Box<dyn BindingBackend>,
                     mountpoint,
                     share_root,
                 );
@@ -1056,7 +1056,7 @@ pub unsafe extern "C" fn vfsi_free(fs: *mut vfsi_fs) {
 
 fn stat_impl(fs: &vfsi_fs, path: &std::path::Path) -> Result<VfAttrs, VfError> {
     let vpath = vpath_for(fs, path)?;
-    lock_or_io(&fs.fs)?.stat(&vpath)
+    lock_or_io(&fs.fs)?.stat_impl(&vpath)
 }
 
 /// Stat `path`, following a final symlink.
@@ -1087,7 +1087,7 @@ fn open_impl(
     mode: u32,
 ) -> Result<i32, VfError> {
     let vpath = vpath_for(fs, path)?;
-    let file = lock_or_io(&fs.fs)?.open(&vpath, flags, mode)?;
+    let file = lock_or_io(&fs.fs)?.open_raw_impl(&vpath, flags, mode)?;
     let mut files = lock_or_io(&fs.files)?;
     insert_c_file(fs, &mut files, file)
 }
@@ -1115,7 +1115,7 @@ fn close_impl(fs: &vfsi_fs, fd: i32) -> Result<(), VfError> {
     let file = lock_or_io(&fs.files)?
         .remove(&fd)
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-    lock_or_io(&fs.fs)?.close(&file)
+    lock_or_io(&fs.fs)?.close_impl(&file)
 }
 
 /// Close a descriptor opened by [`vfsi_open`].
@@ -1143,7 +1143,7 @@ fn pread_impl(
         .get(&fd)
         .cloned()
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-    let data = lock_or_io(&fs.fs)?.read(&file, offset, len)?;
+    let data = lock_or_io(&fs.fs)?.read_raw_impl(&file, offset, len)?;
     // SAFETY: C caller must provide a buffer of at least `len` bytes.
     unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf as *mut u8, data.len()) };
     Ok(data.len())
@@ -1191,7 +1191,7 @@ fn pwrite_impl(
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
     // SAFETY: C caller must provide a valid buffer of `len` bytes.
     let data = unsafe { std::slice::from_raw_parts(buf as *const u8, len) };
-    lock_or_io(&fs.fs)?.write(&file, offset, data)
+    lock_or_io(&fs.fs)?.write_raw_impl(&file, offset, data)
 }
 
 /// Write `len` bytes at `offset`; writes the actual count to `*wrote`.
@@ -1238,9 +1238,9 @@ pub unsafe extern "C" fn vfsi_mkdir(
             let path = vpath_for(fs, &path)?;
             let mut f = lock_or_io(&fs.fs)?;
             if create_parents != 0 {
-                f.ensure_dir(&path, mode)
+                f.ensure_dir_impl(&path, mode)
             } else {
-                f.mkdir(&path, mode)
+                f.mkdir_raw_impl(&path, mode)
             }
         })();
         match result {
@@ -1259,7 +1259,7 @@ pub unsafe extern "C" fn vfsi_remove(fs: *mut vfsi_fs, path: *const c_char) -> c
         };
         let result: Result<(), VfError> = (|| {
             let path = vpath_for(fs, &path)?;
-            lock_or_io(&fs.fs)?.unlink(&path)
+            lock_or_io(&fs.fs)?.unlink_impl(&path)
         })();
         match result {
             Ok(()) => 0,
@@ -1284,7 +1284,8 @@ pub unsafe extern "C" fn vfsi_rename(
         let result: Result<(), VfError> = (|| {
             let old = vpath_for(fs, &old)?;
             let new = vpath_for(fs, &new)?;
-            lock_or_io(&fs.fs)?.renamev(&[(VfFile::from_os_path(&old), VfFile::from_os_path(&new))])
+            lock_or_io(&fs.fs)?
+                .vrename_impl(&[(VfFile::from_os_path(&old), VfFile::from_os_path(&new))])
         })();
         match result {
             Ok(()) => 0,
@@ -1323,7 +1324,9 @@ pub unsafe extern "C" fn vfsi_copy(
             dst_offset,
             (!to_eof).then_some(length),
         );
-        match lock_or_io(&fs.fs).and_then(|mut backend| backend.copyv(&[pair])) {
+        match lock_or_io(&fs.fs)
+            .and_then(|mut backend| backend.vcopy_impl(&[pair], vfsi_sync::CopyOption::new()))
+        {
             Ok(()) => 0,
             Err(error) => vf_code(&error),
         }
@@ -1383,7 +1386,7 @@ pub unsafe extern "C" fn vfsi_openv(
                 Ok(backend) => backend,
                 Err(error) => fail_batch!(results, vfsi_result::from_error(error), true),
             };
-            match backend.openv(&refs, &flags, &modes) {
+            match backend.vopen_raw_impl(&refs, &flags, &modes) {
                 Ok(opened) => opened,
                 Err(error) => return vfsi_result::from_error(error),
             }
@@ -1406,7 +1409,7 @@ pub unsafe extern "C" fn vfsi_openv(
                 }
             }
             if let Ok(mut backend) = fs.fs.lock() {
-                let _ = backend.closev(&opened);
+                let _ = backend.vclose_impl(&opened);
             }
             fail_batch!(results, vfsi_result::from_error(error), true);
         }
@@ -1464,7 +1467,7 @@ pub unsafe extern "C" fn vfsi_closev(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        match backend.closev(&files) {
+        match backend.vclose_impl(&files) {
             Ok(()) => {
                 if let Ok(mut table) = fs.files.lock() {
                     for fd in fds {
@@ -1541,7 +1544,7 @@ pub unsafe extern "C" fn vfsi_statv(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        if let Err(error) = backend.getattrsv(&mut attrs) {
+        if let Err(error) = backend.vgetattrs_impl(&mut attrs) {
             fail_batch!(results, vfsi_result::from_error(error), true);
         }
         for (op, attrs) in ops.iter_mut().zip(&attrs) {
@@ -1615,7 +1618,7 @@ pub unsafe extern "C" fn vfsi_setattrv(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        match backend.setattrsv(&attrs) {
+        match backend.vsetattrs_raw_impl(&attrs) {
             Ok(()) => {
                 complete_results(results);
                 vfsi_result::success(count)
@@ -1687,7 +1690,7 @@ pub unsafe extern "C" fn vfsi_preadv(
                 fail_batch!(item_results, vfsi_result::from_error(error), false)
             }
         };
-        let results = match backend.readv(&reads) {
+        let results = match backend.vread_impl(&reads) {
             Ok(results) => results,
             Err(error) => {
                 fail_batch!(item_results, vfsi_result::from_error(error), true)
@@ -1771,7 +1774,7 @@ pub unsafe extern "C" fn vfsi_pwritev(
                 fail_batch!(item_results, vfsi_result::from_error(error), false)
             }
         };
-        let results = match backend.writev(&writes) {
+        let results = match backend.vwrite_owned_impl(&writes) {
             Ok(results) => results,
             Err(error) => {
                 fail_batch!(item_results, vfsi_result::from_error(error), true)
@@ -1836,7 +1839,7 @@ pub unsafe extern "C" fn vfsi_mkdirv(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        match backend.mkdirv(&dirs) {
+        match backend.vmkdir_impl(&dirs) {
             Ok(()) => {
                 complete_results(results);
                 vfsi_result::success(count)
@@ -1892,7 +1895,7 @@ pub unsafe extern "C" fn vfsi_removev(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        match backend.removev(&files) {
+        match backend.vremove_impl(&files) {
             Ok(()) => {
                 complete_results(results);
                 vfsi_result::success(count)
@@ -1958,7 +1961,7 @@ pub unsafe extern "C" fn vfsi_renamev(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        match backend.renamev(&pairs) {
+        match backend.vrename_impl(&pairs) {
             Ok(()) => {
                 complete_results(results);
                 vfsi_result::success(count)
@@ -2023,7 +2026,7 @@ pub unsafe extern "C" fn vfsi_copyv(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        match backend.copyv(&pairs) {
+        match backend.vcopy_impl(&pairs, vfsi_sync::CopyOption::new()) {
             Ok(()) => {
                 complete_results(results);
                 vfsi_result::success(count)
@@ -2087,7 +2090,7 @@ pub unsafe extern "C" fn vfsi_read_streamv(
             Ok(backend) => backend,
             Err(error) => return vfsi_result::from_error(error),
         };
-        let result = backend.read_streamv(
+        let result = backend.vstream_impl(
             &files,
             chunk_size,
             memory_limit,
@@ -2219,10 +2222,16 @@ pub unsafe extern "C" fn vfsi_listdirv(
             let mut rows = Vec::new();
             {
                 let mut backend = lock_or_io(&fs.fs)?;
-                backend.listdirv(&refs, mask(), max_entries, recursive, &mut |attrs, dir| {
-                    rows.push((attrs.clone(), dir.to_path_buf()));
-                    true
-                })?;
+                backend.vlistdirs_impl(
+                    &refs,
+                    mask(),
+                    max_entries,
+                    recursive,
+                    &mut |attrs, dir| {
+                        rows.push((attrs.clone(), dir.to_path_buf()));
+                        true
+                    },
+                )?;
             }
             for (attrs, dir) in rows {
                 let kernel_dir = match vpath_index.get(&dir) {
@@ -2312,7 +2321,7 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
                 kernel_paths.iter().map(|p| vpath_for(fs, p)).collect();
             let vpaths = vpaths?;
             let files: Vec<VfFile> = vpaths.iter().map(|p| VfFile::from_os_path(p)).collect();
-            let datas = lock_or_io(&fs.fs)?.read_allv_with_options(
+            let datas = lock_or_io(&fs.fs)?.vread_all_with_options_impl(
                 &files,
                 vfsi_sync::ReadAllOptions::new().max_total_bytes(max_bytes),
             )?;
@@ -2335,6 +2344,27 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
             Err(_) => libc::EIO,
         }
     })
+}
+
+// Protocol inspection belongs to the bindings, outside the native operation contracts.
+trait BindingBackend: vfsi_sync::Backend {
+    fn nfs_minorversion(&self) -> Option<u32> {
+        None
+    }
+    fn smb_dialect(&self) -> Option<u16> {
+        None
+    }
+}
+impl BindingBackend for DummyVecFs {}
+impl BindingBackend for NfsVecFs {
+    fn nfs_minorversion(&self) -> Option<u32> {
+        Some(vfsi_nfs::NfsExtensions::nfs_minor_version(self))
+    }
+}
+impl BindingBackend for SmbVecFs {
+    fn smb_dialect(&self) -> Option<u16> {
+        Some(vfsi_smb::SmbExtensions::smb_dialect_revision(self))
+    }
 }
 
 #[cfg(test)]
@@ -2890,7 +2920,7 @@ mod tests {
         let (_root, root) = temp_root();
         let backend = Box::new(DummyVecFs::new(PathBuf::from(
             root.to_string_lossy().into_owned(),
-        ))) as Box<dyn vfsi_sync::VecFs>;
+        ))) as Box<dyn BindingBackend>;
         let raw = make_fs(
             backend,
             PathBuf::from("/mnt/repos"),

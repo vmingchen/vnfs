@@ -188,9 +188,9 @@ pub mod prelude {
     #[cfg(all(feature = "auto", target_os = "linux"))]
     pub use crate::{Auto, Mounted};
     pub use crate::{
-        ControlFlow, FileHandle, MetadataOperand, MetadataOptions, MetadataTarget, ReadOp,
-        ReadOptions, ReadResult, RemoveMode, ResourceLimits, StreamCompletion, TraversalCompletion,
-        Vfsi, VfsiExt, VisitOptions, WriteOp, WriteOptions,
+        ControlFlow, CopyOption, FileHandle, FilesystemStats, MetadataOperand, MetadataOptions,
+        MetadataTarget, ReadOp, ReadOptions, ReadResult, RemoveMode, ResourceLimits,
+        StreamCompletion, TraversalCompletion, Vfsi, VfsiExt, VisitOptions, WriteOp, WriteOptions,
     };
     #[cfg(feature = "nfs")]
     pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile, NfsVersion};
@@ -210,8 +210,8 @@ pub use vfsi_core::api::{
 };
 pub use vfsi_core::api::{ReadIntoResult, WriteResult};
 pub use vfsi_core::{
-    Capabilities, DirEntry, ErrorDomain, Metadata, MetadataUpdate, OpenFlags, OpenRequest,
-    Permissions, RemoveOptions, StatusCode, TransportKind,
+    Capabilities, CopyOption, DirEntry, ErrorDomain, FilesystemStats, Metadata, MetadataUpdate,
+    OpenFlags, OpenRequest, Permissions, RemoveOptions, StatusCode, TransportKind,
 };
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 pub(crate) use vfsi_sync::ReadAllOptions;

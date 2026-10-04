@@ -573,6 +573,30 @@ impl CfhCursor {
     }
 }
 
+// Keep compound safety classification shared by mutation and resource retries.
+fn batch_is_read_only(tag: &[u8]) -> bool {
+    matches!(tag, b"getattrv" | b"vstatfs_impl" | b"readlinkv" | b"readv")
+}
+
+fn batch_resource_progress(
+    tag: &[u8],
+    per_op: usize,
+    status: u32,
+    failed_op: Option<usize>,
+) -> Option<usize> {
+    if batch_is_read_only(tag)
+        && matches!(
+            status,
+            nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
+        )
+    {
+        // SEQUENCE occupies slot zero; only complete caller items are retained.
+        Some(failed_op.unwrap_or(0).saturating_sub(1) / per_op)
+    } else {
+        None
+    }
+}
+
 fn common_prefix_len<T: PartialEq>(a: &[T], b: &[T]) -> usize {
     a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
 }
@@ -1614,7 +1638,7 @@ impl NfsClient {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
-        let read_only = matches!(tag, b"getattrv" | b"readlinkv" | b"readv");
+        let read_only = batch_is_read_only(tag);
         let mut out = Vec::with_capacity(ops.len());
         let mut global = 0usize;
         let mut max_items = usize::MAX;
@@ -1657,14 +1681,9 @@ impl NfsClient {
                     continue;
                 }
             }
-            if read_only
+            if let Some(completed) = batch_resource_progress(tag, per_op, status, bad)
                 && chunk.len() > 1
-                && matches!(
-                    status,
-                    nfsstat4_NFS4ERR_RESOURCE | nfsstat4_NFS4ERR_TOO_MANY_OPS
-                )
             {
-                let completed = bad.unwrap_or(0).saturating_sub(1) / per_op;
                 let next_capacity = self.op_budget_for(tag, 1 + per_op).batch_capacity(per_op)?;
                 if completed > 0 || next_capacity < chunk.len() {
                     for i in 0..completed {
@@ -1709,6 +1728,21 @@ impl NfsClient {
         )
     }
 
+    pub fn getattr_many_with_bitmap(
+        &mut self,
+        ops: &[GetattrOp],
+    ) -> RpcResult<Vec<(bitmap4, Vec<u8>)>> {
+        self.batch_ops(
+            b"vstatfs_impl",
+            2,
+            ops,
+            |c, op, _| {
+                c.putfh(&op.fh.as_nfs_fh());
+                c.getattr(&op.attrs);
+            },
+            |res, i| res.getattr_with_bitmap(2 + 2 * i),
+        )
+    }
     /// SETATTR mode and/or size on several files in one compound.
     pub fn setattr_many(&mut self, ops: &[SetattrOp]) -> RpcResult<()> {
         let _ = self.batch_ops::<SetattrOp, ()>(
@@ -3772,6 +3806,43 @@ fn make_open_how(create: OpenCreate, verifier: verifier4) -> openflag4 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn statistics_resource_retries_preserve_complete_items() {
+        use nfsv41_sys::{nfsstat4_NFS4ERR_RESOURCE, nfsstat4_NFS4ERR_TOO_MANY_OPS};
+        for status in [nfsstat4_NFS4ERR_RESOURCE, nfsstat4_NFS4ERR_TOO_MANY_OPS] {
+            // Two PUTFH/GETATTR pairs succeeded. The next PUTFH or GETATTR failed.
+            for failed_op in [5, 6] {
+                assert_eq!(
+                    super::batch_resource_progress(b"vstatfs_impl", 2, status, Some(failed_op)),
+                    Some(2)
+                );
+            }
+            // Failure on the first GETATTR retains no incomplete item.
+            assert_eq!(
+                super::batch_resource_progress(b"vstatfs_impl", 2, status, Some(2)),
+                Some(0)
+            );
+            assert_eq!(
+                super::batch_resource_progress(b"vstatfs_impl", 2, status, None),
+                Some(0)
+            );
+            // Never enable this retry path for a mutation with partial progress.
+            assert_eq!(
+                super::batch_resource_progress(b"setattrv", 2, status, Some(6)),
+                None
+            );
+        }
+        assert_eq!(
+            super::batch_resource_progress(
+                b"vstatfs_impl",
+                2,
+                nfsv41_sys::nfsstat4_NFS4ERR_ACCESS,
+                Some(6)
+            ),
+            None
+        );
+    }
+
     #[test]
     fn directory_page_eof_suppresses_continuation_without_rewriting_entry_cookies() {
         let mut entry: nfsv41_sys::entry4 = unsafe { std::mem::zeroed() };

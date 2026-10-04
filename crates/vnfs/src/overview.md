@@ -86,17 +86,17 @@ helpers, not core execution methods. Import both with `vnfs::prelude::*`.
   completed mutations. Its input index is not a committed-prefix count; do not
   blindly replay writes after an ambiguous transport failure. Inspect `Error`
   using [`error`] and preserve it when reporting failures.
-- `readv` defaults to the client’s 16 MiB aggregate byte budget.
+- `vread` defaults to the client’s 16 MiB aggregate byte budget.
   Adjust [`ResourceLimits`] or [`ReadOptions`],
   or stream instead. Directory collection and traversal have separate budgets.
   These are not a process-wide peak-memory cap. Standard `std::io::Read::read_to_end`
   does not inherit an allocation limit.
-- `readv` range requests and `writev` may return short progress. Whole-file
+- `vread` range requests and `vwrite` may return short progress. Whole-file
   requests complete or fail; they never silently truncate. Use `vwrite`
   with `WriteOptions::new().write_all(true)` to complete
   successful short writes; do not mistake a short read without EOF for completion.
   Positional requests preserve the file cursor.
-- Files close best-effort on drop. Use explicit `closev` to surface cleanup
+- Files close best-effort on drop. Use explicit `vclose_owned` to surface cleanup
   failures or `vclose` to retain local cleanup ownership on failure. Writes
   are not automatically durable; use a file's `sync_data` or `sync_all` as needed.
 - Cloning a client shares its session and lock, not independent parallelism.

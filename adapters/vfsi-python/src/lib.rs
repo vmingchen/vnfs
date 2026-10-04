@@ -1,6 +1,6 @@
 //! Shared Python bindings for vectorized filesystem backends.
 //!
-//! This module exposes the [`VecFs`] surface as a `NfsClient` PyO3 class
+//! This module exposes the [`Backend`] surface as a `NfsClient` PyO3 class
 //! to protocol-specific extension crates. Every fsspec bulk operation funnels
 //! through vectorized calls here, so round trips scale with batches and
 //! directories rather than files.
@@ -33,7 +33,7 @@ use vfsi_nfs::compound::{compound_stats, rpc_stats};
 use vfsi_nfs::{NfsAuthentication, NfsClientBuilder};
 #[cfg(feature = "smb")]
 use vfsi_smb::SmbVecFs;
-use vfsi_sync::{ReadAllOptions, VecFs, WalkOptions};
+use vfsi_sync::{ReadAllOptions, WalkOptions};
 
 #[cfg(not(feature = "nfs"))]
 fn compound_stats() -> (u64, u64, u64, u64) {
@@ -340,7 +340,7 @@ fn attrs_to_dict(py: Python<'_>, a: &VfAttrs) -> PyResult<Py<PyDict>> {
 /// the remaining operations are retried in fresh batches. Transport failures
 /// abort with `Err`.
 fn attrs_many_impl(
-    fs: &mut dyn VecFs,
+    fs: &mut dyn BindingBackend,
     paths: &[PathBuf],
     masks: AttrMask,
     follow: bool,
@@ -358,9 +358,9 @@ fn attrs_many_impl(
             })
             .collect();
         let res = if follow {
-            fs.getattrsv(&mut attrs)
+            fs.vgetattrs_impl(&mut attrs)
         } else {
-            fs.lgetattrsv(&mut attrs)
+            fs.vgetattrs_nofollow_impl(&mut attrs)
         };
         match res {
             Ok(()) => {
@@ -391,7 +391,7 @@ fn attrs_many_impl(
 /// Read every file in full (offset 0 to EOF) in batched, no-stat reads.
 /// Returns per-path bytes (None on failure) and an errno map.
 fn read_allv_impl(
-    fs: &mut dyn VecFs,
+    fs: &mut dyn BindingBackend,
     paths: &[PathBuf],
     max_total_bytes: usize,
 ) -> Result<ReadManyResult, VfError> {
@@ -401,7 +401,7 @@ fn read_allv_impl(
     let mut remaining: Vec<usize> = (0..paths.len()).collect();
     while !remaining.is_empty() {
         let subset: Vec<VfFile> = remaining.iter().map(|&i| files[i].clone()).collect();
-        match fs.read_allv_with_options(
+        match fs.vread_all_with_options_impl(
             &subset,
             ReadAllOptions::new().max_total_bytes(max_total_bytes),
         ) {
@@ -545,7 +545,7 @@ fn mount_error(error: VfError, path: &Path) -> PyErr {
 /// One vectorized filesystem client behind a mutex.
 #[pyclass]
 struct NfsClient {
-    fs: Mutex<Option<Box<dyn VecFs + Send>>>,
+    fs: Mutex<Option<Box<dyn BindingBackend + Send>>>,
     read_all_max_total_bytes: usize,
     directory_max_entries: usize,
     directory_max_path_bytes: usize,
@@ -559,7 +559,7 @@ impl NfsClient {
     fn with_fs<T, F>(&self, py: Python<'_>, operation: F) -> PyResult<T>
     where
         T: Send,
-        F: FnOnce(&mut (dyn VecFs + Send)) -> PyResult<T> + Send,
+        F: FnOnce(&mut (dyn BindingBackend + Send)) -> PyResult<T> + Send,
     {
         py.detach(|| {
             let mut fs = self.fs.lock().map_err(lock_err)?;
@@ -626,7 +626,7 @@ impl NfsClient {
             &service_principal,
             &mount_config,
         );
-        let fs: Box<dyn VecFs + Send> = py.detach(|| {
+        let fs: Box<dyn BindingBackend + Send> = py.detach(|| {
             Ok(match backend {
                 #[cfg(feature = "nfs")]
                 "nfs" => {
@@ -691,7 +691,7 @@ impl NfsClient {
                         }
                         to_py_err(e, Some(Path::new(host)))
                     })?;
-                    Box::new(nfs) as Box<dyn VecFs + Send>
+                    Box::new(nfs) as Box<dyn BindingBackend + Send>
                 }
                 #[cfg(feature = "smb")]
                 "smb" => {
@@ -706,7 +706,7 @@ impl NfsClient {
                     Box::new(
                         SmbVecFs::connect(host, share, username, password, domain)
                             .map_err(|e| to_py_err(e, Some(Path::new(host))))?,
-                    ) as Box<dyn VecFs + Send>
+                    ) as Box<dyn BindingBackend + Send>
                 }
                 #[cfg(feature = "dummy")]
                 "dummy" => {
@@ -732,7 +732,7 @@ impl NfsClient {
                     Box::new(
                         DummyVecFs::try_new(root_path)
                             .map_err(|error| PyOSError::new_err(error.to_string()))?,
-                    ) as Box<dyn VecFs + Send>
+                    ) as Box<dyn BindingBackend + Send>
                 }
                 other => {
                     return Err(PyValueError::new_err(format!(
@@ -774,7 +774,7 @@ impl NfsClient {
     }
 
     /// Negotiated NFS minor version, or None for the dummy backend.
-    // The erased multi-protocol VecFs object cannot use a concrete backend's
+    // The erased multi-protocol Backend object cannot use a concrete backend's
     // extension trait; this compatibility query is intentional at this seam.
     #[allow(deprecated)]
     fn minor_version(&self, py: Python<'_>) -> PyResult<Option<u32>> {
@@ -789,12 +789,12 @@ impl NfsClient {
 
     /// Current backend capability bitset (see CAP_SERVER_COPY).
     fn capabilities(&self, py: Python<'_>) -> PyResult<u64> {
-        self.with_fs(py, |fs| Ok(fs.capabilities()))
+        self.with_fs(py, |fs| Ok(fs.capability_bits()))
     }
 
     /// Whether NFSv4.2 server COPY is currently enabled.
     fn server_copy_enabled(&self, py: Python<'_>) -> PyResult<bool> {
-        self.with_fs(py, |fs| Ok(fs.capabilities() & VF_CAP_SERVER_COPY != 0))
+        self.with_fs(py, |fs| Ok(fs.capability_bits() & VF_CAP_SERVER_COPY != 0))
     }
 
     // -- single-op ------------------------------------------------------------------
@@ -807,7 +807,7 @@ impl NfsClient {
             ..VfAttrs::default()
         };
         let a = self.with_fs(py, move |fs| {
-            fs.getattrsv(std::slice::from_mut(&mut a))
+            fs.vgetattrs_impl(std::slice::from_mut(&mut a))
                 .map_err(|e| to_py_err(e, Some(path.as_path())))?;
             Ok(a)
         })?;
@@ -822,7 +822,7 @@ impl NfsClient {
             ..VfAttrs::default()
         };
         let a = self.with_fs(py, move |fs| {
-            fs.lgetattrsv(std::slice::from_mut(&mut a))
+            fs.vgetattrs_nofollow_impl(std::slice::from_mut(&mut a))
                 .map_err(|e| to_py_err(e, Some(path.as_path())))?;
             Ok(a)
         })?;
@@ -838,7 +838,7 @@ impl NfsClient {
         let flags = mode_to_flags(mode)?;
         self.with_fs(py, move |fs| {
             let f = fs
-                .open(&path, flags, 0o644)
+                .open_raw_impl(&path, flags, 0o644)
                 .map_err(|e| to_py_err(e, Some(path.as_path())))?;
             descriptor("open", &f)
         })
@@ -846,7 +846,7 @@ impl NfsClient {
 
     fn close(&self, py: Python<'_>, fd: i64) -> PyResult<()> {
         self.with_fs(py, move |fs| {
-            fs.close(&VfFile::from_fd(fd as i32))
+            fs.close_impl(&VfFile::from_fd(fd as i32))
                 .map_err(|e| to_py_err(e, None))
         })
     }
@@ -856,7 +856,7 @@ impl NfsClient {
         self.with_fs(py, move |fs| {
             let op = ReadOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, length);
             let r = fs
-                .readv(std::slice::from_ref(&op))
+                .vread_impl(std::slice::from_ref(&op))
                 .map_err(|e| to_py_err(e, None))?;
             Ok(one_read_result("read", &op, r)?.data)
         })
@@ -867,7 +867,7 @@ impl NfsClient {
         self.with_fs(py, move |fs| {
             let op = WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, data);
             let w = fs
-                .writev(std::slice::from_ref(&op))
+                .vwrite_owned_impl(std::slice::from_ref(&op))
                 .map_err(|e| to_py_err(e, None))?;
             Ok(one_write_result("write", &op, w)?.written)
         })
@@ -880,7 +880,7 @@ impl NfsClient {
         self.with_fs(py, move |fs| {
             let op = WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, data);
             let w = fs
-                .writev(std::slice::from_ref(&op))
+                .vwrite_owned_impl(std::slice::from_ref(&op))
                 .map_err(|e| to_py_err(e, None))?;
             let w = one_write_result("write_positioned", &op, w)?;
             let position = w
@@ -896,7 +896,7 @@ impl NfsClient {
         self.with_fs(py, move |fs| {
             let op = ReadOp::new(VfFile::from_fd(fd as i32), VfOffset::At(offset), length);
             let r = fs
-                .readv(std::slice::from_ref(&op))
+                .vread_impl(std::slice::from_ref(&op))
                 .map_err(|e| to_py_err(e, None))?;
             Ok(one_read_result("pread", &op, r)?.data)
         })
@@ -907,7 +907,7 @@ impl NfsClient {
         self.with_fs(py, move |fs| {
             let op = WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::At(offset), data);
             let w = fs
-                .writev(std::slice::from_ref(&op))
+                .vwrite_owned_impl(std::slice::from_ref(&op))
                 .map_err(|e| to_py_err(e, None))?;
             Ok(one_write_result("pwrite", &op, w)?.written)
         })
@@ -922,7 +922,7 @@ impl NfsClient {
             _ => return Err(PyValueError::new_err("whence must be 0, 1 or 2")),
         };
         self.with_fs(py, move |fs| {
-            fs.fseek(&VfFile::from_fd(fd as i32), offset, whence)
+            fs.seek_raw_impl(&VfFile::from_fd(fd as i32), offset, whence)
                 .map_err(|e| to_py_err(e, None))
         })
     }
@@ -934,7 +934,7 @@ impl NfsClient {
             ..VfAttrs::default()
         };
         let a = self.with_fs(py, move |fs| {
-            fs.getattrsv(std::slice::from_mut(&mut a))
+            fs.vgetattrs_impl(std::slice::from_mut(&mut a))
                 .map_err(|e| to_py_err(e, None))?;
             Ok(a)
         })?;
@@ -952,7 +952,8 @@ impl NfsClient {
             })
             .collect();
         let attrs = self.with_fs(py, move |fs| {
-            fs.getattrsv(&mut attrs).map_err(|e| to_py_err(e, None))?;
+            fs.vgetattrs_impl(&mut attrs)
+                .map_err(|e| to_py_err(e, None))?;
             Ok(attrs)
         })?;
         attrs.iter().map(|attrs| attrs_to_dict(py, attrs)).collect()
@@ -988,7 +989,7 @@ impl NfsClient {
                         )
                     })
                     .collect();
-                match fs.readv(&ops) {
+                match fs.vread_impl(&ops) {
                     Ok(reads) => {
                         let reads = validate_read_results("pread_many", &ops, reads)?;
                         for (&index, read) in remaining.iter().zip(reads) {
@@ -1037,7 +1038,7 @@ impl NfsClient {
             })
             .collect();
         self.with_fs(py, move |fs| {
-            let writes = fs.writev(&ops).map_err(|e| to_py_err(e, None))?;
+            let writes = fs.vwrite_owned_impl(&ops).map_err(|e| to_py_err(e, None))?;
             let writes = validate_write_results("pwrite_many", &ops, writes)?;
             Ok(writes.into_iter().map(|write| write.written).collect())
         })
@@ -1062,7 +1063,7 @@ impl NfsClient {
             .map(|(fd, data)| WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, data))
             .collect();
         self.with_fs(py, move |fs| {
-            let writes = fs.writev(&ops).map_err(|e| to_py_err(e, None))?;
+            let writes = fs.vwrite_owned_impl(&ops).map_err(|e| to_py_err(e, None))?;
             let writes = validate_write_results("append_many", &ops, writes)?;
             writes
                 .into_iter()
@@ -1085,7 +1086,7 @@ impl NfsClient {
             ..VfAttrs::default()
         };
         self.with_fs(py, move |fs| {
-            fs.setattrsv(std::slice::from_ref(&a))
+            fs.vsetattrs_raw_impl(std::slice::from_ref(&a))
                 .map_err(|e| to_py_err(e, Some(path.as_path())))
         })
     }
@@ -1101,7 +1102,7 @@ impl NfsClient {
             ..VfAttrs::default()
         };
         self.with_fs(py, move |fs| {
-            fs.setattrsv(std::slice::from_ref(&a))
+            fs.vsetattrs_raw_impl(std::slice::from_ref(&a))
                 .map_err(|e| to_py_err(e, None))
         })
     }
@@ -1120,7 +1121,7 @@ impl NfsClient {
             ..VfAttrs::default()
         };
         self.with_fs(py, move |fs| {
-            fs.setattrsv(std::slice::from_ref(&a))
+            fs.vsetattrs_raw_impl(std::slice::from_ref(&a))
                 .map_err(|e| to_py_err(e, Some(path.as_path())))
         })
     }
@@ -1133,14 +1134,14 @@ impl NfsClient {
             ..VfAttrs::default()
         };
         self.with_fs(py, move |fs| {
-            fs.setattrsv(std::slice::from_ref(&a))
+            fs.vsetattrs_raw_impl(std::slice::from_ref(&a))
                 .map_err(|e| to_py_err(e, Some(path.as_path())))
         })
     }
 
     fn mkdir(&self, py: Python<'_>, path: PathBuf, mode: u32) -> PyResult<()> {
         self.with_fs(py, move |fs| {
-            fs.mkdir(&path, mode)
+            fs.mkdir_raw_impl(&path, mode)
                 .map_err(|e| to_py_err(e, Some(path.as_path())))
         })
     }
@@ -1148,14 +1149,14 @@ impl NfsClient {
     /// Create `path` and all missing ancestors.
     fn ensure_dir(&self, py: Python<'_>, path: PathBuf, mode: u32) -> PyResult<()> {
         self.with_fs(py, move |fs| {
-            fs.ensure_dir(&path, mode)
+            fs.ensure_dir_impl(&path, mode)
                 .map_err(|e| to_py_err(e, Some(path.as_path())))
         })
     }
 
     fn symlink(&self, py: Python<'_>, target: PathBuf, path: PathBuf) -> PyResult<()> {
         self.with_fs(py, move |fs| {
-            fs.symlink(&target, &path)
+            fs.symlink_raw_impl(&target, &path)
                 .map_err(|e| to_py_err(e, Some(path.as_path())))
         })
     }
@@ -1163,7 +1164,7 @@ impl NfsClient {
     fn readlink(&self, py: Python<'_>, path: PathBuf) -> PyResult<String> {
         self.with_fs(py, move |fs| {
             let b = fs
-                .readlink(&path)
+                .readlink_raw_impl(&path)
                 .map_err(|e| to_py_err(e, Some(path.as_path())))?;
             Ok(String::from_utf8_lossy(&b).into_owned())
         })
@@ -1171,7 +1172,7 @@ impl NfsClient {
 
     fn hardlink(&self, py: Python<'_>, src: PathBuf, dst: PathBuf) -> PyResult<()> {
         self.with_fs(py, move |fs| {
-            fs.hardlinkv(&[src.as_path()], &[dst.as_path()])
+            fs.vhardlink_impl(&[src.as_path()], &[dst.as_path()])
                 .map_err(|e| to_py_err(e, Some(dst.as_path())))
         })
     }
@@ -1210,7 +1211,7 @@ impl NfsClient {
     /// lstat many paths in batches (used by `exists`/`exists_many`).
     fn lstat_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<StatManyResult> {
         let (attrs, errors) = self.with_fs(py, move |fs| {
-            let follow = fs.capabilities() & VF_CAP_LSTAT == 0;
+            let follow = fs.capability_bits() & VF_CAP_LSTAT == 0;
             attrs_many_impl(fs, &paths, full_mask(), follow).map_err(|e| to_py_err(e, None))
         })?;
         let mut out = Vec::with_capacity(attrs.len());
@@ -1227,7 +1228,7 @@ impl NfsClient {
     /// Non-NOENT failures raise.
     fn exists_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<Vec<bool>> {
         self.with_fs(py, move |fs| {
-            let follow = fs.capabilities() & VF_CAP_LSTAT == 0;
+            let follow = fs.capability_bits() & VF_CAP_LSTAT == 0;
             let (attrs, errors) = attrs_many_impl(fs, &paths, AttrMask::stat(), follow)
                 .map_err(|e| to_py_err(e, None))?;
             let mut first_err: Option<VfError> = None;
@@ -1314,7 +1315,7 @@ impl NfsClient {
                     .iter()
                     .map(|&i| ReadOp::at(VfFile::from_os_path(&paths[i]), starts[i], lengths[i]))
                     .collect();
-                match fs.readv(&ops) {
+                match fs.vread_impl(&ops) {
                     Ok(res) => {
                         let res = validate_read_results("read_many", &ops, res)?;
                         for (&i, r) in remaining.iter().zip(res) {
@@ -1371,7 +1372,9 @@ impl NfsClient {
             })
             .collect();
         self.with_fs(py, move |fs| {
-            let res = fs.writev(&ops).map_err(|e| map_err_with_path(e, &paths))?;
+            let res = fs
+                .vwrite_owned_impl(&ops)
+                .map_err(|e| map_err_with_path(e, &paths))?;
             let res = validate_write_results("write_many", &ops, res)?;
             Ok(res.into_iter().map(|r| r.written).collect())
         })
@@ -1393,7 +1396,7 @@ impl NfsClient {
             })
             .collect();
         self.with_fs(py, move |fs| {
-            fs.setattrsv(&attrs)
+            fs.vsetattrs_raw_impl(&attrs)
                 .map_err(|e| map_err_with_path(e, &paths))
         })
     }
@@ -1410,7 +1413,8 @@ impl NfsClient {
             })
             .collect();
         self.with_fs(py, move |fs| {
-            fs.mkdirv(&attrs).map_err(|e| map_err_with_path(e, &paths))
+            fs.vmkdir_impl(&attrs)
+                .map_err(|e| map_err_with_path(e, &paths))
         })
     }
 
@@ -1432,7 +1436,7 @@ impl NfsClient {
         self.with_fs(py, move |fs| {
             let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
             let files = fs
-                .openv(&refs, &flags, &modes)
+                .vopen_raw_impl(&refs, &flags, &modes)
                 .map_err(|e| map_err_with_path(e, &paths))?;
             if files.len() != paths.len() {
                 return Err(contract_error(
@@ -1451,7 +1455,7 @@ impl NfsClient {
     fn close_many(&self, py: Python<'_>, fds: Vec<i64>) -> PyResult<()> {
         let files: Vec<VfFile> = fds.iter().map(|&fd| VfFile::from_fd(fd as i32)).collect();
         self.with_fs(py, move |fs| {
-            fs.closev(&files).map_err(|e| to_py_err(e, None))
+            fs.vclose_impl(&files).map_err(|e| to_py_err(e, None))
         })
     }
 
@@ -1461,7 +1465,7 @@ impl NfsClient {
         let max_path_bytes = self.directory_max_path_bytes;
         let entries = self.with_fs(py, move |fs| {
             let entries = fs
-                .listdir(&path, full_mask(), max_entries.saturating_add(1), false)
+                .listdir_impl(&path, full_mask(), max_entries.saturating_add(1), false)
                 .map_err(|e| to_py_err(e, Some(path.as_path())))?;
             validate_directory_results(&entries, max_entries, max_path_bytes)
                 .map_err(|e| to_py_err(e, Some(path.as_path())))?;
@@ -1486,7 +1490,7 @@ impl NfsClient {
             for p in &paths {
                 let entries = if recursive {
                     let mut no_sort = |_dir: &Path, _attrs: &mut Vec<VfAttrs>| {};
-                    fs.walk_with_options(
+                    fs.walk_with_options_impl(
                         p,
                         full_mask(),
                         WalkOptions::new()
@@ -1501,7 +1505,7 @@ impl NfsClient {
                     .collect()
                 } else {
                     let entries = fs
-                        .listdir(p, full_mask(), max_entries.saturating_add(1), false)
+                        .listdir_impl(p, full_mask(), max_entries.saturating_add(1), false)
                         .map_err(|e| to_py_err(e, Some(p.as_path())))?;
                     validate_directory_results(&entries, max_entries, max_path_bytes)
                         .map_err(|e| to_py_err(e, Some(p.as_path())))?;
@@ -1559,7 +1563,7 @@ impl NfsClient {
                     });
                 }
             };
-            fs.walk_with_options(&root, full_mask(), options, &mut sort_fn)
+            fs.walk_with_options_impl(&root, full_mask(), options, &mut sort_fn)
                 .map_err(|e| to_py_err(e, Some(root.as_path())))
         })?;
         let mut out = Vec::with_capacity(tree.len());
@@ -1581,7 +1585,8 @@ impl NfsClient {
             .map(|path| VfFile::from_os_path(path.as_path()))
             .collect();
         self.with_fs(py, move |fs| {
-            fs.removev(&files).map_err(|e| map_err_with_path(e, &paths))
+            fs.vremove_impl(&files)
+                .map_err(|e| map_err_with_path(e, &paths))
         })
     }
 
@@ -1592,7 +1597,7 @@ impl NfsClient {
             .map(|(a, b)| (VfFile::from_os_path(a), VfFile::from_os_path(b)))
             .collect();
         self.with_fs(py, move |fs| {
-            fs.renamev(&files).map_err(|e| {
+            fs.vrename_impl(&files).map_err(|e| {
                 let path = e
                     .index()
                     .and_then(|index| pairs.get(index))
@@ -1665,7 +1670,7 @@ impl NfsClient {
                 let mut entries = 0usize;
                 let mut path_bytes = 0usize;
                 let mut exhausted = false;
-                let listed = fs.listdirv(
+                let listed = fs.vlistdirs_impl(
                     &parent_refs,
                     AttrMask::MODE,
                     max_directory_entries.saturating_add(1),
@@ -1734,7 +1739,7 @@ impl NfsClient {
                         .with_truncate()
                     })
                     .collect();
-                match fs.writev(&ops) {
+                match fs.vwrite_owned_impl(&ops) {
                     Ok(results) => {
                         let results = validate_write_results("copy_many", &ops, results)?;
                         for (&index, result) in write_remaining.iter().zip(results) {
@@ -1844,7 +1849,7 @@ impl NfsClient {
                         )
                     })
                     .collect();
-                match fs.copyv(&ops) {
+                match fs.vcopy_impl(&ops, vfsi_core::CopyOption::new()) {
                     Ok(()) => {
                         let mut next = Vec::new();
                         for (&index, &length) in remaining.iter().zip(&chunks) {
@@ -1902,7 +1907,7 @@ impl NfsClient {
         symlinks: bool,
     ) -> PyResult<()> {
         self.with_fs(py, move |fs| {
-            fs.cp_recursive(&src, &dst, symlinks, false)
+            fs.copy_tree_impl(&src, &dst, symlinks, false)
                 .map_err(|e| to_py_err(e, Some(src.as_path())))
         })
     }
@@ -1911,7 +1916,7 @@ impl NfsClient {
     fn rm(&self, py: Python<'_>, paths: Vec<PathBuf>, recursive: bool) -> PyResult<()> {
         self.with_fs(py, move |fs| {
             let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-            fs.rm(&refs, recursive)
+            fs.remove_paths_impl(&refs, recursive)
                 .map_err(|e| map_err_with_path(e, &paths))
         })
     }
@@ -1959,6 +1964,30 @@ pub fn register(m: &Bound<'_, PyModule>, version: &str) -> PyResult<()> {
     m.add("CAP_LSTAT", VF_CAP_LSTAT)?;
     m.add("ERR_UNSUPPORTED", VF_ERR_UNSUPPORTED)?;
     Ok(())
+}
+
+// Protocol inspection belongs to the bindings, outside the native operation contracts.
+trait BindingBackend: vfsi_sync::Backend {
+    fn nfs_minorversion(&self) -> Option<u32> {
+        None
+    }
+    fn smb_dialect(&self) -> Option<u16> {
+        None
+    }
+}
+#[cfg(feature = "dummy")]
+impl BindingBackend for DummyVecFs {}
+#[cfg(feature = "nfs")]
+impl BindingBackend for vfsi_nfs::NfsVecFs {
+    fn nfs_minorversion(&self) -> Option<u32> {
+        Some(vfsi_nfs::NfsExtensions::nfs_minor_version(self))
+    }
+}
+#[cfg(feature = "smb")]
+impl BindingBackend for SmbVecFs {
+    fn smb_dialect(&self) -> Option<u16> {
+        Some(vfsi_smb::SmbExtensions::smb_dialect_revision(self))
+    }
 }
 
 #[cfg(test)]

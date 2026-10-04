@@ -1631,3 +1631,77 @@ pub enum VfDir {
     /// A backend without directory handles; the removal re-resolves this path.
     Path(PathBuf),
 }
+
+/// Filesystem capacity and limits for the filesystem containing a target.
+/// Values are observations, not reservations. `None` means unknown or unsupported.
+/// Byte counts use the filesystem allocation unit, not its preferred I/O size.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FilesystemStats {
+    pub total_bytes: Option<u64>,
+    pub free_bytes: Option<u64>,
+    /// Space available to an unprivileged caller (may exclude reserved blocks).
+    pub available_bytes: Option<u64>,
+    pub total_files: Option<u64>,
+    pub free_files: Option<u64>,
+    pub available_files: Option<u64>,
+    /// Preferred I/O block size.
+    pub block_size: Option<u64>,
+    /// Allocation unit used by capacity counts.
+    pub fragment_size: Option<u64>,
+    pub max_name_len: Option<u64>,
+    pub max_path_len: Option<u64>,
+    pub max_links: Option<u64>,
+    pub max_file_size: Option<u64>,
+    /// POSIX FILESIZEBITS; this is not necessarily the filesystem's file-size limit.
+    pub file_size_bits: Option<u32>,
+    pub read_only: Option<bool>,
+    pub no_set_id: Option<bool>,
+}
+
+#[bitfields::bitfield(u8)]
+#[derive(PartialEq, Eq)]
+struct CopyFlags {
+    #[bits(default = true)]
+    follow_source_symlinks: bool,
+    #[bits(7)]
+    _reserved: u8,
+}
+
+/// Options for extent copying. Source final symlinks are followed by default.
+/// Ancestor symlinks use normal namespace resolution. This is not a snapshot.
+/// When preserving a source symlink, its text is copied and extent offsets and
+/// length are ignored. An existing destination is not replaced in that case.
+/// Destination symlinks for data copies retain normal following behavior.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CopyOption {
+    flags: CopyFlags,
+}
+impl CopyOption {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Follow final source symlinks when true; otherwise recreate the links.
+    pub fn follow_source_symlinks(mut self, follow: bool) -> Self {
+        self.flags.set_follow_source_symlinks(follow);
+        self
+    }
+    pub fn follows_source_symlinks(self) -> bool {
+        self.flags.follow_source_symlinks()
+    }
+}
+
+#[cfg(test)]
+mod copy_option_tests {
+    use super::CopyOption;
+    #[test]
+    fn follows_source_symlinks_by_default_and_builder_can_disable_it() {
+        assert!(CopyOption::default().follows_source_symlinks());
+        let preserve = CopyOption::new().follow_source_symlinks(false);
+        assert!(!preserve.follows_source_symlinks());
+        assert!(
+            preserve
+                .follow_source_symlinks(true)
+                .follows_source_symlinks()
+        );
+    }
+}

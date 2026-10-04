@@ -117,6 +117,13 @@ pub trait FileHandle: Read + Write + Seek {
 /// [`FileHandle::sync_all`] on an open handle when required. Drop queues handle cleanup
 /// best-effort; explicit close methods let applications observe cleanup errors.
 pub trait Vfsi {
+    /// Query filesystems for paths (following symlinks) and retained open handles.
+    /// Results preserve input order. Unsupported fields are `None`.
+    fn vstatfs<P: crate::MetadataOperand<Self::File>>(
+        &self,
+        targets: &[P],
+    ) -> Result<Vec<crate::FilesystemStats>>;
+
     /// Query metadata in input order with selected fields and final-symlink behavior.
     /// Backend execution must preserve vector batching. Ancestor symlinks use
     /// ordinary namespace resolution; this is not a snapshot or confinement API.
@@ -489,6 +496,21 @@ pub trait Vfsi {
 /// bounded paging, or recovery semantics. Singular convenience is not a promise
 /// of one RPC, and vector execution is not a promise of atomicity.
 pub trait VfsiExt: Vfsi {
+    /// Query one target through the vector filesystem-statistics engine.
+    fn statfs<P: crate::MetadataOperand<Self::File>>(
+        &self,
+        target: P,
+    ) -> Result<crate::FilesystemStats> {
+        let mut results = self.vstatfs(&[target])?;
+        if results.len() != 1 {
+            return Err(crate::VfError::transport(
+                None,
+                "statfs backend returned an invalid result count",
+            ));
+        }
+        Ok(results.remove(0))
+    }
+
     // Open and close
     /// Single-target convenience. For multiple files, prefer [`Vfsi::vopen`] to expose batching opportunities.
     ///
@@ -634,7 +656,7 @@ pub trait VfsiExt: Vfsi {
         if results.len() != paths.len() {
             return Err(crate::api::Error::transport(
                 None,
-                "readv returned an invalid result count",
+                "vread_native returned an invalid result count",
             ));
         }
         results
@@ -642,12 +664,15 @@ pub trait VfsiExt: Vfsi {
             .enumerate()
             .map(|(index, result)| {
                 let data = result.data.ok_or_else(|| {
-                    crate::api::Error::transport(Some(index), "whole-file readv omitted owned data")
+                    crate::api::Error::transport(
+                        Some(index),
+                        "whole-file vread_native omitted owned data",
+                    )
                 })?;
                 if data.len() != result.read || result.offset != 0 || !result.eof {
                     return Err(crate::api::Error::transport(
                         Some(index),
-                        "whole-file readv returned incomplete or invalid data",
+                        "whole-file vread_native returned incomplete or invalid data",
                     ));
                 }
                 Ok(data)

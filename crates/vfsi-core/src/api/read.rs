@@ -213,7 +213,7 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a>(
     }
     let remap = |error: Error, indices: &[usize]| match error.index() {
         Some(index) if index < indices.len() => error.with_index(indices[index]),
-        Some(_) => Error::transport(None, "invalid readv backend error index"),
+        Some(_) => Error::transport(None, "invalid vread_native backend error index"),
         None => error,
     };
     let buffered = if buffer_ops.is_empty() {
@@ -223,13 +223,16 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a>(
     };
     drop(buffer_ops);
     if buffered.len() != buffer_indices.len() {
-        return Err(Error::transport(None, "invalid readv buffer result count"));
+        return Err(Error::transport(
+            None,
+            "invalid vread_native buffer result count",
+        ));
     }
     let mut remaining = budget;
     for result in &buffered {
         remaining = remaining
             .checked_sub(result.read)
-            .ok_or_else(|| Error::transport(None, "readv backend exceeded byte budget"))?;
+            .ok_or_else(|| Error::transport(None, "vread_native backend exceeded byte budget"))?;
     }
     let allocated = if owned_ops.is_empty() {
         Vec::new()
@@ -237,7 +240,10 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a>(
         owned(&owned_ops, remaining).map_err(|e| remap(e, &owned_indices))?
     };
     if allocated.len() != owned_indices.len() {
-        return Err(Error::transport(None, "invalid readv owned result count"));
+        return Err(Error::transport(
+            None,
+            "invalid vread_native owned result count",
+        ));
     }
     let mut output: Vec<Option<ReadResult>> = (0..count).map(|_| None).collect();
     for (index, result) in buffer_indices.into_iter().zip(buffered) {
@@ -251,7 +257,7 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a>(
     for (index, result) in owned_indices.into_iter().zip(allocated) {
         remaining = remaining
             .checked_sub(result.data.len())
-            .ok_or_else(|| Error::transport(None, "readv backend exceeded byte budget"))?;
+            .ok_or_else(|| Error::transport(None, "vread_native backend exceeded byte budget"))?;
         output[index] = Some(ReadResult {
             offset: result.offset,
             read: result.data.len(),
@@ -261,7 +267,7 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a>(
     }
     output
         .into_iter()
-        .map(|result| result.ok_or_else(|| Error::transport(None, "readv omitted a result")))
+        .map(|result| result.ok_or_else(|| Error::transport(None, "vread_native omitted a result")))
         .collect()
 }
 /// Internal projection for the native owned-result batch path.
@@ -325,7 +331,7 @@ pub fn read_batch<R>(
     }
     let remap = |e: Error, indices: &[usize]| match e.index() {
         Some(i) if i < indices.len() => e.with_index(indices[i]),
-        Some(_) => Error::transport(None, "invalid readv backend error index"),
+        Some(_) => Error::transport(None, "invalid vread_native backend error index"),
         None => e,
     };
     // Group ranges before complete paths. Reads do not promise a snapshot.
@@ -335,13 +341,16 @@ pub fn read_batch<R>(
         read_ranges(&ranges, budget).map_err(|e| remap(e, &range_indices))?
     };
     if range_results.len() != ranges.len() {
-        return Err(Error::transport(None, "invalid readv range result count"));
+        return Err(Error::transport(
+            None,
+            "invalid vread_native range result count",
+        ));
     }
     let mut remaining = budget;
     for r in &range_results {
         remaining = remaining
             .checked_sub(r.data.len())
-            .ok_or_else(|| Error::transport(None, "readv backend exceeded byte budget"))?;
+            .ok_or_else(|| Error::transport(None, "vread_native backend exceeded byte budget"))?;
     }
     let path_results = if paths.is_empty() {
         Vec::new()
@@ -349,12 +358,15 @@ pub fn read_batch<R>(
         read_paths(&paths, remaining).map_err(|e| remap(e, &path_indices))?
     };
     if path_results.len() != paths.len() {
-        return Err(Error::transport(None, "invalid readv path result count"));
+        return Err(Error::transport(
+            None,
+            "invalid vread_native path result count",
+        ));
     }
     for r in &path_results {
         remaining = remaining
             .checked_sub(r.len())
-            .ok_or_else(|| Error::transport(None, "readv backend exceeded byte budget"))?;
+            .ok_or_else(|| Error::transport(None, "vread_native backend exceeded byte budget"))?;
     }
     let mut output: Vec<Option<OwnedReadResult>> = (0..requests.len()).map(|_| None).collect();
     for (i, r) in range_indices.into_iter().zip(range_results) {
@@ -369,7 +381,7 @@ pub fn read_batch<R>(
     }
     output
         .into_iter()
-        .map(|r| r.ok_or_else(|| Error::transport(None, "readv omitted a result")))
+        .map(|r| r.ok_or_else(|| Error::transport(None, "vread_native omitted a result")))
         .collect()
 }
 

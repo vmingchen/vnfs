@@ -6,9 +6,10 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use vfsi_sync::*;
 
 use vfsi_nfs::NfsVecFs;
-use vfsi_sync::{ReadOp, VecFs, VfOffset, WriteOp};
+use vfsi_sync::{ReadOp, VfOffset, WriteOp};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -134,7 +135,7 @@ fn read_ops(paths: &[String], length: usize) -> Vec<ReadOp> {
 fn measure_vnfs_write(client: &mut NfsVecFs, operations: &[WriteOp]) -> Result<Sample> {
     vfsi_nfs::compound::thread_compound_stats();
     vfsi_nfs::compound::rpc_stats();
-    let (milliseconds, result) = elapsed(|| client.writev(operations));
+    let (milliseconds, result) = elapsed(|| client.vwrite_owned_impl(operations));
     result?;
     Ok(Sample {
         milliseconds,
@@ -161,7 +162,7 @@ fn measure_vnfs_read(
 ) -> Result<Sample> {
     vfsi_nfs::compound::thread_compound_stats();
     vfsi_nfs::compound::rpc_stats();
-    let (milliseconds, result) = elapsed(|| client.readv(operations));
+    let (milliseconds, result) = elapsed(|| client.vread_impl(operations));
     let results = result?;
     if results.len() != operations.len() || results.iter().any(|item| item.data != payload) {
         return Err(io::Error::other("vnfs returned unexpected data").into());
@@ -228,7 +229,7 @@ fn run(args: &Args, run_name: &str, direct_run: &Path, mount_run: &Path) -> Resu
     ];
     let probe_ops = write_ops(&probe_paths, b"probe");
     vfsi_nfs::compound::thread_compound_stats();
-    client.writev(&probe_ops)?;
+    client.vwrite_owned_impl(&probe_ops)?;
     let probe_compounds = vfsi_nfs::compound::thread_compound_stats().0;
 
     for round in 0..args.rounds {

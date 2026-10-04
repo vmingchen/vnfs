@@ -6,9 +6,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
+use vfsi_sync::*;
 
 use vfsi_core::{AttrMask, VfAttrs, VfError, VfFile, VfResult};
-use vfsi_sync::VecFs;
 
 use crate::{NfsAuthentication, NfsVecFs};
 
@@ -132,7 +132,7 @@ impl NfsMount {
             masks: AttrMask::FILEID,
             ..VfAttrs::default()
         }];
-        filesystem.getattrsv(&mut attrs)?;
+        filesystem.vgetattrs_impl(&mut attrs)?;
         if !attrs[0].masks.contains(AttrMask::FILEID) {
             return Err(self.stale());
         }

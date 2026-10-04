@@ -1,4 +1,4 @@
-//! A [`VecFs`] implementation backed by the local filesystem (`std::fs`), so
+//! A [`Backend`] implementation backed by the local filesystem (`std::fs`), so
 //! the vectorized API also works on non-NFS filesystems.
 //!
 //! `"/"` maps to the `root` directory passed to [`DummyVecFs::new`]; all
@@ -22,12 +22,12 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "test-faults")]
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
+use vfsi_sync::*;
 
 use vfsi_core::internal::ManyResults;
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 use vfsi_core::path::{cstring_from_bytes, normalize_bytes, path_bytes, path_from_bytes};
-use vfsi_sync::*;
 
 fn checked_offset(base: u64, delta: u64, index: usize) -> VfResult<u64> {
     base.checked_add(delta)
@@ -75,7 +75,7 @@ impl std::ops::Deref for AnchoredPath {
     }
 }
 
-/// A local-filesystem [`VecFs`]. `"/"` is the `root` directory.
+/// A local-filesystem [`Backend`]. `"/"` is the `root` directory.
 pub struct DummyVecFs {
     root: PathBuf,
     /// Canonical form of `root`, used for containment checks on platforms
@@ -948,8 +948,38 @@ impl DummyVecFs {
     }
 }
 
-impl VecFs for DummyVecFs {
-    fn capabilities(&self) -> u64 {
+impl FileSystem for DummyVecFs {
+    #[cfg(target_os = "linux")]
+    fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<FilesystemStats>> {
+        use std::os::fd::AsRawFd;
+        let mut results = Vec::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
+            let anchored;
+            let fd = if let VfFile::Descriptor(fd) = file {
+                self.open_files
+                    .get(fd)
+                    .ok_or_else(|| VfError::failure(index, ERR_EBADF))?
+                    .file
+                    .as_raw_fd()
+            } else {
+                anchored = self
+                    .real_path(&self.tcfile_path(file).map_err(|e| e.with_index(index))?)
+                    .map_err(|e| e.with_index(index))?;
+                if anchored.nofollow_on_open {
+                    return Err(VfError::failure(index, ERR_NOENT));
+                }
+                anchored
+                    .anchor
+                    .as_ref()
+                    .ok_or_else(|| VfError::unsupported(index))?
+                    .as_raw_fd()
+            };
+            results.push(local_filesystem_stats(fd, index)?);
+        }
+        Ok(results)
+    }
+
+    fn capability_bits(&self) -> u64 {
         VF_CAP_UNIX_SEMANTICS
     }
 
@@ -962,60 +992,7 @@ impl VecFs for DummyVecFs {
         path_from_bytes(&normalize_bytes(path_bytes(&root_rel)))
     }
 
-    fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
-        #[cfg(feature = "test-faults")]
-        self.inject_open_fault(OpenFaultPoint::BeforeCleanup { index: _index })?;
-        Ok(())
-    }
-
-    fn before_remove_type(&mut self, _index: usize) -> VfResult<()> {
-        #[cfg(feature = "test-faults")]
-        self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: _index })?;
-        Ok(())
-    }
-
-    fn open_many(
-        &mut self,
-        paths: &[&Path],
-        flags: &[i32],
-        modes: &[u32],
-    ) -> VfResult<ManyResults<VfFile>> {
-        if paths.len() != flags.len() || paths.len() != modes.len() {
-            return Err(VfError::failure(0, ERR_INVAL));
-        }
-        #[cfg(feature = "test-faults")]
-        self.inject_open_fault(OpenFaultPoint::BeforeDispatch { chunk: 0 })?;
-        let mut results = Vec::with_capacity(paths.len());
-        for ((path, flags), mode) in paths.iter().zip(flags).zip(modes) {
-            #[cfg(feature = "test-faults")]
-            let index = results.len();
-            #[cfg(feature = "test-faults")]
-            if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeRegister { index }) {
-                results.push(Err(error));
-                break;
-            }
-            match self.open(path, *flags, *mode) {
-                Ok(file) => {
-                    #[cfg(feature = "test-faults")]
-                    if let Err(error) =
-                        self.inject_open_fault(OpenFaultPoint::AfterRegister { index })
-                    {
-                        let _ = self.close(&file);
-                        results.push(Err(error));
-                        break;
-                    }
-                    results.push(Ok(file));
-                }
-                Err(error) => {
-                    results.push(Err(error));
-                    break;
-                }
-            }
-        }
-        Ok(ManyResults::new(paths.len(), results))
-    }
-
-    fn open_by_path(
+    fn open_path_impl(
         &mut self,
         base: VfPathBase,
         pathname: &Path,
@@ -1079,7 +1056,7 @@ impl VecFs for DummyVecFs {
         Ok(VfFile::from_fd(fd))
     }
 
-    fn close(&mut self, tcf: &VfFile) -> VfResult<()> {
+    fn close_impl(&mut self, tcf: &VfFile) -> VfResult<()> {
         if !tcf.is_descriptor() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
@@ -1122,49 +1099,7 @@ impl VecFs for DummyVecFs {
         Path::new("/").join(&self.cwd)
     }
 
-    fn readv(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
-        let mut out = Vec::with_capacity(reads.len());
-        for (i, op) in reads.iter().enumerate() {
-            out.push(self.readv_one(op).map_err(|e| e.with_index(i))?);
-        }
-        Ok(out)
-    }
-
-    fn readv_into(
-        &mut self,
-        reads: &[ReadOp],
-        buffers: &mut [&mut [u8]],
-    ) -> VfResult<Vec<ReadIntoResult>> {
-        if reads.len() != buffers.len() {
-            return Err(VfError::client(0, ERR_INVAL));
-        }
-        let mut out = Vec::with_capacity(reads.len());
-        for (index, (request, buffer)) in reads.iter().zip(buffers.iter_mut()).enumerate() {
-            out.push(
-                self.readv_one_into(request, buffer)
-                    .map_err(|e| e.with_index(index))?,
-            );
-        }
-        Ok(out)
-    }
-
-    fn writev(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
-        let mut out = Vec::with_capacity(writes.len());
-        for (i, op) in writes.iter().enumerate() {
-            out.push(self.writev_one(op.into()).map_err(|e| e.with_index(i))?);
-        }
-        Ok(out)
-    }
-
-    fn writev_borrowed(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
-        let mut out = Vec::with_capacity(writes.len());
-        for (i, op) in writes.iter().enumerate() {
-            out.push(self.writev_one(*op).map_err(|e| e.with_index(i))?);
-        }
-        Ok(out)
-    }
-
-    fn fseek(&mut self, tcf: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
+    fn seek_raw_impl(&mut self, tcf: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
         if !tcf.is_descriptor() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
@@ -1201,16 +1136,136 @@ impl VecFs for DummyVecFs {
         self.advance_offset(tcf, new);
         Ok(reported)
     }
+    fn read_file_impl(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
+        vfsi_sync::backend_helpers::native_read_file_impl_default(self, file, max_bytes)
+    }
+    fn open_impl(&mut self, request: &OpenRequest) -> VfResult<VfFile> {
+        vfsi_sync::backend_helpers::native_open_impl_default(self, request)
+    }
+    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
+        vfsi_sync::backend_helpers::native_read_impl_default(self, request)
+    }
+    fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
+        vfsi_sync::backend_helpers::native_read_into_impl_default(self, request, buffer)
+    }
+    fn write_impl(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult> {
+        vfsi_sync::backend_helpers::native_write_impl_default(self, request)
+    }
+    fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {
+        vfsi_sync::backend_helpers::native_seek_impl_default(self, file, position)
+    }
+    fn metadata_impl(&mut self, query: MetadataQuery) -> VfResult<VfAttrs> {
+        vfsi_sync::backend_helpers::native_metadata_impl_default(self, query)
+    }
+    fn set_attributes_impl(&mut self, update: SetAttributes) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_set_attributes_impl_default(self, update)
+    }
+    fn vsetattrs_impl(&mut self, updates: Vec<SetAttributes>, follow: bool) -> VfResult<()> {
+        vfsi_sync::backend_helpers::vsetattrs_typed_default(self, updates, follow)
+    }
+}
 
-    fn getattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
+impl VectorFileSystem for DummyVecFs {
+    fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeCleanup { index: _index })?;
+        Ok(())
+    }
+
+    fn vopen_outcomes_impl(
+        &mut self,
+        paths: &[&Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> VfResult<ManyResults<VfFile>> {
+        if paths.len() != flags.len() || paths.len() != modes.len() {
+            return Err(VfError::failure(0, ERR_INVAL));
+        }
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeDispatch { chunk: 0 })?;
+        let mut results = Vec::with_capacity(paths.len());
+        for ((path, flags), mode) in paths.iter().zip(flags).zip(modes) {
+            #[cfg(feature = "test-faults")]
+            let index = results.len();
+            #[cfg(feature = "test-faults")]
+            if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeRegister { index }) {
+                results.push(Err(error));
+                break;
+            }
+            match self.open_raw_impl(path, *flags, *mode) {
+                Ok(file) => {
+                    #[cfg(feature = "test-faults")]
+                    if let Err(error) =
+                        self.inject_open_fault(OpenFaultPoint::AfterRegister { index })
+                    {
+                        let _ = self.close_impl(&file);
+                        results.push(Err(error));
+                        break;
+                    }
+                    results.push(Ok(file));
+                }
+                Err(error) => {
+                    results.push(Err(error));
+                    break;
+                }
+            }
+        }
+        Ok(ManyResults::new(paths.len(), results))
+    }
+
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        let mut out = Vec::with_capacity(reads.len());
+        for (i, op) in reads.iter().enumerate() {
+            out.push(self.readv_one(op).map_err(|e| e.with_index(i))?);
+        }
+        Ok(out)
+    }
+
+    fn vread_into_impl(
+        &mut self,
+        reads: &[ReadOp],
+        buffers: &mut [&mut [u8]],
+    ) -> VfResult<Vec<ReadIntoResult>> {
+        if reads.len() != buffers.len() {
+            return Err(VfError::client(0, ERR_INVAL));
+        }
+        let mut out = Vec::with_capacity(reads.len());
+        for (index, (request, buffer)) in reads.iter().zip(buffers.iter_mut()).enumerate() {
+            out.push(
+                self.readv_one_into(request, buffer)
+                    .map_err(|e| e.with_index(index))?,
+            );
+        }
+        Ok(out)
+    }
+
+    fn vwrite_owned_impl(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+        let mut out = Vec::with_capacity(writes.len());
+        for (i, op) in writes.iter().enumerate() {
+            out.push(self.writev_one(op.into()).map_err(|e| e.with_index(i))?);
+        }
+        Ok(out)
+    }
+
+    fn vwrite_impl(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
+        let mut out = Vec::with_capacity(writes.len());
+        for (i, op) in writes.iter().enumerate() {
+            out.push(self.writev_one(*op).map_err(|e| e.with_index(i))?);
+        }
+        Ok(out)
+    }
+}
+
+impl MetadataFileSystem for DummyVecFs {
+    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
         self.getattrsv_impl(attrs, true)
     }
 
-    fn lgetattrsv(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
+    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
         self.getattrsv_impl(attrs, false)
     }
 
-    fn setattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
+    fn vsetattrs_raw_impl(&mut self, attrs: &[VfAttrs]) -> VfRes {
         const SETTABLE: AttrMask = AttrMask::MODE
             .union(AttrMask::SIZE)
             .union(AttrMask::ATIME)
@@ -1226,7 +1281,7 @@ impl VecFs for DummyVecFs {
         Ok(())
     }
 
-    fn lsetattrsv(&mut self, attrs: &[VfAttrs]) -> VfRes {
+    fn vsetattrs_raw_nofollow_impl(&mut self, attrs: &[VfAttrs]) -> VfRes {
         const SETTABLE: AttrMask = AttrMask::MODE
             .union(AttrMask::SIZE)
             .union(AttrMask::ATIME)
@@ -1260,8 +1315,23 @@ impl VecFs for DummyVecFs {
         }
         Ok(())
     }
+    fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Metadata> {
+        vfsi_sync::backend_helpers::native_metadata_path_impl_default(self, path, follow)
+    }
+    fn set_metadata_path_impl(
+        &mut self,
+        path: &std::path::Path,
+        update: MetadataUpdate,
+        follow: bool,
+    ) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_set_metadata_path_impl_default(
+            self, path, update, follow,
+        )
+    }
+}
 
-    fn listdir(
+impl DirectoryFileSystem for DummyVecFs {
+    fn listdir_impl(
         &mut self,
         dir: &Path,
         masks: AttrMask,
@@ -1273,7 +1343,7 @@ impl VecFs for DummyVecFs {
         Ok(out)
     }
 
-    fn listdir_page(
+    fn listdir_page_impl(
         &mut self,
         dir: &Path,
         masks: AttrMask,
@@ -1322,8 +1392,52 @@ impl VecFs for DummyVecFs {
         }
         Ok((page, Some(DirPageCursor::new(state))))
     }
+    fn create_dir_impl(&mut self, path: &std::path::Path, mode: u32) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_create_dir_impl_default(self, path, mode)
+    }
+    fn read_dir_impl(
+        &mut self,
+        path: &std::path::Path,
+        options: ReadDirOptions,
+    ) -> VfResult<Vec<DirEntry>> {
+        vfsi_sync::backend_helpers::native_read_dir_impl_default(self, path, options)
+    }
+    fn read_dir_page_impl(
+        &mut self,
+        path: &std::path::Path,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
+        vfsi_sync::backend_helpers::native_read_dir_page_impl_default(
+            self,
+            path,
+            cursor,
+            page_size,
+            max_entries,
+        )
+    }
+    fn read_dir_page_with_fields_impl(
+        &mut self,
+        path: &std::path::Path,
+        fields: AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
+        vfsi_sync::backend_helpers::native_read_dir_page_with_fields_impl_default(
+            self,
+            path,
+            fields,
+            cursor,
+            page_size,
+            max_entries,
+        )
+    }
+}
 
-    fn visit_dir(
+impl TraversalFileSystem for DummyVecFs {
+    fn visit_dir_impl(
         &mut self,
         dir: &Path,
         masks: AttrMask,
@@ -1359,8 +1473,10 @@ impl VecFs for DummyVecFs {
         }
         Ok(())
     }
+}
 
-    fn renamev(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
+impl NamespaceFileSystem for DummyVecFs {
+    fn vrename_impl(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
         for (i, (src, dst)) in pairs.iter().enumerate() {
             let sp = self.vf_path(src).map_err(|e| e.with_index(i))?;
             let sp = self
@@ -1375,7 +1491,7 @@ impl VecFs for DummyVecFs {
         Ok(())
     }
 
-    fn removev(&mut self, files: &[VfFile]) -> VfRes {
+    fn vremove_impl(&mut self, files: &[VfFile]) -> VfRes {
         for (i, f) in files.iter().enumerate() {
             let p = self
                 .no_follow_path(
@@ -1395,7 +1511,7 @@ impl VecFs for DummyVecFs {
         Ok(())
     }
 
-    fn mkdirv(&mut self, dirs: &[VfAttrs]) -> VfRes {
+    fn vmkdir_impl(&mut self, dirs: &[VfAttrs]) -> VfRes {
         for (i, a) in dirs.iter().enumerate() {
             let p = self
                 .no_follow_path(
@@ -1414,8 +1530,19 @@ impl VecFs for DummyVecFs {
         }
         Ok(())
     }
+    fn remove_impl(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_remove_impl_default(self, path, recursive)
+    }
+    fn remove_dir_contents_impl(&mut self, path: &std::path::Path) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_remove_dir_contents_impl_default(self, path)
+    }
+    fn rename_impl(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_rename_impl_default(self, from, to)
+    }
+}
 
-    fn symlinkv(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
+impl LinkFileSystem for DummyVecFs {
+    fn vsymlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         if oldpaths.len() != newpaths.len() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
@@ -1428,7 +1555,7 @@ impl VecFs for DummyVecFs {
         Ok(())
     }
 
-    fn readlinkv(&mut self, paths: &[&Path]) -> VfResult<Vec<Vec<u8>>> {
+    fn vreadlink_impl(&mut self, paths: &[&Path]) -> VfResult<Vec<Vec<u8>>> {
         let mut out = Vec::with_capacity(paths.len());
         for (i, p) in paths.iter().enumerate() {
             let path = self
@@ -1441,7 +1568,7 @@ impl VecFs for DummyVecFs {
         Ok(out)
     }
 
-    fn hardlinkv(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
+    fn vhardlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         if oldpaths.len() != newpaths.len() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
@@ -1456,15 +1583,29 @@ impl VecFs for DummyVecFs {
         }
         Ok(())
     }
+    fn symlink_impl(&mut self, target: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_symlink_impl_default(self, target, link)
+    }
+    fn hard_link_impl(&mut self, source: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_hard_link_impl_default(self, source, link)
+    }
+    fn read_link_impl(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf> {
+        vfsi_sync::backend_helpers::native_read_link_impl_default(self, path)
+    }
+}
 
-    fn dupv(&mut self, pairs: &[ExtentPair]) -> VfRes {
+impl CopyFileSystem for DummyVecFs {
+    fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> VfRes {
         for (i, p) in pairs.iter().enumerate() {
             self.copy_extent(p).map_err(|e| e.with_index(i))?;
         }
         Ok(())
     }
 
-    fn lcopyv(&mut self, pairs: &[ExtentPair]) -> VfRes {
+    fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOption) -> VfRes {
+        if options.follows_source_symlinks() {
+            return self.vcopy_data_impl(pairs);
+        }
         for (i, p) in pairs.iter().enumerate() {
             let sp = self
                 .no_follow_path(&self.resolve(&p.src_path))
@@ -1485,7 +1626,75 @@ impl VecFs for DummyVecFs {
         Ok(())
     }
 
-    fn write_adb(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
+    fn copy_tree_impl(
+        &mut self,
+        src_dir: &Path,
+        dst: &Path,
+        symlinks: bool,
+        _use_server_side_copy: bool,
+    ) -> VfRes {
+        if !self.exists_impl(dst)? {
+            self.ensure_dir_impl(dst, 0o755)
+                .map_err(|e| e.with_index(0))?;
+        }
+        let masks = AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID;
+        let mut pending = vec![(src_dir.to_path_buf(), dst.to_path_buf())];
+        while let Some((source, destination)) = pending.pop() {
+            let entries = self.listdir_impl(&source, masks, 0, false)?;
+            let mut directories = Vec::new();
+            for entry in entries {
+                let name = entry
+                    .file
+                    .path()
+                    .and_then(|path| path.file_name())
+                    .map(|name| name.as_bytes().to_vec())
+                    .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+                let source_child = source.join(path_from_bytes(&name));
+                let destination_child = destination.join(path_from_bytes(&name));
+                if entry.ftype == VfType::Directory {
+                    self.ensure_dir_impl(&destination_child, 0o755)
+                        .map_err(|error| error.with_index(0))?;
+                    directories.push((source_child, destination_child));
+                } else if entry.ftype == VfType::Symlink && symlinks {
+                    let target = self
+                        .readlink_raw_impl(&source_child)
+                        .map_err(|error| error.with_index(0))?;
+                    self.symlink_raw_impl(&path_from_bytes(&target), &destination_child)
+                        .map_err(|error| error.with_index(0))?;
+                } else {
+                    let pair =
+                        ExtentPair::from_os_paths(&source_child, 0, &destination_child, 0, None);
+                    self.vcopy_data_impl(std::slice::from_ref(&pair))
+                        .map_err(|error| error.with_index(0))?;
+                }
+            }
+            for directory in directories.into_iter().rev() {
+                pending.push(directory);
+            }
+        }
+        Ok(())
+    }
+    fn copy_impl(
+        &mut self,
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_copy_impl_default(self, source, destination)
+    }
+}
+
+impl ReadWorkflowFileSystem for DummyVecFs {}
+
+impl RemovalFileSystem for DummyVecFs {
+    fn before_remove_type(&mut self, _index: usize) -> VfResult<()> {
+        #[cfg(feature = "test-faults")]
+        self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: _index })?;
+        Ok(())
+    }
+}
+
+impl ApplicationDataFileSystem for DummyVecFs {
+    fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
         for (i, p) in patterns.iter().enumerate() {
             let pattern_len =
@@ -1551,54 +1760,6 @@ impl VecFs for DummyVecFs {
         }
         Ok(counts)
     }
-
-    fn cp_recursive(
-        &mut self,
-        src_dir: &Path,
-        dst: &Path,
-        symlinks: bool,
-        _use_server_side_copy: bool,
-    ) -> VfRes {
-        if !self.exists(dst)? {
-            self.ensure_dir(dst, 0o755).map_err(|e| e.with_index(0))?;
-        }
-        let masks = AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID;
-        let mut pending = vec![(src_dir.to_path_buf(), dst.to_path_buf())];
-        while let Some((source, destination)) = pending.pop() {
-            let entries = self.listdir(&source, masks, 0, false)?;
-            let mut directories = Vec::new();
-            for entry in entries {
-                let name = entry
-                    .file
-                    .path()
-                    .and_then(|path| path.file_name())
-                    .map(|name| name.as_bytes().to_vec())
-                    .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
-                let source_child = source.join(path_from_bytes(&name));
-                let destination_child = destination.join(path_from_bytes(&name));
-                if entry.ftype == VfType::Directory {
-                    self.ensure_dir(&destination_child, 0o755)
-                        .map_err(|error| error.with_index(0))?;
-                    directories.push((source_child, destination_child));
-                } else if entry.ftype == VfType::Symlink && symlinks {
-                    let target = self
-                        .readlink(&source_child)
-                        .map_err(|error| error.with_index(0))?;
-                    self.symlink(&path_from_bytes(&target), &destination_child)
-                        .map_err(|error| error.with_index(0))?;
-                } else {
-                    let pair =
-                        ExtentPair::from_os_paths(&source_child, 0, &destination_child, 0, None);
-                    self.dupv(std::slice::from_ref(&pair))
-                        .map_err(|error| error.with_index(0))?;
-                }
-            }
-            for directory in directories.into_iter().rev() {
-                pending.push(directory);
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Compatibility module matching the historical `vnfs::dummy_vecfs` path.
@@ -1608,3 +1769,56 @@ pub mod dummy_vecfs {
 
 #[cfg(test)]
 mod contract_tests;
+
+#[cfg(target_os = "linux")]
+fn local_filesystem_stats(fd: std::os::fd::RawFd, index: usize) -> VfResult<FilesystemStats> {
+    let mut raw: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatvfs(fd, &mut raw) } != 0 {
+        return Err(VfError::failure(
+            index,
+            DummyVecFs::errno(&std::io::Error::last_os_error()),
+        ));
+    }
+    let bytes = |blocks: u64| {
+        blocks
+            .checked_mul(raw.f_frsize)
+            .map(Some)
+            .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))
+    };
+    let conf = |name| -> VfResult<Option<u64>> {
+        unsafe {
+            *libc::__errno_location() = 0;
+        }
+        let value = unsafe { libc::fpathconf(fd, name) };
+        if value >= 0 {
+            return Ok(Some(value as u64));
+        }
+        let errno = unsafe { *libc::__errno_location() };
+        if errno == 0 || errno == libc::EINVAL {
+            Ok(None)
+        } else {
+            Err(VfError::failure(index, errno as u32))
+        }
+    };
+    Ok(FilesystemStats {
+        total_bytes: bytes(raw.f_blocks)?,
+        free_bytes: bytes(raw.f_bfree)?,
+        available_bytes: bytes(raw.f_bavail)?,
+        total_files: Some(raw.f_files),
+        free_files: Some(raw.f_ffree),
+        available_files: Some(raw.f_favail),
+        block_size: Some(raw.f_bsize),
+        fragment_size: Some(raw.f_frsize),
+        max_name_len: conf(libc::_PC_NAME_MAX)?,
+        max_path_len: conf(libc::_PC_PATH_MAX)?,
+        max_links: conf(libc::_PC_LINK_MAX)?,
+        file_size_bits: conf(libc::_PC_FILESIZEBITS)?
+            .map(|value| {
+                u32::try_from(value).map_err(|_| VfError::failure(index, libc::EOVERFLOW as u32))
+            })
+            .transpose()?,
+        read_only: Some(raw.f_flag & libc::ST_RDONLY != 0),
+        no_set_id: Some(raw.f_flag & libc::ST_NOSUID != 0),
+        ..FilesystemStats::default()
+    })
+}

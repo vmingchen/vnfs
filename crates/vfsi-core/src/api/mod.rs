@@ -10,9 +10,9 @@
 pub type Result<T> = crate::VfResult<T>;
 pub type Error = crate::VfError;
 pub use crate::{
-    AttrMask as MetadataFields, Capabilities, DirEntry, ErrorDomain, Metadata, MetadataUpdate,
-    OpenFlags, OpenRequest, Permissions, RemoveOptions, StatusCode, TransportKind,
-    VfType as FileType,
+    AttrMask as MetadataFields, Capabilities, CopyOption, DirEntry, ErrorDomain, FilesystemStats,
+    Metadata, MetadataUpdate, OpenFlags, OpenRequest, Permissions, RemoveOptions, StatusCode,
+    TransportKind, VfType as FileType,
 };
 pub use std::io::ErrorKind;
 pub use std::ops::ControlFlow;
@@ -62,10 +62,10 @@ pub mod internal {
 /// Common imports for backend-independent application code.
 pub mod prelude {
     pub use super::{
-        ControlFlow, FileHandle, MetadataFields, MetadataOperand, MetadataOptions, MetadataTarget,
-        MetadataUpdate, OpenFlags, OpenRequest, ReadOp, ReadOptions, ReadResult, ReadStreamOptions,
-        RemoveMode, RemoveOptions, ResourceLimits, Vfsi, VfsiExt, VisitOptions, WriteOp,
-        WriteOptions,
+        ControlFlow, CopyOption, FileHandle, MetadataFields, MetadataOperand, MetadataOptions,
+        MetadataTarget, MetadataUpdate, OpenFlags, OpenRequest, ReadOp, ReadOptions, ReadResult,
+        ReadStreamOptions, RemoveMode, RemoveOptions, ResourceLimits, Vfsi, VfsiExt, VisitOptions,
+        WriteOp, WriteOptions,
     };
 }
 

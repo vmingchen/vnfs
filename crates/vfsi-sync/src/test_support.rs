@@ -1,6 +1,6 @@
 #![doc = "Shared backend contract assertions for VFSI integration tests."]
 
-//! A capability-aware shared test suite run against every [`VecFs`]
+//! A capability-aware shared test suite run against every [`Backend`]
 //! implementation. Portable behavior must match on all backends; optional
 //! Unix semantics are asserted only when advertised.
 
@@ -48,24 +48,25 @@ pub fn supervise_with_deadline(test: &str) -> bool {
 
 /// Run a broad set of vectorized-filesystem assertions against `fs`, using
 /// paths under `base` (which must be unique per caller).
-pub fn run_suite(fs: &mut impl VecFs, base: &str) {
-    let capabilities = fs.capabilities();
+pub fn run_suite(fs: &mut impl Backend, base: &str) {
+    let capabilities = fs.capability_bits();
     let posix_metadata = capabilities & VF_CAP_POSIX_METADATA != 0;
     let symlinks = capabilities & VF_CAP_SYMLINKS != 0;
     let hardlinks = capabilities & VF_CAP_HARDLINKS != 0;
     let dir = format!("{}/suite", base);
-    fs.ensure_dir(Path::new(&dir), 0o755).expect("ensure_dir");
+    fs.ensure_dir_impl(Path::new(&dir), 0o755)
+        .expect("ensure_dir");
     let f = format!("{}/f.txt", dir);
 
     // writev / readv via paths.
     let payload = b"the quick brown fox jumps over the lazy dog".to_vec();
     let mut w = WriteOp::from_path(&f, VfOffset::At(0), payload.clone());
     w.creation = true;
-    let wr = &fs.writev(&[w]).expect("writev")[0];
+    let wr = &fs.vwrite_owned_impl(&[w]).expect("writev")[0];
     assert_eq!(wr.written, payload.len());
 
     let r = &fs
-        .readv(&[ReadOp::from_path(&f, VfOffset::At(0), payload.len())])
+        .vread_impl(&[ReadOp::from_path(&f, VfOffset::At(0), payload.len())])
         .expect("readv")[0];
     assert_eq!(r.data, payload);
     // eof is the backend's EOF signal: NFS reports it for an exact-to-EOF
@@ -75,19 +76,19 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // Whole-file vectors are bounded by one aggregate caller-selected limit.
     let whole_a = format!("{}/whole-a", dir);
     let whole_b = format!("{}/whole-b", dir);
-    fs.writev(&[
+    fs.vwrite_owned_impl(&[
         WriteOp::at(VfFile::from_path(&whole_a), 0, b"abc".to_vec()).with_creation(),
         WriteOp::at(VfFile::from_path(&whole_b), 0, b"def".to_vec()).with_creation(),
     ])
     .unwrap();
     let whole_files = [VfFile::from_path(&whole_a), VfFile::from_path(&whole_b)];
     assert_eq!(
-        fs.read_allv_with_options(&whole_files, ReadAllOptions::new().max_total_bytes(6))
+        fs.vread_all_with_options_impl(&whole_files, ReadAllOptions::new().max_total_bytes(6))
             .unwrap(),
         [b"abc".to_vec(), b"def".to_vec()]
     );
     let error = fs
-        .read_allv_with_options(&whole_files, ReadAllOptions::new().max_total_bytes(5))
+        .vread_all_with_options_impl(&whole_files, ReadAllOptions::new().max_total_bytes(5))
         .unwrap_err();
     assert_eq!(
         (error.index(), error.err_no()),
@@ -100,7 +101,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     assert_eq!(DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, 16 * 1024 * 1024);
 
     // stat / exists / file_type.
-    let st = fs.stat(Path::new(&f)).expect("stat");
+    let st = fs.stat_impl(Path::new(&f)).expect("stat");
     assert_eq!(st.size, payload.len() as u64);
     if posix_metadata {
         assert!(st.fileid != 0);
@@ -115,7 +116,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
             masks: AttrMask::ATIME | AttrMask::MTIME | AttrMask::CTIME,
             ..VfAttrs::default()
         };
-        fs.getattrsv(std::slice::from_mut(&mut t)).unwrap();
+        fs.vgetattrs_impl(std::slice::from_mut(&mut t)).unwrap();
         assert_eq!(
             t.returned,
             AttrMask::ATIME | AttrMask::MTIME | AttrMask::CTIME,
@@ -126,59 +127,69 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // (tmpfs reports 0 blocks for tiny files).
     if posix_metadata {
         let big = format!("{}/big.bin", dir);
-        fs.writev(&[WriteOp::at(VfFile::from_path(&big), 0, vec![b'x'; 4096]).with_creation()])
-            .unwrap();
+        fs.vwrite_owned_impl(&[
+            WriteOp::at(VfFile::from_path(&big), 0, vec![b'x'; 4096]).with_creation()
+        ])
+        .unwrap();
         let mut b = VfAttrs {
             file: VfFile::from_path(&big),
             masks: AttrMask::BLOCKS,
             ..VfAttrs::default()
         };
-        fs.getattrsv(std::slice::from_mut(&mut b)).unwrap();
+        fs.vgetattrs_impl(std::slice::from_mut(&mut b)).unwrap();
         assert!(b.returned.contains(AttrMask::BLOCKS), "blocks returned");
         assert!(b.blocks > 0, "blocks in 512-byte units");
     }
-    assert!(fs.exists(Path::new(&f)).unwrap());
-    assert_eq!(fs.file_type(Path::new(&f)).unwrap(), VfType::Regular);
+    assert!(fs.exists_impl(Path::new(&f)).unwrap());
+    assert_eq!(fs.file_type_impl(Path::new(&f)).unwrap(), VfType::Regular);
 
     // setattrs: truncate to 5 bytes, then mode.
-    fs.setattrsv(&[VfAttrs {
+    fs.vsetattrs_raw_impl(&[VfAttrs {
         file: VfFile::from_path(&f),
         masks: AttrMask::SIZE,
         size: 5,
         ..VfAttrs::default()
     }])
     .expect("setattrsv size");
-    assert_eq!(fs.stat(Path::new(&f)).unwrap().size, 5);
+    assert_eq!(fs.stat_impl(Path::new(&f)).unwrap().size, 5);
 
     // mkdir.
     let sub = format!("{}/sub", dir);
-    fs.mkdir(Path::new(&sub), 0o750).expect("mkdir");
-    assert_eq!(fs.stat(Path::new(&sub)).unwrap().ftype, VfType::Directory);
+    fs.mkdir_raw_impl(Path::new(&sub), 0o750).expect("mkdir");
+    assert_eq!(
+        fs.stat_impl(Path::new(&sub)).unwrap().ftype,
+        VfType::Directory
+    );
     if posix_metadata {
-        assert_eq!(fs.stat(Path::new(&sub)).unwrap().mode & 0o777, 0o750);
+        assert_eq!(fs.stat_impl(Path::new(&sub)).unwrap().mode & 0o777, 0o750);
     }
 
     // open / descriptor write / fseek / descriptor read.
-    let tf = fs.open(Path::new(&f), libc::O_RDWR, 0).expect("open");
-    fs.writev(&[WriteOp::from_fd(
+    let tf = fs
+        .open_raw_impl(Path::new(&f), libc::O_RDWR, 0)
+        .expect("open");
+    fs.vwrite_owned_impl(&[WriteOp::from_fd(
         tf.fd().unwrap(),
         VfOffset::At(0),
         b"hello".to_vec(),
     )])
     .expect("writev fd");
-    assert_eq!(fs.fseek(&tf, 0, SeekFrom::Set).unwrap(), 0);
+    assert_eq!(fs.seek_raw_impl(&tf, 0, SeekFrom::Set).unwrap(), 0);
     let r = &fs
-        .readv(&[ReadOp::from_fd(tf.fd().unwrap(), VfOffset::Cur, 5)])
+        .vread_impl(&[ReadOp::from_fd(tf.fd().unwrap(), VfOffset::Cur, 5)])
         .expect("readv fd")[0];
     assert_eq!(r.data, b"hello");
-    fs.close(&tf).expect("close");
+    fs.close_impl(&tf).expect("close");
 
     if symlinks {
         // symlink / readlink.
         let link = format!("{}/ln", dir);
-        fs.symlink(Path::new(&f), Path::new(&link))
+        fs.symlink_raw_impl(Path::new(&f), Path::new(&link))
             .expect("symlink");
-        assert_eq!(fs.readlink(Path::new(&link)).unwrap(), f.as_bytes());
+        assert_eq!(
+            fs.readlink_raw_impl(Path::new(&link)).unwrap(),
+            f.as_bytes()
+        );
 
         // stat follows symlinks; lstat does not. (Relative target so both the
         // NFS and std::fs backends can resolve it.)
@@ -188,21 +199,21 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        fs.symlink(Path::new(&rel), Path::new(&sbase))
+        fs.symlink_raw_impl(Path::new(&rel), Path::new(&sbase))
             .expect("symlink lnstat");
         assert_eq!(
-            fs.stat(Path::new(&sbase)).unwrap().ftype,
+            fs.stat_impl(Path::new(&sbase)).unwrap().ftype,
             VfType::Regular,
             "stat follows"
         );
         assert_eq!(
-            fs.lstat(Path::new(&sbase)).unwrap().ftype,
+            fs.lstat_impl(Path::new(&sbase)).unwrap().ftype,
             VfType::Symlink,
             "lstat stays"
         );
         assert_eq!(
-            fs.stat(Path::new(&sbase)).unwrap().size,
-            fs.stat(Path::new(&f)).unwrap().size,
+            fs.stat_impl(Path::new(&sbase)).unwrap().size,
+            fs.stat_impl(Path::new(&f)).unwrap().size,
             "stat resolves to the target"
         );
     }
@@ -210,27 +221,27 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // hardlink.
     if hardlinks {
         let hard = format!("{}/hard", dir);
-        fs.hardlinkv(&[Path::new(&f)], &[Path::new(&hard)])
+        fs.vhardlink_impl(&[Path::new(&f)], &[Path::new(&hard)])
             .expect("hardlinkv");
         assert_eq!(
-            fs.stat(Path::new(&f)).unwrap().fileid,
-            fs.stat(Path::new(&hard)).unwrap().fileid
+            fs.stat_impl(Path::new(&f)).unwrap().fileid,
+            fs.stat_impl(Path::new(&hard)).unwrap().fileid
         );
     }
 
     // rename.
     let renamed = format!("{}/renamed.txt", dir);
-    fs.renamev(&[(
+    fs.vrename_impl(&[(
         VfFile::from_os_path(Path::new(&f)),
         VfFile::from_os_path(Path::new(&renamed)),
     )])
     .expect("renamev");
-    assert!(fs.exists(Path::new(&renamed)).unwrap());
-    assert!(!fs.exists(Path::new(&f)).unwrap());
+    assert!(fs.exists_impl(Path::new(&renamed)).unwrap());
+    assert!(!fs.exists_impl(Path::new(&f)).unwrap());
 
     // openv / closev.
     let more = format!("{}/more", dir);
-    fs.ensure_dir(Path::new(&more), 0o755).unwrap();
+    fs.ensure_dir_impl(Path::new(&more), 0o755).unwrap();
     let paths = [
         format!("{}/a", more),
         format!("{}/b", more),
@@ -238,13 +249,13 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     ];
     let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
     let files = fs
-        .openv(&refs, &[libc::O_CREAT | libc::O_RDWR; 3], &[0o644; 3])
+        .vopen_raw_impl(&refs, &[libc::O_CREAT | libc::O_RDWR; 3], &[0o644; 3])
         .expect("openv");
-    fs.closev(&files).expect("closev");
+    fs.vclose_impl(&files).expect("closev");
 
     // listdir (non-recursive) finds entries.
     let entries = fs
-        .listdir(Path::new(&dir), AttrMask::default(), 0, false)
+        .listdir_impl(Path::new(&dir), AttrMask::default(), 0, false)
         .expect("listdir");
     assert!(
         entries
@@ -263,45 +274,52 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         seen += 1;
         true
     };
-    fs.listdirv(&[Path::new(&dir)], AttrMask::default(), 0, false, &mut cb)
+    fs.vlistdirs_impl(&[Path::new(&dir)], AttrMask::default(), 0, false, &mut cb)
         .expect("listdirv");
     assert!(seen >= 2);
 
     // dupv extent copy (whole file).
     let copy = format!("{}/copy.txt", dir);
-    fs.dupv(&[ExtentPair::new(&renamed, 0, &copy, 0, None)])
+    fs.vcopy_data_impl(&[ExtentPair::new(&renamed, 0, &copy, 0, None)])
         .expect("dupv");
     assert_eq!(
-        fs.stat(Path::new(&copy)).unwrap().size,
-        fs.stat(Path::new(&renamed)).unwrap().size
+        fs.stat_impl(Path::new(&copy)).unwrap().size,
+        fs.stat_impl(Path::new(&renamed)).unwrap().size
     );
 
     // dupv over a longer existing destination truncates the stale tail.
     let short = format!("{}/short.txt", dir);
     let long = format!("{}/long.txt", dir);
-    fs.writev(&[WriteOp::at(VfFile::from_path(&short), 0, b"ab".to_vec()).with_creation()])
+    fs.vwrite_owned_impl(&[
+        WriteOp::at(VfFile::from_path(&short), 0, b"ab".to_vec()).with_creation()
+    ])
+    .unwrap();
+    fs.vwrite_owned_impl(&[
+        WriteOp::at(VfFile::from_path(&long), 0, b"abcdef".to_vec()).with_creation()
+    ])
+    .unwrap();
+    fs.vcopy_data_impl(&[ExtentPair::new(&short, 0, &long, 0, None)])
         .unwrap();
-    fs.writev(&[WriteOp::at(VfFile::from_path(&long), 0, b"abcdef".to_vec()).with_creation()])
-        .unwrap();
-    fs.dupv(&[ExtentPair::new(&short, 0, &long, 0, None)])
-        .unwrap();
-    let st = fs.stat(Path::new(&long)).unwrap();
+    let st = fs.stat_impl(Path::new(&long)).unwrap();
     assert_eq!(st.size, 2, "dupv truncates the destination");
-    assert_eq!(fs.read(&VfFile::from_path(&long), 0, 8).unwrap(), b"ab");
+    assert_eq!(
+        fs.read_raw_impl(&VfFile::from_path(&long), 0, 8).unwrap(),
+        b"ab"
+    );
 
     // O_CREAT mode is ignored when the file already exists.
     let mode_f = format!("{}/mode.txt", dir);
     let mfd = fs
-        .open(Path::new(&mode_f), libc::O_CREAT | libc::O_RDWR, 0o600)
+        .open_raw_impl(Path::new(&mode_f), libc::O_CREAT | libc::O_RDWR, 0o600)
         .unwrap();
-    fs.close(&mfd).unwrap();
+    fs.close_impl(&mfd).unwrap();
     let mfd = fs
-        .open(Path::new(&mode_f), libc::O_CREAT | libc::O_RDWR, 0o777)
+        .open_raw_impl(Path::new(&mode_f), libc::O_CREAT | libc::O_RDWR, 0o777)
         .unwrap();
-    fs.close(&mfd).unwrap();
+    fs.close_impl(&mfd).unwrap();
     if posix_metadata {
         assert_eq!(
-            fs.stat(Path::new(&mode_f)).unwrap().mode & 0o7777,
+            fs.stat_impl(Path::new(&mode_f)).unwrap().mode & 0o7777,
             0o600,
             "O_CREAT must not chmod an existing file"
         );
@@ -309,7 +327,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // O_CREAT | O_EXCL fails on an existing file; O_TRUNC empties it.
     assert_eq!(
-        fs.open(
+        fs.open_raw_impl(
             Path::new(&mode_f),
             libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
             0o644
@@ -319,27 +337,29 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         ERR_EXIST
     );
     let tfd = fs
-        .open(Path::new(&mode_f), libc::O_RDWR | libc::O_TRUNC, 0)
+        .open_raw_impl(Path::new(&mode_f), libc::O_RDWR | libc::O_TRUNC, 0)
         .unwrap();
-    fs.close(&tfd).unwrap();
+    fs.close_impl(&tfd).unwrap();
     assert_eq!(
-        fs.stat(Path::new(&mode_f)).unwrap().size,
+        fs.stat_impl(Path::new(&mode_f)).unwrap().size,
         0,
         "O_TRUNC empties the file"
     );
 
     // "Current position" offsets are invalid for path-based operations.
     assert_eq!(
-        fs.readv(&[ReadOp::new(VfFile::from_path(&renamed), VfOffset::Cur, 1)])
+        fs.vread_impl(&[ReadOp::new(VfFile::from_path(&renamed), VfOffset::Cur, 1)])
             .unwrap_err()
             .err_no(),
         ERR_INVAL
     );
 
     // Mixed descriptor/path batches work and echo the original files.
-    let rfd = fs.open(Path::new(&renamed), libc::O_RDONLY, 0).unwrap();
+    let rfd = fs
+        .open_raw_impl(Path::new(&renamed), libc::O_RDONLY, 0)
+        .unwrap();
     let mixed = fs
-        .readv(&[
+        .vread_impl(&[
             ReadOp::new(rfd.clone(), VfOffset::At(0), 2),
             ReadOp::at(VfFile::from_path(&copy), 0, 2),
         ])
@@ -348,13 +368,15 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     assert_eq!(mixed[1].data.len(), 2);
     assert!(mixed[0].file.is_descriptor(), "result echoes the fd op");
     assert!(mixed[1].file.path().is_some(), "result echoes the path op");
-    fs.close(&rfd).unwrap();
+    fs.close_impl(&rfd).unwrap();
 
     // A closed descriptor inside a batch fails at its own index with EBADF.
-    let bad = fs.open(Path::new(&renamed), libc::O_RDONLY, 0).unwrap();
-    fs.close(&bad).unwrap();
+    let bad = fs
+        .open_raw_impl(Path::new(&renamed), libc::O_RDONLY, 0)
+        .unwrap();
+    fs.close_impl(&bad).unwrap();
     let e = fs
-        .readv(&[
+        .vread_impl(&[
             ReadOp::at(VfFile::from_path(&copy), 0, 1),
             ReadOp::new(bad, VfOffset::At(0), 1),
         ])
@@ -363,11 +385,11 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // readlink/hardlink error paths.
     assert!(
-        fs.readlink(Path::new(&renamed)).is_err(),
+        fs.readlink_raw_impl(Path::new(&renamed)).is_err(),
         "readlink of a regular file"
     );
     assert!(
-        fs.hardlinkv(
+        fs.vhardlink_impl(
             &[Path::new("/no/such/source")],
             &[Path::new(&format!("{}/h", dir))]
         )
@@ -376,30 +398,35 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     );
 
     // ensure_dir on an existing directory is a no-op.
-    fs.ensure_dir(Path::new(&sub), 0o755)
+    fs.ensure_dir_impl(Path::new(&sub), 0o755)
         .expect("ensure_dir existing");
 
     // Non-recursive rm of a non-empty directory fails.
     let nonempty = format!("{}/nonempty", dir);
-    fs.ensure_dir(Path::new(&nonempty), 0o755).unwrap();
-    fs.writev(&[WriteOp::at(
+    fs.ensure_dir_impl(Path::new(&nonempty), 0o755).unwrap();
+    fs.vwrite_owned_impl(&[WriteOp::at(
         VfFile::from_os_path(Path::new(&format!("{}/x", nonempty))),
         0,
         b"x".to_vec(),
     )
     .with_creation()])
         .unwrap();
-    assert!(fs.rm(&[Path::new(&nonempty)], false).is_err());
+    assert!(
+        fs.remove_paths_impl(&[Path::new(&nonempty)], false)
+            .is_err()
+    );
 
     // write_adb: two blocks with ADBN at block offset 0.
     let adbf = format!("{}/adb.bin", dir);
     let mut a = Adb::blocknum_only(&adbf, 0, 1024, 2, 0, 100);
     a.adb_reloff_pattern = Some(8);
     a.adb_pattern_data = b"PAT".to_vec();
-    fs.write_adb(std::slice::from_mut(&mut a))
+    fs.vwrite_adb_impl(std::slice::from_mut(&mut a))
         .expect("write_adb");
     assert_eq!(a.adb_block_count, 2);
-    let adb = fs.read(&VfFile::from_path(&adbf), 0, 2048).unwrap();
+    let adb = fs
+        .read_raw_impl(&VfFile::from_path(&adbf), 0, 2048)
+        .unwrap();
     assert_eq!(&adb[0..8], &100u64.to_be_bytes(), "ADBN block 0");
     assert_eq!(&adb[1024..1032], &101u64.to_be_bytes(), "ADBN block 1");
     assert_eq!(&adb[8..11], b"PAT", "pattern block 0");
@@ -408,45 +435,45 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // cp_recursive copies the tree.
     let cpsrc = format!("{}/cpsrc", dir);
     let cpdst = format!("{}/cpdst", dir);
-    fs.ensure_dir(Path::new(&format!("{}/inner", cpsrc)), 0o755)
+    fs.ensure_dir_impl(Path::new(&format!("{}/inner", cpsrc)), 0o755)
         .unwrap();
     let srcfile = format!("{}/inner/data.txt", cpsrc);
     let mut w = WriteOp::from_path(&srcfile, VfOffset::At(0), b"xyz".to_vec());
     w.creation = true;
-    fs.writev(&[w]).unwrap();
+    fs.vwrite_owned_impl(&[w]).unwrap();
     if symlinks {
-        fs.symlink(
+        fs.symlink_raw_impl(
             Path::new("data.txt"),
             Path::new(&format!("{}/inner/link", cpsrc)),
         )
         .unwrap();
     }
-    fs.cp_recursive(Path::new(&cpsrc), Path::new(&cpdst), true, false)
+    fs.copy_tree_impl(Path::new(&cpsrc), Path::new(&cpdst), true, false)
         .expect("cp_recursive");
     assert!(
-        fs.exists(Path::new(&format!("{}/inner/data.txt", cpdst)))
+        fs.exists_impl(Path::new(&format!("{}/inner/data.txt", cpdst)))
             .unwrap()
     );
     if symlinks {
         assert_eq!(
-            fs.lstat(Path::new(&format!("{}/inner/link", cpdst)))
+            fs.lstat_impl(Path::new(&format!("{}/inner/link", cpdst)))
                 .unwrap()
                 .ftype,
             VfType::Symlink,
             "cp_recursive(symlinks=true) recreates the link"
         );
         let cpflat = format!("{}/cpflat", dir);
-        fs.cp_recursive(Path::new(&cpsrc), Path::new(&cpflat), false, false)
+        fs.copy_tree_impl(Path::new(&cpsrc), Path::new(&cpflat), false, false)
             .expect("cp_recursive no symlinks");
         assert_eq!(
-            fs.lstat(Path::new(&format!("{}/inner/link", cpflat)))
+            fs.lstat_impl(Path::new(&format!("{}/inner/link", cpflat)))
                 .unwrap()
                 .ftype,
             VfType::Regular,
             "cp_recursive(symlinks=false) copies through the link"
         );
         assert_eq!(
-            fs.read(
+            fs.read_raw_impl(
                 &VfFile::from_os_path(Path::new(&format!("{}/inner/link", cpflat))),
                 0,
                 3
@@ -463,17 +490,17 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         .to_string_lossy()
         .into_owned();
     assert_eq!(
-        fs.stat(Path::new(&format!("{}/./renamed.txt", dir)))
+        fs.stat_impl(Path::new(&format!("{}/./renamed.txt", dir)))
             .unwrap()
             .size,
-        fs.stat(Path::new(&renamed)).unwrap().size,
+        fs.stat_impl(Path::new(&renamed)).unwrap().size,
         "dot component"
     );
     assert_eq!(
-        fs.stat(Path::new(&format!("{}/../{}/renamed.txt", dir, base_name)))
+        fs.stat_impl(Path::new(&format!("{}/../{}/renamed.txt", dir, base_name)))
             .unwrap()
             .size,
-        fs.stat(Path::new(&renamed)).unwrap().size,
+        fs.stat_impl(Path::new(&renamed)).unwrap().size,
         "dotdot component stays inside the tree"
     );
 
@@ -487,51 +514,58 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // O_APPEND writes always go to the end of the file.
     let app = format!("{}/append.txt", dir);
     let afd = fs
-        .open(
+        .open_raw_impl(
             Path::new(&app),
             libc::O_CREAT | libc::O_RDWR | libc::O_APPEND,
             0o644,
         )
         .expect("open append");
-    fs.writev(&[WriteOp::new(afd.clone(), VfOffset::At(0), b"ab".to_vec())])
+    fs.vwrite_owned_impl(&[WriteOp::new(afd.clone(), VfOffset::At(0), b"ab".to_vec())])
         .unwrap();
-    fs.writev(&[WriteOp::new(afd.clone(), VfOffset::At(0), b"cd".to_vec())])
+    fs.vwrite_owned_impl(&[WriteOp::new(afd.clone(), VfOffset::At(0), b"cd".to_vec())])
         .unwrap();
-    let got = fs.read(&VfFile::from_path(&app), 0, 8).unwrap();
+    let got = fs.read_raw_impl(&VfFile::from_path(&app), 0, 8).unwrap();
     assert_eq!(got, b"abcd", "O_APPEND appends regardless of offset");
     // Cursor-based append reports and advances to the real append position,
     // independently of the initial cursor value.
     let w0 = fs
-        .writev(&[WriteOp::new(afd.clone(), VfOffset::Cur, b"e".to_vec())])
+        .vwrite_owned_impl(&[WriteOp::new(afd.clone(), VfOffset::Cur, b"e".to_vec())])
         .unwrap();
     assert_eq!(w0[0].offset, 4, "append write reports the real offset");
-    assert_eq!(fs.fseek(&afd, 0, SeekFrom::Cur).unwrap(), 5);
-    fs.close(&afd).unwrap();
-    assert_eq!(fs.read(&VfFile::from_path(&app), 0, 8).unwrap(), b"abcde");
+    assert_eq!(fs.seek_raw_impl(&afd, 0, SeekFrom::Cur).unwrap(), 5);
+    fs.close_impl(&afd).unwrap();
+    assert_eq!(
+        fs.read_raw_impl(&VfFile::from_path(&app), 0, 8).unwrap(),
+        b"abcde"
+    );
 
     // dupv follows a symlink source and copies the target's data.
     if symlinks {
         let dup_link = format!("{}/dup_link", dir);
         let dup_copy = format!("{}/dup_copy", dir);
         let dup_target = format!("{}/dup_target", dir);
-        fs.writev(&[
-            WriteOp::at(VfFile::from_path(&dup_target), 0, b"linkdata".to_vec()).with_creation(),
-        ])
-        .unwrap();
+        fs.vwrite_owned_impl(&[WriteOp::at(
+            VfFile::from_path(&dup_target),
+            0,
+            b"linkdata".to_vec(),
+        )
+        .with_creation()])
+            .unwrap();
         let rel_name = std::path::Path::new(&dup_target)
             .file_name()
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        fs.symlink(Path::new(&rel_name), Path::new(&dup_link))
+        fs.symlink_raw_impl(Path::new(&rel_name), Path::new(&dup_link))
             .unwrap();
-        fs.dupv(&[ExtentPair::new(&dup_link, 0, &dup_copy, 0, None)])
+        fs.vcopy_data_impl(&[ExtentPair::new(&dup_link, 0, &dup_copy, 0, None)])
             .unwrap();
-        let st = fs.stat(Path::new(&dup_copy)).unwrap();
+        let st = fs.stat_impl(Path::new(&dup_copy)).unwrap();
         assert_eq!(st.ftype, VfType::Regular, "dupv copies target data");
         assert_eq!(st.size, 8);
         assert_eq!(
-            fs.read(&VfFile::from_path(&dup_copy), 0, 8).unwrap(),
+            fs.read_raw_impl(&VfFile::from_path(&dup_copy), 0, 8)
+                .unwrap(),
             b"linkdata"
         );
 
@@ -543,7 +577,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
             ..VfAttrs::default()
         };
         assert_eq!(
-            fs.lsetattrsv(&[lsa]).unwrap_err().err_no(),
+            fs.vsetattrs_raw_nofollow_impl(&[lsa]).unwrap_err().err_no(),
             VF_ERR_UNSUPPORTED,
             "lsetattrsv on a symlink"
         );
@@ -551,7 +585,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // Closing an already-closed descriptor reports EBADF on both backends.
     assert_eq!(
-        fs.close(&tf).unwrap_err().err_no(),
+        fs.close_impl(&tf).unwrap_err().err_no(),
         ERR_EBADF,
         "close of a closed descriptor"
     );
@@ -560,18 +594,18 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // root-relative in both backends.
     let abs_rel = format!("{}/absrel.txt", base.trim_start_matches('/'));
     let f2 = fs
-        .open_by_path(
+        .open_path_impl(
             VfPathBase::Abs,
             Path::new(&abs_rel),
             libc::O_CREAT | libc::O_RDWR,
             0o644,
         )
         .expect("open_by_path Abs relative");
-    fs.writev(&[WriteOp::new(f2.clone(), VfOffset::At(0), b"ar".to_vec())])
+    fs.vwrite_owned_impl(&[WriteOp::new(f2.clone(), VfOffset::At(0), b"ar".to_vec())])
         .unwrap();
-    fs.close(&f2).unwrap();
+    fs.close_impl(&f2).unwrap();
     assert_eq!(
-        fs.read(
+        fs.read_raw_impl(
             &VfFile::from_os_path(Path::new(&format!("/{}", abs_rel))),
             0,
             2
@@ -582,7 +616,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
 
     // Writing through `Current(None)` (the cwd itself) is not a file op.
     assert_eq!(
-        fs.writev(&[WriteOp::at(VfFile::cwd(), 0, b"x".to_vec()).with_creation()])
+        fs.vwrite_owned_impl(&[WriteOp::at(VfFile::cwd(), 0, b"x".to_vec()).with_creation()])
             .unwrap_err()
             .err_no(),
         ERR_ISDIR,
@@ -592,11 +626,11 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // walk returns pre-order with the sort callback applied to every
     // directory (subdirectories visited in the order the caller lists them).
     let wroot = format!("/{}/wroot", dir.trim_start_matches('/'));
-    fs.ensure_dir(Path::new(&wroot), 0o755).unwrap();
+    fs.ensure_dir_impl(Path::new(&wroot), 0o755).unwrap();
     for (sub, file) in [("b", "f1"), ("a", "f2"), ("a", "f3")] {
         let subp = format!("{}/{}", wroot, sub);
-        fs.ensure_dir(Path::new(&subp), 0o755).unwrap();
-        fs.writev(&[WriteOp::at(
+        fs.ensure_dir_impl(Path::new(&subp), 0o755).unwrap();
+        fs.vwrite_owned_impl(&[WriteOp::at(
             VfFile::from_os_path(Path::new(&format!("{}/{}", subp, file))),
             0,
             b"x".to_vec(),
@@ -614,7 +648,7 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
         });
     };
     let tree = fs
-        .walk(Path::new(&wroot), AttrMask::stat(), &mut sort)
+        .walk_impl(Path::new(&wroot), AttrMask::stat(), &mut sort)
         .unwrap();
     let order: Vec<PathBuf> = tree.iter().map(|w| w.path.clone()).collect();
     assert_eq!(
@@ -644,13 +678,16 @@ pub fn run_suite(fs: &mut impl VecFs, base: &str) {
     // Generic recursive removal requires no-follow metadata. Backends without
     // LSTAT must reject it without changing the tree.
     if capabilities & VF_CAP_LSTAT != 0 {
-        fs.rm(&[Path::new(&dir)], true).expect("rm recursive");
-        assert!(!fs.exists(Path::new(&dir)).unwrap());
+        fs.remove_paths_impl(&[Path::new(&dir)], true)
+            .expect("rm recursive");
+        assert!(!fs.exists_impl(Path::new(&dir)).unwrap());
     } else {
         assert_eq!(
-            fs.rm(&[Path::new(&dir)], true).unwrap_err().err_no(),
+            fs.remove_paths_impl(&[Path::new(&dir)], true)
+                .unwrap_err()
+                .err_no(),
             VF_ERR_UNSUPPORTED
         );
-        assert!(fs.exists(Path::new(&dir)).unwrap());
+        assert!(fs.exists_impl(Path::new(&dir)).unwrap());
     }
 }

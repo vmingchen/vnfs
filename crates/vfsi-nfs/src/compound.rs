@@ -1082,6 +1082,12 @@ impl CompoundRes {
         unsafe { &ro.nfs_resop4_u.opreaddir.READDIR4res_u.resok4 }
     }
 
+    /// Preserve the server's returned bitmap alongside the attribute payload.
+    pub fn getattr_with_bitmap(&self, i: usize) -> (bitmap4, Vec<u8>) {
+        let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_GETATTR, "GETATTR");
+        let ok = unsafe { ro.nfs_resop4_u.opgetattr.GETATTR4res_u.resok4 };
+        (ok.obj_attributes.attrmask, self.getattr_bytes(i))
+    }
     /// Return an owned copy of the raw attrlist bytes for `i` (`getattr`).
     pub fn getattr_bytes(&self, i: usize) -> Vec<u8> {
         self.getattr(i).to_vec()

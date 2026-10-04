@@ -1,104 +1,219 @@
-//! Rust-native scalar and vector contracts.
-//!
-//! [`VecFs`] remains the compatibility/backend implementation trait. New
-//! applications should bound generic code by these smaller interfaces.
-
-use crate::traits::{validate_read_into_results, validate_read_results, validate_write_results};
+//! Native synchronous backend contracts. Concrete backends implement these directly.
 use crate::*;
-
-/// Core synchronous scalar filesystem operations.
+use std::path::{Path, PathBuf};
+use vfsi_core::internal::ManyResults;
+/// Scalar native operations and descriptor lifecycle.
+/// Implementing this contract alone does not provide native vector batching.
 pub trait FileSystem {
-    /// Extract callbacks for delivery after the owning client's backend lock
-    /// is released. Implementations must not invoke user callbacks in this hook.
-    fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
-        Vec::new()
+    fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<FilesystemStats>> {
+        crate::backend_helpers::vstatfs_impl_default(self, files)
     }
-    fn capabilities(&self) -> Capabilities;
-    /// Read a complete opened file with a logical payload limit. Specialized backends
-    /// override this to share their optimized vector whole-file path.
-    fn read_file(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
-        let mut output = Vec::new();
-        loop {
-            let remaining = max_bytes.saturating_sub(output.len());
-            let request = ReadOp::new(
-                file.clone(),
-                VfOffset::At(output.len() as u64),
-                remaining.clamp(1, 1024 * 1024),
-            );
-            let result = self.read_one(&request)?;
-            validate_read_results(
-                "read_file",
-                std::slice::from_ref(&request),
-                std::slice::from_ref(&result),
-            )?;
-            if result.data.len() > remaining {
-                return Err(VfError::client(0, libc::EFBIG as u32));
-            }
-            if result.data.is_empty() && !result.eof {
-                return Err(VfError::client(0, ERR_IO));
-            }
-            output.extend_from_slice(&result.data);
-            if result.eof {
-                return Ok(output);
-            }
-        }
-    }
-    fn open_one(&mut self, request: &OpenRequest) -> VfResult<VfFile>;
-    fn close_one(&mut self, file: &VfFile) -> VfResult<()>;
-    /// Finish cleanup of a previously owned, dropped handle. A backend that
-    /// transfers ownership into its own queue after CLOSE fails must reconcile
-    /// that queue here rather than repeatedly reporting an invalid descriptor.
+
     fn close_deferred(&mut self, file: &VfFile) -> VfResult<()> {
-        self.close_one(file)
+        crate::backend_helpers::close_deferred_default(self, file)
     }
-    fn sync_data(&mut self, file: &VfFile) -> VfResult<()>;
-    fn sync_all(&mut self, file: &VfFile) -> VfResult<()>;
-    fn read_one(&mut self, request: &ReadOp) -> VfResult<ReadResult>;
-    /// Read directly into caller storage when supported by the backend.
-    fn read_one_into(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
-        if request.length != buffer.len() {
-            return Err(VfError::client(0, ERR_INVAL));
-        }
-        let result = self.read_one(request)?;
-        if result.data.len() > buffer.len() {
-            return Err(VfError::client(0, ERR_IO));
-        }
-        validate_read_results(
-            "read_one_into",
-            std::slice::from_ref(request),
-            std::slice::from_ref(&result),
-        )?;
-        buffer[..result.data.len()].copy_from_slice(&result.data);
-        Ok(ReadIntoResult {
-            file: result.file,
-            offset: result.offset,
-            read: result.data.len(),
-            eof: result.eof,
-        })
+
+    fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
+        crate::backend_helpers::take_notifications_default(self)
     }
-    fn write_one(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult>;
-    fn seek_one(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64>;
-    fn metadata(&mut self, query: MetadataQuery) -> VfResult<VfAttrs>;
-    fn set_attributes(&mut self, update: SetAttributes) -> VfResult<()>;
-    /// Execute attribute updates in one native vector. Scalar-only backends may
-    /// support singleton requests; larger vectors must not fall back to loops.
-    fn set_attributes_many(&mut self, updates: Vec<SetAttributes>, follow: bool) -> VfResult<()> {
-        match updates.len() {
-            0 => Ok(()),
-            1 => {
-                let mut update = updates.into_iter().next().expect("singleton");
-                update.follow_symlinks = follow;
-                self.set_attributes(update)
-            }
-            _ => Err(VfError::unsupported(0)),
-        }
+
+    fn capability_bits(&self) -> u64 {
+        crate::backend_helpers::capability_bits_default(self)
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        crate::backend_helpers::typed_capabilities_default(self)
+    }
+
+    fn abs_path(&self, path: &Path) -> PathBuf {
+        crate::backend_helpers::abs_path_default(self, path)
+    }
+
+    fn open_path_impl(
+        &mut self,
+        base: VfPathBase,
+        pathname: &Path,
+        flags: i32,
+        mode: u32,
+    ) -> VfResult<VfFile> {
+        crate::backend_helpers::open_path_impl_default(self, base, pathname, flags, mode)
+    }
+
+    fn sync_data(&mut self, tcf: &VfFile) -> VfResult<()>;
+
+    fn sync_all(&mut self, tcf: &VfFile) -> VfResult<()> {
+        crate::backend_helpers::sync_all_default(self, tcf)
+    }
+
+    fn chdir(&mut self, path: &Path) -> VfResult<()> {
+        crate::backend_helpers::chdir_default(self, path)
+    }
+
+    fn getcwd(&self) -> PathBuf {
+        crate::backend_helpers::getcwd_default(self)
+    }
+
+    fn seek_raw_impl(&mut self, tcf: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
+        crate::backend_helpers::seek_raw_impl_default(self, tcf, offset, whence)
+    }
+
+    fn vf_path(&self, file: &VfFile) -> VfResult<PathBuf> {
+        crate::backend_helpers::vf_path_default(self, file)
+    }
+
+    fn open_raw_impl(&mut self, pathname: &Path, flags: i32, mode: u32) -> VfResult<VfFile> {
+        crate::backend_helpers::open_raw_impl_default(self, pathname, flags, mode)
+    }
+
+    fn read_raw_impl(&mut self, file: &VfFile, offset: u64, length: usize) -> VfResult<Vec<u8>> {
+        crate::backend_helpers::read_raw_impl_default(self, file, offset, length)
+    }
+
+    fn write_raw_impl(&mut self, file: &VfFile, offset: u64, data: &[u8]) -> VfResult<usize> {
+        crate::backend_helpers::write_raw_impl_default(self, file, offset, data)
+    }
+
+    fn read_file_impl(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
+        crate::backend_helpers::read_file_impl_default(self, file, max_bytes)
+    }
+
+    fn open_impl(&mut self, request: &OpenRequest) -> VfResult<VfFile>;
+
+    fn close_impl(&mut self, file: &VfFile) -> VfResult<()>;
+
+    fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult>;
+
+    fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
+        crate::backend_helpers::read_into_impl_default(self, request, buffer)
+    }
+
+    fn write_impl(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult>;
+
+    fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64>;
+
+    fn metadata_impl(&mut self, query: MetadataQuery) -> VfResult<VfAttrs>;
+
+    fn set_attributes_impl(&mut self, update: SetAttributes) -> VfResult<()>;
+
+    fn vsetattrs_impl(&mut self, updates: Vec<SetAttributes>, follow: bool) -> VfResult<()> {
+        crate::backend_helpers::vsetattrs_impl_default(self, updates, follow)
     }
 }
 
-/// Path metadata operations independent of open descriptors.
+/// Native vector I/O and strict opens.
+/// Success preserves request order and cardinality. Errors can follow partial effects;
+/// these operations do not promise rollback or atomicity.
+pub trait VectorFileSystem: FileSystem {
+    fn vread_impl(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>>;
+
+    fn vread_into_impl(
+        &mut self,
+        reads: &[ReadOp],
+        buffers: &mut [&mut [u8]],
+    ) -> VfResult<Vec<ReadIntoResult>> {
+        crate::backend_helpers::vread_into_impl_default(self, reads, buffers)
+    }
+
+    fn vwrite_owned_impl(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+        let _ = writes;
+        Err(VfError::unsupported(0))
+    }
+
+    fn vwrite_impl(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
+        crate::backend_helpers::vwrite_impl_default(self, writes)
+    }
+
+    /// Indexed partial outcomes for strict-open collection and cleanup.
+    /// This internal ownership seam is distinct from the strict typed boundary.
+    #[doc(hidden)]
+    fn vopen_outcomes_impl(
+        &mut self,
+        paths: &[&Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> VfResult<ManyResults<VfFile>> {
+        crate::backend_helpers::vopen_outcomes_impl_default(self, paths, flags, modes)
+    }
+
+    fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
+        crate::backend_helpers::before_open_cleanup_default(self, _index, _file)
+    }
+
+    fn vopen_raw_impl(
+        &mut self,
+        paths: &[&Path],
+        flags: &[i32],
+        modes: &[u32],
+    ) -> VfResult<Vec<VfFile>> {
+        crate::backend_helpers::vopen_raw_impl_default(self, paths, flags, modes)
+    }
+
+    fn vopen_raw_simple_impl(
+        &mut self,
+        paths: &[&Path],
+        flags: i32,
+        mode: u32,
+    ) -> VfResult<Vec<VfFile>> {
+        crate::backend_helpers::vopen_raw_simple_impl_default(self, paths, flags, mode)
+    }
+
+    fn vclose_impl(&mut self, files: &[VfFile]) -> VfRes {
+        crate::backend_helpers::vclose_impl_default(self, files)
+    }
+
+    /// Open every typed request or return an error, cleaning confirmed handles.
+    /// Creation and truncation effects are not rolled back.
+    fn vopen_impl(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>> {
+        crate::backend_helpers::vopen_typed_default(self, requests)
+    }
+}
+
+/// Path metadata adapters and vector attribute engines.
+/// Following and no-follow engines retain distinct symlink policies.
 pub trait MetadataFileSystem: FileSystem {
-    fn metadata_path(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Metadata>;
-    fn set_metadata_path(
+    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
+        let _ = (attrs,);
+        Err(VfError::unsupported(0))
+    }
+
+    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
+        let _ = (attrs,);
+        Err(VfError::unsupported(0))
+    }
+
+    fn vsetattrs_raw_impl(&mut self, attrs: &[VfAttrs]) -> VfRes {
+        let _ = (attrs,);
+        Err(VfError::unsupported(0))
+    }
+
+    fn vsetattrs_raw_nofollow_impl(&mut self, attrs: &[VfAttrs]) -> VfRes {
+        let _ = (attrs,);
+        Err(VfError::unsupported(0))
+    }
+
+    fn stat_impl(&mut self, path: &Path) -> VfResult<VfAttrs> {
+        crate::backend_helpers::stat_impl_default(self, path)
+    }
+
+    fn lstat_impl(&mut self, path: &Path) -> VfResult<VfAttrs> {
+        crate::backend_helpers::lstat_impl_default(self, path)
+    }
+
+    fn fstat_impl(&mut self, tcf: &VfFile) -> VfResult<VfAttrs> {
+        crate::backend_helpers::fstat_impl_default(self, tcf)
+    }
+
+    fn exists_impl(&mut self, path: &Path) -> VfResult<bool> {
+        crate::backend_helpers::exists_impl_default(self, path)
+    }
+
+    fn file_type_impl(&mut self, path: &Path) -> VfResult<VfType> {
+        crate::backend_helpers::file_type_impl_default(self, path)
+    }
+
+    fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Metadata>;
+
+    fn set_metadata_path_impl(
         &mut self,
         path: &std::path::Path,
         update: MetadataUpdate,
@@ -106,18 +221,68 @@ pub trait MetadataFileSystem: FileSystem {
     ) -> VfResult<()>;
 }
 
-/// Directory creation and enumeration.
+/// Directory listing and backend-owned continuation pages.
 pub trait DirectoryFileSystem: FileSystem {
-    fn create_dir_one(&mut self, path: &std::path::Path, mode: u32) -> VfResult<()>;
-    fn read_dir_one(
+    fn listdir_impl(
+        &mut self,
+        dir: &Path,
+        masks: AttrMask,
+        max_count: usize,
+        recursive: bool,
+    ) -> VfResult<Vec<VfAttrs>> {
+        let _ = (dir, masks, max_count, recursive);
+        Err(VfError::unsupported(0))
+    }
+
+    fn listdir_page_impl(
+        &mut self,
+        dir: &Path,
+        masks: AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
+        crate::backend_helpers::listdir_page_impl_default(
+            self,
+            dir,
+            masks,
+            cursor,
+            page_size,
+            max_entries,
+        )
+    }
+
+    fn directory_page_batch_size(&self) -> usize {
+        crate::backend_helpers::directory_page_batch_size_default(self)
+    }
+
+    fn vlistdir_pages_impl(
+        &mut self,
+        dirs: &[&Path],
+        masks: AttrMask,
+        cursors: Vec<Option<DirPageCursor>>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<Vec<BackendDirectoryPage>> {
+        crate::backend_helpers::vlistdir_pages_impl_default(
+            self,
+            dirs,
+            masks,
+            cursors,
+            page_size,
+            max_entries,
+        )
+    }
+
+    fn create_dir_impl(&mut self, path: &std::path::Path, mode: u32) -> VfResult<()>;
+
+    fn read_dir_impl(
         &mut self,
         path: &std::path::Path,
         options: ReadDirOptions,
     ) -> VfResult<Vec<DirEntry>>;
 
-    /// Return one bounded page without invoking application code under a
-    /// mutable backend borrow. The continuation token is backend-specific.
-    fn read_dir_page(
+    fn read_dir_page_impl(
         &mut self,
         path: &std::path::Path,
         cursor: Option<DirPageCursor>,
@@ -125,9 +290,7 @@ pub trait DirectoryFileSystem: FileSystem {
         max_entries: usize,
     ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)>;
 
-    /// Selected metadata on one bounded page. Implementations may return a
-    /// superset; the default uses the backend's ordinary paged enumeration.
-    fn read_dir_page_with_fields(
+    fn read_dir_page_with_fields_impl(
         &mut self,
         path: &std::path::Path,
         fields: AttrMask,
@@ -136,32 +299,258 @@ pub trait DirectoryFileSystem: FileSystem {
         max_entries: usize,
     ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
         let _ = fields;
-        self.read_dir_page(path, cursor, page_size, max_entries)
+        self.read_dir_page_impl(path, cursor, page_size, max_entries)
     }
 }
 
-/// Namespace mutations shared by files and directories.
+/// Backend traversal hooks. Shared defaults compose directory and metadata engines.
+pub trait TraversalFileSystem: DirectoryFileSystem + MetadataFileSystem {
+    fn walk_impl(
+        &mut self,
+        root: &Path,
+        masks: AttrMask,
+        sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
+    ) -> VfResult<Vec<WalkEntry>> {
+        crate::backend_helpers::walk_impl_default(self, root, masks, sort)
+    }
+
+    fn walk_with_options_impl(
+        &mut self,
+        root: &Path,
+        masks: AttrMask,
+        options: WalkOptions,
+        sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
+    ) -> VfResult<Vec<WalkEntry>> {
+        crate::backend_helpers::walk_with_options_impl_default(self, root, masks, options, sort)
+    }
+
+    fn vlistdirs_impl(
+        &mut self,
+        dirs: &[&Path],
+        masks: AttrMask,
+        max_entries: usize,
+        recursive: bool,
+        cb: &mut dyn FnMut(&VfAttrs, &Path) -> bool,
+    ) -> VfRes {
+        crate::backend_helpers::vlistdirs_impl_default(
+            self,
+            dirs,
+            masks,
+            max_entries,
+            recursive,
+            cb,
+        )
+    }
+
+    fn visit_dir_impl(
+        &mut self,
+        dir: &Path,
+        masks: AttrMask,
+        max_entries: usize,
+        cb: &mut dyn FnMut(&VfAttrs) -> bool,
+    ) -> VfRes {
+        crate::backend_helpers::visit_dir_impl_default(self, dir, masks, max_entries, cb)
+    }
+}
+
+/// Vector namespace mutations and scalar adapters.
 pub trait NamespaceFileSystem: FileSystem {
-    fn remove_one(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()>;
-    /// Remove the contents of a directory, keeping the directory itself.
-    fn remove_dir_contents(&mut self, path: &std::path::Path) -> VfResult<()>;
-    fn rename_one(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()>;
+    fn vrename_impl(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
+        let _ = (pairs,);
+        Err(VfError::unsupported(0))
+    }
+
+    fn vremove_impl(&mut self, files: &[VfFile]) -> VfRes {
+        let _ = (files,);
+        Err(VfError::unsupported(0))
+    }
+
+    fn vmkdir_impl(&mut self, dirs: &[VfAttrs]) -> VfRes {
+        let _ = (dirs,);
+        Err(VfError::unsupported(0))
+    }
+
+    fn unlink_impl(&mut self, pathname: &Path) -> VfResult<()> {
+        crate::backend_helpers::unlink_impl_default(self, pathname)
+    }
+
+    fn vunlink_impl(&mut self, pathnames: &[&Path]) -> VfRes {
+        crate::backend_helpers::vunlink_impl_default(self, pathnames)
+    }
+
+    fn mkdir_raw_impl(&mut self, path: &Path, mode: u32) -> VfResult<()> {
+        crate::backend_helpers::mkdir_raw_impl_default(self, path, mode)
+    }
+
+    fn ensure_dir_impl(&mut self, dir: &Path, mode: u32) -> VfResult<()> {
+        crate::backend_helpers::ensure_dir_impl_default(self, dir, mode)
+    }
+
+    fn remove_impl(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()>;
+
+    fn remove_dir_contents_impl(&mut self, path: &std::path::Path) -> VfResult<()>;
+
+    fn rename_impl(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()>;
 }
 
-/// Symbolic and hard-link operations.
+/// Vector link engines and scalar adapters.
 pub trait LinkFileSystem: FileSystem {
-    fn symlink_one(&mut self, target: &std::path::Path, link: &std::path::Path) -> VfResult<()>;
-    fn hard_link_one(&mut self, source: &std::path::Path, link: &std::path::Path) -> VfResult<()>;
-    fn read_link_one(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf>;
+    fn vsymlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
+        let _ = (oldpaths, newpaths);
+        Err(VfError::unsupported(0))
+    }
+
+    fn vreadlink_impl(&mut self, paths: &[&Path]) -> VfResult<Vec<Vec<u8>>> {
+        let _ = (paths,);
+        Err(VfError::unsupported(0))
+    }
+
+    fn vhardlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
+        let _ = (oldpaths, newpaths);
+        Err(VfError::unsupported(0))
+    }
+
+    fn symlink_raw_impl(&mut self, oldpath: &Path, newpath: &Path) -> VfResult<()> {
+        crate::backend_helpers::symlink_raw_impl_default(self, oldpath, newpath)
+    }
+
+    fn readlink_raw_impl(&mut self, path: &Path) -> VfResult<Vec<u8>> {
+        crate::backend_helpers::readlink_raw_impl_default(self, path)
+    }
+
+    fn symlink_impl(&mut self, target: &std::path::Path, link: &std::path::Path) -> VfResult<()>;
+
+    fn hard_link_impl(&mut self, source: &std::path::Path, link: &std::path::Path) -> VfResult<()>;
+
+    fn read_link_impl(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf>;
 }
 
-/// File-copy operations. Backends may accelerate this server-side.
+/// Extent-copy policy, client-copy engine, and backend tree-copy hook.
 pub trait CopyFileSystem: FileSystem {
-    fn copy_one(&mut self, source: &std::path::Path, destination: &std::path::Path)
-    -> VfResult<()>;
+    fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> VfRes {
+        let _ = (pairs,);
+        Err(VfError::unsupported(0))
+    }
+
+    fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOption) -> VfRes {
+        crate::backend_helpers::vcopy_impl_default(self, pairs, options)
+    }
+
+    fn copy_tree_impl(
+        &mut self,
+        src_dir: &Path,
+        dst: &Path,
+        symlinks: bool,
+        use_server_side_copy: bool,
+    ) -> VfRes {
+        let _ = (src_dir, dst, symlinks, use_server_side_copy);
+        Err(VfError::unsupported(0))
+    }
+
+    fn copy_impl(
+        &mut self,
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> VfResult<()>;
 }
 
-/// Complete scalar filesystem surface used by ordinary native applications.
+/// Whole-file and stream hooks over vector I/O.
+/// Shared defaults retain budgets, EOF rules, cancellation, and original indices.
+pub trait ReadWorkflowFileSystem: VectorFileSystem {
+    fn vread_all_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<Vec<u8>>> {
+        crate::backend_helpers::vread_all_impl_default(self, files)
+    }
+
+    fn vread_all_with_options_impl(
+        &mut self,
+        files: &[VfFile],
+        options: ReadAllOptions,
+    ) -> VfResult<Vec<Vec<u8>>> {
+        crate::backend_helpers::vread_all_with_options_impl_default(self, files, options)
+    }
+
+    fn vstream_impl(
+        &mut self,
+        files: &[VfFile],
+        chunk_size: usize,
+        memory_limit: usize,
+        cb: &mut ReadStreamCallback<'_>,
+    ) -> VfRes {
+        crate::backend_helpers::vstream_impl_default(self, files, chunk_size, memory_limit, cb)
+    }
+}
+
+/// Removal workflows and retained directory identity.
+/// Backend overrides preserve native batches; shared defaults compose the engines.
+pub trait RemovalFileSystem: TraversalFileSystem + NamespaceFileSystem {
+    fn before_remove_type(&mut self, _index: usize) -> VfResult<()> {
+        crate::backend_helpers::before_remove_type_default(self, _index)
+    }
+
+    fn remove_paths_impl(&mut self, objs: &[&Path], recursive: bool) -> VfRes {
+        crate::backend_helpers::remove_paths_impl_default(self, objs, recursive)
+    }
+
+    fn remove_paths_with_options_impl(
+        &mut self,
+        objs: &[&Path],
+        recursive: bool,
+        options: RemoveOptions,
+    ) -> VfRes {
+        crate::backend_helpers::remove_paths_with_options_impl_default(
+            self, objs, recursive, options,
+        )
+    }
+
+    fn open_dir_impl(&mut self, path: &Path) -> VfResult<VfDir> {
+        crate::backend_helpers::open_dir_impl_default(self, path)
+    }
+
+    fn remove_dir_contents_handle_impl(&mut self, dir: &VfDir) -> VfRes {
+        crate::backend_helpers::remove_dir_contents_handle_impl_default(self, dir)
+    }
+
+    fn remove_dir_contents_handle_with_options_impl(
+        &mut self,
+        dir: &VfDir,
+        options: RemoveOptions,
+    ) -> VfRes {
+        crate::backend_helpers::remove_dir_contents_handle_with_options_impl_default(
+            self, dir, options,
+        )
+    }
+
+    fn close_dir_impl(&mut self, _dir: &VfDir) -> VfResult<()> {
+        crate::backend_helpers::close_dir_impl_default(self, _dir)
+    }
+
+    fn remove_dir_contents_path_impl(&mut self, dir: &Path) -> VfRes {
+        crate::backend_helpers::remove_dir_contents_path_impl_default(self, dir)
+    }
+
+    fn remove_dir_contents_path_with_options_impl(
+        &mut self,
+        dir: &Path,
+        options: RemoveOptions,
+    ) -> VfRes {
+        crate::backend_helpers::remove_dir_contents_path_with_options_impl_default(
+            self, dir, options,
+        )
+    }
+
+    fn ensure_empty_dir_impl(&mut self, dir: &Path) -> VfRes {
+        crate::backend_helpers::ensure_empty_dir_impl_default(self, dir)
+    }
+}
+
+/// Vector application-data pattern writes.
+pub trait ApplicationDataFileSystem: FileSystem {
+    fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
+        let _ = (patterns,);
+        Err(VfError::unsupported(0))
+    }
+}
+/// Aggregate operation contract for type-erased backend dispatch. Contains no methods.
 pub trait NativeFileSystem:
     FileSystem
     + MetadataFileSystem
@@ -171,76 +560,38 @@ pub trait NativeFileSystem:
     + CopyFileSystem
 {
 }
-
-impl<T> NativeFileSystem for T where
+impl<
     T: FileSystem
         + MetadataFileSystem
         + DirectoryFileSystem
         + NamespaceFileSystem
         + LinkFileSystem
         + CopyFileSystem
-        + ?Sized
+        + ?Sized,
+> NativeFileSystem for T
 {
 }
-
-/// Optimized ordered vectors. This is deliberately separate from the scalar
-/// contract so a backend can implement scalar semantics without pretending
-/// to support native batching.
-pub trait VectorFileSystem: FileSystem {
-    /// Backend adapter used by [`FsClient::openv`](crate::FsClient::openv).
-    ///
-    /// Success must return exactly one handle per request, in request order.
-    /// On failure, the implementation must release every handle it confirmed
-    /// open before returning; the strict application API cannot receive a
-    /// partial handle vector and perform that cleanup itself.
-    #[doc(hidden)]
-    fn open_many(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>>;
-
-    /// Close each handle in request order and attribute failures accordingly.
-    #[doc(hidden)]
-    fn close_many(&mut self, files: &[VfFile]) -> VfResult<()>;
-
-    /// Return exactly one result per request, in request order.
-    #[doc(hidden)]
-    fn read_many(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>>;
-
-    /// Vector read into caller storage. Backends can override the copying
-    /// fallback without changing the owned-result `read_many` contract.
-    fn read_many_into(
-        &mut self,
-        requests: &[ReadOp],
-        buffers: &mut [&mut [u8]],
-    ) -> VfResult<Vec<ReadIntoResult>> {
-        if requests.len() != buffers.len() {
-            return Err(VfError::client(0, ERR_INVAL));
-        }
-        for (index, (request, buffer)) in requests.iter().zip(buffers.iter()).enumerate() {
-            if request.length != buffer.len() {
-                return Err(VfError::client(index, ERR_INVAL));
-            }
-        }
-        let results = self.read_many(requests)?;
-        validate_read_results("read_many_into", requests, &results)?;
-        Ok(results
-            .into_iter()
-            .zip(buffers.iter_mut())
-            .map(|(result, buffer)| {
-                buffer[..result.data.len()].copy_from_slice(&result.data);
-                ReadIntoResult {
-                    file: result.file,
-                    offset: result.offset,
-                    read: result.data.len(),
-                    eof: result.eof,
-                }
-            })
-            .collect())
-    }
-
-    /// Return exactly one result per request, in request order.
-    #[doc(hidden)]
-    fn write_many(&mut self, requests: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>>;
+/// Complete backend used by application clients and ABI adapters. Contains no methods.
+pub trait Backend:
+    NativeFileSystem
+    + VectorFileSystem
+    + ReadWorkflowFileSystem
+    + TraversalFileSystem
+    + RemovalFileSystem
+    + ApplicationDataFileSystem
+{
 }
-
+impl<
+    T: NativeFileSystem
+        + VectorFileSystem
+        + ReadWorkflowFileSystem
+        + TraversalFileSystem
+        + RemovalFileSystem
+        + ApplicationDataFileSystem
+        + ?Sized,
+> Backend for T
+{
+}
 pub(crate) fn metadata_mask() -> AttrMask {
     AttrMask::MODE
         | AttrMask::SIZE
@@ -252,163 +603,6 @@ pub(crate) fn metadata_mask() -> AttrMask {
         | AttrMask::MTIME
         | AttrMask::CTIME
         | AttrMask::CHANGE
-}
-
-impl<T: VecFs + ?Sized> FileSystem for T {
-    fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
-        VecFs::take_notifications(self)
-    }
-    fn capabilities(&self) -> Capabilities {
-        self.typed_capabilities()
-    }
-
-    fn read_file(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
-        self.read_allv_with_options(
-            std::slice::from_ref(file),
-            ReadAllOptions::new().max_total_bytes(max_bytes),
-        )
-        .and_then(|mut results| {
-            if results.len() != 1 {
-                return Err(VfError::transport(
-                    None,
-                    "read_file backend returned an invalid result count",
-                ));
-            }
-            let data = results.pop().expect("validated result count");
-            if data.len() > max_bytes {
-                return Err(VfError::client(0, libc::EFBIG as u32));
-            }
-            Ok(data)
-        })
-    }
-
-    fn open_one(&mut self, request: &OpenRequest) -> VfResult<VfFile> {
-        self.open(
-            request.path.as_path(),
-            vfsi_core::open_flags_to_libc(request.flags)?,
-            request.mode,
-        )
-        .map_err(|error| error.with_context("open", &request.path))
-    }
-
-    fn close_one(&mut self, file: &VfFile) -> VfResult<()> {
-        self.close(file)
-    }
-    fn close_deferred(&mut self, file: &VfFile) -> VfResult<()> {
-        VecFs::close_deferred(self, file)
-    }
-    fn sync_data(&mut self, file: &VfFile) -> VfResult<()> {
-        VecFs::sync_data(self, file)
-    }
-    fn sync_all(&mut self, file: &VfFile) -> VfResult<()> {
-        VecFs::sync_all(self, file)
-    }
-
-    fn read_one(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
-        let mut results = self.readv(std::slice::from_ref(request))?;
-        validate_read_results("read_one", std::slice::from_ref(request), &results)?;
-        Ok(results.pop().expect("validated one result"))
-    }
-
-    fn read_one_into(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
-        let mut results = self.readv_into(std::slice::from_ref(request), &mut [buffer])?;
-        validate_read_into_results("read_one_into", std::slice::from_ref(request), &results)?;
-        Ok(results.pop().expect("validated one result"))
-    }
-
-    fn write_one(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult> {
-        let mut results = self.writev_borrowed(std::slice::from_ref(&request))?;
-        validate_write_results("write_one", std::slice::from_ref(&request), &results)?;
-        Ok(results.pop().expect("validated one result"))
-    }
-
-    fn seek_one(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {
-        let (offset, whence) = match position {
-            std::io::SeekFrom::Start(offset) => (
-                i64::try_from(offset).map_err(|_| VfError::failure(0, libc::EOVERFLOW as u32))?,
-                SeekFrom::Set,
-            ),
-            std::io::SeekFrom::End(offset) => (offset, SeekFrom::End),
-            std::io::SeekFrom::Current(offset) => (offset, SeekFrom::Cur),
-        };
-        u64::try_from(self.fseek(file, offset, whence)?).map_err(|_| VfError::failure(0, ERR_INVAL))
-    }
-
-    fn metadata(&mut self, query: MetadataQuery) -> VfResult<VfAttrs> {
-        let path = query.file.path().map(std::path::Path::to_path_buf);
-        let mut attrs = VfAttrs {
-            file: query.file,
-            masks: query.attributes,
-            ..VfAttrs::default()
-        };
-        let result = if query.follow_symlinks {
-            self.getattrsv(std::slice::from_mut(&mut attrs))
-        } else {
-            self.lgetattrsv(std::slice::from_mut(&mut attrs))
-        };
-        result.map_err(|error| match path {
-            Some(path) => error.with_context("metadata", path),
-            None => error,
-        })?;
-        Ok(attrs)
-    }
-
-    fn set_attributes_many(&mut self, updates: Vec<SetAttributes>, follow: bool) -> VfResult<()> {
-        let attrs: Vec<_> = updates
-            .into_iter()
-            .map(SetAttributes::into_legacy)
-            .collect();
-        if follow {
-            self.setattrsv(&attrs)
-        } else {
-            self.lsetattrsv(&attrs)
-        }
-    }
-    fn set_attributes(&mut self, update: SetAttributes) -> VfResult<()> {
-        let follow = update.follow_symlinks;
-        let path = update.file.path().map(std::path::Path::to_path_buf);
-        let result = self.set_attributes_many(vec![update], follow);
-        result.map_err(|error| match path {
-            Some(path) => error.with_context("set_attributes", path),
-            None => error,
-        })
-    }
-}
-
-impl<T: VecFs + ?Sized> MetadataFileSystem for T {
-    fn metadata_path(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Metadata> {
-        let mut attributes = VfAttrs {
-            file: VfFile::from_os_path(path),
-            masks: metadata_mask(),
-            ..VfAttrs::default()
-        };
-        let result = if follow {
-            self.getattrsv(std::slice::from_mut(&mut attributes))
-        } else {
-            self.lgetattrsv(std::slice::from_mut(&mut attributes))
-        };
-        result
-            .map_err(|error| error.with_context("metadata", path))
-            .map(|()| vfsi_core::metadata_from_attrs(attributes))
-    }
-
-    fn set_metadata_path(
-        &mut self,
-        path: &std::path::Path,
-        update: MetadataUpdate,
-        follow: bool,
-    ) -> VfResult<()> {
-        let mut attributes = SetAttributes::new(VfFile::from_os_path(path));
-        attributes.follow_symlinks = follow;
-        attributes.mode = update.permissions.map(Permissions::mode);
-        attributes.size = update.len;
-        attributes.uid = update.uid;
-        attributes.gid = update.gid;
-        attributes.atime = update.accessed.map(system_time_parts).transpose()?;
-        attributes.mtime = update.modified.map(system_time_parts).transpose()?;
-        self.set_attributes(attributes)
-            .map_err(|error| error.with_context("set_metadata", path))
-    }
 }
 
 pub(crate) fn system_time_parts(time: std::time::SystemTime) -> VfResult<(i64, u32)> {
@@ -433,198 +627,16 @@ pub(crate) fn system_time_parts(time: std::time::SystemTime) -> VfResult<(i64, u
         }
     }
 }
-
-impl<T: VecFs + ?Sized> DirectoryFileSystem for T {
-    fn create_dir_one(&mut self, path: &std::path::Path, mode: u32) -> VfResult<()> {
-        self.mkdir(path, mode)
-            .map_err(|error| error.with_context("create_dir", path))
-    }
-
-    fn read_dir_one(
-        &mut self,
-        path: &std::path::Path,
-        options: ReadDirOptions,
-    ) -> VfResult<Vec<DirEntry>> {
-        let requested = options.entry_limit().saturating_add(1);
-        let entries = self
-            .listdir(path, metadata_mask(), requested, false)
-            .map_err(|error| error.with_context("read_dir", path))?;
-        if entries.len() > options.entry_limit() {
-            return Err(VfError::failure(options.entry_limit(), libc::EFBIG as u32)
-                .with_context("read_dir", path));
-        }
-        let mut path_bytes = 0usize;
-        entries
-            .into_iter()
-            .enumerate()
-            .map(|(index, attributes)| {
-                let entry_path = attributes
-                    .file
-                    .path()
-                    .map(std::path::Path::to_path_buf)
-                    .ok_or_else(|| VfError::client(index, ERR_IO).with_context("read_dir", path))?;
-                path_bytes = path_bytes
-                    .checked_add(entry_path.as_os_str().len())
-                    .ok_or_else(|| {
-                        VfError::failure(index, libc::EFBIG as u32).with_context("read_dir", path)
-                    })?;
-                if path_bytes > options.path_byte_limit() {
-                    return Err(
-                        VfError::failure(index, libc::EFBIG as u32).with_context("read_dir", path)
-                    );
-                }
-                Ok(DirEntry::new(
-                    entry_path,
-                    vfsi_core::metadata_from_attrs(attributes),
-                ))
-            })
-            .collect()
-    }
-
-    fn read_dir_page(
-        &mut self,
-        path: &std::path::Path,
-        cursor: Option<DirPageCursor>,
-        page_size: usize,
-        max_entries: usize,
-    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
-        self.read_dir_page_with_fields(path, metadata_mask(), cursor, page_size, max_entries)
-    }
-
-    fn read_dir_page_with_fields(
-        &mut self,
-        path: &std::path::Path,
-        fields: AttrMask,
-        cursor: Option<DirPageCursor>,
-        page_size: usize,
-        max_entries: usize,
-    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
-        let (attributes, next) = self
-            .listdir_page(
-                path,
-                fields | AttrMask::MODE,
-                cursor,
-                page_size,
-                max_entries,
-            )
-            .map_err(|error| error.with_context("visit_dir", path))?;
-        if attributes.len() > page_size {
-            return Err(VfError::transport(
-                None,
-                "listdir_page returned more entries than requested",
-            ));
-        }
-        let entries = attributes
-            .into_iter()
-            .enumerate()
-            .map(|(index, attributes)| {
-                let entry_path = attributes
-                    .file
-                    .path()
-                    .map(std::path::Path::to_path_buf)
-                    .ok_or_else(|| {
-                        VfError::client(index, ERR_IO).with_context("visit_dir", path)
-                    })?;
-                Ok(DirEntry::new(
-                    entry_path,
-                    vfsi_core::metadata_from_attrs(attributes),
-                ))
-            })
-            .collect::<VfResult<Vec<_>>>()?;
-        Ok((entries, next))
-    }
-}
-
-impl<T: VecFs + ?Sized> NamespaceFileSystem for T {
-    fn remove_one(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()> {
-        self.rm(&[path], recursive)
-            .map_err(|error| error.with_context("remove", path))
-    }
-
-    fn remove_dir_contents(&mut self, path: &std::path::Path) -> VfResult<()> {
-        self.rm_contents(path)
-            .map_err(|error| error.with_context("remove_dir_contents", path))
-    }
-
-    fn rename_one(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()> {
-        self.renamev(&[(VfFile::from_os_path(from), VfFile::from_os_path(to))])
-            .map_err(|error| error.with_context("rename", from))
-    }
-}
-
-impl<T: VecFs + ?Sized> LinkFileSystem for T {
-    fn symlink_one(&mut self, target: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
-        self.symlink(target, link)
-            .map_err(|error| error.with_context("symlink", link))
-    }
-
-    fn hard_link_one(&mut self, source: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
-        self.hardlinkv(&[source], &[link])
-            .map_err(|error| error.with_context("hard_link", link))
-    }
-
-    fn read_link_one(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf> {
-        self.readlink(path)
-            .map(bytes_to_path)
-            .map_err(|error| error.with_context("read_link", path))
-    }
-}
-
 #[cfg(unix)]
-pub(crate) fn bytes_to_path(bytes: Vec<u8>) -> std::path::PathBuf {
+pub(crate) fn bytes_to_path(bytes: Vec<u8>) -> PathBuf {
     use std::os::unix::ffi::OsStringExt;
     std::ffi::OsString::from_vec(bytes).into()
 }
-
 #[cfg(not(unix))]
-pub(crate) fn bytes_to_path(bytes: Vec<u8>) -> std::path::PathBuf {
+pub(crate) fn bytes_to_path(bytes: Vec<u8>) -> PathBuf {
     String::from_utf8_lossy(&bytes).into_owned().into()
 }
-
-impl<T: VecFs + ?Sized> CopyFileSystem for T {
-    fn copy_one(
-        &mut self,
-        source: &std::path::Path,
-        destination: &std::path::Path,
-    ) -> VfResult<()> {
-        self.copyv(&[ExtentPair::from_os_paths(source, 0, destination, 0, None)])
-            .map_err(|error| error.with_context("copy", source))
-    }
-}
-
-impl<T: VecFs + ?Sized> VectorFileSystem for T {
-    fn open_many(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>> {
-        let paths: Vec<&std::path::Path> = requests
-            .iter()
-            .map(|request| request.path.as_path())
-            .collect();
-        let flags = translate_open_flags(requests)?;
-        let modes: Vec<u32> = requests.iter().map(|request| request.mode).collect();
-        VecFs::openv(self, &paths, &flags, &modes)
-    }
-
-    fn close_many(&mut self, files: &[VfFile]) -> VfResult<()> {
-        self.closev(files)
-    }
-
-    fn read_many(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
-        self.readv(requests)
-    }
-
-    fn read_many_into(
-        &mut self,
-        requests: &[ReadOp],
-        buffers: &mut [&mut [u8]],
-    ) -> VfResult<Vec<ReadIntoResult>> {
-        self.readv_into(requests, buffers)
-    }
-
-    fn write_many(&mut self, requests: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
-        self.writev_borrowed(requests)
-    }
-}
-
-fn translate_open_flags(requests: &[OpenRequest]) -> VfResult<Vec<i32>> {
+pub(crate) fn translate_open_flags(requests: &[OpenRequest]) -> VfResult<Vec<i32>> {
     requests
         .iter()
         .enumerate()
@@ -632,19 +644,4 @@ fn translate_open_flags(requests: &[OpenRequest]) -> VfResult<Vec<i32>> {
             vfsi_core::open_flags_to_libc(request.flags).map_err(|error| error.with_index(index))
         })
         .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn invalid_open_flags_retain_their_request_index() {
-        let error = translate_open_flags(&[
-            OpenRequest::new("/valid", OpenFlags::READ),
-            OpenRequest::new("/invalid", OpenFlags::empty()),
-        ])
-        .unwrap_err();
-        assert_eq!(error.index(), Some(1));
-    }
 }

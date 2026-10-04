@@ -108,8 +108,8 @@ impl AdaptiveCompoundLimits {
             // replaying a mutation. Leave potentially mutating shapes at the
             // already negotiated maximum rather than probing upward into an
             // avoidable partial side effect.
-            b"lookup_typev" | b"getattrv" | b"getattrv1" | b"readlinkv" | b"readv" | b"readv1"
-            | b"readv2" | b"readdir_children" | b"readdir_pages" => 96,
+            b"lookup_typev" | b"getattrv" | b"getattrv1" | b"vstatfs_impl" | b"readlinkv"
+            | b"readv" | b"readv1" | b"readv2" | b"readdir_children" | b"readdir_pages" => 96,
             _ => negotiated_ops,
         }
     }
@@ -851,6 +851,19 @@ mod tests {
         assert_eq!(lookup.next(100, 0), 24);
         remove.resource_rejected(7);
         assert_eq!(lookup.next(100, 0), 24);
+    }
+
+    #[test]
+    fn statistics_shape_starts_conservatively_and_backs_off_after_partial_resource_failure() {
+        for status in [nfsstat4_NFS4ERR_RESOURCE, nfsstat4_NFS4ERR_TOO_MANY_OPS] {
+            let mut limits = AdaptiveCompoundLimits::new(256);
+            assert_eq!(limits.limit(b"vstatfs_impl"), 96);
+            // Forty-seven items plus SEQUENCE, rejected after two complete items.
+            limits.observe(b"vstatfs_impl", 95, status, 7);
+            assert_eq!(limits.limit(b"vstatfs_impl"), 47);
+            assert_eq!(limits.limit(b"getattrv"), 96);
+        }
+        assert_eq!(AdaptiveCompoundLimits::new(32).limit(b"vstatfs_impl"), 32);
     }
 
     #[test]

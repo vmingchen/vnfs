@@ -1,13 +1,14 @@
 //! Tests for the `std::fs`-backed [`DummyVecFs`]. These need no NFS server:
-//! the suite runs against a temporary directory, proving the `VecFs` API
+//! the suite runs against a temporary directory, proving the `Backend` API
 //! works on non-NFS filesystems too.
 
 use vfsi_sync::test_support as common;
+use vfsi_sync::*;
 
 use std::path::Path;
 use tempfile::TempDir;
 use vfsi_local::DummyVecFs;
-use vfsi_sync::{VecFs, VecFsExt, VfOffset};
+use vfsi_sync::VfOffset;
 
 #[test]
 fn application_walk_prunes_before_io_selects_metadata_and_allows_reentry() {
@@ -301,11 +302,13 @@ fn application_metadata_and_batch_mutations() {
     assert_eq!(metadata.device_id(), None);
 
     client
-        .copyv(&[("/source-1", "/copy-1"), ("/source-2", "/copy-2")])
+        .vcopy(&[("/source-1", "/copy-1"), ("/source-2", "/copy-2")])
         .unwrap();
     assert_eq!(client.read("/copy-1").unwrap(), b"abc");
     assert_eq!(client.read("/copy-2").unwrap(), b"defg");
-    client.remove_paths(&["/copy-1", "/copy-2"], false).unwrap();
+    client
+        .vremove_native(&["/copy-1", "/copy-2"], false)
+        .unwrap();
     assert!(client.read("/copy-1").is_err());
 }
 
@@ -344,7 +347,7 @@ fn dummy_full_suite() {
 fn dummy_getcwd() {
     let (_root, mut fs) = dummy();
     assert_eq!(fs.getcwd(), Path::new("/"));
-    fs.ensure_dir(Path::new("/a/b"), 0o755).unwrap();
+    fs.ensure_dir_impl(Path::new("/a/b"), 0o755).unwrap();
     fs.chdir(Path::new("/a/b")).unwrap();
     assert_eq!(fs.getcwd(), Path::new("/a/b"));
 }
@@ -432,12 +435,12 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
 fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
     use vfsi_sync::FsClient;
     use vfsi_sync::{
-        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, VecFs, VfFile, VfOffset, WriteOp,
+        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, VfFile, VfOffset, WriteOp,
     };
 
     let (_root, mut fs) = dummy();
     let path = VfFile::from_path("/too-large");
-    fs.writev(&[WriteOp::new(
+    fs.vwrite_owned_impl(&[WriteOp::new(
         path.clone(),
         VfOffset::At(0),
         vec![0; DEFAULT_READ_ALLV_MAX_TOTAL_BYTES + 1],
@@ -445,7 +448,7 @@ fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
     .with_creation()])
         .unwrap();
 
-    let error = fs.read_allv(&[path]).unwrap_err();
+    let error = fs.vread_all_impl(&[path]).unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert_eq!(error.err_no(), libc::EFBIG as u32);
 
@@ -458,11 +461,11 @@ fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
 
 #[test]
 fn dummy_errors_on_missing_file() {
-    use vfsi_sync::{ReadOp, VecFs, VfOffset};
+    use vfsi_sync::{ReadOp, VfOffset};
 
     let (_root, mut fs) = dummy();
-    fs.ensure_dir(Path::new("/data"), 0o755).unwrap();
-    let res = fs.readv(&[ReadOp::from_path("/data/missing", VfOffset::At(0), 8)]);
+    fs.ensure_dir_impl(Path::new("/data"), 0o755).unwrap();
+    let res = fs.vread_impl(&[ReadOp::from_path("/data/missing", VfOffset::At(0), 8)]);
     match res {
         Err(e) => {
             assert_eq!(e.index(), Some(0));
@@ -480,7 +483,7 @@ fn dummy_stays_under_root() {
     let _ = std::fs::remove_dir_all(&root);
     let mut fs = DummyVecFs::new(root.clone());
 
-    fs.ensure_dir(Path::new(&format!("/{}", name)), 0o755)
+    fs.ensure_dir_impl(Path::new(&format!("/{}", name)), 0o755)
         .unwrap();
     let inside_root = root.join(&name);
     assert!(inside_root.is_dir(), "created inside the root");
@@ -498,15 +501,17 @@ fn dummy_stays_under_root() {
 #[test]
 fn non_utf8_filenames_roundtrip() {
     use std::os::unix::ffi::OsStringExt;
-    use vfsi_sync::{ReadOp, VecFs, VfOffset, WriteOp};
+    use vfsi_sync::{ReadOp, VfOffset, WriteOp};
 
     let (_root, mut fs) = dummy();
     let raw = b"n\xffb";
     let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(raw.to_vec()));
-    fs.writev(&[WriteOp::from_os_path(&path, VfOffset::At(0), b"data".to_vec()).with_creation()])
-        .unwrap();
+    fs.vwrite_owned_impl(&[
+        WriteOp::from_os_path(&path, VfOffset::At(0), b"data".to_vec()).with_creation(),
+    ])
+    .unwrap();
     let listed = fs
-        .listdir(Path::new("/"), vfsi_sync::AttrMask::stat(), 0, false)
+        .listdir_impl(Path::new("/"), vfsi_sync::AttrMask::stat(), 0, false)
         .unwrap();
     assert_eq!(listed.len(), 1);
     let got = listed[0]
@@ -518,39 +523,47 @@ fn non_utf8_filenames_roundtrip() {
         .to_os_string();
     assert_eq!(got.into_vec(), raw);
     let r = &fs
-        .readv(&[ReadOp::from_os_path(&path, VfOffset::At(0), 4)])
+        .vread_impl(&[ReadOp::from_os_path(&path, VfOffset::At(0), 4)])
         .unwrap()[0];
     assert_eq!(r.data, b"data");
 }
 
 #[test]
-fn path_extension_accepts_strings() {
+fn native_path_adapters_preserve_relative_paths() {
     let (_root, mut fs) = dummy();
-    fs.mkdir_path("/x", 0o755).unwrap();
-    assert!(fs.exists_path("/x").unwrap());
-    assert_eq!(fs.stat_path("/x").unwrap().ftype, vnfs::FileType::Directory);
-    fs.chdir_path("/x").unwrap();
-    fs.symlink_path("missing", "dangling").unwrap();
-    assert!(fs.exists_path("dangling").unwrap());
-    fs.unlink_path("dangling").unwrap();
-    fs.rm_recursive_path("/x").unwrap();
+    fs.mkdir_raw_impl(Path::new("/x"), 0o755).unwrap();
+    assert!(fs.exists_impl(Path::new("/x")).unwrap());
+    assert_eq!(
+        fs.stat_impl(Path::new("/x")).unwrap().ftype,
+        vnfs::FileType::Directory
+    );
+    fs.chdir(Path::new("/x")).unwrap();
+    fs.symlink_raw_impl(Path::new("missing"), Path::new("dangling"))
+        .unwrap();
+    assert!(fs.exists_impl(Path::new("dangling")).unwrap());
+    fs.unlink_impl(Path::new("dangling")).unwrap();
+    vfsi_sync::backend_helpers::remove_tree(&mut fs, Path::new("/x")).unwrap();
 }
 
 #[test]
 fn rm_contents_keeps_the_directory() {
     let (_root, mut fs) = dummy();
-    fs.mkdir_path("/keep", 0o755).unwrap();
-    fs.mkdir_path("/keep/sub", 0o755).unwrap();
+    fs.mkdir_raw_impl(Path::new("/keep"), 0o755).unwrap();
+    fs.mkdir_raw_impl(Path::new("/keep/sub"), 0o755).unwrap();
     for path in ["/keep/a", "/keep/sub/b"] {
-        fs.writev(&[
-            vfsi_sync::WriteOp::from_path(path, VfOffset::At(0), b"x".to_vec()).with_creation(),
-        ])
-        .unwrap();
+        fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+            path,
+            VfOffset::At(0),
+            b"x".to_vec(),
+        )
+        .with_creation()])
+            .unwrap();
     }
-    fs.rm_contents_path("/keep").unwrap();
-    assert!(fs.exists_path("/keep").unwrap(), "root is kept");
+    fs.remove_dir_contents_path_impl(Path::new("/keep"))
+        .unwrap();
+    assert!(fs.exists_impl(Path::new("/keep")).unwrap(), "root is kept");
     assert!(
-        fs.listdir(
+        fs.listdir_impl(
             std::path::Path::new("/keep"),
             vfsi_sync::AttrMask::default(),
             0,
@@ -565,86 +578,103 @@ fn rm_contents_keeps_the_directory() {
 #[test]
 fn rm_contents_rejects_a_symlink_to_a_directory() {
     let (_root, mut fs) = dummy();
-    fs.mkdir_path("/target", 0o755).unwrap();
-    fs.writev(&[
-        vfsi_sync::WriteOp::from_path("/target/keep", VfOffset::At(0), b"k".to_vec())
-            .with_creation(),
-    ])
-    .unwrap();
-    fs.symlink_path("target", "link").unwrap();
+    fs.mkdir_raw_impl(Path::new("/target"), 0o755).unwrap();
+    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+        "/target/keep",
+        VfOffset::At(0),
+        b"k".to_vec(),
+    )
+    .with_creation()])
+        .unwrap();
+    fs.symlink_raw_impl(Path::new("target"), Path::new("link"))
+        .unwrap();
 
-    assert!(fs.rm_contents_path("/link").is_err());
-    assert!(fs.exists_path("/target/keep").unwrap());
+    assert!(
+        fs.remove_dir_contents_path_impl(Path::new("/link"))
+            .is_err()
+    );
+    assert!(fs.exists_impl(Path::new("/target/keep")).unwrap());
 }
 
 #[test]
 fn recursive_rm_removes_a_symlink_not_its_target() {
     let (_root, mut fs) = dummy();
-    fs.mkdir_path("/target", 0o755).unwrap();
-    fs.writev(&[
-        vfsi_sync::WriteOp::from_path("/target/keep", VfOffset::At(0), b"k".to_vec())
-            .with_creation(),
-    ])
-    .unwrap();
-    fs.symlink_path("target", "link").unwrap();
+    fs.mkdir_raw_impl(Path::new("/target"), 0o755).unwrap();
+    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+        "/target/keep",
+        VfOffset::At(0),
+        b"k".to_vec(),
+    )
+    .with_creation()])
+        .unwrap();
+    fs.symlink_raw_impl(Path::new("target"), Path::new("link"))
+        .unwrap();
 
-    fs.rm(&[Path::new("/link")], true).unwrap();
-    assert!(!fs.exists_path("/link").unwrap());
-    assert!(fs.exists_path("/target/keep").unwrap());
+    fs.remove_paths_impl(&[Path::new("/link")], true).unwrap();
+    assert!(!fs.exists_impl(Path::new("/link")).unwrap());
+    assert!(fs.exists_impl(Path::new("/target/keep")).unwrap());
 }
 
 #[test]
 fn ensure_empty_dir_creates_empties_and_rejects_files() {
     let (_root, mut fs) = dummy();
-    fs.ensure_empty_dir_path("/made").unwrap();
-    assert!(fs.exists_path("/made").unwrap());
+    fs.ensure_empty_dir_impl(Path::new("/made")).unwrap();
+    assert!(fs.exists_impl(Path::new("/made")).unwrap());
     assert!(
-        fs.listdir(Path::new("/made"), vfsi_sync::AttrMask::default(), 0, false)
+        fs.listdir_impl(Path::new("/made"), vfsi_sync::AttrMask::default(), 0, false)
             .unwrap()
             .is_empty()
     );
 
-    fs.mkdir_path("/full", 0o755).unwrap();
-    fs.writev(&[
-        vfsi_sync::WriteOp::from_path("/full/child", VfOffset::At(0), b"x".to_vec())
-            .with_creation(),
-    ])
-    .unwrap();
-    fs.ensure_empty_dir_path("/full").unwrap();
+    fs.mkdir_raw_impl(Path::new("/full"), 0o755).unwrap();
+    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+        "/full/child",
+        VfOffset::At(0),
+        b"x".to_vec(),
+    )
+    .with_creation()])
+        .unwrap();
+    fs.ensure_empty_dir_impl(Path::new("/full")).unwrap();
     assert!(
-        fs.listdir(Path::new("/full"), vfsi_sync::AttrMask::default(), 0, false)
+        fs.listdir_impl(Path::new("/full"), vfsi_sync::AttrMask::default(), 0, false)
             .unwrap()
             .is_empty()
     );
 
-    fs.writev(&[
-        vfsi_sync::WriteOp::from_path("/afile", VfOffset::At(0), b"f".to_vec()).with_creation(),
-    ])
-    .unwrap();
-    assert!(fs.ensure_empty_dir_path("/afile").is_err());
-    assert!(fs.exists_path("/afile").unwrap());
+    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+        "/afile",
+        VfOffset::At(0),
+        b"f".to_vec(),
+    )
+    .with_creation()])
+        .unwrap();
+    assert!(fs.ensure_empty_dir_impl(Path::new("/afile")).is_err());
+    assert!(fs.exists_impl(Path::new("/afile")).unwrap());
 }
 
 #[test]
 fn open_dir_handle_empties_contents() {
     let (_root, mut fs) = dummy();
-    fs.mkdir_path("/d", 0o755).unwrap();
-    fs.mkdir_path("/d/sub", 0o755).unwrap();
-    fs.writev(&[
+    fs.mkdir_raw_impl(Path::new("/d"), 0o755).unwrap();
+    fs.mkdir_raw_impl(Path::new("/d/sub"), 0o755).unwrap();
+    fs.vwrite_owned_impl(&[
         vfsi_sync::WriteOp::from_path("/d/a", VfOffset::At(0), b"a".to_vec()).with_creation(),
     ])
     .unwrap();
-    fs.writev(&[
-        vfsi_sync::WriteOp::from_path("/d/sub/b", VfOffset::At(0), b"b".to_vec()).with_creation(),
-    ])
-    .unwrap();
+    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+        "/d/sub/b",
+        VfOffset::At(0),
+        b"b".to_vec(),
+    )
+    .with_creation()])
+        .unwrap();
 
-    let handle = fs.open_dir(Path::new("/d")).unwrap();
-    fs.rm_dir_contents(&handle).unwrap();
-    fs.close_dir(&handle).unwrap();
-    assert!(fs.exists_path("/d").unwrap());
+    let handle = fs.open_dir_impl(Path::new("/d")).unwrap();
+    fs.remove_dir_contents_handle_impl(&handle).unwrap();
+    fs.close_dir_impl(&handle).unwrap();
+    assert!(fs.exists_impl(Path::new("/d")).unwrap());
     assert!(
-        fs.listdir(Path::new("/d"), vfsi_sync::AttrMask::default(), 0, false)
+        fs.listdir_impl(Path::new("/d"), vfsi_sync::AttrMask::default(), 0, false)
             .unwrap()
             .is_empty()
     );
@@ -672,7 +702,7 @@ fn owned_directory_handle_refuses_path_only_backend() {
     assert!(client.remove_dir_all_with_options("/d", options).is_err());
     assert!(
         client
-            .remove_paths_with_options(&["/d/keep"], false, options)
+            .vremove_with_options_native(&["/d/keep"], false, options)
             .is_err()
     );
     assert_eq!(client.read("/d/keep").unwrap(), b"x");
@@ -684,32 +714,38 @@ fn owned_directory_handle_refuses_path_only_backend() {
 #[test]
 fn generic_remover_rejects_options_it_cannot_honor() {
     let (_root, mut fs) = dummy();
-    fs.mkdir_path("/d", 0o755).unwrap();
-    fs.writev(&[
-        vfsi_sync::WriteOp::from_path("/d/keep", VfOffset::At(0), b"x".to_vec()).with_creation(),
-    ])
-    .unwrap();
-    let handle = fs.open_dir(Path::new("/d")).unwrap();
+    fs.mkdir_raw_impl(Path::new("/d"), 0o755).unwrap();
+    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+        "/d/keep",
+        VfOffset::At(0),
+        b"x".to_vec(),
+    )
+    .with_creation()])
+        .unwrap();
+    let handle = fs.open_dir_impl(Path::new("/d")).unwrap();
     for options in [
         vfsi_sync::RemoveOptions::new().continue_on_error(true),
         vfsi_sync::RemoveOptions::new().batch(2),
         vfsi_sync::RemoveOptions::new().retries(0),
     ] {
         assert!(
-            fs.rm_with_options(&[Path::new("/d/keep")], false, options)
+            fs.remove_paths_with_options_impl(&[Path::new("/d/keep")], false, options)
                 .is_err()
         );
         assert!(
-            fs.rm_contents_with_options(Path::new("/d"), options)
+            fs.remove_dir_contents_path_with_options_impl(Path::new("/d"), options)
                 .is_err()
         );
-        assert!(fs.rm_dir_contents_with_options(&handle, options).is_err());
+        assert!(
+            fs.remove_dir_contents_handle_with_options_impl(&handle, options)
+                .is_err()
+        );
     }
     assert!(
-        fs.exists_path("/d/keep").unwrap(),
+        fs.exists_impl(Path::new("/d/keep")).unwrap(),
         "rejected options must not mutate"
     );
-    fs.close_dir(&handle).unwrap();
+    fs.close_dir_impl(&handle).unwrap();
 }
 
 #[test]
@@ -731,7 +767,7 @@ fn standard_io_handle_is_raii_and_seekable() {
         assert_eq!(&out, b"cde");
     }
     assert_eq!(
-        fs.close(&descriptor).unwrap_err().err_no(),
+        fs.close_impl(&descriptor).unwrap_err().err_no(),
         libc::EBADF as u32
     );
 }
@@ -801,20 +837,20 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
         .unwrap();
 
     client
-        .writev(&[
+        .vwrite_native(&[
             first.write_request_at(0, b"one"),
             second.write_request_at(0, b"two"),
         ])
         .unwrap();
     let read_results = client
-        .readv(&[first.read_request_at(0, 3), second.read_request_at(0, 3)])
+        .vread_native(&[first.read_request_at(0, 3), second.read_request_at(0, 3)])
         .unwrap();
     assert_eq!(read_results[0].data, b"one");
     assert_eq!(read_results[1].data, b"two");
     let mut one_buffer = [0; 3];
     let mut two_buffer = [0; 3];
     let lengths = client
-        .readv_into(&mut [
+        .vread_into_native(&mut [
             first.read_request_at_into(0, &mut one_buffer),
             second.read_request_at_into(0, &mut two_buffer),
         ])
@@ -829,7 +865,7 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
     let other_client = FsClient::new(other_backend);
     assert_eq!(
         other_client
-            .readv(&[first.read_request_at(0, 1)])
+            .vread_native(&[first.read_request_at(0, 1)])
             .unwrap_err()
             .err_no(),
         vfsi_sync::ERR_INVAL
@@ -948,11 +984,11 @@ fn native_vector_operations_are_composable() {
         .create(true)
         .truncate(true)
         .mode(0o640)
-        .openv(&["/one", "/two"])
+        .vopen(&["/one", "/two"])
         .unwrap();
 
     let writes = client
-        .writev(&[
+        .vwrite_native(&[
             files[0].write_request_at(0, b"one"),
             files[1].write_request_at(0, b"two"),
         ])
@@ -960,7 +996,7 @@ fn native_vector_operations_are_composable() {
     assert_eq!(writes.len(), 2);
 
     let reads = client
-        .readv(&[
+        .vread_native(&[
             files[0].read_request_at(0, 3),
             files[1].read_request_at(0, 3),
         ])
@@ -968,13 +1004,13 @@ fn native_vector_operations_are_composable() {
     let values = reads;
     assert_eq!(values[0].data, b"one");
     assert_eq!(values[1].data, b"two");
-    client.closev(files).unwrap();
+    client.vclose_owned(files).unwrap();
 
     client.write("/present", b"ok").unwrap();
     let error = client
         .open_options()
         .read(true)
-        .openv(&["/present", "/missing", "/later"])
+        .vopen(&["/present", "/missing", "/later"])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
 }
@@ -988,7 +1024,7 @@ fn openv_fault_before_dispatch_has_no_effects_or_handles() {
         vnfs::Error::transport(None, "injected pre-dispatch failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = VecFs::openv(
+    let error = VectorFileSystem::vopen_raw_impl(
         &mut fs,
         &[Path::new("/f0"), Path::new("/f1")],
         &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
@@ -1003,8 +1039,8 @@ fn openv_fault_before_dispatch_has_no_effects_or_handles() {
         script.remaining()
     );
     assert_eq!(fs.test_open_handle_count(), 0);
-    assert!(!fs.exists_path("/f0").unwrap());
-    assert!(!fs.exists_path("/f1").unwrap());
+    assert!(!fs.exists_impl(Path::new("/f0")).unwrap());
+    assert!(!fs.exists_impl(Path::new("/f1")).unwrap());
 }
 
 #[cfg(feature = "test-faults")]
@@ -1016,7 +1052,7 @@ fn openv_fault_injection_closes_the_successful_prefix() {
         vnfs::Error::transport(None, "injected registration failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = VecFs::openv(
+    let error = VectorFileSystem::vopen_raw_impl(
         &mut fs,
         &[Path::new("/f0"), Path::new("/f1"), Path::new("/f2")],
         &[libc::O_CREAT | libc::O_RDWR; 3],
@@ -1041,7 +1077,7 @@ fn openv_fault_after_registration_closes_the_injected_handle() {
         vnfs::Error::transport(None, "injected post-registration failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = VecFs::openv(
+    let error = VectorFileSystem::vopen_raw_impl(
         &mut fs,
         &[Path::new("/f0"), Path::new("/f1"), Path::new("/f2")],
         &[libc::O_CREAT | libc::O_RDWR; 3],
@@ -1061,17 +1097,19 @@ fn openv_fault_after_registration_closes_the_injected_handle() {
 #[test]
 fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
     let (_root, mut fs) = dummy();
-    fs.writev(&[
-        vfsi_sync::WriteOp::from_path("/exists", VfOffset::At(0), b"existing".to_vec())
-            .with_creation(),
-    ])
-    .unwrap();
+    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+        "/exists",
+        VfOffset::At(0),
+        b"existing".to_vec(),
+    )
+    .with_creation()])
+        .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeCleanup { index: 0 },
         vnfs::Error::transport(None, "injected cleanup failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = VecFs::openv(
+    let error = VectorFileSystem::vopen_raw_impl(
         &mut fs,
         &[Path::new("/created"), Path::new("/exists")],
         &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
@@ -1092,19 +1130,24 @@ fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
 #[test]
 fn recursive_remove_propagates_type_lookup_failure_without_unlinking() {
     let (_root, mut fs) = dummy();
-    fs.writev(&[
-        vfsi_sync::WriteOp::from_path("/kept", VfOffset::At(0), b"data".to_vec()).with_creation(),
-    ])
-    .unwrap();
+    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+        "/kept",
+        VfOffset::At(0),
+        b"data".to_vec(),
+    )
+    .with_creation()])
+        .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeRemoveType { index: 0 },
         vnfs::Error::transport(None, "injected type lookup failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = fs.rm(&[Path::new("/kept")], true).unwrap_err();
+    let error = fs
+        .remove_paths_impl(&[Path::new("/kept")], true)
+        .unwrap_err();
     assert!(error.is_transport());
     assert!(script.is_consumed());
-    assert!(fs.exists_path("/kept").unwrap());
+    assert!(fs.exists_impl(Path::new("/kept")).unwrap());
 }
 
 #[cfg(feature = "test-faults")]
@@ -1117,7 +1160,7 @@ fn create_mode_failure_is_reported_instead_of_ignored() {
     ));
     fs.set_fault_injector(script.clone());
     let error = fs
-        .open(Path::new("/created"), libc::O_CREAT | libc::O_RDWR, 0o600)
+        .open_raw_impl(Path::new("/created"), libc::O_CREAT | libc::O_RDWR, 0o600)
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EPERM as u32);
     assert!(script.is_consumed());
@@ -1133,7 +1176,9 @@ fn mkdir_mode_failure_is_reported_instead_of_ignored() {
         vnfs::Error::failure(0, libc::EPERM as u32),
     ));
     fs.set_fault_injector(script.clone());
-    let error = fs.mkdir(Path::new("/created-dir"), 0o700).unwrap_err();
+    let error = fs
+        .mkdir_raw_impl(Path::new("/created-dir"), 0o700)
+        .unwrap_err();
     assert_eq!(error.err_no(), libc::EPERM as u32);
     assert!(script.is_consumed());
 }
@@ -1143,21 +1188,21 @@ fn strict_vectors_report_failure_index_without_rollback() {
     use vfsi_sync::VfFile;
 
     let (_root, mut fs) = dummy();
-    fs.writev(&[
+    fs.vwrite_owned_impl(&[
         vfsi_sync::WriteOp::from_path("/first", VfOffset::At(0), Vec::new()).with_creation(),
         vfsi_sync::WriteOp::from_path("/third", VfOffset::At(0), Vec::new()).with_creation(),
     ])
     .unwrap();
     let error = fs
-        .removev(&[
+        .vremove_impl(&[
             VfFile::from_path("/first"),
             VfFile::from_path("/missing"),
             VfFile::from_path("/third"),
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert!(!fs.exists_path("/first").unwrap());
-    assert!(fs.exists_path("/third").unwrap());
+    assert!(!fs.exists_impl(Path::new("/first")).unwrap());
+    assert!(fs.exists_impl(Path::new("/third")).unwrap());
 }
 
 #[test]
@@ -1166,14 +1211,14 @@ fn native_scalar_contract_separates_metadata_query_from_update() {
     use vnfs::{OpenFlags, OpenRequest};
 
     let (_root, mut fs) = dummy();
-    let file = FileSystem::open_one(
+    let file = FileSystem::open_impl(
         &mut fs,
         &OpenRequest::new("/metadata", OpenFlags::WRITE | OpenFlags::CREATE),
     )
     .unwrap();
-    FileSystem::close_one(&mut fs, &file).unwrap();
+    FileSystem::close_impl(&mut fs, &file).unwrap();
 
-    let attrs = FileSystem::metadata(
+    let attrs = FileSystem::metadata_impl(
         &mut fs,
         MetadataQuery::new(
             VfFile::from_path("/metadata"),
@@ -1185,8 +1230,11 @@ fn native_scalar_contract_separates_metadata_query_from_update() {
 
     let mut update = SetAttributes::new(VfFile::from_path("/metadata"));
     update.mode = Some(0o640);
-    FileSystem::set_attributes(&mut fs, update).unwrap();
-    assert_eq!(fs.stat_path("/metadata").unwrap().mode & 0o777, 0o640);
+    FileSystem::set_attributes_impl(&mut fs, update).unwrap();
+    assert_eq!(
+        fs.stat_impl(Path::new("/metadata")).unwrap().mode & 0o777,
+        0o640
+    );
 }
 
 #[test]
@@ -1196,15 +1244,15 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
     use vnfs::{ReadDirOptions, WalkOptions};
 
     let (_root, mut fs) = dummy();
-    fs.ensure_dir(Path::new("/tree/sub"), 0o755).unwrap();
-    fs.writev(&[
+    fs.ensure_dir_impl(Path::new("/tree/sub"), 0o755).unwrap();
+    fs.vwrite_owned_impl(&[
         WriteOp::from_path("/tree/one", VfOffset::At(0), Vec::new()).with_creation(),
         WriteOp::from_path("/tree/two", VfOffset::At(0), Vec::new()).with_creation(),
     ])
     .unwrap();
 
     let error = fs
-        .walk_with_options(
+        .walk_with_options_impl(
             Path::new("/tree"),
             AttrMask::stat(),
             WalkOptions::new().max_entries(2),
@@ -1214,7 +1262,7 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
     assert_eq!(error.err_no(), libc::EFBIG as u32);
 
     let error = fs
-        .walk_with_options(
+        .walk_with_options_impl(
             Path::new("/tree"),
             AttrMask::stat(),
             WalkOptions::new().max_depth(0),
@@ -1288,14 +1336,14 @@ fn directory_visitor_supports_limits_early_stop_and_callback_errors() {
     use vnfs::{Error as VfError, ReadDirOptions};
 
     let (_root, mut fs) = dummy();
-    fs.ensure_dir(Path::new("/tree"), 0o755).unwrap();
+    fs.ensure_dir_impl(Path::new("/tree"), 0o755).unwrap();
     let writes: Vec<_> = (0..8)
         .map(|index| {
             WriteOp::from_path(&format!("/tree/item-{index}"), VfOffset::At(0), Vec::new())
                 .with_creation()
         })
         .collect();
-    fs.writev(&writes).unwrap();
+    fs.vwrite_owned_impl(&writes).unwrap();
     let client = FsClient::new(fs);
 
     let mut seen = 0;

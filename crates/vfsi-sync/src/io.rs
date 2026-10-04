@@ -2,7 +2,7 @@ use std::io::{self, Read, Seek, SeekFrom as IoSeekFrom, Write};
 use std::path::Path;
 
 use crate::traits::{validate_read_results, validate_write_results};
-use crate::{ReadOp, SeekFrom, VecFs, VfFile, VfOffset};
+use crate::{ReadOp, SeekFrom, VectorFileSystem, VfFile, VfOffset};
 
 fn io_error(error: crate::VfError) -> io::Error {
     let kind = match error.err_no() {
@@ -128,13 +128,13 @@ impl VfOpenOptions {
     }
 
     /// Open a file whose lifetime is tied to the mutable filesystem borrow.
-    pub fn open<'a, F: VecFs + ?Sized>(
+    pub fn open<'a, F: VectorFileSystem + ?Sized>(
         &self,
         filesystem: &'a mut F,
         path: impl AsRef<Path>,
     ) -> io::Result<VfFileHandle<'a, F>> {
         let file = filesystem
-            .open(path.as_ref(), self.flags()?, self.mode)
+            .open_raw_impl(path.as_ref(), self.flags()?, self.mode)
             .map_err(io_error)?;
         Ok(VfFileHandle {
             filesystem,
@@ -147,12 +147,12 @@ impl VfOpenOptions {
 ///
 /// Dropping the handle closes the remote descriptor on a best-effort basis.
 /// Use [`close`](Self::close) when a close error must be observed.
-pub struct VfFileHandle<'a, F: VecFs + ?Sized> {
+pub struct VfFileHandle<'a, F: VectorFileSystem + ?Sized> {
     filesystem: &'a mut F,
     file: Option<VfFile>,
 }
 
-impl<F: VecFs + ?Sized> VfFileHandle<'_, F> {
+impl<F: VectorFileSystem + ?Sized> VfFileHandle<'_, F> {
     /// Descriptor of an open handle. Use [`try_descriptor`](Self::try_descriptor)
     /// when the handle might already have been closed with `try_close`.
     pub fn descriptor(&self) -> &VfFile {
@@ -171,7 +171,7 @@ impl<F: VecFs + ?Sized> VfFileHandle<'_, F> {
         let Some(file) = self.file.as_ref() else {
             return Ok(());
         };
-        self.filesystem.close(file).map_err(io_error)?;
+        self.filesystem.close_impl(file).map_err(io_error)?;
         self.file = None;
         Ok(())
     }
@@ -182,14 +182,14 @@ impl<F: VecFs + ?Sized> VfFileHandle<'_, F> {
     }
 }
 
-impl<F: VecFs + ?Sized> Read for VfFileHandle<'_, F> {
+impl<F: VectorFileSystem + ?Sized> Read for VfFileHandle<'_, F> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if buffer.is_empty() {
             return Ok(0);
         }
         let file = self.try_descriptor()?.clone();
         let requests = [ReadOp::new(file, VfOffset::Cur, buffer.len())];
-        let mut results = self.filesystem.readv(&requests).map_err(io_error)?;
+        let mut results = self.filesystem.vread_impl(&requests).map_err(io_error)?;
         validate_read_results("Read::read", &requests, &results).map_err(io_error)?;
         let result = results.pop().expect("validated one read result");
         buffer[..result.data.len()].copy_from_slice(&result.data);
@@ -197,17 +197,14 @@ impl<F: VecFs + ?Sized> Read for VfFileHandle<'_, F> {
     }
 }
 
-impl<F: VecFs + ?Sized> Write for VfFileHandle<'_, F> {
+impl<F: VectorFileSystem + ?Sized> Write for VfFileHandle<'_, F> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         if buffer.is_empty() {
             return Ok(0);
         }
         let file = self.try_descriptor()?.clone();
         let requests = [crate::WriteOpRef::new(&file, VfOffset::Cur, buffer)];
-        let mut results = self
-            .filesystem
-            .writev_borrowed(&requests)
-            .map_err(io_error)?;
+        let mut results = self.filesystem.vwrite_impl(&requests).map_err(io_error)?;
         validate_write_results("Write::write", &requests, &results).map_err(io_error)?;
         Ok(results.pop().expect("validated one write result").written)
     }
@@ -218,7 +215,7 @@ impl<F: VecFs + ?Sized> Write for VfFileHandle<'_, F> {
     }
 }
 
-impl<F: VecFs + ?Sized> Seek for VfFileHandle<'_, F> {
+impl<F: VectorFileSystem + ?Sized> Seek for VfFileHandle<'_, F> {
     fn seek(&mut self, position: IoSeekFrom) -> io::Result<u64> {
         let file = self.try_descriptor()?.clone();
         let (offset, whence) = match position {
@@ -233,17 +230,17 @@ impl<F: VecFs + ?Sized> Seek for VfFileHandle<'_, F> {
         };
         let result = self
             .filesystem
-            .fseek(&file, offset, whence)
+            .seek_raw_impl(&file, offset, whence)
             .map_err(io_error)?;
         u64::try_from(result)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "negative seek result"))
     }
 }
 
-impl<F: VecFs + ?Sized> Drop for VfFileHandle<'_, F> {
+impl<F: VectorFileSystem + ?Sized> Drop for VfFileHandle<'_, F> {
     fn drop(&mut self) {
         if let Some(file) = self.file.take() {
-            let _ = self.filesystem.close(&file);
+            let _ = self.filesystem.close_impl(&file);
         }
     }
 }

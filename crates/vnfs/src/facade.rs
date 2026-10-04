@@ -17,6 +17,24 @@ macro_rules! owned_client {
             ) -> Result<Vec<Metadata>> {
                 crate::metadata::metadata_backend(&self.inner, paths, options)
             }
+            /// Query filesystem statistics for paths and this client's open handles.
+            pub fn vstatfs<P: vfsi_core::MetadataOperand<$file>>(
+                &self,
+                targets: &[P],
+            ) -> Result<Vec<FilesystemStats>> {
+                let targets: Vec<_> = targets
+                    .iter()
+                    .map(|target| match target.metadata_target() {
+                        vfsi_core::MetadataTarget::Path(path) => {
+                            vfsi_core::MetadataTarget::Path(path)
+                        }
+                        vfsi_core::MetadataTarget::File(file) => {
+                            vfsi_core::MetadataTarget::File(&file.inner)
+                        }
+                    })
+                    .collect();
+                self.inner.vstatfs(&targets)
+            }
             /// Update selected metadata fields for many paths in one backend vector.
             pub fn vsetattrs<P: vfsi_core::MetadataOperand<$file>>(
                 &self,
@@ -80,12 +98,12 @@ macro_rules! owned_client {
             }
             /// Rename source/destination pairs without scalarizing the native vector.
             pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-                self.inner.renamev(pairs)
+                self.inner.vrename(pairs)
             }
             /// Create directories in vector phases; parents must exist.
             /// An error can follow partially completed mutations.
             pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[(P, u32)]) -> Result<()> {
-                self.inner.mkdirv_with_modes(paths)
+                self.inner.vmkdir(paths)
             }
             /// Create one directory with explicit Unix permission bits.
             pub fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> Result<()> {
@@ -150,22 +168,26 @@ macro_rules! owned_client {
             /// Copy whole files in request order. A successful prefix may remain if
             /// a later request fails; this operation does not provide atomicity.
             pub fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-                self.inner.copyv(pairs)
+                self.inner.vcopy(pairs)
             }
             /// Remove paths in request order, optionally recursing into directories.
             /// A successful prefix may remain if a later path fails.
-            pub fn remove_paths<P: AsRef<Path>>(&self, paths: &[P], recursive: bool) -> Result<()> {
-                self.inner.remove_paths(paths, recursive)
+            pub fn vremove_native<P: AsRef<Path>>(
+                &self,
+                paths: &[P],
+                recursive: bool,
+            ) -> Result<()> {
+                self.inner.vremove_native(paths, recursive)
             }
             /// Remove paths with explicit error, batching, and retry policy.
-            pub fn remove_paths_with_options<P: AsRef<Path>>(
+            pub fn vremove_with_options_native<P: AsRef<Path>>(
                 &self,
                 paths: &[P],
                 recursive: bool,
                 options: RemoveOptions,
             ) -> Result<()> {
                 self.inner
-                    .remove_paths_with_options(paths, recursive, options)
+                    .vremove_with_options_native(paths, recursive, options)
             }
             /// Open an ordered vector of files.
             ///
@@ -174,7 +196,7 @@ macro_rules! owned_client {
             /// filesystem effects such as file creation.
             pub fn vopen(&self, requests: &[OpenRequest]) -> Result<Vec<$file>> {
                 self.inner
-                    .openv(requests)
+                    .vopen(requests)
                     .map(|files| files.into_iter().map(|inner| $file { inner }).collect())
             }
             /// Open a *genuine* directory handle for race-resistant, handle-rooted
@@ -200,7 +222,7 @@ macro_rules! owned_client {
             /// have closed a prefix, so callers must reconcile before retrying.
             pub fn vclose<'a>(&self, files: impl IntoIterator<Item = &'a mut $file>) -> Result<()> {
                 self.inner
-                    .try_closev(files.into_iter().map(|file| &mut file.inner))
+                    .vclose(files.into_iter().map(|file| &mut file.inner))
             }
             /// Read with an explicit aggregate byte budget. See [`Vfsi::vread`].
             pub fn vread<'a>(
@@ -212,7 +234,7 @@ macro_rules! owned_client {
                     ops,
                     options.limit_or(self.limits().max_read_bytes),
                     |requests, options| self.readv_owned(requests, options),
-                    |requests, bytes| self.readv_into_with_limit(requests, bytes),
+                    |requests, bytes| self.vread_into_with_limit_native(requests, bytes),
                 )
             }
             pub(crate) fn readv_owned(
@@ -221,18 +243,20 @@ macro_rules! owned_client {
                 budget: usize,
             ) -> Result<Vec<OwnedReadResult>> {
                 if requests.iter().all(|request| request.range_ref().is_some()) {
-                    return self
-                        .inner
-                        .readv_with_limit_projected(requests, budget, |request| {
-                            &request.range_ref().expect("checked range requests").inner
-                        });
+                    return self.inner.vread_with_limit_projected_native(
+                        requests,
+                        budget,
+                        |request| &request.range_ref().expect("checked range requests").inner,
+                    );
                 }
                 crate::read::read_batch(
                     requests,
                     budget,
                     |ranges, bytes| {
                         self.inner
-                            .readv_with_limit_projected(ranges, bytes, |request| &request.inner)
+                            .vread_with_limit_projected_native(ranges, bytes, |request| {
+                                &request.inner
+                            })
                     },
                     |paths, bytes| {
                         self.inner.read_files_with_options(
@@ -243,12 +267,12 @@ macro_rules! owned_client {
                 )
             }
             /// Read ordered positional ranges into caller-owned buffers, within this client's budget.
-            pub(crate) fn readv_into_with_limit(
+            pub(crate) fn vread_into_with_limit_native(
                 &self,
                 requests: &mut [$into<'_>],
                 bytes: usize,
             ) -> Result<Vec<ReadIntoResult>> {
-                self.inner.readv_into_with_limit_projected(
+                self.inner.vread_into_with_limit_projected_native(
                     requests,
                     bytes,
                     |r| &r.inner,
@@ -260,7 +284,7 @@ macro_rules! owned_client {
                 &self,
                 requests: &[WriteOp<'_, $file>],
             ) -> Result<Vec<WriteResult>> {
-                self.inner.writev_mapped(requests, |op| {
+                self.inner.vwrite_mapped_native(requests, |op| {
                     op.file().inner.write_request_at(op.offset(), op.data())
                 })
             }
@@ -280,7 +304,7 @@ macro_rules! owned_client {
                 result.map_err($crate::write::public_write_error)
             }
             /// Write every byte in each positional request, retrying short writes in
-            /// vector waves. Like `writev`, this is not transactional: an error may
+            /// vector waves. Like `vwrite_native`, this is not transactional: an error may
             /// follow a successfully written prefix. Overlapping requests through the
             /// same path complete in input order; different paths are presumed
             /// independent (including hard-link aliases).
@@ -288,7 +312,7 @@ macro_rules! owned_client {
                 &self,
                 requests: &[WriteOp<'_, $file>],
             ) -> Result<Vec<WriteResult>> {
-                self.inner.write_allv_mapped(requests, |op| {
+                self.inner.vwrite_all_mapped_native(requests, |op| {
                     op.file().inner.write_request_at(op.offset(), op.data())
                 })
             }
@@ -502,7 +526,7 @@ macro_rules! owned_client {
             /// filesystem effects such as file creation.
             pub fn vopen<P: AsRef<std::path::Path>>(&self, paths: &[P]) -> Result<Vec<$file>> {
                 self.inner
-                    .openv(paths)
+                    .vopen(paths)
                     .map(|files| files.into_iter().map(|inner| $file { inner }).collect())
             }
         }

@@ -24,7 +24,7 @@ pub enum TransportKind {
 /// parsing error strings.
 ///
 /// `op_index` is the index of the failing operation in the caller's request
-/// slice: the batched compound helpers (`readv`, `writev`, `getattr_many`,
+/// slice: the batched compound helpers (`vread_native`, `vwrite_native`, `getattr_many`,
 /// ...) translate compound positions to caller-relative indices before
 /// returning. For single-operation helpers it is the position within the
 /// compound (typically 2: `SEQUENCE`, `PUTFH`, op). Transport failures always
