@@ -261,13 +261,19 @@ fn bulk_directory_creation_preserves_error_index_path_and_completed_prefix() {
     let temp = tempfile::tempdir().unwrap();
     let client = Mounted::new(temp.path()).unwrap();
     client.create_dir("/taken").unwrap();
-    let error = client.vmkdir(&["/first", "/taken", "/last"]).unwrap_err();
+    let error = client
+        .vmkdir(&[("/first", 0o777), ("/taken", 0o777), ("/last", 0o777)])
+        .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::AlreadyExists);
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.path(), Some(std::path::Path::new("/taken")));
     assert!(temp.path().join("first").is_dir());
     assert!(!temp.path().join("last").exists());
-    assert!(client.vmkdir(&["/duplicate", "/duplicate"]).is_err());
+    assert!(
+        client
+            .vmkdir(&[("/duplicate", 0o777), ("/duplicate", 0o777)])
+            .is_err()
+    );
     assert!(!temp.path().join("duplicate").exists());
     client.vmkdir::<&str>(&[]).unwrap();
 }
@@ -296,7 +302,11 @@ fn routed_client_supports_the_same_builder_and_directory_preflight() {
             .collect::<Vec<_>>(),
         [b"a".to_vec(), b"b".to_vec()]
     );
-    assert!(client.vmkdir(&["/duplicate", "/duplicate"]).is_err());
+    assert!(
+        client
+            .vmkdir(&[("/duplicate", 0o777), ("/duplicate", 0o777)])
+            .is_err()
+    );
     assert!(!temp.path().join("duplicate").exists());
     client.vmkdir::<&str>(&[]).unwrap();
     client.remove_dir_all(tree.root()).unwrap();

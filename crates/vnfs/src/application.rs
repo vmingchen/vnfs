@@ -206,6 +206,18 @@ macro_rules! client_methods {
             }
             Ok(output)
         }
+        fn capabilities(&self) -> Result<vfsi_core::Capabilities> {
+            <$client>::capabilities($receiver(self))
+        }
+        fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+            <$client>::vsymlink($receiver(self), pairs)
+        }
+        fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<std::path::PathBuf>> {
+            <$client>::vreadlink($receiver(self), paths)
+        }
+        fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+            <$client>::vhardlink($receiver(self), pairs)
+        }
         fn vsetattrs<P: AsRef<Path>>(
             &self,
             updates: &[(P, vfsi_core::MetadataUpdate)],
@@ -254,7 +266,7 @@ macro_rules! client_methods {
         fn vclose(&self, files: &mut [Self::File]) -> Result<()> {
             <$client>::$close($receiver(self), files)
         }
-        fn vmkdir<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {
+        fn vmkdir<P: AsRef<Path>>(&self, paths: &[(P, u32)]) -> Result<()> {
             <$client>::$mkdir($receiver(self), paths)
         }
 
@@ -1011,7 +1023,7 @@ mod extension_tests {
             calls: Cell::new(0),
             shape: Cell::new(0),
         };
-        fs.vmkdir(&["/a", "/b"]).unwrap();
+        fs.vmkdir(&[("/a", 0o777), ("/b", 0o777)]).unwrap();
         fs.write_files(&[("/a/f", b"x"), ("/b/f", b"y")]).unwrap();
         let options = crate::WalkOptions::new().max_entries(2);
         let trees = fs
@@ -1068,7 +1080,7 @@ mod extension_tests {
             calls: Cell::new(0),
             shape: Cell::new(0),
         };
-        fs.vmkdir(&["/a", "/b"]).unwrap();
+        fs.vmkdir(&[("/a", 0o777), ("/b", 0o777)]).unwrap();
         let options = crate::WalkOptions::new().max_entries(0).max_path_bytes(4);
         assert_eq!(
             fs.visit_entries_with_options(&["/a", "/b"], options.into(), |_, _| panic!(

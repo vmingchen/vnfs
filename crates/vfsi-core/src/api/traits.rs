@@ -160,6 +160,25 @@ pub trait Vfsi {
         follow_symlinks: bool,
     ) -> Result<()>;
 
+    /// Capabilities supported by this client. Routed clients report capabilities
+    /// common to their routes; support does not imply authorization for a path.
+    fn capabilities(&self) -> Result<crate::api::Capabilities>;
+
+    /// Create symbolic links from `(target text, link path)` pairs.
+    /// Targets are stored verbatim, including relative or dangling targets.
+    /// Parents must exist. Errors may follow partial creation; no rollback.
+    fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()>;
+
+    /// Read symbolic link targets in input order without following final links.
+    /// Returns their original path bytes, including non-UTF-8 names on Unix.
+    /// An error identifies the input when known and discards collected results.
+    fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<std::path::PathBuf>>;
+
+    /// Create hard links from `(existing source, new link path)` pairs.
+    /// Sources are not followed when the final component is a symlink.
+    /// Cross-filesystem links can fail. Errors may follow partial creation.
+    fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()>;
+
     /// Owned handle; vectors must contain handles belonging to this client.
     type File: FileHandle + 'static;
 
@@ -311,11 +330,14 @@ pub trait Vfsi {
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.create_dir_all("/workspace")?;
-    /// fs.vmkdir(&["/workspace/input", "/workspace/output"])?;
+    /// fs.vmkdir(&[("/workspace/input", 0o750), ("/workspace/output", 0o700)])?;
     /// # Ok(())
     /// # }
     /// ```
-    fn vmkdir<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()>;
+    /// Each `(path, mode)` supplies Unix permission bits; backends apply the
+    /// requested mode rather than relying on the process umask. Unsupported
+    /// permission semantics are reported by the backend.
+    fn vmkdir<P: AsRef<Path>>(&self, directories: &[(P, u32)]) -> Result<()>;
     /// Strict file-copy batches; a failed call can have copied earlier files.
     ///
     /// Pairs are `(source, destination)` in this client's namespace. Contents
@@ -1288,7 +1310,34 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn create_dir(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.vmkdir(&[path])
+        self.vmkdir(&[(path, 0o777)])
+    }
+
+    /// Create one directory with explicit Unix permission bits.
+    fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> Result<()> {
+        self.vmkdir(&[(path, mode)])
+    }
+
+    /// Create one symbolic link; submit multiple pairs with [`Vfsi::vsymlink`].
+    fn symlink(&self, target: impl AsRef<Path>, link: impl AsRef<Path>) -> Result<()> {
+        self.vsymlink(&[(target, link)])
+    }
+
+    /// Read one symlink target; submit multiple paths with [`Vfsi::vreadlink`].
+    fn read_link(&self, path: impl AsRef<Path>) -> Result<std::path::PathBuf> {
+        let mut targets = self.vreadlink(&[path])?;
+        if targets.len() != 1 {
+            return Err(crate::api::Error::transport(
+                None,
+                "invalid readlink result count",
+            ));
+        }
+        Ok(targets.pop().expect("validated readlink count"))
+    }
+
+    /// Create one hard link; submit multiple pairs with [`Vfsi::vhardlink`].
+    fn hard_link(&self, source: impl AsRef<Path>, link: impl AsRef<Path>) -> Result<()> {
+        self.vhardlink(&[(source, link)])
     }
 
     /// Single-target convenience. For multiple directory creations, prefer [`Vfsi::vmkdir`]; plan missing parents before their children.
@@ -1324,7 +1373,7 @@ pub trait VfsiExt: Vfsi {
                     return Err(crate::api::Error::client(0, crate::ERR_INVAL));
                 }
             }
-            match self.vmkdir(&[&current]) {
+            match self.vmkdir(&[(&current, 0o777)]) {
                 Ok(()) => {}
                 Err(error) if error.err_no() == crate::ERR_EXIST => {
                     if !self.metadata(&current)?.is_dir() {

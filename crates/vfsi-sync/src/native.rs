@@ -550,13 +550,13 @@ impl<T: VecFs + ?Sized> LinkFileSystem for T {
 }
 
 #[cfg(unix)]
-fn bytes_to_path(bytes: Vec<u8>) -> std::path::PathBuf {
+pub(crate) fn bytes_to_path(bytes: Vec<u8>) -> std::path::PathBuf {
     use std::os::unix::ffi::OsStringExt;
     std::ffi::OsString::from_vec(bytes).into()
 }
 
 #[cfg(not(unix))]
-fn bytes_to_path(bytes: Vec<u8>) -> std::path::PathBuf {
+pub(crate) fn bytes_to_path(bytes: Vec<u8>) -> std::path::PathBuf {
     String::from_utf8_lossy(&bytes).into_owned().into()
 }
 

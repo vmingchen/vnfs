@@ -241,7 +241,7 @@ impl TreeBuilder {
             .map_err(|e| e.with_context("create_tree", root))?;
         for level in directories.values() {
             for batch in level.chunks(self.batch_size) {
-                let paths: Vec<_> = batch.iter().map(|(path, _)| path).collect();
+                let paths: Vec<_> = batch.iter().map(|(path, _)| (path, 0o777)).collect();
                 client
                     .vmkdir(&paths)
                     .map_err(|e| entry_error(e, batch, &self.entries))?;

@@ -296,6 +296,72 @@ impl AutoClient {
         }
     }
 
+    /// Common routed capabilities. Server-copy acceleration is route-specific
+    /// and is not advertised as a guarantee for the whole namespace.
+    pub fn capabilities(&self) -> VfResult<crate::Capabilities> {
+        self.mounted.capabilities()
+    }
+
+    /// Keep target text unchanged and let the kernel interpret it in the
+    /// mounted namespace, matching the scalar symlink operation.
+    pub fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+        self.mounted.vsymlink(pairs)
+    }
+
+    /// Read link text through the mounted namespace without following links.
+    pub fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<PathBuf>> {
+        self.mounted.vreadlink(paths)
+    }
+
+    /// Route same-backend hard-link pairs together. Cross-route pairs use the
+    /// kernel namespace, which reports cross-filesystem errors when appropriate.
+    pub fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let mounts = read_mounts(false);
+        let mut sources: Vec<_> = pairs
+            .iter()
+            .map(|(source, _)| self.resolve(source.as_ref(), &mounts))
+            .collect();
+        let mut links: Vec<_> = pairs
+            .iter()
+            .map(|(_, link)| self.resolve(link.as_ref(), &mounts))
+            .collect();
+        for (index, (source, link)) in sources.iter_mut().zip(&mut links).enumerate() {
+            if !source.route.same_backend(&link.route) {
+                *source = Resolved {
+                    route: Route::Mounted,
+                    path: pairs[index].0.as_ref().to_path_buf(),
+                };
+                *link = Resolved {
+                    route: Route::Mounted,
+                    path: pairs[index].1.as_ref().to_path_buf(),
+                };
+            }
+        }
+        let mut start = 0;
+        while start < pairs.len() {
+            let end = cohort_end(&sources, start);
+            let batch: Vec<_> = (start..end)
+                .map(|index| (sources[index].path.as_path(), links[index].path.as_path()))
+                .collect();
+            match &sources[start].route {
+                Route::Mounted => self.mounted.vhardlink(&batch),
+                Route::Nfs(connection) => connection.client.vhardlink(&batch),
+            }
+            .map_err(|error| {
+                let error = indexed(error, start);
+                match error.index().and_then(|index| pairs.get(index)) {
+                    Some((_, link)) => error.with_context("vhardlink", link.as_ref()),
+                    None => error,
+                }
+            })?;
+            start = end;
+        }
+        Ok(())
+    }
+
     /// Update route-coherent batches, retaining each original input index.
     pub fn vsetattrs<P: AsRef<Path>>(
         &self,
@@ -368,12 +434,12 @@ impl AutoClient {
 
     /// Create directories in bounded backend cohorts, retaining input order.
     /// Parents must exist; this does not promise transactional rollback.
-    pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
+    pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[(P, u32)]) -> VfResult<()> {
         if paths.is_empty() {
             return Ok(());
         }
         let mut seen = std::collections::HashSet::with_capacity(paths.len());
-        for (index, path) in paths.iter().enumerate() {
+        for (index, (path, _)) in paths.iter().enumerate() {
             if !seen.insert(path.as_ref()) {
                 return Err(VfError::client(index, libc::EINVAL as u32)
                     .with_context("vmkdir", path.as_ref()));
@@ -382,23 +448,24 @@ impl AutoClient {
         let mounts = read_mounts(true);
         let resolved: Vec<_> = paths
             .iter()
-            .map(|path| self.resolve(path.as_ref(), &mounts))
+            .map(|(path, _)| self.resolve(path.as_ref(), &mounts))
             .collect();
         let mut start = 0;
         while start < paths.len() {
             let end = cohort_end(&resolved, start);
             let batch: Vec<_> = resolved[start..end]
                 .iter()
-                .map(|route| route.path.as_path())
+                .zip(&paths[start..end])
+                .map(|(route, (_, mode))| (route.path.as_path(), *mode))
                 .collect();
             let result = match &resolved[start].route {
-                Route::Mounted => self.mounted.mkdirv(&batch),
-                Route::Nfs(connection) => connection.client.mkdirv(&batch),
+                Route::Mounted => self.mounted.mkdirv_with_modes(&batch),
+                Route::Nfs(connection) => connection.client.mkdirv_with_modes(&batch),
             };
             result.map_err(|error| {
                 let error = indexed(error, start);
                 match error.index().and_then(|index| paths.get(index)) {
-                    Some(path) => error.with_context("vmkdir", path.as_ref()),
+                    Some((path, _)) => error.with_context("vmkdir", path.as_ref()),
                     None => error,
                 }
             })?;

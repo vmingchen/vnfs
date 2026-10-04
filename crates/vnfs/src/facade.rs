@@ -25,6 +25,24 @@ macro_rules! owned_client {
             ) -> Result<()> {
                 self.inner.vsetattrs(updates, follow_symlinks)
             }
+            /// Create symbolic links, retaining each target's original text.
+            pub fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+                self.inner.vsymlink(pairs)
+            }
+            /// Read symlink targets in input order.
+            pub fn vreadlink<P: AsRef<Path>>(
+                &self,
+                paths: &[P],
+            ) -> Result<Vec<std::path::PathBuf>> {
+                self.inner.vreadlink(paths)
+            }
+            /// Create hard links in native backend batches.
+            pub fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(
+                &self,
+                pairs: &[(P, Q)],
+            ) -> Result<()> {
+                self.inner.vhardlink(pairs)
+            }
             /// Return this client's allocation and traversal limits.
             pub fn limits(&self) -> ResourceLimits {
                 self.inner.limits()
@@ -52,8 +70,8 @@ macro_rules! owned_client {
             }
             /// Create directories in vector phases; parents must exist.
             /// An error can follow partially completed mutations.
-            pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {
-                self.inner.mkdirv(paths)
+            pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[(P, u32)]) -> Result<()> {
+                self.inner.mkdirv_with_modes(paths)
             }
             /// Create one directory with explicit Unix permission bits.
             pub fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> Result<()> {

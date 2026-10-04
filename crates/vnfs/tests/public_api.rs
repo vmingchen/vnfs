@@ -514,3 +514,23 @@ fn vsetattrs_many_local_and_routed_files() {
         11
     );
 }
+
+#[cfg(all(feature = "auto", target_os = "linux"))]
+#[path = "support/links.rs"]
+mod links_support;
+
+#[cfg(all(feature = "auto", target_os = "linux"))]
+#[test]
+fn vector_links_modes_and_capabilities_work_generically_on_local_and_auto() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("local")).unwrap();
+    std::fs::create_dir(root.path().join("auto")).unwrap();
+    let mounted = vnfs::Mounted::new(root.path()).unwrap();
+    links_support::check_links_and_modes(&mounted, "/local");
+    let auto = vnfs::Auto::new(root.path()).unwrap();
+    links_support::check_links_and_modes(&auto, "/auto");
+    assert_eq!(
+        vnfs::Vfsi::capabilities(&auto).unwrap(),
+        vnfs::Vfsi::capabilities(&mounted).unwrap()
+    );
+}

@@ -561,7 +561,9 @@ fn application_collection_preserves_native_batching_and_root_groups() {
         .connect()
         .unwrap();
     let roots: Vec<_> = (0..10).map(|index| format!("{dir}/d{index}")).collect();
-    client.vmkdir(&roots).unwrap();
+    client
+        .vmkdir(&roots.iter().map(|path| (path, 0o777)).collect::<Vec<_>>())
+        .unwrap();
     let files: Vec<_> = roots
         .iter()
         .map(|root| (format!("{root}/file"), b"data"))
@@ -3863,7 +3865,8 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
         .connect()
         .unwrap();
     let roots: Vec<_> = (0..40).map(|i| format!("{dir}/d{i}")).collect();
-    fs.vmkdir(&roots).unwrap();
+    fs.vmkdir(&roots.iter().map(|path| (path, 0o777)).collect::<Vec<_>>())
+        .unwrap();
     let files: Vec<_> = roots
         .iter()
         .enumerate()
@@ -3938,8 +3941,8 @@ fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
     let child = format!("{tree}/child");
     let saved = format!("{dir}/saved");
     let target = format!("{dir}/outside");
-    fs.vmkdir(&[&tree, &target]).unwrap();
-    fs.vmkdir(&[&child]).unwrap();
+    fs.vmkdir(&[(&tree, 0o777), (&target, 0o777)]).unwrap();
+    fs.vmkdir(&[(&child, 0o777)]).unwrap();
     fs.write(format!("{target}/secret"), b"must not be traversed")
         .unwrap();
     let mut changed = false;
@@ -3996,7 +3999,7 @@ fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
     }
     // Parents exist before children are created.
     for path in &paths {
-        fs.vmkdir(&[path]).unwrap();
+        fs.vmkdir(&[(path, 0o777)]).unwrap();
     }
     fs.write(format!("{path}/leaf"), b"x").unwrap();
     let _ = vfsi_nfs::compound::thread_compound_stats();
@@ -4028,8 +4031,14 @@ fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
     let tree = format!("{dir}/tree");
     let moved = format!("{dir}/moved");
     let children: Vec<_> = (0..4).map(|i| format!("{tree}/child{i}")).collect();
-    fs.vmkdir(&[&tree]).unwrap();
-    fs.vmkdir(&children).unwrap();
+    fs.vmkdir(&[(&tree, 0o777)]).unwrap();
+    fs.vmkdir(
+        &children
+            .iter()
+            .map(|path| (path, 0o777))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
     fs.write_files(
         &children
             .iter()
@@ -4111,5 +4120,23 @@ fn vsetattrs_many_nfs_files() {
         .connect()
         .unwrap();
     vsetattrs_support::check_many(&fs, &directory);
+    fs.remove_dir_all(&directory).unwrap();
+}
+
+#[path = "support/links.rs"]
+mod links_support;
+
+#[test]
+fn vector_links_modes_and_capabilities_work_generically_on_nfs() {
+    let directory = setup_dir("vector-links-modes");
+    let fs = Nfs::builder(test_host())
+        .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => vnfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::NfsVersion::V4_2,
+            _ => vnfs::NfsVersion::Auto,
+        })
+        .connect()
+        .unwrap();
+    links_support::check_links_and_modes(&fs, &directory);
     fs.remove_dir_all(&directory).unwrap();
 }

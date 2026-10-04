@@ -669,32 +669,89 @@ impl<F: VecFs> FsClient<F> {
     /// Create directories in input order using vector MKDIR. Parents must
     /// already exist. This is not transactional: failure may leave a prefix.
     pub fn mkdirv<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
-        let mut seen = HashSet::with_capacity(paths.len());
-        for (index, path) in paths.iter().enumerate() {
+        let directories: Vec<_> = paths.iter().map(|path| (path.as_ref(), 0o777)).collect();
+        self.mkdirv_with_modes(&directories)
+    }
+
+    /// Create directories with per-request Unix permission bits.
+    pub fn mkdirv_with_modes<P: AsRef<Path>>(&self, directories: &[(P, u32)]) -> VfResult<()> {
+        let mut seen = HashSet::with_capacity(directories.len());
+        for (index, (path, _)) in directories.iter().enumerate() {
             if !seen.insert(path.as_ref()) {
                 return Err(
                     VfError::client(index, crate::ERR_INVAL).with_context("mkdirv", path.as_ref())
                 );
             }
         }
-        if paths.is_empty() {
+        if directories.is_empty() {
             return Ok(());
         }
-        let dirs: Vec<_> = paths
+        let dirs: Vec<_> = directories
             .iter()
-            .map(|path| crate::VfAttrs {
+            .map(|(path, mode)| crate::VfAttrs {
                 file: VfFile::from_os_path(path.as_ref()),
                 masks: AttrMask::MODE,
-                mode: 0o777,
+                mode: *mode,
                 ..Default::default()
             })
             .collect();
-        self.lock()?.mkdirv(&dirs).map_err(|error| {
-            match error.index().and_then(|index| paths.get(index)) {
-                Some(path) => error.with_context("mkdirv", path.as_ref()),
+        self.lock()?
+            .mkdirv(&dirs)
+            .map_err(|error| match error.index() {
+                Some(index) if index < directories.len() => {
+                    error.with_context("mkdirv", directories[index].0.as_ref())
+                }
+                Some(_) => {
+                    VfError::transport(None, "mkdir backend returned an invalid error index")
+                }
                 None => error,
-            }
-        })
+            })
+    }
+
+    /// Create symbolic links in one native backend vector.
+    pub fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let targets: Vec<_> = pairs.iter().map(|(target, _)| target.as_ref()).collect();
+        let links: Vec<_> = pairs.iter().map(|(_, link)| link.as_ref()).collect();
+        self.lock()?
+            .symlinkv(&targets, &links)
+            .map_err(|error| link_error(error, &links, "vsymlink"))
+    }
+
+    /// Read targets without converting Unix path bytes through UTF-8.
+    pub fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<PathBuf>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        let paths: Vec<_> = paths.iter().map(AsRef::as_ref).collect();
+        let targets = self
+            .lock()?
+            .readlinkv(&paths)
+            .map_err(|error| link_error(error, &paths, "vreadlink"))?;
+        if targets.len() != paths.len() {
+            return Err(VfError::transport(
+                None,
+                "readlink backend returned an invalid result count",
+            ));
+        }
+        Ok(targets
+            .into_iter()
+            .map(crate::native::bytes_to_path)
+            .collect())
+    }
+
+    /// Create hard links in one native backend vector.
+    pub fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+        if pairs.is_empty() {
+            return Ok(());
+        }
+        let sources: Vec<_> = pairs.iter().map(|(source, _)| source.as_ref()).collect();
+        let links: Vec<_> = pairs.iter().map(|(_, link)| link.as_ref()).collect();
+        self.lock()?
+            .hardlinkv(&sources, &links)
+            .map_err(|error| link_error(error, &links, "vhardlink"))
     }
 
     /// Lazy between directories, with selective no-follow metadata and pruning.
@@ -2453,6 +2510,14 @@ impl<F: FileSystem> Drop for FsFile<F> {
                 },
             );
         }
+    }
+}
+
+fn link_error(error: VfError, paths: &[&Path], operation: &'static str) -> VfError {
+    match error.index() {
+        Some(index) if index < paths.len() => error.with_context(operation, paths[index]),
+        Some(_) => VfError::transport(None, "link backend returned an invalid error index"),
+        None => error,
     }
 }
 

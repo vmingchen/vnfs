@@ -447,6 +447,18 @@ macro_rules! client_methods {
             }
             Ok(output)
         }
+        fn capabilities(&self) -> Result<vfsi_core::Capabilities> {
+            <$client>::capabilities($receiver(self))
+        }
+        fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+            <$client>::vsymlink($receiver(self), pairs)
+        }
+        fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<std::path::PathBuf>> {
+            <$client>::vreadlink($receiver(self), paths)
+        }
+        fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+            <$client>::vhardlink($receiver(self), pairs)
+        }
         fn vsetattrs<P: AsRef<Path>>(
             &self,
             updates: &[(P, vfsi_core::MetadataUpdate)],
@@ -495,8 +507,8 @@ macro_rules! client_methods {
         fn vclose(&self, files: &mut [Self::File]) -> Result<()> {
             <$client>::$close($receiver(self), files)
         }
-        fn vmkdir<P: AsRef<Path>>(&self, paths: &[P]) -> Result<()> {
-            <$client>::$mkdir($receiver(self), paths)
+        fn vmkdir<P: AsRef<Path>>(&self, paths: &[(P, u32)]) -> Result<()> {
+            <$client>::mkdirv_with_modes($receiver(self), paths)
         }
 
         fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
