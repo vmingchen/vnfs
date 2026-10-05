@@ -2046,7 +2046,7 @@ impl Backend for SmbVecFs {
         } else {
             for (index, (source, destination)) in prepared.into_iter().enumerate() {
                 self.runtime
-                    .block_on(self.client.rename(&mut self.tree, &source, &destination))
+                    .block_on(self.client.rename(&self.tree, &source, &destination))
                     .map_err(|e| smb_error(e, index))?;
             }
         }
@@ -2103,10 +2103,10 @@ impl Backend for SmbVecFs {
                 let info = self.client_stat(&path).map_err(|e| e.with_index(index))?;
                 let result = if info.is_directory {
                     self.runtime
-                        .block_on(self.client.delete_directory(&mut self.tree, &path))
+                        .block_on(self.client.delete_directory(&self.tree, &path))
                 } else {
                     self.runtime
-                        .block_on(self.client.delete_file(&mut self.tree, &path))
+                        .block_on(self.client.delete_file(&self.tree, &path))
                 };
                 result.map_err(|e| smb_error(e, index))?;
             }
@@ -2143,7 +2143,7 @@ impl Backend for SmbVecFs {
         } else {
             for (index, (_, path)) in prepared.into_iter().enumerate() {
                 self.runtime
-                    .block_on(self.client.create_directory(&mut self.tree, &path))
+                    .block_on(self.client.create_directory(&self.tree, &path))
                     .map_err(|e| smb_error(e, index))?;
             }
         }
