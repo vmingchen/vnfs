@@ -424,7 +424,7 @@ jobs:
           .typecheck-venv/bin/pip install \
             adapters/vfsi-fsspec/dist/*.whl adapters/nfs4fs/dist/*.whl \
             adapters/vsmb/dist/*.whl adapters/vsmbfs/dist/*.whl \
-            black==26.5.1 mypy==2.3.1 ruff==0.16.6
+            black==26.5.1 mypy==1.20.2 ruff==0.16.6
           .typecheck-venv/bin/black --check \
             adapters/vfsi-fsspec/python adapters/vfsi-fsspec/tests \
             adapters/nfs4fs/python adapters/nfs4fs/tests \
@@ -436,13 +436,13 @@ jobs:
             adapters/vsmb/python adapters/vsmb/tests \
             adapters/vsmbfs/python adapters/vsmbfs/tests
           cd /tmp
-          "$GITHUB_WORKSPACE/.typecheck-venv/bin/python" -m mypy --strict \
+          "$GITHUB_WORKSPACE/.typecheck-venv/bin/python" -m mypy --python-version 3.9 --strict \
             "$GITHUB_WORKSPACE/adapters/vfsi-fsspec/tests/typecheck_api.py"
-          "$GITHUB_WORKSPACE/.typecheck-venv/bin/python" -m mypy --strict \
+          "$GITHUB_WORKSPACE/.typecheck-venv/bin/python" -m mypy --python-version 3.9 --strict \
             "$GITHUB_WORKSPACE/adapters/nfs4fs/tests/typecheck_api.py"
-          "$GITHUB_WORKSPACE/.typecheck-venv/bin/python" -m mypy --strict \
+          "$GITHUB_WORKSPACE/.typecheck-venv/bin/python" -m mypy --python-version 3.9 --strict \
             "$GITHUB_WORKSPACE/adapters/vsmb/tests/typecheck_api.py"
-          "$GITHUB_WORKSPACE/.typecheck-venv/bin/python" -m mypy --strict \
+          "$GITHUB_WORKSPACE/.typecheck-venv/bin/python" -m mypy --python-version 3.9 --strict \
             "$GITHUB_WORKSPACE/adapters/vsmbfs/tests/typecheck_api.py"
 
   security:

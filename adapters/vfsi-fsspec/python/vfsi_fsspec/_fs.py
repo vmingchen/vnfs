@@ -14,6 +14,7 @@ import threading
 import uuid
 import weakref
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from glob import has_magic
 from urllib.parse import unquote, urlsplit
@@ -481,6 +482,69 @@ class _ClientPool:
         owner, client = self._choose()
         with self._client_locks[owner]:
             return [self._register(owner, fd) for fd in client.open_many(paths, modes)]
+
+    def open_many_independent(self, paths, modes):
+        """Open descriptors concurrently across independent pooled sessions.
+
+        Unlike open_many, this does not make one vector OPEN: every file
+        must remain attached to its own session so later positional operations
+        can run concurrently. It is intended for bounded reader pools.
+        """
+        if len(paths) != len(modes):
+            raise ValueError("paths and modes must have equal lengths")
+        self.ensure_ready()
+        self._retry_deferred_closes()
+        if not paths:
+            return []
+        with self._lock:
+            if not self._clients:
+                raise ValueError("filesystem is closed")
+            pool_size = len(self._clients)
+            start = self._next_client
+            self._next_client += len(paths)
+            owners = [(start + index) % pool_size for index in range(len(paths))]
+
+        def open_one(index):
+            owner = owners[index]
+            client = self._clients[owner]
+            with self._client_locks[owner]:
+                native_fd = client.open(paths[index], modes[index])
+                try:
+                    token = self._register(owner, native_fd)
+                except BaseException:
+                    try:
+                        client.close(native_fd)
+                    except BaseException:
+                        pass
+                    raise
+            return index, token
+
+        opened = [None] * len(paths)
+        failures = []
+        with ThreadPoolExecutor(max_workers=min(len(paths), pool_size)) as executor:
+            futures = [executor.submit(open_one, index) for index in range(len(paths))]
+            for future in as_completed(futures):
+                try:
+                    index, token = future.result()
+                except BaseException as error:
+                    failures.append(error)
+                else:
+                    opened[index] = token
+
+        if failures:
+            by_owner = {}
+            for token in opened:
+                if token is not None:
+                    owner, _, _ = self._resolve(token)
+                    by_owner.setdefault(owner, []).append(token)
+            for tokens in by_owner.values():
+                try:
+                    self.close_many(tokens)
+                except BaseException:
+                    self.defer_close_many(tokens)
+            raise failures[0]
+
+        return opened
 
     def chdir(self, path):
         """Keep the session-local working directory identical across the pool."""

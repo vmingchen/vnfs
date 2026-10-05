@@ -103,7 +103,7 @@ class VfsiFileSystem(AbstractFileSystem):
         directory_max_entries: int = 100_000,
         directory_max_path_bytes: int = 16_777_216,
         walk_max_depth: int = 128,
-        auth: str | None = None,
+        auth: Optional[str] = None,
         service_principal: Optional[str] = None,
         connection_pool_size: int = 1,
         **kwargs: Any,

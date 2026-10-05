@@ -56,6 +56,43 @@ def test_pipelined_stream_is_ordered_and_bounded(fs, monkeypatch):
     assert 1 < peak <= 3
 
 
+def test_pipelined_stream_opens_worker_sessions_concurrently(fs, monkeypatch):
+    payload = b"parallel-open"
+    fs.pipe_file("/data", payload)
+    barrier = threading.Barrier(3)
+
+    for client in fs._client._clients:
+        original = client.open
+
+        def synchronized_open(path, mode, _open=original):
+            barrier.wait(timeout=2)
+            return _open(path, mode)
+
+        monkeypatch.setattr(client, "open", synchronized_open)
+
+    chunks = []
+    assert fs.read_stream_pipelined(
+        "/data",
+        lambda offset, data: chunks.append((offset, data)),
+        workers=3,
+        chunk_size=4,
+    ) == len(payload)
+    assert b"".join(data for _, data in chunks) == payload
+
+
+def test_pipelined_stream_open_failure_closes_successful_siblings(fs, monkeypatch):
+    fs.pipe_file("/data", b"opened")
+    failed_client = fs._client._clients[1]
+
+    def fail_open(_path, _mode):
+        raise PermissionError("injected OPEN failure")
+
+    monkeypatch.setattr(failed_client, "open", fail_open)
+    with pytest.raises(PermissionError, match="injected OPEN failure"):
+        fs.read_stream_pipelined("/data", lambda *_: None, workers=3, chunk_size=2)
+    assert fs._client._fds == {}
+
+
 def test_pipelined_stream_never_overlaps_reads_on_one_descriptor(fs, monkeypatch):
     payload = b"abcdefghijklmnopqrstuvwx"
     fs.pipe_file("/data", payload)

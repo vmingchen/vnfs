@@ -134,16 +134,25 @@ class Nfs4FileSystem(_VfsiFileSystem):
         total = 0
 
         with ExitStack() as stack:
+            fds = self._client.open_many_independent(
+                [native_path] * workers, ["rb"] * workers
+            )
             readers = []
-            for _ in range(workers):
-                fd = self._client.open(native_path, "rb")
-                try:
+            try:
+                for fd in fds:
                     reader = _RawVfsiFile(self, internal, "rb", fd=fd)
-                except BaseException:
-                    self._client.close(fd)
-                    raise
-                readers.append(reader)
-                stack.callback(reader.close)
+                    readers.append(reader)
+                    stack.callback(reader.close)
+            except BaseException:
+                # Close handles not yet transferred to a reader; callbacks
+                # already registered on the ExitStack own the earlier ones.
+                for fd in fds[len(readers) :]:
+                    if self._client.descriptor_valid(fd):
+                        try:
+                            self._client.close(fd)
+                        except BaseException:
+                            self._client.defer_close_many([fd])
+                raise
             try:
                 size = self._client.fstat(readers[0]._ensure_open())["size"]
             except ConnectionError:
