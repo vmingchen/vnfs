@@ -1,6 +1,6 @@
 //! Native and high-level NFS integration tests. The server defaults to
-//! 127.0.0.1 with export `/`; configure VFSI_NFS_SERVER and VFSI_NFS_EXPORT
-//! for another writable fixture. Select NFSv4.1 or v4.2 with VNFS_TEST_MINOR.
+//! 127.0.0.1 with writable export `/`; override its address with VNFS_TEST_HOST.
+//! Select NFSv4.1 or v4.2 with VNFS_TEST_MINOR.
 //!
 //! ```sh
 //! cargo test -p vnfs --test nfs --all-features -- --test-threads=1
