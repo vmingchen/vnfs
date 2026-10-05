@@ -47,12 +47,57 @@ class WheelContractTests(unittest.TestCase):
             self.assertFalse(bundling.check(self.make_wheel()))
 
     def test_bundled_second_ntirpc_fails(self):
-        self.assertFalse(
-            bundling.check(self.make_wheel(extra=("libntirpc-hash.so.6",)))
-        )
+        with patch.object(
+            bundling.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0, "(NEEDED) [libc.so.6]"),
+        ):
+            self.assertFalse(
+                bundling.check(self.make_wheel(extra=("libntirpc-hash.so.6",)))
+            )
 
     def test_missing_runtime_dependency_fails(self):
-        self.assertFalse(bundling.check(self.make_wheel(missing=("liburcu-bp.so.8",))))
+        with patch.object(
+            bundling.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0, "(NEEDED) [liburcu-bp.so.8]"),
+        ):
+            self.assertFalse(bundling.check(self.make_wheel(missing=("liburcu-bp.so.8",))))
+
+    def test_static_build_without_dynamic_rcu_passes(self):
+        with patch.object(
+            bundling.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0, "(NEEDED) [libgssapi_krb5.so.2]"),
+        ):
+            self.assertTrue(bundling.check(self.make_wheel(missing=("liburcu-bp.so.8",))))
+
+    def test_bundled_wrong_rcu_flavor_does_not_satisfy_needed_library(self):
+        with patch.object(
+            bundling.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0, "(NEEDED) [liburcu-cds.so.8]"),
+        ):
+            self.assertFalse(bundling.check(self.make_wheel()))
+
+    def test_missing_gss_library_is_still_rejected(self):
+        with patch.object(
+            bundling.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0, "(NEEDED) [libc.so.6]"),
+        ):
+            self.assertFalse(bundling.check(self.make_wheel(missing=("libgssapi_krb5.so.2",))))
+
+    def test_dependency_of_a_bundled_library_also_requires_rcu(self):
+        with patch.object(
+            bundling.subprocess,
+            "run",
+            side_effect=[
+                subprocess.CompletedProcess([], 0, "(NEEDED) [libgssapi_krb5.so.2]"),
+                subprocess.CompletedProcess([], 0, "(NEEDED) [liburcu-bp.so.8]"),
+            ],
+        ):
+            self.assertFalse(bundling.check(self.make_wheel(missing=("liburcu-bp.so.8",))))
 
     def test_inspection_failure_is_not_accepted(self):
         with patch.object(

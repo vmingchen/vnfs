@@ -10,6 +10,7 @@ Usage: check-wheel-bundling.py <wheel> [wheel...]
 """
 
 import sys
+import re
 import zipfile
 import subprocess
 import tempfile
@@ -18,11 +19,12 @@ from pathlib import Path
 # Library-name stems that must be present in the wheel's bundled libraries.
 # auditwheel may mangle the filename,
 # so match on a substring rather than an exact name.
-REQUIRED = ("libgssapi_krb5", "liburcu")
+REQUIRED = ("libgssapi_krb5",)
 
 
-def has_dynamic_ntirpc(wheel):
+def dynamic_dependencies(wheel):
     """Inspect ELF dependency tags, not symbol names or archive substrings."""
+    dependencies = set()
     with zipfile.ZipFile(wheel) as archive, tempfile.TemporaryDirectory() as temp:
         for index, name in enumerate(archive.namelist()):
             basename = name.rsplit("/", 1)[-1]
@@ -37,13 +39,10 @@ def has_dynamic_ntirpc(wheel):
                 text=True,
                 check=True,
             )
-            if any(
-                "(NEEDED)" in line and "libntirpc" in line
-                for line in result.stdout.splitlines()
-            ):
-                print(f"ERROR: {name} dynamically links libntirpc", file=sys.stderr)
-                return True
-    return False
+            dependencies.update(
+                re.findall(r"\(NEEDED\).*\[([^\]]+)\]", result.stdout)
+            )
+    return dependencies
 
 
 def bundled_libraries(wheel):
@@ -61,13 +60,23 @@ def check(wheel):
     print(f"{wheel}: {len(bundled)} bundled libraries")
     for name in sorted(basenames):
         print(f"  {name}")
+    dependencies = dynamic_dependencies(wheel)
+    # Static ntirpc builds can eliminate their unused RCU dependency. Require
+    # RCU only when an ELF object actually needs it; importing on a build host
+    # alone does not prove a dynamically needed library was bundled.
     missing = [stem for stem in REQUIRED if not any(stem in name for name in basenames)]
+    missing.extend(
+        sorted(name for name in dependencies if name.startswith("liburcu") and name not in basenames)
+    )
     for stem in missing:
         print(f"ERROR: {wheel} does not bundle {stem}*", file=sys.stderr)
     unexpected = any("libntirpc" in name for name in basenames)
     if unexpected:
         print(f"ERROR: {wheel} bundles a second libntirpc", file=sys.stderr)
-    return not missing and not unexpected and not has_dynamic_ntirpc(wheel)
+    dynamic_ntirpc = any("libntirpc" in name for name in dependencies)
+    if dynamic_ntirpc:
+        print(f"ERROR: {wheel} dynamically links libntirpc", file=sys.stderr)
+    return not missing and not unexpected and not dynamic_ntirpc
 
 
 def main(argv):
