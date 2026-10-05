@@ -4,6 +4,56 @@ These are observed GitHub Actions timings, retained for a separate release-speed
 investigation. Durations are wall-clock job or step times from the GitHub Actions
 API, not estimates of CPU time. Jobs run concurrently.
 
+## 2026-10-04 coordinated releases
+
+Workflow wall time includes runner queueing; job durations exclude runner wait
+time. These runs occurred after midnight UTC on October 5 (October 4 in
+America/New_York).
+
+| Release run | Wall time | Result |
+| --- | ---: | --- |
+| [vfsi-fsspec 0.1.5](https://github.com/vmingchen/vnfs/actions/runs/37253299887) | 2m 30s | Success |
+| [nfs4fs 0.3.5](https://github.com/vmingchen/vnfs/actions/runs/37254374106) | 23m 04s | Success |
+| [vsmb 0.1.2](https://github.com/vmingchen/vnfs/actions/runs/37253300562) | 4m 46s | Success |
+| [vsmbfs 0.1.2](https://github.com/vmingchen/vnfs/actions/runs/37253714637) | 1m 11s | Success |
+
+| Release | Job | Duration |
+| --- | --- | ---: |
+| vfsi-fsspec 0.1.5 | Verify CI | 7s |
+| vfsi-fsspec 0.1.5 | Build and test | 40s |
+| vfsi-fsspec 0.1.5 | Publish | 29s |
+| nfs4fs 0.3.5 | Verify CI | 5s |
+| nfs4fs 0.3.5 | Source distribution | 18s |
+| nfs4fs 0.3.5 | SBOM | 1m 34s |
+| nfs4fs 0.3.5 | x86_64 abi3 wheel | 2m 36s |
+| nfs4fs 0.3.5 | x86_64 CPython 3.14 free-threaded wheel | 2m 34s |
+| nfs4fs 0.3.5 | aarch64 abi3 wheel under QEMU | 21m 37s |
+| nfs4fs 0.3.5 | Installed wheel against live NFS RPCSEC_GSS | 32s |
+| nfs4fs 0.3.5 | Publish | 24s |
+| vsmb 0.1.2 | Verify CI | 5s |
+| vsmb 0.1.2 | Source distribution | 29s |
+| vsmb 0.1.2 | SBOM | 1m 18s |
+| vsmb 0.1.2 | x86_64 abi3 wheel | 1m 19s |
+| vsmb 0.1.2 | x86_64 CPython 3.14 free-threaded wheel | 1m 25s |
+| vsmb 0.1.2 | aarch64 abi3 wheel | 2m 48s |
+| vsmb 0.1.2 | Publish | 27s |
+| vsmbfs 0.1.2 | Verify CI | 7s |
+| vsmbfs 0.1.2 | Build and test | 39s |
+| vsmbfs 0.1.2 | Publish | 23s |
+
+The initial [nfs4fs 0.3.5 attempt](https://github.com/vmingchen/vnfs/actions/runs/37253539775)
+was canceled after the x86_64 wheel checks rejected an absent but unused RCU
+library. The wheels installed and imported successfully, but nothing was
+published from that attempt. The packaging checker was corrected to require
+the exact RCU library only when an ELF dependency actually needs it, with
+regressions for absent dependencies, wrong RCU flavors, and dynamic ntirpc.
+The unpublished nfs4fs tag was advanced after CI passed. Published release
+tags were unchanged. Failed/canceled attempts are not success-time baselines.
+
+The successful nfs4fs aarch64 **Build the portable wheel** step took
+**21m 00s**, dominating the release's critical path. This is observed timing,
+not a controlled performance comparison; no build strategy was changed.
+
 ## 2026-10-02 coordinated releases
 
 Workflow wall time includes runner queueing, from workflow creation to final
