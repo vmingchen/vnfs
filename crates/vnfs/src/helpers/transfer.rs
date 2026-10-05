@@ -1,7 +1,7 @@
 use crate::{
-    ControlFlow, DepthLimit, Error, FileHandle, Metadata, MetadataFields, MetadataOptions,
-    OpenFlags, OpenRequest, ReadOp, ReadOptions, Result, TransportKind, Vfsi, VfsiExt,
-    VisitOptions, WriteOp, WriteOptions,
+    Attributes, Attrs, AttrsOptions, ControlFlow, DepthLimit, Error, FileHandle, ListDirOptions,
+    OpenFlags, OpenOp, ReadOp, ReadOptions, Result, TransportKind, Vfsi, VfsiExt, WriteOp,
+    WriteOptions,
 };
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -214,7 +214,7 @@ pub fn copy_tree_with_progress(
 struct Task {
     source: PathBuf,
     destination: PathBuf,
-    metadata: Metadata,
+    metadata: Attrs,
     root: usize,
     depth: usize,
     fresh_destination: bool,
@@ -268,8 +268,8 @@ fn normalize(path: &Path, max: usize) -> Result<PathBuf> {
     }
     Ok(out)
 }
-fn fields() -> MetadataFields {
-    MetadataFields::MODE | MetadataFields::SIZE | MetadataFields::FILEID
+fn fields() -> Attributes {
+    Attributes::MODE | Attributes::SIZE | Attributes::FILEID
 }
 fn mapped(error: Error, tasks: &[Task]) -> Error {
     if let Some(task) = error.index().and_then(|i| tasks.get(i)) {
@@ -338,9 +338,7 @@ fn roots<P: AsRef<Path>>(
         let metadata = fs
             .vgetattrs(
                 &paths,
-                MetadataOptions::new()
-                    .fields(fields())
-                    .follow_symlinks(false),
+                AttrsOptions::new().fields(fields()).follow_symlinks(false),
             )
             .map_err(|e| mapped(e, batch))?;
         if metadata.len() != batch.len() {
@@ -393,7 +391,7 @@ fn roots<P: AsRef<Path>>(
     }
     Ok(tasks)
 }
-fn placeholder() -> Metadata {
+fn placeholder() -> Attrs {
     vfsi_core::metadata_from_attrs(vfsi_core::VfAttrs::default())
 }
 fn ensure_dirs(fs: &impl Vfsi, tasks: &mut [Task]) -> Result<()> {
@@ -412,7 +410,7 @@ fn ensure_dirs(fs: &impl Vfsi, tasks: &mut [Task]) -> Result<()> {
             // Semantic EEXIST may follow creations. Reconcile each object; never
             // infer a committed prefix or replay an ambiguous transport error.
             for task in tasks {
-                match fs.symlink_metadata(&task.destination) {
+                match fs.symlink_attrs(&task.destination) {
                     Ok(meta) if meta.is_dir() => {
                         task.fresh_destination = false;
                     }
@@ -509,7 +507,7 @@ fn copy_roots(
         let wave: Vec<_> = pending.drain(pending.len() - wave_size..).collect();
         let paths: Vec<_> = wave.iter().map(|t| &t.source).collect();
         let remaining = budget.max_entries.saturating_sub(budget.entries);
-        let options_visit = VisitOptions::new()
+        let options_visit = ListDirOptions::new()
             .fields(fields())
             .max_entries(remaining)
             .max_path_bytes(budget.max_bytes.saturating_sub(budget.bytes));
@@ -537,7 +535,7 @@ fn copy_roots(
                             .depth
                             .checked_add(1)
                             .ok_or_else(|| limit(parent.root, entry.path()))?;
-                        if entry.metadata().is_dir()
+                        if entry.attrs().is_dir()
                             && depth > options.depth.map_or(limits.max_walk_depth, |d| d.get())
                         {
                             if options.depth.is_some() {
@@ -550,7 +548,7 @@ fn copy_roots(
                         children.push(Task {
                             source: entry.path().to_path_buf(),
                             destination: dest,
-                            metadata: entry.metadata().clone(),
+                            metadata: entry.attrs().clone(),
                             root: parent.root,
                             depth,
                             fresh_destination: parent.fresh_destination,
@@ -706,8 +704,7 @@ fn copy_batch(
         let requests: Vec<_> = tasks
             .iter()
             .map(|t| {
-                OpenRequest::new(&t.destination, OpenFlags::WRITE | OpenFlags::CREATE_NEW)
-                    .mode(0o600)
+                OpenOp::new(&t.destination, OpenFlags::WRITE | OpenFlags::CREATE_NEW).mode(0o600)
             })
             .collect();
         let handles = fs.vopen(&requests).map_err(|e| mapped(e, tasks))?;
@@ -727,7 +724,7 @@ fn copy_batch(
     }
     let requests: Vec<_> = tasks
         .iter()
-        .map(|t| OpenRequest::new(&t.source, OpenFlags::READ))
+        .map(|t| OpenOp::new(&t.source, OpenFlags::READ))
         .collect();
     let sources = fs.vopen(&requests).map_err(|e| mapped(e, tasks))?;
     let mut destinations = Vec::new();
@@ -742,7 +739,7 @@ fn copy_batch(
             // distinguish skipped files without guessing ownership of that prefix.
             for (index, task) in tasks.iter().enumerate() {
                 let request =
-                    OpenRequest::new(&task.destination, OpenFlags::WRITE | OpenFlags::CREATE_NEW)
+                    OpenOp::new(&task.destination, OpenFlags::WRITE | OpenFlags::CREATE_NEW)
                         .mode(0o600);
                 match fs.vopen(&[request]) {
                     Ok(mut files) => {
@@ -767,7 +764,7 @@ fn copy_batch(
             let flags = OpenFlags::WRITE | OpenFlags::CREATE_NEW;
             let requests: Vec<_> = tasks
                 .iter()
-                .map(|t| OpenRequest::new(&t.destination, flags).mode(0o600))
+                .map(|t| OpenOp::new(&t.destination, flags).mode(0o600))
                 .collect();
             destinations = fs.vopen(&requests).map_err(|e| mapped(e, tasks))?;
             if destinations.len() != tasks.len() {
@@ -915,7 +912,7 @@ fn active_error(error: Error, active: &[usize], selected: &[usize], tasks: &[Tas
         error
     }
 }
-fn same_file(source: &Metadata, destination: &Metadata) -> bool {
+fn same_file(source: &Attrs, destination: &Attrs) -> bool {
     // Conservative without a portable filesystem-id field: matching file IDs
     // are rejected, even if two mounted filesystems could reuse the same ID.
     source.file_id().is_some() && source.file_id() == destination.file_id()
@@ -926,7 +923,7 @@ fn prepare_replace(fs: &impl Vfsi, tasks: &[Task]) -> Result<()> {
         if task.fresh_destination {
             continue;
         }
-        match fs.symlink_metadata(&task.destination) {
+        match fs.symlink_attrs(&task.destination) {
             Ok(meta) if !meta.is_file() || same_file(&task.metadata, &meta) => {
                 return Err(invalid(task.root, &task.destination));
             }
@@ -1041,7 +1038,7 @@ fn move_run<P: AsRef<Path>>(
                 .iter()
                 .map(|task| (&task.source, &task.destination))
                 .collect();
-            match fs.vrename_with_options(&pairs, crate::RenameOptions::NoReplace) {
+            match fs.vrename(&pairs, crate::RenameOptions::NoReplace) {
                 Ok(()) => summary.roots_renamed += renames.len() as u64,
                 Err(error) if !error.is_transport() => {
                     // A strict batch may have renamed a prefix. Do not infer that
@@ -1107,12 +1104,12 @@ fn reconcile_renames(
     summary: &mut TransferSummary,
 ) -> Result<()> {
     for task in tasks {
-        match fs.symlink_metadata(&task.source) {
+        match fs.symlink_attrs(&task.source) {
             Ok(source) => {
                 if task.metadata.file_id().is_some() && !same_file(&task.metadata, &source) {
                     return Err(invalid(task.root, &task.source));
                 }
-                match fs.symlink_metadata(&task.destination) {
+                match fs.symlink_attrs(&task.destination) {
                     Err(error)
                         if error.kind() == std::io::ErrorKind::NotFound && allow_fallback =>
                     {
@@ -1130,7 +1127,7 @@ fn reconcile_renames(
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let target = fs
-                    .symlink_metadata(&task.destination)
+                    .symlink_attrs(&task.destination)
                     .map_err(|error| mapped(error, std::slice::from_ref(task)))?;
                 if !same_file(&task.metadata, &target) {
                     return Err(mapped(failure.clone(), tasks));

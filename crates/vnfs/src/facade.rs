@@ -13,8 +13,8 @@ macro_rules! owned_client {
             pub fn vgetattrs<P: AsRef<Path>>(
                 &self,
                 paths: &[P],
-                options: MetadataOptions,
-            ) -> Result<Vec<Metadata>> {
+                options: AttrsOptions,
+            ) -> Result<Vec<Attrs>> {
                 crate::metadata::metadata_backend(&self.inner, paths, options)
             }
             /// Query filesystem statistics for paths and this client's open handles.
@@ -96,17 +96,13 @@ macro_rules! owned_client {
             pub fn capabilities(&self) -> Result<Capabilities> {
                 self.inner.capabilities()
             }
-            /// Rename source/destination pairs without scalarizing the native vector.
-            pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-                self.inner.vrename(pairs)
-            }
-            /// Rename with atomic no-replace semantics when the backend supports them.
-            pub fn vrename_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
+            /// Rename source/destination pairs with per-pair atomic semantics.
+            pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
                 &self,
                 pairs: &[(P, Q)],
                 options: RenameOptions,
             ) -> Result<()> {
-                self.inner.vrename_with_options(pairs, options)
+                self.inner.vrename(pairs, options)
             }
             /// Create directories in vector phases; parents must exist.
             /// An error can follow partially completed mutations.
@@ -123,7 +119,7 @@ macro_rules! owned_client {
             pub(crate) fn read_dir_pages_with_fields(
                 &self,
                 paths: &[&Path],
-                fields: crate::MetadataFields,
+                fields: crate::Attributes,
                 cursors: Vec<Option<vfsi_sync::DirPageCursor>>,
                 page_size: usize,
                 max_entries: usize,
@@ -202,7 +198,7 @@ macro_rules! owned_client {
             /// Success returns one RAII handle per request. Failure returns no
             /// handles; VFSI does not promise transactional rollback of other
             /// filesystem effects such as file creation.
-            pub fn vopen(&self, requests: &[OpenRequest]) -> Result<Vec<$file>> {
+            pub fn vopen(&self, requests: &[OpenOp]) -> Result<Vec<$file>> {
                 self.inner
                     .vopen(requests)
                     .map(|files| files.into_iter().map(|inner| $file { inner }).collect())
@@ -329,13 +325,13 @@ macro_rules! owned_client {
             fn page_capacity(&self, paths: &[&Path]) -> Result<usize> {
                 self.directory_page_batch_size(paths)
             }
-            fn open_native(&self, request: OpenRequest) -> Result<Self::File> {
+            fn open_native(&self, request: OpenOp) -> Result<Self::File> {
                 self.inner.open_with(request).map(|inner| $file { inner })
             }
             fn stream_native(
                 &self,
                 path: impl AsRef<Path>,
-                options: ReadStreamOptions,
+                options: StreamOptions,
                 callback: impl FnMut(u64, &[u8]) -> Result<bool>,
             ) -> Result<StreamCompletion> {
                 self.inner.read_stream_with_options(path, options, callback)
@@ -356,8 +352,8 @@ macro_rules! owned_client {
                 self.inner.path()
             }
             /// Query metadata for the open object without resolving its path again.
-            pub fn metadata(&self) -> Result<Metadata> {
-                self.inner.metadata()
+            pub fn attrs(&self) -> Result<Attrs> {
+                self.inner.attrs()
             }
             /// Positional read which does not alter the file cursor.
             pub fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize> {

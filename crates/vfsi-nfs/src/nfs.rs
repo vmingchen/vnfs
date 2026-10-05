@@ -4323,7 +4323,7 @@ impl FileSystem for NfsVecFs {
     fn read_file_impl(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
         vfsi_sync::backend_helpers::native_read_file_impl_default(self, file, max_bytes)
     }
-    fn open_impl(&mut self, request: &OpenRequest) -> VfResult<VfFile> {
+    fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
         vfsi_sync::backend_helpers::native_open_impl_default(self, request)
     }
     fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
@@ -4671,7 +4671,7 @@ impl Backend for NfsVecFs {
         self.ensure_writable(attrs.len())?;
         self.vsetattrs_nfs(attrs, false)
     }
-    fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Metadata> {
+    fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Attrs> {
         vfsi_sync::backend_helpers::native_metadata_path_impl_default(self, path, follow)
     }
     fn set_metadata_path_impl(

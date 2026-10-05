@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use crate::{Error, OpenFlags, OpenRequest, Result, WriteOp};
+use crate::{Error, OpenFlags, OpenOp, Result, WriteOp};
 
 /// A successfully created tree. Dropping this value does not delete files.
 /// Use the owning client's `remove_dir_all(tree.root())` for explicit cleanup.
@@ -42,14 +42,14 @@ struct Entry {
 ///
 /// ```no_run
 /// use vnfs::{Vfsi, VfsiExt, helpers::TreeBuilder};
-/// # fn example(client: &impl Vfsi) -> vnfs::Result<()> {
+/// # fn example(fs: &impl Vfsi) -> vnfs::Result<()> {
 /// let tree = TreeBuilder::new()
 ///     .add_file("config/app.conf", "host = localhost")
 ///     .add_empty_file("logs/app.log")
 ///     .add_directory("data/raw")
-///     .create(client, "/new-workspace")?;
+///     .create(fs, "/new-workspace")?;
 /// // Explicit cleanup when appropriate:
-/// client.remove_dir_all(tree.root())?;
+/// fs.remove_dir_all(tree.root())?;
 /// # Ok(())
 /// # }
 /// ```
@@ -173,7 +173,7 @@ impl TreeBuilder {
     /// path; entry indices refer to the original declarations (inferred parents
     /// use the first declaration requiring them), not to vector batch positions.
     /// Root-creation errors identify the root, not an entry declaration.
-    pub fn create<C: Vfsi>(self, client: &C, root: impl AsRef<Path>) -> Result<Tree> {
+    pub fn create<C: Vfsi>(self, fs: &C, root: impl AsRef<Path>) -> Result<Tree> {
         let root = root.as_ref();
         if let Some(error) = self.error {
             return Err(error);
@@ -236,27 +236,25 @@ impl TreeBuilder {
                     .push((root.join(path), index));
             }
         }
-        client
-            .create_dir(root)
+        fs.create_dir(root)
             .map_err(|e| e.with_context("create_tree", root))?;
         for level in directories.values() {
             for batch in level.chunks(self.batch_size) {
                 let paths: Vec<_> = batch.iter().map(|(path, _)| (path, 0o777)).collect();
-                client
-                    .vmkdir(&paths)
+                fs.vmkdir(&paths)
                     .map_err(|e| entry_error(e, batch, &self.entries))?;
             }
         }
         for batch in files.chunks(self.batch_size) {
             let requests: Vec<_> = batch
                 .iter()
-                .map(|(path, _)| OpenRequest::new(path, OpenFlags::WRITE | OpenFlags::CREATE_NEW))
+                .map(|(path, _)| OpenOp::new(path, OpenFlags::WRITE | OpenFlags::CREATE_NEW))
                 .collect();
-            let handles = client
+            let handles = fs
                 .vopen(&requests)
                 .map_err(|e| entry_error(e, batch, &self.entries))?;
             if handles.len() != batch.len() {
-                let _ = client.close_files(handles);
+                let _ = fs.close_files(handles);
                 return Err(
                     Error::transport(None, "create_tree: invalid OPEN result count")
                         .with_context("create_tree", root),
@@ -269,12 +267,12 @@ impl TreeBuilder {
                     WriteOp::at(file, 0, self.entries[*index].data.as_deref().unwrap())
                 })
                 .collect();
-            let write = client
+            let write = fs
                 .vwrite(&writes, crate::WriteOptions::new().write_all(true))
                 .map(|_| ())
                 .map_err(|e| entry_error(e, batch, &self.entries));
             drop(writes);
-            let close = client
+            let close = fs
                 .close_files(handles)
                 .map_err(|e| entry_error(e, batch, &self.entries));
             write?;

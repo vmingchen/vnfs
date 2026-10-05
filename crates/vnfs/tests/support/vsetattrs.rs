@@ -1,4 +1,4 @@
-use vnfs::{MetadataFields, MetadataOptions, MetadataUpdate, Permissions, Vfsi, VfsiExt};
+use vnfs::{Attributes, AttrsOptions, MetadataUpdate, Permissions, Vfsi, VfsiExt};
 
 pub fn check_many(fs: &impl Vfsi, directory: &str) {
     fs.vsetattrs::<&str>(&[], true).unwrap();
@@ -23,8 +23,8 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
         })
         .collect();
     fs.vsetattrs(&updates, true).unwrap();
-    let options = MetadataOptions::new()
-        .fields(MetadataFields::MODE | MetadataFields::SIZE | MetadataFields::MTIME);
+    let options =
+        AttrsOptions::new().fields(Attributes::MODE | Attributes::SIZE | Attributes::MTIME);
     let metadata = fs.vgetattrs(&paths, options).unwrap();
     assert_eq!(metadata.len(), paths.len());
     for (i, item) in metadata.iter().enumerate() {
@@ -61,7 +61,7 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
 
 /// Open objects remain targets even when their original names are reused.
 pub fn check_handles(fs: &impl Vfsi, directory: &str) {
-    use vnfs::{FileHandle, MetadataTarget, OpenFlags, OpenRequest};
+    use vnfs::{FileHandle, MetadataTarget, OpenFlags, OpenOp};
     let paths: Vec<_> = (0..64).map(|i| format!("{directory}/handle-{i}")).collect();
     fs.write_files(
         &paths
@@ -72,12 +72,15 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
     .unwrap();
     let requests: Vec<_> = paths
         .iter()
-        .map(|path| OpenRequest::new(path, OpenFlags::READ | OpenFlags::WRITE))
+        .map(|path| OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE))
         .collect();
     let mut files = fs.vopen(&requests).unwrap();
     let renamed: Vec<_> = paths.iter().map(|path| format!("{path}-moved")).collect();
-    fs.vrename(&paths.iter().zip(&renamed).collect::<Vec<_>>())
-        .unwrap();
+    fs.vrename(
+        &paths.iter().zip(&renamed).collect::<Vec<_>>(),
+        vnfs::RenameOptions::Replace,
+    )
+    .unwrap();
     fs.write_files(
         &paths
             .iter()
@@ -100,10 +103,10 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
     // no-follow must still address the opened objects.
     fs.vsetattrs(&updates, false).unwrap();
     for (i, file) in files.iter().enumerate() {
-        let attrs = file.metadata().unwrap();
+        let attrs = file.attrs().unwrap();
         assert_eq!(attrs.len(), i as u64);
         assert_eq!(attrs.permissions().mode() & 0o7777, 0o640);
-        assert_eq!(fs.metadata(&paths[i]).unwrap().len(), 11);
+        assert_eq!(fs.attrs(&paths[i]).unwrap().len(), 11);
     }
     fs.vsetattrs(
         &[
@@ -119,17 +122,17 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
         true,
     )
     .unwrap();
-    assert_eq!(files[0].metadata().unwrap().len(), 13);
-    assert_eq!(fs.metadata(&paths[0]).unwrap().len(), 17);
+    assert_eq!(files[0].attrs().unwrap().len(), 13);
+    assert_eq!(fs.attrs(&paths[0]).unwrap().len(), 17);
     fs.truncate(MetadataTarget::File(&files[0]), 19).unwrap();
     fs.chmod(
         MetadataTarget::File(&files[0]),
         Permissions::from_mode(0o600),
     )
     .unwrap();
-    assert_eq!(files[0].metadata().unwrap().len(), 19);
+    assert_eq!(files[0].attrs().unwrap().len(), 19);
     assert_eq!(
-        files[0].metadata().unwrap().permissions().mode() & 0o7777,
+        files[0].attrs().unwrap().permissions().mode() & 0o7777,
         0o600
     );
     files[1].try_close().unwrap();
@@ -150,7 +153,7 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EBADF as u32);
-    assert_eq!(files[0].metadata().unwrap().len(), 19);
+    assert_eq!(files[0].attrs().unwrap().len(), 19);
     for file in &mut files {
         if !file.is_closed() {
             file.try_close().unwrap();
@@ -159,14 +162,14 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
 }
 
 pub fn check_foreign<F: Vfsi>(fs: &F, other: &F, path: &str) {
-    use vnfs::{FileHandle, MetadataTarget, OpenFlags, OpenRequest};
+    use vnfs::{FileHandle, MetadataTarget, OpenFlags, OpenOp};
     fs.write_files(&[(path, b"original".as_slice())]).unwrap();
     let mut own = fs
-        .vopen(&[OpenRequest::new(path, OpenFlags::READ | OpenFlags::WRITE)])
+        .vopen(&[OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE)])
         .unwrap()
         .remove(0);
     let mut foreign = other
-        .vopen(&[OpenRequest::new(path, OpenFlags::READ | OpenFlags::WRITE)])
+        .vopen(&[OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE)])
         .unwrap()
         .remove(0);
     let error = fs
@@ -180,13 +183,13 @@ pub fn check_foreign<F: Vfsi>(fs: &F, other: &F, path: &str) {
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EINVAL as u32);
-    assert_eq!(own.metadata().unwrap().len(), 8);
+    assert_eq!(own.attrs().unwrap().len(), 8);
     own.try_close().unwrap();
     foreign.try_close().unwrap();
 }
 
 pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
-    use vnfs::{FileHandle, MetadataTarget, OpenFlags, OpenRequest};
+    use vnfs::{FileHandle, MetadataTarget, OpenFlags, OpenOp};
     let paths: Vec<_> = (0..64).map(|i| format!("{directory}/owner-{i}")).collect();
     fs.write_files(
         &paths
@@ -195,13 +198,13 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
             .collect::<Vec<_>>(),
     )
     .unwrap();
-    let options = MetadataOptions::new()
-        .fields(MetadataFields::stat() | MetadataFields::UID | MetadataFields::GID);
-    let metadata = |path: &str, follow: bool| {
-        fs.metadata_with_options(path, options.follow_symlinks(follow))
+    let options =
+        AttrsOptions::new().fields(Attributes::stat() | Attributes::UID | Attributes::GID);
+    let attrs = |path: &str, follow: bool| {
+        fs.attrs_with_options(path, options.follow_symlinks(follow))
             .unwrap()
     };
-    let original = metadata(&paths[0], true);
+    let original = attrs(&paths[0], true);
     let (uid, gid) = (original.uid().unwrap(), original.gid().unwrap());
     let privileged = unsafe { libc::geteuid() } == 0;
     let new_uid = if privileged { 10001 } else { uid };
@@ -232,12 +235,13 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
         .vopen(
             &paths
                 .iter()
-                .map(|p| OpenRequest::new(p, OpenFlags::READ | OpenFlags::WRITE))
+                .map(|p| OpenOp::new(p, OpenFlags::READ | OpenFlags::WRITE))
                 .collect::<Vec<_>>(),
         )
         .unwrap();
     let moved = format!("{directory}/owner-moved");
-    fs.vrename(&[(&paths[0], &moved)]).unwrap();
+    fs.vrename(&[(&paths[0], &moved)], vnfs::RenameOptions::Replace)
+        .unwrap();
     fs.write_files(&[(&paths[0], b"replacement".as_slice())])
         .unwrap();
     let updates: Vec<_> = files
@@ -254,18 +258,18 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
         .collect();
     fs.vsetattrs(&updates, false).unwrap();
     for file in &files {
-        let attrs = file.metadata().unwrap();
+        let attrs = file.attrs().unwrap();
         assert_eq!(attrs.uid(), Some(uid));
         assert_eq!(attrs.gid(), Some(gid));
         assert_eq!(attrs.permissions().mode() & 0o7777, 0o640);
     }
     fs.chown(MetadataTarget::File(&files[0]), Some(new_uid), None)
         .unwrap();
-    assert_eq!(files[0].metadata().unwrap().uid(), Some(new_uid));
-    assert_eq!(files[0].metadata().unwrap().gid(), Some(gid));
+    assert_eq!(files[0].attrs().unwrap().uid(), Some(new_uid));
+    assert_eq!(files[0].attrs().unwrap().gid(), Some(gid));
     fs.chown(&paths[0], None, Some(new_gid)).unwrap();
-    assert_eq!(metadata(&paths[0], true).uid(), Some(uid));
-    assert_eq!(metadata(&paths[0], true).gid(), Some(new_gid));
+    assert_eq!(attrs(&paths[0], true).uid(), Some(uid));
+    assert_eq!(attrs(&paths[0], true).gid(), Some(new_gid));
     let link = format!("{directory}/owner-link");
     fs.symlink("owner-1", &link).unwrap();
     fs.vsetattrs(
@@ -273,11 +277,11 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
         false,
     )
     .unwrap();
-    assert_eq!(metadata(&link, false).uid(), Some(new_uid));
-    assert_eq!(metadata(&paths[1], true).uid(), Some(uid));
+    assert_eq!(attrs(&link, false).uid(), Some(new_uid));
+    assert_eq!(attrs(&paths[1], true).uid(), Some(uid));
     // Following chown must change the target without changing link ownership.
     fs.chown(&link, Some(uid), Some(gid)).unwrap();
-    assert_eq!(metadata(&link, false).uid(), Some(new_uid));
+    assert_eq!(attrs(&link, false).uid(), Some(new_uid));
     let error = fs
         .vsetattrs(
             &[
@@ -295,7 +299,7 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EINVAL as u32);
-    assert_eq!(files[0].metadata().unwrap().len(), 9);
+    assert_eq!(files[0].attrs().unwrap().len(), 9);
     let missing = format!("{directory}/owner-missing");
     let error = fs
         .vsetattrs(

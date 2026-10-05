@@ -124,17 +124,14 @@ mod tests {
                 false,
             )
             .unwrap();
-        let attrs = file.metadata().unwrap();
+        let attrs = file.attrs().unwrap();
         assert_eq!(attrs.len(), 3);
         assert_eq!(attrs.modified(), Some(modified));
         assert_eq!(attrs.permissions().mode() & 0o7777, 0o640);
         file.truncate(5).unwrap();
         file.chmod(Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(file.metadata().unwrap().len(), 5);
-        assert_eq!(
-            file.metadata().unwrap().permissions().mode() & 0o7777,
-            0o600
-        );
+        assert_eq!(file.attrs().unwrap().len(), 5);
+        assert_eq!(file.attrs().unwrap().permissions().mode() & 0o7777, 0o600);
         assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"replacement");
         file.close().unwrap();
     }
@@ -1322,7 +1319,7 @@ mod tests {
         assert_eq!(error.operation(), Some("open"));
         assert_eq!(error.path(), Some(Path::new("/missing")));
         assert_eq!(error.index(), Some(0));
-        let error = client.metadata("/missing").unwrap_err();
+        let error = client.attrs("/missing").unwrap_err();
         assert_eq!(error.operation(), Some("metadata"));
         assert_eq!(error.path(), Some(Path::new("/missing")));
         assert_eq!(error.index(), Some(0));

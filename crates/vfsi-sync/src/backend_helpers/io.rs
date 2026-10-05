@@ -111,7 +111,7 @@ pub fn vclose_impl_default<F: Backend + ?Sized>(backend: &mut F, files: &[VfFile
 
 pub fn vopen_typed_default<F: Backend + ?Sized>(
     backend: &mut F,
-    requests: &[OpenRequest],
+    requests: &[OpenOp],
 ) -> VfResult<Vec<VfFile>> {
     let paths: Vec<&std::path::Path> = requests
         .iter()

@@ -81,7 +81,7 @@ pub trait FileSystem {
         crate::backend_helpers::read_file_impl_default(self, file, max_bytes)
     }
 
-    fn open_impl(&mut self, request: &OpenRequest) -> VfResult<VfFile>;
+    fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile>;
 
     fn close_impl(&mut self, file: &VfFile) -> VfResult<()>;
 
@@ -175,7 +175,7 @@ pub trait Backend: FileSystem {
 
     /// Open every typed request or return an error, cleaning confirmed handles.
     /// Creation and truncation effects are not rolled back.
-    fn vopen_impl(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>> {
+    fn vopen_impl(&mut self, requests: &[OpenOp]) -> VfResult<Vec<VfFile>> {
         crate::backend_helpers::vopen_typed_default(self, requests)
     }
 
@@ -220,7 +220,7 @@ pub trait Backend: FileSystem {
         crate::backend_helpers::file_type_impl_default(self, path)
     }
 
-    fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Metadata> {
+    fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Attrs> {
         crate::backend_helpers::native_metadata_path_impl_default(self, path, follow)
     }
 
@@ -397,8 +397,12 @@ pub trait Backend: FileSystem {
     ) -> VfRes {
         match options {
             vfsi_core::api::RenameOptions::Replace => self.vrename_impl(pairs),
-            vfsi_core::api::RenameOptions::NoReplace if pairs.is_empty() => Ok(()),
-            vfsi_core::api::RenameOptions::NoReplace => {
+            vfsi_core::api::RenameOptions::NoReplace | vfsi_core::api::RenameOptions::Exchange
+                if pairs.is_empty() =>
+            {
+                Ok(())
+            }
+            vfsi_core::api::RenameOptions::NoReplace | vfsi_core::api::RenameOptions::Exchange => {
                 Err(VfError::client(0, vfsi_core::VF_ERR_UNSUPPORTED))
             }
         }
@@ -640,7 +644,7 @@ pub(crate) fn bytes_to_path(bytes: Vec<u8>) -> PathBuf {
 pub(crate) fn bytes_to_path(bytes: Vec<u8>) -> PathBuf {
     String::from_utf8_lossy(&bytes).into_owned().into()
 }
-pub(crate) fn translate_open_flags(requests: &[OpenRequest]) -> VfResult<Vec<i32>> {
+pub(crate) fn translate_open_flags(requests: &[OpenOp]) -> VfResult<Vec<i32>> {
     requests
         .iter()
         .enumerate()

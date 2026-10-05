@@ -41,7 +41,7 @@ pub fn walk_events(
     if count > options.entry_limit() || bytes > options.path_byte_limit() {
         return Err(VfError::client(0, libc::EFBIG as u32));
     }
-    let kind = if root.metadata().is_dir() {
+    let kind = if root.attrs().is_dir() {
         WalkEventKind::Enter
     } else {
         WalkEventKind::Entry
@@ -88,7 +88,7 @@ pub fn walk_events(
                     entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
                 }
                 for entry in entries.into_iter().rev() {
-                    let kind = if entry.metadata().is_dir() {
+                    let kind = if entry.attrs().is_dir() {
                         WalkEventKind::Enter
                     } else {
                         WalkEventKind::Entry

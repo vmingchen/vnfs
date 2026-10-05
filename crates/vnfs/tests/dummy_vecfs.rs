@@ -26,14 +26,14 @@ fn application_walk_prunes_before_io_selects_metadata_and_allows_reentry() {
     client
         .walk_events_with_options(
             "/",
-            vnfs::MetadataFields::MODE,
+            vnfs::Attributes::MODE,
             vnfs::WalkOptions::default(),
             true,
             |event| {
                 visited.push(event.entry.path().to_path_buf());
-                assert!(event.entry.metadata().uid().is_none());
-                assert!(event.entry.metadata().modified().is_none());
-                client.metadata("/a").unwrap();
+                assert!(event.entry.attrs().uid().is_none());
+                assert!(event.entry.attrs().modified().is_none());
+                client.attrs("/a").unwrap();
                 if event.kind == vnfs::WalkEventKind::Enter
                     && event.entry.path() == Path::new("/blocked")
                 {
@@ -90,7 +90,7 @@ fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
     let clone = client.clone();
     let error = client
         .visit_walk("/tree", |entry| {
-            clone.symlink_metadata(entry.path()).unwrap();
+            clone.symlink_attrs(entry.path()).unwrap();
             seen.push(entry.path().to_path_buf());
             Ok(std::ops::ControlFlow::Continue(()))
         })
@@ -110,7 +110,7 @@ fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
     );
     assert_eq!(seen.len(), 4);
     let mut expected: Vec<_> = client
-        .walk_with_options("/tree", vnfs::MetadataFields::stat(), options)
+        .walk_with_options("/tree", vnfs::Attributes::stat(), options)
         .unwrap()
         .into_iter()
         .flat_map(|listing| {
@@ -232,7 +232,7 @@ fn one_shot_file_vectors_handle_empty_batches_and_replace_files() {
 #[test]
 fn application_directory_vectors_preserve_fields_and_limits() {
     use vfsi_sync::FsClient;
-    use vnfs::{MetadataFields, ReadDirOptions, WalkOptions};
+    use vnfs::{Attributes, ReadDirOptions, WalkOptions};
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -241,17 +241,17 @@ fn application_directory_vectors_preserve_fields_and_limits() {
     client.write("/a/one", b"1").unwrap();
     client.write("/b/two", b"22").unwrap();
 
-    let fields = MetadataFields::MODE | MetadataFields::SIZE | MetadataFields::BLOCKS;
+    let fields = Attributes::MODE | Attributes::SIZE | Attributes::BLOCKS;
     let listed = client
         .read_dirs_with_options(&["/a", "/b"], fields, ReadDirOptions::new())
         .unwrap();
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].path, Path::new("/a"));
     assert_eq!(listed[0].entries[0].path(), Path::new("/a/one"));
-    assert_eq!(listed[1].entries[0].metadata().len(), 2);
-    assert!(listed[0].entries[0].metadata().mode().is_some());
-    assert!(listed[0].entries[0].metadata().blocks().is_some());
-    assert_eq!(listed[0].entries[0].metadata().device_id(), None);
+    assert_eq!(listed[1].entries[0].attrs().len(), 2);
+    assert!(listed[0].entries[0].attrs().mode().is_some());
+    assert!(listed[0].entries[0].attrs().blocks().is_some());
+    assert_eq!(listed[0].entries[0].attrs().device_id(), None);
 
     let error = client
         .read_dirs_with_options(&["/a", "/b"], fields, ReadDirOptions::new().max_entries(1))
@@ -287,7 +287,7 @@ fn application_directory_vectors_preserve_fields_and_limits() {
 #[test]
 fn application_metadata_and_batch_mutations() {
     use vfsi_sync::FsClient;
-    use vnfs::MetadataFields;
+    use vnfs::Attributes;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -295,7 +295,7 @@ fn application_metadata_and_batch_mutations() {
     client.write("/source-2", b"defg").unwrap();
     client.symlink("/source-1", "/link").unwrap();
     let metadata = client
-        .symlink_metadata_with_fields("/link", MetadataFields::MODE | MetadataFields::BLOCKS)
+        .symlink_attrs_with_fields("/link", Attributes::MODE | Attributes::BLOCKS)
         .unwrap();
     assert!(metadata.is_symlink());
     assert!(metadata.mode().is_some());
@@ -315,7 +315,7 @@ fn application_metadata_and_batch_mutations() {
 #[test]
 fn application_directory_cohorts_preserve_global_error_index() {
     use vfsi_sync::FsClient;
-    use vnfs::{MetadataFields, ReadDirOptions};
+    use vnfs::{Attributes, ReadDirOptions};
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -327,12 +327,12 @@ fn application_directory_cohorts_preserve_global_error_index() {
     }
     paths.push(paths[0].clone());
     let listings = client
-        .read_dirs_with_options(&paths, MetadataFields::MODE, ReadDirOptions::new())
+        .read_dirs_with_options(&paths, Attributes::MODE, ReadDirOptions::new())
         .unwrap();
     assert_eq!(listings[0], listings[32]);
     paths.push("/missing".to_string());
     let error = client
-        .read_dirs_with_options(&paths, MetadataFields::MODE, ReadDirOptions::new())
+        .read_dirs_with_options(&paths, Attributes::MODE, ReadDirOptions::new())
         .unwrap_err();
     assert_eq!(error.index(), Some(33));
 }
@@ -355,7 +355,7 @@ fn dummy_getcwd() {
 #[test]
 fn single_file_stream_is_bounded_ordered_and_cancellable() {
     use vfsi_sync::FsClient;
-    use vnfs::{Error as VfError, ReadStreamOptions};
+    use vnfs::{Error as VfError, StreamOptions};
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -369,7 +369,7 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     client
         .read_stream_with_options(
             "/stream",
-            ReadStreamOptions::new().chunk_size(64 * 1024),
+            StreamOptions::new().chunk_size(64 * 1024),
             |offset, chunk| {
                 assert_eq!(offset, next_offset);
                 assert!(!chunk.is_empty());
@@ -397,7 +397,7 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     client
         .read_stream_with_options(
             "/stream",
-            ReadStreamOptions::new().chunk_size(1234),
+            StreamOptions::new().chunk_size(1234),
             |_, chunk| {
                 seen += chunk.len();
                 Ok(false)
@@ -424,7 +424,7 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     let error = client
         .read_stream_with_options(
             "/does-not-exist",
-            ReadStreamOptions::new().chunk_size(0),
+            StreamOptions::new().chunk_size(0),
             |_, _| Ok(true),
         )
         .unwrap_err();
@@ -826,15 +826,13 @@ fn standard_open_options_validate_access_modes() {
 fn owned_client_supports_multiple_live_files_and_typed_requests() {
     use std::io::{Read, Seek, SeekFrom, Write};
     use vfsi_sync::FsClient;
-    use vnfs::{OpenFlags, OpenRequest};
+    use vnfs::{OpenFlags, OpenOp};
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
     let flags = OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
-    let mut first = client.open_with(OpenRequest::new("/first", flags)).unwrap();
-    let mut second = client
-        .open_with(OpenRequest::new("/second", flags))
-        .unwrap();
+    let mut first = client.open_with(OpenOp::new("/first", flags)).unwrap();
+    let mut second = client.open_with(OpenOp::new("/second", flags)).unwrap();
 
     client
         .vwrite_native(&[
@@ -893,12 +891,12 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
     let client = FsClient::new(backend);
     client.create_dir_all("/tree/nested").unwrap();
     client.create_dir_all("/../../root-clamped").unwrap();
-    assert!(client.metadata("/root-clamped").unwrap().is_dir());
+    assert!(client.attrs("/root-clamped").unwrap().is_dir());
     client.remove_dir("/root-clamped").unwrap();
     client.write("/tree/nested/file", b"hello").unwrap();
     assert_eq!(client.read_to_string("/tree/nested/file").unwrap(), "hello");
 
-    let metadata = client.metadata("/tree/nested/file").unwrap();
+    let metadata = client.attrs("/tree/nested/file").unwrap();
     assert!(metadata.is_file());
     assert_eq!(metadata.len(), 5);
     assert!(!metadata.permissions().readonly());
@@ -918,10 +916,10 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
     let mut bytes = [0; 5];
     assert_eq!(file.read_at(&mut bytes, 0).unwrap(), 5);
     assert_eq!(&bytes, b"hallo");
-    assert_eq!(file.metadata().unwrap().len(), 5);
+    assert_eq!(file.attrs().unwrap().len(), 5);
     file.truncate(4).unwrap();
     file.chmod(vnfs::Permissions::from_mode(0o600)).unwrap();
-    let metadata = file.metadata().unwrap();
+    let metadata = file.attrs().unwrap();
     assert_eq!(metadata.len(), 4);
     assert_eq!(metadata.permissions().mode(), 0o600);
     file.close().unwrap();
@@ -931,7 +929,7 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
         .len(4)
         .apply()
         .unwrap();
-    let metadata = client.metadata("/tree/nested/file").unwrap();
+    let metadata = client.attrs("/tree/nested/file").unwrap();
     assert_eq!(metadata.len(), 4);
     assert_eq!(metadata.permissions().mode(), 0o400);
 
@@ -949,7 +947,7 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
     );
     assert!(
         client
-            .symlink_metadata("/tree/nested/symlink")
+            .symlink_attrs("/tree/nested/symlink")
             .unwrap()
             .is_symlink()
     );
@@ -1208,12 +1206,12 @@ fn strict_vectors_report_failure_index_without_rollback() {
 #[test]
 fn native_scalar_contract_separates_metadata_query_from_update() {
     use vfsi_sync::{AttrMask, FileSystem, MetadataQuery, SetAttributes, VfFile};
-    use vnfs::{OpenFlags, OpenRequest};
+    use vnfs::{OpenFlags, OpenOp};
 
     let (_root, mut fs) = dummy();
     let file = FileSystem::open_impl(
         &mut fs,
-        &OpenRequest::new("/metadata", OpenFlags::WRITE | OpenFlags::CREATE),
+        &OpenOp::new("/metadata", OpenFlags::WRITE | OpenFlags::CREATE),
     )
     .unwrap();
     FileSystem::close_impl(&mut fs, &file).unwrap();
@@ -1312,7 +1310,7 @@ fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
         let result = client.visit_dir("/tree", |entry| {
             // Both operations acquire the same backend mutex. In particular,
             // dropping an owned file must not block directory enumeration.
-            assert_eq!(client.metadata(entry.path())?.len(), 1);
+            assert_eq!(client.attrs(entry.path())?.len(), 1);
             if let Some(file) = held_file.take() {
                 drop(file);
             }

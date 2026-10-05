@@ -599,13 +599,13 @@ pub fn open_flags_to_libc(flags: OpenFlags) -> VfResult<i32> {
 /// One complete open request. This replaces three error-prone parallel
 /// slices of paths, flags, and modes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenRequest {
+pub struct OpenOp {
     pub path: PathBuf,
     pub flags: OpenFlags,
     pub mode: u32,
 }
 
-impl OpenRequest {
+impl OpenOp {
     pub fn new(path: impl Into<PathBuf>, flags: OpenFlags) -> Self {
         Self {
             path: path.into(),
@@ -1185,7 +1185,7 @@ impl Permissions {
 
 /// Idiomatic metadata returned by the Rust-native path API.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Metadata {
+pub struct Attrs {
     file_type: VfType,
     len: u64,
     permissions: Permissions,
@@ -1203,7 +1203,7 @@ pub struct Metadata {
     gid: Option<u32>,
 }
 
-impl Metadata {
+impl Attrs {
     /// Full POSIX mode, including the file type bits, when returned.
     pub fn mode(&self) -> Option<u32> {
         self.mode
@@ -1348,9 +1348,9 @@ fn system_time(seconds: i64, nanos: u32) -> Option<std::time::SystemTime> {
 }
 
 /// Backend attribute conversion; absent fields remain absent.
-pub fn metadata_from_attrs(attributes: VfAttrs) -> Metadata {
+pub fn metadata_from_attrs(attributes: VfAttrs) -> Attrs {
     let returned = attributes.returned;
-    Metadata {
+    Attrs {
         file_type: attributes.ftype,
         len: attributes.size,
         permissions: Permissions::from_mode(attributes.mode),
@@ -1392,11 +1392,11 @@ pub fn metadata_from_attrs(attributes: VfAttrs) -> Metadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
     path: PathBuf,
-    metadata: Metadata,
+    metadata: Attrs,
 }
 
 impl DirEntry {
-    pub fn new(path: PathBuf, metadata: Metadata) -> Self {
+    pub fn new(path: PathBuf, metadata: Attrs) -> Self {
         Self { path, metadata }
     }
 
@@ -1412,7 +1412,7 @@ impl DirEntry {
         self.metadata.file_type()
     }
 
-    pub fn metadata(&self) -> &Metadata {
+    pub fn attrs(&self) -> &Attrs {
         &self.metadata
     }
 }

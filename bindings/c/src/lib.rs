@@ -1035,7 +1035,7 @@ pub unsafe extern "C" fn vfsi_walk(
                         .map_err(|_| VfError::client(0, libc::EINVAL as u32))?;
                     let path = CString::new(fs.mountpoint.join(relative).as_os_str().as_bytes())
                         .map_err(|_| VfError::client(0, libc::EINVAL as u32))?;
-                    let attrs = attrs_from_metadata(event.entry.metadata());
+                    let attrs = attrs_from_metadata(event.entry.attrs());
                     let kind = match event.kind {
                         vnfs::WalkEventKind::Enter => 0,
                         vnfs::WalkEventKind::Entry => 1,
@@ -1055,7 +1055,7 @@ pub unsafe extern "C" fn vfsi_walk(
     })
 }
 
-fn attrs_from_metadata(metadata: &vnfs::Metadata) -> vfsi_attrs {
+fn attrs_from_metadata(metadata: &vnfs::Attrs) -> vfsi_attrs {
     fn time(value: Option<std::time::SystemTime>) -> (i64, u32) {
         value
             .and_then(|v| match v.duration_since(std::time::UNIX_EPOCH) {
@@ -2607,7 +2607,7 @@ mod tests {
         fn sync_data(&mut self, _: &VfFile) -> vfsi_sync::VfResult<()> {
             Err(VfError::unsupported(0))
         }
-        fn open_impl(&mut self, _: &vfsi_sync::OpenRequest) -> vfsi_sync::VfResult<VfFile> {
+        fn open_impl(&mut self, _: &vfsi_sync::OpenOp) -> vfsi_sync::VfResult<VfFile> {
             Err(VfError::unsupported(0))
         }
         fn close_impl(&mut self, _: &VfFile) -> vfsi_sync::VfResult<()> {

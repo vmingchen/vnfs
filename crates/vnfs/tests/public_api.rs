@@ -1,16 +1,14 @@
 //! Compile-time coverage for the application-facing NFS API and the explicit
 //! low-level backend namespace. No live server is needed.
 
-use vnfs::{
-    Nfs, NfsAuthentication, NfsBuilder, OpenFlags, OpenRequest, ReadOptions, Vfsi, VfsiExt,
-};
+use vnfs::{Nfs, NfsAuthentication, NfsBuilder, OpenFlags, OpenOp, ReadOptions, Vfsi, VfsiExt};
 
 #[test]
 fn application_surface_is_small_and_typed() {
     let _: NfsBuilder = Nfs::builder("server.example.com")
         .root("/export")
         .auth(NfsAuthentication::AuthSys);
-    let _ = OpenRequest::new("/file", OpenFlags::READ);
+    let _ = OpenOp::new("/file", OpenFlags::READ);
     assert_eq!(ReadOptions::new().total_byte_limit(), None);
     assert_eq!(
         ReadOptions::new()
@@ -31,7 +29,7 @@ fn concrete_and_extension_directory_visitors_borrow_entries_consistently() {
         Ok(vnfs::ControlFlow::Continue(()))
     }
     fn direct(fs: &vnfs::NfsClient) -> vnfs::Result<vnfs::TraversalCompletion> {
-        fs.visit_dir_with_options("/dir", vnfs::VisitOptions::new(), callback)
+        fs.visit_dir_with_options("/dir", vnfs::ListDirOptions::new(), callback)
     }
     let _ = direct; // Compile-check direct NFS without requiring a connection.
     let root = tempfile_root();
@@ -52,17 +50,17 @@ fn concrete_and_extension_directory_visitors_borrow_entries_consistently() {
     );
     assert_eq!(
         mounted
-            .visit_dir_with_options("/", vnfs::VisitOptions::new(), callback)
+            .visit_dir_with_options("/", vnfs::ListDirOptions::new(), callback)
             .unwrap(),
         vnfs::TraversalCompletion::Complete
     );
     assert_eq!(
-        VfsiExt::visit_dir_with_options(&mounted, "/", vnfs::VisitOptions::new(), callback)
+        VfsiExt::visit_dir_with_options(&mounted, "/", vnfs::ListDirOptions::new(), callback)
             .unwrap(),
         vnfs::TraversalCompletion::Complete
     );
     assert_eq!(
-        auto.visit_dir_with_options("/", vnfs::VisitOptions::new(), callback)
+        auto.visit_dir_with_options("/", vnfs::ListDirOptions::new(), callback)
             .unwrap(),
         vnfs::TraversalCompletion::Complete
     );
@@ -97,26 +95,25 @@ fn application_requests_results_and_errors_are_root_types() {
 #[test]
 fn application_traversal_and_mutation_do_not_require_backend_imports() {
     fn app(client: &vnfs::NfsClient) -> vnfs::Result<()> {
-        let fields =
-            vnfs::MetadataFields::MODE | vnfs::MetadataFields::BLOCKS | vnfs::MetadataFields::NLINK;
+        let fields = vnfs::Attributes::MODE | vnfs::Attributes::BLOCKS | vnfs::Attributes::NLINK;
         let listings = client.read_dirs_with_options(
             &["/a", "/b"],
-            vnfs::VisitOptions::from(vnfs::ReadDirOptions::new()).fields(fields),
+            vnfs::ListDirOptions::from(vnfs::ReadDirOptions::new()).fields(fields),
         )?;
         for directory in listings.into_iter().flatten() {
             for entry in directory.entries {
-                let _ = (entry.path(), entry.metadata().blocks());
+                let _ = (entry.path(), entry.attrs().blocks());
             }
         }
-        let _ = client.metadata_with_options(
+        let _ = client.attrs_with_options(
             "/a/link",
-            vnfs::MetadataOptions::new()
+            vnfs::AttrsOptions::new()
                 .fields(fields)
                 .follow_symlinks(false),
         )?;
         let _ = client.walk_with_options(
             "/a",
-            vnfs::VisitOptions::from(vnfs::WalkOptions::new()).fields(fields),
+            vnfs::ListDirOptions::from(vnfs::WalkOptions::new()).fields(fields),
         )?;
         client.vcopy(&[("/a/source", "/a/copy")])?;
         client.vremove_native(&["/a/copy"], false)
@@ -241,7 +238,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         .permissions(vnfs::Permissions::from_mode(0o600))
         .apply()
         .unwrap();
-    assert_eq!(client.metadata("/sub/a").unwrap().len(), 2);
+    assert_eq!(client.attrs("/sub/a").unwrap().len(), 2);
     client.create_dir_with_mode("/copies", 0o700).unwrap();
     client
         .vcopy(&[("/sub/a", "/copies/a"), ("/sub/b", "/copies/b")])
@@ -252,14 +249,14 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         client.read_link("/sub/link").unwrap(),
         std::path::Path::new("a")
     );
-    assert!(client.symlink_metadata("/sub/link").unwrap().is_symlink());
+    assert!(client.symlink_attrs("/sub/link").unwrap().is_symlink());
     let metadata = client
         .vgetattrs(
             &[
                 std::path::Path::new("/sub/a"),
                 std::path::Path::new("/sub/link"),
             ],
-            vnfs::MetadataOptions::new().follow_symlinks(false),
+            vnfs::AttrsOptions::new().follow_symlinks(false),
         )
         .unwrap();
     assert!(metadata[0].is_file());
@@ -276,8 +273,8 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         client
             .read_dirs_with_options(
                 &["/sub", "/copies"],
-                vnfs::VisitOptions::from(vnfs::ReadDirOptions::new().max_entries(5))
-                    .fields(vnfs::MetadataFields::stat())
+                vnfs::ListDirOptions::from(vnfs::ReadDirOptions::new().max_entries(5))
+                    .fields(vnfs::Attributes::stat())
             )
             .is_err()
     );
@@ -319,7 +316,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
         let requests: Vec<_> = paths
             .iter()
             .map(|path| {
-                OpenRequest::new(
+                OpenOp::new(
                     path,
                     OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE_NEW,
                 )
@@ -382,7 +379,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
         assert_eq!(client.read_dirs(&[prefix])?[0].entries.len(), 2);
         let mut visited = 0;
         assert_eq!(
-            client.visit_dir_with_options(prefix, vnfs::VisitOptions::default(), |_| {
+            client.visit_dir_with_options(prefix, vnfs::ListDirOptions::default(), |_| {
                 visited += 1;
                 Ok(vnfs::ControlFlow::Continue(()))
             })?,
@@ -403,7 +400,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
 
 #[test]
 fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
-    use vnfs::{MetadataFields, ResourceLimits, VisitOptions, WalkOptions};
+    use vnfs::{Attributes, ListDirOptions, ResourceLimits, WalkOptions};
     let root = tempfile::tempdir().unwrap();
     let fs = vnfs::Mounted::new(root.path()).unwrap();
     fs.create_dir_all("/tree/child").unwrap();
@@ -411,18 +408,18 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
     for depth in [201, 254, 255, 256, 500, usize::MAX - 1, usize::MAX] {
         let walk = WalkOptions::new().max_depth(depth);
         assert_eq!(walk.depth_limit(), usize::MAX);
-        let converted = VisitOptions::from(walk);
+        let converted = ListDirOptions::from(walk);
         assert!(converted.is_recursive());
         let explicit = fs
             .walk_with_options(
                 "/tree",
-                vnfs::VisitOptions::from(walk).fields(MetadataFields::MODE),
+                vnfs::ListDirOptions::from(walk).fields(Attributes::MODE),
             )
             .unwrap();
         let direct = fs
             .read_dirs_with_options(
                 &["/tree"],
-                VisitOptions::new().recursive(true).max_depth(depth),
+                ListDirOptions::new().recursive(true).max_depth(depth),
             )
             .unwrap();
         assert_eq!(explicit.len(), 2);
@@ -438,15 +435,15 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
     assert!(
         fs.walk_with_options(
             "/tree",
-            vnfs::VisitOptions::from(WalkOptions::new().max_depth(0)).fields(MetadataFields::MODE)
+            vnfs::ListDirOptions::from(WalkOptions::new().max_depth(0)).fields(Attributes::MODE)
         )
         .is_err()
     );
     assert_eq!(
         fs.walk_with_options(
             "/tree",
-            vnfs::VisitOptions::from(WalkOptions::new().max_depth(0).truncate_at_max_depth(true))
-                .fields(MetadataFields::MODE)
+            vnfs::ListDirOptions::from(WalkOptions::new().max_depth(0).truncate_at_max_depth(true))
+                .fields(Attributes::MODE)
         )
         .unwrap()
         .len(),
@@ -455,7 +452,7 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
     assert_eq!(
         fs.walk_with_options(
             "/tree",
-            vnfs::VisitOptions::from(WalkOptions::new().max_depth(1)).fields(MetadataFields::MODE)
+            vnfs::ListDirOptions::from(WalkOptions::new().max_depth(1)).fields(Attributes::MODE)
         )
         .unwrap()
         .len(),
@@ -479,8 +476,8 @@ fn portable_traits_and_options_are_reexports_not_parallel_contracts() {
     let _ = accepts_vnfs_extension::<vfsi_sync::FsClient<vfsi_local::DummyVecFs>>;
     let core: vfsi_core::api::ReadOptions = vnfs::ReadOptions::new();
     let _: vnfs::ReadOptions = core;
-    let core: vfsi_core::api::VisitOptions = vnfs::VisitOptions::new();
-    let _: vnfs::VisitOptions = core;
+    let core: vfsi_core::api::ListDirOptions = vnfs::ListDirOptions::new();
+    let _: vnfs::ListDirOptions = core;
 }
 
 #[cfg(all(feature = "auto", target_os = "linux"))]

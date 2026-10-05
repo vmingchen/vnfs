@@ -304,7 +304,7 @@ mod mount_tests {
         std::fs::write(fixture.join("marker"), b"unchanged").unwrap();
         std::fs::create_dir(fixture.join("child")).unwrap();
         let fs = Nfs::from_mount(Path::new(&mount).join(&name)).unwrap();
-        assert!(fs.metadata("/").unwrap().is_dir());
+        assert!(fs.attrs("/").unwrap().is_dir());
         let results = [
             fs.create("/.mount-forbidden").map(|_| ()),
             fs.write_files(&[("/.mount-forbidden", b"forbidden")]),
@@ -330,7 +330,7 @@ mod mount_tests {
             .collect::<Vec<_>>(),
             [b"unchanged".to_vec()]
         );
-        assert!(fs.metadata("/child").unwrap().is_dir());
+        assert!(fs.attrs("/child").unwrap().is_dir());
         // The fixture has a known shape. Teardown need not exercise kernel
         // recursive READDIR, unrelated to mount discovery/read-only policy.
         std::fs::remove_file(fixture.join("marker")).unwrap();

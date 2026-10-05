@@ -78,13 +78,7 @@ fn writer_bridge_handles_short_writes_and_never_replays_failed_output() {
         calls: 0,
     };
     assert_eq!(
-        copy_to_writer(
-            &fs,
-            "/source",
-            &mut ok,
-            ReadStreamOptions::new().chunk_size(3)
-        )
-        .unwrap(),
+        copy_to_writer(&fs, "/source", &mut ok, StreamOptions::new().chunk_size(3)).unwrap(),
         10
     );
     assert_eq!(ok.bytes, b"0123456789");
@@ -93,13 +87,8 @@ fn writer_bridge_handles_short_writes_and_never_replays_failed_output() {
         fail_after: 4,
         calls: 0,
     };
-    let err = copy_to_writer(
-        &fs,
-        "/source",
-        &mut bad,
-        ReadStreamOptions::new().chunk_size(3),
-    )
-    .unwrap_err();
+    let err =
+        copy_to_writer(&fs, "/source", &mut bad, StreamOptions::new().chunk_size(3)).unwrap_err();
     assert_eq!(err.err_no(), libc::ENOSPC as u32);
     assert_eq!(bad.bytes, b"0123");
     assert_eq!(bad.calls, 4);
@@ -118,7 +107,7 @@ fn ordered_walk_preserves_sorting_prunes_before_io_and_callbacks_are_unlocked() 
     let completion = fs
         .visit_dirs_ordered(
             "/",
-            MetadataFields::MODE,
+            Attributes::MODE,
             WalkOptions::new(),
             |entries| entries.sort_by(|a, b| b.path().cmp(a.path())),
             |entry| {
@@ -131,7 +120,7 @@ fn ordered_walk_preserves_sorting_prunes_before_io_and_callbacks_are_unlocked() 
                 }
             },
             |listing, depth| {
-                assert!(fs.metadata(&listing.path).unwrap().is_dir());
+                assert!(fs.attrs(&listing.path).unwrap().is_dir());
                 assert_eq!(depth, usize::from(listing.path != Path::new("/")));
                 paths.push(listing.path);
                 Ok(WalkControl::Continue)
@@ -152,7 +141,7 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
     assert!(
         fs.visit_dirs_ordered(
             "/link",
-            MetadataFields::MODE,
+            Attributes::MODE,
             WalkOptions::new(),
             |_| {},
             |_| true,
@@ -166,7 +155,7 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
         let status = fs
             .visit_dirs_ordered(
                 "/",
-                MetadataFields::MODE,
+                Attributes::MODE,
                 WalkOptions::new(),
                 |_| {},
                 |_| true,
@@ -194,7 +183,7 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
     assert_eq!(
         fs.visit_dirs_ordered(
             "/",
-            MetadataFields::MODE,
+            Attributes::MODE,
             WalkOptions::new().max_entries(1),
             |_| {},
             |_| false,
@@ -211,7 +200,7 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
     assert_eq!(
         fs.visit_dirs_ordered(
             "/",
-            MetadataFields::MODE,
+            Attributes::MODE,
             WalkOptions::new().max_path_bytes(1),
             |_| {},
             |_| false,

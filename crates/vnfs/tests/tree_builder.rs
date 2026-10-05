@@ -14,7 +14,7 @@ fn duplicate_directories_do_not_consume_planned_entry_slots() {
         .add_directory("a/")
         .create(&client, "/one")
         .unwrap();
-    assert!(client.metadata("/one/a").unwrap().is_dir());
+    assert!(client.attrs("/one/a").unwrap().is_dir());
     // Deduplication must not change the stored file position used for writes.
     TreeBuilder::new()
         .max_entries(2)
@@ -46,7 +46,7 @@ fn duplicate_directories_do_not_consume_path_storage_budget() {
         builder = builder.add_directory("./a");
     }
     builder.create(&client, "/fixture").unwrap();
-    assert!(client.metadata("/fixture/a").unwrap().is_dir());
+    assert!(client.attrs("/fixture/a").unwrap().is_dir());
 }
 
 #[test]
@@ -135,7 +135,7 @@ fn builds_nested_binary_empty_and_directory_entries_without_implicit_cleanup() {
             .unwrap()
             .is_empty()
     );
-    assert!(client.metadata("/fixture/data/raw").unwrap().is_dir());
+    assert!(client.attrs("/fixture/data/raw").unwrap().is_dir());
     drop(tree);
     assert!(temp.path().join("fixture/config/app.conf").exists());
     client.remove_dir_all("/fixture").unwrap();

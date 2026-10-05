@@ -1,6 +1,6 @@
 ## Application boundary
 
-Metadata vectors use the canonical options-aware primitive; former aliases
+Attrs vectors use the canonical options-aware primitive; former aliases
 are not retained, even when the extension trait is imported:
 
 ```compile_fail,E0599
@@ -22,20 +22,20 @@ fn old_close<C: Vfsi>(fs: &C, files: Vec<C::File>) {
 }
 ```
 
-Collection and visiting share `VisitOptions`; separate recursive collection
+Collection and visiting share `ListDirOptions`; separate recursive collection
 and concrete-client helper entry points are not retained:
 
 ```compile_fail,E0599
 use vnfs::{Vfsi, VfsiExt};
 fn old_collect(fs: &impl Vfsi) {
-    let _ = fs.walks_with_options(&["/tree"], vnfs::MetadataFields::MODE, vnfs::WalkOptions::new());
+    let _ = fs.walks_with_options(&["/tree"], vnfs::Attributes::MODE, vnfs::WalkOptions::new());
 }
 ```
 
 ```compile_fail,E0599
 fn inherent_open(client: &vnfs::NfsClient) {
     // Without VfsiExt in scope there is no separate inherent implementation.
-    let _ = client.open_with(vnfs::OpenRequest::new("/file", vnfs::OpenFlags::READ));
+    let _ = client.open_with(vnfs::OpenOp::new("/file", vnfs::OpenFlags::READ));
 }
 ```
 
@@ -129,7 +129,7 @@ fn conversion(error: vfsi_sync::RpcError) { let _ = vnfs::Error::from_rpc(error,
 ```
 
 ```compile_fail,E0277
-fn conversion(attrs: vfsi_sync::VfAttrs) -> vnfs::Metadata { attrs.into() }
+fn conversion(attrs: vfsi_sync::VfAttrs) -> vnfs::Attrs { attrs.into() }
 ```
 
 ```compile_fail,E0277
@@ -294,7 +294,7 @@ Each single-target execution method belongs to `VfsiExt`, not `Vfsi`.
 ```compile_fail,E0599
 use vnfs::Vfsi;
 fn open_with(fs: &impl Vfsi) {
-    let _ = fs.open_with(vnfs::OpenRequest::new("/file", vnfs::OpenFlags::READ));
+    let _ = fs.open_with(vnfs::OpenOp::new("/file", vnfs::OpenFlags::READ));
 }
 ```
 
@@ -343,28 +343,28 @@ fn rename(fs: &impl Vfsi) {
 ```compile_fail,E0599
 use vnfs::Vfsi;
 fn walk_with_options(fs: &impl Vfsi) {
-    let _ = fs.walk_with_options("/", vnfs::VisitOptions::from(vnfs::WalkOptions::new()).fields(vnfs::MetadataFields::MODE));
+    let _ = fs.walk_with_options("/", vnfs::ListDirOptions::from(vnfs::WalkOptions::new()).fields(vnfs::Attributes::MODE));
 }
 ```
 
 ```compile_fail,E0599
 use vnfs::{Vfsi, VfsiExt};
 fn visit_walk_with_options(fs: &impl Vfsi) {
-    let _ = fs.visit_walk_with_options("/", vnfs::VisitOptions::new(), |_| Ok(std::ops::ControlFlow::Continue(())));
+    let _ = fs.visit_walk_with_options("/", vnfs::ListDirOptions::new(), |_| Ok(std::ops::ControlFlow::Continue(())));
 }
 ```
 
 ```compile_fail,E0599
 use vnfs::Vfsi;
 fn visit_dir_with_options(fs: &impl Vfsi) {
-    let _ = fs.visit_dir_with_options("/", vnfs::VisitOptions::new(), |_| Ok(std::ops::ControlFlow::Continue(())));
+    let _ = fs.visit_dir_with_options("/", vnfs::ListDirOptions::new(), |_| Ok(std::ops::ControlFlow::Continue(())));
 }
 ```
 
 ```compile_fail,E0599
 use vnfs::Vfsi;
 fn read_stream_with_options(fs: &impl Vfsi) {
-    let _ = fs.read_stream_with_options("/file", vnfs::ReadStreamOptions::new(), |_, _| Ok(true));
+    let _ = fs.read_stream_with_options("/file", vnfs::StreamOptions::new(), |_, _| Ok(true));
 }
 ```
 

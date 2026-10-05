@@ -24,13 +24,13 @@ and explicit `VfsiExt` calls therefore share helper semantics, including error
 indices, rather than selecting different implementations based on receiver type.
 
 `VfsiExt::read_dirs_with_options` collects shallow directories or recursive trees
-with the same `VisitOptions` used for visiting. Results are grouped by input:
+with the same `ListDirOptions` used for visiting. Results are grouped by input:
 `results[i]` holds the listings for `paths[i]`. Shallow mode has exactly one
 listing per root; recursive mode includes descendants. The allocating helper consumes directory pages from the native vector visitor, retaining batching without copying every entry.
 `VfsiExt::read_dirs` supplies the ordinary flat shallow result for convenience.
 
 `Vfsi::vlistdirs` handles both shallow and recursive visits through
-`VisitOptions`. Shallow is the default; `.recursive(true)` enables descent.
+`ListDirOptions`. Shallow is the default; `.recursive(true)` enables descent.
 Depth 0 lists root children, and depth 1 also lists immediate subdirectories.
 Recursive depth limits fail on deeper directories unless intentional truncation
 is enabled. Callbacks receive owned `DirectoryListing` pages, including pages for empty
@@ -78,7 +78,7 @@ ordinary applications use the concrete client methods instead:
 - `NfsClient` owns and shares a connection; `NfsFile` owns a remote handle without
   borrowing the entire client.
 - `NfsExtensions` and `SmbExtensions` contain protocol-only negotiated state.
-- `OpenRequest`, `MetadataQuery`, and `SetAttributes` replace raw flags and
+- `OpenOp`, `MetadataQuery`, and `SetAttributes` replace raw flags and
   overloaded metadata masks.
 - Public `v*` operations return ordered results on success or one `vnfs::Error`
   with an optional input index. They do not promise rollback; an unattributable
@@ -148,12 +148,12 @@ one close per dropped handle.
 
 Real application ports also need metadata-rich traversal and namespace
 operations without constructing `VfAttrs` or calling backend traits directly.
-`MetadataFields` selects only needed attributes; `Metadata` reports optional
+`Attributes` selects only needed attributes; `Attrs` reports optional
 fields such as allocated blocks, device ID, full mode, and named-attribute
 presence as `Option` so an absent value is not confused with zero. Use
-`metadata_with_options` with `MetadataOptions::follow_symlinks(false)` for a no-follow query,
+`attrs_with_options` with `AttrsOptions::follow_symlinks(false)` for a no-follow query,
 `vlistdirs` to visit pages for several directory operands, with
-`VisitOptions::recursive(true)` for bounded recursive trees. Use the
+`ListDirOptions::recursive(true)` for bounded recursive trees. Use the
 `VfsiExt::read_dirs_with_options` collector only when retained listings are needed. `DirectoryListing` carries
 paths and already-fetched entry metadata. `vcopy` and `vremove`
 perform ordered batches without promising transactionality.
@@ -232,7 +232,7 @@ default depth limit and accepts `WalkOptions`. NFS multi-directory listing
 delivers each bounded READDIR page before requesting continuation pages, so
 early-stop callbacks no longer retain the whole remote listing. Applications
 needing to consume one directory incrementally can use `visit_dir_with_options`
-with `VisitOptions`; set `recursive(true)` to visit a recursive root. The
+with `ListDirOptions`; set `recursive(true)` to visit a recursive root. The
 options-aware helper respects the supplied traversal scope, metadata, and budgets.
 `visit_dir` and `visit_walk` select shallow and recursive defaults respectively. `vgetattrs` accepts any `AsRef<Path>` inputs,
 including strings and `PathBuf`, consistently with the other path vectors.

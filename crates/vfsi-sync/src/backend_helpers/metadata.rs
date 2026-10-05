@@ -71,7 +71,7 @@ pub fn native_metadata_path_impl_default<F: Backend + ?Sized>(
     backend: &mut F,
     path: &std::path::Path,
     follow: bool,
-) -> VfResult<Metadata> {
+) -> VfResult<Attrs> {
     let mut attributes = VfAttrs {
         file: VfFile::from_os_path(path),
         masks: metadata_mask(),

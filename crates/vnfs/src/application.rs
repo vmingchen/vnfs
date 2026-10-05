@@ -2,7 +2,7 @@
 #[cfg(test)]
 use crate::VfsiExt;
 use crate::{
-    DirectoryListing, FileHandle, Metadata, OpenRequest, ResourceLimits, Result, Vfsi, WriteResult,
+    Attrs, DirectoryListing, FileHandle, OpenOp, ResourceLimits, Result, Vfsi, WriteResult,
 };
 use std::io::SeekFrom;
 use std::path::Path;
@@ -19,8 +19,8 @@ macro_rules! file_methods {
         fn path(&self) -> &Path {
             <$file>::path(self)
         }
-        fn metadata(&self) -> Result<Metadata> {
-            <$file>::metadata(self)
+        fn attrs(&self) -> Result<Attrs> {
+            <$file>::attrs(self)
         }
         fn read_request_at(&self, offset: u64, length: usize) -> Self::ReadRequest<'_> {
             <$file>::read_request_at(self, offset, length)
@@ -73,11 +73,11 @@ macro_rules! file_methods {
 
 pub(crate) trait NativeHooks: Vfsi {
     fn page_capacity(&self, paths: &[&Path]) -> Result<usize>;
-    fn open_native(&self, request: OpenRequest) -> Result<Self::File>;
+    fn open_native(&self, request: OpenOp) -> Result<Self::File>;
     fn stream_native(
         &self,
         path: impl AsRef<Path>,
-        options: crate::ReadStreamOptions,
+        options: crate::StreamOptions,
         callback: impl FnMut(u64, &[u8]) -> Result<bool>,
     ) -> Result<crate::StreamCompletion>;
 }
@@ -141,20 +141,17 @@ macro_rules! client_methods {
     };
     // Application clients and backend clients use different native method names.
     ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path, $vwrite_native:expr, $vwrite_all_native:expr, $metadata:expr, $write_receiver:path, $rename:ident, $mkdir:ident, $copy:ident, $close:ident, $open_batch:ident) => {
-        fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-            <$client>::$rename($receiver(self), pairs)
-        }
-        fn vrename_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
+        fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
             &self,
             pairs: &[(P, Q)],
             options: crate::RenameOptions,
         ) -> Result<()> {
-            <$client>::vrename_with_options($receiver(self), pairs, options)
+            <$client>::vrename($receiver(self), pairs, options)
         }
         fn vlistdirs<P: AsRef<Path>>(
             &self,
             paths: &[P],
-            options: crate::VisitOptions,
+            options: crate::ListDirOptions,
             callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
         ) -> Result<Vec<crate::TraversalCompletion>> {
             visit_directory_pages(
@@ -165,8 +162,8 @@ macro_rules! client_methods {
                 |path| {
                     let metadata = self.vgetattrs(
                         &[path],
-                        crate::MetadataOptions::new()
-                            .fields(crate::MetadataFields::MODE)
+                        crate::AttrsOptions::new()
+                            .fields(crate::Attributes::MODE)
                             .follow_symlinks(false),
                     )?;
                     if metadata.len() != 1 {
@@ -185,7 +182,7 @@ macro_rules! client_methods {
                     <$client>::read_dir_pages_with_fields(
                         $receiver(self),
                         paths,
-                        options.metadata_fields(),
+                        options.attributes(),
                         cursors,
                         page_size,
                         max_entries,
@@ -197,7 +194,7 @@ macro_rules! client_methods {
         fn vstream<P: AsRef<Path>>(
             &self,
             paths: &[P],
-            options: crate::ReadStreamOptions,
+            options: crate::StreamOptions,
             mut callback: impl FnMut(usize, u64, &[u8]) -> Result<bool>,
         ) -> Result<Vec<crate::StreamCompletion>> {
             let mut output = Vec::new();
@@ -244,15 +241,15 @@ macro_rules! client_methods {
         fn vgetattrs<P: AsRef<Path>>(
             &self,
             paths: &[P],
-            options: crate::MetadataOptions,
-        ) -> Result<Vec<Metadata>> {
+            options: crate::AttrsOptions,
+        ) -> Result<Vec<Attrs>> {
             ($metadata)($receiver(self), paths, options)
         }
         fn limits(&self) -> ResourceLimits {
             <$client>::limits($receiver(self))
         }
 
-        fn vopen(&self, requests: &[OpenRequest]) -> Result<Vec<Self::File>> {
+        fn vopen(&self, requests: &[OpenOp]) -> Result<Vec<Self::File>> {
             if requests.len() == 1 {
                 // Preserve native symlink resolution and independent-handle state.
                 return <$client as NativeHooks>::open_native($receiver(self), requests[0].clone())
@@ -375,12 +372,12 @@ mod extension_tests {
 
     #[test]
     fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
-        use crate::{ControlFlow, ResourceLimits, VisitOptions};
+        use crate::{ControlFlow, ListDirOptions, ResourceLimits};
         for malformed in 0..4 {
             let mut calls = 0;
             let result = super::visit_directory_pages(
                 &["/a"],
-                VisitOptions::new(),
+                ListDirOptions::new(),
                 ResourceLimits::default(),
                 |_| Ok(32),
                 |_| Ok(()),
@@ -415,7 +412,7 @@ mod extension_tests {
         let mut calls = 0;
         let result = super::visit_directory_pages(
             &["/a", "/missing"],
-            VisitOptions::new(),
+            ListDirOptions::new(),
             ResourceLimits::default(),
             |_| Ok(32),
             |_| Ok(()),
@@ -446,16 +443,16 @@ mod extension_tests {
 
     #[test]
     fn directory_continuations_run_in_vector_waves_and_cancellation_marks_unfinished_roots() {
-        use crate::{ControlFlow, ResourceLimits, VisitOptions};
+        use crate::{ControlFlow, ListDirOptions, ResourceLimits};
         let temp = tempfile::tempdir().unwrap();
         let mounted = crate::Mounted::new(temp.path()).unwrap();
         mounted.write("/f", b"x").unwrap();
-        let metadata = mounted.metadata("/f").unwrap();
+        let metadata = mounted.attrs("/f").unwrap();
         for stop in [false, true] {
             let mut widths = Vec::new();
             let result = super::visit_directory_pages(
                 &["/a", "/b"],
-                VisitOptions::new(),
+                ListDirOptions::new(),
                 ResourceLimits::default(),
                 |_| Ok(32),
                 |_| Ok(()),
@@ -506,7 +503,7 @@ mod extension_tests {
 
     #[test]
     fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
-        use crate::{MetadataFields, VisitOptions};
+        use crate::{Attributes, ListDirOptions};
         let root = tempfile::tempdir().unwrap();
         let fs = Probe {
             mounted: crate::Mounted::new(root.path()).unwrap(),
@@ -517,12 +514,12 @@ mod extension_tests {
         fs.create_dir("/b").unwrap();
         fs.write("/a/sub/f", b"payload").unwrap();
         fs.write("/b/f", b"x").unwrap();
-        let shallow = VisitOptions::new().fields(MetadataFields::SIZE);
+        let shallow = ListDirOptions::new().fields(Attributes::SIZE);
         let listed = fs.read_dirs_with_options(&["/a", "/b"], shallow).unwrap();
         assert_eq!(listed.len(), 2);
         assert!(listed.iter().all(|tree| tree.len() == 1));
         assert_eq!(listed[0][0].path, Path::new("/a"));
-        assert_eq!(listed[1][0].entries[0].metadata().len(), 1);
+        assert_eq!(listed[1][0].entries[0].attrs().len(), 1);
         let trees = fs
             .read_dirs_with_options(&["/a", "/b"], shallow.recursive(true))
             .unwrap();
@@ -532,7 +529,7 @@ mod extension_tests {
             trees[0]
                 .iter()
                 .flat_map(|listing| &listing.entries)
-                .any(|entry| entry.path() == Path::new("/a/sub/f") && entry.metadata().len() == 7)
+                .any(|entry| entry.path() == Path::new("/a/sub/f") && entry.attrs().len() == 7)
         );
         assert_eq!(
             fs.read_dirs_with_options(&["/a", "/a"], shallow.max_entries(1))
@@ -564,14 +561,14 @@ mod extension_tests {
         std::os::unix::fs::symlink(root.path().join("a"), root.path().join("link")).unwrap();
         let paths = vec![String::from("/link"), String::from("/b")];
         let metadata = fs
-            .vgetattrs(&paths, crate::MetadataOptions::new().follow_symlinks(false))
+            .vgetattrs(&paths, crate::AttrsOptions::new().follow_symlinks(false))
             .unwrap();
         assert!(metadata[0].is_symlink());
         assert!(metadata[1].is_dir());
         assert!(
             fs.vgetattrs(
                 &[std::path::PathBuf::from("/link")],
-                crate::MetadataOptions::new().follow_symlinks(false)
+                crate::AttrsOptions::new().follow_symlinks(false)
             )
             .unwrap()[0]
                 .is_symlink()
@@ -579,13 +576,13 @@ mod extension_tests {
         assert!(
             fs.vgetattrs(
                 &["/link"],
-                crate::MetadataOptions::new().follow_symlinks(false)
+                crate::AttrsOptions::new().follow_symlinks(false)
             )
             .unwrap()[0]
                 .is_symlink()
         );
         assert!(
-            fs.vgetattrs::<String>(&[], crate::MetadataOptions::new().follow_symlinks(false))
+            fs.vgetattrs::<String>(&[], crate::AttrsOptions::new().follow_symlinks(false))
                 .unwrap()
                 .is_empty()
         );
@@ -593,7 +590,7 @@ mod extension_tests {
 
     #[test]
     fn unified_visiting_preserves_depth_defaults_fields_and_failures() {
-        use crate::{ControlFlow, MetadataFields, TraversalCompletion, VisitOptions};
+        use crate::{Attributes, ControlFlow, ListDirOptions, TraversalCompletion};
         let root = tempfile::tempdir().unwrap();
         let fs = Probe {
             mounted: crate::Mounted::new(root.path())
@@ -611,10 +608,10 @@ mod extension_tests {
         std::os::unix::fs::symlink(root.path().join("tree/sub"), root.path().join("other/link"))
             .unwrap();
         let mut seen = Vec::new();
-        fs.visit_entries_with_options(&["/tree"], VisitOptions::new(), |_, entry| {
+        fs.visit_entries_with_options(&["/tree"], ListDirOptions::new(), |_, entry| {
             seen.push(entry.path().to_path_buf());
             // Callback may reenter the same filesystem.
-            assert!(fs.metadata(entry.path()).is_ok());
+            assert!(fs.attrs(entry.path()).is_ok());
             Ok(ControlFlow::Continue(()))
         })
         .unwrap();
@@ -622,12 +619,12 @@ mod extension_tests {
         assert!(
             fs.visit_entries_with_options(
                 &["/tree"],
-                VisitOptions::new().recursive(true),
+                ListDirOptions::new().recursive(true),
                 |_, _| Ok(ControlFlow::Continue(()))
             )
             .is_err()
         ); // inherits client budget
-        let recursive = VisitOptions::new().recursive(true).max_entries(10);
+        let recursive = ListDirOptions::new().recursive(true).max_entries(10);
         assert!(
             fs.visit_entries_with_options(&["/tree"], recursive.max_depth(0), |_, _| Ok(
                 ControlFlow::Continue(())
@@ -641,10 +638,10 @@ mod extension_tests {
                 recursive
                     .max_depth(depth)
                     .truncate_at_max_depth(true)
-                    .fields(MetadataFields::SIZE),
+                    .fields(Attributes::SIZE),
                 |_, entry| {
                     if entry.path().ends_with("file") {
-                        assert_eq!(entry.metadata().len(), 7);
+                        assert_eq!(entry.attrs().len(), 7);
                     }
                     seen.push(entry.path().to_path_buf());
                     Ok(ControlFlow::Continue(()))
@@ -1021,7 +1018,7 @@ mod extension_tests {
             assert!(bytes.len() <= 2);
             assert_eq!(offset as usize, payload.len());
             // Reenter the same client from its callback.
-            assert_eq!(fs.metadata("/dir/a")?.len(), 3);
+            assert_eq!(fs.attrs("/dir/a")?.len(), 3);
             payload.extend_from_slice(bytes);
             Ok(true)
         })
@@ -1045,7 +1042,7 @@ mod extension_tests {
         let trees = fs
             .read_dirs_with_options(
                 &["/a", "/b"],
-                crate::VisitOptions::from(options).fields(crate::MetadataFields::MODE),
+                crate::ListDirOptions::from(options).fields(crate::Attributes::MODE),
             )
             .unwrap();
         assert_eq!(
@@ -1059,8 +1056,7 @@ mod extension_tests {
         assert_eq!(
             fs.read_dirs_with_options(
                 &["/a", "/b"],
-                crate::VisitOptions::from(options.max_entries(1))
-                    .fields(crate::MetadataFields::MODE)
+                crate::ListDirOptions::from(options.max_entries(1)).fields(crate::Attributes::MODE)
             )
             .unwrap_err()
             .index(),
@@ -1071,16 +1067,15 @@ mod extension_tests {
         assert!(
             fs.read_dirs_with_options(
                 &["/a", "/b"],
-                crate::VisitOptions::from(options.max_entries(0))
-                    .fields(crate::MetadataFields::MODE)
+                crate::ListDirOptions::from(options.max_entries(0)).fields(crate::Attributes::MODE)
             )
             .is_ok()
         );
         assert_eq!(
             fs.read_dirs_with_options(
                 &["/a", "/b"],
-                crate::VisitOptions::from(options.max_path_bytes(3))
-                    .fields(crate::MetadataFields::MODE)
+                crate::ListDirOptions::from(options.max_path_bytes(3))
+                    .fields(crate::Attributes::MODE)
             )
             .unwrap_err()
             .index(),
@@ -1168,7 +1163,7 @@ mod extension_tests {
             fs.mounted
                 .walk_with_options(
                     "/a",
-                    crate::VisitOptions::from(options).fields(crate::MetadataFields::MODE)
+                    crate::ListDirOptions::from(options).fields(crate::Attributes::MODE)
                 )
                 .unwrap_err()
                 .index(),
@@ -1177,7 +1172,7 @@ mod extension_tests {
         assert_eq!(
             fs.read_dirs_with_options(
                 &["/a"],
-                crate::VisitOptions::from(options).fields(crate::MetadataFields::MODE)
+                crate::ListDirOptions::from(options).fields(crate::Attributes::MODE)
             )
             .unwrap_err()
             .index(),
@@ -1202,10 +1197,16 @@ mod extension_tests {
             fs.rename("/one/a", "/one/renamed").unwrap();
         }
         scalar(&fs);
-        fs.vrename(&[("/one/renamed", "/one/a"), ("/two/b", "/two/c")])
-            .unwrap();
+        fs.vrename(
+            &[("/one/renamed", "/one/a"), ("/two/b", "/two/c")],
+            crate::RenameOptions::Replace,
+        )
+        .unwrap();
         let error = fs
-            .vrename(&[("/one/a", "/one/moved"), ("/absent", "/two/moved")])
+            .vrename(
+                &[("/one/a", "/one/moved"), ("/absent", "/two/moved")],
+                crate::RenameOptions::Replace,
+            )
             .unwrap_err();
         assert_eq!(error.index(), Some(1));
         assert!(root.path().join("one/moved").exists());
@@ -1214,8 +1215,8 @@ mod extension_tests {
         let trees = fs
             .read_dirs_with_options(
                 &roots,
-                crate::VisitOptions::from(crate::WalkOptions::new())
-                    .fields(crate::MetadataFields::MODE),
+                crate::ListDirOptions::from(crate::WalkOptions::new())
+                    .fields(crate::Attributes::MODE),
             )
             .unwrap();
         assert_eq!(trees.len(), 2);
@@ -1225,22 +1226,22 @@ mod extension_tests {
             assert_eq!(
                 fs.walk_with_options(
                     "/two",
-                    crate::VisitOptions::from(options).fields(crate::MetadataFields::MODE)
+                    crate::ListDirOptions::from(options).fields(crate::Attributes::MODE)
                 )
                 .is_ok(),
                 fs.mounted
                     .walk_with_options(
                         "/two",
-                        crate::VisitOptions::from(options).fields(crate::MetadataFields::MODE)
+                        crate::ListDirOptions::from(options).fields(crate::Attributes::MODE)
                     )
                     .is_ok()
             );
         }
         let mut seen = Vec::new();
         let completion = fs
-            .visit_entries_with_options(&roots, crate::VisitOptions::new(), |index, entry| {
+            .visit_entries_with_options(&roots, crate::ListDirOptions::new(), |index, entry| {
                 seen.push(index);
-                assert!(fs.metadata(entry.path()).is_ok()); // callbacks can reenter
+                assert!(fs.attrs(entry.path()).is_ok()); // callbacks can reenter
                 Ok(std::ops::ControlFlow::Break(()))
             })
             .unwrap();
@@ -1251,7 +1252,7 @@ mod extension_tests {
         let completion = fs
             .visit_entries_with_options(
                 &roots,
-                crate::VisitOptions::new().recursive(true),
+                crate::ListDirOptions::new().recursive(true),
                 |index, _| {
                     seen.push(index);
                     Ok(std::ops::ControlFlow::Break(()))
@@ -1264,7 +1265,7 @@ mod extension_tests {
         let error = fs
             .visit_entries_with_options(
                 &["/two", "/two"],
-                crate::VisitOptions::new().max_entries(1),
+                crate::ListDirOptions::new().max_entries(1),
                 |_, _| Ok(std::ops::ControlFlow::Continue(())),
             )
             .unwrap_err();
@@ -1272,7 +1273,7 @@ mod extension_tests {
         let error = fs
             .visit_entries_with_options(
                 &["/two", "/two"],
-                crate::VisitOptions::new().max_path_bytes("/two/c".len()),
+                crate::ListDirOptions::new().max_path_bytes("/two/c".len()),
                 |_, _| Ok(std::ops::ControlFlow::Continue(())),
             )
             .unwrap_err();
@@ -1280,8 +1281,8 @@ mod extension_tests {
         assert!(
             fs.read_dirs_with_options(
                 &["/two", "/two"],
-                crate::VisitOptions::from(crate::WalkOptions::new().max_entries(1))
-                    .fields(crate::MetadataFields::MODE)
+                crate::ListDirOptions::from(crate::WalkOptions::new().max_entries(1))
+                    .fields(crate::Attributes::MODE)
             )
             .is_err()
         );
@@ -1290,7 +1291,7 @@ mod extension_tests {
         let completion = fs
             .vstream(
                 &["/one/moved", "/absent"],
-                crate::ReadStreamOptions::new().chunk_size(2),
+                crate::StreamOptions::new().chunk_size(2),
                 |index, offset, data| {
                     assert_eq!((index, offset), (0, 0));
                     assert_eq!(data, b"ab");
@@ -1307,7 +1308,7 @@ mod extension_tests {
         let error = fs
             .vstream(
                 &["/one/moved", "/absent"],
-                crate::ReadStreamOptions::new(),
+                crate::StreamOptions::new(),
                 |_, _, _| Ok(true),
             )
             .unwrap_err();

@@ -2,7 +2,7 @@
 
 #[bitfields::bitfield(u8)]
 #[derive(PartialEq, Eq)]
-struct MetadataFlags {
+struct AttrsFlags {
     #[bits(default = true)]
     follow: bool,
     #[bits(7)]
@@ -12,25 +12,25 @@ struct MetadataFlags {
 /// Select metadata fields and whether to follow the final symlink.
 /// Ancestor symlinks use ordinary backend path-resolution semantics.
 #[derive(Clone, Copy, Debug)]
-pub struct MetadataOptions {
-    fields: crate::api::MetadataFields,
-    flags: MetadataFlags,
+pub struct AttrsOptions {
+    fields: crate::api::Attributes,
+    flags: AttrsFlags,
 }
-impl Default for MetadataOptions {
+impl Default for AttrsOptions {
     fn default() -> Self {
         Self {
-            fields: crate::api::MetadataFields::stat(),
-            flags: MetadataFlags::new(),
+            fields: crate::api::Attributes::stat(),
+            flags: AttrsFlags::new(),
         }
     }
 }
-impl MetadataOptions {
+impl AttrsOptions {
     /// Standard stat fields, following the final symlink.
     pub fn new() -> Self {
         Self::default()
     }
     /// Select requested attributes. Object type may additionally be fetched.
-    pub fn fields(mut self, fields: crate::api::MetadataFields) -> Self {
+    pub fn fields(mut self, fields: crate::api::Attributes) -> Self {
         self.fields = fields;
         self
     }
@@ -40,7 +40,7 @@ impl MetadataOptions {
         self
     }
     /// Requested attributes; unavailable optional attributes remain absent.
-    pub fn requested_fields(self) -> crate::api::MetadataFields {
+    pub fn requested_attributes(self) -> crate::api::Attributes {
         self.fields
     }
     /// Whether to follow the final component if it is a symlink.
@@ -53,14 +53,14 @@ mod option_layout_tests {
     use super::*;
     #[test]
     fn packed_follow_flag_preserves_selected_fields() {
-        assert_eq!(std::mem::size_of::<MetadataFlags>(), 1);
-        assert!(MetadataOptions::default().follows_symlinks());
-        let fields = crate::api::MetadataFields::SIZE | crate::api::MetadataFields::CHANGE;
-        let options = MetadataOptions::new().fields(fields);
+        assert_eq!(std::mem::size_of::<AttrsFlags>(), 1);
+        assert!(AttrsOptions::default().follows_symlinks());
+        let fields = crate::api::Attributes::SIZE | crate::api::Attributes::CHANGE;
+        let options = AttrsOptions::new().fields(fields);
         for follow in [false, true, false] {
             let changed = options.follow_symlinks(follow);
             assert_eq!(changed.follows_symlinks(), follow);
-            assert_eq!(changed.requested_fields(), fields);
+            assert_eq!(changed.requested_attributes(), fields);
             assert!(options.follows_symlinks());
         }
     }

@@ -8,7 +8,7 @@ use std::error::Error;
 use std::io;
 use std::time::{Duration, Instant};
 
-use vnfs::{Nfs, NfsReadPool, NfsReadPoolOptions, ReadStreamOptions, VfsiExt};
+use vnfs::{Nfs, NfsReadPool, NfsReadPoolOptions, StreamOptions, VfsiExt};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -124,7 +124,7 @@ fn read_once(
     let started = Instant::now();
     client.read_stream_with_options(
         path,
-        ReadStreamOptions::new().chunk_size(chunk_size),
+        StreamOptions::new().chunk_size(chunk_size),
         |_, data| {
             bytes += data.len() as u64;
             chunks += 1;

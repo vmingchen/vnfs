@@ -9,9 +9,9 @@ performed. Atomic commit and rollback belong to the future TFSI interface.
 The application-facing Rust API uses the conventional strict shape:
 
 ```rust,no_run
-use vnfs::{OpenRequest, Result, Vfsi};
+use vnfs::{OpenOp, Result, Vfsi};
 
-fn open_group<C: Vfsi>(fs: &C, requests: &[OpenRequest]) -> Result<Vec<C::File>> {
+fn open_group<C: Vfsi>(fs: &C, requests: &[OpenOp]) -> Result<Vec<C::File>> {
     fs.vopen(requests)
 }
 ```

@@ -1,4 +1,4 @@
-use crate::{FileType, MetadataFields, MetadataOptions, Result, Vfsi, VisitOptions};
+use crate::{Attributes, AttrsOptions, FileType, ListDirOptions, Result, Vfsi};
 use std::path::Path;
 
 /// Logical sizes, not allocated disk space. Symlink targets are never followed.
@@ -12,7 +12,7 @@ pub struct TreeStats {
     pub file_bytes: u64,
 }
 impl TreeStats {
-    fn add(&mut self, metadata: &crate::Metadata) -> Result<()> {
+    fn add(&mut self, metadata: &crate::Attrs) -> Result<()> {
         let count = match metadata.file_type() {
             FileType::Regular => {
                 self.file_bytes = self
@@ -39,13 +39,13 @@ fn overflow() -> crate::Error {
 pub fn tree_stats(
     fs: &impl Vfsi,
     root: impl AsRef<Path>,
-    options: VisitOptions,
+    options: ListDirOptions,
 ) -> Result<TreeStats> {
     let root = root.as_ref();
-    let fields = MetadataFields::MODE | MetadataFields::SIZE;
+    let fields = Attributes::MODE | Attributes::SIZE;
     let mut metadata = fs.vgetattrs(
         &[root],
-        MetadataOptions::new().fields(fields).follow_symlinks(false),
+        AttrsOptions::new().fields(fields).follow_symlinks(false),
     )?;
     if metadata.len() != 1 {
         return Err(crate::Error::transport_with_kind(
@@ -70,7 +70,7 @@ pub fn tree_stats(
                     ));
                 }
                 for entry in page.entries {
-                    stats.add(entry.metadata())?;
+                    stats.add(entry.attrs())?;
                 }
                 Ok(std::ops::ControlFlow::Continue(()))
             },

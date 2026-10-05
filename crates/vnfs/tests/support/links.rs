@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use vnfs::{Capabilities, MetadataFields, MetadataOptions, Vfsi, VfsiExt};
+use vnfs::{Attributes, AttrsOptions, Capabilities, Vfsi, VfsiExt};
 
 pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     assert!(
@@ -18,7 +18,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     fs.vmkdir(&directories).unwrap();
     let paths: Vec<_> = directories.iter().map(|(path, _)| path).collect();
     let attrs = fs
-        .vgetattrs(&paths, MetadataOptions::new().fields(MetadataFields::MODE))
+        .vgetattrs(&paths, AttrsOptions::new().fields(Attributes::MODE))
         .unwrap();
     assert_eq!(attrs.len(), directories.len());
     for (attrs, (_, mode)) in attrs.iter().zip(&directories) {
@@ -28,7 +28,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     fs.create_dir_with_mode(format!("{directory}/scalar-dir"), 0o751)
         .unwrap();
     assert_eq!(
-        fs.metadata(format!("{directory}/scalar-dir"))
+        fs.attrs(format!("{directory}/scalar-dir"))
             .unwrap()
             .permissions()
             .mode()
@@ -51,7 +51,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     let read = fs.vreadlink(&links).unwrap();
     assert_eq!(read, targets.iter().map(PathBuf::from).collect::<Vec<_>>());
     for attrs in fs
-        .vgetattrs(&links, MetadataOptions::new().follow_symlinks(false))
+        .vgetattrs(&links, AttrsOptions::new().follow_symlinks(false))
         .unwrap()
     {
         assert!(attrs.is_symlink());
@@ -63,13 +63,13 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     let attrs = fs
         .vgetattrs(
             &files,
-            MetadataOptions::new().fields(MetadataFields::FILEID | MetadataFields::NLINK),
+            AttrsOptions::new().fields(Attributes::FILEID | Attributes::NLINK),
         )
         .unwrap();
     let linked = fs
         .vgetattrs(
             &hardlinks,
-            MetadataOptions::new().fields(MetadataFields::FILEID | MetadataFields::NLINK),
+            AttrsOptions::new().fields(Attributes::FILEID | Attributes::NLINK),
         )
         .unwrap();
     for (source, target) in attrs.iter().zip(&linked) {
@@ -85,7 +85,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     // Hard-linking a symlink must link the symlink object rather than its target.
     let symlink_hard = format!("{directory}/hard-symbolic");
     fs.hard_link(&links[0], &symlink_hard).unwrap();
-    assert!(fs.symlink_metadata(&symlink_hard).unwrap().is_symlink());
+    assert!(fs.symlink_attrs(&symlink_hard).unwrap().is_symlink());
     assert_eq!(fs.read_link(&symlink_hard).unwrap(), Path::new("file-0"));
 
     // Targets are data: retain non-UTF-8, relative, absolute and dangling text.
@@ -125,7 +125,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
     assert_eq!(
-        fs.metadata(&new_dir).unwrap().permissions().mode() & 0o7777,
+        fs.attrs(&new_dir).unwrap().permissions().mode() & 0o7777,
         0o711
     );
     let duplicate = format!("{directory}/duplicate-dir");
@@ -133,5 +133,5 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
         .vmkdir(&[(&duplicate, 0o700), (&duplicate, 0o755)])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert!(fs.metadata(&duplicate).is_err());
+    assert!(fs.attrs(&duplicate).is_err());
 }

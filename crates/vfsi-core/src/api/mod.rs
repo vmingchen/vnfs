@@ -10,11 +10,11 @@
 pub type Result<T> = crate::VfResult<T>;
 pub type Error = crate::VfError;
 pub use crate::{
-    AttrMask as MetadataFields, Capabilities, CopyOption, DirEntry, ErrorDomain, FilesystemStats,
-    Metadata, MetadataUpdate, OpenFlags, OpenRequest, Permissions, RemoveOptions, StatusCode,
+    AttrMask as Attributes, Attrs, Capabilities, CopyOption, DirEntry, ErrorDomain,
+    FilesystemStats, MetadataUpdate, OpenFlags, OpenOp, Permissions, RemoveOptions, StatusCode,
     TransportKind, VfType as FileType,
 };
-/// Atomic destination behavior requested by [`Vfsi::vrename_with_options`].
+/// Per-pair rename semantics requested by [`Vfsi::vrename`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RenameOptions {
     /// Replace a destination according to ordinary filesystem rename semantics.
@@ -22,25 +22,29 @@ pub enum RenameOptions {
     Replace,
     /// Fail atomically if the destination already exists.
     NoReplace,
+    /// Atomically exchange the source and destination names.
+    /// Both paths must exist. This is available only on backends that provide
+    /// native exchange semantics; it is never emulated as multiple operations.
+    Exchange,
 }
 pub use std::io::ErrorKind;
 pub use std::ops::ControlFlow;
 mod traits;
 pub use traits::{FileHandle, Vfsi, VfsiExt};
 mod metadata;
-pub use metadata::MetadataOptions;
+pub use metadata::AttrsOptions;
 mod read;
 pub use read::{ReadOp, ReadOptions, ReadResult};
 mod write;
 pub use write::{WriteOp, WriteOptions};
 mod visit;
-pub use visit::VisitOptions;
+pub use visit::ListDirOptions;
 mod support;
 pub use support::{
     DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
     DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
     DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirectoryListing,
-    ReadDirOptions, ReadStreamOptions, ResourceLimits, StreamCompletion, TraversalCompletion,
+    ReadDirOptions, ResourceLimits, StreamCompletion, StreamOptions, TraversalCompletion,
     WalkOptions,
 };
 pub use support::{ReadIntoResult, WriteResult};
@@ -71,10 +75,10 @@ pub mod internal {
 /// Common imports for backend-independent application code.
 pub mod prelude {
     pub use super::{
-        ControlFlow, CopyOption, FileHandle, MetadataFields, MetadataOperand, MetadataOptions,
-        MetadataTarget, MetadataUpdate, OpenFlags, OpenRequest, ReadOp, ReadOptions, ReadResult,
-        ReadStreamOptions, RemoveMode, RemoveOptions, RenameOptions, ResourceLimits, Vfsi, VfsiExt,
-        VisitOptions, WriteOp, WriteOptions,
+        Attributes, AttrsOptions, ControlFlow, CopyOption, FileHandle, ListDirOptions,
+        MetadataOperand, MetadataTarget, MetadataUpdate, OpenFlags, OpenOp, ReadOp, ReadOptions,
+        ReadResult, RemoveMode, RemoveOptions, RenameOptions, ResourceLimits, StreamOptions, Vfsi,
+        VfsiExt, WriteOp, WriteOptions,
     };
 }
 

@@ -16,9 +16,9 @@ use vfsi_core::api::{
 
 use crate::traits::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::{
-    AttrMask, Backend, Capabilities, DirEntry, FileSystem, Metadata, MetadataQuery, MetadataUpdate,
-    OpenFlags, OpenRequest, Permissions, ReadAllOptions, ReadDirOptions, ReadOp, ReadResult,
-    ReadStreamOptions, RemoveOptions, VfDir, VfError, VfFile, VfOffset, VfResult, WriteOpRef,
+    AttrMask, Attrs, Backend, Capabilities, DirEntry, FileSystem, MetadataQuery, MetadataUpdate,
+    OpenFlags, OpenOp, Permissions, ReadAllOptions, ReadDirOptions, ReadOp, ReadResult,
+    RemoveOptions, StreamOptions, VfDir, VfError, VfFile, VfOffset, VfResult, WriteOpRef,
     WriteResult,
 };
 
@@ -265,10 +265,10 @@ impl<F: FileSystem> FsClient<F> {
     }
     /// Open a path read-only.
     pub fn open(&self, path: impl AsRef<Path>) -> VfResult<FsFile<F>> {
-        self.open_with(OpenRequest::new(path.as_ref(), OpenFlags::READ))
+        self.open_with(OpenOp::new(path.as_ref(), OpenFlags::READ))
     }
 
-    pub fn open_with(&self, request: OpenRequest) -> VfResult<FsFile<F>> {
+    pub fn open_with(&self, request: OpenOp) -> VfResult<FsFile<F>> {
         let file = self.lock()?.open_impl(&request)?;
         Ok(FsFile {
             inner: Arc::clone(&self.inner),
@@ -282,7 +282,7 @@ impl<F: FileSystem> FsClient<F> {
     }
 
     pub fn create(&self, path: impl AsRef<Path>) -> VfResult<FsFile<F>> {
-        self.open_with(OpenRequest::new(
+        self.open_with(OpenOp::new(
             path.as_ref(),
             OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
         ))
@@ -361,7 +361,7 @@ impl<F: FileSystem> FsClient<F> {
     ) -> VfResult<StreamCompletion> {
         self.read_stream_with_options(
             path,
-            ReadStreamOptions::new().chunk_size(self.limits.stream_chunk_bytes),
+            StreamOptions::new().chunk_size(self.limits.stream_chunk_bytes),
             callback,
         )
     }
@@ -370,7 +370,7 @@ impl<F: FileSystem> FsClient<F> {
     pub fn read_stream_with_options(
         &self,
         path: impl AsRef<Path>,
-        options: ReadStreamOptions,
+        options: StreamOptions,
         mut callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
     ) -> VfResult<StreamCompletion> {
         let chunk_size = options.chunk_size_bytes();
@@ -419,11 +419,11 @@ impl<F: FileSystem> FsClient<F> {
 }
 
 impl<F: Backend> FsClient<F> {
-    pub fn metadata(&self, path: impl AsRef<Path>) -> VfResult<Metadata> {
+    pub fn attrs(&self, path: impl AsRef<Path>) -> VfResult<Attrs> {
         self.lock()?.metadata_path_impl(path.as_ref(), true)
     }
 
-    pub fn symlink_metadata(&self, path: impl AsRef<Path>) -> VfResult<Metadata> {
+    pub fn symlink_attrs(&self, path: impl AsRef<Path>) -> VfResult<Attrs> {
         self.lock()?.metadata_path_impl(path.as_ref(), false)
     }
 
@@ -576,7 +576,7 @@ impl<F: Backend> FsClient<F> {
             match self.create_dir(&current) {
                 Ok(()) => {}
                 Err(error) if error.err_no() == crate::ERR_EXIST => {
-                    if !self.metadata(&current)?.is_dir() {
+                    if !self.attrs(&current)?.is_dir() {
                         return Err(VfError::client(0, crate::ERR_NOTDIR)
                             .with_context("create_dir_all", &current));
                     }
@@ -589,7 +589,7 @@ impl<F: Backend> FsClient<F> {
 }
 
 impl<F: Backend> FsClient<F> {
-    fn removal_metadata(&self, path: &Path, operation: &'static str) -> VfResult<Metadata> {
+    fn removal_metadata(&self, path: &Path, operation: &'static str) -> VfResult<Attrs> {
         let mut filesystem = self.lock()?;
         let follow = !filesystem.capabilities().contains(Capabilities::LSTAT);
         filesystem
@@ -642,34 +642,9 @@ impl<F: Backend> FsClient<F> {
 
 impl<F: Backend> FsClient<F> {
     /// Rename independent source/destination pairs in one vector phase.
-    pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
-        if pairs.is_empty() {
-            return Ok(());
-        }
-        let requests: Vec<_> = pairs
-            .iter()
-            .map(|(from, to)| {
-                (
-                    VfFile::from_os_path(from.as_ref()),
-                    VfFile::from_os_path(to.as_ref()),
-                )
-            })
-            .collect();
-        self.lock()?
-            .vrename_impl(&requests)
-            .map_err(|error| match error.index() {
-                Some(index) if index < pairs.len() => {
-                    error.with_context("vrename", pairs[index].0.as_ref())
-                }
-                Some(_) => {
-                    VfError::transport(None, "rename backend returned an invalid error index")
-                }
-                None => error,
-            })
-    }
-
-    /// Rename pairs using native atomic no-replace semantics where supported.
-    pub fn vrename_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
+    /// Requested atomic destination semantics are applied per pair; the vector
+    /// is not transactional. Unsupported semantics are never emulated.
+    pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         pairs: &[(P, Q)],
         options: vfsi_core::api::RenameOptions,
@@ -690,7 +665,7 @@ impl<F: Backend> FsClient<F> {
             .vrename_with_options_impl(&requests, options)
             .map_err(|error| match error.index() {
                 Some(index) if index < pairs.len() => {
-                    error.with_context("vrename_with_options", pairs[index].0.as_ref())
+                    error.with_context("vrename", pairs[index].0.as_ref())
                 }
                 Some(_) => {
                     VfError::transport(None, "rename backend returned an invalid error index")
@@ -799,7 +774,7 @@ impl<F: Backend> FsClient<F> {
         callback: impl FnMut(&crate::WalkEvent) -> VfResult<crate::WalkControl>,
     ) -> VfResult<TraversalCompletion> {
         let root = root.as_ref();
-        let metadata = self.symlink_metadata_with_fields(root, fields | AttrMask::MODE)?;
+        let metadata = self.symlink_attrs_with_fields(root, fields | AttrMask::MODE)?;
         crate::walk_events(
             DirEntry::new(root.to_path_buf(), metadata),
             options,
@@ -848,7 +823,7 @@ impl<F: Backend> FsClient<F> {
         callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
     ) -> VfResult<TraversalCompletion> {
         let root = root.as_ref();
-        if !self.symlink_metadata(root)?.is_dir() {
+        if !self.symlink_attrs(root)?.is_dir() {
             return Err(VfError::client(0, crate::ERR_NOTDIR).with_context("visit_walk", root));
         }
         visit_walk_pages(
@@ -999,7 +974,7 @@ fn visit_walk_pages(
                 if callback(&entry)?.is_break() {
                     return Ok(TraversalCompletion::Stopped);
                 }
-                if entry.metadata().is_dir() {
+                if entry.attrs().is_dir() {
                     if depth >= options.depth_limit() {
                         if !options.truncates_at_depth_limit() {
                             return Err(VfError::client(0, libc::EFBIG as u32)
@@ -1188,12 +1163,12 @@ impl<F: Backend> FsClient<F> {
 
 impl<F: Backend> FsClient<F> {
     /// Fetch selected metadata for one path without following its final symlink.
-    /// Unavailable fields remain `None` on [`Metadata`].
-    pub fn symlink_metadata_with_fields(
+    /// Unavailable fields remain `None` on [`Attrs`].
+    pub fn symlink_attrs_with_fields(
         &self,
         path: impl AsRef<Path>,
         fields: AttrMask,
-    ) -> VfResult<Metadata> {
+    ) -> VfResult<Attrs> {
         let path = path.as_ref();
         let mut attrs = crate::VfAttrs {
             file: VfFile::from_os_path(path),
@@ -1202,7 +1177,7 @@ impl<F: Backend> FsClient<F> {
         };
         self.lock()?
             .vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs))
-            .map_err(|error| error.with_context("symlink_metadata", path))?;
+            .map_err(|error| error.with_context("symlink_attrs", path))?;
         Ok(vfsi_core::metadata_from_attrs(attrs))
     }
 
@@ -1428,7 +1403,7 @@ impl<F: Backend> FsClient<F> {
         paths: &[P],
         fields: AttrMask,
         follow: bool,
-    ) -> VfResult<Vec<Metadata>> {
+    ) -> VfResult<Vec<Attrs>> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
@@ -1462,7 +1437,7 @@ impl<F: Backend> FsClient<F> {
     }
 
     /// Fetch no-follow metadata for many paths using the backend vector operation.
-    pub fn vsymlink_metadata_native(&self, paths: &[&Path]) -> VfResult<Vec<Metadata>> {
+    pub fn vsymlink_attrs_native(&self, paths: &[&Path]) -> VfResult<Vec<Attrs>> {
         let mut attrs: Vec<_> = paths
             .iter()
             .map(|path| crate::VfAttrs {
@@ -1478,7 +1453,7 @@ impl<F: Backend> FsClient<F> {
                     .index()
                     .and_then(|index| paths.get(index))
                     .map_or(error.clone(), |path| {
-                        error.with_context("vsymlink_metadata_native", path)
+                        error.with_context("vsymlink_attrs_native", path)
                     })
             })?;
         Ok(attrs
@@ -1494,7 +1469,7 @@ impl<F: Backend> FsClient<F> {
     /// Success returns one RAII handle per request. Failure returns no
     /// handles; VFSI does not promise transactional rollback of other
     /// filesystem effects such as file creation.
-    pub fn vopen(&self, requests: &[OpenRequest]) -> VfResult<Vec<FsFile<F>>> {
+    pub fn vopen(&self, requests: &[OpenOp]) -> VfResult<Vec<FsFile<F>>> {
         let mut filesystem = self.lock()?;
         let files = filesystem.vopen_impl(requests).map_err(|error| {
             error
@@ -2033,7 +2008,7 @@ impl<F: Backend> FsClient<F> {
         let requests: Vec<_> = entries
             .iter()
             .map(|(path, _)| {
-                OpenRequest::new(
+                OpenOp::new(
                     path.as_ref(),
                     OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
                 )
@@ -2126,15 +2101,15 @@ impl<'a, F: FileSystem> OpenOptions<'a, F> {
 
     pub fn open(&self, path: impl AsRef<Path>) -> VfResult<FsFile<F>> {
         self.client
-            .open_with(OpenRequest::new(path.as_ref(), self.flags).mode(self.mode))
+            .open_with(OpenOp::new(path.as_ref(), self.flags).mode(self.mode))
     }
 }
 
 impl<F: Backend> OpenOptions<'_, F> {
     pub fn vopen<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<FsFile<F>>> {
-        let requests: Vec<OpenRequest> = paths
+        let requests: Vec<OpenOp> = paths
             .iter()
-            .map(|path| OpenRequest::new(path.as_ref(), self.flags).mode(self.mode))
+            .map(|path| OpenOp::new(path.as_ref(), self.flags).mode(self.mode))
             .collect();
         self.client.vopen(&requests)
     }
@@ -2268,7 +2243,7 @@ impl<F: FileSystem> FsFile<F> {
     }
 
     /// Query metadata for the open object without resolving its path again.
-    pub fn metadata(&self) -> VfResult<Metadata> {
+    pub fn attrs(&self) -> VfResult<Attrs> {
         let attributes = AttrMask::MODE
             | AttrMask::SIZE
             | AttrMask::NLINK

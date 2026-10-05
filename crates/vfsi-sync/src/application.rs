@@ -38,7 +38,7 @@ impl VectorBudget {
 }
 pub fn visit_directory_pages<P: AsRef<Path>>(
     roots: &[P],
-    policy: vfsi_core::api::VisitOptions,
+    policy: vfsi_core::api::ListDirOptions,
     limits: ResourceLimits,
     mut capacity: impl FnMut(&[&Path]) -> Result<usize>,
     mut validate_root: impl FnMut(&Path) -> Result<()>,
@@ -150,7 +150,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                         break;
                     }
                     accepted += 1;
-                    if policy.is_recursive() && entry.metadata().is_dir() {
+                    if policy.is_recursive() && entry.attrs().is_dir() {
                         if depth >= walk.depth_limit() {
                             if !walk.truncates_at_depth_limit() {
                                 page_error = Some(
@@ -248,8 +248,8 @@ macro_rules! file_methods {
         fn path(&self) -> &Path {
             <$file>::path(self)
         }
-        fn metadata(&self) -> Result<Metadata> {
-            <$file>::metadata(self)
+        fn attrs(&self) -> Result<Attrs> {
+            <$file>::attrs(self)
         }
         fn read_request_at(&self, offset: u64, length: usize) -> Self::ReadRequest<'_> {
             <$file>::read_request_at(self, offset, length)
@@ -311,11 +311,11 @@ impl<F: crate::FileSystem> FileHandle for crate::FsFile<F> {
 
 pub(crate) trait NativeHooks: Vfsi {
     fn page_capacity(&self, paths: &[&Path]) -> Result<usize>;
-    fn open_native(&self, request: OpenRequest) -> Result<Self::File>;
+    fn open_native(&self, request: OpenOp) -> Result<Self::File>;
     fn stream_native(
         &self,
         path: impl AsRef<Path>,
-        options: crate::ReadStreamOptions,
+        options: crate::StreamOptions,
         callback: impl FnMut(u64, &[u8]) -> Result<bool>,
     ) -> Result<crate::StreamCompletion>;
 }
@@ -379,13 +379,17 @@ macro_rules! client_methods {
     };
     // Application clients and backend clients use different native method names.
     ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path, $vwrite_native:expr, $vwrite_all_native:expr, $metadata:expr, $write_receiver:path, $rename:ident, $mkdir:ident, $copy:ident, $close:ident, $open_batch:ident) => {
-        fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-            <$client>::$rename($receiver(self), pairs)
+        fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
+            &self,
+            pairs: &[(P, Q)],
+            options: vfsi_core::api::RenameOptions,
+        ) -> Result<()> {
+            <$client>::vrename($receiver(self), pairs, options)
         }
         fn vlistdirs<P: AsRef<Path>>(
             &self,
             paths: &[P],
-            options: vfsi_core::api::VisitOptions,
+            options: vfsi_core::api::ListDirOptions,
             callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
         ) -> Result<Vec<crate::TraversalCompletion>> {
             visit_directory_pages(
@@ -396,8 +400,8 @@ macro_rules! client_methods {
                 |path| {
                     let metadata = self.vgetattrs(
                         &[path],
-                        vfsi_core::api::MetadataOptions::new()
-                            .fields(vfsi_core::api::MetadataFields::MODE)
+                        vfsi_core::api::AttrsOptions::new()
+                            .fields(vfsi_core::api::Attributes::MODE)
                             .follow_symlinks(false),
                     )?;
                     if metadata.len() != 1 {
@@ -416,7 +420,7 @@ macro_rules! client_methods {
                     <$client>::read_dir_pages_with_fields(
                         $receiver(self),
                         paths,
-                        options.metadata_fields(),
+                        options.attributes(),
                         cursors,
                         page_size,
                         max_entries,
@@ -428,7 +432,7 @@ macro_rules! client_methods {
         fn vstream<P: AsRef<Path>>(
             &self,
             paths: &[P],
-            options: crate::ReadStreamOptions,
+            options: crate::StreamOptions,
             mut callback: impl FnMut(usize, u64, &[u8]) -> Result<bool>,
         ) -> Result<Vec<crate::StreamCompletion>> {
             let mut output = Vec::new();
@@ -475,15 +479,15 @@ macro_rules! client_methods {
         fn vgetattrs<P: AsRef<Path>>(
             &self,
             paths: &[P],
-            options: vfsi_core::api::MetadataOptions,
-        ) -> Result<Vec<Metadata>> {
+            options: vfsi_core::api::AttrsOptions,
+        ) -> Result<Vec<Attrs>> {
             ($metadata)($receiver(self), paths, options)
         }
         fn limits(&self) -> ResourceLimits {
             <$client>::limits($receiver(self))
         }
 
-        fn vopen(&self, requests: &[OpenRequest]) -> Result<Vec<Self::File>> {
+        fn vopen(&self, requests: &[OpenOp]) -> Result<Vec<Self::File>> {
             if requests.len() == 1 {
                 // Preserve native symlink resolution and independent-handle state.
                 return <$client as NativeHooks>::open_native($receiver(self), requests[0].clone())
@@ -577,7 +581,7 @@ impl<F: crate::Backend + 'static> Vfsi for crate::FsClient<F> {
 }
 
 impl<F: crate::Backend + 'static> NativeHooks for crate::FsClient<F> {
-    fn open_native(&self, request: OpenRequest) -> Result<Self::File> {
+    fn open_native(&self, request: OpenOp) -> Result<Self::File> {
         self.open_with(request)
     }
     fn page_capacity(&self, _paths: &[&Path]) -> Result<usize> {
@@ -586,7 +590,7 @@ impl<F: crate::Backend + 'static> NativeHooks for crate::FsClient<F> {
     fn stream_native(
         &self,
         path: impl AsRef<Path>,
-        options: crate::ReadStreamOptions,
+        options: crate::StreamOptions,
         callback: impl FnMut(u64, &[u8]) -> Result<bool>,
     ) -> Result<crate::StreamCompletion> {
         self.read_stream_with_options(path, options, callback)
@@ -661,14 +665,14 @@ where
 pub(crate) fn metadata_backend<F, P: AsRef<std::path::Path>>(
     client: &crate::FsClient<F>,
     paths: &[P],
-    options: MetadataOptions,
-) -> vfsi_core::api::Result<Vec<crate::Metadata>>
+    options: AttrsOptions,
+) -> vfsi_core::api::Result<Vec<crate::Attrs>>
 where
     F: crate::Backend + 'static,
 {
     client.vgetattrs_native(
         paths,
-        options.requested_fields(),
+        options.requested_attributes(),
         options.follows_symlinks(),
     )
 }

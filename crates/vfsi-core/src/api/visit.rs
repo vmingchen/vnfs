@@ -1,4 +1,4 @@
-use crate::api::{DepthLimit, MetadataFields, ReadDirOptions, ResourceLimits, WalkOptions};
+use crate::api::{Attributes, DepthLimit, ReadDirOptions, ResourceLimits, WalkOptions};
 use std::num::NonZeroUsize;
 
 #[bitfields::bitfield(u8)]
@@ -17,15 +17,15 @@ struct VisitFlags {
 /// visiting delivers owned directory pages incrementally through callbacks.
 /// Unspecified budgets inherit the client's resource limits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct VisitOptions {
+pub struct ListDirOptions {
     flags: VisitFlags,
     entries: Option<NonZeroUsize>,
     bytes: Option<NonZeroUsize>,
     depth: Option<DepthLimit>,
-    fields: Option<MetadataFields>,
+    fields: Option<Attributes>,
 }
 
-impl VisitOptions {
+impl ListDirOptions {
     /// Explicitly disable entry, path-byte and depth limits. This can permit
     /// unbounded collection or traversal; prefer finite application budgets.
     pub const fn unlimited() -> Self {
@@ -90,23 +90,23 @@ impl VisitOptions {
     /// Select metadata returned with directory pages, without per-entry stat
     /// calls. Defaults to common stat fields. MODE is always requested for
     /// traversal; backends may return additional fields or omit unsupported ones.
-    pub const fn fields(mut self, value: MetadataFields) -> Self {
+    pub const fn fields(mut self, value: Attributes) -> Self {
         self.fields = Some(value);
         self
     }
     pub const fn is_recursive(self) -> bool {
         self.flags.recursive()
     }
-    pub fn metadata_fields(self) -> MetadataFields {
+    pub fn attributes(self) -> Attributes {
         self.fields.unwrap_or_else(|| {
-            MetadataFields::stat()
-                | MetadataFields::UID
-                | MetadataFields::GID
-                | MetadataFields::ATIME
-                | MetadataFields::MTIME
-                | MetadataFields::CTIME
-                | MetadataFields::CHANGE
-        }) | MetadataFields::MODE
+            Attributes::stat()
+                | Attributes::UID
+                | Attributes::GID
+                | Attributes::ATIME
+                | Attributes::MTIME
+                | Attributes::CTIME
+                | Attributes::CHANGE
+        }) | Attributes::MODE
     }
     /// Resolve recursive traversal limits against the client's defaults.
     pub fn walk_options(self, limits: ResourceLimits) -> WalkOptions {
@@ -143,14 +143,14 @@ impl VisitOptions {
     }
 }
 
-impl From<ReadDirOptions> for VisitOptions {
+impl From<ReadDirOptions> for ListDirOptions {
     fn from(options: ReadDirOptions) -> Self {
         Self::new()
             .max_entries(options.entry_limit())
             .max_path_bytes(options.path_byte_limit())
     }
 }
-impl From<WalkOptions> for VisitOptions {
+impl From<WalkOptions> for ListDirOptions {
     fn from(options: WalkOptions) -> Self {
         Self::new()
             .recursive(true)
@@ -171,34 +171,31 @@ mod option_layout_tests {
         bytes: Option<usize>,
         depth: Option<usize>,
         truncate: bool,
-        fields: Option<MetadataFields>,
+        fields: Option<Attributes>,
     }
     #[test]
     fn compact_traversal_options_preserve_zero_overrides_and_independent_bits() {
         assert_eq!(std::mem::size_of::<VisitFlags>(), 1);
-        assert!(std::mem::size_of::<VisitOptions>() < std::mem::size_of::<PreviousLayout>());
+        assert!(std::mem::size_of::<ListDirOptions>() < std::mem::size_of::<PreviousLayout>());
         let limits = ResourceLimits::default();
-        let inherited = VisitOptions::new().walk_options(limits);
+        let inherited = ListDirOptions::new().walk_options(limits);
         assert_eq!(inherited.entry_limit(), limits.walk_options().entry_limit());
         assert_eq!(inherited.depth_limit(), limits.walk_options().depth_limit());
         for value in [0, 1, 200, usize::MAX] {
-            let options = VisitOptions::new()
+            let options = ListDirOptions::new()
                 .max_entries(value)
                 .max_path_bytes(value)
                 .max_depth(value)
                 .recursive(true)
                 .truncate_at_max_depth(true)
-                .fields(MetadataFields::SIZE);
+                .fields(Attributes::SIZE);
             let walk = options.walk_options(limits);
             assert_eq!(walk.entry_limit(), value);
             assert_eq!(walk.path_byte_limit(), value);
             assert_eq!(walk.depth_limit(), value);
             assert!(walk.truncates_at_depth_limit());
             assert!(options.is_recursive());
-            assert_eq!(
-                options.metadata_fields(),
-                MetadataFields::SIZE | MetadataFields::MODE
-            );
+            assert_eq!(options.attributes(), Attributes::SIZE | Attributes::MODE);
             let changed = options.recursive(false).truncate_at_max_depth(false);
             assert!(!changed.is_recursive());
             assert!(!changed.walk_options(limits).truncates_at_depth_limit());
@@ -209,13 +206,15 @@ mod option_layout_tests {
             assert_eq!(zero.walk_options(limits).depth_limit(), 0);
         }
         assert_eq!(
-            VisitOptions::unlimited().walk_options(limits).depth_limit(),
+            ListDirOptions::unlimited()
+                .walk_options(limits)
+                .depth_limit(),
             usize::MAX
         );
         eprintln!(
-            "VisitOptions: {} -> {} bytes",
+            "ListDirOptions: {} -> {} bytes",
             std::mem::size_of::<PreviousLayout>(),
-            std::mem::size_of::<VisitOptions>()
+            std::mem::size_of::<ListDirOptions>()
         );
     }
 }

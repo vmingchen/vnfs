@@ -714,7 +714,7 @@ fn worker_main(
                         return Err(VfError::client(0, libc::EBUSY as u32));
                     }
                     let size = if worker == 0 {
-                        Some(client.metadata(&path)?.len())
+                        Some(client.attrs(&path)?.len())
                     } else {
                         None
                     };

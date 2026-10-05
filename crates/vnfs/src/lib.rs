@@ -40,19 +40,19 @@ pub mod mounted {
 pub mod files {
     #[doc(inline)]
     pub use crate::{
-        Capabilities, FileHandle, OpenFlags, OpenRequest, ReadIntoResult, ReadOp, ReadOptions,
-        ReadResult, ReadStreamOptions, ResourceLimits, StreamCompletion, Vfsi, VfsiExt, WriteOp,
+        Capabilities, FileHandle, OpenFlags, OpenOp, ReadIntoResult, ReadOp, ReadOptions,
+        ReadResult, ResourceLimits, StreamCompletion, StreamOptions, Vfsi, VfsiExt, WriteOp,
         WriteOptions, WriteResult,
     };
 }
 
-/// Metadata, bounded directory listings, traversal, and removal policies.
+/// Attrs, bounded directory listings, traversal, and removal policies.
 pub mod directory {
     #[doc(inline)]
     pub use crate::{
-        ControlFlow, DepthLimit, DirEntry, DirectoryListing, FileType, Metadata, MetadataFields,
-        MetadataOptions, MetadataUpdate, Permissions, ReadDirOptions, RemoveMode, RemoveOptions,
-        RenameOptions, TraversalCompletion, VisitOptions, WalkControl, WalkEvent, WalkEventKind,
+        Attributes, Attrs, AttrsOptions, ControlFlow, DepthLimit, DirEntry, DirectoryListing,
+        FileType, ListDirOptions, MetadataUpdate, Permissions, ReadDirOptions, RemoveMode,
+        RemoveOptions, RenameOptions, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
         WalkOptions,
     };
 }
@@ -100,9 +100,9 @@ mod read;
 mod write;
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 pub(crate) use read::ReadRequest;
-pub use vfsi_core::api::MetadataOptions;
+pub use vfsi_core::api::AttrsOptions;
+pub use vfsi_core::api::ListDirOptions;
 pub use vfsi_core::api::RenameOptions;
-pub use vfsi_core::api::VisitOptions;
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 pub(crate) use vfsi_core::api::internal::OwnedReadResult;
 pub use vfsi_core::api::{ReadOp, ReadOptions, ReadResult};
@@ -186,34 +186,35 @@ pub use auto::{
 
 /// Common application imports.
 pub mod prelude {
-    pub use crate::MetadataFields;
+    pub use crate::Attributes;
+    pub use crate::{
+        AttrsOptions, ControlFlow, CopyOption, FileHandle, FilesystemStats, ListDirOptions,
+        MetadataOperand, MetadataTarget, ReadOp, ReadOptions, ReadResult, RemoveMode,
+        ResourceLimits, StreamCompletion, TraversalCompletion, Vfsi, VfsiExt, WriteOp,
+        WriteOptions,
+    };
     #[cfg(all(feature = "auto", target_os = "linux"))]
     pub use crate::{Auto, Mounted};
-    pub use crate::{
-        ControlFlow, CopyOption, FileHandle, FilesystemStats, MetadataOperand, MetadataOptions,
-        MetadataTarget, ReadOp, ReadOptions, ReadResult, RemoveMode, ResourceLimits,
-        StreamCompletion, TraversalCompletion, Vfsi, VfsiExt, VisitOptions, WriteOp, WriteOptions,
-    };
     #[cfg(feature = "nfs")]
     pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile, NfsVersion};
-    pub use vfsi_core::{OpenFlags, OpenRequest, RemoveOptions};
-    pub use vfsi_sync::{DepthLimit, ReadDirOptions, ReadStreamOptions, WalkOptions};
+    pub use vfsi_core::{OpenFlags, OpenOp, RemoveOptions};
+    pub use vfsi_sync::{DepthLimit, ReadDirOptions, StreamOptions, WalkOptions};
 }
 
 pub use std::io::ErrorKind;
 pub use std::ops::ControlFlow;
 /// Attribute selection for metadata queries, directory listings, and walks.
-pub use vfsi_core::AttrMask as MetadataFields;
+pub use vfsi_core::AttrMask as Attributes;
 pub use vfsi_core::VfType as FileType;
 pub use vfsi_core::api::RemoveMode;
 pub use vfsi_core::api::{
-    DepthLimit, DirectoryListing, ReadDirOptions, ReadStreamOptions, ResourceLimits,
-    StreamCompletion, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
+    DepthLimit, DirectoryListing, ReadDirOptions, ResourceLimits, StreamCompletion, StreamOptions,
+    TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
 };
 pub use vfsi_core::api::{ReadIntoResult, WriteResult};
 pub use vfsi_core::{
-    Capabilities, CopyOption, DirEntry, ErrorDomain, FilesystemStats, Metadata, MetadataUpdate,
-    OpenFlags, OpenRequest, Permissions, RemoveOptions, StatusCode, TransportKind,
+    Attrs, Capabilities, CopyOption, DirEntry, ErrorDomain, FilesystemStats, MetadataUpdate,
+    OpenFlags, OpenOp, Permissions, RemoveOptions, StatusCode, TransportKind,
 };
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 pub(crate) use vfsi_sync::ReadAllOptions;

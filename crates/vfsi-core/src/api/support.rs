@@ -12,11 +12,11 @@ pub const DEFAULT_READ_ALLV_MAX_TOTAL_BYTES: usize = DEFAULT_READ_MAX_BYTES;
 
 /// Tuning options for bounded single-file streaming reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReadStreamOptions {
+pub struct StreamOptions {
     chunk_size: usize,
 }
 
-impl ReadStreamOptions {
+impl StreamOptions {
     pub const fn new() -> Self {
         Self {
             chunk_size: DEFAULT_READ_STREAM_CHUNK_BYTES,
@@ -37,7 +37,7 @@ impl ReadStreamOptions {
     }
 }
 
-impl Default for ReadStreamOptions {
+impl Default for StreamOptions {
     fn default() -> Self {
         Self::new()
     }

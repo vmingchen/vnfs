@@ -1,5 +1,5 @@
 //! Data-only bridges leave creation, publication and metadata policy to callers.
-use crate::{Error, ReadStreamOptions, Result, StreamCompletion, Vfsi, VfsiExt};
+use crate::{Error, Result, StreamCompletion, StreamOptions, Vfsi, VfsiExt};
 use std::{io::Write, path::Path};
 
 /// Stream a source into a caller-owned writer with bounded read storage.
@@ -11,7 +11,7 @@ pub fn copy_to_writer(
     source: &impl Vfsi,
     path: impl AsRef<Path>,
     writer: &mut impl Write,
-    options: ReadStreamOptions,
+    options: StreamOptions,
 ) -> Result<u64> {
     let path = path.as_ref();
     let mut written = 0u64;

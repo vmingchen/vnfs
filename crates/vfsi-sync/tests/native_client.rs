@@ -6,8 +6,8 @@ use std::sync::{
 
 use vfsi_sync::{
     Backend, Capabilities, DirEntry, DirPageCursor, FileSystem, FsClient, MetadataQuery, OpenFlags,
-    OpenRequest, ReadDirOptions, ReadIntoResult, ReadOp, ReadResult, SetAttributes, VfAttrs,
-    VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
+    OpenOp, ReadDirOptions, ReadIntoResult, ReadOp, ReadResult, SetAttributes, VfAttrs, VfError,
+    VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
 };
 
 #[test]
@@ -163,7 +163,7 @@ fn opened_file_read_to_end_has_explicit_limits_and_cursor_semantics() {
 }
 
 impl Backend for ScalarOnly {
-    fn vopen_impl(&mut self, requests: &[OpenRequest]) -> VfResult<Vec<VfFile>> {
+    fn vopen_impl(&mut self, requests: &[OpenOp]) -> VfResult<Vec<VfFile>> {
         if self.transport_failure {
             return Err(VfError::transport(None, "reply lost"));
         }
@@ -336,7 +336,7 @@ struct PagedBackend {
 macro_rules! handle_contract {
     ($backend:ty) => {
         impl FileSystem for $backend {
-            fn open_impl(&mut self, request: &OpenRequest) -> VfResult<VfFile> {
+            fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
                 self.scalar.open_impl(request)
             }
             fn open_path_impl(
@@ -347,7 +347,7 @@ macro_rules! handle_contract {
                 mode: u32,
             ) -> VfResult<VfFile> {
                 let _ = (base, flags, mode);
-                self.open_impl(&OpenRequest::new(path, OpenFlags::READ))
+                self.open_impl(&OpenOp::new(path, OpenFlags::READ))
             }
             fn close_impl(&mut self, file: &VfFile) -> VfResult<()> {
                 self.scalar.close_impl(file)
@@ -642,7 +642,7 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
     };
     let backend: &mut dyn Backend = &mut concrete;
     let files = backend
-        .vopen_impl(&[OpenRequest::new("/file", OpenFlags::READ)])
+        .vopen_impl(&[OpenOp::new("/file", OpenFlags::READ)])
         .unwrap();
     let data = backend
         .vread_all_with_options_impl(&files, vfsi_sync::ReadAllOptions::new().max_total_bytes(6))
@@ -733,7 +733,7 @@ impl FileSystem for ScalarOnly {
         Capabilities::empty()
     }
 
-    fn open_impl(&mut self, _: &OpenRequest) -> VfResult<VfFile> {
+    fn open_impl(&mut self, _: &OpenOp) -> VfResult<VfFile> {
         self.open = true;
         Ok(VfFile::from_fd(1))
     }
@@ -888,7 +888,7 @@ fn owned_client_accepts_a_scalar_only_backend() {
     // probe directly here would fail to guard the narrow handle boundary.
     let client = FsClient::new(HandleOnly::default());
     let mut file = client
-        .open_with(OpenRequest::new(
+        .open_with(OpenOp::new(
             "/file",
             OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE,
         ))
@@ -908,7 +908,7 @@ fn owned_file_rejects_backend_results_that_violate_io_contracts() {
         ..ScalarOnly::default()
     });
     let mut file = client
-        .open_with(OpenRequest::new("/file", OpenFlags::READ))
+        .open_with(OpenOp::new("/file", OpenFlags::READ))
         .unwrap();
     let error = file.read_native(&mut [0; 4]).unwrap_err();
     assert_eq!(error.err_no(), vfsi_sync::ERR_IO);
@@ -920,7 +920,7 @@ fn owned_file_rejects_backend_results_that_violate_io_contracts() {
         ..ScalarOnly::default()
     });
     let mut file = client
-        .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
+        .open_with(OpenOp::new("/file", OpenFlags::WRITE))
         .unwrap();
     let error = file.write_native(b"data").unwrap_err();
     assert_eq!(error.err_no(), vfsi_sync::ERR_IO);
@@ -988,8 +988,8 @@ fn vector_transport_failure_does_not_invent_request_zero_context() {
     });
     let error = client
         .vopen(&[
-            OpenRequest::new("/first", OpenFlags::READ),
-            OpenRequest::new("/second", OpenFlags::READ),
+            OpenOp::new("/first", OpenFlags::READ),
+            OpenOp::new("/second", OpenFlags::READ),
         ])
         .unwrap_err();
     assert!(error.is_transport());
@@ -1005,8 +1005,8 @@ fn openv_rejects_wrong_result_count_and_cleans_returned_handles() {
     });
     let error = client
         .vopen(&[
-            OpenRequest::new("/first", OpenFlags::READ),
-            OpenRequest::new("/second", OpenFlags::READ),
+            OpenOp::new("/first", OpenFlags::READ),
+            OpenOp::new("/second", OpenFlags::READ),
         ])
         .unwrap_err();
     assert!(error.is_transport());
@@ -1022,8 +1022,8 @@ fn readv_and_writev_reject_wrong_result_counts() {
     let client = FsClient::new(backend);
     let files = client
         .vopen(&[
-            OpenRequest::new("/first", OpenFlags::READ | OpenFlags::WRITE),
-            OpenRequest::new("/second", OpenFlags::READ | OpenFlags::WRITE),
+            OpenOp::new("/first", OpenFlags::READ | OpenFlags::WRITE),
+            OpenOp::new("/second", OpenFlags::READ | OpenFlags::WRITE),
         ])
         .unwrap();
     *vector_result_limit.lock().unwrap() = Some(1);
@@ -1087,7 +1087,7 @@ fn write_allv_retries_short_writes_in_vector_waves() {
         ..ScalarOnly::default()
     });
     let file = client
-        .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
+        .open_with(OpenOp::new("/file", OpenFlags::WRITE))
         .unwrap();
     let results = client
         .vwrite_all_native(&[
@@ -1117,7 +1117,7 @@ fn write_allv_preserves_order_for_overlapping_short_writes() {
         ..ScalarOnly::default()
     });
     let file = client
-        .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
+        .open_with(OpenOp::new("/file", OpenFlags::WRITE))
         .unwrap();
     let results = client
         .vwrite_all_native(&[
@@ -1143,7 +1143,7 @@ fn write_allv_waits_for_every_earlier_overlapping_request() {
         ..ScalarOnly::default()
     });
     let file = client
-        .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
+        .open_with(OpenOp::new("/file", OpenFlags::WRITE))
         .unwrap();
     client
         .vwrite_all_native(&[
@@ -1163,7 +1163,7 @@ fn write_allv_rejects_zero_progress() {
         ..ScalarOnly::default()
     });
     let file = client
-        .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
+        .open_with(OpenOp::new("/file", OpenFlags::WRITE))
         .unwrap();
     let error = client
         .vwrite_all_native(&[file.write_request_at(0, b"data")])
@@ -1181,10 +1181,10 @@ fn write_allv_validates_every_request_before_writing_a_prefix() {
     });
     let other = FsClient::new(ScalarOnly::default());
     let local_file = client
-        .open_with(OpenRequest::new("/local", OpenFlags::WRITE))
+        .open_with(OpenOp::new("/local", OpenFlags::WRITE))
         .unwrap();
     let foreign_file = other
-        .open_with(OpenRequest::new("/foreign", OpenFlags::WRITE))
+        .open_with(OpenOp::new("/foreign", OpenFlags::WRITE))
         .unwrap();
     let error = client
         .vwrite_all_native(&[
@@ -1228,7 +1228,7 @@ fn vector_results_must_match_their_requests_and_io_limits() {
         ..ScalarOnly::default()
     });
     let file = client
-        .open_with(OpenRequest::new("/file", OpenFlags::WRITE))
+        .open_with(OpenOp::new("/file", OpenFlags::WRITE))
         .unwrap();
     let error = client
         .vwrite_native(&[file.write_request_at(0, b"x")])
@@ -1315,7 +1315,7 @@ fn stream_callback_can_reenter_client_and_drop_another_file() {
     client
         .read_stream_with_options(
             "/file",
-            vfsi_sync::ReadStreamOptions::new().chunk_size(2),
+            vfsi_sync::StreamOptions::new().chunk_size(2),
             |_, data| {
                 drop(other.take());
                 let file = client.open("/nested")?;

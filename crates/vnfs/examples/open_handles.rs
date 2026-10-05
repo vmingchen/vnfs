@@ -1,11 +1,11 @@
-use vnfs::{Nfs, OpenFlags, OpenRequest, Vfsi, VfsiExt};
+use vnfs::{Nfs, OpenFlags, OpenOp, Vfsi, VfsiExt};
 
 // A range read may be short: exact reads must advance by actual progress
 // until their target length or EOF is reached.
 pub fn run(fs: &impl Vfsi, paths: &[String]) -> vnfs::Result<Vec<Vec<u8>>> {
     let requests: Vec<_> = paths
         .iter()
-        .map(|path| OpenRequest::new(path, OpenFlags::READ))
+        .map(|path| OpenOp::new(path, OpenFlags::READ))
         .collect();
     let files = fs.vopen(&requests)?;
     let mut buffers = vec![[0_u8; 4096]; files.len()];

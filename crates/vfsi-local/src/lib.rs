@@ -327,7 +327,7 @@ impl DummyVecFs {
             path.push(name);
         } else {
             // Force normal path traversal through the procfs descriptor;
-            // symlink_metadata on the bare fd entry would describe procfs's
+            // symlink_attrs on the bare fd entry would describe procfs's
             // magic link rather than the directory it anchors.
             path.push(".");
         }
@@ -1161,7 +1161,7 @@ impl FileSystem for DummyVecFs {
     fn read_file_impl(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
         vfsi_sync::backend_helpers::native_read_file_impl_default(self, file, max_bytes)
     }
-    fn open_impl(&mut self, request: &OpenRequest) -> VfResult<VfFile> {
+    fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
         vfsi_sync::backend_helpers::native_open_impl_default(self, request)
     }
     fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
@@ -1335,7 +1335,7 @@ impl Backend for DummyVecFs {
         }
         Ok(())
     }
-    fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Metadata> {
+    fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Attrs> {
         vfsi_sync::backend_helpers::native_metadata_path_impl_default(self, path, follow)
     }
     fn set_metadata_path_impl(
@@ -1531,6 +1531,16 @@ impl Backend for DummyVecFs {
                     .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
                 let destination_name = cstring_from_bytes(path_bytes(&destination))
                     .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+                if options == vfsi_core::api::RenameOptions::Exchange
+                    && source_path == destination_path
+                {
+                    continue;
+                }
+                let flags = match options {
+                    vfsi_core::api::RenameOptions::NoReplace => libc::RENAME_NOREPLACE,
+                    vfsi_core::api::RenameOptions::Exchange => libc::RENAME_EXCHANGE,
+                    vfsi_core::api::RenameOptions::Replace => unreachable!(),
+                };
                 let result = unsafe {
                     libc::syscall(
                         libc::SYS_renameat2,
@@ -1538,7 +1548,7 @@ impl Backend for DummyVecFs {
                         source_name.as_ptr(),
                         libc::AT_FDCWD,
                         destination_name.as_ptr(),
-                        libc::RENAME_NOREPLACE,
+                        flags,
                     )
                 };
                 if result < 0 {
@@ -1546,12 +1556,33 @@ impl Backend for DummyVecFs {
                     let source_is_directory = std::fs::symlink_metadata(&source)
                         .map(|metadata| metadata.is_dir())
                         .unwrap_or(false);
-                    let errno = noreplace_error_code(
-                        &error,
-                        source_is_directory,
-                        &source_path,
-                        &destination_path,
-                    );
+                    let destination_is_directory = std::fs::symlink_metadata(&destination)
+                        .map(|metadata| metadata.is_dir())
+                        .unwrap_or(false);
+                    let errno = if options == vfsi_core::api::RenameOptions::NoReplace {
+                        noreplace_error_code(
+                            &error,
+                            source_is_directory,
+                            &source_path,
+                            &destination_path,
+                        )
+                    } else {
+                        match error.raw_os_error() {
+                            Some(libc::EOPNOTSUPP | libc::ENOSYS) => VF_ERR_UNSUPPORTED,
+                            Some(libc::EINVAL)
+                                if !(source_is_directory
+                                    && destination_path.starts_with(&source_path)
+                                    || destination_is_directory
+                                        && source_path.starts_with(&destination_path)) =>
+                            {
+                                VF_ERR_UNSUPPORTED
+                            }
+                            _ => error
+                                .raw_os_error()
+                                .map(|errno| errno as u32)
+                                .unwrap_or(VF_ERR_RPC),
+                        }
+                    };
                     return Err(VfError::failure(index, errno));
                 }
             }

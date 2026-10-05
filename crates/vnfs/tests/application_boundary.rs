@@ -3,7 +3,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use vnfs::VfsiExt;
-use vnfs::{Mounted, OpenFlags, OpenRequest};
+use vnfs::{Mounted, OpenFlags, OpenOp};
 
 thread_local! {
     static TRACK: Cell<bool> = const { Cell::new(false) };
@@ -112,7 +112,7 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     // Both clients must have warmed descriptor maps before comparing OPEN.
     raw.write_files(&paths.map(|path| (path, b"payload")))
         .unwrap();
-    let requests = paths.map(|path| OpenRequest::new(path, OpenFlags::READ | OpenFlags::WRITE));
+    let requests = paths.map(|path| OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE));
     let (mut files, open_cost) = measured(|| mounted.vopen(&requests).unwrap());
     let (mut raw_files, raw_open_cost) = measured(|| raw.vopen(&requests).unwrap());
     assert_eq!(

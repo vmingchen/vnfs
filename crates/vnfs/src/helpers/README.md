@@ -25,13 +25,13 @@ flushing remain application policy. For a shared filesystem destination, prefer
 the existing vectorized `copy_items` workflows.
 
 ```rust,no_run
-use vnfs::{ReadStreamOptions, helpers::{MountSession, ResolvePath, copy_to_writer}};
+use vnfs::{StreamOptions, helpers::{MountSession, ResolvePath, copy_to_writer}};
 
 let session = MountSession::from_mount("/mnt/data")?;
 let source = session.map("/mnt/data/input", ResolvePath::Follow)?;
 let mut output = std::fs::File::create("output")?;
 copy_to_writer(session.fs(), source, &mut output,
-    ReadStreamOptions::new().chunk_size(1024 * 1024))?;
+    StreamOptions::new().chunk_size(1024 * 1024))?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -40,15 +40,15 @@ copy_to_writer(session.fs(), source, &mut output,
 ```rust,no_run
 use vnfs::{VfsiExt, Nfs, helpers::TreeBuilder};
 
-let client = Nfs::connect("server.example.com")?;
+let fs = Nfs::connect("server.example.com")?;
 let tree = TreeBuilder::new()
     .add_file("config/app.conf", "host = localhost")
     .add_empty_file("logs/app.log")
     .add_directory("data/raw")
-    .create(&client, "/new-workspace")?;
+    .create(&fs, "/new-workspace")?;
 
 // Optional, explicit cleanup. Dropping `tree` does not delete anything.
-client.remove_dir_all(tree.root())?;
+fs.remove_dir_all(tree.root())?;
 # Ok::<(), vnfs::Error>(())
 ```
 
@@ -91,13 +91,13 @@ in its existing NFS integration matrix.
 ## Copy, move, and tree statistics
 
 ```rust,no_run
-use vnfs::{Nfs, VisitOptions, helpers::{copy_items, tree_stats, CopyOptions}};
+use vnfs::{Nfs, ListDirOptions, helpers::{copy_items, tree_stats, CopyOptions}};
 
 let fs = Nfs::connect("server.example.com")?;
 let result = copy_items(&fs, &["/input/images", "/input/config"], "/output",
     CopyOptions::new().batch_size(64).chunk_bytes(1024 * 1024))?;
 println!("copied {} files", result.files_copied);
-let stats = tree_stats(&fs, "/output", VisitOptions::new())?;
+let stats = tree_stats(&fs, "/output", ListDirOptions::new())?;
 println!("{} files, {} logical bytes", stats.files, stats.file_bytes);
 # Ok::<(), vnfs::Error>(())
 ```
@@ -153,5 +153,5 @@ or partial destinations. Use quiescent source trees, particularly for moves.
 
 `tree_stats` folds recursive directory pages without materializing the tree or
 issuing per-child stats. It reports logical bytes, counts hard links per name,
-does not follow symlinks, and includes the root directory. VisitOptions controls
+does not follow symlinks, and includes the root directory. ListDirOptions controls
 its depth/entry/path budgets; explicitly truncated depth reports only that portion.

@@ -38,7 +38,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 .create(&fs, format!("{src}/nested/files"))?;
             let destination = format!("{root}/no-replace");
             let error = fs
-                .vrename_with_options(&[(&src, &destination)], RenameOptions::NoReplace)
+                .vrename(&[(&src, &destination)], RenameOptions::NoReplace)
                 .unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
             // Default conflict-safe copying uses bounded descriptor vectors.
@@ -50,7 +50,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
             )?;
             assert_eq!(s.files_copied, 2);
             assert_eq!(s.bytes_copied, Some(103));
-            let s = tree_stats(&fs, format!("{root}/descriptor"), VisitOptions::new())?;
+            let s = tree_stats(&fs, format!("{root}/descriptor"), ListDirOptions::new())?;
             assert_eq!((s.files, s.directories, s.file_bytes), (2, 3, 103));
             let path = format!("{root}/descriptor/nested/files/a");
             let data = fs.vread([ReadOp::whole(&path)], ReadOptions::new())?;
@@ -82,9 +82,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
             )?;
             assert_eq!(s.roots_removed, 1);
             assert_eq!(
-                fs.metadata(format!("{root}/descriptor"))
-                    .unwrap_err()
-                    .kind(),
+                fs.attrs(format!("{root}/descriptor")).unwrap_err().kind(),
                 std::io::ErrorKind::NotFound
             );
             let mut builder = TreeBuilder::new();

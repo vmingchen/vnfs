@@ -1,14 +1,14 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
 use std::ops::ControlFlow;
 use std::path::Path;
-use vnfs::{Mounted, TraversalCompletion, Vfsi, VfsiExt, VisitOptions};
+use vnfs::{ListDirOptions, Mounted, TraversalCompletion, Vfsi, VfsiExt};
 
 fn collect(
     fs: &impl Vfsi,
     roots: &[&str],
     recursive: bool,
 ) -> vnfs::Result<Vec<Vec<vnfs::DirectoryListing>>> {
-    fs.read_dirs_with_options(roots, VisitOptions::new().recursive(recursive))
+    fs.read_dirs_with_options(roots, ListDirOptions::new().recursive(recursive))
 }
 
 #[test]
@@ -40,11 +40,11 @@ fn page_delivery_is_bounded_reentrant_and_reports_empty_directory_cancellation()
     assert_eq!(
         fs.vlistdirs(
             &["/empty", "/missing"],
-            VisitOptions::new(),
+            ListDirOptions::new(),
             |index, page| {
                 assert_eq!(index, 0);
                 assert!(page.entries.is_empty());
-                assert!(fs.metadata(&page.path).unwrap().is_dir());
+                assert!(fs.attrs(&page.path).unwrap().is_dir());
                 Ok(ControlFlow::Break(()))
             }
         )
@@ -55,10 +55,10 @@ fn page_delivery_is_bounded_reentrant_and_reports_empty_directory_cancellation()
         fs.write(format!("/empty/f{i}"), b"x").unwrap();
     }
     let mut sizes = Vec::new();
-    fs.vlistdirs(&["/empty"], VisitOptions::new(), |_, page| {
+    fs.vlistdirs(&["/empty"], ListDirOptions::new(), |_, page| {
         sizes.push(page.entries.len());
         assert_eq!(page.path, Path::new("/empty"));
-        assert!(fs.metadata(&page.path).unwrap().is_dir());
+        assert!(fs.attrs(&page.path).unwrap().is_dir());
         Ok(ControlFlow::Continue(()))
     })
     .unwrap();
@@ -94,13 +94,13 @@ fn collection_limits_and_errors_keep_the_input_root_index() {
     fs.write("/a/f", b"x").unwrap();
     fs.write("/b/f", b"x").unwrap();
     assert_eq!(
-        fs.read_dirs_with_options(&["/a", "/b"], VisitOptions::new().max_entries(1))
+        fs.read_dirs_with_options(&["/a", "/b"], ListDirOptions::new().max_entries(1))
             .unwrap_err()
             .index(),
         Some(1)
     );
     assert_eq!(
-        fs.read_dirs_with_options(&["/a", "/a"], VisitOptions::new().max_path_bytes(7))
+        fs.read_dirs_with_options(&["/a", "/a"], ListDirOptions::new().max_path_bytes(7))
             .unwrap_err()
             .index(),
         Some(1)
@@ -135,10 +135,10 @@ fn single_directory_visitor_honors_recursion_and_preserves_convenience_defaults(
         paths.sort();
         paths
     };
-    let shallow = collect(VisitOptions::new());
+    let shallow = collect(ListDirOptions::new());
     assert_eq!(shallow.len(), 3);
     assert!(!shallow.contains(&"/tree/sub/leaf".into()));
-    let recursive = collect(VisitOptions::new().recursive(true));
+    let recursive = collect(ListDirOptions::new().recursive(true));
     assert_eq!(recursive.len(), 4);
     assert!(recursive.contains(&"/tree/sub/leaf".into()));
     assert!(!recursive.contains(&"/tree/link/leaf".into()));
@@ -167,12 +167,12 @@ fn consolidated_visitor_preserves_limits_cancellation_and_callback_errors() {
     fs.create_dir_all("/tree/sub").unwrap();
     fs.write("/tree/sub/leaf", b"x").unwrap();
     for recursive in [false, true] {
-        let options = VisitOptions::new().recursive(recursive);
+        let options = ListDirOptions::new().recursive(recursive);
         let mut calls = 0;
         assert_eq!(
             fs.visit_dir_with_options("/tree", options, |entry| {
                 calls += 1;
-                fs.symlink_metadata(entry.path())?;
+                fs.symlink_attrs(entry.path())?;
                 Ok(ControlFlow::Break(()))
             })
             .unwrap(),
@@ -192,7 +192,7 @@ fn consolidated_visitor_preserves_limits_cancellation_and_callback_errors() {
             .unwrap_err();
         assert_eq!(error.kind(), vnfs::ErrorKind::FileTooLarge);
     }
-    let recursive = VisitOptions::new().recursive(true).max_depth(0);
+    let recursive = ListDirOptions::new().recursive(true).max_depth(0);
     assert_eq!(
         fs.visit_dir_with_options("/tree", recursive, |_| { Ok(ControlFlow::Continue(())) })
             .unwrap_err()
@@ -221,20 +221,20 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
     fs.write("/tree/top", b"a").unwrap();
     fs.write("/tree/sub/leaf", b"b").unwrap();
     assert_eq!(
-        fs.read_dir_with_options("/tree", VisitOptions::new())
+        fs.read_dir_with_options("/tree", ListDirOptions::new())
             .unwrap_err()
             .kind(),
         vnfs::ErrorKind::FileTooLarge
     );
     assert_eq!(
-        fs.walk_with_options("/tree", VisitOptions::new())
+        fs.walk_with_options("/tree", ListDirOptions::new())
             .unwrap_err()
             .kind(),
         vnfs::ErrorKind::FileTooLarge
     );
-    let options = VisitOptions::new()
+    let options = ListDirOptions::new()
         .max_entries(3)
-        .fields(vnfs::MetadataFields::MODE);
+        .fields(vnfs::Attributes::MODE);
     let shallow = fs
         .read_dir_with_options("/tree", options.recursive(true))
         .unwrap();

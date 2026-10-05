@@ -27,7 +27,7 @@ pub use native::{Backend, FileSystem};
 pub mod sfsi {
     pub use crate::{
         DepthLimit, DirPageCursor, FileSystem, FsClient, FsFile, OpenOptions, ReadDirOptions,
-        ReadStreamOptions, WalkOptions,
+        StreamOptions, WalkOptions,
     };
     pub use vfsi_core::{Fd, VfAttrs, VfError, VfFile, VfOffset, VfResult, VfType};
 }
@@ -38,7 +38,7 @@ pub mod vfsi {
         Backend, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
         DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
         DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirPageCursor, ReadAllOptions, ReadDirOptions,
-        ReadStreamOptions, WalkOptions,
+        StreamOptions, WalkOptions,
     };
     pub use vfsi_core::*;
 }
@@ -52,8 +52,8 @@ pub use vfsi_core::api::{
     DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
     DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
     DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirectoryListing,
-    ReadDirOptions, ReadIntoResult as FsReadIntoResult, ReadStreamOptions, ResourceLimits,
-    StreamCompletion, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
+    ReadDirOptions, ReadIntoResult as FsReadIntoResult, ResourceLimits, StreamCompletion,
+    StreamOptions, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
     WriteResult as FsWriteResult,
 };
 

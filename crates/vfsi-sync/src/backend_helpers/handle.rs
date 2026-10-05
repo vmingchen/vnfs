@@ -136,7 +136,7 @@ pub fn write_raw_impl_default<F: FileSystem + ?Sized>(
 
 pub fn native_open_impl_default<F: FileSystem + ?Sized>(
     backend: &mut F,
-    request: &OpenRequest,
+    request: &OpenOp,
 ) -> VfResult<VfFile> {
     backend
         .open_raw_impl(

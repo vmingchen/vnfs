@@ -81,10 +81,10 @@ impl Vfsi for Harness {
     fn limits(&self) -> ResourceLimits {
         self.fs.limits()
     }
-    fn vgetattrs<P: AsRef<Path>>(&self, p: &[P], o: MetadataOptions) -> Result<Vec<Metadata>> {
+    fn vgetattrs<P: AsRef<Path>>(&self, p: &[P], o: AttrsOptions) -> Result<Vec<Attrs>> {
         self.fs.vgetattrs(p, o)
     }
-    fn vopen(&self, r: &[OpenRequest]) -> Result<Vec<Self::File>> {
+    fn vopen(&self, r: &[OpenOp]) -> Result<Vec<Self::File>> {
         self.calls.borrow_mut().opens += 1;
         self.fs.vopen(r)
     }
@@ -154,27 +154,7 @@ impl Vfsi for Harness {
         self.calls.borrow_mut().removes += 1;
         self.fs.vremove(p, m, o)
     }
-    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)]) -> Result<()> {
-        self.calls.borrow_mut().renames += 1;
-        match self.fault.get() {
-            Fault::PartialCrossDevice => {
-                self.fs.vrename(&p[..1])?;
-                Err(Error::client(1, libc::EXDEV as u32))
-            }
-            Fault::LostRename => {
-                self.fs.vrename(p)?;
-                Err(Error::transport_with_kind(
-                    None,
-                    TransportKind::InvalidReply,
-                    "lost rename reply",
-                ))
-            }
-            Fault::CrossDevice => Err(Error::client(0, libc::EXDEV as u32)),
-            Fault::Rename => Err(Error::client(0, libc::EIO as u32)),
-            _ => self.fs.vrename(p),
-        }
-    }
-    fn vrename_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
+    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         p: &[(P, Q)],
         options: RenameOptions,
@@ -182,11 +162,12 @@ impl Vfsi for Harness {
         self.calls.borrow_mut().renames += 1;
         match self.fault.get() {
             Fault::PartialCrossDevice => {
-                self.fs.vrename(&[(p[0].0.as_ref(), p[0].1.as_ref())])?;
+                self.fs
+                    .vrename(&[(p[0].0.as_ref(), p[0].1.as_ref())], options)?;
                 Err(Error::client(1, libc::EXDEV as u32))
             }
             Fault::LostRename => {
-                self.fs.vrename_with_options(p, options)?;
+                self.fs.vrename(p, options)?;
                 Err(Error::transport_with_kind(
                     None,
                     TransportKind::InvalidReply,
@@ -195,13 +176,13 @@ impl Vfsi for Harness {
             }
             Fault::CrossDevice => Err(Error::client(0, libc::EXDEV as u32)),
             Fault::Rename => Err(Error::client(0, libc::EIO as u32)),
-            _ => self.fs.vrename_with_options(p, options),
+            _ => self.fs.vrename(p, options),
         }
     }
     fn vlistdirs<P: AsRef<Path>>(
         &self,
         p: &[P],
-        o: VisitOptions,
+        o: ListDirOptions,
         c: impl FnMut(usize, DirectoryListing) -> Result<ControlFlow<()>>,
     ) -> Result<Vec<TraversalCompletion>> {
         self.fs.vlistdirs(p, o, c)
@@ -209,7 +190,7 @@ impl Vfsi for Harness {
     fn vstream<P: AsRef<Path>>(
         &self,
         p: &[P],
-        o: ReadStreamOptions,
+        o: StreamOptions,
         c: impl FnMut(usize, u64, &[u8]) -> Result<bool>,
     ) -> Result<Vec<StreamCompletion>> {
         self.fs.vstream(p, o, c)
@@ -322,7 +303,7 @@ fn layouts_permissions_and_stats() {
         0o640
     );
     symlink("a", t.path().join("src/link")).unwrap();
-    let s = tree_stats(&fs, "/src", VisitOptions::new()).unwrap();
+    let s = tree_stats(&fs, "/src", ListDirOptions::new()).unwrap();
     assert_eq!(
         (s.files, s.directories, s.symlinks, s.file_bytes),
         (3, 2, 1, 157)
@@ -664,14 +645,52 @@ fn no_replace_is_atomic_and_reports_existing_destination() {
     std::fs::write(t.path().join("source"), b"source").unwrap();
     std::fs::write(t.path().join("exists"), b"existing").unwrap();
     let error = fs
-        .vrename_with_options(&[("/source", "/exists")], RenameOptions::NoReplace)
+        .vrename(&[("/source", "/exists")], RenameOptions::NoReplace)
         .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
     assert_eq!(std::fs::read(t.path().join("source")).unwrap(), b"source");
     assert_eq!(std::fs::read(t.path().join("exists")).unwrap(), b"existing");
-    fs.vrename_with_options(&[("/source", "/new")], RenameOptions::NoReplace)
+    fs.vrename(&[("/source", "/new")], RenameOptions::NoReplace)
         .unwrap();
     assert_eq!(std::fs::read(t.path().join("new")).unwrap(), b"source");
+}
+
+#[test]
+fn exchange_swaps_names_atomically() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Mounted::new(root.path()).unwrap();
+    std::fs::write(root.path().join("left"), b"left data").unwrap();
+    std::fs::write(root.path().join("right"), b"right data").unwrap();
+
+    fs.vrename(&[("/left", "/right")], RenameOptions::Exchange)
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read(root.path().join("left")).unwrap(),
+        b"right data"
+    );
+    assert_eq!(
+        std::fs::read(root.path().join("right")).unwrap(),
+        b"left data"
+    );
+}
+
+#[test]
+fn exchange_requires_both_names_to_exist() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Mounted::new(root.path()).unwrap();
+    std::fs::write(root.path().join("source"), b"source data").unwrap();
+
+    let error = fs
+        .vrename(&[("/source", "/missing")], RenameOptions::Exchange)
+        .unwrap_err();
+
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(
+        std::fs::read(root.path().join("source")).unwrap(),
+        b"source data"
+    );
+    assert!(!root.path().join("missing").exists());
 }
 
 #[test]
@@ -682,7 +701,7 @@ fn no_replace_vector_reports_the_failing_pair_after_a_successful_prefix() {
     std::fs::write(t.path().join("b"), b"b").unwrap();
     std::fs::write(t.path().join("exists"), b"old").unwrap();
     let error = fs
-        .vrename_with_options(&[("/a", "/x"), ("/b", "/exists")], RenameOptions::NoReplace)
+        .vrename(&[("/a", "/x"), ("/b", "/exists")], RenameOptions::NoReplace)
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(std::fs::read(t.path().join("x")).unwrap(), b"a");

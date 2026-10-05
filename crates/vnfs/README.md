@@ -56,7 +56,7 @@ Single-target `VfsiExt` helpers use conventional names such as `open`, `write`,
 work on multiple files or directories: `vopen`, `vread`, `write_files`, and
 `vlistdirs` let the backend batch requests.
 `vgetattrs` batches metadata with selected fields and explicit
-final-symlink behavior through `MetadataOptions`.
+final-symlink behavior through `AttrsOptions`.
 
 The API is grouped into `nfs`, `files`, `directory`, `error`, and `helpers`;
 common application types are also available at the crate root.
@@ -68,14 +68,14 @@ batch each phase across both files:
 use vnfs::prelude::*;
 
 fn main() -> vnfs::Result<()> {
-    let client = Nfs::builder("nfs.example.com")
+    let fs = Nfs::builder("nfs.example.com")
         .root("/export/application")
         .connect()?;
-    client.write_files(&[
+    fs.write_files(&[
         ("/file-1", b"hello".as_slice()),
         ("/file-2", b"world".as_slice()),
     ])?;
-    let results = client.vread([
+    let results = fs.vread([
         ReadOp::whole("/file-1"),
         ReadOp::whole("/file-2"),
     ], Default::default())?;
@@ -101,8 +101,8 @@ Already have the directory mounted on Linux? Discover its connection:
 
 ```rust,no_run
 use vnfs::VfsiExt;
-let client = vnfs::Nfs::from_mount("/mnt/data/git/some/tree")?;
-let files = client.vread([
+let fs = vnfs::Nfs::from_mount("/mnt/data/git/some/tree")?;
+let files = fs.vread([
     vnfs::ReadOp::whole("/file-1"),
     vnfs::ReadOp::whole("/file-2"),
 ], Default::default())?;
@@ -120,18 +120,18 @@ caches and state. Mount discovery requires no per-file probing during I/O.
 
 The same model applies to `vopen`, `vread`, `vwrite`, and high-level
 `vlistdirs`, `vcopy`, and `vremove`. For tools such as
-`ls`, `du`, and `find`, `MetadataFields` chooses which attributes a directory
+`ls`, `du`, and `find`, `Attributes` chooses which attributes a directory
 listing fetches, and each `DirectoryListing` includes metadata for its entries
 without a separate stat call per file. For example:
 
 ```rust,no_run
-use vnfs::{ControlFlow, Vfsi, MetadataFields, Nfs, VisitOptions};
+use vnfs::{ControlFlow, Vfsi, Attributes, Nfs, ListDirOptions};
 
 fn main() -> vnfs::Result<()> {
     let fs = Nfs::connect("nfs.example.com")?;
     let directories = ["/export/a", "/export/b"];
     fs.vlistdirs(&directories,
-        VisitOptions::new().fields(MetadataFields::MODE | MetadataFields::SIZE | MetadataFields::BLOCKS),
+        ListDirOptions::new().fields(Attributes::MODE | Attributes::SIZE | Attributes::BLOCKS),
         |index, page| {
             println!("{}: {} entries in this page (input {index})", page.path.display(), page.entries.len());
             Ok(ControlFlow::Continue(()))
@@ -143,7 +143,7 @@ fn main() -> vnfs::Result<()> {
 The NFS backend batches directory lookups and READDIR pages into compounds;
 large listings continue page by page. The aggregate entry and path-byte
 limits bound traversal work. Pages are delivered incrementally without retaining
-an entire listing. Set `VisitOptions::recursive(true)` to visit a tree.
+an entire listing. Set `ListDirOptions::recursive(true)` to visit a tree.
 For collected results, `VfsiExt::read_dirs_with_options` builds on `vlistdirs`;
 `VfsiExt::read_dir_with_options` handles one directory.
 
@@ -172,11 +172,11 @@ you need its cache/coherency semantics, including access through aliases.
 ```rust,no_run
 # #[cfg(all(feature = "auto", target_os = "linux"))]
 # fn main() -> vnfs::Result<()> {
-use vnfs::{Auto, VfsiExt, OpenFlags, OpenRequest};
+use vnfs::{Auto, VfsiExt, OpenFlags, OpenOp};
 
     let fs = Auto::new("/")?;
     let paths = ["/mnt/nfs/file-1", "/mnt/nfs/file-2"];
-    let requests = paths.map(|p| OpenRequest::new(p, OpenFlags::READ));
+    let requests = paths.map(|p| OpenOp::new(p, OpenFlags::READ));
     let mut files = fs.vopen(&requests)?;
     println!("route: {:?}", files[0].route());
     let contents = fs.vread([
@@ -284,9 +284,9 @@ must be observed before close.
 use vnfs::prelude::*;
 
 fn main() -> vnfs::Result<()> {
-    let client = Nfs::connect("nfs.example.com")?;
-    let mut file = client.open("/file-1")?;
-    let mut contents = vec![0; client.metadata("/file-1")?.len() as usize];
+    let fs = Nfs::connect("nfs.example.com")?;
+    let mut file = fs.open("/file-1")?;
+    let mut contents = vec![0; fs.attrs("/file-1")?.len() as usize];
     file.read_at(&mut contents, 0)?;
     file.try_close()?;
     Ok(())
@@ -318,11 +318,11 @@ file-stream callback runs without the backend lock and may call the same client.
 use vnfs::prelude::*;
 
 fn main() -> vnfs::Result<()> {
-    let client = Nfs::connect("nfs.example.com")?;
+    let fs = Nfs::connect("nfs.example.com")?;
     let mut bytes_seen = 0u64;
-    client.vstream(
+    fs.vstream(
         &["/dataset/large.bin"],
-        ReadStreamOptions::new().chunk_size(4 * 1024 * 1024),
+        StreamOptions::new().chunk_size(4 * 1024 * 1024),
         |index, offset, chunk| {
             assert_eq!(index, 0);
             assert_eq!(offset, bytes_seen);
@@ -435,8 +435,8 @@ without boxing, additional copies, or scalar-loop fallbacks.
 
 ```rust,no_run
 use vnfs::VfsiExt;
-fn read_inputs<C: vnfs::Vfsi>(client: &C) -> vnfs::Result<Vec<Vec<u8>>> {
-    Ok(client.vread([vnfs::ReadOp::whole("/file-1"), vnfs::ReadOp::whole("/file-2")], Default::default())?.into_iter().map(|r| r.into_data().unwrap()).collect())
+fn read_inputs<C: vnfs::Vfsi>(fs: &C) -> vnfs::Result<Vec<Vec<u8>>> {
+    Ok(fs.vread([vnfs::ReadOp::whole("/file-1"), vnfs::ReadOp::whole("/file-2")], Default::default())?.into_iter().map(|r| r.into_data().unwrap()).collect())
 }
 ```
 
@@ -571,8 +571,8 @@ For privileged or attacker-influenced paths, root the removal at an
 already-open directory instead of a path:
 
 ```rust,no_run
-# fn example(client: &vnfs::NfsClient) -> vnfs::Result<()> {
-let mut dir = client.open_dir_handle("/attacker/controlled")?;
+# fn example(fs: &vnfs::NfsClient) -> vnfs::Result<()> {
+let mut dir = fs.open_dir_handle("/attacker/controlled")?;
 dir.remove_contents()?; // rooted at the resolved directory handle
 dir.try_close()?;       // Retains cleanup ownership if explicit close fails
 # Ok(())
@@ -641,7 +641,7 @@ the recommended baseline.
 # fn main() -> vnfs::Result<()> {
 use vnfs::{Nfs, NfsAuthentication, RpcsecGssProtection};
 
-    let client = Nfs::builder("nfs.example.com")
+    let fs = Nfs::builder("nfs.example.com")
         .root("/export/application")
         .auth(NfsAuthentication::RpcsecGss {
             // None derives the GSS host-based name nfs@nfs.example.com.
@@ -649,7 +649,7 @@ use vnfs::{Nfs, NfsAuthentication, RpcsecGssProtection};
             protection: RpcsecGssProtection::Integrity,
         })
         .connect()?;
-    drop(client);
+    drop(fs);
     Ok(())
 }
 # #[cfg(not(feature = "rpcsec-gss"))]

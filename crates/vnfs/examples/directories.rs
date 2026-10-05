@@ -1,4 +1,4 @@
-use vnfs::{ControlFlow, MetadataFields, Nfs, Vfsi, VisitOptions};
+use vnfs::{Attributes, ControlFlow, ListDirOptions, Nfs, Vfsi};
 
 pub fn run(fs: &impl Vfsi, paths: &[String], tree: &str) -> vnfs::Result<usize> {
     // Attributes arrive with the listings, avoiding a scalar stat per entry.
@@ -6,10 +6,10 @@ pub fn run(fs: &impl Vfsi, paths: &[String], tree: &str) -> vnfs::Result<usize> 
     for cohort in paths.chunks(64) {
         fs.vlistdirs(
             cohort,
-            VisitOptions::new().fields(MetadataFields::MODE | MetadataFields::SIZE),
+            ListDirOptions::new().fields(Attributes::MODE | Attributes::SIZE),
             |_, listing| {
                 for entry in listing.entries {
-                    println!("{:?}: {} bytes", entry.path(), entry.metadata().len());
+                    println!("{:?}: {} bytes", entry.path(), entry.attrs().len());
                 }
                 Ok(ControlFlow::Continue(()))
             },
@@ -18,7 +18,7 @@ pub fn run(fs: &impl Vfsi, paths: &[String], tree: &str) -> vnfs::Result<usize> 
     // Visit bounded pages instead of collecting a large tree.
     // Symlinks are not followed; iteration order is backend-defined.
     let mut entries = 0;
-    fs.vlistdirs(&[tree], VisitOptions::new().recursive(true), |_, page| {
+    fs.vlistdirs(&[tree], ListDirOptions::new().recursive(true), |_, page| {
         entries += page.entries.len();
         Ok(ControlFlow::Continue(()))
     })?;

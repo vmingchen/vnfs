@@ -29,7 +29,7 @@ impl FileHandle for TestFile {
     fn path(&self) -> &Path {
         Path::new("/file")
     }
-    fn metadata(&self) -> Result<Metadata> {
+    fn attrs(&self) -> Result<Attrs> {
         panic!("unexpected scalar metadata")
     }
     fn read_request_at(&self, offset: u64, length: usize) -> Self::ReadRequest<'_> {
@@ -119,10 +119,10 @@ impl Vfsi for PortableFs {
     fn limits(&self) -> ResourceLimits {
         ResourceLimits::default()
     }
-    fn vgetattrs<P: AsRef<Path>>(&self, _: &[P], _: MetadataOptions) -> Result<Vec<Metadata>> {
+    fn vgetattrs<P: AsRef<Path>>(&self, _: &[P], _: AttrsOptions) -> Result<Vec<Attrs>> {
         panic!("unexpected metadata")
     }
-    fn vopen(&self, requests: &[OpenRequest]) -> Result<Vec<TestFile>> {
+    fn vopen(&self, requests: &[OpenOp]) -> Result<Vec<TestFile>> {
         Ok(requests.iter().map(|_| TestFile).collect())
     }
     fn vread<'a>(
@@ -169,7 +169,11 @@ impl Vfsi for PortableFs {
     fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, _: &[(P, Q)]) -> Result<()> {
         panic!("unexpected copy")
     }
-    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, _: &[(P, Q)]) -> Result<()> {
+    fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        _: &[(P, Q)],
+        _: RenameOptions,
+    ) -> Result<()> {
         panic!("unexpected rename")
     }
     fn vremove<P: AsRef<Path>>(&self, _: &[P], _: RemoveMode, _: RemoveOptions) -> Result<()> {
@@ -178,7 +182,7 @@ impl Vfsi for PortableFs {
     fn vstream<P: AsRef<Path>>(
         &self,
         _: &[P],
-        _: ReadStreamOptions,
+        _: StreamOptions,
         _: impl FnMut(usize, u64, &[u8]) -> Result<bool>,
     ) -> Result<Vec<StreamCompletion>> {
         panic!("unexpected stream")
@@ -186,7 +190,7 @@ impl Vfsi for PortableFs {
     fn vlistdirs<P: AsRef<Path>>(
         &self,
         paths: &[P],
-        _: VisitOptions,
+        _: ListDirOptions,
         mut callback: impl FnMut(usize, DirectoryListing) -> Result<ControlFlow<()>>,
     ) -> Result<Vec<TraversalCompletion>> {
         self.listings.set(self.listings.get() + 1);
@@ -219,7 +223,7 @@ fn blanket_extensions_preserve_vector_dispatch_and_root_grouping() {
     assert_eq!(fs.read_files(&["/a", "/b"]).unwrap(), [vec![0], vec![1]]);
     assert_eq!(fs.reads.get(), 1);
     let trees = fs
-        .read_dirs_with_options(&["/a", "/b"], VisitOptions::new())
+        .read_dirs_with_options(&["/a", "/b"], ListDirOptions::new())
         .unwrap();
     assert_eq!(fs.listings.get(), 1);
     assert_eq!(trees[0][0].path, Path::new("/a"));

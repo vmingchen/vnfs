@@ -2,9 +2,9 @@
 //! promoted to a separate direct NFS connection; everything else stays on
 //! the kernel-mounted path.
 
-use crate::VfsiExt as _;
 #[cfg(test)]
-use crate::VisitOptions;
+use crate::ListDirOptions;
+use crate::VfsiExt as _;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -13,8 +13,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    DirEntry, Error as VfError, Mounted, Nfs, OpenFlags, OpenRequest,
-    OwnedReadResult as ReadResult, ReadIntoResult, ResourceLimits, Result as VfResult, WriteResult,
+    DirEntry, Error as VfError, Mounted, Nfs, OpenFlags, OpenOp, OwnedReadResult as ReadResult,
+    ReadIntoResult, ResourceLimits, Result as VfResult, WriteResult,
 };
 use vfsi_local::DummyVecFs;
 use vfsi_sync::{FsClient, FsFile};
@@ -188,7 +188,7 @@ impl std::fmt::Debug for AutoClient {
 }
 
 impl crate::application::NativeHooks for AutoClient {
-    fn open_native(&self, request: OpenRequest) -> VfResult<Self::File> {
+    fn open_native(&self, request: OpenOp) -> VfResult<Self::File> {
         self.open_native_impl(request)
     }
     fn page_capacity(&self, paths: &[&Path]) -> VfResult<usize> {
@@ -197,7 +197,7 @@ impl crate::application::NativeHooks for AutoClient {
     fn stream_native(
         &self,
         path: impl AsRef<Path>,
-        options: crate::ReadStreamOptions,
+        options: crate::StreamOptions,
         callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
     ) -> VfResult<crate::StreamCompletion> {
         self.stream_native_impl(path, options, callback)
@@ -528,8 +528,8 @@ impl AutoClient {
     pub fn vgetattrs<P: AsRef<Path>>(
         &self,
         paths: &[P],
-        options: crate::MetadataOptions,
-    ) -> VfResult<Vec<crate::Metadata>> {
+        options: crate::AttrsOptions,
+    ) -> VfResult<Vec<crate::Attrs>> {
         let mounts = read_mounts(false);
         let resolved: Vec<_> = paths
             .iter()
@@ -547,12 +547,12 @@ impl AutoClient {
                 match &resolved[start].route {
                     Route::Mounted => self.mounted.vgetattrs_native(
                         &batch,
-                        options.requested_fields(),
+                        options.requested_attributes(),
                         options.follows_symlinks(),
                     ),
                     Route::Nfs(connection) => connection.client.vgetattrs_native(
                         &batch,
-                        options.requested_fields(),
+                        options.requested_attributes(),
                         options.follows_symlinks(),
                     ),
                 }
@@ -717,7 +717,7 @@ impl AutoClient {
     pub(crate) fn read_dir_pages_with_fields(
         &self,
         paths: &[&Path],
-        fields: crate::MetadataFields,
+        fields: crate::Attributes,
         cursors: Vec<Option<vfsi_sync::DirPageCursor>>,
         page_size: usize,
         max_entries: usize,
@@ -821,7 +821,7 @@ impl AutoClient {
                     for entry in &mut listing.entries {
                         *entry = DirEntry::new(
                             self.public_path(connection, entry.path())?,
-                            entry.metadata().clone(),
+                            entry.attrs().clone(),
                         );
                     }
                 }
@@ -906,7 +906,7 @@ impl AutoClient {
     pub(crate) fn stream_native_impl(
         &self,
         path: impl AsRef<Path>,
-        options: crate::ReadStreamOptions,
+        options: crate::StreamOptions,
         callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
     ) -> VfResult<crate::StreamCompletion> {
         let route = self.resolve(path.as_ref(), &read_mounts(false));
@@ -1071,7 +1071,7 @@ impl AutoClient {
             .with_limits(self.limits)
             .inner;
         let kernel_id = fs::metadata(&spec.mount_point).ok()?.ino();
-        if client.metadata("/").ok()?.file_id() != Some(kernel_id) {
+        if client.attrs("/").ok()?.file_id() != Some(kernel_id) {
             return None;
         }
         if AuthSysIdentity::current().as_ref() != Some(&credentials) {
@@ -1094,7 +1094,7 @@ impl AutoClient {
         Some(connection)
     }
 
-    fn resolve_open_batch(&self, requests: &[OpenRequest], mounts: &MountTable) -> Vec<Resolved> {
+    fn resolve_open_batch(&self, requests: &[OpenOp], mounts: &MountTable) -> Vec<Resolved> {
         let mut parents: HashMap<PathBuf, Option<NfsConnection>> = HashMap::new();
         let mut resolved: Vec<_> = requests
             .iter()
@@ -1163,9 +1163,9 @@ impl AutoClient {
                         .iter()
                         .map(|index| resolved[*index].path.as_path())
                         .collect();
-                    match connection.client.vsymlink_metadata_native(&paths) {
-                        Ok(metadata) if metadata.len() == checked.len() => {
-                            for (index, item) in checked.into_iter().zip(metadata) {
+                    match connection.client.vsymlink_attrs_native(&paths) {
+                        Ok(attrs) if attrs.len() == checked.len() => {
+                            for (index, item) in checked.into_iter().zip(attrs) {
                                 if item.file_type() == crate::FileType::Symlink {
                                     resolved[index] = Resolved {
                                         route: Route::Mounted,
@@ -1192,11 +1192,11 @@ impl AutoClient {
 
     /// Preserve request order, including the completed-prefix semantics of
     /// strict vector operations. Consecutive requests to one mount batch.
-    pub(crate) fn open_native_impl(&self, request: OpenRequest) -> VfResult<AutoFile> {
+    pub(crate) fn open_native_impl(&self, request: OpenOp) -> VfResult<AutoFile> {
         self.vopen(&[request]).map(|mut files| files.remove(0))
     }
 
-    pub fn vopen(&self, requests: &[OpenRequest]) -> VfResult<Vec<AutoFile>> {
+    pub fn vopen(&self, requests: &[OpenOp]) -> VfResult<Vec<AutoFile>> {
         let mounts = read_mounts(true);
         let resolved = self.resolve_open_batch(requests, &mounts);
         let mut output = Vec::with_capacity(requests.len());
@@ -1599,9 +1599,28 @@ impl AutoClient {
     }
 
     /// Rename adjacent pairs on the same backend as a vector, preserving order.
-    pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    /// Options are atomic per pair; unsupported semantics are never emulated.
+    pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+        options: crate::RenameOptions,
+    ) -> VfResult<()> {
         if pairs.is_empty() {
             return Ok(());
+        }
+        if options != crate::RenameOptions::Replace {
+            let mounts = read_mounts(false);
+            for (index, (source, destination)) in pairs.iter().enumerate() {
+                let a = self.resolve(source.as_ref(), &mounts);
+                let b = self.resolve(destination.as_ref(), &mounts);
+                if !matches!((&a.route, &b.route), (Route::Mounted, Route::Mounted)) {
+                    return Err(
+                        vfsi_sync::VfError::client(index, vfsi_core::VF_ERR_UNSUPPORTED)
+                            .with_context("vrename", source.as_ref()),
+                    );
+                }
+            }
+            return self.mounted.vrename(pairs, options);
         }
         let mounts = read_mounts(false);
         let sources: Vec<_> = pairs
@@ -1615,7 +1634,6 @@ impl AutoClient {
         let mut start = 0;
         while start < pairs.len() {
             if !sources[start].route.same_backend(&targets[start].route) {
-                // Let the kernel report EXDEV or apply its ordinary mount semantics.
                 self.mounted
                     .rename(pairs[start].0.as_ref(), pairs[start].1.as_ref())
                     .map_err(|error| indexed(error, start))?;
@@ -1633,37 +1651,13 @@ impl AutoClient {
                 .map(|i| (sources[i].path.as_path(), targets[i].path.as_path()))
                 .collect();
             match &sources[start].route {
-                Route::Mounted => self.mounted.vrename(&batch),
-                Route::Nfs(connection) => connection.client.vrename(&batch),
+                Route::Mounted => self.mounted.vrename(&batch, options),
+                Route::Nfs(connection) => connection.client.vrename(&batch, options),
             }
             .map_err(|error| indexed(error, start))?;
             start = end;
         }
         Ok(())
-    }
-
-    /// Apply atomic no-replace rename only when every pair routes through the
-    /// mounted backend. Direct NFS routing currently has no such protocol op.
-    pub fn vrename_with_options<P: AsRef<Path>, Q: AsRef<Path>>(
-        &self,
-        pairs: &[(P, Q)],
-        options: crate::RenameOptions,
-    ) -> VfResult<()> {
-        if options == crate::RenameOptions::Replace {
-            return self.vrename(pairs);
-        }
-        let mounts = read_mounts(false);
-        for (index, (source, destination)) in pairs.iter().enumerate() {
-            let a = self.resolve(source.as_ref(), &mounts);
-            let b = self.resolve(destination.as_ref(), &mounts);
-            if !matches!((&a.route, &b.route), (Route::Mounted, Route::Mounted)) {
-                return Err(
-                    vfsi_sync::VfError::client(index, vfsi_core::VF_ERR_UNSUPPORTED)
-                        .with_context("vrename_with_options", source.as_ref()),
-                );
-            }
-        }
-        self.mounted.vrename_with_options(pairs, options)
     }
 }
 
@@ -1690,7 +1684,7 @@ pub struct AutoOpenOptions<'a> {
     mode: u32,
 }
 
-/// Metadata builder with the same application semantics as `SetMetadata`.
+/// Attrs builder with the same application semantics as `SetMetadata`.
 #[derive(Clone)]
 pub struct AutoSetMetadata<'a> {
     client: &'a AutoClient,
@@ -1805,13 +1799,13 @@ impl AutoOpenOptions<'_> {
     }
     pub fn open(&self, path: impl AsRef<Path>) -> VfResult<AutoFile> {
         self.client
-            .open_with(OpenRequest::new(path.as_ref(), self.flags).mode(self.mode))
+            .open_with(OpenOp::new(path.as_ref(), self.flags).mode(self.mode))
     }
     pub fn vopen<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<AutoFile>> {
         self.client.vopen(
             &paths
                 .iter()
-                .map(|path| OpenRequest::new(path.as_ref(), self.flags).mode(self.mode))
+                .map(|path| OpenOp::new(path.as_ref(), self.flags).mode(self.mode))
                 .collect::<Vec<_>>(),
         )
     }
@@ -1935,11 +1929,11 @@ impl AutoFile {
             AutoFileInner::Nfs(file) => file.write_at(buffer, offset),
         }
     }
-    pub fn metadata(&self) -> VfResult<crate::Metadata> {
+    pub fn attrs(&self) -> VfResult<crate::Attrs> {
         self.check_credentials()?;
         match &self.inner {
-            AutoFileInner::Mounted(file) => file.metadata(),
-            AutoFileInner::Nfs(file) => file.metadata(),
+            AutoFileInner::Mounted(file) => file.attrs(),
+            AutoFileInner::Nfs(file) => file.attrs(),
         }
     }
     pub fn sync_all(&self) -> VfResult<()> {
@@ -2100,7 +2094,7 @@ mod tests {
 
     #[test]
     fn child_seeds_recheck_routing_and_keep_owner_validation() {
-        use crate::{MetadataFields, VfsiExt};
+        use crate::{Attributes, VfsiExt};
         let root = tempfile::tempdir().unwrap();
         let client = Auto::new(root.path()).unwrap();
         client.create_dir("/dir").unwrap();
@@ -2110,7 +2104,7 @@ mod tests {
             let (first, next, _) = client
                 .read_dir_pages_with_fields(
                     &[Path::new("/dir")],
-                    MetadataFields::MODE,
+                    Attributes::MODE,
                     vec![None],
                     1,
                     10,
@@ -2125,7 +2119,7 @@ mod tests {
             let (page, _, _) = client
                 .read_dir_pages_with_fields(
                     &[Path::new("/dir")],
-                    MetadataFields::MODE,
+                    Attributes::MODE,
                     vec![Some(seed)],
                     1,
                     10,
@@ -2146,13 +2140,7 @@ mod tests {
             }
         }
         let (_, next, _) = client
-            .read_dir_pages_with_fields(
-                &[Path::new("/dir")],
-                MetadataFields::MODE,
-                vec![None],
-                1,
-                10,
-            )
+            .read_dir_pages_with_fields(&[Path::new("/dir")], Attributes::MODE, vec![None], 1, 10)
             .unwrap()
             .remove(0);
         let saved = next.unwrap().into_state::<RoutedDirectoryCursor>().unwrap();
@@ -2162,7 +2150,7 @@ mod tests {
             other
                 .read_dir_pages_with_fields(
                     &[Path::new("/dir")],
-                    MetadataFields::MODE,
+                    Attributes::MODE,
                     vec![Some(seed)],
                     1,
                     10
@@ -2176,7 +2164,7 @@ mod tests {
 
     #[test]
     fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
-        use crate::{MetadataFields, VfsiExt, VisitOptions};
+        use crate::{Attributes, ListDirOptions, VfsiExt};
         let root = tempfile::tempdir().unwrap();
         let client = Auto::new(root.path()).unwrap();
         client.create_dir("/dir").unwrap();
@@ -2185,25 +2173,19 @@ mod tests {
         client.write("/dir/b", b"x").unwrap();
         assert_eq!(
             client
-                .read_dirs_with_options(&["/dir"], VisitOptions::new().max_path_bytes(12))
+                .read_dirs_with_options(&["/dir"], ListDirOptions::new().max_path_bytes(12))
                 .unwrap()[0][0]
                 .entries
                 .len(),
             2
         );
         let error = client
-            .read_dirs_with_options(&["/dir"], VisitOptions::new().max_path_bytes(11))
+            .read_dirs_with_options(&["/dir"], ListDirOptions::new().max_path_bytes(11))
             .unwrap_err();
         assert_eq!(error.kind(), crate::ErrorKind::FileTooLarge);
         assert_eq!(error.index(), Some(0));
         let cursor = client
-            .read_dir_pages_with_fields(
-                &[Path::new("/dir")],
-                MetadataFields::MODE,
-                vec![None],
-                1,
-                10,
-            )
+            .read_dir_pages_with_fields(&[Path::new("/dir")], Attributes::MODE, vec![None], 1, 10)
             .unwrap()
             .remove(0)
             .1
@@ -2213,7 +2195,7 @@ mod tests {
             other
                 .read_dir_pages_with_fields(
                     &[Path::new("/dir")],
-                    MetadataFields::MODE,
+                    Attributes::MODE,
                     vec![Some(cursor)],
                     1,
                     10,
@@ -2224,13 +2206,7 @@ mod tests {
             libc::EINVAL as u32
         );
         let cursor = client
-            .read_dir_pages_with_fields(
-                &[Path::new("/dir")],
-                MetadataFields::MODE,
-                vec![None],
-                1,
-                10,
-            )
+            .read_dir_pages_with_fields(&[Path::new("/dir")], Attributes::MODE, vec![None], 1, 10)
             .unwrap()
             .remove(0)
             .1
@@ -2239,7 +2215,7 @@ mod tests {
             client
                 .read_dir_pages_with_fields(
                     &[Path::new("/other")],
-                    MetadataFields::MODE,
+                    Attributes::MODE,
                     vec![Some(cursor)],
                     1,
                     10,
@@ -2250,13 +2226,7 @@ mod tests {
             libc::EINVAL as u32
         );
         let cursor = client
-            .read_dir_pages_with_fields(
-                &[Path::new("/dir")],
-                MetadataFields::MODE,
-                vec![None],
-                1,
-                10,
-            )
+            .read_dir_pages_with_fields(&[Path::new("/dir")], Attributes::MODE, vec![None], 1, 10)
             .unwrap()
             .remove(0)
             .1
@@ -2264,7 +2234,7 @@ mod tests {
         let (page, next, _) = client
             .read_dir_pages_with_fields(
                 &[Path::new("/dir")],
-                MetadataFields::MODE,
+                Attributes::MODE,
                 vec![Some(cursor)],
                 1,
                 10,
@@ -2277,7 +2247,7 @@ mod tests {
             let (page, next, _) = client
                 .read_dir_pages_with_fields(
                     &[Path::new("/dir")],
-                    MetadataFields::MODE,
+                    Attributes::MODE,
                     vec![Some(cursor)],
                     1,
                     10,
@@ -2374,11 +2344,11 @@ mod tests {
         assert_eq!(client.route_for("/file"), AutoRoute::Mounted);
         let files = client
             .vopen(&[
-                OpenRequest::new(
+                OpenOp::new(
                     "/one",
                     OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE,
                 ),
-                OpenRequest::new(
+                OpenOp::new(
                     "/two",
                     OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE,
                 ),
@@ -2409,7 +2379,7 @@ mod tests {
             .mounted
             .vgetattrs(
                 &[Path::new("/one"), Path::new("/link")],
-                crate::MetadataOptions::new().follow_symlinks(false),
+                crate::AttrsOptions::new().follow_symlinks(false),
             )
             .unwrap();
         assert_eq!(metadata[0].file_type(), crate::FileType::Regular);
@@ -2418,7 +2388,7 @@ mod tests {
             .mounted
             .vgetattrs(
                 &[Path::new("/one"), Path::new("/missing")],
-                crate::MetadataOptions::new().follow_symlinks(false),
+                crate::AttrsOptions::new().follow_symlinks(false),
             )
             .unwrap_err();
         assert_eq!(error.index(), Some(1));
@@ -2475,7 +2445,7 @@ mod tests {
             let mut files = client
                 .vopen(
                     &["/first", "/second"]
-                        .map(|path| OpenRequest::new(path, OpenFlags::READ | OpenFlags::WRITE)),
+                        .map(|path| OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE)),
                 )
                 .unwrap();
             if closed {
@@ -2530,7 +2500,7 @@ mod tests {
             matches!(&route, AutoRoute::DirectNfs { .. }),
             "Auto chose {route:?}"
         );
-        assert!(client.metadata(&mount).unwrap().is_dir());
+        assert!(client.attrs(&mount).unwrap().is_dir());
         let unique = format!(
             "vnfs-auto-{}-{:?}",
             std::process::id(),
@@ -2541,7 +2511,7 @@ mod tests {
         let local = std::env::temp_dir().join(format!("{unique}-local"));
         assert_eq!(client.route_for(&local), AutoRoute::Mounted);
         let requests = [first.as_path(), second.as_path(), local.as_path()].map(|path| {
-            OpenRequest::new(
+            OpenOp::new(
                 path,
                 OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE_NEW,
             )
@@ -2622,11 +2592,11 @@ mod tests {
         );
         let existing = client
             .vopen(&[
-                OpenRequest::new(
+                OpenOp::new(
                     &first,
                     OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE,
                 ),
-                OpenRequest::new(
+                OpenOp::new(
                     &second,
                     OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE,
                 ),
@@ -2641,9 +2611,9 @@ mod tests {
         let missing = std::env::temp_dir().join(format!("{unique}-missing"));
         let error = client
             .vopen(&[
-                OpenRequest::new(&first, OpenFlags::READ),
-                OpenRequest::new(&second, OpenFlags::READ),
-                OpenRequest::new(&missing, OpenFlags::READ),
+                OpenOp::new(&first, OpenFlags::READ),
+                OpenOp::new(&second, OpenFlags::READ),
+                OpenOp::new(&missing, OpenFlags::READ),
             ])
             .unwrap_err();
         assert_eq!(error.index(), Some(2));
@@ -2756,10 +2726,7 @@ mod tests {
                     [&local, &remote]
                 };
                 let mut files = client
-                    .vopen(
-                        &paths
-                            .map(|path| OpenRequest::new(path, OpenFlags::READ | OpenFlags::WRITE)),
-                    )
+                    .vopen(&paths.map(|path| OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE)))
                     .unwrap();
                 assert_eq!(
                     matches!(files[0].route(), AutoRoute::DirectNfs { .. }),
@@ -2845,7 +2812,7 @@ mod tests {
             .client
             .walk_with_options(
                 &route.path,
-                crate::MetadataFields::stat(),
+                crate::Attributes::stat(),
                 crate::WalkOptions::unlimited(),
             )
             .unwrap();
@@ -2874,13 +2841,13 @@ mod tests {
         assert!(public_entries > backend_entries && public_total > backend_total);
         let walk = client.walk_with_options(
             &root,
-            crate::VisitOptions::from(crate::WalkOptions::new().max_path_bytes(backend_total))
-                .fields(crate::MetadataFields::stat()),
+            crate::ListDirOptions::from(crate::WalkOptions::new().max_path_bytes(backend_total))
+                .fields(crate::Attributes::stat()),
         );
         let mut dir_bytes = 0;
         let dir = client.visit_dir_with_options(
             &root,
-            VisitOptions::new().max_path_bytes(backend_entries),
+            ListDirOptions::new().max_path_bytes(backend_entries),
             |entry| {
                 dir_bytes += entry.path().as_os_str().len();
                 Ok(std::ops::ControlFlow::Continue(()))
@@ -2889,7 +2856,7 @@ mod tests {
         let mut tree_bytes = root.as_os_str().len();
         let tree = client.visit_dir_with_options(
             &root,
-            crate::VisitOptions::new()
+            crate::ListDirOptions::new()
                 .recursive(true)
                 .max_path_bytes(backend_total),
             |entry| {
@@ -2902,10 +2869,10 @@ mod tests {
             client
                 .walk_with_options(
                     &root,
-                    crate::VisitOptions::from(
+                    crate::ListDirOptions::from(
                         crate::WalkOptions::new().max_path_bytes(public_total)
                     )
-                    .fields(crate::MetadataFields::stat())
+                    .fields(crate::Attributes::stat())
                 )
                 .is_ok()
         );
@@ -2913,7 +2880,7 @@ mod tests {
             client
                 .visit_dir_with_options(
                     &root,
-                    VisitOptions::new().max_path_bytes(public_entries),
+                    ListDirOptions::new().max_path_bytes(public_entries),
                     |_| Ok(std::ops::ControlFlow::Continue(()))
                 )
                 .is_ok()
@@ -2922,7 +2889,7 @@ mod tests {
             client
                 .visit_dir_with_options(
                     &root,
-                    crate::VisitOptions::new()
+                    crate::ListDirOptions::new()
                         .recursive(true)
                         .max_path_bytes(public_total),
                     |_| Ok(std::ops::ControlFlow::Continue(()))

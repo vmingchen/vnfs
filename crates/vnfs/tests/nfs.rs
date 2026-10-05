@@ -359,14 +359,14 @@ fn rust_native_client_workflow_on_nfs() {
     assert_eq!(&second[..3], b"two");
     assert!(lengths.iter().all(|result| result.is_buffered()));
     assert_eq!(vfsi_nfs::compound::thread_compound_stats().0, 1);
-    assert_eq!(client.metadata(&paths[0]).unwrap().len(), 3);
+    assert_eq!(client.attrs(&paths[0]).unwrap().len(), 3);
     assert_eq!(client.read_dir(&nested).unwrap().len(), 2);
     let mut visited = Vec::new();
     let mut held_during_visit = Some(client.open(&paths[0]).unwrap());
     client
         .visit_dir(&nested, |entry| {
             // The application callback must run outside the NFS session lock.
-            assert_eq!(client.metadata(entry.path())?.len(), 3);
+            assert_eq!(client.attrs(entry.path())?.len(), 3);
             drop(held_during_visit.take());
             visited.push(entry.path().to_path_buf());
             Ok(std::ops::ControlFlow::Continue(()))
@@ -412,8 +412,8 @@ fn rust_native_client_workflow_on_nfs() {
         let attrs = client
             .vgetattrs(
                 &paths,
-                vnfs::MetadataOptions::new()
-                    .fields(vnfs::MetadataFields::MODE | vnfs::MetadataFields::SIZE)
+                vnfs::AttrsOptions::new()
+                    .fields(vnfs::Attributes::MODE | vnfs::Attributes::SIZE)
                     .follow_symlinks(follow),
             )
             .unwrap();
@@ -433,14 +433,14 @@ fn rust_native_client_workflow_on_nfs() {
     backend
         .symlink_raw_impl(Path::new("missing"), Path::new(&dangling))
         .unwrap();
-    assert!(client.metadata(&link).unwrap().is_file());
-    assert!(client.symlink_metadata(&link).unwrap().is_symlink());
-    assert!(client.symlink_metadata(&dangling).unwrap().is_symlink());
+    assert!(client.attrs(&link).unwrap().is_file());
+    assert!(client.symlink_attrs(&link).unwrap().is_symlink());
+    assert!(client.symlink_attrs(&dangling).unwrap().is_symlink());
     assert_eq!(
         client
             .vgetattrs(
                 &[paths[0].as_str(), dangling.as_str()],
-                vnfs::MetadataOptions::new()
+                vnfs::AttrsOptions::new()
             )
             .unwrap_err()
             .index(),
@@ -454,6 +454,7 @@ fn rust_native_client_workflow_on_nfs() {
     vnfs::Vfsi::vrename(
         &client,
         &[(&paths[0], &renamed[0]), (&paths[1], &renamed[1])],
+        vnfs::RenameOptions::Replace,
     )
     .unwrap();
     assert_eq!(
@@ -490,7 +491,7 @@ fn native_removal_modes_forward_policy_across_roots() {
         .vremove(&roots, RemoveMode::Contents, RemoveOptions::new())
         .unwrap_err();
     assert_eq!(error.index(), Some(0));
-    assert!(client.metadata(&file).is_ok());
+    assert!(client.attrs(&file).is_ok());
     let error = client
         .vremove(
             &roots,
@@ -500,7 +501,7 @@ fn native_removal_modes_forward_policy_across_roots() {
         .unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert!(client.read_dir(&keep).unwrap().is_empty());
-    assert!(client.metadata(&keep).unwrap().is_dir());
+    assert!(client.attrs(&keep).unwrap().is_dir());
     client
         .vremove(&[&dir], RemoveMode::Tree, Default::default())
         .unwrap();
@@ -508,7 +509,7 @@ fn native_removal_modes_forward_policy_across_roots() {
 
 #[test]
 fn unified_directory_visits_on_nfs() {
-    use vnfs::{ControlFlow, MetadataFields, TraversalCompletion, VisitOptions};
+    use vnfs::{Attributes, ControlFlow, ListDirOptions, TraversalCompletion};
     let dir = setup_dir("unified_directory_visits");
     let client = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
@@ -522,8 +523,8 @@ fn unified_directory_visits_on_nfs() {
     let file = format!("{sub}/file");
     client.create_dir_all(&sub).unwrap();
     client.write(&file, b"payload").unwrap();
-    let options = VisitOptions::new()
-        .fields(MetadataFields::SIZE)
+    let options = ListDirOptions::new()
+        .fields(Attributes::SIZE)
         .max_entries(2);
     for (recursive, count) in [(false, 1), (true, 2)] {
         let mut seen = 0;
@@ -531,10 +532,10 @@ fn unified_directory_visits_on_nfs() {
             .visit_entries_with_options(&[&dir], options.recursive(recursive), |index, entry| {
                 assert_eq!(index, 0);
                 if entry.path() == Path::new(&file) {
-                    assert_eq!(entry.metadata().len(), 7);
+                    assert_eq!(entry.attrs().len(), 7);
                 }
                 seen += 1;
-                assert!(client.metadata(entry.path()).is_ok());
+                assert!(client.attrs(entry.path()).is_ok());
                 Ok(ControlFlow::Continue(()))
             })
             .unwrap();
@@ -555,7 +556,7 @@ fn unified_directory_visits_on_nfs() {
 
 #[test]
 fn application_collection_preserves_native_batching_and_root_groups() {
-    use vnfs::{MetadataFields, VisitOptions};
+    use vnfs::{Attributes, ListDirOptions};
     let dir = setup_dir("application_collection_batch");
     let client = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
@@ -574,10 +575,10 @@ fn application_collection_preserves_native_batching_and_root_groups() {
         .map(|root| (format!("{root}/file"), b"data"))
         .collect();
     client.write_files(&files).unwrap();
-    let fields = MetadataFields::MODE | MetadataFields::SIZE;
+    let fields = Attributes::MODE | Attributes::SIZE;
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let listings = client
-        .read_dirs_with_options(&roots, VisitOptions::new().fields(fields))
+        .read_dirs_with_options(&roots, ListDirOptions::new().fields(fields))
         .unwrap();
     let count = vfsi_nfs::compound::thread_compound_stats().0;
     assert!(
@@ -588,15 +589,18 @@ fn application_collection_preserves_native_batching_and_root_groups() {
     for (index, tree) in listings.iter().enumerate() {
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].path, Path::new(&roots[index]));
-        assert_eq!(tree[0].entries[0].metadata().len(), 4);
+        assert_eq!(tree[0].entries[0].attrs().len(), 4);
     }
     let error = client
-        .read_dirs_with_options(&roots, VisitOptions::new().fields(fields).max_entries(5))
+        .read_dirs_with_options(&roots, ListDirOptions::new().fields(fields).max_entries(5))
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let trees = client
-        .read_dirs_with_options(&[&dir], VisitOptions::new().recursive(true).fields(fields))
+        .read_dirs_with_options(
+            &[&dir],
+            ListDirOptions::new().recursive(true).fields(fields),
+        )
         .unwrap();
     let count = vfsi_nfs::compound::thread_compound_stats().0;
     assert_eq!(trees.len(), 1);
@@ -1817,9 +1821,9 @@ fn scalar_write_follows_final_symlink_chains_and_creates_dangling_targets() {
     fs.write(&dangling, b"created").unwrap();
     assert_eq!(fs.read_files(&[&missing]).unwrap(), [b"created".to_vec()]);
     fs.write(&link, b"").unwrap();
-    assert_eq!(fs.metadata(&target).unwrap().len(), 0);
+    assert_eq!(fs.attrs(&target).unwrap().len(), 0);
     for path in [&link, &chain, &dangling] {
-        assert!(fs.symlink_metadata(path).unwrap().is_symlink());
+        assert!(fs.symlink_attrs(path).unwrap().is_symlink());
     }
     fs.remove_dir_all(&dir).unwrap();
 }
@@ -2545,7 +2549,7 @@ fn listdirv_batches_many_directories() {
 
 #[test]
 fn native_read_dirs_batches_and_reports_bounded_errors() {
-    use vnfs::{MetadataFields, ReadDirOptions};
+    use vnfs::{Attributes, ReadDirOptions};
 
     let dir = setup_dir("native_read_dirs_batch");
     let mut backend = client();
@@ -2561,7 +2565,7 @@ fn native_read_dirs_batches_and_reports_bounded_errors() {
     let listings = client
         .read_dirs_with_options(
             &directories,
-            MetadataFields::MODE | MetadataFields::SIZE | MetadataFields::BLOCKS,
+            Attributes::MODE | Attributes::SIZE | Attributes::BLOCKS,
             ReadDirOptions::new(),
         )
         .unwrap();
@@ -2571,7 +2575,7 @@ fn native_read_dirs_batches_and_reports_bounded_errors() {
     assert!(
         listings
             .iter()
-            .all(|listing| listing.entries[0].metadata().blocks().is_some())
+            .all(|listing| listing.entries[0].attrs().blocks().is_some())
     );
     assert!(
         compounds <= 6,
@@ -2581,7 +2585,7 @@ fn native_read_dirs_batches_and_reports_bounded_errors() {
     let error = client
         .read_dirs_with_options(
             &directories,
-            MetadataFields::MODE,
+            Attributes::MODE,
             ReadDirOptions::new().max_entries(5),
         )
         .unwrap_err();
@@ -2589,7 +2593,7 @@ fn native_read_dirs_batches_and_reports_bounded_errors() {
 
     let missing = [directories[0].clone(), format!("{dir}/missing")];
     let error = client
-        .read_dirs_with_options(&missing, MetadataFields::MODE, ReadDirOptions::new())
+        .read_dirs_with_options(&missing, Attributes::MODE, ReadDirOptions::new())
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
 }
@@ -3084,16 +3088,16 @@ fn owned_directory_handle_survives_rename_and_exposes_options() {
         .unwrap();
     assert_eq!(handle.path(), Path::new(&original));
     assert!(c.read_dir(&moved).unwrap().is_empty());
-    assert!(c.metadata(&file).is_err());
+    assert!(c.attrs(&file).is_err());
     handle.close().unwrap();
     let extra = format!("{moved}/extra");
     c.write(&extra, b"data").unwrap();
     c.vremove_with_options_native(&[&extra], false, RemoveOptions::new().batch(2))
         .unwrap();
-    assert!(c.metadata(&extra).is_err());
+    assert!(c.attrs(&extra).is_err());
     c.remove_dir_all_with_options(&moved, RemoveOptions::new().batch(2))
         .unwrap();
-    assert!(c.metadata(&moved).is_err());
+    assert!(c.attrs(&moved).is_err());
 }
 
 #[test]
@@ -3953,7 +3957,7 @@ fn deferred_cleanup_reconciles_backend_owned_failed_close() {
 
 #[test]
 fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancellation() {
-    use vnfs::{ControlFlow, Vfsi, VisitOptions};
+    use vnfs::{ControlFlow, ListDirOptions, Vfsi};
     let dir = setup_dir("directory_pages");
     let fs = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
@@ -3974,7 +3978,7 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
     fs.write_files(&files).unwrap();
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let listings = fs
-        .read_dirs_with_options(&roots, VisitOptions::new())
+        .read_dirs_with_options(&roots, ListDirOptions::new())
         .unwrap();
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     assert!(
@@ -3991,11 +3995,11 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
     assert_eq!(
         fs.vlistdirs(
             &[roots[1].as_str(), missing.as_str()],
-            VisitOptions::new(),
+            ListDirOptions::new(),
             |index, page| {
                 assert_eq!(index, 0);
                 assert!(page.entries.is_empty());
-                assert!(fs.metadata(&page.path).unwrap().is_dir());
+                assert!(fs.attrs(&page.path).unwrap().is_dir());
                 Ok(ControlFlow::Break(()))
             }
         )
@@ -4003,16 +4007,19 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
         [vnfs::TraversalCompletion::Stopped]
     );
     assert_eq!(
-        fs.read_dirs_with_options(&[roots[1].as_str(), missing.as_str()], VisitOptions::new())
-            .unwrap_err()
-            .index(),
+        fs.read_dirs_with_options(
+            &[roots[1].as_str(), missing.as_str()],
+            ListDirOptions::new()
+        )
+        .unwrap_err()
+        .index(),
         Some(1)
     );
     let large = &roots[0];
     let names: Vec<_> = (0..300).map(|i| (format!("{large}/f{i}"), b"x")).collect();
     fs.write_files(&names).unwrap();
     let mut counts = Vec::new();
-    fs.vlistdirs(&[large], VisitOptions::new(), |_, page| {
+    fs.vlistdirs(&[large], ListDirOptions::new(), |_, page| {
         counts.push(page.entries.len());
         Ok(ControlFlow::Continue(()))
     })
@@ -4025,7 +4032,7 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
 
 #[test]
 fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
-    use vnfs::{ControlFlow, Vfsi, VisitOptions};
+    use vnfs::{ControlFlow, ListDirOptions, Vfsi};
     let dir = setup_dir("page_child_symlink");
     let fs = Nfs::builder(test_host())
         .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
@@ -4045,23 +4052,27 @@ fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
         .unwrap();
     let mut changed = false;
     let mut escaped = false;
-    let result = fs.vlistdirs(&[&tree], VisitOptions::new().recursive(true), |_, page| {
-        if page.path == Path::new(&tree) && !changed {
-            assert!(
-                page.entries
-                    .iter()
-                    .any(|entry| entry.path() == Path::new(&child))
-            );
-            fs.vrename(&[(&child, &saved)])?;
-            fs.symlink("../outside", &child)?;
-            changed = true;
-        }
-        escaped |= page
-            .entries
-            .iter()
-            .any(|entry| entry.path().ends_with("secret"));
-        Ok(ControlFlow::Continue(()))
-    });
+    let result = fs.vlistdirs(
+        &[&tree],
+        ListDirOptions::new().recursive(true),
+        |_, page| {
+            if page.path == Path::new(&tree) && !changed {
+                assert!(
+                    page.entries
+                        .iter()
+                        .any(|entry| entry.path() == Path::new(&child))
+                );
+                fs.vrename(&[(&child, &saved)], vnfs::RenameOptions::Replace)?;
+                fs.symlink("../outside", &child)?;
+                changed = true;
+            }
+            escaped |= page
+                .entries
+                .iter()
+                .any(|entry| entry.path().ends_with("secret"));
+            Ok(ControlFlow::Continue(()))
+        },
+    );
     fs.remove_dir_all(&dir).unwrap();
     assert!(changed);
     assert!(!escaped, "recursive paging followed a replacement symlink");
@@ -4078,7 +4089,7 @@ fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
 
 #[test]
 fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
-    use vnfs::VisitOptions;
+    use vnfs::ListDirOptions;
     let dir = setup_dir("page_deep_tree");
     let fs = Nfs::builder(test_host())
         .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
@@ -4102,7 +4113,7 @@ fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
     fs.write(format!("{path}/leaf"), b"x").unwrap();
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let trees = fs
-        .read_dirs_with_options(&[&dir], VisitOptions::new().recursive(true))
+        .read_dirs_with_options(&[&dir], ListDirOptions::new().recursive(true))
         .unwrap();
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     fs.remove_dir_all(&dir).unwrap();
@@ -4116,7 +4127,7 @@ fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
 
 #[test]
 fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
-    use vnfs::{ControlFlow, Vfsi, VisitOptions};
+    use vnfs::{ControlFlow, ListDirOptions, Vfsi};
     let dir = setup_dir("page_parent_rename");
     let fs = Nfs::builder(test_host())
         .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
@@ -4146,18 +4157,22 @@ fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
     .unwrap();
     let mut renamed = false;
     let mut data = 0;
-    let result = fs.vlistdirs(&[&tree], VisitOptions::new().recursive(true), |_, page| {
-        if page.path == Path::new(&tree) && !renamed {
-            fs.vrename(&[(&tree, &moved)])?;
-            renamed = true;
-        }
-        data += page
-            .entries
-            .iter()
-            .filter(|entry| entry.path().ends_with("data"))
-            .count();
-        Ok(ControlFlow::Continue(()))
-    });
+    let result = fs.vlistdirs(
+        &[&tree],
+        ListDirOptions::new().recursive(true),
+        |_, page| {
+            if page.path == Path::new(&tree) && !renamed {
+                fs.vrename(&[(&tree, &moved)], vnfs::RenameOptions::Replace)?;
+                renamed = true;
+            }
+            data += page
+                .entries
+                .iter()
+                .filter(|entry| entry.path().ends_with("data"))
+                .count();
+            Ok(ControlFlow::Continue(()))
+        },
+    );
     fs.remove_dir_all(&dir).unwrap();
     assert_eq!(result.unwrap(), [vnfs::TraversalCompletion::Complete]);
     assert!(renamed);
@@ -4170,7 +4185,7 @@ fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
 #[cfg(feature = "test-faults")]
 #[test]
 fn recursive_directory_pages_do_not_retry_an_ambiguous_child_reply() {
-    use vnfs::{ControlFlow, Vfsi, VisitOptions};
+    use vnfs::{ControlFlow, ListDirOptions, Vfsi};
     let dir = setup_dir("page_child_reply_loss");
     let mut admin = client();
     let child = format!("{dir}/child");
@@ -4187,7 +4202,7 @@ fn recursive_directory_pages_do_not_retry_an_ambiguous_child_reply() {
         .connect()
         .unwrap();
     let mut delivered = 0;
-    let result = visitor.vlistdirs(&[&dir], VisitOptions::new().recursive(true), |_, page| {
+    let result = visitor.vlistdirs(&[&dir], ListDirOptions::new().recursive(true), |_, page| {
         assert_eq!(
             page.path,
             Path::new(&dir),
@@ -4223,11 +4238,11 @@ fn vsetattrs_many_nfs_files() {
     let other = Nfs::builder(test_host()).connect().unwrap();
     vsetattrs_support::check_foreign(&fs, &other, &format!("{directory}/foreign"));
     // A handle vector must not degrade into one RPC per scalar update.
-    use vnfs::{MetadataTarget, MetadataUpdate, OpenFlags, OpenRequest};
+    use vnfs::{MetadataTarget, MetadataUpdate, OpenFlags, OpenOp};
     let paths: Vec<_> = (0..64).map(|i| format!("{directory}/file-{i}")).collect();
     let requests: Vec<_> = paths
         .iter()
-        .map(|path| OpenRequest::new(path, OpenFlags::WRITE))
+        .map(|path| OpenOp::new(path, OpenFlags::WRITE))
         .collect();
     let mut files = fs.vopen(&requests).unwrap();
     let updates: Vec<_> = files
@@ -4296,7 +4311,7 @@ fn filesystem_stats_nfs_vectors() {
         .vopen(
             &paths
                 .iter()
-                .map(|p| vnfs::OpenRequest::new(p, vnfs::OpenFlags::READ))
+                .map(|p| vnfs::OpenOp::new(p, vnfs::OpenFlags::READ))
                 .collect::<Vec<_>>(),
         )
         .unwrap();

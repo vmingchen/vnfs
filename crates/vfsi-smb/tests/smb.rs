@@ -97,7 +97,7 @@ fn native_directory_visitor_reenters_client_across_snapshot_pages() {
     let mut seen = Vec::new();
     client
         .visit_dir(&remote_dir, |entry| {
-            assert_eq!(client.metadata(entry.path())?.len(), 1);
+            assert_eq!(client.attrs(entry.path())?.len(), 1);
             seen.push(entry.path().to_path_buf());
             Ok(std::ops::ControlFlow::Continue(()))
         })

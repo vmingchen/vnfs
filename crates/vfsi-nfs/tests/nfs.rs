@@ -625,7 +625,7 @@ fn descriptor_positional_io_preserves_sequential_cursor() {
     let path = format!("/vfsi-positional-cursor-{}", std::process::id());
     fs.write(&path, b"abcdefgh").unwrap();
     let mut file = fs
-        .open_with(vfsi_sync::OpenRequest::new(
+        .open_with(vfsi_sync::OpenOp::new(
             &path,
             vfsi_sync::OpenFlags::READ | vfsi_sync::OpenFlags::WRITE,
         ))
