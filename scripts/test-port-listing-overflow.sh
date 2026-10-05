@@ -6,8 +6,8 @@ library=${VFSI_LIBRARY:?set VFSI_LIBRARY to the development adapter shared libra
 fixture=$(mktemp -d /tmp/vfsi-listing-overflow.XXXXXX)
 trap 'rm -rf "${fixture:?}"' EXIT
 cc -shared -fPIC -I "$repo/bindings/c/include" \
-    "$repo/bindings/c/tests/listing-overflow.c" -ldl -o "$fixture/legacy.so"
-export VFSI_IMPL=dummy VFSI_LIBRARY="$fixture/legacy.so" VFSI_REAL_LIBRARY="$library"
+    "$repo/bindings/c/tests/listing-overflow.c" -ldl -o "$fixture/quota.so"
+export VFSI_IMPL=dummy VFSI_LIBRARY="$fixture/quota.so" VFSI_REAL_LIBRARY="$library"
 gitbin="$ports/vfsi-port-git/git"
 mkdir -p "$fixture/git"
 "$gitbin" -C "$fixture/git" init -q
@@ -23,6 +23,12 @@ if ! cmp -s "$fixture/expected" "$fixture/git-output"; then
     echo 'FAIL: Git accepted a truncated object scan' >&2
     failed=1
 fi
+# An older same-version ABI library lacks the new optional symbol. The port
+# must decline acceleration before presenting any scan results as complete.
+cc -shared -fPIC -DVFSI_TEST_OLD_ABI -I "$repo/bindings/c/include" \
+    "$repo/bindings/c/tests/listing-overflow.c" -ldl -o "$fixture/legacy.so"
+VFSI_LIBRARY="$fixture/legacy.so" "$gitbin" -C "$fixture/git" count-objects -v > "$fixture/legacy-output"
+cmp "$fixture/expected" "$fixture/legacy-output"
 mkdir -p "$fixture/source" "$fixture/destination"
 printf 'keep\n' > "$fixture/source/tail"
 cp "$fixture/source/tail" "$fixture/destination/tail"

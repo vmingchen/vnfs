@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 
 static void *symbol(const char *name)
 {
@@ -40,3 +41,31 @@ int vfsi_listdirv(struct vfsi_fs *fs, const char *const *dirs, size_t count,
         if (!cb(dirs[i % count], i == 200000 ? "tail" : "prefix", &attrs, data)) break;
     return 0; /* The legacy contract considers a limit stop successful. */
 }
+
+#ifndef VFSI_TEST_OLD_ABI
+/* New consumers delegate completeness/quota checking to the adapter. */
+int vfsi_listdirs(struct vfsi_fs *fs, const char *const *dirs, size_t count,
+                 const struct vfsi_listing_options *options,
+                 vfsi_indexed_listdir_cb cb, void *data,
+                 struct vfsi_listing_result *results)
+{
+    struct vfsi_attrs attrs = { .struct_size = sizeof(attrs), .abi_version = VFSI_ABI_VERSION,
+                               .ftype = 1, .mode = 0100644, .nlink = 1 };
+    const char *configured = getenv("VFSI_TEST_ENTRIES");
+    size_t i, total = configured ? strtoull(configured, NULL, 10) : 200001;
+    (void)fs;
+    memset(results, 0, count * sizeof(*results));
+    if (!count) return 0;
+    if (total > options->max_entries) return EFBIG;
+    for (i = 0; i < total; i++) {
+        size_t index = i % count;
+        results[index].delivered++;
+        if (!cb(index, dirs[index], "prefix", &attrs, data)) {
+            for (i = 0; i < count; i++) results[i].completion = 2;
+            return 0;
+        }
+    }
+    for (i = 0; i < count; i++) results[i].completion = 1;
+    return 0;
+}
+#endif

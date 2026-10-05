@@ -3,12 +3,20 @@ set -euo pipefail
 # Run against an existing loopback Ganesha export. No server configuration is
 # changed. The export must permit mounting subdirectories on v4.1 and v4.2.
 ports_root=${VFSI_PORTS_ROOT:?set VFSI_PORTS_ROOT to the directory containing the port repos}
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+library=${VFSI_LIBRARY:-$repo_root/target/debug/libvfsi_c.so}
 export_root=${VFSI_NFS_EXPORT_DIR:?set VFSI_NFS_EXPORT_DIR to the server export backing directory}
 server=${VFSI_NFS_SERVER:-127.0.0.1}
 export_path=${VFSI_NFS_EXPORT_PATH:-/}
 port=${VFSI_NFS_PORT:-2049}
 core="$ports_root/vfsi-port-coreutils/target/debug"
 findbin="$ports_root/vfsi-port-findutils/target/debug/find"
+gitbin="$ports_root/vfsi-port-git/git"
+rsyncbin="$ports_root/vfsi-port-rsync/rsync"
+for program in "$core/ls" "$core/du" "$core/cp" "$findbin" "$gitbin" "$rsyncbin"; do
+    [[ -x "$program" ]] || { echo "Missing port executable: $program" >&2; exit 2; }
+done
+[[ -f "$library" ]] || { echo "Missing development C adapter: $library" >&2; exit 2; }
 fixture=$(mktemp -d "$export_root/vfsi-port-live.XXXXXX")
 mountdir=$(mktemp -d /tmp/vfsi-port-mount.XXXXXX)
 outputs=$(mktemp -d /tmp/vfsi-port-output.XXXXXX)
@@ -43,6 +51,22 @@ for minor in 1 2; do
     VNFS_IMPL=nfs "$core/cp" "$mountdir/file-1" "$mountdir/sub/file-2" "$outputs/copy-$minor/"
     cmp "$fixture/file-1" "$outputs/copy-$minor/file-1"
     cmp "$fixture/sub/file-2" "$outputs/copy-$minor/file-2"
+    mkdir -p "$mountdir/git-$minor"
+    "$gitbin" -C "$mountdir/git-$minor" init -q
+    "$gitbin" -C "$mountdir/git-$minor" config user.email vfsi-ci@example.invalid
+    "$gitbin" -C "$mountdir/git-$minor" config user.name 'VFSI CI'
+    printf 'object\n' > "$mountdir/git-$minor/input"
+    "$gitbin" -C "$mountdir/git-$minor" add input
+    "$gitbin" -C "$mountdir/git-$minor" commit -qm smoke
+    VFSI_IMPL=off "$gitbin" -C "$mountdir/git-$minor" count-objects -v > "$outputs/kernel-git"
+    VFSI_IMPL=nfs VFSI_LIBRARY="$library" "$gitbin" -C "$mountdir/git-$minor" count-objects -v > "$outputs/vfsi-git"
+    diff -u "$outputs/kernel-git" "$outputs/vfsi-git"
+    mkdir -p "$outputs/rsync-kernel-$minor" "$outputs/rsync-vfsi-$minor"
+    VFSI_IMPL=off "$rsyncbin" -a --exclude=excluded/ --exclude="git-*/" \
+        "$mountdir/" "$outputs/rsync-kernel-$minor/"
+    VFSI_IMPL=nfs VFSI_LIBRARY="$library" VFSI_VERBOSE=1 "$rsyncbin" \
+        -a --exclude=excluded/ --exclude="git-*/" "$mountdir/" "$outputs/rsync-vfsi-$minor/"
+    diff -r "$outputs/rsync-kernel-$minor" "$outputs/rsync-vfsi-$minor"
     sudo umount "$mountdir"
-    printf 'Rust port parity passed on NFSv4.%s with a subdirectory export.\n' "$minor"
+    printf 'Rust and C port parity passed on NFSv4.%s with a subdirectory export.\n' "$minor"
 done

@@ -1,5 +1,24 @@
 # Local CI and build reuse
 
+### Development application ports
+
+After temporarily pointing the Rust ports' `vnfs` dependency at this checkout:
+
+```sh
+bash scripts/test-ports-local.sh /home/ubuntu/gh
+```
+
+The script verifies dependency resolution, runs shared helper regressions and
+Rust port tests, builds Git/rsync against this checkout's C header/library, and
+checks C port parity. Configure rsync with `--enable-vfsi` first. It does not
+fetch, reset, patch, commit or publish application checkouts. Build artifacts and
+Cargo lockfiles may be updated. This checks local/kernel-backed behavior; run
+`scripts/test-ports-nfs.sh` separately for NFSv4.1/v4.2 parity with a live export.
+
+The scheduled compatibility workflow still uses pinned published port revisions.
+After committing the migrations in their own repositories, update those pins
+before claiming scheduled CI coverage for the new port source.
+
 Run these commands from the repository root:
 
 ```sh

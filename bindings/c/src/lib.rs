@@ -391,6 +391,219 @@ pub type vfsi_read_paths_cb = Option<
     ) -> bool,
 >;
 
+/// Aggregate limits for complete shallow vector listings. Zero is a zero
+/// budget; SIZE_MAX explicitly opts out. MODE is always requested.
+#[repr(C)]
+pub struct vfsi_listing_options {
+    pub max_entries: usize,
+    pub max_path_bytes: usize,
+    pub attributes: u32,
+}
+/// Complete=1, stopped=2, not completed=0. Empty directories are explicitly
+/// complete with zero delivered entries. Failure leaves every result incomplete.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct vfsi_listing_result {
+    pub completion: u32,
+    pub delivered: usize,
+}
+pub type vfsi_indexed_listdir_cb = Option<
+    unsafe extern "C" fn(
+        usize,
+        *const c_char,
+        *const c_char,
+        *const vfsi_attrs,
+        *mut c_void,
+    ) -> bool,
+>;
+
+/// Complete bounded vector listings, with callbacks outside backend locks.
+/// Collect the bounded cohort before delivery, so callers may safely fall back
+/// on a listing error without mixing a partial snapshot into ordinary scanning.
+/// Budgets include duplicate operands. Results are associated with input indices.
+/// A false callback stops delivery successfully and is distinguishable from EOF.
+/// A callback stop marks the entire cohort stopped, even if an earlier empty
+/// directory had no entries to deliver. Requested but absent attributes fail
+/// with ENOTSUP before delivery; applications must not fabricate stat values.
+/// Operand planning is additionally capped by the default directory entry/path
+/// limits, independently of the configured response quotas.
+/// Backend first-page fetches use bounded directory cohorts; aggregate quotas
+/// and deferred callback delivery span all cohorts, including duplicate inputs.
+///
+/// # Safety
+/// `fs` must be a live handle. `dirs` and `results` must hold `count` elements,
+/// and each directory must be NUL-terminated. `options` must be readable for the
+/// call. Callback strings/attributes are borrowed only during the invocation.
+/// The callback must not free `fs` or mutate the input/result arrays.
+#[no_mangle]
+pub unsafe extern "C" fn vfsi_listdirs(
+    fs: *mut vfsi_fs,
+    dirs: *const *const c_char,
+    count: usize,
+    options: *const vfsi_listing_options,
+    cb: vfsi_indexed_listdir_cb,
+    userdata: *mut c_void,
+    results: *mut vfsi_listing_result,
+) -> c_int {
+    ffi_guard!(libc::EIO, {
+        let (Some(fs), Some(options), Some(cb)) = (fs.as_ref(), options.as_ref(), cb) else {
+            return libc::EINVAL;
+        };
+        if count == 0 {
+            return 0;
+        }
+        if dirs.is_null() || results.is_null() {
+            return libc::EINVAL;
+        }
+        // Caller owns count elements in both arrays.
+        let results = std::slice::from_raw_parts_mut(results, count);
+        results.fill(vfsi_listing_result::default());
+        let Some(fields) = AttrMask::from_bits(options.attributes) else {
+            return libc::EINVAL;
+        };
+        // Bound planning storage as well as returned entries; empty inputs can
+        // otherwise bypass every payload quota.
+        if count > vfsi_sync::DEFAULT_DIRECTORY_MAX_ENTRIES {
+            return libc::EFBIG;
+        }
+        let mut planning_bytes = 0usize;
+        // Check borrowed input spellings before allocating their owned copies.
+        for i in 0..count {
+            let pointer = *dirs.add(i);
+            if pointer.is_null() {
+                return libc::EINVAL;
+            }
+            let length = CStr::from_ptr(pointer).to_bytes().len();
+            let Some(total) = planning_bytes.checked_add(length) else {
+                return libc::EFBIG;
+            };
+            if total > vfsi_sync::DEFAULT_DIRECTORY_MAX_PATH_BYTES {
+                return libc::EFBIG;
+            }
+            planning_bytes = total;
+        }
+        let mut paths = Vec::with_capacity(count);
+        let mut index = std::collections::HashMap::<PathBuf, Vec<usize>>::new();
+        for i in 0..count {
+            let Some(path) = cstr_path(*dirs.add(i)) else {
+                return libc::EINVAL;
+            };
+            let vpath = match vpath_for(fs, &path) {
+                Ok(path) => path,
+                Err(error) => return vf_code(&error),
+            };
+            let Some(total) = planning_bytes.checked_add(vpath.as_os_str().len()) else {
+                return libc::EFBIG;
+            };
+            if total > vfsi_sync::DEFAULT_DIRECTORY_MAX_PATH_BYTES {
+                return libc::EFBIG;
+            }
+            planning_bytes = total;
+            index.entry(vpath).or_default().push(i);
+            paths.push(path);
+        }
+        let refs: Vec<&Path> = index.keys().map(PathBuf::as_path).collect();
+        let mut rows = Vec::new();
+        let mut entries = 0usize;
+        let mut bytes = 0usize;
+        let mut overflow = false;
+        let result = match lock_or_io(&fs.fs) {
+            Ok(mut backend) => {
+                // Native engines can retain every root's first page before
+                // invoking cb. Bound that work even when output quotas are tiny.
+                const DIRECTORY_COHORT: usize = 32;
+                let mut result = Ok(());
+                for cohort in refs.chunks(DIRECTORY_COHORT) {
+                    // Never pass zero: native zero means unlimited enumeration.
+                    let probe = options
+                        .max_entries
+                        .saturating_sub(entries)
+                        .saturating_add(1);
+                    result = backend.vlistdirs_impl(
+                        cohort,
+                        fields | AttrMask::MODE,
+                        probe,
+                        false,
+                        &mut |attrs, dir| {
+                            let Some(indices) = index.get(dir) else {
+                                overflow = true;
+                                return false;
+                            };
+                            let next_entries = entries.checked_add(indices.len());
+                            let next_bytes = attrs
+                                .file
+                                .path()
+                                .and_then(|path| path.as_os_str().len().checked_mul(indices.len()))
+                                .and_then(|n| bytes.checked_add(n));
+                            if next_entries.is_none_or(|n| n > options.max_entries)
+                                || next_bytes.is_none_or(|n| n > options.max_path_bytes)
+                            {
+                                overflow = true;
+                                return false;
+                            }
+                            entries = next_entries.unwrap_or_default();
+                            bytes = next_bytes.unwrap_or_default();
+                            rows.push((attrs.clone(), dir.to_path_buf()));
+                            true
+                        },
+                    );
+                    if result.is_err() || overflow {
+                        break;
+                    }
+                }
+                result
+            }
+            Err(error) => Err(error),
+        };
+        if let Err(error) = result {
+            return vf_code(&error);
+        }
+        if overflow {
+            return libc::EFBIG;
+        }
+        // Validate the entire snapshot before invoking user callbacks. A bad
+        // row must not leave applications with a seemingly complete prefix.
+        let mut prepared = Vec::with_capacity(rows.len());
+        for (attrs, dir) in rows {
+            if !attrs.returned.contains(fields | AttrMask::MODE) {
+                return libc::ENOTSUP;
+            }
+            let Some(name) = attrs
+                .file
+                .path()
+                .and_then(|p| p.file_name())
+                .and_then(|name| cstr_from_os(name.as_bytes()))
+            else {
+                return libc::EIO;
+            };
+            prepared.push((vfsi_attrs::from_vf(&attrs), dir, name));
+        }
+        let paths: Vec<_> = paths
+            .iter()
+            .map(|path| cstr_from_os(path.as_os_str().as_bytes()))
+            .collect();
+        if paths.iter().any(Option::is_none) {
+            return libc::EINVAL;
+        }
+        for result in results.iter_mut() {
+            result.completion = 1;
+        }
+        for (attrs, dir, name) in prepared {
+            for &i in &index[&dir] {
+                let path = paths[i].as_ref().expect("validated C paths");
+                results[i].delivered += 1;
+                if !cb(i, path.as_ptr(), name.as_ptr(), &attrs, userdata) {
+                    for result in results.iter_mut() {
+                        result.completion = 2;
+                    }
+                    return 0;
+                }
+            }
+        }
+        0
+    })
+}
+
 pub type vfsi_read_stream_cb = Option<
     unsafe extern "C" fn(
         path: *const c_char,
@@ -2373,6 +2586,354 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    #[derive(Default)]
+    struct ListingCall {
+        directories: Vec<PathBuf>,
+        max_entries: usize,
+    }
+
+    // Exercise the actual C entry point. Like NFS, this backend fetches all
+    // roots' first pages before its first quota callback, and records that work.
+    struct ListingBackend {
+        calls: std::sync::Arc<Mutex<Vec<ListingCall>>>,
+        entries_per_dir: usize,
+        emitted: usize,
+        missing: AttrMask,
+        missing_after: usize,
+        fail_call: Option<usize>,
+    }
+
+    impl vfsi_sync::FileSystem for ListingBackend {
+        fn sync_data(&mut self, _: &VfFile) -> vfsi_sync::VfResult<()> {
+            Err(VfError::unsupported(0))
+        }
+        fn open_impl(&mut self, _: &vfsi_sync::OpenRequest) -> vfsi_sync::VfResult<VfFile> {
+            Err(VfError::unsupported(0))
+        }
+        fn close_impl(&mut self, _: &VfFile) -> vfsi_sync::VfResult<()> {
+            Err(VfError::unsupported(0))
+        }
+        fn read_impl(&mut self, _: &ReadOp) -> vfsi_sync::VfResult<vfsi_sync::ReadResult> {
+            Err(VfError::unsupported(0))
+        }
+        fn write_impl(
+            &mut self,
+            _: vfsi_sync::WriteOpRef<'_>,
+        ) -> vfsi_sync::VfResult<vfsi_sync::WriteResult> {
+            Err(VfError::unsupported(0))
+        }
+        fn seek_impl(&mut self, _: &VfFile, _: std::io::SeekFrom) -> vfsi_sync::VfResult<u64> {
+            Err(VfError::unsupported(0))
+        }
+        fn metadata_impl(&mut self, _: vfsi_sync::MetadataQuery) -> vfsi_sync::VfResult<VfAttrs> {
+            Err(VfError::unsupported(0))
+        }
+        fn set_attributes_impl(&mut self, _: vfsi_sync::SetAttributes) -> vfsi_sync::VfResult<()> {
+            Err(VfError::unsupported(0))
+        }
+    }
+
+    impl vfsi_sync::Backend for ListingBackend {
+        fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VfResult<Vec<vfsi_sync::ReadResult>> {
+            Err(VfError::unsupported(0))
+        }
+
+        fn vlistdirs_impl(
+            &mut self,
+            dirs: &[&Path],
+            masks: AttrMask,
+            max_entries: usize,
+            recursive: bool,
+            cb: &mut dyn FnMut(&VfAttrs, &Path) -> bool,
+        ) -> vfsi_sync::VfRes {
+            assert!(!recursive);
+            let call = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(ListingCall {
+                    directories: dirs.iter().map(|path| path.to_path_buf()).collect(),
+                    max_entries,
+                });
+                calls.len()
+            };
+            if self.fail_call == Some(call) {
+                return Err(VfError::client(0, libc::EIO as u32));
+            }
+            let mut delivered = 0;
+            for dir in dirs {
+                for entry in 0..self.entries_per_dir {
+                    if max_entries != 0 && delivered >= max_entries {
+                        return Ok(());
+                    }
+                    let returned = if self.emitted >= self.missing_after {
+                        masks & !self.missing
+                    } else {
+                        masks
+                    };
+                    let attrs = VfAttrs {
+                        file: VfFile::from_os_path(&dir.join(format!("entry-{entry}"))),
+                        masks,
+                        returned,
+                        mode: libc::S_IFREG | 0o644,
+                        // Zero ownership is valid when explicitly returned.
+                        uid: 0,
+                        gid: 0,
+                        ..Default::default()
+                    };
+                    self.emitted += 1;
+                    if !cb(&attrs, dir) {
+                        return Ok(());
+                    }
+                    delivered += 1;
+                }
+            }
+            Ok(())
+        }
+    }
+    impl BindingBackend for ListingBackend {}
+
+    struct ListingFixture {
+        fs: *mut vfsi_fs,
+        calls: std::sync::Arc<Mutex<Vec<ListingCall>>>,
+    }
+    impl ListingFixture {
+        fn new(entries_per_dir: usize, missing: AttrMask, missing_after: usize) -> Self {
+            Self::with_failure(entries_per_dir, missing, missing_after, None)
+        }
+
+        fn with_failure(
+            entries_per_dir: usize,
+            missing: AttrMask,
+            missing_after: usize,
+            fail_call: Option<usize>,
+        ) -> Self {
+            let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+            Self {
+                fs: make_fs(
+                    Box::new(ListingBackend {
+                        calls: calls.clone(),
+                        entries_per_dir,
+                        emitted: 0,
+                        missing,
+                        missing_after,
+                        fail_call,
+                    }),
+                    PathBuf::from("/"),
+                    PathBuf::from("/"),
+                ),
+                calls,
+            }
+        }
+
+        fn run(
+            &self,
+            dirs: &[CString],
+            options: &vfsi_listing_options,
+        ) -> (c_int, Vec<usize>, Vec<vfsi_listing_result>) {
+            unsafe extern "C" fn cb(
+                index: usize,
+                _: *const c_char,
+                _: *const c_char,
+                _: *const vfsi_attrs,
+                user: *mut c_void,
+            ) -> bool {
+                let indices = &mut *(user as *mut Vec<usize>);
+                indices.push(index);
+                true
+            }
+            let pointers: Vec<_> = dirs.iter().map(|dir| dir.as_ptr()).collect();
+            // Failure must clear even caller-supplied, previously successful results.
+            let mut results = vec![
+                vfsi_listing_result {
+                    completion: 1,
+                    delivered: 7
+                };
+                dirs.len()
+            ];
+            let mut indices = Vec::<usize>::new();
+            let status = unsafe {
+                vfsi_listdirs(
+                    self.fs,
+                    pointers.as_ptr(),
+                    pointers.len(),
+                    options,
+                    Some(cb),
+                    &mut indices as *mut _ as *mut c_void,
+                    results.as_mut_ptr(),
+                )
+            };
+            (status, indices, results)
+        }
+    }
+    impl Drop for ListingFixture {
+        fn drop(&mut self) {
+            unsafe { vfsi_free(self.fs) };
+        }
+    }
+
+    #[test]
+    fn indexed_listings_reject_missing_returned_fields_before_any_callback() {
+        let options = vfsi_listing_options {
+            max_entries: 10,
+            max_path_bytes: 1024,
+            attributes: VFSI_ATTR_SIZE
+                | VFSI_ATTR_NLINK
+                | VFSI_ATTR_FILEID
+                | VFSI_ATTR_BLOCKS
+                | VFSI_ATTR_RDEV
+                | VFSI_ATTR_UID
+                | VFSI_ATTR_GID
+                | VFSI_ATTR_ATIME
+                | VFSI_ATTR_MTIME
+                | VFSI_ATTR_CTIME,
+        };
+        let fields = AttrMask::from_bits(options.attributes).unwrap() | AttrMask::MODE;
+        let dirs = [CString::new("/dir").unwrap()];
+        for bit in fields.iter() {
+            // A valid prefix followed by an omitted server field must not leak.
+            let fixture = ListingFixture::new(2, bit, 1);
+            let (status, indices, results) = fixture.run(&dirs, &options);
+            assert_eq!(status, libc::ENOTSUP, "missing returned field: {bit:?}");
+            assert!(indices.is_empty());
+            assert!(results
+                .iter()
+                .all(|r| r.completion == 0 && r.delivered == 0));
+        }
+        let fixture = ListingFixture::new(2, AttrMask::empty(), 0);
+        let (status, indices, results) = fixture.run(&dirs, &options);
+        assert_eq!(status, 0, "explicitly returned zero ownership is valid");
+        assert_eq!(indices, [0, 0]);
+        assert_eq!(results[0].completion, 1);
+        assert_eq!(results[0].delivered, 2);
+    }
+
+    #[test]
+    fn indexed_listings_bound_first_page_fetches_even_with_tiny_quotas() {
+        let dirs: Vec<_> = (0..97)
+            .map(|n| CString::new(format!("/dir-{n}")).unwrap())
+            .collect();
+        for (max_entries, max_path_bytes, expected_calls) in [
+            (1, usize::MAX, 1),
+            (usize::MAX, 1, 1),
+            (32, usize::MAX, 2),
+            (33, usize::MAX, 2),
+        ] {
+            let fixture = ListingFixture::new(1, AttrMask::empty(), 0);
+            let (status, indices, results) = fixture.run(
+                &dirs,
+                &vfsi_listing_options {
+                    max_entries,
+                    max_path_bytes,
+                    attributes: VFSI_ATTR_MODE,
+                },
+            );
+            assert_eq!(status, libc::EFBIG);
+            assert!(indices.is_empty());
+            assert!(results
+                .iter()
+                .all(|r| r.completion == 0 && r.delivered == 0));
+            let calls = fixture.calls.lock().unwrap();
+            assert_eq!(calls.len(), expected_calls);
+            assert!(
+                calls.iter().all(|call| call.directories.len() <= 32),
+                "first pages must be bounded before backend callbacks"
+            );
+            if expected_calls == 2 {
+                assert_eq!(
+                    calls[1].max_entries,
+                    max_entries - 32 + 1,
+                    "the next cohort must receive the remaining budget plus one probe"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_listings_share_exact_budgets_across_cohorts_and_duplicate_operands() {
+        let mut dirs: Vec<_> = (0..65)
+            .map(|n| CString::new(format!("/dir-{n}")).unwrap())
+            .collect();
+        dirs.push(dirs[0].clone());
+        let bytes = dirs
+            .iter()
+            .map(|dir| dir.as_bytes().len() + b"/entry-0".len())
+            .sum();
+        for (max_entries, max_path_bytes, status) in [
+            (dirs.len(), bytes, 0),
+            (dirs.len() - 1, bytes, libc::EFBIG),
+            (dirs.len(), bytes - 1, libc::EFBIG),
+        ] {
+            let fixture = ListingFixture::new(1, AttrMask::empty(), 0);
+            let (actual, mut indices, results) = fixture.run(
+                &dirs,
+                &vfsi_listing_options {
+                    max_entries,
+                    max_path_bytes,
+                    attributes: VFSI_ATTR_MODE,
+                },
+            );
+            assert_eq!(actual, status);
+            assert_eq!(fixture.calls.lock().unwrap().len(), 3);
+            if status == 0 {
+                indices.sort_unstable();
+                assert_eq!(indices, (0..dirs.len()).collect::<Vec<_>>());
+                assert!(results
+                    .iter()
+                    .all(|r| r.completion == 1 && r.delivered == 1));
+            } else {
+                assert!(
+                    indices.is_empty(),
+                    "a later-cohort overflow must not leak a prefix"
+                );
+                assert!(results
+                    .iter()
+                    .all(|r| r.completion == 0 && r.delivered == 0));
+            }
+        }
+        // Zero response budgets still allow empty roots in multiple cohorts.
+        let fixture = ListingFixture::new(0, AttrMask::empty(), 0);
+        let (status, indices, results) = fixture.run(
+            &dirs,
+            &vfsi_listing_options {
+                max_entries: 0,
+                max_path_bytes: 0,
+                attributes: VFSI_ATTR_MODE,
+            },
+        );
+        assert_eq!(status, 0);
+        assert!(indices.is_empty());
+        assert!(results
+            .iter()
+            .all(|r| r.completion == 1 && r.delivered == 0));
+        let calls = fixture.calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert!(calls.iter().all(|call| call.max_entries == 1));
+    }
+
+    #[test]
+    fn indexed_listings_discard_earlier_cohorts_on_late_backend_or_metadata_failure() {
+        let dirs: Vec<_> = (0..65)
+            .map(|n| CString::new(format!("/dir-{n}")).unwrap())
+            .collect();
+        let options = vfsi_listing_options {
+            max_entries: dirs.len(),
+            max_path_bytes: 4096,
+            attributes: VFSI_ATTR_MODE | VFSI_ATTR_UID | VFSI_ATTR_GID,
+        };
+        for (missing, fail_call, expected) in [
+            (AttrMask::empty(), Some(3), libc::EIO),
+            (AttrMask::UID | AttrMask::GID, None, libc::ENOTSUP),
+        ] {
+            let fixture = ListingFixture::with_failure(1, missing, 32, fail_call);
+            let (status, indices, results) = fixture.run(&dirs, &options);
+            assert_eq!(status, expected);
+            assert_eq!(fixture.calls.lock().unwrap().len(), 3);
+            assert!(indices.is_empty());
+            assert!(results
+                .iter()
+                .all(|r| r.completion == 0 && r.delivered == 0));
+        }
+    }
+
     #[test]
     fn directory_byte_overflow_stops_before_retaining_or_visiting_more_entries() {
         for max_entries in [100, usize::MAX] {
@@ -2698,6 +3259,109 @@ mod tests {
         assert_eq!(seen, vec!["f.bin"]);
 
         unsafe { vfsi_free(fs) };
+    }
+
+    #[test]
+    fn indexed_listings_report_empty_duplicates_stop_and_reject_overflow_before_callbacks() {
+        let (_root, root) = temp_root();
+        let mut fs = std::ptr::null_mut();
+        assert_eq!(unsafe { vfsi_dummy_open(root.as_ptr(), &mut fs) }, 0);
+        let dir = CString::new("/dir").unwrap();
+        let empty = CString::new("/empty").unwrap();
+        for path in [&dir, &empty] {
+            assert_eq!(unsafe { vfsi_mkdir(fs, path.as_ptr(), 0o755, 0) }, 0);
+        }
+        let file = CString::new("/dir/file").unwrap();
+        let fd = unsafe { vfsi_open(fs, file.as_ptr(), libc::O_CREAT | libc::O_WRONLY, 0o644) };
+        assert!(fd > 0);
+        assert_eq!(unsafe { vfsi_close(fs, fd) }, 0);
+        struct Seen {
+            fs: *mut vfsi_fs,
+            indices: Vec<usize>,
+            stop: bool,
+        }
+        unsafe extern "C" fn cb(
+            index: usize,
+            dir: *const c_char,
+            _: *const c_char,
+            _: *const vfsi_attrs,
+            user: *mut c_void,
+        ) -> bool {
+            let seen = &mut *(user as *mut Seen);
+            let mut attrs = std::mem::zeroed();
+            // Re-entering must not deadlock: delivery is outside the backend lock.
+            assert_eq!(vfsi_stat(seen.fs, dir, &mut attrs), 0);
+            seen.indices.push(index);
+            !seen.stop
+        }
+        let dirs = [dir.as_ptr(), empty.as_ptr(), dir.as_ptr()];
+        let mut options = vfsi_listing_options {
+            max_entries: 2,
+            max_path_bytes: 18,
+            attributes: VFSI_ATTR_MODE,
+        };
+        let mut results = [vfsi_listing_result::default(); 3];
+        let mut seen = Seen {
+            fs,
+            indices: vec![],
+            stop: false,
+        };
+        let run = |options: &vfsi_listing_options,
+                   seen: &mut Seen,
+                   results: &mut [vfsi_listing_result; 3]| unsafe {
+            vfsi_listdirs(
+                fs,
+                dirs.as_ptr(),
+                3,
+                options,
+                Some(cb),
+                seen as *mut _ as *mut c_void,
+                results.as_mut_ptr(),
+            )
+        };
+        assert_eq!(run(&options, &mut seen, &mut results), 0);
+        seen.indices.sort_unstable();
+        assert_eq!(seen.indices, [0, 2]);
+        assert!(results.iter().all(|result| result.completion == 1));
+        assert_eq!(results.map(|result| result.delivered), [1, 0, 1]);
+        for (entries, bytes) in [(1, 18), (2, 17)] {
+            options.max_entries = entries;
+            options.max_path_bytes = bytes;
+            seen.indices.clear();
+            assert_eq!(run(&options, &mut seen, &mut results), libc::EFBIG);
+            assert!(seen.indices.is_empty());
+            assert!(results
+                .iter()
+                .all(|result| result.completion == 0 && result.delivered == 0));
+        }
+        options.max_entries = 2;
+        options.max_path_bytes = 18;
+        seen.stop = true;
+        assert_eq!(run(&options, &mut seen, &mut results), 0);
+        assert_eq!(seen.indices.len(), 1);
+        assert!(results.iter().all(|result| result.completion == 2));
+        let missing = CString::new("/missing").unwrap();
+        let bad_dirs = [dir.as_ptr(), missing.as_ptr()];
+        seen.indices.clear();
+        seen.stop = false;
+        assert_eq!(
+            unsafe {
+                vfsi_listdirs(
+                    fs,
+                    bad_dirs.as_ptr(),
+                    2,
+                    &options,
+                    Some(cb),
+                    &mut seen as *mut _ as *mut c_void,
+                    results.as_mut_ptr(),
+                )
+            },
+            libc::ENOENT
+        );
+        assert!(seen.indices.is_empty());
+        unsafe {
+            vfsi_free(fs);
+        }
     }
 
     #[test]

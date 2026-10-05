@@ -111,16 +111,14 @@
 typedef struct vfsi_fs vfsi_fs;
 
 /**
- * Resource policy for an incremental tree traversal. Zero is a zero limit,
- * not unlimited. Set SIZE_MAX explicitly to opt out of a limit.
+ * Aggregate limits for complete shallow vector listings. Zero is a zero
+ * budget; SIZE_MAX explicitly opts out. MODE is always requested.
  */
-typedef struct vfsi_walk_options {
+typedef struct vfsi_listing_options {
   size_t max_entries;
   size_t max_path_bytes;
-  size_t max_depth;
   uint32_t attributes;
-  bool sort_by_name;
-} vfsi_walk_options;
+} vfsi_listing_options;
 
 /**
  * Attributes returned by [`vfsi_stat`] and passed to listdir callbacks.
@@ -149,6 +147,33 @@ typedef struct vfsi_attrs {
   int64_t ctime_sec;
   uint32_t ctime_nsec;
 } vfsi_attrs;
+
+typedef bool (*vfsi_indexed_listdir_cb)(size_t,
+                                        const char*,
+                                        const char*,
+                                        const struct vfsi_attrs*,
+                                        void*);
+
+/**
+ * Complete=1, stopped=2, not completed=0. Empty directories are explicitly
+ * complete with zero delivered entries. Failure leaves every result incomplete.
+ */
+typedef struct vfsi_listing_result {
+  uint32_t completion;
+  size_t delivered;
+} vfsi_listing_result;
+
+/**
+ * Resource policy for an incremental tree traversal. Zero is a zero limit,
+ * not unlimited. Set SIZE_MAX explicitly to opt out of a limit.
+ */
+typedef struct vfsi_walk_options {
+  size_t max_entries;
+  size_t max_path_bytes;
+  size_t max_depth;
+  uint32_t attributes;
+  bool sort_by_name;
+} vfsi_walk_options;
 
 /**
  * Event kinds: 0=enter directory, 1=entry, 2=leave directory.
@@ -253,6 +278,34 @@ typedef bool (*vfsi_read_paths_cb)(const char *path, const uint8_t *data, size_t
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
+
+/**
+ * Complete bounded vector listings, with callbacks outside backend locks.
+ * Collect the bounded cohort before delivery, so callers may safely fall back
+ * on a listing error without mixing a partial snapshot into ordinary scanning.
+ * Budgets include duplicate operands. Results are associated with input indices.
+ * A false callback stops delivery successfully and is distinguishable from EOF.
+ * A callback stop marks the entire cohort stopped, even if an earlier empty
+ * directory had no entries to deliver. Requested but absent attributes fail
+ * with ENOTSUP before delivery; applications must not fabricate stat values.
+ * Operand planning is additionally capped by the default directory entry/path
+ * limits, independently of the configured response quotas.
+ * Backend first-page fetches use bounded directory cohorts; aggregate quotas
+ * and deferred callback delivery span all cohorts, including duplicate inputs.
+ *
+ * # Safety
+ * `fs` must be a live handle. `dirs` and `results` must hold `count` elements,
+ * and each directory must be NUL-terminated. `options` must be readable for the
+ * call. Callback strings/attributes are borrowed only during the invocation.
+ * The callback must not free `fs` or mutate the input/result arrays.
+ */
+int vfsi_listdirs(struct vfsi_fs *fs,
+                  const char *const *dirs,
+                  size_t count,
+                  const struct vfsi_listing_options *options,
+                  vfsi_indexed_listdir_cb cb,
+                  void *userdata,
+                  struct vfsi_listing_result *results);
 
 /**
  * Return the ABI version implemented by the loaded library.

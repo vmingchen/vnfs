@@ -16,3 +16,7 @@ pub use transfer::{
 };
 mod stats;
 pub use stats::{TreeStats, tree_stats};
+mod session;
+pub use session::{MountSession, ResolvePath};
+mod data;
+pub use data::copy_to_writer;

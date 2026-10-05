@@ -105,6 +105,7 @@ class RustQuickTests(unittest.TestCase):
         self.assertIn("--lib", calls[1])
         self.assertIn("--test readv", calls[2])
         self.assertIn("--test application_boundary", calls[2])
+        self.assertIn("--test port_helpers", calls[2])
         self.assertIn("dummy test-faults", calls[2])
         self.assertFalse(any("--manifest-path" in call or "--test nfs" in call
                              or "--test smb" in call or "--doc" in call for call in calls))

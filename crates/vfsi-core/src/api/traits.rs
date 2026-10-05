@@ -1364,6 +1364,97 @@ pub trait VfsiExt: Vfsi {
         )
     }
 
+    /// Visit complete shallow listings in depth-first order with application policy.
+    ///
+    /// `order` may reorder siblings (for example, locale-aware `ls` ordering).
+    /// `descend` selects directories before their contents are read; it does not
+    /// filter entries delivered in their parent's listing. Symlinks are never
+    /// traversed. `visitor` runs outside backend locks and may stop immediately
+    /// or skip all children of the current directory. Errors after delivered
+    /// listings must not trigger replay through another backend.
+    ///
+    /// Storage is bounded by one complete listing and the pending directory
+    /// frontier. Entry/path budgets charge all fetched children, including those
+    /// rejected by `descend`. This ordered workflow deliberately does not
+    /// speculatively list children before admission; use `vlistdirs` to batch
+    /// already-approved independent directories.
+    ///
+    /// ```no_run
+    /// use vfsi_core::api::{MetadataFields, Result, Vfsi, VfsiExt, WalkControl};
+    /// # fn example(fs: &impl Vfsi) -> Result<()> {
+    /// fs.visit_dirs_ordered("/input", MetadataFields::MODE | MetadataFields::SIZE,
+    ///     fs.limits().walk_options(),
+    ///     |entries| entries.sort_by(|a, b| a.path().cmp(b.path())),
+    ///     |entry| entry.file_name() != Some(std::ffi::OsStr::new(".git")),
+    ///     |listing, depth| {
+    ///         println!("{}: {} entries at depth {depth}", listing.path.display(), listing.entries.len());
+    ///         Ok(WalkControl::Continue)
+    ///     })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    fn visit_dirs_ordered(
+        &self,
+        root: impl AsRef<Path>,
+        fields: crate::api::MetadataFields,
+        options: crate::api::WalkOptions,
+        mut order: impl FnMut(&mut [crate::api::DirEntry]),
+        mut descend: impl FnMut(&crate::api::DirEntry) -> bool,
+        mut visitor: impl FnMut(DirectoryListing, usize) -> Result<crate::api::WalkControl>,
+    ) -> Result<crate::api::TraversalCompletion> {
+        let root = root.as_ref();
+        let mut count = 1usize;
+        let mut bytes = root.as_os_str().len();
+        if count > options.entry_limit() || bytes > options.path_byte_limit() {
+            return Err(crate::api::Error::client(0, libc::EFBIG as u32));
+        }
+        let mut pending = vec![(root.to_path_buf(), 0usize)];
+        while let Some((path, depth)) = pending.pop() {
+            if depth >= options.depth_limit() && options.truncates_at_depth_limit() {
+                continue;
+            }
+            let mut entries = self.read_dir_with_options(
+                &path,
+                crate::api::VisitOptions::new()
+                    .fields(fields | crate::api::MetadataFields::MODE)
+                    .max_entries(options.entry_limit().saturating_sub(count))
+                    .max_path_bytes(options.path_byte_limit().saturating_sub(bytes)),
+            )?;
+            for entry in &entries {
+                count = count
+                    .checked_add(1)
+                    .ok_or_else(|| crate::api::Error::client(0, libc::EFBIG as u32))?;
+                bytes = bytes
+                    .checked_add(entry.path().as_os_str().len())
+                    .ok_or_else(|| crate::api::Error::client(0, libc::EFBIG as u32))?;
+                if count > options.entry_limit()
+                    || bytes > options.path_byte_limit()
+                    || depth >= options.depth_limit()
+                {
+                    return Err(crate::api::Error::client(0, libc::EFBIG as u32)
+                        .with_context("visit_dirs_ordered", entry.path()));
+                }
+            }
+            order(&mut entries);
+            let listing = DirectoryListing { path, entries };
+            let children: Vec<_> = listing
+                .entries
+                .iter()
+                .filter(|entry| entry.metadata().is_dir() && descend(entry))
+                .map(|entry| (entry.path().to_path_buf(), depth + 1))
+                .collect();
+            match visitor(listing, depth)? {
+                crate::api::WalkControl::Stop => {
+                    return Ok(crate::api::TraversalCompletion::Stopped);
+                }
+                crate::api::WalkControl::SkipSubtree => continue,
+                crate::api::WalkControl::Continue => {}
+            }
+            pending.extend(children.into_iter().rev());
+        }
+        Ok(crate::api::TraversalCompletion::Complete)
+    }
+
     // Create, move, copy, and remove
     /// Single-target convenience. For multiple independent directories, prefer [`Vfsi::vmkdir`].
     ///

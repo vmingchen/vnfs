@@ -3,6 +3,38 @@
 `vnfs::helpers` contains high-level workflows built only on the public `Vfsi`
 and `FileHandle` contracts. It is part of `vnfs`, not a separate dependency.
 
+## Application bridges
+
+`helpers::MountSession` pairs one reusable client with its local namespace root.
+Use `ResolvePath::Follow` for existing source operands and `NoFollow` for links,
+removal operands and new destinations. Mapping preserves non-UTF-8 paths and
+rejects operands outside the session root. It is not race-free confinement or a
+kernel/direct-client cache-coherence mechanism. Keep mount configuration stable
+for the session's lifetime.
+
+`VfsiExt::visit_dirs_ordered` provides lazy, application-ordered directory
+listings with entry/path/depth budgets and admission before child-directory I/O.
+It lets tools such as `ls` retain their sort and display policy without owning a
+second traversal engine. Use `walk_events_with_options` for pre/post-order entry
+events and `vlistdirs` to batch independent, already-approved directories.
+
+`helpers::copy_to_writer` streams a source to a caller-owned `std::io::Write`
+destination. It handles short writes, uses bounded read chunks, and stops on
+writer failure without replay. Opening/truncating, publication, metadata and
+flushing remain application policy. For a shared filesystem destination, prefer
+the existing vectorized `copy_items` workflows.
+
+```rust,no_run
+use vnfs::{ReadStreamOptions, helpers::{MountSession, ResolvePath, copy_to_writer}};
+
+let session = MountSession::from_mount("/mnt/data")?;
+let source = session.map("/mnt/data/input", ResolvePath::Follow)?;
+let mut output = std::fs::File::create("output")?;
+copy_to_writer(session.fs(), source, &mut output,
+    ReadStreamOptions::new().chunk_size(1024 * 1024))?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
 ## TreeBuilder
 
 ```rust,no_run
