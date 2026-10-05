@@ -2,7 +2,6 @@
 
 use std::time::Duration;
 use std::{process::Command, thread};
-use vfsi_sync::*;
 
 use vfsi_nfs::NfsConnectOptions;
 use vfsi_nfs::NfsVecFs;

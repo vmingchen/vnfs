@@ -1,10 +1,9 @@
-//! Tests for the `tc` module: one test per `tc_api.h` call, run against the
-//! local NFSv4.1 server (127.0.0.1, export `/`). Requires root to read/write
-//! the export, so run with `sudo` and the libntirpc library path:
+//! Native and high-level NFS integration tests. The server defaults to
+//! 127.0.0.1 with export `/`; configure VFSI_NFS_SERVER and VFSI_NFS_EXPORT
+//! for another writable fixture. Select NFSv4.1 or v4.2 with VNFS_TEST_MINOR.
 //!
 //! ```sh
-//! sudo LD_LIBRARY_PATH=$PWD/target/debug/build/libntirpc-sys-*/out/ntirpc/install/lib \
-//!     cargo test -p vnfs --test tc_api -- --test-threads=1
+//! cargo test -p vnfs --test nfs --all-features -- --test-threads=1
 //! ```
 
 use nfsv41_sys::nfsstat4_NFS4ERR_EXIST;
@@ -21,7 +20,7 @@ use vnfs::{Nfs, NfsReadPoolOptions};
 fn failed_gss_negotiation_does_not_fall_back_to_a_working_auth_sys_export() {
     // Establish that a downgrade could actually succeed on this fixture.
     let mut ordinary = client();
-    assert!(ordinary.exists(Path::new("/")).unwrap());
+    assert!(ordinary.exists_impl(Path::new("/")).unwrap());
     let error = NfsVecFs::builder(test_host())
         .minor_version(
             std::env::var("VNFS_TEST_MINOR")
