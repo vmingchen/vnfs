@@ -5,6 +5,26 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## Coordinated patch release - 2026-10-04
+
+- Rust: vnfs 0.0.18, vfsi-core 0.1.6, vfsi-sync 0.1.7,
+  vfsi-local 0.1.5, vfsi-nfs 0.1.6, vfsi-smb 0.1.4,
+  nfsv41-sys 0.1.10, and vfsi-c 0.3.4. libntirpc-sys remains at 0.3.0.
+- Python: nfs4fs 0.3.5, vfsi-fsspec 0.1.5, vsmb 0.1.2, and vsmbfs 0.1.2.
+- Consolidated native backend contracts and shared workflows, and exposed
+  vectorized ownership, attribute, link, and directory creation operations
+  through the portable Vfsi API.
+- Added bounded copy/move workflows, atomic no-replace rename, reusable mount
+  path mapping, ordered/prunable traversal, and streaming to caller-owned
+  writers so application ports can use the high-level API.
+- Added indexed C listings that distinguish completion from cancellation,
+  preserve duplicate operands, reject missing returned metadata, and bound
+  first-page fetch cohorts before enforcing aggregate quotas. Callbacks run
+  outside backend locks and no partial snapshot is delivered on failure.
+- Updated package dependency floors together and added local/live application
+  compatibility checks, including fault-injection coverage for listing limits
+  and missing metadata.
+
 ## Coordinated patch release - 2026-10-02
 
 - Rust: vnfs 0.0.16, vfsi-core 0.1.4, vfsi-sync 0.1.5,

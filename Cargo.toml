@@ -16,11 +16,11 @@ bitfields = "3.1.0"
 clap = { version = "4.5.17", features = ["derive"] }
 libc = "0.2"
 libntirpc-sys = "0.3.0"
-nfsv41-sys = { path = "crates/nfsv41-sys", version = "0.1.9" }
+nfsv41-sys = { path = "crates/nfsv41-sys", version = "0.1.10" }
 xdr-codec = "0.4.4"
 xdrgen = "0.4.4"
-vfsi-core = { path = "crates/vfsi-core", version = "0.1.5" }
-vfsi-local = { path = "crates/vfsi-local", version = "0.1.4" }
-vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.1.5" }
-vfsi-smb = { path = "crates/vfsi-smb", version = "0.1.3" }
-vfsi-sync = { path = "crates/vfsi-sync", version = "0.1.6" }
+vfsi-core = { path = "crates/vfsi-core", version = "0.1.6" }
+vfsi-local = { path = "crates/vfsi-local", version = "0.1.5" }
+vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.1.6" }
+vfsi-smb = { path = "crates/vfsi-smb", version = "0.1.4" }
+vfsi-sync = { path = "crates/vfsi-sync", version = "0.1.7" }

@@ -29,7 +29,7 @@ is required. Add the crate:
 
 ```toml
 [dependencies]
-vnfs = "0.0.17"
+vnfs = "0.0.18"
 ```
 
 On Ubuntu 24.04 or newer, install the native build dependencies once:
