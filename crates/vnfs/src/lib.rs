@@ -16,6 +16,9 @@ pub mod nfs {
     #[cfg(feature = "rpcsec-gss")]
     pub use crate::RpcsecGssProtection;
     #[doc(inline)]
+    #[cfg(target_os = "linux")]
+    pub use crate::helpers::NfsMountSession;
+    #[doc(inline)]
     pub use crate::{
         Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsClientPool, NfsDir, NfsEvent, NfsFile,
         NfsObserver, NfsOpenOptions, NfsRead, NfsReadInto, NfsReadPool, NfsReadPoolOptions,

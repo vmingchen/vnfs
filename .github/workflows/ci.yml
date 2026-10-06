@@ -177,9 +177,12 @@ jobs:
               # archive patches before the separate cdylib smoke build.
               cargo "${patches[@]}" update --offline --manifest-path "$archive/Cargo.toml"
               cargo "${patches[@]}" build --locked --offline --manifest-path "$archive/Cargo.toml"
+              cc -Wall -Wextra -Werror -I "$archive/include" \
+                "$archive/tests/dynamic-loader.c" -ldl -o /tmp/vfsi-packaged-loader-test
+              /tmp/vfsi-packaged-loader-test
               cc -Wall -Wextra -Werror \
                 -I "$archive/include" "$archive/tests/smoke.c" \
-                -L "$CARGO_TARGET_DIR/debug" -lvfsi_c \
+                -L "$CARGO_TARGET_DIR/debug" -lvfsi_c -ldl \
                 -o /tmp/vfsi-packaged-c-smoke
               LD_LIBRARY_PATH="$CARGO_TARGET_DIR/debug" \
                 /tmp/vfsi-packaged-c-smoke /tmp/vfsi-packaged-c-root
@@ -231,7 +234,9 @@ jobs:
             'select(.reason == "compiler-artifact" and (.package_id | contains("#vfsi-c@"))) | .filenames[] | select(endswith("/libvfsi_c.so"))' | tail -1)
           test -f "$library"
           library_dir=$(dirname "$library")
-          cc -I bindings/c/include bindings/c/tests/smoke.c -L "$library_dir" -lvfsi_c -o /tmp/vfsi-smoke
+          cc -Wall -Wextra -Werror -I bindings/c/include bindings/c/tests/dynamic-loader.c -ldl -o /tmp/vfsi-loader-test
+          /tmp/vfsi-loader-test
+          cc -I bindings/c/include bindings/c/tests/smoke.c -L "$library_dir" -lvfsi_c -ldl -o /tmp/vfsi-smoke
           LD_LIBRARY_PATH="$library_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" /tmp/vfsi-smoke /tmp/vfsi-smoke-root
 
   python:
@@ -706,7 +711,7 @@ jobs:
       - name: Run C ABI smoke test against NFS
         run: |
           cargo build -p vfsi-c
-          cc -Wall -Wextra -Werror -I bindings/c/include bindings/c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
+          cc -Wall -Wextra -Werror -I bindings/c/include bindings/c/tests/smoke.c -L target/debug -lvfsi_c -ldl -o /tmp/vfsi-smoke
           LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke --nfs 127.0.0.1 '${{ matrix.minor-version }}'
       - name: Run required Python/fsspec coverage against NFS
         env:
@@ -871,7 +876,7 @@ jobs:
           VFSI_REQUIRE_SERVER_COPY: 1
         run: |
           cargo build -p vfsi-c
-          cc -Wall -Wextra -Werror -I bindings/c/include bindings/c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
+          cc -Wall -Wextra -Werror -I bindings/c/include bindings/c/tests/smoke.c -L target/debug -lvfsi_c -ldl -o /tmp/vfsi-smoke
           LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke --nfs 127.0.0.1 2
       - name: Run required Python/fsspec coverage against patched NFSv4.2
         env:
@@ -1025,7 +1030,7 @@ jobs:
         if: matrix.bindings
         run: |
           cargo build -p vfsi-c
-          cc -Wall -Wextra -Werror -I bindings/c/include bindings/c/tests/smoke.c -L target/debug -lvfsi_c -o /tmp/vfsi-smoke
+          cc -Wall -Wextra -Werror -I bindings/c/include bindings/c/tests/smoke.c -L target/debug -lvfsi_c -ldl -o /tmp/vfsi-smoke
           LD_LIBRARY_PATH=target/debug /tmp/vfsi-smoke --smb 127.0.0.1 vfsi-test '${{ matrix.username }}' '${{ matrix.password }}' ''
       - name: Run Python/fsspec conformance test against Samba
         if: matrix.bindings

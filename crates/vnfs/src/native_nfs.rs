@@ -98,6 +98,8 @@ impl Nfs {
         NfsBuilder {
             inner: NfsClientBuilder::new(host),
             limits: ResourceLimits::default(),
+            #[cfg(target_os = "linux")]
+            mount_binding: None,
         }
     }
 
@@ -126,6 +128,14 @@ impl NfsMount {
     pub fn local_path(&self) -> &Path {
         self.inner.local_path()
     }
+
+    /// Build a client from this already-discovered mount configuration.
+    ///
+    /// This avoids rediscovering the mount when an application first inspects
+    /// it (for example, to group operands) and then opens a direct connection.
+    pub fn builder(&self) -> VfResult<NfsBuilder> {
+        NfsBuilder::from_mount_config(self)
+    }
 }
 
 /// NFS configuration builder whose `connect` returns an owned native client.
@@ -133,6 +143,10 @@ impl NfsMount {
 pub struct NfsBuilder {
     inner: NfsClientBuilder,
     limits: ResourceLimits,
+    // A customization callback may clone the supplied builder, but must not
+    // replace it with one whose backend lacks the original mount safeguards.
+    #[cfg(target_os = "linux")]
+    mount_binding: Option<Arc<()>>,
 }
 
 impl NfsBuilder {
@@ -140,16 +154,47 @@ impl NfsBuilder {
     pub fn from_mount(path: impl AsRef<Path>) -> VfResult<Self> {
         #[cfg(target_os = "linux")]
         {
-            Ok(Self {
-                inner: NfsClientBuilder::from_mount(path)?,
-                limits: ResourceLimits::default(),
-            })
+            Self::from_mount_config(&Nfs::discover_mount(path)?)
         }
         #[cfg(not(target_os = "linux"))]
         {
             Err(crate::Error::client(0, libc::EOPNOTSUPP as u32)
                 .with_context("from_mount requires Linux", path.as_ref()))
         }
+    }
+
+    /// Configure a client from previously discovered mount information.
+    ///
+    /// The mount is revalidated when the client connects, so stale mount
+    /// configuration fails rather than silently targeting a different export.
+    #[cfg(target_os = "linux")]
+    fn from_mount_config(mount: &NfsMount) -> VfResult<Self> {
+        Ok(Self {
+            inner: NfsClientBuilder::from_mount_config(mount.inner.clone())?,
+            limits: ResourceLimits::default(),
+            mount_binding: Some(Arc::new(())),
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn configure_for_mount(
+        self,
+        local_path: &Path,
+        configure: impl FnOnce(Self) -> Self,
+    ) -> VfResult<Self> {
+        let binding = self.mount_binding.clone();
+        let configured = configure(self);
+        if !binding
+            .as_ref()
+            .zip(configured.mount_binding.as_ref())
+            .is_some_and(|(expected, actual)| Arc::ptr_eq(expected, actual))
+        {
+            return Err(crate::Error::client(0, libc::EINVAL as u32).with_context(
+                "mount session customization must retain the supplied builder",
+                local_path,
+            ));
+        }
+        Ok(configured)
     }
 
     /// Select an NFS-visible namespace directory, not a host-local directory.
@@ -256,17 +301,95 @@ mod mount_tests {
     use super::*;
 
     #[test]
+    fn mount_customization_rejects_unbound_and_differently_bound_builders() {
+        let path = Path::new("/mnt/nfs/project");
+        for separately_bound in [false, true] {
+            let mut supplied = Nfs::builder("127.0.0.1:2049");
+            supplied.mount_binding = Some(Arc::new(()));
+            let mut replacement = Nfs::builder("127.0.0.1:2049");
+            if separately_bound {
+                replacement.mount_binding = Some(Arc::new(()));
+            }
+            let error = supplied
+                .configure_for_mount(path, |_| replacement)
+                .unwrap_err();
+            assert_eq!(error.err_no(), libc::EINVAL as u32);
+            assert_eq!(error.path(), Some(path));
+            assert!(error.to_string().contains("supplied builder"));
+        }
+    }
+
+    #[test]
+    fn mount_customization_accepts_cloning_and_tuning_the_supplied_builder() {
+        let binding = Arc::new(());
+        let mut supplied = Nfs::builder("127.0.0.1:2049");
+        supplied.mount_binding = Some(binding.clone());
+        let limits = ResourceLimits {
+            max_read_bytes: 1024,
+            ..ResourceLimits::default()
+        };
+        let configured = supplied
+            .configure_for_mount(Path::new("/mnt/nfs/project"), |builder| {
+                builder
+                    .clone()
+                    .request_timeout(Duration::from_secs(2))
+                    .limits(limits)
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            configured.mount_binding.as_ref().unwrap(),
+            &binding
+        ));
+        assert_eq!(configured.limits, limits);
+    }
+
+    #[test]
+    #[ignore = "requires configured NFS mount fixtures"]
+    fn live_mount_session_rejects_replacement_builders() {
+        let directory = std::env::var("VFSI_NFS_TEST_MOUNT")
+            .expect("VFSI_NFS_TEST_MOUNT is required for this ignored integration test");
+        let mount = Nfs::discover_mount(&directory).unwrap();
+        let host = mount.host().to_owned();
+        let replacement = |_| {
+            Nfs::builder(&host)
+                .root("/")
+                .version(NfsVersion::V4_2)
+                .connect_timeout(Duration::from_secs(2))
+                .request_timeout(Duration::from_secs(2))
+        };
+        let error =
+            crate::helpers::NfsMountSession::from_discovered_with(mount, replacement).unwrap_err();
+        assert_eq!(error.err_no(), libc::EINVAL as u32);
+        assert!(error.to_string().contains("supplied builder"));
+
+        let error =
+            crate::helpers::NfsMountSession::from_mount_with(&directory, replacement).unwrap_err();
+        assert_eq!(error.err_no(), libc::EINVAL as u32);
+        assert!(error.to_string().contains("supplied builder"));
+    }
+
+    #[test]
     #[ignore = "requires configured NFS mount fixtures"]
     fn live_mount_constructor_roots_vector_io_at_a_subdirectory() {
         let mount = std::env::var("VFSI_NFS_TEST_MOUNT")
             .expect("VFSI_NFS_TEST_MOUNT is required for this ignored integration test");
         let directory = Path::new(&mount).join(format!(".vnfs-from-mount-{}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
-        let fs = NfsBuilder::from_mount(&directory)
-            .unwrap()
-            .request_timeout(Duration::from_secs(2))
-            .connect()
-            .unwrap();
+        let session = crate::helpers::NfsMountSession::from_mount_with(&directory, |builder| {
+            builder.request_timeout(Duration::from_secs(2))
+        })
+        .unwrap();
+        assert_eq!(session.local_root(), directory.canonicalize().unwrap());
+        assert_eq!(
+            session
+                .map(
+                    directory.join("file-1"),
+                    crate::helpers::ResolvePath::NoFollow
+                )
+                .unwrap(),
+            Path::new("/file-1")
+        );
+        let fs = session.fs();
         fs.write_files(&[
             ("/file-1", b"hello".as_slice()),
             ("/file-2", b"world".as_slice()),

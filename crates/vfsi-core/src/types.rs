@@ -1189,6 +1189,7 @@ pub struct Attrs {
     file_type: VfType,
     len: u64,
     permissions: Permissions,
+    returned: AttrMask,
     mode: Option<u32>,
     blocks: Option<u64>,
     device_id: Option<u64>,
@@ -1204,6 +1205,25 @@ pub struct Attrs {
 }
 
 impl Attrs {
+    /// Attribute fields actually returned by the backend, not merely requested.
+    ///
+    /// Optional accessors remain `None` when a field was not requested or the
+    /// backend could not provide it. Check this mask before projecting the
+    /// metadata into an API that requires concrete values (such as `stat`).
+    pub fn returned_attributes(&self) -> AttrMask {
+        self.returned
+    }
+
+    /// Requested fields that were not returned by the backend.
+    pub fn missing_attributes(&self, requested: AttrMask) -> AttrMask {
+        requested.difference(self.returned)
+    }
+
+    /// Whether every field in `requested` was returned by the backend.
+    pub fn has_attributes(&self, requested: AttrMask) -> bool {
+        self.missing_attributes(requested).is_empty()
+    }
+
     /// Full POSIX mode, including the file type bits, when returned.
     pub fn mode(&self) -> Option<u32> {
         self.mode
@@ -1354,6 +1374,7 @@ pub fn metadata_from_attrs(attributes: VfAttrs) -> Attrs {
         file_type: attributes.ftype,
         len: attributes.size,
         permissions: Permissions::from_mode(attributes.mode),
+        returned,
         mode: returned.contains(AttrMask::MODE).then_some(attributes.mode),
         blocks: returned
             .contains(AttrMask::BLOCKS)

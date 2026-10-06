@@ -1,4 +1,5 @@
 #include "vfsi.h"
+#include "vfsi_dynamic.h"
 
 #include <fcntl.h>
 #include <stdio.h>
@@ -20,6 +21,12 @@ static bool list_one(const char *name, const struct vfsi_attrs *attrs, void *use
 
 int main(int argc, char **argv)
 {
+    vfsi_dynamic_api dynamic_api;
+    if (vfsi_dynamic_load(&dynamic_api, RTLD_DEFAULT) != 0 ||
+        dynamic_api.abi_version == NULL || dynamic_api.free == NULL ||
+        dynamic_api.dummy_open_mount == NULL)
+        return 2;
+
     bool smb = (argc == 4 || argc == 7) && strcmp(argv[1], "--smb") == 0;
     bool nfs = argc == 4 && strcmp(argv[1], "--nfs") == 0;
     unsigned long nfs_minor = nfs ? strtoul(argv[3], NULL, 10) : 0;

@@ -12,6 +12,13 @@ rejects operands outside the session root. It is not race-free confinement or a
 kernel/direct-client cache-coherence mechanism. Keep mount configuration stable
 for the session's lifetime.
 
+For direct NFS clients, `helpers::NfsMountSession::from_mount` combines mount
+discovery, connection, mount details, and local-to-remote path mapping. Use it
+when a tool needs to group paths by mount or report the discovered server while
+also issuing direct vector operations. It performs one discovery and validates
+the pinned mount again when connecting. It does not make direct NFS operations
+coherent with concurrent kernel-mounted access.
+
 `VfsiExt::visit_dirs_ordered` provides lazy, application-ordered directory
 listings with entry/path/depth budgets and admission before child-directory I/O.
 It lets tools such as `ls` retain their sort and display policy without owning a
@@ -32,6 +39,22 @@ let source = session.map("/mnt/data/input", ResolvePath::Follow)?;
 let mut output = std::fs::File::create("output")?;
 copy_to_writer(session.fs(), source, &mut output,
     StreamOptions::new().chunk_size(1024 * 1024))?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+When the application also needs mount information, use the bundled session
+instead of separately discovering the mount and constructing a path mapper:
+
+```rust,no_run
+use vnfs::{Attributes, AttrsOptions, Vfsi, VfsiExt};
+use vnfs::helpers::{NfsMountSession, ResolvePath};
+
+let session = NfsMountSession::from_mount("/mnt/nfs/project")?;
+let path = session.map("/mnt/nfs/project/README", ResolvePath::Follow)?;
+let attrs = session.fs().vgetattrs(&[path], AttrsOptions::new()
+    .fields(Attributes::MODE | Attributes::SIZE))?;
+assert!(attrs[0].has_attributes(Attributes::MODE | Attributes::SIZE));
+println!("NFS server: {}", session.mount().host());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 

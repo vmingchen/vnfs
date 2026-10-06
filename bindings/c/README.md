@@ -13,6 +13,17 @@ with:
 cargo build -p vfsi-c
 ```
 
+Applications that keep VFSI optional at runtime can include
+`include/vfsi_dynamic.h` after the library is installed. Its
+`vfsi_dynamic_load()` resolves the common optional port-facing symbols and
+checks the ABI once, so each application does not need to maintain its own
+`dlsym` declarations. The caller still owns the `dlopen` handle, decides which
+optional operations it requires, and keeps the library loaded until all calls
+finish. This header does not change the C ABI; consumers that need the helper
+should require a `vfsi-c` version that packages it.
+On Linux, link applications that use this loader with `-ldl`; this is required
+on glibc versions before 2.34, where `dlsym` is provided by a separate library.
+
 Consumers that load the library dynamically must call `vfsi_abi_version()`
 and require `VFSI_ABI_VERSION` before resolving or invoking the rest of the
 API. Attribute structures also carry their size and ABI version.
@@ -76,7 +87,7 @@ Example C smoke test:
 
 ```sh
 cc -I bindings/c/include bindings/c/tests/smoke.c \
-   -L target/debug -lvfsi_c \
+   -L target/debug -lvfsi_c -ldl \
    -o /tmp/vfsi_smoke
 /tmp/vfsi_smoke /tmp/vfsi_root
 ```

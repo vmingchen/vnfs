@@ -200,6 +200,45 @@ fn metadata_distinguishes_unavailable_fields_from_zero_and_false() {
 }
 
 #[test]
+fn metadata_exposes_returned_and_missing_attribute_masks() {
+    let requested = AttrMask::MODE | AttrMask::UID | AttrMask::MTIME;
+    let metadata = vfsi_core::metadata_from_attrs(VfAttrs {
+        returned: AttrMask::MODE | AttrMask::MTIME,
+        mode: libc::S_IFREG | 0o644,
+        mtime_sec: 1,
+        ..VfAttrs::default()
+    });
+
+    assert_eq!(
+        metadata.returned_attributes(),
+        AttrMask::MODE | AttrMask::MTIME
+    );
+    assert_eq!(metadata.missing_attributes(requested), AttrMask::UID);
+    assert!(!metadata.has_attributes(requested));
+    assert!(metadata.has_attributes(AttrMask::MODE | AttrMask::MTIME));
+}
+
+#[test]
+fn metadata_missing_attributes_preserves_unknown_requested_bits() {
+    let unknown = AttrMask::from_bits_retain(1 << 31);
+    let requested = AttrMask::MODE | unknown;
+    let metadata = vfsi_core::metadata_from_attrs(VfAttrs {
+        returned: AttrMask::MODE,
+        ..VfAttrs::default()
+    });
+    assert_eq!(metadata.missing_attributes(requested), unknown);
+    assert!(!metadata.has_attributes(requested));
+    assert!(!metadata.has_attributes(unknown));
+
+    let returned = vfsi_core::metadata_from_attrs(VfAttrs {
+        returned: requested,
+        ..VfAttrs::default()
+    });
+    assert!(returned.missing_attributes(requested).is_empty());
+    assert!(returned.has_attributes(requested));
+}
+
+#[test]
 fn protocol_status_constructors_preserve_their_domains() {
     let nfs = VfError::nfs(4, 10_001);
     assert_eq!(nfs.index(), Some(4));
