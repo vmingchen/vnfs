@@ -371,14 +371,13 @@ macro_rules! client_methods {
             $metadata,
             $write_receiver,
             vrename,
-            vmkdir,
             vcopy,
             vclose,
             vopen
         );
     };
     // Application clients and backend clients use different native method names.
-    ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path, $vwrite_native:expr, $vwrite_all_native:expr, $metadata:expr, $write_receiver:path, $rename:ident, $mkdir:ident, $copy:ident, $close:ident, $open_batch:ident) => {
+    ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path, $vwrite_native:expr, $vwrite_all_native:expr, $metadata:expr, $write_receiver:path, $rename:ident, $copy:ident, $close:ident, $open_batch:ident) => {
         fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
             &self,
             pairs: &[(P, Q)],
@@ -521,8 +520,12 @@ macro_rules! client_methods {
             <$client>::vmkdir($receiver(self), paths)
         }
 
-        fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-            <$client>::$copy($receiver(self), pairs)
+        fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
+            &self,
+            pairs: &[(P, Q)],
+            options: vfsi_core::api::CopyOption,
+        ) -> Result<()> {
+            <$client>::$copy($receiver(self), pairs, options)
         }
         fn vremove<P: AsRef<Path>>(
             &self,
@@ -573,7 +576,6 @@ impl<F: crate::Backend + 'static> Vfsi for crate::FsClient<F> {
         metadata_backend::<F, _>,
         std::convert::identity,
         vrename,
-        vmkdir_default,
         vcopy,
         vclose,
         vopen
@@ -582,7 +584,7 @@ impl<F: crate::Backend + 'static> Vfsi for crate::FsClient<F> {
 
 impl<F: crate::Backend + 'static> NativeHooks for crate::FsClient<F> {
     fn open_native(&self, request: OpenOp) -> Result<Self::File> {
-        self.open_with(request)
+        self.open_with_native(request)
     }
     fn page_capacity(&self, _paths: &[&Path]) -> Result<usize> {
         self.directory_page_batch_size()
@@ -612,8 +614,7 @@ pub(crate) fn read_backend_owned<F: crate::Backend + 'static>(
         budget,
         |ranges, bytes| client.vread_with_limit_projected_native(ranges, bytes, |request| request),
         |paths, bytes| {
-            client
-                .read_files_with_options(paths, crate::ReadAllOptions::new().max_total_bytes(bytes))
+            client.read_files_native(paths, crate::ReadAllOptions::new().max_total_bytes(bytes))
         },
     )
 }
@@ -678,3 +679,150 @@ where
 }
 
 use vfsi_core::api::internal::{OwnedReadResult, ReadRequest, consume_ops, read_batch};
+#[cfg(test)]
+mod traversal_tests {
+    use super::*;
+    use crate::{AttrMask, DirEntry, DirPageCursor, VfAttrs, VfFile, VfType};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    // The fallback cursor owns the unconsumed listing. Track retained snapshots
+    // while exercising the same visitor the Vfsi adapter uses in production.
+    struct Snapshot {
+        remaining: std::vec::IntoIter<DirEntry>,
+        live: Arc<AtomicUsize>,
+    }
+
+    impl Drop for Snapshot {
+        fn drop(&mut self) {
+            self.live.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[allow(clippy::type_complexity)] // Mirrors the page-fetch callback contract under test.
+    fn snapshot_pages(
+        live: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    ) -> impl FnMut(
+        &[&Path],
+        Vec<Option<DirPageCursor>>,
+        usize,
+        usize,
+    ) -> Result<Vec<crate::DirectoryPage>> {
+        move |paths, cursors, page_size, max_entries| {
+            let mut pages = Vec::with_capacity(paths.len());
+            for (path, cursor) in paths.iter().zip(cursors) {
+                let mut snapshot = match cursor {
+                    Some(cursor) => cursor.into_state::<Snapshot>()?,
+                    None => {
+                        let depth = path.components().count();
+                        let entries = (0..129)
+                            .take(max_entries)
+                            .map(|index| {
+                                let path = path.join(format!("entry-{index}"));
+                                let attrs = VfAttrs {
+                                    file: VfFile::from_os_path(&path),
+                                    ftype: if index == 0 && depth < 5 {
+                                        VfType::Directory
+                                    } else {
+                                        VfType::Regular
+                                    },
+                                    masks: AttrMask::MODE,
+                                    ..Default::default()
+                                };
+                                DirEntry::new(path, vfsi_core::metadata_from_attrs(attrs))
+                            })
+                            .collect::<Vec<_>>();
+                        peak.fetch_max(live.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                        Snapshot {
+                            remaining: entries.into_iter(),
+                            live: Arc::clone(&live),
+                        }
+                    }
+                };
+                let entries = snapshot.remaining.by_ref().take(page_size).collect();
+                let next = if snapshot.remaining.len() == 0 {
+                    None
+                } else {
+                    Some(DirPageCursor::new(snapshot))
+                };
+                pages.push((
+                    crate::DirectoryListing {
+                        path: path.to_path_buf(),
+                        entries,
+                    },
+                    next,
+                    Vec::new(),
+                ));
+            }
+            Ok(pages)
+        }
+    }
+
+    fn visit(
+        live: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        options: ListDirOptions,
+        callback: impl FnMut(usize, crate::DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
+    ) -> Result<Vec<crate::TraversalCompletion>> {
+        visit_directory_pages(
+            &["/tree"],
+            options,
+            ResourceLimits::default(),
+            |_| Ok(1),
+            |_| Ok(()),
+            snapshot_pages(live, peak),
+            callback,
+        )
+    }
+
+    #[test]
+    fn recursive_visit_releases_fallback_snapshots_before_descending() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let mut seen = 0;
+        let completions = visit(
+            Arc::clone(&live),
+            Arc::clone(&peak),
+            ListDirOptions::new()
+                .recursive(true)
+                .max_entries(1000)
+                .max_path_bytes(1_000_000),
+            |_, page| {
+                seen += page.entries.len();
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(completions, [crate::TraversalCompletion::Complete]);
+        assert_eq!(seen, 4 * 129);
+        assert_eq!(live.load(Ordering::SeqCst), 0);
+        assert_eq!(peak.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn recursive_visit_drops_fallback_snapshot_on_stop_error_and_limit() {
+        for outcome in 0..3 {
+            let live = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let options = ListDirOptions::new()
+                .recursive(true)
+                .max_entries(if outcome == 2 { 2 } else { 1000 })
+                .max_path_bytes(1_000_000);
+            let result = visit(Arc::clone(&live), peak, options, |_, _| match outcome {
+                0 => Ok(std::ops::ControlFlow::Break(())),
+                1 => Err(vfsi_core::api::Error::client(0, libc::EIO as u32)),
+                _ => Ok(std::ops::ControlFlow::Continue(())),
+            });
+            match outcome {
+                0 => assert_eq!(result.unwrap(), [crate::TraversalCompletion::Stopped]),
+                1 => assert_eq!(result.unwrap_err().err_no(), libc::EIO as u32),
+                _ => assert_eq!(result.unwrap_err().err_no(), libc::EFBIG as u32),
+            }
+            assert_eq!(live.load(Ordering::SeqCst), 0);
+        }
+    }
+}

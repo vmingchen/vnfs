@@ -52,9 +52,9 @@ pub use vfsi_core::api::{
     DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
     DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
     DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirectoryListing,
-    ReadDirOptions, ReadIntoResult as FsReadIntoResult, ResourceLimits, StreamCompletion,
-    StreamOptions, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
-    WriteResult as FsWriteResult,
+    ListDirOptions, ReadDirOptions, ReadIntoResult as FsReadIntoResult, ReadOptions,
+    ResourceLimits, StreamCompletion, StreamOptions, TraversalCompletion, WalkControl, WalkEvent,
+    WalkEventKind, WalkOptions, WriteResult as FsWriteResult,
 };
 
 #[doc(hidden)]

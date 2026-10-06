@@ -5714,14 +5714,6 @@ impl Backend for NfsVecFs {
         }
         Ok(())
     }
-    fn copy_impl(
-        &mut self,
-        source: &std::path::Path,
-        destination: &std::path::Path,
-    ) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_copy_impl_default(self, source, destination)
-    }
-
     fn vread_all_with_options_impl(
         &mut self,
         files: &[VfFile],

@@ -1,7 +1,7 @@
 use crate::{
-    Attributes, Attrs, AttrsOptions, ControlFlow, DepthLimit, Error, FileHandle, ListDirOptions,
-    OpenFlags, OpenOp, ReadOp, ReadOptions, Result, TransportKind, Vfsi, VfsiExt, WriteOp,
-    WriteOptions,
+    Attributes, Attrs, AttrsOptions, ControlFlow, CopyOption, DepthLimit, Error, FileHandle,
+    ListDirOptions, OpenFlags, OpenOp, ReadOp, ReadOptions, Result, TransportKind, Vfsi, VfsiExt,
+    WriteOp, WriteOptions,
 };
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -717,7 +717,8 @@ fn copy_batch(
         }
         close?;
         let pairs: Vec<_> = tasks.iter().map(|t| (&t.source, &t.destination)).collect();
-        fs.vcopy(&pairs).map_err(|e| mapped(e, tasks))?;
+        fs.vcopy(&pairs, CopyOption::default())
+            .map_err(|e| mapped(e, tasks))?;
         summary.files_copied += tasks.len() as u64;
         summary.bytes_copied = None;
         return Ok(());

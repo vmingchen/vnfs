@@ -1,7 +1,9 @@
 //! Protocol-independent application contracts. Backend implementer traits
 //! live in implementation crates; generic applications need only these traits.
 
-use crate::api::{Attrs, DirectoryListing, OpenOp, ResourceLimits, Result, WriteResult};
+use crate::api::{
+    Attrs, CopyOption, DirectoryListing, OpenOp, ResourceLimits, Result, WriteResult,
+};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
@@ -368,20 +370,26 @@ pub trait Vfsi {
     ///
     /// Pairs are `(source, destination)` in this client's namespace. Contents
     /// are copied, not a recursive tree or a metadata-preserving snapshot.
+    /// `options` controls whether final source symlinks are followed; ancestor
+    /// symlinks retain ordinary path-resolution behavior.
     /// Avoid aliasing sources/destinations; batching does not make overlapping
     /// copies transactional or safe to replay after ambiguous failure.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
+    /// use vfsi_core::api::{CopyOption, Vfsi, VfsiExt, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.vcopy(&[
     ///     ("/input/file-1", "/output/file-1"),
     ///     ("/input/file-2", "/output/file-2"),
-    /// ])?;
+    /// ], CopyOption::default())?;
     /// # Ok(())
     /// # }
     /// ```
-    fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()>;
+    fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+        options: CopyOption,
+    ) -> Result<()>;
     /// Remove entries, recursive trees, or directory contents with explicit policy.
     ///
     /// Contents mode retains each root and uses native anchored removal without
@@ -629,6 +637,26 @@ pub trait VfsiExt: Vfsi {
     }
 
     // Read files
+    /// Read one complete file within the client's aggregate read budget.
+    ///
+    /// For multiple files, prefer [`Self::read_files`]. This is a convenience
+    /// over the vector read operation and retains its allocation limits.
+    fn read(&self, path: impl AsRef<Path>) -> Result<Vec<u8>> {
+        self.read_with_options(path, crate::api::ReadOptions::default())
+    }
+
+    /// Read one complete file with an explicit read policy.
+    fn read_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: crate::api::ReadOptions,
+    ) -> Result<Vec<u8>> {
+        let path = path.as_ref();
+        let files = self
+            .read_files_with_options(&[path], options)
+            .map_err(|error| error.with_context("read", path))?;
+        single_completion(files, "read")
+    }
     /// Read complete files in input order using vectorized whole-file reads.
     ///
     /// The aggregate payload is bounded by `limits().max_read_bytes`.
@@ -912,7 +940,7 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn attrs(&self, path: impl AsRef<Path>) -> Result<Attrs> {
-        attrs_query(self, path, crate::api::AttrsOptions::new())
+        attrs_query(self, path, crate::api::AttrsOptions::new(), "attrs")
     }
 
     /// Single-target convenience. For multiple paths, prefer [`Vfsi::vgetattrs`] with selected fields and follow_symlinks(false).
@@ -941,7 +969,7 @@ pub trait VfsiExt: Vfsi {
         path: impl AsRef<Path>,
         options: crate::api::AttrsOptions,
     ) -> Result<Attrs> {
-        attrs_query(self, path, options)
+        attrs_query(self, path, options, "attrs_with_options")
     }
 
     /// Single-target convenience. For multiple paths, prefer [`Vfsi::vgetattrs`] with follow_symlinks(false).
@@ -960,7 +988,12 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn symlink_attrs(&self, path: impl AsRef<Path>) -> Result<Attrs> {
-        self.attrs_with_options(path, crate::api::AttrsOptions::new().follow_symlinks(false))
+        attrs_query(
+            self,
+            path,
+            crate::api::AttrsOptions::new().follow_symlinks(false),
+            "symlink_attrs",
+        )
     }
 
     // Collect directories
@@ -1608,7 +1641,18 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn copy(&self, source: impl AsRef<Path>, destination: impl AsRef<Path>) -> Result<()> {
-        self.vcopy(&[(source, destination)])
+        self.copy_with_options(source, destination, CopyOption::default())
+    }
+
+    /// Single-target copy with explicit operation semantics; prefer [`Vfsi::vcopy`]
+    /// when submitting multiple pairs.
+    fn copy_with_options(
+        &self,
+        source: impl AsRef<Path>,
+        destination: impl AsRef<Path>,
+        options: CopyOption,
+    ) -> Result<()> {
+        self.vcopy(&[(source, destination)], options)
     }
 
     /// Single-target convenience. For multiple paths, prefer [`Vfsi::vremove`]. That vector API accepts both files and directories.
@@ -1696,6 +1740,19 @@ pub trait VfsiExt: Vfsi {
         )
     }
 
+    /// Recursively remove one directory using explicit batching and failure
+    /// policy. The directory is validated before mutation; symlink roots are
+    /// not followed. Prefer [`Vfsi::vremove`] when removing several trees.
+    fn remove_dir_all_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: crate::api::RemoveOptions,
+    ) -> Result<()> {
+        let path = path.as_ref();
+        require_directory(self, path, "remove_dir_all")?;
+        self.vremove(&[path], crate::api::RemoveMode::Tree, options)
+    }
+
     /// Single-target convenience. For multiple directory roots, prefer [`Vfsi::vremove`].
     ///
     /// Recursively empty a directory while keeping its root.
@@ -1713,11 +1770,20 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn remove_dir_contents(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.vremove(
-            &[path],
-            crate::api::RemoveMode::Contents,
-            crate::api::RemoveOptions::new(),
-        )
+        self.remove_dir_contents_with_options(path, crate::api::RemoveOptions::new())
+    }
+
+    /// Recursively empty one directory while retaining its root, using
+    /// explicit batching and failure policy. The root is validated without
+    /// following a symlink. Prefer [`Vfsi::vremove`] for several roots.
+    fn remove_dir_contents_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: crate::api::RemoveOptions,
+    ) -> Result<()> {
+        let path = path.as_ref();
+        require_directory(self, path, "remove_dir_contents")?;
+        self.vremove(&[path], crate::api::RemoveMode::Contents, options)
     }
 }
 
@@ -1742,13 +1808,18 @@ fn attrs_query<C: Vfsi + ?Sized>(
     client: &C,
     path: impl AsRef<Path>,
     options: crate::api::AttrsOptions,
+    operation: &'static str,
 ) -> Result<Attrs> {
-    let mut results = client.vgetattrs(&[path], options)?;
+    let path = path.as_ref();
+    let mut results = client
+        .vgetattrs(&[path], options)
+        .map_err(|error| error.with_context(operation, path))?;
     if results.len() != 1 {
         return Err(crate::api::Error::transport(
             None,
             "vgetattrs returned an invalid result count",
-        ));
+        )
+        .with_context(operation, path));
     }
     Ok(results.remove(0))
 }

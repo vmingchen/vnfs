@@ -1774,14 +1774,6 @@ impl Backend for DummyVecFs {
         }
         Ok(())
     }
-    fn copy_impl(
-        &mut self,
-        source: &std::path::Path,
-        destination: &std::path::Path,
-    ) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_copy_impl_default(self, source, destination)
-    }
-
     fn before_remove_type(&mut self, _index: usize) -> VfResult<()> {
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeRemoveType { index: _index })?;

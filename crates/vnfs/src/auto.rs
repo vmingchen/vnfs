@@ -4,6 +4,7 @@
 
 #[cfg(test)]
 use crate::ListDirOptions;
+use crate::Vfsi as _;
 use crate::VfsiExt as _;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -658,7 +659,11 @@ impl AutoClient {
         Ok(())
     }
 
-    pub fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+        options: vfsi_core::api::CopyOption,
+    ) -> VfResult<()> {
         let mounts = read_mounts(false);
         let pairs: Vec<_> = pairs
             .iter()
@@ -689,8 +694,8 @@ impl AutoClient {
                 .map(|(source, destination)| (source.path.as_path(), destination.as_path()))
                 .collect();
             match &pairs[start].0.route {
-                Route::Mounted => self.mounted.vcopy(&batch),
-                Route::Nfs(connection) => connection.client.vcopy(&batch),
+                Route::Mounted => self.mounted.vcopy(&batch, options),
+                Route::Nfs(connection) => connection.client.vcopy(&batch, options),
             }
             .map_err(|error| indexed(error, start))?;
             start = end;
@@ -886,10 +891,8 @@ impl AutoClient {
                 .collect();
             let options = crate::ReadAllOptions::new().max_total_bytes(remaining);
             let buffers = match &resolved[start].route {
-                Route::Mounted => self.mounted.read_files_with_options(&batch, options),
-                Route::Nfs(connection) => {
-                    connection.client.read_files_with_options(&batch, options)
-                }
+                Route::Mounted => self.mounted.read_files_native(&batch, options),
+                Route::Nfs(connection) => connection.client.read_files_native(&batch, options),
             }
             .map_err(|error| indexed(error, start))?;
             for buffer in buffers {
@@ -1575,27 +1578,6 @@ impl AutoClient {
             start = end;
         }
         Ok(())
-    }
-
-    /// Read a complete file with the same default allocation limit as
-    /// `FsClient::read`; use `AutoFile` for streaming larger files.
-    #[cfg(test)]
-    pub(crate) fn read(&self, path: impl AsRef<Path>) -> VfResult<Vec<u8>> {
-        self.read_with_limit(path, self.limits.max_read_bytes)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn read_with_limit(
-        &self,
-        path: impl AsRef<Path>,
-        limit: usize,
-    ) -> VfResult<Vec<u8>> {
-        let path = path.as_ref();
-        let route = self.resolve(path, &read_mounts(false));
-        match route.route {
-            Route::Mounted => self.mounted.read_with_limit(&route.path, limit),
-            Route::Nfs(connection) => connection.client.read_with_limit(&route.path, limit),
-        }
     }
 
     /// Rename adjacent pairs on the same backend as a vector, preserving order.
@@ -2812,8 +2794,8 @@ mod tests {
             .client
             .walk_with_options(
                 &route.path,
-                crate::Attributes::stat(),
-                crate::WalkOptions::unlimited(),
+                crate::ListDirOptions::from(crate::WalkOptions::unlimited())
+                    .fields(crate::Attributes::stat()),
             )
             .unwrap();
         let backend_entries: usize = listings

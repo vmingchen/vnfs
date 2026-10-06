@@ -1320,7 +1320,7 @@ mod tests {
         assert_eq!(error.path(), Some(Path::new("/missing")));
         assert_eq!(error.index(), Some(0));
         let error = client.attrs("/missing").unwrap_err();
-        assert_eq!(error.operation(), Some("metadata"));
+        assert_eq!(error.operation(), Some("attrs"));
         assert_eq!(error.path(), Some(Path::new("/missing")));
         assert_eq!(error.index(), Some(0));
     }

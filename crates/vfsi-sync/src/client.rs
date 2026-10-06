@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::{self, Read, Seek, SeekFrom as IoSeekFrom, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -11,15 +11,14 @@ use std::time::SystemTime;
 use vfsi_core::api::internal::OwnedReadResult as FsReadResult;
 use vfsi_core::api::{
     DirectoryListing, ReadIntoResult as FsReadIntoResult, ResourceLimits, StreamCompletion,
-    TraversalCompletion, WriteResult as FsWriteResult,
+    WriteResult as FsWriteResult,
 };
 
 use crate::traits::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::{
     AttrMask, Attrs, Backend, Capabilities, DirEntry, FileSystem, MetadataQuery, MetadataUpdate,
-    OpenFlags, OpenOp, Permissions, ReadAllOptions, ReadDirOptions, ReadOp, ReadResult,
-    RemoveOptions, StreamOptions, VfDir, VfError, VfFile, VfOffset, VfResult, WriteOpRef,
-    WriteResult,
+    OpenFlags, OpenOp, Permissions, ReadAllOptions, ReadOp, ReadResult, RemoveOptions,
+    StreamOptions, VfDir, VfError, VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
 };
 
 fn read_result(result: ReadResult) -> FsReadResult {
@@ -260,15 +259,15 @@ impl<F: FileSystem> FsClient<F> {
 }
 
 impl<F: FileSystem> FsClient<F> {
-    pub fn capabilities(&self) -> VfResult<Capabilities> {
+    pub(crate) fn capabilities(&self) -> VfResult<Capabilities> {
         Ok(self.lock()?.capabilities())
     }
     /// Open a path read-only.
-    pub fn open(&self, path: impl AsRef<Path>) -> VfResult<FsFile<F>> {
-        self.open_with(OpenOp::new(path.as_ref(), OpenFlags::READ))
+    pub(crate) fn open(&self, path: impl AsRef<Path>) -> VfResult<FsFile<F>> {
+        self.open_with_native(OpenOp::new(path.as_ref(), OpenFlags::READ))
     }
 
-    pub fn open_with(&self, request: OpenOp) -> VfResult<FsFile<F>> {
+    pub(crate) fn open_with_native(&self, request: OpenOp) -> VfResult<FsFile<F>> {
         let file = self.lock()?.open_impl(&request)?;
         Ok(FsFile {
             inner: Arc::clone(&self.inner),
@@ -280,94 +279,16 @@ impl<F: FileSystem> FsClient<F> {
     pub fn open_options(&self) -> OpenOptions<'_, F> {
         OpenOptions::new(self)
     }
-
-    pub fn create(&self, path: impl AsRef<Path>) -> VfResult<FsFile<F>> {
-        self.open_with(OpenOp::new(
-            path.as_ref(),
-            OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
-        ))
-    }
-
-    pub fn read(&self, path: impl AsRef<Path>) -> VfResult<Vec<u8>> {
-        self.read_with_limit(path, self.limits.max_read_bytes)
-    }
-
-    /// Read one complete file while limiting the returned allocation.
-    ///
-    /// Use [`FsFile::read_native`] or [`std::io::Read`] to stream files that
-    /// should not be held in one allocation.
-    pub fn read_with_limit(&self, path: impl AsRef<Path>, max_bytes: usize) -> VfResult<Vec<u8>> {
-        let path = path.as_ref();
-        let file = self.open(path)?;
-        let operation = self
-            .lock()?
-            .read_file_impl(file.raw()?, max_bytes)
-            .map_err(|error| error.with_context("read", path))
-            .and_then(|data| {
-                if data.len() > max_bytes {
-                    Err(VfError::client(0, libc::EFBIG as u32).with_context("read", path))
-                } else {
-                    Ok(data)
-                }
-            });
-        // Owned cleanup queues a retry through Drop on close failure, and keeps
-        // the read error primary when both read and close fail.
-        let cleanup = file.close();
-        operation.and_then(|data| cleanup.map(|()| data))
-    }
-
-    pub fn read_to_string(&self, path: impl AsRef<Path>) -> VfResult<String> {
-        self.read_to_string_with_limit(path, self.limits.max_read_bytes)
-    }
-
-    /// Read one complete UTF-8 file with a caller-selected allocation limit.
-    pub fn read_to_string_with_limit(
-        &self,
-        path: impl AsRef<Path>,
-        max_bytes: usize,
-    ) -> VfResult<String> {
-        let path = path.as_ref();
-        String::from_utf8(self.read_with_limit(path, max_bytes)?)
-            .map_err(|_| VfError::client(0, crate::ERR_INVAL).with_context("read_to_string", path))
-    }
-
-    pub fn write(&self, path: impl AsRef<Path>, data: &[u8]) -> VfResult<()> {
-        let path = path.as_ref();
-        let mut file = self.create(path)?;
-        let mut written = 0;
-        while written < data.len() {
-            let count = file.write_native(&data[written..])?;
-            if count == 0 {
-                return Err(VfError::client(0, crate::ERR_IO).with_context("write", path));
-            }
-            written += count;
-        }
-        file.close()
-    }
 }
 
 impl<F: FileSystem> FsClient<F> {
-    /// Stream one file from offset zero in bounded chunks.
+    /// Stream one file using an explicit maximum chunk size.
     ///
     /// The callback runs without holding the backend lock, so it may use this
     /// client or drop other files owned by it. Return `Ok(false)` to stop
-    /// successfully. Callback errors
-    /// are propagated. The file is closed on success, cancellation, callback
-    /// error, or read error. At most one requested chunk is buffered at once.
-    pub fn read_stream(
-        &self,
-        path: impl AsRef<Path>,
-        callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
-    ) -> VfResult<StreamCompletion> {
-        self.read_stream_with_options(
-            path,
-            StreamOptions::new().chunk_size(self.limits.stream_chunk_bytes),
-            callback,
-        )
-    }
-
-    /// Stream one file using an explicit maximum chunk size.
-    pub fn read_stream_with_options(
+    /// successfully. Callback errors propagate. At most one requested chunk is
+    /// buffered at once, and the file closes on success, cancellation, or error.
+    pub(crate) fn read_stream_with_options(
         &self,
         path: impl AsRef<Path>,
         options: StreamOptions,
@@ -419,14 +340,6 @@ impl<F: FileSystem> FsClient<F> {
 }
 
 impl<F: Backend> FsClient<F> {
-    pub fn attrs(&self, path: impl AsRef<Path>) -> VfResult<Attrs> {
-        self.lock()?.metadata_path_impl(path.as_ref(), true)
-    }
-
-    pub fn symlink_attrs(&self, path: impl AsRef<Path>) -> VfResult<Attrs> {
-        self.lock()?.metadata_path_impl(path.as_ref(), false)
-    }
-
     pub fn set_metadata(&self, path: impl AsRef<Path>) -> SetMetadata<'_, F> {
         SetMetadata {
             client: self,
@@ -438,157 +351,6 @@ impl<F: Backend> FsClient<F> {
 }
 
 impl<F: Backend> FsClient<F> {
-    pub fn create_dir(&self, path: impl AsRef<Path>) -> VfResult<()> {
-        self.create_dir_with_mode(path, 0o777)
-    }
-
-    pub fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> VfResult<()> {
-        self.lock()?.create_dir_impl(path.as_ref(), mode)
-    }
-
-    pub fn read_dir(&self, path: impl AsRef<Path>) -> VfResult<Vec<DirEntry>> {
-        self.read_dir_with_options(path, self.limits.directory_options())
-    }
-
-    /// Read one directory with explicit entry and path-storage limits.
-    pub fn read_dir_with_options(
-        &self,
-        path: impl AsRef<Path>,
-        options: ReadDirOptions,
-    ) -> VfResult<Vec<DirEntry>> {
-        self.lock()?.read_dir_impl(path.as_ref(), options)
-    }
-
-    /// Visit one directory one bounded page at a time. `Continue(())` requests
-    /// the next entry; `Break(())` stops the entire visit successfully.
-    /// The callback runs without the lock and may reenter or drop its files.
-    pub fn visit_dir(
-        &self,
-        path: impl AsRef<Path>,
-        callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
-    ) -> VfResult<TraversalCompletion> {
-        self.visit_dir_with_options(path, self.limits.directory_options(), callback)
-    }
-
-    /// Visit entries with explicit entry and cumulative path-byte limits.
-    pub fn visit_dir_with_options(
-        &self,
-        path: impl AsRef<Path>,
-        options: ReadDirOptions,
-        callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
-    ) -> VfResult<TraversalCompletion> {
-        self.visit_dir_with_fields(path, crate::native::metadata_mask(), options, callback)
-    }
-
-    pub fn visit_dir_with_fields(
-        &self,
-        path: impl AsRef<Path>,
-        fields: AttrMask,
-        options: ReadDirOptions,
-        mut callback: impl FnMut(DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
-    ) -> VfResult<TraversalCompletion> {
-        const PAGE_SIZE: usize = 1024;
-        let path = path.as_ref();
-        let mut cursor = None;
-        let mut count = 0usize;
-        let mut path_bytes = 0usize;
-        let max_entries = if options.entry_limit() == usize::MAX {
-            0 // Backend uses zero for an explicitly unlimited listing.
-        } else {
-            options.entry_limit().saturating_add(1)
-        };
-        loop {
-            // Start with one entry so early-stop callbacks and tight limits
-            // do not trigger a large local scan before application code runs.
-            let page_size = if cursor.is_none() {
-                1
-            } else {
-                PAGE_SIZE.min(
-                    options
-                        .entry_limit()
-                        .saturating_sub(count)
-                        .saturating_add(1),
-                )
-            };
-            let (entries, next) = {
-                self.lock()?.read_dir_page_with_fields_impl(
-                    path,
-                    fields,
-                    cursor,
-                    page_size,
-                    max_entries,
-                )?
-            };
-            if entries.is_empty() && next.is_some() {
-                return Err(VfError::transport(None, "directory page made no progress"));
-            }
-            for entry in entries {
-                if count >= options.entry_limit() {
-                    return Err(
-                        VfError::failure(count, libc::EFBIG as u32).with_context("visit_dir", path)
-                    );
-                }
-                path_bytes = path_bytes
-                    .checked_add(entry.path().as_os_str().len())
-                    .ok_or_else(|| {
-                        VfError::failure(count, libc::EFBIG as u32).with_context("visit_dir", path)
-                    })?;
-                if path_bytes > options.path_byte_limit() {
-                    return Err(
-                        VfError::failure(count, libc::EFBIG as u32).with_context("visit_dir", path)
-                    );
-                }
-                count += 1;
-                if callback(entry)?.is_break() {
-                    return Ok(TraversalCompletion::Stopped);
-                }
-            }
-            match next {
-                Some(value) => cursor = Some(value),
-                None => return Ok(TraversalCompletion::Complete),
-            }
-        }
-    }
-}
-
-impl<F: Backend> FsClient<F> {
-    pub fn create_dir_all(&self, path: impl AsRef<Path>) -> VfResult<()> {
-        let path = path.as_ref();
-        let mut current = PathBuf::new();
-        for component in path.components() {
-            match component {
-                Component::RootDir => {
-                    current.push(Path::new("/"));
-                    continue;
-                }
-                Component::Normal(part) => current.push(part),
-                Component::CurDir => continue,
-                Component::ParentDir => {
-                    // Preserve `..` so the backend resolves it relative to
-                    // its own rooted namespace. Lexically popping `/` would
-                    // accidentally turn a later absolute component into a
-                    // current-directory-relative path.
-                    current.push("..");
-                    continue;
-                }
-                Component::Prefix(_) => return Err(VfError::client(0, crate::ERR_INVAL)),
-            }
-            match self.create_dir(&current) {
-                Ok(()) => {}
-                Err(error) if error.err_no() == crate::ERR_EXIST => {
-                    if !self.attrs(&current)?.is_dir() {
-                        return Err(VfError::client(0, crate::ERR_NOTDIR)
-                            .with_context("create_dir_all", &current));
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<F: Backend> FsClient<F> {
     fn removal_metadata(&self, path: &Path, operation: &'static str) -> VfResult<Attrs> {
         let mut filesystem = self.lock()?;
         let follow = !filesystem.capabilities().contains(Capabilities::LSTAT);
@@ -596,55 +358,13 @@ impl<F: Backend> FsClient<F> {
             .metadata_path_impl(path, follow)
             .map_err(|error| error.with_context(operation, path))
     }
-
-    pub fn remove_file(&self, path: impl AsRef<Path>) -> VfResult<()> {
-        let path = path.as_ref();
-        if self.removal_metadata(path, "remove_file")?.is_dir() {
-            return Err(VfError::client(0, crate::ERR_ISDIR).with_context("remove_file", path));
-        }
-        self.lock()?.remove_impl(path, false)
-    }
-
-    pub fn remove_dir(&self, path: impl AsRef<Path>) -> VfResult<()> {
-        let path = path.as_ref();
-        if !self.removal_metadata(path, "remove_dir")?.is_dir() {
-            return Err(VfError::client(0, crate::ERR_NOTDIR).with_context("remove_dir", path));
-        }
-        self.lock()?.remove_impl(path, false)
-    }
-
-    pub fn remove_dir_all(&self, path: impl AsRef<Path>) -> VfResult<()> {
-        let path = path.as_ref();
-        if !self.removal_metadata(path, "remove_dir_all")?.is_dir() {
-            return Err(VfError::client(0, crate::ERR_NOTDIR).with_context("remove_dir_all", path));
-        }
-        self.lock()?.remove_impl(path, true)
-    }
-
-    /// Remove the contents of a directory, keeping the directory itself.
-    pub fn remove_dir_contents_impl(&self, path: impl AsRef<Path>) -> VfResult<()> {
-        let path = path.as_ref();
-        if !self
-            .removal_metadata(path, "remove_dir_contents_impl")?
-            .is_dir()
-        {
-            return Err(
-                VfError::client(0, crate::ERR_NOTDIR).with_context("remove_dir_contents", path)
-            );
-        }
-        self.lock()?.remove_dir_contents_impl(path)
-    }
-
-    pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> VfResult<()> {
-        self.lock()?.rename_impl(from.as_ref(), to.as_ref())
-    }
 }
 
 impl<F: Backend> FsClient<F> {
     /// Rename independent source/destination pairs in one vector phase.
     /// Requested atomic destination semantics are applied per pair; the vector
     /// is not transactional. Unsupported semantics are never emulated.
-    pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
+    pub(crate) fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         pairs: &[(P, Q)],
         options: vfsi_core::api::RenameOptions,
@@ -674,20 +394,14 @@ impl<F: Backend> FsClient<F> {
             })
     }
 
-    /// Create directories in input order using vector MKDIR. Parents must
-    /// already exist. This is not transactional: failure may leave a prefix.
-    pub fn vmkdir_default<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<()> {
-        let directories: Vec<_> = paths.iter().map(|path| (path.as_ref(), 0o777)).collect();
-        self.vmkdir(&directories)
-    }
-
     /// Create directories with per-request Unix permission bits.
-    pub fn vmkdir<P: AsRef<Path>>(&self, directories: &[(P, u32)]) -> VfResult<()> {
+    pub(crate) fn vmkdir<P: AsRef<Path>>(&self, directories: &[(P, u32)]) -> VfResult<()> {
         let mut seen = HashSet::with_capacity(directories.len());
         for (index, (path, _)) in directories.iter().enumerate() {
             if !seen.insert(path.as_ref()) {
-                return Err(VfError::client(index, crate::ERR_INVAL)
-                    .with_context("vmkdir_default", path.as_ref()));
+                return Err(
+                    VfError::client(index, crate::ERR_INVAL).with_context("vmkdir", path.as_ref())
+                );
             }
         }
         if directories.is_empty() {
@@ -706,7 +420,7 @@ impl<F: Backend> FsClient<F> {
             .vmkdir_impl(&dirs)
             .map_err(|error| match error.index() {
                 Some(index) if index < directories.len() => {
-                    error.with_context("vmkdir_default", directories[index].0.as_ref())
+                    error.with_context("vmkdir", directories[index].0.as_ref())
                 }
                 Some(_) => {
                     VfError::transport(None, "mkdir backend returned an invalid error index")
@@ -716,7 +430,10 @@ impl<F: Backend> FsClient<F> {
     }
 
     /// Create symbolic links in one native backend vector.
-    pub fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub(crate) fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+    ) -> VfResult<()> {
         if pairs.is_empty() {
             return Ok(());
         }
@@ -728,7 +445,7 @@ impl<F: Backend> FsClient<F> {
     }
 
     /// Read targets without converting Unix path bytes through UTF-8.
-    pub fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<PathBuf>> {
+    pub(crate) fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<PathBuf>> {
         if paths.is_empty() {
             return Ok(Vec::new());
         }
@@ -750,7 +467,10 @@ impl<F: Backend> FsClient<F> {
     }
 
     /// Create hard links in one native backend vector.
-    pub fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub(crate) fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+    ) -> VfResult<()> {
         if pairs.is_empty() {
             return Ok(());
         }
@@ -765,87 +485,13 @@ impl<F: Backend> FsClient<F> {
     /// Enter runs before any listing; Leave follows even a pruned directory.
     /// Sorting buffers one bounded directory, not the whole tree. The callback
     /// runs outside the backend lock. Limits include the starting object.
-    pub fn walk_events_with_options(
-        &self,
-        root: impl AsRef<Path>,
-        fields: AttrMask,
-        options: crate::WalkOptions,
-        sort_by_name: bool,
-        callback: impl FnMut(&crate::WalkEvent) -> VfResult<crate::WalkControl>,
-    ) -> VfResult<TraversalCompletion> {
-        let root = root.as_ref();
-        let metadata = self.symlink_attrs_with_fields(root, fields | AttrMask::MODE)?;
-        crate::walk_events(
-            DirEntry::new(root.to_path_buf(), metadata),
-            options,
-            sort_by_name,
-            |path, limits| {
-                let mut listings =
-                    self.read_dirs_with_options(&[path], fields | AttrMask::MODE, limits)?;
-                if listings.len() != 1 {
-                    return Err(VfError::transport(None, "invalid directory result count"));
-                }
-                Ok(listings.remove(0).entries)
-            },
-            callback,
-        )
-    }
-    /// Visit a tree using bounded directory pages,
-    /// never follows symlinks, and invokes the callback outside the backend
-    /// lock. Unlike collecting `walk`, this trades multi-directory batching
-    /// for bounded incremental delivery. A backend without native paging
-    /// may retain one bounded listing; finish its pages before descending,
-    /// so snapshots never accumulate across ancestor directories.
-    /// `ControlFlow::Break(())` stops the entire walk successfully, not merely
-    /// the current subtree. Directory order is backend-defined.
-    pub fn visit_walk(
-        &self,
-        root: impl AsRef<Path>,
-        callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
-    ) -> VfResult<TraversalCompletion> {
-        self.visit_walk_with_options(root, self.limits.walk_options(), callback)
-    }
-
-    pub fn visit_walk_with_options(
-        &self,
-        root: impl AsRef<Path>,
-        options: crate::WalkOptions,
-        callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
-    ) -> VfResult<TraversalCompletion> {
-        self.visit_walk_with_fields(root, crate::native::metadata_mask(), options, callback)
-    }
-
-    pub fn visit_walk_with_fields(
-        &self,
-        root: impl AsRef<Path>,
-        fields: AttrMask,
-        options: crate::WalkOptions,
-        callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
-    ) -> VfResult<TraversalCompletion> {
-        let root = root.as_ref();
-        if !self.symlink_attrs(root)?.is_dir() {
-            return Err(VfError::client(0, crate::ERR_NOTDIR).with_context("visit_walk", root));
-        }
-        visit_walk_pages(
-            root,
-            options,
-            |path, cursor, page_size, max_entries| {
-                self.lock()?.read_dir_page_with_fields_impl(
-                    path,
-                    fields,
-                    cursor,
-                    page_size,
-                    max_entries,
-                )
-            },
-            callback,
-        )
-    }
     /// Maximum safe cohort size for incremental directory paging.
+    #[doc(hidden)]
     pub fn directory_page_batch_size(&self) -> VfResult<usize> {
         Ok(self.lock()?.directory_page_batch_size().clamp(1, 32))
     }
     /// Fetch a bounded vector of directory pages, retaining backend cursors.
+    #[doc(hidden)]
     pub fn read_dir_pages_with_fields(
         &self,
         paths: &[&Path],
@@ -919,112 +565,17 @@ impl<F: Backend> FsClient<F> {
             })
             .collect()
     }
-
-    /// List several directories with common stat attributes and finite
-    /// allocation limits. Use `read_dirs_with_options` for richer fields.
-    pub fn read_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<DirectoryListing>> {
-        self.read_dirs_with_options(paths, AttrMask::stat(), self.limits.directory_options())
-    }
-}
-
-type DirectoryPage = (Vec<DirEntry>, Option<crate::DirPageCursor>);
-
-fn visit_walk_pages(
-    root: &Path,
-    options: crate::WalkOptions,
-    mut read_page: impl FnMut(
-        &Path,
-        Option<crate::DirPageCursor>,
-        usize,
-        usize,
-    ) -> VfResult<DirectoryPage>,
-    mut callback: impl FnMut(&DirEntry) -> VfResult<std::ops::ControlFlow<()>>,
-) -> VfResult<TraversalCompletion> {
-    let mut pending = vec![(root.to_path_buf(), 0usize)];
-    let mut count = 0usize;
-    let mut path_bytes = root.as_os_str().len();
-    if path_bytes > options.path_byte_limit() {
-        return Err(VfError::client(0, libc::EFBIG as u32));
-    }
-    while let Some((path, depth)) = pending.pop() {
-        let mut cursor = None;
-        let mut children = Vec::new();
-        loop {
-            let requested = options
-                .entry_limit()
-                .saturating_sub(count)
-                .saturating_add(1);
-            let (entries, next) = read_page(&path, cursor, requested.min(128), requested)?;
-            if entries.is_empty() && next.is_some() {
-                return Err(VfError::transport(None, "directory page made no progress")
-                    .with_context("visit_walk", &path));
-            }
-            for entry in entries {
-                count = count
-                    .checked_add(1)
-                    .ok_or_else(|| VfError::client(0, libc::EFBIG as u32))?;
-                path_bytes = path_bytes
-                    .checked_add(entry.path().as_os_str().len())
-                    .ok_or_else(|| VfError::client(0, libc::EFBIG as u32))?;
-                if count > options.entry_limit() || path_bytes > options.path_byte_limit() {
-                    return Err(
-                        VfError::client(0, libc::EFBIG as u32).with_context("visit_walk", &path)
-                    );
-                }
-                if callback(&entry)?.is_break() {
-                    return Ok(TraversalCompletion::Stopped);
-                }
-                if entry.attrs().is_dir() {
-                    if depth >= options.depth_limit() {
-                        if !options.truncates_at_depth_limit() {
-                            return Err(VfError::client(0, libc::EFBIG as u32)
-                                .with_context("visit_walk", entry.path()));
-                        }
-                    } else {
-                        children.push((entry.path().to_path_buf(), depth + 1));
-                    }
-                }
-            }
-            cursor = next;
-            if cursor.is_none() {
-                break;
-            }
-        }
-        pending.extend(children.into_iter().rev());
-    }
-    Ok(TraversalCompletion::Complete)
 }
 
 impl<F: Backend> FsClient<F> {
-    /// Recursively enumerate a bounded tree with common stat attributes.
-    /// Use `walk_with_options` to select fields or change limits.
-    pub fn walk(&self, root: impl AsRef<Path>) -> VfResult<Vec<DirectoryListing>> {
-        self.walk_with_options(root, AttrMask::stat(), self.limits.walk_options())
-    }
-
     /// Create `path` if missing, otherwise empty it. Errors if it exists and is
     /// not a directory (a symlink to a directory is not a directory here).
     pub fn ensure_empty_dir(&self, path: impl AsRef<Path>) -> VfResult<()> {
         self.lock()?.ensure_empty_dir_impl(path.as_ref())
     }
 
-    /// Remove a directory tree with explicit error, batching, and retry policy.
-    pub fn remove_dir_all_with_options(
-        &self,
-        path: impl AsRef<Path>,
-        options: RemoveOptions,
-    ) -> VfResult<()> {
-        let path = path.as_ref();
-        if !self.removal_metadata(path, "remove_dir_all")?.is_dir() {
-            return Err(VfError::client(0, crate::ERR_NOTDIR).with_context("remove_dir_all", path));
-        }
-        self.lock()?
-            .remove_paths_with_options_impl(&[path], true, options)
-            .map_err(|error| error.with_context("remove_dir_all", path))
-    }
-
     /// Empty a directory while keeping it, with explicit removal policy.
-    pub fn remove_dir_contents_with_options(
+    pub(crate) fn remove_dir_contents_with_options(
         &self,
         path: impl AsRef<Path>,
         options: RemoveOptions,
@@ -1141,242 +692,38 @@ impl<F: Backend> Drop for FsDir<F> {
 }
 
 impl<F: Backend> FsClient<F> {
-    pub fn symlink(&self, target: impl AsRef<Path>, link: impl AsRef<Path>) -> VfResult<()> {
-        self.lock()?.symlink_impl(target.as_ref(), link.as_ref())
-    }
-
-    pub fn hard_link(&self, source: impl AsRef<Path>, link: impl AsRef<Path>) -> VfResult<()> {
-        self.lock()?.hard_link_impl(source.as_ref(), link.as_ref())
-    }
-
-    pub fn read_link(&self, path: impl AsRef<Path>) -> VfResult<PathBuf> {
-        self.lock()?.read_link_impl(path.as_ref())
-    }
-}
-
-impl<F: Backend> FsClient<F> {
-    pub fn copy(&self, source: impl AsRef<Path>, destination: impl AsRef<Path>) -> VfResult<()> {
-        self.lock()?
-            .copy_impl(source.as_ref(), destination.as_ref())
-    }
-}
-
-impl<F: Backend> FsClient<F> {
-    /// Fetch selected metadata for one path without following its final symlink.
-    /// Unavailable fields remain `None` on [`Attrs`].
-    pub fn symlink_attrs_with_fields(
-        &self,
-        path: impl AsRef<Path>,
-        fields: AttrMask,
-    ) -> VfResult<Attrs> {
-        let path = path.as_ref();
-        let mut attrs = crate::VfAttrs {
-            file: VfFile::from_os_path(path),
-            masks: fields | AttrMask::MODE | AttrMask::SIZE,
-            ..crate::VfAttrs::default()
-        };
-        self.lock()?
-            .vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs))
-            .map_err(|error| error.with_context("symlink_attrs", path))?;
-        Ok(vfsi_core::metadata_from_attrs(attrs))
-    }
-
-    /// List multiple directories in a vector call. The limits apply to the
-    /// aggregate returned entries and stored path bytes. Streaming backends
-    /// apply these limits before collecting a full listing; a backend using
-    /// the compatibility `visit_dir` fallback may buffer one directory first.
-    /// An error discards the collected prefix; callers may retry individual
-    /// directories if desired.
-    pub fn read_dirs_with_options<P: AsRef<Path>>(
-        &self,
-        paths: &[P],
-        fields: AttrMask,
-        options: ReadDirOptions,
-    ) -> VfResult<Vec<DirectoryListing>> {
-        if paths.is_empty() {
-            return Ok(Vec::new());
-        }
-        let paths: Vec<&Path> = paths.iter().map(AsRef::as_ref).collect();
-        let mut positions: HashMap<PathBuf, Vec<usize>> = HashMap::with_capacity(paths.len());
-        let mut unique_paths = Vec::with_capacity(paths.len());
-        for (index, path) in paths.iter().enumerate() {
-            if let Some(indices) = positions.get_mut(*path) {
-                indices.push(index);
-            } else {
-                positions.insert(path.to_path_buf(), vec![index]);
-                unique_paths.push(*path);
-            }
-        }
-        let mut listings: Vec<DirectoryListing> = paths
-            .iter()
-            .map(|path| DirectoryListing {
-                path: path.to_path_buf(),
-                entries: Vec::new(),
-            })
-            .collect();
-        let mut entry_count = 0usize;
-        let mut path_bytes = 0usize;
-        // Bound the number of simultaneous first READDIR pages even when the
-        // caller supplies thousands of directory operands.
-        const DIRECTORY_COHORT: usize = 32;
-        for cohort in unique_paths.chunks(DIRECTORY_COHORT) {
-            let mut callback_error = None;
-            let requested = options
-                .entry_limit()
-                .saturating_sub(entry_count)
-                .saturating_add(1);
-            let result = self.lock()?.vlistdirs_impl(
-                cohort,
-                fields | AttrMask::MODE | AttrMask::SIZE,
-                requested,
-                false,
-                &mut |attributes, directory| {
-                    let Some(indices) = positions.get(directory) else {
-                        callback_error = Some(VfError::transport(
-                            None,
-                            format!(
-                                "read_dirs backend returned an unexpected directory: {}",
-                                directory.display()
-                            ),
-                        ));
-                        return false;
-                    };
-                    if !cohort.contains(&directory) {
-                        callback_error = Some(VfError::transport(
-                            None,
-                            "read_dirs backend returned a directory outside the active cohort",
-                        ));
-                        return false;
-                    }
-                    let Some(path) = attributes.file.path() else {
-                        callback_error = Some(VfError::transport(
-                            None,
-                            "read_dirs backend returned an entry without a path",
-                        ));
-                        return false;
-                    };
-                    if path.parent() != Some(directory) {
-                        callback_error = Some(VfError::transport(
-                            None,
-                            format!(
-                                "read_dirs backend returned an entry outside {}",
-                                directory.display()
-                            ),
-                        ));
-                        return false;
-                    }
-                    for &index in indices {
-                        entry_count += 1;
-                        path_bytes = path_bytes.saturating_add(path.as_os_str().len());
-                        if entry_count > options.entry_limit()
-                            || path_bytes > options.path_byte_limit()
-                        {
-                            callback_error = Some(
-                                VfError::failure(index, libc::EFBIG as u32)
-                                    .with_context("read_dirs", directory),
-                            );
-                            return false;
-                        }
-                        listings[index].entries.push(DirEntry::new(
-                            path.to_path_buf(),
-                            vfsi_core::metadata_from_attrs(attributes.clone()),
-                        ));
-                    }
-                    true
-                },
-            );
-            if let Some(error) = callback_error {
-                return Err(error);
-            }
-            result.map_err(|error| {
-                error.map_index(|index| {
-                    cohort
-                        .get(index)
-                        .and_then(|path| positions.get(*path))
-                        .and_then(|indices| indices.first())
-                        .copied()
-                        .unwrap_or(index)
-                })
-            })?;
-        }
-        Ok(listings)
-    }
-
-    /// Recursively enumerate directories with selected entry attributes.
-    /// The walk is bounded by `options`; sorting and presentation remain the
-    /// application's responsibility.
-    pub fn walk_with_options(
-        &self,
-        root: impl AsRef<Path>,
-        fields: AttrMask,
-        options: crate::WalkOptions,
-    ) -> VfResult<Vec<DirectoryListing>> {
-        let root = root.as_ref();
-        let tree = self.lock()?.walk_with_options_impl(
-            root,
-            fields | AttrMask::MODE | AttrMask::SIZE,
-            options,
-            &mut |_, _| {},
-        )?;
-        tree.into_iter()
-            .map(|directory| {
-                let entries = directory
-                    .entries
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, attributes)| {
-                        let path = attributes
-                            .file
-                            .path()
-                            .ok_or_else(|| {
-                                VfError::transport(
-                                    None,
-                                    format!("walk backend returned entry {index} without a path"),
-                                )
-                            })?
-                            .to_path_buf();
-                        Ok(DirEntry::new(
-                            path,
-                            vfsi_core::metadata_from_attrs(attributes),
-                        ))
-                    })
-                    .collect::<VfResult<Vec<_>>>()?;
-                Ok(DirectoryListing {
-                    path: directory.path,
-                    entries,
-                })
-            })
-            .collect()
-    }
-
     /// Copy whole files in request order. A successful prefix may remain if
     /// a later request fails; this operation does not provide atomicity.
-    pub fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub(crate) fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+        options: vfsi_core::api::CopyOption,
+    ) -> VfResult<()> {
         let extents: Vec<_> = pairs
             .iter()
             .map(|(from, to)| {
                 crate::ExtentPair::from_os_paths(from.as_ref(), 0, to.as_ref(), 0, None)
             })
             .collect();
-        self.lock()?
-            .vcopy_impl(&extents, vfsi_core::CopyOption::new())
-            .map_err(|error| {
-                error
-                    .index()
-                    .and_then(|index| pairs.get(index))
-                    .map_or(error.clone(), |(_, to)| {
-                        error.with_context("vcopy", to.as_ref())
-                    })
-            })
+        self.lock()?.vcopy_impl(&extents, options).map_err(|error| {
+            error
+                .index()
+                .and_then(|index| pairs.get(index))
+                .map_or(error.clone(), |(_, to)| {
+                    error.with_context("vcopy", to.as_ref())
+                })
+        })
     }
 
     /// Remove paths in request order, optionally recursing into directories.
     /// A successful prefix may remain if a later path fails.
+    #[doc(hidden)]
     pub fn vremove_native<P: AsRef<Path>>(&self, paths: &[P], recursive: bool) -> VfResult<()> {
         self.vremove_with_options_native(paths, recursive, RemoveOptions::default())
     }
 
     /// Remove paths with explicit error, batching, and retry policy.
+    #[doc(hidden)]
     pub fn vremove_with_options_native<P: AsRef<Path>>(
         &self,
         paths: &[P],
@@ -1398,6 +745,7 @@ impl<F: Backend> FsClient<F> {
 
     /// Vector metadata query with explicit fields and final-symlink handling.
     /// Ancestor symlinks follow the backend's normal namespace semantics.
+    #[doc(hidden)]
     pub fn vgetattrs_native<P: AsRef<Path>>(
         &self,
         paths: &[P],
@@ -1437,6 +785,7 @@ impl<F: Backend> FsClient<F> {
     }
 
     /// Fetch no-follow metadata for many paths using the backend vector operation.
+    #[doc(hidden)]
     pub fn vsymlink_attrs_native(&self, paths: &[&Path]) -> VfResult<Vec<Attrs>> {
         let mut attrs: Vec<_> = paths
             .iter()
@@ -1469,7 +818,7 @@ impl<F: Backend> FsClient<F> {
     /// Success returns one RAII handle per request. Failure returns no
     /// handles; VFSI does not promise transactional rollback of other
     /// filesystem effects such as file creation.
-    pub fn vopen(&self, requests: &[OpenOp]) -> VfResult<Vec<FsFile<F>>> {
+    pub(crate) fn vopen(&self, requests: &[OpenOp]) -> VfResult<Vec<FsFile<F>>> {
         let mut filesystem = self.lock()?;
         let files = filesystem.vopen_impl(requests).map_err(|error| {
             error
@@ -1501,6 +850,7 @@ impl<F: Backend> FsClient<F> {
     /// Try to close a group through one vector operation without consuming
     /// the handles. On failure, all handles remain armed: the backend may
     /// have closed a prefix, so callers must reconcile before retrying.
+    #[doc(hidden)]
     pub fn vclose<'a>(&self, files: impl IntoIterator<Item = &'a mut FsFile<F>>) -> VfResult<()>
     where
         F: 'a,
@@ -1542,6 +892,7 @@ impl<F: Backend> FsClient<F> {
     /// On failure, the handles are dropped and the backend receives
     /// best-effort scalar cleanup attempts. Use [`vclose`](Self::vclose)
     /// to retain the handles after an error.
+    #[doc(hidden)]
     pub fn vclose_owned(&self, mut files: Vec<FsFile<F>>) -> VfResult<()> {
         self.vclose(&mut files)
     }
@@ -1549,11 +900,13 @@ impl<F: Backend> FsClient<F> {
     /// Read an ordered vector with a 16 MiB aggregate request limit.
     /// Use [`vread_with_limit_native`](Self::vread_with_limit_native) to tune the limit or
     /// [`vread_into_native`](Self::vread_into_native) to provide bounded caller-owned buffers.
+    #[doc(hidden)]
     pub fn vread_native(&self, requests: &[FsRead<'_, F>]) -> VfResult<Vec<FsReadResult>> {
         self.vread_with_limit_native(requests, self.limits.max_read_bytes)
     }
 
     /// Read an ordered vector with an explicit aggregate request limit.
+    #[doc(hidden)]
     pub fn vread_with_limit_native(
         &self,
         requests: &[FsRead<'_, F>],
@@ -1564,6 +917,7 @@ impl<F: Backend> FsClient<F> {
 
     /// Backend adapter for opaque application requests; projection does not allocate.
     /// The projection must return the same embedded request on every invocation.
+    #[doc(hidden)]
     pub fn vread_with_limit_projected_native<'b, T>(
         &self,
         requests: &[T],
@@ -1630,6 +984,7 @@ impl<F: Backend> FsClient<F> {
         Ok(reads)
     }
 
+    #[doc(hidden)]
     pub fn vread_into_native(
         &self,
         requests: &mut [FsReadInto<'_, F>],
@@ -1639,6 +994,7 @@ impl<F: Backend> FsClient<F> {
 
     /// Read into caller storage with an explicit aggregate buffer budget.
     /// This also bounds allocation in copying fallback implementations.
+    #[doc(hidden)]
     pub fn vread_into_with_limit_native(
         &self,
         requests: &mut [FsReadInto<'_, F>],
@@ -1655,6 +1011,7 @@ impl<F: Backend> FsClient<F> {
     /// Project borrowed buffers without an intermediate request allocation.
     /// Both projections must identify the same embedded request, and remain
     /// stable across preflight, dispatch, and result validation.
+    #[doc(hidden)]
     pub fn vread_into_with_limit_projected_native<'b, T>(
         &self,
         requests: &mut [T],
@@ -1715,12 +1072,14 @@ impl<F: Backend> FsClient<F> {
             .collect())
     }
 
+    #[doc(hidden)]
     pub fn vwrite_native(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
         self.vwrite_projected_native(requests, |request| request)
     }
 
     /// Backend adapter for opaque application requests, preserving borrowed payloads.
     /// The projection must return the same embedded request on every invocation.
+    #[doc(hidden)]
     pub fn vwrite_projected_native<'b, T>(
         &self,
         requests: &[T],
@@ -1741,6 +1100,7 @@ impl<F: Backend> FsClient<F> {
 
     /// Adapter constructing cheap borrowed requests without a temporary vector.
     /// The mapper must return the same file, offset, and payload on each call.
+    #[doc(hidden)]
     #[doc(hidden)]
     pub fn vwrite_mapped_native<'b, T>(
         &self,
@@ -1782,12 +1142,14 @@ impl<F: Backend> FsClient<F> {
     /// follow a successfully written prefix. Overlapping requests through the
     /// same path complete in input order; different paths are presumed
     /// independent (including hard-link aliases).
+    #[doc(hidden)]
     pub fn vwrite_all_native(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
         self.vwrite_all_projected_native(requests, |request| request)
     }
 
     /// Complete projected requests with the same preflight and dependency waves.
     /// The projection must return the same embedded request on every invocation.
+    #[doc(hidden)]
     pub fn vwrite_all_projected_native<'b, T>(
         &self,
         requests: &[T],
@@ -1808,6 +1170,7 @@ impl<F: Backend> FsClient<F> {
 
     /// Complete mapped writes with whole-batch preflight and dependency waves.
     /// The mapper must return the same file, offset, and payload on each call.
+    #[doc(hidden)]
     #[doc(hidden)]
     pub fn vwrite_all_mapped_native<'b, T>(
         &self,
@@ -1948,21 +1311,11 @@ impl<F: Backend> FsClient<F> {
 }
 
 impl<F: Backend> FsClient<F> {
-    /// Read several complete files by path using vector READ operations.
+    /// Native bounded whole-file reads for backend adapters.
     ///
-    /// The aggregate returned data is limited to 16 MiB by default. Use
-    /// [`read_files_with_options`](Self::read_files_with_options) to choose a
-    /// different limit, or stream large files instead. This is not a snapshot
-    /// or an atomic operation across files.
-    pub fn read_files<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<Vec<u8>>> {
-        self.read_files_with_options(
-            paths,
-            ReadAllOptions::new().max_total_bytes(self.limits.max_read_bytes),
-        )
-    }
-
-    /// Read several complete files with an explicit aggregate allocation limit.
-    pub fn read_files_with_options<P: AsRef<Path>>(
+    /// Applications should use [`VfsiExt::read_files_with_options`].
+    #[doc(hidden)]
+    pub fn read_files_native<P: AsRef<Path>>(
         &self,
         paths: &[P],
         options: ReadAllOptions,
@@ -1989,42 +1342,6 @@ impl<F: Backend> FsClient<F> {
                 Ok(buffers)
             }
         })
-    }
-
-    /// Replace several files from borrowed buffers using vector OPEN, WRITE,
-    /// and CLOSE phases. Identical path spellings are rejected before opening
-    /// anything; aliases such as hard links are still the caller's responsibility.
-    /// The batch is not transactional: an error may follow files already
-    /// created or written. Large inputs should be chunked by the caller rather
-    /// than held in memory solely for this convenience method.
-    pub fn write_files<P: AsRef<Path>, B: AsRef<[u8]>>(&self, entries: &[(P, B)]) -> VfResult<()> {
-        let mut seen = HashSet::with_capacity(entries.len());
-        for (index, (path, _)) in entries.iter().enumerate() {
-            if !seen.insert(path.as_ref()) {
-                return Err(VfError::client(index, crate::ERR_INVAL)
-                    .with_context("write_files", path.as_ref()));
-            }
-        }
-        let requests: Vec<_> = entries
-            .iter()
-            .map(|(path, _)| {
-                OpenOp::new(
-                    path.as_ref(),
-                    OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE,
-                )
-            })
-            .collect();
-        let files = self.vopen(&requests)?;
-        let writes: Vec<_> = files
-            .iter()
-            .zip(entries)
-            .map(|(file, (_, data))| file.write_request_at(0, data.as_ref()))
-            .collect();
-        let result = self.vwrite_all_native(&writes);
-        drop(writes);
-        let close_result = self.vclose_owned(files);
-        result?;
-        close_result
     }
 }
 
@@ -2101,7 +1418,7 @@ impl<'a, F: FileSystem> OpenOptions<'a, F> {
 
     pub fn open(&self, path: impl AsRef<Path>) -> VfResult<FsFile<F>> {
         self.client
-            .open_with(OpenOp::new(path.as_ref(), self.flags).mode(self.mode))
+            .open_with_native(OpenOp::new(path.as_ref(), self.flags).mode(self.mode))
     }
 }
 
@@ -2493,7 +1810,7 @@ impl<F: FileSystem> Drop for FsFile<F> {
 
 impl<F: FileSystem> FsClient<F> {
     /// Query filesystems using one native vector of paths and retained handles.
-    pub fn vstatfs<P: vfsi_core::MetadataOperand<FsFile<F>>>(
+    pub(crate) fn vstatfs<P: vfsi_core::MetadataOperand<FsFile<F>>>(
         &self,
         targets: &[P],
     ) -> VfResult<Vec<crate::FilesystemStats>> {
@@ -2541,7 +1858,7 @@ impl<F: FileSystem> FsClient<F> {
         Ok(results)
     }
     /// Update paths and open objects with one native attribute vector.
-    pub fn vsetattrs<P: vfsi_core::MetadataOperand<FsFile<F>>>(
+    pub(crate) fn vsetattrs<P: vfsi_core::MetadataOperand<FsFile<F>>>(
         &self,
         updates: &[(P, MetadataUpdate)],
         follow_symlinks: bool,
@@ -2610,108 +1927,5 @@ fn link_error(error: VfError, paths: &[&Path], operation: &'static str) -> VfErr
         Some(index) if index < paths.len() => error.with_context(operation, paths[index]),
         Some(_) => VfError::transport(None, "link backend returned an invalid error index"),
         None => error,
-    }
-}
-
-#[cfg(test)]
-mod traversal_tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    // The generic listdir_page fallback's cursor owns the full unconsumed
-    // listing, not just its next page. Count these retained allocations.
-    struct Snapshot {
-        remaining: std::vec::IntoIter<DirEntry>,
-        live: Arc<AtomicUsize>,
-    }
-    impl Drop for Snapshot {
-        fn drop(&mut self) {
-            self.live.fetch_sub(1, Ordering::SeqCst);
-        }
-    }
-    fn snapshot_pages(
-        live: Arc<AtomicUsize>,
-        peak: Arc<AtomicUsize>,
-    ) -> impl FnMut(&Path, Option<crate::DirPageCursor>, usize, usize) -> VfResult<DirectoryPage>
-    {
-        move |path, cursor, page_size, max_entries| {
-            let mut snapshot = match cursor {
-                Some(cursor) => cursor.into_state::<Snapshot>()?,
-                None => {
-                    let depth = path.components().count();
-                    let entries = (0..129)
-                        .take(max_entries)
-                        .map(|index| {
-                            let path = path.join(format!("entry-{index}"));
-                            let attrs = crate::VfAttrs {
-                                file: VfFile::from_os_path(&path),
-                                ftype: if index == 0 && depth < 5 {
-                                    crate::VfType::Directory
-                                } else {
-                                    crate::VfType::Regular
-                                },
-                                ..Default::default()
-                            };
-                            DirEntry::new(path, vfsi_core::metadata_from_attrs(attrs))
-                        })
-                        .collect::<Vec<_>>();
-                    peak.fetch_max(live.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
-                    Snapshot {
-                        remaining: entries.into_iter(),
-                        live: Arc::clone(&live),
-                    }
-                }
-            };
-            let entries = snapshot.remaining.by_ref().take(page_size).collect();
-            let next = if snapshot.remaining.len() == 0 {
-                None
-            } else {
-                Some(crate::DirPageCursor::new(snapshot))
-            };
-            Ok((entries, next))
-        }
-    }
-    #[test]
-    fn traversal_never_retains_multiple_fallback_snapshots() {
-        let live = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-        let mut seen = 0;
-        let completion = visit_walk_pages(
-            Path::new("/tree"),
-            crate::WalkOptions::new().max_entries(1000),
-            snapshot_pages(Arc::clone(&live), Arc::clone(&peak)),
-            |_| {
-                seen += 1;
-                Ok(std::ops::ControlFlow::Continue(()))
-            },
-        )
-        .unwrap();
-        assert_eq!(completion, TraversalCompletion::Complete);
-        assert_eq!(seen, 4 * 129);
-        assert_eq!(live.load(Ordering::SeqCst), 0);
-        assert_eq!(peak.load(Ordering::SeqCst), 1);
-    }
-    #[test]
-    fn traversal_drops_fallback_snapshot_on_stop_error_and_limit() {
-        for outcome in 0..3 {
-            let live = Arc::new(AtomicUsize::new(0));
-            let peak = Arc::new(AtomicUsize::new(0));
-            let result = visit_walk_pages(
-                Path::new("/tree"),
-                crate::WalkOptions::new().max_entries(if outcome == 2 { 2 } else { 1000 }),
-                snapshot_pages(Arc::clone(&live), peak),
-                |_| match outcome {
-                    0 => Ok(std::ops::ControlFlow::Break(())),
-                    1 => Err(VfError::client(0, libc::EIO as u32)),
-                    _ => Ok(std::ops::ControlFlow::Continue(())),
-                },
-            );
-            match outcome {
-                0 => assert_eq!(result.unwrap(), TraversalCompletion::Stopped),
-                1 => assert_eq!(result.unwrap_err().err_no(), libc::EIO as u32),
-                _ => assert_eq!(result.unwrap_err().err_no(), libc::EFBIG as u32),
-            }
-            assert_eq!(live.load(Ordering::SeqCst), 0);
-        }
     }
 }

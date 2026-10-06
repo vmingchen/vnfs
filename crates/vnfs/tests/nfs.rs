@@ -2549,7 +2549,7 @@ fn listdirv_batches_many_directories() {
 
 #[test]
 fn native_read_dirs_batches_and_reports_bounded_errors() {
-    use vnfs::{Attributes, ReadDirOptions};
+    use vnfs::{Attributes, ListDirOptions};
 
     let dir = setup_dir("native_read_dirs_batch");
     let mut backend = client();
@@ -2565,17 +2565,20 @@ fn native_read_dirs_batches_and_reports_bounded_errors() {
     let listings = client
         .read_dirs_with_options(
             &directories,
-            Attributes::MODE | Attributes::SIZE | Attributes::BLOCKS,
-            ReadDirOptions::new(),
+            ListDirOptions::new().fields(Attributes::MODE | Attributes::SIZE | Attributes::BLOCKS),
         )
         .unwrap();
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     assert_eq!(listings.len(), 10);
-    assert!(listings.iter().all(|listing| listing.entries.len() == 1));
     assert!(
         listings
             .iter()
-            .all(|listing| listing.entries[0].attrs().blocks().is_some())
+            .all(|root| root.len() == 1 && root[0].entries.len() == 1)
+    );
+    assert!(
+        listings
+            .iter()
+            .all(|root| root[0].entries[0].attrs().blocks().is_some())
     );
     assert!(
         compounds <= 6,
@@ -2585,15 +2588,16 @@ fn native_read_dirs_batches_and_reports_bounded_errors() {
     let error = client
         .read_dirs_with_options(
             &directories,
-            Attributes::MODE,
-            ReadDirOptions::new().max_entries(5),
+            ListDirOptions::new()
+                .fields(Attributes::MODE)
+                .max_entries(5),
         )
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
 
     let missing = [directories[0].clone(), format!("{dir}/missing")];
     let error = client
-        .read_dirs_with_options(&missing, Attributes::MODE, ReadDirOptions::new())
+        .read_dirs_with_options(&missing, ListDirOptions::new().fields(Attributes::MODE))
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
 }

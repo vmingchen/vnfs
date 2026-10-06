@@ -166,7 +166,11 @@ impl Vfsi for PortableFs {
     fn vmkdir<P: AsRef<Path>>(&self, _: &[(P, u32)]) -> Result<()> {
         panic!("unexpected mkdir")
     }
-    fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, _: &[(P, Q)]) -> Result<()> {
+    fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        _: &[(P, Q)],
+        _: vfsi_core::api::CopyOption,
+    ) -> Result<()> {
         panic!("unexpected copy")
     }
     fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
@@ -222,6 +226,8 @@ fn blanket_extensions_preserve_vector_dispatch_and_root_grouping() {
     let fs = PortableFs::default();
     assert_eq!(fs.read_files(&["/a", "/b"]).unwrap(), [vec![0], vec![1]]);
     assert_eq!(fs.reads.get(), 1);
+    assert_eq!(fs.read("/a").unwrap(), [0]);
+    assert_eq!(fs.reads.get(), 2);
     let trees = fs
         .read_dirs_with_options(&["/a", "/b"], ListDirOptions::new())
         .unwrap();

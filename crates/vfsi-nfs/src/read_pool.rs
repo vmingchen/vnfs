@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vfsi_core::{VfError, VfResult};
-use vfsi_sync::{FsClient, FsFile, StreamCompletion};
+use vfsi_sync::{FsClient, FsFile, StreamCompletion, VfsiExt};
 
 use super::{NfsClientBuilder, NfsVecFs};
 

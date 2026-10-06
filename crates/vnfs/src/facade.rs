@@ -171,8 +171,12 @@ macro_rules! owned_client {
             }
             /// Copy whole files in request order. A successful prefix may remain if
             /// a later request fails; this operation does not provide atomicity.
-            pub fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-                self.inner.vcopy(pairs)
+            pub fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
+                &self,
+                pairs: &[(P, Q)],
+                options: crate::CopyOption,
+            ) -> Result<()> {
+                self.inner.vcopy(pairs, options)
             }
             /// Remove paths in request order, optionally recursing into directories.
             /// A successful prefix may remain if a later path fails.
@@ -263,10 +267,8 @@ macro_rules! owned_client {
                             })
                     },
                     |paths, bytes| {
-                        self.inner.read_files_with_options(
-                            paths,
-                            ReadAllOptions::new().max_total_bytes(bytes),
-                        )
+                        self.inner
+                            .read_files_native(paths, ReadAllOptions::new().max_total_bytes(bytes))
                     },
                 )
             }

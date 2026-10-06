@@ -2,8 +2,8 @@
 #![cfg(target_os = "linux")]
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use vnfs::VfsiExt;
 use vnfs::{Mounted, OpenFlags, OpenOp};
+use vnfs::{Vfsi, VfsiExt};
 
 thread_local! {
     static TRACK: Cell<bool> = const { Cell::new(false) };
@@ -138,14 +138,17 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
         .collect();
     let raw_writes: Vec<_> = raw_files
         .iter()
-        .map(|f| f.write_request_at(0, b"payload"))
+        .map(|f| vnfs::WriteOp::at(f, 0, b"payload"))
         .collect();
     let (results, cost) = measured(|| {
         mounted
             .vwrite(&writes, vnfs::WriteOptions::new().write_all(true))
             .unwrap()
     });
-    let (expected, raw_cost) = measured(|| raw.vwrite_all_native(&raw_writes).unwrap());
+    let (expected, raw_cost) = measured(|| {
+        raw.vwrite(&raw_writes, vnfs::WriteOptions::new().write_all(true))
+            .unwrap()
+    });
     assert_eq!(results, expected);
     assert_eq!(
         cost, raw_cost,

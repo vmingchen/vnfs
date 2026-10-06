@@ -503,14 +503,6 @@ pub trait Backend: FileSystem {
         Err(VfError::unsupported(0))
     }
 
-    fn copy_impl(
-        &mut self,
-        source: &std::path::Path,
-        destination: &std::path::Path,
-    ) -> VfResult<()> {
-        crate::backend_helpers::native_copy_impl_default(self, source, destination)
-    }
-
     // Bounded whole-file reads and streams.
     fn vread_all_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<Vec<u8>>> {
         crate::backend_helpers::vread_all_impl_default(self, files)

@@ -115,7 +115,7 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
             "/a",
             vnfs::ListDirOptions::from(vnfs::WalkOptions::new()).fields(fields),
         )?;
-        client.vcopy(&[("/a/source", "/a/copy")])?;
+        client.vcopy(&[("/a/source", "/a/copy")], vnfs::CopyOption::default())?;
         client.vremove_native(&["/a/copy"], false)
     }
     let _ = app as fn(&vnfs::NfsClient) -> vnfs::Result<()>;
@@ -241,7 +241,10 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     assert_eq!(client.attrs("/sub/a").unwrap().len(), 2);
     client.create_dir_with_mode("/copies", 0o700).unwrap();
     client
-        .vcopy(&[("/sub/a", "/copies/a"), ("/sub/b", "/copies/b")])
+        .vcopy(
+            &[("/sub/a", "/copies/a"), ("/sub/b", "/copies/b")],
+            vnfs::CopyOption::default(),
+        )
         .unwrap();
     client.hard_link("/sub/a", "/copies/hard").unwrap();
     client.symlink("a", "/sub/link").unwrap();

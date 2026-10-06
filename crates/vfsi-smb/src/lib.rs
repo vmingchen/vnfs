@@ -2302,14 +2302,6 @@ impl Backend for SmbVecFs {
         }
         Ok(())
     }
-    fn copy_impl(
-        &mut self,
-        source: &std::path::Path,
-        destination: &std::path::Path,
-    ) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_copy_impl_default(self, source, destination)
-    }
-
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
         for (index, pattern) in patterns.iter().enumerate() {

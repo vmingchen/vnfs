@@ -1667,10 +1667,10 @@ struct CopyFlags {
     _reserved: u8,
 }
 
-/// Options for extent copying. Source final symlinks are followed by default.
-/// Ancestor symlinks use normal namespace resolution. This is not a snapshot.
-/// When preserving a source symlink, its text is copied and extent offsets and
-/// length are ignored. An existing destination is not replaced in that case.
+/// Options for whole-file copies through [`crate::api::Vfsi::vcopy`].
+/// Source final symlinks are followed by default; ancestor symlinks use normal
+/// namespace resolution. This is not a snapshot. When preserving a source
+/// symlink, its link text is copied and an existing destination is not replaced.
 /// Destination symlinks for data copies retain normal following behavior.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CopyOption {

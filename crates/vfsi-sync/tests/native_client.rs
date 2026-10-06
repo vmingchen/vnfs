@@ -4,10 +4,11 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use vfsi_sync::api::ReadOptions;
 use vfsi_sync::{
     Backend, Capabilities, DirEntry, DirPageCursor, FileSystem, FsClient, MetadataQuery, OpenFlags,
     OpenOp, ReadDirOptions, ReadIntoResult, ReadOp, ReadResult, SetAttributes, VfAttrs, VfError,
-    VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
+    VfFile, VfOffset, VfResult, Vfsi, VfsiExt, WriteOpRef, WriteResult,
 };
 
 #[test]
@@ -28,7 +29,15 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
         client.read("/file").unwrap_err().kind(),
         std::io::ErrorKind::FileTooLarge
     );
-    assert_eq!(client.read_with_limit("/file", 6).unwrap(), b"abcdef");
+    assert_eq!(
+        client
+            .read_with_options(
+                "/file",
+                ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(6))
+            )
+            .unwrap(),
+        b"abcdef"
+    );
     let file = client.open("/file").unwrap();
     let before = read_calls.load(Ordering::SeqCst);
     assert!(client.vread_native(&[file.read_request_at(0, 4)]).is_err());
@@ -72,7 +81,7 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
 }
 
 #[test]
-fn optimized_scalar_read_preserves_cleanup_retry_and_primary_error() {
+fn scalar_read_uses_bounded_whole_file_api_without_opening_a_handle() {
     for read_failure in [false, true] {
         let client = FsClient::new(ScalarOnly {
             data: b"data".to_vec(),
@@ -80,16 +89,16 @@ fn optimized_scalar_read_preserves_cleanup_retry_and_primary_error() {
             read_failure,
             ..ScalarOnly::default()
         });
-        let error = client.read("/file").unwrap_err();
+        let result = client.read("/file");
         if read_failure {
+            let error = result.unwrap_err();
             assert!(!error.is_transport());
             assert_eq!(error.operation(), Some("read"));
         } else {
-            assert!(error.is_transport());
-            assert_eq!(error.operation(), Some("close"));
+            assert_eq!(result.unwrap(), b"data");
         }
         let backend = client.into_inner().unwrap();
-        assert_eq!(backend.close_calls, 2);
+        assert_eq!(backend.close_calls, 0);
         assert!(!backend.open);
     }
 }
@@ -184,6 +193,39 @@ impl Backend for ScalarOnly {
             self.close_impl(file)?;
         }
         Ok(())
+    }
+
+    fn listdir_page_impl(
+        &mut self,
+        dir: &std::path::Path,
+        masks: vfsi_sync::AttrMask,
+        cursor: Option<DirPageCursor>,
+        page_size: usize,
+        max_entries: usize,
+    ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
+        self.directory_fields.lock().unwrap().push(masks);
+        self.directory_page_sizes.lock().unwrap().push(page_size);
+        let start = cursor
+            .map(|cursor| cursor.into_state::<usize>())
+            .transpose()?
+            .unwrap_or(0);
+        let count = if max_entries == 0 {
+            self.directory_entries
+        } else {
+            self.directory_entries
+                .min(start.saturating_add(max_entries))
+        };
+        let end = start.saturating_add(page_size).min(count);
+        let entries = (start..end)
+            .map(|index| VfAttrs {
+                file: VfFile::from_os_path(&dir.join(format!("item-{index:04}"))),
+                masks,
+                mode: 0o100644,
+                size: index as u64,
+                ..VfAttrs::default()
+            })
+            .collect();
+        Ok((entries, (end < count).then(|| DirPageCursor::new(end))))
     }
 
     fn vread_impl(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
@@ -490,10 +532,11 @@ fn default_directory_visitor_uses_native_pages_without_materializing_a_listing()
     let client = FsClient::new(concrete);
     let mut paths = Vec::new();
     let completion = client
-        .visit_dir_with_fields(
+        .visit_dir_with_options(
             "/tree",
-            vfsi_sync::AttrMask::SIZE,
-            ReadDirOptions::new().max_entries(3),
+            vfsi_sync::ListDirOptions::new()
+                .fields(vfsi_sync::AttrMask::SIZE)
+                .max_entries(3),
             |entry| {
                 paths.push(entry.path().to_path_buf());
                 Ok(std::ops::ControlFlow::Continue(()))
@@ -511,7 +554,7 @@ fn default_directory_visitor_uses_native_pages_without_materializing_a_listing()
         *calls.lock().unwrap(),
         [
             (vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE, 1, 4),
-            (vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE, 3, 4),
+            (vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE, 3, 3),
         ]
     );
 }
@@ -608,7 +651,16 @@ fn shared_workflows_keep_dynamic_backend_overrides_reachable() {
         .remove_impl(std::path::Path::new("/tree"), true)
         .unwrap();
     backend
-        .copy_impl(std::path::Path::new("/a"), std::path::Path::new("/b"))
+        .vcopy_impl(
+            &[vfsi_sync::ExtentPair::from_os_paths(
+                std::path::Path::new("/a"),
+                0,
+                std::path::Path::new("/b"),
+                0,
+                None,
+            )],
+            vfsi_sync::CopyOption::default(),
+        )
         .unwrap();
     let (entries, next) = backend
         .read_dir_page_impl(std::path::Path::new("/tree"), None, 1, 4)
@@ -887,12 +939,9 @@ fn owned_client_accepts_a_scalar_only_backend() {
     // This wrapper implements FileSystem only, not Backend. Keeping the vector
     // probe directly here would fail to guard the narrow handle boundary.
     let client = FsClient::new(HandleOnly::default());
-    let mut file = client
-        .open_with(OpenOp::new(
-            "/file",
-            OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE,
-        ))
-        .unwrap();
+    let mut options = client.open_options();
+    options.read(true).write(true).create(true);
+    let mut file = options.open("/file").unwrap();
     file.write_all(b"scalar").unwrap();
     file.seek(SeekFrom::Start(0)).unwrap();
     let mut output = String::new();
@@ -959,7 +1008,12 @@ fn allocating_whole_file_reads_enforce_a_configurable_limit() {
         data: b"four".to_vec(),
         ..ScalarOnly::default()
     });
-    let error = client.read_with_limit("/file", 3).unwrap_err();
+    let error = client
+        .read_with_options(
+            "/file",
+            ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(3)),
+        )
+        .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
     assert_eq!(error.operation(), Some("read"));
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
@@ -968,14 +1022,27 @@ fn allocating_whole_file_reads_enforce_a_configurable_limit() {
         data: b"four".to_vec(),
         ..ScalarOnly::default()
     });
-    assert_eq!(client.read_with_limit("/file", 4).unwrap(), b"four");
+    assert_eq!(
+        client
+            .read_with_options(
+                "/file",
+                ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(4))
+            )
+            .unwrap(),
+        b"four"
+    );
 
     let client = FsClient::new(ScalarOnly {
         data: b"utf8".to_vec(),
         ..ScalarOnly::default()
     });
     assert_eq!(
-        client.read_to_string_with_limit("/file", 4).unwrap(),
+        client
+            .read_to_string_with_options(
+                "/file",
+                ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(4))
+            )
+            .unwrap(),
         "utf8"
     );
 }
@@ -1347,10 +1414,14 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
     page_sizes.lock().unwrap().clear();
     let mut seen = 0;
     let error = client
-        .visit_dir_with_options("/tree", ReadDirOptions::new().max_entries(3), |_| {
-            seen += 1;
-            Ok(std::ops::ControlFlow::Continue(()))
-        })
+        .visit_dir_with_options(
+            "/tree",
+            vfsi_sync::ListDirOptions::new().max_entries(3),
+            |_| {
+                seen += 1;
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
         .unwrap_err();
     assert_eq!(seen, 3);
     assert_eq!(error.err_no(), libc::EFBIG as u32);
@@ -1366,7 +1437,10 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
         .unwrap();
     assert_eq!(completion, vfsi_sync::TraversalCompletion::Complete);
     assert_eq!(seen, 2_100);
-    assert_eq!(*page_sizes.lock().unwrap(), [1, 1024, 1024, 1024]);
+    let page_sizes = page_sizes.lock().unwrap();
+    assert_eq!(page_sizes.first(), Some(&1));
+    assert_eq!(page_sizes.len(), 18);
+    assert!(page_sizes[1..].iter().all(|size| *size == 128));
     let empty = FsClient::new(ScalarOnly::default());
     assert_eq!(
         empty
@@ -1398,10 +1472,9 @@ fn visitor_field_selection_is_forwarded_to_each_page() {
     });
     let mut seen = 0;
     client
-        .visit_dir_with_fields(
+        .visit_dir_with_options(
             "/tree",
-            vfsi_sync::AttrMask::SIZE,
-            ReadDirOptions::new(),
+            vfsi_sync::ListDirOptions::new().fields(vfsi_sync::AttrMask::SIZE),
             |_| {
                 seen += 1;
                 Ok(std::ops::ControlFlow::Continue(()))
@@ -1409,8 +1482,11 @@ fn visitor_field_selection_is_forwarded_to_each_page() {
         )
         .unwrap();
     assert_eq!(seen, 3);
-    assert_eq!(*fields.lock().unwrap(), [vfsi_sync::AttrMask::SIZE; 2]);
-    assert_eq!(*pages.lock().unwrap(), [1, 1024]);
+    assert_eq!(
+        *fields.lock().unwrap(),
+        [vfsi_sync::AttrMask::MODE | vfsi_sync::AttrMask::SIZE; 2]
+    );
+    assert_eq!(*pages.lock().unwrap(), [1, 128]);
 }
 
 #[test]

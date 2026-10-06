@@ -283,8 +283,12 @@ macro_rules! client_methods {
             <$client>::$mkdir($receiver(self), paths)
         }
 
-        fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-            <$client>::$copy($receiver(self), pairs)
+        fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
+            &self,
+            pairs: &[(P, Q)],
+            options: crate::CopyOption,
+        ) -> Result<()> {
+            <$client>::$copy($receiver(self), pairs, options)
         }
         fn vremove<P: AsRef<Path>>(
             &self,

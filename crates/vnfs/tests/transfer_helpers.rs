@@ -146,9 +146,13 @@ impl Vfsi for Harness {
     fn vmkdir<P: AsRef<Path>>(&self, p: &[(P, u32)]) -> Result<()> {
         self.fs.vmkdir(p)
     }
-    fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)]) -> Result<()> {
+    fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        p: &[(P, Q)],
+        options: vnfs::CopyOption,
+    ) -> Result<()> {
         self.calls.borrow_mut().copies += 1;
-        self.fs.vcopy(p)
+        self.fs.vcopy(p, options)
     }
     fn vremove<P: AsRef<Path>>(&self, p: &[P], m: RemoveMode, o: RemoveOptions) -> Result<()> {
         self.calls.borrow_mut().removes += 1;
