@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-core"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bitfields",
  "bitflags",
@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-smb"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bitfields",
  "futures-util",
@@ -873,7 +873,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-sync"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "bitfields",
  "libc",

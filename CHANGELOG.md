@@ -5,6 +5,11 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## Coordinated patch release - 2026-10-05
+
+- Rust: vnfs 0.0.19, vfsi-core 0.1.7, vfsi-sync 0.1.8, vfsi-local 0.1.6, vfsi-nfs 0.1.7, vfsi-smb 0.1.5, and vfsi-c 0.3.5.
+- Moved high-level scalar and workflow conveniences onto VfsiExt, keeping Vfsi focused on vectorized backend operations.
+
 ## Coordinated patch release - 2026-10-04
 
 - Rust: vnfs 0.0.18, vfsi-core 0.1.6, vfsi-sync 0.1.7,

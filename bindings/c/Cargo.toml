@@ -1,6 +1,6 @@
 [package]
 name = "vfsi-c"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "C API for VFSI vectorized filesystem interfaces"
@@ -17,7 +17,7 @@ libntirpc-sys = { workspace = true }
 vfsi-sync = { workspace = true }
 vfsi-nfs = { workspace = true }
 vfsi-local = { workspace = true }
-vnfs = { path = "../../crates/vnfs", version = "0.0.18", features = ["dummy"] }
+vnfs = { path = "../../crates/vnfs", version = "0.0.19", features = ["dummy"] }
 vfsi-smb = { workspace = true, features = ["server-copy"] }
 
 [build-dependencies]
