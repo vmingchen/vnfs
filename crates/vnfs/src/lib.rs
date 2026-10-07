@@ -54,8 +54,8 @@ pub mod directory {
     #[doc(inline)]
     pub use crate::{
         Attributes, Attrs, AttrsOptions, ControlFlow, DepthLimit, DirEntry, DirectoryListing,
-        FileType, ListDirOptions, MetadataUpdate, Permissions, ReadDirOptions, RemoveMode,
-        RemoveOptions, RenameOptions, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
+        FileType, ListDirOptions, MkDirOp, Permissions, ReadDirOptions, RemoveMode, RemoveOptions,
+        RenameOptions, SetAttrsOp, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
         WalkOptions,
     };
 }
@@ -192,8 +192,8 @@ pub mod prelude {
     pub use crate::Attributes;
     pub use crate::{
         AttrsOptions, ControlFlow, CopyOption, FileHandle, FilesystemStats, ListDirOptions,
-        MetadataOperand, MetadataTarget, ReadOp, ReadOptions, ReadResult, RemoveMode,
-        ResourceLimits, StreamCompletion, TraversalCompletion, Vfsi, VfsiExt, WriteOp,
+        MetadataOperand, MetadataTarget, MkDirOp, ReadOp, ReadOptions, ReadResult, RemoveMode,
+        ResourceLimits, SetAttrsOp, StreamCompletion, TraversalCompletion, Vfsi, VfsiExt, WriteOp,
         WriteOptions,
     };
     #[cfg(all(feature = "auto", target_os = "linux"))]
@@ -214,10 +214,10 @@ pub use vfsi_core::api::{
     DepthLimit, DirectoryListing, ReadDirOptions, ResourceLimits, StreamCompletion, StreamOptions,
     TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
 };
-pub use vfsi_core::api::{ReadIntoResult, WriteResult};
+pub use vfsi_core::api::{MkDirOp, ReadIntoResult, SetAttrsOp, WriteResult};
 pub use vfsi_core::{
-    Attrs, Capabilities, CopyOption, DirEntry, ErrorDomain, FilesystemStats, MetadataUpdate,
-    OpenFlags, OpenOp, Permissions, RemoveOptions, StatusCode, TransportKind,
+    Attrs, Capabilities, CopyOption, DirEntry, ErrorDomain, FilesystemStats, OpenFlags, OpenOp,
+    Permissions, RemoveOptions, StatusCode, TransportKind,
 };
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 pub(crate) use vfsi_sync::ReadAllOptions;

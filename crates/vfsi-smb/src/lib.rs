@@ -1944,15 +1944,8 @@ impl Backend for SmbVecFs {
     fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Attrs> {
         vfsi_sync::backend_helpers::native_metadata_path_impl_default(self, path, follow)
     }
-    fn set_metadata_path_impl(
-        &mut self,
-        path: &std::path::Path,
-        update: MetadataUpdate,
-        follow: bool,
-    ) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_set_metadata_path_impl_default(
-            self, path, update, follow,
-        )
+    fn set_metadata_path_impl(&mut self, op: &SetAttrsOp<&std::path::Path>) -> VfResult<()> {
+        vfsi_sync::backend_helpers::native_set_metadata_path_impl_default(self, op)
     }
 
     fn listdir_impl(

@@ -1,7 +1,7 @@
-use vnfs::{Attributes, AttrsOptions, MetadataUpdate, Permissions, Vfsi, VfsiExt};
+use vnfs::{Attributes, AttrsOptions, Permissions, Vfsi, VfsiExt};
 
 pub fn check_many(fs: &impl Vfsi, directory: &str) {
-    fs.vsetattrs::<&str>(&[], true).unwrap();
+    fs.vsetattrs::<&str>(&[]).unwrap();
     let paths: Vec<_> = (0..96).map(|i| format!("{directory}/file-{i}")).collect();
     let writes: Vec<_> = paths
         .iter()
@@ -13,16 +13,13 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
         .iter()
         .enumerate()
         .map(|(i, path)| {
-            (
-                path,
-                MetadataUpdate::new()
-                    .permissions(Permissions::from_mode(0o600 | ((i % 8) as u32)))
-                    .len(if i % 2 == 0 { 3 } else { 100 + i as u64 })
-                    .modified(modified),
-            )
+            vnfs::SetAttrsOp::new(path)
+                .permissions(Permissions::from_mode(0o600 | ((i % 8) as u32)))
+                .len(if i % 2 == 0 { 3 } else { 100 + i as u64 })
+                .modified(modified)
         })
         .collect();
-    fs.vsetattrs(&updates, true).unwrap();
+    fs.vsetattrs(&updates).unwrap();
     let options =
         AttrsOptions::new().fields(Attributes::MODE | Attributes::SIZE | Attributes::MTIME);
     let metadata = fs.vgetattrs(&paths, options).unwrap();
@@ -36,9 +33,13 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
     let sizes: Vec<_> = paths
         .iter()
         .enumerate()
-        .map(|(i, path)| (path, MetadataUpdate::new().len(i as u64)))
+        .map(|(i, path)| {
+            vnfs::SetAttrsOp::new(path)
+                .len(i as u64)
+                .follow_symlinks(false)
+        })
         .collect();
-    fs.vsetattrs(&sizes, false).unwrap();
+    fs.vsetattrs(&sizes).unwrap();
     let metadata = fs.vgetattrs(&paths, options).unwrap();
     for (i, item) in metadata.iter().enumerate() {
         assert_eq!(item.len(), i as u64);
@@ -46,17 +47,55 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
     }
     let missing = format!("{directory}/missing");
     let error = fs
-        .vsetattrs(
-            &[
-                (&paths[0], MetadataUpdate::new().len(7)),
-                (&missing, MetadataUpdate::new().len(7)),
-                (&paths[1], MetadataUpdate::new().len(7)),
-            ],
-            true,
-        )
+        .vsetattrs(&[
+            vnfs::SetAttrsOp::new(&paths[0]).len(7),
+            vnfs::SetAttrsOp::new(&missing).len(7),
+            vnfs::SetAttrsOp::new(&paths[1]).len(7),
+        ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::ENOENT as u32);
+    check_mixed_policies(fs, directory);
+}
+
+fn check_mixed_policies(fs: &impl Vfsi, directory: &str) {
+    use vnfs::SetAttrsOp;
+    let first = format!("{directory}/mixed-first");
+    let last = format!("{directory}/mixed-last");
+    let link = format!("{directory}/mixed-link");
+    fs.write_files(&[(&first, b"abcdefghij"), (&last, b"abcdefghij")])
+        .unwrap();
+    fs.symlink("mixed-first", &link).unwrap();
+    // A failing no-follow wave must not send the following wave.
+    let error = fs
+        .vsetattrs(&[
+            SetAttrsOp::new(&first).len(2),
+            SetAttrsOp::new(&link).len(4).follow_symlinks(false),
+            SetAttrsOp::new(&last).len(1),
+        ])
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(fs.attrs(&first).unwrap().len(), 2);
+    assert_eq!(fs.attrs(&last).unwrap().len(), 10);
+    // Do not regroup nonadjacent equal policies: these updates alias one object.
+    fs.vsetattrs(&[
+        SetAttrsOp::new(&link).len(5),
+        SetAttrsOp::new(&first).len(6).follow_symlinks(false),
+        SetAttrsOp::new(&link).len(7),
+    ])
+    .unwrap();
+    assert_eq!(fs.attrs(&first).unwrap().len(), 7);
+    assert!(fs.symlink_attrs(&link).unwrap().is_symlink());
+    // Validation spans policy boundaries and must precede the first mutation.
+    let error = fs
+        .vsetattrs(&[
+            SetAttrsOp::new(&first).len(1).follow_symlinks(false),
+            SetAttrsOp::new(&last).uid(u32::MAX),
+        ])
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.err_no(), libc::EINVAL as u32);
+    assert_eq!(fs.attrs(&first).unwrap().len(), 7);
 }
 
 /// Open objects remain targets even when their original names are reused.
@@ -92,35 +131,24 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
         .iter()
         .enumerate()
         .map(|(i, file)| {
-            (
-                MetadataTarget::File(file),
-                MetadataUpdate::new()
-                    .len(i as u64)
-                    .permissions(Permissions::from_mode(0o640)),
-            )
+            vnfs::SetAttrsOp::new(MetadataTarget::File(file))
+                .len(i as u64)
+                .permissions(Permissions::from_mode(0o640))
+                .follow_symlinks(false)
         })
         .collect();
     // no-follow must still address the opened objects.
-    fs.vsetattrs(&updates, false).unwrap();
+    fs.vsetattrs(&updates).unwrap();
     for (i, file) in files.iter().enumerate() {
         let attrs = file.attrs().unwrap();
         assert_eq!(attrs.len(), i as u64);
         assert_eq!(attrs.permissions().mode() & 0o7777, 0o640);
         assert_eq!(fs.attrs(&paths[i]).unwrap().len(), 11);
     }
-    fs.vsetattrs(
-        &[
-            (
-                MetadataTarget::File(&files[0]),
-                MetadataUpdate::new().len(13),
-            ),
-            (
-                MetadataTarget::Path(std::path::Path::new(&paths[0])),
-                MetadataUpdate::new().len(17),
-            ),
-        ],
-        true,
-    )
+    fs.vsetattrs(&[
+        vnfs::SetAttrsOp::new(MetadataTarget::File(&files[0])).len(13),
+        vnfs::SetAttrsOp::new(MetadataTarget::Path(std::path::Path::new(&paths[0]))).len(17),
+    ])
     .unwrap();
     assert_eq!(files[0].attrs().unwrap().len(), 13);
     assert_eq!(fs.attrs(&paths[0]).unwrap().len(), 17);
@@ -137,19 +165,10 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
     );
     files[1].try_close().unwrap();
     let error = fs
-        .vsetattrs(
-            &[
-                (
-                    MetadataTarget::File(&files[0]),
-                    MetadataUpdate::new().len(5),
-                ),
-                (
-                    MetadataTarget::File(&files[1]),
-                    MetadataUpdate::new().len(5),
-                ),
-            ],
-            true,
-        )
+        .vsetattrs(&[
+            vnfs::SetAttrsOp::new(MetadataTarget::File(&files[0])).len(5),
+            vnfs::SetAttrsOp::new(MetadataTarget::File(&files[1])).len(5),
+        ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EBADF as u32);
@@ -173,13 +192,10 @@ pub fn check_foreign<F: Vfsi>(fs: &F, other: &F, path: &str) {
         .unwrap()
         .remove(0);
     let error = fs
-        .vsetattrs(
-            &[
-                (MetadataTarget::File(&own), MetadataUpdate::new().len(3)),
-                (MetadataTarget::File(&foreign), MetadataUpdate::new().len(3)),
-            ],
-            true,
-        )
+        .vsetattrs(&[
+            vnfs::SetAttrsOp::new(MetadataTarget::File(&own)).len(3),
+            vnfs::SetAttrsOp::new(MetadataTarget::File(&foreign)).len(3),
+        ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EINVAL as u32);
@@ -211,9 +227,9 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
     let new_gid = if privileged { 10002 } else { gid };
     let updates: Vec<_> = paths
         .iter()
-        .map(|p| (p, MetadataUpdate::new().uid(new_uid)))
+        .map(|p| vnfs::SetAttrsOp::new(p).uid(new_uid))
         .collect();
-    fs.vsetattrs(&updates, true).unwrap();
+    fs.vsetattrs(&updates).unwrap();
     for attrs in fs.vgetattrs(&paths, options).unwrap() {
         assert_eq!(attrs.uid(), Some(new_uid));
         assert_eq!(attrs.gid(), Some(gid));
@@ -222,9 +238,8 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
     fs.vsetattrs(
         &paths
             .iter()
-            .map(|p| (p, MetadataUpdate::new().gid(new_gid)))
+            .map(|p| vnfs::SetAttrsOp::new(p).gid(new_gid))
             .collect::<Vec<_>>(),
-        true,
     )
     .unwrap();
     for attrs in fs.vgetattrs(&paths, options).unwrap() {
@@ -247,16 +262,14 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
     let updates: Vec<_> = files
         .iter()
         .map(|file| {
-            (
-                MetadataTarget::File(file),
-                MetadataUpdate::new()
-                    .uid(uid)
-                    .gid(gid)
-                    .permissions(Permissions::from_mode(0o640)),
-            )
+            vnfs::SetAttrsOp::new(MetadataTarget::File(file))
+                .uid(uid)
+                .gid(gid)
+                .permissions(Permissions::from_mode(0o640))
+                .follow_symlinks(false)
         })
         .collect();
-    fs.vsetattrs(&updates, false).unwrap();
+    fs.vsetattrs(&updates).unwrap();
     for file in &files {
         let attrs = file.attrs().unwrap();
         assert_eq!(attrs.uid(), Some(uid));
@@ -272,43 +285,32 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
     assert_eq!(attrs(&paths[0], true).gid(), Some(new_gid));
     let link = format!("{directory}/owner-link");
     fs.symlink("owner-1", &link).unwrap();
-    fs.vsetattrs(
-        &[(&link, MetadataUpdate::new().uid(new_uid).gid(new_gid))],
-        false,
-    )
-    .unwrap();
+    fs.vsetattrs(&[vnfs::SetAttrsOp::new(&link)
+        .uid(new_uid)
+        .gid(new_gid)
+        .follow_symlinks(false)])
+        .unwrap();
     assert_eq!(attrs(&link, false).uid(), Some(new_uid));
     assert_eq!(attrs(&paths[1], true).uid(), Some(uid));
     // Following chown must change the target without changing link ownership.
     fs.chown(&link, Some(uid), Some(gid)).unwrap();
     assert_eq!(attrs(&link, false).uid(), Some(new_uid));
     let error = fs
-        .vsetattrs(
-            &[
-                (
-                    MetadataTarget::File(&files[0]),
-                    MetadataUpdate::new().len(2),
-                ),
-                (
-                    MetadataTarget::Path(std::path::Path::new(&paths[0])),
-                    MetadataUpdate::new().uid(u32::MAX),
-                ),
-            ],
-            true,
-        )
+        .vsetattrs(&[
+            vnfs::SetAttrsOp::new(MetadataTarget::File(&files[0])).len(2),
+            vnfs::SetAttrsOp::new(MetadataTarget::Path(std::path::Path::new(&paths[0])))
+                .uid(u32::MAX),
+        ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EINVAL as u32);
     assert_eq!(files[0].attrs().unwrap().len(), 9);
     let missing = format!("{directory}/owner-missing");
     let error = fs
-        .vsetattrs(
-            &[
-                (&paths[0], MetadataUpdate::new().uid(uid)),
-                (&missing, MetadataUpdate::new().gid(gid)),
-            ],
-            true,
-        )
+        .vsetattrs(&[
+            vnfs::SetAttrsOp::new(&paths[0]).uid(uid),
+            vnfs::SetAttrsOp::new(&missing).gid(gid),
+        ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::ENOENT as u32);

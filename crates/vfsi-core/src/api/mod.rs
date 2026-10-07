@@ -11,8 +11,8 @@ pub type Result<T> = crate::VfResult<T>;
 pub type Error = crate::VfError;
 pub use crate::{
     AttrMask as Attributes, Attrs, Capabilities, CopyOption, DirEntry, ErrorDomain,
-    FilesystemStats, MetadataUpdate, OpenFlags, OpenOp, Permissions, RemoveOptions, StatusCode,
-    TransportKind, VfType as FileType,
+    FilesystemStats, OpenFlags, OpenOp, Permissions, RemoveOptions, StatusCode, TransportKind,
+    VfType as FileType,
 };
 /// Per-pair rename semantics requested by [`Vfsi::vrename`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -32,7 +32,9 @@ pub use std::ops::ControlFlow;
 mod traits;
 pub use traits::{FileHandle, Vfsi, VfsiExt};
 mod metadata;
-pub use metadata::AttrsOptions;
+pub use metadata::{AttrsOptions, SetAttrsOp};
+mod mkdir;
+pub use mkdir::MkDirOp;
 mod read;
 pub use read::{ReadOp, ReadOptions, ReadResult};
 mod write;
@@ -76,9 +78,9 @@ pub mod internal {
 pub mod prelude {
     pub use super::{
         Attributes, AttrsOptions, ControlFlow, CopyOption, FileHandle, ListDirOptions,
-        MetadataOperand, MetadataTarget, MetadataUpdate, OpenFlags, OpenOp, ReadOp, ReadOptions,
-        ReadResult, RemoveMode, RemoveOptions, RenameOptions, ResourceLimits, StreamOptions, Vfsi,
-        VfsiExt, WriteOp, WriteOptions,
+        MetadataOperand, MetadataTarget, MkDirOp, OpenFlags, OpenOp, ReadOp, ReadOptions,
+        ReadResult, RemoveMode, RemoveOptions, RenameOptions, ResourceLimits, SetAttrsOp,
+        StreamOptions, Vfsi, VfsiExt, WriteOp, WriteOptions,
     };
 }
 

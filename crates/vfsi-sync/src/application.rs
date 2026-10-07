@@ -470,10 +470,9 @@ macro_rules! client_methods {
         }
         fn vsetattrs<P: vfsi_core::MetadataOperand<Self::File>>(
             &self,
-            updates: &[(P, vfsi_core::MetadataUpdate)],
-            follow_symlinks: bool,
+            updates: &[vfsi_core::SetAttrsOp<P>],
         ) -> Result<()> {
-            <$client>::vsetattrs($receiver(self), updates, follow_symlinks)
+            <$client>::vsetattrs($receiver(self), updates)
         }
         fn vgetattrs<P: AsRef<Path>>(
             &self,
@@ -516,7 +515,7 @@ macro_rules! client_methods {
         fn vclose(&self, files: &mut [Self::File]) -> Result<()> {
             <$client>::$close($receiver(self), files)
         }
-        fn vmkdir<P: AsRef<Path>>(&self, paths: &[(P, u32)]) -> Result<()> {
+        fn vmkdir<P: AsRef<Path>>(&self, paths: &[vfsi_core::MkDirOp<P>]) -> Result<()> {
             <$client>::vmkdir($receiver(self), paths)
         }
 

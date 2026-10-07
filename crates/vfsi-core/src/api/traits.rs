@@ -2,7 +2,8 @@
 //! live in implementation crates; generic applications need only these traits.
 
 use crate::api::{
-    Attrs, CopyOption, DirectoryListing, OpenOp, ResourceLimits, Result, WriteResult,
+    Attrs, CopyOption, DirectoryListing, MkDirOp, OpenOp, ResourceLimits, Result, SetAttrsOp,
+    WriteResult,
 };
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -153,39 +154,41 @@ pub trait Vfsi {
 
     /// Update selected attributes for paths or open handles using native batching.
     /// Every handle is validated before dispatch, including ownership and closure.
-    /// Unspecified fields are unchanged. `follow_symlinks` controls the final
-    /// component of path targets; it does not change open-handle identity.
+    /// Unspecified fields are unchanged. Each [`SetAttrsOp`] controls whether
+    /// its final path symlink is followed; this does not change open-handle identity.
     /// Ancestor symlinks retain ordinary backend resolution.
+    /// Equal-policy runs remain batched; mixed policies retain input order.
+    /// Validate every input before any run mutates the filesystem.
     /// Failure can follow partial mutations, including within one request;
     /// an error index identifies an input, not a committed-prefix count.
     /// Empty vectors succeed without I/O. Do not replay ambiguous failures.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, MetadataUpdate, Permissions};
+    /// use vfsi_core::api::{Vfsi, Permissions, SetAttrsOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.vsetattrs(&[
-    ///     ("/file-1", MetadataUpdate::new().permissions(Permissions::from_mode(0o640)).len(1024)),
-    ///     ("/file-2", MetadataUpdate::new().len(0)),
-    /// ], true)?;
+    ///     SetAttrsOp::new("/file-1").permissions(Permissions::from_mode(0o640)).len(1024),
+    ///     SetAttrsOp::new("/file-2").len(0),
+    /// ])?;
     /// # Ok(())
     /// # }
     /// ```
     /// Handle targets and paths can share a batch:
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, MetadataTarget, MetadataUpdate};
+    /// use vfsi_core::api::{Vfsi, MetadataTarget, SetAttrsOp};
     /// # fn example<F: Vfsi>(fs: &F, file: &F::File) -> vfsi_core::api::Result<()> {
     /// fs.vsetattrs(&[
-    ///     (MetadataTarget::File(file), MetadataUpdate::new().len(1024)),
-    ///     (MetadataTarget::Path(std::path::Path::new("/other")), MetadataUpdate::new().len(0)),
-    /// ], true)?;
+    ///     SetAttrsOp::new(MetadataTarget::File(file)).len(1024),
+    ///     SetAttrsOp::new(MetadataTarget::Path(std::path::Path::new("/other"))).len(0)
+    ///         .follow_symlinks(false),
+    /// ])?;
     /// # Ok(())
     /// # }
     /// ```
     fn vsetattrs<P: crate::api::MetadataOperand<Self::File>>(
         &self,
-        updates: &[(P, crate::api::MetadataUpdate)],
-        follow_symlinks: bool,
+        updates: &[SetAttrsOp<P>],
     ) -> Result<()>;
 
     /// Capabilities supported by this client. Routed clients report capabilities
@@ -216,7 +219,7 @@ pub trait Vfsi {
     /// concrete client's builder or `with_limits` to change its defaults.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
+    /// use vfsi_core::api::Vfsi;
     /// # fn example(fs: &impl Vfsi) {
     /// let limits = fs.limits();
     /// println!("owned-read budget: {} bytes", limits.max_read_bytes);
@@ -355,17 +358,17 @@ pub trait Vfsi {
     /// a dependency-aware tree builder for dependency-aware fresh-tree creation.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
+    /// use vfsi_core::api::{Vfsi, VfsiExt, MkDirOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.create_dir_all("/workspace")?;
-    /// fs.vmkdir(&[("/workspace/input", 0o750), ("/workspace/output", 0o700)])?;
+    /// fs.vmkdir(&[MkDirOp::new("/workspace/input", 0o750), MkDirOp::new("/workspace/output", 0o700)])?;
     /// # Ok(())
     /// # }
     /// ```
-    /// Each `(path, mode)` supplies Unix permission bits; backends apply the
+    /// Each [`MkDirOp`] supplies a path and Unix permission bits; backends apply the
     /// requested mode rather than relying on the process umask. Unsupported
     /// permission semantics are reported by the backend.
-    fn vmkdir<P: AsRef<Path>>(&self, directories: &[(P, u32)]) -> Result<()>;
+    fn vmkdir<P: AsRef<Path>>(&self, directories: &[MkDirOp<P>]) -> Result<()>;
     /// Strict file-copy batches; a failed call can have copied earlier files.
     ///
     /// Pairs are `(source, destination)` in this client's namespace. Contents
@@ -1486,7 +1489,7 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn create_dir(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.vmkdir(&[(path, 0o777)])
+        self.vmkdir(&[MkDirOp::new(path, 0o777)])
     }
 
     /// Truncate or extend one path or opened object using [`Vfsi::vsetattrs`].
@@ -1495,10 +1498,7 @@ pub trait VfsiExt: Vfsi {
         target: T,
         len: u64,
     ) -> Result<()> {
-        self.vsetattrs(
-            &[(target, crate::api::MetadataUpdate::new().len(len))],
-            true,
-        )
+        self.vsetattrs(&[SetAttrsOp::new(target).len(len)])
     }
 
     /// Change permissions on one path or opened object using [`Vfsi::vsetattrs`].
@@ -1507,33 +1507,32 @@ pub trait VfsiExt: Vfsi {
         target: T,
         permissions: crate::api::Permissions,
     ) -> Result<()> {
-        self.vsetattrs(
-            &[(
-                target,
-                crate::api::MetadataUpdate::new().permissions(permissions),
-            )],
-            true,
-        )
+        self.vsetattrs(&[SetAttrsOp::new(target).permissions(permissions)])
     }
 
     /// Change ownership of one path or opened object through [`Vfsi::vsetattrs`].
     /// `None` leaves the corresponding owner/group unchanged. Use the vector
-    /// with `follow_symlinks = false` to change a symlink itself.
+    /// with [`SetAttrsOp::follow_symlinks(false)`](SetAttrsOp::follow_symlinks)
+    /// to change a symlink itself.
     fn chown<T: crate::api::MetadataOperand<Self::File>>(
         &self,
         target: T,
         uid: Option<u32>,
         gid: Option<u32>,
     ) -> Result<()> {
-        let mut update = crate::api::MetadataUpdate::new();
-        update.uid = uid;
-        update.gid = gid;
-        self.vsetattrs(&[(target, update)], true)
+        let mut op = SetAttrsOp::new(target);
+        if let Some(uid) = uid {
+            op = op.uid(uid);
+        }
+        if let Some(gid) = gid {
+            op = op.gid(gid);
+        }
+        self.vsetattrs(&[op])
     }
 
     /// Create one directory with explicit Unix permission bits.
     fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> Result<()> {
-        self.vmkdir(&[(path, mode)])
+        self.vmkdir(&[MkDirOp::new(path, mode)])
     }
 
     /// Create one symbolic link; submit multiple pairs with [`Vfsi::vsymlink`].
@@ -1591,7 +1590,7 @@ pub trait VfsiExt: Vfsi {
                     return Err(crate::api::Error::client(0, crate::ERR_INVAL));
                 }
             }
-            match self.vmkdir(&[(&current, 0o777)]) {
+            match self.vmkdir(&[MkDirOp::new(&current, 0o777)]) {
                 Ok(()) => {}
                 Err(error) if error.err_no() == crate::ERR_EXIST => {
                     if !self.attrs(&current)?.is_dir() {

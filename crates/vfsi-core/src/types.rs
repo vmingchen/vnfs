@@ -1306,57 +1306,6 @@ impl Attrs {
     }
 }
 
-/// Rust-native metadata changes used by [`Backend`](https://docs.rs/vfsi-sync).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MetadataUpdate {
-    pub permissions: Option<Permissions>,
-    pub uid: Option<u32>,
-    pub gid: Option<u32>,
-    pub len: Option<u64>,
-    pub accessed: Option<std::time::SystemTime>,
-    pub modified: Option<std::time::SystemTime>,
-}
-
-impl MetadataUpdate {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn permissions(mut self, permissions: Permissions) -> Self {
-        self.permissions = Some(permissions);
-        self
-    }
-
-    /// Change the owner; an unspecified owner is unchanged.
-    /// `u32::MAX` is reserved by Unix and rejected by the application API.
-    pub fn uid(mut self, uid: u32) -> Self {
-        self.uid = Some(uid);
-        self
-    }
-
-    /// Change the group; an unspecified group is unchanged.
-    /// `u32::MAX` is reserved by Unix and rejected by the application API.
-    pub fn gid(mut self, gid: u32) -> Self {
-        self.gid = Some(gid);
-        self
-    }
-
-    pub fn len(mut self, len: u64) -> Self {
-        self.len = Some(len);
-        self
-    }
-
-    pub fn accessed(mut self, accessed: std::time::SystemTime) -> Self {
-        self.accessed = Some(accessed);
-        self
-    }
-
-    pub fn modified(mut self, modified: std::time::SystemTime) -> Self {
-        self.modified = Some(modified);
-        self
-    }
-}
-
 fn system_time(seconds: i64, nanos: u32) -> Option<std::time::SystemTime> {
     if seconds < 0 {
         std::time::UNIX_EPOCH

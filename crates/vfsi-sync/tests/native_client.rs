@@ -104,9 +104,12 @@ fn scalar_read_uses_bounded_whole_file_api_without_opening_a_handle() {
 }
 
 type Notifications = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
+type AttributeCalls = Arc<Mutex<Vec<(bool, Vec<Option<u64>>)>>>;
 
 #[derive(Default)]
 struct ScalarOnly {
+    attrs_calls: AttributeCalls,
+    attrs_failure: Option<(usize, VfError)>,
     stats_calls: Arc<AtomicUsize>,
     stats_result_count: Option<usize>,
     stats_error_index: Option<usize>,
@@ -767,6 +770,16 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
 }
 
 impl FileSystem for ScalarOnly {
+    fn vsetattrs_impl(&mut self, updates: Vec<SetAttributes>, follow: bool) -> VfResult<()> {
+        let mut calls = self.attrs_calls.lock().unwrap();
+        calls.push((follow, updates.iter().map(|op| op.size).collect()));
+        if let Some((call, error)) = &self.attrs_failure
+            && calls.len() == *call
+        {
+            return Err(error.clone());
+        }
+        Ok(())
+    }
     fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<vfsi_sync::FilesystemStats>> {
         self.stats_calls.fetch_add(1, Ordering::SeqCst);
         if let Some(index) = self.stats_error_index {
@@ -931,6 +944,76 @@ impl FileSystem for ScalarOnly {
 
     fn set_attributes_impl(&mut self, _: SetAttributes) -> VfResult<()> {
         Err(VfError::unsupported(0))
+    }
+}
+
+#[test]
+fn setattrs_ops_batch_policy_runs_in_order_and_preflight_before_dispatch() {
+    use vfsi_core::SetAttrsOp;
+    let backend = ScalarOnly::default();
+    let calls = Arc::clone(&backend.attrs_calls);
+    let fs = FsClient::new(backend);
+    fs.vsetattrs::<&str>(&[]).unwrap();
+    assert!(calls.lock().unwrap().is_empty());
+    fs.vsetattrs(&[
+        SetAttrsOp::new("/a").len(1),
+        SetAttrsOp::new("/b").len(2),
+        SetAttrsOp::new("/c").len(3).follow_symlinks(false),
+        SetAttrsOp::new("/d").len(4).follow_symlinks(false),
+        SetAttrsOp::new("/a").len(5),
+    ])
+    .unwrap();
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [
+            (true, vec![Some(1), Some(2)]),
+            (false, vec![Some(3), Some(4)]),
+            (true, vec![Some(5)]),
+        ]
+    );
+    calls.lock().unwrap().clear();
+    let error = fs
+        .vsetattrs(&[
+            SetAttrsOp::new("/a").len(6),
+            SetAttrsOp::new("/b").uid(u32::MAX).follow_symlinks(false),
+        ])
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert_eq!(error.err_no(), libc::EINVAL as u32);
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn setattrs_ops_remap_later_run_failures_without_replaying_or_dispatching_suffix() {
+    use vfsi_core::SetAttrsOp;
+    for failure in [
+        VfError::client(1, libc::ENOENT as u32),
+        VfError::client(2, libc::ENOENT as u32),
+        VfError::transport(None, "lost attribute reply"),
+    ] {
+        let backend = ScalarOnly {
+            attrs_failure: Some((2, failure.clone())),
+            ..Default::default()
+        };
+        let calls = Arc::clone(&backend.attrs_calls);
+        let fs = FsClient::new(backend);
+        let error = fs
+            .vsetattrs(&[
+                SetAttrsOp::new("/a").len(1),
+                SetAttrsOp::new("/b").len(2).follow_symlinks(false),
+                SetAttrsOp::new("/c").len(3).follow_symlinks(false),
+                SetAttrsOp::new("/d").len(4),
+            ])
+            .unwrap_err();
+        assert_eq!(calls.lock().unwrap().len(), 2);
+        if failure.index() == Some(1) {
+            assert_eq!(error.index(), Some(2));
+            assert_eq!(error.err_no(), libc::ENOENT as u32);
+            assert_eq!(error.path(), Some(std::path::Path::new("/c")));
+        } else {
+            assert!(error.is_transport());
+            assert_eq!(error.index(), None);
+        }
     }
 }
 

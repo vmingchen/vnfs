@@ -109,8 +109,7 @@ impl Vfsi for PortableFs {
     }
     fn vsetattrs<P: vfsi_core::MetadataOperand<Self::File>>(
         &self,
-        _: &[(P, vfsi_core::MetadataUpdate)],
-        _: bool,
+        _: &[vfsi_core::SetAttrsOp<P>],
     ) -> vfsi_core::api::Result<()> {
         Ok(())
     }
@@ -163,7 +162,7 @@ impl Vfsi for PortableFs {
     fn vclose(&self, _: &mut [TestFile]) -> Result<()> {
         Ok(())
     }
-    fn vmkdir<P: AsRef<Path>>(&self, _: &[(P, u32)]) -> Result<()> {
+    fn vmkdir<P: AsRef<Path>>(&self, _: &[vfsi_core::MkDirOp<P>]) -> Result<()> {
         panic!("unexpected mkdir")
     }
     fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(

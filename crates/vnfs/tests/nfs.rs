@@ -568,7 +568,12 @@ fn application_collection_preserves_native_batching_and_root_groups() {
         .unwrap();
     let roots: Vec<_> = (0..10).map(|index| format!("{dir}/d{index}")).collect();
     client
-        .vmkdir(&roots.iter().map(|path| (path, 0o777)).collect::<Vec<_>>())
+        .vmkdir(
+            &roots
+                .iter()
+                .map(|path| vnfs::MkDirOp::new(path, 0o777))
+                .collect::<Vec<_>>(),
+        )
         .unwrap();
     let files: Vec<_> = roots
         .iter()
@@ -3971,8 +3976,13 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
         .connect()
         .unwrap();
     let roots: Vec<_> = (0..40).map(|i| format!("{dir}/d{i}")).collect();
-    fs.vmkdir(&roots.iter().map(|path| (path, 0o777)).collect::<Vec<_>>())
-        .unwrap();
+    fs.vmkdir(
+        &roots
+            .iter()
+            .map(|path| vnfs::MkDirOp::new(path, 0o777))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
     let files: Vec<_> = roots
         .iter()
         .enumerate()
@@ -4050,8 +4060,12 @@ fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
     let child = format!("{tree}/child");
     let saved = format!("{dir}/saved");
     let target = format!("{dir}/outside");
-    fs.vmkdir(&[(&tree, 0o777), (&target, 0o777)]).unwrap();
-    fs.vmkdir(&[(&child, 0o777)]).unwrap();
+    fs.vmkdir(&[
+        vnfs::MkDirOp::new(&tree, 0o777),
+        vnfs::MkDirOp::new(&target, 0o777),
+    ])
+    .unwrap();
+    fs.vmkdir(&[vnfs::MkDirOp::new(&child, 0o777)]).unwrap();
     fs.write(format!("{target}/secret"), b"must not be traversed")
         .unwrap();
     let mut changed = false;
@@ -4112,7 +4126,7 @@ fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
     }
     // Parents exist before children are created.
     for path in &paths {
-        fs.vmkdir(&[(path, 0o777)]).unwrap();
+        fs.vmkdir(&[vnfs::MkDirOp::new(path, 0o777)]).unwrap();
     }
     fs.write(format!("{path}/leaf"), b"x").unwrap();
     let _ = vfsi_nfs::compound::thread_compound_stats();
@@ -4144,11 +4158,11 @@ fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
     let tree = format!("{dir}/tree");
     let moved = format!("{dir}/moved");
     let children: Vec<_> = (0..4).map(|i| format!("{tree}/child{i}")).collect();
-    fs.vmkdir(&[(&tree, 0o777)]).unwrap();
+    fs.vmkdir(&[vnfs::MkDirOp::new(&tree, 0o777)]).unwrap();
     fs.vmkdir(
         &children
             .iter()
-            .map(|path| (path, 0o777))
+            .map(|path| vnfs::MkDirOp::new(path, 0o777))
             .collect::<Vec<_>>(),
     )
     .unwrap();
@@ -4242,7 +4256,7 @@ fn vsetattrs_many_nfs_files() {
     let other = Nfs::builder(test_host()).connect().unwrap();
     vsetattrs_support::check_foreign(&fs, &other, &format!("{directory}/foreign"));
     // A handle vector must not degrade into one RPC per scalar update.
-    use vnfs::{MetadataTarget, MetadataUpdate, OpenFlags, OpenOp};
+    use vnfs::{MetadataTarget, OpenFlags, OpenOp};
     let paths: Vec<_> = (0..64).map(|i| format!("{directory}/file-{i}")).collect();
     let requests: Vec<_> = paths
         .iter()
@@ -4252,17 +4266,14 @@ fn vsetattrs_many_nfs_files() {
     let updates: Vec<_> = files
         .iter()
         .map(|file| {
-            (
-                MetadataTarget::File(file),
-                MetadataUpdate::new()
-                    .len(4)
-                    .uid(unsafe { libc::geteuid() })
-                    .gid(unsafe { libc::getegid() }),
-            )
+            vnfs::SetAttrsOp::new(MetadataTarget::File(file))
+                .len(4)
+                .uid(unsafe { libc::geteuid() })
+                .gid(unsafe { libc::getegid() })
         })
         .collect();
     let _ = vfsi_nfs::compound::thread_compound_stats();
-    fs.vsetattrs(&updates, true).unwrap();
+    fs.vsetattrs(&updates).unwrap();
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     assert!(
         compounds < 16,

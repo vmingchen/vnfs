@@ -13,17 +13,17 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     assert!(fs.vreadlink::<&str>(&[]).unwrap().is_empty());
 
     let directories: Vec<_> = (0..64)
-        .map(|i| (format!("{directory}/dir-{i}"), 0o700 | (i % 8)))
+        .map(|i| vnfs::MkDirOp::new(format!("{directory}/dir-{i}"), 0o700 | (i % 8)))
         .collect();
     fs.vmkdir(&directories).unwrap();
-    let paths: Vec<_> = directories.iter().map(|(path, _)| path).collect();
+    let paths: Vec<_> = directories.iter().map(|op| op.path()).collect();
     let attrs = fs
         .vgetattrs(&paths, AttrsOptions::new().fields(Attributes::MODE))
         .unwrap();
     assert_eq!(attrs.len(), directories.len());
-    for (attrs, (_, mode)) in attrs.iter().zip(&directories) {
+    for (attrs, op) in attrs.iter().zip(&directories) {
         assert!(attrs.is_dir());
-        assert_eq!(attrs.permissions().mode() & 0o7777, *mode);
+        assert_eq!(attrs.permissions().mode() & 0o7777, op.mode());
     }
     fs.create_dir_with_mode(format!("{directory}/scalar-dir"), 0o751)
         .unwrap();
@@ -120,7 +120,10 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     assert_eq!(error.index(), Some(1));
     let new_dir = format!("{directory}/fresh-dir");
     let error = fs
-        .vmkdir(&[(&new_dir, 0o711), (&directories[0].0, 0o755)])
+        .vmkdir(&[
+            vnfs::MkDirOp::new(std::path::Path::new(&new_dir), 0o711),
+            vnfs::MkDirOp::new(directories[0].path(), 0o755),
+        ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
@@ -130,7 +133,10 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     );
     let duplicate = format!("{directory}/duplicate-dir");
     let error = fs
-        .vmkdir(&[(&duplicate, 0o700), (&duplicate, 0o755)])
+        .vmkdir(&[
+            vnfs::MkDirOp::new(&duplicate, 0o700),
+            vnfs::MkDirOp::new(&duplicate, 0o755),
+        ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert!(fs.attrs(&duplicate).is_err());

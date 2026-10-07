@@ -512,15 +512,19 @@ fn vsetattrs_many_local_and_routed_files() {
         "/auto/foreign",
     );
     std::os::unix::fs::symlink("mounted/file-0", root.path().join("link")).unwrap();
-    let updates = [("/link", vnfs::MetadataUpdate::new().len(11))];
-    assert!(mounted.vsetattrs(&updates, false).is_err());
+    let updates = [vnfs::SetAttrsOp::new("/link").len(11)];
+    assert!(
+        mounted
+            .vsetattrs(&[updates[0].follow_symlinks(false)])
+            .is_err()
+    );
     assert_eq!(
         std::fs::metadata(root.path().join("mounted/file-0"))
             .unwrap()
             .len(),
         7
     );
-    mounted.vsetattrs(&updates, true).unwrap();
+    mounted.vsetattrs(&updates).unwrap();
     assert_eq!(
         std::fs::metadata(root.path().join("mounted/file-0"))
             .unwrap()

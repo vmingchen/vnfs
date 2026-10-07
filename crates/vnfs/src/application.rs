@@ -233,10 +233,9 @@ macro_rules! client_methods {
         }
         fn vsetattrs<P: vfsi_core::MetadataOperand<Self::File>>(
             &self,
-            updates: &[(P, vfsi_core::MetadataUpdate)],
-            follow_symlinks: bool,
+            updates: &[vfsi_core::SetAttrsOp<P>],
         ) -> Result<()> {
-            <$client>::vsetattrs($receiver(self), updates, follow_symlinks)
+            <$client>::vsetattrs($receiver(self), updates)
         }
         fn vgetattrs<P: AsRef<Path>>(
             &self,
@@ -279,7 +278,7 @@ macro_rules! client_methods {
         fn vclose(&self, files: &mut [Self::File]) -> Result<()> {
             <$client>::$close($receiver(self), files)
         }
-        fn vmkdir<P: AsRef<Path>>(&self, paths: &[(P, u32)]) -> Result<()> {
+        fn vmkdir<P: AsRef<Path>>(&self, paths: &[vfsi_core::MkDirOp<P>]) -> Result<()> {
             <$client>::$mkdir($receiver(self), paths)
         }
 
@@ -1040,7 +1039,11 @@ mod extension_tests {
             calls: Cell::new(0),
             shape: Cell::new(0),
         };
-        fs.vmkdir(&[("/a", 0o777), ("/b", 0o777)]).unwrap();
+        fs.vmkdir(&[
+            crate::MkDirOp::new("/a", 0o777),
+            crate::MkDirOp::new("/b", 0o777),
+        ])
+        .unwrap();
         fs.write_files(&[("/a/f", b"x"), ("/b/f", b"y")]).unwrap();
         let options = crate::WalkOptions::new().max_entries(2);
         let trees = fs
@@ -1095,7 +1098,11 @@ mod extension_tests {
             calls: Cell::new(0),
             shape: Cell::new(0),
         };
-        fs.vmkdir(&[("/a", 0o777), ("/b", 0o777)]).unwrap();
+        fs.vmkdir(&[
+            crate::MkDirOp::new("/a", 0o777),
+            crate::MkDirOp::new("/b", 0o777),
+        ])
+        .unwrap();
         let options = crate::WalkOptions::new().max_entries(0).max_path_bytes(4);
         assert_eq!(
             fs.visit_entries_with_options(&["/a", "/b"], options.into(), |_, _| panic!(

@@ -240,8 +240,7 @@ impl AutoClient {
         AutoSetMetadata {
             client: self,
             path: path.as_ref().to_path_buf(),
-            update: vfsi_core::MetadataUpdate::new(),
-            follow: true,
+            update: crate::SetAttrsOp::new(()),
         }
     }
 
@@ -435,8 +434,7 @@ impl AutoClient {
     /// Update route-coherent batches of paths and open objects.
     pub fn vsetattrs<P: vfsi_core::MetadataOperand<AutoFile>>(
         &self,
-        updates: &[(P, crate::MetadataUpdate)],
-        follow_symlinks: bool,
+        updates: &[crate::SetAttrsOp<P>],
     ) -> VfResult<()> {
         use vfsi_core::MetadataTarget;
         if updates.is_empty() {
@@ -444,7 +442,8 @@ impl AutoClient {
         }
         let mounts = read_mounts(false);
         let mut resolved = Vec::with_capacity(updates.len());
-        for (index, (target, update)) in updates.iter().enumerate() {
+        for (index, op) in updates.iter().enumerate() {
+            let target = op.target();
             // Preflight all inputs before any route is allowed to mutate.
             let route = match target.metadata_target() {
                 MetadataTarget::Path(path) => self.resolve(path, &mounts),
@@ -460,11 +459,14 @@ impl AutoClient {
                     }
                 }
             };
-            if update.uid == Some(u32::MAX) || update.gid == Some(u32::MAX) {
+            if op.requested_uid() == Some(u32::MAX) || op.requested_gid() == Some(u32::MAX) {
                 return Err(VfError::client(index, libc::EINVAL as u32)
                     .with_context("vsetattrs", &route.path));
             }
-            for time in [update.accessed, update.modified].into_iter().flatten() {
+            for time in [op.requested_accessed(), op.requested_modified()]
+                .into_iter()
+                .flatten()
+            {
                 // NFS timestamps are signed seconds, matching the core engine.
                 let duration = time
                     .duration_since(std::time::UNIX_EPOCH)
@@ -488,7 +490,7 @@ impl AutoClient {
                 ($variant:ident) => {{
                     (start..end)
                         .map(|index| {
-                            let target = match updates[index].0.metadata_target() {
+                            let target = match updates[index].target().metadata_target() {
                                 MetadataTarget::Path(_) => {
                                     MetadataTarget::Path(resolved[index].path.as_path())
                                 }
@@ -497,22 +499,20 @@ impl AutoClient {
                                     _ => unreachable!("validated route"),
                                 },
                             };
-                            (target, updates[index].1.clone())
+                            updates[index].with_target(target)
                         })
                         .collect::<Vec<_>>()
                 }};
             }
             match &resolved[start].route {
-                Route::Mounted => self.mounted.vsetattrs(&batch!(Mounted), follow_symlinks),
-                Route::Nfs(connection) => {
-                    connection.client.vsetattrs(&batch!(Nfs), follow_symlinks)
-                }
+                Route::Mounted => self.mounted.vsetattrs(&batch!(Mounted)),
+                Route::Nfs(connection) => connection.client.vsetattrs(&batch!(Nfs)),
             }
             .map_err(|error| {
                 let error = indexed(error, start);
                 match error.index().and_then(|index| updates.get(index)) {
-                    Some((target, _)) => {
-                        let path = match target.metadata_target() {
+                    Some(op) => {
+                        let path = match op.target().metadata_target() {
                             MetadataTarget::Path(path) => path,
                             MetadataTarget::File(file) => file.path.as_path(),
                         };
@@ -566,21 +566,23 @@ impl AutoClient {
 
     /// Create directories in bounded backend cohorts, retaining input order.
     /// Parents must exist; this does not promise transactional rollback.
-    pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[(P, u32)]) -> VfResult<()> {
+    pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[crate::MkDirOp<P>]) -> VfResult<()> {
         if paths.is_empty() {
             return Ok(());
         }
         let mut seen = std::collections::HashSet::with_capacity(paths.len());
-        for (index, (path, _)) in paths.iter().enumerate() {
-            if !seen.insert(path.as_ref()) {
-                return Err(VfError::client(index, libc::EINVAL as u32)
-                    .with_context("vmkdir", path.as_ref()));
+        for (index, op) in paths.iter().enumerate() {
+            let path = op.path();
+            if !seen.insert(path) {
+                return Err(
+                    VfError::client(index, libc::EINVAL as u32).with_context("vmkdir", path)
+                );
             }
         }
         let mounts = read_mounts(true);
         let resolved: Vec<_> = paths
             .iter()
-            .map(|(path, _)| self.resolve(path.as_ref(), &mounts))
+            .map(|op| self.resolve(op.path(), &mounts))
             .collect();
         let mut start = 0;
         while start < paths.len() {
@@ -588,7 +590,7 @@ impl AutoClient {
             let batch: Vec<_> = resolved[start..end]
                 .iter()
                 .zip(&paths[start..end])
-                .map(|(route, (_, mode))| (route.path.as_path(), *mode))
+                .map(|(route, op)| crate::MkDirOp::new(route.path.as_path(), op.mode()))
                 .collect();
             let result = match &resolved[start].route {
                 Route::Mounted => self.mounted.vmkdir(&batch),
@@ -597,7 +599,7 @@ impl AutoClient {
             result.map_err(|error| {
                 let error = indexed(error, start);
                 match error.index().and_then(|index| paths.get(index)) {
-                    Some((path, _)) => error.with_context("vmkdir", path.as_ref()),
+                    Some(op) => error.with_context("vmkdir", op.path()),
                     None => error,
                 }
             })?;
@@ -1671,14 +1673,13 @@ pub struct AutoOpenOptions<'a> {
 pub struct AutoSetMetadata<'a> {
     client: &'a AutoClient,
     path: PathBuf,
-    update: vfsi_core::MetadataUpdate,
-    follow: bool,
+    update: crate::SetAttrsOp<()>,
 }
 
 macro_rules! metadata_setter {
     ($name:ident, $type:ty) => {
         pub fn $name(&mut self, value: $type) -> &mut Self {
-            self.update.$name = Some(value);
+            self.update = self.update.$name(value);
             self
         }
     };
@@ -1692,12 +1693,12 @@ impl AutoSetMetadata<'_> {
     metadata_setter!(accessed, std::time::SystemTime);
     metadata_setter!(modified, std::time::SystemTime);
     pub fn follow_symlinks(&mut self, follow: bool) -> &mut Self {
-        self.follow = follow;
+        self.update = self.update.follow_symlinks(follow);
         self
     }
     pub fn apply(&self) -> VfResult<()> {
         self.client
-            .vsetattrs(&[(&self.path, self.update.clone())], self.follow)
+            .vsetattrs(&[self.update.with_target(&self.path)])
     }
 }
 

@@ -81,15 +81,12 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, path)| {
-                (
-                    path,
-                    MetadataUpdate::new()
-                        .permissions(Permissions::from_mode(0o640))
-                        .len(i as u64),
-                )
+                vfsi_core::SetAttrsOp::new(path)
+                    .permissions(Permissions::from_mode(0o640))
+                    .len(i as u64)
             })
             .collect();
-        vfsi_core::Vfsi::vsetattrs(&client, &updates, true).unwrap();
+        vfsi_core::Vfsi::vsetattrs(&client, &updates).unwrap();
         use std::os::unix::fs::MetadataExt;
         for (i, path) in paths.iter().enumerate() {
             let metadata = std::fs::metadata(root.0.join(path.trim_start_matches('/'))).unwrap();
@@ -113,16 +110,13 @@ mod tests {
         std::fs::write(root.0.join("file"), b"replacement").unwrap();
         let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_001);
         client
-            .vsetattrs(
-                &[(
-                    vfsi_core::MetadataTarget::File(&file),
-                    MetadataUpdate::new()
-                        .len(3)
-                        .permissions(Permissions::from_mode(0o640))
-                        .modified(modified),
-                )],
-                false,
-            )
+            .vsetattrs(&[
+                vfsi_core::SetAttrsOp::new(vfsi_core::MetadataTarget::File(&file))
+                    .len(3)
+                    .permissions(Permissions::from_mode(0o640))
+                    .modified(modified)
+                    .follow_symlinks(false),
+            ])
             .unwrap();
         let attrs = file.attrs().unwrap();
         assert_eq!(attrs.len(), 3);

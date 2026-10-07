@@ -224,13 +224,8 @@ pub trait Backend: FileSystem {
         crate::backend_helpers::native_metadata_path_impl_default(self, path, follow)
     }
 
-    fn set_metadata_path_impl(
-        &mut self,
-        path: &std::path::Path,
-        update: MetadataUpdate,
-        follow: bool,
-    ) -> VfResult<()> {
-        crate::backend_helpers::native_set_metadata_path_impl_default(self, path, update, follow)
+    fn set_metadata_path_impl(&mut self, op: &SetAttrsOp<&std::path::Path>) -> VfResult<()> {
+        crate::backend_helpers::native_set_metadata_path_impl_default(self, op)
     }
 
     // Paged directory enumeration.

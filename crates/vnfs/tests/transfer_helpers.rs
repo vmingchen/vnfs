@@ -56,12 +56,8 @@ impl Vfsi for Harness {
     fn capabilities(&self) -> Result<Capabilities> {
         self.fs.capabilities()
     }
-    fn vsetattrs<P: MetadataOperand<Self::File>>(
-        &self,
-        targets: &[(P, MetadataUpdate)],
-        follow_symlinks: bool,
-    ) -> Result<()> {
-        self.fs.vsetattrs(targets, follow_symlinks)
+    fn vsetattrs<P: MetadataOperand<Self::File>>(&self, targets: &[SetAttrsOp<P>]) -> Result<()> {
+        self.fs.vsetattrs(targets)
     }
     fn vstatfs<P: MetadataOperand<Self::File>>(
         &self,
@@ -143,7 +139,7 @@ impl Vfsi for Harness {
         }
         Ok(())
     }
-    fn vmkdir<P: AsRef<Path>>(&self, p: &[(P, u32)]) -> Result<()> {
+    fn vmkdir<P: AsRef<Path>>(&self, p: &[MkDirOp<P>]) -> Result<()> {
         self.fs.vmkdir(p)
     }
     fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(

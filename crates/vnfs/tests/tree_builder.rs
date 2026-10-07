@@ -262,7 +262,11 @@ fn bulk_directory_creation_preserves_error_index_path_and_completed_prefix() {
     let client = Mounted::new(temp.path()).unwrap();
     client.create_dir("/taken").unwrap();
     let error = client
-        .vmkdir(&[("/first", 0o777), ("/taken", 0o777), ("/last", 0o777)])
+        .vmkdir(&[
+            vnfs::MkDirOp::new("/first", 0o777),
+            vnfs::MkDirOp::new("/taken", 0o777),
+            vnfs::MkDirOp::new("/last", 0o777),
+        ])
         .unwrap_err();
     assert_eq!(error.kind(), ErrorKind::AlreadyExists);
     assert_eq!(error.index(), Some(1));
@@ -271,7 +275,10 @@ fn bulk_directory_creation_preserves_error_index_path_and_completed_prefix() {
     assert!(!temp.path().join("last").exists());
     assert!(
         client
-            .vmkdir(&[("/duplicate", 0o777), ("/duplicate", 0o777)])
+            .vmkdir(&[
+                vnfs::MkDirOp::new("/duplicate", 0o777),
+                vnfs::MkDirOp::new("/duplicate", 0o777)
+            ])
             .is_err()
     );
     assert!(!temp.path().join("duplicate").exists());
@@ -304,7 +311,10 @@ fn routed_client_supports_the_same_builder_and_directory_preflight() {
     );
     assert!(
         client
-            .vmkdir(&[("/duplicate", 0o777), ("/duplicate", 0o777)])
+            .vmkdir(&[
+                vnfs::MkDirOp::new("/duplicate", 0o777),
+                vnfs::MkDirOp::new("/duplicate", 0o777)
+            ])
             .is_err()
     );
     assert!(!temp.path().join("duplicate").exists());

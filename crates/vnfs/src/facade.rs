@@ -38,13 +38,12 @@ macro_rules! owned_client {
             /// Update selected metadata fields for many paths in one backend vector.
             pub fn vsetattrs<P: vfsi_core::MetadataOperand<$file>>(
                 &self,
-                updates: &[(P, MetadataUpdate)],
-                follow_symlinks: bool,
+                updates: &[SetAttrsOp<P>],
             ) -> Result<()> {
                 let updates: Vec<_> = updates
                     .iter()
-                    .map(|(target, update)| {
-                        let target = match target.metadata_target() {
+                    .map(|op| {
+                        let target = match op.target().metadata_target() {
                             vfsi_core::MetadataTarget::Path(path) => {
                                 vfsi_core::MetadataTarget::Path(path)
                             }
@@ -52,10 +51,10 @@ macro_rules! owned_client {
                                 vfsi_core::MetadataTarget::File(&file.inner)
                             }
                         };
-                        (target, update.clone())
+                        op.with_target(target)
                     })
                     .collect();
-                self.inner.vsetattrs(&updates, follow_symlinks)
+                self.inner.vsetattrs(&updates)
             }
             /// Create symbolic links, retaining each target's original text.
             pub fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
@@ -106,7 +105,7 @@ macro_rules! owned_client {
             }
             /// Create directories in vector phases; parents must exist.
             /// An error can follow partially completed mutations.
-            pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[(P, u32)]) -> Result<()> {
+            pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[MkDirOp<P>]) -> Result<()> {
                 self.inner.vmkdir(paths)
             }
             /// Create one directory with explicit Unix permission bits.

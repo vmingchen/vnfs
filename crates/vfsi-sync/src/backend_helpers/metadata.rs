@@ -89,18 +89,17 @@ pub fn native_metadata_path_impl_default<F: Backend + ?Sized>(
 
 pub fn native_set_metadata_path_impl_default<F: Backend + ?Sized>(
     backend: &mut F,
-    path: &std::path::Path,
-    update: MetadataUpdate,
-    follow: bool,
+    op: &SetAttrsOp<&std::path::Path>,
 ) -> VfResult<()> {
+    let path = *op.target();
     let mut attributes = SetAttributes::new(VfFile::from_os_path(path));
-    attributes.follow_symlinks = follow;
-    attributes.mode = update.permissions.map(Permissions::mode);
-    attributes.size = update.len;
-    attributes.uid = update.uid;
-    attributes.gid = update.gid;
-    attributes.atime = update.accessed.map(system_time_parts).transpose()?;
-    attributes.mtime = update.modified.map(system_time_parts).transpose()?;
+    attributes.follow_symlinks = op.follows_symlinks();
+    attributes.mode = op.requested_permissions().map(Permissions::mode);
+    attributes.size = op.requested_len();
+    attributes.uid = op.requested_uid();
+    attributes.gid = op.requested_gid();
+    attributes.atime = op.requested_accessed().map(system_time_parts).transpose()?;
+    attributes.mtime = op.requested_modified().map(system_time_parts).transpose()?;
     backend
         .set_attributes_impl(attributes)
         .map_err(|error| error.with_context("set_metadata", path))

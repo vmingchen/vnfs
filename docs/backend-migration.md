@@ -122,7 +122,9 @@ vectors and namespace workflows. `VfFileHandle` uses `Backend`. Scalar-only
 clients remain usable through `FileSystem`; they do not need `Backend`.
 
 Application vectors use `vopen`, `vclose`, `vrename`, `vmkdir`, and `vcopy`.
-`vmkdir` accepts `(path, mode)` pairs; `VfsiExt::close_files` consumes handles.
+`vmkdir` accepts `MkDirOp::new(path, mode)` operations; `vsetattrs` accepts
+`SetAttrsOp::new(target)` operations with fluent attribute setters and an optional
+`follow_symlinks(false)` policy. `VfsiExt::close_files` consumes handles.
 The native `FsClient` also has `vmkdir_default` and `vclose_owned` compatibility
 helpers; these are not re-exported as application methods by `vnfs`. Structured internal I/O
 adapters use `vread_native`/`vwrite_native` and corresponding semantic variants
