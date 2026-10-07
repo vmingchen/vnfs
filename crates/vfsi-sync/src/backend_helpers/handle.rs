@@ -118,13 +118,7 @@ pub fn write_raw_impl_default<F: FileSystem + ?Sized>(
     offset: u64,
     data: &[u8],
 ) -> VfResult<usize> {
-    let request = WriteOpRef {
-        file,
-        offset: VfOffset::At(offset),
-        data,
-        creation: false,
-        truncate: false,
-    };
+    let request = WriteOp::new(file, VfOffset::At(offset), data);
     let result = backend.write_impl(request)?;
     validate_write_results(
         "write_raw",

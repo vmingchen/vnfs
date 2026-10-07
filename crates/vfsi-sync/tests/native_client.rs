@@ -8,7 +8,7 @@ use vfsi_sync::api::ReadOptions;
 use vfsi_sync::{
     Backend, Capabilities, DirEntry, DirPageCursor, FileSystem, FsClient, OpenFlags, OpenOp,
     ReadDirOptions, ReadIntoResult, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfError,
-    VfFile, VfOffset, VfResult, Vfsi, VfsiExt, WriteOpRef, WriteResult,
+    VfFile, VfOffset, VfResult, Vfsi, VfsiExt, WriteOp, WriteResult,
 };
 
 #[test]
@@ -287,7 +287,7 @@ impl Backend for ScalarOnly {
         Ok(results)
     }
 
-    fn vwrite_impl(&mut self, requests: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_impl(&mut self, requests: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
         let limit = self
             .vector_result_limit
             .lock()
@@ -403,7 +403,7 @@ macro_rules! handle_contract {
             fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
                 self.scalar.read_impl(request)
             }
-            fn write_impl(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult> {
+            fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
                 self.scalar.write_impl(request)
             }
             fn seek_impl(&mut self, file: &VfFile, position: SeekFrom) -> VfResult<u64> {
@@ -429,6 +429,146 @@ macro_rules! handle_contract {
 handle_contract!(HandleOnly);
 handle_contract!(DefaultBackend);
 handle_contract!(PagedBackend);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WriteObservation {
+    pointer: usize,
+    length: usize,
+    offset: VfOffset,
+    create: bool,
+    truncate: bool,
+}
+
+#[derive(Default)]
+struct WriteBoundaryProbe {
+    scalar: ScalarOnly,
+    calls: Arc<Mutex<Vec<Vec<WriteObservation>>>>,
+    failure: Option<VfError>,
+}
+handle_contract!(WriteBoundaryProbe);
+impl Backend for WriteBoundaryProbe {
+    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        Err(VfError::unsupported(0))
+    }
+    fn vwrite_impl(&mut self, writes: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
+        self.calls.lock().unwrap().push(
+            writes
+                .iter()
+                .map(|op| WriteObservation {
+                    pointer: op.data().as_ptr() as usize,
+                    length: op.data().len(),
+                    offset: op.offset(),
+                    create: op.creates(),
+                    truncate: op.truncates(),
+                })
+                .collect(),
+        );
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        Ok(writes
+            .iter()
+            .map(|op| WriteResult {
+                file: op.file().clone(),
+                offset: match op.offset() {
+                    VfOffset::At(offset) => offset,
+                    _ => 0,
+                },
+                written: op.data().len().min(2),
+                stable: true,
+            })
+            .collect())
+    }
+}
+
+#[test]
+fn shared_write_operations_keep_storage_borrowed_through_dynamic_vector_dispatch() {
+    let mut concrete = WriteBoundaryProbe::default();
+    let calls = Arc::clone(&concrete.calls);
+    let backend: &mut dyn Backend = &mut concrete;
+    let storage = [
+        WriteOp::from_path("/created", VfOffset::At(0), b"abc".to_vec())
+            .with_creation()
+            .with_truncate(),
+        WriteOp::from_fd(7, VfOffset::Cur, b"def".to_vec()),
+    ];
+    let writes: Vec<_> = storage.iter().map(vfsi_core::WriteOp::borrowed).collect();
+    let results = backend.vwrite_impl(&writes).unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0].file, *storage[0].file());
+    assert_eq!(results[1].file, *storage[1].file());
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [vec![
+            WriteObservation {
+                pointer: storage[0].data().as_ptr() as usize,
+                length: 3,
+                offset: VfOffset::At(0),
+                create: true,
+                truncate: true
+            },
+            WriteObservation {
+                pointer: storage[1].data().as_ptr() as usize,
+                length: 3,
+                offset: VfOffset::Cur,
+                create: false,
+                truncate: false
+            },
+        ]]
+    );
+}
+
+#[test]
+fn consolidated_write_dispatch_retries_only_successful_short_writes_without_copying() {
+    for failure in [
+        None,
+        Some(VfError::client(1, libc::ENOSPC as u32)),
+        Some(VfError::transport(None, "lost write reply")),
+    ] {
+        let backend = WriteBoundaryProbe {
+            failure: failure.clone(),
+            ..Default::default()
+        };
+        let calls = Arc::clone(&backend.calls);
+        let client = FsClient::new(backend);
+        let files = [
+            client.open("/first").unwrap(),
+            client.open("/second").unwrap(),
+        ];
+        let data = b"abcdef";
+        let ops = [
+            files[0].write_request_at(0, data),
+            files[1].write_request_at(10, data),
+        ];
+        let result = client.vwrite_all_native(&ops);
+        let calls = calls.lock().unwrap();
+        if let Some(error) = failure {
+            let actual = result.unwrap_err();
+            assert_eq!(actual.index(), error.index());
+            assert_eq!(actual.is_transport(), error.is_transport());
+            if error.index().is_some() {
+                assert_eq!(actual.path(), Some(std::path::Path::new("/second")));
+            }
+            assert_eq!(
+                calls.len(),
+                1,
+                "indexed and ambiguous failures must never replay"
+            );
+        } else {
+            assert!(result.unwrap().iter().all(|r| r.written == data.len()));
+            assert_eq!(calls.len(), 3);
+            for (wave, requests) in calls.iter().enumerate() {
+                assert_eq!(requests.len(), 2, "independent requests stay vectorized");
+                for (index, op) in requests.iter().enumerate() {
+                    assert_eq!(op.pointer, data[2 * wave..].as_ptr() as usize);
+                    assert_eq!(op.length, data.len() - 2 * wave);
+                    assert_eq!(op.offset, VfOffset::At(index as u64 * 10 + 2 * wave as u64));
+                    assert!(!op.create && !op.truncate);
+                }
+            }
+        }
+    }
+}
 
 #[derive(Default)]
 struct AttrsBackend {
@@ -920,7 +1060,7 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
     );
     assert_eq!(
         backend
-            .vwrite_impl(&[WriteOpRef::new(&files[0], VfOffset::At(0), b"x")])
+            .vwrite_impl(&[WriteOp::new(&files[0], VfOffset::At(0), b"x")])
             .unwrap_err()
             .kind(),
         std::io::ErrorKind::Unsupported
@@ -1058,17 +1198,17 @@ impl FileSystem for ScalarOnly {
         })
     }
 
-    fn write_impl(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
         self.write_calls.fetch_add(1, Ordering::SeqCst);
         if self.oversized_write_count {
             return Ok(WriteResult {
-                file: request.file.clone(),
+                file: request.file().clone(),
                 offset: 0,
-                written: request.data.len() + 1,
+                written: request.data().len() + 1,
                 stable: true,
             });
         }
-        let offset = match request.offset {
+        let offset = match request.offset() {
             VfOffset::At(value) => value,
             VfOffset::Cur => self.cursor,
             VfOffset::End => self.data.len() as u64,
@@ -1076,14 +1216,14 @@ impl FileSystem for ScalarOnly {
         };
         let start = offset as usize;
         let length = request
-            .data
+            .data()
             .len()
             .min(self.max_write_once.unwrap_or(usize::MAX));
         self.data.resize(self.data.len().max(start + length), 0);
-        self.data[start..start + length].copy_from_slice(&request.data[..length]);
+        self.data[start..start + length].copy_from_slice(&request.data()[..length]);
         self.cursor = offset + length as u64;
         Ok(WriteResult {
-            file: request.file.clone(),
+            file: request.file().clone(),
             offset,
             written: length,
             stable: true,

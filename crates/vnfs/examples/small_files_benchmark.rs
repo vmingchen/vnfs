@@ -135,7 +135,14 @@ fn read_ops(paths: &[String], length: usize) -> Vec<ReadOp> {
 fn measure_vnfs_write(client: &mut NfsVecFs, operations: &[WriteOp]) -> Result<Sample> {
     vfsi_nfs::compound::thread_compound_stats();
     vfsi_nfs::compound::rpc_stats();
-    let (milliseconds, result) = elapsed(|| client.vwrite_owned_impl(operations));
+    let (milliseconds, result) = elapsed(|| {
+        client.vwrite_impl(
+            &(operations)
+                .iter()
+                .map(vfsi_core::WriteOp::borrowed)
+                .collect::<Vec<_>>(),
+        )
+    });
     result?;
     Ok(Sample {
         milliseconds,
@@ -229,7 +236,12 @@ fn run(args: &Args, run_name: &str, direct_run: &Path, mount_run: &Path) -> Resu
     ];
     let probe_ops = write_ops(&probe_paths, b"probe");
     vfsi_nfs::compound::thread_compound_stats();
-    client.vwrite_owned_impl(&probe_ops)?;
+    client.vwrite_impl(
+        &probe_ops
+            .iter()
+            .map(vfsi_core::WriteOp::borrowed)
+            .collect::<Vec<_>>(),
+    )?;
     let probe_compounds = vfsi_nfs::compound::thread_compound_stats().0;
 
     for round in 0..args.rounds {

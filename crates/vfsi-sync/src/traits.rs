@@ -204,7 +204,7 @@ pub(crate) fn validate_read_into_results(
 
 pub(crate) fn validate_write_results(
     operation: &str,
-    requests: &[WriteOpRef<'_>],
+    requests: &[WriteOp<&VfFile, &[u8]>],
     results: &[WriteResult],
 ) -> VfResult<()> {
     if results.len() != requests.len() {
@@ -219,25 +219,25 @@ pub(crate) fn validate_write_results(
         ));
     }
     for (index, (request, result)) in requests.iter().zip(results).enumerate() {
-        if result.file != *request.file {
+        if result.file != *request.file() {
             return Err(contract_error(
                 operation,
                 Some(index),
                 "result file does not match request",
             ));
         }
-        if result.written > request.data.len() {
+        if result.written > request.data().len() {
             return Err(contract_error(
                 operation,
                 Some(index),
                 format!(
                     "reported {} bytes written for a {}-byte write",
                     result.written,
-                    request.data.len()
+                    request.data().len()
                 ),
             ));
         }
-        if let VfOffset::At(expected) = request.offset
+        if let VfOffset::At(expected) = request.offset()
             && result.offset != expected
         {
             return Err(contract_error(
@@ -354,7 +354,7 @@ mod contract_tests {
     #[test]
     fn write_result_identity_offset_size_and_cardinality_are_checked() {
         let file = VfFile::from_path("/file");
-        let request = WriteOpRef::new(&file, VfOffset::At(0), b"x");
+        let request: WriteOp<&VfFile, &[u8]> = WriteOp::new(&file, VfOffset::At(0), b"x");
         let valid = WriteResult {
             file: file.clone(),
             offset: 0,

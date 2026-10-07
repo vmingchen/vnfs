@@ -2544,7 +2544,10 @@ impl NfsVecFs {
     }
 
     /// Batched writev for open (descriptor) ops.
-    fn vwrite_batch_nfs(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_batch_nfs(
+        &mut self,
+        writes: &[WriteOp<&VfFile, &[u8]>],
+    ) -> VfResult<Vec<WriteResult>> {
         let per = self.nfs.per_op_bytes();
         let mut ops = Vec::new();
         let mut offsets = Vec::with_capacity(writes.len());
@@ -2556,26 +2559,26 @@ impl NfsVecFs {
         // Validate every operand before issuing any mutating RPC.
         for (index, request) in writes.iter().enumerate() {
             let offset = self
-                .write_offset(request.file, request.offset)
+                .write_offset(request.file(), request.offset())
                 .map_err(|error| error.with_index(index))?;
             offset
-                .checked_add(request.data.len() as u64)
+                .checked_add(request.data().len() as u64)
                 .ok_or_else(|| VfError::client(index, libc::EOVERFLOW as u32))?;
             let open = self
                 .open_files
-                .get(&request.file.fd().unwrap())
+                .get(&request.file().fd().unwrap())
                 .ok_or_else(|| VfError::client(index, ERR_EBADF))?;
             predecessors.push(!seen_handles.insert(open.fh.clone()));
-            positional.push(matches!(request.offset, VfOffset::At(_)) && !open.append);
+            positional.push(matches!(request.offset(), VfOffset::At(_)) && !open.append);
             handles.push(open.fh.clone());
             let start = ops.len();
-            for part in (0..request.data.len().max(1)).step_by(per) {
-                let end = request.data.len().min(part.saturating_add(per));
+            for part in (0..request.data().len().max(1)).step_by(per) {
+                let end = request.data().len().min(part.saturating_add(per));
                 ops.push(crate::client::WriteOp {
                     fh: open.fh.clone(),
                     stateid: open.stateid,
                     offset: offset + part as u64,
-                    data: &request.data[part..end],
+                    data: &request.data()[part..end],
                 });
             }
             offsets.push(offset);
@@ -2601,7 +2604,7 @@ impl NfsVecFs {
                 if done[index] {
                     continue;
                 }
-                let range = offsets[index]..offsets[index] + request.data.len() as u64;
+                let range = offsets[index]..offsets[index] + request.data().len() as u64;
                 match active_files.entry(&handles[index]) {
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         entry.insert(WriteWaveAccess::new(range, positional[index]));
@@ -2619,13 +2622,13 @@ impl NfsVecFs {
                 // append requests the cursor/size after the earlier write.
                 if !activated[index] {
                     let offset = if predecessors[index] && !positional[index] {
-                        self.write_offset(request.file, request.offset)
+                        self.write_offset(request.file(), request.offset())
                             .map_err(|error| error.with_index(index))?
                     } else {
                         offsets[index]
                     };
                     offset
-                        .checked_add(request.data.len() as u64)
+                        .checked_add(request.data().len() as u64)
                         .ok_or_else(|| VfError::client(index, libc::EOVERFLOW as u32))?;
                     offsets[index] = offset;
                     let mut part = 0;
@@ -2707,8 +2710,8 @@ impl NfsVecFs {
                     } else {
                         progress[next_chunks[index]]
                     };
-                if request.offset == VfOffset::Cur {
-                    self.advance_offset(request.file, offsets[index] + contiguous as u64);
+                if request.offset() == VfOffset::Cur {
+                    self.advance_offset(request.file(), offsets[index] + contiguous as u64);
                 }
             }
             #[cfg(feature = "test-faults")]
@@ -2721,9 +2724,9 @@ impl NfsVecFs {
             .iter()
             .enumerate()
             .map(|(index, request)| WriteResult {
-                file: request.file.clone(),
+                file: request.file().clone(),
                 offset: offsets[index],
-                written: request.data.len(),
+                written: request.data().len(),
                 stable: stable[index],
             })
             .collect())
@@ -3278,7 +3281,7 @@ impl NfsVecFs {
     /// The legacy phased path-based writev.
     fn vwrite_path_fallback_nfs(
         &mut self,
-        writes: &[WriteOpRef<'_>],
+        writes: &[WriteOp<&VfFile, &[u8]>],
     ) -> VfResult<Vec<WriteResult>> {
         if writes.is_empty() {
             return Ok(Vec::new());
@@ -3288,17 +3291,17 @@ impl NfsVecFs {
         let mut creation = Vec::with_capacity(writes.len());
         let mut needs_open = false;
         for (i, w) in writes.iter().enumerate() {
-            files.push(w.file);
-            creation.push(w.creation);
-            if !w.file.is_descriptor() {
+            files.push(w.file());
+            creation.push(w.creates());
+            if !w.file().is_descriptor() {
                 needs_open = true;
-                if w.offset == VfOffset::Cur {
+                if w.offset() == VfOffset::Cur {
                     return Err(VfError::failure(i, ERR_INVAL));
                 }
             }
         }
         if needs_open {
-            let truncation: Vec<bool> = writes.iter().map(|w| w.truncate).collect();
+            let truncation: Vec<bool> = writes.iter().map(|w| w.truncates()).collect();
             tmp = self.open_path_batch(&files, &creation, true, &truncation)?;
         }
         let remapped_files: Vec<VfFile> = writes
@@ -3306,32 +3309,26 @@ impl NfsVecFs {
             .enumerate()
             .map(|(i, w)| match tmp[i] {
                 Some(fd) => VfFile::from_fd(fd),
-                None => w.file.clone(),
+                None => w.file().clone(),
             })
             .collect();
-        let remapped: Vec<WriteOpRef<'_>> = writes
+        let remapped: Vec<WriteOp<&VfFile, &[u8]>> = writes
             .iter()
             .zip(&remapped_files)
-            .map(|(w, file)| WriteOpRef {
-                file,
-                offset: w.offset,
-                data: w.data,
-                creation: false,
-                truncate: false,
-            })
+            .map(|(w, file)| WriteOp::new(file, w.offset(), w.data()))
             .collect();
         let result = self.vwrite_batch_nfs(&remapped);
         self.close_tmp(&tmp);
         let mut out = result?;
         for (i, r) in out.iter_mut().enumerate() {
-            r.file = writes[i].file.clone();
+            r.file = writes[i].file().clone();
         }
         Ok(out)
     }
 
     fn vwrite_path_openwrite_nfs(
         &mut self,
-        writes: &[WriteOpRef<'_>],
+        writes: &[WriteOp<&VfFile, &[u8]>],
         path_ops: &[crate::client::PathWriteOp<'_>],
         offsets: &[u64],
     ) -> VfResult<Vec<WriteResult>> {
@@ -3363,7 +3360,7 @@ impl NfsVecFs {
 
     fn vwrite_path_full_nfs(
         &mut self,
-        writes: &[WriteOpRef<'_>],
+        writes: &[WriteOp<&VfFile, &[u8]>],
         path_ops: &[crate::client::PathWriteOp<'_>],
         offsets: &[u64],
     ) -> VfResult<Vec<WriteResult>> {
@@ -3401,7 +3398,7 @@ impl NfsVecFs {
 
     fn assemble_writes(
         &self,
-        writes: &[WriteOpRef<'_>],
+        writes: &[WriteOp<&VfFile, &[u8]>],
         offsets: &[u64],
         counts: &[Option<u32>],
         committed: &[Option<u32>],
@@ -3410,7 +3407,7 @@ impl NfsVecFs {
             .iter()
             .enumerate()
             .map(|(i, w)| WriteResult {
-                file: w.file.clone(),
+                file: w.file().clone(),
                 offset: offsets[i],
                 written: counts[i].unwrap_or(0) as usize,
                 stable: committed[i].unwrap_or(0) == stable_how4_FILE_SYNC4,
@@ -4332,7 +4329,7 @@ impl FileSystem for NfsVecFs {
     fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
         vfsi_sync::backend_helpers::native_read_into_impl_default(self, request, buffer)
     }
-    fn write_impl(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
         vfsi_sync::backend_helpers::native_write_impl_default(self, request)
     }
     fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {
@@ -4569,30 +4566,25 @@ impl Backend for NfsVecFs {
         Ok(output)
     }
 
-    fn vwrite_owned_impl(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
-        let borrowed: Vec<_> = writes.iter().map(WriteOpRef::from).collect();
-        self.vwrite_impl(&borrowed)
-    }
-
-    fn vwrite_impl(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_impl(&mut self, writes: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
         self.ensure_writable(writes.len())?;
         if writes.is_empty() {
             return Ok(Vec::new());
         }
-        if writes.iter().all(|w| w.file.is_descriptor()) {
+        if writes.iter().all(|w| w.file().is_descriptor()) {
             return self.vwrite_batch_nfs(writes);
         }
         let mut path_ops = Vec::with_capacity(writes.len());
         let mut offsets = Vec::with_capacity(writes.len());
         for (i, w) in writes.iter().enumerate() {
-            let off = match w.offset {
+            let off = match w.offset() {
                 VfOffset::At(o) => o,
                 VfOffset::End => {
-                    let path = self.server_vf_path(w.file).map_err(|e| e.with_index(i))?;
+                    let path = self.server_vf_path(w.file()).map_err(|e| e.with_index(i))?;
                     let fh = self.resolve_follow(&path).map_err(|e| e.with_index(i))?;
                     self.file_size(&fh).map_err(|e| e.with_index(i))?
                 }
-                VfOffset::Cur => match w.file.fd() {
+                VfOffset::Cur => match w.file().fd() {
                     Some(fd) => self
                         .open_files
                         .get(&fd)
@@ -4602,13 +4594,13 @@ impl Backend for NfsVecFs {
                 },
                 _ => return Err(VfError::failure(i, ERR_INVAL)),
             };
-            let length = u64::try_from(w.data.len())
+            let length = u64::try_from(w.data().len())
                 .map_err(|_| VfError::failure(i, libc::EOVERFLOW as u32))?;
             off.checked_add(length)
                 .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
             offsets.push(off);
-            let file = if w.file.is_descriptor() {
-                let fd = w.file.fd().unwrap();
+            let file = if w.file().is_descriptor() {
+                let fd = w.file().fd().unwrap();
                 let open = self
                     .open_files
                     .get(&fd)
@@ -4617,7 +4609,7 @@ impl Backend for NfsVecFs {
             } else {
                 crate::client::FileRef::Path(
                     crate::path::path_bytes(
-                        &self.server_vf_path(w.file).map_err(|e| e.with_index(i))?,
+                        &self.server_vf_path(w.file()).map_err(|e| e.with_index(i))?,
                     )
                     .to_vec(),
                 )
@@ -4625,11 +4617,11 @@ impl Backend for NfsVecFs {
             path_ops.push(crate::client::PathWriteOp {
                 file,
                 offset: off,
-                data: w.data,
-                create: w.creation && !w.file.is_descriptor(),
-                truncate: w.truncate && !w.file.is_descriptor(),
+                data: w.data(),
+                create: w.creates() && !w.file().is_descriptor(),
+                truncate: w.truncates() && !w.file().is_descriptor(),
                 stateid: w
-                    .file
+                    .file()
                     .fd()
                     .and_then(|fd| self.open_files.get(&fd).map(|o| o.stateid)),
             });
@@ -4641,12 +4633,12 @@ impl Backend for NfsVecFs {
         }?;
         // Advance descriptor cursors for Cur-offset writes.
         for (i, w) in writes.iter().enumerate() {
-            if w.offset == VfOffset::Cur && w.file.is_descriptor() {
+            if w.offset() == VfOffset::Cur && w.file().is_descriptor() {
                 let new = out[i]
                     .offset
                     .checked_add(out[i].written as u64)
                     .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
-                self.advance_offset(w.file, new);
+                self.advance_offset(w.file(), new);
             }
         }
         Ok(out)

@@ -56,7 +56,7 @@ use crate::vecfs::{
     Adb, AttrMask, CopyOption, ERR_ACCES, ERR_EBADF, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT,
     ERR_NOTDIR, ExtentPair, Fd, ReadOp, ReadResult, SeekFrom, SetAttrsOp, Target,
     VF_CAP_SERVER_COPY, VfAttrs, VfError, VfFile, VfOffset, VfPathBase, VfRes, VfResult, VfType,
-    WriteOp, WriteOpRef, WriteResult,
+    WriteOp, WriteResult,
 };
 
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
@@ -1176,28 +1176,28 @@ impl SmbVecFs {
         })
     }
 
-    fn write_one(&mut self, op: WriteOpRef<'_>) -> VfResult<WriteResult> {
-        if !op.file.is_descriptor() {
-            if matches!(op.file, VfFile::Saved) {
+    fn write_one(&mut self, op: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
+        if !op.file().is_descriptor() {
+            if matches!(op.file(), VfFile::Saved) {
                 return Err(VfError::unsupported(0));
             }
-            let path = self.path_string(&self.file_path(op.file)?)?;
-            let offset = match op.offset {
+            let path = self.path_string(&self.file_path(op.file())?)?;
+            let offset = match op.offset() {
                 VfOffset::At(offset) => offset,
                 VfOffset::End => self.client_stat(&path)?.size,
                 VfOffset::Cur => return Err(VfError::failure(0, ERR_INVAL)),
                 _ => return Err(VfError::failure(0, ERR_INVAL)),
             };
             let written =
-                self.compound_write_path(&path, offset, op.data, op.creation, op.truncate)?;
+                self.compound_write_path(&path, offset, op.data(), op.creates(), op.truncates())?;
             return Ok(WriteResult {
-                file: op.file.clone(),
+                file: op.file().clone(),
                 offset,
                 written,
                 stable: true,
             });
         }
-        let (file_id, temporary, descriptor, append) = match op.file {
+        let (file_id, temporary, descriptor, append) = match op.file() {
             VfFile::Descriptor(fd) => {
                 let open = self
                     .open_files
@@ -1210,12 +1210,12 @@ impl SmbVecFs {
             }
             VfFile::Saved => return Err(VfError::unsupported(0)),
             _ => {
-                let path = self.path_string(&self.file_path(op.file)?)?;
+                let path = self.path_string(&self.file_path(op.file())?)?;
                 let mut flags = libc::O_WRONLY;
-                if op.creation {
+                if op.creates() {
                     flags |= libc::O_CREAT;
                 }
-                if op.truncate {
+                if op.truncates() {
                     flags |= libc::O_TRUNC;
                 }
                 let (id, _) = self.raw_open(&path, flags)?;
@@ -1227,10 +1227,10 @@ impl SmbVecFs {
             let offset = if append {
                 size
             } else {
-                self.resolve_offset(descriptor, op.offset, size)?
+                self.resolve_offset(descriptor, op.offset(), size)?
             };
             let mut confirmed = 0usize;
-            let write_result = self.raw_write_progress(file_id, offset, op.data, |written| {
+            let write_result = self.raw_write_progress(file_id, offset, op.data(), |written| {
                 confirmed = written;
             });
             if let Some(fd) = descriptor
@@ -1248,7 +1248,7 @@ impl SmbVecFs {
             close?;
         }
         Ok(WriteResult {
-            file: op.file.clone(),
+            file: op.file().clone(),
             offset,
             written,
             stable: true,
@@ -1434,7 +1434,7 @@ impl FileSystem for SmbVecFs {
     fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
         vfsi_sync::backend_helpers::native_read_into_impl_default(self, request, buffer)
     }
-    fn write_impl(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
         vfsi_sync::backend_helpers::native_write_impl_default(self, request)
     }
     fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {
@@ -1699,12 +1699,7 @@ impl Backend for SmbVecFs {
         Ok(output)
     }
 
-    fn vwrite_owned_impl(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
-        let borrowed: Vec<_> = writes.iter().map(WriteOpRef::from).collect();
-        self.vwrite_impl(&borrowed)
-    }
-
-    fn vwrite_impl(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_impl(&mut self, writes: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
         #[cfg(feature = "test-faults")]
         {
             self.last_writev_was_concurrent = false;
@@ -1716,14 +1711,14 @@ impl Backend for SmbVecFs {
             .unwrap_or(65_536);
         let concurrent = writes.len() > 1
             && writes.iter().all(|write| {
-                !write.file.is_descriptor()
-                    && !matches!(write.file, VfFile::Saved)
-                    && matches!(write.offset, VfOffset::At(_))
-                    && !write.creation
-                    && !write.truncate
-                    && !write.data.is_empty()
-                    && write.data.len() <= max_write
-                    && write.data.len() <= u32::MAX as usize
+                !write.file().is_descriptor()
+                    && !matches!(write.file(), VfFile::Saved)
+                    && matches!(write.offset(), VfOffset::At(_))
+                    && !write.creates()
+                    && !write.truncates()
+                    && !write.data().is_empty()
+                    && write.data().len() <= max_write
+                    && write.data().len() <= u32::MAX as usize
             });
         if concurrent {
             let mut prepared = Vec::with_capacity(writes.len());
@@ -1731,7 +1726,7 @@ impl Backend for SmbVecFs {
                 let path = self
                     .path_string(
                         &self
-                            .file_path(write.file)
+                            .file_path(write.file())
                             .map_err(|e| e.with_index(index))?,
                     )
                     .map_err(|e| e.with_index(index))?;
@@ -1744,10 +1739,10 @@ impl Backend for SmbVecFs {
                 identity_create.desired_access = FileAccessMask::new(
                     FileAccessMask::FILE_READ_ATTRIBUTES | FileAccessMask::SYNCHRONIZE,
                 );
-                let VfOffset::At(offset) = write.offset else {
+                let VfOffset::At(offset) = write.offset() else {
                     unreachable!("concurrent write eligibility checked")
                 };
-                prepared.push((create, identity_create, offset, write.data));
+                prepared.push((create, identity_create, offset, write.data()));
             }
             let connection = self.client.connection_mut().clone();
             let tree_id = self.tree.tree_id;
@@ -1778,11 +1773,11 @@ impl Backend for SmbVecFs {
                 let mut output = Vec::with_capacity(writes.len());
                 for (index, (write, result)) in writes.iter().zip(results).enumerate() {
                     let written = result.map_err(|error| error.with_index(index))?;
-                    let VfOffset::At(offset) = write.offset else {
+                    let VfOffset::At(offset) = write.offset() else {
                         unreachable!("concurrent write eligibility checked")
                     };
                     output.push(WriteResult {
-                        file: write.file.clone(),
+                        file: write.file().clone(),
                         offset,
                         written,
                         stable: true,

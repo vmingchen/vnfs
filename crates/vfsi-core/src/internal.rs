@@ -1,8 +1,10 @@
 //! Unstable implementation contracts shared by VFSI backend crates.
 //!
 //! Nothing in this module is part of the application-facing API. Backends
-//! use these types to retain ordered per-request results until a strict
-//! vector API converts them into `Result<Vec<_>, _>`.
+//! use these types for shared request storage and to retain ordered per-request
+//! results until a strict vector API converts them into `Result<Vec<_>, _>`.
+
+pub use crate::write::WriteRequest;
 
 use crate::{VfError, VfResult};
 

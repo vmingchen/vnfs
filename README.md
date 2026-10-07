@@ -103,7 +103,8 @@ keep their wire vocabulary. `VfsiExt` also provides bulk composed workflows.
 
 This is a breaking Rust migration: `VecFs`/`VecFsExt` are removed. Strict typed
 opens use `vopen_impl`; indexed partial outcomes use `vopen_outcomes_impl`.
-Borrowed writes use `vwrite_impl`; owned payloads use `vwrite_owned_impl`.
+All writes use the borrowed `vwrite_impl` boundary. Owned preparation storage
+uses `WriteOp::borrowed()` without copying payloads.
 Typed attribute updates use `vsetattrs_impl`; raw attribute masks use
 `vsetattrs_raw_impl`. C/Python operation names are unchanged. See the
 [migration ledger](docs/backend-migration.md) for the complete mapping.

@@ -203,7 +203,7 @@ impl<F: Backend + ?Sized> Write for VfFileHandle<'_, F> {
             return Ok(0);
         }
         let file = self.try_descriptor()?.clone();
-        let requests = [crate::WriteOpRef::new(&file, VfOffset::Cur, buffer)];
+        let requests = [crate::WriteOp::new(&file, VfOffset::Cur, buffer)];
         let mut results = self.filesystem.vwrite_impl(&requests).map_err(io_error)?;
         validate_write_results("Write::write", &requests, &results).map_err(io_error)?;
         Ok(results.pop().expect("validated one write result").written)

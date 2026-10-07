@@ -18,7 +18,7 @@ use crate::traits::{validate_read_into_results, validate_read_results, validate_
 use crate::{
     AttrMask, Attrs, Backend, Capabilities, DirEntry, FileSystem, OpenFlags, OpenOp, Permissions,
     ReadAllOptions, ReadOp, ReadResult, RemoveOptions, StreamOptions, VfDir, VfError, VfFile,
-    VfOffset, VfResult, WriteOpRef, WriteResult,
+    VfOffset, VfResult, WriteOp, WriteResult,
 };
 
 fn read_result(result: ReadResult) -> FsReadResult {
@@ -1092,11 +1092,7 @@ impl<F: Backend> FsClient<F> {
     {
         self.vwrite_mapped_native(requests, |item| {
             let request = project(item);
-            FsWrite {
-                file: request.file,
-                offset: request.offset,
-                data: request.data,
-            }
+            *request
         })
     }
 
@@ -1118,7 +1114,7 @@ impl<F: Backend> FsClient<F> {
                 .index()
                 .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
-                    error.with_context("vwrite_native", request.file.path())
+                    error.with_context("vwrite_native", request.file().path())
                 })
         })?;
         if results.len() != requests.len() {
@@ -1133,7 +1129,7 @@ impl<F: Backend> FsClient<F> {
                 .index()
                 .and_then(|index| requests.get(index).map(&project))
                 .map_or(error.clone(), |request| {
-                    error.with_context("vwrite_native", request.file.path())
+                    error.with_context("vwrite_native", request.file().path())
                 })
         })?;
         Ok(results.into_iter().map(write_result).collect())
@@ -1162,11 +1158,7 @@ impl<F: Backend> FsClient<F> {
     {
         self.vwrite_all_mapped_native(requests, |item| {
             let request = project(item);
-            FsWrite {
-                file: request.file,
-                offset: request.offset,
-                data: request.data,
-            }
+            *request
         })
     }
 
@@ -1187,26 +1179,26 @@ impl<F: Backend> FsClient<F> {
         let mut prior_by_path: HashMap<&Path, Vec<(usize, u64, u64)>> = HashMap::new();
         let mut blocked_by = vec![Vec::new(); requests.len()];
         for (index, request) in requests.iter().map(&project).enumerate() {
-            self.validate_owner(request.file, index)?;
-            request.file.raw().map_err(|error| {
+            self.validate_owner(request.file(), index)?;
+            request.file().raw().map_err(|error| {
                 error
                     .with_index(index)
-                    .with_context("vwrite_all_native", request.file.path())
+                    .with_context("vwrite_all_native", request.file().path())
             })?;
-            let VfOffset::At(offset) = request.offset else {
+            let VfOffset::At(offset) = request.offset() else {
                 return Err(VfError::client(index, crate::ERR_INVAL)
-                    .with_context("vwrite_all_native", request.file.path()));
+                    .with_context("vwrite_all_native", request.file().path()));
             };
             let end = offset
-                .checked_add(request.data.len() as u64)
+                .checked_add(request.data().len() as u64)
                 .ok_or_else(|| {
                     VfError::client(index, libc::EOVERFLOW as u32)
-                        .with_context("vwrite_all_native", request.file.path())
+                        .with_context("vwrite_all_native", request.file().path())
                 })?;
             // Non-overlapping writes commute. An overlapping later request
             // must wait until every earlier conflicting request is complete:
             // otherwise a short-write retry can overwrite the later bytes.
-            let prior = prior_by_path.entry(request.file.path()).or_default();
+            let prior = prior_by_path.entry(request.file().path()).or_default();
             for &(earlier, start, earlier_end) in prior.iter() {
                 if offset < earlier_end && start < end {
                     blocked_by[index].push(earlier);
@@ -1217,7 +1209,7 @@ impl<F: Backend> FsClient<F> {
         let mut totals = vec![0usize; requests.len()];
         let mut stable = vec![true; requests.len()];
         let mut pending: Vec<usize> = (0..requests.len())
-            .filter(|&index| !project(&requests[index]).data.is_empty())
+            .filter(|&index| !project(&requests[index]).data().is_empty())
             .collect();
         while !pending.is_empty() {
             let wave_indices: Vec<usize> = pending
@@ -1226,26 +1218,26 @@ impl<F: Backend> FsClient<F> {
                 .filter(|&index| {
                     blocked_by[index]
                         .iter()
-                        .all(|&earlier| totals[earlier] == project(&requests[earlier]).data.len())
+                        .all(|&earlier| totals[earlier] == project(&requests[earlier]).data().len())
                 })
                 .collect();
             let wave: Vec<_> = wave_indices
                 .iter()
                 .map(|&index| {
                     let request = project(&requests[index]);
-                    let VfOffset::At(offset) = request.offset else {
+                    let VfOffset::At(offset) = request.offset() else {
                         return Err(VfError::client(index, crate::ERR_INVAL)
-                            .with_context("vwrite_all_native", request.file.path()));
+                            .with_context("vwrite_all_native", request.file().path()));
                     };
                     let offset = offset.checked_add(totals[index] as u64).ok_or_else(|| {
                         VfError::client(index, libc::EOVERFLOW as u32)
-                            .with_context("vwrite_all_native", request.file.path())
+                            .with_context("vwrite_all_native", request.file().path())
                     })?;
-                    Ok(FsWrite {
-                        file: request.file,
-                        offset: VfOffset::At(offset),
-                        data: &request.data[totals[index]..],
-                    })
+                    Ok(FsWrite::new(
+                        request.file(),
+                        VfOffset::At(offset),
+                        &request.data()[totals[index]..],
+                    ))
                 })
                 .collect::<VfResult<_>>()?;
             let results = self.vwrite_native(&wave).map_err(|error| {
@@ -1253,22 +1245,24 @@ impl<F: Backend> FsClient<F> {
             })?;
             for (&index, result) in wave_indices.iter().zip(results) {
                 if result.written == 0 {
-                    return Err(VfError::client(index, crate::ERR_IO)
-                        .with_context("vwrite_all_native", project(&requests[index]).file.path()));
+                    return Err(VfError::client(index, crate::ERR_IO).with_context(
+                        "vwrite_all_native",
+                        project(&requests[index]).file().path(),
+                    ));
                 }
                 totals[index] += result.written;
                 stable[index] &= result.stable;
             }
-            pending.retain(|&index| totals[index] < project(&requests[index]).data.len());
+            pending.retain(|&index| totals[index] < project(&requests[index]).data().len());
         }
         requests
             .iter()
             .map(&project)
             .enumerate()
             .map(|(index, request)| {
-                let VfOffset::At(offset) = request.offset else {
+                let VfOffset::At(offset) = request.offset() else {
                     return Err(VfError::client(index, crate::ERR_INVAL)
-                        .with_context("vwrite_all_native", request.file.path()));
+                        .with_context("vwrite_all_native", request.file().path()));
                 };
                 Ok(FsWriteResult {
                     offset,
@@ -1283,21 +1277,21 @@ impl<F: Backend> FsClient<F> {
         &self,
         requests: &'a [T],
         project: impl Fn(&T) -> FsWrite<'b, F>,
-    ) -> VfResult<Vec<WriteOpRef<'a>>>
+    ) -> VfResult<Vec<WriteOp<&'a VfFile, &'a [u8]>>>
     where
         F: 'b,
         'b: 'a,
     {
         let mut writes = Vec::with_capacity(requests.len());
         for (index, request) in requests.iter().map(&project).enumerate() {
-            self.validate_owner(request.file, index)?;
-            writes.push(WriteOpRef::new(
+            self.validate_owner(request.file(), index)?;
+            writes.push(WriteOp::new(
                 request
-                    .file
+                    .file()
                     .raw()
                     .map_err(|error| error.with_index(index))?,
-                request.offset,
-                request.data,
+                request.offset(),
+                request.data(),
             ));
         }
         Ok(writes)
@@ -1602,11 +1596,7 @@ impl<F: FileSystem> FsFile<F> {
     }
 
     pub fn write_request_at<'a>(&'a self, offset: u64, data: &'a [u8]) -> FsWrite<'a, F> {
-        FsWrite {
-            file: self,
-            offset: VfOffset::At(offset),
-            data,
-        }
+        FsWrite::new(self, VfOffset::At(offset), data)
     }
 
     pub fn read_request_at_into<'a>(
@@ -1692,7 +1682,7 @@ impl<F: FileSystem> FsFile<F> {
             .inner
             .lock()
             .map_err(|_| poisoned())?
-            .write_impl(WriteOpRef::new(&file, offset, buffer))
+            .write_impl(WriteOp::new(&file, offset, buffer))
             .map_err(|error| error.with_context("write", &self.path))?;
         if result.written > buffer.len() {
             return Err(VfError::client(0, crate::ERR_IO).with_context("write", &self.path));
@@ -1781,11 +1771,7 @@ pub struct FsRead<'a, F: FileSystem> {
 }
 
 /// Typed borrowed write request for [`FsClient::vwrite_native`].
-pub struct FsWrite<'a, F: FileSystem> {
-    file: &'a FsFile<F>,
-    offset: VfOffset,
-    data: &'a [u8],
-}
+pub type FsWrite<'a, F> = vfsi_core::internal::WriteRequest<&'a FsFile<F>, &'a [u8], VfOffset, ()>;
 
 /// Typed vector read into caller-provided storage.
 pub struct FsReadInto<'a, F: FileSystem> {

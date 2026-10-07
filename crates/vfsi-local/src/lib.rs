@@ -802,8 +802,8 @@ impl DummyVecFs {
         })
     }
 
-    fn writev_one(&mut self, op: WriteOpRef<'_>) -> VfResult<WriteResult> {
-        let (file, off, descriptor) = match op.file {
+    fn writev_one(&mut self, op: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
+        let (file, off, descriptor) = match op.file() {
             VfFile::Descriptor(fd) => {
                 let o = self
                     .open_files
@@ -819,7 +819,7 @@ impl DummyVecFs {
                 let off = if o.append {
                     len
                 } else {
-                    self.resolve_offset(op.file, op.offset, len)?
+                    self.resolve_offset(op.file(), op.offset(), len)?
                 };
                 let f = o
                     .file
@@ -828,13 +828,13 @@ impl DummyVecFs {
                 (f, off, true)
             }
             VfFile::Path { .. } | VfFile::Cwd | VfFile::CwdPath(_) => {
-                let p = self.real_path(&self.tcfile_path(op.file)?)?;
+                let p = self.real_path(&self.tcfile_path(op.file())?)?;
                 let mut opts = OpenOptions::new();
                 opts.write(true);
-                if op.creation {
+                if op.creates() {
                     opts.create(true);
                 }
-                if op.truncate {
+                if op.truncates() {
                     opts.truncate(true);
                 }
                 Self::protect_create_open(&p, &mut opts);
@@ -845,7 +845,7 @@ impl DummyVecFs {
                     .metadata()
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?
                     .len();
-                let off = self.resolve_offset(op.file, op.offset, len)?;
+                let off = self.resolve_offset(op.file(), op.offset(), len)?;
                 (f, off, false)
             }
             VfFile::Saved => {
@@ -853,18 +853,18 @@ impl DummyVecFs {
             }
             _ => return Err(VfError::unsupported(0)),
         };
-        let requested = u64::try_from(op.data.len()).map_err(|_| Self::overflow(0))?;
+        let requested = u64::try_from(op.data().len()).map_err(|_| Self::overflow(0))?;
         checked_offset(off, requested, 0)?;
-        file.write_all_at(op.data, off)
+        file.write_all_at(op.data(), off)
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
-        if descriptor && !matches!(op.offset, VfOffset::At(_)) {
-            let next = checked_offset(off, op.data.len() as u64, 0)?;
-            self.advance_offset(op.file, next);
+        if descriptor && !matches!(op.offset(), VfOffset::At(_)) {
+            let next = checked_offset(off, op.data().len() as u64, 0)?;
+            self.advance_offset(op.file(), next);
         }
         Ok(WriteResult {
-            file: op.file.clone(),
+            file: op.file().clone(),
             offset: off,
-            written: op.data.len(),
+            written: op.data().len(),
             stable: true,
         })
     }
@@ -1170,7 +1170,7 @@ impl FileSystem for DummyVecFs {
     fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
         vfsi_sync::backend_helpers::native_read_into_impl_default(self, request, buffer)
     }
-    fn write_impl(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
         vfsi_sync::backend_helpers::native_write_impl_default(self, request)
     }
     fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {
@@ -1265,15 +1265,7 @@ impl Backend for DummyVecFs {
         Ok(out)
     }
 
-    fn vwrite_owned_impl(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
-        let mut out = Vec::with_capacity(writes.len());
-        for (i, op) in writes.iter().enumerate() {
-            out.push(self.writev_one(op.into()).map_err(|e| e.with_index(i))?);
-        }
-        Ok(out)
-    }
-
-    fn vwrite_impl(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_impl(&mut self, writes: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
         let mut out = Vec::with_capacity(writes.len());
         for (i, op) in writes.iter().enumerate() {
             out.push(self.writev_one(*op).map_err(|e| e.with_index(i))?);

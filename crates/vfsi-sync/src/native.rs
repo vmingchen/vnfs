@@ -91,7 +91,7 @@ pub trait FileSystem {
         crate::backend_helpers::read_into_impl_default(self, request, buffer)
     }
 
-    fn write_impl(&mut self, request: WriteOpRef<'_>) -> VfResult<WriteResult>;
+    fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult>;
 
     fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64>;
 
@@ -136,14 +136,11 @@ pub trait Backend: FileSystem {
     ) -> VfResult<Vec<ReadIntoResult>> {
         crate::backend_helpers::vread_into_impl_default(self, reads, buffers)
     }
-
-    fn vwrite_owned_impl(&mut self, writes: &[WriteOp]) -> VfResult<Vec<WriteResult>> {
+    /// Execute a borrowed ordered vector. Payloads and target storage remain
+    /// with the caller; implementations must not retain them after returning.
+    fn vwrite_impl(&mut self, writes: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
         let _ = writes;
         Err(VfError::unsupported(0))
-    }
-
-    fn vwrite_impl(&mut self, writes: &[WriteOpRef<'_>]) -> VfResult<Vec<WriteResult>> {
-        crate::backend_helpers::vwrite_impl_default(self, writes)
     }
 
     /// Indexed partial outcomes for strict-open collection and cleanup.

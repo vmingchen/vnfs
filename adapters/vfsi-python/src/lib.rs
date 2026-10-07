@@ -194,13 +194,13 @@ fn validate_write_results(
         ));
     }
     for (index, (op, result)) in ops.iter().zip(&results).enumerate() {
-        if result.file != op.file {
+        if &result.file != op.file() {
             return Err(contract_error(
                 operation,
                 format!("result {index} file does not match request"),
             ));
         }
-        if let VfOffset::At(offset) = op.offset
+        if let VfOffset::At(offset) = op.offset()
             && result.offset != offset
         {
             return Err(contract_error(
@@ -211,13 +211,13 @@ fn validate_write_results(
                 ),
             ));
         }
-        if result.written > op.data.len() {
+        if result.written > op.data().len() {
             return Err(contract_error(
                 operation,
                 format!(
                     "result {index} reported {} bytes for a {}-byte request",
                     result.written,
-                    op.data.len()
+                    op.data().len()
                 ),
             ));
         }
@@ -867,7 +867,7 @@ impl NfsClient {
         self.with_fs(py, move |fs| {
             let op = WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, data);
             let w = fs
-                .vwrite_owned_impl(std::slice::from_ref(&op))
+                .vwrite_impl(std::slice::from_ref(&op.borrowed()))
                 .map_err(|e| to_py_err(e, None))?;
             Ok(one_write_result("write", &op, w)?.written)
         })
@@ -880,7 +880,7 @@ impl NfsClient {
         self.with_fs(py, move |fs| {
             let op = WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, data);
             let w = fs
-                .vwrite_owned_impl(std::slice::from_ref(&op))
+                .vwrite_impl(std::slice::from_ref(&op.borrowed()))
                 .map_err(|e| to_py_err(e, None))?;
             let w = one_write_result("write_positioned", &op, w)?;
             let position = w
@@ -907,7 +907,7 @@ impl NfsClient {
         self.with_fs(py, move |fs| {
             let op = WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::At(offset), data);
             let w = fs
-                .vwrite_owned_impl(std::slice::from_ref(&op))
+                .vwrite_impl(std::slice::from_ref(&op.borrowed()))
                 .map_err(|e| to_py_err(e, None))?;
             Ok(one_write_result("pwrite", &op, w)?.written)
         })
@@ -1038,7 +1038,13 @@ impl NfsClient {
             })
             .collect();
         self.with_fs(py, move |fs| {
-            let writes = fs.vwrite_owned_impl(&ops).map_err(|e| to_py_err(e, None))?;
+            let writes = fs
+                .vwrite_impl(
+                    &ops.iter()
+                        .map(vfsi_core::WriteOp::borrowed)
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|e| to_py_err(e, None))?;
             let writes = validate_write_results("pwrite_many", &ops, writes)?;
             Ok(writes.into_iter().map(|write| write.written).collect())
         })
@@ -1063,7 +1069,13 @@ impl NfsClient {
             .map(|(fd, data)| WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, data))
             .collect();
         self.with_fs(py, move |fs| {
-            let writes = fs.vwrite_owned_impl(&ops).map_err(|e| to_py_err(e, None))?;
+            let writes = fs
+                .vwrite_impl(
+                    &ops.iter()
+                        .map(vfsi_core::WriteOp::borrowed)
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(|e| to_py_err(e, None))?;
             let writes = validate_write_results("append_many", &ops, writes)?;
             writes
                 .into_iter()
@@ -1349,7 +1361,7 @@ impl NfsClient {
         })
     }
 
-    /// Write files at offset 0 (creating them) through `Backend::vwrite_owned_impl`;
+    /// Write files at offset 0 (creating them) through `Backend::vwrite_impl`;
     /// with `truncate=True` each file is truncated before its data is written.
     /// A vector batch may span multiple protocol requests.
     /// Returns the number of bytes written per file.
@@ -1374,7 +1386,11 @@ impl NfsClient {
             .collect();
         self.with_fs(py, move |fs| {
             let res = fs
-                .vwrite_owned_impl(&ops)
+                .vwrite_impl(
+                    &ops.iter()
+                        .map(vfsi_core::WriteOp::borrowed)
+                        .collect::<Vec<_>>(),
+                )
                 .map_err(|e| map_err_with_path(e, &paths))?;
             let res = validate_write_results("write_many", &ops, res)?;
             Ok(res.into_iter().map(|r| r.written).collect())
@@ -1741,7 +1757,11 @@ impl NfsClient {
                         .with_truncate()
                     })
                     .collect();
-                match fs.vwrite_owned_impl(&ops) {
+                match fs.vwrite_impl(
+                    &ops.iter()
+                        .map(vfsi_core::WriteOp::borrowed)
+                        .collect::<Vec<_>>(),
+                ) {
                     Ok(results) => {
                         let results = validate_write_results("copy_many", &ops, results)?;
                         for (&index, result) in write_remaining.iter().zip(results) {

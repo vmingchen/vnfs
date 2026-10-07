@@ -3,6 +3,7 @@
 //! works on non-NFS filesystems too.
 
 use vfsi_sync::test_support as common;
+use vfsi_sync::test_support::borrow_writes;
 use vfsi_sync::*;
 
 use std::path::Path;
@@ -479,12 +480,12 @@ fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
 
     let (_root, mut fs) = dummy();
     let path = VfFile::from_path("/too-large");
-    fs.vwrite_owned_impl(&[WriteOp::new(
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::new(
         path.clone(),
         VfOffset::At(0),
         vec![0; DEFAULT_READ_ALLV_MAX_TOTAL_BYTES + 1],
     )
-    .with_creation()])
+    .with_creation()]))
         .unwrap();
 
     let error = fs.vread_all_impl(&[path]).unwrap_err();
@@ -545,10 +546,13 @@ fn non_utf8_filenames_roundtrip() {
     let (_root, mut fs) = dummy();
     let raw = b"n\xffb";
     let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(raw.to_vec()));
-    fs.vwrite_owned_impl(&[
-        WriteOp::from_os_path(&path, VfOffset::At(0), b"data".to_vec()).with_creation(),
-    ])
-    .unwrap();
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::from_os_path(
+        &path,
+        VfOffset::At(0),
+        b"data".to_vec(),
+    )
+    .with_creation()]))
+        .unwrap();
     let listed = fs
         .listdir_impl(Path::new("/"), vfsi_sync::AttrMask::stat(), 0, false)
         .unwrap();
@@ -590,12 +594,12 @@ fn rm_contents_keeps_the_directory() {
     fs.mkdir_raw_impl(Path::new("/keep"), 0o755).unwrap();
     fs.mkdir_raw_impl(Path::new("/keep/sub"), 0o755).unwrap();
     for path in ["/keep/a", "/keep/sub/b"] {
-        fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+        fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_path(
             path,
             VfOffset::At(0),
             b"x".to_vec(),
         )
-        .with_creation()])
+        .with_creation()]))
             .unwrap();
     }
     fs.remove_dir_contents_path_impl(Path::new("/keep"))
@@ -618,12 +622,12 @@ fn rm_contents_keeps_the_directory() {
 fn rm_contents_rejects_a_symlink_to_a_directory() {
     let (_root, mut fs) = dummy();
     fs.mkdir_raw_impl(Path::new("/target"), 0o755).unwrap();
-    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+    fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_path(
         "/target/keep",
         VfOffset::At(0),
         b"k".to_vec(),
     )
-    .with_creation()])
+    .with_creation()]))
         .unwrap();
     fs.symlink_raw_impl(Path::new("target"), Path::new("link"))
         .unwrap();
@@ -639,12 +643,12 @@ fn rm_contents_rejects_a_symlink_to_a_directory() {
 fn recursive_rm_removes_a_symlink_not_its_target() {
     let (_root, mut fs) = dummy();
     fs.mkdir_raw_impl(Path::new("/target"), 0o755).unwrap();
-    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+    fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_path(
         "/target/keep",
         VfOffset::At(0),
         b"k".to_vec(),
     )
-    .with_creation()])
+    .with_creation()]))
         .unwrap();
     fs.symlink_raw_impl(Path::new("target"), Path::new("link"))
         .unwrap();
@@ -666,12 +670,12 @@ fn ensure_empty_dir_creates_empties_and_rejects_files() {
     );
 
     fs.mkdir_raw_impl(Path::new("/full"), 0o755).unwrap();
-    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+    fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_path(
         "/full/child",
         VfOffset::At(0),
         b"x".to_vec(),
     )
-    .with_creation()])
+    .with_creation()]))
         .unwrap();
     fs.ensure_empty_dir_impl(Path::new("/full")).unwrap();
     assert!(
@@ -680,12 +684,12 @@ fn ensure_empty_dir_creates_empties_and_rejects_files() {
             .is_empty()
     );
 
-    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+    fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_path(
         "/afile",
         VfOffset::At(0),
         b"f".to_vec(),
     )
-    .with_creation()])
+    .with_creation()]))
         .unwrap();
     assert!(fs.ensure_empty_dir_impl(Path::new("/afile")).is_err());
     assert!(fs.exists_impl(Path::new("/afile")).unwrap());
@@ -696,16 +700,19 @@ fn open_dir_handle_empties_contents() {
     let (_root, mut fs) = dummy();
     fs.mkdir_raw_impl(Path::new("/d"), 0o755).unwrap();
     fs.mkdir_raw_impl(Path::new("/d/sub"), 0o755).unwrap();
-    fs.vwrite_owned_impl(&[
-        vfsi_sync::WriteOp::from_path("/d/a", VfOffset::At(0), b"a".to_vec()).with_creation(),
-    ])
-    .unwrap();
-    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+    fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_path(
+        "/d/a",
+        VfOffset::At(0),
+        b"a".to_vec(),
+    )
+    .with_creation()]))
+        .unwrap();
+    fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_path(
         "/d/sub/b",
         VfOffset::At(0),
         b"b".to_vec(),
     )
-    .with_creation()])
+    .with_creation()]))
         .unwrap();
 
     let handle = fs.open_dir_impl(Path::new("/d")).unwrap();
@@ -748,12 +755,12 @@ fn owned_directory_handle_refuses_path_only_backend() {
 fn generic_remover_rejects_options_it_cannot_honor() {
     let (_root, mut fs) = dummy();
     fs.mkdir_raw_impl(Path::new("/d"), 0o755).unwrap();
-    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+    fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_path(
         "/d/keep",
         VfOffset::At(0),
         b"x".to_vec(),
     )
-    .with_creation()])
+    .with_creation()]))
         .unwrap();
     let handle = fs.open_dir_impl(Path::new("/d")).unwrap();
     for options in [
@@ -1128,12 +1135,12 @@ fn openv_fault_after_registration_closes_the_injected_handle() {
 #[test]
 fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
     let (_root, mut fs) = dummy();
-    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+    fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_path(
         "/exists",
         VfOffset::At(0),
         b"existing".to_vec(),
     )
-    .with_creation()])
+    .with_creation()]))
         .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeCleanup { index: 0 },
@@ -1161,12 +1168,12 @@ fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
 #[test]
 fn recursive_remove_propagates_type_lookup_failure_without_unlinking() {
     let (_root, mut fs) = dummy();
-    fs.vwrite_owned_impl(&[vfsi_sync::WriteOp::from_path(
+    fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_path(
         "/kept",
         VfOffset::At(0),
         b"data".to_vec(),
     )
-    .with_creation()])
+    .with_creation()]))
         .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeRemoveType { index: 0 },
@@ -1219,10 +1226,10 @@ fn strict_vectors_report_failure_index_without_rollback() {
     use vfsi_sync::VfFile;
 
     let (_root, mut fs) = dummy();
-    fs.vwrite_owned_impl(&[
+    fs.vwrite_impl(&borrow_writes(&[
         vfsi_sync::WriteOp::from_path("/first", VfOffset::At(0), Vec::new()).with_creation(),
         vfsi_sync::WriteOp::from_path("/third", VfOffset::At(0), Vec::new()).with_creation(),
-    ])
+    ]))
     .unwrap();
     let error = fs
         .vremove_impl(&[
@@ -1275,10 +1282,10 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
 
     let (_root, mut fs) = dummy();
     fs.ensure_dir_impl(Path::new("/tree/sub"), 0o755).unwrap();
-    fs.vwrite_owned_impl(&[
+    fs.vwrite_impl(&borrow_writes(&[
         WriteOp::from_path("/tree/one", VfOffset::At(0), Vec::new()).with_creation(),
         WriteOp::from_path("/tree/two", VfOffset::At(0), Vec::new()).with_creation(),
-    ])
+    ]))
     .unwrap();
 
     let error = fs
@@ -1373,7 +1380,7 @@ fn directory_visitor_supports_limits_early_stop_and_callback_errors() {
                 .with_creation()
         })
         .collect();
-    fs.vwrite_owned_impl(&writes).unwrap();
+    fs.vwrite_impl(&borrow_writes(&writes)).unwrap();
     let client = FsClient::new(fs);
 
     let mut seen = 0;

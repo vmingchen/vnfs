@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 use std::{process::Command, thread};
+use vfsi_sync::test_support::borrow_writes;
 
 use vfsi_nfs::NfsConnectOptions;
 use vfsi_nfs::NfsVecFs;
@@ -42,12 +43,14 @@ fn supported_rpcsec_gss_protection_levels_access_the_export() {
             .unwrap_or_else(|error| panic!("connect using {name}: {error}"));
         let path = format!("/vnfs-gss-{name}-{}", std::process::id());
         let payload = format!("authenticated with {name}").into_bytes();
-        fs.vwrite_owned_impl(
-            &[WriteOp::from_path(&path, VfOffset::At(0), payload.clone())
-                .with_creation()
-                .with_truncate()],
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+            &path,
+            VfOffset::At(0),
+            payload.clone(),
         )
-        .unwrap_or_else(|error| panic!("write using {name}: {error}"));
+        .with_creation()
+        .with_truncate()]))
+            .unwrap_or_else(|error| panic!("write using {name}: {error}"));
         let result = fs
             .vread_impl(&[ReadOp::from_path(&path, VfOffset::At(0), payload.len())])
             .unwrap_or_else(|error| panic!("read using {name}: {error}"));
@@ -94,12 +97,14 @@ fn renewable_ticket_allows_reconnect_after_ticket_expiry() {
         .expect("connect while the renewable Kerberos ticket is valid");
     let path = format!("/vnfs-gss-renew-{}", std::process::id());
     let payload = b"ticket renewal and RPCSEC_GSS reconnect";
-    fs.vwrite_owned_impl(
-        &[WriteOp::from_path(&path, VfOffset::At(0), payload.to_vec())
-            .with_creation()
-            .with_truncate()],
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+        &path,
+        VfOffset::At(0),
+        payload.to_vec(),
     )
-    .expect("initial authenticated write");
+    .with_creation()
+    .with_truncate()]))
+        .expect("initial authenticated write");
 
     // The integration script obtains a one-minute renewable TGT. Let it
     // expire, assert the cache no longer has a valid ticket, renew it, then

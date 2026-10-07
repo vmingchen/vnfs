@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use vfsi_core::*;
+use vfsi_sync::test_support::borrow_writes;
 use vfsi_sync::*;
 
 #[cfg(test)]
@@ -142,10 +143,13 @@ mod tests {
     }
 
     fn write(fs: &mut DummyVecFs, path: &str, data: &[u8]) {
-        fs.vwrite_owned_impl(&[
-            WriteOp::at(VfFile::from_path(path), 0, data.to_vec()).with_creation()
-        ])
-        .expect("write");
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+            VfFile::from_path(path),
+            0,
+            data.to_vec(),
+        )
+        .with_creation()]))
+            .expect("write");
     }
 
     // ------------------------------------------------------------------
@@ -182,11 +186,19 @@ mod tests {
         assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::End).unwrap(), 11);
 
         let w = fs
-            .vwrite_owned_impl(&[WriteOp::new(fd.clone(), VfOffset::Cur, b"XY".to_vec())])
+            .vwrite_impl(&borrow_writes(&[WriteOp::new(
+                fd.clone(),
+                VfOffset::Cur,
+                b"XY".to_vec(),
+            )]))
             .unwrap();
         assert_eq!(w[0].offset, 11); // resolved current position
         let w = fs
-            .vwrite_owned_impl(&[WriteOp::new(fd.clone(), VfOffset::Cur, b"Z".to_vec())])
+            .vwrite_impl(&borrow_writes(&[WriteOp::new(
+                fd.clone(),
+                VfOffset::Cur,
+                b"Z".to_vec(),
+            )]))
             .unwrap();
         assert_eq!(w[0].offset, 13);
 
@@ -203,8 +215,8 @@ mod tests {
     fn borrowed_write_and_direct_read_into_preserve_offsets_and_eof() {
         let (_root, mut fs) = fs("borrowed-io");
         let file = VfFile::from_path("/f");
-        let mut write = WriteOpRef::new(&file, VfOffset::At(0), b"hello");
-        write.creation = true;
+        let write: WriteOp<&VfFile, &[u8]> =
+            WriteOp::new(&file, VfOffset::At(0), &b"hello"[..]).with_creation();
         let written = fs.vwrite_impl(&[write]).unwrap();
         assert_eq!(written[0].written, 5);
 
@@ -233,7 +245,11 @@ mod tests {
 
         let fd = fs.open_raw_impl(Path::new("/f"), libc::O_RDWR, 0).unwrap();
         let w = fs
-            .vwrite_owned_impl(&[WriteOp::new(fd.clone(), VfOffset::End, b"!".to_vec())])
+            .vwrite_impl(&borrow_writes(&[WriteOp::new(
+                fd.clone(),
+                VfOffset::End,
+                b"!".to_vec(),
+            )]))
             .unwrap();
         assert_eq!(w[0].offset, 11);
         fs.close_impl(&fd).unwrap();
@@ -257,10 +273,13 @@ mod tests {
     fn writev_truncate_removes_stale_tail() {
         let (_root, mut fs) = fs("writev-truncate");
         write(&mut fs, "/f", b"longer-than-needed");
-        fs.vwrite_owned_impl(&[
-            WriteOp::at(VfFile::from_path("/f"), 0, b"hi".to_vec()).with_truncate()
-        ])
-        .unwrap();
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+            VfFile::from_path("/f"),
+            0,
+            b"hi".to_vec(),
+        )
+        .with_truncate()]))
+            .unwrap();
         // O_TRUNC semantics: the stale tail is gone.
         assert_eq!(
             fs.read_raw_impl(&VfFile::from_path("/f"), 0, 100).unwrap(),
@@ -269,8 +288,12 @@ mod tests {
 
         // A plain overwrite keeps the tail (pwrite semantics).
         write(&mut fs, "/g", b"abcdef");
-        fs.vwrite_owned_impl(&[WriteOp::at(VfFile::from_path("/g"), 0, b"xy".to_vec())])
-            .unwrap();
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+            VfFile::from_path("/g"),
+            0,
+            b"xy".to_vec(),
+        )]))
+        .unwrap();
         assert_eq!(
             fs.read_raw_impl(&VfFile::from_path("/g"), 0, 100).unwrap(),
             b"xycdef"
@@ -332,7 +355,11 @@ mod tests {
         let fd = fs.open_raw_impl(Path::new("/f"), libc::O_RDWR, 0).unwrap();
 
         let error = fs
-            .vwrite_owned_impl(&[WriteOp::at(fd.clone(), u64::MAX, b"xx".to_vec())])
+            .vwrite_impl(&borrow_writes(&[WriteOp::at(
+                fd.clone(),
+                u64::MAX,
+                b"xx".to_vec(),
+            )]))
             .unwrap_err();
         assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
 
@@ -533,22 +560,25 @@ mod tests {
         let (root, mut fs) = fs("sandbox-dotdot");
 
         // Writing through ".." lands inside the root, not in its parent.
-        fs.vwrite_owned_impl(&[
-            WriteOp::at(VfFile::from_path("/../escape"), 0, b"x".to_vec()).with_creation(),
-        ])
-        .unwrap();
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+            VfFile::from_path("/../escape"),
+            0,
+            b"x".to_vec(),
+        )
+        .with_creation()]))
+            .unwrap();
         assert!(fs.exists_impl(Path::new("/escape")).unwrap());
         assert!(!root.0.parent().unwrap().join("escape").exists());
 
         // "/.." and "/../../x" stay under the root.
         let st = fs.stat_impl(Path::new("/..")).unwrap();
         assert_eq!(st.ftype, VfType::Directory);
-        fs.vwrite_owned_impl(&[WriteOp::at(
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
             VfFile::from_path("/../sub1/../../sub2"),
             0,
             b"y".to_vec(),
         )
-        .with_creation()])
+        .with_creation()]))
             .unwrap();
         assert!(fs.exists_impl(Path::new("/sub2")).unwrap());
         assert!(!root.0.parent().unwrap().join("sub2").exists());
@@ -611,10 +641,13 @@ mod tests {
         fs.mkdir_raw_impl(Path::new("/subdir"), 0o755).unwrap();
         fs.symlink_raw_impl(Path::new("/subdir/created-inside"), Path::new("/evil3"))
             .unwrap();
-        fs.vwrite_owned_impl(&[
-            WriteOp::at(VfFile::from_path("/evil3"), 0, b"x".to_vec()).with_creation()
-        ])
-        .unwrap();
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+            VfFile::from_path("/evil3"),
+            0,
+            b"x".to_vec(),
+        )
+        .with_creation()]))
+            .unwrap();
         assert_eq!(
             fs.read_raw_impl(&VfFile::from_path("/subdir/created-inside"), 0, 1)
                 .unwrap(),
@@ -635,11 +668,14 @@ mod tests {
         fs.symlink_raw_impl(Path::new(&dangling), Path::new("/evil2"))
             .unwrap();
         assert_eq!(
-            fs.vwrite_owned_impl(&[
-                WriteOp::at(VfFile::from_path("/evil2"), 0, b"x".to_vec()).with_creation()
-            ])
-            .unwrap_err()
-            .err_no(),
+            fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+                VfFile::from_path("/evil2"),
+                0,
+                b"x".to_vec()
+            )
+            .with_creation()]))
+                .unwrap_err()
+                .err_no(),
             ERR_NOENT,
             "the chroot-relative target's parent does not exist"
         );
@@ -651,10 +687,13 @@ mod tests {
         // created through (POSIX O_CREAT semantics).
         fs.symlink_raw_impl(Path::new("internal-target"), Path::new("/ok-link"))
             .unwrap();
-        fs.vwrite_owned_impl(&[
-            WriteOp::at(VfFile::from_path("/ok-link"), 0, b"z".to_vec()).with_creation()
-        ])
-        .unwrap();
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+            VfFile::from_path("/ok-link"),
+            0,
+            b"z".to_vec(),
+        )
+        .with_creation()]))
+            .unwrap();
         assert_eq!(
             fs.read_raw_impl(&VfFile::from_path("/internal-target"), 0, 1)
                 .unwrap(),
@@ -811,8 +850,12 @@ mod tests {
                 0o644,
             )
             .unwrap();
-        fs.vwrite_owned_impl(&[WriteOp::new(fd.clone(), VfOffset::At(0), b"x".to_vec())])
-            .unwrap();
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::new(
+            fd.clone(),
+            VfOffset::At(0),
+            b"x".to_vec(),
+        )]))
+        .unwrap();
         fs.close_impl(&fd).unwrap();
         assert!(fs.exists_impl(Path::new("/rel")).unwrap());
     }
@@ -889,14 +932,20 @@ mod tests {
         fs.mkdir_raw_impl(Path::new("/a"), 0o755).unwrap();
         fs.chdir(Path::new("/a")).unwrap();
 
-        fs.vwrite_owned_impl(&[
-            WriteOp::at(VfFile::from_path("../x"), 0, b"1".to_vec()).with_creation()
-        ])
-        .unwrap();
-        fs.vwrite_owned_impl(&[
-            WriteOp::at(VfFile::from_path("a/../y"), 0, b"2".to_vec()).with_creation()
-        ])
-        .unwrap();
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+            VfFile::from_path("../x"),
+            0,
+            b"1".to_vec(),
+        )
+        .with_creation()]))
+            .unwrap();
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+            VfFile::from_path("a/../y"),
+            0,
+            b"2".to_vec(),
+        )
+        .with_creation()]))
+            .unwrap();
         assert!(fs.exists_impl(Path::new("/x")).unwrap());
         // From cwd /a, "a/../y" resolves to /a/y (the ".." cancels the "a").
         assert!(fs.exists_impl(Path::new("/a/y")).unwrap());
@@ -906,10 +955,13 @@ mod tests {
 
         // ".." from the root clamps at the root instead of escaping.
         fs.chdir(Path::new("/")).unwrap();
-        fs.vwrite_owned_impl(&[
-            WriteOp::at(VfFile::from_path("../z"), 0, b"3".to_vec()).with_creation()
-        ])
-        .unwrap();
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+            VfFile::from_path("../z"),
+            0,
+            b"3".to_vec(),
+        )
+        .with_creation()]))
+            .unwrap();
         assert!(fs.exists_impl(Path::new("/z")).unwrap());
         assert!(!root.0.parent().unwrap().join("z").exists());
     }
@@ -1278,10 +1330,13 @@ mod tests {
             fs.mkdir_raw_impl(&directory, 0o755).unwrap();
         }
         let leaf = directory.join("leaf");
-        fs.vwrite_owned_impl(&[
-            WriteOp::from_os_path(&leaf, VfOffset::At(0), b"deep".to_vec()).with_creation(),
-        ])
-        .unwrap();
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::from_os_path(
+            &leaf,
+            VfOffset::At(0),
+            b"deep".to_vec(),
+        )
+        .with_creation()]))
+            .unwrap();
 
         let listed = fs
             .listdir_impl(Path::new("/source"), AttrMask::MODE, 0, true)

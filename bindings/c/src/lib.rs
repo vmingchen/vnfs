@@ -1958,7 +1958,7 @@ pub unsafe extern "C" fn vfsi_pwritev(
                 fail_batch!(item_results, vfsi_result::from_error(error), false)
             }
         };
-        let mut writes = Vec::with_capacity(count);
+        let mut files = Vec::with_capacity(count);
         for (index, op) in ops.iter().enumerate() {
             if op.len > 0 && op.buf.is_null() {
                 fail_batch!(
@@ -1974,21 +1974,31 @@ pub unsafe extern "C" fn vfsi_pwritev(
                     false
                 );
             };
-            let data = if op.len == 0 {
-                Vec::new()
-            } else {
-                std::slice::from_raw_parts(op.buf.cast::<u8>(), op.len).to_vec()
-            };
-            writes.push(WriteOp::at(file, op.offset, data));
+            files.push(file);
         }
         drop(table);
+        // All handles and buffers are validated before dispatch. The C caller
+        // owns payload storage until this synchronous call returns; no copy is
+        // needed, and a zero-length buffer need not have a non-null pointer.
+        let writes: Vec<WriteOp<&VfFile, &[u8]>> = ops
+            .iter()
+            .zip(&files)
+            .map(|(op, file)| {
+                let data = if op.len == 0 {
+                    &[][..]
+                } else {
+                    std::slice::from_raw_parts(op.buf.cast::<u8>(), op.len)
+                };
+                WriteOp::at(file, op.offset, data)
+            })
+            .collect();
         let mut backend = match lock_or_io(&fs.fs) {
             Ok(backend) => backend,
             Err(error) => {
                 fail_batch!(item_results, vfsi_result::from_error(error), false)
             }
         };
-        let results = match backend.vwrite_owned_impl(&writes) {
+        let results = match backend.vwrite_impl(&writes) {
             Ok(results) => results,
             Err(error) => {
                 fail_batch!(item_results, vfsi_result::from_error(error), true)
@@ -2592,6 +2602,8 @@ mod tests {
         max_entries: usize,
     }
 
+    type WriteCalls = std::sync::Arc<Mutex<Vec<Vec<(usize, usize)>>>>;
+
     // Exercise the actual C entry point. Like NFS, this backend fetches all
     // roots' first pages before its first quota callback, and records that work.
     struct ListingBackend {
@@ -2601,6 +2613,7 @@ mod tests {
         missing: AttrMask,
         missing_after: usize,
         fail_call: Option<usize>,
+        write_calls: Option<WriteCalls>,
     }
 
     impl vfsi_sync::FileSystem for ListingBackend {
@@ -2618,7 +2631,7 @@ mod tests {
         }
         fn write_impl(
             &mut self,
-            _: vfsi_sync::WriteOpRef<'_>,
+            _: vfsi_sync::WriteOp<&VfFile, &[u8]>,
         ) -> vfsi_sync::VfResult<vfsi_sync::WriteResult> {
             Err(VfError::unsupported(0))
         }
@@ -2643,6 +2656,34 @@ mod tests {
     impl vfsi_sync::Backend for ListingBackend {
         fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VfResult<Vec<vfsi_sync::ReadResult>> {
             Err(VfError::unsupported(0))
+        }
+
+        fn vwrite_impl(
+            &mut self,
+            writes: &[WriteOp<&VfFile, &[u8]>],
+        ) -> vfsi_sync::VfResult<Vec<vfsi_sync::WriteResult>> {
+            let calls = self
+                .write_calls
+                .as_ref()
+                .ok_or_else(|| VfError::unsupported(0))?;
+            calls.lock().unwrap().push(
+                writes
+                    .iter()
+                    .map(|op| (op.data().as_ptr() as usize, op.data().len()))
+                    .collect(),
+            );
+            Ok(writes
+                .iter()
+                .map(|op| vfsi_sync::WriteResult {
+                    file: op.file().clone(),
+                    offset: match op.offset() {
+                        vfsi_sync::VfOffset::At(offset) => offset,
+                        _ => unreachable!(),
+                    },
+                    written: op.data().len(),
+                    stable: true,
+                })
+                .collect())
         }
 
         fn vlistdirs_impl(
@@ -2723,6 +2764,7 @@ mod tests {
                         missing,
                         missing_after,
                         fail_call,
+                        write_calls: None,
                     }),
                     PathBuf::from("/"),
                     PathBuf::from("/"),
@@ -2769,6 +2811,79 @@ mod tests {
                 )
             };
             (status, indices, results)
+        }
+    }
+
+    #[test]
+    fn c_vector_writes_borrow_payloads_and_preflight_the_entire_batch() {
+        let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let fs = make_fs(
+            Box::new(ListingBackend {
+                calls: Default::default(),
+                entries_per_dir: 0,
+                emitted: 0,
+                missing: AttrMask::empty(),
+                missing_after: 0,
+                fail_call: None,
+                write_calls: Some(calls.clone()),
+            }),
+            PathBuf::from("/"),
+            PathBuf::from("/"),
+        );
+        let fs_ref = unsafe { &*fs };
+        fs_ref
+            .files
+            .lock()
+            .unwrap()
+            .insert(10, VfFile::from_fd(100));
+        fs_ref
+            .files
+            .lock()
+            .unwrap()
+            .insert(11, VfFile::from_fd(101));
+        let data = b"payload owned by C caller";
+        let mut ops = [
+            vfsi_pwrite_op {
+                fd: 10,
+                buf: data.as_ptr().cast(),
+                len: data.len(),
+                offset: 7,
+                wrote: 0,
+            },
+            vfsi_pwrite_op {
+                fd: 11,
+                buf: std::ptr::null(),
+                len: 0,
+                offset: 0,
+                wrote: 0,
+            },
+        ];
+        let mut results = [vfsi_result::success(0); 2];
+        let result = unsafe { vfsi_pwritev(fs, ops.as_mut_ptr(), 2, results.as_mut_ptr()) };
+        assert_eq!(result.category, VFSI_ERROR_NONE);
+        assert_eq!(ops[0].wrote, data.len());
+        assert_eq!(ops[1].wrote, 0);
+        {
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0][0], (data.as_ptr() as usize, data.len()));
+            assert_eq!(calls[0][1].1, 0);
+        }
+        // A later invalid input cannot cause an earlier valid write to run.
+        ops[1].fd = 999;
+        assert_ne!(
+            unsafe { vfsi_pwritev(fs, ops.as_mut_ptr(), 2, results.as_mut_ptr()) }.category,
+            VFSI_ERROR_NONE
+        );
+        ops[1].fd = 11;
+        ops[1].len = 1;
+        assert_ne!(
+            unsafe { vfsi_pwritev(fs, ops.as_mut_ptr(), 2, results.as_mut_ptr()) }.category,
+            VFSI_ERROR_NONE
+        );
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        unsafe {
+            drop(Box::from_raw(fs));
         }
     }
     impl Drop for ListingFixture {

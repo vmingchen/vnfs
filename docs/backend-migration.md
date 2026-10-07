@@ -1,5 +1,27 @@
 # Native backend migration ledger
 
+## Shared write operations
+
+Portable `api::WriteOp`, native owned/borrowed requests, and `FsWrite` now
+specialize one `vfsi_core::internal::WriteRequest` definition. Portable writes keep absolute
+offsets and borrowed handles; native operations retain `VfOffset::Cur`/`End`
+and packed path-only create/truncate flags. Their fields are private and
+construction does not perform I/O. Portable and retained-handle requests carry
+no native path flags and retain their previous size.
+
+The native and portable aliases fix their offset and flag policy types, so
+standalone `WriteOp::new`/`at` calls need no expected type or flag builder.
+The generic storage definition is available only through the doc-hidden
+`vfsi_core::internal::WriteRequest` implementation interface.
+
+`WriteOpRef` and the separate owned backend write hook are removed. A binding
+may keep an owned `WriteOp` for input storage, then dispatch
+`op.borrowed()` or a vector of borrowed projections through `vwrite_impl`.
+Backends must not retain those references after returning. Short-write
+completion remains a `WriteOptions` policy; ambiguous failures never authorize
+replay. NFS/SMB wire-operation structs remain protocol-internal representations,
+not additional application contracts.
+
 The `VecFs` and `VecFsExt` traits and their blanket native adapters have been
 removed in a deliberate breaking Rust migration. Concrete types `DummyVecFs`,
 `NfsVecFs`, and `SmbVecFs` keep their names. The native contracts are now
@@ -20,7 +42,9 @@ and COPYCHUNK, and local anchored descriptors remain backend implementations.
 - `vopen_impl` accepts typed requests and returns a strict ordered handle vector.
   `vopen_outcomes_impl` accepts raw flags and exposes indexed partial outcomes to
   the strict-open collector; `vopen_raw_impl` preserves the raw-flags boundary.
-- `vwrite_impl` borrows payloads; `vwrite_owned_impl` accepts owned payloads.
+- `vwrite_impl` is the single borrowed write boundary. `WriteOp` can own
+  preparation storage or borrow it; `WriteOp::borrowed()` preserves native
+  options without cloning targets or copying payloads.
 - `vsetattrs_impl` accepts typed updates; `vsetattrs_raw_impl` and its no-follow
   variant accept raw attribute masks.
 - `vcopy_impl` accepts extent pairs and `CopyOption`; `vcopy_data_impl` is the
@@ -58,7 +82,7 @@ its operation engines directly.
 | `readv_into` | `Backend::vread_into_impl` | local, NFS |
 | `read_allv` | `Backend::vread_all_impl` | — |
 | `read_allv_with_options` | `Backend::vread_all_with_options_impl` | NFS |
-| `writev` | `Backend::vwrite_owned_impl` | local, NFS, SMB |
+| `writev` | `Backend::vwrite_impl` via `WriteOp::borrowed()` | local, NFS, SMB |
 | `writev_borrowed` | `Backend::vwrite_impl` | local, NFS, SMB |
 | `fseek` | `FileSystem::seek_raw_impl` | local, NFS, SMB |
 | `getattrsv` | `Backend::vgetattrs_impl` | local, NFS, SMB |

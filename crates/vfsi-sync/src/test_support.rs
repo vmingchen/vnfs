@@ -7,6 +7,12 @@
 use crate::*;
 use std::path::{Path, PathBuf};
 
+/// Borrow fixture storage for one vector dispatch without copying payloads.
+/// Only available with `test-support`; this adds no production backend hook.
+pub fn borrow_writes(writes: &[WriteOp]) -> Vec<WriteOp<&VfFile, &[u8]>> {
+    writes.iter().map(WriteOp::borrowed).collect()
+}
+
 /// Run a potentially deadlocking test in an isolated test-harness process.
 /// Return `true` in the supervising parent and `false` in the child, which
 /// must execute the actual test body. Killing a timed-out child avoids leaving
@@ -58,11 +64,11 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
         .expect("ensure_dir");
     let f = format!("{}/f.txt", dir);
 
-    // vwrite_owned_impl / vread_impl via paths.
+    // vwrite_impl / vread_impl via paths.
     let payload = b"the quick brown fox jumps over the lazy dog".to_vec();
     let mut w = WriteOp::from_path(&f, VfOffset::At(0), payload.clone());
-    w.creation = true;
-    let wr = &fs.vwrite_owned_impl(&[w]).expect("writev")[0];
+    w = w.with_creation();
+    let wr = &fs.vwrite_impl(&borrow_writes(&[w])).expect("writev")[0];
     assert_eq!(wr.written, payload.len());
 
     let r = &fs
@@ -76,10 +82,10 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
     // Whole-file vectors are bounded by one aggregate caller-selected limit.
     let whole_a = format!("{}/whole-a", dir);
     let whole_b = format!("{}/whole-b", dir);
-    fs.vwrite_owned_impl(&[
+    fs.vwrite_impl(&borrow_writes(&[
         WriteOp::at(VfFile::from_path(&whole_a), 0, b"abc".to_vec()).with_creation(),
         WriteOp::at(VfFile::from_path(&whole_b), 0, b"def".to_vec()).with_creation(),
-    ])
+    ]))
     .unwrap();
     let whole_files = [VfFile::from_path(&whole_a), VfFile::from_path(&whole_b)];
     assert_eq!(
@@ -127,10 +133,13 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
     // (tmpfs reports 0 blocks for tiny files).
     if posix_metadata {
         let big = format!("{}/big.bin", dir);
-        fs.vwrite_owned_impl(&[
-            WriteOp::at(VfFile::from_path(&big), 0, vec![b'x'; 4096]).with_creation()
-        ])
-        .unwrap();
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+            VfFile::from_path(&big),
+            0,
+            vec![b'x'; 4096],
+        )
+        .with_creation()]))
+            .unwrap();
         let mut b = VfAttrs {
             file: VfFile::from_path(&big),
             masks: AttrMask::BLOCKS,
@@ -168,11 +177,11 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
     let tf = fs
         .open_raw_impl(Path::new(&f), libc::O_RDWR, 0)
         .expect("open");
-    fs.vwrite_owned_impl(&[WriteOp::from_fd(
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::from_fd(
         tf.fd().unwrap(),
         VfOffset::At(0),
         b"hello".to_vec(),
-    )])
+    )]))
     .expect("writev fd");
     assert_eq!(fs.seek_raw_impl(&tf, 0, SeekFrom::Set).unwrap(), 0);
     let r = &fs
@@ -290,14 +299,20 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
     // dupv over a longer existing destination truncates the stale tail.
     let short = format!("{}/short.txt", dir);
     let long = format!("{}/long.txt", dir);
-    fs.vwrite_owned_impl(&[
-        WriteOp::at(VfFile::from_path(&short), 0, b"ab".to_vec()).with_creation()
-    ])
-    .unwrap();
-    fs.vwrite_owned_impl(&[
-        WriteOp::at(VfFile::from_path(&long), 0, b"abcdef".to_vec()).with_creation()
-    ])
-    .unwrap();
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+        VfFile::from_path(&short),
+        0,
+        b"ab".to_vec(),
+    )
+    .with_creation()]))
+        .unwrap();
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+        VfFile::from_path(&long),
+        0,
+        b"abcdef".to_vec(),
+    )
+    .with_creation()]))
+        .unwrap();
     fs.vcopy_data_impl(&[ExtentPair::new(&short, 0, &long, 0, None)])
         .unwrap();
     let st = fs.stat_impl(Path::new(&long)).unwrap();
@@ -404,12 +419,12 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
     // Non-recursive rm of a non-empty directory fails.
     let nonempty = format!("{}/nonempty", dir);
     fs.ensure_dir_impl(Path::new(&nonempty), 0o755).unwrap();
-    fs.vwrite_owned_impl(&[WriteOp::at(
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
         VfFile::from_os_path(Path::new(&format!("{}/x", nonempty))),
         0,
         b"x".to_vec(),
     )
-    .with_creation()])
+    .with_creation()]))
         .unwrap();
     assert!(
         fs.remove_paths_impl(&[Path::new(&nonempty)], false)
@@ -439,8 +454,8 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
         .unwrap();
     let srcfile = format!("{}/inner/data.txt", cpsrc);
     let mut w = WriteOp::from_path(&srcfile, VfOffset::At(0), b"xyz".to_vec());
-    w.creation = true;
-    fs.vwrite_owned_impl(&[w]).unwrap();
+    w = w.with_creation();
+    fs.vwrite_impl(&borrow_writes(&[w])).unwrap();
     if symlinks {
         fs.symlink_raw_impl(
             Path::new("data.txt"),
@@ -520,16 +535,28 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
             0o644,
         )
         .expect("open append");
-    fs.vwrite_owned_impl(&[WriteOp::new(afd.clone(), VfOffset::At(0), b"ab".to_vec())])
-        .unwrap();
-    fs.vwrite_owned_impl(&[WriteOp::new(afd.clone(), VfOffset::At(0), b"cd".to_vec())])
-        .unwrap();
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::new(
+        afd.clone(),
+        VfOffset::At(0),
+        b"ab".to_vec(),
+    )]))
+    .unwrap();
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::new(
+        afd.clone(),
+        VfOffset::At(0),
+        b"cd".to_vec(),
+    )]))
+    .unwrap();
     let got = fs.read_raw_impl(&VfFile::from_path(&app), 0, 8).unwrap();
     assert_eq!(got, b"abcd", "O_APPEND appends regardless of offset");
     // Cursor-based append reports and advances to the real append position,
     // independently of the initial cursor value.
     let w0 = fs
-        .vwrite_owned_impl(&[WriteOp::new(afd.clone(), VfOffset::Cur, b"e".to_vec())])
+        .vwrite_impl(&borrow_writes(&[WriteOp::new(
+            afd.clone(),
+            VfOffset::Cur,
+            b"e".to_vec(),
+        )]))
         .unwrap();
     assert_eq!(w0[0].offset, 4, "append write reports the real offset");
     assert_eq!(fs.seek_raw_impl(&afd, 0, SeekFrom::Cur).unwrap(), 5);
@@ -544,12 +571,12 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
         let dup_link = format!("{}/dup_link", dir);
         let dup_copy = format!("{}/dup_copy", dir);
         let dup_target = format!("{}/dup_target", dir);
-        fs.vwrite_owned_impl(&[WriteOp::at(
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
             VfFile::from_path(&dup_target),
             0,
             b"linkdata".to_vec(),
         )
-        .with_creation()])
+        .with_creation()]))
             .unwrap();
         let rel_name = std::path::Path::new(&dup_target)
             .file_name()
@@ -601,8 +628,12 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
             0o644,
         )
         .expect("open_by_path Abs relative");
-    fs.vwrite_owned_impl(&[WriteOp::new(f2.clone(), VfOffset::At(0), b"ar".to_vec())])
-        .unwrap();
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::new(
+        f2.clone(),
+        VfOffset::At(0),
+        b"ar".to_vec(),
+    )]))
+    .unwrap();
     fs.close_impl(&f2).unwrap();
     assert_eq!(
         fs.read_raw_impl(
@@ -616,7 +647,12 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
 
     // Writing through `Current(None)` (the cwd itself) is not a file op.
     assert_eq!(
-        fs.vwrite_owned_impl(&[WriteOp::at(VfFile::cwd(), 0, b"x".to_vec()).with_creation()])
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
+            VfFile::cwd(),
+            0,
+            b"x".to_vec()
+        )
+        .with_creation()]))
             .unwrap_err()
             .err_no(),
         ERR_ISDIR,
@@ -630,12 +666,12 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
     for (sub, file) in [("b", "f1"), ("a", "f2"), ("a", "f3")] {
         let subp = format!("{}/{}", wroot, sub);
         fs.ensure_dir_impl(Path::new(&subp), 0o755).unwrap();
-        fs.vwrite_owned_impl(&[WriteOp::at(
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
             VfFile::from_os_path(Path::new(&format!("{}/{}", subp, file))),
             0,
             b"x".to_vec(),
         )
-        .with_creation()])
+        .with_creation()]))
             .unwrap();
     }
     let mut sort = |_dir: &Path, attrs: &mut Vec<VfAttrs>| {

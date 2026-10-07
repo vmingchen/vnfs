@@ -1,5 +1,4 @@
 //! Portable borrowed positional writes.
-use crate::api::FileHandle;
 
 #[bitfields::bitfield(u8)]
 #[derive(PartialEq, Eq)]
@@ -37,55 +36,8 @@ impl WriteOptions {
 
 /// A positional write borrowing its handle and payload without copying either.
 /// Construction performs no I/O or allocation. Does not change the file cursor.
-pub struct WriteOp<'a, H: FileHandle + 'a> {
-    file: &'a H,
-    offset: u64,
-    data: &'a [u8],
-}
-impl<H: FileHandle> Copy for WriteOp<'_, H> {}
-impl<H: FileHandle> Clone for WriteOp<'_, H> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl<H: FileHandle> std::fmt::Debug for WriteOp<'_, H> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WriteOp")
-            .field("offset", &self.offset)
-            .field("length", &self.data.len())
-            .finish_non_exhaustive()
-    }
-}
-impl<'a, H: FileHandle> WriteOp<'a, H> {
-    /// Prepare a write at an absolute byte offset; validation happens at dispatch.
-    ///
-    /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// let file = fs.create("/output")?;
-    /// let result = fs.vwrite(&[WriteOp::at(&file, 0, b"hello")], vfsi_core::api::WriteOptions::new().write_all(true));
-    /// let close = fs.close_files(vec![file]);
-    /// result?;
-    /// close?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn at(file: &'a H, offset: u64, data: &'a [u8]) -> Self {
-        Self { file, offset, data }
-    }
-    /// The borrowed handle, available to third-party client implementations.
-    pub fn file(&self) -> &'a H {
-        self.file
-    }
-    /// Absolute byte offset, independent of the handle's cursor.
-    pub fn offset(&self) -> u64 {
-        self.offset
-    }
-    /// Borrowed payload; no ownership transfer or copy occurs.
-    pub fn data(&self) -> &'a [u8] {
-        self.data
-    }
-}
+/// Uses the same storage definition as the native [`crate::WriteOp`].
+pub type WriteOp<'a, H> = crate::internal::WriteRequest<&'a H, &'a [u8], u64, ()>;
 
 #[cfg(test)]
 mod option_layout_tests {

@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use vfsi_sync::test_support::borrow_writes;
 use vfsi_sync::*;
 
 use vfsi_nfs::NfsVecFs;
@@ -52,14 +53,14 @@ fn read_recovers_after_server_restart_and_reopens_live_descriptor() {
     let mut fs = client();
     fs.mkdir_raw_impl(Path::new(&dir), 0o755)
         .expect("create recovery directory");
-    fs.vwrite_owned_impl(&[
+    fs.vwrite_impl(&borrow_writes(&[
         WriteOp::from_path(&first_path, VfOffset::At(0), b"abcdef".to_vec())
             .with_creation()
             .with_truncate(),
         WriteOp::from_path(&second_path, VfOffset::At(0), b"uvwxyz".to_vec())
             .with_creation()
             .with_truncate(),
-    ])
+    ]))
     .expect("create recovery files");
     let files = fs
         .vopen_raw_simple_impl(

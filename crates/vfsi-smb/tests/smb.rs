@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use vfsi_smb::{SmbConnectOptions, SmbExtensions, SmbVecFs};
+use vfsi_sync::test_support::borrow_writes;
 use vfsi_sync::*;
 use vfsi_sync::{
     AttrMask, ExtentPair, ReadOp, VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS,
@@ -153,10 +154,10 @@ fn concurrent_write_preflight_detects_hard_link_aliases() {
     let first = PathBuf::from(format!("/{name}/first"));
     let alias = PathBuf::from(format!("/{name}/alias"));
     client
-        .vwrite_owned_impl(&[
+        .vwrite_impl(&borrow_writes(&[
             WriteOp::from_os_path(&first, VfOffset::At(0), b"1111".to_vec()),
             WriteOp::from_os_path(&alias, VfOffset::At(0), b"2222".to_vec()),
-        ])
+        ]))
         .unwrap();
     assert!(!client.test_last_writev_was_concurrent());
     assert_eq!(
@@ -182,16 +183,16 @@ fn concurrent_write_preflight_keeps_distinct_files_vectorized() {
     let first = root.join("first");
     let second = root.join("second");
     client
-        .vwrite_owned_impl(&[
+        .vwrite_impl(&borrow_writes(&[
             WriteOp::from_os_path(&first, VfOffset::At(0), b"0000".to_vec()).with_creation(),
             WriteOp::from_os_path(&second, VfOffset::At(0), b"0000".to_vec()).with_creation(),
-        ])
+        ]))
         .unwrap();
     client
-        .vwrite_owned_impl(&[
+        .vwrite_impl(&borrow_writes(&[
             WriteOp::from_os_path(&first, VfOffset::At(0), b"1111".to_vec()),
             WriteOp::from_os_path(&second, VfOffset::At(0), b"2222".to_vec()),
-        ])
+        ]))
         .unwrap();
     assert!(client.test_last_writev_was_concurrent());
     cleanup_test_tree(&root);
@@ -208,10 +209,13 @@ fn recursive_remove_requires_no_follow_metadata() {
     cleanup_test_tree(&root);
     fs.mkdir_raw_impl(&root, 0o755).unwrap();
     let child = root.join("keep");
-    fs.vwrite_owned_impl(&[
-        WriteOp::from_os_path(&child, VfOffset::At(0), b"x".to_vec()).with_creation(),
-    ])
-    .unwrap();
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::from_os_path(
+        &child,
+        VfOffset::At(0),
+        b"x".to_vec(),
+    )
+    .with_creation()]))
+        .unwrap();
 
     let error = fs.remove_paths_impl(&[root.as_path()], true).unwrap_err();
     assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
@@ -450,13 +454,21 @@ fn smb_confirmed_write_advances_descriptor_when_flush_path_fails() {
     ));
     fs.set_fault_injector(script.clone());
     assert!(
-        fs.vwrite_owned_impl(&[WriteOp::new(file.clone(), VfOffset::Cur, b"a".to_vec(),)])
-            .unwrap_err()
-            .is_transport()
+        fs.vwrite_impl(&borrow_writes(&[WriteOp::new(
+            file.clone(),
+            VfOffset::Cur,
+            b"a".to_vec(),
+        )]))
+        .unwrap_err()
+        .is_transport()
     );
     assert!(script.is_consumed());
-    fs.vwrite_owned_impl(&[WriteOp::new(file.clone(), VfOffset::Cur, b"b".to_vec())])
-        .unwrap();
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::new(
+        file.clone(),
+        VfOffset::Cur,
+        b"b".to_vec(),
+    )]))
+    .unwrap();
     let read = fs
         .vread_impl(&[ReadOp::new(file.clone(), VfOffset::At(0), 2)])
         .unwrap();
@@ -566,7 +578,7 @@ fn samba_round_trip_and_copy() {
     );
 
     let patch = WriteOp::from_os_path(&copied, VfOffset::At(6), b"SMB3".to_vec());
-    fs.vwrite_owned_impl(&[patch]).unwrap();
+    fs.vwrite_impl(&borrow_writes(&[patch])).unwrap();
     assert_eq!(
         fs.vread_all_impl(&[VfFile::from_os_path(&copied)]).unwrap()[0],
         b"hello SMB3 smb"
@@ -588,16 +600,18 @@ fn samba_round_trip_and_copy() {
         VF_ERR_UNSUPPORTED
     );
 
-    // Exceed Samba's usual single-request limit so vwrite_owned_impl chunks
+    // Exceed Samba's usual single-request limit so vwrite_impl chunks
     // the write and vread_all_impl uses the bounded whole-file reader.
     let large = root.join("large.bin");
     let large_data = vec![b'L'; 10 * 1024 * 1024 + 123];
-    fs.vwrite_owned_impl(&[
-        WriteOp::from_os_path(&large, VfOffset::At(0), large_data.clone())
-            .with_creation()
-            .with_truncate(),
-    ])
-    .expect("large SMB write");
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::from_os_path(
+        &large,
+        VfOffset::At(0),
+        large_data.clone(),
+    )
+    .with_creation()
+    .with_truncate()]))
+        .expect("large SMB write");
     assert_eq!(
         fs.vread_all_impl(&[VfFile::from_os_path(&large)])
             .expect("large SMB read")[0],
@@ -636,13 +650,13 @@ fn path_reads_recover_after_server_restart() {
     let file = root.join("survives.bin");
     cleanup_test_tree(&root);
     fs.ensure_dir_impl(&root, 0o755).unwrap();
-    fs.vwrite_owned_impl(&[WriteOp::from_os_path(
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::from_os_path(
         &file,
         VfOffset::At(0),
         b"after restart".to_vec(),
     )
     .with_creation()
-    .with_truncate()])
+    .with_truncate()]))
         .unwrap();
     assert!(
         std::process::Command::new("sh")

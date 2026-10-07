@@ -14,13 +14,17 @@
 //! ```
 //!
 //! The other root types support backend implementation; application read/write
-//! operations should be imported from [`api`] rather than their backend counterparts.
+//! operations should be imported from [`api`] for the portable specializations.
+//! [`api::WriteOp`] and the native [`WriteOp`] share one operation definition;
+//! their offset types preserve positional versus cursor/append semantics.
 
 mod error;
 #[doc(hidden)]
 pub mod internal;
 pub mod path;
 mod types;
+mod write;
+pub use write::WriteOp;
 
 pub use error::{RpcError, RpcResult, STATUS_TRANSPORT, TransportKind};
 pub use types::*;

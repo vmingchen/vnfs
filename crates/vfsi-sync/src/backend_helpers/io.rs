@@ -30,23 +30,6 @@ pub fn vread_into_impl_default<F: Backend + ?Sized>(
         .collect())
 }
 
-pub fn vwrite_impl_default<F: Backend + ?Sized>(
-    backend: &mut F,
-    writes: &[WriteOpRef<'_>],
-) -> VfResult<Vec<WriteResult>> {
-    let owned: Vec<WriteOp> = writes
-        .iter()
-        .map(|write| WriteOp {
-            file: write.file.clone(),
-            offset: write.offset,
-            data: write.data.to_vec(),
-            creation: write.creation,
-            truncate: write.truncate,
-        })
-        .collect();
-    backend.vwrite_owned_impl(&owned)
-}
-
 pub fn vopen_outcomes_impl_default<F: Backend + ?Sized>(
     backend: &mut F,
     paths: &[&Path],
@@ -143,7 +126,7 @@ pub fn native_read_into_impl_default<F: Backend + ?Sized>(
 
 pub fn native_write_impl_default<F: Backend + ?Sized>(
     backend: &mut F,
-    request: WriteOpRef<'_>,
+    request: WriteOp<&VfFile, &[u8]>,
 ) -> VfResult<WriteResult> {
     let mut results = backend.vwrite_impl(std::slice::from_ref(&request))?;
     validate_write_results("write_impl", std::slice::from_ref(&request), &results)?;

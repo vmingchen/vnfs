@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use vfsi_nfs::NfsVecFs;
 use vfsi_nfs::nfs::*;
+use vfsi_sync::test_support::borrow_writes;
 use vnfs::VfsiExt;
 use vnfs::{Nfs, NfsReadPoolOptions};
 
@@ -224,10 +225,10 @@ fn builder_root_confines_absolute_and_parent_paths() {
         .connect()
         .expect("connect with namespace root");
     confined
-        .vwrite_owned_impl(&[
+        .vwrite_impl(&borrow_writes(&[
             WriteOp::from_path("/absolute", VfOffset::At(0), b"a".to_vec()).with_creation(),
             WriteOp::from_path("../../clamped", VfOffset::At(0), b"b".to_vec()).with_creation(),
-        ])
+        ]))
         .unwrap();
     assert!(
         admin
@@ -923,10 +924,18 @@ fn openv_append_writes_at_end() {
         .vopen_raw_simple_impl(&refs, libc::O_CREAT | libc::O_RDWR | libc::O_APPEND, 0o644)
         .expect("openv_simple append");
     for f in &files {
-        c.vwrite_owned_impl(&[WriteOp::new(f.clone(), VfOffset::At(0), b"ab".to_vec())])
-            .unwrap();
-        c.vwrite_owned_impl(&[WriteOp::new(f.clone(), VfOffset::At(0), b"cd".to_vec())])
-            .unwrap();
+        c.vwrite_impl(&borrow_writes(&[WriteOp::new(
+            f.clone(),
+            VfOffset::At(0),
+            b"ab".to_vec(),
+        )]))
+        .unwrap();
+        c.vwrite_impl(&borrow_writes(&[WriteOp::new(
+            f.clone(),
+            VfOffset::At(0),
+            b"cd".to_vec(),
+        )]))
+        .unwrap();
     }
     c.vclose_impl(&files).expect("closev");
     for p in &paths {
@@ -975,9 +984,12 @@ fn writev_then_readv() {
 
     let payload = b"the quick brown fox jumps over the lazy dog\n".to_vec();
     let wr = &c
-        .vwrite_owned_impl(&[
-            WriteOp::from_path(&f, VfOffset::At(0), payload.clone()).with_creation()
-        ])
+        .vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+            &f,
+            VfOffset::At(0),
+            payload.clone(),
+        )
+        .with_creation()]))
         .expect("writev")[0];
     assert_eq!(wr.written, payload.len(), "all bytes written");
 
@@ -1010,10 +1022,13 @@ fn readv_eof() {
     let f = format!("{}/short.txt", dir);
     let mut c = client();
     let payload = b"abcdefghij".to_vec();
-    c.vwrite_owned_impl(
-        &[WriteOp::from_path(&f, VfOffset::At(0), payload.clone()).with_creation()],
+    c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+        &f,
+        VfOffset::At(0),
+        payload.clone(),
     )
-    .unwrap();
+    .with_creation()]))
+        .unwrap();
 
     // Ask for more than exists: must not fail and must hit EOF.
     let r = &c
@@ -1031,7 +1046,12 @@ fn readv_multiple_files() {
     for (i, name) in ["x", "y", "z"].iter().enumerate() {
         let f = format!("{}/{}.txt", dir, name);
         let payload = vec![b'a' + i as u8; 8];
-        c.vwrite_owned_impl(&[WriteOp::from_path(&f, VfOffset::At(0), payload).with_creation()])
+        c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+            &f,
+            VfOffset::At(0),
+            payload,
+        )
+        .with_creation()]))
             .unwrap();
         let r = &c
             .vread_impl(&[ReadOp::from_path(&f, VfOffset::At(0), 8)])
@@ -1049,10 +1069,13 @@ fn readv_multiple_files() {
 
 fn make_file(path: &str, content: &[u8]) -> NfsVecFs {
     let mut c = client();
-    c.vwrite_owned_impl(&[
-        WriteOp::from_path(path, VfOffset::At(0), content.to_vec()).with_creation()
-    ])
-    .unwrap();
+    c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+        path,
+        VfOffset::At(0),
+        content.to_vec(),
+    )
+    .with_creation()]))
+        .unwrap();
     c
 }
 
@@ -1106,10 +1129,13 @@ fn getattrsv() {
     let mut attrs = Vec::new();
     for name in ["g0", "g1", "g2"] {
         let f = format!("{}/{}.txt", dir, name);
-        c.vwrite_owned_impl(&[
-            WriteOp::from_path(&f, VfOffset::At(0), vec![b'x'; 3]).with_creation()
-        ])
-        .unwrap();
+        c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+            &f,
+            VfOffset::At(0),
+            vec![b'x'; 3],
+        )
+        .with_creation()]))
+            .unwrap();
         attrs.push(VfAttrs {
             file: VfFile::from_path(&f),
             masks: AttrMask::MODE | AttrMask::SIZE | AttrMask::NLINK | AttrMask::FILEID,
@@ -1187,10 +1213,13 @@ fn listdir() {
         .unwrap();
     for (i, name) in ["a.txt", "b.txt", "c.txt"].iter().enumerate() {
         let f = format!("{}/{}", dir, name);
-        c.vwrite_owned_impl(&[
-            WriteOp::from_path(&f, VfOffset::At(0), vec![b'a' + i as u8; 4]).with_creation(),
-        ])
-        .unwrap();
+        c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+            &f,
+            VfOffset::At(0),
+            vec![b'a' + i as u8; 4],
+        )
+        .with_creation()]))
+            .unwrap();
     }
     let contents = c
         .listdir_impl(Path::new(&dir), AttrMask::default(), 0, false)
@@ -1207,10 +1236,13 @@ fn listdir_recursive() {
     c.ensure_dir_impl(Path::new(&format!("{}/d1/d2", dir)), 0o755)
         .unwrap();
     for f in [format!("{}/top.txt", dir), format!("{}/d1/deep.txt", dir)] {
-        c.vwrite_owned_impl(&[
-            WriteOp::from_path(&f, VfOffset::At(0), b"ok".to_vec()).with_creation()
-        ])
-        .unwrap();
+        c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+            &f,
+            VfOffset::At(0),
+            b"ok".to_vec(),
+        )
+        .with_creation()]))
+            .unwrap();
     }
     let contents = c
         .listdir_impl(Path::new(&dir), AttrMask::default(), 0, true)
@@ -1236,7 +1268,12 @@ fn bounded_walk_limits_nfs_accumulation() {
     c.ensure_dir_impl(Path::new(&format!("{}/d1/d2", dir)), 0o755)
         .unwrap();
     let one = format!("{}/one", dir);
-    c.vwrite_owned_impl(&[WriteOp::from_path(&one, VfOffset::At(0), Vec::new()).with_creation()])
+    c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+        &one,
+        VfOffset::At(0),
+        Vec::new(),
+    )
+    .with_creation()]))
         .unwrap();
 
     let error = c
@@ -1315,10 +1352,13 @@ fn unlinkv() {
     ];
     let refs: Vec<&Path> = files.iter().map(Path::new).collect();
     for f in &files {
-        c.vwrite_owned_impl(&[
-            WriteOp::from_path(f, VfOffset::At(0), b"z".to_vec()).with_creation()
-        ])
-        .unwrap();
+        c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+            f,
+            VfOffset::At(0),
+            b"z".to_vec(),
+        )
+        .with_creation()]))
+            .unwrap();
     }
     c.vunlink_impl(&refs).expect("unlinkv");
     for f in &files {
@@ -1331,7 +1371,12 @@ fn removev() {
     let dir = setup_dir("removev");
     let mut c = client();
     let f = format!("{}/rv.txt", dir);
-    c.vwrite_owned_impl(&[WriteOp::from_path(&f, VfOffset::At(0), b"r".to_vec()).with_creation()])
+    c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+        &f,
+        VfOffset::At(0),
+        b"r".to_vec(),
+    )
+    .with_creation()]))
         .unwrap();
     c.vremove_impl(&[VfFile::from_path(&f)]).expect("removev");
     assert!(!c.exists_impl(Path::new(&f)).unwrap());
@@ -1471,7 +1516,7 @@ fn writev_path_is_one_compound_per_dir() {
         .iter()
         .map(|p| WriteOp::at(VfFile::from_path(p), 0, b"x".to_vec()).with_creation())
         .collect();
-    let res = c.vwrite_owned_impl(&ops).unwrap();
+    let res = c.vwrite_impl(&borrow_writes(&ops)).unwrap();
     assert_eq!(res.len(), 5);
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     assert_eq!(
@@ -1529,7 +1574,7 @@ fn writev_path_openwrite_form_is_two_compounds() {
         .zip(&payloads)
         .map(|(p, d)| WriteOp::at(VfFile::from_path(p), 0, d.clone()).with_creation())
         .collect();
-    let res = c.vwrite_owned_impl(&ops).unwrap();
+    let res = c.vwrite_impl(&borrow_writes(&ops)).unwrap();
     assert_eq!(res.len(), 5);
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     assert_eq!(
@@ -1576,7 +1621,7 @@ fn phased_create_batch_continues_after_missing_middle_lookup() {
         .map(|(path, data)| WriteOp::at(VfFile::from_path(path), 0, data.clone()).with_creation())
         .collect();
     let results = c
-        .vwrite_owned_impl(&writes)
+        .vwrite_impl(&borrow_writes(&writes))
         .expect("mixed existence create batch");
     assert_eq!(results.len(), paths.len());
 
@@ -1775,11 +1820,11 @@ fn path_writev_follows_final_symlink() {
         .into_owned();
     c.symlink_raw_impl(Path::new(&rel), Path::new(&link))
         .unwrap();
-    c.vwrite_owned_impl(&[WriteOp::at(
+    c.vwrite_impl(&borrow_writes(&[WriteOp::at(
         VfFile::from_path(&link),
         0,
         b"via-link".to_vec(),
-    )])
+    )]))
     .unwrap();
     assert_eq!(
         c.read_raw_impl(&VfFile::from_path(&target), 0, 8).unwrap(),
@@ -1847,11 +1892,11 @@ fn writev_path_compresses_shared_prefix() {
         .unwrap();
     let _ = vfsi_nfs::compound::thread_compound_stats(); // reset counters
     let res = c
-        .vwrite_owned_impl(&[
+        .vwrite_impl(&borrow_writes(&[
             WriteOp::at(VfFile::from_path(&f0), 0, b"0".to_vec()).with_creation(),
             WriteOp::at(VfFile::from_path(&f1), 0, b"1".to_vec()).with_creation(),
             WriteOp::at(VfFile::from_path(&f2), 0, b"2".to_vec()).with_creation(),
-        ])
+        ]))
         .unwrap();
     assert_eq!(res.len(), 3);
     let (compounds, ops, _, _) = vfsi_nfs::compound::thread_compound_stats();
@@ -1881,10 +1926,10 @@ fn readv_writev_mixes_descriptors_and_paths() {
 
     let _ = vfsi_nfs::compound::thread_compound_stats(); // reset counters
     let w = c
-        .vwrite_owned_impl(&[
+        .vwrite_impl(&borrow_writes(&[
             WriteOp::new(fd.clone(), VfOffset::At(0), b"fd-data".to_vec()),
             WriteOp::at(VfFile::from_path(&fpath), 0, b"path-data".to_vec()).with_creation(),
-        ])
+        ]))
         .unwrap();
     assert_eq!(w.len(), 2);
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
@@ -1919,7 +1964,7 @@ fn writev_respects_compound_size_limit() {
         .iter()
         .map(|p| WriteOp::at(VfFile::from_path(p), 0, payload.clone()).with_creation())
         .collect();
-    let res = c.vwrite_owned_impl(&ops).unwrap();
+    let res = c.vwrite_impl(&borrow_writes(&ops)).unwrap();
     assert_eq!(res.len(), 4);
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     assert_eq!(compounds, 4, "payload cap must split into 4 compounds");
@@ -1943,11 +1988,11 @@ fn writev_partial_failure_reports_failing_index() {
     let missing = format!("{}/no/such/dir/f1", dir);
     let f2 = format!("{}/f2", dir);
     let e = c
-        .vwrite_owned_impl(&[
+        .vwrite_impl(&borrow_writes(&[
             WriteOp::at(VfFile::from_path(&f0), 0, b"x".to_vec()).with_creation(),
             WriteOp::at(VfFile::from_path(&missing), 0, b"y".to_vec()).with_creation(),
             WriteOp::at(VfFile::from_path(&f2), 0, b"z".to_vec()).with_creation(),
-        ])
+        ]))
         .unwrap_err();
     assert_eq!(
         e.index(),
@@ -2123,12 +2168,20 @@ fn confirmed_write_chunk_advances_descriptor_after_later_failure() {
     ));
     client.set_fault_injector(script.clone());
     let error = client
-        .vwrite_owned_impl(&[WriteOp::new(file.clone(), VfOffset::Cur, vec![b'a'; 8192])])
+        .vwrite_impl(&borrow_writes(&[WriteOp::new(
+            file.clone(),
+            VfOffset::Cur,
+            vec![b'a'; 8192],
+        )]))
         .unwrap_err();
     assert!(error.is_transport());
     assert!(script.is_consumed());
     client
-        .vwrite_owned_impl(&[WriteOp::new(file.clone(), VfOffset::Cur, vec![b'b'])])
+        .vwrite_impl(&borrow_writes(&[WriteOp::new(
+            file.clone(),
+            VfOffset::Cur,
+            vec![b'b'],
+        )]))
         .unwrap();
     let read = client
         .vread_impl(&[ReadOp::new(file.clone(), VfOffset::At(4096), 1)])
@@ -2145,9 +2198,12 @@ fn recursive_remove_propagates_type_lookup_transport_failure() {
     let mut client = client();
     let path = format!("{dir}/kept");
     client
-        .vwrite_owned_impl(&[
-            WriteOp::from_path(&path, VfOffset::At(0), b"data".to_vec()).with_creation()
-        ])
+        .vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+            &path,
+            VfOffset::At(0),
+            b"data".to_vec(),
+        )
+        .with_creation()]))
         .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeRemoveType { index: 0 },
@@ -2422,7 +2478,7 @@ fn directory_visit_does_not_replay_after_delivering_an_entry() {
         .iter()
         .map(|name| WriteOp::at(VfFile::from_path(name), 0, b"x".to_vec()).with_creation())
         .collect();
-    admin.vwrite_owned_impl(&writes).unwrap();
+    admin.vwrite_impl(&borrow_writes(&writes)).unwrap();
 
     let proxy = DropReplyProxy::start(reply_loss_target());
     let visitor = Nfs::builder(proxy.endpoint())
@@ -2619,7 +2675,12 @@ fn large_writev_readv_roundtrip() {
     // 64 MiB, so the per-op limit is the compound budget, not 1 MiB).
     let _ = vfsi_nfs::compound::thread_compound_stats(); // reset counters
     let w = c
-        .vwrite_owned_impl(&[WriteOp::at(VfFile::from_path(&p), 0, data.clone()).with_creation()])
+        .vwrite_impl(&borrow_writes(&[WriteOp::at(
+            VfFile::from_path(&p),
+            0,
+            data.clone(),
+        )
+        .with_creation()]))
         .unwrap();
     assert_eq!(w[0].written, data.len());
     assert_eq!(
@@ -2651,7 +2712,12 @@ fn read_allv_is_no_stat_whole_file_read() {
     for i in 0..4 {
         let p = format!("{}/f{}.bin", dir, i);
         let data = vec![b'a' + i as u8; 2 * 1024 * 1024 + 123];
-        c.vwrite_owned_impl(&[WriteOp::at(VfFile::from_path(&p), 0, data.clone()).with_creation()])
+        c.vwrite_impl(&borrow_writes(&[WriteOp::at(
+            VfFile::from_path(&p),
+            0,
+            data.clone(),
+        )
+        .with_creation()]))
             .unwrap();
         files.push((p, data));
     }
@@ -2877,10 +2943,13 @@ fn rm_recursive_api() {
         format!("{}/x/deep", dir),
         format!("{}/x/y/deep2", dir),
     ] {
-        c.vwrite_owned_impl(&[
-            WriteOp::from_path(&f, VfOffset::At(0), b"d".to_vec()).with_creation()
-        ])
-        .unwrap();
+        c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+            &f,
+            VfOffset::At(0),
+            b"d".to_vec(),
+        )
+        .with_creation()]))
+            .unwrap();
     }
     assert!(
         c.exists_impl(Path::new(&format!("{}/x/deep", dir)))
@@ -3222,10 +3291,13 @@ fn rm_nonrecursive_keeps_subdirs() {
     let file = format!("{}/keepdir/target", dir);
     c.ensure_dir_impl(Path::new(&format!("{}/keepdir", dir)), 0o755)
         .unwrap();
-    c.vwrite_owned_impl(&[
-        WriteOp::from_path(&file, VfOffset::At(0), b"k".to_vec()).with_creation()
-    ])
-    .unwrap();
+    c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
+        &file,
+        VfOffset::At(0),
+        b"k".to_vec(),
+    )
+    .with_creation()]))
+        .unwrap();
     // Non-recursive removal of the directory fails because it is not empty.
     let r = c.remove_paths_impl(&[Path::new(&dir)], false);
     assert!(
@@ -3240,10 +3312,13 @@ fn rm_nonrecursive_keeps_subdirs() {
 // ---------------------------------------------------------------------------
 
 fn write_file(c: &mut NfsVecFs, path: &Path, data: &[u8]) {
-    c.vwrite_owned_impl(&[
-        WriteOp::from_os_path(path, VfOffset::At(0), data.to_vec()).with_creation()
-    ])
-    .unwrap();
+    c.vwrite_impl(&borrow_writes(&[WriteOp::from_os_path(
+        path,
+        VfOffset::At(0),
+        data.to_vec(),
+    )
+    .with_creation()]))
+        .unwrap();
 }
 
 fn read_all(c: &mut NfsVecFs, path: &Path) -> Vec<u8> {
@@ -3294,11 +3369,11 @@ fn fseek_set_cur_end() {
         .expect("open");
 
     let payload = b"0123456789".to_vec();
-    c.vwrite_owned_impl(&[WriteOp::from_fd(
+    c.vwrite_impl(&borrow_writes(&[WriteOp::from_fd(
         tf.fd().unwrap(),
         VfOffset::At(0),
         payload.clone(),
-    )])
+    )]))
     .unwrap();
     assert_eq!(c.seek_raw_impl(&tf, 0, SeekFrom::End).unwrap(), 10);
 
@@ -3422,13 +3497,13 @@ fn copyv_extent_semantics_and_server_telemetry() {
     }
 
     let sparse = format!("{dir}/sparse");
-    c.vwrite_owned_impl(&[WriteOp::from_path(
+    c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
         &sparse,
         VfOffset::At(1024 * 1024),
         b"tail".to_vec(),
     )
     .with_creation()
-    .with_truncate()])
+    .with_truncate()]))
         .expect("create sparse source");
     let sparse_copy = format!("{dir}/sparse-copy");
 
@@ -3759,7 +3834,9 @@ fn batched_readv_writev_many_files() {
             )
         })
         .collect();
-    let wres = c.vwrite_owned_impl(&writes).expect("batched writev");
+    let wres = c
+        .vwrite_impl(&borrow_writes(&writes))
+        .expect("batched writev");
     for (i, w) in wres.iter().enumerate() {
         assert_eq!(w.written, 3, "write {} wrote 3 bytes", i);
     }
@@ -3832,7 +3909,7 @@ fn batch_exceeds_compound_op_limit() {
         })
         .collect();
     let _ = vfsi_nfs::compound::thread_compound_stats();
-    c.vwrite_owned_impl(&writes)
+    c.vwrite_impl(&borrow_writes(&writes))
         .expect("batched writev (10 files)");
     let (count, _, _, max_ops) = vfsi_nfs::compound::thread_compound_stats();
     assert!(count > 1, "WRITE must split across compounds");

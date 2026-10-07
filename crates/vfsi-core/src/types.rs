@@ -822,6 +822,12 @@ pub enum VfOffset {
     End,
 }
 
+impl From<u64> for VfOffset {
+    fn from(offset: u64) -> Self {
+        Self::At(offset)
+    }
+}
+
 /// One element of a batched read, replacing the C `tc_iovec` (which mixed
 /// input and output fields in a single mutable struct).
 #[derive(Debug, Clone)]
@@ -889,97 +895,7 @@ pub struct ReadIntoResult {
     pub eof: bool,
 }
 
-/// One element of a batched write.
-#[derive(Debug, Clone)]
-pub struct WriteOp {
-    pub file: VfFile,
-    pub offset: VfOffset,
-    pub data: Vec<u8>,
-    /// Create the file if it does not exist.
-    pub creation: bool,
-    /// Truncate the file to zero before writing (POSIX `O_TRUNC` semantics
-    /// fused into the same round trip as the write).
-    pub truncate: bool,
-}
-
-/// Borrowed write request for callers that should not have to allocate an
-/// owned `Vec<u8>` merely to submit a vector operation.
-#[derive(Debug, Clone, Copy)]
-pub struct WriteOpRef<'a> {
-    pub file: &'a VfFile,
-    pub offset: VfOffset,
-    pub data: &'a [u8],
-    pub creation: bool,
-    pub truncate: bool,
-}
-
-impl<'a> WriteOpRef<'a> {
-    pub fn new(file: &'a VfFile, offset: VfOffset, data: &'a [u8]) -> Self {
-        Self {
-            file,
-            offset,
-            data,
-            creation: false,
-            truncate: false,
-        }
-    }
-}
-
-impl<'a> From<&'a WriteOp> for WriteOpRef<'a> {
-    fn from(write: &'a WriteOp) -> Self {
-        Self {
-            file: &write.file,
-            offset: write.offset,
-            data: &write.data,
-            creation: write.creation,
-            truncate: write.truncate,
-        }
-    }
-}
-
-impl WriteOp {
-    pub fn new(file: VfFile, offset: VfOffset, data: Vec<u8>) -> WriteOp {
-        WriteOp {
-            file,
-            offset,
-            data,
-            creation: false,
-            truncate: false,
-        }
-    }
-
-    /// A write at an absolute offset.
-    pub fn at(file: VfFile, offset: u64, data: Vec<u8>) -> WriteOp {
-        WriteOp::new(file, VfOffset::At(offset), data)
-    }
-
-    pub fn from_path(path: &str, offset: VfOffset, data: Vec<u8>) -> WriteOp {
-        WriteOp::new(VfFile::from_path(path), offset, data)
-    }
-
-    /// Construct a write from a native path.
-    pub fn from_os_path(path: &Path, offset: VfOffset, data: Vec<u8>) -> WriteOp {
-        WriteOp::new(VfFile::from_os_path(path), offset, data)
-    }
-
-    pub fn from_fd(fd: Fd, offset: VfOffset, data: Vec<u8>) -> WriteOp {
-        WriteOp::new(VfFile::from_fd(fd), offset, data)
-    }
-
-    /// Create the file if it does not exist.
-    pub fn with_creation(mut self) -> WriteOp {
-        self.creation = true;
-        self
-    }
-
-    /// Truncate the file to zero before writing, in the same round trip.
-    pub fn with_truncate(mut self) -> WriteOp {
-        self.truncate = true;
-        self
-    }
-}
-
-/// The result of one [`WriteOp`]. `file` echoes the request's file reference.
+/// The result of one [`crate::WriteOp`]. `file` echoes the request's file reference.
 #[derive(Debug, Clone)]
 pub struct WriteResult {
     pub file: VfFile,
