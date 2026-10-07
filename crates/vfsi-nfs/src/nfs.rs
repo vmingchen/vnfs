@@ -49,6 +49,12 @@ struct OpenFile {
     reopen: Option<ReopenFile>,
 }
 
+struct DescriptorReadPlan {
+    ops: Vec<crate::client::ReadOp>,
+    owners: Vec<usize>,
+    offsets: Vec<u64>,
+}
+
 /// Same-object dependencies for one descriptor WRITE wave. The first range
 /// needs no tree allocation; additional independent ranges are indexed in
 /// O(log n), avoiding quadratic overlap checks for large scatter vectors.
@@ -2233,12 +2239,23 @@ impl NfsVecFs {
         Ok((received, eof))
     }
 
-    fn vread_batch_nfs(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+    fn descriptor_read_plan(
+        &mut self,
+        reads: &[ReadOp],
+        buffers: Option<&[&mut [u8]]>,
+    ) -> VfResult<DescriptorReadPlan> {
         let per = self.nfs.read_per_op_bytes();
         let mut ops = Vec::with_capacity(reads.len());
         let mut offsets = Vec::with_capacity(reads.len());
         let mut owner = Vec::with_capacity(reads.len());
         for (i, op) in reads.iter().enumerate() {
+            if buffers.is_some_and(|buffers| {
+                buffers
+                    .get(i)
+                    .is_none_or(|buffer| buffer.len() != op.length)
+            }) {
+                return Err(VfError::client(i, ERR_INVAL));
+            }
             let off = self
                 .resolve_offset(&op.file, op.offset)
                 .map_err(|e| e.with_index(i))?;
@@ -2274,6 +2291,19 @@ impl NfsVecFs {
             }
             offsets.push(off);
         }
+        Ok(DescriptorReadPlan {
+            ops,
+            owners: owner,
+            offsets,
+        })
+    }
+
+    fn vread_batch_nfs(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        let DescriptorReadPlan {
+            ops,
+            owners: owner,
+            offsets,
+        } = self.descriptor_read_plan(reads, None)?;
         // The server validates the summed READ counts of a compound against
         // ca_maxresponsesize. Pack by each chunk's actual count so many small
         // descriptor reads share a compound instead of being pessimistically
@@ -2360,48 +2390,11 @@ impl NfsVecFs {
         reads: &[ReadOp],
         buffers: &mut [&mut [u8]],
     ) -> VfResult<Vec<ReadIntoResult>> {
-        let per = self.nfs.read_per_op_bytes();
-        let mut ops = Vec::with_capacity(reads.len());
-        let mut owners = Vec::with_capacity(reads.len());
-        let mut offsets = Vec::with_capacity(reads.len());
-        for (index, read) in reads.iter().enumerate() {
-            if read.length != buffers[index].len() {
-                return Err(VfError::client(index, ERR_INVAL));
-            }
-            let offset = self
-                .resolve_offset(&read.file, read.offset)
-                .map_err(|error| error.with_index(index))?;
-            let length = u64::try_from(read.length)
-                .map_err(|_| VfError::failure(index, libc::EOVERFLOW as u32))?;
-            offset
-                .checked_add(length)
-                .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
-            let open = self
-                .open_files
-                .get(&read.file.fd().unwrap())
-                .cloned()
-                .ok_or_else(|| VfError::failure(index, ERR_EBADF))?;
-            let mut remaining = read.length;
-            let mut start = 0usize;
-            loop {
-                let count = remaining.min(per);
-                ops.push(crate::client::ReadOp {
-                    fh: open.fh.clone(),
-                    stateid: open.stateid,
-                    offset: offset
-                        .checked_add(start as u64)
-                        .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?,
-                    count: count as u32,
-                });
-                owners.push(index);
-                remaining -= count;
-                if remaining == 0 {
-                    break;
-                }
-                start += count;
-            }
-            offsets.push(offset);
-        }
+        let DescriptorReadPlan {
+            ops,
+            owners,
+            offsets,
+        } = self.descriptor_read_plan(reads, Some(buffers))?;
         let byte_limit = if self.nfs.max_response_bytes > 0 {
             self.nfs.read_compound_bytes().saturating_sub(128)
         } else {
@@ -4685,12 +4678,6 @@ impl Backend for NfsVecFs {
         self.ensure_writable(attrs.len())?;
         self.vsetattrs_nfs(attrs, false)
     }
-    fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Attrs> {
-        vfsi_sync::backend_helpers::native_metadata_path_impl_default(self, path, follow)
-    }
-    fn set_metadata_path_impl(&mut self, op: &SetAttrsOp<&std::path::Path>) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_set_metadata_path_impl_default(self, op)
-    }
 
     fn listdir_impl(
         &mut self,
@@ -4948,48 +4935,6 @@ impl Backend for NfsVecFs {
                 Ok((output, next, seeds))
             })
             .collect()
-    }
-    fn create_dir_impl(&mut self, path: &std::path::Path, mode: u32) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_create_dir_impl_default(self, path, mode)
-    }
-    fn read_dir_impl(
-        &mut self,
-        path: &std::path::Path,
-        options: ReadDirOptions,
-    ) -> VfResult<Vec<DirEntry>> {
-        vfsi_sync::backend_helpers::native_read_dir_impl_default(self, path, options)
-    }
-    fn read_dir_page_impl(
-        &mut self,
-        path: &std::path::Path,
-        cursor: Option<DirPageCursor>,
-        page_size: usize,
-        max_entries: usize,
-    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
-        vfsi_sync::backend_helpers::native_read_dir_page_impl_default(
-            self,
-            path,
-            cursor,
-            page_size,
-            max_entries,
-        )
-    }
-    fn read_dir_page_with_fields_impl(
-        &mut self,
-        path: &std::path::Path,
-        fields: AttrMask,
-        cursor: Option<DirPageCursor>,
-        page_size: usize,
-        max_entries: usize,
-    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
-        vfsi_sync::backend_helpers::native_read_dir_page_with_fields_impl_default(
-            self,
-            path,
-            fields,
-            cursor,
-            page_size,
-            max_entries,
-        )
     }
 
     fn visit_dir_impl(
@@ -5467,15 +5412,6 @@ impl Backend for NfsVecFs {
         }
         self.apply_dir_modes(dirs)
     }
-    fn remove_impl(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_remove_impl_default(self, path, recursive)
-    }
-    fn remove_dir_contents_impl(&mut self, path: &std::path::Path) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_remove_dir_contents_impl_default(self, path)
-    }
-    fn rename_impl(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_rename_impl_default(self, from, to)
-    }
 
     fn vsymlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         self.ensure_writable(newpaths.len())?;
@@ -5590,15 +5526,6 @@ impl Backend for NfsVecFs {
         self.nfs
             .link_many(&ops)
             .map_err(vfsi_core::error_from_rpc_indexed)
-    }
-    fn symlink_impl(&mut self, target: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_symlink_impl_default(self, target, link)
-    }
-    fn hard_link_impl(&mut self, source: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_hard_link_impl_default(self, source, link)
-    }
-    fn read_link_impl(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf> {
-        vfsi_sync::backend_helpers::native_read_link_impl_default(self, path)
     }
 
     fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> VfRes {

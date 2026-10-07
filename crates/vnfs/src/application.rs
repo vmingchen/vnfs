@@ -6,71 +6,8 @@ use crate::{
 };
 use std::io::SeekFrom;
 use std::path::Path;
+#[cfg(test)]
 use vfsi_sync::application::visit_directory_pages;
-fn vector_index(error: crate::Error, index: usize) -> crate::Error {
-    if error.index().is_some() {
-        error.with_index(index)
-    } else {
-        error
-    }
-}
-macro_rules! file_methods {
-    ($file:ty) => {
-        fn path(&self) -> &Path {
-            <$file>::path(self)
-        }
-        fn attrs(&self) -> Result<Attrs> {
-            <$file>::attrs(self)
-        }
-        fn read_request_at(&self, offset: u64, length: usize) -> Self::ReadRequest<'_> {
-            <$file>::read_request_at(self, offset, length)
-        }
-        fn read_request_at_into<'a>(
-            &'a self,
-            offset: u64,
-            buffer: &'a mut [u8],
-        ) -> Self::ReadIntoRequest<'a> {
-            <$file>::read_request_at_into(self, offset, buffer)
-        }
-        fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize> {
-            <$file>::read_at(self, buffer, offset)
-        }
-        fn write_at(&self, buffer: &[u8], offset: u64) -> Result<usize> {
-            <$file>::write_at(self, buffer, offset)
-        }
-        fn read_native(&mut self, buffer: &mut [u8]) -> Result<usize> {
-            <$file>::read_native(self, buffer)
-        }
-        fn read_to_end_with_limit(&mut self, max_bytes: usize) -> Result<Vec<u8>> {
-            <$file>::read_to_end_with_limit(self, max_bytes)
-        }
-        fn write_native(&mut self, buffer: &[u8]) -> Result<usize> {
-            <$file>::write_native(self, buffer)
-        }
-        fn seek_native(&mut self, position: SeekFrom) -> Result<u64> {
-            <$file>::seek_native(self, position)
-        }
-        fn sync_data(&self) -> Result<()> {
-            <$file>::sync_data(self)
-        }
-        fn sync_all(&self) -> Result<()> {
-            <$file>::sync_all(self)
-        }
-        fn set_permissions(&self, permissions: crate::Permissions) -> Result<()> {
-            <$file>::chmod(self, permissions)
-        }
-        fn try_close(&mut self) -> Result<()> {
-            <$file>::try_close(self)
-        }
-        fn is_closed(&self) -> bool {
-            <$file>::is_closed(self)
-        }
-        fn close(self) -> Result<()> {
-            <$file>::close(self)
-        }
-    };
-}
-
 pub(crate) trait NativeHooks: Vfsi {
     fn page_capacity(&self, paths: &[&Path]) -> Result<usize>;
     fn open_native(&self, request: OpenOp) -> Result<Self::File>;
@@ -84,246 +21,33 @@ pub(crate) trait NativeHooks: Vfsi {
 
 macro_rules! client_methods {
     ($client:ty, $receiver:path) => {
-        client_methods!($client, $receiver, <$client>::vread);
+        client_methods!($client, $receiver, <$client>::vread, $receiver);
     };
-    ($client:ty, $receiver:path, $vread_native:expr) => {
-        client_methods!($client, $receiver, $vread_native, $receiver);
-    };
-    ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path) => {
+    ($client:ty, $receiver:path, $read:expr, $read_receiver:path) => {
         client_methods!(
             $client,
             $receiver,
-            $vread_native,
+            $read,
             $read_receiver,
             <$client>::write_partial_native,
-            <$client>::write_complete
-        );
-    };
-    ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path, $vwrite_native:expr, $vwrite_all_native:expr) => {
-        client_methods!(
-            $client,
-            $receiver,
-            $vread_native,
-            $read_receiver,
-            $vwrite_native,
-            $vwrite_all_native,
-            <$client>::vgetattrs
-        );
-    };
-    ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path, $vwrite_native:expr, $vwrite_all_native:expr, $metadata:expr) => {
-        client_methods!(
-            $client,
-            $receiver,
-            $vread_native,
-            $read_receiver,
-            $vwrite_native,
-            $vwrite_all_native,
-            $metadata,
+            <$client>::write_complete,
+            <$client>::vgetattrs,
             $receiver
         );
     };
-    ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path, $vwrite_native:expr, $vwrite_all_native:expr, $metadata:expr, $write_receiver:path) => {
-        client_methods!(
+    ($client:ty, $receiver:path, $read:expr, $read_receiver:path,
+     $partial:expr, $complete:expr, $attrs:expr, $write_receiver:path) => {
+        vfsi_sync::__vfsi_client_methods!(
             $client,
             $receiver,
-            $vread_native,
+            $read,
             $read_receiver,
-            $vwrite_native,
-            $vwrite_all_native,
-            $metadata,
+            $partial,
+            $complete,
+            $attrs,
             $write_receiver,
-            vrename,
-            vmkdir,
-            vcopy,
-            vclose,
-            vopen
+            NativeHooks
         );
-    };
-    // Application clients and backend clients use different native method names.
-    ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path, $vwrite_native:expr, $vwrite_all_native:expr, $metadata:expr, $write_receiver:path, $rename:ident, $mkdir:ident, $copy:ident, $close:ident, $open_batch:ident) => {
-        fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
-            &self,
-            pairs: &[(P, Q)],
-            options: crate::RenameOptions,
-        ) -> Result<()> {
-            <$client>::vrename($receiver(self), pairs, options)
-        }
-        fn vlistdirs<P: AsRef<Path>>(
-            &self,
-            paths: &[P],
-            options: crate::ListDirOptions,
-            callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
-        ) -> Result<Vec<crate::TraversalCompletion>> {
-            visit_directory_pages(
-                paths,
-                options,
-                self.limits(),
-                |paths| <$client as NativeHooks>::page_capacity($receiver(self), paths),
-                |path| {
-                    let metadata = self.vgetattrs(
-                        &[path],
-                        crate::AttrsOptions::new()
-                            .fields(crate::Attributes::MODE)
-                            .follow_symlinks(false),
-                    )?;
-                    if metadata.len() != 1 {
-                        return Err(crate::Error::transport(
-                            None,
-                            "invalid directory root metadata count",
-                        ));
-                    }
-                    if !metadata[0].is_dir() {
-                        return Err(crate::Error::client(0, libc::ENOTDIR as u32)
-                            .with_context("visit_dirs", path));
-                    }
-                    Ok(())
-                },
-                |paths, cursors, page_size, max_entries| {
-                    <$client>::read_dir_pages_with_fields(
-                        $receiver(self),
-                        paths,
-                        options.attributes(),
-                        cursors,
-                        page_size,
-                        max_entries,
-                        options.follows_symlinks(),
-                    )
-                },
-                callback,
-            )
-        }
-        fn vstream<P: AsRef<Path>>(
-            &self,
-            paths: &[P],
-            options: crate::StreamOptions,
-            mut callback: impl FnMut(usize, u64, &[u8]) -> Result<bool>,
-        ) -> Result<Vec<crate::StreamCompletion>> {
-            let mut output = Vec::new();
-            for (index, path) in paths.iter().enumerate() {
-                let completion = <$client as NativeHooks>::stream_native(
-                    $receiver(self),
-                    path,
-                    options,
-                    |offset, data| callback(index, offset, data),
-                )
-                .map_err(|error| vector_index(error, index))?;
-                output.push(completion);
-                if matches!(completion, crate::StreamCompletion::Stopped { .. }) {
-                    break;
-                }
-            }
-            Ok(output)
-        }
-        fn capabilities(&self) -> Result<vfsi_core::Capabilities> {
-            <$client>::capabilities($receiver(self))
-        }
-        fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-            <$client>::vsymlink($receiver(self), pairs)
-        }
-        fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<std::path::PathBuf>> {
-            <$client>::vreadlink($receiver(self), paths)
-        }
-        fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-            <$client>::vhardlink($receiver(self), pairs)
-        }
-        fn vstatfs<P: vfsi_core::AsTarget<Self::File>>(
-            &self,
-            targets: &[P],
-        ) -> Result<Vec<vfsi_core::FilesystemStats>> {
-            <$client>::vstatfs($receiver(self), targets)
-        }
-        fn vsetattrs<P: vfsi_core::AsTarget<Self::File>>(
-            &self,
-            updates: &[vfsi_core::SetAttrsOp<P>],
-        ) -> Result<()> {
-            <$client>::vsetattrs($receiver(self), updates)
-        }
-        fn vgetattrs<P: AsRef<Path>>(
-            &self,
-            paths: &[P],
-            options: crate::AttrsOptions,
-        ) -> Result<Vec<Attrs>> {
-            ($metadata)($receiver(self), paths, options)
-        }
-        fn limits(&self) -> ResourceLimits {
-            <$client>::limits($receiver(self))
-        }
-
-        fn vopen(&self, requests: &[OpenOp]) -> Result<Vec<Self::File>> {
-            if requests.len() == 1 {
-                // Preserve native symlink resolution and independent-handle state.
-                return <$client as NativeHooks>::open_native($receiver(self), requests[0].clone())
-                    .map(|file| vec![file]);
-            }
-            <$client>::$open_batch($receiver(self), requests)
-        }
-        fn vread<'a>(
-            &self,
-            ops: impl IntoIterator<Item = crate::ReadOp<'a, Self::File>>,
-            options: crate::ReadOptions,
-        ) -> Result<Vec<crate::ReadResult>> {
-            ($vread_native)($read_receiver(self), ops, options)
-        }
-        fn vwrite<'a>(
-            &self,
-            requests: &[crate::WriteOp<'a, Self::File>],
-            options: crate::WriteOptions,
-        ) -> Result<Vec<WriteResult>> {
-            let result = if options.writes_all() {
-                ($vwrite_all_native)($write_receiver(self), requests)
-            } else {
-                ($vwrite_native)($write_receiver(self), requests)
-            };
-            result.map_err(crate::write::public_write_error)
-        }
-        fn vclose(&self, files: &mut [Self::File]) -> Result<()> {
-            <$client>::$close($receiver(self), files)
-        }
-        fn vmkdir<P: AsRef<Path>>(&self, paths: &[vfsi_core::MkDirOp<P>]) -> Result<()> {
-            <$client>::$mkdir($receiver(self), paths)
-        }
-
-        fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
-            &self,
-            pairs: &[(P, Q)],
-            options: crate::CopyOption,
-        ) -> Result<()> {
-            <$client>::$copy($receiver(self), pairs, options)
-        }
-        fn vremove<P: AsRef<Path>>(
-            &self,
-            paths: &[P],
-            mode: crate::RemoveMode,
-            options: crate::RemoveOptions,
-        ) -> Result<()> {
-            match mode {
-                crate::RemoveMode::Entry | crate::RemoveMode::Tree => {
-                    <$client>::vremove_with_options_native(
-                        $receiver(self),
-                        paths,
-                        mode == crate::RemoveMode::Tree,
-                        options,
-                    )
-                }
-                crate::RemoveMode::Contents => {
-                    let mut first_error = None;
-                    for (index, path) in paths.iter().enumerate() {
-                        if let Err(error) = <$client>::remove_dir_contents_with_options(
-                            $receiver(self),
-                            path,
-                            options,
-                        ) {
-                            let error = vector_index(error, index);
-                            if error.is_transport() || !options.continues_on_error() {
-                                return Err(error);
-                            }
-                            first_error.get_or_insert(error);
-                        }
-                    }
-                    first_error.map_or(Ok(()), Err)
-                }
-            }
-        }
     };
 }
 
@@ -331,7 +55,7 @@ macro_rules! client_methods {
 impl FileHandle for crate::NfsFile {
     type ReadRequest<'a> = crate::NfsRead<'a>;
     type ReadIntoRequest<'a> = crate::NfsReadInto<'a>;
-    file_methods!(crate::NfsFile);
+    vfsi_sync::__vfsi_file_methods!(crate::NfsFile, permissions = chmod);
 }
 #[cfg(feature = "nfs")]
 impl Vfsi for crate::NfsClient {
@@ -345,7 +69,7 @@ mod routed {
     impl FileHandle for crate::AutoFile {
         type ReadRequest<'a> = crate::AutoRead<'a>;
         type ReadIntoRequest<'a> = crate::AutoReadInto<'a>;
-        file_methods!(crate::AutoFile);
+        vfsi_sync::__vfsi_file_methods!(crate::AutoFile, permissions = chmod);
     }
     impl Vfsi for crate::AutoClient {
         type File = crate::AutoFile;
@@ -365,7 +89,7 @@ mod routed {
     impl FileHandle for crate::MountedFile {
         type ReadRequest<'a> = crate::MountedRead<'a>;
         type ReadIntoRequest<'a> = crate::MountedReadInto<'a>;
-        file_methods!(crate::MountedFile);
+        vfsi_sync::__vfsi_file_methods!(crate::MountedFile, permissions = chmod);
     }
 }
 

@@ -1444,7 +1444,7 @@ impl AutoClient {
         options: crate::WriteOptions,
     ) -> VfResult<Vec<WriteResult>> {
         self.write_vector(requests, options.writes_all())
-            .map_err(crate::write::public_write_error)
+            .map_err(vfsi_sync::application::public_write_error)
     }
 
     pub(crate) fn write_complete(

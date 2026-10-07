@@ -928,7 +928,7 @@ fn read_into_stops_callbacks_on_first_error() {
     client
         .write(&fh, &stateid, 0, b"abcdef")
         .expect("write test file");
-    let reads: Vec<ReadOp> = (0..3)
+    let mut reads: Vec<ReadOp> = (0..3)
         .map(|index| ReadOp {
             fh: fh.clone(),
             stateid,
@@ -936,6 +936,30 @@ fn read_into_stops_callbacks_on_first_error() {
             count: 2,
         })
         .collect();
+    // Both destinations use the same wire engine, including empty EOF replies.
+    reads.push(ReadOp {
+        fh: fh.clone(),
+        stateid,
+        offset: 6,
+        count: 3,
+    });
+    let owned = client.readv(&reads).unwrap();
+    let mut bytes = Vec::new();
+    let into = client
+        .readv_into(&reads, |index, data| {
+            assert_eq!(index, bytes.len());
+            bytes.push(data.to_vec());
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(owned.len(), reads.len());
+    assert_eq!(into.len(), reads.len());
+    assert_eq!(bytes.len(), reads.len());
+    for ((data, (len, eof)), (expected, expected_eof)) in bytes.iter().zip(into).zip(owned) {
+        assert_eq!(data, &expected);
+        assert_eq!(len, expected.len());
+        assert_eq!(eof, expected_eof);
+    }
     let mut calls = 0usize;
     let error = client
         .readv_into(&reads, |_, _| {

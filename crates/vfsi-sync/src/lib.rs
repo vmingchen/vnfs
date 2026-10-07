@@ -14,6 +14,7 @@ mod traits;
 pub use traits::{BackendDirectoryPage, DirPageCursor, DirectoryPage, ReadAllOptions};
 mod io;
 pub use io::{VfFileHandle, VfOpenOptions};
+mod application_macros;
 mod client;
 mod traversal;
 pub use client::{FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite, OpenOptions, SetMetadata};

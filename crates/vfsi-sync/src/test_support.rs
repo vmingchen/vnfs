@@ -88,6 +88,22 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
     ]))
     .unwrap();
     let whole_files = [VfFile::from_path(&whole_a), VfFile::from_path(&whole_b)];
+    // Exercise a real cross-file vector, not a loop of singleton reads.
+    let ranges = fs
+        .vread_impl(&[
+            ReadOp::at(whole_files[1].clone(), 0, 3),
+            ReadOp::at(whole_files[0].clone(), 0, 3),
+        ])
+        .unwrap();
+    assert_eq!(ranges.len(), 2);
+    for (result, (file, data)) in ranges
+        .iter()
+        .zip([(&whole_files[1], b"def"), (&whole_files[0], b"abc")])
+    {
+        assert_eq!(&result.file, file);
+        assert_eq!(result.offset, 0);
+        assert_eq!(&result.data, data);
+    }
     assert_eq!(
         fs.vread_all_with_options_impl(&whole_files, ReadAllOptions::new().max_total_bytes(6))
             .unwrap(),
@@ -113,6 +129,7 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
         assert!(st.fileid != 0);
         assert!(st.nlink >= 1, "nlink");
         assert_eq!(st.rdev, 0, "rdev of a regular file");
+        assert_eq!(fs.lstat_impl(Path::new(&f)).unwrap().fileid, st.fileid);
     }
     // Time attributes are populated (reported in `returned`) on both
     // backends; exact values depend on the filesystem clock semantics.
@@ -177,6 +194,7 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
     let tf = fs
         .open_raw_impl(Path::new(&f), libc::O_RDWR, 0)
         .expect("open");
+    assert_eq!(fs.fstat_impl(&tf).unwrap().size, 5);
     fs.vwrite_impl(&borrow_writes(&[WriteOp::from_fd(
         tf.fd().unwrap(),
         VfOffset::At(0),

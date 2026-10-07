@@ -525,14 +525,7 @@ pub trait Vfsi {
 pub trait VfsiExt: Vfsi {
     /// Query one target through the vector filesystem-statistics engine.
     fn statfs<P: crate::AsTarget<Self::File>>(&self, target: P) -> Result<crate::FilesystemStats> {
-        let mut results = self.vstatfs(&[target])?;
-        if results.len() != 1 {
-            return Err(crate::VfError::transport(
-                None,
-                "statfs backend returned an invalid result count",
-            ));
-        }
-        Ok(results.remove(0))
+        single_completion(self.vstatfs(&[target])?, "statfs backend")
     }
 
     // Open and close
@@ -608,14 +601,7 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn open_with(&self, request: OpenOp) -> Result<Self::File> {
-        let mut files = self.vopen(&[request])?;
-        if files.len() != 1 {
-            return Err(crate::api::Error::transport(
-                None,
-                "vopen returned an invalid result count",
-            ));
-        }
-        Ok(files.remove(0))
+        single_completion(self.vopen(&[request])?, "vopen")
     }
 
     /// Consume all handles. Errors cannot return cleanup ownership; Drop is
@@ -1037,14 +1023,7 @@ pub trait VfsiExt: Vfsi {
         options: crate::api::ListDirOptions,
     ) -> Result<Vec<crate::api::DirEntry>> {
         let mut trees = self.read_dirs_with_options(&[path], options.recursive(false))?;
-        let mut listings = single_tree(&mut trees)?;
-        if listings.len() != 1 {
-            return Err(crate::api::Error::transport(
-                None,
-                "read_dirs returned an invalid result count",
-            ));
-        }
-        Ok(listings.remove(0).entries)
+        Ok(single_completion(single_tree(&mut trees)?, "read_dirs")?.entries)
     }
 
     /// Collect directory listings under one aggregate entry/path-byte policy.
@@ -1178,14 +1157,10 @@ pub trait VfsiExt: Vfsi {
         path: impl AsRef<Path>,
         options: crate::api::ListDirOptions,
     ) -> Result<Vec<DirectoryListing>> {
-        let mut trees = self.read_dirs_with_options(&[path], options.recursive(true))?;
-        if trees.len() != 1 {
-            return Err(crate::api::Error::transport(
-                None,
-                "walks returned an invalid result count",
-            ));
-        }
-        Ok(trees.remove(0))
+        single_completion(
+            self.read_dirs_with_options(&[path], options.recursive(true))?,
+            "walks",
+        )
     }
 
     // Visit directories
@@ -1705,17 +1680,10 @@ fn attrs_query<C: Vfsi + ?Sized>(
     operation: &'static str,
 ) -> Result<Attrs> {
     let path = path.as_ref();
-    let mut results = client
+    let results = client
         .vgetattrs(&[path], options)
         .map_err(|error| error.with_context(operation, path))?;
-    if results.len() != 1 {
-        return Err(crate::api::Error::transport(
-            None,
-            "vgetattrs returned an invalid result count",
-        )
-        .with_context(operation, path));
-    }
-    Ok(results.remove(0))
+    single_completion(results, "vgetattrs").map_err(|error| error.with_context(operation, path))
 }
 
 fn single_tree(trees: &mut Vec<Vec<DirectoryListing>>) -> Result<Vec<DirectoryListing>> {

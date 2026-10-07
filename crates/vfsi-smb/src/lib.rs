@@ -1941,12 +1941,6 @@ impl Backend for SmbVecFs {
             None => Ok(()),
         }
     }
-    fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Attrs> {
-        vfsi_sync::backend_helpers::native_metadata_path_impl_default(self, path, follow)
-    }
-    fn set_metadata_path_impl(&mut self, op: &SetAttrsOp<&std::path::Path>) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_set_metadata_path_impl_default(self, op)
-    }
 
     fn listdir_impl(
         &mut self,
@@ -1958,48 +1952,6 @@ impl Backend for SmbVecFs {
         let mut output = Vec::new();
         self.listdir_rec(dir, masks, max_count, recursive, &mut output)?;
         Ok(output)
-    }
-    fn create_dir_impl(&mut self, path: &std::path::Path, mode: u32) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_create_dir_impl_default(self, path, mode)
-    }
-    fn read_dir_impl(
-        &mut self,
-        path: &std::path::Path,
-        options: ReadDirOptions,
-    ) -> VfResult<Vec<DirEntry>> {
-        vfsi_sync::backend_helpers::native_read_dir_impl_default(self, path, options)
-    }
-    fn read_dir_page_impl(
-        &mut self,
-        path: &std::path::Path,
-        cursor: Option<DirPageCursor>,
-        page_size: usize,
-        max_entries: usize,
-    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
-        vfsi_sync::backend_helpers::native_read_dir_page_impl_default(
-            self,
-            path,
-            cursor,
-            page_size,
-            max_entries,
-        )
-    }
-    fn read_dir_page_with_fields_impl(
-        &mut self,
-        path: &std::path::Path,
-        fields: AttrMask,
-        cursor: Option<DirPageCursor>,
-        page_size: usize,
-        max_entries: usize,
-    ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
-        vfsi_sync::backend_helpers::native_read_dir_page_with_fields_impl_default(
-            self,
-            path,
-            fields,
-            cursor,
-            page_size,
-            max_entries,
-        )
     }
 
     fn vrename_impl(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
@@ -2142,15 +2094,6 @@ impl Backend for SmbVecFs {
         }
         Ok(())
     }
-    fn remove_impl(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_remove_impl_default(self, path, recursive)
-    }
-    fn remove_dir_contents_impl(&mut self, path: &std::path::Path) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_remove_dir_contents_impl_default(self, path)
-    }
-    fn rename_impl(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_rename_impl_default(self, from, to)
-    }
 
     fn vsymlink_impl(&mut self, oldpaths: &[&Path], newpaths: &[&Path]) -> VfRes {
         if oldpaths.len() != newpaths.len() {
@@ -2180,15 +2123,6 @@ impl Backend for SmbVecFs {
         } else {
             Err(VfError::unsupported(0))
         }
-    }
-    fn symlink_impl(&mut self, target: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_symlink_impl_default(self, target, link)
-    }
-    fn hard_link_impl(&mut self, source: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_hard_link_impl_default(self, source, link)
-    }
-    fn read_link_impl(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf> {
-        vfsi_sync::backend_helpers::native_read_link_impl_default(self, path)
     }
 
     fn vcopy_data_impl(&mut self, pairs: &[ExtentPair]) -> VfRes {

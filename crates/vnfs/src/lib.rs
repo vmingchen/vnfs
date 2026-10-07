@@ -100,8 +100,6 @@ mod metadata;
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod read;
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
-mod write;
-#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 pub(crate) use read::ReadRequest;
 pub use vfsi_core::api::AttrsOptions;
 pub use vfsi_core::api::ListDirOptions;

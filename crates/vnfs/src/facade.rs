@@ -300,7 +300,7 @@ macro_rules! owned_client {
                 } else {
                     self.write_partial_native(requests)
                 };
-                result.map_err($crate::write::public_write_error)
+                result.map_err(vfsi_sync::application::public_write_error)
             }
             /// Write every byte in each positional request, retrying short writes in
             /// vector waves. Like `vwrite_native`, this is not transactional: an error may

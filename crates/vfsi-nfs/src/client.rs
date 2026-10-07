@@ -1332,57 +1332,7 @@ impl NfsClient {
     /// Returns the data and the server's EOF flag per request, in request
     /// order.
     pub fn readv(&mut self, ops: &[ReadOp]) -> RpcResult<Vec<(Vec<u8>, bool)>> {
-        let byte_budget = self.read_compound_bytes().saturating_sub(128);
-        let mut results = Vec::with_capacity(ops.len());
-        let mut start = 0usize;
-        while start < ops.len() {
-            let mut end = start;
-            let mut bytes = 0usize;
-            while end < ops.len() {
-                // PUTFH and READ each contribute a result header even when
-                // the file is at EOF. Bound the maximum, not the observed,
-                // reply size before asking the server to produce it.
-                let next = (ops[end].count as usize).saturating_add(128);
-                if bytes.saturating_add(next) > byte_budget {
-                    break;
-                }
-                bytes += next;
-                end += 1;
-            }
-            if end == start {
-                return Err(RpcError::op(start, nfsstat4_NFS4ERR_REP_TOO_BIG));
-            }
-            let mut chunk = self
-                .batch_ops(
-                    b"readv",
-                    2,
-                    &ops[start..end],
-                    |c, op, _| {
-                        c.putfh(&op.fh.as_nfs_fh());
-                        c.read(&op.stateid, op.offset, op.count);
-                    },
-                    |res, i| {
-                        let ok = res.read(2 + 2 * i);
-                        let len = ok.data.data_len as usize;
-                        let data = if len == 0 {
-                            Vec::new()
-                        } else {
-                            unsafe {
-                                std::slice::from_raw_parts(ok.data.data_val as *const u8, len)
-                            }
-                            .to_vec()
-                        };
-                        (data, ok.eof != 0)
-                    },
-                )
-                .map_err(|error| {
-                    let index = start + error.op_index;
-                    error.with_op_index(index)
-                })?;
-            results.append(&mut chunk);
-            start = end;
-        }
-        Ok(results)
+        self.readv_decode(ops, |_, data, eof| Ok((data.to_vec(), eof)))
     }
 
     /// Decode READ replies into caller storage while the compound reply is
@@ -1392,6 +1342,19 @@ impl NfsClient {
         ops: &[ReadOp],
         mut on_data: impl FnMut(usize, &[u8]) -> RpcResult<()>,
     ) -> RpcResult<Vec<(usize, bool)>> {
+        self.readv_decode(ops, |index, data, eof| {
+            on_data(index, data)?;
+            Ok((data.len(), eof))
+        })
+    }
+
+    // One packing/validation engine; destinations are statically dispatched
+    // while the reply storage is alive. Into reads never allocate owned data.
+    fn readv_decode<R>(
+        &mut self,
+        ops: &[ReadOp],
+        mut decode: impl FnMut(usize, &[u8], bool) -> RpcResult<R>,
+    ) -> RpcResult<Vec<R>> {
         let byte_budget = self.read_compound_bytes().saturating_sub(128);
         let mut results = Vec::with_capacity(ops.len());
         let mut start = 0usize;
@@ -1438,9 +1401,8 @@ impl NfsClient {
                                 std::slice::from_raw_parts(ok.data.data_val as *const u8, len)
                             }
                         };
-                        on_data(wire_index, data)
-                            .map_err(|error| error.with_op_index(local_index))?;
-                        Ok((len, ok.eof != 0))
+                        decode(wire_index, data, ok.eof != 0)
+                            .map_err(|error| error.with_op_index(local_index))
                     },
                 )
                 .map_err(|error| {

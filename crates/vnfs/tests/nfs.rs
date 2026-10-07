@@ -977,29 +977,6 @@ fn chdir_getcwd() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn writev_then_readv() {
-    let dir = setup_dir("rwv");
-    let f = format!("{}/data.bin", dir);
-    let mut c = client();
-
-    let payload = b"the quick brown fox jumps over the lazy dog\n".to_vec();
-    let wr = &c
-        .vwrite_impl(&borrow_writes(&[WriteOp::from_path(
-            &f,
-            VfOffset::At(0),
-            payload.clone(),
-        )
-        .with_creation()]))
-        .expect("writev")[0];
-    assert_eq!(wr.written, payload.len(), "all bytes written");
-
-    let r = &c
-        .vread_impl(&[ReadOp::from_path(&f, VfOffset::At(0), payload.len())])
-        .expect("readv")[0];
-    assert_eq!(r.data, payload, "read back what was written");
-}
-
-#[test]
 fn non_utf8_filenames_roundtrip() {
     let dir = setup_dir("non_utf8");
     let mut c = client();
@@ -1038,31 +1015,6 @@ fn readv_eof() {
     assert!(r.eof, "short read must set eof");
 }
 
-#[test]
-fn readv_multiple_files() {
-    let dir = setup_dir("readv_multi");
-    let mut c = client();
-    let mut iovs = Vec::new();
-    for (i, name) in ["x", "y", "z"].iter().enumerate() {
-        let f = format!("{}/{}.txt", dir, name);
-        let payload = vec![b'a' + i as u8; 8];
-        c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
-            &f,
-            VfOffset::At(0),
-            payload,
-        )
-        .with_creation()]))
-            .unwrap();
-        let r = &c
-            .vread_impl(&[ReadOp::from_path(&f, VfOffset::At(0), 8)])
-            .unwrap()[0];
-        iovs.push(r.data.clone());
-    }
-    assert_eq!(iovs[0], vec![b'a'; 8]);
-    assert_eq!(iovs[1], vec![b'b'; 8]);
-    assert_eq!(iovs[2], vec![b'c'; 8]);
-}
-
 // ---------------------------------------------------------------------------
 // getattrs / stat / lstat / fstat / exists
 // ---------------------------------------------------------------------------
@@ -1077,49 +1029,6 @@ fn make_file(path: &str, content: &[u8]) -> NfsVecFs {
     .with_creation()]))
         .unwrap();
     c
-}
-
-#[test]
-fn stat_and_lstat() {
-    let dir = setup_dir("stat");
-    let f = format!("{}/s.txt", dir);
-    let content = b"1234567890".to_vec();
-    let mut c = make_file(&f, &content);
-
-    let st = c.stat_impl(Path::new(&f)).expect("stat");
-    assert_eq!(st.size, content.len() as u64);
-    assert!(st.nlink >= 1);
-    assert!(st.fileid != 0);
-
-    let lst = c.lstat_impl(Path::new(&f)).expect("lstat");
-    assert_eq!(lst.fileid, st.fileid);
-}
-
-#[test]
-fn fstat() {
-    let dir = setup_dir("fstat");
-    let f = format!("{}/fs.txt", dir);
-    let content = b"fstat me".to_vec();
-    let mut c = make_file(&f, &content);
-
-    let tf = c
-        .open_raw_impl(Path::new(&f), libc::O_RDONLY, 0)
-        .expect("open");
-    let st = c.fstat_impl(&tf).expect("fstat");
-    assert_eq!(st.size, content.len() as u64);
-    c.close_impl(&tf).unwrap();
-}
-
-#[test]
-fn exists() {
-    let dir = setup_dir("exists");
-    let f = format!("{}/e.txt", dir);
-    let mut c = make_file(&f, b"hi");
-    assert!(c.exists_impl(Path::new(&f)).unwrap());
-    assert!(
-        !c.exists_impl(Path::new(&format!("{}/missing.txt", dir)))
-            .unwrap()
-    );
 }
 
 #[test]
@@ -1170,23 +1079,6 @@ fn setattrsv_mode() {
 }
 
 #[test]
-fn setattrsv_size_truncate() {
-    let dir = setup_dir("setattrs_size");
-    let f = format!("{}/trunc.txt", dir);
-    let content = b"abcdefghijklmnop".to_vec();
-    let mut c = make_file(&f, &content);
-    c.vsetattrs_raw_impl(&[VfAttrs {
-        file: VfFile::from_path(&f),
-        masks: AttrMask::SIZE,
-        size: 5,
-        ..VfAttrs::default()
-    }])
-    .expect("setattrsv");
-    let st = c.stat_impl(Path::new(&f)).expect("stat");
-    assert_eq!(st.size, 5);
-}
-
-#[test]
 fn lsetattrsv() {
     let dir = setup_dir("lsetattrs");
     let f = format!("{}/l.txt", dir);
@@ -1204,30 +1096,6 @@ fn lsetattrsv() {
 // ---------------------------------------------------------------------------
 // listdir
 // ---------------------------------------------------------------------------
-
-#[test]
-fn listdir() {
-    let dir = setup_dir("listdir");
-    let mut c = client();
-    c.ensure_dir_impl(Path::new(&format!("{}/sub", dir)), 0o755)
-        .unwrap();
-    for (i, name) in ["a.txt", "b.txt", "c.txt"].iter().enumerate() {
-        let f = format!("{}/{}", dir, name);
-        c.vwrite_impl(&borrow_writes(&[WriteOp::from_path(
-            &f,
-            VfOffset::At(0),
-            vec![b'a' + i as u8; 4],
-        )
-        .with_creation()]))
-            .unwrap();
-    }
-    let contents = c
-        .listdir_impl(Path::new(&dir), AttrMask::default(), 0, false)
-        .expect("listdir");
-    let names: Vec<&Path> = contents.iter().map(|a| a.file.path().unwrap()).collect();
-    assert!(names.iter().any(|n| n.ends_with("a.txt")));
-    assert!(names.iter().any(|n| n.ends_with("sub")));
-}
 
 #[test]
 fn listdir_recursive() {
