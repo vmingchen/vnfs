@@ -166,11 +166,13 @@ pub fn native_seek_impl_default<F: FileSystem + ?Sized>(
 
 pub fn native_set_attributes_impl_default<F: FileSystem + ?Sized>(
     backend: &mut F,
-    update: SetAttributes,
+    update: &SetAttrsOp<Target<'_, VfFile>>,
 ) -> VfResult<()> {
-    let follow = update.follow_symlinks;
-    let path = update.file.path().map(std::path::Path::to_path_buf);
-    let result = backend.vsetattrs_impl(vec![update], follow);
+    let path = match update.target() {
+        Target::Path(path) => Some(*path),
+        Target::File(file) => file.path(),
+    };
+    let result = backend.vsetattrs_impl(std::slice::from_ref(update));
     result.map_err(|error| match path {
         Some(path) => error.with_context("set_attributes", path),
         None => error,
@@ -237,16 +239,11 @@ pub fn read_into_impl_default<F: FileSystem + ?Sized>(
 
 pub fn vsetattrs_impl_default<F: FileSystem + ?Sized>(
     backend: &mut F,
-    updates: Vec<SetAttributes>,
-    follow: bool,
+    updates: &[SetAttrsOp<Target<'_, VfFile>>],
 ) -> VfResult<()> {
     match updates.len() {
         0 => Ok(()),
-        1 => {
-            let mut update = updates.into_iter().next().expect("singleton");
-            update.follow_symlinks = follow;
-            backend.set_attributes_impl(update)
-        }
+        1 => backend.set_attributes_impl(&updates[0]),
         _ => Err(VfError::unsupported(0)),
     }
 }

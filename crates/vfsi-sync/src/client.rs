@@ -16,9 +16,9 @@ use vfsi_core::api::{
 
 use crate::traits::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::{
-    AttrMask, Attrs, Backend, Capabilities, DirEntry, FileSystem, MetadataQuery, OpenFlags, OpenOp,
-    Permissions, ReadAllOptions, ReadOp, ReadResult, RemoveOptions, StreamOptions, VfDir, VfError,
-    VfFile, VfOffset, VfResult, WriteOpRef, WriteResult,
+    AttrMask, Attrs, Backend, Capabilities, DirEntry, FileSystem, OpenFlags, OpenOp, Permissions,
+    ReadAllOptions, ReadOp, ReadResult, RemoveOptions, StreamOptions, VfDir, VfError, VfFile,
+    VfOffset, VfResult, WriteOpRef, WriteResult,
 };
 
 fn read_result(result: ReadResult) -> FsReadResult {
@@ -1573,30 +1573,27 @@ impl<F: FileSystem> FsFile<F> {
         self.inner
             .lock()
             .map_err(|_| poisoned())?
-            .metadata_impl(MetadataQuery::new(self.raw()?.clone(), attributes))
+            .metadata_impl(
+                vfsi_core::Target::File(self.raw()?),
+                vfsi_core::api::AttrsOptions::new().fields(attributes),
+            )
             .map(vfsi_core::metadata_from_attrs)
             .map_err(|error| error.with_context("metadata", &self.path))
     }
 
     /// Truncate or extend the open file.
     pub fn truncate(&self, len: u64) -> VfResult<()> {
-        self.set_attrs_op(
-            vfsi_core::SetAttrsOp::new(vfsi_core::MetadataTarget::File(self)).len(len),
-        )
+        self.set_attrs_op(vfsi_core::SetAttrsOp::new(vfsi_core::Target::File(self)).len(len))
     }
 
     /// Change permissions on the open file through the shared vector engine.
     pub fn chmod(&self, permissions: Permissions) -> VfResult<()> {
         self.set_attrs_op(
-            vfsi_core::SetAttrsOp::new(vfsi_core::MetadataTarget::File(self))
-                .permissions(permissions),
+            vfsi_core::SetAttrsOp::new(vfsi_core::Target::File(self)).permissions(permissions),
         )
     }
 
-    fn set_attrs_op(
-        &self,
-        op: vfsi_core::SetAttrsOp<vfsi_core::MetadataTarget<'_, Self>>,
-    ) -> VfResult<()> {
+    fn set_attrs_op(&self, op: vfsi_core::SetAttrsOp<vfsi_core::Target<'_, Self>>) -> VfResult<()> {
         let client = FsClient {
             inner: Arc::clone(&self.inner),
             limits: ResourceLimits::default(),
@@ -1817,20 +1814,20 @@ impl<F: FileSystem> Drop for FsFile<F> {
 
 impl<F: FileSystem> FsClient<F> {
     /// Query filesystems using one native vector of paths and retained handles.
-    pub(crate) fn vstatfs<P: vfsi_core::MetadataOperand<FsFile<F>>>(
+    pub(crate) fn vstatfs<P: vfsi_core::AsTarget<FsFile<F>>>(
         &self,
         targets: &[P],
     ) -> VfResult<Vec<crate::FilesystemStats>> {
-        use vfsi_core::MetadataTarget;
+        use vfsi_core::Target;
         if targets.is_empty() {
             return Ok(Vec::new());
         }
         let mut files = Vec::with_capacity(targets.len());
         let mut paths = Vec::with_capacity(targets.len());
         for (index, target) in targets.iter().enumerate() {
-            let (raw, path) = match target.metadata_target() {
-                MetadataTarget::Path(path) => (VfFile::from_os_path(path), path),
-                MetadataTarget::File(file) => {
+            let (raw, path) = match target.as_target() {
+                Target::Path(path) => (VfFile::from_os_path(path), path),
+                Target::File(file) => {
                     if !Arc::ptr_eq(&self.inner, &file.inner) {
                         return Err(VfError::client(index, crate::ERR_INVAL)
                             .with_context("vstatfs", &file.path));
@@ -1865,11 +1862,11 @@ impl<F: FileSystem> FsClient<F> {
         Ok(results)
     }
     /// Update paths and open objects with one native attribute vector.
-    pub(crate) fn vsetattrs<P: vfsi_core::MetadataOperand<FsFile<F>>>(
+    pub(crate) fn vsetattrs<P: vfsi_core::AsTarget<FsFile<F>>>(
         &self,
         updates: &[vfsi_core::SetAttrsOp<P>],
     ) -> VfResult<()> {
-        use vfsi_core::MetadataTarget;
+        use vfsi_core::Target;
         if updates.is_empty() {
             return Ok(());
         }
@@ -1877,17 +1874,17 @@ impl<F: FileSystem> FsClient<F> {
         let mut attrs = Vec::with_capacity(updates.len());
         for (index, op) in updates.iter().enumerate() {
             let target = op.target();
-            let (raw, path) = match target.metadata_target() {
-                MetadataTarget::Path(path) => (VfFile::from_os_path(path), path),
-                MetadataTarget::File(file) => {
+            let (raw, path) = match target.as_target() {
+                Target::Path(path) => (Target::Path(path), path),
+                Target::File(file) => {
                     if !Arc::ptr_eq(&self.inner, &file.inner) {
                         return Err(VfError::client(index, crate::ERR_INVAL)
                             .with_context("vsetattrs", &file.path));
                     }
                     (
-                        file.raw()
-                            .map_err(|e| e.with_index(index).with_context("vsetattrs", &file.path))?
-                            .clone(),
+                        Target::File(file.raw().map_err(|e| {
+                            e.with_index(index).with_context("vsetattrs", &file.path)
+                        })?),
                         file.path.as_path(),
                     )
                 }
@@ -1898,22 +1895,14 @@ impl<F: FileSystem> FsClient<F> {
                 );
             }
             paths.push(path);
-            let mut attributes = crate::SetAttributes::new(raw);
-            attributes.mode = op.requested_permissions().map(crate::Permissions::mode);
-            attributes.size = op.requested_len();
-            attributes.uid = op.requested_uid();
-            attributes.gid = op.requested_gid();
-            attributes.atime = op
-                .requested_accessed()
-                .map(crate::native::system_time_parts)
-                .transpose()
-                .map_err(|e| e.with_index(index).with_context("vsetattrs", path))?;
-            attributes.mtime = op
-                .requested_modified()
-                .map(crate::native::system_time_parts)
-                .transpose()
-                .map_err(|e| e.with_index(index).with_context("vsetattrs", path))?;
-            attrs.push(attributes);
+            for time in [op.requested_accessed(), op.requested_modified()]
+                .into_iter()
+                .flatten()
+            {
+                crate::native::system_time_parts(time)
+                    .map_err(|e| e.with_index(index).with_context("vsetattrs", path))?;
+            }
+            attrs.push(op.with_target(raw));
         }
         let map_error = |error: VfError, start: usize, count: usize| match error.index() {
             Some(index) if index < count => error
@@ -1926,10 +1915,9 @@ impl<F: FileSystem> FsClient<F> {
         let follow = updates[0].follows_symlinks();
         if updates.iter().all(|op| op.follows_symlinks() == follow) {
             return backend
-                .vsetattrs_impl(attrs, follow)
+                .vsetattrs_impl(&attrs)
                 .map_err(|error| map_error(error, 0, updates.len()));
         }
-        let mut attrs = attrs.into_iter();
         let mut start = 0;
         while start < updates.len() {
             let follow = updates[start].follows_symlinks();
@@ -1937,9 +1925,8 @@ impl<F: FileSystem> FsClient<F> {
                 .iter()
                 .take_while(|op| op.follows_symlinks() == follow)
                 .count();
-            let batch = attrs.by_ref().take(count).collect();
             backend
-                .vsetattrs_impl(batch, follow)
+                .vsetattrs_impl(&attrs[start..start + count])
                 .map_err(|error| map_error(error, start, count))?;
             start += count;
         }

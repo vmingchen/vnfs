@@ -56,13 +56,10 @@ impl Vfsi for Harness {
     fn capabilities(&self) -> Result<Capabilities> {
         self.fs.capabilities()
     }
-    fn vsetattrs<P: MetadataOperand<Self::File>>(&self, targets: &[SetAttrsOp<P>]) -> Result<()> {
+    fn vsetattrs<P: AsTarget<Self::File>>(&self, targets: &[SetAttrsOp<P>]) -> Result<()> {
         self.fs.vsetattrs(targets)
     }
-    fn vstatfs<P: MetadataOperand<Self::File>>(
-        &self,
-        targets: &[P],
-    ) -> Result<Vec<FilesystemStats>> {
+    fn vstatfs<P: AsTarget<Self::File>>(&self, targets: &[P]) -> Result<Vec<FilesystemStats>> {
         self.fs.vstatfs(targets)
     }
     fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {

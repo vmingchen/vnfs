@@ -575,14 +575,11 @@ fn filesystem_stats_local_and_routed_handles() {
     assert!(stats.file_size_bits.unwrap() > 0);
     assert!(stats.max_file_size.is_none());
     // Direct fd identity remains valid after unlink, without pathname lookup.
-    use vnfs::MetadataTarget;
+    use vnfs::Target;
     let file = mounted.open("/local/renamed").unwrap();
     mounted.remove_file("/local/renamed").unwrap();
     assert_eq!(
-        mounted
-            .statfs(MetadataTarget::File(&file))
-            .unwrap()
-            .total_bytes,
+        mounted.statfs(Target::File(&file)).unwrap().total_bytes,
         stats.total_bytes
     );
     file.close().unwrap();

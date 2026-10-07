@@ -77,42 +77,82 @@ pub mod internal {
 /// Common imports for backend-independent application code.
 pub mod prelude {
     pub use super::{
-        Attributes, AttrsOptions, ControlFlow, CopyOption, FileHandle, ListDirOptions,
-        MetadataOperand, MetadataTarget, MkDirOp, OpenFlags, OpenOp, ReadOp, ReadOptions,
-        ReadResult, RemoveMode, RemoveOptions, RenameOptions, ResourceLimits, SetAttrsOp,
-        StreamOptions, Vfsi, VfsiExt, WriteOp, WriteOptions,
+        AsTarget, Attributes, AttrsOptions, ControlFlow, CopyOption, FileHandle, ListDirOptions,
+        MkDirOp, OpenFlags, OpenOp, ReadOp, ReadOptions, ReadResult, RemoveMode, RemoveOptions,
+        RenameOptions, ResourceLimits, SetAttrsOp, StreamOptions, Target, Vfsi, VfsiExt, WriteOp,
+        WriteOptions,
     };
 }
 
-/// A path or an opened object for an attribute update. Handle targets retain
-/// object identity across rename/unlink; `follow_symlinks` applies only to paths.
-pub enum MetadataTarget<'a, F> {
+/// Borrowed filesystem operand: a path to resolve or an already-open object.
+/// Used by attribute updates, filesystem statistics, and scalar conveniences.
+/// Handle targets retain object identity across rename/unlink; path symlink
+/// policies do not change that identity. A target never owns or closes a handle.
+#[derive(Debug)]
+pub enum Target<'a, F> {
     Path(&'a std::path::Path),
     File(&'a F),
 }
-impl<F> MetadataTarget<'_, F> {
-    pub fn path(path: &impl AsRef<std::path::Path>) -> MetadataTarget<'_, F> {
-        MetadataTarget::Path(path.as_ref())
-    }
-    pub fn file(file: &F) -> MetadataTarget<'_, F> {
-        MetadataTarget::File(file)
+impl<F> Copy for Target<'_, F> {}
+impl<F> Clone for Target<'_, F> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
-/// Inputs accepted by [`Vfsi::vsetattrs`]. Paths can be passed directly;
-/// use [`MetadataTarget`] to submit handles or mixed path/handle vectors.
-pub trait MetadataOperand<F> {
-    fn metadata_target(&self) -> MetadataTarget<'_, F>;
-}
-impl<F, P: AsRef<std::path::Path>> MetadataOperand<F> for P {
-    fn metadata_target(&self) -> MetadataTarget<'_, F> {
-        MetadataTarget::Path(self.as_ref())
+impl<F> Target<'_, F> {
+    pub fn path(path: &impl AsRef<std::path::Path>) -> Target<'_, F> {
+        Target::Path(path.as_ref())
+    }
+    pub fn file(file: &F) -> Target<'_, F> {
+        Target::File(file)
     }
 }
-impl<F> MetadataOperand<F> for MetadataTarget<'_, F> {
-    fn metadata_target(&self) -> MetadataTarget<'_, F> {
+/// Borrow a target for attribute updates or filesystem statistics.
+/// Paths can be passed directly; use [`Target`] for handles or mixed vectors.
+/// Conversion performs no I/O. Implementations must return the same operand
+/// throughout a call so preflight and execution address the same object.
+pub trait AsTarget<F> {
+    fn as_target(&self) -> Target<'_, F>;
+}
+impl<F, P: AsRef<std::path::Path>> AsTarget<F> for P {
+    fn as_target(&self) -> Target<'_, F> {
+        Target::Path(self.as_ref())
+    }
+}
+impl<F> AsTarget<F> for Target<'_, F> {
+    fn as_target(&self) -> Target<'_, F> {
         match self {
-            Self::Path(path) => MetadataTarget::Path(path),
-            Self::File(file) => MetadataTarget::File(file),
+            Self::Path(path) => Target::Path(path),
+            Self::File(file) => Target::File(file),
+        }
+    }
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+    #[test]
+    fn borrowed_targets_and_handle_operations_do_not_require_cloning_handles() {
+        struct NonClone;
+        fn copy<T: Copy>(value: T) -> (T, T) {
+            (value, value)
+        }
+        let file = NonClone;
+        let (first, second) = copy(Target::file(&file));
+        for target in [first, second.as_target()] {
+            assert!(matches!(target, Target::File(actual) if std::ptr::eq(actual, &file)));
+        }
+        let (first, second) = copy(SetAttrsOp::file(&file).len(0).follow_symlinks(false));
+        for op in [first, second] {
+            assert_eq!(op.requested_len(), Some(0));
+            assert!(!op.follows_symlinks());
+            assert!(matches!(op.target(), Target::File(actual) if std::ptr::eq(*actual, &file)));
+        }
+        let path = std::path::Path::new("/file");
+        let direct: Target<'_, NonClone> = path.as_target();
+        let explicit: Target<'_, NonClone> = Target::path(&path);
+        for target in [direct, explicit] {
+            assert!(matches!(target, Target::Path(actual) if actual == path));
         }
     }
 }

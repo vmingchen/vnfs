@@ -95,12 +95,23 @@ pub trait FileSystem {
 
     fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64>;
 
-    fn metadata_impl(&mut self, query: MetadataQuery) -> VfResult<VfAttrs>;
+    /// Query a raw backend target with the same field/symlink options used by
+    /// the application interface. Returned attributes retain target identity.
+    fn metadata_impl(
+        &mut self,
+        target: Target<'_, VfFile>,
+        options: vfsi_core::api::AttrsOptions,
+    ) -> VfResult<VfAttrs>;
 
-    fn set_attributes_impl(&mut self, update: SetAttributes) -> VfResult<()>;
+    /// Apply one shared attribute operation. Raw timestamps and masks are
+    /// converted by the backend, not exposed through a second mutation type.
+    fn set_attributes_impl(&mut self, update: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<()>;
 
-    fn vsetattrs_impl(&mut self, updates: Vec<SetAttributes>, follow: bool) -> VfResult<()> {
-        crate::backend_helpers::vsetattrs_impl_default(self, updates, follow)
+    /// Borrow an ordered batch without transferring request ownership.
+    /// Each operation carries its own final-symlink policy; native backends
+    /// batch contiguous equal-policy runs and validate all inputs before I/O.
+    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, VfFile>>]) -> VfResult<()> {
+        crate::backend_helpers::vsetattrs_impl_default(self, updates)
     }
 }
 

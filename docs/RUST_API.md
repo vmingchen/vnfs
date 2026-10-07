@@ -78,7 +78,7 @@ ordinary applications use the concrete client methods instead:
 - `NfsClient` owns and shares a connection; `NfsFile` owns a remote handle without
   borrowing the entire client.
 - `NfsExtensions` and `SmbExtensions` contain protocol-only negotiated state.
-- `OpenOp`, `MetadataQuery`, and `SetAttributes` replace raw flags and
+- `OpenOp`, `AttrsOptions`, and `SetAttrsOp` replace raw flags and
   overloaded metadata masks.
 - Public `v*` operations return ordered results on success or one `vnfs::Error`
   with an optional input index. They do not promise rollback; an unattributable

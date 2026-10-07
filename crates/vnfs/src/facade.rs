@@ -18,38 +18,30 @@ macro_rules! owned_client {
                 crate::metadata::metadata_backend(&self.inner, paths, options)
             }
             /// Query filesystem statistics for paths and this client's open handles.
-            pub fn vstatfs<P: vfsi_core::MetadataOperand<$file>>(
+            pub fn vstatfs<P: vfsi_core::AsTarget<$file>>(
                 &self,
                 targets: &[P],
             ) -> Result<Vec<FilesystemStats>> {
                 let targets: Vec<_> = targets
                     .iter()
-                    .map(|target| match target.metadata_target() {
-                        vfsi_core::MetadataTarget::Path(path) => {
-                            vfsi_core::MetadataTarget::Path(path)
-                        }
-                        vfsi_core::MetadataTarget::File(file) => {
-                            vfsi_core::MetadataTarget::File(&file.inner)
-                        }
+                    .map(|target| match target.as_target() {
+                        vfsi_core::Target::Path(path) => vfsi_core::Target::Path(path),
+                        vfsi_core::Target::File(file) => vfsi_core::Target::File(&file.inner),
                     })
                     .collect();
                 self.inner.vstatfs(&targets)
             }
             /// Update selected metadata fields for many paths in one backend vector.
-            pub fn vsetattrs<P: vfsi_core::MetadataOperand<$file>>(
+            pub fn vsetattrs<P: vfsi_core::AsTarget<$file>>(
                 &self,
                 updates: &[SetAttrsOp<P>],
             ) -> Result<()> {
                 let updates: Vec<_> = updates
                     .iter()
                     .map(|op| {
-                        let target = match op.target().metadata_target() {
-                            vfsi_core::MetadataTarget::Path(path) => {
-                                vfsi_core::MetadataTarget::Path(path)
-                            }
-                            vfsi_core::MetadataTarget::File(file) => {
-                                vfsi_core::MetadataTarget::File(&file.inner)
-                            }
+                        let target = match op.target().as_target() {
+                            vfsi_core::Target::Path(path) => vfsi_core::Target::Path(path),
+                            vfsi_core::Target::File(file) => vfsi_core::Target::File(&file.inner),
                         };
                         op.with_target(target)
                     })

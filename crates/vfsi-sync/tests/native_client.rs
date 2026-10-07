@@ -6,8 +6,8 @@ use std::sync::{
 
 use vfsi_sync::api::ReadOptions;
 use vfsi_sync::{
-    Backend, Capabilities, DirEntry, DirPageCursor, FileSystem, FsClient, MetadataQuery, OpenFlags,
-    OpenOp, ReadDirOptions, ReadIntoResult, ReadOp, ReadResult, SetAttributes, VfAttrs, VfError,
+    Backend, Capabilities, DirEntry, DirPageCursor, FileSystem, FsClient, OpenFlags, OpenOp,
+    ReadDirOptions, ReadIntoResult, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfError,
     VfFile, VfOffset, VfResult, Vfsi, VfsiExt, WriteOpRef, WriteResult,
 };
 
@@ -409,10 +409,17 @@ macro_rules! handle_contract {
             fn seek_impl(&mut self, file: &VfFile, position: SeekFrom) -> VfResult<u64> {
                 self.scalar.seek_impl(file, position)
             }
-            fn metadata_impl(&mut self, query: MetadataQuery) -> VfResult<VfAttrs> {
-                self.scalar.metadata_impl(query)
+            fn metadata_impl(
+                &mut self,
+                target: Target<'_, VfFile>,
+                options: vfsi_core::api::AttrsOptions,
+            ) -> VfResult<VfAttrs> {
+                self.scalar.metadata_impl(target, options)
             }
-            fn set_attributes_impl(&mut self, update: SetAttributes) -> VfResult<()> {
+            fn set_attributes_impl(
+                &mut self,
+                update: &SetAttrsOp<Target<'_, VfFile>>,
+            ) -> VfResult<()> {
                 self.scalar.set_attributes_impl(update)
             }
         }
@@ -422,6 +429,161 @@ macro_rules! handle_contract {
 handle_contract!(HandleOnly);
 handle_contract!(DefaultBackend);
 handle_contract!(PagedBackend);
+
+#[derive(Default)]
+struct AttrsBackend {
+    scalar: ScalarOnly,
+    calls: Vec<(bool, Vec<VfAttrs>)>,
+    failure: Option<(usize, VfError)>,
+    queries: Vec<(bool, VfFile, vfsi_core::AttrMask)>,
+}
+handle_contract!(AttrsBackend);
+impl Backend for AttrsBackend {
+    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        Err(VfError::unsupported(0))
+    }
+    fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfResult<()> {
+        self.queries
+            .push((true, attrs[0].file.clone(), attrs[0].masks));
+        Ok(())
+    }
+    fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> VfResult<()> {
+        self.queries
+            .push((false, attrs[0].file.clone(), attrs[0].masks));
+        Ok(())
+    }
+    fn vsetattrs_raw_impl(&mut self, attrs: &[VfAttrs]) -> VfResult<()> {
+        self.record_attrs(true, attrs)
+    }
+    fn vsetattrs_raw_nofollow_impl(&mut self, attrs: &[VfAttrs]) -> VfResult<()> {
+        self.record_attrs(false, attrs)
+    }
+}
+impl AttrsBackend {
+    fn record_attrs(&mut self, follow: bool, attrs: &[VfAttrs]) -> VfResult<()> {
+        self.calls.push((follow, attrs.to_vec()));
+        if let Some((call, error)) = &self.failure
+            && self.calls.len() == *call
+        {
+            return Err(error.clone());
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
+    use vfsi_sync::backend_helpers::{native_metadata_impl_default, vsetattrs_typed_default};
+    use vfsi_sync::{AttrMask, Permissions};
+    let mut concrete = AttrsBackend::default();
+    let backend: &mut dyn Backend = &mut concrete;
+    let file = VfFile::from_fd(7);
+    let op = SetAttrsOp::file(&file)
+        .len(0)
+        .permissions(Permissions::from_mode(0o640))
+        .uid(42)
+        .gid(43)
+        .accessed(std::time::UNIX_EPOCH + std::time::Duration::new(123, 456))
+        .modified(std::time::UNIX_EPOCH - std::time::Duration::new(1, 25))
+        .follow_symlinks(false);
+    vsetattrs_typed_default(backend, std::slice::from_ref(&op)).unwrap();
+    // Borrowing the operation leaves it reusable; changing options performs no I/O.
+    vsetattrs_typed_default(backend, std::slice::from_ref(&op)).unwrap();
+    let fields = AttrMask::MODE
+        | AttrMask::SIZE
+        | AttrMask::UID
+        | AttrMask::GID
+        | AttrMask::ATIME
+        | AttrMask::MTIME;
+    let attrs = native_metadata_impl_default(
+        backend,
+        Target::File(&file),
+        vfsi_core::api::AttrsOptions::new()
+            .fields(fields)
+            .follow_symlinks(false),
+    )
+    .unwrap();
+    assert_eq!(attrs.file, file);
+    assert_eq!(attrs.masks, fields);
+    native_metadata_impl_default(
+        backend,
+        Target::Path(std::path::Path::new("/link")),
+        vfsi_core::api::AttrsOptions::new().fields(AttrMask::SIZE),
+    )
+    .unwrap();
+    assert_eq!(concrete.calls.len(), 2);
+    for (follow, attrs) in &concrete.calls {
+        assert!(!follow);
+        assert_eq!(attrs.len(), 1);
+        let attrs = &attrs[0];
+        assert_eq!(attrs.file, file);
+        assert_eq!(attrs.masks, fields);
+        assert_eq!(
+            (attrs.mode, attrs.size, attrs.uid, attrs.gid),
+            (0o640, 0, 42, 43)
+        );
+        assert_eq!((attrs.atime_sec, attrs.atime_nsec), (123, 456));
+        assert_eq!((attrs.mtime_sec, attrs.mtime_nsec), (-2, 999_999_975));
+    }
+    assert_eq!(
+        concrete.queries,
+        [
+            (false, file, fields),
+            (true, VfFile::from_path("/link"), AttrMask::SIZE),
+        ]
+    );
+}
+
+#[test]
+fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
+    use vfsi_sync::backend_helpers::vsetattrs_typed_default;
+    let ops = [
+        SetAttrsOp::new(Target::Path(std::path::Path::new("/a"))).len(1),
+        SetAttrsOp::new(Target::Path(std::path::Path::new("/b")))
+            .len(2)
+            .follow_symlinks(false),
+        SetAttrsOp::new(Target::Path(std::path::Path::new("/c")))
+            .len(3)
+            .follow_symlinks(false),
+        SetAttrsOp::new(Target::Path(std::path::Path::new("/a"))).len(4),
+    ];
+    let mut backend = AttrsBackend::default();
+    vsetattrs_typed_default(&mut backend, &[]).unwrap();
+    assert!(backend.calls.is_empty());
+    vsetattrs_typed_default(&mut backend, &ops).unwrap();
+    assert_eq!(
+        backend
+            .calls
+            .iter()
+            .map(|(follow, attrs)| (*follow, attrs.iter().map(|a| a.size).collect::<Vec<_>>()))
+            .collect::<Vec<_>>(),
+        [(true, vec![1]), (false, vec![2, 3]), (true, vec![4])]
+    );
+    backend.calls.clear();
+    for invalid in [ops[3].uid(u32::MAX), ops[3].gid(u32::MAX)] {
+        let error = vsetattrs_typed_default(&mut backend, &[ops[0], invalid]).unwrap_err();
+        assert_eq!(error.index(), Some(1));
+        assert_eq!(error.path(), Some(std::path::Path::new("/a")));
+        assert!(backend.calls.is_empty());
+    }
+    for failure in [
+        VfError::client(1, libc::ENOENT as u32),
+        VfError::client(2, libc::ENOENT as u32),
+        VfError::transport(None, "reply lost"),
+    ] {
+        backend.failure = Some((2, failure.clone()));
+        backend.calls.clear();
+        let error = vsetattrs_typed_default(&mut backend, &ops).unwrap_err();
+        assert_eq!(backend.calls.len(), 2);
+        if failure.index() == Some(1) {
+            assert_eq!(error.index(), Some(2));
+            assert_eq!(error.err_no(), libc::ENOENT as u32);
+        } else {
+            assert!(error.is_transport());
+            assert_eq!(error.index(), None);
+        }
+    }
+}
 
 impl Backend for PagedBackend {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
@@ -770,9 +932,12 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
 }
 
 impl FileSystem for ScalarOnly {
-    fn vsetattrs_impl(&mut self, updates: Vec<SetAttributes>, follow: bool) -> VfResult<()> {
+    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, VfFile>>]) -> VfResult<()> {
         let mut calls = self.attrs_calls.lock().unwrap();
-        calls.push((follow, updates.iter().map(|op| op.size).collect()));
+        calls.push((
+            updates[0].follows_symlinks(),
+            updates.iter().map(|op| op.requested_len()).collect(),
+        ));
         if let Some((call, error)) = &self.attrs_failure
             && calls.len() == *call
         {
@@ -938,11 +1103,15 @@ impl FileSystem for ScalarOnly {
         Ok(self.cursor)
     }
 
-    fn metadata_impl(&mut self, _: MetadataQuery) -> VfResult<vfsi_sync::VfAttrs> {
+    fn metadata_impl(
+        &mut self,
+        _: Target<'_, VfFile>,
+        _: vfsi_core::api::AttrsOptions,
+    ) -> VfResult<vfsi_sync::VfAttrs> {
         Err(VfError::unsupported(0))
     }
 
-    fn set_attributes_impl(&mut self, _: SetAttributes) -> VfResult<()> {
+    fn set_attributes_impl(&mut self, _: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<()> {
         Err(VfError::unsupported(0))
     }
 }
@@ -1774,16 +1943,16 @@ fn filesystem_statistics_validate_backend_shape_and_preflight_all_handles() {
     let mut file = client.open("/file").unwrap();
     file.try_close().unwrap();
     let targets = [
-        vfsi_sync::MetadataTarget::Path(std::path::Path::new("/a")),
-        vfsi_sync::MetadataTarget::File(&file),
+        vfsi_sync::Target::Path(std::path::Path::new("/a")),
+        vfsi_sync::Target::File(&file),
     ];
     assert_eq!(client.vstatfs(&targets).unwrap_err().index(), Some(1));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let other = FsClient::new(ScalarOnly::default());
     let foreign = other.open("/foreign").unwrap();
     let targets = [
-        vfsi_sync::MetadataTarget::Path(std::path::Path::new("/a")),
-        vfsi_sync::MetadataTarget::File(&foreign),
+        vfsi_sync::Target::Path(std::path::Path::new("/a")),
+        vfsi_sync::Target::File(&foreign),
     ];
     assert_eq!(client.vstatfs(&targets).unwrap_err().index(), Some(1));
     assert_eq!(calls.load(Ordering::SeqCst), 0);

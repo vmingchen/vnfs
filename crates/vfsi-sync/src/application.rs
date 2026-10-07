@@ -462,13 +462,13 @@ macro_rules! client_methods {
         fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
             <$client>::vhardlink($receiver(self), pairs)
         }
-        fn vstatfs<P: vfsi_core::MetadataOperand<Self::File>>(
+        fn vstatfs<P: vfsi_core::AsTarget<Self::File>>(
             &self,
             targets: &[P],
         ) -> Result<Vec<vfsi_core::FilesystemStats>> {
             <$client>::vstatfs($receiver(self), targets)
         }
-        fn vsetattrs<P: vfsi_core::MetadataOperand<Self::File>>(
+        fn vsetattrs<P: vfsi_core::AsTarget<Self::File>>(
             &self,
             updates: &[vfsi_core::SetAttrsOp<P>],
         ) -> Result<()> {

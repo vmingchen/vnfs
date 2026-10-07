@@ -4256,7 +4256,7 @@ fn vsetattrs_many_nfs_files() {
     let other = Nfs::builder(test_host()).connect().unwrap();
     vsetattrs_support::check_foreign(&fs, &other, &format!("{directory}/foreign"));
     // A handle vector must not degrade into one RPC per scalar update.
-    use vnfs::{MetadataTarget, OpenFlags, OpenOp};
+    use vnfs::{OpenFlags, OpenOp, Target};
     let paths: Vec<_> = (0..64).map(|i| format!("{directory}/file-{i}")).collect();
     let requests: Vec<_> = paths
         .iter()
@@ -4266,7 +4266,7 @@ fn vsetattrs_many_nfs_files() {
     let updates: Vec<_> = files
         .iter()
         .map(|file| {
-            vnfs::SetAttrsOp::new(MetadataTarget::File(file))
+            vnfs::SetAttrsOp::new(Target::File(file))
                 .len(4)
                 .uid(unsafe { libc::geteuid() })
                 .gid(unsafe { libc::getegid() })
@@ -4330,7 +4330,7 @@ fn filesystem_stats_nfs_vectors() {
                 .collect::<Vec<_>>(),
         )
         .unwrap();
-    let targets: Vec<_> = files.iter().map(vnfs::MetadataTarget::File).collect();
+    let targets: Vec<_> = files.iter().map(vnfs::Target::File).collect();
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let stats = fs.vstatfs(&targets).unwrap();
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;

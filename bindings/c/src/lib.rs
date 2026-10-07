@@ -2625,10 +2625,17 @@ mod tests {
         fn seek_impl(&mut self, _: &VfFile, _: std::io::SeekFrom) -> vfsi_sync::VfResult<u64> {
             Err(VfError::unsupported(0))
         }
-        fn metadata_impl(&mut self, _: vfsi_sync::MetadataQuery) -> vfsi_sync::VfResult<VfAttrs> {
+        fn metadata_impl(
+            &mut self,
+            _: vfsi_sync::Target<'_, VfFile>,
+            _: vfsi_sync::api::AttrsOptions,
+        ) -> vfsi_sync::VfResult<VfAttrs> {
             Err(VfError::unsupported(0))
         }
-        fn set_attributes_impl(&mut self, _: vfsi_sync::SetAttributes) -> vfsi_sync::VfResult<()> {
+        fn set_attributes_impl(
+            &mut self,
+            _: &vfsi_sync::SetAttrsOp<vfsi_sync::Target<'_, VfFile>>,
+        ) -> vfsi_sync::VfResult<()> {
             Err(VfError::unsupported(0))
         }
     }

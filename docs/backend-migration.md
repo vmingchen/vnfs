@@ -125,6 +125,14 @@ Application vectors use `vopen`, `vclose`, `vrename`, `vmkdir`, and `vcopy`.
 `vmkdir` accepts `MkDirOp::new(path, mode)` operations; `vsetattrs` accepts
 `SetAttrsOp::new(target)` operations with fluent attribute setters and an optional
 `follow_symlinks(false)` policy. `VfsiExt::close_files` consumes handles.
+Paths and opened objects use the shared `Target` enum and `AsTarget` conversion
+trait; paths remain directly accepted without an explicit wrapper.
+`SetAttrsOp::file(&file)` prepares a handle update. `MetadataTarget`,
+`MetadataOperand`, `MetadataQuery`, and `SetAttributes` are removed rather than
+retained as compatibility aliases. Native `metadata_impl` takes `Target<'_, VfFile>` plus
+`AttrsOptions`, and native attribute setters borrow `SetAttrsOp<Target<'_, VfFile>>` operations
+or slices. Timestamp/mask conversion is an execution detail; it does not require
+a second public mutation type. C/Python entry points and wire formats are unchanged.
 The native `FsClient` also has `vmkdir_default` and `vclose_owned` compatibility
 helpers; these are not re-exported as application methods by `vnfs`. Structured internal I/O
 adapters use `vread_native`/`vwrite_native` and corresponding semantic variants

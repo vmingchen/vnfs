@@ -94,7 +94,7 @@ pub type Error = vfsi_core::VfError;
 
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod application;
-pub use vfsi_core::{FileHandle, MetadataOperand, MetadataTarget, Vfsi, VfsiExt};
+pub use vfsi_core::{AsTarget, FileHandle, Target, Vfsi, VfsiExt};
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod metadata;
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
@@ -191,9 +191,9 @@ pub use auto::{
 pub mod prelude {
     pub use crate::Attributes;
     pub use crate::{
-        AttrsOptions, ControlFlow, CopyOption, FileHandle, FilesystemStats, ListDirOptions,
-        MetadataOperand, MetadataTarget, MkDirOp, ReadOp, ReadOptions, ReadResult, RemoveMode,
-        ResourceLimits, SetAttrsOp, StreamCompletion, TraversalCompletion, Vfsi, VfsiExt, WriteOp,
+        AsTarget, AttrsOptions, ControlFlow, CopyOption, FileHandle, FilesystemStats,
+        ListDirOptions, MkDirOp, ReadOp, ReadOptions, ReadResult, RemoveMode, ResourceLimits,
+        SetAttrsOp, StreamCompletion, Target, TraversalCompletion, Vfsi, VfsiExt, WriteOp,
         WriteOptions,
     };
     #[cfg(all(feature = "auto", target_os = "linux"))]

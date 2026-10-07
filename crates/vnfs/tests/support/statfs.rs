@@ -1,4 +1,4 @@
-use vnfs::{FilesystemStats, MetadataTarget, Vfsi, VfsiExt};
+use vnfs::{FilesystemStats, Target, Vfsi, VfsiExt};
 
 fn check_stats(stats: &FilesystemStats) {
     let total = stats.total_bytes.expect("total capacity");
@@ -34,27 +34,22 @@ pub fn check<F: Vfsi>(fs: &F, other: &F, directory: &str) {
     let renamed = format!("{directory}/renamed");
     fs.rename(&paths[0], &renamed).unwrap();
     let mixed = [
-        MetadataTarget::File(&files[0]),
-        MetadataTarget::Path(std::path::Path::new(&paths[1])),
+        Target::File(&files[0]),
+        Target::Path(std::path::Path::new(&paths[1])),
     ];
     let stats = fs.vstatfs(&mixed).unwrap();
     assert_eq!(stats[0].total_bytes, stats[1].total_bytes);
     // A renamed handle must not reopen its missing original name.
-    check_stats(&fs.statfs(MetadataTarget::File(&files[0])).unwrap());
+    check_stats(&fs.statfs(Target::File(&files[0])).unwrap());
     let error = fs.vstatfs(&[&paths[1], &paths[0]]).unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::ENOENT as u32);
-    let error = other
-        .vstatfs(&[MetadataTarget::File(&files[1])])
-        .unwrap_err();
+    let error = other.vstatfs(&[Target::File(&files[1])]).unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert_eq!(error.err_no(), libc::EINVAL as u32);
     fs.vclose(&mut files[..1]).unwrap();
     let error = fs
-        .vstatfs(&[
-            MetadataTarget::File(&files[1]),
-            MetadataTarget::File(&files[0]),
-        ])
+        .vstatfs(&[Target::File(&files[1]), Target::File(&files[0])])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EBADF as u32);

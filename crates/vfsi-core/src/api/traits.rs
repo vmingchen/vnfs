@@ -127,7 +127,7 @@ pub trait FileHandle: Read + Write + Seek {
 pub trait Vfsi {
     /// Query filesystems for paths (following symlinks) and retained open handles.
     /// Results preserve input order. Unsupported fields are `None`.
-    fn vstatfs<P: crate::MetadataOperand<Self::File>>(
+    fn vstatfs<P: crate::AsTarget<Self::File>>(
         &self,
         targets: &[P],
     ) -> Result<Vec<crate::FilesystemStats>>;
@@ -176,17 +176,17 @@ pub trait Vfsi {
     /// Handle targets and paths can share a batch:
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, MetadataTarget, SetAttrsOp};
+    /// use vfsi_core::api::{Vfsi, Target, SetAttrsOp};
     /// # fn example<F: Vfsi>(fs: &F, file: &F::File) -> vfsi_core::api::Result<()> {
     /// fs.vsetattrs(&[
-    ///     SetAttrsOp::new(MetadataTarget::File(file)).len(1024),
-    ///     SetAttrsOp::new(MetadataTarget::Path(std::path::Path::new("/other"))).len(0)
+    ///     SetAttrsOp::file(file).len(1024),
+    ///     SetAttrsOp::new(Target::Path(std::path::Path::new("/other"))).len(0)
     ///         .follow_symlinks(false),
     /// ])?;
     /// # Ok(())
     /// # }
     /// ```
-    fn vsetattrs<P: crate::api::MetadataOperand<Self::File>>(
+    fn vsetattrs<P: crate::api::AsTarget<Self::File>>(
         &self,
         updates: &[SetAttrsOp<P>],
     ) -> Result<()>;
@@ -524,10 +524,7 @@ pub trait Vfsi {
 /// of one RPC, and vector execution is not a promise of atomicity.
 pub trait VfsiExt: Vfsi {
     /// Query one target through the vector filesystem-statistics engine.
-    fn statfs<P: crate::MetadataOperand<Self::File>>(
-        &self,
-        target: P,
-    ) -> Result<crate::FilesystemStats> {
+    fn statfs<P: crate::AsTarget<Self::File>>(&self, target: P) -> Result<crate::FilesystemStats> {
         let mut results = self.vstatfs(&[target])?;
         if results.len() != 1 {
             return Err(crate::VfError::transport(
@@ -1493,16 +1490,12 @@ pub trait VfsiExt: Vfsi {
     }
 
     /// Truncate or extend one path or opened object using [`Vfsi::vsetattrs`].
-    fn truncate<T: crate::api::MetadataOperand<Self::File>>(
-        &self,
-        target: T,
-        len: u64,
-    ) -> Result<()> {
+    fn truncate<T: crate::api::AsTarget<Self::File>>(&self, target: T, len: u64) -> Result<()> {
         self.vsetattrs(&[SetAttrsOp::new(target).len(len)])
     }
 
     /// Change permissions on one path or opened object using [`Vfsi::vsetattrs`].
-    fn chmod<T: crate::api::MetadataOperand<Self::File>>(
+    fn chmod<T: crate::api::AsTarget<Self::File>>(
         &self,
         target: T,
         permissions: crate::api::Permissions,
@@ -1514,7 +1507,7 @@ pub trait VfsiExt: Vfsi {
     /// `None` leaves the corresponding owner/group unchanged. Use the vector
     /// with [`SetAttrsOp::follow_symlinks(false)`](SetAttrsOp::follow_symlinks)
     /// to change a symlink itself.
-    fn chown<T: crate::api::MetadataOperand<Self::File>>(
+    fn chown<T: crate::api::AsTarget<Self::File>>(
         &self,
         target: T,
         uid: Option<u32>,

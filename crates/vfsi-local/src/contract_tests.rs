@@ -110,13 +110,11 @@ mod tests {
         std::fs::write(root.0.join("file"), b"replacement").unwrap();
         let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_001);
         client
-            .vsetattrs(&[
-                vfsi_core::SetAttrsOp::new(vfsi_core::MetadataTarget::File(&file))
-                    .len(3)
-                    .permissions(Permissions::from_mode(0o640))
-                    .modified(modified)
-                    .follow_symlinks(false),
-            ])
+            .vsetattrs(&[vfsi_core::SetAttrsOp::new(vfsi_core::Target::File(&file))
+                .len(3)
+                .permissions(Permissions::from_mode(0o640))
+                .modified(modified)
+                .follow_symlinks(false)])
             .unwrap();
         let attrs = file.attrs().unwrap();
         assert_eq!(attrs.len(), 3);

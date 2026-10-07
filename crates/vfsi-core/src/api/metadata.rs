@@ -51,7 +51,7 @@ impl AttrsOptions {
 
 /// One attribute update for a path or opened object.
 ///
-/// Paths can be supplied directly. Use [`super::MetadataTarget`] for handles
+/// Paths can be supplied directly. Use [`super::Target`] for handles
 /// or mixed path/handle batches. Unspecified fields are unchanged; construction
 /// performs no I/O. Final symlinks are followed by default.
 #[derive(Clone, Copy, Debug)]
@@ -172,6 +172,22 @@ impl<T> SetAttrsOp<T> {
     /// Whether the final path symlink is followed.
     pub fn follows_symlinks(&self) -> bool {
         self.flags.follow()
+    }
+}
+
+impl<'a, F> SetAttrsOp<super::Target<'a, F>> {
+    /// Prepare an update for an opened object without borrowing its pathname.
+    /// The handle remains owned by the caller and is checked at dispatch.
+    ///
+    /// ```no_run
+    /// use vfsi_core::api::{SetAttrsOp, Vfsi};
+    /// # fn example<F: Vfsi>(fs: &F, file: &F::File) -> vfsi_core::api::Result<()> {
+    /// fs.vsetattrs(&[SetAttrsOp::file(file).len(1024)])?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn file(file: &'a F) -> Self {
+        Self::new(super::Target::File(file))
     }
 }
 

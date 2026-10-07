@@ -363,20 +363,20 @@ impl AutoClient {
     }
 
     /// Query route-coherent batches, preserving each open handle's retained route.
-    pub fn vstatfs<P: vfsi_core::MetadataOperand<AutoFile>>(
+    pub fn vstatfs<P: vfsi_core::AsTarget<AutoFile>>(
         &self,
         targets: &[P],
     ) -> VfResult<Vec<crate::FilesystemStats>> {
-        use vfsi_core::MetadataTarget;
+        use vfsi_core::Target;
         if targets.is_empty() {
             return Ok(Vec::new());
         }
         let mounts = read_mounts(false);
         let mut resolved = Vec::with_capacity(targets.len());
         for (index, target) in targets.iter().enumerate() {
-            let route = match target.metadata_target() {
-                MetadataTarget::Path(path) => self.resolve(path, &mounts),
-                MetadataTarget::File(file) => {
+            let route = match target.as_target() {
+                Target::Path(path) => self.resolve(path, &mounts),
+                Target::File(file) => {
                     self.check_owner(file, index)?;
                     if file.is_closed() {
                         return Err(VfError::client(index, libc::EBADF as u32)
@@ -397,12 +397,10 @@ impl AutoClient {
             macro_rules! batch {
                 ($variant:ident) => {{
                     (start..end)
-                        .map(|index| match targets[index].metadata_target() {
-                            MetadataTarget::Path(_) => {
-                                MetadataTarget::Path(resolved[index].path.as_path())
-                            }
-                            MetadataTarget::File(file) => match &file.inner {
-                                AutoFileInner::$variant(inner) => MetadataTarget::File(inner),
+                        .map(|index| match targets[index].as_target() {
+                            Target::Path(_) => Target::Path(resolved[index].path.as_path()),
+                            Target::File(file) => match &file.inner {
+                                AutoFileInner::$variant(inner) => Target::File(inner),
                                 _ => unreachable!("validated route"),
                             },
                         })
@@ -417,9 +415,9 @@ impl AutoClient {
                 let error = indexed(error, start);
                 match error.index().and_then(|index| targets.get(index)) {
                     Some(target) => {
-                        let path = match target.metadata_target() {
-                            MetadataTarget::Path(path) => path,
-                            MetadataTarget::File(file) => file.path.as_path(),
+                        let path = match target.as_target() {
+                            Target::Path(path) => path,
+                            Target::File(file) => file.path.as_path(),
                         };
                         error.with_context("vstatfs", path)
                     }
@@ -432,11 +430,11 @@ impl AutoClient {
         Ok(output)
     }
     /// Update route-coherent batches of paths and open objects.
-    pub fn vsetattrs<P: vfsi_core::MetadataOperand<AutoFile>>(
+    pub fn vsetattrs<P: vfsi_core::AsTarget<AutoFile>>(
         &self,
         updates: &[crate::SetAttrsOp<P>],
     ) -> VfResult<()> {
-        use vfsi_core::MetadataTarget;
+        use vfsi_core::Target;
         if updates.is_empty() {
             return Ok(());
         }
@@ -445,9 +443,9 @@ impl AutoClient {
         for (index, op) in updates.iter().enumerate() {
             let target = op.target();
             // Preflight all inputs before any route is allowed to mutate.
-            let route = match target.metadata_target() {
-                MetadataTarget::Path(path) => self.resolve(path, &mounts),
-                MetadataTarget::File(file) => {
+            let route = match target.as_target() {
+                Target::Path(path) => self.resolve(path, &mounts),
+                Target::File(file) => {
                     self.check_owner(file, index)?;
                     if file.is_closed() {
                         return Err(VfError::client(index, libc::EBADF as u32)
@@ -490,12 +488,10 @@ impl AutoClient {
                 ($variant:ident) => {{
                     (start..end)
                         .map(|index| {
-                            let target = match updates[index].target().metadata_target() {
-                                MetadataTarget::Path(_) => {
-                                    MetadataTarget::Path(resolved[index].path.as_path())
-                                }
-                                MetadataTarget::File(file) => match &file.inner {
-                                    AutoFileInner::$variant(inner) => MetadataTarget::File(inner),
+                            let target = match updates[index].target().as_target() {
+                                Target::Path(_) => Target::Path(resolved[index].path.as_path()),
+                                Target::File(file) => match &file.inner {
+                                    AutoFileInner::$variant(inner) => Target::File(inner),
                                     _ => unreachable!("validated route"),
                                 },
                             };
@@ -512,9 +508,9 @@ impl AutoClient {
                 let error = indexed(error, start);
                 match error.index().and_then(|index| updates.get(index)) {
                     Some(op) => {
-                        let path = match op.target().metadata_target() {
-                            MetadataTarget::Path(path) => path,
-                            MetadataTarget::File(file) => file.path.as_path(),
+                        let path = match op.target().as_target() {
+                            Target::Path(path) => path,
+                            Target::File(file) => file.path.as_path(),
                         };
                         error.with_context("vsetattrs", path)
                     }

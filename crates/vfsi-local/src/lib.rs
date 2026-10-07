@@ -1176,14 +1176,18 @@ impl FileSystem for DummyVecFs {
     fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {
         vfsi_sync::backend_helpers::native_seek_impl_default(self, file, position)
     }
-    fn metadata_impl(&mut self, query: MetadataQuery) -> VfResult<VfAttrs> {
-        vfsi_sync::backend_helpers::native_metadata_impl_default(self, query)
+    fn metadata_impl(
+        &mut self,
+        target: Target<'_, VfFile>,
+        options: vfsi_core::api::AttrsOptions,
+    ) -> VfResult<VfAttrs> {
+        vfsi_sync::backend_helpers::native_metadata_impl_default(self, target, options)
     }
-    fn set_attributes_impl(&mut self, update: SetAttributes) -> VfResult<()> {
+    fn set_attributes_impl(&mut self, update: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<()> {
         vfsi_sync::backend_helpers::native_set_attributes_impl_default(self, update)
     }
-    fn vsetattrs_impl(&mut self, updates: Vec<SetAttributes>, follow: bool) -> VfResult<()> {
-        vfsi_sync::backend_helpers::vsetattrs_typed_default(self, updates, follow)
+    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, VfFile>>]) -> VfResult<()> {
+        vfsi_sync::backend_helpers::vsetattrs_typed_default(self, updates)
     }
 }
 

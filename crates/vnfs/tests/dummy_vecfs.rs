@@ -1238,7 +1238,8 @@ fn strict_vectors_report_failure_index_without_rollback() {
 
 #[test]
 fn native_scalar_contract_separates_metadata_query_from_update() {
-    use vfsi_sync::{AttrMask, FileSystem, MetadataQuery, SetAttributes, VfFile};
+    use vfsi_sync::api::AttrsOptions;
+    use vfsi_sync::{AttrMask, FileSystem, SetAttrsOp, Target};
     use vnfs::{OpenFlags, OpenOp};
 
     let (_root, mut fs) = dummy();
@@ -1251,17 +1252,15 @@ fn native_scalar_contract_separates_metadata_query_from_update() {
 
     let attrs = FileSystem::metadata_impl(
         &mut fs,
-        MetadataQuery::new(
-            VfFile::from_path("/metadata"),
-            AttrMask::MODE | AttrMask::SIZE,
-        ),
+        Target::Path(Path::new("/metadata")),
+        AttrsOptions::new().fields(AttrMask::MODE | AttrMask::SIZE),
     )
     .unwrap();
     assert!(attrs.returned.contains(AttrMask::MODE | AttrMask::SIZE));
 
-    let mut update = SetAttributes::new(VfFile::from_path("/metadata"));
-    update.mode = Some(0o640);
-    FileSystem::set_attributes_impl(&mut fs, update).unwrap();
+    let update = SetAttrsOp::new(Target::Path(Path::new("/metadata")))
+        .permissions(vnfs::Permissions::from_mode(0o640));
+    FileSystem::set_attributes_impl(&mut fs, &update).unwrap();
     assert_eq!(
         fs.stat_impl(Path::new("/metadata")).unwrap().mode & 0o777,
         0o640

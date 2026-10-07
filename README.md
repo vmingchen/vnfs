@@ -114,11 +114,11 @@ Typed attribute updates use `vsetattrs_impl`; raw attribute masks use
 `VfsiExt::statfs` helper delegates to that vector operation:
 
 ```rust,ignore
-use vnfs::{MetadataTarget, Vfsi, VfsiExt};
+use vnfs::{Target, Vfsi, VfsiExt};
 
 let capacities = fs.vstatfs(&["/data", "/archive"])?;
 let file = fs.open("/data/example")?;
-let capacity = fs.statfs(MetadataTarget::File(&file))?;
+let capacity = fs.statfs(Target::File(&file))?;
 println!("available bytes: {:?}", capacity.available_bytes);
 ```
 

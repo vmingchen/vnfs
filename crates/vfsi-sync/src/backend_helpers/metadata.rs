@@ -47,15 +47,23 @@ pub fn file_type_impl_default<F: Backend + ?Sized>(
 
 pub fn native_metadata_impl_default<F: Backend + ?Sized>(
     backend: &mut F,
-    query: MetadataQuery,
+    target: Target<'_, VfFile>,
+    options: vfsi_core::api::AttrsOptions,
 ) -> VfResult<VfAttrs> {
-    let path = query.file.path().map(std::path::Path::to_path_buf);
+    let file = match target {
+        Target::Path(path) => VfFile::from_os_path(path),
+        Target::File(file) => file.clone(),
+    };
+    let path = match target {
+        Target::Path(path) => Some(path),
+        Target::File(file) => file.path(),
+    };
     let mut attrs = VfAttrs {
-        file: query.file,
-        masks: query.attributes,
+        file,
+        masks: options.requested_attributes(),
         ..VfAttrs::default()
     };
-    let result = if query.follow_symlinks {
+    let result = if options.follows_symlinks() {
         backend.vgetattrs_impl(std::slice::from_mut(&mut attrs))
     } else {
         backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs))
@@ -72,19 +80,14 @@ pub fn native_metadata_path_impl_default<F: Backend + ?Sized>(
     path: &std::path::Path,
     follow: bool,
 ) -> VfResult<Attrs> {
-    let mut attributes = VfAttrs {
-        file: VfFile::from_os_path(path),
-        masks: metadata_mask(),
-        ..VfAttrs::default()
-    };
-    let result = if follow {
-        backend.vgetattrs_impl(std::slice::from_mut(&mut attributes))
-    } else {
-        backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut attributes))
-    };
-    result
-        .map_err(|error| error.with_context("metadata", path))
-        .map(|()| vfsi_core::metadata_from_attrs(attributes))
+    native_metadata_impl_default(
+        backend,
+        Target::Path(path),
+        vfsi_core::api::AttrsOptions::new()
+            .fields(metadata_mask())
+            .follow_symlinks(follow),
+    )
+    .map(vfsi_core::metadata_from_attrs)
 }
 
 pub fn native_set_metadata_path_impl_default<F: Backend + ?Sized>(
@@ -92,31 +95,90 @@ pub fn native_set_metadata_path_impl_default<F: Backend + ?Sized>(
     op: &SetAttrsOp<&std::path::Path>,
 ) -> VfResult<()> {
     let path = *op.target();
-    let mut attributes = SetAttributes::new(VfFile::from_os_path(path));
-    attributes.follow_symlinks = op.follows_symlinks();
-    attributes.mode = op.requested_permissions().map(Permissions::mode);
-    attributes.size = op.requested_len();
-    attributes.uid = op.requested_uid();
-    attributes.gid = op.requested_gid();
-    attributes.atime = op.requested_accessed().map(system_time_parts).transpose()?;
-    attributes.mtime = op.requested_modified().map(system_time_parts).transpose()?;
     backend
-        .set_attributes_impl(attributes)
+        .set_attributes_impl(&op.with_target(Target::Path(path)))
         .map_err(|error| error.with_context("set_metadata", path))
+}
+
+// Wire/raw masks and timestamp tuples are execution details, not a second
+// public mutation type. Convert and validate every operation before dispatch.
+fn setattrs_to_legacy(op: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<VfAttrs> {
+    if op.requested_uid() == Some(u32::MAX) || op.requested_gid() == Some(u32::MAX) {
+        return Err(VfError::client(0, ERR_INVAL));
+    }
+    let mut attrs = VfAttrs {
+        file: match op.target() {
+            Target::Path(path) => VfFile::from_os_path(path),
+            Target::File(file) => (*file).clone(),
+        },
+        ..VfAttrs::default()
+    };
+    if let Some(permissions) = op.requested_permissions() {
+        attrs.masks |= AttrMask::MODE;
+        attrs.mode = permissions.mode();
+    }
+    if let Some(uid) = op.requested_uid() {
+        attrs.masks |= AttrMask::UID;
+        attrs.uid = uid;
+    }
+    if let Some(gid) = op.requested_gid() {
+        attrs.masks |= AttrMask::GID;
+        attrs.gid = gid;
+    }
+    if let Some(size) = op.requested_len() {
+        attrs.masks |= AttrMask::SIZE;
+        attrs.size = size;
+    }
+    if let Some(time) = op.requested_accessed() {
+        (attrs.atime_sec, attrs.atime_nsec) = system_time_parts(time)?;
+        attrs.masks |= AttrMask::ATIME;
+    }
+    if let Some(time) = op.requested_modified() {
+        (attrs.mtime_sec, attrs.mtime_nsec) = system_time_parts(time)?;
+        attrs.masks |= AttrMask::MTIME;
+    }
+    Ok(attrs)
 }
 
 pub fn vsetattrs_typed_default<F: Backend + ?Sized>(
     backend: &mut F,
-    updates: Vec<SetAttributes>,
-    follow: bool,
+    updates: &[SetAttrsOp<Target<'_, VfFile>>],
 ) -> VfResult<()> {
-    let attrs: Vec<VfAttrs> = updates
-        .into_iter()
-        .map(SetAttributes::into_legacy)
-        .collect();
-    if follow {
-        backend.vsetattrs_raw_impl(&attrs)
-    } else {
-        backend.vsetattrs_raw_nofollow_impl(&attrs)
+    let attrs = updates
+        .iter()
+        .enumerate()
+        .map(|(index, op)| {
+            setattrs_to_legacy(op).map_err(|error| {
+                let error = error.with_index(index);
+                let path = match op.target() {
+                    Target::Path(path) => Some(*path),
+                    Target::File(file) => file.path(),
+                };
+                match path {
+                    Some(path) => error.with_context("vsetattrs", path),
+                    None => error,
+                }
+            })
+        })
+        .collect::<VfResult<Vec<_>>>()?;
+    let mut start = 0;
+    while start < updates.len() {
+        let follow = updates[start].follows_symlinks();
+        let count = updates[start..]
+            .iter()
+            .take_while(|op| op.follows_symlinks() == follow)
+            .count();
+        let result = if follow {
+            backend.vsetattrs_raw_impl(&attrs[start..start + count])
+        } else {
+            backend.vsetattrs_raw_nofollow_impl(&attrs[start..start + count])
+        };
+        result.map_err(|error| match error.index() {
+            Some(index) if index < count => error.with_index(start + index),
+            Some(_) => VfError::transport(None, "setattrs backend returned an invalid error index"),
+            None => error,
+        })?;
+        start += count;
     }
+    Ok(())
 }
