@@ -501,6 +501,7 @@ impl<F: Backend> FsClient<F> {
         cursors: Vec<Option<crate::DirPageCursor>>,
         page_size: usize,
         max_entries: usize,
+        follow_symlinks: bool,
     ) -> VfResult<Vec<crate::DirectoryPage>> {
         let pages = self.lock()?.vlistdir_pages_impl(
             paths,
@@ -508,6 +509,7 @@ impl<F: Backend> FsClient<F> {
             cursors,
             page_size,
             max_entries,
+            follow_symlinks,
         )?;
         if pages.len() != paths.len() {
             return Err(VfError::transport(

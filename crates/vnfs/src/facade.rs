@@ -114,6 +114,7 @@ macro_rules! owned_client {
                 cursors: Vec<Option<vfsi_sync::DirPageCursor>>,
                 page_size: usize,
                 max_entries: usize,
+                follow_symlinks: bool,
             ) -> Result<Vec<vfsi_sync::DirectoryPage>> {
                 self.inner.read_dir_pages_with_fields(
                     paths,
@@ -121,6 +122,7 @@ macro_rules! owned_client {
                     cursors,
                     page_size,
                     max_entries,
+                    follow_symlinks,
                 )
             }
             /// Create `path` if missing, otherwise empty it. Errors if it exists and is

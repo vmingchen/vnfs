@@ -22,7 +22,7 @@ coherent with concurrent kernel-mounted access.
 `VfsiExt::visit_dirs_ordered` provides lazy, application-ordered directory
 listings with entry/path/depth budgets and admission before child-directory I/O.
 It lets tools such as `ls` retain their sort and display policy without owning a
-second traversal engine. Use `walk_events_with_options` for pre/post-order entry
+second traversal engine. Use `listdir` with `enter_leave(true)` for pre/post-order entry
 events and `vlistdirs` to batch independent, already-approved directories.
 
 `helpers::copy_to_writer` streams a source to a caller-owned `std::io::Write`

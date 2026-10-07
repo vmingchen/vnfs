@@ -365,20 +365,20 @@ fn rust_native_client_workflow_on_nfs() {
     let mut visited = Vec::new();
     let mut held_during_visit = Some(client.open(&paths[0]).unwrap());
     client
-        .visit_dir(&nested, |entry| {
+        .listdir(&nested, vfsi_core::api::ListDirOptions::new(), |entry| {
             // The application callback must run outside the NFS session lock.
-            assert_eq!(client.attrs(entry.path())?.len(), 3);
+            assert_eq!(client.attrs(entry.entry.path())?.len(), 3);
             drop(held_during_visit.take());
-            visited.push(entry.path().to_path_buf());
-            Ok(std::ops::ControlFlow::Continue(()))
+            visited.push(entry.entry.path().to_path_buf());
+            Ok(vfsi_core::api::WalkControl::Continue)
         })
         .unwrap();
     assert_eq!(visited.len(), 2);
     let mut early_count = 0;
     client
-        .visit_dir(&nested, |_| {
+        .listdir(&nested, vfsi_core::api::ListDirOptions::new(), |_| {
             early_count += 1;
-            Ok(std::ops::ControlFlow::Break(()))
+            Ok(vfsi_core::api::WalkControl::Stop)
         })
         .unwrap();
     assert_eq!(early_count, 1);
@@ -2414,9 +2414,9 @@ fn directory_visit_continuation_reuses_resolved_nfs_handle() {
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let mut native_count = 0;
     visitor
-        .visit_dir(&dir, |_| {
+        .listdir(&dir, vfsi_core::api::ListDirOptions::new(), |_| {
             native_count += 1;
-            Ok(std::ops::ControlFlow::Continue(()))
+            Ok(vfsi_core::api::WalkControl::Continue)
         })
         .unwrap();
     let native_compounds = vfsi_nfs::compound::thread_compound_stats().0;
@@ -2454,9 +2454,9 @@ fn directory_visit_recovers_if_reply_is_lost_before_first_entry() {
     proxy.arm();
     let mut seen = Vec::new();
     visitor
-        .visit_dir(&dir, |entry| {
-            seen.push(entry.path().to_path_buf());
-            Ok(std::ops::ControlFlow::Continue(()))
+        .listdir(&dir, vfsi_core::api::ListDirOptions::new(), |entry| {
+            seen.push(entry.entry.path().to_path_buf());
+            Ok(vfsi_core::api::WalkControl::Continue)
         })
         .expect("read-only directory visit should reconnect before delivering entries");
     proxy.wait_for_drop();
@@ -2494,13 +2494,16 @@ fn directory_visit_does_not_replay_after_delivering_an_entry() {
     let mut delivered = 0;
     let mut unique = std::collections::HashSet::new();
     let error = visitor
-        .visit_dir(&dir, |entry| {
+        .listdir(&dir, vfsi_core::api::ListDirOptions::new(), |entry| {
             delivered += 1;
-            assert!(unique.insert(entry.path().to_path_buf()), "entry replayed");
+            assert!(
+                unique.insert(entry.entry.path().to_path_buf()),
+                "entry replayed"
+            );
             if delivered == 1 {
                 proxy.arm();
             }
-            Ok(std::ops::ControlFlow::Continue(()))
+            Ok(vfsi_core::api::WalkControl::Continue)
         })
         .unwrap_err();
     proxy.wait_for_drop();
@@ -4123,6 +4126,46 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
 
 #[test]
 fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
+    let options = vnfs::ListDirOptions::new().recursive(true);
+    for mode in [
+        DirectoryVisit::Pages,
+        DirectoryVisit::Events(options),
+        DirectoryVisit::Events(options.sort_by_name(true)),
+        DirectoryVisit::Events(options.enter_leave(true)),
+        DirectoryVisit::Events(options.sort_by_name(true).enter_leave(true)),
+    ] {
+        directory_replacement_is_not_followed(mode, ReplacedDirectory::Child);
+    }
+}
+
+#[test]
+fn buffered_directory_walk_rejects_an_ancestor_replaced_by_a_symlink() {
+    let options = vnfs::ListDirOptions::new().recursive(true);
+    for options in [
+        options.sort_by_name(true),
+        options.enter_leave(true),
+        options.sort_by_name(true).enter_leave(true),
+    ] {
+        directory_replacement_is_not_followed(
+            DirectoryVisit::Events(options),
+            ReplacedDirectory::Ancestor,
+        );
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DirectoryVisit {
+    Pages,
+    Events(vnfs::ListDirOptions),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ReplacedDirectory {
+    Child,
+    Ancestor,
+}
+
+fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: ReplacedDirectory) {
     use vnfs::{ControlFlow, ListDirOptions, Vfsi};
     let dir = setup_dir("page_child_symlink");
     let fs = Nfs::builder(test_host())
@@ -4143,34 +4186,57 @@ fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
     ])
     .unwrap();
     fs.vmkdir(&[vnfs::MkDirOp::new(&child, 0o777)]).unwrap();
+    let target = if matches!(replacement, ReplacedDirectory::Ancestor) {
+        let target_child = format!("{target}/child");
+        fs.vmkdir(&[vnfs::MkDirOp::new(&target_child, 0o777)])
+            .unwrap();
+        target_child
+    } else {
+        target
+    };
     fs.write(format!("{target}/secret"), b"must not be traversed")
         .unwrap();
     let mut changed = false;
     let mut escaped = false;
-    let result = fs.vlistdirs(
-        &[&tree],
-        ListDirOptions::new().recursive(true),
-        |_, page| {
-            if page.path == Path::new(&tree) && !changed {
-                assert!(
-                    page.entries
-                        .iter()
-                        .any(|entry| entry.path() == Path::new(&child))
-                );
-                fs.vrename(&[(&child, &saved)], vnfs::RenameOptions::Replace)?;
-                fs.symlink("../outside", &child)?;
-                changed = true;
-            }
-            escaped |= page
-                .entries
-                .iter()
-                .any(|entry| entry.path().ends_with("secret"));
-            Ok(ControlFlow::Continue(()))
-        },
-    );
+    let (victim, link_target) = match replacement {
+        ReplacedDirectory::Child => (&child, "../outside"),
+        ReplacedDirectory::Ancestor => (&tree, "outside"),
+    };
+    let mut on_entry = |entry: &vnfs::DirEntry| -> vnfs::Result<()> {
+        if entry.path() == Path::new(&child) && !changed {
+            fs.vrename(&[(victim, &saved)], vnfs::RenameOptions::Replace)?;
+            fs.symlink(link_target, victim)?;
+            changed = true;
+        }
+        escaped |= entry.path().ends_with("secret");
+        Ok(())
+    };
+    let result = match mode {
+        DirectoryVisit::Events(options) => fs
+            .listdir(&tree, options, |event| {
+                on_entry(&event.entry)?;
+                Ok(vnfs::WalkControl::Continue)
+            })
+            .map(|_| ()),
+        DirectoryVisit::Pages => fs
+            .vlistdirs(
+                &[&tree],
+                ListDirOptions::new().recursive(true),
+                |_, page| {
+                    for entry in &page.entries {
+                        on_entry(entry)?;
+                    }
+                    Ok(ControlFlow::Continue(()))
+                },
+            )
+            .map(|_| ()),
+    };
     fs.remove_dir_all(&dir).unwrap();
     assert!(changed);
-    assert!(!escaped, "recursive paging followed a replacement symlink");
+    assert!(
+        !escaped,
+        "replacement symlink followed: {mode:?}, {replacement:?}"
+    );
     let error = result.unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert!(
@@ -4180,6 +4246,40 @@ fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
         ),
         "{error}"
     );
+}
+
+#[test]
+fn directory_path_resolution_preserves_shallow_symlinks_and_rejects_strict_aliases() {
+    use vnfs::ListDirOptions;
+    let dir = setup_dir("directory_path_policy");
+    let fs = Nfs::builder(test_host())
+        .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
+            vnfs::NfsVersion::V4_2
+        } else {
+            vnfs::NfsVersion::V4_1
+        })
+        .connect()
+        .unwrap();
+    let target = format!("{dir}/target");
+    let child = format!("{target}/child");
+    fs.create_dir_all(&child).unwrap();
+    fs.write(format!("{child}/file"), b"x").unwrap();
+    let link = format!("{dir}/link");
+    fs.symlink("target", &link).unwrap();
+    let linked_child = format!("{link}/child");
+    for path in [&link, &linked_child] {
+        assert_eq!(
+            fs.read_dir_with_options(path, ListDirOptions::new())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            fs.read_dir_with_options(path, ListDirOptions::new().follow_symlinks(false))
+                .is_err()
+        );
+    }
+    fs.remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -4211,6 +4311,22 @@ fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
         .read_dirs_with_options(&[&dir], ListDirOptions::new().recursive(true))
         .unwrap();
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
+    let mut entries = 0;
+    let mut maximum_depth = 0;
+    fs.listdir(&dir, ListDirOptions::new().recursive(true), |event| {
+        assert_eq!(event.kind, vnfs::WalkEventKind::Entry);
+        entries += 1;
+        maximum_depth = maximum_depth.max(event.depth);
+        Ok(vnfs::WalkControl::Continue)
+    })
+    .unwrap();
+    let visitor_compounds = vfsi_nfs::compound::thread_compound_stats().0;
+    assert_eq!(
+        visitor_compounds, compounds,
+        "listdir must preserve native anchored traversal cost"
+    );
+    assert_eq!(entries, depth + 1);
+    assert_eq!(maximum_depth, depth + 1);
     fs.remove_dir_all(&dir).unwrap();
     eprintln!("depth {depth}: {compounds} compounds");
     assert_eq!(trees[0].len(), depth + 1);

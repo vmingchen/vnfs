@@ -298,9 +298,10 @@ path, operation, vector index, and retry information. The standard `Read`,
 `Write`, and `Seek` implementations remain available when integration with
 generic `std::io` code is more important than retaining that detail.
 
-`NfsClient::visit_dir` invokes a callback for each directory entry without
-retaining the full listing. Use `visit_dir_with_options` to adjust the default
-entry and path-byte limits, including `ReadDirOptions::unlimited()` for very
+`VfsiExt::listdir(root, ListDirOptions::new(), callback)` invokes a callback
+with one `WalkEventKind::Entry` per child without retaining the full listing
+on paging backends. Use `ListDirOptions` to adjust the default
+entry and path-byte limits, including `ListDirOptions::unlimited()` for very
 large directories. The client fetches bounded READDIR pages and releases its
 backend lock before invoking the callback, so the callback may use the same
 client or drop another of its files. Concurrent directory mutation can change
@@ -468,16 +469,22 @@ RPCs. Use `connect_pool` for independent application workers, or
 waits for outstanding reads to finish and then closes the worker handles.
 Neither streaming path promises a snapshot of a concurrently modified file.
 
-`walk_events_with_options(root, fields, limits, sort_by_name, callback)` adds
-selective metadata and depth-first `Enter`, `Entry`, and `Leave` events.
+`listdir(root, ListDirOptions::new().recursive(true).enter_leave(true), callback)`
+adds depth-first `Enter`, `Entry`, and `Leave` events. Use `.fields(...)`
+for selective metadata and `.sort_by_name(true)` for sorted siblings.
 Return `WalkControl::SkipSubtree` from `Enter` to avoid reading that directory;
 `Stop` ends the entire traversal. A pruned directory still receives `Leave`.
 Errors or stopping can leave the remaining events undelivered. Never replay
 side-effectful callbacks through another backend after a partial traversal.
 The root is depth zero and counts toward the aggregate entry/path budget.
-This traversal is lazy between directories; each directory is bounded before
-optional sorting, and only its active frontier is retained. Use collecting
-`walk` when eager multi-directory batching matters more than pruning.
+Lifecycle traversal is lazy between directories and retains bounded directory
+buffers for depth-first ordering. Sorting also requires buffering a complete
+bounded directory. `visit_dirs_ordered` remains available for custom sibling
+ordering, descent admission, and callbacks receiving complete listings.
+Buffered recursive/lifecycle `listdir` reopens directory paths without following
+symlinks, including replaced ancestors. Backends unable to enforce this return
+`Unsupported`. Ordinary shallow listing retains its existing path behavior;
+`ListDirOptions::follow_symlinks(false)` requests strict no-follow directory opens.
 
 `Nfs::discover_mount(path)` inspects a supported Linux mount without opening
 a network connection. Its opaque result exposes the host, export root,
@@ -490,17 +497,19 @@ from the development repository to check exact-limit and overflow behavior
 with a test-only legacy adapter, including rsync deletion safety. The fixture
 streams synthetic entries without creating 200,001 files on disk.
 
-`visit_walk` incrementally delivers bounded directory pages without retaining
-the whole tree; callbacks may reenter the client. It does not follow symlinks.
+`listdir(root, ListDirOptions::new().recursive(true), callback)` incrementally
+delivers child Entry events without retaining the whole tree; callbacks may
+reenter the client. It does not follow entry symlinks.
 Backends without native paging may retain one bounded directory snapshot.
 The visitor finishes that directory's pages before descending into children,
 so snapshots cannot accumulate across ancestors.
-Directory visitors accept `Ok(ControlFlow::Continue(()))` or
-`Ok(ControlFlow::Break(()))`; a break stops the entire visit/walk, not one
-subtree. Both return `TraversalCompletion::Complete` or `Stopped`. Callback
+The scalar visitor accepts `Ok(WalkControl::Continue)`, `SkipSubtree`, or
+`Stop`; enable `enter_leave(true)` and skip on Enter to prune before child I/O.
+Stopping ends the entire traversal, not one subtree. It returns
+`TraversalCompletion::Complete` or `Stopped`. Callback
 errors propagate, and even breaking on the last entry reports `Stopped`.
-Use collecting `walk` when multi-directory batching is more important than
-incremental delivery. `NfsDir::try_close` retains ownership after a failed close,
+Child directories retain native anchored cursors and batching through `vlistdirs`; plain entry mode
+does not impose depth-first callback order. `NfsDir::try_close` retains ownership after a failed close,
 as `NfsFile::try_close` does. Dropping either handle may block on the client lock
 and a network cleanup operation, and discards cleanup errors. Close explicitly
 when errors matter. `Write::flush` requests backend durability (`sync_data`),

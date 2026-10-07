@@ -248,6 +248,9 @@ pub trait Backend: FileSystem {
         Err(VfError::unsupported(0))
     }
 
+    /// False requires resolving every component without following symlinks;
+    /// validate-and-then-follow is not sufficient. Continuations retain the
+    /// originally opened directory. Unsupported guarantees must fail closed.
     fn listdir_page_impl(
         &mut self,
         dir: &Path,
@@ -255,6 +258,7 @@ pub trait Backend: FileSystem {
         cursor: Option<DirPageCursor>,
         page_size: usize,
         max_entries: usize,
+        follow_symlinks: bool,
     ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
         crate::backend_helpers::listdir_page_impl_default(
             self,
@@ -263,6 +267,7 @@ pub trait Backend: FileSystem {
             cursor,
             page_size,
             max_entries,
+            follow_symlinks,
         )
     }
 
@@ -277,6 +282,7 @@ pub trait Backend: FileSystem {
         cursors: Vec<Option<DirPageCursor>>,
         page_size: usize,
         max_entries: usize,
+        follow_symlinks: bool,
     ) -> VfResult<Vec<BackendDirectoryPage>> {
         crate::backend_helpers::vlistdir_pages_impl_default(
             self,
@@ -285,6 +291,7 @@ pub trait Backend: FileSystem {
             cursors,
             page_size,
             max_entries,
+            follow_symlinks,
         )
     }
 

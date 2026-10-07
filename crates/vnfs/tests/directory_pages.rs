@@ -1,7 +1,9 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
 use std::ops::ControlFlow;
 use std::path::Path;
-use vnfs::{ListDirOptions, Mounted, TraversalCompletion, Vfsi, VfsiExt};
+use vnfs::{
+    ListDirOptions, Mounted, TraversalCompletion, Vfsi, VfsiExt, WalkControl, WalkEventKind,
+};
 
 fn collect(
     fs: &impl Vfsi,
@@ -115,97 +117,213 @@ fn collection_limits_and_errors_keep_the_input_root_index() {
 }
 
 #[test]
-fn single_directory_visitor_honors_recursion_and_preserves_convenience_defaults() {
+fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
+    if vfsi_sync::test_support::supervise_with_deadline(
+        "listdir_modes_preserve_scope_limits_depth_and_callback_contracts",
+    ) {
+        return;
+    }
     let root = tempfile::tempdir().unwrap();
     let fs = Mounted::new(root.path()).unwrap();
     fs.create_dir_all("/tree/sub").unwrap();
+    fs.create_dir("/tree/empty").unwrap();
     fs.write("/tree/top", b"a").unwrap();
     fs.write("/tree/sub/leaf", b"b").unwrap();
     fs.symlink("sub", "/tree/link").unwrap();
-    let collect = |options| {
-        let mut paths = Vec::new();
+    let limited = Mounted::new(root.path())
+        .unwrap()
+        .with_limits(vnfs::ResourceLimits {
+            max_directory_entries: 1,
+            ..Default::default()
+        });
+    for (name, recursive, lifecycle, sort) in [
+        ("paged", false, false, false),
+        ("sorted", false, false, true),
+        ("lifecycle", false, true, false),
+        ("sorted lifecycle", false, true, true),
+        ("recursive paged", true, false, false),
+        ("recursive sorted", true, false, true),
+        ("recursive lifecycle", true, true, false),
+        ("recursive sorted lifecycle", true, true, true),
+    ] {
+        let options = ListDirOptions::new()
+            .recursive(recursive)
+            .enter_leave(lifecycle)
+            .sort_by_name(sort)
+            .max_depth(usize::from(recursive));
+        let mut expected: Vec<_> = ["/tree/empty", "/tree/link", "/tree/sub", "/tree/top"]
+            .map(std::path::PathBuf::from)
+            .into();
+        if recursive {
+            expected.push("/tree/sub/leaf".into());
+        }
+        if lifecycle {
+            expected.push("/tree".into());
+        }
+        expected.sort();
+        let collect = |options| -> vnfs::Result<Vec<std::path::PathBuf>> {
+            let mut paths = Vec::new();
+            let completion = fs.listdir("/tree", options, |event| {
+                assert_eq!(
+                    event.depth,
+                    event
+                        .entry
+                        .path()
+                        .strip_prefix("/tree")
+                        .unwrap()
+                        .components()
+                        .count(),
+                    "{name}"
+                );
+                if !lifecycle || (!recursive && event.depth > 0) {
+                    assert_eq!(event.kind, WalkEventKind::Entry, "{name}");
+                }
+                if event.kind != WalkEventKind::Leave {
+                    paths.push(event.entry.path().to_owned());
+                }
+                Ok(WalkControl::Continue)
+            })?;
+            assert_eq!(completion, TraversalCompletion::Complete, "{name}");
+            paths.sort();
+            Ok(paths)
+        };
+        assert_eq!(collect(options).unwrap(), expected, "{name}");
         assert_eq!(
-            fs.visit_dir_with_options("/tree", options, |entry| {
-                paths.push(entry.path().to_path_buf());
-                Ok(ControlFlow::Continue(()))
+            collect(options.max_entries(usize::MAX).max_path_bytes(usize::MAX)).unwrap(),
+            expected,
+            "{name}: unlimited budgets"
+        );
+        assert_eq!(
+            collect(options.max_entries(expected.len())).unwrap(),
+            expected,
+            "{name}: exact entry budget"
+        );
+        // Expected paths are fixture literals, not another traversal's output.
+        let bytes = expected.iter().map(|p| p.as_os_str().len()).sum::<usize>()
+            + if recursive && !lifecycle {
+                "/tree".len() + "/tree/sub".len() + "/tree/empty".len()
+            } else {
+                0
+            };
+        assert_eq!(
+            collect(options.max_path_bytes(bytes)).unwrap(),
+            expected,
+            "{name}"
+        );
+        for limited_options in [
+            options.max_entries(expected.len() - 1),
+            options.max_path_bytes(bytes - 1),
+            options.max_path_bytes(1),
+        ] {
+            let error = collect(limited_options).unwrap_err();
+            assert_eq!(error.kind(), vnfs::ErrorKind::FileTooLarge, "{name}");
+            assert_eq!(error.index(), Some(0), "{name}");
+        }
+        assert_eq!(
+            fs.listdir("/tree", options.max_entries(0), |_| panic!("zero budget"))
+                .unwrap_err()
+                .kind(),
+            vnfs::ErrorKind::FileTooLarge,
+            "{name}"
+        );
+        assert_eq!(
+            limited
+                .listdir("/tree", options, |_| Ok(WalkControl::Continue))
+                .unwrap_err()
+                .kind(),
+            vnfs::ErrorKind::FileTooLarge,
+            "{name}: inherited limits"
+        );
+        let mut calls = 0;
+        assert_eq!(
+            fs.listdir("/tree", options, |event| {
+                calls += 1;
+                fs.symlink_attrs(event.entry.path())?;
+                Ok(WalkControl::Stop)
             })
             .unwrap(),
-            TraversalCompletion::Complete
+            TraversalCompletion::Stopped,
+            "{name}"
         );
-        paths.sort();
-        paths
-    };
-    let shallow = collect(ListDirOptions::new());
-    assert_eq!(shallow.len(), 3);
-    assert!(!shallow.contains(&"/tree/sub/leaf".into()));
-    let recursive = collect(ListDirOptions::new().recursive(true));
-    assert_eq!(recursive.len(), 4);
-    assert!(recursive.contains(&"/tree/sub/leaf".into()));
-    assert!(!recursive.contains(&"/tree/link/leaf".into()));
-    for (walk, expected) in [(false, shallow), (true, recursive)] {
-        let mut paths = Vec::new();
-        let callback = |entry: &vnfs::DirEntry| {
-            paths.push(entry.path().to_path_buf());
-            Ok(ControlFlow::Continue(()))
-        };
-        let completion = if walk {
-            fs.visit_walk("/tree", callback)
-        } else {
-            fs.visit_dir("/tree", callback)
+        assert_eq!(calls, 1, "{name}");
+        for fault in [
+            vnfs::Error::client(0, libc::ECANCELED as u32),
+            vnfs::Error::transport(None, "callback failure"),
+        ] {
+            calls = 0;
+            let error = fs
+                .listdir("/tree", options, |_| {
+                    calls += 1;
+                    Err(fault.clone())
+                })
+                .unwrap_err();
+            assert_eq!(error.kind(), fault.kind(), "{name}");
+            assert_eq!(error.err_no(), fault.err_no(), "{name}");
+            assert_eq!(calls, 1, "{name}: callbacks must not replay");
         }
-        .unwrap();
-        assert_eq!(completion, TraversalCompletion::Complete);
-        paths.sort();
-        assert_eq!(paths, expected);
+        if recursive {
+            assert_eq!(
+                collect(options.max_depth(0)).unwrap_err().kind(),
+                vnfs::ErrorKind::FileTooLarge,
+                "{name}"
+            );
+            let truncated = collect(options.max_depth(0).truncate_at_max_depth(true)).unwrap();
+            let shallow: Vec<_> = expected
+                .iter()
+                .filter(|p| p.as_path() != Path::new("/tree/sub/leaf"))
+                .cloned()
+                .collect();
+            assert_eq!(truncated, shallow, "{name}");
+            if lifecycle {
+                fs.listdir("/tree", options.max_depth(0), |event| {
+                    assert_ne!(event.entry.path(), Path::new("/tree/sub/leaf"));
+                    Ok(if event.depth > 0 && event.kind == WalkEventKind::Enter {
+                        WalkControl::SkipSubtree
+                    } else {
+                        WalkControl::Continue
+                    })
+                })
+                .unwrap();
+            }
+        }
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
-fn consolidated_visitor_preserves_limits_cancellation_and_callback_errors() {
-    let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path()).unwrap();
-    fs.create_dir_all("/tree/sub").unwrap();
-    fs.write("/tree/sub/leaf", b"x").unwrap();
-    for recursive in [false, true] {
-        let options = ListDirOptions::new().recursive(recursive);
-        let mut calls = 0;
-        assert_eq!(
-            fs.visit_dir_with_options("/tree", options, |entry| {
-                calls += 1;
-                fs.symlink_attrs(entry.path())?;
-                Ok(ControlFlow::Break(()))
-            })
-            .unwrap(),
-            TraversalCompletion::Stopped
-        );
-        assert_eq!(calls, 1);
-        let error = fs
-            .visit_dir_with_options("/tree", options, |_| {
-                Err(vnfs::Error::transport(None, "callback failure"))
-            })
-            .unwrap_err();
-        assert!(error.to_string().contains("callback failure"));
-        let error = fs
-            .visit_dir_with_options("/tree", options.max_entries(0), |_| {
-                panic!("entry budget must be enforced before delivery")
-            })
-            .unwrap_err();
-        assert_eq!(error.kind(), vnfs::ErrorKind::FileTooLarge);
+fn buffered_local_walk_never_follows_replaced_children_or_ancestors() {
+    for options in [
+        ListDirOptions::new().sort_by_name(true),
+        ListDirOptions::new().enter_leave(true),
+        ListDirOptions::new().sort_by_name(true).enter_leave(true),
+    ] {
+        for (name, victim, target, outside) in [
+            ("child", "/tree/child", "../outside", "/outside"),
+            ("ancestor", "/tree", "outside", "/outside/child"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let fs = Mounted::new(root.path()).unwrap();
+            fs.create_dir_all("/tree/child").unwrap();
+            fs.create_dir_all(outside).unwrap();
+            fs.write(format!("{outside}/secret"), b"never traverse this")
+                .unwrap();
+            let mut changed = false;
+            let mut escaped = false;
+            let result = fs.listdir("/tree", options.recursive(true), |event| {
+                if event.entry.path() == Path::new("/tree/child") && !changed {
+                    fs.vrename(&[(victim, "/saved")], Default::default())?;
+                    fs.symlink(target, victim)?;
+                    changed = true;
+                }
+                escaped |= event.entry.path().ends_with("secret");
+                Ok(vnfs::WalkControl::Continue)
+            });
+            assert!(changed);
+            assert!(!escaped, "{options:?}, {name}");
+            let error = result.unwrap_err();
+            assert_eq!(error.err_no(), libc::ELOOP as u32);
+        }
     }
-    let recursive = ListDirOptions::new().recursive(true).max_depth(0);
-    assert_eq!(
-        fs.visit_dir_with_options("/tree", recursive, |_| { Ok(ControlFlow::Continue(())) })
-            .unwrap_err()
-            .kind(),
-        vnfs::ErrorKind::FileTooLarge
-    );
-    let mut paths = Vec::new();
-    fs.visit_dir_with_options("/tree", recursive.truncate_at_max_depth(true), |entry| {
-        paths.push(entry.path().to_path_buf());
-        Ok(ControlFlow::Continue(()))
-    })
-    .unwrap();
-    assert_eq!(paths, [Path::new("/tree/sub")]);
 }
 
 #[test]

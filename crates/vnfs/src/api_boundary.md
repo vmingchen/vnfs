@@ -356,8 +356,10 @@ fn visit_walk_with_options(fs: &impl Vfsi) {
 
 ```compile_fail,E0599
 use vnfs::Vfsi;
-fn visit_dir_with_options(fs: &impl Vfsi) {
-    let _ = fs.visit_dir_with_options("/", vnfs::ListDirOptions::new(), |_| Ok(std::ops::ControlFlow::Continue(())));
+fn listdir(fs: &impl Vfsi) {
+    let _ = fs.listdir("/", vnfs::ListDirOptions::new(), |_| {
+        Ok(vnfs::WalkControl::Continue)
+    });
 }
 ```
 

@@ -186,6 +186,7 @@ macro_rules! client_methods {
                         cursors,
                         page_size,
                         max_entries,
+                        options.follows_symlinks(),
                     )
                 },
                 callback,
@@ -1027,8 +1028,10 @@ mod extension_tests {
         })
         .unwrap();
         assert_eq!(payload, b"abc");
-        fs.visit_dir("/dir", |_| Ok(std::ops::ControlFlow::Break(())))
-            .unwrap();
+        fs.listdir("/dir", vfsi_core::api::ListDirOptions::new(), |_| {
+            Ok(vfsi_core::api::WalkControl::Stop)
+        })
+        .unwrap();
     }
 
     #[test]

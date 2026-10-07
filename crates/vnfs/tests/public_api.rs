@@ -24,12 +24,12 @@ fn application_surface_is_small_and_typed() {
 #[cfg(all(feature = "auto", target_os = "linux"))]
 #[test]
 fn concrete_and_extension_directory_visitors_borrow_entries_consistently() {
-    fn callback(entry: &vnfs::DirEntry) -> vnfs::Result<vnfs::ControlFlow<()>> {
-        assert!(entry.path().ends_with("file"));
-        Ok(vnfs::ControlFlow::Continue(()))
+    fn callback(event: &vnfs::WalkEvent) -> vnfs::Result<vnfs::WalkControl> {
+        assert!(event.entry.path().ends_with("file"));
+        Ok(vnfs::WalkControl::Continue)
     }
     fn direct(fs: &vnfs::NfsClient) -> vnfs::Result<vnfs::TraversalCompletion> {
-        fs.visit_dir_with_options("/dir", vnfs::ListDirOptions::new(), callback)
+        fs.listdir("/dir", vnfs::ListDirOptions::new(), callback)
     }
     let _ = direct; // Compile-check direct NFS without requiring a connection.
     let root = tempfile_root();
@@ -50,17 +50,16 @@ fn concrete_and_extension_directory_visitors_borrow_entries_consistently() {
     );
     assert_eq!(
         mounted
-            .visit_dir_with_options("/", vnfs::ListDirOptions::new(), callback)
+            .listdir("/", vnfs::ListDirOptions::new(), callback)
             .unwrap(),
         vnfs::TraversalCompletion::Complete
     );
     assert_eq!(
-        VfsiExt::visit_dir_with_options(&mounted, "/", vnfs::ListDirOptions::new(), callback)
-            .unwrap(),
+        VfsiExt::listdir(&mounted, "/", vnfs::ListDirOptions::new(), callback).unwrap(),
         vnfs::TraversalCompletion::Complete
     );
     assert_eq!(
-        auto.visit_dir_with_options("/", vnfs::ListDirOptions::new(), callback)
+        auto.listdir("/", vnfs::ListDirOptions::new(), callback)
             .unwrap(),
         vnfs::TraversalCompletion::Complete
     );
@@ -212,7 +211,11 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     );
     assert_eq!(
         client
-            .visit_walk("/sub", |_| Ok(std::ops::ControlFlow::Continue(())))
+            .listdir(
+                "/sub",
+                vfsi_core::api::ListDirOptions::new().recursive(true),
+                |_| Ok(vfsi_core::api::WalkControl::Continue)
+            )
             .unwrap(),
         vnfs::TraversalCompletion::Complete
     );
@@ -382,9 +385,9 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
         assert_eq!(client.read_dirs(&[prefix])?[0].entries.len(), 2);
         let mut visited = 0;
         assert_eq!(
-            client.visit_dir_with_options(prefix, vnfs::ListDirOptions::default(), |_| {
+            client.listdir(prefix, vnfs::ListDirOptions::default(), |_| {
                 visited += 1;
-                Ok(vnfs::ControlFlow::Continue(()))
+                Ok(vfsi_core::api::WalkControl::Continue)
             })?,
             vnfs::TraversalCompletion::Complete
         );

@@ -508,7 +508,7 @@ pub trait Vfsi {
 /// - Write files: [`write`](Self::write), [`write_files`](Self::write_files).
 /// - Attrs: [`attrs`](Self::attrs), [`attrs_with_options`](Self::attrs_with_options).
 /// - Collect directories: [`read_dir`](Self::read_dir), [`read_dir_with_options`](Self::read_dir_with_options).
-/// - Visit directories: [`visit_dir`](Self::visit_dir), [`visit_walk`](Self::visit_walk).
+/// - Visit directories: [`listdir`](Self::listdir), [`visit_dirs_ordered`](Self::visit_dirs_ordered).
 /// - Create, move, copy, and remove: [`create_dir`](Self::create_dir), [`create_dir_all`](Self::create_dir_all).
 ///
 /// # Boundary
@@ -1160,7 +1160,7 @@ pub trait VfsiExt: Vfsi {
     /// apply across the walk; depth zero is the starting directory. Explicit
     /// options override client defaults. This helper forces `recursive(true)`.
     /// Use a visitor for incremental delivery
-    /// or [`walk_events_with_options`](VfsiExt::walk_events_with_options) for pruning.
+    /// or [`listdir`](VfsiExt::listdir) for pruning and lifecycle events.
     ///
     /// ```no_run
     /// use vfsi_core::api::{ListDirOptions, Vfsi, VfsiExt, Attributes, WalkOptions, WriteOp};
@@ -1189,105 +1189,77 @@ pub trait VfsiExt: Vfsi {
     }
 
     // Visit directories
-    /// Single-target convenience. For multiple directories, prefer [`Vfsi::vlistdirs`].
+    /// List one directory through callbacks, optionally recursively.
+    /// For independent roots and owned pages, prefer [`Vfsi::vlistdirs`].
     ///
-    /// Visit a directory incrementally using the client's allocation limits.
-    /// The callback runs outside the backend lock.
+    /// By default, only child `Entry` events are delivered, with no extra root
+    /// attribute request or full-listing allocation on paging backends. Set
+    /// `recursive(true)` to descend without following entry symlinks. Entry-only
+    /// traversal retains native anchored child cursors and sibling batching;
+    /// its order is backend-defined.
+    ///
+    /// `enter_leave(true)` includes the root and emits depth-first `Enter` and
+    /// `Leave` events for traversed directories, including pruned directories.
+    /// In shallow lifecycle mode, children are `Entry` events. Symlinks are
+    /// always `Entry` events. A non-directory lifecycle root produces one Entry.
+    /// Lifecycle traversal currently retains bounded directory buffers because
+    /// the vector page primitive does not expose resumable cursors.
+    /// `sort_by_name(true)` also buffers a bounded directory before sorting.
+    /// Unsorted entry-only visiting remains paged. This is not a snapshot.
+    /// Buffered recursive/lifecycle visiting rejects symlinks in reopened
+    /// directory paths, including ancestors. Backends unable to guarantee that
+    /// return Unsupported instead of checking and then following the path.
+    /// Ordinary shallow listing retains the backend's path resolution; use
+    /// `follow_symlinks(false)` to require no-follow directory opens explicitly.
+    ///
+    /// The root is depth zero and its children have depth one. Directory depth
+    /// limits control descent; shallow mode ignores them. Lifecycle mode charges
+    /// the root against the entry/path budgets; recursive entry-only mode charges
+    /// retained directory paths. All unspecified budgets inherit client limits.
+    ///
+    /// `SkipSubtree` on Enter prevents reading that directory's children;
+    /// it does nothing on files or Leave. Pruning a recursive directory Entry
+    /// without lifecycle events is rejected: enable `enter_leave(true)`.
+    /// `Stop` returns Stopped immediately,
+    /// without synthesizing pending Leave events. Callback errors propagate
+    /// without replay. Callbacks run outside backend locks and may reenter.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
+    /// use vfsi_core::api::{ListDirOptions, Vfsi, VfsiExt, WalkControl};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// fs.visit_dir("/input", |entry| {
-    ///     println!("{}", entry.path().display());
-    ///     Ok(std::ops::ControlFlow::Continue(()))
+    /// fs.listdir("/input", ListDirOptions::new(), |event| {
+    ///     println!("{}", event.entry.path().display());
+    ///     Ok(WalkControl::Continue)
     /// })?;
     /// # Ok(())
     /// # }
     /// ```
-    fn visit_dir(
-        &self,
-        path: impl AsRef<Path>,
-        callback: impl FnMut(&crate::api::DirEntry) -> Result<std::ops::ControlFlow<()>>,
-    ) -> Result<crate::api::TraversalCompletion> {
-        self.visit_dir_with_options(path, crate::api::ListDirOptions::new(), callback)
-    }
-
-    /// Single-target convenience. For multiple roots, prefer [`Vfsi::vlistdirs`].
     ///
-    /// Visit a no-follow tree incrementally using the client's traversal limits.
-    /// The callback runs outside the backend lock.
+    /// Recursive lifecycle events allow pruning before listing children:
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
+    /// use vfsi_core::api::{ListDirOptions, Vfsi, VfsiExt, WalkControl, WalkEventKind};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// fs.visit_walk("/project", |entry| {
-    ///     println!("{}", entry.path().display());
-    ///     Ok(std::ops::ControlFlow::Continue(()))
-    /// })?;
+    /// fs.listdir("/project",
+    ///     ListDirOptions::new().recursive(true).enter_leave(true).sort_by_name(true),
+    ///     |event| {
+    ///         if event.kind == WalkEventKind::Enter
+    ///             && event.entry.file_name() == Some(std::ffi::OsStr::new(".git")) {
+    ///             return Ok(WalkControl::SkipSubtree);
+    ///         }
+    ///         println!("{:?}: {}", event.kind, event.entry.path().display());
+    ///         Ok(WalkControl::Continue)
+    ///     })?;
     /// # Ok(())
     /// # }
     /// ```
-    fn visit_walk(
+    fn listdir(
         &self,
         root: impl AsRef<Path>,
-        callback: impl FnMut(&crate::api::DirEntry) -> Result<std::ops::ControlFlow<()>>,
-    ) -> Result<crate::api::TraversalCompletion> {
-        self.visit_dir_with_options(
-            root,
-            crate::api::ListDirOptions::new().recursive(true),
-            callback,
-        )
-    }
-
-    /// Single-target convenience. For multiple directories, prefer [`Vfsi::vlistdirs`].
-    ///
-    /// Visit one directory; `Break(())` returns Stopped, exhaustion returns
-    /// Complete, and callback errors propagate. The callback may reenter.
-    ///
-    /// Defaults to immediate children. Set `recursive(true)` to visit descendants
-    /// without following entry symlinks. Options are forwarded unchanged, including
-    /// entry, path-byte, and depth limits. Paging bounds incremental delivery;
-    /// backends without paging may buffer one bounded listing. Entry order is
-    /// backend-defined. `Break(())` stops the entire traversal, not one subtree.
-    /// To prune a subtree, use [`walk_events_with_options`](Self::walk_events_with_options).
-    ///
-    /// ```no_run
-    /// use vfsi_core::api::{ListDirOptions, Vfsi, VfsiExt, ControlFlow, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// let completion = fs.visit_dir_with_options(
-    ///     "/input", ListDirOptions::new().max_entries(10_000), |entry| {
-    ///         println!("{}", entry.path().display());
-    ///         Ok(ControlFlow::Continue(()))
-    ///     },
-    /// )?;
-    /// # let _ = completion;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// Recursive traversal uses the same entry point:
-    ///
-    /// ```no_run
-    /// use vfsi_core::api::{ControlFlow, VfsiExt, ListDirOptions};
-    /// # fn example(fs: &impl vfsi_core::Vfsi) -> vfsi_core::api::Result<()> {
-    /// fs.visit_dir_with_options("/project", ListDirOptions::new().recursive(true), |entry| {
-    ///     println!("{}", entry.path().display());
-    ///     Ok(ControlFlow::Continue(()))
-    /// })?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    fn visit_dir_with_options(
-        &self,
-        path: impl AsRef<Path>,
         options: crate::api::ListDirOptions,
-        callback: impl FnMut(&crate::api::DirEntry) -> Result<std::ops::ControlFlow<()>>,
+        visitor: impl FnMut(&crate::api::WalkEvent) -> Result<crate::api::WalkControl>,
     ) -> Result<crate::api::TraversalCompletion> {
-        let mut callback = callback;
-        single_completion(
-            self.visit_entries_with_options(&[path], options, |_, entry| callback(entry))?,
-            "visit_dirs",
-        )
+        super::listdir::listdir(self, root.as_ref(), options, visitor)
     }
 
     /// Visit individual entries using the directory-page primitive.
@@ -1306,76 +1278,6 @@ pub trait VfsiExt: Vfsi {
             }
             Ok(std::ops::ControlFlow::Continue(()))
         })
-    }
-
-    /// Single-target convenience. For multiple roots without enter/leave events or subtree pruning, prefer [`Vfsi::vlistdirs`]. Keep this helper when those event semantics are required.
-    ///
-    /// Incremental no-follow traversal with enter/leave events and pruning.
-    /// Listings are bounded by the remaining aggregate budget; the callback
-    /// runs before entering each directory, so pruning avoids its listing.
-    ///
-    /// `Enter`/`Leave` surround directories (including pruned ones); symlinks
-    /// are `Entry` events, never followed. `SkipSubtree` is meaningful on `Enter`;
-    /// `Stop` stops the entire walk. `sort_by_name` sorts siblings, not the whole
-    /// tree. Limits charge fetched entries, including the root, even if pruned.
-    /// Unlike a flat visit, this retains a bounded active frontier/listing.
-    ///
-    /// # Example: skip `.git` before listing it
-    ///
-    /// ```no_run
-    /// use vfsi_core::api::{ListDirOptions, Vfsi, VfsiExt, Attributes, WalkControl, WalkEventKind, WalkOptions, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// let completion = fs.walk_events_with_options(
-    ///     "/project", Attributes::MODE, WalkOptions::new(), true,
-    ///     |event| {
-    ///         if event.kind == WalkEventKind::Enter
-    ///             && event.entry.file_name() == Some(std::ffi::OsStr::new(".git")) {
-    ///             return Ok(WalkControl::SkipSubtree);
-    ///         }
-    ///         println!("{:?}: {}", event.kind, event.entry.path().display());
-    ///         Ok(WalkControl::Continue)
-    ///     },
-    /// )?;
-    /// # let _ = completion;
-    /// # Ok(())
-    /// # }
-    /// ```
-    fn walk_events_with_options(
-        &self,
-        root: impl AsRef<Path>,
-        fields: crate::api::Attributes,
-        options: crate::api::WalkOptions,
-        sort_by_name: bool,
-        callback: impl FnMut(&crate::api::WalkEvent) -> Result<crate::api::WalkControl>,
-    ) -> Result<crate::api::TraversalCompletion> {
-        let root = root.as_ref();
-        let fields = fields | crate::api::Attributes::MODE;
-        let metadata = self.attrs_with_options(
-            root,
-            crate::api::AttrsOptions::new()
-                .fields(fields)
-                .follow_symlinks(false),
-        )?;
-        crate::api::walk_events(
-            crate::api::DirEntry::new(root.to_path_buf(), metadata),
-            options,
-            sort_by_name,
-            |path, limits| {
-                let mut trees = self.read_dirs_with_options(
-                    &[path],
-                    crate::api::ListDirOptions::from(limits).fields(fields),
-                )?;
-                let mut listings = single_tree(&mut trees)?;
-                if listings.len() != 1 {
-                    return Err(crate::api::Error::transport(
-                        None,
-                        "invalid directory result count",
-                    ));
-                }
-                Ok(listings.remove(0).entries)
-            },
-            callback,
-        )
     }
 
     /// Visit complete shallow listings in depth-first order with application policy.

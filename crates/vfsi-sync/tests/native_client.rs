@@ -205,6 +205,7 @@ impl Backend for ScalarOnly {
         cursor: Option<DirPageCursor>,
         page_size: usize,
         max_entries: usize,
+        _follow_symlinks: bool,
     ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
         self.directory_fields.lock().unwrap().push(masks);
         self.directory_page_sizes.lock().unwrap().push(page_size);
@@ -429,6 +430,48 @@ macro_rules! handle_contract {
 handle_contract!(HandleOnly);
 handle_contract!(DefaultBackend);
 handle_contract!(PagedBackend);
+
+#[derive(Default)]
+struct LegacyDirectoryBackend {
+    scalar: ScalarOnly,
+    calls: usize,
+}
+handle_contract!(LegacyDirectoryBackend);
+impl Backend for LegacyDirectoryBackend {
+    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        panic!("unexpected read")
+    }
+    fn listdir_impl(
+        &mut self,
+        _: &std::path::Path,
+        _: vfsi_sync::AttrMask,
+        _: usize,
+        _: bool,
+    ) -> VfResult<Vec<VfAttrs>> {
+        self.calls += 1;
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn legacy_directory_fallback_fails_closed_without_no_follow_support() {
+    let mut backend = LegacyDirectoryBackend::default();
+    let dir = std::path::Path::new("/tree");
+    let page = backend
+        .vlistdir_pages_impl(&[dir], vfsi_sync::AttrMask::MODE, vec![None], 1, 4, true)
+        .unwrap();
+    assert!(page[0].0.is_empty());
+    assert_eq!(backend.calls, 1);
+    let error = backend
+        .vlistdir_pages_impl(&[dir], vfsi_sync::AttrMask::MODE, vec![None], 1, 4, false)
+        .err()
+        .expect("legacy listing cannot provide no-follow guarantees");
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert_eq!(
+        backend.calls, 1,
+        "do not check and then call a following backend"
+    );
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct WriteObservation {
@@ -737,6 +780,7 @@ impl Backend for PagedBackend {
         cursor: Option<DirPageCursor>,
         page_size: usize,
         max_entries: usize,
+        _follow_symlinks: bool,
     ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
         self.page_calls
             .lock()
@@ -789,7 +833,7 @@ fn minimal_backend_directory_defaults_return_unsupported() {
     let client = FsClient::new(concrete);
     assert_eq!(
         client
-            .visit_dir(dir, |_| panic!(
+            .listdir(dir, vfsi_core::api::ListDirOptions::new(), |_| panic!(
                 "unsupported listing must not invoke the visitor"
             ))
             .unwrap_err()
@@ -837,14 +881,14 @@ fn default_directory_visitor_uses_native_pages_without_materializing_a_listing()
     let client = FsClient::new(concrete);
     let mut paths = Vec::new();
     let completion = client
-        .visit_dir_with_options(
+        .listdir(
             "/tree",
             vfsi_sync::ListDirOptions::new()
                 .fields(vfsi_sync::AttrMask::SIZE)
                 .max_entries(3),
             |entry| {
-                paths.push(entry.path().to_path_buf());
-                Ok(std::ops::ControlFlow::Continue(()))
+                paths.push(entry.entry.path().to_path_buf());
+                Ok(vfsi_core::api::WalkControl::Continue)
             },
         )
         .unwrap();
@@ -1797,7 +1841,9 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
     });
     assert_eq!(
         client
-            .visit_dir("/tree", |_| Ok(std::ops::ControlFlow::Break(())))
+            .listdir("/tree", vfsi_core::api::ListDirOptions::new(), |_| Ok(
+                vfsi_core::api::WalkControl::Stop
+            ))
             .unwrap(),
         vfsi_sync::TraversalCompletion::Stopped
     );
@@ -1806,12 +1852,12 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
     page_sizes.lock().unwrap().clear();
     let mut seen = 0;
     let error = client
-        .visit_dir_with_options(
+        .listdir(
             "/tree",
             vfsi_sync::ListDirOptions::new().max_entries(3),
             |_| {
                 seen += 1;
-                Ok(std::ops::ControlFlow::Continue(()))
+                Ok(vfsi_core::api::WalkControl::Continue)
             },
         )
         .unwrap_err();
@@ -1822,9 +1868,9 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
     page_sizes.lock().unwrap().clear();
     let mut seen = 0;
     let completion = client
-        .visit_dir("/tree", |_| {
+        .listdir("/tree", vfsi_core::api::ListDirOptions::new(), |_| {
             seen += 1;
-            Ok(std::ops::ControlFlow::Continue(()))
+            Ok(vfsi_core::api::WalkControl::Continue)
         })
         .unwrap();
     assert_eq!(completion, vfsi_sync::TraversalCompletion::Complete);
@@ -1836,7 +1882,9 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
     let empty = FsClient::new(ScalarOnly::default());
     assert_eq!(
         empty
-            .visit_dir("/empty", |_| panic!("empty directory has no entry"))
+            .listdir("/empty", vfsi_core::api::ListDirOptions::new(), |_| panic!(
+                "empty directory has no entry"
+            ))
             .unwrap(),
         vfsi_sync::TraversalCompletion::Complete
     );
@@ -1846,7 +1894,9 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
     });
     assert_eq!(
         single
-            .visit_dir("/single", |_| Ok(std::ops::ControlFlow::Break(())))
+            .listdir("/single", vfsi_core::api::ListDirOptions::new(), |_| Ok(
+                vfsi_core::api::WalkControl::Stop
+            ))
             .unwrap(),
         vfsi_sync::TraversalCompletion::Stopped
     );
@@ -1864,12 +1914,12 @@ fn visitor_field_selection_is_forwarded_to_each_page() {
     });
     let mut seen = 0;
     client
-        .visit_dir_with_options(
+        .listdir(
             "/tree",
             vfsi_sync::ListDirOptions::new().fields(vfsi_sync::AttrMask::SIZE),
             |_| {
                 seen += 1;
-                Ok(std::ops::ControlFlow::Continue(()))
+                Ok(vfsi_core::api::WalkControl::Continue)
             },
         )
         .unwrap();

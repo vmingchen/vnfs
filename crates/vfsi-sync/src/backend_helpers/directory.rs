@@ -7,7 +7,12 @@ pub fn listdir_page_impl_default<F: Backend + ?Sized>(
     cursor: Option<DirPageCursor>,
     page_size: usize,
     max_entries: usize,
+    follow_symlinks: bool,
 ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
+    if !follow_symlinks && cursor.is_none() {
+        // The legacy whole-listing hook has no atomic no-follow contract.
+        return Err(VfError::unsupported(0));
+    }
     if page_size == 0 {
         return Err(VfError::client(0, ERR_INVAL));
     }
@@ -37,6 +42,7 @@ pub fn vlistdir_pages_impl_default<F: Backend + ?Sized>(
     cursors: Vec<Option<DirPageCursor>>,
     page_size: usize,
     max_entries: usize,
+    follow_symlinks: bool,
 ) -> VfResult<Vec<BackendDirectoryPage>> {
     if dirs.len() != cursors.len() || page_size == 0 {
         return Err(VfError::client(0, ERR_INVAL));
@@ -46,7 +52,7 @@ pub fn vlistdir_pages_impl_default<F: Backend + ?Sized>(
         .enumerate()
         .map(|(index, (dir, cursor))| {
             backend
-                .listdir_page_impl(dir, masks, cursor, page_size, max_entries)
+                .listdir_page_impl(dir, masks, cursor, page_size, max_entries, follow_symlinks)
                 .map(|(entries, next)| {
                     let children = (0..entries.len()).map(|_| None).collect();
                     (entries, next, children)
@@ -262,6 +268,7 @@ pub fn native_read_dir_page_with_fields_impl_default<F: Backend + ?Sized>(
             cursor,
             page_size,
             max_entries,
+            true,
         )
         .map_err(|error| error.with_context("visit_dir", path))?;
     if attributes.len() > page_size {

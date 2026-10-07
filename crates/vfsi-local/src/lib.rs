@@ -114,6 +114,63 @@ pub struct DummyVecFs {
 }
 
 impl DummyVecFs {
+    /// Hold the entire directory, resolving every component in one no-symlink
+    /// openat2. Reading through its procfs descriptor closes validation races.
+    fn strict_directory_path(&self, dir: &Path) -> VfResult<AnchoredPath> {
+        #[cfg(target_os = "linux")]
+        {
+            #[repr(C)]
+            struct OpenHow {
+                flags: u64,
+                mode: u64,
+                resolve: u64,
+            }
+            let resolved = self.resolve(dir);
+            let relative = resolved
+                .strip_prefix(&self.root)
+                .map_err(|_| VfError::client(0, ERR_ACCES))?;
+            let relative = if relative.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                relative
+            };
+            let path = cstring_from_bytes(path_bytes(relative))
+                .ok_or_else(|| VfError::client(0, ERR_INVAL))?;
+            let how = OpenHow {
+                flags: (libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) as u64,
+                mode: 0,
+                resolve: 0x10 | 0x04, // RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS
+            };
+            // OpenHow matches the kernel ABI; both borrowed pointers remain
+            // valid until this synchronous syscall returns.
+            let fd = unsafe {
+                libc::syscall(
+                    libc::SYS_openat2,
+                    self.root_dir.as_raw_fd(),
+                    path.as_ptr(),
+                    &how as *const OpenHow,
+                    std::mem::size_of::<OpenHow>(),
+                ) as i32
+            };
+            if fd < 0 {
+                let error = std::io::Error::last_os_error();
+                return Err(match error.raw_os_error() {
+                    Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP) => VfError::unsupported(0),
+                    _ => VfError::client(0, Self::errno(&error)),
+                });
+            }
+            Ok(AnchoredPath {
+                path: PathBuf::from(format!("/proc/self/fd/{fd}/.")),
+                anchor: Some(unsafe { File::from_raw_fd(fd) }),
+                nofollow_on_open: false,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = dir;
+            Err(VfError::unsupported(0))
+        }
+    }
     fn system_time(
         seconds: i64,
         nanoseconds: u32,
@@ -1357,6 +1414,7 @@ impl Backend for DummyVecFs {
         cursor: Option<DirPageCursor>,
         page_size: usize,
         _max_entries: usize,
+        follow_symlinks: bool,
     ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
         if page_size == 0 {
             return Err(VfError::client(0, ERR_INVAL));
@@ -1364,7 +1422,11 @@ impl Backend for DummyVecFs {
         let mut state = match cursor {
             Some(cursor) => cursor.into_state::<LocalDirectoryCursor>()?,
             None => {
-                let p = self.no_follow_path(&self.resolve(dir))?;
+                let p = if follow_symlinks {
+                    self.no_follow_path(&self.resolve(dir))?
+                } else {
+                    self.strict_directory_path(dir)?
+                };
                 let metadata = std::fs::symlink_metadata(&p)
                     .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
                 if metadata.file_type().is_symlink() {

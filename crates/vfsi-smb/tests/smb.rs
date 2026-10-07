@@ -95,15 +95,24 @@ fn native_directory_visitor_reenters_client_across_snapshot_pages() {
 
     let client = vfsi_sync::FsClient::new(backend);
     let remote_dir = format!("/{name}");
-    let mut seen = Vec::new();
-    client
-        .visit_dir(&remote_dir, |entry| {
-            assert_eq!(client.attrs(entry.path())?.len(), 1);
-            seen.push(entry.path().to_path_buf());
-            Ok(std::ops::ControlFlow::Continue(()))
-        })
-        .unwrap();
-    assert_eq!(seen.len(), 3);
+    for sort in [false, true] {
+        let mut seen = Vec::new();
+        client
+            .listdir(
+                &remote_dir,
+                vfsi_core::api::ListDirOptions::new().sort_by_name(sort),
+                |entry| {
+                    assert_eq!(client.attrs(entry.entry.path())?.len(), 1);
+                    seen.push(entry.entry.path().to_path_buf());
+                    Ok(vfsi_core::api::WalkControl::Continue)
+                },
+            )
+            .unwrap();
+        assert_eq!(seen.len(), 3);
+        if sort {
+            assert!(seen.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+    }
     drop(client);
     fs::remove_dir_all(local_dir).unwrap();
 }

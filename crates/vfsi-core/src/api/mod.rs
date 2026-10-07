@@ -50,6 +50,7 @@ pub use support::{
     WalkOptions,
 };
 pub use support::{ReadIntoResult, WriteResult};
+mod listdir;
 mod traversal;
 #[doc(hidden)]
 pub use traversal::walk_events;

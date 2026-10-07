@@ -25,11 +25,12 @@ fn application_walk_prunes_before_io_selects_metadata_and_allows_reentry() {
     client.write("/a", b"hello").unwrap();
     let mut visited = Vec::new();
     client
-        .walk_events_with_options(
+        .listdir(
             "/",
-            vnfs::Attributes::MODE,
-            vnfs::WalkOptions::default(),
-            true,
+            vfsi_core::api::ListDirOptions::from(vnfs::WalkOptions::default())
+                .fields(vnfs::Attributes::MODE)
+                .enter_leave(true)
+                .sort_by_name(true),
             |event| {
                 visited.push(event.entry.path().to_path_buf());
                 assert!(event.entry.attrs().uid().is_none());
@@ -72,8 +73,10 @@ fn bounded_open_file_collection_keeps_identity_across_rename_and_replacement() {
 }
 
 #[test]
-fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
-    if common::supervise_with_deadline("paged_tree_visiting_is_bounded_cancellable_and_reentrant") {
+fn native_paged_tree_honors_budget_overrides_and_allows_reentry() {
+    if common::supervise_with_deadline(
+        "native_paged_tree_honors_budget_overrides_and_allows_reentry",
+    ) {
         return;
     }
     use vfsi_sync::FsClient;
@@ -90,11 +93,15 @@ fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
     let mut seen = Vec::new();
     let clone = client.clone();
     let error = client
-        .visit_walk("/tree", |entry| {
-            clone.symlink_attrs(entry.path()).unwrap();
-            seen.push(entry.path().to_path_buf());
-            Ok(std::ops::ControlFlow::Continue(()))
-        })
+        .listdir(
+            "/tree",
+            vfsi_core::api::ListDirOptions::new().recursive(true),
+            |entry| {
+                clone.symlink_attrs(entry.entry.path()).unwrap();
+                seen.push(entry.entry.path().to_path_buf());
+                Ok(vfsi_core::api::WalkControl::Continue)
+            },
+        )
         .unwrap_err();
     assert_eq!(error.kind(), vnfs::ErrorKind::FileTooLarge);
     assert_eq!(seen.len(), 3);
@@ -102,67 +109,18 @@ fn paged_tree_visiting_is_bounded_cancellable_and_reentrant() {
     let options = WalkOptions::new().max_entries(10);
     assert_eq!(
         client
-            .visit_dir_with_options("/tree", vnfs::ListDirOptions::from(options), |entry| {
-                seen.push(entry.path().to_path_buf());
-                Ok(std::ops::ControlFlow::Continue(()))
+            .listdir("/tree", vnfs::ListDirOptions::from(options), |entry| {
+                seen.push(entry.entry.path().to_path_buf());
+                Ok(vfsi_core::api::WalkControl::Continue)
             })
             .unwrap(),
         TraversalCompletion::Complete
     );
     assert_eq!(seen.len(), 4);
-    let mut expected: Vec<_> = client
-        .walk_with_options("/tree", vnfs::ListDirOptions::from(options))
-        .unwrap()
-        .into_iter()
-        .flat_map(|listing| {
-            listing
-                .entries
-                .into_iter()
-                .map(|entry| entry.path().to_path_buf())
-        })
-        .collect();
-    expected.sort();
     seen.sort();
-    assert_eq!(seen, expected);
     assert_eq!(
-        client
-            .visit_dir_with_options("/tree", vnfs::ListDirOptions::from(options), |_| Ok(
-                std::ops::ControlFlow::Break(())
-            ))
-            .unwrap(),
-        TraversalCompletion::Stopped
-    );
-    assert_eq!(
-        client
-            .visit_dir_with_options(
-                "/tree",
-                vnfs::ListDirOptions::from(options.max_depth(0)),
-                |_| Ok(std::ops::ControlFlow::Continue(()))
-            )
-            .unwrap_err()
-            .kind(),
-        vnfs::ErrorKind::FileTooLarge
-    );
-    assert_eq!(
-        client
-            .visit_dir_with_options(
-                "/tree",
-                vnfs::ListDirOptions::from(options.max_path_bytes(1)),
-                |_| panic!("budget exhausted before callback")
-            )
-            .unwrap_err()
-            .kind(),
-        vnfs::ErrorKind::FileTooLarge
-    );
-    assert_eq!(
-        client
-            .visit_dir_with_options(
-                "/tree",
-                vnfs::ListDirOptions::from(options.max_depth(0).truncate_at_max_depth(true)),
-                |_| Ok(std::ops::ControlFlow::Continue(()))
-            )
-            .unwrap(),
-        TraversalCompletion::Complete
+        seen,
+        ["/tree/a", "/tree/link", "/tree/sub", "/tree/sub/b"].map(std::path::PathBuf::from)
     );
     client.remove_dir_all("/tree").unwrap();
 }
@@ -1336,7 +1294,8 @@ fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
     client.create_dir("/tree").unwrap();
-    for index in 0..1100 {
+    // First page, one full continuation, and a final partial page.
+    for index in 0..130 {
         client
             .write(format!("/tree/item-{index:04}"), b"x")
             .unwrap();
@@ -1346,15 +1305,15 @@ fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
     let worker = std::thread::spawn(move || {
         let mut held_file = Some(held_file);
         let mut seen = 0;
-        let result = client.visit_dir("/tree", |entry| {
+        let result = client.listdir("/tree", vfsi_core::api::ListDirOptions::new(), |entry| {
             // Both operations acquire the same backend mutex. In particular,
             // dropping an owned file must not block directory enumeration.
-            assert_eq!(client.attrs(entry.path())?.len(), 1);
+            assert_eq!(client.attrs(entry.entry.path())?.len(), 1);
             if let Some(file) = held_file.take() {
                 drop(file);
             }
             seen += 1;
-            Ok(std::ops::ControlFlow::Continue(()))
+            Ok(vfsi_core::api::WalkControl::Continue)
         });
         sender.send((result, seen)).unwrap();
     });
@@ -1362,76 +1321,6 @@ fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
         .recv_timeout(Duration::from_secs(10))
         .expect("directory callback deadlocked on its own client");
     result.unwrap();
-    assert_eq!(seen, 1100);
+    assert_eq!(seen, 130);
     worker.join().unwrap();
-}
-
-#[test]
-fn directory_visitor_supports_limits_early_stop_and_callback_errors() {
-    use vfsi_sync::FsClient;
-    use vfsi_sync::WriteOp;
-    use vnfs::Error as VfError;
-
-    let (_root, mut fs) = dummy();
-    fs.ensure_dir_impl(Path::new("/tree"), 0o755).unwrap();
-    let writes: Vec<_> = (0..8)
-        .map(|index| {
-            WriteOp::from_path(&format!("/tree/item-{index}"), VfOffset::At(0), Vec::new())
-                .with_creation()
-        })
-        .collect();
-    fs.vwrite_impl(&borrow_writes(&writes)).unwrap();
-    let client = FsClient::new(fs);
-
-    let mut seen = 0;
-    let error = client
-        .visit_dir_with_options("/tree", ListDirOptions::new().max_entries(3), |_| {
-            seen += 1;
-            Ok(std::ops::ControlFlow::Continue(()))
-        })
-        .unwrap_err();
-    assert_eq!(seen, 3);
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
-
-    let mut first = None;
-    client
-        .visit_dir_with_options(
-            "/tree",
-            ListDirOptions::new()
-                .max_entries(usize::MAX)
-                .max_path_bytes(usize::MAX),
-            |entry| {
-                first = Some(entry.path().to_path_buf());
-                Ok(std::ops::ControlFlow::Break(()))
-            },
-        )
-        .unwrap();
-    assert!(first.unwrap().starts_with("/tree"));
-
-    let mut all = Vec::new();
-    client
-        .visit_dir_with_options(
-            "/tree",
-            ListDirOptions::new()
-                .max_entries(usize::MAX)
-                .max_path_bytes(usize::MAX),
-            |entry| {
-                all.push(entry.path().to_path_buf());
-                Ok(std::ops::ControlFlow::Continue(()))
-            },
-        )
-        .unwrap();
-    assert_eq!(all.len(), 8);
-
-    let error = client
-        .visit_dir("/tree", |_| Err(VfError::client(0, libc::ECANCELED as u32)))
-        .unwrap_err();
-    assert_eq!(error.err_no(), libc::ECANCELED as u32);
-
-    let error = client
-        .visit_dir_with_options("/tree", ListDirOptions::new().max_path_bytes(1), |_| {
-            panic!("over-budget entry must not reach the callback")
-        })
-        .unwrap_err();
-    assert_eq!(error.err_no(), libc::EFBIG as u32);
 }

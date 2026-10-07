@@ -1727,6 +1727,24 @@ impl NfsVecFs {
         }
     }
 
+    /// Fresh buffered-walk paths must not be redirected by a replaced ancestor
+    /// or child. Raw NFS LOOKUP resolution never follows symlinks; READDIR also
+    /// rejects a final symlink handle. Keep ordinary shallow POSIX resolution.
+    fn resolve_directory_path(
+        &mut self,
+        dir: &Path,
+        follow_symlinks: bool,
+    ) -> VfResult<WireFileHandle> {
+        let path = self.server_path(dir);
+        if follow_symlinks {
+            self.resolve_path(&path, true)
+        } else {
+            self.nfs
+                .resolve(&normalize_bytes(path_bytes(&path)))
+                .map_err(|error| vfsi_core::error_from_rpc(error, 0))
+        }
+    }
+
     /// Resolve a root-relative path to a file handle, following symlinks in
     /// intermediate components (POSIX pathwalk) and, when `follow_final` is
     /// set, the final component too (for `stat`/`open` semantics).
@@ -4698,6 +4716,7 @@ impl Backend for NfsVecFs {
         cursor: Option<DirPageCursor>,
         page_size: usize,
         _max_entries: usize,
+        follow_symlinks: bool,
     ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
         if page_size == 0 {
             return Err(VfError::client(0, ERR_INVAL));
@@ -4706,13 +4725,13 @@ impl Backend for NfsVecFs {
         // the application, a reconnect could invalidate the READDIR cookie.
         if !self.recovery_in_progress && cursor.is_none() {
             return self.read_with_recovery(|client| {
-                client.listdir_page_impl(dir, masks, None, page_size, _max_entries)
+                client.listdir_page_impl(dir, masks, None, page_size, _max_entries, follow_symlinks)
             });
         }
         let mut state = match cursor {
             Some(cursor) => cursor.into_state::<NfsDirectoryCursor>()?,
             None => NfsDirectoryCursor {
-                fh: self.resolve_path(&self.server_path(dir), true)?,
+                fh: self.resolve_directory_path(dir, follow_symlinks)?,
                 cookie: 0,
                 buffered: VecDeque::new(),
             },
@@ -4767,6 +4786,7 @@ impl Backend for NfsVecFs {
         cursors: Vec<Option<DirPageCursor>>,
         page_size: usize,
         _max_entries: usize,
+        follow_symlinks: bool,
     ) -> VfResult<Vec<vfsi_sync::BackendDirectoryPage>> {
         if dirs.len() != cursors.len() || page_size == 0 {
             return Err(VfError::client(0, ERR_INVAL));
@@ -4782,6 +4802,7 @@ impl Backend for NfsVecFs {
                     (0..dirs.len()).map(|_| None).collect(),
                     page_size,
                     _max_entries,
+                    follow_symlinks,
                 )
             });
         }
@@ -4791,11 +4812,18 @@ impl Backend for NfsVecFs {
             .filter_map(|(i, cursor)| cursor.is_none().then_some(i))
             .collect();
         let mut handles = std::collections::HashMap::new();
-        if let [index] = fresh.as_slice() {
+        if !follow_symlinks {
+            for &index in &fresh {
+                let fh = self
+                    .resolve_directory_path(dirs[index], false)
+                    .map_err(|error| error.with_index(index))?;
+                handles.insert(index, fh);
+            }
+        } else if let [index] = fresh.as_slice() {
             // Preserve the scalar deep-resolution fast path. READDIR itself
             // validates that the resolved target is a directory.
             let fh = self
-                .resolve_path(&self.server_path(dirs[*index]), true)
+                .resolve_directory_path(dirs[*index], true)
                 .map_err(|error| error.with_index(*index))?;
             handles.insert(*index, fh);
         } else if !fresh.is_empty() {

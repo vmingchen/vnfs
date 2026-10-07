@@ -724,6 +724,7 @@ impl AutoClient {
         cursors: Vec<Option<vfsi_sync::DirPageCursor>>,
         page_size: usize,
         max_entries: usize,
+        follow_symlinks: bool,
     ) -> VfResult<Vec<vfsi_sync::DirectoryPage>> {
         if paths.len() != cursors.len() {
             return Err(VfError::client(0, libc::EINVAL as u32));
@@ -801,6 +802,7 @@ impl AutoClient {
                     cursors,
                     page_size,
                     max_entries,
+                    follow_symlinks,
                 ),
                 Route::Nfs(connection) => connection.client.read_dir_pages_with_fields(
                     &batch,
@@ -808,6 +810,7 @@ impl AutoClient {
                     cursors,
                     page_size,
                     max_entries,
+                    follow_symlinks,
                 ),
             }
             .map_err(|error| indexed(error, start))?;
@@ -2087,6 +2090,7 @@ mod tests {
                     vec![None],
                     1,
                     10,
+                    true,
                 )
                 .unwrap()
                 .remove(0);
@@ -2102,6 +2106,7 @@ mod tests {
                     vec![Some(seed)],
                     1,
                     10,
+                    true,
                 )
                 .unwrap()
                 .remove(0);
@@ -2119,7 +2124,14 @@ mod tests {
             }
         }
         let (_, next, _) = client
-            .read_dir_pages_with_fields(&[Path::new("/dir")], Attributes::MODE, vec![None], 1, 10)
+            .read_dir_pages_with_fields(
+                &[Path::new("/dir")],
+                Attributes::MODE,
+                vec![None],
+                1,
+                10,
+                true,
+            )
             .unwrap()
             .remove(0);
         let saved = next.unwrap().into_state::<RoutedDirectoryCursor>().unwrap();
@@ -2132,7 +2144,8 @@ mod tests {
                     Attributes::MODE,
                     vec![Some(seed)],
                     1,
-                    10
+                    10,
+                    true
                 )
                 .err()
                 .unwrap()
@@ -2164,7 +2177,14 @@ mod tests {
         assert_eq!(error.kind(), crate::ErrorKind::FileTooLarge);
         assert_eq!(error.index(), Some(0));
         let cursor = client
-            .read_dir_pages_with_fields(&[Path::new("/dir")], Attributes::MODE, vec![None], 1, 10)
+            .read_dir_pages_with_fields(
+                &[Path::new("/dir")],
+                Attributes::MODE,
+                vec![None],
+                1,
+                10,
+                true,
+            )
             .unwrap()
             .remove(0)
             .1
@@ -2178,6 +2198,7 @@ mod tests {
                     vec![Some(cursor)],
                     1,
                     10,
+                    true
                 )
                 .err()
                 .unwrap()
@@ -2185,7 +2206,14 @@ mod tests {
             libc::EINVAL as u32
         );
         let cursor = client
-            .read_dir_pages_with_fields(&[Path::new("/dir")], Attributes::MODE, vec![None], 1, 10)
+            .read_dir_pages_with_fields(
+                &[Path::new("/dir")],
+                Attributes::MODE,
+                vec![None],
+                1,
+                10,
+                true,
+            )
             .unwrap()
             .remove(0)
             .1
@@ -2198,6 +2226,7 @@ mod tests {
                     vec![Some(cursor)],
                     1,
                     10,
+                    true
                 )
                 .err()
                 .unwrap()
@@ -2205,7 +2234,14 @@ mod tests {
             libc::EINVAL as u32
         );
         let cursor = client
-            .read_dir_pages_with_fields(&[Path::new("/dir")], Attributes::MODE, vec![None], 1, 10)
+            .read_dir_pages_with_fields(
+                &[Path::new("/dir")],
+                Attributes::MODE,
+                vec![None],
+                1,
+                10,
+                true,
+            )
             .unwrap()
             .remove(0)
             .1
@@ -2217,6 +2253,7 @@ mod tests {
                 vec![Some(cursor)],
                 1,
                 10,
+                true,
             )
             .unwrap()
             .remove(0);
@@ -2230,6 +2267,7 @@ mod tests {
                     vec![Some(cursor)],
                     1,
                     10,
+                    true,
                 )
                 .unwrap()
                 .remove(0);
@@ -2824,23 +2862,23 @@ mod tests {
                 .fields(crate::Attributes::stat()),
         );
         let mut dir_bytes = 0;
-        let dir = client.visit_dir_with_options(
+        let dir = client.listdir(
             &root,
             ListDirOptions::new().max_path_bytes(backend_entries),
             |entry| {
-                dir_bytes += entry.path().as_os_str().len();
-                Ok(std::ops::ControlFlow::Continue(()))
+                dir_bytes += entry.entry.path().as_os_str().len();
+                Ok(vfsi_core::api::WalkControl::Continue)
             },
         );
         let mut tree_bytes = root.as_os_str().len();
-        let tree = client.visit_dir_with_options(
+        let tree = client.listdir(
             &root,
             crate::ListDirOptions::new()
                 .recursive(true)
                 .max_path_bytes(backend_total),
             |entry| {
-                tree_bytes += entry.path().as_os_str().len();
-                Ok(std::ops::ControlFlow::Continue(()))
+                tree_bytes += entry.entry.path().as_os_str().len();
+                Ok(vfsi_core::api::WalkControl::Continue)
             },
         );
         // Exact public budgets remain usable, including both callbacks.
@@ -2857,21 +2895,21 @@ mod tests {
         );
         assert!(
             client
-                .visit_dir_with_options(
+                .listdir(
                     &root,
                     ListDirOptions::new().max_path_bytes(public_entries),
-                    |_| Ok(std::ops::ControlFlow::Continue(()))
+                    |_| Ok(vfsi_core::api::WalkControl::Continue)
                 )
                 .is_ok()
         );
         assert_eq!(
             client
-                .visit_dir_with_options(
+                .listdir(
                     &root,
                     crate::ListDirOptions::new()
                         .recursive(true)
                         .max_path_bytes(public_total),
-                    |_| Ok(std::ops::ControlFlow::Continue(()))
+                    |_| Ok(vfsi_core::api::WalkControl::Continue)
                 )
                 .unwrap(),
             crate::TraversalCompletion::Complete

@@ -423,6 +423,7 @@ macro_rules! client_methods {
                         cursors,
                         page_size,
                         max_entries,
+                        options.follows_symlinks(),
                     )
                 },
                 callback,

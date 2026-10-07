@@ -231,10 +231,17 @@ returned vector. Recursive `NfsClient::walk_with_options` additionally has a
 default depth limit and accepts `WalkOptions`. NFS multi-directory listing
 delivers each bounded READDIR page before requesting continuation pages, so
 early-stop callbacks no longer retain the whole remote listing. Applications
-needing to consume one directory incrementally can use `visit_dir_with_options`
+needing to consume one directory incrementally can use `listdir`
 with `ListDirOptions`; set `recursive(true)` to visit a recursive root. The
 options-aware helper respects the supplied traversal scope, metadata, and budgets.
-`visit_dir` and `visit_walk` select shallow and recursive defaults respectively. `vgetattrs` accepts any `AsRef<Path>` inputs,
+`listdir` replaces the former shallow, recursive, options-aware, and event-walk
+entry points. Its callback receives `WalkEvent` and returns `WalkControl`.
+Use `enter_leave(true)` for lifecycle events and `sort_by_name(true)` for sorted
+siblings; those modes retain bounded directory buffers. The default entry-only
+mode stays paged and retains native anchored child cursors and batching. With
+lifecycle events enabled, `SkipSubtree` on Enter prevents descent.
+`visit_dirs_ordered` still supplies custom ordering and complete listings.
+`vgetattrs` accepts any `AsRef<Path>` inputs,
 including strings and `PathBuf`, consistently with the other path vectors.
 The application visitor starts with one entry, then delivers at most 128 entries per page
 and releases its backend lock before invoking the application callback, which
