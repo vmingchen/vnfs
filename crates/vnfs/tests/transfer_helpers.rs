@@ -24,6 +24,7 @@ enum Fault {
 }
 #[derive(Default)]
 struct Calls {
+    attrs: Vec<usize>,
     opens: usize,
     renames: usize,
     reads: usize,
@@ -57,6 +58,12 @@ impl Vfsi for Harness {
         self.fs.capabilities()
     }
     fn vsetattrs<P: AsTarget<Self::File>>(&self, targets: &[SetAttrsOp<P>]) -> Result<()> {
+        assert!(
+            targets
+                .iter()
+                .all(|op| matches!(op.target().as_target(), Target::File(_)))
+        );
+        self.calls.borrow_mut().attrs.push(targets.len());
         self.fs.vsetattrs(targets)
     }
     fn vstatfs<P: AsTarget<Self::File>>(&self, targets: &[P]) -> Result<Vec<FilesystemStats>> {
@@ -291,6 +298,7 @@ fn layouts_permissions_and_stats() {
     )
     .unwrap();
     assert!(t.path().join("contents/nested/b").exists());
+    assert_eq!(fs.calls.borrow().attrs, [1, 1, 1]);
     assert_eq!(
         std::fs::metadata(t.path().join("contents/a"))
             .unwrap()
@@ -352,7 +360,9 @@ fn cancellation_reports_completed_wave_and_retains_sources() {
         &fs,
         &["/src/a", "/src/c"],
         "/dst",
-        CopyOptions::new().chunk_bytes(16),
+        CopyOptions::new()
+            .chunk_bytes(16)
+            .preserve_permissions(true),
         |p| {
             assert_eq!(p.file_bytes_copied, 16);
             Ok(ControlFlow::Break(()))
@@ -360,6 +370,7 @@ fn cancellation_reports_completed_wave_and_retains_sources() {
     )
     .unwrap();
     assert!(s.stopped);
+    assert!(fs.calls.borrow().attrs.iter().all(|&width| width == 0));
     assert_eq!(s.bytes_copied, Some(32));
     assert_eq!(s.roots_removed, 0);
     assert_eq!(std::fs::read(t.path().join("dst/a")).unwrap().len(), 16);
@@ -470,13 +481,22 @@ fn vector_counts_and_storage_follow_cohort_limits() {
     for p in &sources {
         std::fs::write(t.path().join(p.trim_start_matches('/')), vec![7; 16]).unwrap();
     }
-    copy_items(&fs, &sources, "/batch", CopyOptions::new().chunk_bytes(16)).unwrap();
+    copy_items(
+        &fs,
+        &sources,
+        "/batch",
+        CopyOptions::new()
+            .chunk_bytes(16)
+            .preserve_permissions(true),
+    )
+    .unwrap();
     {
         let c = fs.calls.borrow();
         assert_eq!(c.reads, 3);
         assert_eq!(c.writes, 3);
         assert_eq!(c.max_bytes, 64);
         assert_eq!(c.max_files, 4);
+        assert_eq!(c.attrs, [4, 4, 4]);
     }
     *fs.calls.borrow_mut() = Calls::default();
     copy_items(

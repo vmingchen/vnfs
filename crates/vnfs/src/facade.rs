@@ -290,14 +290,6 @@ macro_rules! owned_client {
             pub fn write_native(&mut self, buffer: &[u8]) -> Result<usize> {
                 self.inner.write_native(buffer)
             }
-            /// Truncate or extend the open file.
-            pub fn truncate(&self, len: u64) -> Result<()> {
-                self.inner.truncate(len)
-            }
-            /// Change permissions on the open file.
-            pub fn chmod(&self, permissions: Permissions) -> Result<()> {
-                self.inner.chmod(permissions)
-            }
             /// Request durable file data from the backend.
             pub fn sync_data(&self) -> Result<()> {
                 self.inner.sync_data()

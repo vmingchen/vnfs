@@ -47,7 +47,7 @@ macro_rules! client_methods {
 
 #[cfg(feature = "nfs")]
 impl FileHandle for crate::NfsFile {
-    vfsi_sync::__vfsi_file_methods!(crate::NfsFile, permissions = chmod);
+    vfsi_sync::__vfsi_file_methods!(crate::NfsFile);
 }
 #[cfg(feature = "nfs")]
 impl Vfsi for crate::NfsClient {
@@ -59,7 +59,7 @@ impl Vfsi for crate::NfsClient {
 mod routed {
     use super::*;
     impl FileHandle for crate::AutoFile {
-        vfsi_sync::__vfsi_file_methods!(crate::AutoFile, permissions = chmod);
+        vfsi_sync::__vfsi_file_methods!(crate::AutoFile);
     }
     impl Vfsi for crate::AutoClient {
         type File = crate::AutoFile;
@@ -77,7 +77,7 @@ mod routed {
     }
 
     impl FileHandle for crate::MountedFile {
-        vfsi_sync::__vfsi_file_methods!(crate::MountedFile, permissions = chmod);
+        vfsi_sync::__vfsi_file_methods!(crate::MountedFile);
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::{
-    Attributes, Attrs, AttrsOptions, ControlFlow, CopyOption, DepthLimit, Error, FileHandle,
-    ListDirOptions, OpenFlags, OpenOp, ReadOp, ReadOptions, Result, TransportKind, Vfsi, VfsiExt,
+    Attributes, Attrs, AttrsOptions, ControlFlow, CopyOption, DepthLimit, Error, ListDirOptions,
+    OpenFlags, OpenOp, ReadOp, ReadOptions, Result, SetAttrsOp, TransportKind, Vfsi, VfsiExt,
     WriteOp, WriteOptions,
 };
 use std::collections::HashSet;
@@ -271,8 +271,12 @@ fn normalize(path: &Path, max: usize) -> Result<PathBuf> {
 fn fields() -> Attributes {
     Attributes::MODE | Attributes::SIZE | Attributes::FILEID
 }
-fn mapped(error: Error, tasks: &[Task]) -> Error {
-    if let Some(task) = error.index().and_then(|i| tasks.get(i)) {
+fn mapped(error: Error, tasks: &[impl std::borrow::Borrow<Task>]) -> Error {
+    if let Some(task) = error
+        .index()
+        .and_then(|i| tasks.get(i))
+        .map(std::borrow::Borrow::borrow)
+    {
         error
             .with_index(task.root)
             .with_context("transfer", &task.source)
@@ -875,13 +879,20 @@ fn copy_batch(
             }
         }
         if options.flags.preserve_permissions() {
-            for (i, file) in destinations.iter().enumerate() {
-                // Never finalize metadata for incomplete files after cancellation.
-                if done[i] {
-                    file.set_permissions(tasks[selected[i]].metadata.permissions())
-                        .map_err(|e| mapped(e, std::slice::from_ref(&tasks[selected[i]])))?;
-                }
-            }
+            // Finalize completed handles together; cancellation excludes partial files.
+            let (updates, completed): (Vec<_>, Vec<_>) = destinations
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| done[*i])
+                .map(|(i, file)| {
+                    let task = &tasks[selected[i]];
+                    (
+                        SetAttrsOp::file(file).permissions(task.metadata.permissions()),
+                        task,
+                    )
+                })
+                .unzip();
+            fs.vsetattrs(&updates).map_err(|e| mapped(e, &completed))?;
         }
         Ok(())
     })();

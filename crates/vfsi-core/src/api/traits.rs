@@ -37,11 +37,6 @@ pub trait FileHandle: Read + Write + Seek {
     fn sync_data(&self) -> Result<()>;
     /// Request durability of file data and metadata supported by the backend.
     fn sync_all(&self) -> Result<()>;
-    /// Change permission bits on the opened object, not by re-resolving its path.
-    /// The default reports Unsupported; callers must not silently claim preservation.
-    fn set_permissions(&self, _permissions: crate::api::Permissions) -> Result<()> {
-        Err(crate::api::Error::client(0, crate::VF_ERR_UNSUPPORTED))
-    }
     /// Close without surrendering cleanup ownership on failure. After an
     /// ambiguous failure, reconcile/close rather than resume ordinary I/O.
     fn try_close(&mut self) -> Result<()>;

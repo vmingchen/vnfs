@@ -1840,20 +1840,6 @@ impl AutoFile {
             AutoFileInner::Nfs(file) => file.sync_data(),
         }
     }
-    pub fn truncate(&self, len: u64) -> VfResult<()> {
-        self.check_credentials()?;
-        match &self.inner {
-            AutoFileInner::Mounted(file) => file.truncate(len),
-            AutoFileInner::Nfs(file) => file.truncate(len),
-        }
-    }
-    pub fn chmod(&self, permissions: crate::Permissions) -> VfResult<()> {
-        self.check_credentials()?;
-        match &self.inner {
-            AutoFileInner::Mounted(file) => file.chmod(permissions),
-            AutoFileInner::Nfs(file) => file.chmod(permissions),
-        }
-    }
     pub fn seek_native(&mut self, position: SeekFrom) -> VfResult<u64> {
         self.check_credentials()?;
         match &mut self.inner {

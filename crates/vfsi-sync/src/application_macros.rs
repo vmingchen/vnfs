@@ -3,7 +3,7 @@
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __vfsi_file_methods {
-    ($file:ty $(, permissions = $chmod:ident)?) => {
+    ($file:ty) => {
         fn path(&self) -> &Path {
             <$file>::path(self)
         }
@@ -34,11 +34,6 @@ macro_rules! __vfsi_file_methods {
         fn sync_all(&self) -> Result<()> {
             <$file>::sync_all(self)
         }
-        $(
-        fn set_permissions(&self, permissions: $crate::api::Permissions) -> Result<()> {
-            <$file>::$chmod(self, permissions)
-        }
-        )?
         fn try_close(&mut self) -> Result<()> {
             <$file>::try_close(self)
         }
