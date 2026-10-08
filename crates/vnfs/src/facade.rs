@@ -2,7 +2,7 @@
 use crate::*;
 
 macro_rules! owned_client {
-    ($client:ident, $file:ident, $dir:ident, $open:ident, $set:ident, $backend:ty) => {
+    ($client:ident, $file:ident, $dir:ident, $backend:ty) => {
         /// Owned application client. Clones share one connection and its lock.
         #[derive(Debug, Clone)]
         pub struct $client {
@@ -170,18 +170,6 @@ macro_rules! owned_client {
             /// losing the handle safety guarantee.
             pub fn open_dir_handle(&self, path: impl AsRef<std::path::Path>) -> Result<$dir> {
                 self.inner.open_dir_handle(path).map(|inner| $dir { inner })
-            }
-            /// Build reusable open flags for scalar or vector opens.
-            pub fn open_options(&self) -> $open<'_> {
-                $open {
-                    inner: self.inner.open_options(),
-                }
-            }
-            /// Build a metadata update for the given path.
-            pub fn set_metadata(&self, path: impl AsRef<std::path::Path>) -> $set<'_> {
-                $set {
-                    inner: self.inner.set_metadata(path),
-                }
             }
             /// Try to close a group through one vector operation without consuming
             /// the handles. On failure, all handles remain armed: the backend may
@@ -360,108 +348,13 @@ macro_rules! owned_client {
                 self.try_close()
             }
         }
-        /// Open-options builder tied to the owning application client.
-        #[derive(Debug, Clone)]
-        pub struct $open<'a> {
-            inner: vfsi_sync::OpenOptions<'a, $backend>,
-        }
-        impl $open<'_> {
-            /// Enable or disable read access.
-            pub fn read(&mut self, enabled: bool) -> &mut Self {
-                self.inner.read(enabled);
-                self
-            }
-            pub fn write(&mut self, enabled: bool) -> &mut Self {
-                self.inner.write(enabled);
-                self
-            }
-            pub fn append(&mut self, enabled: bool) -> &mut Self {
-                self.inner.append(enabled);
-                self
-            }
-            pub fn truncate(&mut self, enabled: bool) -> &mut Self {
-                self.inner.truncate(enabled);
-                self
-            }
-            /// Create the file if missing; does not itself enable truncation.
-            pub fn create(&mut self, enabled: bool) -> &mut Self {
-                self.inner.create(enabled);
-                self
-            }
-            pub fn create_new(&mut self, enabled: bool) -> &mut Self {
-                self.inner.create_new(enabled);
-                self
-            }
-            pub fn mode(&mut self, mode: u32) -> &mut Self {
-                self.inner.mode(mode);
-                self
-            }
-            /// Open one path with this builder's flags and permission mode.
-            pub fn open(&self, path: impl AsRef<std::path::Path>) -> Result<$file> {
-                self.inner.open(path).map(|inner| $file { inner })
-            }
-            /// Open an ordered vector of files.
-            ///
-            /// Success returns one RAII handle per request. Failure returns no
-            /// handles; VFSI does not promise transactional rollback of other
-            /// filesystem effects such as file creation.
-            pub fn vopen<P: AsRef<std::path::Path>>(&self, paths: &[P]) -> Result<Vec<$file>> {
-                self.inner
-                    .vopen(paths)
-                    .map(|files| files.into_iter().map(|inner| $file { inner }).collect())
-            }
-        }
-        /// Metadata update builder with no raw attribute access.
-        pub struct $set<'a> {
-            inner: vfsi_sync::SetMetadata<'a, $backend>,
-        }
-        impl $set<'_> {
-            pub fn permissions(&mut self, permissions: Permissions) -> &mut Self {
-                self.inner.permissions(permissions);
-                self
-            }
-            pub fn len(&mut self, len: u64) -> &mut Self {
-                self.inner.len(len);
-                self
-            }
-            pub fn accessed(&mut self, accessed: std::time::SystemTime) -> &mut Self {
-                self.inner.accessed(accessed);
-                self
-            }
-            pub fn uid(&mut self, uid: u32) -> &mut Self {
-                self.inner.uid(uid);
-                self
-            }
-            pub fn gid(&mut self, gid: u32) -> &mut Self {
-                self.inner.gid(gid);
-                self
-            }
-            pub fn modified(&mut self, modified: std::time::SystemTime) -> &mut Self {
-                self.inner.modified(modified);
-                self
-            }
-            pub fn follow_symlinks(&mut self, follow: bool) -> &mut Self {
-                self.inner.follow_symlinks(follow);
-                self
-            }
-            pub fn apply(&self) -> Result<()> {
-                self.inner.apply()
-            }
-        }
     };
 }
 #[cfg(feature = "nfs")]
 mod nfs {
     use super::*;
     use std::path::Path;
-    owned_client!(
-        NfsClient,
-        NfsFile,
-        NfsDir,
-        NfsOpenOptions,
-        NfsSetMetadata,
-        vfsi_nfs::NfsVecFs
-    );
+    owned_client!(NfsClient, NfsFile, NfsDir, vfsi_nfs::NfsVecFs);
 }
 #[cfg(feature = "nfs")]
 pub use nfs::*;
@@ -469,14 +362,7 @@ pub use nfs::*;
 mod mounted {
     use super::*;
     use std::path::Path;
-    owned_client!(
-        Mounted,
-        MountedFile,
-        MountedDir,
-        MountedOpenOptions,
-        MountedSetMetadata,
-        vfsi_local::DummyVecFs
-    );
+    owned_client!(Mounted, MountedFile, MountedDir, vfsi_local::DummyVecFs);
     impl Mounted {
         /// Access this host directory through kernel filesystem operations.
         /// Namespace rooting is not a security sandbox.

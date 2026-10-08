@@ -29,6 +29,8 @@ pub enum RenameOptions {
 }
 pub use std::io::ErrorKind;
 pub use std::ops::ControlFlow;
+mod builders;
+pub use builders::{OpenOptions, SetMetadata};
 mod traits;
 pub use traits::{FileHandle, Vfsi, VfsiExt};
 mod metadata;

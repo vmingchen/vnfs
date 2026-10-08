@@ -6,7 +6,6 @@ use std::io::{self, Read, Seek, SeekFrom as IoSeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 
 use vfsi_core::api::internal::OwnedReadResult as FsReadResult;
 use vfsi_core::api::{
@@ -335,16 +334,6 @@ impl<F: FileSystem> FsClient<F> {
         match operation {
             Err(error) => Err(error),
             Ok(completion) => close.map(|()| completion),
-        }
-    }
-}
-
-impl<F: Backend> FsClient<F> {
-    pub fn set_metadata(&self, path: impl AsRef<Path>) -> SetMetadata<'_, F> {
-        SetMetadata {
-            client: self,
-            path: path.as_ref().to_path_buf(),
-            update: vfsi_core::SetAttrsOp::new(()),
         }
     }
 }
@@ -1377,73 +1366,6 @@ impl<F: Backend> OpenOptions<'_, F> {
             .map(|path| OpenOp::new(path.as_ref(), self.flags).mode(self.mode))
             .collect();
         self.client.vopen(&requests)
-    }
-}
-
-/// Builder for an atomic metadata update request.
-pub struct SetMetadata<'a, F: Backend> {
-    client: &'a FsClient<F>,
-    path: PathBuf,
-    update: vfsi_core::SetAttrsOp<()>,
-}
-
-impl<F: Backend> Clone for SetMetadata<'_, F> {
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client,
-            path: self.path.clone(),
-            update: self.update,
-        }
-    }
-}
-
-impl<F: Backend> fmt::Debug for SetMetadata<'_, F> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SetMetadata")
-            .field("path", &self.path)
-            .field("update", &self.update)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<F: Backend> SetMetadata<'_, F> {
-    pub fn permissions(&mut self, permissions: Permissions) -> &mut Self {
-        self.update = self.update.permissions(permissions);
-        self
-    }
-
-    pub fn len(&mut self, len: u64) -> &mut Self {
-        self.update = self.update.len(len);
-        self
-    }
-
-    pub fn accessed(&mut self, accessed: SystemTime) -> &mut Self {
-        self.update = self.update.accessed(accessed);
-        self
-    }
-
-    pub fn modified(&mut self, modified: SystemTime) -> &mut Self {
-        self.update = self.update.modified(modified);
-        self
-    }
-
-    pub fn follow_symlinks(&mut self, follow: bool) -> &mut Self {
-        self.update = self.update.follow_symlinks(follow);
-        self
-    }
-
-    pub fn uid(&mut self, uid: u32) -> &mut Self {
-        self.update = self.update.uid(uid);
-        self
-    }
-    pub fn gid(&mut self, gid: u32) -> &mut Self {
-        self.update = self.update.gid(gid);
-        self
-    }
-    pub fn apply(&self) -> VfResult<()> {
-        self.client
-            .vsetattrs(&[self.update.with_target(&self.path)])
     }
 }
 

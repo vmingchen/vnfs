@@ -500,6 +500,18 @@ pub trait Vfsi {
 /// bounded paging, or recovery semantics. Singular convenience is not a promise
 /// of one RPC, and vector execution is not a promise of atomicity.
 pub trait VfsiExt: Vfsi {
+    /// Build reusable open options for this client.
+    fn open_options(&self) -> super::OpenOptions<'_, Self> {
+        super::OpenOptions::new(self)
+    }
+    /// Build selected metadata changes for a path or retained open handle.
+    fn set_metadata<T: super::AsTarget<Self::File>>(
+        &self,
+        target: T,
+    ) -> super::SetMetadata<'_, Self, T> {
+        super::SetMetadata::new(self, target)
+    }
+
     /// Query one target through the vector filesystem-statistics engine.
     fn statfs<P: crate::AsTarget<Self::File>>(&self, target: P) -> Result<crate::FilesystemStats> {
         single_completion(self.vstatfs(&[target])?, "statfs backend")

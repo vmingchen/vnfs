@@ -21,8 +21,7 @@ pub mod nfs {
     #[doc(inline)]
     pub use crate::{
         Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsClientPool, NfsDir, NfsEvent, NfsFile,
-        NfsObserver, NfsOpenOptions, NfsReadPool, NfsReadPoolOptions, NfsRecoveryPolicy,
-        NfsSetMetadata, NfsVersion,
+        NfsObserver, NfsReadPool, NfsReadPoolOptions, NfsRecoveryPolicy, NfsVersion,
     };
 }
 
@@ -32,19 +31,16 @@ pub mod nfs {
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub mod mounted {
     #[doc(inline)]
-    pub use crate::{
-        Auto, AutoDir, AutoFile, AutoOpenOptions, AutoRoute, AutoSetMetadata, Mounted, MountedDir,
-        MountedFile, MountedOpenOptions, MountedSetMetadata,
-    };
+    pub use crate::{Auto, AutoDir, AutoFile, AutoRoute, Mounted, MountedDir, MountedFile};
 }
 
 /// Backend-independent file I/O, allocation budgets, and vector result types.
 pub mod files {
     #[doc(inline)]
     pub use crate::{
-        Capabilities, FileHandle, OpenFlags, OpenOp, ReadIntoResult, ReadOp, ReadOptions,
-        ReadResult, ResourceLimits, StreamCompletion, StreamOptions, Vfsi, VfsiExt, WriteOp,
-        WriteOptions, WriteResult,
+        Capabilities, FileHandle, OpenFlags, OpenOp, OpenOptions, ReadIntoResult, ReadOp,
+        ReadOptions, ReadResult, ResourceLimits, StreamCompletion, StreamOptions, Vfsi, VfsiExt,
+        WriteOp, WriteOptions, WriteResult,
     };
 }
 
@@ -54,8 +50,8 @@ pub mod directory {
     pub use crate::{
         Attributes, Attrs, AttrsOptions, ControlFlow, DepthLimit, DirEntry, DirectoryListing,
         FileType, ListDirOptions, MkDirOp, Permissions, ReadDirOptions, RemoveMode, RemoveOptions,
-        RenameOptions, SetAttrsOp, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
-        WalkOptions,
+        RenameOptions, SetAttrsOp, SetMetadata, TraversalCompletion, WalkControl, WalkEvent,
+        WalkEventKind, WalkOptions,
     };
 }
 
@@ -100,11 +96,11 @@ mod metadata;
 mod read;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use read::ReadRequest;
-pub use vfsi_core::api::AttrsOptions;
 pub use vfsi_core::api::ListDirOptions;
 pub use vfsi_core::api::RenameOptions;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_core::api::internal::OwnedReadResult;
+pub use vfsi_core::api::{AttrsOptions, OpenOptions, SetMetadata};
 pub use vfsi_core::api::{ReadOp, ReadOptions, ReadResult};
 pub use vfsi_core::api::{WriteOp, WriteOptions};
 
@@ -126,9 +122,9 @@ mod facade;
 /// High-level filesystem workflows built on the application API.
 pub mod helpers;
 #[cfg(all(feature = "auto", target_os = "linux"))]
-pub use facade::{Mounted, MountedDir, MountedFile, MountedOpenOptions, MountedSetMetadata};
+pub use facade::{Mounted, MountedDir, MountedFile};
 #[cfg(feature = "nfs")]
-pub use facade::{NfsClient, NfsDir, NfsFile, NfsOpenOptions, NfsSetMetadata};
+pub use facade::{NfsClient, NfsDir, NfsFile};
 
 /// Aggregate NFS transport counters for optional application diagnostics.
 /// These counters are process-wide, not per client, and may include other
@@ -174,7 +170,7 @@ pub mod diagnostics {
 #[cfg(all(feature = "auto", target_os = "linux"))]
 mod auto;
 #[cfg(all(feature = "auto", target_os = "linux"))]
-pub use auto::{Auto, AutoDir, AutoFile, AutoOpenOptions, AutoRoute, AutoSetMetadata};
+pub use auto::{Auto, AutoDir, AutoFile, AutoRoute};
 
 /// Common application imports.
 pub mod prelude {

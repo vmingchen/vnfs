@@ -17,8 +17,9 @@ pub use io::{VfFileHandle, VfOpenOptions};
 mod application_macros;
 mod client;
 mod traversal;
-pub use client::{FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite, OpenOptions, SetMetadata};
+pub use client::{FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite, OpenOptions};
 pub use traversal::walk_events;
+pub use vfsi_core::api::SetMetadata;
 #[doc(hidden)]
 pub mod backend_helpers;
 mod native;

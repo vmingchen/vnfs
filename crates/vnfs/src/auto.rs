@@ -188,20 +188,6 @@ impl Auto {
         }
         result
     }
-    pub fn open_options(&self) -> AutoOpenOptions<'_> {
-        AutoOpenOptions {
-            client: self,
-            flags: OpenFlags::empty(),
-            mode: 0o666,
-        }
-    }
-    pub fn set_metadata(&self, path: impl AsRef<Path>) -> AutoSetMetadata<'_> {
-        AutoSetMetadata {
-            client: self,
-            path: path.as_ref().to_path_buf(),
-            update: crate::SetAttrsOp::new(()),
-        }
-    }
 
     pub fn open_dir_handle(&self, path: impl AsRef<Path>) -> VfResult<AutoDir> {
         let route = self.resolve_tree(path.as_ref());
@@ -1573,48 +1559,6 @@ fn cohort_end(resolved: &[Resolved], start: usize) -> usize {
     end
 }
 
-/// OpenOptions-style builder for a mount-aware client.
-#[derive(Clone)]
-pub struct AutoOpenOptions<'a> {
-    client: &'a Auto,
-    flags: OpenFlags,
-    mode: u32,
-}
-
-/// Attrs builder with the same application semantics as `SetMetadata`.
-#[derive(Clone)]
-pub struct AutoSetMetadata<'a> {
-    client: &'a Auto,
-    path: PathBuf,
-    update: crate::SetAttrsOp<()>,
-}
-
-macro_rules! metadata_setter {
-    ($name:ident, $type:ty) => {
-        pub fn $name(&mut self, value: $type) -> &mut Self {
-            self.update = self.update.$name(value);
-            self
-        }
-    };
-}
-
-impl AutoSetMetadata<'_> {
-    metadata_setter!(permissions, crate::Permissions);
-    metadata_setter!(len, u64);
-    metadata_setter!(uid, u32);
-    metadata_setter!(gid, u32);
-    metadata_setter!(accessed, std::time::SystemTime);
-    metadata_setter!(modified, std::time::SystemTime);
-    pub fn follow_symlinks(&mut self, follow: bool) -> &mut Self {
-        self.update = self.update.follow_symlinks(follow);
-        self
-    }
-    pub fn apply(&self) -> VfResult<()> {
-        self.client
-            .vsetattrs(&[self.update.with_target(&self.path)])
-    }
-}
-
 enum AutoDirInner {
     Mounted(vfsi_sync::FsDir<DummyVecFs>),
     Nfs(vfsi_sync::FsDir<vfsi_nfs::NfsVecFs>),
@@ -1670,40 +1614,6 @@ impl AutoDir {
     }
     pub fn close(mut self) -> VfResult<()> {
         self.try_close()
-    }
-}
-
-macro_rules! auto_open_flag {
-    ($name:ident, $flag:ident) => {
-        pub fn $name(&mut self, enabled: bool) -> &mut Self {
-            self.flags.set(OpenFlags::$flag, enabled);
-            self
-        }
-    };
-}
-
-impl AutoOpenOptions<'_> {
-    auto_open_flag!(read, READ);
-    auto_open_flag!(write, WRITE);
-    auto_open_flag!(append, APPEND);
-    auto_open_flag!(truncate, TRUNCATE);
-    auto_open_flag!(create, CREATE);
-    auto_open_flag!(create_new, CREATE_NEW);
-    pub fn mode(&mut self, mode: u32) -> &mut Self {
-        self.mode = mode;
-        self
-    }
-    pub fn open(&self, path: impl AsRef<Path>) -> VfResult<AutoFile> {
-        self.client
-            .open_with(OpenOp::new(path.as_ref(), self.flags).mode(self.mode))
-    }
-    pub fn vopen<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<AutoFile>> {
-        self.client.vopen(
-            &paths
-                .iter()
-                .map(|path| OpenOp::new(path.as_ref(), self.flags).mode(self.mode))
-                .collect::<Vec<_>>(),
-        )
     }
 }
 

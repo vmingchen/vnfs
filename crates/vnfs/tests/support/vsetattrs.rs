@@ -152,7 +152,10 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
     .unwrap();
     assert_eq!(files[0].attrs().unwrap().len(), 13);
     assert_eq!(fs.attrs(&paths[0]).unwrap().len(), 17);
-    fs.truncate(Target::File(&files[0]), 19).unwrap();
+    fs.set_metadata(Target::File(&files[0]))
+        .len(19)
+        .apply()
+        .unwrap();
     fs.chmod(Target::File(&files[0]), Permissions::from_mode(0o600))
         .unwrap();
     assert_eq!(files[0].attrs().unwrap().len(), 19);
