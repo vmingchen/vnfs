@@ -48,8 +48,7 @@ pub use support::{
     DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
     DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
     DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirectoryListing,
-    ReadDirOptions, ResourceLimits, StreamCompletion, StreamOptions, TraversalCompletion,
-    WalkOptions,
+    ResourceLimits, StreamCompletion, StreamOptions, TraversalCompletion,
 };
 pub use support::{ReadIntoResult, WriteResult};
 mod listdir;

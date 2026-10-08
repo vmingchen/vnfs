@@ -225,10 +225,10 @@ cursor-rollback operation.
 
 Allocating directory APIs are bounded for the same reason. `NfsClient::read_dir`
 uses finite entry and combined-path-byte defaults; `read_dir_with_options` and
-`ReadDirOptions` select tighter limits or explicitly opt into unlimited
+`ListDirOptions` select tighter limits or explicitly opt into unlimited
 collection. `read_dirs_with_options` applies these limits across the entire
 returned vector. Recursive `NfsClient::walk_with_options` additionally has a
-default depth limit and accepts `WalkOptions`. NFS multi-directory listing
+default depth limit and accepts `ListDirOptions`. NFS multi-directory listing
 delivers each bounded READDIR page before requesting continuation pages, so
 early-stop callbacks no longer retain the whole remote listing. Applications
 needing to consume one directory incrementally can use `listdir`

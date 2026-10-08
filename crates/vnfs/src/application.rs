@@ -755,12 +755,9 @@ mod extension_tests {
         ])
         .unwrap();
         fs.write_files(&[("/a/f", b"x"), ("/b/f", b"y")]).unwrap();
-        let options = crate::WalkOptions::new().max_entries(2);
+        let options = crate::ListDirOptions::new().recursive(true).max_entries(2);
         let trees = fs
-            .read_dirs_with_options(
-                &["/a", "/b"],
-                crate::ListDirOptions::from(options).fields(crate::Attributes::MODE),
-            )
+            .read_dirs_with_options(&["/a", "/b"], options.fields(crate::Attributes::MODE))
             .unwrap();
         assert_eq!(
             trees
@@ -773,7 +770,7 @@ mod extension_tests {
         assert_eq!(
             fs.read_dirs_with_options(
                 &["/a", "/b"],
-                crate::ListDirOptions::from(options.max_entries(1)).fields(crate::Attributes::MODE)
+                options.max_entries(1).fields(crate::Attributes::MODE)
             )
             .unwrap_err()
             .index(),
@@ -784,15 +781,14 @@ mod extension_tests {
         assert!(
             fs.read_dirs_with_options(
                 &["/a", "/b"],
-                crate::ListDirOptions::from(options.max_entries(0)).fields(crate::Attributes::MODE)
+                options.max_entries(0).fields(crate::Attributes::MODE)
             )
             .is_ok()
         );
         assert_eq!(
             fs.read_dirs_with_options(
                 &["/a", "/b"],
-                crate::ListDirOptions::from(options.max_path_bytes(3))
-                    .fields(crate::Attributes::MODE)
+                options.max_path_bytes(3).fields(crate::Attributes::MODE)
             )
             .unwrap_err()
             .index(),
@@ -813,20 +809,19 @@ mod extension_tests {
             crate::MkDirOp::new("/b", 0o777),
         ])
         .unwrap();
-        let options = crate::WalkOptions::new().max_entries(0).max_path_bytes(4);
+        let options = crate::ListDirOptions::new()
+            .recursive(true)
+            .max_entries(0)
+            .max_path_bytes(4);
         assert_eq!(
-            fs.visit_entries_with_options(&["/a", "/b"], options.into(), |_, _| panic!(
-                "empty roots"
-            ))
-            .unwrap(),
+            fs.visit_entries_with_options(&["/a", "/b"], options, |_, _| panic!("empty roots"))
+                .unwrap(),
             [crate::TraversalCompletion::Complete; 2]
         );
         assert_eq!(
-            fs.visit_entries_with_options(
-                &["/a", "/b"],
-                options.max_path_bytes(2).into(),
-                |_, _| panic!("empty roots")
-            )
+            fs.visit_entries_with_options(&["/a", "/b"], options.max_path_bytes(2), |_, _| panic!(
+                "empty roots"
+            ))
             .unwrap_err()
             .index(),
             Some(1)
@@ -834,7 +829,7 @@ mod extension_tests {
         fs.write_files(&[("/a/f", b"x"), ("/b/f", b"y")]).unwrap();
         let options = options.max_entries(2).max_path_bytes(12);
         let mut seen = Vec::new();
-        fs.visit_entries_with_options(&["/a", "/b"], options.into(), |index, entry| {
+        fs.visit_entries_with_options(&["/a", "/b"], options, |index, entry| {
             seen.push((index, entry.path().to_path_buf()));
             Ok(std::ops::ControlFlow::Continue(()))
         })
@@ -847,11 +842,9 @@ mod extension_tests {
             ]
         );
         assert_eq!(
-            fs.visit_entries_with_options(
-                &["/a", "/b"],
-                options.max_path_bytes(11).into(),
-                |_, _| Ok(std::ops::ControlFlow::Continue(()))
-            )
+            fs.visit_entries_with_options(&["/a", "/b"], options.max_path_bytes(11), |_, _| Ok(
+                std::ops::ControlFlow::Continue(())
+            ))
             .unwrap_err()
             .index(),
             Some(1)
@@ -859,7 +852,7 @@ mod extension_tests {
         assert_eq!(
             fs.visit_entries_with_options(
                 &["/a", "/missing"],
-                options.max_path_bytes(6).into(),
+                options.max_path_bytes(6),
                 |_, _| Ok(std::ops::ControlFlow::Break(()))
             )
             .unwrap(),
@@ -877,26 +870,20 @@ mod extension_tests {
         };
         fs.create_dir_all("/a/sub").unwrap();
         fs.write("/a/f", b"x").unwrap();
-        let options = crate::WalkOptions::new().max_depth(0);
+        let options = crate::ListDirOptions::new().recursive(true).max_depth(0);
         // Concrete method syntax must use the same extension as generic code,
         // not leak the backend's per-entry index.
         assert_eq!(
             fs.mounted
-                .walk_with_options(
-                    "/a",
-                    crate::ListDirOptions::from(options).fields(crate::Attributes::MODE)
-                )
+                .walk_with_options("/a", options.fields(crate::Attributes::MODE))
                 .unwrap_err()
                 .index(),
             Some(0)
         );
         assert_eq!(
-            fs.read_dirs_with_options(
-                &["/a"],
-                crate::ListDirOptions::from(options).fields(crate::Attributes::MODE)
-            )
-            .unwrap_err()
-            .index(),
+            fs.read_dirs_with_options(&["/a"], options.fields(crate::Attributes::MODE))
+                .unwrap_err()
+                .index(),
             Some(0)
         );
     }
@@ -936,25 +923,22 @@ mod extension_tests {
         let trees = fs
             .read_dirs_with_options(
                 &roots,
-                crate::ListDirOptions::from(crate::WalkOptions::new())
+                crate::ListDirOptions::new()
+                    .recursive(true)
                     .fields(crate::Attributes::MODE),
             )
             .unwrap();
         assert_eq!(trees.len(), 2);
         assert!(trees.iter().all(|tree| !tree.is_empty()));
         for limit in 0..=4 {
-            let options = crate::WalkOptions::new().max_entries(limit);
+            let options = crate::ListDirOptions::new()
+                .recursive(true)
+                .max_entries(limit);
             assert_eq!(
-                fs.walk_with_options(
-                    "/two",
-                    crate::ListDirOptions::from(options).fields(crate::Attributes::MODE)
-                )
-                .is_ok(),
+                fs.walk_with_options("/two", options.fields(crate::Attributes::MODE))
+                    .is_ok(),
                 fs.mounted
-                    .walk_with_options(
-                        "/two",
-                        crate::ListDirOptions::from(options).fields(crate::Attributes::MODE)
-                    )
+                    .walk_with_options("/two", options.fields(crate::Attributes::MODE))
                     .is_ok()
             );
         }
@@ -1002,7 +986,9 @@ mod extension_tests {
         assert!(
             fs.read_dirs_with_options(
                 &["/two", "/two"],
-                crate::ListDirOptions::from(crate::WalkOptions::new().max_entries(1))
+                crate::ListDirOptions::new()
+                    .recursive(true)
+                    .max_entries(1)
                     .fields(crate::Attributes::MODE)
             )
             .is_err()

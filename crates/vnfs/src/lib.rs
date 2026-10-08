@@ -49,9 +49,8 @@ pub mod directory {
     #[doc(inline)]
     pub use crate::{
         Attributes, Attrs, AttrsOptions, ControlFlow, DepthLimit, DirEntry, DirectoryListing,
-        FileType, ListDirOptions, MkDirOp, Permissions, ReadDirOptions, RemoveMode, RemoveOptions,
-        RenameOptions, SetAttrsOp, SetMetadata, TraversalCompletion, WalkControl, WalkEvent,
-        WalkEventKind, WalkOptions,
+        FileType, ListDirOptions, MkDirOp, Permissions, RemoveMode, RemoveOptions, RenameOptions,
+        SetAttrsOp, SetMetadata, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
     };
 }
 
@@ -185,8 +184,8 @@ pub mod prelude {
     pub use crate::{Auto, Mounted};
     #[cfg(feature = "nfs")]
     pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile, NfsVersion};
+    pub use vfsi_core::api::{DepthLimit, StreamOptions};
     pub use vfsi_core::{OpenFlags, OpenOp, RemoveOptions};
-    pub use vfsi_sync::{DepthLimit, ReadDirOptions, StreamOptions, WalkOptions};
 }
 
 pub use std::io::ErrorKind;
@@ -196,8 +195,8 @@ pub use vfsi_core::AttrMask as Attributes;
 pub use vfsi_core::VfType as FileType;
 pub use vfsi_core::api::RemoveMode;
 pub use vfsi_core::api::{
-    DepthLimit, DirectoryListing, ReadDirOptions, ResourceLimits, StreamCompletion, StreamOptions,
-    TraversalCompletion, WalkControl, WalkEvent, WalkEventKind, WalkOptions,
+    DepthLimit, DirectoryListing, ResourceLimits, StreamCompletion, StreamOptions,
+    TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
 };
 pub use vfsi_core::api::{MkDirOp, ReadIntoResult, SetAttrsOp, WriteResult};
 pub use vfsi_core::{

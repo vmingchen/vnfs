@@ -28,7 +28,7 @@ and concrete-client helper entry points are not retained:
 ```compile_fail,E0599
 use vnfs::{Vfsi, VfsiExt};
 fn old_collect(fs: &impl Vfsi) {
-    let _ = fs.walks_with_options(&["/tree"], vnfs::Attributes::MODE, vnfs::WalkOptions::new());
+    let _ = fs.walks_with_options(&["/tree"], vnfs::Attributes::MODE, vnfs::ListDirOptions::new().recursive(true));
 }
 ```
 
@@ -50,7 +50,7 @@ Shallow and recursive visits share one primitive, with borrowed entries:
 ```compile_fail,E0599
 use vnfs::Vfsi;
 fn old_walk(fs: &impl Vfsi) {
-    let _ = fs.visit_walks_with_options(&["/tree"], vnfs::WalkOptions::new(),
+    let _ = fs.visit_walks_with_options(&["/tree"], vnfs::ListDirOptions::new().recursive(true),
         |_, _| Ok(vnfs::ControlFlow::Continue(())));
 }
 ```
@@ -339,7 +339,7 @@ fn rename(fs: &impl Vfsi) {
 ```compile_fail,E0599
 use vnfs::Vfsi;
 fn walk_with_options(fs: &impl Vfsi) {
-    let _ = fs.walk_with_options("/", vnfs::ListDirOptions::from(vnfs::WalkOptions::new()).fields(vnfs::Attributes::MODE));
+    let _ = fs.walk_with_options("/", vnfs::ListDirOptions::new().recursive(true).fields(vnfs::Attributes::MODE));
 }
 ```
 
@@ -416,4 +416,10 @@ fn removal_backend(fs: &vnfs::NfsClient) {
 
 ```compile_fail
 use vnfs::AutoClient;
+```
+
+Directory collection and traversal share one options type.
+
+```compile_fail
+use vnfs::{ReadDirOptions, WalkOptions};
 ```

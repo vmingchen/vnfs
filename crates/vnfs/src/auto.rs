@@ -2619,7 +2619,8 @@ mod tests {
             .client
             .walk_with_options(
                 &route.path,
-                crate::ListDirOptions::from(crate::WalkOptions::unlimited())
+                crate::ListDirOptions::unlimited()
+                    .recursive(true)
                     .fields(crate::Attributes::stat()),
             )
             .unwrap();
@@ -2648,7 +2649,9 @@ mod tests {
         assert!(public_entries > backend_entries && public_total > backend_total);
         let walk = client.walk_with_options(
             &root,
-            crate::ListDirOptions::from(crate::WalkOptions::new().max_path_bytes(backend_total))
+            crate::ListDirOptions::new()
+                .recursive(true)
+                .max_path_bytes(backend_total)
                 .fields(crate::Attributes::stat()),
         );
         let mut dir_bytes = 0;
@@ -2676,10 +2679,10 @@ mod tests {
             client
                 .walk_with_options(
                     &root,
-                    crate::ListDirOptions::from(
-                        crate::WalkOptions::new().max_path_bytes(public_total)
-                    )
-                    .fields(crate::Attributes::stat())
+                    crate::ListDirOptions::new()
+                        .recursive(true)
+                        .max_path_bytes(public_total)
+                        .fields(crate::Attributes::stat())
                 )
                 .is_ok()
         );

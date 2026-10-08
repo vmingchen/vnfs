@@ -93,10 +93,8 @@ fn application_requests_results_and_errors_are_root_types() {
 fn application_traversal_and_mutation_do_not_require_backend_imports() {
     fn app(client: &vnfs::NfsClient) -> vnfs::Result<()> {
         let fields = vnfs::Attributes::MODE | vnfs::Attributes::BLOCKS | vnfs::Attributes::NLINK;
-        let listings = client.read_dirs_with_options(
-            &["/a", "/b"],
-            vnfs::ListDirOptions::from(vnfs::ReadDirOptions::new()).fields(fields),
-        )?;
+        let listings = client
+            .read_dirs_with_options(&["/a", "/b"], vnfs::ListDirOptions::new().fields(fields))?;
         for directory in listings.into_iter().flatten() {
             for entry in directory.entries {
                 let _ = (entry.path(), entry.attrs().blocks());
@@ -110,7 +108,7 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
         )?;
         let _ = client.walk_with_options(
             "/a",
-            vnfs::ListDirOptions::from(vnfs::WalkOptions::new()).fields(fields),
+            vnfs::ListDirOptions::new().recursive(true).fields(fields),
         )?;
         client.vcopy(&[("/a/source", "/a/copy")], vnfs::CopyOption::default())?;
         client.vremove(&["/a/copy"], vnfs::RemoveMode::Entry, Default::default())
@@ -277,7 +275,8 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         client
             .read_dirs_with_options(
                 &["/sub", "/copies"],
-                vnfs::ListDirOptions::from(vnfs::ReadDirOptions::new().max_entries(5))
+                vnfs::ListDirOptions::new()
+                    .max_entries(5)
                     .fields(vnfs::Attributes::stat())
             )
             .is_err()
@@ -408,21 +407,18 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
 
 #[test]
 fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
-    use vnfs::{Attributes, ListDirOptions, ResourceLimits, WalkOptions};
+    use vnfs::{Attributes, ListDirOptions, ResourceLimits};
     let root = tempfile::tempdir().unwrap();
     let fs = vnfs::Mounted::new(root.path()).unwrap();
     fs.create_dir_all("/tree/child").unwrap();
     fs.write("/tree/child/file", b"x").unwrap();
     for depth in [201, 254, 255, 256, 500, usize::MAX - 1, usize::MAX] {
-        let walk = WalkOptions::new().max_depth(depth);
+        let walk = ListDirOptions::new().recursive(true).max_depth(depth);
         assert_eq!(walk.depth_limit(), usize::MAX);
-        let converted = ListDirOptions::from(walk);
+        let converted = walk;
         assert!(converted.is_recursive());
         let explicit = fs
-            .walk_with_options(
-                "/tree",
-                vnfs::ListDirOptions::from(walk).fields(Attributes::MODE),
-            )
+            .walk_with_options("/tree", walk.fields(Attributes::MODE))
             .unwrap();
         let direct = fs
             .read_dirs_with_options(
@@ -443,14 +439,20 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
     assert!(
         fs.walk_with_options(
             "/tree",
-            vnfs::ListDirOptions::from(WalkOptions::new().max_depth(0)).fields(Attributes::MODE)
+            vnfs::ListDirOptions::new()
+                .recursive(true)
+                .max_depth(0)
+                .fields(Attributes::MODE)
         )
         .is_err()
     );
     assert_eq!(
         fs.walk_with_options(
             "/tree",
-            vnfs::ListDirOptions::from(WalkOptions::new().max_depth(0).truncate_at_max_depth(true))
+            vnfs::ListDirOptions::new()
+                .recursive(true)
+                .max_depth(0)
+                .truncate_at_max_depth(true)
                 .fields(Attributes::MODE)
         )
         .unwrap()
@@ -460,13 +462,22 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
     assert_eq!(
         fs.walk_with_options(
             "/tree",
-            vnfs::ListDirOptions::from(WalkOptions::new().max_depth(1)).fields(Attributes::MODE)
+            vnfs::ListDirOptions::new()
+                .recursive(true)
+                .max_depth(1)
+                .fields(Attributes::MODE)
         )
         .unwrap()
         .len(),
         2
     );
-    assert_eq!(WalkOptions::new().max_depth(200).depth_limit(), 200);
+    assert_eq!(
+        ListDirOptions::new()
+            .recursive(true)
+            .max_depth(200)
+            .depth_limit(),
+        200
+    );
 }
 
 #[test]

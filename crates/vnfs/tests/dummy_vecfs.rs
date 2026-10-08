@@ -27,7 +27,8 @@ fn application_walk_prunes_before_io_selects_metadata_and_allows_reentry() {
     client
         .listdir(
             "/",
-            vfsi_core::api::ListDirOptions::from(vnfs::WalkOptions::default())
+            vfsi_core::api::ListDirOptions::default()
+                .recursive(true)
                 .fields(vnfs::Attributes::MODE)
                 .enter_leave(true)
                 .sort_by_name(true),
@@ -80,7 +81,7 @@ fn native_paged_tree_honors_budget_overrides_and_allows_reentry() {
         return;
     }
     use vfsi_sync::FsClient;
-    use vnfs::{ResourceLimits, TraversalCompletion, WalkOptions};
+    use vnfs::{ListDirOptions, ResourceLimits, TraversalCompletion};
     let (_root, backend) = dummy();
     let client = FsClient::new(backend).with_limits(ResourceLimits {
         max_directory_entries: 3,
@@ -106,10 +107,10 @@ fn native_paged_tree_honors_budget_overrides_and_allows_reentry() {
     assert_eq!(error.kind(), vnfs::ErrorKind::FileTooLarge);
     assert_eq!(seen.len(), 3);
     seen.clear();
-    let options = WalkOptions::new().max_entries(10);
+    let options = ListDirOptions::new().recursive(true).max_entries(10);
     assert_eq!(
         client
-            .listdir("/tree", vnfs::ListDirOptions::from(options), |entry| {
+            .listdir("/tree", options, |entry| {
                 seen.push(entry.entry.path().to_path_buf());
                 Ok(vfsi_core::api::WalkControl::Continue)
             })
@@ -197,7 +198,7 @@ fn one_shot_file_vectors_handle_empty_batches_and_replace_files() {
 #[test]
 fn application_directory_vectors_preserve_fields_and_limits() {
     use vfsi_sync::FsClient;
-    use vnfs::{Attributes, WalkOptions};
+    use vnfs::{Attributes, ListDirOptions};
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -239,7 +240,7 @@ fn application_directory_vectors_preserve_fields_and_limits() {
     assert_eq!(error.index(), Some(1));
 
     let tree = client
-        .walk_with_options("/", ListDirOptions::from(WalkOptions::new()).fields(fields))
+        .walk_with_options("/", ListDirOptions::new().recursive(true).fields(fields))
         .unwrap();
     assert!(
         tree.iter()
@@ -252,7 +253,10 @@ fn application_directory_vectors_preserve_fields_and_limits() {
     let error = client
         .walk_with_options(
             "/",
-            ListDirOptions::from(WalkOptions::new().max_entries(1)).fields(fields),
+            ListDirOptions::new()
+                .recursive(true)
+                .max_entries(1)
+                .fields(fields),
         )
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
@@ -1232,7 +1236,7 @@ fn native_scalar_contract_separates_metadata_query_from_update() {
 fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
     use vfsi_sync::FsClient;
     use vfsi_sync::{AttrMask, WriteOp};
-    use vnfs::WalkOptions;
+    use vnfs::ListDirOptions;
 
     let (_root, mut fs) = dummy();
     fs.ensure_dir_impl(Path::new("/tree/sub"), 0o755).unwrap();
@@ -1246,7 +1250,7 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
         .walk_with_options_impl(
             Path::new("/tree"),
             AttrMask::stat(),
-            WalkOptions::new().max_entries(2),
+            ListDirOptions::new().recursive(true).max_entries(2),
             &mut |_, _| {},
         )
         .unwrap_err();
@@ -1256,7 +1260,7 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
         .walk_with_options_impl(
             Path::new("/tree"),
             AttrMask::stat(),
-            WalkOptions::new().max_depth(0),
+            ListDirOptions::new().recursive(true).max_depth(0),
             &mut |_, _| {},
         )
         .unwrap_err();

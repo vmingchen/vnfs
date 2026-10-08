@@ -1,4 +1,4 @@
-use crate::api::{Attributes, DepthLimit, ReadDirOptions, ResourceLimits, WalkOptions};
+use crate::api::{Attributes, DepthLimit, ResourceLimits};
 use std::num::NonZeroUsize;
 
 #[bitfields::bitfield(u8)]
@@ -144,56 +144,56 @@ impl ListDirOptions {
                 | Attributes::CHANGE
         }) | Attributes::MODE
     }
-    /// Resolve recursive traversal limits against the client's defaults.
-    pub fn walk_options(self, limits: ResourceLimits) -> WalkOptions {
-        let mut options = limits.walk_options();
+    /// Configured entry budget, or the built-in default before client resolution.
+    pub fn entry_limit(self) -> usize {
         if self.flags.entries_unlimited() {
-            options = options.max_entries(usize::MAX);
-        } else if let Some(encoded) = self.entries {
-            options = options.max_entries(encoded.get() - 1);
+            usize::MAX
+        } else {
+            self.entries
+                .map_or(super::DEFAULT_DIRECTORY_MAX_ENTRIES, |v| v.get() - 1)
         }
+    }
+    /// Configured path-byte budget, or the built-in default before client resolution.
+    pub fn path_byte_limit(self) -> usize {
         if self.flags.bytes_unlimited() {
-            options = options.max_path_bytes(usize::MAX);
-        } else if let Some(encoded) = self.bytes {
-            options = options.max_path_bytes(encoded.get() - 1);
+            usize::MAX
+        } else {
+            self.bytes
+                .map_or(super::DEFAULT_DIRECTORY_MAX_PATH_BYTES, |v| v.get() - 1)
         }
-        if let Some(depth) = self.depth {
-            options = options.max_depth(depth.get());
-        }
-        options.truncate_at_max_depth(self.flags.truncate())
     }
-    /// Resolve shallow listing limits against the client's defaults.
-    pub fn directory_options(self, limits: ResourceLimits) -> ReadDirOptions {
-        let mut options = limits.directory_options();
-        if self.flags.entries_unlimited() {
-            options = options.max_entries(usize::MAX);
-        } else if let Some(encoded) = self.entries {
-            options = options.max_entries(encoded.get() - 1);
-        }
-        if self.flags.bytes_unlimited() {
-            options = options.max_path_bytes(usize::MAX);
-        } else if let Some(encoded) = self.bytes {
-            options = options.max_path_bytes(encoded.get() - 1);
-        }
-        options
+    pub fn depth_limit(self) -> usize {
+        self.depth
+            .map_or(super::DEFAULT_WALK_MAX_DEPTH, DepthLimit::get)
     }
-}
-
-impl From<ReadDirOptions> for ListDirOptions {
-    fn from(options: ReadDirOptions) -> Self {
-        Self::new()
-            .max_entries(options.entry_limit())
-            .max_path_bytes(options.path_byte_limit())
+    pub const fn truncates_at_depth_limit(self) -> bool {
+        self.flags.truncate()
     }
-}
-impl From<WalkOptions> for ListDirOptions {
-    fn from(options: WalkOptions) -> Self {
-        Self::new()
-            .recursive(true)
-            .max_entries(options.entry_limit())
-            .max_path_bytes(options.path_byte_limit())
-            .max_depth(options.depth_limit())
-            .truncate_at_max_depth(options.truncates_at_depth_limit())
+    /// Apply client defaults while preserving explicit zero and unlimited budgets.
+    pub fn resolve(mut self, limits: ResourceLimits) -> Self {
+        let entries = if self.entries.is_some() || self.flags.entries_unlimited() {
+            self.entry_limit()
+        } else {
+            limits.max_directory_entries
+        };
+        let bytes = if self.bytes.is_some() || self.flags.bytes_unlimited() {
+            self.path_byte_limit()
+        } else {
+            limits.max_directory_path_bytes
+        };
+        self.depth = Some(
+            self.depth
+                .unwrap_or_else(|| DepthLimit::new(limits.max_walk_depth)),
+        );
+        self.max_entries(entries).max_path_bytes(bytes)
+    }
+    /// Resolve a recursive traversal against the client's defaults.
+    pub fn walk_options(self, limits: ResourceLimits) -> Self {
+        self.recursive(true).resolve(limits)
+    }
+    /// Resolve a shallow listing against the client's defaults.
+    pub fn directory_options(self, limits: ResourceLimits) -> Self {
+        self.recursive(false).resolve(limits)
     }
 }
 
@@ -213,13 +213,19 @@ mod option_layout_tests {
     fn compact_traversal_options_preserve_zero_overrides_and_independent_bits() {
         assert_eq!(std::mem::size_of::<VisitFlags>(), 1);
         assert!(std::mem::size_of::<ListDirOptions>() < std::mem::size_of::<PreviousLayout>());
-        let limits = ResourceLimits::default();
+        let limits = ResourceLimits {
+            max_directory_entries: usize::MAX,
+            max_directory_path_bytes: 13,
+            max_walk_depth: 3,
+            ..ResourceLimits::default()
+        };
         let inherited = ListDirOptions::new().walk_options(limits);
         assert!(!ListDirOptions::new().emits_enter_leave());
         assert!(!ListDirOptions::new().sorts_by_name());
         assert!(ListDirOptions::new().follows_symlinks());
         assert_eq!(inherited.entry_limit(), limits.walk_options().entry_limit());
         assert_eq!(inherited.depth_limit(), limits.walk_options().depth_limit());
+        assert_eq!(inherited.path_byte_limit(), 13);
         for value in [0, 1, 200, usize::MAX] {
             let options = ListDirOptions::new()
                 .max_entries(value)
@@ -233,6 +239,8 @@ mod option_layout_tests {
                 .fields(Attributes::SIZE);
             let walk = options.walk_options(limits);
             assert_eq!(walk.entry_limit(), value);
+            assert_eq!(walk.attributes(), options.attributes());
+            assert!(!walk.follows_symlinks());
             assert_eq!(walk.path_byte_limit(), value);
             assert_eq!(walk.depth_limit(), value);
             assert!(walk.truncates_at_depth_limit());

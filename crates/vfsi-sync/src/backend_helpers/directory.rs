@@ -68,14 +68,14 @@ pub fn walk_impl_default<F: Backend + ?Sized>(
     masks: AttrMask,
     sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
 ) -> VfResult<Vec<WalkEntry>> {
-    backend.walk_with_options_impl(root, masks, WalkOptions::default(), sort)
+    backend.walk_with_options_impl(root, masks, ListDirOptions::default().recursive(true), sort)
 }
 
 pub fn walk_with_options_impl_default<F: Backend + ?Sized>(
     backend: &mut F,
     root: &Path,
     masks: AttrMask,
-    options: WalkOptions,
+    options: ListDirOptions,
     sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
 ) -> VfResult<Vec<WalkEntry>> {
     // Explicit stack (pre-order, subdirectories visited in the order the
@@ -205,7 +205,7 @@ pub fn visit_dir_impl_default<F: Backend + ?Sized>(
 pub fn native_read_dir_impl_default<F: Backend + ?Sized>(
     backend: &mut F,
     path: &std::path::Path,
-    options: ReadDirOptions,
+    options: ListDirOptions,
 ) -> VfResult<Vec<DirEntry>> {
     let requested = options.entry_limit().saturating_add(1);
     let entries = backend

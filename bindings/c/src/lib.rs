@@ -996,7 +996,8 @@ pub unsafe extern "C" fn vfsi_walk(
             let path = vpath_for(fs, &root)?;
             let root_attrs = lock_or_io(&fs.fs)?.lstat_impl(&path)?;
             let metadata = vfsi_sync::metadata_from_attrs(root_attrs);
-            let walk_options = vnfs::WalkOptions::new()
+            let walk_options = vnfs::ListDirOptions::new()
+                .recursive(true)
                 .max_entries(options.max_entries)
                 .max_path_bytes(options.max_path_bytes)
                 .max_depth(options.max_depth);

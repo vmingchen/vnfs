@@ -1129,7 +1129,7 @@ fn listdir_recursive() {
 
 #[test]
 fn bounded_walk_limits_nfs_accumulation() {
-    use vnfs::WalkOptions;
+    use vnfs::ListDirOptions;
 
     let dir = setup_dir("bounded_walk");
     let mut c = client();
@@ -1148,7 +1148,7 @@ fn bounded_walk_limits_nfs_accumulation() {
         .walk_with_options_impl(
             Path::new(&dir),
             AttrMask::stat(),
-            WalkOptions::new().max_entries(1),
+            ListDirOptions::new().recursive(true).max_entries(1),
             &mut |_, _| {},
         )
         .unwrap_err();
@@ -1158,7 +1158,7 @@ fn bounded_walk_limits_nfs_accumulation() {
         .walk_with_options_impl(
             Path::new(&dir),
             AttrMask::stat(),
-            WalkOptions::new().max_depth(0),
+            ListDirOptions::new().recursive(true).max_depth(0),
             &mut |_, _| {},
         )
         .unwrap_err();
@@ -1168,7 +1168,8 @@ fn bounded_walk_limits_nfs_accumulation() {
         .walk_with_options_impl(
             Path::new(&dir),
             AttrMask::stat(),
-            WalkOptions::new()
+            ListDirOptions::new()
+                .recursive(true)
                 .max_entries(16)
                 .max_path_bytes(4096)
                 .max_depth(4),

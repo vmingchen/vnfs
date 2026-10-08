@@ -6,8 +6,8 @@ use std::sync::{
 
 use vfsi_sync::api::ReadOptions;
 use vfsi_sync::{
-    Backend, Capabilities, DirEntry, DirPageCursor, FileSystem, FsClient, OpenFlags, OpenOp,
-    ReadDirOptions, ReadIntoResult, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfError,
+    Backend, Capabilities, DirEntry, DirPageCursor, FileSystem, FsClient, ListDirOptions,
+    OpenFlags, OpenOp, ReadIntoResult, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfError,
     VfFile, VfOffset, VfResult, Vfsi, VfsiExt, WriteOp, WriteResult,
 };
 
@@ -325,7 +325,7 @@ impl Backend for ScalarOnly {
         Ok(())
     }
 
-    fn read_dir_impl(&mut self, _: &std::path::Path, _: ReadDirOptions) -> VfResult<Vec<DirEntry>> {
+    fn read_dir_impl(&mut self, _: &std::path::Path, _: ListDirOptions) -> VfResult<Vec<DirEntry>> {
         unreachable!("the visitor must use paged enumeration")
     }
 
@@ -971,7 +971,7 @@ impl Backend for WorkflowOverride {
         &mut self,
         _: &std::path::Path,
         _: vfsi_sync::AttrMask,
-        _: vfsi_sync::WalkOptions,
+        _: vfsi_sync::ListDirOptions,
         _: &mut dyn FnMut(&std::path::Path, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<vfsi_sync::WalkEntry>> {
         self.calls.push("walk");

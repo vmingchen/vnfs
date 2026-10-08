@@ -1,5 +1,5 @@
 //! Incremental, no-follow traversal shared by application adapters.
-use crate::api::{DirEntry, ReadDirOptions, TraversalCompletion, WalkOptions};
+use crate::api::{DirEntry, ListDirOptions, TraversalCompletion};
 use crate::{VfError, VfResult};
 use std::path::Path;
 
@@ -31,9 +31,9 @@ pub struct WalkEvent {
 #[doc(hidden)]
 pub fn walk_events(
     root: DirEntry,
-    options: WalkOptions,
+    options: ListDirOptions,
     sort_by_name: bool,
-    mut read_dir: impl FnMut(&Path, ReadDirOptions) -> VfResult<Vec<DirEntry>>,
+    mut read_dir: impl FnMut(&Path, ListDirOptions) -> VfResult<Vec<DirEntry>>,
     mut callback: impl FnMut(&WalkEvent) -> VfResult<WalkControl>,
 ) -> VfResult<TraversalCompletion> {
     let mut count = 1usize;
@@ -65,7 +65,7 @@ pub fn walk_events(
                 if event.depth >= options.depth_limit() && options.truncates_at_depth_limit() {
                     continue;
                 }
-                let remaining = ReadDirOptions::new()
+                let remaining = ListDirOptions::new()
                     .max_entries(options.entry_limit().saturating_sub(count))
                     .max_path_bytes(options.path_byte_limit().saturating_sub(bytes));
                 let mut entries = read_dir(event.entry.path(), remaining)?;
@@ -130,7 +130,7 @@ mod tests {
         let mut events = Vec::new();
         walk_events(
             entry("/", true),
-            WalkOptions::default(),
+            ListDirOptions::default().recursive(true),
             true,
             |path, _| {
                 assert_eq!(path, Path::new("/"), "pruned directory must not be read");
@@ -165,7 +165,7 @@ mod tests {
         assert_eq!(
             walk_events(
                 entry("/", true),
-                WalkOptions::default(),
+                ListDirOptions::default().recursive(true),
                 false,
                 |_, _| panic!("stopped"),
                 |_| Ok(WalkControl::Stop)
@@ -176,7 +176,7 @@ mod tests {
         assert!(
             walk_events(
                 entry("/", true),
-                WalkOptions::default(),
+                ListDirOptions::default().recursive(true),
                 false,
                 |_, _| panic!("callback failed"),
                 |_| Err(VfError::client(0, libc::EIO as u32))
@@ -184,9 +184,9 @@ mod tests {
             .is_err()
         );
         for options in [
-            WalkOptions::new().max_entries(1),
-            WalkOptions::new().max_path_bytes(1),
-            WalkOptions::new().max_depth(0),
+            ListDirOptions::new().recursive(true).max_entries(1),
+            ListDirOptions::new().recursive(true).max_path_bytes(1),
+            ListDirOptions::new().recursive(true).max_depth(0),
         ] {
             assert_eq!(
                 walk_events(

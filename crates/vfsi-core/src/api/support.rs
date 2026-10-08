@@ -52,62 +52,6 @@ pub const DEFAULT_DIRECTORY_MAX_PATH_BYTES: usize = 16 * 1024 * 1024;
 /// Default recursion depth for recursive walks.
 pub const DEFAULT_WALK_MAX_DEPTH: usize = 128;
 
-/// Resource limits for one allocating directory listing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReadDirOptions {
-    max_entries: usize,
-    max_path_bytes: usize,
-}
-
-impl ReadDirOptions {
-    pub const fn new() -> Self {
-        Self {
-            max_entries: DEFAULT_DIRECTORY_MAX_ENTRIES,
-            max_path_bytes: DEFAULT_DIRECTORY_MAX_PATH_BYTES,
-        }
-    }
-
-    /// Explicitly opt out of the default allocation limits.
-    pub const fn unlimited() -> Self {
-        Self {
-            max_entries: usize::MAX,
-            max_path_bytes: usize::MAX,
-        }
-    }
-
-    pub const fn max_entries(mut self, entries: usize) -> Self {
-        self.max_entries = entries;
-        self
-    }
-
-    pub const fn max_path_bytes(mut self, bytes: usize) -> Self {
-        self.max_path_bytes = bytes;
-        self
-    }
-
-    pub const fn entry_limit(self) -> usize {
-        self.max_entries
-    }
-
-    pub const fn path_byte_limit(self) -> usize {
-        self.max_path_bytes
-    }
-}
-
-impl Default for ReadDirOptions {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[bitfields::bitfield(u8)]
-#[derive(PartialEq, Eq)]
-struct WalkFlags {
-    truncate: bool,
-    #[bits(7)]
-    _reserved: u8,
-}
-
 /// Compact traversal depth: 0 through 200 are finite, larger inputs are unlimited.
 /// The root has depth zero. Unlimited depth does not disable entry/byte budgets.
 /// Both this type and `Option<DepthLimit>` occupy one byte.
@@ -136,80 +80,6 @@ impl DepthLimit {
     /// Whether traversal has no depth limit.
     pub const fn is_unlimited(self) -> bool {
         self.0.get() == 202
-    }
-}
-
-/// Resource limits for an allocating recursive directory walk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WalkOptions {
-    directory: ReadDirOptions,
-    max_depth: DepthLimit,
-    flags: WalkFlags,
-}
-
-impl WalkOptions {
-    pub const fn new() -> Self {
-        Self {
-            directory: ReadDirOptions::new(),
-            max_depth: DepthLimit::new(DEFAULT_WALK_MAX_DEPTH),
-            flags: WalkFlags::new(),
-        }
-    }
-
-    /// Explicitly opt out of the default allocation and recursion limits.
-    pub const fn unlimited() -> Self {
-        Self {
-            directory: ReadDirOptions::unlimited(),
-            max_depth: DepthLimit::unlimited(),
-            flags: WalkFlags::new(),
-        }
-    }
-
-    pub const fn max_entries(mut self, entries: usize) -> Self {
-        self.directory = self.directory.max_entries(entries);
-        self
-    }
-
-    pub const fn max_path_bytes(mut self, bytes: usize) -> Self {
-        self.directory = self.directory.max_path_bytes(bytes);
-        self
-    }
-
-    /// Root depth is zero. Values from 0 through 200 are finite limits;
-    /// any larger value disables the depth limit (other budgets still apply).
-    pub const fn max_depth(mut self, depth: usize) -> Self {
-        self.max_depth = DepthLimit::new(depth);
-        self
-    }
-
-    /// Stop descending at `max_depth` instead of treating a deeper subtree
-    /// as a safety-limit violation. Intended for caller-requested shallow walks.
-    pub const fn truncate_at_max_depth(mut self, truncate: bool) -> Self {
-        self.flags.set_truncate(truncate);
-        self
-    }
-
-    pub const fn entry_limit(self) -> usize {
-        self.directory.entry_limit()
-    }
-
-    pub const fn path_byte_limit(self) -> usize {
-        self.directory.path_byte_limit()
-    }
-
-    /// Effective depth limit, or `usize::MAX` when unlimited.
-    pub const fn depth_limit(self) -> usize {
-        self.max_depth.get()
-    }
-
-    pub const fn truncates_at_depth_limit(self) -> bool {
-        self.flags.truncate()
-    }
-}
-
-impl Default for WalkOptions {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -285,14 +155,15 @@ impl Default for ResourceLimits {
 }
 
 impl ResourceLimits {
-    pub fn directory_options(self) -> ReadDirOptions {
-        ReadDirOptions::new()
+    pub fn directory_options(self) -> ListDirOptions {
+        ListDirOptions::new()
             .max_entries(self.max_directory_entries)
             .max_path_bytes(self.max_directory_path_bytes)
     }
 
-    pub fn walk_options(self) -> crate::api::WalkOptions {
-        crate::api::WalkOptions::new()
+    pub fn walk_options(self) -> crate::api::ListDirOptions {
+        crate::api::ListDirOptions::new()
+            .recursive(true)
             .max_entries(self.max_directory_entries)
             .max_path_bytes(self.max_directory_path_bytes)
             .max_depth(self.max_walk_depth)

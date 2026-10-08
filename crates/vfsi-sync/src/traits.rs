@@ -426,7 +426,7 @@ mod contract_tests {
 
 #[cfg(test)]
 mod walk_depth_tests {
-    use super::{DepthLimit, WalkOptions};
+    use super::{DepthLimit, ListDirOptions};
     #[test]
     fn depth_limit_is_one_byte_and_preserves_optional_inheritance() {
         const UNLIMITED: DepthLimit = DepthLimit::new(201);
@@ -446,10 +446,11 @@ mod walk_depth_tests {
     }
     #[test]
     fn depth_limits_normalize_without_wrapping_and_keep_other_options() {
-        const UNLIMITED: WalkOptions = WalkOptions::new().max_depth(201);
+        const UNLIMITED: ListDirOptions = ListDirOptions::new().recursive(true).max_depth(201);
         assert_eq!(UNLIMITED.depth_limit(), usize::MAX);
         for depth in 0..=200 {
-            let options = WalkOptions::new()
+            let options = ListDirOptions::new()
+                .recursive(true)
                 .max_depth(depth)
                 .max_entries(7)
                 .max_path_bytes(11)
@@ -460,11 +461,14 @@ mod walk_depth_tests {
             assert!(options.truncates_at_depth_limit());
         }
         for depth in [201, 254, 255, 256, 500, usize::MAX - 1, usize::MAX] {
-            let options = WalkOptions::new().max_depth(depth);
+            let options = ListDirOptions::new().recursive(true).max_depth(depth);
             assert_eq!(options.depth_limit(), usize::MAX);
             assert_eq!(options.max_depth(0).depth_limit(), 0);
             assert_eq!(options.max_depth(200).depth_limit(), 200);
         }
-        assert_eq!(WalkOptions::unlimited().depth_limit(), usize::MAX);
+        assert_eq!(
+            ListDirOptions::unlimited().recursive(true).depth_limit(),
+            usize::MAX
+        );
     }
 }

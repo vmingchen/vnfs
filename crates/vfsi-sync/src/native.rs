@@ -302,7 +302,7 @@ pub trait Backend: FileSystem {
     fn read_dir_impl(
         &mut self,
         path: &std::path::Path,
-        options: ReadDirOptions,
+        options: ListDirOptions,
     ) -> VfResult<Vec<DirEntry>> {
         crate::backend_helpers::native_read_dir_impl_default(self, path, options)
     }
@@ -359,7 +359,7 @@ pub trait Backend: FileSystem {
         &mut self,
         root: &Path,
         masks: AttrMask,
-        options: WalkOptions,
+        options: ListDirOptions,
         sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<WalkEntry>> {
         crate::backend_helpers::walk_with_options_impl_default(self, root, masks, options, sort)

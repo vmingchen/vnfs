@@ -107,8 +107,9 @@ fn ordered_walk_preserves_sorting_prunes_before_io_and_callbacks_are_unlocked() 
     let completion = fs
         .visit_dirs_ordered(
             "/",
-            Attributes::MODE,
-            WalkOptions::new(),
+            ListDirOptions::new()
+                .recursive(true)
+                .fields(Attributes::MODE),
             |entries| entries.sort_by(|a, b| b.path().cmp(a.path())),
             |entry| {
                 if entry.path() == Path::new("/prune") {
@@ -141,8 +142,9 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
     assert!(
         fs.visit_dirs_ordered(
             "/link",
-            Attributes::MODE,
-            WalkOptions::new(),
+            ListDirOptions::new()
+                .recursive(true)
+                .fields(Attributes::MODE),
             |_| {},
             |_| true,
             |_, _| panic!("symlink root must not be followed")
@@ -155,8 +157,9 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
         let status = fs
             .visit_dirs_ordered(
                 "/",
-                Attributes::MODE,
-                WalkOptions::new(),
+                ListDirOptions::new()
+                    .recursive(true)
+                    .fields(Attributes::MODE),
                 |_| {},
                 |_| true,
                 |listing, _| {
@@ -183,8 +186,10 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
     assert_eq!(
         fs.visit_dirs_ordered(
             "/",
-            Attributes::MODE,
-            WalkOptions::new().max_entries(1),
+            ListDirOptions::new()
+                .recursive(true)
+                .max_entries(1)
+                .fields(Attributes::MODE),
             |_| {},
             |_| false,
             |_, _| {
@@ -200,8 +205,10 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
     assert_eq!(
         fs.visit_dirs_ordered(
             "/",
-            Attributes::MODE,
-            WalkOptions::new().max_path_bytes(1),
+            ListDirOptions::new()
+                .recursive(true)
+                .max_path_bytes(1)
+                .fields(Attributes::MODE),
             |_| {},
             |_| false,
             |_, _| panic!("over-budget snapshot must not be delivered")

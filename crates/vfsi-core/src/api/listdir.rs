@@ -144,7 +144,8 @@ fn buffered<F: Vfsi + ?Sized>(
                 .ok_or_else(|| limit_error(path))?;
             fs.read_dir_with_options(
                 path,
-                ListDirOptions::from(remaining.max_path_bytes(bytes))
+                remaining
+                    .max_path_bytes(bytes)
                     .fields(fields)
                     // Reopening a path is not anchored to the original page.
                     // Require atomic no-follow resolution, including ancestors.

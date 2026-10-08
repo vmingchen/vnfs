@@ -20,7 +20,7 @@ use vnfs::{Mounted, Result, Vfsi};
 fn grouped_namespaces_use_the_same_application_types() {
     let _: vnfs::nfs::NfsBuilder = vnfs::Nfs::builder("server");
     let _: vnfs::files::ResourceLimits = vnfs::ResourceLimits::default();
-    let _: vnfs::directory::ReadDirOptions = vnfs::ReadDirOptions::new();
+    let _: vnfs::directory::ListDirOptions = vnfs::ListDirOptions::new();
     let _: vnfs::error::Result<()> = Ok::<(), vnfs::Error>(());
     let _: vnfs::mounted::AutoRoute = vnfs::AutoRoute::Mounted;
 }

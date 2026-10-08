@@ -1131,7 +1131,7 @@ pub trait VfsiExt: Vfsi {
     /// or [`listdir`](VfsiExt::listdir) for pruning and lifecycle events.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{ListDirOptions, Vfsi, VfsiExt, Attributes, WalkOptions, WriteOp};
+    /// use vfsi_core::api::{ListDirOptions, Vfsi, VfsiExt, Attributes, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let listings = fs.walk_with_options(
     ///     "/project", ListDirOptions::new().fields(Attributes::MODE | Attributes::SIZE)
@@ -1262,8 +1262,8 @@ pub trait VfsiExt: Vfsi {
     /// ```no_run
     /// use vfsi_core::api::{Attributes, Result, Vfsi, VfsiExt, WalkControl};
     /// # fn example(fs: &impl Vfsi) -> Result<()> {
-    /// fs.visit_dirs_ordered("/input", Attributes::MODE | Attributes::SIZE,
-    ///     fs.limits().walk_options(),
+    /// fs.visit_dirs_ordered("/input",
+    ///     fs.limits().walk_options().fields(Attributes::MODE | Attributes::SIZE),
     ///     |entries| entries.sort_by(|a, b| a.path().cmp(b.path())),
     ///     |entry| entry.file_name() != Some(std::ffi::OsStr::new(".git")),
     ///     |listing, depth| {
@@ -1276,12 +1276,12 @@ pub trait VfsiExt: Vfsi {
     fn visit_dirs_ordered(
         &self,
         root: impl AsRef<Path>,
-        fields: crate::api::Attributes,
-        options: crate::api::WalkOptions,
+        options: crate::api::ListDirOptions,
         mut order: impl FnMut(&mut [crate::api::DirEntry]),
         mut descend: impl FnMut(&crate::api::DirEntry) -> bool,
         mut visitor: impl FnMut(DirectoryListing, usize) -> Result<crate::api::WalkControl>,
     ) -> Result<crate::api::TraversalCompletion> {
+        let options = options.walk_options(self.limits());
         let root = root.as_ref();
         let mut count = 1usize;
         let mut bytes = root.as_os_str().len();
@@ -1296,7 +1296,8 @@ pub trait VfsiExt: Vfsi {
             let mut entries = self.read_dir_with_options(
                 &path,
                 crate::api::ListDirOptions::new()
-                    .fields(fields | crate::api::Attributes::MODE)
+                    .fields(options.attributes())
+                    .follow_symlinks(options.follows_symlinks())
                     .max_entries(options.entry_limit().saturating_sub(count))
                     .max_path_bytes(options.path_byte_limit().saturating_sub(bytes)),
             )?;
