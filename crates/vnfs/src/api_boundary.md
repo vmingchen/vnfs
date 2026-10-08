@@ -388,3 +388,17 @@ Read-result fields cannot be independently mutated:
 let mut result = vnfs::ReadResult::owned(0, vec![1], true);
 result.read = 100;
 ```
+
+Filesystem operations require the portable traits; internal dispatch is private.
+
+```compile_fail
+fn read_without_trait(fs: &vnfs::NfsClient) {
+    fs.vread([vnfs::ReadOp::path("/file")], vnfs::ReadOptions::new());
+}
+```
+
+```compile_fail
+fn internal_dispatch(fs: &vnfs::NfsClient) {
+    fs.vopen_impl(&[]);
+}
+```

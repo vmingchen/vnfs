@@ -212,9 +212,9 @@ fn opaque_requests_preserve_owner_preflight_and_error_sources() {
             .unwrap(),
         b"original"
     );
-    assert!(other.vclose([&mut file]).is_err());
+    assert!(other.vclose(std::slice::from_mut(&mut file)).is_err());
     assert!(!file.is_closed());
-    owner.vclose([&mut file]).unwrap();
+    owner.vclose(std::slice::from_mut(&mut file)).unwrap();
     assert!(file.is_closed());
     let error = std::io::Read::read(&mut file, &mut [0; 1]).unwrap_err();
     assert!(
@@ -244,7 +244,7 @@ fn handles_remain_send_sync_and_clients_remain_cheaply_cloneable() {
     assert_eq!(allocations, (0, 0), "client clone must share its backend");
     client.write("/shared", b"data").unwrap();
     let mut file = client.open("/shared").unwrap();
-    clone.vclose([&mut file]).unwrap();
+    clone.vclose(std::slice::from_mut(&mut file)).unwrap();
     assert!(
         file.is_closed(),
         "clones must retain the same ownership identity"

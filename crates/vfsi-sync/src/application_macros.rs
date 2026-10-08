@@ -57,12 +57,26 @@ macro_rules! __vfsi_client_methods {
     ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path,
      $vwrite_native:expr, $vwrite_all_native:expr, $metadata:expr,
      $write_receiver:path, $page_capacity:expr, $open_native:expr, $stream_native:expr) => {
+        $crate::__vfsi_client_methods!(
+            $client, $receiver, $vread_native, $read_receiver, $vwrite_native,
+            $vwrite_all_native, $metadata, $write_receiver, $page_capacity,
+            $open_native, $stream_native;
+            vrename, vsymlink, vreadlink, vhardlink, vstatfs, vsetattrs,
+            limits, vopen, vclose, vmkdir, vcopy, capabilities
+        );
+    };
+    ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path,
+     $vwrite_native:expr, $vwrite_all_native:expr, $metadata:expr,
+     $write_receiver:path, $page_capacity:expr, $open_native:expr, $stream_native:expr;
+     $rename:ident, $symlink:ident, $readlink:ident, $hardlink:ident,
+     $statfs:ident, $setattrs:ident, $limits:ident, $open:ident,
+     $close:ident, $mkdir:ident, $copy:ident, $capabilities:ident) => {
         fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
             &self,
             pairs: &[(P, Q)],
             options: vfsi_core::api::RenameOptions,
         ) -> Result<()> {
-            <$client>::vrename($receiver(self), pairs, options)
+            <$client>::$rename($receiver(self), pairs, options)
         }
         fn vlistdirs<P: AsRef<Path>>(
             &self,
@@ -129,28 +143,28 @@ macro_rules! __vfsi_client_methods {
             Ok(output)
         }
         fn capabilities(&self) -> Result<vfsi_core::Capabilities> {
-            <$client>::capabilities($receiver(self))
+            <$client>::$capabilities($receiver(self))
         }
         fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-            <$client>::vsymlink($receiver(self), pairs)
+            <$client>::$symlink($receiver(self), pairs)
         }
         fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<std::path::PathBuf>> {
-            <$client>::vreadlink($receiver(self), paths)
+            <$client>::$readlink($receiver(self), paths)
         }
         fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
-            <$client>::vhardlink($receiver(self), pairs)
+            <$client>::$hardlink($receiver(self), pairs)
         }
         fn vstatfs<P: vfsi_core::AsTarget<Self::File>>(
             &self,
             targets: &[P],
         ) -> Result<Vec<vfsi_core::FilesystemStats>> {
-            <$client>::vstatfs($receiver(self), targets)
+            <$client>::$statfs($receiver(self), targets)
         }
         fn vsetattrs<P: vfsi_core::AsTarget<Self::File>>(
             &self,
             updates: &[vfsi_core::SetAttrsOp<P>],
         ) -> Result<()> {
-            <$client>::vsetattrs($receiver(self), updates)
+            <$client>::$setattrs($receiver(self), updates)
         }
         fn vgetattrs<P: AsRef<Path>>(
             &self,
@@ -160,7 +174,7 @@ macro_rules! __vfsi_client_methods {
             ($metadata)($receiver(self), paths, options)
         }
         fn limits(&self) -> ResourceLimits {
-            <$client>::limits($receiver(self))
+            <$client>::$limits($receiver(self))
         }
 
         fn vopen(&self, requests: &[OpenOp]) -> Result<Vec<Self::File>> {
@@ -168,7 +182,7 @@ macro_rules! __vfsi_client_methods {
                 // Preserve native symlink resolution and independent-handle state.
                 return ($open_native)($receiver(self), requests[0].clone()).map(|file| vec![file]);
             }
-            <$client>::vopen($receiver(self), requests)
+            <$client>::$open($receiver(self), requests)
         }
         fn vread<'a>(
             &self,
@@ -190,10 +204,10 @@ macro_rules! __vfsi_client_methods {
             result.map_err($crate::application::public_write_error)
         }
         fn vclose(&self, files: &mut [Self::File]) -> Result<()> {
-            <$client>::vclose($receiver(self), files)
+            <$client>::$close($receiver(self), files)
         }
         fn vmkdir<P: AsRef<Path>>(&self, paths: &[vfsi_core::MkDirOp<P>]) -> Result<()> {
-            <$client>::vmkdir($receiver(self), paths)
+            <$client>::$mkdir($receiver(self), paths)
         }
 
         fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
@@ -201,7 +215,7 @@ macro_rules! __vfsi_client_methods {
             pairs: &[(P, Q)],
             options: vfsi_core::api::CopyOption,
         ) -> Result<()> {
-            <$client>::vcopy($receiver(self), pairs, options)
+            <$client>::$copy($receiver(self), pairs, options)
         }
         fn vremove<P: AsRef<Path>>(
             &self,

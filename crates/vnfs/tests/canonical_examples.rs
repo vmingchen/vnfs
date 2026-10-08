@@ -14,7 +14,7 @@ mod open_handles;
 mod stream_file;
 
 use vnfs::VfsiExt;
-use vnfs::{Mounted, Result};
+use vnfs::{Mounted, Result, Vfsi};
 
 #[test]
 fn grouped_namespaces_use_the_same_application_types() {

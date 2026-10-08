@@ -299,6 +299,7 @@ impl NfsBuilder {
 #[cfg(all(test, target_os = "linux"))]
 mod mount_tests {
     use super::*;
+    use crate::Vfsi;
 
     #[test]
     fn mount_customization_rejects_unbound_and_differently_bound_builders() {

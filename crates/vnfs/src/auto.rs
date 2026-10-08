@@ -24,18 +24,6 @@ type NfsFile = FsFile<vfsi_nfs::NfsVecFs>;
 #[cfg(test)]
 use vfsi_sync::DEFAULT_READ_ALLV_MAX_TOTAL_BYTES;
 
-macro_rules! routed_path_method {
-    ($name:ident, $result:ty) => {
-        pub fn $name(&self, path: impl AsRef<Path>) -> VfResult<$result> {
-            let route = self.resolve(path.as_ref(), &read_mounts(false));
-            match route.route {
-                Route::Mounted => self.mounted.$name(&route.path),
-                Route::Nfs(connection) => connection.client.$name(&route.path),
-            }
-        }
-    };
-}
-
 const READ_CHUNK: usize = 1024 * 1024;
 
 /// Opt into mount-aware direct NFS acceleration. Unlike [`Mounted`], eligible
@@ -189,7 +177,7 @@ impl std::fmt::Debug for AutoClient {
 }
 
 impl AutoClient {
-    pub fn limits(&self) -> ResourceLimits {
+    pub(crate) fn limits_impl(&self) -> ResourceLimits {
         self.limits
     }
     /// Drain Drop cleanup on mounted and already-connected NFS backends.
@@ -242,7 +230,6 @@ impl AutoClient {
         })
     }
 
-    routed_path_method!(read_link, PathBuf);
     pub fn ensure_empty_dir(&self, path: impl AsRef<Path>) -> VfResult<()> {
         let route = self.resolve_tree(path.as_ref());
         match route.route {
@@ -251,54 +238,32 @@ impl AutoClient {
         }
     }
 
-    pub fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> VfResult<()> {
-        let route = self.resolve(path.as_ref(), &read_mounts(false));
-        match route.route {
-            Route::Mounted => self.mounted.create_dir_with_mode(&route.path, mode),
-            Route::Nfs(connection) => connection.client.create_dir_with_mode(&route.path, mode),
-        }
-    }
-
-    pub fn symlink(&self, target: impl AsRef<Path>, link: impl AsRef<Path>) -> VfResult<()> {
-        // A symlink target is interpreted by subsequent kernel pathname
-        // resolution; do not rewrite its text into an export-relative name.
-        self.mounted.symlink(target, link)
-    }
-
-    pub fn hard_link(&self, source: impl AsRef<Path>, link: impl AsRef<Path>) -> VfResult<()> {
-        let mounts = read_mounts(false);
-        let source_route = self.resolve(source.as_ref(), &mounts);
-        let link_route = self.resolve(link.as_ref(), &mounts);
-        match &source_route.route {
-            Route::Nfs(connection) if source_route.route.same_backend(&link_route.route) => {
-                connection
-                    .client
-                    .hard_link(&source_route.path, &link_route.path)
-            }
-            _ => self.mounted.hard_link(source, link),
-        }
-    }
-
     /// Common routed capabilities. Server-copy acceleration is route-specific
     /// and is not advertised as a guarantee for the whole namespace.
-    pub fn capabilities(&self) -> VfResult<crate::Capabilities> {
+    pub(crate) fn capabilities_impl(&self) -> VfResult<crate::Capabilities> {
         self.mounted.capabilities()
     }
 
     /// Keep target text unchanged and let the kernel interpret it in the
     /// mounted namespace, matching the scalar symlink operation.
-    pub fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub(crate) fn vsymlink_impl<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+    ) -> VfResult<()> {
         self.mounted.vsymlink(pairs)
     }
 
     /// Read link text through the mounted namespace without following links.
-    pub fn vreadlink<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<PathBuf>> {
+    pub(crate) fn vreadlink_impl<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<PathBuf>> {
         self.mounted.vreadlink(paths)
     }
 
     /// Route same-backend hard-link pairs together. Cross-route pairs use the
     /// kernel namespace, which reports cross-filesystem errors when appropriate.
-    pub fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> VfResult<()> {
+    pub(crate) fn vhardlink_impl<P: AsRef<Path>, Q: AsRef<Path>>(
+        &self,
+        pairs: &[(P, Q)],
+    ) -> VfResult<()> {
         if pairs.is_empty() {
             return Ok(());
         }
@@ -346,7 +311,7 @@ impl AutoClient {
     }
 
     /// Query route-coherent batches, preserving each open handle's retained route.
-    pub fn vstatfs<P: vfsi_core::AsTarget<AutoFile>>(
+    pub(crate) fn vstatfs_impl<P: vfsi_core::AsTarget<AutoFile>>(
         &self,
         targets: &[P],
     ) -> VfResult<Vec<crate::FilesystemStats>> {
@@ -413,7 +378,7 @@ impl AutoClient {
         Ok(output)
     }
     /// Update route-coherent batches of paths and open objects.
-    pub fn vsetattrs<P: vfsi_core::AsTarget<AutoFile>>(
+    pub(crate) fn vsetattrs_impl<P: vfsi_core::AsTarget<AutoFile>>(
         &self,
         updates: &[crate::SetAttrsOp<P>],
     ) -> VfResult<()> {
@@ -505,7 +470,7 @@ impl AutoClient {
         Ok(())
     }
 
-    pub fn vgetattrs<P: AsRef<Path>>(
+    pub(crate) fn vgetattrs_impl<P: AsRef<Path>>(
         &self,
         paths: &[P],
         options: crate::AttrsOptions,
@@ -545,7 +510,7 @@ impl AutoClient {
 
     /// Create directories in bounded backend cohorts, retaining input order.
     /// Parents must exist; this does not promise transactional rollback.
-    pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[crate::MkDirOp<P>]) -> VfResult<()> {
+    pub(crate) fn vmkdir_impl<P: AsRef<Path>>(&self, paths: &[crate::MkDirOp<P>]) -> VfResult<()> {
         if paths.is_empty() {
             return Ok(());
         }
@@ -640,7 +605,7 @@ impl AutoClient {
         Ok(())
     }
 
-    pub fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
+    pub(crate) fn vcopy_impl<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         pairs: &[(P, Q)],
         options: vfsi_core::api::CopyOption,
@@ -938,22 +903,6 @@ impl AutoClient {
         self.resolve(path, &mounts)
     }
 
-    pub fn remove_dir_all_with_options(
-        &self,
-        path: impl AsRef<Path>,
-        options: crate::RemoveOptions,
-    ) -> VfResult<()> {
-        let route = self.resolve_tree(path.as_ref());
-        match route.route {
-            Route::Mounted => self
-                .mounted
-                .remove_dir_all_with_options(&route.path, options),
-            Route::Nfs(connection) => connection
-                .client
-                .remove_dir_all_with_options(&route.path, options),
-        }
-    }
-
     pub fn remove_dir_contents_with_options(
         &self,
         path: impl AsRef<Path>,
@@ -1184,10 +1133,10 @@ impl AutoClient {
     /// Preserve request order, including the completed-prefix semantics of
     /// strict vector operations. Consecutive requests to one mount batch.
     pub(crate) fn open_native(&self, request: OpenOp) -> VfResult<AutoFile> {
-        self.vopen(&[request]).map(|mut files| files.remove(0))
+        self.vopen_impl(&[request]).map(|mut files| files.remove(0))
     }
 
-    pub fn vopen(&self, requests: &[OpenOp]) -> VfResult<Vec<AutoFile>> {
+    pub(crate) fn vopen_impl(&self, requests: &[OpenOp]) -> VfResult<Vec<AutoFile>> {
         let mounts = read_mounts(true);
         let resolved = self.resolve_open_batch(requests, &mounts);
         let mut output = Vec::with_capacity(requests.len());
@@ -1246,7 +1195,7 @@ impl AutoClient {
     }
 
     /// Consume a batch with an explicit aggregate read budget.
-    pub fn vread<'a>(
+    pub(crate) fn vread_impl<'a>(
         &self,
         ops: impl IntoIterator<Item = crate::ReadOp<'a, AutoFile>>,
         options: crate::ReadOptions,
@@ -1430,20 +1379,6 @@ impl AutoClient {
         self.write_vector(requests, false)
     }
 
-    /// Select short-write reporting (default) or completion with `write_all(true)`.
-    /// Completion validates ownership, live handles, and positional ranges across
-    /// the entire batch before dispatching any backend cohort. Failed or ambiguous
-    /// mutations are never replayed. Server-side errors
-    /// may still follow completed writes; this is not an atomic operation.
-    pub fn vwrite(
-        &self,
-        requests: &[crate::WriteOp<'_, AutoFile>],
-        options: crate::WriteOptions,
-    ) -> VfResult<Vec<WriteResult>> {
-        self.write_vector(requests, options.writes_all())
-            .map_err(vfsi_sync::application::public_write_error)
-    }
-
     pub(crate) fn write_complete(
         &self,
         requests: &[crate::WriteOp<'_, AutoFile>],
@@ -1530,7 +1465,7 @@ impl AutoClient {
 
     /// Retain every handle on cohort failure. Already completed cohorts are
     /// closed; a failing cohort may have a server-side completed prefix.
-    pub fn vclose(&self, files: &mut [AutoFile]) -> VfResult<()> {
+    pub(crate) fn vclose_impl(&self, files: &mut [AutoFile]) -> VfResult<()> {
         for (index, file) in files.iter().enumerate() {
             self.check_owner(file, index)?;
         }
@@ -1580,7 +1515,7 @@ impl AutoClient {
 
     /// Rename adjacent pairs on the same backend as a vector, preserving order.
     /// Options are atomic per pair; unsupported semantics are never emulated.
-    pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
+    pub(crate) fn vrename_impl<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         pairs: &[(P, Q)],
         options: crate::RenameOptions,

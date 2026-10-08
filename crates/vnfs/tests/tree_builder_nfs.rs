@@ -1,6 +1,6 @@
 #![cfg(feature = "nfs")]
 
-use vnfs::{Nfs, NfsVersion, VfsiExt, helpers::TreeBuilder};
+use vnfs::{Nfs, NfsVersion, Vfsi, VfsiExt, helpers::TreeBuilder};
 
 /// Optional live coverage; set VFSI_NFS_SERVER and VFSI_NFS_EXPORT. CI can
 /// require it with VFSI_NFS_REQUIRED=1, matching the backend integration suite.

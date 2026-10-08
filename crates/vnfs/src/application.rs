@@ -10,7 +10,7 @@ use std::path::Path;
 use vfsi_sync::application::visit_directory_pages;
 macro_rules! client_methods {
     ($client:ty, $receiver:path) => {
-        client_methods!($client, $receiver, <$client>::vread, $receiver);
+        client_methods!($client, $receiver, <$client>::vread_impl, $receiver);
     };
     ($client:ty, $receiver:path, $read:expr, $read_receiver:path) => {
         client_methods!(
@@ -20,7 +20,7 @@ macro_rules! client_methods {
             $read_receiver,
             <$client>::write_partial_native,
             <$client>::write_complete,
-            <$client>::vgetattrs,
+            <$client>::vgetattrs_impl,
             $receiver
         );
     };
@@ -37,7 +37,10 @@ macro_rules! client_methods {
             $write_receiver,
             <$client>::directory_page_batch_size,
             <$client>::open_native,
-            <$client>::stream_native
+            <$client>::stream_native;
+            vrename_impl, vsymlink_impl, vreadlink_impl, vhardlink_impl,
+            vstatfs_impl, vsetattrs_impl, limits_impl, vopen_impl,
+            vclose_impl, vmkdir_impl, vcopy_impl, capabilities_impl
         );
     };
 }
@@ -632,11 +635,11 @@ mod extension_tests {
         client_methods!(
             crate::Mounted,
             WritePolicyProbe::inner,
-            crate::Mounted::vread,
+            crate::Mounted::vread_impl,
             WritePolicyProbe::inner,
             WritePolicyProbe::partial,
             WritePolicyProbe::complete,
-            crate::Mounted::vgetattrs,
+            crate::Mounted::vgetattrs_impl,
             std::convert::identity
         );
     }

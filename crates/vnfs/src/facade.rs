@@ -10,7 +10,7 @@ macro_rules! owned_client {
         }
         impl $client {
             /// Vector metadata with selected attributes and final-symlink handling.
-            pub fn vgetattrs<P: AsRef<Path>>(
+            pub(crate) fn vgetattrs_impl<P: AsRef<Path>>(
                 &self,
                 paths: &[P],
                 options: AttrsOptions,
@@ -18,7 +18,7 @@ macro_rules! owned_client {
                 crate::metadata::metadata_backend(&self.inner, paths, options)
             }
             /// Query filesystem statistics for paths and this client's open handles.
-            pub fn vstatfs<P: vfsi_core::AsTarget<$file>>(
+            pub(crate) fn vstatfs_impl<P: vfsi_core::AsTarget<$file>>(
                 &self,
                 targets: &[P],
             ) -> Result<Vec<FilesystemStats>> {
@@ -32,7 +32,7 @@ macro_rules! owned_client {
                 self.inner.vstatfs(&targets)
             }
             /// Update selected metadata fields for many paths in one backend vector.
-            pub fn vsetattrs<P: vfsi_core::AsTarget<$file>>(
+            pub(crate) fn vsetattrs_impl<P: vfsi_core::AsTarget<$file>>(
                 &self,
                 updates: &[SetAttrsOp<P>],
             ) -> Result<()> {
@@ -49,25 +49,28 @@ macro_rules! owned_client {
                 self.inner.vsetattrs(&updates)
             }
             /// Create symbolic links, retaining each target's original text.
-            pub fn vsymlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()> {
+            pub(crate) fn vsymlink_impl<P: AsRef<Path>, Q: AsRef<Path>>(
+                &self,
+                pairs: &[(P, Q)],
+            ) -> Result<()> {
                 self.inner.vsymlink(pairs)
             }
             /// Read symlink targets in input order.
-            pub fn vreadlink<P: AsRef<Path>>(
+            pub(crate) fn vreadlink_impl<P: AsRef<Path>>(
                 &self,
                 paths: &[P],
             ) -> Result<Vec<std::path::PathBuf>> {
                 self.inner.vreadlink(paths)
             }
             /// Create hard links in native backend batches.
-            pub fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(
+            pub(crate) fn vhardlink_impl<P: AsRef<Path>, Q: AsRef<Path>>(
                 &self,
                 pairs: &[(P, Q)],
             ) -> Result<()> {
                 self.inner.vhardlink(pairs)
             }
             /// Return this client's allocation and traversal limits.
-            pub fn limits(&self) -> ResourceLimits {
+            pub(crate) fn limits_impl(&self) -> ResourceLimits {
                 self.inner.limits()
             }
             /// Drain file/directory cleanup queued by Drop. Failed targets
@@ -84,11 +87,11 @@ macro_rules! owned_client {
                 }
             }
             /// Query the backend's supported operations.
-            pub fn capabilities(&self) -> Result<Capabilities> {
+            pub(crate) fn capabilities_impl(&self) -> Result<Capabilities> {
                 self.inner.capabilities()
             }
             /// Rename source/destination pairs with per-pair atomic semantics.
-            pub fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
+            pub(crate) fn vrename_impl<P: AsRef<Path>, Q: AsRef<Path>>(
                 &self,
                 pairs: &[(P, Q)],
                 options: RenameOptions,
@@ -97,12 +100,8 @@ macro_rules! owned_client {
             }
             /// Create directories in vector phases; parents must exist.
             /// An error can follow partially completed mutations.
-            pub fn vmkdir<P: AsRef<Path>>(&self, paths: &[MkDirOp<P>]) -> Result<()> {
+            pub(crate) fn vmkdir_impl<P: AsRef<Path>>(&self, paths: &[MkDirOp<P>]) -> Result<()> {
                 self.inner.vmkdir(paths)
-            }
-            /// Create one directory with explicit Unix permission bits.
-            pub fn create_dir_with_mode(&self, path: impl AsRef<Path>, mode: u32) -> Result<()> {
-                self.inner.create_dir_with_mode(path, mode)
             }
             pub(crate) fn directory_page_batch_size(&self, _paths: &[&Path]) -> Result<usize> {
                 self.inner.directory_page_batch_size()
@@ -130,14 +129,6 @@ macro_rules! owned_client {
             pub fn ensure_empty_dir(&self, path: impl AsRef<Path>) -> Result<()> {
                 self.inner.ensure_empty_dir(path)
             }
-            /// Remove a directory tree with explicit error, batching, and retry policy.
-            pub fn remove_dir_all_with_options(
-                &self,
-                path: impl AsRef<Path>,
-                options: RemoveOptions,
-            ) -> Result<()> {
-                self.inner.remove_dir_all_with_options(path, options)
-            }
             /// Empty a directory while keeping it, with explicit removal policy.
             pub fn remove_dir_contents_with_options(
                 &self,
@@ -146,25 +137,9 @@ macro_rules! owned_client {
             ) -> Result<()> {
                 self.inner.remove_dir_contents_with_options(path, options)
             }
-            /// Create a symbolic link whose contents are the supplied target.
-            pub fn symlink(&self, target: impl AsRef<Path>, link: impl AsRef<Path>) -> Result<()> {
-                self.inner.symlink(target, link)
-            }
-            /// Create a hard link to the source object.
-            pub fn hard_link(
-                &self,
-                source: impl AsRef<Path>,
-                link: impl AsRef<Path>,
-            ) -> Result<()> {
-                self.inner.hard_link(source, link)
-            }
-            /// Read the target of a symbolic link.
-            pub fn read_link(&self, path: impl AsRef<Path>) -> Result<PathBuf> {
-                self.inner.read_link(path)
-            }
             /// Copy whole files in request order. A successful prefix may remain if
             /// a later request fails; this operation does not provide atomicity.
-            pub fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
+            pub(crate) fn vcopy_impl<P: AsRef<Path>, Q: AsRef<Path>>(
                 &self,
                 pairs: &[(P, Q)],
                 options: crate::CopyOption,
@@ -195,7 +170,7 @@ macro_rules! owned_client {
             /// Success returns one RAII handle per request. Failure returns no
             /// handles; VFSI does not promise transactional rollback of other
             /// filesystem effects such as file creation.
-            pub fn vopen(&self, requests: &[OpenOp]) -> Result<Vec<$file>> {
+            pub(crate) fn vopen_impl(&self, requests: &[OpenOp]) -> Result<Vec<$file>> {
                 self.inner
                     .vopen(requests)
                     .map(|files| files.into_iter().map(|inner| $file { inner }).collect())
@@ -221,12 +196,15 @@ macro_rules! owned_client {
             /// Try to close a group through one vector operation without consuming
             /// the handles. On failure, all handles remain armed: the backend may
             /// have closed a prefix, so callers must reconcile before retrying.
-            pub fn vclose<'a>(&self, files: impl IntoIterator<Item = &'a mut $file>) -> Result<()> {
+            pub(crate) fn vclose_impl<'a>(
+                &self,
+                files: impl IntoIterator<Item = &'a mut $file>,
+            ) -> Result<()> {
                 self.inner
                     .vclose(files.into_iter().map(|file| &mut file.inner))
             }
             /// Read with an explicit aggregate byte budget. See [`Vfsi::vread`].
-            pub fn vread<'a>(
+            pub(crate) fn vread_impl<'a>(
                 &self,
                 ops: impl IntoIterator<Item = ReadOp<'a, $file>>,
                 options: ReadOptions,
@@ -250,21 +228,6 @@ macro_rules! owned_client {
                 self.inner.vwrite_mapped_native(requests, |op| {
                     op.file().inner.write_request_at(op.offset(), op.data())
                 })
-            }
-            /// Select short-write reporting or completion of successful short writes.
-            /// Completion performs whole-batch local preflight, but errors may
-            /// follow mutations. Failed or ambiguous writes are never replayed.
-            pub fn vwrite(
-                &self,
-                requests: &[WriteOp<'_, $file>],
-                options: $crate::WriteOptions,
-            ) -> Result<Vec<WriteResult>> {
-                let result = if options.writes_all() {
-                    self.write_complete(requests)
-                } else {
-                    self.write_partial_native(requests)
-                };
-                result.map_err(vfsi_sync::application::public_write_error)
             }
             /// Write every byte in each positional request, retrying short writes in
             /// vector waves. Like `vwrite_native`, this is not transactional: an error may
@@ -508,7 +471,7 @@ macro_rules! owned_client {
 #[cfg(feature = "nfs")]
 mod nfs {
     use super::*;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     owned_client!(
         NfsClient,
         NfsFile,
@@ -523,7 +486,7 @@ pub use nfs::*;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 mod mounted {
     use super::*;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     owned_client!(
         Mounted,
         MountedFile,

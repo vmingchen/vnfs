@@ -1,7 +1,7 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
 
 use vnfs::VfsiExt;
-use vnfs::{ErrorKind, Mounted, helpers::TreeBuilder};
+use vnfs::{ErrorKind, Mounted, Vfsi, helpers::TreeBuilder};
 
 #[test]
 fn duplicate_directories_do_not_consume_planned_entry_slots() {

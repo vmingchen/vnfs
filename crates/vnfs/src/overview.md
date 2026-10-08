@@ -11,7 +11,7 @@ You do not need to construct protocol operations yourself.
 ```no_run
 # #[cfg(feature = "nfs")]
 # fn main() -> vnfs::Result<()> {
-use vnfs::{VfsiExt, Nfs, ReadOp};
+use vnfs::{Vfsi, VfsiExt, Nfs, ReadOp};
 
 let fs = Nfs::builder("nfs.example.com")
     .root("/export/application")

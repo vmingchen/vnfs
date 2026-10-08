@@ -100,7 +100,7 @@ limits allow; oversized vectors are split automatically.
 Already have the directory mounted on Linux? Discover its connection:
 
 ```rust,no_run
-use vnfs::VfsiExt;
+use vnfs::Vfsi;
 let fs = vnfs::Nfs::from_mount("/mnt/data/git/some/tree")?;
 let files = fs.vread([
     vnfs::ReadOp::whole("/file-1"),
@@ -172,7 +172,7 @@ you need its cache/coherency semantics, including access through aliases.
 ```rust,no_run
 # #[cfg(all(feature = "auto", target_os = "linux"))]
 # fn main() -> vnfs::Result<()> {
-use vnfs::{Auto, VfsiExt, OpenFlags, OpenOp};
+use vnfs::{Auto, Vfsi, OpenFlags, OpenOp};
 
     let fs = Auto::new("/")?;
     let paths = ["/mnt/nfs/file-1", "/mnt/nfs/file-2"];
