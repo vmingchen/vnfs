@@ -98,12 +98,12 @@ pub use vfsi_core::{AsTarget, FileHandle, Target, Vfsi, VfsiExt};
 mod metadata;
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod read;
-#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
+#[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use read::ReadRequest;
 pub use vfsi_core::api::AttrsOptions;
 pub use vfsi_core::api::ListDirOptions;
 pub use vfsi_core::api::RenameOptions;
-#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
+#[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_core::api::internal::OwnedReadResult;
 pub use vfsi_core::api::{ReadOp, ReadOptions, ReadResult};
 pub use vfsi_core::api::{WriteOp, WriteOptions};
@@ -208,7 +208,7 @@ pub use vfsi_core::{
     Attrs, Capabilities, CopyOption, DirEntry, ErrorDomain, FilesystemStats, OpenFlags, OpenOp,
     Permissions, RemoveOptions, StatusCode, TransportKind,
 };
-#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
+#[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_sync::ReadAllOptions;
 #[cfg(feature = "nfs")]
 mod native_nfs;

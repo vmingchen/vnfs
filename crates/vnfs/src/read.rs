@@ -1,7 +1,11 @@
 //! Private read dispatch projections and their regression tests.
 #[cfg(test)]
-use crate::{Error, OwnedReadResult, ReadOp};
-pub(crate) use vfsi_core::api::internal::{ReadRequest, consume_ops, read_batch};
+use crate::{Error, ReadOp};
+#[cfg(test)]
+use vfsi_core::api::internal::OwnedReadResult;
+pub(crate) use vfsi_core::api::internal::consume_ops;
+#[cfg(any(test, all(feature = "auto", target_os = "linux")))]
+pub(crate) use vfsi_core::api::internal::{ReadRequest, read_batch};
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1150,7 +1150,11 @@ impl AutoClient {
                         .iter()
                         .map(|index| resolved[*index].path.as_path())
                         .collect();
-                    match connection.client.vsymlink_attrs_native(&paths) {
+                    match connection.client.vgetattrs_native(
+                        &paths,
+                        vfsi_core::AttrMask::MODE,
+                        false,
+                    ) {
                         Ok(attrs) if attrs.len() == checked.len() => {
                             for (index, item) in checked.into_iter().zip(attrs) {
                                 if item.file_type() == crate::FileType::Symlink {

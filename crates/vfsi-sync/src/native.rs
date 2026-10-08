@@ -10,15 +10,19 @@ use vfsi_core::internal::ManyResults;
 /// namespace operations, directory enumeration, or native vector I/O.
 pub trait FileSystem {
     fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<FilesystemStats>> {
-        crate::backend_helpers::vstatfs_impl_default(self, files)
+        if files.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(VfError::unsupported(0))
+        }
     }
 
     fn close_deferred(&mut self, file: &VfFile) -> VfResult<()> {
-        crate::backend_helpers::close_deferred_default(self, file)
+        self.close_impl(file)
     }
 
     fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
-        crate::backend_helpers::take_notifications_default(self)
+        Vec::new()
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -26,35 +30,35 @@ pub trait FileSystem {
     }
 
     fn abs_path(&self, path: &Path) -> PathBuf {
-        crate::backend_helpers::abs_path_default(self, path)
+        path.to_path_buf()
     }
 
     fn open_path_impl(
         &mut self,
-        base: VfPathBase,
-        pathname: &Path,
-        flags: i32,
-        mode: u32,
+        _base: VfPathBase,
+        _pathname: &Path,
+        _flags: i32,
+        _mode: u32,
     ) -> VfResult<VfFile> {
-        crate::backend_helpers::open_path_impl_default(self, base, pathname, flags, mode)
+        Err(VfError::unsupported(0))
     }
 
     fn sync_data(&mut self, tcf: &VfFile) -> VfResult<()>;
 
     fn sync_all(&mut self, tcf: &VfFile) -> VfResult<()> {
-        crate::backend_helpers::sync_all_default(self, tcf)
+        self.sync_data(tcf)
     }
 
-    fn chdir(&mut self, path: &Path) -> VfResult<()> {
-        crate::backend_helpers::chdir_default(self, path)
+    fn chdir(&mut self, _path: &Path) -> VfResult<()> {
+        Err(VfError::unsupported(0))
     }
 
     fn getcwd(&self) -> PathBuf {
-        crate::backend_helpers::getcwd_default(self)
+        PathBuf::from("/")
     }
 
-    fn seek_raw_impl(&mut self, tcf: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
-        crate::backend_helpers::seek_raw_impl_default(self, tcf, offset, whence)
+    fn seek_raw_impl(&mut self, _tcf: &VfFile, _offset: i64, _whence: SeekFrom) -> VfResult<i64> {
+        Err(VfError::unsupported(0))
     }
 
     fn vf_path(&self, file: &VfFile) -> VfResult<PathBuf> {

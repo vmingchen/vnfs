@@ -265,7 +265,9 @@ impl<F: crate::Backend + 'static> Vfsi for crate::FsClient<F> {
     );
 }
 
-pub(crate) fn read_backend_owned<F: crate::Backend + 'static>(
+/// Shared owned-read dispatcher for native clients and their opaque facades.
+#[doc(hidden)]
+pub fn read_backend_owned<F: crate::Backend + 'static>(
     client: &crate::FsClient<F>,
     requests: &[ReadRequest<'_, crate::FsRead<'_, F>>],
     budget: usize,

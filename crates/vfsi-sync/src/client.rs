@@ -787,33 +787,6 @@ impl<F: Backend> FsClient<F> {
             .map(vfsi_core::metadata_from_attrs)
             .collect())
     }
-
-    /// Fetch no-follow metadata for many paths using the backend vector operation.
-    #[doc(hidden)]
-    pub fn vsymlink_attrs_native(&self, paths: &[&Path]) -> VfResult<Vec<Attrs>> {
-        let mut attrs: Vec<_> = paths
-            .iter()
-            .map(|path| crate::VfAttrs {
-                file: VfFile::from_os_path(path),
-                masks: AttrMask::MODE,
-                ..crate::VfAttrs::default()
-            })
-            .collect();
-        self.lock()?
-            .vgetattrs_nofollow_impl(&mut attrs)
-            .map_err(|error| {
-                error
-                    .index()
-                    .and_then(|index| paths.get(index))
-                    .map_or(error.clone(), |path| {
-                        error.with_context("vsymlink_attrs_native", path)
-                    })
-            })?;
-        Ok(attrs
-            .into_iter()
-            .map(vfsi_core::metadata_from_attrs)
-            .collect())
-    }
 }
 
 impl<F: Backend> FsClient<F> {

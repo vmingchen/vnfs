@@ -236,33 +236,10 @@ macro_rules! owned_client {
                     options.limit_or(self.limits().max_read_bytes),
                     |file, offset, length| file.inner.read_request_at(offset, length),
                     |file, offset, buffer| file.inner.read_request_at_into(offset, buffer),
-                    |requests, options| self.readv_owned(requests, options),
+                    |requests, budget| {
+                        vfsi_sync::application::read_backend_owned(&self.inner, requests, budget)
+                    },
                     |requests, bytes| self.inner.vread_into_with_limit_native(requests, bytes),
-                )
-            }
-            pub(crate) fn readv_owned(
-                &self,
-                requests: &[ReadRequest<'_, vfsi_sync::FsRead<'_, $backend>>],
-                budget: usize,
-            ) -> Result<Vec<OwnedReadResult>> {
-                if requests.iter().all(|request| request.range_ref().is_some()) {
-                    return self.inner.vread_with_limit_projected_native(
-                        requests,
-                        budget,
-                        |request| request.range_ref().expect("checked range requests"),
-                    );
-                }
-                crate::read::read_batch(
-                    requests,
-                    budget,
-                    |ranges, bytes| {
-                        self.inner
-                            .vread_with_limit_projected_native(ranges, bytes, |request| request)
-                    },
-                    |paths, bytes| {
-                        self.inner
-                            .read_files_native(paths, ReadAllOptions::new().max_total_bytes(bytes))
-                    },
                 )
             }
             /// Write ordered positional ranges; short writes are reported and effects are not atomic.

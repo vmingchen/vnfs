@@ -715,6 +715,27 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
             (true, VfFile::from_path("/link"), AttrMask::SIZE),
         ]
     );
+    let client = FsClient::new(concrete);
+    client
+        .vgetattrs_native::<&str>(&[], AttrMask::MODE, false)
+        .unwrap();
+    assert_eq!(
+        client
+            .vgetattrs_native(&["/link", "/file"], AttrMask::MODE, false)
+            .unwrap()
+            .len(),
+        2
+    );
+    let backend = client.into_inner().unwrap();
+    assert_eq!(
+        backend.queries.len(),
+        3,
+        "one no-follow vector, no empty dispatch"
+    );
+    assert_eq!(
+        backend.queries[2],
+        (false, VfFile::from_path("/link"), AttrMask::MODE)
+    );
 }
 
 #[test]
@@ -1042,6 +1063,22 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
         ..Default::default()
     };
     let backend: &mut dyn Backend = &mut concrete;
+    assert!(backend.vstatfs_impl(&[]).unwrap().is_empty());
+    assert!(backend.take_notifications().is_empty());
+    assert_eq!(backend.getcwd(), std::path::Path::new("/"));
+    let path = std::path::Path::new("relative/file");
+    assert_eq!(backend.abs_path(path), path);
+    assert_eq!(
+        backend.chdir(path).unwrap_err().kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        backend
+            .seek_raw_impl(&VfFile::from_fd(0), 0, vfsi_sync::SeekFrom::Set)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::Unsupported
+    );
     let files = backend
         .vopen_impl(&[OpenOp::new("/file", OpenFlags::READ)])
         .unwrap();
@@ -1109,9 +1146,14 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
             .kind(),
         std::io::ErrorKind::Unsupported
     );
+    backend.sync_all(&files[0]).unwrap();
+    backend.close_deferred(&files[0]).unwrap();
+    let files = backend
+        .vopen_impl(&[OpenOp::new("/file", OpenFlags::READ)])
+        .unwrap();
     backend.vclose_impl(&files).unwrap();
     assert!(!concrete.scalar.open);
-    assert_eq!(concrete.scalar.close_calls, 1);
+    assert_eq!(concrete.scalar.close_calls, 2);
     assert!(concrete.vector_reads >= 5);
 }
 
