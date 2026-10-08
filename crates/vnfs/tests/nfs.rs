@@ -3041,7 +3041,7 @@ fn owned_directory_handle_survives_rename_and_exposes_options() {
     handle.close().unwrap();
     let extra = format!("{moved}/extra");
     c.write(&extra, b"data").unwrap();
-    c.vremove_with_options_native(&[&extra], false, RemoveOptions::new().batch(2))
+    c.vremove_impl(&[&extra], false, RemoveOptions::new().batch(2))
         .unwrap();
     assert!(c.attrs(&extra).is_err());
     c.remove_dir_all_with_options(&moved, RemoveOptions::new().batch(2))

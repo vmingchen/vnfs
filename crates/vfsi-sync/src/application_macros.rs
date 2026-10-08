@@ -225,7 +225,7 @@ macro_rules! __vfsi_client_methods {
         ) -> Result<()> {
             match mode {
                 vfsi_core::api::RemoveMode::Entry | vfsi_core::api::RemoveMode::Tree => {
-                    <$client>::vremove_with_options_native(
+                    <$client>::vremove_impl(
                         $receiver(self),
                         paths,
                         mode == vfsi_core::api::RemoveMode::Tree,
@@ -235,7 +235,7 @@ macro_rules! __vfsi_client_methods {
                 vfsi_core::api::RemoveMode::Contents => {
                     let mut first_error = None;
                     for (index, path) in paths.iter().enumerate() {
-                        if let Err(error) = <$client>::remove_dir_contents_with_options(
+                        if let Err(error) = <$client>::remove_dir_contents_impl(
                             $receiver(self),
                             path,
                             options,

@@ -552,11 +552,7 @@ impl AutoClient {
         Ok(())
     }
 
-    pub fn vremove_native<P: AsRef<Path>>(&self, paths: &[P], recursive: bool) -> VfResult<()> {
-        self.vremove_with_options_native(paths, recursive, crate::RemoveOptions::default())
-    }
-
-    pub fn vremove_with_options_native<P: AsRef<Path>>(
+    pub(crate) fn vremove_impl<P: AsRef<Path>>(
         &self,
         paths: &[P],
         recursive: bool,
@@ -592,12 +588,10 @@ impl AutoClient {
                 .map(|route| route.path.as_path())
                 .collect();
             match &resolved[start].route {
-                Route::Mounted => self
-                    .mounted
-                    .vremove_with_options_native(&batch, recursive, options),
-                Route::Nfs(connection) => connection
-                    .client
-                    .vremove_with_options_native(&batch, recursive, options),
+                Route::Mounted => self.mounted.vremove_impl(&batch, recursive, options),
+                Route::Nfs(connection) => {
+                    connection.client.vremove_impl(&batch, recursive, options)
+                }
             }
             .map_err(|error| indexed(error, start))?;
             start = end;
@@ -903,7 +897,7 @@ impl AutoClient {
         self.resolve(path, &mounts)
     }
 
-    pub fn remove_dir_contents_with_options(
+    pub(crate) fn remove_dir_contents_impl(
         &self,
         path: impl AsRef<Path>,
         options: crate::RemoveOptions,

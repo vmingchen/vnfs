@@ -186,7 +186,9 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     assert!(buffers.iter().all(|buffer| buffer == b"payload"));
     mounted.close_files(reopened).unwrap();
     raw.vclose_owned(raw_reopened).unwrap();
-    mounted.vremove_native(&paths, false).unwrap();
+    mounted
+        .vremove(&paths, vnfs::RemoveMode::Entry, Default::default())
+        .unwrap();
 }
 
 #[test]

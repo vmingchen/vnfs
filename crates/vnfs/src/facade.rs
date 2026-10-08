@@ -130,7 +130,7 @@ macro_rules! owned_client {
                 self.inner.ensure_empty_dir(path)
             }
             /// Empty a directory while keeping it, with explicit removal policy.
-            pub fn remove_dir_contents_with_options(
+            pub(crate) fn remove_dir_contents_impl(
                 &self,
                 path: impl AsRef<Path>,
                 options: RemoveOptions,
@@ -146,24 +146,14 @@ macro_rules! owned_client {
             ) -> Result<()> {
                 self.inner.vcopy(pairs, options)
             }
-            /// Remove paths in request order, optionally recursing into directories.
-            /// A successful prefix may remain if a later path fails.
-            pub fn vremove_native<P: AsRef<Path>>(
-                &self,
-                paths: &[P],
-                recursive: bool,
-            ) -> Result<()> {
-                self.inner.vremove_native(paths, recursive)
-            }
             /// Remove paths with explicit error, batching, and retry policy.
-            pub fn vremove_with_options_native<P: AsRef<Path>>(
+            pub(crate) fn vremove_impl<P: AsRef<Path>>(
                 &self,
                 paths: &[P],
                 recursive: bool,
                 options: RemoveOptions,
             ) -> Result<()> {
-                self.inner
-                    .vremove_with_options_native(paths, recursive, options)
+                self.inner.vremove_impl(paths, recursive, options)
             }
             /// Open an ordered vector of files.
             ///

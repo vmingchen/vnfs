@@ -402,3 +402,12 @@ fn internal_dispatch(fs: &vnfs::NfsClient) {
     fs.vopen_impl(&[]);
 }
 ```
+
+Removal dispatch stays private; applications use `Vfsi::vremove`.
+
+```compile_fail
+use vnfs::Vfsi;
+fn removal_backend(fs: &vnfs::NfsClient) {
+    fs.vremove_impl(&["/file"], false, Default::default());
+}
+```

@@ -115,7 +115,7 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
             vnfs::ListDirOptions::from(vnfs::WalkOptions::new()).fields(fields),
         )?;
         client.vcopy(&[("/a/source", "/a/copy")], vnfs::CopyOption::default())?;
-        client.vremove_native(&["/a/copy"], false)
+        client.vremove(&["/a/copy"], vnfs::RemoveMode::Entry, Default::default())
     }
     let _ = app as fn(&vnfs::NfsClient) -> vnfs::Result<()>;
 }
@@ -289,7 +289,11 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         vnfs::ErrorKind::Unsupported
     );
     client
-        .vremove_native(&["/copies/a", "/copies/b", "/copies/hard"], false)
+        .vremove(
+            &["/copies/a", "/copies/b", "/copies/hard"],
+            vnfs::RemoveMode::Entry,
+            Default::default(),
+        )
         .unwrap();
     client.ensure_empty_dir("/copies").unwrap();
     client.remove_dir_all("/copies").unwrap();

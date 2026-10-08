@@ -579,7 +579,7 @@ impl<F: Backend> FsClient<F> {
     }
 
     /// Empty a directory while keeping it, with explicit removal policy.
-    pub(crate) fn remove_dir_contents_with_options(
+    pub(crate) fn remove_dir_contents_impl(
         &self,
         path: impl AsRef<Path>,
         options: RemoveOptions,
@@ -723,12 +723,12 @@ impl<F: Backend> FsClient<F> {
     /// A successful prefix may remain if a later path fails.
     #[doc(hidden)]
     pub fn vremove_native<P: AsRef<Path>>(&self, paths: &[P], recursive: bool) -> VfResult<()> {
-        self.vremove_with_options_native(paths, recursive, RemoveOptions::default())
+        self.vremove_impl(paths, recursive, RemoveOptions::default())
     }
 
     /// Remove paths with explicit error, batching, and retry policy.
     #[doc(hidden)]
-    pub fn vremove_with_options_native<P: AsRef<Path>>(
+    pub fn vremove_impl<P: AsRef<Path>>(
         &self,
         paths: &[P],
         recursive: bool,

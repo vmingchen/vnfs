@@ -700,11 +700,7 @@ fn owned_directory_handle_refuses_path_only_backend() {
     let options = RemoveOptions::new().continue_on_error(true);
     assert!(VfsiExt::remove_dir_contents_with_options(&client, "/d", options).is_err());
     assert!(VfsiExt::remove_dir_all_with_options(&client, "/d", options).is_err());
-    assert!(
-        client
-            .vremove_with_options_native(&["/d/keep"], false, options)
-            .is_err()
-    );
+    assert!(client.vremove_impl(&["/d/keep"], false, options).is_err());
     assert_eq!(client.read("/d/keep").unwrap(), b"x");
     VfsiExt::remove_dir_all_with_options(&client, "/d", RemoveOptions::default()).unwrap();
 }
