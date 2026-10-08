@@ -61,14 +61,9 @@ mod routed {
     impl FileHandle for crate::AutoFile {
         vfsi_sync::__vfsi_file_methods!(crate::AutoFile);
     }
-    impl Vfsi for crate::AutoClient {
-        type File = crate::AutoFile;
-        client_methods!(crate::AutoClient, std::convert::identity);
-    }
-
     impl Vfsi for crate::Auto {
         type File = crate::AutoFile;
-        client_methods!(crate::AutoClient, std::ops::Deref::deref);
+        client_methods!(crate::Auto, std::convert::identity);
     }
 
     impl Vfsi for crate::Mounted {

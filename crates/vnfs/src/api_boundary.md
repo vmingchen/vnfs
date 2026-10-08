@@ -411,3 +411,9 @@ fn removal_backend(fs: &vnfs::NfsClient) {
     fs.vremove_impl(&["/file"], false, Default::default());
 }
 ```
+
+`Auto` is the single routed client, with no public inner-client type.
+
+```compile_fail
+use vnfs::AutoClient;
+```

@@ -36,9 +36,7 @@ fn concrete_and_extension_directory_visitors_borrow_entries_consistently() {
     std::fs::write(root.join("file"), b"data").unwrap();
     let mounted = vnfs::Mounted::new(&root).unwrap();
     let auto = vnfs::Auto::new(&root).unwrap();
-    // The dereferenced concrete client must not shadow the public helper with
-    // its private optimized whole-file implementation and native option type.
-    let concrete: &vnfs::AutoClient = &auto;
+    let concrete: &vnfs::Auto = &auto;
     assert_eq!(
         concrete
             .read_files_with_options(

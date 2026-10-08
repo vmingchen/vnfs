@@ -26,17 +26,6 @@ use vfsi_sync::DEFAULT_READ_ALLV_MAX_TOTAL_BYTES;
 
 const READ_CHUNK: usize = 1024 * 1024;
 
-/// Opt into mount-aware direct NFS acceleration. Unlike [`Mounted`], eligible
-/// NFSv4 AUTH_SYS mounts use a separate client and vectorized COMPOUNDs.
-///
-/// # Consistency
-/// Direct operations do not share or invalidate the kernel client's caches.
-/// Mixing them with kernel I/O on the same objects (including path aliases)
-/// can expose stale data or delayed writes. This is not a transparent caching
-/// acceleration. Use `Mounted` when kernel coherency semantics are required.
-#[derive(Debug)]
-pub struct Auto(AutoClient);
-
 impl Auto {
     /// Root all application paths at this existing host directory. For example,
     /// root `/work` plus application `/a` addresses host `/work/a`.
@@ -47,22 +36,21 @@ impl Auto {
         if !root.is_dir() {
             return Err(VfError::client(0, libc::ENOTDIR as u32));
         }
-        Ok(Self(AutoClient {
+        Ok(Self {
             mounted: Mounted::new(&root)?.inner,
             root,
             connections: Mutex::new(HashMap::new()),
             owner: Arc::new(()),
             limits: ResourceLimits::default(),
-        }))
+        })
     }
 
     pub fn with_limits(mut self, limits: ResourceLimits) -> Self {
-        self.0.limits = limits;
-        self.0.mounted = self.0.mounted.with_limits(limits);
+        self.limits = limits;
+        self.mounted = self.mounted.with_limits(limits);
         // Keep the connection/route identities: already-open handles still
         // belong to these clients. Only replace their per-clone policies.
         for connection in self
-            .0
             .connections
             .get_mut()
             .unwrap_or_else(|error| error.into_inner())
@@ -71,13 +59,6 @@ impl Auto {
             connection.client = connection.client.clone().with_limits(limits);
         }
         self
-    }
-}
-
-impl std::ops::Deref for Auto {
-    type Target = AutoClient;
-    fn deref(&self) -> &Self::Target {
-        &self.0
     }
 }
 
@@ -158,8 +139,15 @@ struct Resolved {
     path: PathBuf,
 }
 
-/// Mount-aware client with lazily established per-mount NFS connections.
-pub struct AutoClient {
+/// Opt into mount-aware direct NFS acceleration. Unlike [`Mounted`], eligible
+/// NFSv4 AUTH_SYS mounts use a separate client and vectorized COMPOUNDs.
+///
+/// # Consistency
+/// Direct operations do not share or invalidate the kernel client's caches.
+/// Mixing them with kernel I/O on the same objects (including path aliases)
+/// can expose stale data or delayed writes. This is not a transparent caching
+/// acceleration. Use `Mounted` when kernel coherency semantics are required.
+pub struct Auto {
     root: PathBuf,
     mounted: FsClient<DummyVecFs>,
     connections: Mutex<HashMap<u64, NfsConnection>>,
@@ -167,16 +155,16 @@ pub struct AutoClient {
     limits: ResourceLimits,
 }
 
-impl std::fmt::Debug for AutoClient {
+impl std::fmt::Debug for Auto {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("AutoClient")
+            .debug_struct("Auto")
             .field("root", &self.root)
             .finish_non_exhaustive()
     }
 }
 
-impl AutoClient {
+impl Auto {
     pub(crate) fn limits_impl(&self) -> ResourceLimits {
         self.limits
     }
@@ -1588,7 +1576,7 @@ fn cohort_end(resolved: &[Resolved], start: usize) -> usize {
 /// OpenOptions-style builder for a mount-aware client.
 #[derive(Clone)]
 pub struct AutoOpenOptions<'a> {
-    client: &'a AutoClient,
+    client: &'a Auto,
     flags: OpenFlags,
     mode: u32,
 }
@@ -1596,7 +1584,7 @@ pub struct AutoOpenOptions<'a> {
 /// Attrs builder with the same application semantics as `SetMetadata`.
 #[derive(Clone)]
 pub struct AutoSetMetadata<'a> {
-    client: &'a AutoClient,
+    client: &'a Auto,
     path: PathBuf,
     update: crate::SetAttrsOp<()>,
 }

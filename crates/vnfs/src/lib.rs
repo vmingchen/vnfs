@@ -33,8 +33,8 @@ pub mod nfs {
 pub mod mounted {
     #[doc(inline)]
     pub use crate::{
-        Auto, AutoClient, AutoDir, AutoFile, AutoOpenOptions, AutoRoute, AutoSetMetadata, Mounted,
-        MountedDir, MountedFile, MountedOpenOptions, MountedSetMetadata,
+        Auto, AutoDir, AutoFile, AutoOpenOptions, AutoRoute, AutoSetMetadata, Mounted, MountedDir,
+        MountedFile, MountedOpenOptions, MountedSetMetadata,
     };
 }
 
@@ -174,7 +174,7 @@ pub mod diagnostics {
 #[cfg(all(feature = "auto", target_os = "linux"))]
 mod auto;
 #[cfg(all(feature = "auto", target_os = "linux"))]
-pub use auto::{Auto, AutoClient, AutoDir, AutoFile, AutoOpenOptions, AutoRoute, AutoSetMetadata};
+pub use auto::{Auto, AutoDir, AutoFile, AutoOpenOptions, AutoRoute, AutoSetMetadata};
 
 /// Common application imports.
 pub mod prelude {
