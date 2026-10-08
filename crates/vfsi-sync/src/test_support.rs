@@ -55,10 +55,10 @@ pub fn supervise_with_deadline(test: &str) -> bool {
 /// Run a broad set of vectorized-filesystem assertions against `fs`, using
 /// paths under `base` (which must be unique per caller).
 pub fn run_suite(fs: &mut impl Backend, base: &str) {
-    let capabilities = fs.capability_bits();
-    let posix_metadata = capabilities & VF_CAP_POSIX_METADATA != 0;
-    let symlinks = capabilities & VF_CAP_SYMLINKS != 0;
-    let hardlinks = capabilities & VF_CAP_HARDLINKS != 0;
+    let capabilities = fs.capabilities();
+    let posix_metadata = capabilities.contains(Capabilities::POSIX_METADATA);
+    let symlinks = capabilities.contains(Capabilities::SYMLINKS);
+    let hardlinks = capabilities.contains(Capabilities::HARDLINKS);
     let dir = format!("{}/suite", base);
     fs.ensure_dir_impl(Path::new(&dir), 0o755)
         .expect("ensure_dir");
@@ -731,7 +731,7 @@ pub fn run_suite(fs: &mut impl Backend, base: &str) {
 
     // Generic recursive removal requires no-follow metadata. Backends without
     // LSTAT must reject it without changing the tree.
-    if capabilities & VF_CAP_LSTAT != 0 {
+    if capabilities.contains(Capabilities::LSTAT) {
         fs.remove_paths_impl(&[Path::new(&dir)], true)
             .expect("rm recursive");
         assert!(!fs.exists_impl(Path::new(&dir)).unwrap());

@@ -77,7 +77,7 @@ ordinary applications use the concrete client methods instead:
   for C and Python adapters, and has no blanket implementation from scalar I/O.
 - `NfsClient` owns and shares a connection; `NfsFile` owns a remote handle without
   borrowing the entire client.
-- `NfsExtensions` and `SmbExtensions` contain protocol-only negotiated state.
+- Concrete NFS and SMB backends expose protocol-only negotiated state directly.
 - `OpenOp`, `AttrsOptions`, and `SetAttrsOp` replace raw flags and
   overloaded metadata masks.
 - Public `v*` operations return ordered results on success or one `vnfs::Error`

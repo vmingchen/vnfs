@@ -21,12 +21,8 @@ pub trait FileSystem {
         crate::backend_helpers::take_notifications_default(self)
     }
 
-    fn capability_bits(&self) -> u64 {
-        crate::backend_helpers::capability_bits_default(self)
-    }
-
     fn capabilities(&self) -> Capabilities {
-        crate::backend_helpers::typed_capabilities_default(self)
+        Capabilities::empty()
     }
 
     fn abs_path(&self, path: &Path) -> PathBuf {

@@ -54,9 +54,8 @@ use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 use crate::path::{normalize_bytes, path_bytes, path_from_bytes};
 use crate::vecfs::{
     Adb, AttrMask, CopyOption, ERR_ACCES, ERR_EBADF, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT,
-    ERR_NOTDIR, ExtentPair, Fd, ReadOp, ReadResult, SeekFrom, SetAttrsOp, Target,
-    VF_CAP_SERVER_COPY, VfAttrs, VfError, VfFile, VfOffset, VfPathBase, VfRes, VfResult, VfType,
-    WriteOp, WriteResult,
+    ERR_NOTDIR, ExtentPair, Fd, ReadOp, ReadResult, SeekFrom, SetAttrsOp, Target, VfAttrs, VfError,
+    VfFile, VfOffset, VfPathBase, VfRes, VfResult, VfType, WriteOp, WriteResult,
 };
 
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
@@ -159,22 +158,12 @@ pub struct SmbVecFs {
     last_writev_was_concurrent: bool,
 }
 
-/// SMB-only negotiated state, kept out of protocol-neutral VFSI traits.
-pub trait SmbExtensions {
-    fn smb_dialect_revision(&self) -> u16;
-    fn server_copy_enabled(&self) -> bool;
-}
-
-impl SmbExtensions for SmbVecFs {
-    fn smb_dialect_revision(&self) -> u16 {
-        self.dialect() as u16
-    }
-    fn server_copy_enabled(&self) -> bool {
+impl SmbVecFs {
+    /// Whether server-side copy was enabled for this connection.
+    pub fn server_copy_enabled(&self) -> bool {
         self.server_copy_enabled
     }
-}
 
-impl SmbVecFs {
     /// Connect to an SMB share using NTLM credentials (or guest access when
     /// `username` and `password` are empty).
     pub fn connect(
@@ -1302,11 +1291,11 @@ impl SmbVecFs {
 }
 
 impl FileSystem for SmbVecFs {
-    fn capability_bits(&self) -> u64 {
+    fn capabilities(&self) -> Capabilities {
         if self.server_copy_enabled {
-            VF_CAP_SERVER_COPY
+            Capabilities::SERVER_COPY
         } else {
-            0
+            Capabilities::empty()
         }
     }
 

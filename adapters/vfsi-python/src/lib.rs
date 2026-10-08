@@ -18,10 +18,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 
 use vfsi_core::{
-    AttrMask, ERR_ACCES, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT, ERR_NOTDIR, ExtentPair,
-    ReadOp, ReadResult, SeekFrom, VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS,
-    VF_CAP_POSIX_METADATA, VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VF_ERR_UNSUPPORTED, VfAttrs,
-    VfError, VfFile, VfOffset, VfType, WriteOp, WriteResult,
+    AttrMask, Capabilities, ERR_ACCES, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT, ERR_NOTDIR,
+    ExtentPair, ReadOp, ReadResult, SeekFrom, VF_CAP_HARDLINKS, VF_CAP_LSTAT,
+    VF_CAP_NON_UTF8_PATHS, VF_CAP_POSIX_METADATA, VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS,
+    VF_ERR_UNSUPPORTED, VfAttrs, VfError, VfFile, VfOffset, VfType, WriteOp, WriteResult,
 };
 #[cfg(feature = "dummy")]
 use vfsi_local::DummyVecFs;
@@ -789,12 +789,14 @@ impl NfsClient {
 
     /// Current backend capability bitset (see CAP_SERVER_COPY).
     fn capabilities(&self, py: Python<'_>) -> PyResult<u64> {
-        self.with_fs(py, |fs| Ok(fs.capability_bits()))
+        self.with_fs(py, |fs| Ok(fs.capabilities().bits()))
     }
 
     /// Whether NFSv4.2 server COPY is currently enabled.
     fn server_copy_enabled(&self, py: Python<'_>) -> PyResult<bool> {
-        self.with_fs(py, |fs| Ok(fs.capability_bits() & VF_CAP_SERVER_COPY != 0))
+        self.with_fs(py, |fs| {
+            Ok(fs.capabilities().contains(Capabilities::SERVER_COPY))
+        })
     }
 
     // -- single-op ------------------------------------------------------------------
@@ -1223,7 +1225,7 @@ impl NfsClient {
     /// lstat many paths in batches (used by `exists`/`exists_many`).
     fn lstat_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<StatManyResult> {
         let (attrs, errors) = self.with_fs(py, move |fs| {
-            let follow = fs.capability_bits() & VF_CAP_LSTAT == 0;
+            let follow = !fs.capabilities().contains(Capabilities::LSTAT);
             attrs_many_impl(fs, &paths, full_mask(), follow).map_err(|e| to_py_err(e, None))
         })?;
         let mut out = Vec::with_capacity(attrs.len());
@@ -1240,7 +1242,7 @@ impl NfsClient {
     /// Non-NOENT failures raise.
     fn exists_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<Vec<bool>> {
         self.with_fs(py, move |fs| {
-            let follow = fs.capability_bits() & VF_CAP_LSTAT == 0;
+            let follow = !fs.capabilities().contains(Capabilities::LSTAT);
             let (attrs, errors) = attrs_many_impl(fs, &paths, AttrMask::stat(), follow)
                 .map_err(|e| to_py_err(e, None))?;
             let mut first_err: Option<VfError> = None;
@@ -2002,13 +2004,13 @@ impl BindingBackend for DummyVecFs {}
 #[cfg(feature = "nfs")]
 impl BindingBackend for vfsi_nfs::NfsVecFs {
     fn nfs_minorversion(&self) -> Option<u32> {
-        Some(vfsi_nfs::NfsExtensions::nfs_minor_version(self))
+        Some(self.minorversion())
     }
 }
 #[cfg(feature = "smb")]
 impl BindingBackend for SmbVecFs {
     fn smb_dialect(&self) -> Option<u16> {
-        Some(vfsi_smb::SmbExtensions::smb_dialect_revision(self))
+        Some(self.dialect() as u16)
     }
 }
 

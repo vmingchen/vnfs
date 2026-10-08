@@ -1058,8 +1058,8 @@ impl FileSystem for DummyVecFs {
         Ok(results)
     }
 
-    fn capability_bits(&self) -> u64 {
-        VF_CAP_UNIX_SEMANTICS
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::UNIX_SEMANTICS
     }
 
     fn abs_path(&self, path: &Path) -> PathBuf {

@@ -245,26 +245,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
 }
 
 impl<F: crate::FileSystem> FileHandle for crate::FsFile<F> {
-    type ReadRequest<'a>
-        = crate::FsRead<'a, F>
-    where
-        Self: 'a;
-    type ReadIntoRequest<'a>
-        = crate::FsReadInto<'a, F>
-    where
-        Self: 'a;
     crate::__vfsi_file_methods!(crate::FsFile<F>);
-}
-
-pub(crate) trait NativeHooks: Vfsi {
-    fn page_capacity(&self, paths: &[&Path]) -> Result<usize>;
-    fn open_native(&self, request: OpenOp) -> Result<Self::File>;
-    fn stream_native(
-        &self,
-        path: impl AsRef<Path>,
-        options: crate::StreamOptions,
-        callback: impl FnMut(u64, &[u8]) -> Result<bool>,
-    ) -> Result<crate::StreamCompletion>;
 }
 
 impl<F: crate::Backend + 'static> Vfsi for crate::FsClient<F> {
@@ -278,25 +259,10 @@ impl<F: crate::Backend + 'static> Vfsi for crate::FsClient<F> {
         write_backend_all::<F>,
         metadata_backend::<F, _>,
         std::convert::identity,
-        NativeHooks
+        |client: &Self, _: &[&Path]| client.directory_page_batch_size(),
+        Self::open_with_native,
+        Self::read_stream_with_options
     );
-}
-
-impl<F: crate::Backend + 'static> NativeHooks for crate::FsClient<F> {
-    fn open_native(&self, request: OpenOp) -> Result<Self::File> {
-        self.open_with_native(request)
-    }
-    fn page_capacity(&self, _paths: &[&Path]) -> Result<usize> {
-        self.directory_page_batch_size()
-    }
-    fn stream_native(
-        &self,
-        path: impl AsRef<Path>,
-        options: crate::StreamOptions,
-        callback: impl FnMut(u64, &[u8]) -> Result<bool>,
-    ) -> Result<crate::StreamCompletion> {
-        self.read_stream_with_options(path, options, callback)
-    }
 }
 
 pub(crate) fn read_backend_owned<F: crate::Backend + 'static>(
@@ -326,6 +292,8 @@ pub(crate) fn read_backend<'a, F: crate::Backend + 'static>(
     consume_ops(
         ops,
         options.limit_or(client.limits().max_read_bytes),
+        crate::FsFile::read_request_at,
+        crate::FsFile::read_request_at_into,
         |requests, options| read_backend_owned(client, requests, options),
         |requests, bytes| client.vread_into_with_limit_native(requests, bytes),
     )

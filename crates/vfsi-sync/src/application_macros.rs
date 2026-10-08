@@ -10,16 +10,6 @@ macro_rules! __vfsi_file_methods {
         fn attrs(&self) -> Result<Attrs> {
             <$file>::attrs(self)
         }
-        fn read_request_at(&self, offset: u64, length: usize) -> Self::ReadRequest<'_> {
-            <$file>::read_request_at(self, offset, length)
-        }
-        fn read_request_at_into<'a>(
-            &'a self,
-            offset: u64,
-            buffer: &'a mut [u8],
-        ) -> Self::ReadIntoRequest<'a> {
-            <$file>::read_request_at_into(self, offset, buffer)
-        }
         fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize> {
             <$file>::read_at(self, buffer, offset)
         }
@@ -66,7 +56,7 @@ macro_rules! __vfsi_file_methods {
 macro_rules! __vfsi_client_methods {
     ($client:ty, $receiver:path, $vread_native:expr, $read_receiver:path,
      $vwrite_native:expr, $vwrite_all_native:expr, $metadata:expr,
-     $write_receiver:path, $hooks:path) => {
+     $write_receiver:path, $page_capacity:expr, $open_native:expr, $stream_native:expr) => {
         fn vrename<P: AsRef<Path>, Q: AsRef<Path>>(
             &self,
             pairs: &[(P, Q)],
@@ -84,7 +74,7 @@ macro_rules! __vfsi_client_methods {
                 paths,
                 options,
                 self.limits(),
-                |paths| <$client as $hooks>::page_capacity($receiver(self), paths),
+                |paths| ($page_capacity)($receiver(self), paths),
                 |path| {
                     let metadata = self.vgetattrs(
                         &[path],
@@ -126,13 +116,11 @@ macro_rules! __vfsi_client_methods {
         ) -> Result<Vec<$crate::StreamCompletion>> {
             let mut output = Vec::new();
             for (index, path) in paths.iter().enumerate() {
-                let completion = <$client as $hooks>::stream_native(
-                    $receiver(self),
-                    path,
-                    options,
-                    |offset, data| callback(index, offset, data),
-                )
-                .map_err(|error| $crate::application::vector_index(error, index))?;
+                let completion =
+                    ($stream_native)($receiver(self), path, options, |offset, data| {
+                        callback(index, offset, data)
+                    })
+                    .map_err(|error| $crate::application::vector_index(error, index))?;
                 output.push(completion);
                 if matches!(completion, $crate::StreamCompletion::Stopped { .. }) {
                     break;
@@ -178,8 +166,7 @@ macro_rules! __vfsi_client_methods {
         fn vopen(&self, requests: &[OpenOp]) -> Result<Vec<Self::File>> {
             if requests.len() == 1 {
                 // Preserve native symlink resolution and independent-handle state.
-                return <$client as $hooks>::open_native($receiver(self), requests[0].clone())
-                    .map(|file| vec![file]);
+                return ($open_native)($receiver(self), requests[0].clone()).map(|file| vec![file]);
             }
             <$client>::vopen($receiver(self), requests)
         }

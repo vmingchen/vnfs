@@ -21,8 +21,8 @@ pub mod nfs {
     #[doc(inline)]
     pub use crate::{
         Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsClientPool, NfsDir, NfsEvent, NfsFile,
-        NfsObserver, NfsOpenOptions, NfsRead, NfsReadInto, NfsReadPool, NfsReadPoolOptions,
-        NfsRecoveryPolicy, NfsSetMetadata, NfsVersion,
+        NfsObserver, NfsOpenOptions, NfsReadPool, NfsReadPoolOptions, NfsRecoveryPolicy,
+        NfsSetMetadata, NfsVersion,
     };
 }
 
@@ -33,9 +33,8 @@ pub mod nfs {
 pub mod mounted {
     #[doc(inline)]
     pub use crate::{
-        Auto, AutoClient, AutoDir, AutoFile, AutoOpenOptions, AutoRead, AutoReadInto, AutoRoute,
-        AutoSetMetadata, Mounted, MountedDir, MountedFile, MountedOpenOptions, MountedRead,
-        MountedReadInto, MountedSetMetadata,
+        Auto, AutoClient, AutoDir, AutoFile, AutoOpenOptions, AutoRoute, AutoSetMetadata, Mounted,
+        MountedDir, MountedFile, MountedOpenOptions, MountedSetMetadata,
     };
 }
 
@@ -127,14 +126,9 @@ mod facade;
 /// High-level filesystem workflows built on the application API.
 pub mod helpers;
 #[cfg(all(feature = "auto", target_os = "linux"))]
-pub use facade::{
-    Mounted, MountedDir, MountedFile, MountedOpenOptions, MountedRead, MountedReadInto,
-    MountedSetMetadata,
-};
+pub use facade::{Mounted, MountedDir, MountedFile, MountedOpenOptions, MountedSetMetadata};
 #[cfg(feature = "nfs")]
-pub use facade::{
-    NfsClient, NfsDir, NfsFile, NfsOpenOptions, NfsRead, NfsReadInto, NfsSetMetadata,
-};
+pub use facade::{NfsClient, NfsDir, NfsFile, NfsOpenOptions, NfsSetMetadata};
 
 /// Aggregate NFS transport counters for optional application diagnostics.
 /// These counters are process-wide, not per client, and may include other
@@ -180,10 +174,7 @@ pub mod diagnostics {
 #[cfg(all(feature = "auto", target_os = "linux"))]
 mod auto;
 #[cfg(all(feature = "auto", target_os = "linux"))]
-pub use auto::{
-    Auto, AutoClient, AutoDir, AutoFile, AutoOpenOptions, AutoRead, AutoReadInto, AutoRoute,
-    AutoSetMetadata,
-};
+pub use auto::{Auto, AutoClient, AutoDir, AutoFile, AutoOpenOptions, AutoRoute, AutoSetMetadata};
 
 /// Common application imports.
 pub mod prelude {

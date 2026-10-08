@@ -24,14 +24,6 @@ pub fn take_notifications_default<F: FileSystem + ?Sized>(
     Vec::new()
 }
 
-pub fn capability_bits_default<F: FileSystem + ?Sized>(_backend: &F) -> u64 {
-    0
-}
-
-pub fn typed_capabilities_default<F: FileSystem + ?Sized>(backend: &F) -> Capabilities {
-    Capabilities::from_bits_retain(backend.capability_bits())
-}
-
 pub fn abs_path_default<F: FileSystem + ?Sized>(_backend: &F, path: &Path) -> PathBuf {
     path.to_path_buf()
 }

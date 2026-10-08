@@ -8,17 +8,6 @@ use std::io::SeekFrom;
 use std::path::Path;
 #[cfg(test)]
 use vfsi_sync::application::visit_directory_pages;
-pub(crate) trait NativeHooks: Vfsi {
-    fn page_capacity(&self, paths: &[&Path]) -> Result<usize>;
-    fn open_native(&self, request: OpenOp) -> Result<Self::File>;
-    fn stream_native(
-        &self,
-        path: impl AsRef<Path>,
-        options: crate::StreamOptions,
-        callback: impl FnMut(u64, &[u8]) -> Result<bool>,
-    ) -> Result<crate::StreamCompletion>;
-}
-
 macro_rules! client_methods {
     ($client:ty, $receiver:path) => {
         client_methods!($client, $receiver, <$client>::vread, $receiver);
@@ -46,15 +35,15 @@ macro_rules! client_methods {
             $complete,
             $attrs,
             $write_receiver,
-            NativeHooks
+            <$client>::directory_page_batch_size,
+            <$client>::open_native,
+            <$client>::stream_native
         );
     };
 }
 
 #[cfg(feature = "nfs")]
 impl FileHandle for crate::NfsFile {
-    type ReadRequest<'a> = crate::NfsRead<'a>;
-    type ReadIntoRequest<'a> = crate::NfsReadInto<'a>;
     vfsi_sync::__vfsi_file_methods!(crate::NfsFile, permissions = chmod);
 }
 #[cfg(feature = "nfs")]
@@ -67,8 +56,6 @@ impl Vfsi for crate::NfsClient {
 mod routed {
     use super::*;
     impl FileHandle for crate::AutoFile {
-        type ReadRequest<'a> = crate::AutoRead<'a>;
-        type ReadIntoRequest<'a> = crate::AutoReadInto<'a>;
         vfsi_sync::__vfsi_file_methods!(crate::AutoFile, permissions = chmod);
     }
     impl Vfsi for crate::AutoClient {
@@ -87,8 +74,6 @@ mod routed {
     }
 
     impl FileHandle for crate::MountedFile {
-        type ReadRequest<'a> = crate::MountedRead<'a>;
-        type ReadIntoRequest<'a> = crate::MountedReadInto<'a>;
         vfsi_sync::__vfsi_file_methods!(crate::MountedFile, permissions = chmod);
     }
 }

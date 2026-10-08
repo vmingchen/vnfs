@@ -1143,10 +1143,6 @@ impl FileSystem for ScalarOnly {
     fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
         std::mem::take(&mut *self.notifications.lock().unwrap())
     }
-    fn capabilities(&self) -> Capabilities {
-        Capabilities::empty()
-    }
-
     fn open_impl(&mut self, _: &OpenOp) -> VfResult<VfFile> {
         self.open = true;
         Ok(VfFile::from_fd(1))
@@ -1968,6 +1964,22 @@ fn native_read_into_dispatches_without_owned_read_results() {
     assert_eq!(file.read_at(&mut scalar, 2).unwrap(), 2);
     assert_eq!(&scalar, b"cd");
     assert_eq!(calls.load(Ordering::SeqCst), 3);
+    let results = client
+        .vread(
+            [
+                vfsi_sync::api::ReadOp::into(&file, 0, &mut first),
+                vfsi_sync::api::ReadOp::into(&file, 3, &mut second),
+            ],
+            ReadOptions::new(),
+        )
+        .unwrap();
+    assert!(
+        results
+            .iter()
+            .all(|result| result.is_buffered() && result.read() == 3)
+    );
+    assert_eq!((&first, &second), (b"abc", b"def"));
+    assert_eq!(calls.load(Ordering::SeqCst), 5);
 }
 
 #[test]

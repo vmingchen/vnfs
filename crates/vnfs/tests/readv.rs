@@ -181,14 +181,20 @@ fn external_clients_can_inspect_sources_without_private_fields() {
     let file = fs.open("/a").unwrap();
     let whole: ReadOp<'_, vnfs::MountedFile> = ReadOp::whole("/a");
     assert_eq!(whole.whole_file_path(), Some(std::path::Path::new("/a")));
-    assert!(whole.range_ref().is_none());
+    assert!(whole.range_parts().is_none());
     let range = ReadOp::range(&file, 0, 1);
-    assert!(range.range_ref().is_some());
+    let (handle, offset, length) = range.range_parts().unwrap();
+    assert!(std::ptr::eq(handle, &file));
+    assert_eq!((offset, length), (0, 1));
     assert!(range.whole_file_path().is_none());
     let mut bytes = [0; 1];
     let mut into = ReadOp::into(&file, 0, &mut bytes);
-    assert!(into.buffer_request_mut().is_some());
-    assert!(into.range_ref().is_none());
+    let (handle, offset, buffer) = into.buffer_parts_mut().unwrap();
+    assert!(std::ptr::eq(handle, &file));
+    assert_eq!((offset, buffer.len()), (0, 1));
+    buffer[0] = 42;
+    assert!(into.range_parts().is_none());
+    assert_eq!(bytes, [42]);
 }
 
 #[test]

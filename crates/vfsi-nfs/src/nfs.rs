@@ -4144,12 +4144,12 @@ impl FileSystem for NfsVecFs {
             .collect()
     }
 
-    fn capability_bits(&self) -> u64 {
-        VF_CAP_UNIX_SEMANTICS
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::UNIX_SEMANTICS
             | if self.server_copy_enabled() {
-                VF_CAP_SERVER_COPY
+                Capabilities::SERVER_COPY
             } else {
-                0
+                Capabilities::empty()
             }
     }
 

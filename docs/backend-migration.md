@@ -69,7 +69,7 @@ its operation engines directly.
 | `take_notifications` | `FileSystem::take_notifications` | NFS |
 | `nfs_minorversion` | Protocol extension APIs; bindings-specific `BindingBackend` inspection | NFS |
 | `smb_dialect` | Protocol extension APIs; bindings-specific `BindingBackend` inspection | SMB |
-| `capabilities` | `FileSystem::capability_bits` | local, NFS, SMB |
+| `capabilities` | `FileSystem::capabilities` (typed flags) | local, NFS, SMB |
 | `typed_capabilities` | `FileSystem::capabilities` | — |
 | `abs_path` | `FileSystem::abs_path` | local, NFS, SMB |
 | `open_by_path` | `FileSystem::open_path_impl` | local, NFS, SMB |

@@ -45,10 +45,6 @@ fn inherent_read(client: &vnfs::NfsClient) {
 }
 ```
 
-```compile_fail
-use vnfs::application::NativeHooks;
-```
-
 Shallow and recursive visits share one primitive, with borrowed entries:
 
 ```compile_fail,E0599

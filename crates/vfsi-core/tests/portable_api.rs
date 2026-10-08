@@ -28,23 +28,11 @@ impl io::Seek for TestFile {
     }
 }
 impl FileHandle for TestFile {
-    type ReadRequest<'a> = (u64, usize);
-    type ReadIntoRequest<'a> = (u64, &'a mut [u8]);
     fn path(&self) -> &Path {
         Path::new("/file")
     }
     fn attrs(&self) -> Result<Attrs> {
         panic!("unexpected scalar metadata")
-    }
-    fn read_request_at(&self, offset: u64, length: usize) -> Self::ReadRequest<'_> {
-        (offset, length)
-    }
-    fn read_request_at_into<'a>(
-        &'a self,
-        offset: u64,
-        buffer: &'a mut [u8],
-    ) -> Self::ReadIntoRequest<'a> {
-        (offset, buffer)
     }
     fn read_at(&self, _: &mut [u8], _: u64) -> Result<usize> {
         panic!("unexpected scalar I/O")
@@ -149,9 +137,9 @@ impl Vfsi for PortableFs {
             .into_iter()
             .enumerate()
             .map(|(index, mut op)| {
-                if let Some((offset, buffer)) = op.buffer_request_mut() {
+                if let Some((_, offset, buffer)) = op.buffer_parts_mut() {
                     buffer.fill(index as u8);
-                    ReadResult::buffered(*offset, buffer.len(), false)
+                    ReadResult::buffered(offset, buffer.len(), false)
                 } else {
                     assert!(op.whole_file_path().is_some());
                     ReadResult::owned(0, vec![index as u8], true)

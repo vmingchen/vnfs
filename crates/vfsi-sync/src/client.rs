@@ -1004,31 +1004,9 @@ impl<F: Backend> FsClient<F> {
         requests: &mut [FsReadInto<'_, F>],
         max_bytes: usize,
     ) -> VfResult<Vec<FsReadIntoResult>> {
-        self.vread_into_with_limit_projected_native(
-            requests,
-            max_bytes,
-            |request| request,
-            |request| request,
-        )
-    }
-
-    /// Project borrowed buffers without an intermediate request allocation.
-    /// Both projections must identify the same embedded request, and remain
-    /// stable across preflight, dispatch, and result validation.
-    #[doc(hidden)]
-    pub fn vread_into_with_limit_projected_native<'b, T>(
-        &self,
-        requests: &mut [T],
-        max_bytes: usize,
-        project: impl for<'r> Fn(&'r T) -> &'r FsReadInto<'b, F>,
-        mut project_mut: impl for<'r> FnMut(&'r mut T) -> &'r mut FsReadInto<'b, F>,
-    ) -> VfResult<Vec<FsReadIntoResult>>
-    where
-        F: 'b,
-    {
         let mut requested = 0usize;
         let mut reads = Vec::with_capacity(requests.len());
-        for (index, request) in requests.iter().map(&project).enumerate() {
+        for (index, request) in requests.iter().enumerate() {
             self.validate_owner(request.file, index)?;
             requested = requested
                 .checked_add(request.buffer.len())
@@ -1045,7 +1023,6 @@ impl<F: Backend> FsClient<F> {
         let results = {
             let mut buffers: Vec<&mut [u8]> = requests
                 .iter_mut()
-                .map(&mut project_mut)
                 .map(|request| &mut *request.buffer)
                 .collect();
             self.lock()?.vread_into_impl(&reads, &mut buffers)
@@ -1053,7 +1030,7 @@ impl<F: Backend> FsClient<F> {
         .map_err(|error| {
             error
                 .index()
-                .and_then(|index| requests.get(index).map(&project))
+                .and_then(|index| requests.get(index))
                 .map_or(error.clone(), |request| {
                     error.with_context("vread_into_native", request.file.path())
                 })
@@ -1061,7 +1038,7 @@ impl<F: Backend> FsClient<F> {
         validate_read_into_results("vread_into_native", &reads, &results).map_err(|error| {
             error
                 .index()
-                .and_then(|index| requests.get(index).map(&project))
+                .and_then(|index| requests.get(index))
                 .map_or(error.clone(), |request| {
                     error.with_context("vread_into_native", request.file.path())
                 })

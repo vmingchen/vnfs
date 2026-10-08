@@ -47,24 +47,3 @@ pub use nfs::{
     NfsAuthentication, NfsClientBuilder, NfsConnectOptions, NfsEvent, NfsObserver, NfsReadPool,
     NfsReadPoolOptions, NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
 };
-
-/// NFS-only negotiated state, kept out of protocol-neutral VFSI traits.
-#[cfg(feature = "ffi")]
-pub trait NfsExtensions {
-    fn nfs_minor_version(&self) -> u32;
-    fn server_copy_enabled(&self) -> bool;
-    fn server_copy_stats(&self) -> NfsServerCopyStats;
-}
-
-#[cfg(feature = "ffi")]
-impl NfsExtensions for NfsVecFs {
-    fn nfs_minor_version(&self) -> u32 {
-        self.minorversion()
-    }
-    fn server_copy_enabled(&self) -> bool {
-        self.server_copy_enabled()
-    }
-    fn server_copy_stats(&self) -> NfsServerCopyStats {
-        self.server_copy_stats()
-    }
-}

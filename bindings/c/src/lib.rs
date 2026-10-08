@@ -665,7 +665,7 @@ pub unsafe extern "C" fn vfsi_capabilities(fs: *const vfsi_fs) -> u64 {
         };
         fs.fs
             .lock()
-            .map(|backend| backend.capability_bits())
+            .map(|backend| backend.capabilities().bits())
             .unwrap_or(0)
     })
 }
@@ -2582,12 +2582,12 @@ trait BindingBackend: vfsi_sync::Backend {
 impl BindingBackend for DummyVecFs {}
 impl BindingBackend for NfsVecFs {
     fn nfs_minorversion(&self) -> Option<u32> {
-        Some(vfsi_nfs::NfsExtensions::nfs_minor_version(self))
+        Some(self.minorversion())
     }
 }
 impl BindingBackend for SmbVecFs {
     fn smb_dialect(&self) -> Option<u16> {
-        Some(vfsi_smb::SmbExtensions::smb_dialect_revision(self))
+        Some(self.dialect() as u16)
     }
 }
 

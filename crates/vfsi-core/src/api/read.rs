@@ -9,20 +9,20 @@ pub struct ReadOp<'a, H: crate::api::FileHandle + 'a> {
 }
 enum OpSource<'a, H: crate::api::FileHandle + 'a> {
     Whole(&'a Path),
-    Range(H::ReadRequest<'a>, usize),
-    Into(H::ReadIntoRequest<'a>, usize),
+    Range(&'a H, u64, usize),
+    Into(&'a H, u64, &'a mut [u8]),
 }
 impl<H: crate::api::FileHandle> std::fmt::Debug for ReadOp<'_, H> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.source {
             OpSource::Whole(path) => formatter.debug_tuple("ReadOp::whole").field(path).finish(),
-            OpSource::Range(_, length) => formatter
+            OpSource::Range(_, _, length) => formatter
                 .debug_struct("ReadOp::range")
                 .field("length", length)
                 .finish_non_exhaustive(),
-            OpSource::Into(_, length) => formatter
+            OpSource::Into(_, _, buffer) => formatter
                 .debug_struct("ReadOp::into")
-                .field("length", length)
+                .field("length", &buffer.len())
                 .finish_non_exhaustive(),
         }
     }
@@ -47,15 +47,14 @@ impl<'a, H: crate::api::FileHandle + 'a> ReadOp<'a, H> {
     /// Allocate a positional range. Short progress and EOF are reported explicitly.
     pub fn range(file: &'a H, offset: u64, length: usize) -> Self {
         Self {
-            source: OpSource::Range(file.read_request_at(offset, length), length),
+            source: OpSource::Range(file, offset, length),
         }
     }
     /// Fill caller storage at an absolute offset, without changing the cursor.
     /// The request length is exactly `buffer.len()`.
     pub fn into(file: &'a H, offset: u64, buffer: &'a mut [u8]) -> Self {
-        let length = buffer.len();
         Self {
-            source: OpSource::Into(file.read_request_at_into(offset, buffer), length),
+            source: OpSource::Into(file, offset, buffer),
         }
     }
     /// Inspect a complete-file path from an external `Vfsi` implementation.
@@ -65,17 +64,17 @@ impl<'a, H: crate::api::FileHandle + 'a> ReadOp<'a, H> {
             _ => None,
         }
     }
-    /// Borrow an allocating range request from an external implementation.
-    pub fn range_ref(&self) -> Option<&H::ReadRequest<'a>> {
+    /// Inspect the handle, absolute offset, and length of an allocating range.
+    pub fn range_parts(&self) -> Option<(&'a H, u64, usize)> {
         match &self.source {
-            OpSource::Range(request, _) => Some(request),
+            OpSource::Range(file, offset, length) => Some((*file, *offset, *length)),
             _ => None,
         }
     }
-    /// Borrow a caller-buffer request exclusively from an external implementation.
-    pub fn buffer_request_mut(&mut self) -> Option<&mut H::ReadIntoRequest<'a>> {
+    /// Borrow the handle, absolute offset, and caller storage for direct dispatch.
+    pub fn buffer_parts_mut(&mut self) -> Option<(&'a H, u64, &mut [u8])> {
         match &mut self.source {
-            OpSource::Into(request, _) => Some(request),
+            OpSource::Into(file, offset, buffer) => Some((*file, *offset, buffer)),
             _ => None,
         }
     }
@@ -171,14 +170,13 @@ impl Default for ReadOptions {
         Self::new()
     }
 }
-pub fn consume_ops<'a, H: crate::api::FileHandle + 'a>(
+pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
     ops: impl IntoIterator<Item = ReadOp<'a, H>>,
     budget: usize,
-    owned: impl FnOnce(&[ReadRequest<'a, H::ReadRequest<'a>>], usize) -> Result<Vec<OwnedReadResult>>,
-    buffers: impl FnOnce(
-        &mut [H::ReadIntoRequest<'a>],
-        usize,
-    ) -> Result<Vec<crate::api::ReadIntoResult>>,
+    range: impl Fn(&'a H, u64, usize) -> R,
+    into: impl Fn(&'a H, u64, &'a mut [u8]) -> B,
+    owned: impl FnOnce(&[ReadRequest<'a, R>], usize) -> Result<Vec<OwnedReadResult>>,
+    buffers: impl FnOnce(&mut [B], usize) -> Result<Vec<crate::api::ReadIntoResult>>,
 ) -> Result<Vec<ReadResult>> {
     let mut owned_ops = Vec::new();
     let mut owned_indices = Vec::new();
@@ -190,7 +188,8 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a>(
         count += 1;
         let length = match &op.source {
             OpSource::Whole(_) => 0,
-            OpSource::Range(_, length) | OpSource::Into(_, length) => *length,
+            OpSource::Range(_, _, length) => *length,
+            OpSource::Into(_, _, buffer) => buffer.len(),
         };
         requested = requested
             .checked_add(length)
@@ -201,12 +200,12 @@ pub fn consume_ops<'a, H: crate::api::FileHandle + 'a>(
                 owned_ops.push(ReadRequest::whole_file(path));
                 owned_indices.push(index);
             }
-            OpSource::Range(request, _) => {
-                owned_ops.push(ReadRequest::range(request));
+            OpSource::Range(file, offset, length) => {
+                owned_ops.push(ReadRequest::range(range(file, offset, length)));
                 owned_indices.push(index);
             }
-            OpSource::Into(request, _) => {
-                buffer_ops.push(request);
+            OpSource::Into(file, offset, buffer) => {
+                buffer_ops.push(into(file, offset, buffer));
                 buffer_indices.push(index);
             }
         }

@@ -10,9 +10,11 @@ mod tests {
     #[test]
     fn consuming_dispatch_rejects_bad_reply_shapes_and_does_not_replay() {
         for count in [0, 2] {
-            let error = consume_ops::<crate::MountedFile>(
+            let error = consume_ops::<crate::MountedFile, (), ()>(
                 [ReadOp::whole("/a")],
                 16,
+                |_, _, _| (),
+                |_, _, _| (),
                 |_, _| {
                     Ok((0..count)
                         .map(|_| OwnedReadResult {
@@ -36,6 +38,8 @@ mod tests {
             let error = consume_ops(
                 [ReadOp::into(&file, 0, &mut buffer)],
                 16,
+                |_, _, _| (),
+                |_, _, buffer| buffer,
                 |_, _| panic!("no owned operations"),
                 |_, _| {
                     Ok(vec![
@@ -56,6 +60,8 @@ mod tests {
         let error = consume_ops(
             [ReadOp::whole("/a"), ReadOp::into(&file, 0, &mut buffer)],
             16,
+            |_, _, _| (),
+            |_, _, buffer| buffer,
             |_, _| panic!("failure must stop later phases"),
             |_, _| {
                 calls += 1;

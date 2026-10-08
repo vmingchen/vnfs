@@ -10,13 +10,12 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use vfsi_smb::{SmbConnectOptions, SmbExtensions, SmbVecFs};
+use vfsi_smb::{SmbConnectOptions, SmbVecFs};
 use vfsi_sync::test_support::borrow_writes;
 use vfsi_sync::*;
 use vfsi_sync::{
-    AttrMask, ExtentPair, ReadOp, VF_CAP_HARDLINKS, VF_CAP_LSTAT, VF_CAP_NON_UTF8_PATHS,
-    VF_CAP_POSIX_METADATA, VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS, VF_ERR_UNSUPPORTED, VfAttrs,
-    VfFile, VfOffset, WriteOp,
+    AttrMask, Capabilities, ExtentPair, ReadOp, VF_ERR_UNSUPPORTED, VfAttrs, VfFile, VfOffset,
+    WriteOp,
 };
 
 use vfsi_sync::test_support as common;
@@ -492,7 +491,7 @@ fn samba_round_trip_and_copy() {
         eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
         return;
     };
-    let dialect = fs.smb_dialect_revision();
+    let dialect = fs.dialect() as u16;
     assert!((0x0202..=0x0311).contains(&dialect));
     if let Ok(expected) = std::env::var("VFSI_SMB_EXPECT_DIALECT") {
         let expected = u16::from_str_radix(expected.trim_start_matches("0x"), 16)
@@ -500,16 +499,12 @@ fn samba_round_trip_and_copy() {
         assert_eq!(dialect, expected);
     }
     let expect_copy = std::env::var("VFSI_SMB_EXPECT_SERVER_COPY").as_deref() != Ok("0");
-    assert_eq!(fs.capability_bits() & VF_CAP_SERVER_COPY != 0, expect_copy);
     assert_eq!(
-        fs.capability_bits()
-            & (VF_CAP_POSIX_METADATA
-                | VF_CAP_SYMLINKS
-                | VF_CAP_HARDLINKS
-                | VF_CAP_NON_UTF8_PATHS
-                | VF_CAP_LSTAT),
-        0
+        fs.capabilities().contains(Capabilities::SERVER_COPY),
+        expect_copy
     );
+    assert!(!fs.capabilities().intersects(Capabilities::UNIX_SEMANTICS));
+    assert_eq!(fs.server_copy_enabled(), expect_copy);
 
     let root = PathBuf::from(format!("/vfsi-smb-test-{}", std::process::id()));
     cleanup_test_tree(&root);

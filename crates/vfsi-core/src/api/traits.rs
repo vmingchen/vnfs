@@ -11,32 +11,14 @@ use std::path::Path;
 /// Owned application file. Borrowed requests preserve the file's lifetime;
 /// clients validate connection ownership before dispatching a vector.
 ///
-/// External implementations must keep request storage valid for its borrowed
-/// lifetime, validate client ownership before I/O, and report positional progress
-/// without changing the cursor. Request constructors do no I/O. Associated
-/// request types are implementer contracts, not application-facing builders.
+/// Clients validate ownership before I/O and report positional progress without
+/// changing the cursor. `ReadOp` borrows handles directly; constructing it does no I/O.
 /// A backend must retain ownership of live descriptors through cleanup failures.
 pub trait FileHandle: Read + Write + Seek {
-    /// Borrowed positional read request; constructing it performs no I/O.
-    type ReadRequest<'a>
-    where
-        Self: 'a;
-    /// Borrowed positional request into a caller-owned destination buffer.
-    type ReadIntoRequest<'a>
-    where
-        Self: 'a;
     /// Diagnostic name captured at open; not current path or object identity.
     fn path(&self) -> &Path;
     /// Query the opened object, even if its original pathname was renamed.
     fn attrs(&self) -> Result<Attrs>;
-    /// Prepare a non-cursor-changing read for this handle's owning client.
-    fn read_request_at(&self, offset: u64, length: usize) -> Self::ReadRequest<'_>;
-    /// Borrow both the handle and destination until the vector call completes.
-    fn read_request_at_into<'a>(
-        &'a self,
-        offset: u64,
-        buffer: &'a mut [u8],
-    ) -> Self::ReadIntoRequest<'a>;
     /// Read up to the buffer's length without changing the cursor; may be short.
     fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize>;
     /// Write up to the input's length without changing the cursor; may be short.
@@ -77,7 +59,7 @@ pub trait FileHandle: Read + Write + Seek {
 /// Construction, builders and protocol-specific diagnostics stay concrete.
 /// Vectors are strict, ordered results on success, not transactions: errors
 /// can follow partially completed requests and never imply rollback.
-/// This uses borrowed request GATs, so it is for static generic dispatch, not
+/// Generic vector and callback methods require static generic dispatch, not
 /// `dyn Vfsi`. It adds no boxing, data copies or serial-loop fallbacks.
 ///
 /// # Choosing an operation

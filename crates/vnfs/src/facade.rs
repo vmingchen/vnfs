@@ -2,7 +2,7 @@
 use crate::*;
 
 macro_rules! owned_client {
-    ($client:ident, $file:ident, $dir:ident, $open:ident, $set:ident, $read:ident, $into:ident, $backend:ty) => {
+    ($client:ident, $file:ident, $dir:ident, $open:ident, $set:ident, $backend:ty) => {
         /// Owned application client. Clones share one connection and its lock.
         #[derive(Debug, Clone)]
         pub struct $client {
@@ -234,20 +234,22 @@ macro_rules! owned_client {
                 crate::read::consume_ops(
                     ops,
                     options.limit_or(self.limits().max_read_bytes),
+                    |file, offset, length| file.inner.read_request_at(offset, length),
+                    |file, offset, buffer| file.inner.read_request_at_into(offset, buffer),
                     |requests, options| self.readv_owned(requests, options),
-                    |requests, bytes| self.vread_into_with_limit_native(requests, bytes),
+                    |requests, bytes| self.inner.vread_into_with_limit_native(requests, bytes),
                 )
             }
             pub(crate) fn readv_owned(
                 &self,
-                requests: &[ReadRequest<'_, $read<'_>>],
+                requests: &[ReadRequest<'_, vfsi_sync::FsRead<'_, $backend>>],
                 budget: usize,
             ) -> Result<Vec<OwnedReadResult>> {
                 if requests.iter().all(|request| request.range_ref().is_some()) {
                     return self.inner.vread_with_limit_projected_native(
                         requests,
                         budget,
-                        |request| &request.range_ref().expect("checked range requests").inner,
+                        |request| request.range_ref().expect("checked range requests"),
                     );
                 }
                 crate::read::read_batch(
@@ -255,27 +257,12 @@ macro_rules! owned_client {
                     budget,
                     |ranges, bytes| {
                         self.inner
-                            .vread_with_limit_projected_native(ranges, bytes, |request| {
-                                &request.inner
-                            })
+                            .vread_with_limit_projected_native(ranges, bytes, |request| request)
                     },
                     |paths, bytes| {
                         self.inner
                             .read_files_native(paths, ReadAllOptions::new().max_total_bytes(bytes))
                     },
-                )
-            }
-            /// Read ordered positional ranges into caller-owned buffers, within this client's budget.
-            pub(crate) fn vread_into_with_limit_native(
-                &self,
-                requests: &mut [$into<'_>],
-                bytes: usize,
-            ) -> Result<Vec<ReadIntoResult>> {
-                self.inner.vread_into_with_limit_projected_native(
-                    requests,
-                    bytes,
-                    |r| &r.inner,
-                    |r| &mut r.inner,
                 )
             }
             /// Write ordered positional ranges; short writes are reported and effects are not atomic.
@@ -316,14 +303,11 @@ macro_rules! owned_client {
                 })
             }
         }
-        impl crate::application::NativeHooks for $client {
-            fn page_capacity(&self, paths: &[&Path]) -> Result<usize> {
-                self.directory_page_batch_size(paths)
-            }
-            fn open_native(&self, request: OpenOp) -> Result<Self::File> {
+        impl $client {
+            pub(crate) fn open_native(&self, request: OpenOp) -> Result<$file> {
                 self.inner.open_with(request).map(|inner| $file { inner })
             }
-            fn stream_native(
+            pub(crate) fn stream_native(
                 &self,
                 path: impl AsRef<Path>,
                 options: StreamOptions,
@@ -405,22 +389,6 @@ macro_rules! owned_client {
             pub fn close(self) -> Result<()> {
                 self.inner.close()
             }
-            /// Borrow this handle for a positional vector read; the cursor is unchanged.
-            pub(crate) fn read_request_at(&self, offset: u64, length: usize) -> $read<'_> {
-                $read {
-                    inner: self.inner.read_request_at(offset, length),
-                }
-            }
-            /// Borrow this handle and caller storage for a positional vector read.
-            pub(crate) fn read_request_at_into<'a>(
-                &'a self,
-                offset: u64,
-                buffer: &'a mut [u8],
-            ) -> $into<'a> {
-                $into {
-                    inner: self.inner.read_request_at_into(offset, buffer),
-                }
-            }
         }
         impl std::io::Read for $file {
             fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
@@ -439,14 +407,6 @@ macro_rules! owned_client {
             fn seek(&mut self, p: std::io::SeekFrom) -> std::io::Result<u64> {
                 std::io::Seek::seek(&mut self.inner, p)
             }
-        }
-        /// Borrowed positional request; construction performs no I/O or allocation.
-        pub struct $read<'a> {
-            inner: vfsi_sync::FsRead<'a, $backend>,
-        }
-        /// Borrowed positional request into caller storage.
-        pub struct $into<'a> {
-            inner: vfsi_sync::FsReadInto<'a, $backend>,
         }
         /// An opened directory, never a publicly extractable backend token.
         #[derive(Debug)]
@@ -578,8 +538,6 @@ mod nfs {
         NfsDir,
         NfsOpenOptions,
         NfsSetMetadata,
-        NfsRead,
-        NfsReadInto,
         vfsi_nfs::NfsVecFs
     );
 }
@@ -595,8 +553,6 @@ mod mounted {
         MountedDir,
         MountedOpenOptions,
         MountedSetMetadata,
-        MountedRead,
-        MountedReadInto,
         vfsi_local::DummyVecFs
     );
     impl Mounted {

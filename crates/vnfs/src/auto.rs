@@ -188,23 +188,6 @@ impl std::fmt::Debug for AutoClient {
     }
 }
 
-impl crate::application::NativeHooks for AutoClient {
-    fn open_native(&self, request: OpenOp) -> VfResult<Self::File> {
-        self.open_native_impl(request)
-    }
-    fn page_capacity(&self, paths: &[&Path]) -> VfResult<usize> {
-        self.directory_page_batch_size(paths)
-    }
-    fn stream_native(
-        &self,
-        path: impl AsRef<Path>,
-        options: crate::StreamOptions,
-        callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
-    ) -> VfResult<crate::StreamCompletion> {
-        self.stream_native_impl(path, options, callback)
-    }
-}
-
 impl AutoClient {
     pub fn limits(&self) -> ResourceLimits {
         self.limits
@@ -907,7 +890,7 @@ impl AutoClient {
         Ok(output)
     }
 
-    pub(crate) fn stream_native_impl(
+    pub(crate) fn stream_native(
         &self,
         path: impl AsRef<Path>,
         options: crate::StreamOptions,
@@ -1196,7 +1179,7 @@ impl AutoClient {
 
     /// Preserve request order, including the completed-prefix semantics of
     /// strict vector operations. Consecutive requests to one mount batch.
-    pub(crate) fn open_native_impl(&self, request: OpenOp) -> VfResult<AutoFile> {
+    pub(crate) fn open_native(&self, request: OpenOp) -> VfResult<AutoFile> {
         self.vopen(&[request]).map(|mut files| files.remove(0))
     }
 
@@ -1267,11 +1250,21 @@ impl AutoClient {
         crate::read::consume_ops(
             ops,
             options.limit_or(self.limits.max_read_bytes),
+            |file, offset, length| AutoRead {
+                file,
+                offset,
+                length,
+            },
+            |file, offset, buffer| AutoReadInto {
+                file,
+                offset,
+                buffer,
+            },
             |requests, options| self.readv_owned(requests, options),
             |requests, bytes| self.vread_into_with_limit_native(requests, bytes),
         )
     }
-    pub(crate) fn readv_owned(
+    fn readv_owned(
         &self,
         requests: &[crate::ReadRequest<'_, AutoRead<'_>>],
         budget: usize,
@@ -1850,24 +1843,6 @@ impl AutoFile {
         self.route.public()
     }
 
-    pub(crate) fn read_request_at(&self, offset: u64, length: usize) -> AutoRead<'_> {
-        AutoRead {
-            file: self,
-            offset,
-            length,
-        }
-    }
-    pub(crate) fn read_request_at_into<'a>(
-        &'a self,
-        offset: u64,
-        buffer: &'a mut [u8],
-    ) -> AutoReadInto<'a> {
-        AutoReadInto {
-            file: self,
-            offset,
-            buffer,
-        }
-    }
     pub fn read_at(&self, buffer: &mut [u8], offset: u64) -> VfResult<usize> {
         self.check_credentials()?;
         let count = buffer.len().min(READ_CHUNK);
@@ -2004,14 +1979,12 @@ impl Seek for AutoFile {
     }
 }
 
-/// Positional read request for [`crate::Vfsi::vread`].
-pub struct AutoRead<'a> {
+struct AutoRead<'a> {
     file: &'a AutoFile,
     offset: u64,
     length: usize,
 }
-/// Internal borrowed-buffer representation used by [`crate::ReadOp::into`].
-pub struct AutoReadInto<'a> {
+struct AutoReadInto<'a> {
     file: &'a AutoFile,
     offset: u64,
     buffer: &'a mut [u8],
