@@ -33,7 +33,7 @@ use vfsi_nfs::compound::{compound_stats, rpc_stats};
 use vfsi_nfs::{NfsAuthentication, NfsClientBuilder};
 #[cfg(feature = "smb")]
 use vfsi_smb::SmbVecFs;
-use vfsi_sync::{ReadAllOptions, ListDirOptions};
+use vfsi_sync::{ListDirOptions, ReadAllOptions};
 
 #[cfg(not(feature = "nfs"))]
 fn compound_stats() -> (u64, u64, u64, u64) {
@@ -1512,7 +1512,8 @@ impl NfsClient {
                     fs.walk_with_options_impl(
                         p,
                         full_mask(),
-                        ListDirOptions::new().recursive(true)
+                        ListDirOptions::new()
+                            .recursive(true)
                             .max_entries(max_entries)
                             .max_path_bytes(max_path_bytes)
                             .max_depth(max_depth),
@@ -1556,7 +1557,8 @@ impl NfsClient {
         sort: bool,
         max_depth: Option<usize>,
     ) -> PyResult<WalkResult> {
-        let options = ListDirOptions::new().recursive(true)
+        let options = ListDirOptions::new()
+            .recursive(true)
             .max_entries(self.directory_max_entries)
             .max_path_bytes(self.directory_max_path_bytes)
             .max_depth(
