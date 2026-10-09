@@ -43,6 +43,19 @@ pub trait FileSystem {
         Err(VfError::unsupported(0))
     }
 
+    /// One backend synchronization vector. POSIX backends may loop under one
+    /// lock because fsync has no vector syscall; protocol backends may batch.
+    fn vfsync_impl(&mut self, files: &[VfFile], mode: vfsi_core::api::SyncMode) -> VfRes {
+        for (index, file) in files.iter().enumerate() {
+            match mode {
+                vfsi_core::api::SyncMode::Data => self.sync_data(file),
+                vfsi_core::api::SyncMode::All => self.sync_all(file),
+            }
+            .map_err(|error| error.map_index(|_| index))?;
+        }
+        Ok(())
+    }
+
     fn sync_data(&mut self, tcf: &VfFile) -> VfResult<()>;
 
     fn sync_all(&mut self, tcf: &VfFile) -> VfResult<()> {

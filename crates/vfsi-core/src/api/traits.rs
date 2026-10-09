@@ -5,38 +5,17 @@ use crate::api::{
     Attrs, CopyOption, DirectoryListing, MkDirOp, OpenOp, ResourceLimits, Result, SetAttrsOp,
     WriteResult,
 };
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// Owned application file. Borrowed requests preserve the file's lifetime;
 /// clients validate connection ownership before dispatching a vector.
 ///
-/// Clients validate ownership before I/O and report positional progress without
-/// changing the cursor. `ReadOp` borrows handles directly; constructing it does no I/O.
+/// Clients validate ownership before I/O and report positional progress.
+/// Standard-I/O adapters manage their own independent cursors. `ReadOp` borrows handles directly; constructing it does no I/O.
 /// A backend must retain ownership of live descriptors through cleanup failures.
-pub trait FileHandle: Read + Write + Seek {
+pub trait FileHandle {
     /// Diagnostic name captured at open; not current path or object identity.
     fn path(&self) -> &Path;
-    /// Query the opened object, even if its original pathname was renamed.
-    fn attrs(&self) -> Result<Attrs>;
-    /// Read up to the buffer's length without changing the cursor; may be short.
-    fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize>;
-    /// Write up to the input's length without changing the cursor; may be short.
-    fn write_at(&self, buffer: &[u8], offset: u64) -> Result<usize>;
-    /// Cursor-based read retaining structured errors, unlike the `Read` adapter.
-    fn read_native(&mut self, buffer: &mut [u8]) -> Result<usize>;
-    /// Collect from the current cursor with a caller-selected payload budget.
-    /// A failed read may advance the cursor; exceeding the limit is an error,
-    /// not successful truncation. Standard `Read::read_to_end` is not bounded.
-    fn read_to_end_with_limit(&mut self, max_bytes: usize) -> Result<Vec<u8>>;
-    /// Cursor-based possibly short write retaining structured errors.
-    fn write_native(&mut self, buffer: &[u8]) -> Result<usize>;
-    /// Change the cursor, retaining structured errors unlike `Seek`.
-    fn seek_native(&mut self, position: SeekFrom) -> Result<u64>;
-    /// Request durability of file data; errors are not discarded.
-    fn sync_data(&self) -> Result<()>;
-    /// Request durability of file data and metadata supported by the backend.
-    fn sync_all(&self) -> Result<()>;
     /// Close without surrendering cleanup ownership on failure. After an
     /// ambiguous failure, reconcile/close rather than resume ordinary I/O.
     fn try_close(&mut self) -> Result<()>;
@@ -98,8 +77,8 @@ pub trait FileHandle: Read + Write + Seek {
 /// per-call options override them; neither is a process-wide memory cap.
 /// Calls are synchronous. Callback methods invoke user code outside the backend
 /// lock and propagate callback errors, but do not provide a filesystem snapshot.
-/// Writes are not automatically durable: use [`FileHandle::sync_data`] or
-/// [`FileHandle::sync_all`] on an open handle when required. Drop queues handle cleanup
+/// Writes are not automatically durable: use [`Vfsi::vfsync`] on open handles
+/// when required. Drop queues handle cleanup
 /// best-effort; explicit close methods let applications observe cleanup errors.
 pub trait Vfsi {
     /// Query filesystems for paths (following symlinks) and retained open handles.
@@ -109,7 +88,10 @@ pub trait Vfsi {
         targets: &[P],
     ) -> Result<Vec<crate::FilesystemStats>>;
 
-    /// Query metadata in input order with selected fields and final-symlink behavior.
+    /// Query paths and retained handles in input order with selected fields.
+    /// Final-symlink behavior applies to paths; handles retain their opened
+    /// identity after rename/unlink. Preflight every handle's ownership and live
+    /// state before dispatching any query. Empty vectors perform no I/O.
     /// Backend execution must preserve vector batching. Ancestor symlinks use
     /// ordinary namespace resolution; this is not a snapshot or confinement API.
     ///
@@ -123,11 +105,17 @@ pub trait Vfsi {
     /// # Ok(())
     /// # }
     /// ```
-    fn vgetattrs<P: AsRef<Path>>(
+    fn vgetattrs<P: crate::AsTarget<Self::File>>(
         &self,
         paths: &[P],
         options: crate::api::AttrsOptions,
     ) -> Result<Vec<Attrs>>;
+
+    /// Synchronize retained handles in input order. All handles must belong to
+    /// this client and be live; validate the entire vector before dispatch.
+    /// Errors may follow completed synchronization of earlier handles. Empty
+    /// vectors succeed without I/O; ambiguous failures must not be replayed.
+    fn vfsync(&self, files: &[&Self::File], mode: crate::api::SyncMode) -> Result<()>;
 
     /// Update selected attributes for paths or open handles using native batching.
     /// Every handle is validated before dispatch, including ownership and closure.
@@ -281,6 +269,7 @@ pub trait Vfsi {
     /// Backend failures can still follow mutations; aliasing paths are the
     /// caller's responsibility and do not imply transactional ordering.
     ///
+    /// Handles opened for append select EOF regardless of the requested offset.
     /// With completion enabled, success means every request's payload was written.
     /// Short writes are completed at their remaining offsets; this does not
     /// authorize replay after an ambiguous failure or guarantee durability.
@@ -523,17 +512,17 @@ pub trait VfsiExt: Vfsi {
     /// Open read-only. Paths are relative to this client's configured namespace.
     ///
     /// Use [`open_with`](VfsiExt::open_with) for write/create flags, or
-    /// [`vopen`](Vfsi::vopen) to batch many opens. The returned handle implements
-    /// `std::io::Read`/`Write`/`Seek`; use native methods to retain structured errors.
+    /// [`vopen`](Vfsi::vopen) to batch many opens. The returned handle owns
+    /// lifecycle only; use vectors or [`file_io`](VfsiExt::file_io) for I/O.
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// let mut file = fs.open("/config")?;
+    /// let file = fs.open("/config")?;
     /// let mut header = [0_u8; 128];
-    /// let result = file.read_native(&mut header); // May be short.
+    /// let result = fs.vread([vfsi_core::api::ReadOp::into(&file, 0, &mut header)], Default::default());
     /// let close = file.close();
-    /// let bytes = result?;
+    /// let bytes = result?[0].read();
     /// close?;
     /// println!("read {bytes} bytes");
     /// # Ok(())
@@ -898,23 +887,40 @@ pub trait VfsiExt: Vfsi {
         close_result
     }
 
+    /// Borrow an explicit standard-I/O adapter with an independent cursor.
+    /// Reads/writes use this client's vectors; collecting reads enforce its
+    /// payload budget. The adapter does not own or close the file.
+    fn file_io<'a>(&'a self, file: &'a Self::File) -> crate::api::FileIo<'a, Self> {
+        crate::api::FileIo::new(self, file)
+    }
+
+    /// Synchronize one retained handle through [`Vfsi::vfsync`].
+    fn sync_data(&self, file: &Self::File) -> Result<()> {
+        self.vfsync(&[file], crate::api::SyncMode::Data)
+    }
+
+    /// Synchronize one retained handle's data and metadata through [`Vfsi::vfsync`].
+    fn sync_all(&self, file: &Self::File) -> Result<()> {
+        self.vfsync(&[file], crate::api::SyncMode::All)
+    }
+
     // Attrs
     /// Single-target convenience. For multiple paths, prefer [`Vfsi::vgetattrs`].
     ///
     /// Query a path following its final symlink; unavailable fields remain None.
     ///
     /// To inspect the symlink itself use [`symlink_attrs`](VfsiExt::symlink_attrs).
-    /// To identify an already opened object after rename, use [`FileHandle::attrs`].
+    /// To query an opened object after rename, pass [`crate::api::Target::file`].
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let attrs = fs.attrs("/file-1")?;
-    /// println!("{} bytes; directory={}", attrs.len(), attrs.is_dir());
+    /// println!("{:?} bytes; directory={}", attrs.len(), attrs.is_dir());
     /// # Ok(())
     /// # }
     /// ```
-    fn attrs(&self, path: impl AsRef<Path>) -> Result<Attrs> {
+    fn attrs<T: crate::AsTarget<Self::File>>(&self, path: T) -> Result<Attrs> {
         attrs_query(self, path, crate::api::AttrsOptions::new(), "attrs")
     }
 
@@ -939,9 +945,9 @@ pub trait VfsiExt: Vfsi {
     /// # Ok(())
     /// # }
     /// ```
-    fn attrs_with_options(
+    fn attrs_with_options<T: crate::AsTarget<Self::File>>(
         &self,
-        path: impl AsRef<Path>,
+        path: T,
         options: crate::api::AttrsOptions,
     ) -> Result<Attrs> {
         attrs_query(self, path, options, "attrs_with_options")
@@ -1028,7 +1034,7 @@ pub trait VfsiExt: Vfsi {
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// for listing in fs.read_dirs(&["/input", "/output"])? {
     ///     for entry in listing.entries {
-    ///         println!("{}: {} bytes", entry.path().display(), entry.attrs().len());
+    ///         println!("{}: {:?} bytes", entry.path().display(), entry.attrs().len());
     ///     }
     /// }
     /// # Ok(())
@@ -1665,13 +1671,17 @@ fn require_directory<C: Vfsi + ?Sized>(fs: &C, path: &Path, operation: &'static 
 }
 fn attrs_query<C: Vfsi + ?Sized>(
     client: &C,
-    path: impl AsRef<Path>,
+    target: impl crate::AsTarget<C::File>,
     options: crate::api::AttrsOptions,
     operation: &'static str,
 ) -> Result<Attrs> {
-    let path = path.as_ref();
+    let target = target.as_target();
+    let path = match target {
+        crate::Target::Path(path) => path,
+        crate::Target::File(file) => file.path(),
+    };
     let results = client
-        .vgetattrs(&[path], options)
+        .vgetattrs(&[target], options)
         .map_err(|error| error.with_context(operation, path))?;
     single_completion(results, "vgetattrs").map_err(|error| error.with_context(operation, path))
 }

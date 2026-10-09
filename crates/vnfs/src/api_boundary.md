@@ -423,3 +423,22 @@ Directory collection and traversal share one options type.
 ```compile_fail
 use vnfs::{ReadDirOptions, WalkOptions};
 ```
+
+File I/O requires an explicit client adapter; handles expose lifecycle only.
+
+```compile_fail
+fn read_direct(file: vnfs::NfsFile) {
+    fn reader(_: impl std::io::Read) {}
+    reader(file);
+}
+```
+
+```compile_fail
+fn metadata_direct(file: &vnfs::NfsFile) { let _ = file.attrs(); }
+```
+
+Destructive initialization is explicit.
+
+```compile_fail
+fn empty(fs: &vnfs::NfsClient) { let _ = fs.ensure_empty_dir("/data"); }
+```

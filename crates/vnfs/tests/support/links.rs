@@ -23,7 +23,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     assert_eq!(attrs.len(), directories.len());
     for (attrs, op) in attrs.iter().zip(&directories) {
         assert!(attrs.is_dir());
-        assert_eq!(attrs.permissions().mode() & 0o7777, op.mode());
+        assert_eq!(attrs.permissions().unwrap().mode() & 0o7777, op.mode());
     }
     fs.create_dir_with_mode(format!("{directory}/scalar-dir"), 0o751)
         .unwrap();
@@ -31,6 +31,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
         fs.attrs(format!("{directory}/scalar-dir"))
             .unwrap()
             .permissions()
+            .unwrap()
             .mode()
             & 0o7777,
         0o751
@@ -128,7 +129,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
     assert_eq!(
-        fs.attrs(&new_dir).unwrap().permissions().mode() & 0o7777,
+        fs.attrs(&new_dir).unwrap().permissions().unwrap().mode() & 0o7777,
         0o711
     );
     let duplicate = format!("{directory}/duplicate-dir");

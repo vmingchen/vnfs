@@ -7,6 +7,7 @@
 //! ```
 
 use nfsv41_sys::nfsstat4_NFS4ERR_EXIST;
+use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -360,14 +361,14 @@ fn rust_native_client_workflow_on_nfs() {
     assert_eq!(&second[..3], b"two");
     assert!(lengths.iter().all(|result| result.is_buffered()));
     assert_eq!(vfsi_nfs::compound::thread_compound_stats().0, 1);
-    assert_eq!(client.attrs(&paths[0]).unwrap().len(), 3);
+    assert_eq!(client.attrs(&paths[0]).unwrap().len().unwrap(), 3);
     assert_eq!(client.read_dir(&nested).unwrap().len(), 2);
     let mut visited = Vec::new();
     let mut held_during_visit = Some(client.open(&paths[0]).unwrap());
     client
         .listdir(&nested, vfsi_core::api::ListDirOptions::new(), |entry| {
             // The application callback must run outside the NFS session lock.
-            assert_eq!(client.attrs(entry.entry.path())?.len(), 3);
+            assert_eq!(client.attrs(entry.entry.path())?.len(), Some(3));
             drop(held_during_visit.take());
             visited.push(entry.entry.path().to_path_buf());
             Ok(vfsi_core::api::WalkControl::Continue)
@@ -383,9 +384,9 @@ fn rust_native_client_workflow_on_nfs() {
         .unwrap();
     assert_eq!(early_count, 1);
     let large = vec![0xa5; 2 * 1024 * 1024];
-    files[0].write_at(&large, 0).unwrap();
+    client.file_io(&files[0]).write_all(&large).unwrap();
     let mut large_buffer = vec![0; large.len() + 16];
-    let read = files[0].read_at(&mut large_buffer, 0).unwrap();
+    let read = client.file_io(&files[0]).read(&mut large_buffer).unwrap();
     assert_eq!(read, large.len());
     assert_eq!(&large_buffer[..read], large);
     client.close_files(files).unwrap();
@@ -418,7 +419,10 @@ fn rust_native_client_workflow_on_nfs() {
                     .follow_symlinks(follow),
             )
             .unwrap();
-        assert_eq!(attrs.iter().map(|m| m.len()).collect::<Vec<_>>(), [5, 6]);
+        assert_eq!(
+            attrs.iter().map(|m| m.len().unwrap()).collect::<Vec<_>>(),
+            [5, 6]
+        );
         assert_eq!(
             vfsi_nfs::compound::thread_compound_stats().0,
             1,
@@ -533,7 +537,7 @@ fn unified_directory_visits_on_nfs() {
             .visit_entries_with_options(&[&dir], options.recursive(recursive), |index, entry| {
                 assert_eq!(index, 0);
                 if entry.path() == Path::new(&file) {
-                    assert_eq!(entry.attrs().len(), 7);
+                    assert_eq!(entry.attrs().len().unwrap(), 7);
                 }
                 seen += 1;
                 assert!(client.attrs(entry.path()).is_ok());
@@ -595,7 +599,7 @@ fn application_collection_preserves_native_batching_and_root_groups() {
     for (index, tree) in listings.iter().enumerate() {
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].path, Path::new(&roots[index]));
-        assert_eq!(tree[0].entries[0].attrs().len(), 4);
+        assert_eq!(tree[0].entries[0].attrs().len().unwrap(), 4);
     }
     let error = client
         .read_dirs_with_options(&roots, ListDirOptions::new().fields(fields).max_entries(5))
@@ -680,17 +684,16 @@ fn rust_native_client_pool_uses_independent_sessions() {
     assert!(!pool.is_empty());
     assert!(pool.client(2).is_none());
     let first = pool.client(0).unwrap();
-    use std::io::Write;
     let paths: Vec<_> = (0..2).map(|index| format!("{dir}/file-{index}")).collect();
     for path in &paths {
-        let mut file = first
+        let file = first
             .open_options()
             .write(true)
             .create(true)
             .truncate(true)
             .open(path)
             .unwrap();
-        file.write_all(b"pool").unwrap();
+        first.file_io(&file).write_all(b"pool").unwrap();
         file.close().unwrap();
     }
     let threads: Vec<_> = paths
@@ -700,7 +703,7 @@ fn rust_native_client_pool_uses_independent_sessions() {
             std::thread::spawn(move || {
                 let file = client.open(&path).unwrap();
                 let mut bytes = [0; 4];
-                assert_eq!(file.read_at(&mut bytes, 0).unwrap(), 4);
+                assert_eq!(client.file_io(&file).read(&mut bytes).unwrap(), 4);
                 assert_eq!(&bytes, b"pool");
             })
         })
@@ -1740,7 +1743,7 @@ fn scalar_write_follows_final_symlink_chains_and_creates_dangling_targets() {
     fs.write(&dangling, b"created").unwrap();
     assert_eq!(fs.read_files(&[&missing]).unwrap(), [b"created".to_vec()]);
     fs.write(&link, b"").unwrap();
-    assert_eq!(fs.attrs(&target).unwrap().len(), 0);
+    assert_eq!(fs.attrs(&target).unwrap().len().unwrap(), 0);
     for path in [&link, &chain, &dangling] {
         assert!(fs.symlink_attrs(path).unwrap().is_symlink());
     }

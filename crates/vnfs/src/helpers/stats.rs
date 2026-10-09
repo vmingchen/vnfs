@@ -17,7 +17,7 @@ impl TreeStats {
             FileType::Regular => {
                 self.file_bytes = self
                     .file_bytes
-                    .checked_add(metadata.len())
+                    .checked_add(metadata.len().ok_or_else(|| crate::Error::unsupported(0))?)
                     .ok_or_else(overflow)?;
                 &mut self.files
             }

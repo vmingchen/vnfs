@@ -2,7 +2,7 @@
 use vnfs::{Attributes, AttrsOptions, OpenFlags, OpenOp, Vfsi, VfsiExt, WriteOp};
 
 fn writes<C: Vfsi>(fs: &C) {
-    let mut files = fs
+    let files = fs
         .vopen(&[
             OpenOp::new("/a", OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE),
             OpenOp::new("/b", OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE),
@@ -23,7 +23,10 @@ fn writes<C: Vfsi>(fs: &C) {
             .collect::<Vec<_>>(),
         [(3, 7), (0, 3)]
     );
-    assert_eq!(std::io::Seek::stream_position(&mut files[0]).unwrap(), 0);
+    assert_eq!(
+        std::io::Seek::stream_position(&mut fs.file_io(&files[0])).unwrap(),
+        0
+    );
     fs.vwrite(
         &[
             WriteOp::at(&files[1], 0, b"first"),
@@ -118,11 +121,11 @@ fn attrs_query<C: Vfsi>(fs: &C) {
         .attrs_with_options("/a", AttrsOptions::new().fields(Attributes::FILEID))
         .unwrap();
     assert!(scalar.file_id().is_some());
-    assert_eq!(scalar.len(), 0);
+    assert_eq!(scalar.len(), None);
     let follow = fs
         .vgetattrs(&["/link", "/a"], vnfs::AttrsOptions::new())
         .unwrap();
-    assert!(follow.iter().all(|m| m.is_file() && m.len() == 3));
+    assert!(follow.iter().all(|m| m.is_file() && m.len() == Some(3)));
     let links = fs
         .vgetattrs(
             &["/a", "/link", "/dangling"],
@@ -141,7 +144,7 @@ fn attrs_query<C: Vfsi>(fs: &C) {
     assert!(partial[0].file_id().is_some());
     assert_eq!(
         partial[0].len(),
-        0,
+        None,
         "unrequested size must remain absent/default"
     );
     assert_eq!(

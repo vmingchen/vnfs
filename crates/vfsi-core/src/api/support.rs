@@ -102,7 +102,9 @@ pub struct ReadIntoResult {
     pub eof: bool,
 }
 
-/// Application result for one positional vector write, in request order.
+/// Application result for one vector write, in request order.
+/// For completed append writes, `offset + written` is the last reported end;
+/// concurrent writers can interleave between short-write waves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteResult {
     pub offset: u64,

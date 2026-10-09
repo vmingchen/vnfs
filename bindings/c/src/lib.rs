@@ -1086,7 +1086,7 @@ fn attrs_from_metadata(metadata: &vnfs::Attrs) -> vfsi_attrs {
         abi_version: VFSI_ABI_VERSION,
         ftype: vfsi_sync::file_type_to_nfs(&metadata.file_type()),
         mode: metadata.mode().unwrap_or_default() & 0o7777,
-        size: metadata.len(),
+        size: metadata.len().unwrap_or_default(),
         nlink: metadata.nlink().unwrap_or_default(),
         fileid: metadata.file_id().unwrap_or_default(),
         blocks: metadata.blocks().unwrap_or_default(),

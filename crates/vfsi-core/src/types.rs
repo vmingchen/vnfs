@@ -1176,16 +1176,20 @@ impl Attrs {
         self.file_type == VfType::Symlink
     }
 
-    pub fn len(&self) -> u64 {
-        self.len
+    /// Logical size, when SIZE was returned. Missing is distinct from zero.
+    pub fn len(&self) -> Option<u64> {
+        self.returned.contains(AttrMask::SIZE).then_some(self.len)
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
+    pub fn is_empty(&self) -> Option<bool> {
+        self.len().map(|len| len == 0)
     }
 
-    pub fn permissions(&self) -> Permissions {
-        self.permissions
+    /// Permission bits, when MODE was returned. Missing is distinct from mode zero.
+    pub fn permissions(&self) -> Option<Permissions> {
+        self.returned
+            .contains(AttrMask::MODE)
+            .then_some(self.permissions)
     }
 
     pub fn modified(&self) -> Option<std::time::SystemTime> {
@@ -1497,5 +1501,39 @@ mod copy_option_tests {
                 .follow_source_symlinks(true)
                 .follows_source_symlinks()
         );
+    }
+}
+
+#[cfg(test)]
+mod sparse_metadata_tests {
+    use super::*;
+    #[test]
+    fn omitted_fields_are_distinct_from_real_zero_values() {
+        let missing = metadata_from_attrs(VfAttrs {
+            size: 123,
+            mode: 0o777,
+            ..VfAttrs::default()
+        });
+        assert_eq!(missing.len(), None);
+        assert_eq!(missing.is_empty(), None);
+        assert_eq!(missing.permissions(), None);
+        let zero = metadata_from_attrs(VfAttrs {
+            returned: AttrMask::SIZE | AttrMask::MODE,
+            size: 0,
+            mode: 0,
+            ..VfAttrs::default()
+        });
+        assert_eq!(zero.len(), Some(0));
+        assert_eq!(zero.is_empty(), Some(true));
+        assert_eq!(zero.permissions().unwrap().mode(), 0);
+        let size_only = metadata_from_attrs(VfAttrs {
+            returned: AttrMask::SIZE,
+            size: 123,
+            mode: 0o777,
+            ..VfAttrs::default()
+        });
+        assert_eq!(size_only.len(), Some(123));
+        assert_eq!(size_only.is_empty(), Some(false));
+        assert_eq!(size_only.permissions(), None);
     }
 }

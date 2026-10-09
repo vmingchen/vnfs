@@ -1,5 +1,4 @@
 //! Native execution of the portable VFSI contract.
-use std::io::SeekFrom;
 use std::path::Path;
 use vfsi_core::api::*;
 #[doc(hidden)]
@@ -334,7 +333,7 @@ where
     client.vwrite_all_mapped_native(ops, |op| op.file().write_request_at(op.offset(), op.data()))
 }
 
-pub(crate) fn metadata_backend<F, P: AsRef<std::path::Path>>(
+pub(crate) fn metadata_backend<F, P: vfsi_core::AsTarget<crate::FsFile<F>>>(
     client: &crate::FsClient<F>,
     paths: &[P],
     options: AttrsOptions,

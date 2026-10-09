@@ -21,9 +21,13 @@ enum Fault {
     IndexedRead,
     PartialCrossDevice,
     LostRename,
+    MissingSize,
 }
 #[derive(Default)]
 struct Calls {
+    read_attempts: usize,
+    metadata: Vec<usize>,
+    syncs: Vec<(SyncMode, usize)>,
     attrs: Vec<usize>,
     opens: usize,
     renames: usize,
@@ -37,6 +41,7 @@ struct Calls {
 }
 struct Harness {
     fs: Mounted,
+    read_failure: Cell<Option<(usize, u32)>>,
     calls: RefCell<Calls>,
     fault: Cell<Fault>,
 }
@@ -47,6 +52,7 @@ impl Harness {
                 max_read_bytes: 64,
                 ..Default::default()
             }),
+            read_failure: Cell::new(None),
             calls: RefCell::new(Calls::default()),
             fault: Cell::new(Fault::None),
         }
@@ -66,6 +72,10 @@ impl Vfsi for Harness {
         self.calls.borrow_mut().attrs.push(targets.len());
         self.fs.vsetattrs(targets)
     }
+    fn vfsync(&self, files: &[&Self::File], mode: SyncMode) -> Result<()> {
+        self.calls.borrow_mut().syncs.push((mode, files.len()));
+        self.fs.vfsync(files, mode)
+    }
     fn vstatfs<P: AsTarget<Self::File>>(&self, targets: &[P]) -> Result<Vec<FilesystemStats>> {
         self.fs.vstatfs(targets)
     }
@@ -81,7 +91,22 @@ impl Vfsi for Harness {
     fn limits(&self) -> ResourceLimits {
         self.fs.limits()
     }
-    fn vgetattrs<P: AsRef<Path>>(&self, p: &[P], o: AttrsOptions) -> Result<Vec<Attrs>> {
+    fn vgetattrs<P: AsTarget<Self::File>>(&self, p: &[P], o: AttrsOptions) -> Result<Vec<Attrs>> {
+        self.calls.borrow_mut().metadata.push(p.len());
+        if self.fault.get() == Fault::MissingSize {
+            return Ok(p
+                .iter()
+                .map(|_| {
+                    vfsi_core::metadata_from_attrs(vfsi_core::VfAttrs {
+                        returned: Attributes::MODE,
+                        ftype: FileType::Regular,
+                        mode: libc::S_IFREG | 0o644,
+                        size: 100,
+                        ..Default::default()
+                    })
+                })
+                .collect());
+        }
         self.fs.vgetattrs(p, o)
     }
     fn vopen(&self, r: &[OpenOp]) -> Result<Vec<Self::File>> {
@@ -93,6 +118,17 @@ impl Vfsi for Harness {
         r: impl IntoIterator<Item = ReadOp<'a, Self::File>>,
         o: ReadOptions,
     ) -> Result<Vec<ReadResult>> {
+        let attempt = {
+            let mut calls = self.calls.borrow_mut();
+            calls.read_attempts += 1;
+            calls.read_attempts
+        };
+        if let Some((at, errno)) = self.read_failure.get()
+            && at == attempt
+        {
+            self.read_failure.set(None);
+            return Err(Error::client(0, errno));
+        }
         if self.fault.get() == Fault::IndexedRead {
             return Err(Error::client(1, libc::EIO as u32));
         }
@@ -805,4 +841,156 @@ fn batch_copy_error_or_close_error_retains_every_source() {
             assert_eq!(calls.writes, 1);
         }
     }
+}
+
+#[test]
+fn standard_io_adapter_uses_vectors_and_has_an_independent_retained_cursor() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    fs.fs.write("/io", b"abcdef").unwrap();
+    let file = fs
+        .open_options()
+        .read(true)
+        .write(true)
+        .open("/io")
+        .unwrap();
+    let mut io = fs.file_io(&file);
+    let mut prefix = [0; 2];
+    io.read_exact(&mut prefix).unwrap();
+    assert_eq!(&prefix, b"ab");
+    assert_eq!(io.position(), 2);
+    assert_eq!(io.seek(SeekFrom::End(-2)).unwrap(), 4);
+    io.write_all(b"XY").unwrap();
+    io.flush().unwrap();
+    assert_eq!(fs.calls.borrow().writes, 1);
+    assert_eq!(fs.calls.borrow().syncs, [(SyncMode::Data, 1)]);
+    assert_eq!(fs.calls.borrow().metadata, [1]);
+    assert_eq!(io.position(), 6);
+    assert_eq!(fs.file_io(&file).position(), 0);
+    fs.rename("/io", "/retained").unwrap();
+    fs.fs.write("/io", b"replacement").unwrap();
+    assert_eq!(io.seek(SeekFrom::End(0)).unwrap(), 6);
+    io.seek(SeekFrom::Start(0)).unwrap();
+    let mut bytes = Vec::new();
+    io.read_to_end(&mut bytes).unwrap();
+    assert_eq!(bytes, b"abcdXY");
+    assert_eq!(fs.attrs(Target::file(&file)).unwrap().len(), Some(6));
+    fs.sync_all(&file).unwrap();
+    assert_eq!(fs.calls.borrow().syncs.last(), Some(&(SyncMode::All, 1)));
+    let reads = fs.calls.borrow().reads;
+    fs.fault.set(Fault::BadRead);
+    let mut bad_io = fs.file_io(&file);
+    assert_eq!(
+        bad_io.read(&mut prefix).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert_eq!(bad_io.position(), 0);
+    assert_eq!(fs.calls.borrow().reads, reads + 1);
+    fs.fault.set(Fault::WrongOffset);
+    assert!(bad_io.read(&mut prefix).is_err());
+    assert_eq!(bad_io.position(), 0);
+    fs.fault.set(Fault::BadWrite);
+    assert!(bad_io.write_all(b"x").is_err());
+    assert_eq!(bad_io.position(), 0);
+}
+#[test]
+fn absent_sizes_make_copy_and_tree_statistics_fail_instead_of_reporting_zero() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    fs.fs.write("/source", b"content").unwrap();
+    fs.fault.set(Fault::MissingSize);
+    assert_eq!(
+        tree_stats(&fs, "/source", ListDirOptions::new())
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert_eq!(
+        copy_items(&fs, &["/source"], "/dest", CopyOptions::new())
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::Unsupported
+    );
+    assert_eq!(fs.calls.borrow().opens, 0);
+    assert_eq!(fs.fs.read("/source").unwrap(), b"content");
+}
+
+#[test]
+fn collecting_adapter_retries_interrupted_reads_and_exact_budget_probes() {
+    use std::io::Read;
+    for string in [false, true] {
+        for interrupted_at in [1, 2] {
+            let root = tempfile::tempdir().unwrap();
+            let mut fs = Harness::new(root.path());
+            fs.fs = fs.fs.with_limits(ResourceLimits {
+                max_read_bytes: 3,
+                ..Default::default()
+            });
+            fs.fs.write("/file", b"abc").unwrap();
+            fs.read_failure
+                .set(Some((interrupted_at, libc::EINTR as u32)));
+            let file = fs.open("/file").unwrap();
+            let mut io = fs.file_io(&file);
+            if string {
+                let mut output = String::from("prefix");
+                assert_eq!(io.read_to_string(&mut output).unwrap(), 3);
+                assert_eq!(output, "prefixabc");
+            } else {
+                let mut output = vec![9];
+                assert_eq!(io.read_to_end(&mut output).unwrap(), 3);
+                assert_eq!(output, [9, b'a', b'b', b'c']);
+            }
+            assert_eq!(io.position(), 3);
+            assert_eq!(fs.calls.borrow().read_attempts, 3);
+        }
+    }
+    // Other errors must neither retry nor leave resized, unread bytes in output.
+    for failed_at in [1, 2] {
+        let root = tempfile::tempdir().unwrap();
+        let mut fs = Harness::new(root.path());
+        fs.fs = fs.fs.with_limits(ResourceLimits {
+            max_read_bytes: 3,
+            ..Default::default()
+        });
+        fs.fs.write("/file", b"abcdef").unwrap();
+        fs.read_failure.set(Some((failed_at, libc::EIO as u32)));
+        let file = fs.open("/file").unwrap();
+        let mut output = vec![9];
+        let mut io = fs.file_io(&file);
+        assert!(io.read_to_end(&mut output).is_err());
+        assert_eq!(
+            output,
+            if failed_at == 1 {
+                vec![9]
+            } else {
+                vec![9, b'a', b'b', b'c']
+            }
+        );
+        assert_eq!(io.position(), if failed_at == 1 { 0 } else { 3 });
+        assert_eq!(fs.calls.borrow().read_attempts, failed_at);
+    }
+}
+
+#[test]
+fn collecting_adapter_uses_bounded_stream_chunks_without_small_read_waves() {
+    use std::io::Read;
+    let root = tempfile::tempdir().unwrap();
+    let mut fs = Harness::new(root.path());
+    fs.fs = fs.fs.with_limits(ResourceLimits::default());
+    let chunk = vfsi_core::api::DEFAULT_READ_STREAM_CHUNK_BYTES;
+    let payload = vec![0x5a; chunk + 17];
+    fs.fs.write("/large", &payload).unwrap();
+    let file = fs.open("/large").unwrap();
+    let mut output = vec![9];
+    assert_eq!(
+        fs.file_io(&file).read_to_end(&mut output).unwrap(),
+        payload.len()
+    );
+    assert_eq!(&output[1..], payload);
+    let calls = fs.calls.borrow();
+    assert_eq!(calls.read_attempts, 2);
+    assert_eq!(calls.reads, 2);
+    assert_eq!(calls.max_files, 1);
+    assert_eq!(calls.max_bytes, chunk);
 }

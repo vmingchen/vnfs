@@ -9,7 +9,7 @@ pub fn run(fs: &impl Vfsi, paths: &[String], tree: &str) -> vnfs::Result<usize> 
             ListDirOptions::new().fields(Attributes::MODE | Attributes::SIZE),
             |_, listing| {
                 for entry in listing.entries {
-                    println!("{:?}: {} bytes", entry.path(), entry.attrs().len());
+                    println!("{:?}: {:?} bytes", entry.path(), entry.attrs().len());
                 }
                 Ok(ControlFlow::Continue(()))
             },

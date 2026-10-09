@@ -271,6 +271,7 @@ impl<F: FileSystem> FsClient<F> {
         Ok(FsFile {
             inner: Arc::clone(&self.inner),
             file: Some(file),
+            append: request.flags.contains(OpenFlags::APPEND),
             path: request.path,
         })
     }
@@ -739,38 +740,66 @@ impl<F: Backend> FsClient<F> {
     /// Vector metadata query with explicit fields and final-symlink handling.
     /// Ancestor symlinks follow the backend's normal namespace semantics.
     #[doc(hidden)]
-    pub fn vgetattrs_native<P: AsRef<Path>>(
+    pub fn vgetattrs_native<P: vfsi_core::AsTarget<FsFile<F>>>(
         &self,
-        paths: &[P],
+        targets: &[P],
         fields: AttrMask,
         follow: bool,
     ) -> VfResult<Vec<Attrs>> {
-        if paths.is_empty() {
+        use vfsi_core::Target;
+        if targets.is_empty() {
             return Ok(Vec::new());
         }
-        let mut attrs: Vec<_> = paths
-            .iter()
-            .map(|path| crate::VfAttrs {
-                file: VfFile::from_os_path(path.as_ref()),
+        let mut paths = Vec::with_capacity(targets.len());
+        let mut attrs = Vec::with_capacity(targets.len());
+        let mut policies = Vec::with_capacity(targets.len());
+        for (index, target) in targets.iter().enumerate() {
+            let (raw, path, follows) = match target.as_target() {
+                Target::Path(path) => (VfFile::from_os_path(path), path, follow),
+                Target::File(file) => {
+                    self.validate_owner(file, index)
+                        .map_err(|e| e.with_context("vgetattrs", &file.path))?;
+                    (
+                        file.raw()
+                            .map_err(|e| e.with_index(index).with_context("vgetattrs", &file.path))?
+                            .clone(),
+                        file.path.as_path(),
+                        true,
+                    )
+                }
+            };
+            paths.push(path);
+            policies.push(follows);
+            attrs.push(crate::VfAttrs {
+                file: raw,
                 masks: fields | AttrMask::MODE,
                 ..crate::VfAttrs::default()
-            })
-            .collect();
-        let result = {
-            let mut backend = self.lock()?;
-            if follow {
-                backend.vgetattrs_impl(&mut attrs)
+            });
+        }
+        let mut backend = self.lock()?;
+        let mut start = 0;
+        while start < attrs.len() {
+            let end = start
+                + policies[start..]
+                    .iter()
+                    .take_while(|p| **p == policies[start])
+                    .count();
+            let result = if policies[start] {
+                backend.vgetattrs_impl(&mut attrs[start..end])
             } else {
-                backend.vgetattrs_nofollow_impl(&mut attrs)
-            }
-        };
-        result.map_err(|error| match error.index() {
-            Some(index) if index < paths.len() => {
-                error.with_context("metadatav", paths[index].as_ref())
-            }
-            Some(_) => VfError::transport(None, "metadata backend returned an invalid error index"),
-            None => error,
-        })?;
+                backend.vgetattrs_nofollow_impl(&mut attrs[start..end])
+            };
+            result.map_err(|error| match error.index() {
+                Some(index) if index < end - start => error
+                    .with_index(start + index)
+                    .with_context("vgetattrs", paths[start + index]),
+                Some(_) => {
+                    VfError::transport(None, "metadata backend returned an invalid error index")
+                }
+                None => error,
+            })?;
+            start = end;
+        }
         Ok(attrs
             .into_iter()
             .map(vfsi_core::metadata_from_attrs)
@@ -808,6 +837,7 @@ impl<F: Backend> FsClient<F> {
             .map(|(file, request)| FsFile {
                 inner: Arc::clone(&self.inner),
                 file: Some(file),
+                append: request.flags.contains(OpenFlags::APPEND),
                 path: request.path.clone(),
             })
             .collect())
@@ -1117,8 +1147,9 @@ impl<F: Backend> FsClient<F> {
     {
         // Validate the entire batch before writing any prefix. In particular,
         // empty requests must not conceal a foreign or already-closed file.
-        let mut prior_by_path: HashMap<&Path, Vec<(usize, u64, u64)>> = HashMap::new();
+        let mut prior_by_path: HashMap<&Path, Vec<(usize, u64, u64, bool)>> = HashMap::new();
         let mut blocked_by = vec![Vec::new(); requests.len()];
+        let mut offsets = Vec::with_capacity(requests.len());
         for (index, request) in requests.iter().map(&project).enumerate() {
             self.validate_owner(request.file(), index)?;
             request.file().raw().map_err(|error| {
@@ -1136,16 +1167,18 @@ impl<F: Backend> FsClient<F> {
                     VfError::client(index, libc::EOVERFLOW as u32)
                         .with_context("vwrite_all_native", request.file().path())
                 })?;
-            // Non-overlapping writes commute. An overlapping later request
-            // must wait until every earlier conflicting request is complete:
-            // otherwise a short-write retry can overwrite the later bytes.
+            offsets.push(offset);
+            // Non-overlapping positional writes commute. Append requests must
+            // wait for every earlier write to the same diagnostic path.
+            // Finish conflicting requests before dispatching later bytes, so
+            // short-write retries cannot overwrite or interleave their payloads.
             let prior = prior_by_path.entry(request.file().path()).or_default();
-            for &(earlier, start, earlier_end) in prior.iter() {
-                if offset < earlier_end && start < end {
+            for &(earlier, start, earlier_end, append) in prior.iter() {
+                if append || request.file().append || (offset < earlier_end && start < end) {
                     blocked_by[index].push(earlier);
                 }
             }
-            prior.push((index, offset, end));
+            prior.push((index, offset, end, request.file().append));
         }
         let mut totals = vec![0usize; requests.len()];
         let mut stable = vec![true; requests.len()];
@@ -1192,26 +1225,35 @@ impl<F: Backend> FsClient<F> {
                     ));
                 }
                 totals[index] += result.written;
+                if project(&requests[index]).file().append {
+                    // Preserve the last reported end even when outside writers
+                    // append between short-write waves. This is an aggregate
+                    // completion offset, not a guarantee of a contiguous extent.
+                    offsets[index] = result
+                        .offset
+                        .checked_add(result.written as u64)
+                        .and_then(|end| end.checked_sub(totals[index] as u64))
+                        .ok_or_else(|| {
+                            VfError::transport_with_kind(
+                                Some(index),
+                                crate::TransportKind::InvalidReply,
+                                "append completion offset cannot be represented",
+                            )
+                        })?;
+                }
                 stable[index] &= result.stable;
             }
             pending.retain(|&index| totals[index] < project(&requests[index]).data().len());
         }
-        requests
-            .iter()
-            .map(&project)
+        Ok(offsets
+            .into_iter()
             .enumerate()
-            .map(|(index, request)| {
-                let VfOffset::At(offset) = request.offset() else {
-                    return Err(VfError::client(index, crate::ERR_INVAL)
-                        .with_context("vwrite_all_native", request.file().path()));
-                };
-                Ok(FsWriteResult {
-                    offset,
-                    written: totals[index],
-                    stable: stable[index],
-                })
+            .map(|(index, offset)| FsWriteResult {
+                offset,
+                written: totals[index],
+                stable: stable[index],
             })
-            .collect()
+            .collect())
     }
 
     fn write_ops<'a, 'b, T>(
@@ -1231,7 +1273,13 @@ impl<F: Backend> FsClient<F> {
                     .file()
                     .raw()
                     .map_err(|error| error.with_index(index))?,
-                request.offset(),
+                // Canonicalize append requests before common result validation:
+                // the backend selects EOF, not the caller's positional offset.
+                if request.file().append {
+                    VfOffset::End
+                } else {
+                    request.offset()
+                },
                 request.data(),
             ));
         }
@@ -1377,6 +1425,8 @@ impl<F: Backend> OpenOptions<'_, F> {
 pub struct FsFile<F: FileSystem> {
     inner: Arc<SharedBackend<F>>,
     file: Option<VfFile>,
+    // Retained open policy; never exposed through the portable handle API.
+    append: bool,
     path: PathBuf,
 }
 
@@ -1673,6 +1723,40 @@ impl<F: FileSystem> Drop for FsFile<F> {
 }
 
 impl<F: FileSystem> FsClient<F> {
+    /// Preflight every handle, then submit one synchronization vector.
+    pub(crate) fn vfsync_impl(
+        &self,
+        files: &[&FsFile<F>],
+        mode: vfsi_core::api::SyncMode,
+    ) -> VfResult<()> {
+        if files.is_empty() {
+            return Ok(());
+        }
+        let mut raw = Vec::with_capacity(files.len());
+        for (index, file) in files.iter().enumerate() {
+            if !Arc::ptr_eq(&self.inner, &file.inner) {
+                return Err(
+                    VfError::client(index, crate::ERR_INVAL).with_context("vfsync", &file.path)
+                );
+            }
+            raw.push(
+                file.raw()
+                    .map_err(|e| e.with_index(index).with_context("vfsync", &file.path))?
+                    .clone(),
+            );
+        }
+        self.lock()?
+            .vfsync_impl(&raw, mode)
+            .map_err(|error| match error.index() {
+                Some(index) if index < files.len() => {
+                    error.with_context("vfsync", &files[index].path)
+                }
+                Some(_) => {
+                    VfError::transport(None, "fsync backend returned an invalid error index")
+                }
+                None => error,
+            })
+    }
     /// Query filesystems using one native vector of paths and retained handles.
     pub(crate) fn vstatfs<P: vfsi_core::AsTarget<FsFile<F>>>(
         &self,

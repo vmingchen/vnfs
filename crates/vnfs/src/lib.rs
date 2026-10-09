@@ -38,9 +38,9 @@ pub mod mounted {
 pub mod files {
     #[doc(inline)]
     pub use crate::{
-        Capabilities, FileHandle, OpenFlags, OpenOp, OpenOptions, ReadIntoResult, ReadOp,
-        ReadOptions, ReadResult, ResourceLimits, StreamCompletion, StreamOptions, Vfsi, VfsiExt,
-        WriteOp, WriteOptions, WriteResult,
+        Capabilities, FileHandle, FileIo, OpenFlags, OpenOp, OpenOptions, ReadIntoResult, ReadOp,
+        ReadOptions, ReadResult, ResourceLimits, StreamCompletion, StreamOptions, SyncMode, Vfsi,
+        VfsiExt, WriteOp, WriteOptions, WriteResult,
     };
 }
 
@@ -90,8 +90,6 @@ pub type Error = vfsi_core::VfError;
 mod application;
 pub use vfsi_core::{AsTarget, FileHandle, Target, Vfsi, VfsiExt};
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
-mod metadata;
-#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod read;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use read::ReadRequest;
@@ -99,7 +97,7 @@ pub use vfsi_core::api::ListDirOptions;
 pub use vfsi_core::api::RenameOptions;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_core::api::internal::OwnedReadResult;
-pub use vfsi_core::api::{AttrsOptions, OpenOptions, SetMetadata};
+pub use vfsi_core::api::{AttrsOptions, FileIo, OpenOptions, SetMetadata, SyncMode};
 pub use vfsi_core::api::{ReadOp, ReadOptions, ReadResult};
 pub use vfsi_core::api::{WriteOp, WriteOptions};
 
@@ -177,8 +175,8 @@ pub mod prelude {
     pub use crate::{
         AsTarget, AttrsOptions, ControlFlow, CopyOption, FileHandle, FilesystemStats,
         ListDirOptions, MkDirOp, ReadOp, ReadOptions, ReadResult, RemoveMode, ResourceLimits,
-        SetAttrsOp, StreamCompletion, Target, TraversalCompletion, Vfsi, VfsiExt, WriteOp,
-        WriteOptions,
+        SetAttrsOp, StreamCompletion, SyncMode, Target, TraversalCompletion, Vfsi, VfsiExt,
+        WriteOp, WriteOptions,
     };
     #[cfg(all(feature = "auto", target_os = "linux"))]
     pub use crate::{Auto, Mounted};

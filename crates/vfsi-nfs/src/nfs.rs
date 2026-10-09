@@ -4265,6 +4265,14 @@ impl FileSystem for NfsVecFs {
         }
     }
 
+    fn vfsync_impl(&mut self, files: &[VfFile], _mode: vfsi_core::api::SyncMode) -> VfRes {
+        for (index, file) in files.iter().enumerate() {
+            self.sync_data(file)
+                .map_err(|error| error.map_index(|_| index))?;
+        }
+        Ok(())
+    }
+
     fn sync_data(&mut self, tcf: &VfFile) -> VfResult<()> {
         let fd = tcf.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
         if self.open_files.contains_key(&fd) {

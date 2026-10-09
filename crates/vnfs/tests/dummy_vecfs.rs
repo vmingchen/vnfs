@@ -214,7 +214,7 @@ fn application_directory_vectors_preserve_fields_and_limits() {
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0][0].path, Path::new("/a"));
     assert_eq!(listed[0][0].entries[0].path(), Path::new("/a/one"));
-    assert_eq!(listed[1][0].entries[0].attrs().len(), 2);
+    assert_eq!(listed[1][0].entries[0].attrs().len().unwrap(), 2);
     assert!(listed[0][0].entries[0].attrs().mode().is_some());
     assert!(listed[0][0].entries[0].attrs().blocks().is_some());
     assert_eq!(listed[0][0].entries[0].attrs().device_id(), None);
@@ -896,8 +896,8 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
 
     let metadata = client.attrs("/tree/nested/file").unwrap();
     assert!(metadata.is_file());
-    assert_eq!(metadata.len(), 5);
-    assert!(!metadata.permissions().readonly());
+    assert_eq!(metadata.len(), Some(5));
+    assert!(!metadata.permissions().unwrap().readonly());
 
     let entries = client.read_dir("/tree/nested").unwrap();
     assert_eq!(entries.len(), 1);
@@ -914,12 +914,12 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
     let mut bytes = [0; 5];
     assert_eq!(file.read_at(&mut bytes, 0).unwrap(), 5);
     assert_eq!(&bytes, b"hallo");
-    assert_eq!(file.attrs().unwrap().len(), 5);
+    assert_eq!(file.attrs().unwrap().len().unwrap(), 5);
     file.truncate(4).unwrap();
     file.chmod(vnfs::Permissions::from_mode(0o600)).unwrap();
     let metadata = file.attrs().unwrap();
-    assert_eq!(metadata.len(), 4);
-    assert_eq!(metadata.permissions().mode(), 0o600);
+    assert_eq!(metadata.len(), Some(4));
+    assert_eq!(metadata.permissions().unwrap().mode(), 0o600);
     file.close().unwrap();
     client
         .set_metadata("/tree/nested/file")
@@ -928,8 +928,8 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
         .apply()
         .unwrap();
     let metadata = client.attrs("/tree/nested/file").unwrap();
-    assert_eq!(metadata.len(), 4);
-    assert_eq!(metadata.permissions().mode(), 0o400);
+    assert_eq!(metadata.len(), Some(4));
+    assert_eq!(metadata.permissions().unwrap().mode(), 0o400);
 
     client
         .rename("/tree/nested/file", "/tree/nested/renamed")
@@ -1308,7 +1308,7 @@ fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
         let result = client.listdir("/tree", vfsi_core::api::ListDirOptions::new(), |entry| {
             // Both operations acquire the same backend mutex. In particular,
             // dropping an owned file must not block directory enumeration.
-            assert_eq!(client.attrs(entry.entry.path())?.len(), 1);
+            assert_eq!(client.attrs(entry.entry.path())?.len(), Some(1));
             if let Some(file) = held_file.take() {
                 drop(file);
             }

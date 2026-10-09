@@ -1783,6 +1783,12 @@ impl Backend for SmbVecFs {
     }
 
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
+        // This engine queries paths; reopening a retained handle's old name
+        // after rename/unlink would query another object. Fail closed until a
+        // handle-based QUERY_INFO engine is available.
+        if let Some(index) = attrs.iter().position(|attrs| attrs.file.is_descriptor()) {
+            return Err(VfError::unsupported(index));
+        }
         if attrs.len() > 1
             && !self.tree.is_dfs
             && attrs.iter().all(|attrs| !attrs.file.is_descriptor())

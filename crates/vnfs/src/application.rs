@@ -4,7 +4,6 @@ use crate::VfsiExt;
 use crate::{
     Attrs, DirectoryListing, FileHandle, OpenOp, ResourceLimits, Result, Vfsi, WriteResult,
 };
-use std::io::SeekFrom;
 use std::path::Path;
 #[cfg(test)]
 use vfsi_sync::application::visit_directory_pages;
@@ -230,7 +229,7 @@ mod extension_tests {
         assert_eq!(listed.len(), 2);
         assert!(listed.iter().all(|tree| tree.len() == 1));
         assert_eq!(listed[0][0].path, Path::new("/a"));
-        assert_eq!(listed[1][0].entries[0].attrs().len(), 1);
+        assert_eq!(listed[1][0].entries[0].attrs().len().unwrap(), 1);
         let trees = fs
             .read_dirs_with_options(&["/a", "/b"], shallow.recursive(true))
             .unwrap();
@@ -240,7 +239,8 @@ mod extension_tests {
             trees[0]
                 .iter()
                 .flat_map(|listing| &listing.entries)
-                .any(|entry| entry.path() == Path::new("/a/sub/f") && entry.attrs().len() == 7)
+                .any(|entry| entry.path() == Path::new("/a/sub/f")
+                    && entry.attrs().len().unwrap() == 7)
         );
         assert_eq!(
             fs.read_dirs_with_options(&["/a", "/a"], shallow.max_entries(1))
@@ -352,7 +352,7 @@ mod extension_tests {
                     .fields(Attributes::SIZE),
                 |_, entry| {
                     if entry.path().ends_with("file") {
-                        assert_eq!(entry.attrs().len(), 7);
+                        assert_eq!(entry.attrs().len().unwrap(), 7);
                     }
                     seen.push(entry.path().to_path_buf());
                     Ok(ControlFlow::Continue(()))
@@ -729,7 +729,7 @@ mod extension_tests {
             assert!(bytes.len() <= 2);
             assert_eq!(offset as usize, payload.len());
             // Reenter the same client from its callback.
-            assert_eq!(fs.attrs("/dir/a")?.len(), 3);
+            assert_eq!(fs.attrs("/dir/a")?.len(), Some(3));
             payload.extend_from_slice(bytes);
             Ok(true)
         })

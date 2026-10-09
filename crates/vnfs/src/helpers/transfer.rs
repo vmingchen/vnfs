@@ -215,6 +215,7 @@ struct Task {
     source: PathBuf,
     destination: PathBuf,
     metadata: Attrs,
+    size: u64,
     root: usize,
     depth: usize,
     fresh_destination: bool,
@@ -332,6 +333,7 @@ fn roots<P: AsRef<Path>>(
             source,
             destination: dest,
             metadata: placeholder(),
+            size: 0,
             root,
             depth: 0,
             fresh_destination: false,
@@ -463,6 +465,7 @@ fn run<P: AsRef<Path>>(
             source: roots[0].source.clone(),
             destination: normalize(destination, budget.max_bytes)?,
             metadata: roots[0].metadata.clone(),
+            size: 0,
             root: 0,
             depth: 0,
             fresh_destination: false,
@@ -556,6 +559,7 @@ fn copy_roots(
                             source: entry.path().to_path_buf(),
                             destination: dest,
                             metadata: entry.attrs().clone(),
+                            size: 0,
                             root: parent.root,
                             depth,
                             fresh_destination: parent.fresh_destination,
@@ -619,10 +623,13 @@ fn dispatch(
 ) -> Result<()> {
     let mut dirs = Vec::new();
     let mut files = Vec::new();
-    for task in tasks {
+    for mut task in tasks {
         if task.metadata.is_dir() {
             dirs.push(task);
         } else if task.metadata.is_file() {
+            task.size = task.metadata.len().ok_or_else(|| {
+                Error::unsupported(task.root).with_context("transfer size", &task.source)
+            })?;
             files.push(task);
         } else if options.unsupported == UnsupportedEntry::Skip {
             summary.entries_skipped += 1;
@@ -660,8 +667,7 @@ fn dispatch(
         let mut end = start;
         let mut bytes = 0;
         while end < files.len() && end - start < options.batch_size {
-            let required =
-                chunk.min(usize::try_from(files[end].metadata.len()).unwrap_or(usize::MAX));
+            let required = chunk.min(usize::try_from(files[end].size).unwrap_or(usize::MAX));
             if !native_copy && required > fs.limits().max_read_bytes - bytes {
                 break;
             }
@@ -784,12 +790,7 @@ fn copy_batch(
         let mut done = vec![false; selected.len()];
         let mut buffers: Vec<_> = selected
             .iter()
-            .map(|i| {
-                vec![
-                    0u8;
-                    chunk.min(usize::try_from(tasks[*i].metadata.len()).unwrap_or(usize::MAX))
-                ]
-            })
+            .map(|i| vec![0u8; chunk.min(usize::try_from(tasks[*i].size).unwrap_or(usize::MAX))])
             .collect();
         while done.iter().any(|v| !v) {
             let active: Vec<_> = (0..selected.len()).filter(|i| !done[*i]).collect();
@@ -798,7 +799,7 @@ fn copy_batch(
                 .enumerate()
                 .filter(|(i, _)| !done[*i])
                 .map(|(i, buffer)| {
-                    let remaining = tasks[selected[i]].metadata.len().saturating_sub(offsets[i]);
+                    let remaining = tasks[selected[i]].size.saturating_sub(offsets[i]);
                     let length = buffer
                         .len()
                         .min(usize::try_from(remaining).unwrap_or(usize::MAX));
@@ -812,10 +813,7 @@ fn copy_batch(
                 return Err(contract("transfer: invalid READ cardinality"));
             }
             for (result, i) in read.iter().zip(&active) {
-                let remaining = tasks[selected[*i]]
-                    .metadata
-                    .len()
-                    .saturating_sub(offsets[*i]);
+                let remaining = tasks[selected[*i]].size.saturating_sub(offsets[*i]);
                 if result.offset() != offsets[*i]
                     || result.data().is_some()
                     || result.read()
@@ -852,7 +850,7 @@ fn copy_batch(
                         limit(tasks[selected[*i]].root, &tasks[selected[*i]].source)
                     })?;
                 }
-                done[*i] = read.eof() || offsets[*i] == tasks[selected[*i]].metadata.len();
+                done[*i] = read.eof() || offsets[*i] == tasks[selected[*i]].size;
                 if done[*i] {
                     summary.files_copied += 1;
                 }
@@ -864,7 +862,7 @@ fn copy_batch(
                         source: &task.source,
                         destination: &task.destination,
                         file_bytes_copied: offsets[*i],
-                        file_size: task.metadata.len(),
+                        file_size: task.size,
                         summary: *summary,
                     })?
                     .is_break()
@@ -887,7 +885,11 @@ fn copy_batch(
                 .map(|(i, file)| {
                     let task = &tasks[selected[i]];
                     (
-                        SetAttrsOp::file(file).permissions(task.metadata.permissions()),
+                        SetAttrsOp::file(file).permissions(
+                            task.metadata
+                                .permissions()
+                                .expect("MODE validated before copy"),
+                        ),
                         task,
                     )
                 })
@@ -1013,6 +1015,7 @@ fn move_run<P: AsRef<Path>>(
             source: task.source.clone(),
             destination: normalize(destination, budget.max_bytes)?,
             metadata: task.metadata.clone(),
+            size: 0,
             root: 0,
             depth: 0,
             fresh_destination: false,
