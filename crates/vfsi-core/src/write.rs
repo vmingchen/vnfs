@@ -27,7 +27,7 @@ pub type WriteOp<T = VfFile, D = Vec<u8>> = WriteRequest<T, D, VfOffset, u8>;
 ///
 /// Native adapters may own a `VfFile` and `Vec<u8>` while preparing a batch;
 /// execution borrows both through [`WriteRequest::borrowed`]. The portable API uses
-/// the same type with a borrowed application handle and an absolute `u64`
+/// an opaque wrapper over this storage with a borrowed application handle and an absolute `u64`
 /// offset. Borrowing for dispatch never clones a handle or copies payload bytes.
 ///
 /// The final storage parameter is `u8` for native path flags and `()` for

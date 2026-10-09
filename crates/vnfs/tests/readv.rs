@@ -50,10 +50,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
     let temp = tempfile::tempdir().unwrap();
     let fs = Mounted::new(temp.path())
         .unwrap()
-        .with_limits(ResourceLimits {
-            max_read_bytes: 4,
-            ..Default::default()
-        });
+        .with_limits(ResourceLimits::new().max_read_bytes(4));
     fs.write_files(&[("/a", b"abc"), ("/b", b"xyz")]).unwrap();
     assert_eq!(
         fs.vread(
@@ -219,10 +216,7 @@ fn an_exhausted_internal_budget_never_restores_the_default() {
     let root = tempfile::tempdir().unwrap();
     let fs = Mounted::new(root.path())
         .unwrap()
-        .with_limits(vnfs::ResourceLimits {
-            max_read_bytes: 3,
-            ..vnfs::ResourceLimits::default()
-        });
+        .with_limits(vnfs::ResourceLimits::new().max_read_bytes(3));
     fs.write("/a", b"abc").unwrap();
     fs.write("/empty", b"").unwrap();
     fs.write("/extra", b"x").unwrap();
@@ -245,10 +239,7 @@ fn an_exhausted_internal_budget_never_restores_the_default() {
     assert_eq!(error.kind(), vnfs::ErrorKind::FileTooLarge);
     assert_eq!(error.index(), Some(1));
     assert_eq!(&buffer, b"abc");
-    let fs = fs.with_limits(vnfs::ResourceLimits {
-        max_read_bytes: 0,
-        ..vnfs::ResourceLimits::default()
-    });
+    let fs = fs.with_limits(vnfs::ResourceLimits::new().max_read_bytes(0));
     assert_eq!(fs.read_files(&["/empty"]).unwrap(), vec![Vec::<u8>::new()]);
     assert_eq!(
         fs.read_files(&["/extra"]).unwrap_err().kind(),
@@ -271,10 +262,7 @@ fn text_options_inherit_or_override_budgets_and_preserve_utf8_errors() {
     let root = tempfile::tempdir().unwrap();
     let fs = vnfs::Mounted::new(root.path())
         .unwrap()
-        .with_limits(vnfs::ResourceLimits {
-            max_read_bytes: 2,
-            ..Default::default()
-        });
+        .with_limits(vnfs::ResourceLimits::new().max_read_bytes(2));
     fs.write("/text", b"hello").unwrap();
     fs.write("/invalid", &[0xff]).unwrap();
     assert_eq!(

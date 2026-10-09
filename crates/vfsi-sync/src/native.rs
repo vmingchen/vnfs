@@ -664,7 +664,7 @@ pub(crate) fn translate_open_flags(requests: &[OpenOp]) -> VfResult<Vec<i32>> {
         .iter()
         .enumerate()
         .map(|(index, request)| {
-            vfsi_core::open_flags_to_libc(request.flags).map_err(|error| error.with_index(index))
+            vfsi_core::open_flags_to_libc(request.flags()).map_err(|error| error.with_index(index))
         })
         .collect()
 }

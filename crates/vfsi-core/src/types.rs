@@ -568,6 +568,9 @@ bitflags::bitflags! {
 
 /// Translate the typed flags for compatibility backends.
 pub fn open_flags_to_libc(flags: OpenFlags) -> VfResult<i32> {
+    if flags.bits() & !OpenFlags::all().bits() != 0 {
+        return Err(VfError::failure(0, ERR_INVAL));
+    }
     let writable = flags.intersects(OpenFlags::WRITE | OpenFlags::APPEND);
     let mut raw = match (flags.contains(OpenFlags::READ), writable) {
         (true, true) => libc::O_RDWR,
@@ -600,12 +603,27 @@ pub fn open_flags_to_libc(flags: OpenFlags) -> VfResult<i32> {
 /// slices of paths, flags, and modes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenOp {
-    pub path: PathBuf,
-    pub flags: OpenFlags,
-    pub mode: u32,
+    path: PathBuf,
+    flags: OpenFlags,
+    mode: u32,
 }
 
 impl OpenOp {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+    /// Consume the request and transfer its path without cloning storage.
+    pub fn into_path(self) -> PathBuf {
+        self.path
+    }
+    pub const fn flags(&self) -> OpenFlags {
+        self.flags
+    }
+    /// Requested creation permissions, before applying the backend's umask.
+    pub const fn creation_mode(&self) -> u32 {
+        self.mode
+    }
+
     pub fn new(path: impl Into<PathBuf>, flags: OpenFlags) -> Self {
         Self {
             path: path.into(),
@@ -1370,9 +1388,9 @@ pub struct RemoveOptions {
     flags: RemoveFlags,
     /// Maximum batch size for vectorized removals; `0` lets the backend learn
     /// a safe size from useful work, starting at a conservative default.
-    pub batch: usize,
+    batch: usize,
     /// Bounded retries for retryable per-entry statuses.
-    pub retries: u32,
+    retries: u32,
 }
 
 impl Default for RemoveOptions {
@@ -1386,6 +1404,15 @@ impl Default for RemoveOptions {
 }
 
 impl RemoveOptions {
+    /// Configured batch size; zero allows backend adaptation.
+    pub const fn batch_size(self) -> usize {
+        self.batch
+    }
+    /// Retry cap; zero disables retries.
+    pub const fn retry_limit(self) -> u32 {
+        self.retries
+    }
+
     pub fn new() -> Self {
         Self::default()
     }

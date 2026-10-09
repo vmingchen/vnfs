@@ -103,12 +103,12 @@ impl<C: Vfsi + ?Sized> Read for FileIo<'_, C> {
         if buffer.is_empty() {
             return Ok(0);
         }
-        self.read_at(buffer, self.client.limits().max_read_bytes)
+        self.read_at(buffer, self.client.limits().read_byte_limit())
             .map(|(count, _)| count)
             .map_err(Into::into)
     }
     fn read_to_end(&mut self, output: &mut Vec<u8>) -> io::Result<usize> {
-        let budget = self.client.limits().max_read_bytes;
+        let budget = self.client.limits().read_byte_limit();
         let mut added = 0;
         loop {
             let remaining = budget - added;

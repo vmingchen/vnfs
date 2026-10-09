@@ -1068,9 +1068,9 @@ impl Auto {
             .map(|request| {
                 let fallback = || Resolved {
                     route: Route::Mounted,
-                    path: request.path.clone(),
+                    path: request.path().to_path_buf(),
                 };
-                let Some(host) = self.host_path(&request.path) else {
+                let Some(host) = self.host_path(request.path()) else {
                     return fallback();
                 };
                 // A file or directory mounted over an NFS entry belongs to
@@ -1123,7 +1123,7 @@ impl Auto {
             }
             if let Route::Nfs(connection) = &resolved[start].route {
                 let checked: Vec<_> = (start..end)
-                    .filter(|index| !requests[*index].flags.contains(OpenFlags::CREATE_NEW))
+                    .filter(|index| !requests[*index].flags().contains(OpenFlags::CREATE_NEW))
                     .collect();
                 if !checked.is_empty() {
                     let paths: Vec<_> = checked
@@ -1140,7 +1140,7 @@ impl Auto {
                                 if item.file_type() == crate::FileType::Symlink {
                                     resolved[index] = Resolved {
                                         route: Route::Mounted,
-                                        path: requests[index].path.clone(),
+                                        path: requests[index].path().to_path_buf(),
                                     };
                                 }
                             }
@@ -1149,7 +1149,7 @@ impl Auto {
                             for index in start..end {
                                 resolved[index] = Resolved {
                                     route: Route::Mounted,
-                                    path: requests[index].path.clone(),
+                                    path: requests[index].path().to_path_buf(),
                                 };
                             }
                         }
@@ -1168,6 +1168,7 @@ impl Auto {
     }
 
     pub(crate) fn vopen_impl(&self, requests: &[OpenOp]) -> VfResult<Vec<AutoFile>> {
+        vfsi_core::internal::validate_open_requests(requests)?;
         let mounts = read_mounts(true);
         let resolved = self.resolve_open_batch(requests, &mounts);
         let mut output = Vec::with_capacity(requests.len());
@@ -1179,9 +1180,8 @@ impl Auto {
             }
             let batch: Vec<_> = (start..end)
                 .map(|index| {
-                    let mut request = requests[index].clone();
-                    request.path = resolved[index].path.clone();
-                    request
+                    OpenOp::new(&resolved[index].path, requests[index].flags())
+                        .mode(requests[index].creation_mode())
                 })
                 .collect();
             let route = resolved[start].route.clone();
@@ -1190,7 +1190,7 @@ impl Auto {
                     let files = self.mounted.vopen(&batch).map_err(|e| indexed(e, start))?;
                     for (index, file) in files.into_iter().enumerate() {
                         output.push(AutoFile::new(
-                            requests[start + index].path.clone(),
+                            requests[start + index].path().to_path_buf(),
                             route.clone(),
                             AutoFileInner::Mounted(file),
                             &self.owner,
@@ -1204,7 +1204,7 @@ impl Auto {
                         .map_err(|e| indexed(e, start))?;
                     for (index, file) in files.into_iter().enumerate() {
                         output.push(AutoFile::new(
-                            requests[start + index].path.clone(),
+                            requests[start + index].path().to_path_buf(),
                             route.clone(),
                             AutoFileInner::Nfs(file),
                             &self.owner,
@@ -1233,7 +1233,7 @@ impl Auto {
     ) -> VfResult<Vec<crate::ReadResult>> {
         crate::read::consume_ops(
             ops,
-            options.limit_or(self.limits.max_read_bytes),
+            options.limit_or(self.limits.read_byte_limit()),
             |file, offset, length| AutoRead {
                 file,
                 offset,
@@ -2155,10 +2155,9 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error.index(), Some(1));
-        let tiny = Auto::new(&root).unwrap().with_limits(ResourceLimits {
-            max_read_bytes: 5,
-            ..ResourceLimits::default()
-        });
+        let tiny = Auto::new(&root)
+            .unwrap()
+            .with_limits(ResourceLimits::new().max_read_bytes(5));
         let tiny_file = tiny.open("/one").unwrap();
         let error = tiny
             .vread(
@@ -2406,16 +2405,12 @@ mod tests {
         fs::write(&path, b"abcdef").unwrap();
         let mut outcomes = Vec::new();
         for reopen in [false, true] {
-            let client = Auto::new("/").unwrap().with_limits(ResourceLimits {
-                max_read_bytes: 4,
-                ..Default::default()
-            });
+            let client = Auto::new("/")
+                .unwrap()
+                .with_limits(ResourceLimits::new().max_read_bytes(4));
             let file = client.open(&path).unwrap();
             assert!(matches!(file.route(), AutoRoute::DirectNfs { .. }));
-            let client = client.with_limits(ResourceLimits {
-                max_read_bytes: 8,
-                ..Default::default()
-            });
+            let client = client.with_limits(ResourceLimits::new().max_read_bytes(8));
             let file = if reopen {
                 file.close().unwrap();
                 client.open(&path).unwrap()
@@ -2434,10 +2429,7 @@ mod tests {
                         assert_eq!(&buffer, b"abcdef");
                     }),
             );
-            let client = client.with_limits(ResourceLimits {
-                max_read_bytes: 3,
-                ..Default::default()
-            });
+            let client = client.with_limits(ResourceLimits::new().max_read_bytes(3));
             buffer.fill(0xff);
             assert_eq!(
                 client
@@ -2576,12 +2568,13 @@ mod tests {
         };
         let listings = connection
             .client
-            .walk_with_options(
-                &route.path,
+            .read_dirs_with_options(
+                &[&route.path],
                 crate::ListDirOptions::unlimited()
-                    .recursive(true)
-                    .fields(crate::Attributes::stat()),
+                    .fields(crate::Attributes::stat())
+                    .recursive(true),
             )
+            .map(|mut trees| trees.remove(0))
             .unwrap();
         let backend_entries: usize = listings
             .iter()
@@ -2606,13 +2599,15 @@ mod tests {
             .sum();
         let public_total = public_entries + root.as_os_str().len();
         assert!(public_entries > backend_entries && public_total > backend_total);
-        let walk = client.walk_with_options(
-            &root,
-            crate::ListDirOptions::new()
-                .recursive(true)
-                .max_path_bytes(backend_total)
-                .fields(crate::Attributes::stat()),
-        );
+        let walk = client
+            .read_dirs_with_options(
+                &[&root],
+                crate::ListDirOptions::new()
+                    .max_path_bytes(backend_total)
+                    .fields(crate::Attributes::stat())
+                    .recursive(true),
+            )
+            .map(|mut trees| trees.remove(0));
         let mut dir_bytes = 0;
         let dir = client.listdir(
             &root,
@@ -2636,13 +2631,14 @@ mod tests {
         // Exact public budgets remain usable, including both callbacks.
         assert!(
             client
-                .walk_with_options(
-                    &root,
+                .read_dirs_with_options(
+                    &[&root],
                     crate::ListDirOptions::new()
-                        .recursive(true)
                         .max_path_bytes(public_total)
                         .fields(crate::Attributes::stat())
+                        .recursive(true)
                 )
+                .map(|mut trees| trees.remove(0))
                 .is_ok()
         );
         assert!(

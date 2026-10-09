@@ -48,10 +48,9 @@ struct Harness {
 impl Harness {
     fn new(path: &Path) -> Self {
         Self {
-            fs: Mounted::new(path).unwrap().with_limits(ResourceLimits {
-                max_read_bytes: 64,
-                ..Default::default()
-            }),
+            fs: Mounted::new(path)
+                .unwrap()
+                .with_limits(ResourceLimits::new().max_read_bytes(64)),
             read_failure: Cell::new(None),
             calls: RefCell::new(Calls::default()),
             fault: Cell::new(Fault::None),
@@ -923,10 +922,7 @@ fn collecting_adapter_retries_interrupted_reads_and_exact_budget_probes() {
         for interrupted_at in [1, 2] {
             let root = tempfile::tempdir().unwrap();
             let mut fs = Harness::new(root.path());
-            fs.fs = fs.fs.with_limits(ResourceLimits {
-                max_read_bytes: 3,
-                ..Default::default()
-            });
+            fs.fs = fs.fs.with_limits(ResourceLimits::new().max_read_bytes(3));
             fs.fs.write("/file", b"abc").unwrap();
             fs.read_failure
                 .set(Some((interrupted_at, libc::EINTR as u32)));
@@ -949,10 +945,7 @@ fn collecting_adapter_retries_interrupted_reads_and_exact_budget_probes() {
     for failed_at in [1, 2] {
         let root = tempfile::tempdir().unwrap();
         let mut fs = Harness::new(root.path());
-        fs.fs = fs.fs.with_limits(ResourceLimits {
-            max_read_bytes: 3,
-            ..Default::default()
-        });
+        fs.fs = fs.fs.with_limits(ResourceLimits::new().max_read_bytes(3));
         fs.fs.write("/file", b"abcdef").unwrap();
         fs.read_failure.set(Some((failed_at, libc::EIO as u32)));
         let file = fs.open("/file").unwrap();

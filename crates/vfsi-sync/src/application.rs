@@ -292,7 +292,7 @@ pub(crate) fn read_backend<'a, F: crate::Backend + 'static>(
 ) -> Result<Vec<ReadResult>> {
     consume_ops(
         ops,
-        options.limit_or(client.limits().max_read_bytes),
+        options.limit_or(client.limits().read_byte_limit()),
         crate::FsFile::read_request_at,
         crate::FsFile::read_request_at_into,
         |requests, options| read_backend_owned(client, requests, options),

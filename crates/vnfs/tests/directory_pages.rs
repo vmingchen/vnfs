@@ -132,10 +132,7 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
     fs.symlink("sub", "/tree/link").unwrap();
     let limited = Mounted::new(root.path())
         .unwrap()
-        .with_limits(vnfs::ResourceLimits {
-            max_directory_entries: 1,
-            ..Default::default()
-        });
+        .with_limits(vnfs::ResourceLimits::new().max_directory_entries(1));
     for (name, recursive, lifecycle, sort) in [
         ("paged", false, false, false),
         ("sorted", false, false, true),
@@ -331,10 +328,7 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
     let root = tempfile::tempdir().unwrap();
     let fs = Mounted::new(root.path())
         .unwrap()
-        .with_limits(vnfs::ResourceLimits {
-            max_directory_entries: 1,
-            ..Default::default()
-        });
+        .with_limits(vnfs::ResourceLimits::new().max_directory_entries(1));
     fs.create_dir_all("/tree/sub").unwrap();
     fs.write("/tree/top", b"a").unwrap();
     fs.write("/tree/sub/leaf", b"b").unwrap();
@@ -345,7 +339,8 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
         vnfs::ErrorKind::FileTooLarge
     );
     assert_eq!(
-        fs.walk_with_options("/tree", ListDirOptions::new())
+        fs.read_dirs_with_options(&["/tree"], ListDirOptions::new().recursive(true))
+            .map(|mut trees| trees.remove(0))
             .unwrap_err()
             .kind(),
         vnfs::ErrorKind::FileTooLarge
@@ -363,7 +358,8 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
             .any(|entry| entry.path() == Path::new("/tree/sub/leaf"))
     );
     let tree = fs
-        .walk_with_options("/tree", options.recursive(false))
+        .read_dirs_with_options(&["/tree"], options.recursive(true))
+        .map(|mut trees| trees.remove(0))
         .unwrap();
     assert_eq!(tree.len(), 2);
     assert!(
@@ -371,7 +367,8 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
             .any(|listing| listing.path == Path::new("/tree/sub"))
     );
     assert_eq!(
-        fs.walk_with_options("/tree", options.max_depth(0))
+        fs.read_dirs_with_options(&["/tree"], options.max_depth(0).recursive(true))
+            .map(|mut trees| trees.remove(0))
             .unwrap_err()
             .kind(),
         vnfs::ErrorKind::FileTooLarge

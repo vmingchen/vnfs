@@ -133,22 +133,23 @@ pub struct ResourceLimits {
     /// Maximum collected scalar payload or aggregate vector read buffers.
     /// Not a process-memory cap; standard `Read::read_to_end` and explicit
     /// positional file reads remain caller-managed.
-    pub max_read_bytes: usize,
+    max_read_bytes: usize,
     /// Default request size for client `read_stream`, not file `Read` or pools.
-    pub stream_chunk_bytes: usize,
+    stream_chunk_bytes: std::num::NonZeroUsize,
     /// Aggregate entries delivered/collected by a directory call or tree walk.
-    pub max_directory_entries: usize,
+    max_directory_entries: usize,
     /// Aggregate logical path bytes, excluding allocator and metadata overhead.
-    pub max_directory_path_bytes: usize,
+    max_directory_path_bytes: usize,
     /// Maximum descent depth; the starting directory is depth zero.
-    pub max_walk_depth: usize,
+    max_walk_depth: usize,
 }
 
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
             max_read_bytes: DEFAULT_READ_MAX_BYTES,
-            stream_chunk_bytes: crate::api::DEFAULT_READ_STREAM_CHUNK_BYTES,
+            stream_chunk_bytes: std::num::NonZeroUsize::new(DEFAULT_READ_STREAM_CHUNK_BYTES)
+                .unwrap(),
             max_directory_entries: crate::api::DEFAULT_DIRECTORY_MAX_ENTRIES,
             max_directory_path_bytes: crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES,
             max_walk_depth: crate::api::DEFAULT_WALK_MAX_DEPTH,
@@ -157,6 +158,55 @@ impl Default for ResourceLimits {
 }
 
 impl ResourceLimits {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Set the collected read budget; zero permits only empty payloads.
+    pub const fn max_read_bytes(mut self, value: usize) -> Self {
+        self.max_read_bytes = value;
+        self
+    }
+    /// Read the configured policy value.
+    pub const fn read_byte_limit(self) -> usize {
+        self.max_read_bytes
+    }
+    /// Set the default streaming chunk size. Nonzero chunks guarantee progress.
+    pub const fn stream_chunk_bytes(mut self, value: std::num::NonZeroUsize) -> Self {
+        self.stream_chunk_bytes = value;
+        self
+    }
+    /// Read the configured policy value.
+    pub const fn stream_chunk_size(self) -> usize {
+        self.stream_chunk_bytes.get()
+    }
+    /// Set the aggregate directory entry budget; zero is a valid budget.
+    pub const fn max_directory_entries(mut self, value: usize) -> Self {
+        self.max_directory_entries = value;
+        self
+    }
+    /// Read the configured policy value.
+    pub const fn directory_entry_limit(self) -> usize {
+        self.max_directory_entries
+    }
+    /// Set the aggregate path byte budget; zero is a valid budget.
+    pub const fn max_directory_path_bytes(mut self, value: usize) -> Self {
+        self.max_directory_path_bytes = value;
+        self
+    }
+    /// Read the configured policy value.
+    pub const fn directory_path_byte_limit(self) -> usize {
+        self.max_directory_path_bytes
+    }
+    /// Set maximum descent depth; zero includes only the starting directory.
+    pub const fn max_walk_depth(mut self, value: usize) -> Self {
+        self.max_walk_depth = value;
+        self
+    }
+    /// Read the configured policy value.
+    pub const fn walk_depth_limit(self) -> usize {
+        self.max_walk_depth
+    }
+
     pub fn directory_options(self) -> ListDirOptions {
         ListDirOptions::new()
             .max_entries(self.max_directory_entries)

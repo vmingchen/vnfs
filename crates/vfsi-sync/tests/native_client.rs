@@ -18,11 +18,11 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
         ..ScalarOnly::default()
     };
     let read_calls = Arc::clone(&backend.read_calls);
-    let client = FsClient::new(backend).with_limits(vfsi_sync::ResourceLimits {
-        max_read_bytes: 3,
-        stream_chunk_bytes: 2,
-        ..vfsi_sync::ResourceLimits::default()
-    });
+    let client = FsClient::new(backend).with_limits(
+        vfsi_sync::ResourceLimits::new()
+            .max_read_bytes(3)
+            .stream_chunk_bytes(std::num::NonZeroUsize::new(2).unwrap()),
+    );
     assert_eq!(client.clone().limits(), client.limits());
     assert_eq!(client.capabilities().unwrap(), Capabilities::empty());
     assert_eq!(
@@ -150,10 +150,7 @@ fn opened_file_read_to_end_has_explicit_limits_and_cursor_semantics() {
             data: b"abcdef".to_vec(),
             ..Default::default()
         })
-        .with_limits(vfsi_sync::ResourceLimits {
-            max_read_bytes: 1,
-            ..Default::default()
-        });
+        .with_limits(vfsi_sync::ResourceLimits::new().max_read_bytes(1));
         let mut file = client.open("/file").unwrap();
         let result = file.read_to_end_with_limit(limit);
         if limit < 6 {

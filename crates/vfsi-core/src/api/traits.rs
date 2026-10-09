@@ -187,8 +187,8 @@ pub trait Vfsi {
     /// use vfsi_core::api::Vfsi;
     /// # fn example(fs: &impl Vfsi) {
     /// let limits = fs.limits();
-    /// println!("owned-read budget: {} bytes", limits.max_read_bytes);
-    /// println!("walk depth: {}", limits.max_walk_depth);
+    /// println!("owned-read budget: {} bytes", limits.read_byte_limit());
+    /// println!("walk depth: {}", limits.walk_depth_limit());
     /// # }
     /// ```
     fn limits(&self) -> ResourceLimits;
@@ -234,7 +234,7 @@ pub trait Vfsi {
     /// Construction does no I/O. Results retain input order and never borrow
     /// caller storage. Whole files complete or fail; ranges may return short
     /// progress. Only `buffer[..result.read]` is valid after a buffered read.
-    /// The default aggregate budget comes from `limits().max_read_bytes`.
+    /// The default aggregate budget comes from `limits().read_byte_limit()`.
     /// All range and buffer lengths must fit before dispatch. Buffer reads run
     /// first, then allocating ranges, then whole paths, in batched phases.
     /// Errors retain original indices; buffers may already contain partial
@@ -493,13 +493,6 @@ pub trait VfsiExt: Vfsi {
     fn open_options(&self) -> super::OpenOptions<'_, Self> {
         super::OpenOptions::new(self)
     }
-    /// Build selected metadata changes for a path or retained open handle.
-    fn set_metadata<T: super::AsTarget<Self::File>>(
-        &self,
-        target: T,
-    ) -> super::SetMetadata<'_, Self, T> {
-        super::SetMetadata::new(self, target)
-    }
 
     /// Query one target through the vector filesystem-statistics engine.
     fn statfs<P: crate::AsTarget<Self::File>>(&self, target: P) -> Result<crate::FilesystemStats> {
@@ -623,7 +616,7 @@ pub trait VfsiExt: Vfsi {
     }
     /// Read complete files in input order using vectorized whole-file reads.
     ///
-    /// The aggregate payload is bounded by `limits().max_read_bytes`.
+    /// The aggregate payload is bounded by `limits().read_byte_limit()`.
     /// Use [`Self::read_files_with_options`] to override it, or stream large files.
     /// A failure returns an error, not a successful partial collection.
     ///
@@ -754,7 +747,7 @@ pub trait VfsiExt: Vfsi {
     ) -> Result<crate::api::StreamCompletion> {
         self.read_stream_with_options(
             path,
-            crate::api::StreamOptions::new().chunk_size(self.limits().stream_chunk_bytes),
+            crate::api::StreamOptions::new().chunk_size(self.limits().stream_chunk_size()),
             callback,
         )
     }
@@ -1104,58 +1097,6 @@ pub trait VfsiExt: Vfsi {
             Ok(std::ops::ControlFlow::Continue(()))
         })?;
         Ok(trees)
-    }
-
-    /// Single-target convenience. For multiple roots, prefer [`VfsiExt::read_dirs_with_options`].
-    ///
-    /// Collect a no-follow tree using the client's entry, byte, and depth limits.
-    ///
-    /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// for listing in fs.walk("/project")? {
-    ///     println!("{}", listing.path.display());
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    fn walk(&self, root: impl AsRef<Path>) -> Result<Vec<DirectoryListing>> {
-        self.walk_with_options(
-            root,
-            crate::api::ListDirOptions::new().fields(crate::api::Attributes::stat()),
-        )
-    }
-
-    /// Single-target convenience. For multiple roots, prefer [`VfsiExt::read_dirs_with_options`] with one aggregate budget.
-    ///
-    /// Collect a bounded tree, without following symlinks; no snapshot promise.
-    ///
-    /// Returns directory listings, not one flattened entry vector. Budgets
-    /// apply across the walk; depth zero is the starting directory. Explicit
-    /// options override client defaults. This helper forces `recursive(true)`.
-    /// Use a visitor for incremental delivery
-    /// or [`listdir`](VfsiExt::listdir) for pruning and lifecycle events.
-    ///
-    /// ```no_run
-    /// use vfsi_core::api::{ListDirOptions, Vfsi, VfsiExt, Attributes, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// let listings = fs.walk_with_options(
-    ///     "/project", ListDirOptions::new().fields(Attributes::MODE | Attributes::SIZE)
-    ///         .max_entries(10_000).max_path_bytes(1024 * 1024).max_depth(8),
-    /// )?;
-    /// println!("{} directory listings", listings.len());
-    /// # Ok(())
-    /// # }
-    /// ```
-    fn walk_with_options(
-        &self,
-        path: impl AsRef<Path>,
-        options: crate::api::ListDirOptions,
-    ) -> Result<Vec<DirectoryListing>> {
-        single_completion(
-            self.read_dirs_with_options(&[path], options.recursive(true))?,
-            "walks",
-        )
     }
 
     // Visit directories

@@ -32,7 +32,7 @@ pub use std::ops::ControlFlow;
 mod io;
 pub use io::{FileIo, SyncMode};
 mod builders;
-pub use builders::{OpenOptions, SetMetadata};
+pub use builders::OpenOptions;
 mod traits;
 pub use traits::{FileHandle, Vfsi, VfsiExt};
 mod metadata;

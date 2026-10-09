@@ -38,9 +38,9 @@ pub mod mounted {
 pub mod files {
     #[doc(inline)]
     pub use crate::{
-        Capabilities, FileHandle, FileIo, OpenFlags, OpenOp, OpenOptions, ReadIntoResult, ReadOp,
-        ReadOptions, ReadResult, ResourceLimits, StreamCompletion, StreamOptions, SyncMode, Vfsi,
-        VfsiExt, WriteOp, WriteOptions, WriteResult,
+        Capabilities, FileHandle, FileIo, OpenFlags, OpenOp, OpenOptions, ReadOp, ReadOptions,
+        ReadResult, ResourceLimits, StreamCompletion, StreamOptions, SyncMode, Vfsi, VfsiExt,
+        WriteOp, WriteOptions, WriteResult,
     };
 }
 
@@ -50,7 +50,7 @@ pub mod directory {
     pub use crate::{
         Attributes, Attrs, AttrsOptions, ControlFlow, DepthLimit, DirEntry, DirectoryListing,
         FileType, ListDirOptions, MkDirOp, Permissions, RemoveMode, RemoveOptions, RenameOptions,
-        SetAttrsOp, SetMetadata, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
+        SetAttrsOp, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
     };
 }
 
@@ -97,7 +97,7 @@ pub use vfsi_core::api::ListDirOptions;
 pub use vfsi_core::api::RenameOptions;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_core::api::internal::OwnedReadResult;
-pub use vfsi_core::api::{AttrsOptions, FileIo, OpenOptions, SetMetadata, SyncMode};
+pub use vfsi_core::api::{AttrsOptions, FileIo, OpenOptions, SyncMode};
 pub use vfsi_core::api::{ReadOp, ReadOptions, ReadResult};
 pub use vfsi_core::api::{WriteOp, WriteOptions};
 
@@ -196,7 +196,7 @@ pub use vfsi_core::api::{
     DepthLimit, DirectoryListing, ResourceLimits, StreamCompletion, StreamOptions,
     TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
 };
-pub use vfsi_core::api::{MkDirOp, ReadIntoResult, SetAttrsOp, WriteResult};
+pub use vfsi_core::api::{MkDirOp, SetAttrsOp, WriteResult};
 pub use vfsi_core::{
     Attrs, Capabilities, CopyOption, DirEntry, ErrorDomain, FilesystemStats, OpenFlags, OpenOp,
     Permissions, RemoveOptions, StatusCode, TransportKind,
@@ -215,3 +215,6 @@ pub use vfsi_nfs::RpcsecGssProtection;
 pub use vfsi_nfs::{
     NfsAuthentication, NfsEvent, NfsObserver, NfsReadPool, NfsReadPoolOptions, NfsRecoveryPolicy,
 };
+
+#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
+pub(crate) use vfsi_core::api::ReadIntoResult;

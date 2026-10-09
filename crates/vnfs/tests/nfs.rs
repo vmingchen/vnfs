@@ -51,7 +51,7 @@ fn failed_gss_negotiation_does_not_fall_back_to_a_working_auth_sys_export() {
 }
 
 #[cfg(feature = "test-faults")]
-use std::io::{self, Read, Write};
+use std::io;
 #[cfg(feature = "test-faults")]
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 #[cfg(feature = "test-faults")]
@@ -634,10 +634,7 @@ fn whole_file_readv_honors_the_client_budget() {
     const BYTES: usize = 1024 * 1024 + 17;
     let client = Nfs::builder(host)
         .version(version)
-        .limits(vnfs::ResourceLimits {
-            max_read_bytes: BYTES,
-            ..Default::default()
-        })
+        .limits(vnfs::ResourceLimits::new().max_read_bytes(BYTES))
         .connect()
         .unwrap();
     let path = format!("{dir}/file");

@@ -164,9 +164,7 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
         13
     );
     assert_eq!(fs.attrs(&paths[0]).unwrap().len().unwrap(), 17);
-    fs.set_metadata(Target::File(&files[0]))
-        .len(19)
-        .apply()
+    fs.vsetattrs(&[vnfs::SetAttrsOp::new(Target::File(&files[0])).len(19)])
         .unwrap();
     fs.chmod(Target::File(&files[0]), Permissions::from_mode(0o600))
         .unwrap();

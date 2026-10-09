@@ -293,7 +293,7 @@ fn roots<P: AsRef<Path>>(
     exact: bool,
     budget: &mut Budget,
 ) -> Result<Vec<Task>> {
-    if options.batch_size == 0 || options.chunk_bytes == 0 || fs.limits().max_read_bytes == 0 {
+    if options.batch_size == 0 || options.chunk_bytes == 0 || fs.limits().read_byte_limit() == 0 {
         return Err(invalid(0, destination));
     }
     if sources.len() > budget.max_entries {
@@ -449,10 +449,12 @@ fn run<P: AsRef<Path>>(
     let mut budget = Budget {
         entries: 0,
         bytes: 0,
-        max_entries: options.max_entries.unwrap_or(limits.max_directory_entries),
+        max_entries: options
+            .max_entries
+            .unwrap_or(limits.directory_entry_limit()),
         max_bytes: options
             .max_path_bytes
-            .unwrap_or(limits.max_directory_path_bytes),
+            .unwrap_or(limits.directory_path_byte_limit()),
     };
     let mut roots = roots(fs, sources, destination, options, exact, &mut budget)?;
     let mut summary = TransferSummary::default();
@@ -546,7 +548,7 @@ fn copy_roots(
                             .checked_add(1)
                             .ok_or_else(|| limit(parent.root, entry.path()))?;
                         if entry.attrs().is_dir()
-                            && depth > options.depth.map_or(limits.max_walk_depth, |d| d.get())
+                            && depth > options.depth.map_or(limits.walk_depth_limit(), |d| d.get())
                         {
                             if options.depth.is_some() {
                                 summary.entries_skipped += 1;
@@ -658,7 +660,7 @@ fn dispatch(
         }
     }
     pending.extend(dirs);
-    let chunk = options.chunk_bytes.min(fs.limits().max_read_bytes);
+    let chunk = options.chunk_bytes.min(fs.limits().read_byte_limit());
     let native_copy = progress.is_none()
         && options.existing == Existing::Replace
         && !options.flags.preserve_permissions();
@@ -668,7 +670,7 @@ fn dispatch(
         let mut bytes = 0;
         while end < files.len() && end - start < options.batch_size {
             let required = chunk.min(usize::try_from(files[end].size).unwrap_or(usize::MAX));
-            if !native_copy && required > fs.limits().max_read_bytes - bytes {
+            if !native_copy && required > fs.limits().read_byte_limit() - bytes {
                 break;
             }
             if !native_copy {
@@ -1002,10 +1004,12 @@ fn move_run<P: AsRef<Path>>(
     let mut budget = Budget {
         entries: 0,
         bytes: 0,
-        max_entries: options.max_entries.unwrap_or(limits.max_directory_entries),
+        max_entries: options
+            .max_entries
+            .unwrap_or(limits.directory_entry_limit()),
         max_bytes: options
             .max_path_bytes
-            .unwrap_or(limits.max_directory_path_bytes),
+            .unwrap_or(limits.directory_path_byte_limit()),
     };
     // Validate all roots/overlaps before the first mutation.
     let mut tasks = roots(fs, sources, destination, options, false, &mut budget)?;

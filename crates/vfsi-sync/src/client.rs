@@ -267,12 +267,13 @@ impl<F: FileSystem> FsClient<F> {
     }
 
     pub(crate) fn open_with_native(&self, request: OpenOp) -> VfResult<FsFile<F>> {
+        vfsi_core::internal::validate_open_requests(std::slice::from_ref(&request))?;
         let file = self.lock()?.open_impl(&request)?;
         Ok(FsFile {
             inner: Arc::clone(&self.inner),
             file: Some(file),
-            append: request.flags.contains(OpenFlags::APPEND),
-            path: request.path,
+            append: request.flags().contains(OpenFlags::APPEND),
+            path: request.into_path(),
         })
     }
 
@@ -814,13 +815,14 @@ impl<F: Backend> FsClient<F> {
     /// handles; VFSI does not promise transactional rollback of other
     /// filesystem effects such as file creation.
     pub(crate) fn vopen(&self, requests: &[OpenOp]) -> VfResult<Vec<FsFile<F>>> {
+        vfsi_core::internal::validate_open_requests(requests)?;
         let mut filesystem = self.lock()?;
         let files = filesystem.vopen_impl(requests).map_err(|error| {
             error
                 .index()
                 .and_then(|index| requests.get(index))
                 .map_or(error.clone(), |request| {
-                    error.with_context("vopen", &request.path)
+                    error.with_context("vopen", request.path())
                 })
         })?;
         if files.len() != requests.len() {
@@ -837,8 +839,8 @@ impl<F: Backend> FsClient<F> {
             .map(|(file, request)| FsFile {
                 inner: Arc::clone(&self.inner),
                 file: Some(file),
-                append: request.flags.contains(OpenFlags::APPEND),
-                path: request.path.clone(),
+                append: request.flags().contains(OpenFlags::APPEND),
+                path: request.path().to_path_buf(),
             })
             .collect())
     }
@@ -898,7 +900,7 @@ impl<F: Backend> FsClient<F> {
     /// [`vread_into_native`](Self::vread_into_native) to provide bounded caller-owned buffers.
     #[doc(hidden)]
     pub fn vread_native(&self, requests: &[FsRead<'_, F>]) -> VfResult<Vec<FsReadResult>> {
-        self.vread_with_limit_native(requests, self.limits.max_read_bytes)
+        self.vread_with_limit_native(requests, self.limits.read_byte_limit())
     }
 
     /// Read an ordered vector with an explicit aggregate request limit.
@@ -985,7 +987,7 @@ impl<F: Backend> FsClient<F> {
         &self,
         requests: &mut [FsReadInto<'_, F>],
     ) -> VfResult<Vec<FsReadIntoResult>> {
-        self.vread_into_with_limit_native(requests, self.limits.max_read_bytes)
+        self.vread_into_with_limit_native(requests, self.limits.read_byte_limit())
     }
 
     /// Read into caller storage with an explicit aggregate buffer budget.

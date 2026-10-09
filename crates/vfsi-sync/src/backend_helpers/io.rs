@@ -96,12 +96,12 @@ pub fn vopen_typed_default<F: Backend + ?Sized>(
     backend: &mut F,
     requests: &[OpenOp],
 ) -> VfResult<Vec<VfFile>> {
-    let paths: Vec<&std::path::Path> = requests
-        .iter()
-        .map(|request| request.path.as_path())
-        .collect();
+    let paths: Vec<&std::path::Path> = requests.iter().map(|request| request.path()).collect();
     let flags = translate_open_flags(requests)?;
-    let modes: Vec<u32> = requests.iter().map(|request| request.mode).collect();
+    let modes: Vec<u32> = requests
+        .iter()
+        .map(|request| request.creation_mode())
+        .collect();
     backend.vopen_raw_impl(&paths, &flags, &modes)
 }
 

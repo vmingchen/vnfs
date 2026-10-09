@@ -306,10 +306,7 @@ mod extension_tests {
         let fs = Probe {
             mounted: crate::Mounted::new(root.path())
                 .unwrap()
-                .with_limits(ResourceLimits {
-                    max_directory_entries: 1,
-                    ..Default::default()
-                }),
+                .with_limits(ResourceLimits::new().max_directory_entries(1)),
             calls: Cell::new(0),
             shape: Cell::new(0),
         };
@@ -522,10 +519,7 @@ mod extension_tests {
         let fs = Probe {
             mounted: crate::Mounted::new(root.path())
                 .unwrap()
-                .with_limits(ResourceLimits {
-                    max_read_bytes: 5,
-                    ..Default::default()
-                }),
+                .with_limits(ResourceLimits::new().max_read_bytes(5)),
             calls: Cell::new(0),
             shape: Cell::new(0),
         };
@@ -709,13 +703,11 @@ mod extension_tests {
     fn default_listing_and_stream_helpers_respect_client_limits_and_reentry() {
         let root = tempfile::tempdir().unwrap();
         let fs = Probe {
-            mounted: crate::Mounted::new(root.path())
-                .unwrap()
-                .with_limits(ResourceLimits {
-                    max_directory_entries: 1,
-                    stream_chunk_bytes: 2,
-                    ..Default::default()
-                }),
+            mounted: crate::Mounted::new(root.path()).unwrap().with_limits(
+                ResourceLimits::new()
+                    .max_directory_entries(1)
+                    .stream_chunk_bytes(std::num::NonZeroUsize::new(2).unwrap()),
+            ),
             calls: Cell::new(0),
             shape: Cell::new(0),
         };
@@ -723,7 +715,16 @@ mod extension_tests {
         fs.write_files(&[("/dir/a", b"abc"), ("/dir/b", b"def")])
             .unwrap();
         assert!(fs.read_dir("/dir").is_err());
-        assert!(fs.walk("/dir").is_err());
+        assert!(
+            fs.read_dirs_with_options(
+                &["/dir"],
+                crate::ListDirOptions::new()
+                    .fields(crate::Attributes::stat())
+                    .recursive(true)
+            )
+            .map(|mut trees| trees.remove(0))
+            .is_err()
+        );
         let mut payload = Vec::new();
         fs.read_stream("/dir/a", |offset, bytes| {
             assert!(bytes.len() <= 2);
@@ -875,7 +876,11 @@ mod extension_tests {
         // not leak the backend's per-entry index.
         assert_eq!(
             fs.mounted
-                .walk_with_options("/a", options.fields(crate::Attributes::MODE))
+                .read_dirs_with_options(
+                    &["/a"],
+                    options.fields(crate::Attributes::MODE).recursive(true)
+                )
+                .map(|mut trees| trees.remove(0))
                 .unwrap_err()
                 .index(),
             Some(0)
@@ -935,10 +940,18 @@ mod extension_tests {
                 .recursive(true)
                 .max_entries(limit);
             assert_eq!(
-                fs.walk_with_options("/two", options.fields(crate::Attributes::MODE))
-                    .is_ok(),
+                fs.read_dirs_with_options(
+                    &["/two"],
+                    options.fields(crate::Attributes::MODE).recursive(true)
+                )
+                .map(|mut trees| trees.remove(0))
+                .is_ok(),
                 fs.mounted
-                    .walk_with_options("/two", options.fields(crate::Attributes::MODE))
+                    .read_dirs_with_options(
+                        &["/two"],
+                        options.fields(crate::Attributes::MODE).recursive(true)
+                    )
+                    .map(|mut trees| trees.remove(0))
                     .is_ok()
             );
         }

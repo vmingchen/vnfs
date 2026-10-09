@@ -83,10 +83,7 @@ fn native_paged_tree_honors_budget_overrides_and_allows_reentry() {
     use vfsi_sync::FsClient;
     use vnfs::{ListDirOptions, ResourceLimits, TraversalCompletion};
     let (_root, backend) = dummy();
-    let client = FsClient::new(backend).with_limits(ResourceLimits {
-        max_directory_entries: 3,
-        ..Default::default()
-    });
+    let client = FsClient::new(backend).with_limits(ResourceLimits::new().max_directory_entries(3));
     client.create_dir_all("/tree/sub").unwrap();
     client.write("/tree/a", b"a").unwrap();
     client.write("/tree/sub/b", b"b").unwrap();
@@ -240,7 +237,8 @@ fn application_directory_vectors_preserve_fields_and_limits() {
     assert_eq!(error.index(), Some(1));
 
     let tree = client
-        .walk_with_options("/", ListDirOptions::new().recursive(true).fields(fields))
+        .read_dirs_with_options(&["/"], ListDirOptions::new().fields(fields).recursive(true))
+        .map(|mut trees| trees.remove(0))
         .unwrap();
     assert!(
         tree.iter()
@@ -251,13 +249,14 @@ fn application_directory_vectors_preserve_fields_and_limits() {
             .any(|directory| directory.path == Path::new("/b"))
     );
     let error = client
-        .walk_with_options(
-            "/",
+        .read_dirs_with_options(
+            &["/"],
             ListDirOptions::new()
-                .recursive(true)
                 .max_entries(1)
-                .fields(fields),
+                .fields(fields)
+                .recursive(true),
         )
+        .map(|mut trees| trees.remove(0))
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
 }
@@ -922,10 +921,9 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
     assert_eq!(metadata.permissions().unwrap().mode(), 0o600);
     file.close().unwrap();
     client
-        .set_metadata("/tree/nested/file")
-        .permissions(vnfs::Permissions::from_mode(0o400))
-        .len(4)
-        .apply()
+        .vsetattrs(&[vnfs::SetAttrsOp::new("/tree/nested/file")
+            .permissions(vnfs::Permissions::from_mode(0o400))
+            .len(4)])
         .unwrap();
     let metadata = client.attrs("/tree/nested/file").unwrap();
     assert_eq!(metadata.len(), Some(4));

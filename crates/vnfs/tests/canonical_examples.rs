@@ -46,10 +46,9 @@ fn bulk_roundtrip_cleanup_and_existing_directory_protection() -> Result<()> {
             .unwrap(),
         b"keep"
     );
-    let bounded = fs.clone().with_limits(vnfs::ResourceLimits {
-        max_read_bytes: 3,
-        ..Default::default()
-    });
+    let bounded = fs
+        .clone()
+        .with_limits(vnfs::ResourceLimits::new().max_read_bytes(3));
     // Fail after creating/writing the owned directory, then still clean it up.
     assert!(bulk_files::run(&bounded, "/failed-read").is_err());
     assert!(!root.path().join("failed-read").exists());

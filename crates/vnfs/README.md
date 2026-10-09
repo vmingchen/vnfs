@@ -195,7 +195,7 @@ Use `Mounted::new("/")?` to **always** use the kernel client, or
 `Nfs::builder(server).root(export).connect()?` for a fully explicit direct
 connection. `Auto` selects a backend before dispatch; it never replays a
 possibly completed write through a different backend. Open handles remain
-pinned to their selected backend. `Auto::with_limits(ResourceLimits { .. })`
+pinned to their selected backend. `Auto::with_limits(ResourceLimits::new().max_read_bytes(bytes))`
 configures the same client resource policy as `NfsBuilder::limits`;
 file `Read` calls
 are chunked to 1 MiB.
@@ -456,6 +456,20 @@ is 16 MiB, shared by scalar whole-file reads and aggregate vector reads. Explici
 per-call options override these defaults. Limits bound logical data/path bytes,
 not allocator rounding, result metadata, RPC envelopes, or all process memory.
 Read pools have their own explicit concurrency/buffer options.
+Configure resource policies through builders such as
+`ResourceLimits::new().max_read_bytes(1024).max_walk_depth(8)` and inspect
+values through accessors. Zero read, entry, path-byte, and depth limits remain
+valid. `stream_chunk_bytes` takes `NonZeroUsize` to ensure forward progress.
+`OpenOp`, `RemoveOptions`, and `NfsRecoveryPolicy` also keep their fields private;
+use their constructors, builders, and accessors.
+
+Use `SetAttrsOp` with `vsetattrs` for metadata changes, including mixed path and
+handle targets. The singular `truncate`, `chmod`, and `chown` helpers delegate
+to that engine. Recursive collection uses
+`read_dirs_with_options(&[root], ListDirOptions::new().recursive(true))`, returning
+one tree per root; `listdir` provides incremental traversal. All portable reads
+return `ReadResult`, with `data()` for owned reads and `read()` for buffered reads.
+
 `max_read_bytes` is a collection/batch policy, not a cap on all reads or
 process memory. The explicit `fs.file_io(&file)` adapter bounds collecting reads
 using the client's read budget. Repeated reads into caller-managed buffers remain caller-managed.

@@ -105,7 +105,7 @@ fn lock(client: &vnfs::NfsClient) { let _ = client.lock(); }
 ```
 
 ```compile_fail,E0432
-use vnfs::{FsClient, FsFile, FsDir, FsRead, FsWrite, SetMetadata};
+use vnfs::{FsClient, FsFile, FsDir, FsRead, FsWrite};
 ```
 
 ```compile_fail,E0599
@@ -441,4 +441,76 @@ Destructive initialization is explicit.
 
 ```compile_fail
 fn empty(fs: &vnfs::NfsClient) { let _ = fs.ensure_empty_dir("/data"); }
+```
+
+
+Portable reads have one result type and metadata updates use vector requests.
+
+```compile_fail,E0603
+use vnfs::ReadIntoResult;
+```
+
+```compile_fail,E0603
+use vnfs::files::ReadIntoResult;
+```
+
+```compile_fail,E0432
+use vnfs::SetMetadata;
+```
+
+```compile_fail,E0599
+use vnfs::{Vfsi, VfsiExt};
+fn update(fs: &impl Vfsi) { let _ = fs.set_metadata("/file"); }
+```
+
+Recursive collection uses `read_dirs_with_options`.
+
+```compile_fail,E0599
+use vnfs::{Vfsi, VfsiExt};
+fn collect(fs: &impl Vfsi) { let _ = fs.walk("/"); }
+```
+
+```compile_fail,E0599
+use vnfs::{Vfsi, VfsiExt};
+fn collect(fs: &impl Vfsi) {
+    let _ = fs.walk_with_options("/", vnfs::ListDirOptions::new());
+}
+```
+
+Portable writes do not expose native preparation storage or path creation.
+
+```compile_fail,E0308
+fn native_storage<H>(op: vnfs::WriteOp<'_, H>) {
+    let _: vfsi_core::internal::WriteRequest<&H, &[u8], u64, ()> = op;
+}
+```
+
+```compile_fail,E0599
+fn prepare<H>(op: vnfs::WriteOp<'_, H>) { let _ = op.borrowed(); }
+```
+
+Policy fields are configured only through builders.
+
+```compile_fail,E0616
+let mut op = vnfs::OpenOp::new("/file", vnfs::OpenFlags::READ);
+op.path = "/other".into();
+```
+
+```compile_fail,E0616
+let mut limits = vnfs::ResourceLimits::new();
+limits.max_read_bytes = 0;
+```
+
+```compile_fail,E0308
+let _ = vnfs::ResourceLimits::new().stream_chunk_bytes(0);
+```
+
+```compile_fail,E0616
+let mut options = vnfs::RemoveOptions::new();
+options.retries = 0;
+```
+
+```compile_fail,E0616
+let mut policy = vnfs::NfsRecoveryPolicy::new();
+policy.reconnect_attempts = 0;
 ```
