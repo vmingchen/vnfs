@@ -85,6 +85,7 @@ class RustQuickTests(unittest.TestCase):
             stub.write_text(
                 '#!/bin/sh\n'
                 'printf "%s\\n" "$*" >> "$CALL_LOG"\n'
+                'printf "%s\\n" "${TEST_OUTPUT:-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out}"\n'
                 'exit "${FAIL_STATUS:-0}"\n'
             )
             stub.chmod(0o755)
@@ -127,6 +128,115 @@ class RustQuickTests(unittest.TestCase):
             result = self.run_script("test-rust.sh", *args)
             self.assertEqual(result.returncode, 2)
             self.assertFalse(self.log.exists())
+
+    def test_focused_selection_preserves_features_and_selects_only_one_target(self):
+        for package, features in [
+            ("vfsi-core", "test-faults"),
+            ("vfsi-sync", "test-faults test-support"),
+            ("vfsi-local", "test-faults"),
+            ("vnfs", "dummy test-faults"),
+            ("vfsi-nfs", None),
+            ("vfsi-smb", ""),
+            ("nfsv41-sys", ""),
+            ("vfsi-c", ""),
+        ]:
+            with self.subTest(package=package):
+                result = self.run_script("test-rust.sh", "--package", package, "--lib")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = self.log.read_text().splitlines()
+                self.assertEqual(len(calls), 2)
+                self.assertTrue(calls[1].startswith(f"test -p {package} "))
+                self.assertIn("--lib", calls[1])
+                if features is None:
+                    self.assertIn("--all-features", calls[1])
+                elif features:
+                    self.assertIn(f"--features {features}", calls[1])
+                else:
+                    self.assertNotIn("--features", calls[1])
+                self.log.unlink()
+
+    def test_focused_named_target_and_filter(self):
+        result = self.run_script("test-rust.sh", "--package", "vnfs",
+                                 "--test", "readv", "--filter", "budgets")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.log.read_text().splitlines()
+        self.assertEqual(len(calls), 2)
+        self.assertIn("--test readv budgets -- --nocapture", calls[1])
+        self.assertNotIn("--lib", calls[1])
+        self.assertNotIn("public_api", calls[1])
+
+    def test_focused_zero_tests_skips_and_cargo_failures_are_not_success(self):
+        for output, status in [
+            ("test result: ok. 0 passed; 0 failed; 3 ignored; 0 measured; 0 filtered out", "0"),
+            ("skipping NFS integration test: missing fixture\ntest result: ok. 1 passed; 0 failed", "0"),
+            ("test result: FAILED. 0 passed; 1 failed", "19"),
+        ]:
+            with self.subTest(output=output):
+                # Fail only Cargo, not the preliminary script regression check.
+                cargo = self.bin / "cargo"
+                cargo.write_text(f'#!/bin/sh\nprintf "%s\\n" "{output}"\nexit {status}\n')
+                result = self.run_script("test-rust.sh", "--package", "vnfs", "--test", "readv")
+                self.assertEqual(result.returncode, int(status) or 1)
+                self.assertTrue((self.root / "timings").read_text().rstrip()
+                                .endswith(f"\t{result.returncode}"))
+
+    def test_focused_test_names_are_not_skip_diagnostics(self):
+        result = self.run_script("test-rust.sh", "--package", "vnfs", "--test", "readv",
+                                 TEST_OUTPUT="test skipping_existing_files ... ok\ntest result: ok. 1 passed; 0 failed")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_invalid_focused_selections_do_not_run_tests(self):
+        for args in [
+            ("--package",), ("--test",), ("--filter",),
+            ("--package", "vnfs"), ("--lib",), ("--filter", "budgets"),
+            ("--package", "unknown", "--lib"),
+            ("--package", "vnfs", "--lib", "--test", "readv"),
+            ("--quick", "--package", "vnfs", "--lib"),
+            ("--package", "vnfs", "--package", "vfsi-core", "--lib"),
+            ("--package", "vnfs", "--lib", "--filter", "--help"),
+        ]:
+            with self.subTest(args=args):
+                result = self.run_script("test-rust.sh", *args)
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(self.log.exists())
+
+    def test_live_focused_targets_require_fixture_configuration(self):
+        for package, target, env in [
+            ("vfsi-nfs", "nfs", dict(VFSI_NFS_SERVER="")),
+            ("vnfs", "tree_builder_nfs", dict(VFSI_NFS_SERVER="", VFSI_NFS_REQUIRED="0")),
+            ("vnfs", "transfer_helpers_nfs", dict(VFSI_NFS_SERVER="", VFSI_NFS_REQUIRED="0")),
+            ("vfsi-smb", "smb", dict(VFSI_SMB_SERVER="", VFSI_SMB_SHARE="")),
+        ]:
+            with self.subTest(package=package):
+                self.log.unlink(missing_ok=True)
+                result = self.run_script("test-rust.sh", "--package", package,
+                                         "--test", target, **env)
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(self.log.exists())
+
+    def test_configured_live_targets_require_execution_and_keep_fault_features(self):
+        cargo = self.bin / "cargo"
+        stub = cargo.read_text().split("\n", 1)[1]
+        for package, target, required in [
+            ("vfsi-nfs", "nfs", "VFSI_NFS_REQUIRED"),
+            ("vnfs", "tree_builder_nfs", "VFSI_NFS_REQUIRED"),
+            ("vnfs", "transfer_helpers_nfs", "VFSI_NFS_REQUIRED"),
+            ("vfsi-smb", "smb", "VFSI_SMB_REQUIRED"),
+        ]:
+            with self.subTest(package=package, target=target):
+                self.log.unlink(missing_ok=True)
+                cargo.write_text(f'#!/bin/sh\n[ "${{{required}:-}}" = "1" ] || exit 41\n' + stub)
+                result = self.run_script(
+                    "test-rust.sh", "--package", package, "--test", target,
+                    VFSI_NFS_SERVER="test-server.invalid", VFSI_SMB_SERVER="test-server.invalid",
+                    VFSI_SMB_SHARE="test-share", **{required: "0"})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = self.log.read_text().splitlines()
+                self.assertEqual(len(calls), 2)
+                self.assertIn(f"--test {target}", calls[1])
+                if package == "vfsi-smb":
+                    self.assertIn("--features test-faults", calls[1])
+                self.log.unlink()
 
 
 if __name__ == "__main__":
