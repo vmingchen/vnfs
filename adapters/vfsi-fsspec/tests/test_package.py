@@ -1,6 +1,7 @@
 """Standalone contract tests for the backend-neutral vfsi-fsspec package."""
 
 import errno
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -116,3 +117,41 @@ def test_info_preserves_unavailable_posix_identity_fields():
 
     assert "uid" in info and info["uid"] is None
     assert "gid" in info and info["gid"] is None
+
+
+@pytest.mark.parametrize("reconnect", [False, True])
+def test_legacy_nfs_constructor_compatibility(reconnect):
+    class LegacyClient(_MemoryClient):
+        instances = []
+        # The previous PyO3 constructor has 18 positional parameters.
+        __signature__ = inspect.Signature(
+            [
+                inspect.Parameter(f"p{i}", inspect.Parameter.POSITIONAL_ONLY)
+                for i in range(18)
+            ]
+        )
+
+        def __init__(self, *args):
+            assert len(args) <= 18
+            super().__init__(*args)
+
+    class LegacyFs(VfsiFileSystem):
+        _native_module = SimpleNamespace(NfsClient=LegacyClient)
+        _supported_backends = frozenset({"nfs"})
+
+    kwargs = dict(
+        host="server",
+        backend="nfs",
+        auth="auth_sys",
+        auto_reconnect=reconnect,
+        skip_instance_cache=True,
+    )
+    if reconnect:
+        with LegacyFs(**kwargs) as fs:
+            assert fs.cat_file("/alpha") == b"alpha"
+        assert len(LegacyClient.instances) == 1
+        assert LegacyClient.instances[0].was_shutdown
+    else:
+        with pytest.raises(ImportError, match="upgrade nfs4fs alongside vfsi-fsspec"):
+            LegacyFs(**kwargs)
+        assert not LegacyClient.instances, "fail before opening a connection"

@@ -576,7 +576,7 @@ impl NfsClient {
     /// Connect to an NFS server (`backend="nfs"`, default), an SMB2/3 share
     /// (`backend="smb"`), or a local directory (`backend="dummy"`).
     #[new]
-    #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None, minor_version=None, share=None, username="", password="", domain="", connect_timeout=10.0, request_timeout=5.0, read_all_max_total_bytes=16777216, directory_max_entries=100000, directory_max_path_bytes=16777216, walk_max_depth=128, auth=None, service_principal=None, mount_config=None))]
+    #[pyo3(signature = (host, backend="nfs", root=None, compound_size_limit=None, minor_version=None, share=None, username="", password="", domain="", connect_timeout=10.0, request_timeout=5.0, read_all_max_total_bytes=16777216, directory_max_entries=100000, directory_max_path_bytes=16777216, walk_max_depth=128, auth=None, service_principal=None, mount_config=None, auto_reconnect=true))]
     #[allow(clippy::too_many_arguments)]
     fn new(
         py: Python<'_>,
@@ -598,6 +598,7 @@ impl NfsClient {
         auth: Option<&str>,
         service_principal: Option<String>,
         mount_config: Option<Py<MountConfiguration>>,
+        auto_reconnect: bool,
     ) -> PyResult<Self> {
         let mount_config = mount_config.map(|config| config.borrow(py).clone());
         if mount_config.is_some() && (backend != "nfs" || root.is_some()) {
@@ -625,6 +626,7 @@ impl NfsClient {
             &auth,
             &service_principal,
             &mount_config,
+            auto_reconnect,
         );
         let fs: Box<dyn BindingBackend + Send> = py.detach(|| {
             Ok(match backend {
@@ -680,6 +682,7 @@ impl NfsClient {
                         .minor_version(minor_version)
                         .connect_timeout(connect_timeout)
                         .request_timeout(request_timeout)
+                        .auto_reconnect(auto_reconnect)
                         .authentication(nfs_authentication);
                     if let Some(limit) = compound_size_limit {
                         builder = builder.max_compound_bytes(limit);
@@ -1175,13 +1178,13 @@ impl NfsClient {
         })
     }
 
-    fn readlink(&self, py: Python<'_>, path: PathBuf) -> PyResult<String> {
-        self.with_fs(py, move |fs| {
-            let b = fs
-                .readlink_raw_impl(&path)
-                .map_err(|e| to_py_err(e, Some(path.as_path())))?;
-            Ok(String::from_utf8_lossy(&b).into_owned())
-        })
+    fn readlink(&self, py: Python<'_>, path: PathBuf) -> PyResult<Py<PyString>> {
+        let target = self.with_fs(py, move |fs| {
+            fs.readlink_raw_impl(&path)
+                .map(|bytes| vfsi_core::path::path_from_bytes(&bytes))
+                .map_err(|e| to_py_err(e, Some(path.as_path())))
+        })?;
+        Ok(target.as_os_str().into_pyobject(py)?.unbind())
     }
 
     fn hardlink(&self, py: Python<'_>, src: PathBuf, dst: PathBuf) -> PyResult<()> {

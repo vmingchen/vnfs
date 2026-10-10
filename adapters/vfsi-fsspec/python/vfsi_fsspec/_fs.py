@@ -3,6 +3,7 @@
 import datetime
 import errno
 import hashlib
+import inspect
 import io
 import math
 import operator
@@ -17,6 +18,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from glob import has_magic
+from itertools import groupby
 from urllib.parse import unquote, urlsplit
 
 from fsspec.caching import caches
@@ -721,6 +723,11 @@ class _RawVfsiFile(io.RawIOBase):
             if isinstance(error, OSError) and not isinstance(error, ConnectionError):
                 if error.errno != errno.EBADF or not stale:
                     raise
+            if self._writable:
+                # Reopening an update handle can repeat create/truncate or
+                # switch its identity. Retain the descriptor only for cleanup.
+                self._broken = True
+                raise
             if not self.fs.auto_reconnect:
                 raise
             if not stale:
@@ -1687,6 +1694,7 @@ class _DeferredWriteFile:
         self._closed = False
         self._committed = False
         self._prepared = False
+        self._published = False
         parent = posixpath.dirname(path) or "/"
         name = posixpath.basename(path) or "root"
         self.temp_path = posixpath.join(
@@ -1753,14 +1761,38 @@ class _DeferredWriteFile:
         self._prepared = True
 
     def finalize(self):
-        if self._committed:
+        self.finalize_many([self])
+
+    @staticmethod
+    def finalize_many(files):
+        pending = [file for file in files if not file._committed]
+        if not pending:
             return
-        self.fs._client.rename_many(
-            [(self.fs._native_path(self.temp_path), self.fs._native_path(self.path))]
-        )
-        self._prepared = False
-        self._committed = True
-        self._spool.close()
+        fs = pending[0].fs
+        fs._invalidate_namespace(file.path for file in pending)
+        # Preserve input order and vectorize contiguous overwriting renames.
+        # LINK publishes a staged exclusive create atomically without replacing
+        # an existing destination, including a dangling symlink.
+        for exclusive, run in groupby(pending, key=lambda file: "x" in file.mode):
+            batch = list(run)
+            if exclusive:
+                for file in batch:
+                    if not file._published:
+                        fs._client.hardlink(
+                            fs._native_path(file.temp_path), fs._native_path(file.path)
+                        )
+                        file._published = True
+                    file.discard()  # unlink only our staging name and close spool
+            else:
+                fs._client.rename_many(
+                    [
+                        (fs._native_path(file.temp_path), fs._native_path(file.path))
+                        for file in batch
+                    ]
+                )
+                for file in batch:
+                    file._prepared = False
+                    file.discard()
 
     def commit(self):
         if self._committed:
@@ -1769,15 +1801,17 @@ class _DeferredWriteFile:
         self.finalize()
 
     def discard(self):
-        if self._prepared:
-            try:
-                self.fs.rm(self.temp_path)
-            except FileNotFoundError:
-                pass
-            self._prepared = False
-        self._spool.close()
+        try:
+            if self._prepared:
+                try:
+                    self.fs.rm(self.temp_path)
+                except FileNotFoundError:
+                    pass
+                self._prepared = False
+        finally:
+            self._spool.close()
+            self._closed = True
         self._committed = True
-        self._closed = True
 
     @property
     def closed(self):
@@ -1785,7 +1819,7 @@ class _DeferredWriteFile:
 
 
 class _VfsiTransaction(Transaction):
-    """Prepare all writes, then expose them with one batched rename."""
+    """Stage writes, then publish ordered rename batches and exclusive links."""
 
     def complete(self, commit=True):
         files = list(self.files)
@@ -1801,21 +1835,7 @@ class _VfsiTransaction(Transaction):
                 for file in files:
                     file.prepare()
                     prepared.append(file)
-                if prepared:
-                    fs._invalidate_namespace(file.path for file in prepared)
-                    self.fs._client.rename_many(
-                        [
-                            (
-                                self.fs._native_path(file.temp_path),
-                                self.fs._native_path(file.path),
-                            )
-                            for file in prepared
-                        ]
-                    )
-                for file in prepared:
-                    file._prepared = False
-                    file._committed = True
-                    file._spool.close()
+                _DeferredWriteFile.finalize_many(prepared)
             except Exception:
                 for file in prepared:
                     file.discard()
@@ -2050,8 +2070,19 @@ class VfsiFileSystem(AbstractFileSystem):
             self.auth,
             self.service_principal,
         )
-        if _mount_config is not None:
+        disable_native_recovery = backend == "nfs" and not self.auto_reconnect
+        if _mount_config is not None or disable_native_recovery:
             factory_args += (_mount_config,)
+        if disable_native_recovery:
+            if (
+                "auto_reconnect"
+                not in inspect.signature(native_module.NfsClient).parameters
+            ):
+                raise ImportError(
+                    "auto_reconnect=False requires a native adapter with recovery "
+                    "control; upgrade nfs4fs alongside vfsi-fsspec"
+                )
+            factory_args += (False,)
         self._client = _ClientPool(
             native_module,
             factory_args,
@@ -3462,14 +3493,17 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def mkdir(self, path, create_parents=True, **kwargs):
         internal = self._checked_strip_protocol(path)
-        mode = (kwargs.get("mode", 0o755) or 0o755) & 0o7777
+        mode = kwargs.get("mode", 0o755)
+        mode = (0o755 if mode is None else mode) & 0o7777
         if create_parents:
             if self.exists(internal):
                 raise FileExistsError(errno.EEXIST, "File exists", internal)
-            self._ensure_dirs([internal], mode)
-        else:
-            self._invalidate_namespace([internal])
-            self._client.mkdir(self._native_path(internal), mode)
+            if mode == 0o755:
+                self._ensure_dirs([internal])
+                return
+            self._ensure_dirs([posixpath.dirname(internal) or "/"])
+        self._invalidate_namespace([internal])
+        self._client.mkdir(self._native_path(internal), mode)
 
     def makedirs(self, path, exist_ok=False):
         self._makedirs_batched([path], exist_ok)
@@ -3599,7 +3633,10 @@ class VfsiFileSystem(AbstractFileSystem):
         )
         for s, d in symlink_pairs:
             target = self.readlink(s)
-            self.symlink(target, d)
+            self._invalidate_namespace([d])
+            # readlink returns the stored target, already in the backend's
+            # namespace. Do not apply the application root prefix again.
+            self._client.symlink(target, self._native_path(d))
             _complete_child(callback, s, d, 0)
 
     def cp_file(self, path1, path2, callback=DEFAULT_CALLBACK, **kwargs):
