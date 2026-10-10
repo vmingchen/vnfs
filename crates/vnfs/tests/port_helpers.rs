@@ -3,10 +3,8 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
 };
-use vnfs::{
-    helpers::{PathMapper, ResolvePath, copy_to_writer},
-    *,
-};
+use vnfs::nfs::mount::{PathMapper, ResolvePath};
+use vnfs::{directory::*, files::*, helpers::*, posix::*};
 
 #[test]
 fn mapping_preserves_final_links_and_rejects_escapes_and_destructive_dot_paths() {

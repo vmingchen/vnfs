@@ -1,4 +1,5 @@
-use vnfs::{Nfs, Vfsi, VfsiExt};
+use vnfs::files::{Vfsi, VfsiExt};
+use vnfs::nfs::Nfs;
 
 // The parent must exist. Never delete an existing directory to make room.
 pub fn run(fs: &impl Vfsi, fresh_root: &str) -> vnfs::Result<Vec<Vec<u8>>> {
@@ -12,7 +13,7 @@ pub fn run(fs: &impl Vfsi, fresh_root: &str) -> vnfs::Result<Vec<Vec<u8>>> {
             (&paths[0], b"hello".as_slice()),
             (&paths[1], b"world".as_slice()),
         ])?;
-        let requests: Vec<_> = paths.iter().map(vnfs::ReadOp::whole).collect();
+        let requests: Vec<_> = paths.iter().map(vnfs::files::ReadOp::whole).collect();
         fs.vread(requests, Default::default()).map(|results| {
             results
                 .into_iter()

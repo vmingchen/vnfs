@@ -31,6 +31,8 @@ Write two files, then read them together. Their parent directory must exist;
 
 ```rust,no_run
 use vnfs::prelude::*;
+use vnfs::nfs::Nfs;
+use vnfs::files::ReadOp;
 
 fn main() -> vnfs::Result<()> {
     let fs = Nfs::builder("nfs.example.com")

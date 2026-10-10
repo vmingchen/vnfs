@@ -8,7 +8,8 @@ use std::error::Error;
 use std::io;
 use std::time::{Duration, Instant};
 
-use vnfs::{Nfs, NfsReadPool, NfsReadPoolOptions, StreamOptions, VfsiExt};
+use vnfs::files::{StreamOptions, VfsiExt};
+use vnfs::nfs::{Nfs, NfsReadPool, NfsReadPoolOptions};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -115,7 +116,7 @@ fn median(mut values: Vec<f64>) -> f64 {
 }
 
 fn read_once(
-    client: &vnfs::NfsClient,
+    client: &vnfs::nfs::NfsClient,
     path: &str,
     chunk_size: usize,
 ) -> Result<(Duration, u64, u64)> {
@@ -150,7 +151,7 @@ fn main() -> Result<()> {
     let args = parse()?;
     let client = Nfs::builder(args.host.clone())
         .root(args.root.clone())
-        .version(vnfs::NfsVersion::try_from(args.minor_version)?)
+        .version(vnfs::nfs::NfsVersion::try_from(args.minor_version)?)
         .connect()?;
 
     println!("streaming {} without retaining contents", args.path);
@@ -185,7 +186,7 @@ fn main() -> Result<()> {
             let setup_started = Instant::now();
             let mut pool = Nfs::builder(args.host.clone())
                 .root(args.root.clone())
-                .version(vnfs::NfsVersion::try_from(args.minor_version)?)
+                .version(vnfs::nfs::NfsVersion::try_from(args.minor_version)?)
                 .connect_read_pool(
                     NfsReadPoolOptions::new()
                         .worker_count(worker_count)

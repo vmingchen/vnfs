@@ -19,6 +19,7 @@ to inspect it. Its concrete type is intentionally private.
 ```rust,no_run
 use std::io::{Read, Seek};
 use vnfs::prelude::*;
+use vnfs::nfs::Nfs;
 
 fn main() -> std::io::Result<()> {
     let fs = Nfs::connect("nfs.example.com")?;
@@ -59,5 +60,5 @@ Vector errors retain protocol details. Standard-I/O adapters wrap them in
 getters such as `Attrs::len()` return `None` for missing fields; missing does
 not mean zero.
 
-See [failure and recovery](crate::guides::failure_recovery) and
-[resource limits](crate::guides::operations).
+See [failure and recovery](crate::nfs) and
+[resource limits](crate::nfs).

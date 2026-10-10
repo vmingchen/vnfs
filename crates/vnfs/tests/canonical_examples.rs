@@ -13,16 +13,18 @@ mod open_handles;
 #[path = "../examples/stream_file.rs"]
 mod stream_file;
 
-use vnfs::VfsiExt;
-use vnfs::{Posix, Result, Vfsi};
+use vnfs::Result;
+use vnfs::files::Vfsi;
+use vnfs::files::VfsiExt;
+use vnfs::posix::Posix;
 
 #[test]
 fn grouped_namespaces_use_the_same_application_types() {
-    let _: vnfs::nfs::NfsBuilder = vnfs::Nfs::builder("server");
-    let _: vnfs::files::ResourceLimits = vnfs::ResourceLimits::default();
-    let _: vnfs::directory::ListDirOptions = vnfs::ListDirOptions::new();
+    let _: vnfs::nfs::NfsBuilder = vnfs::nfs::Nfs::builder("server");
+    let _: vnfs::files::ResourceLimits = vnfs::files::ResourceLimits::default();
+    let _: vnfs::directory::ListDirOptions = vnfs::directory::ListDirOptions::new();
     let _: vnfs::error::Result<()> = Ok::<(), vnfs::Error>(());
-    let _: vnfs::mounted::AutoRoute = vnfs::AutoRoute::Posix;
+    let _: vnfs::mounted::AutoRoute = vnfs::mounted::AutoRoute::Posix;
 }
 
 #[test]
@@ -39,8 +41,8 @@ fn bulk_roundtrip_cleanup_and_existing_directory_protection() -> Result<()> {
     assert!(bulk_files::run(&fs, "/existing").is_err());
     assert_eq!(
         fs.vread(
-            [vnfs::ReadOp::whole("/existing/precious")],
-            vnfs::ReadOptions::default()
+            [vnfs::files::ReadOp::whole("/existing/precious")],
+            vnfs::files::ReadOptions::default()
         )?[0]
             .data()
             .unwrap(),
@@ -48,7 +50,7 @@ fn bulk_roundtrip_cleanup_and_existing_directory_protection() -> Result<()> {
     );
     let bounded = fs
         .clone()
-        .with_limits(vnfs::ResourceLimits::new().max_read_bytes(3));
+        .with_limits(vnfs::files::ResourceLimits::new().max_read_bytes(3));
     // Fail after creating/writing the owned directory, then still clean it up.
     assert!(bulk_files::run(&bounded, "/failed-read").is_err());
     assert!(!root.path().join("failed-read").exists());
@@ -105,7 +107,8 @@ fn directory_batches_and_no_follow_walk() -> Result<()> {
 #[test]
 #[ignore = "requires VFSI_NFS_SERVER and a writable VFSI_NFS_EXPORT"]
 fn canonical_workflows_on_nfsv41_and_nfsv42() -> Result<()> {
-    use vnfs::{Nfs, NfsVersion, helpers::TreeBuilder};
+    use vnfs::helpers::TreeBuilder;
+    use vnfs::nfs::{Nfs, NfsVersion};
     let host = std::env::var("VFSI_NFS_SERVER").expect("set VFSI_NFS_SERVER");
     let export = std::env::var("VFSI_NFS_EXPORT").expect("set VFSI_NFS_EXPORT");
     let versions = match std::env::var("VFSI_NFS_MINOR").as_deref() {
@@ -149,12 +152,12 @@ fn canonical_workflows_on_nfsv41_and_nfsv42() -> Result<()> {
             let mut buffer = [0; 4];
             let mixed = fs.vread(
                 [
-                    vnfs::ReadOp::whole(&paths[2]),
-                    vnfs::ReadOp::range(&file, 10, 3),
-                    vnfs::ReadOp::whole(&paths[1]),
-                    vnfs::ReadOp::into(&file, 20, &mut buffer),
+                    vnfs::files::ReadOp::whole(&paths[2]),
+                    vnfs::files::ReadOp::range(&file, 10, 3),
+                    vnfs::files::ReadOp::whole(&paths[1]),
+                    vnfs::files::ReadOp::into(&file, 20, &mut buffer),
                 ],
-                vnfs::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(12)),
+                vnfs::files::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(12)),
             )?;
             assert_eq!(mixed[0].data().unwrap(), b"hello");
             assert_eq!(mixed[1].offset(), 10);

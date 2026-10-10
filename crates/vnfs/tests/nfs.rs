@@ -15,8 +15,8 @@ use vfsi_nfs::NfsVecFs;
 use vfsi_nfs::nfs::*;
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::test_support::borrow_writes;
-use vnfs::VfsiExt;
-use vnfs::{Nfs, NfsReadPoolOptions};
+use vnfs::files::VfsiExt;
+use vnfs::nfs::{Nfs, NfsReadPoolOptions};
 
 #[cfg(feature = "rpcsec-gss")]
 #[test]
@@ -32,9 +32,9 @@ fn failed_gss_negotiation_does_not_fall_back_to_a_working_auth_sys_export() {
         )
         .connect_timeout(std::time::Duration::from_secs(2))
         .request_timeout(std::time::Duration::from_secs(2))
-        .authentication(vnfs::NfsAuthentication::RpcsecGss {
+        .authentication(vnfs::nfs::NfsAuthentication::RpcsecGss {
             service_principal: Some("nfs@vnfs-nonexistent-service.invalid".into()),
-            protection: vnfs::RpcsecGssProtection::Integrity,
+            protection: vnfs::nfs::RpcsecGssProtection::Integrity,
         })
         .connect()
         .err()
@@ -302,10 +302,10 @@ fn rust_native_client_workflow_on_nfs() {
     let dir = setup_dir("rust_native_client");
     let host = std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let builder =
-        vnfs::Nfs::builder(&host).version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => vnfs::NfsVersion::V4_1,
-            Ok("2") => vnfs::NfsVersion::V4_2,
-            _ => vnfs::NfsVersion::Auto,
+        vnfs::nfs::Nfs::builder(&host).version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
+            Ok("1") => vnfs::nfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+            _ => vnfs::nfs::NfsVersion::Auto,
         });
     let client = builder.connect().unwrap();
     let nested = format!("{dir}/nested");
@@ -322,8 +322,8 @@ fn rust_native_client_workflow_on_nfs() {
     client
         .vwrite(
             &[
-                vnfs::WriteOp::at(&files[0], 0, b"one"),
-                vnfs::WriteOp::at(&files[1], 0, b"two"),
+                vnfs::files::WriteOp::at(&files[0], 0, b"one"),
+                vnfs::files::WriteOp::at(&files[1], 0, b"two"),
             ],
             Default::default(),
         )
@@ -331,10 +331,10 @@ fn rust_native_client_workflow_on_nfs() {
     let values = client
         .vread(
             [
-                vnfs::ReadOp::range(&files[0], 0, 3),
-                vnfs::ReadOp::range(&files[1], 0, 3),
+                vnfs::files::ReadOp::range(&files[0], 0, 3),
+                vnfs::files::ReadOp::range(&files[1], 0, 3),
             ],
-            vnfs::ReadOptions::default(),
+            vnfs::files::ReadOptions::default(),
         )
         .unwrap();
     assert_eq!(values[0].data().unwrap(), b"one");
@@ -345,8 +345,8 @@ fn rust_native_client_workflow_on_nfs() {
     let lengths = client
         .vread(
             [
-                vnfs::ReadOp::into(&files[0], 0, &mut first),
-                vnfs::ReadOp::into(&files[1], 0, &mut second),
+                vnfs::files::ReadOp::into(&files[0], 0, &mut first),
+                vnfs::files::ReadOp::into(&files[1], 0, &mut second),
             ],
             Default::default(),
         )
@@ -415,8 +415,8 @@ fn rust_native_client_workflow_on_nfs() {
         let attrs = client
             .vgetattrs(
                 &paths,
-                vnfs::AttrsOptions::new()
-                    .fields(vnfs::Attributes::MODE | vnfs::Attributes::SIZE)
+                vnfs::directory::AttrsOptions::new()
+                    .fields(vnfs::directory::Attributes::MODE | vnfs::directory::Attributes::SIZE)
                     .follow_symlinks(follow),
             )
             .unwrap();
@@ -446,7 +446,7 @@ fn rust_native_client_workflow_on_nfs() {
         client
             .vgetattrs(
                 &[paths[0].as_str(), dangling.as_str()],
-                vnfs::AttrsOptions::new()
+                vnfs::directory::AttrsOptions::new()
             )
             .unwrap_err()
             .index(),
@@ -457,10 +457,10 @@ fn rust_native_client_workflow_on_nfs() {
         format!("{nested}/renamed-two"),
     ];
     let _ = vfsi_nfs::compound::thread_compound_stats();
-    vnfs::Vfsi::vrename(
+    vnfs::files::Vfsi::vrename(
         &client,
         &[(&paths[0], &renamed[0]), (&paths[1], &renamed[1])],
-        vnfs::RenameOptions::Replace,
+        vnfs::directory::RenameOptions::Replace,
     )
     .unwrap();
     assert_eq!(
@@ -477,13 +477,14 @@ fn rust_native_client_workflow_on_nfs() {
 
 #[test]
 fn native_removal_modes_forward_policy_across_roots() {
-    use vnfs::{RemoveMode, RemoveOptions, Vfsi};
+    use vnfs::directory::{RemoveMode, RemoveOptions};
+    use vnfs::files::Vfsi;
     let dir = setup_dir("native_removal_modes");
     let client = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => vnfs::NfsVersion::V4_1,
-            Ok("2") => vnfs::NfsVersion::V4_2,
-            _ => vnfs::NfsVersion::Auto,
+            Ok("1") => vnfs::nfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+            _ => vnfs::nfs::NfsVersion::Auto,
         })
         .connect()
         .unwrap();
@@ -515,13 +516,13 @@ fn native_removal_modes_forward_policy_across_roots() {
 
 #[test]
 fn unified_directory_visits_on_nfs() {
-    use vnfs::{Attributes, ControlFlow, ListDirOptions, TraversalCompletion};
+    use vnfs::directory::{Attributes, ControlFlow, ListDirOptions, TraversalCompletion};
     let dir = setup_dir("unified_directory_visits");
     let client = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => vnfs::NfsVersion::V4_1,
-            Ok("2") => vnfs::NfsVersion::V4_2,
-            _ => vnfs::NfsVersion::Auto,
+            Ok("1") => vnfs::nfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+            _ => vnfs::nfs::NfsVersion::Auto,
         })
         .connect()
         .unwrap();
@@ -562,13 +563,13 @@ fn unified_directory_visits_on_nfs() {
 
 #[test]
 fn application_collection_preserves_native_batching_and_root_groups() {
-    use vnfs::{Attributes, ListDirOptions};
+    use vnfs::directory::{Attributes, ListDirOptions};
     let dir = setup_dir("application_collection_batch");
     let client = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => vnfs::NfsVersion::V4_1,
-            Ok("2") => vnfs::NfsVersion::V4_2,
-            _ => vnfs::NfsVersion::Auto,
+            Ok("1") => vnfs::nfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+            _ => vnfs::nfs::NfsVersion::Auto,
         })
         .connect()
         .unwrap();
@@ -577,7 +578,7 @@ fn application_collection_preserves_native_batching_and_root_groups() {
         .vmkdir(
             &roots
                 .iter()
-                .map(|path| vnfs::MkDirOp::new(path, 0o777))
+                .map(|path| vnfs::directory::MkDirOp::new(path, 0o777))
                 .collect::<Vec<_>>(),
         )
         .unwrap();
@@ -628,14 +629,14 @@ fn whole_file_readv_honors_the_client_budget() {
     let dir = setup_dir("whole_file_readv_budget");
     let host = std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let version = match std::env::var("VNFS_TEST_MINOR").as_deref() {
-        Ok("1") => vnfs::NfsVersion::V4_1,
-        Ok("2") => vnfs::NfsVersion::V4_2,
-        _ => vnfs::NfsVersion::Auto,
+        Ok("1") => vnfs::nfs::NfsVersion::V4_1,
+        Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+        _ => vnfs::nfs::NfsVersion::Auto,
     };
     const BYTES: usize = 1024 * 1024 + 17;
     let client = Nfs::builder(host)
         .version(version)
-        .limits(vnfs::ResourceLimits::new().max_read_bytes(BYTES))
+        .limits(vnfs::files::ResourceLimits::new().max_read_bytes(BYTES))
         .connect()
         .unwrap();
     let path = format!("{dir}/file");
@@ -643,7 +644,10 @@ fn whole_file_readv_honors_the_client_budget() {
     client.write(&path, &data).unwrap();
     assert_eq!(
         client
-            .vread([vnfs::ReadOp::whole(&path)], vnfs::ReadOptions::default())
+            .vread(
+                [vnfs::files::ReadOp::whole(&path)],
+                vnfs::files::ReadOptions::default()
+            )
             .unwrap()[0]
             .data()
             .unwrap(),
@@ -652,12 +656,13 @@ fn whole_file_readv_honors_the_client_budget() {
     assert_eq!(
         client
             .vread(
-                [vnfs::ReadOp::whole(&path)],
-                vnfs::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(BYTES - 1))
+                [vnfs::files::ReadOp::whole(&path)],
+                vnfs::files::ReadOptions::new()
+                    .max_total_bytes(std::num::NonZeroUsize::new(BYTES - 1))
             )
             .unwrap_err()
             .kind(),
-        vnfs::ErrorKind::FileTooLarge
+        vnfs::error::ErrorKind::FileTooLarge
     );
     let mut dir_handle = client.open_dir_handle(&dir).unwrap();
     dir_handle.try_close().unwrap();
@@ -671,9 +676,9 @@ fn rust_native_client_pool_uses_independent_sessions() {
     let host = std::env::var("VNFS_TEST_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let pool = Nfs::builder(host)
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => vnfs::NfsVersion::V4_1,
-            Ok("2") => vnfs::NfsVersion::V4_2,
-            _ => vnfs::NfsVersion::Auto,
+            Ok("1") => vnfs::nfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+            _ => vnfs::nfs::NfsVersion::Auto,
         })
         .client_owner(b"vnfs-integration-pool".to_vec())
         .connect_pool(2)
@@ -816,7 +821,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
             Ok(std::ops::ControlFlow::Continue(()))
         })
         .expect("stream complete file");
-    assert_eq!(completion, vnfs::StreamCompletion::Complete);
+    assert_eq!(completion, vnfs::files::StreamCompletion::Complete);
     assert_eq!(actual, expected);
 
     let mut callbacks = 0;
@@ -828,7 +833,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
         .expect("cancel stream");
     assert_eq!(
         completion,
-        vnfs::StreamCompletion::Stopped {
+        vnfs::files::StreamCompletion::Stopped {
             next_offset: 64 * 1024
         }
     );
@@ -1130,7 +1135,7 @@ fn listdir_recursive() {
 
 #[test]
 fn bounded_walk_limits_nfs_accumulation() {
-    use vnfs::ListDirOptions;
+    use vnfs::directory::ListDirOptions;
 
     let dir = setup_dir("bounded_walk");
     let mut c = client();
@@ -1713,9 +1718,9 @@ fn scalar_write_follows_final_symlink_chains_and_creates_dangling_targets() {
     let mut backend = self::client();
     let fs = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => vnfs::NfsVersion::V4_1,
-            Ok("2") => vnfs::NfsVersion::V4_2,
-            _ => vnfs::NfsVersion::Auto,
+            Ok("1") => vnfs::nfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+            _ => vnfs::nfs::NfsVersion::Auto,
         })
         .connect()
         .unwrap();
@@ -2314,9 +2319,9 @@ fn directory_visit_recovers_if_reply_is_lost_before_first_entry() {
     let proxy = DropReplyProxy::start(reply_loss_target());
     let visitor = Nfs::builder(proxy.endpoint())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => vnfs::NfsVersion::V4_1,
-            Ok("2") => vnfs::NfsVersion::V4_2,
-            _ => vnfs::NfsVersion::Auto,
+            Ok("1") => vnfs::nfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+            _ => vnfs::nfs::NfsVersion::Auto,
         })
         .request_timeout(Duration::from_millis(500))
         .connect()
@@ -2353,9 +2358,9 @@ fn directory_visit_does_not_replay_after_delivering_an_entry() {
     let proxy = DropReplyProxy::start(reply_loss_target());
     let visitor = Nfs::builder(proxy.endpoint())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => vnfs::NfsVersion::V4_1,
-            Ok("2") => vnfs::NfsVersion::V4_2,
-            _ => vnfs::NfsVersion::Auto,
+            Ok("1") => vnfs::nfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+            _ => vnfs::nfs::NfsVersion::Auto,
         })
         .request_timeout(Duration::from_millis(500))
         .max_compound_bytes(8 * 1024)
@@ -2385,7 +2390,7 @@ fn directory_visit_does_not_replay_after_delivering_an_entry() {
 #[cfg(feature = "test-faults")]
 #[test]
 fn pipelined_read_recovers_after_a_lost_read_reply() {
-    use vnfs::{Nfs, NfsReadPoolOptions};
+    use vnfs::nfs::{Nfs, NfsReadPoolOptions};
 
     let dir = setup_dir("read_pool_proxy_reply_loss");
     let path = format!("{dir}/large.bin");
@@ -2483,7 +2488,7 @@ fn listdirv_batches_many_directories() {
 
 #[test]
 fn native_read_dirs_batches_and_reports_bounded_errors() {
-    use vnfs::{Attributes, ListDirOptions};
+    use vnfs::directory::{Attributes, ListDirOptions};
 
     let dir = setup_dir("native_read_dirs_batch");
     let mut backend = client();
@@ -3022,7 +3027,7 @@ fn open_dir_accepts_namespace_root() {
 #[test]
 fn owned_directory_handle_survives_rename_and_exposes_options() {
     use vfsi_sync::FsClient;
-    use vnfs::RemoveOptions;
+    use vnfs::directory::RemoveOptions;
 
     let root = setup_dir("owned_remove_dir");
     let original = format!("{root}/original");
@@ -3053,7 +3058,7 @@ fn owned_directory_handle_survives_rename_and_exposes_options() {
 #[test]
 fn recursive_removal_drains_large_directory_and_nested_children() {
     use vfsi_sync::FsClient;
-    use vnfs::RemoveOptions;
+    use vnfs::directory::RemoveOptions;
 
     let root = setup_dir("paged_remove_dir");
     let c = FsClient::new(client());
@@ -3915,12 +3920,13 @@ fn deferred_cleanup_reconciles_backend_owned_failed_close() {
 
 #[test]
 fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancellation() {
-    use vnfs::{ControlFlow, ListDirOptions, Vfsi};
+    use vnfs::directory::{ControlFlow, ListDirOptions};
+    use vnfs::files::Vfsi;
     let dir = setup_dir("directory_pages");
     let fs = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("2") => vnfs::NfsVersion::V4_2,
-            _ => vnfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+            _ => vnfs::nfs::NfsVersion::V4_1,
         })
         .connect()
         .unwrap();
@@ -3928,7 +3934,7 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
     fs.vmkdir(
         &roots
             .iter()
-            .map(|path| vnfs::MkDirOp::new(path, 0o777))
+            .map(|path| vnfs::directory::MkDirOp::new(path, 0o777))
             .collect::<Vec<_>>(),
     )
     .unwrap();
@@ -3967,7 +3973,7 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
             }
         )
         .unwrap(),
-        [vnfs::TraversalCompletion::Stopped]
+        [vnfs::directory::TraversalCompletion::Stopped]
     );
     assert_eq!(
         fs.read_dirs_with_options(
@@ -3995,7 +4001,7 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
 
 #[test]
 fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
-    let options = vnfs::ListDirOptions::new().recursive(true);
+    let options = vnfs::directory::ListDirOptions::new().recursive(true);
     for mode in [
         DirectoryVisit::Pages,
         DirectoryVisit::Events(options),
@@ -4009,7 +4015,7 @@ fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
 
 #[test]
 fn buffered_directory_walk_rejects_an_ancestor_replaced_by_a_symlink() {
-    let options = vnfs::ListDirOptions::new().recursive(true);
+    let options = vnfs::directory::ListDirOptions::new().recursive(true);
     for options in [
         options.sort_by_name(true),
         options.enter_leave(true),
@@ -4025,7 +4031,7 @@ fn buffered_directory_walk_rejects_an_ancestor_replaced_by_a_symlink() {
 #[derive(Clone, Copy, Debug)]
 enum DirectoryVisit {
     Pages,
-    Events(vnfs::ListDirOptions),
+    Events(vnfs::directory::ListDirOptions),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4035,13 +4041,14 @@ enum ReplacedDirectory {
 }
 
 fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: ReplacedDirectory) {
-    use vnfs::{ControlFlow, ListDirOptions, Vfsi};
+    use vnfs::directory::{ControlFlow, ListDirOptions};
+    use vnfs::files::Vfsi;
     let dir = setup_dir("page_child_symlink");
     let fs = Nfs::builder(test_host())
         .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
-            vnfs::NfsVersion::V4_2
+            vnfs::nfs::NfsVersion::V4_2
         } else {
-            vnfs::NfsVersion::V4_1
+            vnfs::nfs::NfsVersion::V4_1
         })
         .connect()
         .unwrap();
@@ -4050,14 +4057,15 @@ fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: Repl
     let saved = format!("{dir}/saved");
     let target = format!("{dir}/outside");
     fs.vmkdir(&[
-        vnfs::MkDirOp::new(&tree, 0o777),
-        vnfs::MkDirOp::new(&target, 0o777),
+        vnfs::directory::MkDirOp::new(&tree, 0o777),
+        vnfs::directory::MkDirOp::new(&target, 0o777),
     ])
     .unwrap();
-    fs.vmkdir(&[vnfs::MkDirOp::new(&child, 0o777)]).unwrap();
+    fs.vmkdir(&[vnfs::directory::MkDirOp::new(&child, 0o777)])
+        .unwrap();
     let target = if matches!(replacement, ReplacedDirectory::Ancestor) {
         let target_child = format!("{target}/child");
-        fs.vmkdir(&[vnfs::MkDirOp::new(&target_child, 0o777)])
+        fs.vmkdir(&[vnfs::directory::MkDirOp::new(&target_child, 0o777)])
             .unwrap();
         target_child
     } else {
@@ -4071,9 +4079,9 @@ fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: Repl
         ReplacedDirectory::Child => (&child, "../outside"),
         ReplacedDirectory::Ancestor => (&tree, "outside"),
     };
-    let mut on_entry = |entry: &vnfs::DirEntry| -> vnfs::Result<()> {
+    let mut on_entry = |entry: &vnfs::directory::DirEntry| -> vnfs::Result<()> {
         if entry.path() == Path::new(&child) && !changed {
-            fs.vrename(&[(victim, &saved)], vnfs::RenameOptions::Replace)?;
+            fs.vrename(&[(victim, &saved)], vnfs::directory::RenameOptions::Replace)?;
             fs.symlink(link_target, victim)?;
             changed = true;
         }
@@ -4084,7 +4092,7 @@ fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: Repl
         DirectoryVisit::Events(options) => fs
             .listdir(&tree, options, |event| {
                 on_entry(&event.entry)?;
-                Ok(vnfs::WalkControl::Continue)
+                Ok(vnfs::directory::WalkControl::Continue)
             })
             .map(|_| ()),
         DirectoryVisit::Pages => fs
@@ -4119,13 +4127,13 @@ fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: Repl
 
 #[test]
 fn directory_path_resolution_preserves_shallow_symlinks_and_rejects_strict_aliases() {
-    use vnfs::ListDirOptions;
+    use vnfs::directory::ListDirOptions;
     let dir = setup_dir("directory_path_policy");
     let fs = Nfs::builder(test_host())
         .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
-            vnfs::NfsVersion::V4_2
+            vnfs::nfs::NfsVersion::V4_2
         } else {
-            vnfs::NfsVersion::V4_1
+            vnfs::nfs::NfsVersion::V4_1
         })
         .connect()
         .unwrap();
@@ -4153,13 +4161,13 @@ fn directory_path_resolution_preserves_shallow_symlinks_and_rejects_strict_alias
 
 #[test]
 fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
-    use vnfs::ListDirOptions;
+    use vnfs::directory::ListDirOptions;
     let dir = setup_dir("page_deep_tree");
     let fs = Nfs::builder(test_host())
         .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
-            vnfs::NfsVersion::V4_2
+            vnfs::nfs::NfsVersion::V4_2
         } else {
-            vnfs::NfsVersion::V4_1
+            vnfs::nfs::NfsVersion::V4_1
         })
         .connect()
         .unwrap();
@@ -4172,7 +4180,8 @@ fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
     }
     // Parents exist before children are created.
     for path in &paths {
-        fs.vmkdir(&[vnfs::MkDirOp::new(path, 0o777)]).unwrap();
+        fs.vmkdir(&[vnfs::directory::MkDirOp::new(path, 0o777)])
+            .unwrap();
     }
     fs.write(format!("{path}/leaf"), b"x").unwrap();
     let _ = vfsi_nfs::compound::thread_compound_stats();
@@ -4183,10 +4192,10 @@ fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
     let mut entries = 0;
     let mut maximum_depth = 0;
     fs.listdir(&dir, ListDirOptions::new().recursive(true), |event| {
-        assert_eq!(event.kind, vnfs::WalkEventKind::Entry);
+        assert_eq!(event.kind, vnfs::directory::WalkEventKind::Entry);
         entries += 1;
         maximum_depth = maximum_depth.max(event.depth);
-        Ok(vnfs::WalkControl::Continue)
+        Ok(vnfs::directory::WalkControl::Continue)
     })
     .unwrap();
     let visitor_compounds = vfsi_nfs::compound::thread_compound_stats().0;
@@ -4207,24 +4216,26 @@ fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
 
 #[test]
 fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
-    use vnfs::{ControlFlow, ListDirOptions, Vfsi};
+    use vnfs::directory::{ControlFlow, ListDirOptions};
+    use vnfs::files::Vfsi;
     let dir = setup_dir("page_parent_rename");
     let fs = Nfs::builder(test_host())
         .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
-            vnfs::NfsVersion::V4_2
+            vnfs::nfs::NfsVersion::V4_2
         } else {
-            vnfs::NfsVersion::V4_1
+            vnfs::nfs::NfsVersion::V4_1
         })
         .connect()
         .unwrap();
     let tree = format!("{dir}/tree");
     let moved = format!("{dir}/moved");
     let children: Vec<_> = (0..4).map(|i| format!("{tree}/child{i}")).collect();
-    fs.vmkdir(&[vnfs::MkDirOp::new(&tree, 0o777)]).unwrap();
+    fs.vmkdir(&[vnfs::directory::MkDirOp::new(&tree, 0o777)])
+        .unwrap();
     fs.vmkdir(
         &children
             .iter()
-            .map(|path| vnfs::MkDirOp::new(path, 0o777))
+            .map(|path| vnfs::directory::MkDirOp::new(path, 0o777))
             .collect::<Vec<_>>(),
     )
     .unwrap();
@@ -4242,7 +4253,7 @@ fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
         ListDirOptions::new().recursive(true),
         |_, page| {
             if page.path == Path::new(&tree) && !renamed {
-                fs.vrename(&[(&tree, &moved)], vnfs::RenameOptions::Replace)?;
+                fs.vrename(&[(&tree, &moved)], vnfs::directory::RenameOptions::Replace)?;
                 renamed = true;
             }
             data += page
@@ -4254,7 +4265,10 @@ fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
         },
     );
     fs.remove_dir_all(&dir).unwrap();
-    assert_eq!(result.unwrap(), [vnfs::TraversalCompletion::Complete]);
+    assert_eq!(
+        result.unwrap(),
+        [vnfs::directory::TraversalCompletion::Complete]
+    );
     assert!(renamed);
     assert_eq!(
         data, 4,
@@ -4265,7 +4279,8 @@ fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
 #[cfg(feature = "test-faults")]
 #[test]
 fn recursive_directory_pages_do_not_retry_an_ambiguous_child_reply() {
-    use vnfs::{ControlFlow, ListDirOptions, Vfsi};
+    use vnfs::directory::{ControlFlow, ListDirOptions};
+    use vnfs::files::Vfsi;
     let dir = setup_dir("page_child_reply_loss");
     let mut admin = client();
     let child = format!("{dir}/child");
@@ -4274,9 +4289,9 @@ fn recursive_directory_pages_do_not_retry_an_ambiguous_child_reply() {
     let proxy = DropReplyProxy::start(reply_loss_target());
     let visitor = Nfs::builder(proxy.endpoint())
         .version(if std::env::var("VNFS_TEST_MINOR").as_deref() == Ok("2") {
-            vnfs::NfsVersion::V4_2
+            vnfs::nfs::NfsVersion::V4_2
         } else {
-            vnfs::NfsVersion::V4_1
+            vnfs::nfs::NfsVersion::V4_1
         })
         .request_timeout(Duration::from_millis(500))
         .connect()
@@ -4306,9 +4321,9 @@ fn vsetattrs_many_nfs_files() {
     let directory = setup_dir("vsetattrs-many");
     let fs = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => vnfs::NfsVersion::V4_1,
-            Ok("2") => vnfs::NfsVersion::V4_2,
-            _ => vnfs::NfsVersion::Auto,
+            Ok("1") => vnfs::nfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+            _ => vnfs::nfs::NfsVersion::Auto,
         })
         .connect()
         .unwrap();
@@ -4318,7 +4333,7 @@ fn vsetattrs_many_nfs_files() {
     let other = Nfs::builder(test_host()).connect().unwrap();
     vsetattrs_support::check_foreign(&fs, &other, &format!("{directory}/foreign"));
     // A handle vector must not degrade into one RPC per scalar update.
-    use vnfs::{OpenFlags, OpenOp, Target};
+    use vnfs::files::{OpenFlags, OpenOp, Target};
     let paths: Vec<_> = (0..64).map(|i| format!("{directory}/file-{i}")).collect();
     let requests: Vec<_> = paths
         .iter()
@@ -4328,7 +4343,7 @@ fn vsetattrs_many_nfs_files() {
     let updates: Vec<_> = files
         .iter()
         .map(|file| {
-            vnfs::SetAttrsOp::new(Target::File(file))
+            vnfs::directory::SetAttrsOp::new(Target::File(file))
                 .len(4)
                 .uid(unsafe { libc::geteuid() })
                 .gid(unsafe { libc::getegid() })
@@ -4353,9 +4368,9 @@ fn vector_links_modes_and_capabilities_work_generically_on_nfs() {
     let directory = setup_dir("vector-links-modes");
     let fs = Nfs::builder(test_host())
         .version(match std::env::var("VNFS_TEST_MINOR").as_deref() {
-            Ok("1") => vnfs::NfsVersion::V4_1,
-            Ok("2") => vnfs::NfsVersion::V4_2,
-            _ => vnfs::NfsVersion::Auto,
+            Ok("1") => vnfs::nfs::NfsVersion::V4_1,
+            Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+            _ => vnfs::nfs::NfsVersion::Auto,
         })
         .connect()
         .unwrap();
@@ -4370,9 +4385,9 @@ mod statfs_support;
 fn filesystem_stats_nfs_vectors() {
     let directory = setup_dir("filesystem-stats");
     let version = match std::env::var("VNFS_TEST_MINOR").as_deref() {
-        Ok("1") => vnfs::NfsVersion::V4_1,
-        Ok("2") => vnfs::NfsVersion::V4_2,
-        _ => vnfs::NfsVersion::Auto,
+        Ok("1") => vnfs::nfs::NfsVersion::V4_1,
+        Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+        _ => vnfs::nfs::NfsVersion::Auto,
     };
     let fs = Nfs::builder(test_host())
         .version(version)
@@ -4388,11 +4403,11 @@ fn filesystem_stats_nfs_vectors() {
         .vopen(
             &paths
                 .iter()
-                .map(|p| vnfs::OpenOp::new(p, vnfs::OpenFlags::READ))
+                .map(|p| vnfs::files::OpenOp::new(p, vnfs::files::OpenFlags::READ))
                 .collect::<Vec<_>>(),
         )
         .unwrap();
-    let targets: Vec<_> = files.iter().map(vnfs::Target::File).collect();
+    let targets: Vec<_> = files.iter().map(vnfs::files::Target::File).collect();
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let stats = fs.vstatfs(&targets).unwrap();
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
@@ -4525,16 +4540,16 @@ fn portable_directory_vectors_preflight_and_retain_identity() {
 fn portable_auto_directory_vectors_preflight_and_retain_identity() {
     let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
     let root = tempfile::tempdir_in(mount).unwrap();
-    let fs = vnfs::Auto::new(root.path()).unwrap();
-    let other = vnfs::Auto::new(root.path()).unwrap();
+    let fs = vnfs::mounted::Auto::new(root.path()).unwrap();
+    let other = vnfs::mounted::Auto::new(root.path()).unwrap();
     assert!(matches!(
         fs.route_for("/"),
-        vnfs::AutoRoute::DirectNfs { .. }
+        vnfs::mounted::AutoRoute::DirectNfs { .. }
     ));
     // Create and rename through the kernel namespace so Auto's host-side route
     // discovery observes its own fixture changes. Check post-removal state via
     // direct NFS to avoid assuming kernel/direct-client cache coherence.
-    let namespace = vnfs::Posix::new(root.path()).unwrap();
+    let namespace = vnfs::posix::Posix::new(root.path()).unwrap();
     let verify = Nfs::from_mount(root.path()).unwrap();
     portable_directory_handles::check(&fs, &other, &namespace, &verify);
 }

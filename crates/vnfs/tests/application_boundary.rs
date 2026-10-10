@@ -2,8 +2,9 @@
 #![cfg(target_os = "linux")]
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use vnfs::{OpenFlags, OpenOp, Posix};
-use vnfs::{Vfsi, VfsiExt};
+use vnfs::files::{OpenFlags, OpenOp};
+use vnfs::files::{Vfsi, VfsiExt};
+use vnfs::posix::Posix;
 
 thread_local! {
     static TRACK: Cell<bool> = const { Cell::new(false) };
@@ -50,7 +51,7 @@ fn measured<T>(f: impl FnOnce() -> T) -> (T, (usize, usize)) {
 #[test]
 fn auto_range_only_reads_keep_the_legacy_routing_allocation_cost() {
     let root = tempfile::tempdir().unwrap();
-    let auto = vnfs::Auto::new(root.path()).unwrap();
+    let auto = vnfs::mounted::Auto::new(root.path()).unwrap();
     let mounted = Posix::new(root.path()).unwrap();
     mounted
         .write_files(&[("/a", b"abc"), ("/b", b"def")])
@@ -60,11 +61,11 @@ fn auto_range_only_reads_keep_the_legacy_routing_allocation_cost() {
     let files = mounted.open_options().read(true).vopen(&paths).unwrap();
     let auto_reads: Vec<_> = auto_files
         .iter()
-        .map(|file| vnfs::ReadOp::range(file, 0, 3))
+        .map(|file| vnfs::files::ReadOp::range(file, 0, 3))
         .collect();
     let reads: Vec<_> = files
         .iter()
-        .map(|file| vnfs::ReadOp::range(file, 0, 3))
+        .map(|file| vnfs::files::ReadOp::range(file, 0, 3))
         .collect();
     let (actual, cost) = measured(|| auto.vread(auto_reads, Default::default()).unwrap());
     let (expected, baseline) = measured(|| mounted.vread(reads, Default::default()).unwrap());
@@ -72,7 +73,7 @@ fn auto_range_only_reads_keep_the_legacy_routing_allocation_cost() {
     // Legacy Auto routing needs only a result vector and one backend request
     // vector beyond Posix. Partition/index/scatter vectors are unnecessary.
     let routing_bytes = paths.len()
-        * (std::mem::size_of::<vnfs::ReadResult>()
+        * (std::mem::size_of::<vnfs::files::ReadResult>()
             + std::mem::size_of::<vfsi_sync::FsRead<'_, vfsi_local::LocalBackend>>());
     assert_eq!(cost.0, baseline.0 + 2);
     assert!(cost.1 <= baseline.1 + routing_bytes);
@@ -87,9 +88,9 @@ fn unified_operation_construction_does_not_allocate() {
     let mut buffer = [0; 1];
     let (ops, cost) = measured(|| {
         [
-            vnfs::ReadOp::whole("/a"),
-            vnfs::ReadOp::range(&file, 0, 1),
-            vnfs::ReadOp::into(&file, 0, &mut buffer),
+            vnfs::files::ReadOp::whole("/a"),
+            vnfs::files::ReadOp::range(&file, 0, 1),
+            vnfs::files::ReadOp::into(&file, 0, &mut buffer),
         ]
     });
     assert_eq!(cost, (0, 0));
@@ -118,14 +119,17 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
         open_cost, raw_open_cost,
         "opaque OPEN must reuse the result allocation"
     );
-    let reads: Vec<_> = files.iter().map(|f| vnfs::ReadOp::range(f, 0, 7)).collect();
+    let reads: Vec<_> = files
+        .iter()
+        .map(|f| vnfs::files::ReadOp::range(f, 0, 7))
+        .collect();
     let raw_reads: Vec<_> = raw_files
         .iter()
-        .map(|f| vnfs::ReadOp::range(f, 0, 7))
+        .map(|f| vnfs::files::ReadOp::range(f, 0, 7))
         .collect();
     let (results, cost) = measured(|| mounted.vread(reads, Default::default()).unwrap());
     let (expected, raw_cost) =
-        measured(|| vnfs::Vfsi::vread(&raw, raw_reads, Default::default()).unwrap());
+        measured(|| vnfs::files::Vfsi::vread(&raw, raw_reads, Default::default()).unwrap());
     assert_eq!(results, expected);
     assert_eq!(
         cost, raw_cost,
@@ -133,20 +137,23 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     );
     let writes: Vec<_> = files
         .iter()
-        .map(|f| vnfs::WriteOp::at(f, 0, b"payload"))
+        .map(|f| vnfs::files::WriteOp::at(f, 0, b"payload"))
         .collect();
     let raw_writes: Vec<_> = raw_files
         .iter()
-        .map(|f| vnfs::WriteOp::at(f, 0, b"payload"))
+        .map(|f| vnfs::files::WriteOp::at(f, 0, b"payload"))
         .collect();
     let (results, cost) = measured(|| {
         mounted
-            .vwrite(&writes, vnfs::WriteOptions::new().write_all(true))
+            .vwrite(&writes, vnfs::files::WriteOptions::new().write_all(true))
             .unwrap()
     });
     let (expected, raw_cost) = measured(|| {
-        raw.vwrite(&raw_writes, vnfs::WriteOptions::new().write_all(true))
-            .unwrap()
+        raw.vwrite(
+            &raw_writes,
+            vnfs::files::WriteOptions::new().write_all(true),
+        )
+        .unwrap()
     });
     assert_eq!(results, expected);
     assert_eq!(
@@ -167,16 +174,16 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     let requests: Vec<_> = reopened
         .iter()
         .zip(&mut buffers)
-        .map(|(file, buffer)| vnfs::ReadOp::into(file, 0, buffer))
+        .map(|(file, buffer)| vnfs::files::ReadOp::into(file, 0, buffer))
         .collect();
     let raw_requests: Vec<_> = raw_reopened
         .iter()
         .zip(&mut raw_buffers)
-        .map(|(file, buffer)| vnfs::ReadOp::into(file, 0, buffer))
+        .map(|(file, buffer)| vnfs::files::ReadOp::into(file, 0, buffer))
         .collect();
     let (results, cost) = measured(|| mounted.vread(requests, Default::default()).unwrap());
     let (expected, raw_cost) =
-        measured(|| vnfs::Vfsi::vread(&raw, raw_requests, Default::default()).unwrap());
+        measured(|| vnfs::files::Vfsi::vread(&raw, raw_requests, Default::default()).unwrap());
     assert_eq!(results, expected);
     assert_eq!(
         cost, raw_cost,
@@ -186,7 +193,11 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
     mounted.close_files(reopened).unwrap();
     raw.vclose_owned(raw_reopened).unwrap();
     mounted
-        .vremove(&paths, vnfs::RemoveMode::Entry, Default::default())
+        .vremove(
+            &paths,
+            vnfs::directory::RemoveMode::Entry,
+            Default::default(),
+        )
         .unwrap();
 }
 
@@ -202,12 +213,15 @@ fn opaque_requests_preserve_owner_preflight_and_error_sources() {
         .write(true)
         .open("/a")
         .unwrap();
-    let (request, allocations) = measured(|| vnfs::WriteOp::at(&file, 0, b"changed"));
+    let (request, allocations) = measured(|| vnfs::files::WriteOp::at(&file, 0, b"changed"));
     assert_eq!(allocations, (0, 0));
     assert!(other.vwrite(&[request], Default::default()).is_err());
     assert_eq!(
         owner
-            .vread([vnfs::ReadOp::whole("/a")], vnfs::ReadOptions::default())
+            .vread(
+                [vnfs::files::ReadOp::whole("/a")],
+                vnfs::files::ReadOptions::default()
+            )
             .unwrap()[0]
             .data()
             .unwrap(),
@@ -232,13 +246,13 @@ fn opaque_requests_preserve_owner_preflight_and_error_sources() {
 fn handles_remain_send_sync_and_clients_remain_cheaply_cloneable() {
     fn send_sync<T: Send + Sync>() {}
     fn cloneable<T: Clone>() {}
-    send_sync::<vnfs::NfsClient>();
-    send_sync::<vnfs::NfsFile>();
-    send_sync::<vnfs::NfsDir>();
-    send_sync::<vnfs::Posix>();
-    send_sync::<vnfs::PosixFile>();
-    cloneable::<vnfs::NfsClient>();
-    cloneable::<vnfs::Posix>();
+    send_sync::<vnfs::nfs::NfsClient>();
+    send_sync::<vnfs::nfs::NfsFile>();
+    send_sync::<vnfs::nfs::NfsDir>();
+    send_sync::<vnfs::posix::Posix>();
+    send_sync::<vnfs::posix::PosixFile>();
+    cloneable::<vnfs::nfs::NfsClient>();
+    cloneable::<vnfs::posix::Posix>();
     let root = tempfile::TempDir::new().unwrap();
     let client = Posix::new(root.path()).unwrap();
     let (clone, allocations) = measured(|| client.clone());
@@ -251,7 +265,7 @@ fn handles_remain_send_sync_and_clients_remain_cheaply_cloneable() {
         "clones must retain the same ownership identity"
     );
     assert_eq!(
-        std::mem::size_of::<vnfs::NfsFile>(),
+        std::mem::size_of::<vnfs::nfs::NfsFile>(),
         std::mem::size_of::<vfsi_sync::FsFile<vfsi_nfs::NfsVecFs>>()
     );
 }

@@ -1,6 +1,8 @@
 #![cfg(feature = "nfs")]
 
-use vnfs::{Nfs, NfsVersion, Vfsi, VfsiExt, helpers::TreeBuilder};
+use vnfs::files::{Vfsi, VfsiExt};
+use vnfs::helpers::TreeBuilder;
+use vnfs::nfs::{Nfs, NfsVersion};
 
 /// Optional live coverage; set VFSI_NFS_SERVER and VFSI_NFS_EXPORT. CI can
 /// require it with VFSI_NFS_REQUIRED=1, matching the backend integration suite.
@@ -41,7 +43,7 @@ fn tree_creation_batches_compounds_on_nfsv41_and_nfsv42() {
             stats.compounds
         );
         let paths: Vec<_> = (0..16).map(|i| format!("{root}/dir-{i}/file")).collect();
-        let requests: Vec<_> = paths.iter().map(vnfs::ReadOp::whole).collect();
+        let requests: Vec<_> = paths.iter().map(vnfs::files::ReadOp::whole).collect();
         let contents = client.vread(requests, Default::default()).map(|results| {
             results
                 .into_iter()

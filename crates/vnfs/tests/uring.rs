@@ -1,9 +1,8 @@
 #![cfg(all(feature = "uring", target_os = "linux"))]
-use vnfs::{OpenFlags, OpenOp, ReadOp, Uring, Vfsi, VfsiExt, WriteOp};
+use vnfs::files::{OpenFlags, OpenOp, ReadOp, Vfsi, VfsiExt, WriteOp};
+use vnfs::uring::Uring;
 // This target runs with only the uring feature, so NFS cannot hide its guide.
 #[allow(unused_imports)]
-use vnfs::guides::uring as _;
-
 #[test]
 fn opaque_facade_batches_and_rejects_foreign_handles_before_io() {
     let root = tempfile::tempdir().unwrap();

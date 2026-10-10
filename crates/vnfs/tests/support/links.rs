@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
-use vnfs::{Attributes, AttrsOptions, Capabilities, Vfsi, VfsiExt};
+use vnfs::directory::{Attributes, AttrsOptions};
+use vnfs::files::{Capabilities, Vfsi, VfsiExt};
 
 pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     assert!(
@@ -13,7 +14,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     assert!(fs.vreadlink::<&str>(&[]).unwrap().is_empty());
 
     let directories: Vec<_> = (0..64)
-        .map(|i| vnfs::MkDirOp::new(format!("{directory}/dir-{i}"), 0o700 | (i % 8)))
+        .map(|i| vnfs::directory::MkDirOp::new(format!("{directory}/dir-{i}"), 0o700 | (i % 8)))
         .collect();
     fs.vmkdir(&directories).unwrap();
     let paths: Vec<_> = directories.iter().map(|op| op.path()).collect();
@@ -122,8 +123,8 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     let new_dir = format!("{directory}/fresh-dir");
     let error = fs
         .vmkdir(&[
-            vnfs::MkDirOp::new(std::path::Path::new(&new_dir), 0o711),
-            vnfs::MkDirOp::new(directories[0].path(), 0o755),
+            vnfs::directory::MkDirOp::new(std::path::Path::new(&new_dir), 0o711),
+            vnfs::directory::MkDirOp::new(directories[0].path(), 0o755),
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -135,8 +136,8 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     let duplicate = format!("{directory}/duplicate-dir");
     let error = fs
         .vmkdir(&[
-            vnfs::MkDirOp::new(&duplicate, 0o700),
-            vnfs::MkDirOp::new(&duplicate, 0o755),
+            vnfs::directory::MkDirOp::new(&duplicate, 0o700),
+            vnfs::directory::MkDirOp::new(&duplicate, 0o755),
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));

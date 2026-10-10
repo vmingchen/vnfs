@@ -351,6 +351,45 @@ pub struct PathReadOp {
     pub stateid: Option<stateid4>,
 }
 
+#[derive(Clone, Copy)]
+struct PathIoOpen {
+    access: u32,
+    create: OpenCreate,
+    truncate_create: bool,
+    truncate_existing: bool,
+}
+
+enum PathIoChunkResult {
+    Repack { max_items: usize },
+    Retry,
+    Response(CompoundRes),
+}
+
+struct PathIoTarget<'a> {
+    compound: &'a mut Compound,
+    cursor: &'a mut CfhCursor,
+    map: &'a mut ExecutionMap,
+    close_in_compound: bool,
+    opened_path: &'a mut Option<Vec<u8>>,
+    fh_at_opened: &'a mut bool,
+    base_seq: u32,
+    opens_in_chunk: &'a mut usize,
+}
+
+struct PathIoChunk<'a> {
+    tag: &'a [u8],
+    one_item_ops: usize,
+    reserve: usize,
+    per_file: usize,
+    old_budget: usize,
+    allow_repack: bool,
+    compound: &'a mut Compound,
+    map: &'a ExecutionMap,
+    base_seq: u32,
+    opens_in_chunk: usize,
+    safety: RequestSafety,
+}
+
 /// Per-op results of a merged path compound. `counts`/`committed` are `None`
 /// for ops that never executed (the compound aborted at `failed`).
 pub struct PathWriteOutcome {
@@ -608,6 +647,38 @@ fn chunk_lens(start: usize, end: usize, per: usize) -> Vec<usize> {
         .step_by(per)
         .map(|off| (end - off).min(per))
         .collect()
+}
+
+fn path_io_chunk_end(
+    start: usize,
+    total: usize,
+    per_op: usize,
+    room: usize,
+    available_ops: usize,
+    allow_first: bool,
+) -> Option<usize> {
+    let remaining = total.saturating_sub(start);
+    let chunks_total = remaining.div_ceil(per_op).max(1);
+    let per_chunk = per_op.min(remaining).max(1);
+    let by_bytes = if room >= per_chunk {
+        (room / per_chunk).max(1)
+    } else {
+        0
+    };
+    let mut take = chunks_total.min(available_ops).min(by_bytes);
+    if take == 0 {
+        if allow_first {
+            take = 1;
+        } else {
+            return None;
+        }
+    }
+    let end = (start + take * per_op).min(total);
+    if end == start && remaining > 0 {
+        None
+    } else {
+        Some(end)
+    }
 }
 
 fn first_failed_range(res: &CompoundRes, map: &ExecutionMap) -> RpcResult<Option<(usize, u32)>> {
@@ -965,6 +1036,116 @@ impl NfsClient {
                 .op_budget_for(tag, 1 + per_item)
                 .merged_limit(reserve, per_item)
                 < old_budget
+    }
+
+    fn prepare_path_io_target(
+        &mut self,
+        target: &mut PathIoTarget<'_>,
+        file: &FileRef,
+        open: PathIoOpen,
+    ) -> Option<bool> {
+        match file {
+            FileRef::Path(path) => {
+                if target.opened_path.as_deref() == Some(path.as_slice()) && *target.fh_at_opened {
+                    return Some(false);
+                }
+                if target.close_in_compound && target.opened_path.is_some() && *target.fh_at_opened
+                {
+                    target
+                        .compound
+                        .close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
+                    target.map.note_ops(1);
+                    *target.opened_path = None;
+                }
+                let (leaf, nops) = target.cursor.set_parent(&mut *target.compound, path)?;
+                target.map.note_ops(nops);
+                let seqid = target.base_seq + *target.opens_in_chunk as u32;
+                if open.truncate_create {
+                    target.compound.open_claim_null_create_mode(
+                        seqid,
+                        open.access,
+                        OPEN4_SHARE_DENY_NONE,
+                        self.session.clientid,
+                        &self.session.path_owner.name,
+                        &leaf,
+                        None,
+                        true,
+                    );
+                } else {
+                    target.compound.open_claim_null(
+                        seqid,
+                        open.access,
+                        OPEN4_SHARE_DENY_NONE,
+                        self.session.clientid,
+                        &self.session.path_owner.name,
+                        make_open_how(open.create, self.session.path_owner.verifier),
+                        &leaf,
+                    );
+                }
+                *target.opens_in_chunk += 1;
+                target.map.note_ops(1);
+                if !target.close_in_compound {
+                    target.compound.getfh();
+                    target.map.note_ops(1);
+                }
+                *target.opened_path = Some(path.clone());
+                *target.fh_at_opened = true;
+                if open.truncate_existing {
+                    target
+                        .compound
+                        .setattr_with_stateid(None, Some(0), &SPECIAL_STATEID);
+                    target.map.note_ops(1);
+                }
+                Some(true)
+            }
+            FileRef::Handle(handle) => {
+                if target.close_in_compound && target.opened_path.is_some() && *target.fh_at_opened
+                {
+                    target
+                        .compound
+                        .close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
+                    target.map.note_ops(1);
+                    *target.opened_path = None;
+                }
+                target.cursor.set_handle(&mut *target.compound, handle);
+                target.map.note_ops(1);
+                *target.fh_at_opened = false;
+                Some(false)
+            }
+        }
+    }
+
+    fn send_path_io_chunk(&mut self, chunk: PathIoChunk<'_>) -> RpcResult<PathIoChunkResult> {
+        let PathIoChunk {
+            tag,
+            one_item_ops,
+            reserve,
+            per_file,
+            old_budget,
+            allow_repack,
+            compound,
+            map,
+            base_seq,
+            opens_in_chunk,
+            safety,
+        } = chunk;
+        if allow_repack
+            && self.merged_paths_need_repack(tag, one_item_ops, compound, map.ranges.len())?
+        {
+            return Ok(PathIoChunkResult::Repack {
+                max_items: map.ranges.len() - 1,
+            });
+        }
+        CompoundBudget::new(self.max_ops).ensure(compound)?;
+        self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
+        let response = self.call_compound_with_safety(compound, safety)?;
+        if resource_rejected_before_mutation(&response) {
+            self.session.path_owner.seqid = base_seq;
+            if self.can_retry_merged_resource(tag, &response, old_budget, reserve, per_file) {
+                return Ok(PathIoChunkResult::Retry);
+            }
+        }
+        Ok(PathIoChunkResult::Response(response))
     }
 
     fn can_retry_read_only_merged_resource(
@@ -1943,13 +2124,9 @@ impl NfsClient {
             while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
                 let op = &ops[global];
                 let start = part_off;
-                let remaining = op.data.len() - start;
-                // A single WRITE op is capped by the server's per-op limit
-                // (and the generated XDR's 1 MiB opaque bound), so large
-                // payloads become consecutive WRITE ops. Only as many chunks
-                // as fit this compound's byte and op budgets are emitted; the
-                // rest resume in the next compound.
-                let chunks_total = remaining.div_ceil(per_op).max(1);
+                // Bound the next write window by both wire-op and request
+                // payload budgets. A first operation may still make progress
+                // when its byte estimate reaches the soft boundary.
                 let room = if self.max_request_arg_bytes() > 0 {
                     if payload > 0 {
                         self.max_request_arg_bytes().saturating_sub(payload + 128)
@@ -1959,159 +2136,76 @@ impl NfsClient {
                 } else {
                     usize::MAX
                 };
-                // Cap by the byte budget using the next chunk's actual size
-                // (not the 1 MiB op cap): small per-file windows must pack
-                // densely into the compound.
-                let per_chunk = per_op.min(remaining).max(1);
-                let mut take = chunks_total.min(budget.saturating_sub(map.next + 3));
-                let by_bytes = if room >= per_chunk {
-                    (room / per_chunk).max(1)
-                } else {
-                    0
+                let end = match path_io_chunk_end(
+                    start,
+                    op.data.len(),
+                    per_op,
+                    room,
+                    budget.saturating_sub(map.next + 3),
+                    map.next == 0 && payload == 0,
+                ) {
+                    Some(end) => end,
+                    None => break,
                 };
-                take = take.min(by_bytes);
-                if take == 0 {
-                    if map.next == 0 && payload == 0 {
-                        // Never stall on the first file: a single chunk is at
-                        // most per_op bytes, which fits by construction.
-                        take = 1;
-                    } else {
+                map.begin(global);
+                let newly_opened = match self.prepare_path_io_target(
+                    &mut PathIoTarget {
+                        compound: &mut c,
+                        cursor: &mut cursor,
+                        map: &mut map,
+                        close_in_compound,
+                        opened_path: &mut opened_path,
+                        fh_at_opened: &mut fh_at_opened,
+                        base_seq,
+                        opens_in_chunk: &mut opens_in_chunk,
+                    },
+                    &op.file,
+                    PathIoOpen {
+                        access: OPEN4_SHARE_ACCESS_BOTH,
+                        create: if op.create {
+                            OpenCreate::Unchecked
+                        } else {
+                            OpenCreate::NoCreate
+                        },
+                        truncate_create: op.create && op.truncate && start == 0,
+                        truncate_existing: op.truncate && !op.create && start == 0,
+                    },
+                ) {
+                    Some(opened) => opened,
+                    None => {
+                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                        global = n;
                         break;
                     }
-                }
-                let end = (start + take * per_op).min(op.data.len());
-                if end == start && remaining > 0 {
-                    break;
-                }
-                map.begin(global);
-                let mut newly_opened = false;
-                match &op.file {
-                    FileRef::Path(p) => {
-                        if opened_path.as_deref() == Some(p.as_slice()) && fh_at_opened {
-                            // Same file: the current fh is still the opened file.
-                        } else {
-                            if close_in_compound && opened_path.is_some() && fh_at_opened {
-                                // Close the previous file while its fh is current.
-                                c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
-                                map.note_ops(1);
-                                opened_path = None;
-                            }
-                            let (leaf, nops) = match cursor.set_parent(&mut c, p) {
-                                Some(x) => x,
-                                None => {
-                                    failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                                    global = n;
-                                    break;
-                                }
-                            };
-                            map.note_ops(nops);
-                            // A split write reopens the path in later
-                            // compounds. Truncating on those continuation
-                            // opens would erase the chunks already written.
-                            if op.create && op.truncate && start == 0 {
-                                c.open_claim_null_create_mode(
-                                    base_seq + opens_in_chunk as u32,
-                                    OPEN4_SHARE_ACCESS_BOTH,
-                                    OPEN4_SHARE_DENY_NONE,
-                                    self.session.clientid,
-                                    &self.session.path_owner.name,
-                                    &leaf,
-                                    None,
-                                    true,
-                                );
-                            } else {
-                                let create = if op.create {
-                                    OpenCreate::Unchecked
-                                } else {
-                                    OpenCreate::NoCreate
-                                };
-                                c.open_claim_null(
-                                    base_seq + opens_in_chunk as u32,
-                                    OPEN4_SHARE_ACCESS_BOTH,
-                                    OPEN4_SHARE_DENY_NONE,
-                                    self.session.clientid,
-                                    &self.session.path_owner.name,
-                                    make_open_how(create, self.session.path_owner.verifier),
-                                    &leaf,
-                                );
-                            }
-                            opens_in_chunk += 1;
-                            map.note_ops(1);
-                            if !close_in_compound {
-                                c.getfh();
-                                map.note_ops(1);
-                            }
-                            opened_path = Some(p.clone());
-                            fh_at_opened = true;
-                            newly_opened = true;
-                            if op.truncate && !op.create && start == 0 {
-                                // Truncate in-compound right after OPEN so a
-                                // no-create open still has O_TRUNC semantics.
-                                // Creation opens carry size=0 in OPEN's
-                                // createattrs instead.
-                                c.setattr_with_stateid(None, Some(0), &SPECIAL_STATEID);
-                                map.note_ops(1);
-                            }
-                        }
-                        if end > start {
-                            let mut off = 0usize;
-                            for chunk in op.data[start..end].chunks(per_op) {
-                                c.write(
-                                    &SPECIAL_STATEID,
-                                    checked_offset(op.offset, start + off, global)?,
-                                    stable_how4_FILE_SYNC4,
-                                    chunk,
-                                );
-                                map.note_ops(1);
-                                off += chunk.len();
-                            }
-                        } else {
-                            // Zero-length write: still open/create the file
-                            // and emit an empty WRITE for the result.
-                            c.write(
-                                &SPECIAL_STATEID,
-                                checked_offset(op.offset, start, global)?,
-                                stable_how4_FILE_SYNC4,
-                                &[],
-                            );
-                            map.note_ops(1);
-                        }
-                        if newly_opened {
-                            cursor.descend();
-                        }
-                    }
-                    FileRef::Handle(fh) => {
-                        if close_in_compound && opened_path.is_some() && fh_at_opened {
-                            c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
-                            map.note_ops(1);
-                            opened_path = None;
-                        }
-                        cursor.set_handle(&mut c, fh);
+                };
+                let stateid = match &op.file {
+                    FileRef::Path(_) => &SPECIAL_STATEID,
+                    FileRef::Handle(_) => op.stateid.as_ref().unwrap_or(&SPECIAL_STATEID),
+                };
+                if end > start {
+                    let mut off = 0usize;
+                    for chunk in op.data[start..end].chunks(per_op) {
+                        c.write(
+                            stateid,
+                            checked_offset(op.offset, start + off, global)?,
+                            stable_how4_FILE_SYNC4,
+                            chunk,
+                        );
                         map.note_ops(1);
-                        let sid = op.stateid.as_ref().unwrap_or(&SPECIAL_STATEID);
-                        if end > start {
-                            let mut off = 0usize;
-                            for chunk in op.data[start..end].chunks(per_op) {
-                                c.write(
-                                    sid,
-                                    checked_offset(op.offset, start + off, global)?,
-                                    stable_how4_FILE_SYNC4,
-                                    chunk,
-                                );
-                                map.note_ops(1);
-                                off += chunk.len();
-                            }
-                        } else {
-                            c.write(
-                                sid,
-                                checked_offset(op.offset, start, global)?,
-                                stable_how4_FILE_SYNC4,
-                                &[],
-                            );
-                            map.note_ops(1);
-                        }
-                        fh_at_opened = false;
+                        off += chunk.len();
                     }
+                } else {
+                    // A zero-length write still emits a WRITE for this item.
+                    c.write(
+                        stateid,
+                        checked_offset(op.offset, start, global)?,
+                        stable_how4_FILE_SYNC4,
+                        &[],
+                    );
+                    map.note_ops(1);
+                }
+                if newly_opened {
+                    cursor.descend();
                 }
                 map.end();
                 payload += 128 + (end - start);
@@ -2137,32 +2231,36 @@ impl NfsClient {
                 c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
                 map.note_ops(1);
             }
-            if failed.is_none()
-                && self.merged_paths_need_repack(tag, 1 + per_file, &c, map.ranges.len())?
-            {
-                max_items = map.ranges.len() - 1;
-                global = chunk_start;
-                part_off = chunk_part_off;
-                continue;
-            }
-            CompoundBudget::new(self.max_ops).ensure(&c)?;
-            max_items = usize::MAX;
-            self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
-
-            let res =
-                self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
-            if resource_rejected_before_mutation(&res) {
-                // No OPEN or WRITE ran. Restore the unsent open-owner seqids
-                // and rebuild the exact same pending range using the smaller
-                // per-shape budget learned by call_compound. A rejection
-                // after any mutation never enters this branch.
-                self.session.path_owner.seqid = base_seq;
-                if self.can_retry_merged_resource(tag, &res, budget, reserve, per_file) {
+            let res = match self.send_path_io_chunk(PathIoChunk {
+                tag,
+                one_item_ops: 1 + per_file,
+                reserve,
+                per_file,
+                old_budget: budget,
+                allow_repack: failed.is_none(),
+                compound: &mut c,
+                map: &map,
+                base_seq,
+                opens_in_chunk,
+                safety: RequestSafety::NonIdempotentMutation,
+            })? {
+                PathIoChunkResult::Repack { max_items: cap } => {
+                    max_items = cap;
                     global = chunk_start;
                     part_off = chunk_part_off;
                     continue;
                 }
-            }
+                PathIoChunkResult::Retry => {
+                    max_items = usize::MAX;
+                    global = chunk_start;
+                    part_off = chunk_part_off;
+                    continue;
+                }
+                PathIoChunkResult::Response(response) => {
+                    max_items = usize::MAX;
+                    response
+                }
+            };
             let report = map.analyze(&res).map_err(|error| {
                 RpcError::transport(format!("malformed writev COMPOUND reply: {error}"))
             })?;
@@ -2281,143 +2379,76 @@ impl NfsClient {
             while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
                 let op = &ops[global];
                 let start = part_off;
-                let remaining = op.count.saturating_sub(start);
-                // A single READ op is capped by the server's per-op limit
-                // (and the generated XDR's 1 MiB opaque reply bound), so
-                // large reads become consecutive READ ops. Only as many
-                // chunks as fit this compound's byte and op budgets are
-                // emitted; the rest resume in the next compound.
-                let chunks_total = remaining.div_ceil(per_op).max(1);
+                // Leave reply-array overhead in the response byte budget.
                 let room = if self.max_response_bytes > 0 {
-                    // Reserve a little overhead even for the first file: the
-                    // server validates the summed READ counts (plus resarray
-                    // overhead) against ca_maxresponsesize before serving.
                     if payload > 0 {
                         self.read_compound_bytes().saturating_sub(payload + 128)
                     } else {
-                        // The first op is capped at read_per_op_bytes(), so a
-                        // full-budget room never lets it overflow the reply.
                         self.read_compound_bytes()
                     }
                 } else {
                     usize::MAX
                 };
-                // Cap by the byte budget using the next chunk's actual size
-                // (not the 1 MiB op cap): small per-file windows must pack
-                // densely into the compound.
-                let per_chunk = per_op.min(remaining).max(1);
-                let mut take = chunks_total.min(budget.saturating_sub(map.next + 3));
-                let by_bytes = if room >= per_chunk {
-                    (room / per_chunk).max(1)
-                } else {
-                    0
+                let end = match path_io_chunk_end(
+                    start,
+                    op.count,
+                    per_op,
+                    room,
+                    budget.saturating_sub(map.next + 3),
+                    map.next == 0 && payload == 0,
+                ) {
+                    Some(end) => end,
+                    None => break,
                 };
-                take = take.min(by_bytes);
-                if take == 0 {
-                    if map.next == 0 && payload == 0 {
-                        take = 1;
-                    } else {
+                map.begin(global);
+                let newly_opened = match self.prepare_path_io_target(
+                    &mut PathIoTarget {
+                        compound: &mut c,
+                        cursor: &mut cursor,
+                        map: &mut map,
+                        close_in_compound,
+                        opened_path: &mut opened_path,
+                        fh_at_opened: &mut fh_at_opened,
+                        base_seq,
+                        opens_in_chunk: &mut opens_in_chunk,
+                    },
+                    &op.file,
+                    PathIoOpen {
+                        access: OPEN4_SHARE_ACCESS_READ,
+                        create: OpenCreate::NoCreate,
+                        truncate_create: false,
+                        truncate_existing: false,
+                    },
+                ) {
+                    Some(opened) => opened,
+                    None => {
+                        failed = Some((global, nfsstat4_NFS4ERR_INVAL));
+                        global = n;
                         break;
                     }
-                }
-                let end = (start + take * per_op).min(op.count);
-                if end == start && remaining > 0 {
-                    break;
-                }
-                map.begin(global);
-                let mut newly_opened = false;
-                match &op.file {
-                    FileRef::Path(p) => {
-                        if opened_path.as_deref() == Some(p.as_slice()) && fh_at_opened {
-                            // Same file: the current fh is still the opened file.
-                        } else {
-                            if close_in_compound && opened_path.is_some() && fh_at_opened {
-                                c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
-                                map.note_ops(1);
-                                opened_path = None;
-                            }
-                            let (leaf, nops) = match cursor.set_parent(&mut c, p) {
-                                Some(x) => x,
-                                None => {
-                                    failed = Some((global, nfsstat4_NFS4ERR_INVAL));
-                                    global = n;
-                                    break;
-                                }
-                            };
-                            map.note_ops(nops);
-                            c.open_claim_null(
-                                base_seq + opens_in_chunk as u32,
-                                OPEN4_SHARE_ACCESS_READ,
-                                OPEN4_SHARE_DENY_NONE,
-                                self.session.clientid,
-                                &self.session.path_owner.name,
-                                make_open_how(
-                                    OpenCreate::NoCreate,
-                                    self.session.path_owner.verifier,
-                                ),
-                                &leaf,
-                            );
-                            opens_in_chunk += 1;
-                            map.note_ops(1);
-                            if !close_in_compound {
-                                c.getfh();
-                                map.note_ops(1);
-                            }
-                            opened_path = Some(p.clone());
-                            fh_at_opened = true;
-                            newly_opened = true;
-                        }
-                        if end > start {
-                            let mut off = 0usize;
-                            for chunk_len in chunk_lens(start, end, per_op) {
-                                c.read(
-                                    &SPECIAL_STATEID,
-                                    checked_offset(op.offset, start + off, global)?,
-                                    chunk_len as u32,
-                                );
-                                map.note_ops(1);
-                                off += chunk_len;
-                            }
-                        } else {
-                            // Zero-length read: still OPEN and emit an empty
-                            // READ so the result array stays aligned.
-                            c.read(
-                                &SPECIAL_STATEID,
-                                checked_offset(op.offset, start, global)?,
-                                0,
-                            );
-                            map.note_ops(1);
-                        }
-                        if newly_opened {
-                            cursor.descend();
-                        }
-                    }
-                    FileRef::Handle(fh) => {
-                        if close_in_compound && opened_path.is_some() && fh_at_opened {
-                            c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
-                            map.note_ops(1);
-                            opened_path = None;
-                        }
-                        cursor.set_handle(&mut c, fh);
+                };
+                let stateid = match &op.file {
+                    FileRef::Path(_) => &SPECIAL_STATEID,
+                    FileRef::Handle(_) => op.stateid.as_ref().unwrap_or(&SPECIAL_STATEID),
+                };
+                if end > start {
+                    let mut off = 0usize;
+                    for chunk_len in chunk_lens(start, end, per_op) {
+                        c.read(
+                            stateid,
+                            checked_offset(op.offset, start + off, global)?,
+                            chunk_len as u32,
+                        );
                         map.note_ops(1);
-                        let sid = op.stateid.as_ref().unwrap_or(&SPECIAL_STATEID);
-                        if end > start {
-                            let mut off = 0usize;
-                            for chunk_len in chunk_lens(start, end, per_op) {
-                                c.read(
-                                    sid,
-                                    checked_offset(op.offset, start + off, global)?,
-                                    chunk_len as u32,
-                                );
-                                map.note_ops(1);
-                                off += chunk_len;
-                            }
-                        } else {
-                            c.read(sid, checked_offset(op.offset, start, global)?, 0);
-                            map.note_ops(1);
-                        }
-                        fh_at_opened = false;
+                        off += chunk_len;
                     }
+                } else {
+                    // Empty reads still emit a READ to preserve result order.
+                    c.read(stateid, checked_offset(op.offset, start, global)?, 0);
+                    map.note_ops(1);
+                }
+                if newly_opened {
+                    cursor.descend();
                 }
                 map.end();
                 payload += 128 + (end - start);
@@ -2441,27 +2472,36 @@ impl NfsClient {
                 c.close(SPECIAL_STATEID.seqid, &SPECIAL_STATEID);
                 map.note_ops(1);
             }
-            if failed.is_none()
-                && self.merged_paths_need_repack(tag, 1 + per_file, &c, map.ranges.len())?
-            {
-                max_items = map.ranges.len() - 1;
-                global = chunk_start;
-                part_off = chunk_part_off;
-                continue;
-            }
-            CompoundBudget::new(self.max_ops).ensure(&c)?;
-            max_items = usize::MAX;
-            self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
-
-            let res = self.call_compound_with_safety(&mut c, RequestSafety::ReadOnly)?;
-            if resource_rejected_before_mutation(&res) {
-                self.session.path_owner.seqid = base_seq;
-                if self.can_retry_merged_resource(tag, &res, budget, reserve, per_file) {
+            let res = match self.send_path_io_chunk(PathIoChunk {
+                tag,
+                one_item_ops: 1 + per_file,
+                reserve,
+                per_file,
+                old_budget: budget,
+                allow_repack: failed.is_none(),
+                compound: &mut c,
+                map: &map,
+                base_seq,
+                opens_in_chunk,
+                safety: RequestSafety::ReadOnly,
+            })? {
+                PathIoChunkResult::Repack { max_items: cap } => {
+                    max_items = cap;
                     global = chunk_start;
                     part_off = chunk_part_off;
                     continue;
                 }
-            }
+                PathIoChunkResult::Retry => {
+                    max_items = usize::MAX;
+                    global = chunk_start;
+                    part_off = chunk_part_off;
+                    continue;
+                }
+                PathIoChunkResult::Response(response) => {
+                    max_items = usize::MAX;
+                    response
+                }
+            };
             let report = map.analyze(&res).map_err(|error| {
                 RpcError::transport(format!("malformed readv COMPOUND reply: {error}"))
             })?;

@@ -41,7 +41,8 @@ struct Entry {
 /// symlinks in the root's ancestors are not sandboxed by this helper.
 ///
 /// ```no_run
-/// use vnfs::{Vfsi, VfsiExt, helpers::TreeBuilder};
+/// use vnfs::files::{Vfsi, VfsiExt};
+/// use vnfs::helpers::TreeBuilder;
 /// # fn example(fs: &impl Vfsi) -> vnfs::Result<()> {
 /// let tree = TreeBuilder::new()
 ///     .add_file("config/app.conf", "host = localhost")

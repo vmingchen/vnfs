@@ -71,7 +71,7 @@ impl NfsClientPool {
 ///
 /// Use [`Nfs::builder`] to configure a direct connection, or
 /// [`Nfs::from_mount`] to discover an existing Linux NFS-mounted directory.
-/// See [`crate::examples`] for complete application workflows.
+/// See [`crate::files`] for complete application workflows.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Nfs;
 
@@ -358,13 +358,14 @@ mod mount_tests {
                 .connect_timeout(Duration::from_secs(2))
                 .request_timeout(Duration::from_secs(2))
         };
-        let error =
-            crate::helpers::NfsMountSession::from_discovered_with(mount, replacement).unwrap_err();
+        let error = crate::nfs::mount::NfsMountSession::from_discovered_with(mount, replacement)
+            .unwrap_err();
         assert_eq!(error.err_no(), libc::EINVAL as u32);
         assert!(error.to_string().contains("supplied builder"));
 
-        let error = crate::helpers::NfsMountSession::from_mount_with(directory.path(), replacement)
-            .unwrap_err();
+        let error =
+            crate::nfs::mount::NfsMountSession::from_mount_with(directory.path(), replacement)
+                .unwrap_err();
         assert_eq!(error.err_no(), libc::EINVAL as u32);
         assert!(error.to_string().contains("supplied builder"));
     }
@@ -376,7 +377,7 @@ mod mount_tests {
             .expect("VFSI_NFS_TEST_MOUNT is required for this ignored integration test");
         let directory = Path::new(&mount).join(format!(".vnfs-from-mount-{}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
-        let session = crate::helpers::NfsMountSession::from_mount_with(&directory, |builder| {
+        let session = crate::nfs::mount::NfsMountSession::from_mount_with(&directory, |builder| {
             builder.request_timeout(Duration::from_secs(2))
         })
         .unwrap();
@@ -385,7 +386,7 @@ mod mount_tests {
             session
                 .map(
                     directory.join("file-1"),
-                    crate::helpers::ResolvePath::NoFollow
+                    crate::nfs::mount::ResolvePath::NoFollow
                 )
                 .unwrap(),
             Path::new("/file-1")

@@ -1,5 +1,6 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
-use vnfs::{Attributes, AttrsOptions, OpenFlags, OpenOp, Vfsi, VfsiExt, WriteOp};
+use vnfs::directory::{Attributes, AttrsOptions};
+use vnfs::files::{OpenFlags, OpenOp, Vfsi, VfsiExt, WriteOp};
 
 fn writes<C: Vfsi>(fs: &C) {
     let files = fs
@@ -32,13 +33,13 @@ fn writes<C: Vfsi>(fs: &C) {
             WriteOp::at(&files[1], 0, b"first"),
             WriteOp::at(&files[1], 2, b"XX"),
         ],
-        vnfs::WriteOptions::new().write_all(true),
+        vnfs::files::WriteOptions::new().write_all(true),
     )
     .unwrap();
     assert_eq!(fs.read_files(&["/b"]).unwrap(), [b"fiXXt".to_vec()]);
     fs.vwrite(
         &[WriteOp::at(&files[0], 0, b"")],
-        vnfs::WriteOptions::new().write_all(true),
+        vnfs::files::WriteOptions::new().write_all(true),
     )
     .unwrap();
     fs.close_files(files).unwrap();
@@ -49,9 +50,9 @@ fn portable_writes_on_mounted_and_auto() {
     for auto in [false, true] {
         let root = tempfile::tempdir().unwrap();
         if auto {
-            writes(&vnfs::Auto::new(root.path()).unwrap());
+            writes(&vnfs::mounted::Auto::new(root.path()).unwrap());
         } else {
-            writes(&vnfs::Posix::new(root.path()).unwrap());
+            writes(&vnfs::posix::Posix::new(root.path()).unwrap());
         }
     }
 }
@@ -59,12 +60,12 @@ fn portable_writes_on_mounted_and_auto() {
 #[test]
 fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
     let root = tempfile::tempdir().unwrap();
-    let fs = vnfs::Posix::new(root.path()).unwrap();
-    let other = vnfs::Posix::new(root.path()).unwrap();
+    let fs = vnfs::posix::Posix::new(root.path()).unwrap();
+    let other = vnfs::posix::Posix::new(root.path()).unwrap();
     let file = fs.create("/a").unwrap();
     fs.vwrite(
         &[WriteOp::at(&file, 0, b"keep")],
-        vnfs::WriteOptions::new().write_all(true),
+        vnfs::files::WriteOptions::new().write_all(true),
     )
     .unwrap();
     let foreign = other.create("/b").unwrap();
@@ -74,7 +75,7 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
                 WriteOp::at(&file, 0, b"bad!"),
                 WriteOp::at(&foreign, 0, b""),
             ],
-            vnfs::WriteOptions::new().write_all(true),
+            vnfs::files::WriteOptions::new().write_all(true),
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -84,7 +85,7 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
                 WriteOp::at(&file, 0, b"bad!"),
                 WriteOp::at(&file, u64::MAX, b"xx"),
             ],
-            vnfs::WriteOptions::new().write_all(true),
+            vnfs::files::WriteOptions::new().write_all(true),
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -97,7 +98,7 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
     assert_eq!(
         fs.vwrite(
             &[WriteOp::at(&file, 0, b"bad!"), WriteOp::at(&closed, 0, b"")],
-            vnfs::WriteOptions::new().write_all(true)
+            vnfs::files::WriteOptions::new().write_all(true)
         )
         .unwrap_err()
         .index(),
@@ -123,7 +124,7 @@ fn attrs_query<C: Vfsi>(fs: &C) {
     assert!(scalar.file_id().is_some());
     assert_eq!(scalar.len(), None);
     let follow = fs
-        .vgetattrs(&["/link", "/a"], vnfs::AttrsOptions::new())
+        .vgetattrs(&["/link", "/a"], vnfs::directory::AttrsOptions::new())
         .unwrap();
     assert!(follow.iter().all(|m| m.is_file() && m.len() == Some(3)));
     let links = fs
@@ -148,13 +149,13 @@ fn attrs_query<C: Vfsi>(fs: &C) {
         "unrequested size must remain absent/default"
     );
     assert_eq!(
-        fs.vgetattrs(&["/a", "/missing"], vnfs::AttrsOptions::new())
+        fs.vgetattrs(&["/a", "/missing"], vnfs::directory::AttrsOptions::new())
             .unwrap_err()
             .index(),
         Some(1)
     );
     assert_eq!(
-        fs.vgetattrs(&["/a", "/dangling"], vnfs::AttrsOptions::new())
+        fs.vgetattrs(&["/a", "/dangling"], vnfs::directory::AttrsOptions::new())
             .unwrap_err()
             .index(),
         Some(1)
@@ -167,7 +168,7 @@ fn attrs_query<C: Vfsi>(fs: &C) {
     assert!(
         fs.attrs_with_options(
             "/link",
-            vnfs::AttrsOptions::new()
+            vnfs::directory::AttrsOptions::new()
                 .fields(Attributes::MODE)
                 .follow_symlinks(false)
         )
@@ -184,20 +185,20 @@ fn consolidated_metadata_fields_and_symlinks_on_mounted_and_auto() {
         std::os::unix::fs::symlink("a", root.path().join("link")).unwrap();
         std::os::unix::fs::symlink("missing", root.path().join("dangling")).unwrap();
         if auto {
-            attrs_query(&vnfs::Auto::new(root.path()).unwrap());
+            attrs_query(&vnfs::mounted::Auto::new(root.path()).unwrap());
         } else {
-            attrs_query(&vnfs::Posix::new(root.path()).unwrap());
+            attrs_query(&vnfs::posix::Posix::new(root.path()).unwrap());
         }
     }
 }
 
 struct ChangingTarget<'a, F> {
-    first: vnfs::Target<'a, F>,
-    later: vnfs::Target<'a, F>,
+    first: vnfs::files::Target<'a, F>,
+    later: vnfs::files::Target<'a, F>,
     calls: std::cell::Cell<usize>,
 }
 impl<'a, F> ChangingTarget<'a, F> {
-    fn new(first: vnfs::Target<'a, F>, later: vnfs::Target<'a, F>) -> Self {
+    fn new(first: vnfs::files::Target<'a, F>, later: vnfs::files::Target<'a, F>) -> Self {
         Self {
             first,
             later,
@@ -205,15 +206,16 @@ impl<'a, F> ChangingTarget<'a, F> {
         }
     }
 }
-impl<F> vnfs::AsTarget<F> for ChangingTarget<'_, F> {
-    fn as_target(&self) -> vnfs::Target<'_, F> {
+impl<F> vnfs::files::AsTarget<F> for ChangingTarget<'_, F> {
+    fn as_target(&self) -> vnfs::files::Target<'_, F> {
         let calls = self.calls.replace(self.calls.get() + 1);
         if calls == 0 { self.first } else { self.later }
     }
 }
 
 fn stable_targets<C: Vfsi>(fs: &C, other: &C) {
-    use vnfs::{FileHandle, SetAttrsOp, Target};
+    use vnfs::directory::SetAttrsOp;
+    use vnfs::files::{FileHandle, Target};
     let file = fs.create("/original").unwrap();
     fs.vwrite(&[WriteOp::at(&file, 0, b"original")], Default::default())
         .unwrap();
@@ -272,13 +274,13 @@ fn custom_targets_are_prepared_once_on_mounted_and_auto() {
         let root = tempfile::tempdir().unwrap();
         if auto {
             stable_targets(
-                &vnfs::Auto::new(root.path()).unwrap(),
-                &vnfs::Auto::new(root.path()).unwrap(),
+                &vnfs::mounted::Auto::new(root.path()).unwrap(),
+                &vnfs::mounted::Auto::new(root.path()).unwrap(),
             );
         } else {
             stable_targets(
-                &vnfs::Posix::new(root.path()).unwrap(),
-                &vnfs::Posix::new(root.path()).unwrap(),
+                &vnfs::posix::Posix::new(root.path()).unwrap(),
+                &vnfs::posix::Posix::new(root.path()).unwrap(),
             );
         }
     }
@@ -292,11 +294,11 @@ fn portable_directory_open_preserves_path_only_backend_rejection() {
         assert!(fs.vopen_dirs::<&str>(&[]).unwrap().is_empty());
         assert_eq!(
             fs.open_dir_handle("/dir").err().unwrap().kind(),
-            vnfs::ErrorKind::Unsupported
+            vnfs::error::ErrorKind::Unsupported
         );
         assert_eq!(
             fs.vopen_dirs(&["/dir"]).err().unwrap().kind(),
-            vnfs::ErrorKind::Unsupported
+            vnfs::error::ErrorKind::Unsupported
         );
         fs.vremove_dir_contents(&[], Default::default()).unwrap();
         assert_eq!(fs.read("/dir/keep").unwrap(), b"keep");
@@ -304,9 +306,9 @@ fn portable_directory_open_preserves_path_only_backend_rejection() {
     for auto in [false, true] {
         let root = tempfile::tempdir().unwrap();
         if auto {
-            check(&vnfs::Auto::new(root.path()).unwrap());
+            check(&vnfs::mounted::Auto::new(root.path()).unwrap());
         } else {
-            check(&vnfs::Posix::new(root.path()).unwrap());
+            check(&vnfs::posix::Posix::new(root.path()).unwrap());
         }
     }
 }

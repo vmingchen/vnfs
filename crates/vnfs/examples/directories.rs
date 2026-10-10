@@ -1,4 +1,6 @@
-use vnfs::{Attributes, ControlFlow, ListDirOptions, Nfs, Vfsi};
+use vnfs::directory::{Attributes, ControlFlow, ListDirOptions};
+use vnfs::files::Vfsi;
+use vnfs::nfs::Nfs;
 
 pub fn run(fs: &impl Vfsi, paths: &[String], tree: &str) -> vnfs::Result<usize> {
     // Attributes arrive with the listings, avoiding a scalar stat per entry.

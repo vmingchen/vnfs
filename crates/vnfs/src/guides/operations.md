@@ -10,8 +10,10 @@ memory. Caller-managed buffers and read pools have separate memory policies.
 
 ```rust,no_run
 use vnfs::prelude::*;
+use vnfs::files::{ReadOp, ReadOptions, StreamOptions};
+use vnfs::directory::{Attributes, ControlFlow, ListDirOptions};
 use std::num::NonZeroUsize;
-# fn example(fs: &vnfs::NfsClient) -> vnfs::Result<()> {
+# fn example(fs: &vnfs::nfs::NfsClient) -> vnfs::Result<()> {
 let results = fs.vread(
     [ReadOp::whole("/file-1"), ReadOp::whole("/file-2")],
     ReadOptions::new().max_total_bytes(NonZeroUsize::new(32 * 1024 * 1024)),
@@ -35,8 +37,10 @@ retain chunks to keep memory bounded; reads do not promise snapshot consistency.
 
 ```rust,no_run
 use vnfs::prelude::*;
+use vnfs::files::{ReadOp, ReadOptions, StreamOptions};
+use vnfs::directory::{Attributes, ControlFlow, ListDirOptions};
 use std::num::NonZeroUsize;
-# fn example(fs: &vnfs::NfsClient) -> vnfs::Result<()> {
+# fn example(fs: &vnfs::nfs::NfsClient) -> vnfs::Result<()> {
 let mut bytes_seen = 0u64;
 fs.vstream(
     &["/dataset/large.bin"],
@@ -84,7 +88,7 @@ restrictions, and creates a direct connection. `NfsBuilder::from_mount` permits
 tuning before connecting. Unsupported security or ambiguous mappings fail;
 discovered configurations remain pinned to the mount.
 
-`Nfs::discover_mount` inspects without connecting. `helpers::NfsMountSession`
+`Nfs::discover_mount` inspects without connecting. `nfs::mount::NfsMountSession`
 combines a connection with mapping host-local operands to remote paths.
 Neither discovery nor connection establishes coherence with kernel caches.
 

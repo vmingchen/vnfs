@@ -123,22 +123,14 @@ pub(super) fn append_bounded_walk_page(
     page: &[crate::client::DirEntry],
     options: ListDirOptions,
     entry_count: &mut usize,
-    path_bytes: &mut usize,
+    budget: &mut vfsi_core::internal::TraversalBudget,
     out: &mut Vec<VfAttrs>,
 ) -> VfResult<()> {
     for entry in page {
-        if *entry_count >= options.entry_limit() {
-            return Err(
-                VfError::failure(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
-            );
-        }
         let path = dir.join(path_from_bytes(&entry.name));
-        let next_path_bytes = path_bytes
-            .checked_add(path.as_os_str().len())
-            .filter(|bytes| *bytes <= options.path_byte_limit())
-            .ok_or_else(|| {
-                VfError::failure(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
-            })?;
+        budget.charge(&path).map_err(|_| {
+            VfError::failure(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
+        })?;
         let mut attrs = VfAttrs {
             file: VfFile::from_os_path(&path),
             masks,
@@ -159,7 +151,6 @@ pub(super) fn append_bounded_walk_page(
             }
         }
         out.push(attrs);
-        *path_bytes = next_path_bytes;
         *entry_count += 1;
     }
     Ok(())

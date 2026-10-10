@@ -11,7 +11,8 @@ You do not need to construct protocol operations yourself.
 ```no_run
 # #[cfg(feature = "nfs")]
 # fn main() -> vnfs::Result<()> {
-use vnfs::{Vfsi, VfsiExt, Nfs, ReadOp};
+use vnfs::files::{Vfsi, VfsiExt, ReadOp};
+use vnfs::nfs::{Nfs};
 
 let fs = Nfs::builder("nfs.example.com")
     .root("/export/application")
@@ -37,7 +38,7 @@ Both files share vector phases instead of a scalar loop. `write_files` performs
 OPEN, complete WRITE, and CLOSE phases; it is **not one RPC or a transaction**.
 Small path-based reads can share a single compound when negotiated limits
 permit. Larger batches are split automatically, and successful results retain
-input order. See [the runnable examples](examples) for complete workflows.
+input order. See [the runnable examples](files/index.html) for complete workflows.
 
 Paths are relative to the configured remote namespace: `/file-1` above names
 `/export/application/file-1`, not a host-local file. This root is not a security
@@ -48,14 +49,14 @@ are in the [package README](https://github.com/vmingchen/vnfs/tree/main/crates/v
 
 | Task | Recommended API | Example |
 | --- | --- | --- |
-| Many complete small files | [`Vfsi::vread`], [`VfsiExt::write_files`] | [Bulk files](examples::bulk_files) |
-| Repeated or positional I/O | [`Vfsi::vopen`], [`Vfsi::vread`], [`Vfsi::vwrite`] | [Open handles](examples::open_handles) |
-| One large file | [`Vfsi::vstream`] | [Bounded streaming](examples::stream_file) |
-| Many directory listings with attributes | [`Vfsi::vlistdirs`] | [Directories](examples::directories) |
-| Large trees without collecting everything | [`Vfsi::vlistdirs`] with [`ListDirOptions::recursive`] | [Directories](examples::directories) |
+| Many complete small files | [`Vfsi::vread`], [`VfsiExt::write_files`] | [Bulk files](files/index.html#bulk-files) |
+| Repeated or positional I/O | [`Vfsi::vopen`], [`Vfsi::vread`], [`Vfsi::vwrite`] | [Open handles](files/index.html#open-handles) |
+| One large file | [`Vfsi::vstream`] | [Bounded streaming](files/index.html#bounded-streaming) |
+| Many directory listings with attributes | [`Vfsi::vlistdirs`] | [Directories](directory/index.html#runnable-example) |
+| Large trees without collecting everything | [`Vfsi::vlistdirs`] with [`ListDirOptions::recursive`] | [Directories](directory/index.html#runnable-example) |
 | Declarative fresh directory tree | `helpers::TreeBuilder` | [Builder example](helpers::TreeBuilder) |
-| Existing Linux NFS mount | `NfsMountSession::from_mount` for a connection plus local-path mapping; `Nfs::from_mount` for a connection only | [Mount discovery](Nfs::from_mount) |
-| Backend-independent application code | `Vfsi`, `VfsiExt`, `FileHandle` | [Generic workflows](examples) |
+| Existing Linux NFS mount | `nfs::mount::NfsMountSession::from_mount` for a connection plus local-path mapping; `nfs::Nfs::from_mount` for a connection only | [Mount discovery](nfs::Nfs::from_mount) |
+| Backend-independent application code | `Vfsi`, `VfsiExt`, `FileHandle` | [Generic workflows](files/index.html) |
 
 `Vfsi` and `VfsiExt` are defined in `vfsi-core` and re-exported here;
 applications using `vnfs` need no additional dependency or import path.
@@ -64,11 +65,11 @@ convenience helpers (`read_files`, `write_files`, scalar open, and default-optio
 listing/streaming) without scalarizing vectors. `VfsiExt::read_dirs_with_options`
 collects pages returned by `Vfsi::vlistdirs`; `VfsiExt::read_stream_with_options`
 is the single-path adapter for `Vfsi::vstream`. These remain valid extension
-helpers, not core execution methods. Import both with `vnfs::prelude::*`.
+helpers, not core execution methods. Import the traits with `vnfs::prelude::*` and operation types from `vnfs::files` or `vnfs::directory`.
 
 ## API map
 
-- [`guides`]: standard Rust I/O, failure/recovery, authentication, and operational tuning.
+- [NFS guides](nfs/index.html): standard I/O, failure recovery, authentication, and operational tuning.
 - [`nfs`]: direct connections, owned handles, authentication, read pools, tuning.
 - [`files`]: portable I/O traits, read/write results, resource limits.
 - [`directory`]: metadata selection, listings, traversal and removal options.
@@ -77,7 +78,7 @@ helpers, not core execution methods. Import both with `vnfs::prelude::*`.
 - `mounted` (Linux, `auto` feature): kernel access and automatic routing, **not** coherent caching
   between kernel and direct clients.
 - [`diagnostics`]: optional process-wide compound/RPC counters.
-- [`prelude`]: common imports. Common application types also remain at the root.
+- [`prelude`]: the core traits and result/error types for generic code.
 - Separate `vfsi-*` crates: advanced backend implementation; ordinary
   applications should not need these implementation crates.
 
@@ -101,10 +102,10 @@ helpers, not core execution methods. Import both with `vnfs::prelude::*`.
   failures or `vclose` to retain local cleanup ownership on failure. Writes
   are not automatically durable; use `VfsiExt::sync_data` or `VfsiExt::sync_all` as needed.
 - Cloning a client shares its session and lock, not independent parallelism.
-  [`NfsClientPool`] distributes workloads across independent sessions;
-  [`NfsReadPool`] provides bounded pipelined large-file reads.
+  [`nfs::NfsClientPool`] distributes workloads across independent sessions;
+  [`nfs::NfsReadPool`] provides bounded pipelined large-file reads.
 - Default AUTH_SYS conveys Unix identity without cryptographic peer authentication
-  or encryption. Enable `rpcsec-gss` and select [`NfsAuthentication`] explicitly
+  or encryption. Enable `rpcsec-gss` and select [`nfs::NfsAuthentication`] explicitly
   for Kerberos. Requested secure authentication fails rather than downgrades.
 - Direct NFS access, including mount discovery, does not share or invalidate
   the Linux kernel client's caches. Mixing the two requires an explicit coherence

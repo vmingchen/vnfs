@@ -14,24 +14,39 @@ impl TraversalBudget {
     pub fn remaining_entries(&self) -> usize {
         self.entries
     }
+    pub fn remaining_path_bytes(&self) -> usize {
+        self.bytes
+    }
     pub fn remaining_options(&self, options: ListDirOptions) -> ListDirOptions {
         options.max_entries(self.entries).max_path_bytes(self.bytes)
     }
     pub fn charge(&mut self, path: &Path) -> VfResult<()> {
+        self.charge_paths([path])
+    }
+    pub fn charge_paths<'a>(&mut self, paths: impl IntoIterator<Item = &'a Path>) -> VfResult<()> {
         if self.entries == 0 {
-            return Err(VfError::client(0, libc::EFBIG as u32));
+            return Err(limit_error());
         }
-        self.charge_path(path)?;
+        let bytes = paths.into_iter().try_fold(0usize, |total, path| {
+            total
+                .checked_add(path.as_os_str().len())
+                .ok_or_else(limit_error)
+        })?;
+        self.charge_bytes(bytes)?;
         self.entries -= 1;
         Ok(())
     }
     pub fn charge_path(&mut self, path: &Path) -> VfResult<()> {
-        self.bytes = self
-            .bytes
-            .checked_sub(path.as_os_str().len())
-            .ok_or_else(|| VfError::client(0, libc::EFBIG as u32))?;
+        self.charge_bytes(path.as_os_str().len())
+    }
+    pub fn charge_bytes(&mut self, bytes: usize) -> VfResult<()> {
+        self.bytes = self.bytes.checked_sub(bytes).ok_or_else(limit_error)?;
         Ok(())
     }
+}
+
+fn limit_error() -> VfError {
+    VfError::client(0, libc::EFBIG as u32)
 }
 
 #[cfg(test)]

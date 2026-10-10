@@ -1,4 +1,5 @@
-use vnfs::{Nfs, StreamOptions, Vfsi};
+use vnfs::files::{StreamOptions, Vfsi};
+use vnfs::nfs::Nfs;
 
 pub fn run(fs: &impl Vfsi, path: &str) -> vnfs::Result<u64> {
     let mut bytes = 0_u64;

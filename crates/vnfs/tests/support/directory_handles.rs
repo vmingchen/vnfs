@@ -1,15 +1,15 @@
-use vnfs::{Vfsi, VfsiExt};
+use vnfs::files::{Vfsi, VfsiExt};
 
 pub fn check<C: Vfsi>(fs: &C, other: &C, namespace: &impl Vfsi, verify: &impl Vfsi) {
-    use vnfs::{DirHandle, RemoveOptions};
+    use vnfs::directory::{DirHandle, RemoveOptions};
     assert!(fs.vopen_dirs::<&str>(&[]).unwrap().is_empty());
     fs.vremove_dir_contents(&[], RemoveOptions::default())
         .unwrap();
     namespace
         .vmkdir(&[
-            vnfs::MkDirOp::new("/a", 0o755),
-            vnfs::MkDirOp::new("/b", 0o755),
-            vnfs::MkDirOp::new("/outside", 0o755),
+            vnfs::directory::MkDirOp::new("/a", 0o755),
+            vnfs::directory::MkDirOp::new("/b", 0o755),
+            vnfs::directory::MkDirOp::new("/outside", 0o755),
         ])
         .unwrap();
     namespace.write("/a/file", b"original").unwrap();

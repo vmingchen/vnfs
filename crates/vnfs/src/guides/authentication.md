@@ -18,7 +18,7 @@ process's default GSS credential cache, not a supplied password.
 ```rust,no_run
 # #[cfg(feature = "rpcsec-gss")]
 # fn main() -> vnfs::Result<()> {
-use vnfs::{Nfs, NfsAuthentication, RpcsecGssProtection};
+use vnfs::nfs::{Nfs, NfsAuthentication, RpcsecGssProtection};
 
 let fs = Nfs::builder("nfs.example.com")
     .root("/export/application")
@@ -46,4 +46,4 @@ neither mode above encrypts file contents. RPC-over-TLS is also unsupported.
 
 Mount discovery supports `sec=sys`, not Kerberos mounts. Configure a direct
 connection explicitly for RPCSEC_GSS; `Auto` leaves Kerberos mounts on the
-kernel route. See [mount routing](crate::guides::operations).
+kernel route. See [mount routing](crate::nfs).
