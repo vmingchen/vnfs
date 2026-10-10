@@ -94,6 +94,25 @@ docs/                   architecture and compatibility policy
 ci/                     integration servers and ecosystem tests
 ```
 
+### Private implementation modules
+
+Keep public contracts and re-exports stable while grouping implementation by
+resource ownership. In `vfsi-core/src/api`, `handles` defines retained-resource
+contracts, `vfsi` defines vectors, and `extensions` composes conveniences.
+`vfsi-sync/src/client` separates shared connection locking/cleanup, owned
+handles, and read, write, directory, metadata, and namespace dispatch.
+
+`vfsi-nfs/src/nfs.rs` owns backend state and configuration. Its private `nfs/`
+modules own open/close handling, I/O planning, metadata decoding, directory
+cursors/removal, namespace resolution, copying, and connection recovery.
+The two backend trait implementations remain intact in `handle_backend` and
+`vector_backend`, without extra forwarding layers.
+
+`vnfs/src/auto` separates routing policy and connection identities from vector
+dispatch and retained handles. Routing tests and application extension tests
+live in dedicated test modules. These source boundaries add no public modules;
+helpers shared between siblings are restricted to their owning parent module.
+
 ### Native RPC dependency ownership
 
 `libntirpc-sys` is maintained independently in
