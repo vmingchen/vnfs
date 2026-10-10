@@ -9,7 +9,8 @@ usage() {
   cat <<'HELP'
 Usage: scripts/test-ci-local.sh [--managed-nfs] [--managed-smb] JOB [JOB ...]
 
-Jobs: smoke, fast, check, rust, python, nfs, smb, quick (rust + python), all/full
+Jobs: smoke, fast, check, rust, python, nfs, smb, uring, quick (rust + python), all/full
+uring: Linux real-ring tests (requires io_uring permitted by kernel/seccomp).
 smoke: small server-independent Rust subset for iteration (not full CI).
 fast: server-independent Rust tests; check: formatting and Clippy.
 rust: check + fast. all/full: rust + python + nfs + smb.
@@ -39,7 +40,7 @@ while (($#)); do
     --managed-nfs) managed_nfs=1 ;;
     --managed-smb) managed_smb=1 ;;
     -h|--help) usage; exit 0 ;;
-    smoke|fast|check|rust|python|nfs|smb) jobs+=("$1") ;;
+    smoke|fast|check|rust|python|nfs|smb|uring) jobs+=("$1") ;;
     quick) jobs+=(rust python) ;;
     all|full) jobs+=(rust python nfs smb) ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -258,6 +259,14 @@ run_check() {
 run_fast() { ./scripts/test-rust.sh; }
 run_smoke() { ./scripts/test-rust.sh --quick; }
 
+run_uring() {
+  [[ $(uname -s) == Linux ]] || { echo 'uring tests require Linux' >&2; return 1; }
+  cargo test -p vfsi-uring --locked
+  cargo test -p vnfs --locked --no-default-features --features uring --test uring
+  cargo test -p vnfs --locked --no-default-features --features uring,dummy --example uring_bench
+  cargo test -p vnfs --locked --no-default-features --features uring --doc guides::uring
+}
+
 run_python() {
   prepare_python
   "$python_bin" -m pytest adapters/vfsi-fsspec/tests
@@ -303,7 +312,7 @@ run_smb() {
   "$python_bin" -m pytest adapters/vsmb/tests adapters/vsmbfs/tests
 }
 
-for job in check smoke fast python nfs smb; do
+for job in check smoke fast python nfs smb uring; do
   if [[ -v selected[$job] ]]; then
     echo "==> Running local CI job: $job"
     started=$SECONDS

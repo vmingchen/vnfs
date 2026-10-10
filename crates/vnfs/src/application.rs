@@ -51,6 +51,21 @@ impl Vfsi for crate::NfsClient {
     client_methods!(crate::NfsClient, std::convert::identity);
 }
 
+#[cfg(all(feature = "uring", target_os = "linux"))]
+impl FileHandle for crate::uring::UringFile {
+    vfsi_sync::__vfsi_file_methods!(crate::uring::UringFile);
+}
+#[cfg(all(feature = "uring", target_os = "linux"))]
+impl crate::DirHandle for crate::uring::UringDir {
+    vfsi_sync::__vfsi_file_methods!(crate::uring::UringDir);
+}
+#[cfg(all(feature = "uring", target_os = "linux"))]
+impl Vfsi for crate::Uring {
+    type File = crate::uring::UringFile;
+    type Dir = crate::uring::UringDir;
+    client_methods!(crate::Uring, std::convert::identity);
+}
+
 #[cfg(all(feature = "auto", target_os = "linux"))]
 mod routed {
     use super::*;

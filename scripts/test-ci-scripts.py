@@ -117,6 +117,19 @@ class RustQuickTests(unittest.TestCase):
         self.assertIn("Running local CI job: smoke", result.stdout)
         self.assertEqual(len(self.log.read_text().splitlines()), 3)
 
+    def test_uring_dispatch_includes_benchmark_and_nfs_free_guide(self):
+        uname = self.bin / "uname"
+        uname.write_text('#!/bin/sh\nprintf "Linux\\n"\n')
+        uname.chmod(0o755)
+        result = self.run_script("test-ci-local.sh", "uring")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.log.read_text().splitlines()
+        self.assertEqual(len(calls), 4)
+        self.assertIn("test -p vfsi-uring --locked", calls[0])
+        self.assertIn("--no-default-features --features uring --test uring", calls[1])
+        self.assertIn("--features uring,dummy --example uring_bench", calls[2])
+        self.assertIn("--no-default-features --features uring --doc guides::uring", calls[3])
+
     def test_failures_propagate_and_are_recorded(self):
         result = self.run_script("test-rust.sh", "--quick", FAIL_STATUS="17")
         self.assertEqual(result.returncode, 17)

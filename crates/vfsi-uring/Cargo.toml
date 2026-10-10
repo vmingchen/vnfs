@@ -1,0 +1,19 @@
+[package]
+name = "vfsi-uring"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "Batched Linux io_uring filesystem backend for VFSI"
+repository = "https://github.com/vmingchen/vnfs"
+keywords = ["filesystem", "vectorized", "io-uring", "vfsi"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7.15"
+libc = { workspace = true }
+vfsi-core = { workspace = true }
+vfsi-local = { workspace = true }
+vfsi-sync = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

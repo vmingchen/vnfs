@@ -6,6 +6,7 @@ members = [
     "crates/vfsi-nfs",
     "crates/vfsi-smb",
     "crates/vfsi-local",
+    "crates/vfsi-uring",
     "crates/nfsv41-sys",
     "bindings/c",
 ]
@@ -21,6 +22,7 @@ xdr-codec = "0.4.4"
 xdrgen = "0.4.4"
 vfsi-core = { path = "crates/vfsi-core", version = "0.1.8" }
 vfsi-local = { path = "crates/vfsi-local", version = "0.1.7" }
+vfsi-uring = { path = "crates/vfsi-uring", version = "0.1.0" }
 vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.1.8" }
 vfsi-smb = { path = "crates/vfsi-smb", version = "0.1.6" }
 vfsi-sync = { path = "crates/vfsi-sync", version = "0.1.9" }

@@ -19,7 +19,6 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
-#[cfg(feature = "test-faults")]
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
@@ -30,9 +29,49 @@ use vfsi_core::internal::ManyResults;
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 use vfsi_core::path::{cstring_from_bytes, normalize_bytes, path_bytes, path_from_bytes};
 
+pub mod io;
+
 fn checked_offset(base: u64, delta: u64, index: usize) -> VfResult<u64> {
     base.checked_add(delta)
         .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))
+}
+
+// Sort by object identity and start offset, so aliases are checked together
+// without comparing every pair of unrelated writes. Empty writes cannot race.
+fn writes_overlap(ranges: &mut Vec<((u64, u64), u64, u64)>) -> bool {
+    ranges.retain(|&(_, start, end)| start < end);
+    ranges.sort_unstable();
+    ranges
+        .windows(2)
+        .any(|pair| pair[0].0 == pair[1].0 && pair[1].1 < pair[0].2)
+}
+
+#[cfg(test)]
+mod io_range_tests {
+    use super::writes_overlap;
+
+    #[test]
+    fn sorted_overlap_checks_preserve_alias_empty_and_adjacent_semantics() {
+        for (mut ranges, expected) in [
+            (vec![((1, 1), 8, 12), ((1, 1), 0, 8)], false),
+            (vec![((1, 1), 8, 12), ((1, 1), 0, 9)], true),
+            (vec![((1, 1), 0, 20), ((1, 1), 2, 3)], true),
+            (vec![((1, 1), 0, 20), ((1, 1), 2, 2)], false),
+            (vec![((1, 1), 0, 8), ((2, 1), 0, 8)], false),
+            (vec![((1, 1), 0, 8), ((1, 2), 0, 8)], false),
+        ] {
+            assert_eq!(writes_overlap(&mut ranges), expected);
+        }
+        // Large/reversed vectors exercise the scalable sorted path without
+        // brittle wall-clock assertions.
+        let mut ranges: Vec<_> = (0..32_768)
+            .rev()
+            .map(|i| ((1, 1), i * 2, i * 2 + 1))
+            .collect();
+        assert!(!writes_overlap(&mut ranges));
+        ranges.push(((1, 1), 100, 102));
+        assert!(writes_overlap(&mut ranges));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -59,7 +98,7 @@ fn noreplace_error_code(
 
 /// Open state for a descriptor on the local filesystem.
 struct DummyOpen {
-    file: File,
+    file: Arc<File>,
     path: PathBuf,
     cur_offset: u64,
     append: bool,
@@ -100,6 +139,7 @@ impl std::ops::Deref for AnchoredPath {
 
 /// A local-filesystem [`VectorBackend`]. `"/"` is the `root` directory.
 pub struct DummyVecFs {
+    io: Option<Box<dyn io::DescriptorIo>>,
     root: PathBuf,
     /// Canonical form of `root`, used for containment checks on platforms
     /// without Linux's dirfd-relative `openat2` resolution.
@@ -244,6 +284,7 @@ impl DummyVecFs {
         let root_dir =
             File::open(&root_canon).map_err(|error| VfError::failure(0, Self::errno(&error)))?;
         Ok(DummyVecFs {
+            io: None,
             root: root_canon.clone(),
             #[cfg(not(target_os = "linux"))]
             root_canon,
@@ -255,6 +296,13 @@ impl DummyVecFs {
             #[cfg(feature = "test-faults")]
             fault_injector: None,
         })
+    }
+
+    /// Install a synchronous batch executor without changing local namespace
+    /// semantics. Intended for backend implementers, not application callers.
+    pub fn with_io_engine(mut self, engine: impl io::DescriptorIo + 'static) -> Self {
+        self.io = Some(Box::new(engine));
+        self
     }
 
     #[cfg(feature = "test-faults")]
@@ -1029,6 +1077,40 @@ impl DummyVecFs {
 }
 
 impl HandleBackend for DummyVecFs {
+    fn vfsync_impl(&mut self, files: &[VfFile], mode: vfsi_core::api::SyncMode) -> VfRes {
+        if let Some(engine) = self.io.as_mut() {
+            let files: Vec<_> = files
+                .iter()
+                .enumerate()
+                .map(|(index, file)| {
+                    let fd = file
+                        .fd()
+                        .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+                    self.open_files
+                        .get(&fd)
+                        .map(|open| &open.file)
+                        .ok_or_else(|| VfError::failure(index, ERR_EBADF))
+                })
+                .collect::<VfResult<_>>()?;
+            let results = engine.sync(&files, matches!(mode, vfsi_core::api::SyncMode::Data));
+            if results.len() != files.len() {
+                return Err(VfError::client(0, VF_ERR_RPC));
+            }
+            for (index, result) in results.into_iter().enumerate() {
+                result.map_err(|error| VfError::failure(index, Self::errno(&error)))?;
+            }
+            return Ok(());
+        }
+        for (index, file) in files.iter().enumerate() {
+            match mode {
+                vfsi_core::api::SyncMode::Data => self.sync_data(file),
+                vfsi_core::api::SyncMode::All => self.sync_all(file),
+            }
+            .map_err(|error| error.with_index(index))?;
+        }
+        Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<FilesystemStats>> {
         use std::os::fd::AsRawFd;
@@ -1128,7 +1210,7 @@ impl HandleBackend for DummyVecFs {
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         }
         let fd = self.insert_open_file(DummyOpen {
-            file,
+            file: Arc::new(file),
             path: pathname.to_path_buf(),
             cur_offset: 0,
             append: flags & libc::O_APPEND != 0,
@@ -1298,6 +1380,24 @@ impl VectorBackend for DummyVecFs {
     }
 
     fn vread_impl(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        if self.io.is_some() && reads.iter().all(|op| op.file.is_descriptor()) {
+            let mut storage: Vec<_> = reads.iter().map(|op| vec![0; op.length]).collect();
+            let mut buffers: Vec<_> = storage.iter_mut().map(Vec::as_mut_slice).collect();
+            let results = self.vread_into_impl(reads, &mut buffers)?;
+            return Ok(results
+                .into_iter()
+                .zip(storage)
+                .map(|(result, mut data)| {
+                    data.truncate(result.read);
+                    ReadResult {
+                        file: result.file,
+                        offset: result.offset,
+                        data,
+                        eof: result.eof,
+                    }
+                })
+                .collect());
+        }
         let mut out = Vec::with_capacity(reads.len());
         for (i, op) in reads.iter().enumerate() {
             out.push(self.readv_one(op).map_err(|e| e.with_index(i))?);
@@ -1313,6 +1413,71 @@ impl VectorBackend for DummyVecFs {
         if reads.len() != buffers.len() {
             return Err(VfError::client(0, ERR_INVAL));
         }
+        // Positional requests on the same descriptor are independent. Multiple
+        // cursor requests are ordered by the existing scalar implementation.
+        let mut cursors = std::collections::HashSet::new();
+        let independent = reads.iter().all(|op| {
+            op.file.is_descriptor()
+                && (!matches!(op.offset, VfOffset::Cur) || cursors.insert(op.file.fd()))
+        });
+        if self.io.is_some() && independent {
+            let mut operations = Vec::with_capacity(reads.len());
+            for (index, (op, buffer)) in reads.iter().zip(buffers.iter_mut()).enumerate() {
+                if op.length != buffer.len() {
+                    return Err(VfError::client(index, ERR_INVAL));
+                }
+                let file = &self
+                    .open_files
+                    .get(&op.file.fd().unwrap())
+                    .ok_or_else(|| VfError::failure(index, ERR_EBADF))?
+                    .file;
+                let len = file
+                    .metadata()
+                    .map_err(|e| VfError::failure(index, Self::errno(&e)))?
+                    .len();
+                let offset = self
+                    .resolve_offset(&op.file, op.offset, len)
+                    .map_err(|e| e.with_index(index))?;
+                checked_offset(offset, op.length as u64, index)?;
+                operations.push(io::Read {
+                    file,
+                    offset,
+                    buffer,
+                });
+            }
+            let offsets: Vec<_> = operations.iter().map(|op| op.offset).collect();
+            let results = self.io.as_mut().unwrap().read(&mut operations);
+            drop(operations);
+            if results.len() != reads.len() {
+                return Err(VfError::client(0, VF_ERR_RPC));
+            }
+            let mut out = Vec::with_capacity(reads.len());
+            let mut failure = None;
+            for (index, ((op, offset), result)) in
+                reads.iter().zip(offsets).zip(results).enumerate()
+            {
+                match result {
+                    Ok(read) if read <= op.length => {
+                        if matches!(op.offset, VfOffset::Cur) {
+                            self.advance_offset(&op.file, offset + read as u64);
+                        }
+                        out.push(ReadIntoResult {
+                            file: op.file.clone(),
+                            offset,
+                            read,
+                            eof: read < op.length,
+                        });
+                    }
+                    Ok(_) => {
+                        failure.get_or_insert(VfError::client(index, VF_ERR_RPC));
+                    }
+                    Err(error) => {
+                        failure.get_or_insert(VfError::failure(index, Self::errno(&error)));
+                    }
+                }
+            }
+            return failure.map_or(Ok(out), Err);
+        }
         let mut out = Vec::with_capacity(reads.len());
         for (index, (request, buffer)) in reads.iter().zip(buffers.iter_mut()).enumerate() {
             out.push(
@@ -1324,6 +1489,74 @@ impl VectorBackend for DummyVecFs {
     }
 
     fn vwrite_impl(&mut self, writes: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
+        if let Some(engine) = self.io.as_mut()
+            && writes
+                .iter()
+                .all(|op| op.file().is_descriptor() && matches!(op.offset(), VfOffset::At(_)))
+        {
+            let mut operations = Vec::with_capacity(writes.len());
+            let mut ranges = Vec::with_capacity(writes.len());
+            let mut identities = HashMap::new();
+            let mut independent = true;
+            for (index, op) in writes.iter().enumerate() {
+                let fd = op.file().fd().unwrap();
+                let open = self
+                    .open_files
+                    .get(&fd)
+                    .ok_or_else(|| VfError::failure(index, ERR_EBADF))?;
+                if open.append {
+                    independent = false;
+                    break;
+                }
+                let VfOffset::At(offset) = op.offset() else {
+                    unreachable!()
+                };
+                let end = checked_offset(offset, op.data().len() as u64, index)?;
+                let identity = if let Some(identity) = identities.get(&fd) {
+                    *identity
+                } else {
+                    let md = open
+                        .file
+                        .metadata()
+                        .map_err(|e| VfError::failure(index, Self::errno(&e)))?;
+                    let identity = (md.dev(), md.ino());
+                    identities.insert(fd, identity);
+                    identity
+                };
+                ranges.push((identity, offset, end));
+                operations.push(io::Write {
+                    file: &open.file,
+                    offset,
+                    data: op.data(),
+                });
+            }
+            if independent && !writes_overlap(&mut ranges) {
+                let offsets: Vec<_> = operations.iter().map(|op| op.offset).collect();
+                let results = engine.write(&operations);
+                if results.len() != writes.len() {
+                    return Err(VfError::client(0, VF_ERR_RPC));
+                }
+                return writes
+                    .iter()
+                    .zip(offsets)
+                    .zip(results)
+                    .enumerate()
+                    .map(|(index, ((op, offset), result))| {
+                        let written =
+                            result.map_err(|e| VfError::failure(index, Self::errno(&e)))?;
+                        if written > op.data().len() {
+                            return Err(VfError::client(index, VF_ERR_RPC));
+                        }
+                        Ok(WriteResult {
+                            file: op.file().clone(),
+                            offset,
+                            written,
+                            stable: true,
+                        })
+                    })
+                    .collect();
+            }
+        }
         let mut out = Vec::with_capacity(writes.len());
         for (i, op) in writes.iter().enumerate() {
             out.push(self.writev_one(*op).map_err(|e| e.with_index(i))?);

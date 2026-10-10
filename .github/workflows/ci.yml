@@ -12,6 +12,18 @@ env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
 jobs:
+  uring:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Permit io_uring on this disposable test runner
+        run: sudo sysctl -w kernel.io_uring_disabled=0
+      - name: Real ring batching and public VFSI contracts
+        run: ./scripts/test-ci-local.sh uring
+
   nfs-adversarial:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
@@ -112,6 +124,7 @@ jobs:
           vfsi-core crates/vfsi-core/Cargo.toml
           vfsi-sync crates/vfsi-sync/Cargo.toml
           vfsi-local crates/vfsi-local/Cargo.toml
+          vfsi-uring crates/vfsi-uring/Cargo.toml
           vfsi-nfs crates/vfsi-nfs/Cargo.toml
           vfsi-smb crates/vfsi-smb/Cargo.toml
           nfsv41-sys crates/nfsv41-sys/Cargo.toml

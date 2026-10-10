@@ -17,6 +17,7 @@ all-features = true
 default = ["nfs", "server-copy", "auto"]
 nfs = ["dep:nfsv41-sys", "dep:vfsi-nfs"]
 dummy = ["dep:vfsi-local"]
+uring = ["dep:vfsi-uring", "dep:vfsi-local"]
 auto = ["nfs", "dummy"]
 server-copy = ["vfsi-nfs?/server-copy"]
 rpcsec-gss = ["nfs", "vfsi-nfs/rpcsec-gss"]
@@ -36,9 +37,16 @@ vfsi-local = { workspace = true, optional = true }
 vfsi-nfs = { workspace = true, optional = true }
 vfsi-sync = { workspace = true }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+vfsi-uring = { workspace = true, optional = true }
+
 [dev-dependencies]
 tempfile = "3"
 vfsi-sync = { workspace = true, features = ["test-support"] }
+
+[[example]]
+name = "uring_bench"
+required-features = ["uring", "dummy"]
 
 [[test]]
 name = "dummy_vecfs"

@@ -326,3 +326,32 @@ mod mounted {
 }
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub use mounted::*;
+
+#[cfg(all(feature = "uring", target_os = "linux"))]
+mod uring {
+    use super::*;
+    use std::path::Path;
+    owned_client!(Uring, UringFile, UringDir, vfsi_local::DummyVecFs);
+    impl Uring {
+        /// Open a Linux local backend with bounded io_uring descriptor batches.
+        /// Setup errors are reported; no implicit syscall-backend fallback.
+        pub fn new(root: impl AsRef<Path>) -> Result<Self> {
+            Self::with_options(root, vfsi_uring::Options::default())
+        }
+
+        pub fn with_options(root: impl AsRef<Path>, options: vfsi_uring::Options) -> Result<Self> {
+            vfsi_uring::connect(root, options).map(|inner| Self { inner })
+        }
+
+        /// Return actual ring submission counters alongside the opaque client.
+        pub fn with_telemetry(
+            root: impl AsRef<Path>,
+            options: vfsi_uring::Options,
+        ) -> Result<(Self, vfsi_uring::Telemetry)> {
+            vfsi_uring::connect_with_telemetry(root, options)
+                .map(|(inner, telemetry)| (Self { inner }, telemetry))
+        }
+    }
+}
+#[cfg(all(feature = "uring", target_os = "linux"))]
+pub use uring::*;

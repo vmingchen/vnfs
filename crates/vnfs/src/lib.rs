@@ -82,14 +82,22 @@ pub mod examples {
 }
 
 /// Operational guides with compiled examples, separate from the API reference.
-#[cfg(feature = "nfs")]
+#[cfg(any(feature = "nfs", all(feature = "uring", target_os = "linux")))]
 pub mod guides {
+    /// Linux io_uring batching, operational limits and measured comparisons.
+    #[cfg(all(feature = "uring", target_os = "linux"))]
+    #[doc = include_str!("guides/uring.md")]
+    pub mod uring {}
+    #[cfg(feature = "nfs")]
     #[doc = include_str!("guides/standard_io.md")]
     pub mod standard_io {}
+    #[cfg(feature = "nfs")]
     #[doc = include_str!("guides/failure_recovery.md")]
     pub mod failure_recovery {}
+    #[cfg(feature = "nfs")]
     #[doc = include_str!("guides/authentication.md")]
     pub mod authentication {}
+    #[cfg(feature = "nfs")]
     #[doc = include_str!("guides/operations.md")]
     pub mod operations {}
 }
@@ -100,10 +108,16 @@ pub type Result<T> = vfsi_core::VfResult<T>;
 /// Application-facing error type for the Rust-native API.
 pub type Error = vfsi_core::VfError;
 
-#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
+#[cfg(any(
+    feature = "nfs",
+    all(any(feature = "auto", feature = "uring"), target_os = "linux")
+))]
 mod application;
 pub use vfsi_core::{AsTarget, DirHandle, FileHandle, Target, Vfsi, VfsiExt};
-#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
+#[cfg(any(
+    feature = "nfs",
+    all(any(feature = "auto", feature = "uring"), target_os = "linux")
+))]
 mod read;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use read::ReadRequest;
@@ -128,7 +142,10 @@ mod api_contract {}
 #[doc = include_str!("../README.md")]
 mod readme_examples {}
 
-#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
+#[cfg(any(
+    feature = "nfs",
+    all(any(feature = "auto", feature = "uring"), target_os = "linux")
+))]
 mod facade;
 /// High-level filesystem workflows built on the application API.
 pub mod helpers;
@@ -136,6 +153,15 @@ pub mod helpers;
 pub use facade::{Mounted, MountedDir, MountedFile};
 #[cfg(feature = "nfs")]
 pub use facade::{NfsClient, NfsDir, NfsFile};
+
+/// Batched local descriptor I/O through Linux io_uring (opt-in `uring` feature).
+#[cfg(all(feature = "uring", target_os = "linux"))]
+pub mod uring {
+    pub use crate::facade::{Uring, UringDir, UringFile};
+    pub use vfsi_uring::{Options, Stats, Telemetry};
+}
+#[cfg(all(feature = "uring", target_os = "linux"))]
+pub use uring::Uring;
 
 /// Aggregate NFS transport counters for optional application diagnostics.
 /// These counters are process-wide, not per client, and may include other
@@ -186,6 +212,8 @@ pub use auto::{Auto, AutoDir, AutoFile, AutoRoute};
 /// Common application imports.
 pub mod prelude {
     pub use crate::Attributes;
+    #[cfg(all(feature = "uring", target_os = "linux"))]
+    pub use crate::Uring;
     pub use crate::{
         AsTarget, AttrsOptions, ControlFlow, CopyOption, DirHandle, FileHandle, FilesystemStats,
         ListDirOptions, MkDirOp, ReadOp, ReadOptions, ReadResult, RemoveMode, ResourceLimits,
