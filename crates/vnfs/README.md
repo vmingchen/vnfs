@@ -217,7 +217,7 @@ can take the direct path without following a pre-existing symlink. The
 ## Small-file benchmark
 
 The repository includes a [Rust benchmark driver][benchmark] that compares
-the native `Backend::vwrite_impl` and `Backend::vread_impl` operations on
+the native `VectorBackend::vwrite_impl` and `VectorBackend::vread_impl` operations on
 `NfsVecFs` with scalar `std::fs::write` and
 `std::fs::read` calls through a Linux kernel NFS mount. Both paths reach the
 same NFS-Ganesha 15.3 NFSv4.2 export. Linux `netem` added 500 microseconds to

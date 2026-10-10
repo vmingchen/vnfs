@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use vfsi_core::*;
+use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::test_support::borrow_writes;
 use vfsi_sync::*;
 
@@ -1215,14 +1216,14 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // openv length contract, listdir limits, walk via dyn Backend
+    // openv length contract, listdir limits, walk via dyn VectorBackend
     // ------------------------------------------------------------------
 
     #[test]
     fn openv_rejects_mismatched_lengths() {
         let (_root, mut fs) = fs("openv");
         use libc::O_CREAT;
-        let e = Backend::vopen_raw_impl(
+        let e = VectorBackend::vopen_raw_impl(
             &mut fs,
             &[Path::new("/a"), Path::new("/b")],
             &[O_CREAT],
@@ -1255,7 +1256,7 @@ mod tests {
         fs.mkdir_raw_impl(Path::new("/sub"), 0o755).unwrap();
         write(&mut fs, "/sub/a", b"1");
 
-        let mut dyn_fs: Box<dyn Backend> = Box::new(fs);
+        let mut dyn_fs: Box<dyn VectorBackend> = Box::new(fs);
         let mut visited: Vec<String> = Vec::new();
         let entries = dyn_fs
             .walk_impl(Path::new(""), AttrMask::stat(), &mut |dir, _| {

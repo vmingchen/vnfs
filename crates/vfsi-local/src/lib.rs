@@ -1,4 +1,4 @@
-//! A [`Backend`] implementation backed by the local filesystem (`std::fs`), so
+//! A [`VectorBackend`] implementation backed by the local filesystem (`std::fs`), so
 //! the vectorized API also works on non-NFS filesystems.
 //!
 //! `"/"` maps to the `root` directory passed to [`DummyVecFs::new`]; all
@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "test-faults")]
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
+use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::*;
 
 use vfsi_core::internal::ManyResults;
@@ -97,7 +98,7 @@ impl std::ops::Deref for AnchoredPath {
     }
 }
 
-/// A local-filesystem [`Backend`]. `"/"` is the `root` directory.
+/// A local-filesystem [`VectorBackend`]. `"/"` is the `root` directory.
 pub struct DummyVecFs {
     root: PathBuf,
     /// Canonical form of `root`, used for containment checks on platforms
@@ -1027,7 +1028,7 @@ impl DummyVecFs {
     }
 }
 
-impl FileSystem for DummyVecFs {
+impl HandleBackend for DummyVecFs {
     #[cfg(target_os = "linux")]
     fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<FilesystemStats>> {
         use std::os::fd::AsRawFd;
@@ -1216,39 +1217,39 @@ impl FileSystem for DummyVecFs {
         Ok(reported)
     }
     fn read_file_impl(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
-        vfsi_sync::backend_helpers::native_read_file_impl_default(self, file, max_bytes)
+        vfsi_sync::backend::helpers::native_read_file_impl_default(self, file, max_bytes)
     }
     fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
-        vfsi_sync::backend_helpers::native_open_impl_default(self, request)
+        vfsi_sync::backend::helpers::native_open_impl_default(self, request)
     }
     fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
-        vfsi_sync::backend_helpers::native_read_impl_default(self, request)
+        vfsi_sync::backend::helpers::native_read_impl_default(self, request)
     }
     fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
-        vfsi_sync::backend_helpers::native_read_into_impl_default(self, request, buffer)
+        vfsi_sync::backend::helpers::native_read_into_impl_default(self, request, buffer)
     }
     fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
-        vfsi_sync::backend_helpers::native_write_impl_default(self, request)
+        vfsi_sync::backend::helpers::native_write_impl_default(self, request)
     }
     fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {
-        vfsi_sync::backend_helpers::native_seek_impl_default(self, file, position)
+        vfsi_sync::backend::helpers::native_seek_impl_default(self, file, position)
     }
     fn metadata_impl(
         &mut self,
         target: Target<'_, VfFile>,
         options: vfsi_core::api::AttrsOptions,
     ) -> VfResult<VfAttrs> {
-        vfsi_sync::backend_helpers::native_metadata_impl_default(self, target, options)
+        vfsi_sync::backend::helpers::native_metadata_impl_default(self, target, options)
     }
     fn set_attributes_impl(&mut self, update: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_set_attributes_impl_default(self, update)
+        vfsi_sync::backend::helpers::native_set_attributes_impl_default(self, update)
     }
     fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, VfFile>>]) -> VfResult<()> {
-        vfsi_sync::backend_helpers::vsetattrs_typed_default(self, updates)
+        vfsi_sync::backend::helpers::vsetattrs_typed_default(self, updates)
     }
 }
 
-impl Backend for DummyVecFs {
+impl VectorBackend for DummyVecFs {
     fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeCleanup { index: _index })?;

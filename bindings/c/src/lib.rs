@@ -2572,7 +2572,7 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
 }
 
 // Protocol inspection belongs to the bindings, outside the native operation contracts.
-trait BindingBackend: vfsi_sync::Backend {
+trait BindingBackend: vfsi_sync::backend::VectorBackend {
     fn nfs_minorversion(&self) -> Option<u32> {
         None
     }
@@ -2617,7 +2617,7 @@ mod tests {
         write_calls: Option<WriteCalls>,
     }
 
-    impl vfsi_sync::FileSystem for ListingBackend {
+    impl vfsi_sync::backend::HandleBackend for ListingBackend {
         fn sync_data(&mut self, _: &VfFile) -> vfsi_sync::VfResult<()> {
             Err(VfError::unsupported(0))
         }
@@ -2654,7 +2654,7 @@ mod tests {
         }
     }
 
-    impl vfsi_sync::Backend for ListingBackend {
+    impl vfsi_sync::backend::VectorBackend for ListingBackend {
         fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VfResult<Vec<vfsi_sync::ReadResult>> {
             Err(VfError::unsupported(0))
         }

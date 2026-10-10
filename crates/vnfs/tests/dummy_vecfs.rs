@@ -1,7 +1,8 @@
 //! Tests for the `std::fs`-backed [`DummyVecFs`]. These need no NFS server:
-//! the suite runs against a temporary directory, proving the `Backend` API
+//! the suite runs against a temporary directory, proving the `VectorBackend` API
 //! works on non-NFS filesystems too.
 
+use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::test_support as common;
 use vfsi_sync::test_support::borrow_writes;
 use vfsi_sync::*;
@@ -552,7 +553,7 @@ fn native_path_adapters_preserve_relative_paths() {
         .unwrap();
     assert!(fs.exists_impl(Path::new("dangling")).unwrap());
     fs.unlink_impl(Path::new("dangling")).unwrap();
-    vfsi_sync::backend_helpers::remove_tree(&mut fs, Path::new("/x")).unwrap();
+    vfsi_sync::backend::helpers::remove_tree(&mut fs, Path::new("/x")).unwrap();
 }
 
 #[test]
@@ -1070,7 +1071,7 @@ fn openv_fault_before_dispatch_has_no_effects_or_handles() {
         vnfs::Error::transport(None, "injected pre-dispatch failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = Backend::vopen_raw_impl(
+    let error = VectorBackend::vopen_raw_impl(
         &mut fs,
         &[Path::new("/f0"), Path::new("/f1")],
         &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
@@ -1098,7 +1099,7 @@ fn openv_fault_injection_closes_the_successful_prefix() {
         vnfs::Error::transport(None, "injected registration failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = Backend::vopen_raw_impl(
+    let error = VectorBackend::vopen_raw_impl(
         &mut fs,
         &[Path::new("/f0"), Path::new("/f1"), Path::new("/f2")],
         &[libc::O_CREAT | libc::O_RDWR; 3],
@@ -1123,7 +1124,7 @@ fn openv_fault_after_registration_closes_the_injected_handle() {
         vnfs::Error::transport(None, "injected post-registration failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = Backend::vopen_raw_impl(
+    let error = VectorBackend::vopen_raw_impl(
         &mut fs,
         &[Path::new("/f0"), Path::new("/f1"), Path::new("/f2")],
         &[libc::O_CREAT | libc::O_RDWR; 3],
@@ -1155,7 +1156,7 @@ fn openv_cleanup_fault_does_not_mask_primary_error_or_leak_handles() {
         vnfs::Error::transport(None, "injected cleanup failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = Backend::vopen_raw_impl(
+    let error = VectorBackend::vopen_raw_impl(
         &mut fs,
         &[Path::new("/created"), Path::new("/exists")],
         &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
@@ -1254,18 +1255,19 @@ fn strict_vectors_report_failure_index_without_rollback() {
 #[test]
 fn native_scalar_contract_separates_metadata_query_from_update() {
     use vfsi_sync::api::AttrsOptions;
-    use vfsi_sync::{AttrMask, FileSystem, SetAttrsOp, Target};
+    use vfsi_sync::backend::HandleBackend;
+    use vfsi_sync::{AttrMask, SetAttrsOp, Target};
     use vnfs::{OpenFlags, OpenOp};
 
     let (_root, mut fs) = dummy();
-    let file = FileSystem::open_impl(
+    let file = HandleBackend::open_impl(
         &mut fs,
         &OpenOp::new("/metadata", OpenFlags::WRITE | OpenFlags::CREATE),
     )
     .unwrap();
-    FileSystem::close_impl(&mut fs, &file).unwrap();
+    HandleBackend::close_impl(&mut fs, &file).unwrap();
 
-    let attrs = FileSystem::metadata_impl(
+    let attrs = HandleBackend::metadata_impl(
         &mut fs,
         Target::Path(Path::new("/metadata")),
         AttrsOptions::new().fields(AttrMask::MODE | AttrMask::SIZE),
@@ -1275,7 +1277,7 @@ fn native_scalar_contract_separates_metadata_query_from_update() {
 
     let update = SetAttrsOp::new(Target::Path(Path::new("/metadata")))
         .permissions(vnfs::Permissions::from_mode(0o640));
-    FileSystem::set_attributes_impl(&mut fs, &update).unwrap();
+    HandleBackend::set_attributes_impl(&mut fs, &update).unwrap();
     assert_eq!(
         fs.stat_impl(Path::new("/metadata")).unwrap().mode & 0o777,
         0o640

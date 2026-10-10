@@ -3,6 +3,7 @@
 use std::path::Path;
 #[cfg(feature = "test-faults")]
 use std::{path::PathBuf, sync::Arc};
+use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::test_support::borrow_writes;
 use vfsi_sync::*;
 

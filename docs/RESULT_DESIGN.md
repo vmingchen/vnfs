@@ -31,7 +31,7 @@ Public vector methods use the `v` + operation vocabulary on `Vfsi`:
 - `vremove`
 - `vrename`
 
-Native backends implement `Backend: FileSystem` in `vfsi-sync` and use
+Native backends implement `VectorBackend: HandleBackend` in `vfsi-sync` and use
 `*_impl` operation hooks. Protocol internals can retain their wire-oriented
 names. The indexed open-outcome seam is:
 
@@ -138,8 +138,8 @@ batch is not replayed and remains unattributed to a fabricated request index.
 
 ## Migration
 
-The former `open_many` hook is now `Backend::vopen_outcomes_impl`; its partial
-outcomes remain backend-only. `Backend::vopen_impl` is the strict typed native
+The former `open_many` hook is now `VectorBackend::vopen_outcomes_impl`; its partial
+outcomes remain backend-only. `VectorBackend::vopen_impl` is the strict typed native
 boundary, and applications use `Vfsi::vopen`. Per-item outcome APIs are not
 exposed by the Rust application facade. Other native vector engines likewise
 use `*_impl` hooks; the migration mappings are in [backend-migration.md](backend-migration.md).

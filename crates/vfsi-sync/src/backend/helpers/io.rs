@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn vread_into_impl_default<F: Backend + ?Sized>(
+pub fn vread_into_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     reads: &[ReadOp],
     buffers: &mut [&mut [u8]],
@@ -30,7 +30,7 @@ pub fn vread_into_impl_default<F: Backend + ?Sized>(
         .collect())
 }
 
-pub fn vopen_outcomes_impl_default<F: Backend + ?Sized>(
+pub fn vopen_outcomes_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     paths: &[&Path],
     flags: &[i32],
@@ -52,7 +52,7 @@ pub fn vopen_outcomes_impl_default<F: Backend + ?Sized>(
     Ok(ManyResults::new(paths.len(), results))
 }
 
-pub fn before_open_cleanup_default<F: Backend + ?Sized>(
+pub fn before_open_cleanup_default<F: VectorBackend + ?Sized>(
     _backend: &mut F,
     _index: usize,
     _file: &VfFile,
@@ -60,7 +60,7 @@ pub fn before_open_cleanup_default<F: Backend + ?Sized>(
     Ok(())
 }
 
-pub fn vopen_raw_impl_default<F: Backend + ?Sized>(
+pub fn vopen_raw_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     paths: &[&Path],
     flags: &[i32],
@@ -74,7 +74,7 @@ pub fn vopen_raw_impl_default<F: Backend + ?Sized>(
     })
 }
 
-pub fn vopen_raw_simple_impl_default<F: Backend + ?Sized>(
+pub fn vopen_raw_simple_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     paths: &[&Path],
     flags: i32,
@@ -85,14 +85,14 @@ pub fn vopen_raw_simple_impl_default<F: Backend + ?Sized>(
     backend.vopen_raw_impl(paths, &flags_v, &modes_v)
 }
 
-pub fn vclose_impl_default<F: Backend + ?Sized>(backend: &mut F, files: &[VfFile]) -> VfRes {
+pub fn vclose_impl_default<F: VectorBackend + ?Sized>(backend: &mut F, files: &[VfFile]) -> VfRes {
     for (i, f) in files.iter().enumerate() {
         backend.close_impl(f).map_err(|e| e.with_index(i))?;
     }
     Ok(())
 }
 
-pub fn vopen_typed_default<F: Backend + ?Sized>(
+pub fn vopen_typed_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     requests: &[OpenOp],
 ) -> VfResult<Vec<VfFile>> {
@@ -105,7 +105,7 @@ pub fn vopen_typed_default<F: Backend + ?Sized>(
     backend.vopen_raw_impl(&paths, &flags, &modes)
 }
 
-pub fn native_read_impl_default<F: Backend + ?Sized>(
+pub fn native_read_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     request: &ReadOp,
 ) -> VfResult<ReadResult> {
@@ -114,7 +114,7 @@ pub fn native_read_impl_default<F: Backend + ?Sized>(
     Ok(results.pop().expect("validated one result"))
 }
 
-pub fn native_read_into_impl_default<F: Backend + ?Sized>(
+pub fn native_read_into_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     request: &ReadOp,
     buffer: &mut [u8],
@@ -124,7 +124,7 @@ pub fn native_read_into_impl_default<F: Backend + ?Sized>(
     Ok(results.pop().expect("validated one result"))
 }
 
-pub fn native_write_impl_default<F: Backend + ?Sized>(
+pub fn native_write_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     request: WriteOp<&VfFile, &[u8]>,
 ) -> VfResult<WriteResult> {

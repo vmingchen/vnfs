@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use vfsi_smb::{SmbConnectOptions, SmbVecFs};
+use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::test_support::borrow_writes;
 use vfsi_sync::*;
 use vfsi_sync::{
@@ -288,7 +289,7 @@ fn smb_openv_injected_registration_failure_closes_all_successes() {
         VfError::transport(None, "injected registration failure"),
     ));
     fs.set_fault_injector(script.clone());
-    let error = Backend::vopen_raw_impl(
+    let error = VectorBackend::vopen_raw_impl(
         &mut fs,
         &refs,
         &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 3],
@@ -361,7 +362,7 @@ fn smb_closev_failure_keeps_handles_available_for_cleanup() {
     fs.mkdir_raw_impl(root.as_path(), 0o755).unwrap();
     let paths = [root.join("f0"), root.join("f1")];
     let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-    let files = Backend::vopen_raw_impl(
+    let files = VectorBackend::vopen_raw_impl(
         &mut fs,
         &refs,
         &[libc::O_CREAT | libc::O_RDWR; 2],
@@ -392,7 +393,7 @@ fn smb_closev_removes_successes_on_both_sides_of_a_failure() {
     fs.mkdir_raw_impl(root.as_path(), 0o755).unwrap();
     let paths = [root.join("f0"), root.join("f1"), root.join("f2")];
     let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-    let files = Backend::vopen_raw_impl(
+    let files = VectorBackend::vopen_raw_impl(
         &mut fs,
         &refs,
         &[libc::O_CREAT | libc::O_RDWR; 3],

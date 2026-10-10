@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use vfsi_nfs::NfsVecFs;
 use vfsi_nfs::nfs::*;
+use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::test_support::borrow_writes;
 use vnfs::VfsiExt;
 use vnfs::{Nfs, NfsReadPoolOptions};
@@ -1601,7 +1602,7 @@ fn openv_closev_path_is_one_compound_each() {
     let paths: Vec<String> = (0..5).map(|i| format!("{}/f{}", dir, i)).collect();
     let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
     let _ = vfsi_nfs::compound::thread_compound_stats(); // reset counters
-    let files = Backend::vopen_raw_impl(
+    let files = VectorBackend::vopen_raw_impl(
         &mut c,
         &refs,
         &[libc::O_CREAT | libc::O_RDWR; 5],
@@ -1888,7 +1889,7 @@ fn openv_partial_failure_resumes_from_failing_index() {
     let refs = [Path::new(&f0), Path::new(&bad), Path::new(&f2)];
     let flags = [libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 3];
     let modes = [0o644; 3];
-    let e = Backend::vopen_raw_impl(&mut c, &refs, &flags, &modes).unwrap_err();
+    let e = VectorBackend::vopen_raw_impl(&mut c, &refs, &flags, &modes).unwrap_err();
     assert_eq!(e.index(), Some(1), "resume must fail at the missing parent");
     assert_eq!(
         e.status(),
@@ -1921,7 +1922,7 @@ fn openv_injected_registration_failure_closes_every_confirmed_handle() {
         format!("{dir}/f2"),
     ];
     let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
-    let error = Backend::vopen_raw_impl(
+    let error = VectorBackend::vopen_raw_impl(
         &mut client,
         &refs,
         &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 3],
@@ -1945,7 +1946,7 @@ fn closev_failure_keeps_handles_available_for_cleanup() {
     let mut client = client();
     let paths = [format!("{dir}/f0"), format!("{dir}/f1")];
     let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
-    let files = Backend::vopen_raw_impl(
+    let files = VectorBackend::vopen_raw_impl(
         &mut client,
         &refs,
         &[libc::O_CREAT | libc::O_RDWR; 2],
@@ -1977,7 +1978,7 @@ fn closev_semantic_failure_removes_only_confirmed_prefix() {
         format!("{dir}/f2"),
     ];
     let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
-    let files = Backend::vopen_raw_impl(
+    let files = VectorBackend::vopen_raw_impl(
         &mut client,
         &refs,
         &[libc::O_CREAT | libc::O_RDWR; 3],
@@ -2102,7 +2103,7 @@ fn openv_injected_post_reply_transport_failure_has_no_fabricated_index() {
     client.set_fault_injector(script.clone());
     let paths = [format!("{dir}/f0"), format!("{dir}/f1")];
     let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
-    let error = Backend::vopen_raw_impl(
+    let error = VectorBackend::vopen_raw_impl(
         &mut client,
         &refs,
         &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
@@ -2141,7 +2142,7 @@ fn openv_later_chunk_failure_closes_confirmed_earlier_opens() {
         VfError::transport(None, "injected failure before second open compound"),
     ));
     client.set_fault_injector(script.clone());
-    let error = Backend::vopen_raw_impl(
+    let error = VectorBackend::vopen_raw_impl(
         &mut client,
         &refs,
         &vec![libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; paths.len()],
@@ -2179,7 +2180,7 @@ fn failed_open_cleanup_is_retained_and_retried_before_the_next_openv() {
     ]));
     client.set_fault_injector(script.clone());
     assert!(
-        Backend::vopen_raw_impl(
+        VectorBackend::vopen_raw_impl(
             &mut client,
             &refs,
             &vec![libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; paths.len()],
@@ -2192,7 +2193,7 @@ fn failed_open_cleanup_is_retained_and_retried_before_the_next_openv() {
     assert!(client.test_deferred_path_close_count() > 0);
 
     let next_path = format!("{dir}/next");
-    let next = Backend::vopen_raw_impl(
+    let next = VectorBackend::vopen_raw_impl(
         &mut client,
         &[Path::new(&next_path)],
         &[libc::O_CREAT | libc::O_RDWR],
@@ -2226,7 +2227,7 @@ fn openv_does_not_replay_exclusive_create_after_real_reply_loss() {
     let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
 
     proxy.arm();
-    let error = Backend::vopen_raw_impl(
+    let error = VectorBackend::vopen_raw_impl(
         &mut proxied,
         &refs,
         &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 2],
@@ -2740,7 +2741,7 @@ fn openv_ocreat_preserves_existing_mode() {
     c.close_impl(&fd).unwrap();
 
     let g = format!("{}/new.txt", dir);
-    Backend::vopen_raw_impl(
+    VectorBackend::vopen_raw_impl(
         &mut c,
         &[Path::new(&f), Path::new(&g)],
         &[libc::O_CREAT | libc::O_RDWR, libc::O_CREAT | libc::O_RDWR],
@@ -2827,7 +2828,7 @@ fn rm_recursive_api() {
         c.exists_impl(Path::new(&format!("{}/x/deep", dir)))
             .unwrap()
     );
-    vfsi_sync::backend_helpers::remove_tree(&mut c, Path::new(&dir)).expect("rm_recursive");
+    vfsi_sync::backend::helpers::remove_tree(&mut c, Path::new(&dir)).expect("rm_recursive");
     assert!(
         !c.exists_impl(Path::new(&dir)).unwrap(),
         "whole tree removed"
@@ -3213,7 +3214,7 @@ fn openv_per_file_flags_and_modes() {
     let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
     let flags = [libc::O_CREAT | libc::O_RDWR, libc::O_CREAT | libc::O_RDONLY];
     let modes = [0o600, 0o640];
-    let files = Backend::vopen_raw_impl(&mut c, &refs, &flags, &modes).expect("openv");
+    let files = VectorBackend::vopen_raw_impl(&mut c, &refs, &flags, &modes).expect("openv");
     assert_eq!(files.len(), 2);
     assert_eq!(
         c.stat_impl(Path::new(&paths[0])).unwrap().mode & 0o777,

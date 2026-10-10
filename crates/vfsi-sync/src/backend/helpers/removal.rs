@@ -1,13 +1,13 @@
 use super::*;
 
-pub fn before_remove_type_default<F: Backend + ?Sized>(
+pub fn before_remove_type_default<F: VectorBackend + ?Sized>(
     _backend: &mut F,
     _index: usize,
 ) -> VfResult<()> {
     Ok(())
 }
 
-pub fn remove_paths_impl_default<F: Backend + ?Sized>(
+pub fn remove_paths_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     objs: &[&Path],
     recursive: bool,
@@ -15,7 +15,7 @@ pub fn remove_paths_impl_default<F: Backend + ?Sized>(
     backend.remove_paths_with_options_impl(objs, recursive, RemoveOptions::default())
 }
 
-pub fn remove_paths_with_options_impl_default<F: Backend + ?Sized>(
+pub fn remove_paths_with_options_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     objs: &[&Path],
     recursive: bool,
@@ -106,7 +106,10 @@ pub fn remove_paths_with_options_impl_default<F: Backend + ?Sized>(
     Ok(())
 }
 
-pub fn open_dir_impl_default<F: Backend + ?Sized>(backend: &mut F, path: &Path) -> VfResult<VfDir> {
+pub fn open_dir_impl_default<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    path: &Path,
+) -> VfResult<VfDir> {
     let mut attrs = VfAttrs {
         file: VfFile::from_os_path(path),
         masks: AttrMask::default(),
@@ -119,14 +122,14 @@ pub fn open_dir_impl_default<F: Backend + ?Sized>(backend: &mut F, path: &Path) 
     Ok(VfDir::Path(path.to_path_buf()))
 }
 
-pub fn remove_dir_contents_handle_impl_default<F: Backend + ?Sized>(
+pub fn remove_dir_contents_handle_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     dir: &VfDir,
 ) -> VfRes {
     backend.remove_dir_contents_handle_with_options_impl(dir, RemoveOptions::default())
 }
 
-pub fn remove_dir_contents_handle_with_options_impl_default<F: Backend + ?Sized>(
+pub fn remove_dir_contents_handle_with_options_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     dir: &VfDir,
     options: RemoveOptions,
@@ -137,18 +140,21 @@ pub fn remove_dir_contents_handle_with_options_impl_default<F: Backend + ?Sized>
     }
 }
 
-pub fn close_dir_impl_default<F: Backend + ?Sized>(_backend: &mut F, _dir: &VfDir) -> VfResult<()> {
+pub fn close_dir_impl_default<F: VectorBackend + ?Sized>(
+    _backend: &mut F,
+    _dir: &VfDir,
+) -> VfResult<()> {
     Ok(())
 }
 
-pub fn remove_dir_contents_path_impl_default<F: Backend + ?Sized>(
+pub fn remove_dir_contents_path_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     dir: &Path,
 ) -> VfRes {
     backend.remove_dir_contents_path_with_options_impl(dir, RemoveOptions::default())
 }
 
-pub fn remove_dir_contents_path_with_options_impl_default<F: Backend + ?Sized>(
+pub fn remove_dir_contents_path_with_options_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     dir: &Path,
     options: RemoveOptions,
@@ -183,7 +189,10 @@ pub fn remove_dir_contents_path_with_options_impl_default<F: Backend + ?Sized>(
     Ok(())
 }
 
-pub fn ensure_empty_dir_impl_default<F: Backend + ?Sized>(backend: &mut F, dir: &Path) -> VfRes {
+pub fn ensure_empty_dir_impl_default<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    dir: &Path,
+) -> VfRes {
     match backend.mkdir_raw_impl(dir, 0o777) {
         Ok(()) => Ok(()),
         Err(error) if error.err_no() == ERR_EXIST => {
@@ -202,7 +211,7 @@ pub fn ensure_empty_dir_impl_default<F: Backend + ?Sized>(backend: &mut F, dir: 
     }
 }
 
-pub fn native_remove_impl_default<F: Backend + ?Sized>(
+pub fn native_remove_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     path: &std::path::Path,
     recursive: bool,
@@ -212,7 +221,7 @@ pub fn native_remove_impl_default<F: Backend + ?Sized>(
         .map_err(|error| error.with_context("remove", path))
 }
 
-pub fn native_remove_dir_contents_impl_default<F: Backend + ?Sized>(
+pub fn native_remove_dir_contents_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     path: &std::path::Path,
 ) -> VfResult<()> {
@@ -221,6 +230,6 @@ pub fn native_remove_dir_contents_impl_default<F: Backend + ?Sized>(
         .map_err(|error| error.with_context("remove_dir_contents", path))
 }
 
-pub fn remove_tree<F: Backend + ?Sized>(backend: &mut F, path: &Path) -> VfResult<()> {
+pub fn remove_tree<F: VectorBackend + ?Sized>(backend: &mut F, path: &Path) -> VfResult<()> {
     backend.remove_paths_impl(&[path], true)
 }

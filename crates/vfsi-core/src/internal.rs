@@ -22,7 +22,7 @@ pub fn validate_open_requests(requests: &[crate::OpenOp]) -> VfResult<()> {
 }
 
 /// Ordered partial results produced by a native backend outcome hook, such as
-/// `vfsi_sync::Backend::vopen_outcomes_impl`.
+/// `vfsi_sync::backend::VectorBackend::vopen_outcomes_impl`.
 ///
 /// Entry `n` always corresponds to request `n`. The vector may be shorter
 /// than `requested` when an ordered protocol stopped after a failure.

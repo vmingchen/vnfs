@@ -590,25 +590,25 @@ fn custom_cursor<C: Vfsi>(fs: &C, file: &C::File) {
 Native owned handles provide ownership and cleanup; I/O uses the client:
 
 ```compile_fail,E0277
-fn read<F: vfsi_sync::FileSystem>(file: &mut vfsi_sync::FsFile<F>) {
+fn read<F: vfsi_sync::backend::HandleBackend>(file: &mut vfsi_sync::FsFile<F>) {
     let _ = std::io::Read::read(file, &mut [0]);
 }
 ```
 
 ```compile_fail,E0277
-fn write<F: vfsi_sync::FileSystem>(file: &mut vfsi_sync::FsFile<F>) {
+fn write<F: vfsi_sync::backend::HandleBackend>(file: &mut vfsi_sync::FsFile<F>) {
     let _ = std::io::Write::write(file, b"data");
 }
 ```
 
 ```compile_fail,E0277
-fn seek<F: vfsi_sync::FileSystem>(file: &mut vfsi_sync::FsFile<F>) {
+fn seek<F: vfsi_sync::backend::HandleBackend>(file: &mut vfsi_sync::FsFile<F>) {
     let _ = std::io::Seek::seek(file, std::io::SeekFrom::Start(0));
 }
 ```
 
 ```compile_fail,E0599
-fn positional_read<F: vfsi_sync::FileSystem>(file: &vfsi_sync::FsFile<F>) {
+fn positional_read<F: vfsi_sync::backend::HandleBackend>(file: &vfsi_sync::FsFile<F>) {
     let _ = file.read_at(&mut [0], 0);
 }
 ```
@@ -616,7 +616,7 @@ fn positional_read<F: vfsi_sync::FileSystem>(file: &vfsi_sync::FsFile<F>) {
 The open builder is supplied by `VfsiExt`, with no inherent native alternative:
 
 ```compile_fail,E0599
-fn native_builder<F: vfsi_sync::Backend + 'static>(client: &vfsi_sync::FsClient<F>) {
+fn native_builder<F: vfsi_sync::backend::VectorBackend + 'static>(client: &vfsi_sync::FsClient<F>) {
     let _ = client.open_options();
 }
 ```

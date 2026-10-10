@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn vf_path_default<F: FileSystem + ?Sized>(backend: &F, file: &VfFile) -> VfResult<PathBuf> {
+pub fn vf_path_default<F: HandleBackend + ?Sized>(backend: &F, file: &VfFile) -> VfResult<PathBuf> {
     match file {
         VfFile::Path {
             base: VfPathBase::Abs,
@@ -17,7 +17,7 @@ pub fn vf_path_default<F: FileSystem + ?Sized>(backend: &F, file: &VfFile) -> Vf
     }
 }
 
-pub fn open_raw_impl_default<F: FileSystem + ?Sized>(
+pub fn open_raw_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
     pathname: &Path,
     flags: i32,
@@ -26,7 +26,7 @@ pub fn open_raw_impl_default<F: FileSystem + ?Sized>(
     backend.open_path_impl(VfPathBase::Cwd, pathname, flags, mode)
 }
 
-pub fn read_raw_impl_default<F: FileSystem + ?Sized>(
+pub fn read_raw_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
     file: &VfFile,
     offset: u64,
@@ -42,7 +42,7 @@ pub fn read_raw_impl_default<F: FileSystem + ?Sized>(
     Ok(result.data)
 }
 
-pub fn write_raw_impl_default<F: FileSystem + ?Sized>(
+pub fn write_raw_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
     file: &VfFile,
     offset: u64,
@@ -58,7 +58,7 @@ pub fn write_raw_impl_default<F: FileSystem + ?Sized>(
     Ok(result.written)
 }
 
-pub fn native_open_impl_default<F: FileSystem + ?Sized>(
+pub fn native_open_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
     request: &OpenOp,
 ) -> VfResult<VfFile> {
@@ -71,7 +71,7 @@ pub fn native_open_impl_default<F: FileSystem + ?Sized>(
         .map_err(|error| error.with_context("open", request.path()))
 }
 
-pub fn native_seek_impl_default<F: FileSystem + ?Sized>(
+pub fn native_seek_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
     file: &VfFile,
     position: std::io::SeekFrom,
@@ -88,7 +88,7 @@ pub fn native_seek_impl_default<F: FileSystem + ?Sized>(
         .map_err(|_| VfError::failure(0, ERR_INVAL))
 }
 
-pub fn native_set_attributes_impl_default<F: FileSystem + ?Sized>(
+pub fn native_set_attributes_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
     update: &SetAttrsOp<Target<'_, VfFile>>,
 ) -> VfResult<()> {
@@ -103,7 +103,7 @@ pub fn native_set_attributes_impl_default<F: FileSystem + ?Sized>(
     })
 }
 
-pub fn read_file_impl_default<F: FileSystem + ?Sized>(
+pub fn read_file_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
     file: &VfFile,
     max_bytes: usize,
@@ -135,7 +135,7 @@ pub fn read_file_impl_default<F: FileSystem + ?Sized>(
     }
 }
 
-pub fn read_into_impl_default<F: FileSystem + ?Sized>(
+pub fn read_into_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
     request: &ReadOp,
     buffer: &mut [u8],
@@ -161,7 +161,7 @@ pub fn read_into_impl_default<F: FileSystem + ?Sized>(
     })
 }
 
-pub fn vsetattrs_impl_default<F: FileSystem + ?Sized>(
+pub fn vsetattrs_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
     updates: &[SetAttrsOp<Target<'_, VfFile>>],
 ) -> VfResult<()> {

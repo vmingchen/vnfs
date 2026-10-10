@@ -1,5 +1,15 @@
 # Native backend migration ledger
 
+## Backend names and namespace
+
+Implementers import `vfsi_sync::backend::{HandleBackend, VectorBackend}`.
+`FileSystem` is renamed to `HandleBackend`, and `Backend` to `VectorBackend`.
+The traits are defined only under `backend`; root aliases and the `sfsi`/`vfsi`
+modules are removed. Shared defaults move from `backend_helpers` to
+`backend::helpers`, with source in `crates/vfsi-sync/src/backend/`.
+`Vfsi` and `VfsiExt` remain the portable application contracts. Trait methods,
+object-safe dispatch, protocol behavior, and C/Python entry points are unchanged.
+
 ## Shared write operations
 
 Portable `api::WriteOp`, native owned/borrowed requests, and `FsWrite` now
@@ -25,14 +35,14 @@ not additional application contracts.
 The `VecFs` and `VecFsExt` traits and their blanket native adapters have been
 removed in a deliberate breaking Rust migration. Concrete types `DummyVecFs`,
 `NfsVecFs`, and `SmbVecFs` keep their names. The native contracts are now
-`FileSystem` (the minimum owned-handle contract) and `Backend: FileSystem`
+`HandleBackend` (the minimum owned-handle contract) and `VectorBackend: HandleBackend`
 (native vector engines and overridable workflows). The intermediate operation-
 family traits and methodless aggregates were consolidated; no blanket
 implementation synthesizes a backend from scalar I/O.
 
-Shared defaults are free functions in `crates/vfsi-sync/src/backend_helpers/`,
+Shared defaults are free functions in `crates/vfsi-sync/src/backend/helpers/`,
 grouped into handle, I/O, metadata, directory, namespace, link, copy, read, and
-removal modules. They are generic over `FileSystem` or `Backend`, including
+removal modules. They are generic over `HandleBackend` or `VectorBackend`, including
 `?Sized` for dynamic dispatch. Trait defaults delegate to those functions;
 backend overrides remain execution hooks. NFS compounds/recovery, SMB transport
 and COPYCHUNK, and local anchored descriptors remain backend implementations.
@@ -59,90 +69,90 @@ and COPYCHUNK, and local anchored descriptors remain backend implementations.
 The last column lists preserved concrete overrides. Other entries use shared
 defaults or explicitly unsupported optional seams for scalar-only implementations.
 Application consumers are `FsClient`/`Vfsi`; C and Python bindings use the
-object-safe `Backend` contract. Native test support and integration tests call
+object-safe `VectorBackend` contract. Native test support and integration tests call
 its operation engines directly.
 
 | Legacy method | Target contract / method | Preserved overrides |
 |---|---|---|
-| `vstatfs_impl` | `FileSystem::vstatfs_impl` | local, NFS |
-| `close_deferred` | `FileSystem::close_deferred` | NFS |
-| `take_notifications` | `FileSystem::take_notifications` | NFS |
+| `vstatfs_impl` | `HandleBackend::vstatfs_impl` | local, NFS |
+| `close_deferred` | `HandleBackend::close_deferred` | NFS |
+| `take_notifications` | `HandleBackend::take_notifications` | NFS |
 | `nfs_minorversion` | Protocol extension APIs; bindings-specific `BindingBackend` inspection | NFS |
 | `smb_dialect` | Protocol extension APIs; bindings-specific `BindingBackend` inspection | SMB |
-| `capabilities` | `FileSystem::capabilities` (typed flags) | local, NFS, SMB |
-| `typed_capabilities` | `FileSystem::capabilities` | — |
-| `abs_path` | `FileSystem::abs_path` | local, NFS, SMB |
-| `open_by_path` | `FileSystem::open_path_impl` | local, NFS, SMB |
-| `close` | `FileSystem::close_impl` | local, NFS, SMB |
-| `sync_data` | `FileSystem::sync_data` | local, NFS, SMB |
-| `sync_all` | `FileSystem::sync_all` | local |
-| `chdir` | `FileSystem::chdir` | local, NFS, SMB |
-| `getcwd` | `FileSystem::getcwd` | local, NFS, SMB |
-| `readv` | `Backend::vread_impl` | local, NFS, SMB |
-| `readv_into` | `Backend::vread_into_impl` | local, NFS |
-| `read_allv` | `Backend::vread_all_impl` | — |
-| `read_allv_with_options` | `Backend::vread_all_with_options_impl` | NFS |
-| `writev` | `Backend::vwrite_impl` via `WriteOp::borrowed()` | local, NFS, SMB |
-| `writev_borrowed` | `Backend::vwrite_impl` | local, NFS, SMB |
-| `fseek` | `FileSystem::seek_raw_impl` | local, NFS, SMB |
-| `getattrsv` | `Backend::vgetattrs_impl` | local, NFS, SMB |
-| `lgetattrsv` | `Backend::vgetattrs_nofollow_impl` | local, NFS, SMB |
-| `setattrsv` | `Backend::vsetattrs_raw_impl` | local, NFS, SMB |
-| `lsetattrsv` | `Backend::vsetattrs_raw_nofollow_impl` | local, NFS, SMB |
-| `listdir` | `Backend::listdir_impl` | local, NFS, SMB |
-| `listdir_page` | `Backend::listdir_page_impl` | local, NFS |
-| `directory_page_batch_size` | `Backend::directory_page_batch_size` | NFS |
-| `listdir_pages` | `Backend::vlistdir_pages_impl` | NFS |
-| `walk` | `Backend::walk_impl` | — |
-| `walk_with_options` | `Backend::walk_with_options_impl` | NFS |
-| `renamev` | `Backend::vrename_impl` | local, NFS, SMB |
-| `removev` | `Backend::vremove_impl` | local, NFS, SMB |
-| `mkdirv` | `Backend::vmkdir_impl` | local, NFS, SMB |
-| `symlinkv` | `Backend::vsymlink_impl` | local, NFS, SMB |
-| `readlinkv` | `Backend::vreadlink_impl` | local, NFS, SMB |
-| `hardlinkv` | `Backend::vhardlink_impl` | local, NFS, SMB |
-| `dupv` | `Backend::vcopy_data_impl` | local, NFS, SMB |
-| `write_adb` | `Backend::vwrite_adb_impl` | local, NFS, SMB |
-| `read_streamv` | `Backend::vstream_impl` | — |
-| `rm` | `Backend::remove_paths_impl` | — |
-| `rm_with_options` | `Backend::remove_paths_with_options_impl` | NFS |
-| `open_dir` | `Backend::open_dir_impl` | NFS |
-| `rm_dir_contents` | `Backend::remove_dir_contents_handle_impl` | — |
-| `rm_dir_contents_with_options` | `Backend::remove_dir_contents_handle_with_options_impl` | NFS |
-| `close_dir` | `Backend::close_dir_impl` | NFS |
-| `rm_contents` | `Backend::remove_dir_contents_path_impl` | — |
-| `rm_contents_with_options` | `Backend::remove_dir_contents_path_with_options_impl` | NFS |
-| `ensure_empty_dir` | `Backend::ensure_empty_dir_impl` | — |
-| `cp_recursive` | `Backend::copy_tree_impl` | local, NFS, SMB |
-| `vf_path` | `FileSystem::vf_path` | — |
-| `open` | `FileSystem::open_raw_impl` | — |
-| `read` | `FileSystem::read_raw_impl` | — |
-| `write` | `FileSystem::write_raw_impl` | — |
-| `open_many` | `Backend::vopen_outcomes_impl` | local, NFS, SMB |
-| `before_open_cleanup` | `Backend::before_open_cleanup` | local, NFS, SMB |
-| `before_remove_type` | `Backend::before_remove_type` | local |
-| `openv` | `Backend::vopen_raw_impl` | — |
-| `openv_simple` | `Backend::vopen_raw_simple_impl` | — |
-| `closev` | `Backend::vclose_impl` | NFS, SMB |
-| `stat` | `Backend::stat_impl` | — |
-| `lstat` | `Backend::lstat_impl` | — |
-| `fstat` | `Backend::fstat_impl` | — |
-| `exists` | `Backend::exists_impl` | SMB |
-| `file_type` | `Backend::file_type_impl` | SMB |
-| `listdirv` | `Backend::vlistdirs_impl` | NFS |
-| `visit_dir` | `Backend::visit_dir_impl` | local, NFS |
-| `unlink` | `Backend::unlink_impl` | — |
-| `unlinkv` | `Backend::vunlink_impl` | — |
-| `mkdir` | `Backend::mkdir_raw_impl` | — |
-| `symlink` | `Backend::symlink_raw_impl` | — |
-| `readlink` | `Backend::readlink_raw_impl` | — |
-| `vcopy_impl` | `Backend::vcopy_impl` | local, NFS, SMB |
-| `ensure_dir` | `Backend::ensure_dir_impl` | — |
+| `capabilities` | `HandleBackend::capabilities` (typed flags) | local, NFS, SMB |
+| `typed_capabilities` | `HandleBackend::capabilities` | — |
+| `abs_path` | `HandleBackend::abs_path` | local, NFS, SMB |
+| `open_by_path` | `HandleBackend::open_path_impl` | local, NFS, SMB |
+| `close` | `HandleBackend::close_impl` | local, NFS, SMB |
+| `sync_data` | `HandleBackend::sync_data` | local, NFS, SMB |
+| `sync_all` | `HandleBackend::sync_all` | local |
+| `chdir` | `HandleBackend::chdir` | local, NFS, SMB |
+| `getcwd` | `HandleBackend::getcwd` | local, NFS, SMB |
+| `readv` | `VectorBackend::vread_impl` | local, NFS, SMB |
+| `readv_into` | `VectorBackend::vread_into_impl` | local, NFS |
+| `read_allv` | `VectorBackend::vread_all_impl` | — |
+| `read_allv_with_options` | `VectorBackend::vread_all_with_options_impl` | NFS |
+| `writev` | `VectorBackend::vwrite_impl` via `WriteOp::borrowed()` | local, NFS, SMB |
+| `writev_borrowed` | `VectorBackend::vwrite_impl` | local, NFS, SMB |
+| `fseek` | `HandleBackend::seek_raw_impl` | local, NFS, SMB |
+| `getattrsv` | `VectorBackend::vgetattrs_impl` | local, NFS, SMB |
+| `lgetattrsv` | `VectorBackend::vgetattrs_nofollow_impl` | local, NFS, SMB |
+| `setattrsv` | `VectorBackend::vsetattrs_raw_impl` | local, NFS, SMB |
+| `lsetattrsv` | `VectorBackend::vsetattrs_raw_nofollow_impl` | local, NFS, SMB |
+| `listdir` | `VectorBackend::listdir_impl` | local, NFS, SMB |
+| `listdir_page` | `VectorBackend::listdir_page_impl` | local, NFS |
+| `directory_page_batch_size` | `VectorBackend::directory_page_batch_size` | NFS |
+| `listdir_pages` | `VectorBackend::vlistdir_pages_impl` | NFS |
+| `walk` | `VectorBackend::walk_impl` | — |
+| `walk_with_options` | `VectorBackend::walk_with_options_impl` | NFS |
+| `renamev` | `VectorBackend::vrename_impl` | local, NFS, SMB |
+| `removev` | `VectorBackend::vremove_impl` | local, NFS, SMB |
+| `mkdirv` | `VectorBackend::vmkdir_impl` | local, NFS, SMB |
+| `symlinkv` | `VectorBackend::vsymlink_impl` | local, NFS, SMB |
+| `readlinkv` | `VectorBackend::vreadlink_impl` | local, NFS, SMB |
+| `hardlinkv` | `VectorBackend::vhardlink_impl` | local, NFS, SMB |
+| `dupv` | `VectorBackend::vcopy_data_impl` | local, NFS, SMB |
+| `write_adb` | `VectorBackend::vwrite_adb_impl` | local, NFS, SMB |
+| `read_streamv` | `VectorBackend::vstream_impl` | — |
+| `rm` | `VectorBackend::remove_paths_impl` | — |
+| `rm_with_options` | `VectorBackend::remove_paths_with_options_impl` | NFS |
+| `open_dir` | `VectorBackend::open_dir_impl` | NFS |
+| `rm_dir_contents` | `VectorBackend::remove_dir_contents_handle_impl` | — |
+| `rm_dir_contents_with_options` | `VectorBackend::remove_dir_contents_handle_with_options_impl` | NFS |
+| `close_dir` | `VectorBackend::close_dir_impl` | NFS |
+| `rm_contents` | `VectorBackend::remove_dir_contents_path_impl` | — |
+| `rm_contents_with_options` | `VectorBackend::remove_dir_contents_path_with_options_impl` | NFS |
+| `ensure_empty_dir` | `VectorBackend::ensure_empty_dir_impl` | — |
+| `cp_recursive` | `VectorBackend::copy_tree_impl` | local, NFS, SMB |
+| `vf_path` | `HandleBackend::vf_path` | — |
+| `open` | `HandleBackend::open_raw_impl` | — |
+| `read` | `HandleBackend::read_raw_impl` | — |
+| `write` | `HandleBackend::write_raw_impl` | — |
+| `open_many` | `VectorBackend::vopen_outcomes_impl` | local, NFS, SMB |
+| `before_open_cleanup` | `VectorBackend::before_open_cleanup` | local, NFS, SMB |
+| `before_remove_type` | `VectorBackend::before_remove_type` | local |
+| `openv` | `VectorBackend::vopen_raw_impl` | — |
+| `openv_simple` | `VectorBackend::vopen_raw_simple_impl` | — |
+| `closev` | `VectorBackend::vclose_impl` | NFS, SMB |
+| `stat` | `VectorBackend::stat_impl` | — |
+| `lstat` | `VectorBackend::lstat_impl` | — |
+| `fstat` | `VectorBackend::fstat_impl` | — |
+| `exists` | `VectorBackend::exists_impl` | SMB |
+| `file_type` | `VectorBackend::file_type_impl` | SMB |
+| `listdirv` | `VectorBackend::vlistdirs_impl` | NFS |
+| `visit_dir` | `VectorBackend::visit_dir_impl` | local, NFS |
+| `unlink` | `VectorBackend::unlink_impl` | — |
+| `unlinkv` | `VectorBackend::vunlink_impl` | — |
+| `mkdir` | `VectorBackend::mkdir_raw_impl` | — |
+| `symlink` | `VectorBackend::symlink_raw_impl` | — |
+| `readlink` | `VectorBackend::readlink_raw_impl` | — |
+| `vcopy_impl` | `VectorBackend::vcopy_impl` | local, NFS, SMB |
+| `ensure_dir` | `VectorBackend::ensure_dir_impl` | — |
 
 ## Caller migration
 
-`FsClient` retains `FileSystem` for connection and handle lifecycle; its
-application `Vfsi` implementation requires `Backend`. `FsFile` owns the open
+`FsClient` retains `HandleBackend` for connection and handle lifecycle; its
+application `Vfsi` implementation requires `VectorBackend`. `FsFile` owns the open
 resource and cleanup obligation, while operations use the owning client's
 vectors. Direct handle I/O, metadata, synchronization, and the borrowed
 `VfFileHandle`/`VfOpenOptions` adapter have been removed.
@@ -172,7 +182,7 @@ to avoid shadowing portable `Vfsi` methods with different operands.
 
 `VecFsExt` path aliases are removed. Application callers use `VfsiExt`; direct
 backend callers pass `&Path` to native methods. `rm_recursive` is replaced by
-`backend_helpers::remove_tree`. C/Python exported operations retain their names,
+`backend::helpers::remove_tree`. C/Python exported operations retain their names,
 raw flags, partial-result behavior, and descriptor ownership. Protocol inspection
 is implemented in binding-specific extension contracts.
 

@@ -65,13 +65,14 @@ flags, results, or errors. There are no historical root aliases: applications us
 `Error`, `Result`, and `FileType`. This is a pre-1.0 Rust source change; the C ABI
 is unchanged.
 
-The following backend contracts describe implementation responsibilities;
-ordinary applications use the concrete client methods instead:
+Backend implementers import `vfsi_sync::backend::{HandleBackend, VectorBackend}`.
+These contracts describe execution responsibilities; applications use `Vfsi`
+and `VfsiExt` on clients instead:
 
-- `FileSystem` is the minimum owned-handle contract: descriptor I/O, lifecycle,
+- `HandleBackend` is the minimum owned-handle contract: descriptor I/O, lifecycle,
   synchronization, and handle-level metadata/statistics. Scalar-only backends
   do not need namespace or vector operations.
-- `Backend: FileSystem` adds native vectors, paged directories, namespace/link/
+- `VectorBackend: HandleBackend` adds native vectors, paged directories, namespace/link/
   copy operations, and overridable workflows. Defaults compose shared helpers;
   native overrides retain batching and identity guarantees. It is object-safe
   for C and Python adapters, and has no blanket implementation from scalar I/O.
@@ -119,8 +120,8 @@ roots containing nested mounts return an explicit error. Discovery adds no
 per-operation mount lookups to the resulting direct NFS client and does not
 share the kernel client's caches.
 
-The `vnfs` crate root exposes the NFS application API. Native `FileSystem` and
-`Backend` contracts, `VfFile`, `Fd`, `VfAttrs`, raw libc flags,
+The `vnfs` crate root exposes the NFS application API. Native `HandleBackend` and
+`VectorBackend` contracts, `VfFile`, `Fd`, `VfAttrs`, raw libc flags,
 and NFS protocol modules live in the corresponding `vfsi-*` crates; they are
 not republished by `vnfs`. The former `VecFs` trait has been removed. New
 application code can start with:
@@ -202,7 +203,7 @@ Callers may select another bound with `ReadOptions` on `vread`,
 `read_files_with_options`, or `read_to_string_with_options`. A
 `ReadOptions::max_total_bytes(Some(NonZeroUsize))` override must be nonzero;
 `None` inherits the client default. Native backend whole-file collection uses
-the separate `ReadAllOptions` type on `Backend::vread_all_with_options_impl`.
+the separate `ReadAllOptions` type on `VectorBackend::vread_all_with_options_impl`.
 `ResourceLimits` sets client defaults through `NfsBuilder::limits`,
 `NfsClient::with_limits`, or `Auto::with_limits`. Existing clones retain their
 configured policy. Scalar and vector whole-file reads share the optimized

@@ -5,10 +5,11 @@ use std::sync::{
 };
 
 use vfsi_sync::api::ReadOptions;
+use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::{
-    Backend, Capabilities, DirEntry, DirPageCursor, FileSystem, FsClient, ListDirOptions,
-    OpenFlags, OpenOp, ReadIntoResult, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfError,
-    VfFile, VfOffset, VfResult, Vfsi, VfsiExt, WriteOp, WriteResult,
+    Capabilities, DirEntry, DirPageCursor, FsClient, ListDirOptions, OpenFlags, OpenOp,
+    ReadIntoResult, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfError, VfFile, VfOffset,
+    VfResult, Vfsi, VfsiExt, WriteOp, WriteResult,
 };
 
 #[test]
@@ -181,7 +182,7 @@ fn std_io_collection_obeys_client_limits_and_retains_cursor() {
     }
 }
 
-impl Backend for ScalarOnly {
+impl VectorBackend for ScalarOnly {
     fn vopen_impl(&mut self, requests: &[OpenOp]) -> VfResult<Vec<VfFile>> {
         if self.transport_failure {
             return Err(VfError::transport(None, "reply lost"));
@@ -383,7 +384,7 @@ struct PagedBackend {
 
 macro_rules! handle_contract {
     ($backend:ty) => {
-        impl FileSystem for $backend {
+        impl HandleBackend for $backend {
             fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
                 self.scalar.open_impl(request)
             }
@@ -448,7 +449,7 @@ struct LegacyDirectoryBackend {
     calls: usize,
 }
 handle_contract!(LegacyDirectoryBackend);
-impl Backend for LegacyDirectoryBackend {
+impl VectorBackend for LegacyDirectoryBackend {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         panic!("unexpected read")
     }
@@ -503,7 +504,7 @@ struct WriteBoundaryProbe {
     failure_after: usize,
 }
 handle_contract!(WriteBoundaryProbe);
-impl Backend for WriteBoundaryProbe {
+impl VectorBackend for WriteBoundaryProbe {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         Err(VfError::unsupported(0))
     }
@@ -550,7 +551,7 @@ impl Backend for WriteBoundaryProbe {
 fn shared_write_operations_keep_storage_borrowed_through_dynamic_vector_dispatch() {
     let mut concrete = WriteBoundaryProbe::default();
     let calls = Arc::clone(&concrete.calls);
-    let backend: &mut dyn Backend = &mut concrete;
+    let backend: &mut dyn VectorBackend = &mut concrete;
     let storage = [
         WriteOp::from_path("/created", VfOffset::At(0), b"abc".to_vec())
             .with_creation()
@@ -644,7 +645,7 @@ struct AttrsBackend {
     queries: Vec<(bool, VfFile, vfsi_core::AttrMask)>,
 }
 handle_contract!(AttrsBackend);
-impl Backend for AttrsBackend {
+impl VectorBackend for AttrsBackend {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         Err(VfError::unsupported(0))
     }
@@ -687,10 +688,10 @@ impl AttrsBackend {
 
 #[test]
 fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
-    use vfsi_sync::backend_helpers::{native_metadata_impl_default, vsetattrs_typed_default};
+    use vfsi_sync::backend::helpers::{native_metadata_impl_default, vsetattrs_typed_default};
     use vfsi_sync::{AttrMask, Permissions};
     let mut concrete = AttrsBackend::default();
-    let backend: &mut dyn Backend = &mut concrete;
+    let backend: &mut dyn VectorBackend = &mut concrete;
     let file = VfFile::from_fd(7);
     let op = SetAttrsOp::file(&file)
         .len(0)
@@ -771,7 +772,7 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
 
 #[test]
 fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
-    use vfsi_sync::backend_helpers::vsetattrs_typed_default;
+    use vfsi_sync::backend::helpers::vsetattrs_typed_default;
     let ops = [
         SetAttrsOp::new(Target::Path(std::path::Path::new("/a"))).len(1),
         SetAttrsOp::new(Target::Path(std::path::Path::new("/b")))
@@ -820,7 +821,7 @@ fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
     }
 }
 
-impl Backend for PagedBackend {
+impl VectorBackend for PagedBackend {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         panic!("directory paging must not issue reads")
     }
@@ -864,7 +865,7 @@ impl Backend for PagedBackend {
 #[test]
 fn minimal_backend_directory_defaults_return_unsupported() {
     let mut concrete = DefaultBackend::default();
-    let backend: &mut dyn Backend = &mut concrete;
+    let backend: &mut dyn VectorBackend = &mut concrete;
     let dir = std::path::Path::new("/tree");
     assert_eq!(
         backend
@@ -898,7 +899,7 @@ fn minimal_backend_directory_defaults_return_unsupported() {
 fn default_directory_pages_preserve_cursor_fields_and_bounds() {
     let mut concrete = PagedBackend::default();
     let calls = concrete.page_calls.clone();
-    let backend: &mut dyn Backend = &mut concrete;
+    let backend: &mut dyn VectorBackend = &mut concrete;
     let dir = std::path::Path::new("/tree");
     let (first, next) = backend.read_dir_page_impl(dir, None, 1, 3).unwrap();
     assert_eq!(first.len(), 1);
@@ -967,7 +968,7 @@ struct WorkflowOverride {
 }
 handle_contract!(WorkflowOverride);
 
-impl Backend for WorkflowOverride {
+impl VectorBackend for WorkflowOverride {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         panic!("specialized workflows must not fall back to generic vector reads")
     }
@@ -1032,7 +1033,7 @@ impl Backend for WorkflowOverride {
 #[test]
 fn shared_workflows_keep_dynamic_backend_overrides_reachable() {
     let mut concrete = WorkflowOverride::default();
-    let backend: &mut dyn Backend = &mut concrete;
+    let backend: &mut dyn VectorBackend = &mut concrete;
     let files = [VfFile::from_fd(1)];
     assert_eq!(
         backend.vread_all_impl(&files).unwrap(),
@@ -1074,7 +1075,7 @@ fn shared_workflows_keep_dynamic_backend_overrides_reachable() {
     );
 }
 
-impl Backend for DefaultBackend {
+impl VectorBackend for DefaultBackend {
     fn vread_impl(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         self.vector_reads += 1;
         requests
@@ -1093,7 +1094,7 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
         },
         ..Default::default()
     };
-    let backend: &mut dyn Backend = &mut concrete;
+    let backend: &mut dyn VectorBackend = &mut concrete;
     assert!(backend.vstatfs_impl(&[]).unwrap().is_empty());
     assert!(backend.take_notifications().is_empty());
     assert_eq!(backend.getcwd(), std::path::Path::new("/"));
@@ -1188,7 +1189,7 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
     assert!(concrete.vector_reads >= 5);
 }
 
-impl FileSystem for ScalarOnly {
+impl HandleBackend for ScalarOnly {
     fn vfsync_impl(&mut self, files: &[VfFile], mode: vfsi_core::api::SyncMode) -> VfResult<()> {
         self.sync_calls.lock().unwrap().push((mode, files.to_vec()));
         self.sync_failure.clone().map_or(Ok(()), Err)
@@ -2533,7 +2534,7 @@ struct DirectoryProbe {
     failure: Option<(i32, VfError)>,
 }
 handle_contract!(DirectoryProbe);
-impl Backend for DirectoryProbe {
+impl VectorBackend for DirectoryProbe {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         unreachable!("directory test must not issue file reads")
     }

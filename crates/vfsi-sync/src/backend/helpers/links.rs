@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn symlink_raw_impl_default<F: Backend + ?Sized>(
+pub fn symlink_raw_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     oldpath: &Path,
     newpath: &Path,
@@ -11,7 +11,7 @@ pub fn symlink_raw_impl_default<F: Backend + ?Sized>(
     )
 }
 
-pub fn readlink_raw_impl_default<F: Backend + ?Sized>(
+pub fn readlink_raw_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     path: &Path,
 ) -> VfResult<Vec<u8>> {
@@ -21,7 +21,7 @@ pub fn readlink_raw_impl_default<F: Backend + ?Sized>(
     )
 }
 
-pub fn native_symlink_impl_default<F: Backend + ?Sized>(
+pub fn native_symlink_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     target: &std::path::Path,
     link: &std::path::Path,
@@ -31,7 +31,7 @@ pub fn native_symlink_impl_default<F: Backend + ?Sized>(
         .map_err(|error| error.with_context("symlink", link))
 }
 
-pub fn native_hard_link_impl_default<F: Backend + ?Sized>(
+pub fn native_hard_link_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     source: &std::path::Path,
     link: &std::path::Path,
@@ -41,7 +41,7 @@ pub fn native_hard_link_impl_default<F: Backend + ?Sized>(
         .map_err(|error| error.with_context("hard_link", link))
 }
 
-pub fn native_read_link_impl_default<F: Backend + ?Sized>(
+pub fn native_read_link_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     path: &std::path::Path,
 ) -> VfResult<std::path::PathBuf> {

@@ -117,11 +117,12 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
 
 #[test]
 fn backend_implementers_depend_on_lower_level_crates() {
-    use vfsi_sync::{Backend, ReadOp, VfFile, VfOffset};
+    use vfsi_sync::backend::VectorBackend;
+    use vfsi_sync::{ReadOp, VfFile, VfOffset};
 
     let _ = ReadOp::new(VfFile::from_path("/file"), VfOffset::At(0), 1);
-    fn accepts_backend<T: Backend + ?Sized>(_: &mut T) {}
-    let _ = accepts_backend::<dyn Backend>;
+    fn accepts_backend<T: VectorBackend + ?Sized>(_: &mut T) {}
+    let _ = accepts_backend::<dyn VectorBackend>;
 }
 
 #[cfg(all(feature = "auto", target_os = "linux"))]

@@ -1,6 +1,6 @@
 //! Shared Python bindings for vectorized filesystem backends.
 //!
-//! This module exposes the [`Backend`] surface as a `NfsClient` PyO3 class
+//! This module exposes the [`vfsi_sync::backend::VectorBackend`] surface as a `NfsClient` PyO3 class
 //! to protocol-specific extension crates. Every fsspec bulk operation funnels
 //! through vectorized calls here, so round trips scale with batches and
 //! directories rather than files.
@@ -774,7 +774,7 @@ impl NfsClient {
     }
 
     /// Negotiated NFS minor version, or None for the dummy backend.
-    // The erased multi-protocol Backend object cannot use a concrete backend's
+    // The erased multi-protocol VectorBackend object cannot use a concrete backend's
     // extension trait; this compatibility query is intentional at this seam.
     #[allow(deprecated)]
     fn minor_version(&self, py: Python<'_>) -> PyResult<Option<u32>> {
@@ -1363,7 +1363,7 @@ impl NfsClient {
         })
     }
 
-    /// Write files at offset 0 (creating them) through `Backend::vwrite_impl`;
+    /// Write files at offset 0 (creating them) through `VectorBackend::vwrite_impl`;
     /// with `truncate=True` each file is truncated before its data is written.
     /// A vector batch may span multiple protocol requests.
     /// Returns the number of bytes written per file.
@@ -1420,7 +1420,7 @@ impl NfsClient {
         })
     }
 
-    /// Create directories through one `Backend::vmkdir_impl` vector batch.
+    /// Create directories through one `VectorBackend::vmkdir_impl` vector batch.
     fn mkdir_many(&self, py: Python<'_>, paths: Vec<PathBuf>, mode: u32) -> PyResult<()> {
         let attrs: Vec<VfAttrs> = paths
             .iter()
@@ -1437,7 +1437,7 @@ impl NfsClient {
         })
     }
 
-    /// Open many files through `Backend::vopen_raw_impl`; returns descriptors.
+    /// Open many files through `VectorBackend::vopen_raw_impl`; returns descriptors.
     fn open_many(
         &self,
         py: Python<'_>,
@@ -1470,7 +1470,7 @@ impl NfsClient {
         })
     }
 
-    /// Close many descriptors through `Backend::vclose_impl`.
+    /// Close many descriptors through `VectorBackend::vclose_impl`.
     fn close_many(&self, py: Python<'_>, fds: Vec<i64>) -> PyResult<()> {
         let files: Vec<VfFile> = fds.iter().map(|&fd| VfFile::from_fd(fd as i32)).collect();
         self.with_fs(py, move |fs| {
@@ -1597,7 +1597,7 @@ impl NfsClient {
         Ok(out)
     }
 
-    /// Remove paths through `Backend::vremove_impl`. NFS groups siblings by
+    /// Remove paths through `VectorBackend::vremove_impl`. NFS groups siblings by
     /// parent and splits compounds to respect negotiated limits.
     fn remove_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<()> {
         let files: Vec<VfFile> = paths
@@ -1610,7 +1610,7 @@ impl NfsClient {
         })
     }
 
-    /// Rename pairs through one `Backend::vrename_impl` vector batch.
+    /// Rename pairs through one `VectorBackend::vrename_impl` vector batch.
     fn rename_many(&self, py: Python<'_>, pairs: Vec<(PathBuf, PathBuf)>) -> PyResult<()> {
         let files: Vec<(VfFile, VfFile)> = pairs
             .iter()
@@ -1627,7 +1627,7 @@ impl NfsClient {
         })
     }
 
-    /// Copy whole files through `Backend::vcopy_impl` in bounded 16 MiB extents.
+    /// Copy whole files through `VectorBackend::vcopy_impl` in bounded 16 MiB extents.
     /// NFSv4.2 and SMB can use server-side copy, with client-copy fallback.
     /// Returns `(copied_bytes, errors)`.
     fn copy_many(
@@ -1991,7 +1991,7 @@ pub fn register(m: &Bound<'_, PyModule>, version: &str) -> PyResult<()> {
 }
 
 // Protocol inspection belongs to the bindings, outside the native operation contracts.
-trait BindingBackend: vfsi_sync::Backend {
+trait BindingBackend: vfsi_sync::backend::VectorBackend {
     fn nfs_minorversion(&self) -> Option<u32> {
         None
     }

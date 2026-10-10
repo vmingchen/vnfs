@@ -1,4 +1,4 @@
-//! SMB2/3 [`Backend`] backend.
+//! SMB2/3 [`VectorBackend`] backend.
 //!
 //! The backend talks to Samba (or any modern SMB server) with the pure-Rust
 //! `smb2` crate. Path-based stat, rename, delete, and small whole-file I/O use
@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "test-faults")]
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
+use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::*;
 
 use futures_util::future::join_all;
@@ -1290,7 +1291,7 @@ impl SmbVecFs {
     }
 }
 
-impl FileSystem for SmbVecFs {
+impl HandleBackend for SmbVecFs {
     fn capabilities(&self) -> Capabilities {
         if self.server_copy_enabled {
             Capabilities::SERVER_COPY
@@ -1412,39 +1413,39 @@ impl FileSystem for SmbVecFs {
         Ok(new as i64)
     }
     fn read_file_impl(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
-        vfsi_sync::backend_helpers::native_read_file_impl_default(self, file, max_bytes)
+        vfsi_sync::backend::helpers::native_read_file_impl_default(self, file, max_bytes)
     }
     fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
-        vfsi_sync::backend_helpers::native_open_impl_default(self, request)
+        vfsi_sync::backend::helpers::native_open_impl_default(self, request)
     }
     fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
-        vfsi_sync::backend_helpers::native_read_impl_default(self, request)
+        vfsi_sync::backend::helpers::native_read_impl_default(self, request)
     }
     fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
-        vfsi_sync::backend_helpers::native_read_into_impl_default(self, request, buffer)
+        vfsi_sync::backend::helpers::native_read_into_impl_default(self, request, buffer)
     }
     fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
-        vfsi_sync::backend_helpers::native_write_impl_default(self, request)
+        vfsi_sync::backend::helpers::native_write_impl_default(self, request)
     }
     fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {
-        vfsi_sync::backend_helpers::native_seek_impl_default(self, file, position)
+        vfsi_sync::backend::helpers::native_seek_impl_default(self, file, position)
     }
     fn metadata_impl(
         &mut self,
         target: Target<'_, VfFile>,
         options: vfsi_core::api::AttrsOptions,
     ) -> VfResult<VfAttrs> {
-        vfsi_sync::backend_helpers::native_metadata_impl_default(self, target, options)
+        vfsi_sync::backend::helpers::native_metadata_impl_default(self, target, options)
     }
     fn set_attributes_impl(&mut self, update: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_set_attributes_impl_default(self, update)
+        vfsi_sync::backend::helpers::native_set_attributes_impl_default(self, update)
     }
     fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, VfFile>>]) -> VfResult<()> {
-        vfsi_sync::backend_helpers::vsetattrs_typed_default(self, updates)
+        vfsi_sync::backend::helpers::vsetattrs_typed_default(self, updates)
     }
 }
 
-impl Backend for SmbVecFs {
+impl VectorBackend for SmbVecFs {
     fn vopen_outcomes_impl(
         &mut self,
         paths: &[&Path],
@@ -1850,7 +1851,7 @@ impl Backend for SmbVecFs {
             Ok(())
         } else {
             // Standard SMB metadata follows reparse points. Reporting it as
-            // lstat data would silently violate Backend's no-follow contract.
+            // lstat data would silently violate VectorBackend's no-follow contract.
             Err(VfError::unsupported(0))
         }
     }
