@@ -346,7 +346,10 @@ mod mount_tests {
     fn live_mount_session_rejects_replacement_builders() {
         let directory = std::env::var("VFSI_NFS_TEST_MOUNT")
             .expect("VFSI_NFS_TEST_MOUNT is required for this ignored integration test");
-        let mount = Nfs::discover_mount(&directory).unwrap();
+        // Other live tests install nested bind mounts under the export root;
+        // mount discovery correctly rejects roots containing those mounts.
+        let directory = tempfile::tempdir_in(directory).unwrap();
+        let mount = Nfs::discover_mount(directory.path()).unwrap();
         let host = mount.host().to_owned();
         let replacement = |_| {
             Nfs::builder(&host)
@@ -360,8 +363,8 @@ mod mount_tests {
         assert_eq!(error.err_no(), libc::EINVAL as u32);
         assert!(error.to_string().contains("supplied builder"));
 
-        let error =
-            crate::helpers::NfsMountSession::from_mount_with(&directory, replacement).unwrap_err();
+        let error = crate::helpers::NfsMountSession::from_mount_with(directory.path(), replacement)
+            .unwrap_err();
         assert_eq!(error.err_no(), libc::EINVAL as u32);
         assert!(error.to_string().contains("supplied builder"));
     }
