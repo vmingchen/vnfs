@@ -7,7 +7,7 @@ Use it only on trusted networks with appropriate server export policies.
 ## Enable RPCSEC_GSS
 
 ```toml
-vnfs = { version = "0.0.19", features = ["rpcsec-gss"] }
+vnfs = { version = "0.0.20", features = ["rpcsec-gss"] }
 ```
 
 Install `libkrb5-dev` in addition to the Linux build prerequisites. Configure a
