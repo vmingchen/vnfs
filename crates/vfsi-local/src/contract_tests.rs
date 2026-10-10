@@ -381,9 +381,10 @@ mod tests {
 
     #[test]
     fn offset_overflow_is_reported_without_io_or_cursor_wraparound() {
-        let (_root, mut fs) = fs("offset-overflow");
+        let (root, mut fs) = fs("offset-overflow");
         write(&mut fs, "/f", b"x");
         let fd = fs.open_raw_impl(Path::new("/f"), libc::O_RDWR, 0).unwrap();
+        fs.seek_raw_impl(&fd, 1, SeekFrom::Set).unwrap();
 
         let error = fs
             .vwrite_impl(&borrow_writes(&[WriteOp::at(
@@ -393,10 +394,16 @@ mod tests {
             )]))
             .unwrap_err();
         assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+        assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur).unwrap(), 1);
+        assert_eq!(std::fs::metadata(root.0.join("f")).unwrap().len(), 1);
+        assert_eq!(std::fs::read(root.0.join("f")).unwrap(), b"x");
 
         fs.seek_raw_impl(&fd, i64::MAX, SeekFrom::Set).unwrap();
         let error = fs.seek_raw_impl(&fd, 1, SeekFrom::Cur).unwrap_err();
         assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
+        assert_eq!(fs.seek_raw_impl(&fd, 0, SeekFrom::Cur).unwrap(), i64::MAX);
+        assert_eq!(std::fs::metadata(root.0.join("f")).unwrap().len(), 1);
+        assert_eq!(std::fs::read(root.0.join("f")).unwrap(), b"x");
         fs.close_impl(&fd).unwrap();
     }
 
@@ -1094,28 +1101,35 @@ mod tests {
 
     #[test]
     fn setattrsv_rejects_unsupported_bits() {
-        let (_root, mut fs) = fs("setattr-strict");
+        use std::os::unix::fs::PermissionsExt;
+        let (root, mut fs) = fs("setattr-strict");
         write(&mut fs, "/f", b"x");
+        let path = root.0.join("f");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
         let mut a = VfAttrs {
             file: VfFile::from_path("/f"),
             masks: AttrMask::BLOCKS,
+            mode: 0o640,
+            size: 0,
             ..VfAttrs::default()
         };
-        assert_eq!(
-            fs.vsetattrs_raw_impl(std::slice::from_ref(&a))
-                .unwrap_err()
-                .err_no(),
-            VF_ERR_UNSUPPORTED
-        );
-
-        a.masks = AttrMask::MODE | AttrMask::BLOCKS;
-        assert_eq!(
-            fs.vsetattrs_raw_impl(std::slice::from_ref(&a))
-                .unwrap_err()
-                .err_no(),
-            VF_ERR_UNSUPPORTED
-        );
+        for masks in [
+            AttrMask::BLOCKS,
+            AttrMask::MODE | AttrMask::SIZE | AttrMask::BLOCKS,
+        ] {
+            a.masks = masks;
+            assert_eq!(
+                fs.vsetattrs_raw_impl(std::slice::from_ref(&a))
+                    .unwrap_err()
+                    .err_no(),
+                VF_ERR_UNSUPPORTED
+            );
+            let metadata = std::fs::metadata(&path).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o7777, 0o600);
+            assert_eq!(metadata.len(), 1);
+            assert_eq!(std::fs::read(&path).unwrap(), b"x");
+        }
 
         // MODE-only still works.
         a.masks = AttrMask::MODE;
@@ -1161,8 +1175,11 @@ mod tests {
 
     #[test]
     fn lsetattrsv_does_not_follow_symlinks() {
-        let (_root, mut fs) = fs("lsetattr");
+        use std::os::unix::fs::PermissionsExt;
+        let (root, mut fs) = fs("lsetattr");
         write(&mut fs, "/target", b"x");
+        let target = root.0.join("target");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
         fs.symlink_raw_impl(Path::new("/target"), Path::new("/link"))
             .unwrap();
 
@@ -1179,6 +1196,19 @@ mod tests {
                 .unwrap_err()
                 .err_no(),
             VF_ERR_UNSUPPORTED
+        );
+        let metadata = std::fs::metadata(&target).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o7777, 0o640);
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(std::fs::read(&target).unwrap(), b"x");
+        assert!(
+            std::fs::symlink_metadata(root.0.join("link"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert_eq!(
+            std::fs::read_link(root.0.join("link")).unwrap(),
+            Path::new("/target")
         );
 
         // Regular files are set normally.

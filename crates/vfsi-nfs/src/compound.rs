@@ -1447,25 +1447,44 @@ mod request_size_tests {
 
     #[test]
     fn bounded_xdr_size_counts_variable_payload_and_sequence() {
-        let mut compound = Compound::new();
-        compound.tag(b"size-test");
-        compound.putrootfh();
-        compound.lookup(&vec![b'x'; 233]);
-        compound.write(
-            &unsafe { std::mem::zeroed() },
-            0,
-            stable_how4_FILE_SYNC4,
-            &vec![7; 4097],
-        );
-        let before = compound.encoded_len_up_to(8192).unwrap().unwrap();
-        assert_eq!(compound.encoded_len_up_to(before).unwrap(), Some(before));
-        assert_eq!(compound.encoded_len_up_to(before - 1).unwrap(), None);
-
-        let mut sequence: nfs_argop4 = unsafe { std::mem::zeroed() };
-        sequence.argop = nfs_opnum4_NFS4_OP_SEQUENCE;
-        compound.prepend_sequence(sequence);
-        let after = compound.encoded_len_up_to(8192).unwrap().unwrap();
-        assert_eq!(after - before, SEQUENCE_XDR_BYTES);
+        // Independent XDR oracle: header 12 + padded tag, PUTROOTFH 4,
+        // LOOKUP 8 + padded name, WRITE 36 + padded data. SEQUENCE adds 36.
+        // Exercise both sides of the four-byte padding boundaries separately.
+        for (tag_len, name_len, data_len) in (0..=5)
+            .flat_map(|len| [(len, 1, 1), (1, len, 1), (1, 1, len)])
+            .chain([(9, 233, 4097)])
+        {
+            let padded = |len: usize| len.div_ceil(4) * 4;
+            let expected = 60 + padded(tag_len) + padded(name_len) + padded(data_len);
+            let mut compound = Compound::new();
+            compound.tag(&vec![b't'; tag_len]);
+            compound.putrootfh();
+            compound.lookup(&vec![b'x'; name_len]);
+            compound.write(
+                &unsafe { std::mem::zeroed() },
+                0,
+                stable_how4_FILE_SYNC4,
+                &vec![7; data_len],
+            );
+            for sequence_bytes in [0, 36] {
+                if sequence_bytes != 0 {
+                    let mut sequence: nfs_argop4 = unsafe { std::mem::zeroed() };
+                    sequence.argop = nfs_opnum4_NFS4_OP_SEQUENCE;
+                    compound.prepend_sequence(sequence);
+                }
+                let expected = expected + sequence_bytes;
+                assert_eq!(
+                    compound.encoded_len_up_to(8192).unwrap(),
+                    Some(expected),
+                    "tag={tag_len}, name={name_len}, data={data_len}, sequence={sequence_bytes}"
+                );
+                assert_eq!(
+                    compound.encoded_len_up_to(expected).unwrap(),
+                    Some(expected)
+                );
+                assert_eq!(compound.encoded_len_up_to(expected - 1).unwrap(), None);
+            }
+        }
     }
 
     #[test]

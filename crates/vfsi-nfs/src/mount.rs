@@ -435,7 +435,7 @@ mod tests {
         let info = parse_mount(LINE).unwrap();
         let mount = NfsMount {
             root: info.export.clone(),
-            local_path: info.mount_point.clone(),
+            local_path: "/dev/null/missing-mount".into(),
             info,
             device: 1,
             inode: 123,
@@ -450,10 +450,43 @@ mod tests {
             mount.verify_file_id(124).unwrap_err().err_no(),
             libc::ESTALE as u32
         );
-        assert!(
+        let mut matching = crate::NfsConnectOptions::default();
+        matching.root = mount.root.clone();
+        matching.minorversion = Some(mount.minor_version());
+        matching.authentication = NfsAuthentication::AuthSys;
+        // Matching options reach local identity validation; option conflicts
+        // must instead fail with EINVAL before checking this stale mount.
+        assert_eq!(
             mount
-                .validate_options("different-server", &crate::NfsConnectOptions::default())
-                .is_err()
+                .validate_options(mount.host(), &matching)
+                .unwrap_err()
+                .err_no(),
+            libc::ESTALE as u32
         );
+        let mut conflicts = vec![("different-server", matching.clone())];
+        let mut wrong_root = matching.clone();
+        wrong_root.root = "/different-export".into();
+        conflicts.push((mount.host(), wrong_root));
+        let mut wrong_minor = matching.clone();
+        wrong_minor.minorversion = Some(1);
+        conflicts.push((mount.host(), wrong_minor));
+        #[cfg(feature = "rpcsec-gss")]
+        {
+            let mut wrong_auth = matching;
+            wrong_auth.authentication = NfsAuthentication::RpcsecGss {
+                service_principal: None,
+                protection: crate::RpcsecGssProtection::Integrity,
+            };
+            conflicts.push((mount.host(), wrong_auth));
+        }
+        for (host, options) in conflicts {
+            let error = mount.validate_options(host, &options).unwrap_err();
+            assert_eq!(error.err_no(), libc::EINVAL as u32);
+            assert_eq!(
+                error.operation(),
+                Some("conflicting mount connection options")
+            );
+            assert_eq!(error.path(), Some(mount.local_path.as_path()));
+        }
     }
 }

@@ -480,23 +480,63 @@ mod traversal_tests {
 
     #[test]
     fn recursive_visit_drops_fallback_snapshot_on_stop_error_and_limit() {
-        for outcome in 0..3 {
+        for outcome in 0..4 {
             let live = Arc::new(AtomicUsize::new(0));
             let peak = Arc::new(AtomicUsize::new(0));
             let options = ListDirOptions::new()
                 .recursive(true)
                 .max_entries(if outcome == 2 { 2 } else { 1000 })
-                .max_path_bytes(1_000_000);
-            let result = visit(Arc::clone(&live), peak, options, |_, _| match outcome {
-                0 => Ok(std::ops::ControlFlow::Break(())),
-                1 => Err(vfsi_core::api::Error::client(0, libc::EIO as u32)),
-                _ => Ok(std::ops::ControlFlow::Continue(())),
-            });
+                // Root (5 bytes) and two entry paths (13 bytes each) fit.
+                .max_path_bytes(if outcome == 3 { 31 } else { 1_000_000 });
+            let mut fetch = snapshot_pages(Arc::clone(&live), peak);
+            let mut callbacks = 0;
+            let mut live_budget_page = false;
+            let result = visit_directory_pages(
+                &["/tree"],
+                options,
+                ResourceLimits::default(),
+                |_| Ok(1),
+                |_| Ok(()),
+                |paths, cursors, page_size, max_entries| {
+                    // A legal short page leaves a live snapshot when the byte
+                    // limit rejects its second entry, after accepting the first.
+                    let pages = fetch(paths, cursors, page_size.min(2), max_entries)?;
+                    if outcome == 3 && pages[0].0.entries.len() == 2 {
+                        assert!(pages[0].1.is_some());
+                        live_budget_page = true;
+                    }
+                    Ok(pages)
+                },
+                |_, page| {
+                    if outcome != 2 {
+                        assert_eq!(live.load(Ordering::SeqCst), 1);
+                    }
+                    assert_eq!(page.entries.len(), 1);
+                    assert_eq!(
+                        page.entries[0].path(),
+                        Path::new(&format!("/tree/entry-{callbacks}"))
+                    );
+                    callbacks += 1;
+                    match outcome {
+                        0 => Ok(std::ops::ControlFlow::Break(())),
+                        1 => Err(vfsi_core::api::Error::client(0, libc::EIO as u32)),
+                        _ => Ok(std::ops::ControlFlow::Continue(())),
+                    }
+                },
+            );
             match outcome {
                 0 => assert_eq!(result.unwrap(), [crate::TraversalCompletion::Stopped]),
                 1 => assert_eq!(result.unwrap_err().err_no(), libc::EIO as u32),
-                _ => assert_eq!(result.unwrap_err().err_no(), libc::EFBIG as u32),
+                _ => {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.err_no(), libc::EFBIG as u32);
+                    assert_eq!(error.path(), Some(Path::new("/tree/entry-2")));
+                    if outcome == 3 {
+                        assert!(live_budget_page);
+                    }
+                }
             }
+            assert_eq!(callbacks, if outcome >= 2 { 2 } else { 1 });
             assert_eq!(live.load(Ordering::SeqCst), 0);
         }
     }
