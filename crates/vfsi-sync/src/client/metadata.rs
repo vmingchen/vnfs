@@ -115,19 +115,9 @@ impl<F: HandleBackend> FsClient<F> {
                     )
                 }
             };
-            if op.requested_uid() == Some(u32::MAX) || op.requested_gid() == Some(u32::MAX) {
-                return Err(
-                    VfError::client(index, crate::ERR_INVAL).with_context("vsetattrs", path)
-                );
-            }
+            vfsi_core::internal::validate_setattrs(op)
+                .map_err(|error| error.with_index(index).with_context("vsetattrs", path))?;
             paths.push(path);
-            for time in [op.requested_accessed(), op.requested_modified()]
-                .into_iter()
-                .flatten()
-            {
-                crate::backend::system_time_parts(time)
-                    .map_err(|e| e.with_index(index).with_context("vsetattrs", path))?;
-            }
             attrs.push(op.with_target(raw));
         }
         let map_error = |error: VfError, start: usize, count: usize| match error.index() {

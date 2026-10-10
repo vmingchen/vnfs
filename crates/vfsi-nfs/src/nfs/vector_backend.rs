@@ -1252,52 +1252,20 @@ impl VectorBackend for NfsVecFs {
         _use_server_side_copy: bool,
     ) -> VfRes {
         self.ensure_writable(1)?;
-        if !self.exists_impl(dst)? {
-            self.ensure_dir_impl(dst, 0o755)
-                .map_err(|e| e.with_index(0))?;
-        }
-        let masks = AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID;
-        let mut pending = vec![(src_dir.to_path_buf(), dst.to_path_buf())];
-        while let Some((source, destination)) = pending.pop() {
-            let entries = self.listdir_impl(&source, masks, 0, false)?;
-            let mut directories = Vec::new();
-            for entry in entries {
-                let name = entry
-                    .file
-                    .path()
-                    .and_then(|path| path.file_name())
-                    .map(|name| path_bytes(Path::new(name)).to_vec())
-                    .ok_or_else(|| VfError::failure(0, nfsstat4_NFS4ERR_INVAL))?;
-                let source_child = source.join(path_from_bytes(&name));
-                let destination_child = destination.join(path_from_bytes(&name));
-                if entry.ftype == VfType::Directory {
-                    self.ensure_dir_impl(&destination_child, 0o755)
-                        .map_err(|error| error.with_index(0))?;
-                    directories.push((source_child, destination_child));
-                } else if entry.ftype == VfType::Symlink && symlinks {
-                    let target = self
-                        .readlink_raw_impl(&source_child)
-                        .map_err(|error| error.with_index(0))?;
-                    self.symlink_raw_impl(&path_from_bytes(&target), &destination_child)
-                        .map_err(|error| error.with_index(0))?;
-                } else {
-                    let pair =
-                        ExtentPair::from_os_paths(&source_child, 0, &destination_child, 0, None);
-                    let source_target = self
-                        .follow_target_path(&self.server_path(&source_child))
-                        .map_err(|error| error.with_index(0))?;
-                    let destination_target = self
-                        .follow_target_path(&self.server_path(&destination_child))
-                        .map_err(|error| error.with_index(0))?;
-                    self.copy_extent(&source_target, &destination_target, &pair)
-                        .map_err(|error| error.with_index(0))?;
-                }
-            }
-            for directory in directories.into_iter().rev() {
-                pending.push(directory);
-            }
-        }
-        Ok(())
+        vfsi_sync::backend::helpers::copy_tree_with(
+            self,
+            src_dir,
+            dst,
+            symlinks,
+            AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID,
+            |backend, pair| {
+                let source = backend.follow_target_path(&backend.server_path(&pair.src_path))?;
+                let destination =
+                    backend.follow_target_path(&backend.server_path(&pair.dst_path))?;
+                backend.copy_extent(&source, &destination, pair)
+            },
+            |error| error.with_index(0),
+        )
     }
     fn vread_all_with_options_impl(
         &mut self,
@@ -1464,35 +1432,7 @@ impl VectorBackend for NfsVecFs {
         self.ensure_writable(patterns.len())?;
         let mut counts = Vec::with_capacity(patterns.len());
         for (i, p) in patterns.iter().enumerate() {
-            // Validate the entire layout before creating/opening a file so an
-            // overflow cannot strand server-side open state.
-            let mut layout = Vec::with_capacity(p.adb_block_count);
-            let pattern_len = u64::try_from(p.adb_pattern_data.len())
-                .map_err(|_| VfError::failure(i, libc::EOVERFLOW as u32))?;
-            for b in 0..p.adb_block_count {
-                let base = adb_block_base(p, b, i)?;
-                let block_number = p
-                    .adb_block_num
-                    .checked_add(b as u64)
-                    .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
-                let number_offset = p
-                    .adb_reloff_blocknum
-                    .map(|relative| {
-                        let offset = adb_field_offset(base, relative, i)?;
-                        adb_field_offset(offset, 8, i)?;
-                        Ok(offset)
-                    })
-                    .transpose()?;
-                let pattern_offset = p
-                    .adb_reloff_pattern
-                    .map(|relative| {
-                        let offset = adb_field_offset(base, relative, i)?;
-                        adb_field_offset(offset, pattern_len, i)?;
-                        Ok(offset)
-                    })
-                    .transpose()?;
-                layout.push((block_number, number_offset, pattern_offset));
-            }
+            let layout = vfsi_core::internal::adb_layout(p, i)?;
             let full = self.server_path(&p.path);
             let (dir, name) = match split_path_bytes(path_bytes(&full)) {
                 Ok(x) => x,

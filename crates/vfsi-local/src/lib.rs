@@ -1719,46 +1719,15 @@ impl VectorBackend for DummyVecFs {
         symlinks: bool,
         _use_server_side_copy: bool,
     ) -> VfRes {
-        if !self.exists_impl(dst)? {
-            self.ensure_dir_impl(dst, 0o755)
-                .map_err(|e| e.with_index(0))?;
-        }
-        let masks = AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID;
-        let mut pending = vec![(src_dir.to_path_buf(), dst.to_path_buf())];
-        while let Some((source, destination)) = pending.pop() {
-            let entries = self.listdir_impl(&source, masks, 0, false)?;
-            let mut directories = Vec::new();
-            for entry in entries {
-                let name = entry
-                    .file
-                    .path()
-                    .and_then(|path| path.file_name())
-                    .map(|name| name.as_bytes().to_vec())
-                    .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
-                let source_child = source.join(path_from_bytes(&name));
-                let destination_child = destination.join(path_from_bytes(&name));
-                if entry.ftype == VfType::Directory {
-                    self.ensure_dir_impl(&destination_child, 0o755)
-                        .map_err(|error| error.with_index(0))?;
-                    directories.push((source_child, destination_child));
-                } else if entry.ftype == VfType::Symlink && symlinks {
-                    let target = self
-                        .readlink_raw_impl(&source_child)
-                        .map_err(|error| error.with_index(0))?;
-                    self.symlink_raw_impl(&path_from_bytes(&target), &destination_child)
-                        .map_err(|error| error.with_index(0))?;
-                } else {
-                    let pair =
-                        ExtentPair::from_os_paths(&source_child, 0, &destination_child, 0, None);
-                    self.vcopy_data_impl(std::slice::from_ref(&pair))
-                        .map_err(|error| error.with_index(0))?;
-                }
-            }
-            for directory in directories.into_iter().rev() {
-                pending.push(directory);
-            }
-        }
-        Ok(())
+        vfsi_sync::backend::helpers::copy_tree_with(
+            self,
+            src_dir,
+            dst,
+            symlinks,
+            AttrMask::MODE | AttrMask::SIZE | AttrMask::FILEID,
+            |backend, pair| backend.vcopy_data_impl(std::slice::from_ref(pair)),
+            |error| error.with_index(0),
+        )
     }
     fn before_remove_type(&mut self, _index: usize) -> VfResult<()> {
         #[cfg(feature = "test-faults")]
@@ -1769,41 +1738,7 @@ impl VectorBackend for DummyVecFs {
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
         for (i, p) in patterns.iter().enumerate() {
-            let pattern_len =
-                u64::try_from(p.adb_pattern_data.len()).map_err(|_| Self::overflow(i))?;
-            let mut layout = Vec::with_capacity(p.adb_block_count);
-            for b in 0..p.adb_block_count {
-                let relative = (b as u64)
-                    .checked_mul(p.adb_block_size)
-                    .ok_or_else(|| Self::overflow(i))?;
-                let base = p
-                    .adb_offset
-                    .checked_add(relative)
-                    .ok_or_else(|| Self::overflow(i))?;
-                let block_number = p
-                    .adb_block_num
-                    .checked_add(b as u64)
-                    .ok_or_else(|| Self::overflow(i))?;
-                let number_offset = p
-                    .adb_reloff_blocknum
-                    .map(|field| {
-                        let offset = base.checked_add(field).ok_or_else(|| Self::overflow(i))?;
-                        offset.checked_add(8).ok_or_else(|| Self::overflow(i))?;
-                        Ok(offset)
-                    })
-                    .transpose()?;
-                let pattern_offset = p
-                    .adb_reloff_pattern
-                    .map(|field| {
-                        let offset = base.checked_add(field).ok_or_else(|| Self::overflow(i))?;
-                        offset
-                            .checked_add(pattern_len)
-                            .ok_or_else(|| Self::overflow(i))?;
-                        Ok(offset)
-                    })
-                    .transpose()?;
-                layout.push((block_number, number_offset, pattern_offset));
-            }
+            let layout = vfsi_core::internal::adb_layout(p, i)?;
             let path = self
                 .real_path(&self.resolve(&p.path))
                 .map_err(|e| e.with_index(i))?;

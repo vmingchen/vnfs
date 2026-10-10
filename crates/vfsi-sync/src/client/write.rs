@@ -5,29 +5,11 @@ use super::*;
 impl<F: VectorBackend> FsClient<F> {
     #[doc(hidden)]
     pub fn vwrite_native(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
-        self.vwrite_projected_native(requests, |request| request)
-    }
-
-    /// Backend adapter for opaque application requests, preserving borrowed payloads.
-    /// The projection must return the same embedded request on every invocation.
-    #[doc(hidden)]
-    pub fn vwrite_projected_native<'b, T>(
-        &self,
-        requests: &[T],
-        project: impl for<'r> Fn(&'r T) -> &'r FsWrite<'b, F>,
-    ) -> VfResult<Vec<FsWriteResult>>
-    where
-        F: 'b,
-    {
-        self.vwrite_mapped_native(requests, |item| {
-            let request = project(item);
-            *request
-        })
+        self.vwrite_mapped_native(requests, |request| *request)
     }
 
     /// Adapter constructing cheap borrowed requests without a temporary vector.
     /// The mapper must return the same file, offset, and payload on each call.
-    #[doc(hidden)]
     #[doc(hidden)]
     pub fn vwrite_mapped_native<'b, T>(
         &self,
@@ -71,29 +53,11 @@ impl<F: VectorBackend> FsClient<F> {
     /// independent (including hard-link aliases).
     #[doc(hidden)]
     pub fn vwrite_all_native(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
-        self.vwrite_all_projected_native(requests, |request| request)
-    }
-
-    /// Complete projected requests with the same preflight and dependency waves.
-    /// The projection must return the same embedded request on every invocation.
-    #[doc(hidden)]
-    pub fn vwrite_all_projected_native<'b, T>(
-        &self,
-        requests: &[T],
-        project: impl for<'r> Fn(&'r T) -> &'r FsWrite<'b, F>,
-    ) -> VfResult<Vec<FsWriteResult>>
-    where
-        F: 'b,
-    {
-        self.vwrite_all_mapped_native(requests, |item| {
-            let request = project(item);
-            *request
-        })
+        self.vwrite_all_mapped_native(requests, |request| *request)
     }
 
     /// Complete mapped writes with whole-batch preflight and dependency waves.
     /// The mapper must return the same file, offset, and payload on each call.
-    #[doc(hidden)]
     #[doc(hidden)]
     pub fn vwrite_all_mapped_native<'b, T>(
         &self,

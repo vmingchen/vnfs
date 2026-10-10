@@ -311,16 +311,6 @@ fn malformed_readdir_attributes_are_transport_errors() {
 }
 
 #[test]
-fn adb_offset_overflow_preserves_request_index() {
-    let pattern = Adb::blocknum_only("/overflow", u64::MAX, 2, 2, 0, 0);
-    let error = adb_block_base(&pattern, 1, 4).unwrap_err();
-    assert_eq!(error.index(), Some(4));
-    assert_eq!(error.err_no(), libc::EOVERFLOW as u32);
-    let error = adb_field_offset(u64::MAX, 1, 5).unwrap_err();
-    assert_eq!(error.index(), Some(5));
-}
-
-#[test]
 fn recovery_only_retries_transport_and_recoverable_session_statuses() {
     assert!(NfsVecFs::needs_recovery(&VfError::transport(None, "reset")));
     for status in [

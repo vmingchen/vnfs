@@ -300,28 +300,11 @@ impl Auto {
                     }
                 }
             };
-            if op.requested_uid() == Some(u32::MAX) || op.requested_gid() == Some(u32::MAX) {
-                return Err(VfError::client(index, libc::EINVAL as u32)
-                    .with_context("vsetattrs", &route.path));
-            }
-            for time in [op.requested_accessed(), op.requested_modified()]
-                .into_iter()
-                .flatten()
-            {
-                // NFS timestamps are signed seconds, matching the core engine.
-                let duration = time
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_else(|e| e.duration());
-                let seconds = duration.as_secs();
-                if seconds > i64::MAX as u64
-                    || (time < std::time::UNIX_EPOCH
-                        && seconds == i64::MAX as u64
-                        && duration.subsec_nanos() != 0)
-                {
-                    return Err(VfError::client(index, libc::EOVERFLOW as u32)
-                        .with_context("vsetattrs", &route.path));
-                }
-            }
+            vfsi_core::internal::validate_setattrs(op).map_err(|error| {
+                error
+                    .with_index(index)
+                    .with_context("vsetattrs", &route.path)
+            })?;
             resolved.push(route);
         }
         let mut start = 0;
@@ -1109,9 +1092,9 @@ impl Auto {
         self.write_vector(requests, true)
     }
 
-    fn write_vector(
+    fn write_vector<'a>(
         &self,
-        requests: &[crate::WriteOp<'_, AutoFile>],
+        requests: &[crate::WriteOp<'a, AutoFile>],
         complete: bool,
     ) -> VfResult<Vec<WriteResult>> {
         for (index, request) in requests.iter().enumerate() {
@@ -1145,42 +1128,26 @@ impl Auto {
             {
                 end += 1;
             }
-            match &requests[start].file().route {
-                Route::Mounted => {
-                    let batch: Vec<_> = requests[start..end]
-                        .iter()
-                        .map(|request| {
-                            let AutoFileInner::Mounted(file) = &request.file().inner else {
-                                unreachable!()
-                            };
-                            file.write_request_at(request.offset(), request.data())
-                        })
-                        .collect();
-                    let result = if complete {
-                        self.mounted.vwrite_all_native(&batch)
-                    } else {
-                        self.mounted.vwrite_native(&batch)
+            macro_rules! dispatch {
+                ($client:expr, $variant:ident) => {{
+                    let project = |request: &crate::WriteOp<'a, AutoFile>| {
+                        let AutoFileInner::$variant(file) = &request.file().inner else {
+                            unreachable!("validated route")
+                        };
+                        file.write_request_at(request.offset(), request.data())
                     };
-                    output.extend(result.map_err(|e| indexed(e, start))?);
-                }
-                Route::Nfs(connection) => {
-                    let batch: Vec<_> = requests[start..end]
-                        .iter()
-                        .map(|request| {
-                            let AutoFileInner::Nfs(file) = &request.file().inner else {
-                                unreachable!()
-                            };
-                            file.write_request_at(request.offset(), request.data())
-                        })
-                        .collect();
-                    let result = if complete {
-                        connection.client.vwrite_all_native(&batch)
+                    if complete {
+                        $client.vwrite_all_mapped_native(&requests[start..end], project)
                     } else {
-                        connection.client.vwrite_native(&batch)
-                    };
-                    output.extend(result.map_err(|e| indexed(e, start))?);
-                }
+                        $client.vwrite_mapped_native(&requests[start..end], project)
+                    }
+                }};
             }
+            let result = match &requests[start].file().route {
+                Route::Mounted => dispatch!(self.mounted, Mounted),
+                Route::Nfs(connection) => dispatch!(connection.client, Nfs),
+            };
+            output.extend(result.map_err(|error| indexed(error, start))?);
             start = end;
         }
         Ok(output)

@@ -140,21 +140,6 @@ pub(super) fn merge_read_allv_round(
     Ok(next)
 }
 
-pub(super) fn adb_block_base(pattern: &Adb, block: usize, index: usize) -> VfResult<u64> {
-    let relative = (block as u64)
-        .checked_mul(pattern.adb_block_size)
-        .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
-    pattern
-        .adb_offset
-        .checked_add(relative)
-        .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))
-}
-
-pub(super) fn adb_field_offset(base: u64, relative: u64, index: usize) -> VfResult<u64> {
-    base.checked_add(relative)
-        .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))
-}
-
 impl NfsVecFs {
     /// Batched readv for open (descriptor) ops: one compound per chunk of
     /// files, each carrying `[PUTFH, READ]` for every op.

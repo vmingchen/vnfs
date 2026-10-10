@@ -802,11 +802,9 @@ pub trait VfsiExt: Vfsi {
     ) -> Result<crate::api::TraversalCompletion> {
         let options = options.walk_options(self.limits());
         let root = root.as_ref();
-        let mut count = 1usize;
-        let mut bytes = root.as_os_str().len();
-        if count > options.entry_limit() || bytes > options.path_byte_limit() {
-            return Err(crate::api::Error::client(0, libc::EFBIG as u32));
-        }
+        let mut budget =
+            crate::internal::TraversalBudget::new(options.entry_limit(), options.path_byte_limit());
+        budget.charge(root)?;
         let mut pending = vec![(root.to_path_buf(), 0usize)];
         while let Some((path, depth)) = pending.pop() {
             if depth >= options.depth_limit() && options.truncates_at_depth_limit() {
@@ -814,23 +812,17 @@ pub trait VfsiExt: Vfsi {
             }
             let mut entries = self.read_dir_with_options(
                 &path,
-                crate::api::ListDirOptions::new()
-                    .fields(options.attributes())
-                    .follow_symlinks(options.follows_symlinks())
-                    .max_entries(options.entry_limit().saturating_sub(count))
-                    .max_path_bytes(options.path_byte_limit().saturating_sub(bytes)),
+                budget.remaining_options(
+                    crate::api::ListDirOptions::new()
+                        .fields(options.attributes())
+                        .follow_symlinks(options.follows_symlinks()),
+                ),
             )?;
             for entry in &entries {
-                count = count
-                    .checked_add(1)
-                    .ok_or_else(|| crate::api::Error::client(0, libc::EFBIG as u32))?;
-                bytes = bytes
-                    .checked_add(entry.path().as_os_str().len())
-                    .ok_or_else(|| crate::api::Error::client(0, libc::EFBIG as u32))?;
-                if count > options.entry_limit()
-                    || bytes > options.path_byte_limit()
-                    || depth >= options.depth_limit()
-                {
+                budget
+                    .charge(entry.path())
+                    .map_err(|error| error.with_context("visit_dirs_ordered", entry.path()))?;
+                if depth >= options.depth_limit() {
                     return Err(crate::api::Error::client(0, libc::EFBIG as u32)
                         .with_context("visit_dirs_ordered", entry.path()));
                 }
