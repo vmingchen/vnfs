@@ -81,6 +81,19 @@ pub mod examples {
     pub mod directories {}
 }
 
+/// Operational guides with compiled examples, separate from the API reference.
+#[cfg(feature = "nfs")]
+pub mod guides {
+    #[doc = include_str!("guides/standard_io.md")]
+    pub mod standard_io {}
+    #[doc = include_str!("guides/failure_recovery.md")]
+    pub mod failure_recovery {}
+    #[doc = include_str!("guides/authentication.md")]
+    pub mod authentication {}
+    #[doc = include_str!("guides/operations.md")]
+    pub mod operations {}
+}
+
 /// Application-facing result type for the Rust-native API.
 pub type Result<T> = vfsi_core::VfResult<T>;
 

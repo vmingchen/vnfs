@@ -68,6 +68,7 @@ helpers, not core execution methods. Import both with `vnfs::prelude::*`.
 
 ## API map
 
+- [`guides`]: standard Rust I/O, failure/recovery, authentication, and operational tuning.
 - [`nfs`]: direct connections, owned handles, authentication, read pools, tuning.
 - [`files`]: portable I/O traits, read/write results, resource limits.
 - [`directory`]: metadata selection, listings, traversal and removal options.
@@ -98,7 +99,7 @@ helpers, not core execution methods. Import both with `vnfs::prelude::*`.
   Positional requests preserve the file cursor.
 - Files close best-effort on drop. Use explicit `VfsiExt::close_files` to surface cleanup
   failures or `vclose` to retain local cleanup ownership on failure. Writes
-  are not automatically durable; use a file's `sync_data` or `sync_all` as needed.
+  are not automatically durable; use `VfsiExt::sync_data` or `VfsiExt::sync_all` as needed.
 - Cloning a client shares its session and lock, not independent parallelism.
   [`NfsClientPool`] distributes workloads across independent sessions;
   [`NfsReadPool`] provides bounded pipelined large-file reads.

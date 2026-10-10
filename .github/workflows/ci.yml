@@ -90,6 +90,9 @@ jobs:
           for example in bulk_files open_handles stream_file directories; do
             test -f "target/doc/vnfs/examples/$example/index.html"
           done
+          for guide in standard_io failure_recovery authentication operations; do
+            test -f "target/doc/vnfs/guides/$guide/index.html"
+          done
           test -f target/doc/vfsi_nfs/nfs/struct.NfsVecFs.html
       - name: Run the repository Rust test suite
         run: ./scripts/test-rust.sh
