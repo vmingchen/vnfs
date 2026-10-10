@@ -5,15 +5,15 @@ and `FileHandle` contracts. It is part of `vnfs`, not a separate dependency.
 
 ## Application bridges
 
-`helpers::PathMapper` maps local paths to a root-relative namespace without owning
-a filesystem. Use `NfsMountSession` to bind a validated NFS connection to a mapping.
-Use `ResolvePath::Follow` for existing source operands and `NoFollow` for links,
+`nfs::mount::PathMapper` maps local paths to a root-relative namespace without owning
+a filesystem. Use `nfs::mount::NfsMountSession` to bind a validated NFS connection to a mapping.
+Use `nfs::mount::ResolvePath::Follow` for existing source operands and `NoFollow` for links,
 removal operands and new destinations. Mapping preserves non-UTF-8 paths and
 rejects operands outside the mapping root. It is not race-free confinement or a
 kernel/direct-client cache-coherence mechanism. Keep mount configuration stable
 for the session's lifetime.
 
-For direct NFS clients, `helpers::NfsMountSession::from_mount` combines mount
+For direct NFS clients, `nfs::mount::NfsMountSession::from_mount` combines mount
 discovery, connection, mount details, and local-to-remote path mapping. Use it
 when a tool needs to group paths by mount or report the discovered server while
 also issuing direct vector operations. It performs one discovery and validates
@@ -34,7 +34,9 @@ flushing remain application policy. For a shared filesystem destination, prefer
 the existing vectorized `copy_items` workflows.
 
 ```rust,no_run
-use vnfs::{StreamOptions, helpers::{NfsMountSession, ResolvePath, copy_to_writer}};
+use vnfs::files::{StreamOptions};
+use vnfs::nfs::mount::{NfsMountSession, ResolvePath};
+use vnfs::helpers::copy_to_writer;
 
 let session = NfsMountSession::from_mount("/mnt/data")?;
 let source = session.map("/mnt/data/input", ResolvePath::Follow)?;
@@ -48,8 +50,9 @@ When the application also needs mount information, use the bundled session
 instead of separately discovering the mount and constructing a path mapper:
 
 ```rust,no_run
-use vnfs::{Attributes, AttrsOptions, Vfsi, VfsiExt};
-use vnfs::helpers::{NfsMountSession, ResolvePath};
+use vnfs::directory::{Attributes, AttrsOptions};
+use vnfs::files::{Vfsi, VfsiExt};
+use vnfs::nfs::mount::{NfsMountSession, ResolvePath};
 
 let session = NfsMountSession::from_mount("/mnt/nfs/project")?;
 let path = session.map("/mnt/nfs/project/README", ResolvePath::Follow)?;
@@ -63,7 +66,9 @@ println!("NFS server: {}", session.mount().host());
 ## TreeBuilder
 
 ```rust,no_run
-use vnfs::{VfsiExt, Nfs, helpers::TreeBuilder};
+use vnfs::files::{VfsiExt};
+use vnfs::nfs::{Nfs};
+use vnfs::helpers::TreeBuilder;
 
 let fs = Nfs::connect("server.example.com")?;
 let tree = TreeBuilder::new()
@@ -116,7 +121,11 @@ in its existing NFS integration matrix.
 ## Copy, move, and tree statistics
 
 ```rust,no_run
-use vnfs::{Nfs, ListDirOptions, helpers::{copy_items, tree_stats, CopyOptions}};
+use vnfs::nfs::{Nfs};
+use vnfs::directory::{ListDirOptions};
+use vnfs::helpers::copy_items;
+use vnfs::helpers::tree_stats;
+use vnfs::helpers::CopyOptions;
 
 let fs = Nfs::connect("server.example.com")?;
 let result = copy_items(&fs, &["/input/images", "/input/config"], "/output",

@@ -63,8 +63,8 @@ not secure directory handles.
 Obtain a genuine handle from a trusted namespace for security-sensitive removal:
 
 ```rust,no_run
-use vnfs::VfsiExt;
-# fn example(fs: &vnfs::NfsClient) -> vnfs::Result<()> {
+use vnfs::files::VfsiExt;
+# fn example(fs: &vnfs::nfs::NfsClient) -> vnfs::Result<()> {
 let mut dir = fs.open_dir_handle("/resolved-directory")?;
 fs.remove_dir_contents_handle(&dir)?;
 dir.try_close()?;

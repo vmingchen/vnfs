@@ -30,7 +30,7 @@ fn application_walk_prunes_before_io_selects_metadata_and_allows_reentry() {
             "/",
             vfsi_core::api::ListDirOptions::default()
                 .recursive(true)
-                .fields(vnfs::Attributes::MODE)
+                .fields(vnfs::directory::Attributes::MODE)
                 .enter_leave(true)
                 .sort_by_name(true),
             |event| {
@@ -38,13 +38,13 @@ fn application_walk_prunes_before_io_selects_metadata_and_allows_reentry() {
                 assert!(event.entry.attrs().uid().is_none());
                 assert!(event.entry.attrs().modified().is_none());
                 client.attrs("/a").unwrap();
-                if event.kind == vnfs::WalkEventKind::Enter
+                if event.kind == vnfs::directory::WalkEventKind::Enter
                     && event.entry.path() == Path::new("/blocked")
                 {
                     client.remove_dir_all("/blocked").unwrap();
-                    Ok(vnfs::WalkControl::SkipSubtree)
+                    Ok(vnfs::directory::WalkControl::SkipSubtree)
                 } else {
-                    Ok(vnfs::WalkControl::Continue)
+                    Ok(vnfs::directory::WalkControl::Continue)
                 }
             },
         )
@@ -79,7 +79,7 @@ fn bounded_open_file_collection_keeps_identity_across_rename_and_replacement() {
             .read_to_end(&mut Vec::new())
             .unwrap_err()
             .kind(),
-        vnfs::ErrorKind::FileTooLarge
+        vnfs::error::ErrorKind::FileTooLarge
     );
     drop(io);
     file.close().unwrap();
@@ -97,7 +97,8 @@ fn native_paged_tree_honors_budget_overrides_and_allows_reentry() {
         return;
     }
     use vfsi_sync::FsClient;
-    use vnfs::{ListDirOptions, ResourceLimits, TraversalCompletion};
+    use vnfs::directory::{ListDirOptions, TraversalCompletion};
+    use vnfs::files::ResourceLimits;
     let (_root, backend) = dummy();
     let client = FsClient::new(backend).with_limits(ResourceLimits::new().max_directory_entries(3));
     client.create_dir_all("/tree/sub").unwrap();
@@ -117,7 +118,7 @@ fn native_paged_tree_honors_budget_overrides_and_allows_reentry() {
             },
         )
         .unwrap_err();
-    assert_eq!(error.kind(), vnfs::ErrorKind::FileTooLarge);
+    assert_eq!(error.kind(), vnfs::error::ErrorKind::FileTooLarge);
     assert_eq!(seen.len(), 3);
     seen.clear();
     let options = ListDirOptions::new().recursive(true).max_entries(10);
@@ -211,7 +212,7 @@ fn one_shot_file_vectors_handle_empty_batches_and_replace_files() {
 #[test]
 fn application_directory_vectors_preserve_fields_and_limits() {
     use vfsi_sync::FsClient;
-    use vnfs::{Attributes, ListDirOptions};
+    use vnfs::directory::{Attributes, ListDirOptions};
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -280,7 +281,7 @@ fn application_directory_vectors_preserve_fields_and_limits() {
 #[test]
 fn application_metadata_and_batch_mutations() {
     use vfsi_sync::FsClient;
-    use vnfs::Attributes;
+    use vnfs::directory::Attributes;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -290,7 +291,7 @@ fn application_metadata_and_batch_mutations() {
     let metadata = client
         .attrs_with_options(
             "/link",
-            vnfs::AttrsOptions::new()
+            vnfs::directory::AttrsOptions::new()
                 .fields(Attributes::MODE | Attributes::BLOCKS)
                 .follow_symlinks(false),
         )
@@ -302,7 +303,7 @@ fn application_metadata_and_batch_mutations() {
     client
         .vcopy(
             &[("/source-1", "/copy-1"), ("/source-2", "/copy-2")],
-            vnfs::CopyOption::default(),
+            vnfs::files::CopyOption::default(),
         )
         .unwrap();
     assert_eq!(client.read("/copy-1").unwrap(), b"abc");
@@ -311,7 +312,7 @@ fn application_metadata_and_batch_mutations() {
         .copy_with_options(
             "/link",
             "/link-copy",
-            vnfs::CopyOption::new().follow_source_symlinks(false),
+            vnfs::files::CopyOption::new().follow_source_symlinks(false),
         )
         .unwrap();
     assert_eq!(
@@ -322,7 +323,7 @@ fn application_metadata_and_batch_mutations() {
     client
         .vremove(
             &["/copy-1", "/copy-2"],
-            vnfs::RemoveMode::Entry,
+            vnfs::directory::RemoveMode::Entry,
             Default::default(),
         )
         .unwrap();
@@ -332,7 +333,7 @@ fn application_metadata_and_batch_mutations() {
 #[test]
 fn application_directory_cohorts_preserve_global_error_index() {
     use vfsi_sync::FsClient;
-    use vnfs::Attributes;
+    use vnfs::directory::Attributes;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -372,7 +373,8 @@ fn dummy_getcwd() {
 #[test]
 fn single_file_stream_is_bounded_ordered_and_cancellable() {
     use vfsi_sync::FsClient;
-    use vnfs::{Error as VfError, StreamOptions};
+    use vnfs::Error as VfError;
+    use vnfs::files::StreamOptions;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -546,7 +548,7 @@ fn native_path_adapters_preserve_relative_paths() {
     assert!(fs.exists_impl(Path::new("/x")).unwrap());
     assert_eq!(
         fs.stat_impl(Path::new("/x")).unwrap().ftype,
-        vnfs::FileType::Directory
+        vnfs::directory::FileType::Directory
     );
     fs.chdir(Path::new("/x")).unwrap();
     fs.symlink_raw_impl(Path::new("missing"), Path::new("dangling"))
@@ -697,7 +699,8 @@ fn open_dir_handle_empties_contents() {
 #[test]
 fn owned_directory_handle_refuses_path_only_backend() {
     use vfsi_sync::FsClient;
-    use vnfs::{RemoveOptions, VfsiExt};
+    use vnfs::directory::RemoveOptions;
+    use vnfs::files::VfsiExt;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -845,7 +848,7 @@ fn standard_open_options_validate_access_modes() {
 fn owned_client_supports_multiple_live_files_and_typed_requests() {
     use std::io::{Read, Seek, SeekFrom, Write};
     use vfsi_sync::FsClient;
-    use vnfs::{OpenFlags, OpenOp};
+    use vnfs::files::{OpenFlags, OpenOp};
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -908,7 +911,7 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
 #[test]
 fn native_client_covers_idiomatic_file_and_namespace_workflows() {
     use vfsi_sync::FsClient;
-    use vnfs::FileType as VfType;
+    use vnfs::directory::FileType as VfType;
 
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
@@ -937,7 +940,10 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
         .unwrap();
     assert_eq!(
         client
-            .vwrite(&[vnfs::WriteOp::at(&file, 1, b"a")], Default::default())
+            .vwrite(
+                &[vnfs::files::WriteOp::at(&file, 1, b"a")],
+                Default::default()
+            )
             .unwrap()[0]
             .written,
         1
@@ -946,7 +952,7 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
     assert_eq!(
         client
             .vread(
-                [vnfs::ReadOp::into(&file, 0, &mut bytes)],
+                [vnfs::files::ReadOp::into(&file, 0, &mut bytes)],
                 Default::default()
             )
             .unwrap()[0]
@@ -966,7 +972,7 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
     client
         .chmod(
             vfsi_core::Target::file(&file),
-            vnfs::Permissions::from_mode(0o600),
+            vnfs::directory::Permissions::from_mode(0o600),
         )
         .unwrap();
     let metadata = client.attrs(vfsi_core::Target::file(&file)).unwrap();
@@ -974,8 +980,8 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
     assert_eq!(metadata.permissions().unwrap().mode(), 0o600);
     file.close().unwrap();
     client
-        .vsetattrs(&[vnfs::SetAttrsOp::new("/tree/nested/file")
-            .permissions(vnfs::Permissions::from_mode(0o400))
+        .vsetattrs(&[vnfs::directory::SetAttrsOp::new("/tree/nested/file")
+            .permissions(vnfs::directory::Permissions::from_mode(0o400))
             .len(4)])
         .unwrap();
     let metadata = client.attrs("/tree/nested/file").unwrap();
@@ -1257,7 +1263,7 @@ fn native_scalar_contract_separates_metadata_query_from_update() {
     use vfsi_sync::api::AttrsOptions;
     use vfsi_sync::backend::HandleBackend;
     use vfsi_sync::{AttrMask, SetAttrsOp, Target};
-    use vnfs::{OpenFlags, OpenOp};
+    use vnfs::files::{OpenFlags, OpenOp};
 
     let (_root, mut fs) = dummy();
     let file = HandleBackend::open_impl(
@@ -1276,7 +1282,7 @@ fn native_scalar_contract_separates_metadata_query_from_update() {
     assert!(attrs.returned.contains(AttrMask::MODE | AttrMask::SIZE));
 
     let update = SetAttrsOp::new(Target::Path(Path::new("/metadata")))
-        .permissions(vnfs::Permissions::from_mode(0o640));
+        .permissions(vnfs::directory::Permissions::from_mode(0o640));
     HandleBackend::set_attributes_impl(&mut fs, &update).unwrap();
     assert_eq!(
         fs.stat_impl(Path::new("/metadata")).unwrap().mode & 0o777,
@@ -1288,7 +1294,7 @@ fn native_scalar_contract_separates_metadata_query_from_update() {
 fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
     use vfsi_sync::FsClient;
     use vfsi_sync::{AttrMask, WriteOp};
-    use vnfs::ListDirOptions;
+    use vnfs::directory::ListDirOptions;
 
     let (_root, mut fs) = dummy();
     fs.ensure_dir_impl(Path::new("/tree/sub"), 0o755).unwrap();

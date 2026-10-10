@@ -5,7 +5,7 @@ use std::{
     ops::ControlFlow,
     path::Path,
 };
-use vnfs::{helpers::*, *};
+use vnfs::{directory::*, error::*, files::*, helpers::*, posix::*};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fault {
@@ -185,7 +185,7 @@ impl Vfsi for Harness {
     fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         p: &[(P, Q)],
-        options: vnfs::CopyOption,
+        options: vnfs::files::CopyOption,
     ) -> Result<()> {
         self.calls.borrow_mut().copies += 1;
         self.fs.vcopy(p, options)

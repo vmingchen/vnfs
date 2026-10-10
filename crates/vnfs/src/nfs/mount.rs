@@ -1,4 +1,5 @@
-//! Reusable path mapping for applications that opt into direct mount access.
+//! Linux NFS mount discovery and local-to-remote path mapping.
+pub use crate::native_nfs::NfsMount;
 use crate::{Error, Result};
 use std::path::{Path, PathBuf};
 
@@ -99,8 +100,8 @@ impl PathMapper {
 #[cfg(all(feature = "nfs", target_os = "linux"))]
 #[derive(Debug)]
 pub struct NfsMountSession {
-    mount: crate::NfsMount,
-    fs: crate::NfsClient,
+    mount: NfsMount,
+    fs: super::NfsClient,
     paths: PathMapper,
 }
 
@@ -120,15 +121,15 @@ impl NfsMountSession {
     /// protocol version must remain unchanged.
     pub fn from_mount_with(
         directory: impl AsRef<Path>,
-        configure: impl FnOnce(crate::NfsBuilder) -> crate::NfsBuilder,
+        configure: impl FnOnce(super::NfsBuilder) -> super::NfsBuilder,
     ) -> Result<Self> {
-        Self::from_discovered_with(crate::Nfs::discover_mount(directory)?, configure)
+        Self::from_discovered_with(super::Nfs::discover_mount(directory)?, configure)
     }
 
     /// Connect using mount information already returned by
-    /// [`crate::Nfs::discover_mount`]. This avoids repeating system mount-table
+    /// [`super::Nfs::discover_mount`]. This avoids repeating system mount-table
     /// discovery when an application first classifies or groups an operand.
-    pub fn from_discovered(mount: crate::NfsMount) -> Result<Self> {
+    pub fn from_discovered(mount: NfsMount) -> Result<Self> {
         Self::from_discovered_with(mount, |builder| builder)
     }
 
@@ -138,8 +139,8 @@ impl NfsMountSession {
     /// [`Self::from_mount_with`]. Replacement builders are rejected before any
     /// connection is attempted.
     pub fn from_discovered_with(
-        mount: crate::NfsMount,
-        configure: impl FnOnce(crate::NfsBuilder) -> crate::NfsBuilder,
+        mount: NfsMount,
+        configure: impl FnOnce(super::NfsBuilder) -> super::NfsBuilder,
     ) -> Result<Self> {
         let fs = mount
             .builder()?
@@ -154,12 +155,12 @@ impl NfsMountSession {
     }
 
     /// The validated direct NFS client.
-    pub fn fs(&self) -> &crate::NfsClient {
+    pub fn fs(&self) -> &super::NfsClient {
         &self.fs
     }
 
     /// Information about the discovered kernel mount.
-    pub fn mount(&self) -> &crate::NfsMount {
+    pub fn mount(&self) -> &NfsMount {
         &self.mount
     }
 

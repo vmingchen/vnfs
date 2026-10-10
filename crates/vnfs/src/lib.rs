@@ -5,108 +5,90 @@
 )]
 
 /// Direct NFSv4 connections, authentication, tuning, and owned handles.
-/// Start with [`Nfs::builder`] for a server or [`Nfs::from_mount`] for an
-/// existing Linux NFS mount. Mount discovery still uses a direct connection,
-/// not the kernel client's cache.
+/// Start with Nfs::builder for a server. Linux mount discovery and path
+/// mapping live under the mount submodule.
 #[cfg(feature = "nfs")]
+#[doc = include_str!("guides/standard_io.md")]
+#[doc = include_str!("guides/failure_recovery.md")]
+#[doc = include_str!("guides/authentication.md")]
+#[doc = include_str!("guides/operations.md")]
 pub mod nfs {
-    #[doc(inline)]
-    #[cfg(target_os = "linux")]
-    pub use crate::NfsMount;
+    pub use crate::facade::{NfsClient, NfsDir, NfsFile};
+    pub use crate::native_nfs::{Nfs, NfsBuilder, NfsClientPool, NfsVersion};
     #[cfg(feature = "rpcsec-gss")]
-    pub use crate::RpcsecGssProtection;
-    #[doc(inline)]
-    #[cfg(target_os = "linux")]
-    pub use crate::helpers::NfsMountSession;
-    #[doc(inline)]
-    pub use crate::{
-        Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsClientPool, NfsDir, NfsEvent, NfsFile,
-        NfsObserver, NfsReadPool, NfsReadPoolOptions, NfsRecoveryPolicy, NfsVersion,
+    pub use vfsi_nfs::RpcsecGssProtection;
+    pub use vfsi_nfs::{
+        NfsAuthentication, NfsEvent, NfsObserver, NfsReadPool, NfsReadPoolOptions,
+        NfsRecoveryPolicy,
     };
+
+    /// Linux mount discovery and local-to-remote path mapping for direct NFS access.
+    #[cfg(target_os = "linux")]
+    pub mod mount;
 }
 
 /// Linux-mounted paths and opt-in automatic direct NFS routing.
-/// [`crate::Posix`] always uses the kernel. [`Auto`] can use a separate direct NFS
-/// client; it does **not** provide cache coherence with kernel access.
+/// crate::posix::Posix always uses the kernel. Auto can use a separate direct NFS
+/// client; it does not provide cache coherence with kernel access.
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub mod mounted {
-    #[doc(inline)]
-    pub use crate::{Auto, AutoDir, AutoFile, AutoRoute};
+    pub use crate::auto::{Auto, AutoDir, AutoFile, AutoRoute};
 }
 
-/// Rooted filesystem access through ordinary POSIX syscalls (`posix` feature).
+/// Rooted filesystem access through ordinary POSIX syscalls (posix feature).
 #[cfg(all(feature = "posix", unix))]
 pub mod posix {
-    #[doc(inline)]
-    pub use crate::{Posix, PosixDir, PosixFile};
+    pub use crate::facade::{Posix, PosixDir, PosixFile};
 }
 
 /// Backend-independent file I/O, allocation budgets, and vector result types.
+#[cfg_attr(
+    feature = "nfs",
+    doc = "\n\n## Runnable examples\n\n### Bulk files\n\nBatch complete small files while preserving input order.\n"
+)]
+#[cfg_attr(feature = "nfs", doc = concat!("\n```no_run\n", include_str!("../examples/bulk_files.rs"), "\n```\n"))]
+#[cfg_attr(
+    feature = "nfs",
+    doc = "\n### Open handles\n\nRead ranges into caller-owned buffers and close handles explicitly.\n"
+)]
+#[cfg_attr(feature = "nfs", doc = concat!("\n```no_run\n", include_str!("../examples/open_handles.rs"), "\n```\n"))]
+#[cfg_attr(
+    feature = "nfs",
+    doc = "\n### Bounded streaming\n\nProcess a large file without collecting it in memory.\n"
+)]
+#[cfg_attr(feature = "nfs", doc = concat!("\n```no_run\n", include_str!("../examples/stream_file.rs"), "\n```\n"))]
 pub mod files {
-    #[doc(inline)]
-    pub use crate::{
-        Capabilities, FileHandle, OpenFlags, OpenOp, OpenOptions, ReadOp, ReadOptions, ReadResult,
-        ResourceLimits, StreamCompletion, StreamOptions, SyncMode, Vfsi, VfsiExt, WriteOp,
-        WriteOptions, WriteResult,
+    pub use vfsi_core::api::{
+        OpenOptions, ReadOp, ReadOptions, ReadResult, ResourceLimits, StreamCompletion,
+        StreamOptions, SyncMode, WriteOp, WriteOptions, WriteResult,
+    };
+    pub use vfsi_core::{
+        AsTarget, Capabilities, CopyOption, FileHandle, FilesystemStats, OpenFlags, OpenOp, Target,
+        Vfsi, VfsiExt,
     };
 }
 
 /// Attrs, bounded directory listings, traversal, and removal policies.
+#[cfg_attr(
+    feature = "nfs",
+    doc = "\n\n## Runnable example\n\nBatch directory metadata or visit a tree incrementally.\n"
+)]
+#[cfg_attr(feature = "nfs", doc = concat!("\n```no_run\n", include_str!("../examples/directories.rs"), "\n```\n"))]
 pub mod directory {
-    #[doc(inline)]
-    pub use crate::{
-        Attributes, Attrs, AttrsOptions, ControlFlow, DepthLimit, DirEntry, DirHandle,
-        DirectoryListing, FileType, ListDirOptions, MkDirOp, Permissions, RemoveMode,
+    pub use std::ops::ControlFlow;
+    pub use vfsi_core::api::{
+        AttrsOptions, DepthLimit, DirHandle, DirectoryListing, ListDirOptions, MkDirOp, RemoveMode,
         RemoveOptions, RenameOptions, SetAttrsOp, TraversalCompletion, WalkControl, WalkEvent,
         WalkEventKind,
     };
+    pub use vfsi_core::{AttrMask as Attributes, Attrs, DirEntry, Permissions, VfType as FileType};
 }
 
 /// Error classification without losing protocol status or the failing input index.
 pub mod error {
-    #[doc(inline)]
-    pub use crate::{Error, ErrorDomain, ErrorKind, Result, StatusCode, TransportKind};
-}
-
-/// Canonical, runnable application examples. Each listing is compiled as a
-/// doctest and as a Cargo example; workflows are also tested on mounted files.
-/// None requires importing backend crates. See the repository's
-/// `crates/vnfs/examples/README.md` for commands and benchmark programs.
-#[cfg(feature = "nfs")]
-pub mod examples {
-    /// Batch complete small files, with explicit fresh-directory ownership.
-    #[doc = concat!("```no_run\n", include_str!("../examples/bulk_files.rs"), "\n```")]
-    pub mod bulk_files {}
-    /// Read ranges into caller-owned buffers and explicitly close handles.
-    #[doc = concat!("```no_run\n", include_str!("../examples/open_handles.rs"), "\n```")]
-    pub mod open_handles {}
-    /// Process a large file with bounded memory rather than collecting it.
-    #[doc = concat!("```no_run\n", include_str!("../examples/stream_file.rs"), "\n```")]
-    pub mod stream_file {}
-    /// Batch directory metadata or visit a tree incrementally.
-    #[doc = concat!("```no_run\n", include_str!("../examples/directories.rs"), "\n```")]
-    pub mod directories {}
-}
-
-/// Operational guides with compiled examples, separate from the API reference.
-#[cfg(any(feature = "nfs", all(feature = "uring", target_os = "linux")))]
-pub mod guides {
-    /// Linux io_uring batching, operational limits and measured comparisons.
-    #[cfg(all(feature = "uring", target_os = "linux"))]
-    #[doc = include_str!("guides/uring.md")]
-    pub mod uring {}
-    #[cfg(feature = "nfs")]
-    #[doc = include_str!("guides/standard_io.md")]
-    pub mod standard_io {}
-    #[cfg(feature = "nfs")]
-    #[doc = include_str!("guides/failure_recovery.md")]
-    pub mod failure_recovery {}
-    #[cfg(feature = "nfs")]
-    #[doc = include_str!("guides/authentication.md")]
-    pub mod authentication {}
-    #[cfg(feature = "nfs")]
-    #[doc = include_str!("guides/operations.md")]
-    pub mod operations {}
+    pub use crate::{Error, Result};
+    pub use vfsi_core::api::ErrorKind;
+    pub use vfsi_core::{ErrorDomain, StatusCode, TransportKind};
 }
 
 /// Application-facing result type for the Rust-native API.
@@ -121,7 +103,12 @@ pub type Error = vfsi_core::VfError;
     all(any(feature = "auto", feature = "uring"), target_os = "linux")
 ))]
 mod application;
-pub use vfsi_core::{AsTarget, DirHandle, FileHandle, Target, Vfsi, VfsiExt};
+// The root keeps only the core application traits, errors, and result alias.
+// Other public types have one canonical path under files, directory, error,
+// or a backend-specific namespace. Crate-private aliases keep implementation
+// modules concise without expanding the external API.
+pub(crate) use vfsi_core::{DirHandle, FileHandle, Target};
+pub use vfsi_core::{Vfsi, VfsiExt};
 #[cfg(any(
     feature = "nfs",
     all(feature = "posix", unix),
@@ -130,13 +117,12 @@ pub use vfsi_core::{AsTarget, DirHandle, FileHandle, Target, Vfsi, VfsiExt};
 mod read;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use read::ReadRequest;
-pub use vfsi_core::api::ListDirOptions;
-pub use vfsi_core::api::RenameOptions;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_core::api::internal::OwnedReadResult;
-pub use vfsi_core::api::{AttrsOptions, OpenOptions, SyncMode};
-pub use vfsi_core::api::{ReadOp, ReadOptions, ReadResult};
-pub use vfsi_core::api::{WriteOp, WriteOptions};
+pub(crate) use vfsi_core::api::{
+    AttrsOptions, ListDirOptions, ReadOp, ReadOptions, ReadResult, RenameOptions, SyncMode,
+    WriteOp, WriteOptions,
+};
 
 // Keep negative API-contract doctests without presenting unsupported calls
 // as introductory documentation on the Nfs constructor.
@@ -160,9 +146,9 @@ mod facade;
 /// High-level filesystem workflows built on the application API.
 pub mod helpers;
 #[cfg(feature = "nfs")]
-pub use facade::{NfsClient, NfsDir, NfsFile};
+pub(crate) use facade::{NfsClient, NfsDir, NfsFile};
 #[cfg(all(feature = "posix", unix))]
-pub use facade::{Posix, PosixDir, PosixFile};
+pub(crate) use facade::{Posix, PosixDir, PosixFile};
 
 /// Batched local descriptor I/O through Linux io_uring (opt-in `uring` feature).
 #[cfg(all(feature = "uring", target_os = "linux"))]
@@ -171,7 +157,7 @@ pub mod uring {
     pub use vfsi_uring::{Options, Stats, Telemetry};
 }
 #[cfg(all(feature = "uring", target_os = "linux"))]
-pub use uring::Uring;
+pub(crate) use uring::Uring;
 
 /// Aggregate NFS transport counters for optional application diagnostics.
 /// These counters are process-wide, not per client, and may include other
@@ -217,58 +203,37 @@ pub mod diagnostics {
 #[cfg(all(feature = "auto", target_os = "linux"))]
 mod auto;
 #[cfg(all(feature = "auto", target_os = "linux"))]
-pub use auto::{Auto, AutoDir, AutoFile, AutoRoute};
+pub(crate) use auto::{Auto, AutoDir, AutoFile};
 
-/// Common application imports.
+/// Minimal backend-independent imports for generic application code.
+/// Import concrete operations from files and directory, and choose a backend
+/// explicitly from nfs, posix, mounted, or uring.
 pub mod prelude {
-    pub use crate::Attributes;
-    #[cfg(all(feature = "auto", target_os = "linux"))]
-    pub use crate::Auto;
-    #[cfg(all(feature = "posix", unix))]
-    pub use crate::Posix;
-    #[cfg(all(feature = "uring", target_os = "linux"))]
-    pub use crate::Uring;
-    pub use crate::{
-        AsTarget, AttrsOptions, ControlFlow, CopyOption, DirHandle, FileHandle, FilesystemStats,
-        ListDirOptions, MkDirOp, ReadOp, ReadOptions, ReadResult, RemoveMode, ResourceLimits,
-        SetAttrsOp, StreamCompletion, SyncMode, Target, TraversalCompletion, Vfsi, VfsiExt,
-        WriteOp, WriteOptions,
-    };
-    #[cfg(feature = "nfs")]
-    pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile, NfsVersion};
-    pub use vfsi_core::api::{DepthLimit, StreamOptions};
-    pub use vfsi_core::{OpenFlags, OpenOp, RemoveOptions};
+    pub use crate::{Error, Result, Vfsi, VfsiExt};
 }
 
-pub use std::io::ErrorKind;
-pub use std::ops::ControlFlow;
-/// Attribute selection for metadata queries, directory listings, and walks.
-pub use vfsi_core::AttrMask as Attributes;
-pub use vfsi_core::VfType as FileType;
-pub use vfsi_core::api::RemoveMode;
-pub use vfsi_core::api::{
-    DepthLimit, DirectoryListing, ResourceLimits, StreamCompletion, StreamOptions,
-    TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
+// Internal compatibility imports for implementation modules only. These are
+// deliberately crate-private; external callers use the grouped namespaces.
+#[cfg(test)]
+pub(crate) use std::io::ErrorKind;
+pub(crate) use std::ops::ControlFlow;
+pub(crate) use vfsi_core::AttrMask as Attributes;
+#[cfg(all(feature = "auto", target_os = "linux"))]
+pub(crate) use vfsi_core::DirEntry;
+pub(crate) use vfsi_core::VfType as FileType;
+pub(crate) use vfsi_core::api::{
+    DepthLimit, DirectoryListing, MkDirOp, RemoveMode, RemoveOptions, ResourceLimits, SetAttrsOp,
+    StreamCompletion, StreamOptions, TraversalCompletion, WriteResult,
 };
-pub use vfsi_core::api::{MkDirOp, SetAttrsOp, WriteResult};
-pub use vfsi_core::{
-    Attrs, Capabilities, CopyOption, DirEntry, ErrorDomain, FilesystemStats, OpenFlags, OpenOp,
-    Permissions, RemoveOptions, StatusCode, TransportKind,
+pub(crate) use vfsi_core::{
+    Attrs, Capabilities, CopyOption, FilesystemStats, OpenFlags, OpenOp, TransportKind,
 };
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_sync::ReadAllOptions;
 #[cfg(feature = "nfs")]
 mod native_nfs;
-#[cfg(all(feature = "nfs", target_os = "linux"))]
-pub use native_nfs::NfsMount;
-#[cfg(feature = "nfs")]
-pub use native_nfs::{Nfs, NfsBuilder, NfsClientPool, NfsVersion};
-#[cfg(all(feature = "nfs", feature = "rpcsec-gss"))]
-pub use vfsi_nfs::RpcsecGssProtection;
-#[cfg(feature = "nfs")]
-pub use vfsi_nfs::{
-    NfsAuthentication, NfsEvent, NfsObserver, NfsReadPool, NfsReadPoolOptions, NfsRecoveryPolicy,
-};
+#[cfg(all(feature = "auto", target_os = "linux"))]
+pub(crate) use native_nfs::{Nfs, NfsVersion};
 
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_core::api::ReadIntoResult;

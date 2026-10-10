@@ -8,7 +8,7 @@ use vfsi_nfs::NfsConnectOptions;
 use vfsi_nfs::NfsVecFs;
 use vfsi_sync::backend::VectorBackend;
 use vfsi_sync::{ReadOp, VfFile, VfOffset, WriteOp};
-use vnfs::{NfsAuthentication, RpcsecGssProtection};
+use vnfs::nfs::{NfsAuthentication, RpcsecGssProtection};
 
 fn options(protection: RpcsecGssProtection) -> NfsConnectOptions {
     let mut options = NfsConnectOptions::default();

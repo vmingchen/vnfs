@@ -1,6 +1,6 @@
 #![cfg(feature = "nfs")]
 
-use vnfs::{helpers::*, *};
+use vnfs::{directory::*, error::*, files::*, helpers::*, nfs::*};
 
 #[test]
 fn transfers_and_statistics_on_nfsv41_and_nfsv42() {

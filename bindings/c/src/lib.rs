@@ -996,13 +996,13 @@ pub unsafe extern "C" fn vfsi_walk(
             let path = vpath_for(fs, &root)?;
             let root_attrs = lock_or_io(&fs.fs)?.lstat_impl(&path)?;
             let metadata = vfsi_sync::metadata_from_attrs(root_attrs);
-            let walk_options = vnfs::ListDirOptions::new()
+            let walk_options = vnfs::directory::ListDirOptions::new()
                 .recursive(true)
                 .max_entries(options.max_entries)
                 .max_path_bytes(options.max_path_bytes)
                 .max_depth(options.max_depth);
             vfsi_sync::walk_events(
-                vnfs::DirEntry::new(path, metadata),
+                vnfs::directory::DirEntry::new(path, metadata),
                 walk_options,
                 options.sort_by_name,
                 |path, limits| {
@@ -1021,7 +1021,7 @@ pub unsafe extern "C" fn vfsi_walk(
                                 .path()
                                 .ok_or_else(|| VfError::client(0, libc::EIO as u32))?
                                 .to_path_buf();
-                            Ok(vnfs::DirEntry::new(
+                            Ok(vnfs::directory::DirEntry::new(
                                 path,
                                 vfsi_sync::metadata_from_attrs(attrs),
                             ))
@@ -1038,14 +1038,14 @@ pub unsafe extern "C" fn vfsi_walk(
                         .map_err(|_| VfError::client(0, libc::EINVAL as u32))?;
                     let attrs = attrs_from_metadata(event.entry.attrs());
                     let kind = match event.kind {
-                        vnfs::WalkEventKind::Enter => 0,
-                        vnfs::WalkEventKind::Entry => 1,
-                        vnfs::WalkEventKind::Leave => 2,
+                        vnfs::directory::WalkEventKind::Enter => 0,
+                        vnfs::directory::WalkEventKind::Entry => 1,
+                        vnfs::directory::WalkEventKind::Leave => 2,
                     };
                     match cb(path.as_ptr(), kind, event.depth, &attrs, userdata) {
-                        0 => Ok(vnfs::WalkControl::Continue),
-                        1 => Ok(vnfs::WalkControl::SkipSubtree),
-                        2 => Ok(vnfs::WalkControl::Stop),
+                        0 => Ok(vnfs::directory::WalkControl::Continue),
+                        1 => Ok(vnfs::directory::WalkControl::SkipSubtree),
+                        2 => Ok(vnfs::directory::WalkControl::Stop),
                         _ => Err(VfError::client(0, libc::EINVAL as u32)),
                     }
                 },
@@ -1056,7 +1056,7 @@ pub unsafe extern "C" fn vfsi_walk(
     })
 }
 
-fn attrs_from_metadata(metadata: &vnfs::Attrs) -> vfsi_attrs {
+fn attrs_from_metadata(metadata: &vnfs::directory::Attrs) -> vfsi_attrs {
     fn time(value: Option<std::time::SystemTime>) -> (i64, u32) {
         value
             .and_then(|v| match v.duration_since(std::time::UNIX_EPOCH) {

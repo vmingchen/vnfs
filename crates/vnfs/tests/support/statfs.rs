@@ -1,4 +1,4 @@
-use vnfs::{FilesystemStats, Target, Vfsi, VfsiExt};
+use vnfs::files::{FilesystemStats, Target, Vfsi, VfsiExt};
 
 fn check_stats(stats: &FilesystemStats) {
     let total = stats.total_bytes.expect("total capacity");
@@ -28,7 +28,7 @@ pub fn check<F: Vfsi>(fs: &F, other: &F, directory: &str) {
     assert_eq!(single.total_bytes, stats[0].total_bytes);
     let requests: Vec<_> = paths
         .iter()
-        .map(|p| vnfs::OpenOp::new(p, vnfs::OpenFlags::READ))
+        .map(|p| vnfs::files::OpenOp::new(p, vnfs::files::OpenFlags::READ))
         .collect();
     let mut files = fs.vopen(&requests).unwrap();
     let renamed = format!("{directory}/renamed");

@@ -799,7 +799,10 @@ impl VectorBackend for NfsVecFs {
         let mut collected: std::collections::HashMap<PathBuf, Vec<VfAttrs>> =
             std::collections::HashMap::new();
         let mut entry_count = 0usize;
-        let mut stored_path_bytes = 0usize;
+        let mut budget = vfsi_core::internal::TraversalBudget::new(
+            options.entry_limit(),
+            options.path_byte_limit(),
+        );
 
         // Resolve the root once, then decode each bounded READDIR response
         // directly into the caller-visible accumulator. Raw continuation
@@ -819,7 +822,7 @@ impl VectorBackend for NfsVecFs {
                 &page,
                 options,
                 &mut entry_count,
-                &mut stored_path_bytes,
+                &mut budget,
                 &mut root_attrs,
             )?;
             cookie = page.last().map(|entry| entry.cookie).unwrap_or(0);
@@ -871,7 +874,7 @@ impl VectorBackend for NfsVecFs {
                     &result.entries,
                     options,
                     &mut entry_count,
-                    &mut stored_path_bytes,
+                    &mut budget,
                     &mut level_attrs[index],
                 )?;
                 if result.cookie != 0 {
@@ -898,7 +901,7 @@ impl VectorBackend for NfsVecFs {
                         &page,
                         options,
                         &mut entry_count,
-                        &mut stored_path_bytes,
+                        &mut budget,
                         &mut level_attrs[*index],
                     )?;
                     if cookie != 0 {

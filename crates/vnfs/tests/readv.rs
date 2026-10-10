@@ -1,5 +1,7 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
-use vnfs::{ErrorKind, FileHandle, Posix, ReadOp, ReadOptions, ResourceLimits, Vfsi, VfsiExt};
+use vnfs::error::ErrorKind;
+use vnfs::files::{FileHandle, ReadOp, ReadOptions, ResourceLimits, Vfsi, VfsiExt};
+use vnfs::posix::Posix;
 
 fn mixed<C: Vfsi>(fs: &C) {
     fs.write_files(&[
@@ -43,7 +45,7 @@ fn mixed<C: Vfsi>(fs: &C) {
 fn mixed_destinations_on_mounted_and_auto() {
     let temp = tempfile::tempdir().unwrap();
     mixed(&Posix::new(temp.path()).unwrap());
-    mixed(&vnfs::Auto::new(temp.path()).unwrap());
+    mixed(&vnfs::mounted::Auto::new(temp.path()).unwrap());
 }
 #[test]
 fn budgets_are_shared_and_preflight_buffer_lengths() {
@@ -175,7 +177,7 @@ fn external_clients_can_inspect_sources_without_private_fields() {
     let fs = Posix::new(temp.path()).unwrap();
     fs.write("/a", b"abc").unwrap();
     let file = fs.open("/a").unwrap();
-    let whole: ReadOp<'_, vnfs::PosixFile> = ReadOp::whole("/a");
+    let whole: ReadOp<'_, vnfs::posix::PosixFile> = ReadOp::whole("/a");
     assert_eq!(whole.whole_file_path(), Some(std::path::Path::new("/a")));
     assert!(whole.range_parts().is_none());
     let range = ReadOp::range(&file, 0, 1);
@@ -195,20 +197,23 @@ fn external_clients_can_inspect_sources_without_private_fields() {
 
 #[test]
 fn result_constructors_preserve_storage_invariants_without_retaining_borrows() {
-    let owned = vnfs::ReadResult::owned(17, vec![1, 2, 3], true);
+    let owned = vnfs::files::ReadResult::owned(17, vec![1, 2, 3], true);
     assert_eq!(owned.offset(), 17);
     assert_eq!(owned.read(), 3);
     assert!(owned.eof());
     assert!(!owned.is_buffered());
     assert_eq!(owned.data(), Some([1, 2, 3].as_slice()));
     assert_eq!(owned.into_data(), Some(vec![1, 2, 3]));
-    let borrowed = vnfs::ReadResult::buffered(5, 2, false);
+    let borrowed = vnfs::files::ReadResult::buffered(5, 2, false);
     assert!(borrowed.is_buffered());
     assert_eq!(borrowed.read(), 2);
     assert!(!borrowed.eof());
     assert_eq!(borrowed.data(), None);
     assert_eq!(borrowed.into_data(), None);
-    assert_eq!(vnfs::ReadResult::owned(0, Vec::new(), true).read(), 0);
+    assert_eq!(
+        vnfs::files::ReadResult::owned(0, Vec::new(), true).read(),
+        0
+    );
 }
 
 #[test]
@@ -216,7 +221,7 @@ fn an_exhausted_internal_budget_never_restores_the_default() {
     let root = tempfile::tempdir().unwrap();
     let fs = Posix::new(root.path())
         .unwrap()
-        .with_limits(vnfs::ResourceLimits::new().max_read_bytes(3));
+        .with_limits(vnfs::files::ResourceLimits::new().max_read_bytes(3));
     fs.write("/a", b"abc").unwrap();
     fs.write("/empty", b"").unwrap();
     fs.write("/extra", b"x").unwrap();
@@ -236,19 +241,19 @@ fn an_exhausted_internal_budget_never_restores_the_default() {
             Default::default(),
         )
         .unwrap_err();
-    assert_eq!(error.kind(), vnfs::ErrorKind::FileTooLarge);
+    assert_eq!(error.kind(), vnfs::error::ErrorKind::FileTooLarge);
     assert_eq!(error.index(), Some(1));
     assert_eq!(&buffer, b"abc");
-    let fs = fs.with_limits(vnfs::ResourceLimits::new().max_read_bytes(0));
+    let fs = fs.with_limits(vnfs::files::ResourceLimits::new().max_read_bytes(0));
     assert_eq!(fs.read_files(&["/empty"]).unwrap(), vec![Vec::<u8>::new()]);
     assert_eq!(
         fs.read_files(&["/extra"]).unwrap_err().kind(),
-        vnfs::ErrorKind::FileTooLarge
+        vnfs::error::ErrorKind::FileTooLarge
     );
     assert_eq!(fs.read_to_string("/empty").unwrap(), "");
     assert_eq!(
         fs.read_to_string("/a").unwrap_err().kind(),
-        vnfs::ErrorKind::FileTooLarge
+        vnfs::error::ErrorKind::FileTooLarge
     );
     assert_eq!(
         fs.read_to_string_with_options("/empty", ReadOptions::default())
@@ -260,16 +265,16 @@ fn an_exhausted_internal_budget_never_restores_the_default() {
 #[test]
 fn text_options_inherit_or_override_budgets_and_preserve_utf8_errors() {
     let root = tempfile::tempdir().unwrap();
-    let fs = vnfs::Posix::new(root.path())
+    let fs = vnfs::posix::Posix::new(root.path())
         .unwrap()
-        .with_limits(vnfs::ResourceLimits::new().max_read_bytes(2));
+        .with_limits(vnfs::files::ResourceLimits::new().max_read_bytes(2));
     fs.write("/text", b"hello").unwrap();
     fs.write("/invalid", &[0xff]).unwrap();
     assert_eq!(
         fs.read_to_string_with_options("/text", ReadOptions::default())
             .unwrap_err()
             .kind(),
-        vnfs::ErrorKind::FileTooLarge
+        vnfs::error::ErrorKind::FileTooLarge
     );
     let options = ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(5));
     assert_eq!(
@@ -280,6 +285,6 @@ fn text_options_inherit_or_override_budgets_and_preserve_utf8_errors() {
         fs.read_to_string_with_options("/invalid", options)
             .unwrap_err()
             .kind(),
-        vnfs::ErrorKind::InvalidInput
+        vnfs::error::ErrorKind::InvalidInput
     );
 }

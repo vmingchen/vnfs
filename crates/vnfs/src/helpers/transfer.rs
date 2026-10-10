@@ -5,6 +5,7 @@ use crate::{
 };
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
+use vfsi_core::internal::TraversalBudget;
 
 /// Destination-file policy. Existing directories are merged, never replaced.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -220,29 +221,6 @@ struct Task {
     depth: usize,
     fresh_destination: bool,
 }
-struct Budget {
-    entries: usize,
-    bytes: usize,
-    max_entries: usize,
-    max_bytes: usize,
-}
-impl Budget {
-    fn charge(&mut self, source: &Path, destination: &Path, root: usize) -> Result<()> {
-        self.entries = self
-            .entries
-            .checked_add(1)
-            .ok_or_else(|| limit(root, source))?;
-        self.bytes = self
-            .bytes
-            .checked_add(source.as_os_str().len())
-            .and_then(|n| n.checked_add(destination.as_os_str().len()))
-            .ok_or_else(|| limit(root, source))?;
-        if self.entries > self.max_entries || self.bytes > self.max_bytes {
-            return Err(limit(root, source));
-        }
-        Ok(())
-    }
-}
 fn invalid(root: usize, path: &Path) -> Error {
     Error::client(root, libc::EINVAL as u32).with_context("transfer", path)
 }
@@ -291,19 +269,19 @@ fn roots<P: AsRef<Path>>(
     destination: &Path,
     options: CopyOptions,
     exact: bool,
-    budget: &mut Budget,
+    budget: &mut TraversalBudget,
+    max_path_bytes: usize,
 ) -> Result<Vec<Task>> {
     if options.batch_size == 0 || options.chunk_bytes == 0 || fs.limits().read_byte_limit() == 0 {
         return Err(invalid(0, destination));
     }
-    if sources.len() > budget.max_entries {
+    if sources.len() > budget.remaining_entries() {
         return Err(limit(0, destination));
     }
-    let destination = normalize(destination, budget.max_bytes)?;
+    let destination = normalize(destination, max_path_bytes)?;
     let mut tasks = Vec::with_capacity(sources.len());
     for (root, source) in sources.iter().enumerate() {
-        let source =
-            normalize(source.as_ref(), budget.max_bytes).map_err(|e| e.with_index(root))?;
+        let source = normalize(source.as_ref(), max_path_bytes).map_err(|e| e.with_index(root))?;
         let dest = if exact || options.layout == CopyLayout::Contents {
             destination.clone()
         } else {
@@ -327,7 +305,9 @@ fn roots<P: AsRef<Path>>(
                 return Err(invalid(root, &source));
             }
         }
-        budget.charge(&source, &dest, root)?;
+        budget
+            .charge_paths([source.as_path(), dest.as_path()])
+            .map_err(|_| limit(root, &source))?;
         // Query one bounded root wave, without materializing a whole tree.
         tasks.push(Task {
             source,
@@ -368,18 +348,13 @@ fn roots<P: AsRef<Path>>(
                         .file_name()
                         .ok_or_else(|| invalid(task.root, &task.source))?,
                 );
-                budget.bytes = budget
-                    .bytes
-                    .checked_add(
-                        mapped
-                            .as_os_str()
-                            .len()
-                            .saturating_sub(task.destination.as_os_str().len()),
-                    )
-                    .ok_or_else(|| limit(task.root, &task.source))?;
-                if budget.bytes > budget.max_bytes {
-                    return Err(limit(task.root, &task.source));
-                }
+                let additional_bytes = mapped
+                    .as_os_str()
+                    .len()
+                    .saturating_sub(task.destination.as_os_str().len());
+                budget
+                    .charge_bytes(additional_bytes)
+                    .map_err(|_| limit(task.root, &task.source))?;
                 task.destination = mapped;
             }
             task.metadata = metadata;
@@ -446,17 +421,22 @@ fn run<P: AsRef<Path>>(
     mut progress: Progress<'_>,
 ) -> Result<TransferSummary> {
     let limits = fs.limits();
-    let mut budget = Budget {
-        entries: 0,
-        bytes: 0,
-        max_entries: options
-            .max_entries
-            .unwrap_or(limits.directory_entry_limit()),
-        max_bytes: options
-            .max_path_bytes
-            .unwrap_or(limits.directory_path_byte_limit()),
-    };
-    let mut roots = roots(fs, sources, destination, options, exact, &mut budget)?;
+    let max_entries = options
+        .max_entries
+        .unwrap_or(limits.directory_entry_limit());
+    let max_path_bytes = options
+        .max_path_bytes
+        .unwrap_or(limits.directory_path_byte_limit());
+    let mut budget = TraversalBudget::new(max_entries, max_path_bytes);
+    let mut roots = roots(
+        fs,
+        sources,
+        destination,
+        options,
+        exact,
+        &mut budget,
+        max_path_bytes,
+    )?;
     let mut summary = TransferSummary::default();
     if roots.is_empty() {
         return Ok(summary);
@@ -465,7 +445,7 @@ fn run<P: AsRef<Path>>(
     if !exact {
         let container = Task {
             source: roots[0].source.clone(),
-            destination: normalize(destination, budget.max_bytes)?,
+            destination: normalize(destination, max_path_bytes)?,
             metadata: roots[0].metadata.clone(),
             size: 0,
             root: 0,
@@ -493,7 +473,7 @@ fn copy_roots(
     fs: &impl Vfsi,
     roots: Vec<Task>,
     options: CopyOptions,
-    budget: &mut Budget,
+    budget: &mut TraversalBudget,
     summary: &mut TransferSummary,
     progress: &mut Progress<'_>,
     skipped: &mut HashSet<usize>,
@@ -518,11 +498,7 @@ fn copy_roots(
         let wave_size = pending.len().min(options.batch_size);
         let wave: Vec<_> = pending.drain(pending.len() - wave_size..).collect();
         let paths: Vec<_> = wave.iter().map(|t| &t.source).collect();
-        let remaining = budget.max_entries.saturating_sub(budget.entries);
-        let options_visit = ListDirOptions::new()
-            .fields(fields())
-            .max_entries(remaining)
-            .max_path_bytes(budget.max_bytes.saturating_sub(budget.bytes));
+        let options_visit = budget.remaining_options(ListDirOptions::new().fields(fields()));
         let mut callback_error = None;
         let completed = fs
             .vlistdirs(&paths, options_visit, |index, page| {
@@ -542,7 +518,9 @@ fn copy_roots(
                             .file_name()
                             .ok_or_else(|| contract("transfer: missing child name"))?;
                         let dest = parent.destination.join(name);
-                        budget.charge(entry.path(), &dest, parent.root)?;
+                        budget
+                            .charge_paths([entry.path(), dest.as_path()])
+                            .map_err(|_| limit(parent.root, entry.path()))?;
                         let depth = parent
                             .depth
                             .checked_add(1)
@@ -1001,23 +979,28 @@ fn move_run<P: AsRef<Path>>(
     mut progress: Progress<'_>,
 ) -> Result<TransferSummary> {
     let limits = fs.limits();
-    let mut budget = Budget {
-        entries: 0,
-        bytes: 0,
-        max_entries: options
-            .max_entries
-            .unwrap_or(limits.directory_entry_limit()),
-        max_bytes: options
-            .max_path_bytes
-            .unwrap_or(limits.directory_path_byte_limit()),
-    };
+    let max_entries = options
+        .max_entries
+        .unwrap_or(limits.directory_entry_limit());
+    let max_path_bytes = options
+        .max_path_bytes
+        .unwrap_or(limits.directory_path_byte_limit());
+    let mut budget = TraversalBudget::new(max_entries, max_path_bytes);
     // Validate all roots/overlaps before the first mutation.
-    let mut tasks = roots(fs, sources, destination, options, false, &mut budget)?;
+    let mut tasks = roots(
+        fs,
+        sources,
+        destination,
+        options,
+        false,
+        &mut budget,
+        max_path_bytes,
+    )?;
     let mut summary = TransferSummary::default();
     if let Some(task) = tasks.first() {
         let container = Task {
             source: task.source.clone(),
-            destination: normalize(destination, budget.max_bytes)?,
+            destination: normalize(destination, max_path_bytes)?,
             metadata: task.metadata.clone(),
             size: 0,
             root: 0,

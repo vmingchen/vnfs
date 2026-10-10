@@ -1,5 +1,6 @@
 #![cfg(all(feature = "posix", unix))]
-use vnfs::{Posix, ReadOp, Vfsi, VfsiExt};
+use vnfs::files::{ReadOp, Vfsi, VfsiExt};
+use vnfs::posix::Posix;
 
 // Run this target with only `posix`: neither Auto nor NFS may supply the facade.
 #[test]

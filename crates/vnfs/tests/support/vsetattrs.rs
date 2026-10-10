@@ -1,4 +1,5 @@
-use vnfs::{Attributes, AttrsOptions, Permissions, Vfsi, VfsiExt};
+use vnfs::directory::{Attributes, AttrsOptions, Permissions};
+use vnfs::files::{Vfsi, VfsiExt};
 
 pub fn check_many(fs: &impl Vfsi, directory: &str) {
     fs.vsetattrs::<&str>(&[]).unwrap();
@@ -13,7 +14,7 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
         .iter()
         .enumerate()
         .map(|(i, path)| {
-            vnfs::SetAttrsOp::new(path)
+            vnfs::directory::SetAttrsOp::new(path)
                 .permissions(Permissions::from_mode(0o600 | ((i % 8) as u32)))
                 .len(if i % 2 == 0 { 3 } else { 100 + i as u64 })
                 .modified(modified)
@@ -40,7 +41,7 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
         .iter()
         .enumerate()
         .map(|(i, path)| {
-            vnfs::SetAttrsOp::new(path)
+            vnfs::directory::SetAttrsOp::new(path)
                 .len(i as u64)
                 .follow_symlinks(false)
         })
@@ -57,9 +58,9 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
     let missing = format!("{directory}/missing");
     let error = fs
         .vsetattrs(&[
-            vnfs::SetAttrsOp::new(&paths[0]).len(7),
-            vnfs::SetAttrsOp::new(&missing).len(7),
-            vnfs::SetAttrsOp::new(&paths[1]).len(7),
+            vnfs::directory::SetAttrsOp::new(&paths[0]).len(7),
+            vnfs::directory::SetAttrsOp::new(&missing).len(7),
+            vnfs::directory::SetAttrsOp::new(&paths[1]).len(7),
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -68,7 +69,7 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
 }
 
 fn check_mixed_policies(fs: &impl Vfsi, directory: &str) {
-    use vnfs::SetAttrsOp;
+    use vnfs::directory::SetAttrsOp;
     let first = format!("{directory}/mixed-first");
     let last = format!("{directory}/mixed-last");
     let link = format!("{directory}/mixed-link");
@@ -109,7 +110,7 @@ fn check_mixed_policies(fs: &impl Vfsi, directory: &str) {
 
 /// Open objects remain targets even when their original names are reused.
 pub fn check_handles(fs: &impl Vfsi, directory: &str) {
-    use vnfs::{FileHandle, OpenFlags, OpenOp, Target};
+    use vnfs::files::{FileHandle, OpenFlags, OpenOp, Target};
     let paths: Vec<_> = (0..64).map(|i| format!("{directory}/handle-{i}")).collect();
     fs.write_files(
         &paths
@@ -126,7 +127,7 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
     let renamed: Vec<_> = paths.iter().map(|path| format!("{path}-moved")).collect();
     fs.vrename(
         &paths.iter().zip(&renamed).collect::<Vec<_>>(),
-        vnfs::RenameOptions::Replace,
+        vnfs::directory::RenameOptions::Replace,
     )
     .unwrap();
     fs.write_files(
@@ -140,7 +141,7 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
         .iter()
         .enumerate()
         .map(|(i, file)| {
-            vnfs::SetAttrsOp::new(Target::File(file))
+            vnfs::directory::SetAttrsOp::new(Target::File(file))
                 .len(i as u64)
                 .permissions(Permissions::from_mode(0o640))
                 .follow_symlinks(false)
@@ -155,8 +156,8 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
         assert_eq!(fs.attrs(&paths[i]).unwrap().len().unwrap(), 11);
     }
     fs.vsetattrs(&[
-        vnfs::SetAttrsOp::new(Target::File(&files[0])).len(13),
-        vnfs::SetAttrsOp::new(Target::Path(std::path::Path::new(&paths[0]))).len(17),
+        vnfs::directory::SetAttrsOp::new(Target::File(&files[0])).len(13),
+        vnfs::directory::SetAttrsOp::new(Target::Path(std::path::Path::new(&paths[0]))).len(17),
     ])
     .unwrap();
     assert_eq!(
@@ -164,7 +165,7 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
         13
     );
     assert_eq!(fs.attrs(&paths[0]).unwrap().len().unwrap(), 17);
-    fs.vsetattrs(&[vnfs::SetAttrsOp::new(Target::File(&files[0])).len(19)])
+    fs.vsetattrs(&[vnfs::directory::SetAttrsOp::new(Target::File(&files[0])).len(19)])
         .unwrap();
     fs.chmod(Target::File(&files[0]), Permissions::from_mode(0o600))
         .unwrap();
@@ -184,8 +185,8 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
     files[1].try_close().unwrap();
     let error = fs
         .vsetattrs(&[
-            vnfs::SetAttrsOp::new(Target::File(&files[0])).len(5),
-            vnfs::SetAttrsOp::new(Target::File(&files[1])).len(5),
+            vnfs::directory::SetAttrsOp::new(Target::File(&files[0])).len(5),
+            vnfs::directory::SetAttrsOp::new(Target::File(&files[1])).len(5),
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -202,7 +203,7 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
 }
 
 pub fn check_foreign<F: Vfsi>(fs: &F, other: &F, path: &str) {
-    use vnfs::{FileHandle, OpenFlags, OpenOp, Target};
+    use vnfs::files::{FileHandle, OpenFlags, OpenOp, Target};
     fs.write_files(&[(path, b"original".as_slice())]).unwrap();
     let mut own = fs
         .vopen(&[OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE)])
@@ -214,8 +215,8 @@ pub fn check_foreign<F: Vfsi>(fs: &F, other: &F, path: &str) {
         .remove(0);
     let error = fs
         .vsetattrs(&[
-            vnfs::SetAttrsOp::new(Target::File(&own)).len(3),
-            vnfs::SetAttrsOp::new(Target::File(&foreign)).len(3),
+            vnfs::directory::SetAttrsOp::new(Target::File(&own)).len(3),
+            vnfs::directory::SetAttrsOp::new(Target::File(&foreign)).len(3),
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -226,7 +227,7 @@ pub fn check_foreign<F: Vfsi>(fs: &F, other: &F, path: &str) {
 }
 
 pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
-    use vnfs::{OpenFlags, OpenOp, Target};
+    use vnfs::files::{OpenFlags, OpenOp, Target};
     let paths: Vec<_> = (0..64).map(|i| format!("{directory}/owner-{i}")).collect();
     fs.write_files(
         &paths
@@ -248,7 +249,7 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
     let new_gid = if privileged { 10002 } else { gid };
     let updates: Vec<_> = paths
         .iter()
-        .map(|p| vnfs::SetAttrsOp::new(p).uid(new_uid))
+        .map(|p| vnfs::directory::SetAttrsOp::new(p).uid(new_uid))
         .collect();
     fs.vsetattrs(&updates).unwrap();
     for attrs in fs.vgetattrs(&paths, options).unwrap() {
@@ -259,7 +260,7 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
     fs.vsetattrs(
         &paths
             .iter()
-            .map(|p| vnfs::SetAttrsOp::new(p).gid(new_gid))
+            .map(|p| vnfs::directory::SetAttrsOp::new(p).gid(new_gid))
             .collect::<Vec<_>>(),
     )
     .unwrap();
@@ -276,14 +277,17 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
         )
         .unwrap();
     let moved = format!("{directory}/owner-moved");
-    fs.vrename(&[(&paths[0], &moved)], vnfs::RenameOptions::Replace)
-        .unwrap();
+    fs.vrename(
+        &[(&paths[0], &moved)],
+        vnfs::directory::RenameOptions::Replace,
+    )
+    .unwrap();
     fs.write_files(&[(&paths[0], b"replacement".as_slice())])
         .unwrap();
     let updates: Vec<_> = files
         .iter()
         .map(|file| {
-            vnfs::SetAttrsOp::new(Target::File(file))
+            vnfs::directory::SetAttrsOp::new(Target::File(file))
                 .uid(uid)
                 .gid(gid)
                 .permissions(Permissions::from_mode(0o640))
@@ -316,7 +320,7 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
     assert_eq!(attrs(&paths[0], true).gid(), Some(new_gid));
     let link = format!("{directory}/owner-link");
     fs.symlink("owner-1", &link).unwrap();
-    fs.vsetattrs(&[vnfs::SetAttrsOp::new(&link)
+    fs.vsetattrs(&[vnfs::directory::SetAttrsOp::new(&link)
         .uid(new_uid)
         .gid(new_gid)
         .follow_symlinks(false)])
@@ -328,8 +332,9 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
     assert_eq!(attrs(&link, false).uid(), Some(new_uid));
     let error = fs
         .vsetattrs(&[
-            vnfs::SetAttrsOp::new(Target::File(&files[0])).len(2),
-            vnfs::SetAttrsOp::new(Target::Path(std::path::Path::new(&paths[0]))).uid(u32::MAX),
+            vnfs::directory::SetAttrsOp::new(Target::File(&files[0])).len(2),
+            vnfs::directory::SetAttrsOp::new(Target::Path(std::path::Path::new(&paths[0])))
+                .uid(u32::MAX),
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -338,8 +343,8 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
     let missing = format!("{directory}/owner-missing");
     let error = fs
         .vsetattrs(&[
-            vnfs::SetAttrsOp::new(&paths[0]).uid(uid),
-            vnfs::SetAttrsOp::new(&missing).gid(gid),
+            vnfs::directory::SetAttrsOp::new(&paths[0]).uid(uid),
+            vnfs::directory::SetAttrsOp::new(&missing).gid(gid),
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));

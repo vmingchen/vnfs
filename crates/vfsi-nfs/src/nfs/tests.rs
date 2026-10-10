@@ -254,7 +254,9 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
         },
     ];
     let mut count = 0;
-    let mut bytes = 0;
+    let options = ListDirOptions::new().recursive(true).max_entries(1);
+    let mut budget =
+        vfsi_core::internal::TraversalBudget::new(options.entry_limit(), options.path_byte_limit());
     let mut output = Vec::new();
     let error = append_bounded_walk_page(
         Path::new("/root"),
@@ -262,9 +264,9 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
         AttrMask::empty(),
         &[],
         &page,
-        ListDirOptions::new().recursive(true).max_entries(1),
+        options,
         &mut count,
-        &mut bytes,
+        &mut budget,
         &mut output,
     )
     .unwrap_err();
@@ -273,7 +275,9 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
     assert_eq!(output.len(), 1);
 
     count = 0;
-    bytes = 0;
+    let options = ListDirOptions::new().recursive(true).max_path_bytes(1);
+    budget =
+        vfsi_core::internal::TraversalBudget::new(options.entry_limit(), options.path_byte_limit());
     output.clear();
     let error = append_bounded_walk_page(
         Path::new("/root"),
@@ -281,9 +285,9 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
         AttrMask::empty(),
         &[],
         &page[..1],
-        ListDirOptions::new().recursive(true).max_path_bytes(1),
+        options,
         &mut count,
-        &mut bytes,
+        &mut budget,
         &mut output,
     )
     .unwrap_err();

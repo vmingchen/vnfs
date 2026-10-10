@@ -10,7 +10,8 @@ vnfs = { path = "/path/to/vnfs/crates/vnfs", default-features = false, features 
 This feature is currently in the development checkout, not yet published.
 
 ```no_run
-use vnfs::{Uring, Vfsi, VfsiExt, OpenOp, OpenFlags, ReadOp};
+use vnfs::uring::{Uring};
+use vnfs::files::{Vfsi, VfsiExt, OpenOp, OpenFlags, ReadOp};
 
 # fn main() -> vnfs::Result<()> {
 let fs = Uring::new("/data")?;
@@ -29,7 +30,7 @@ for result in results { println!("{} bytes", result.read()); }
 ```
 
 `vfsi-uring::connect` provides the same `Vfsi`/`VfsiExt` API as a standalone
-crate. `vnfs::Uring` keeps backend handles opaque. Neither needs Tokio.
+crate. `vnfs::uring::Uring` keeps backend handles opaque. Neither needs Tokio.
 
 ## Execution and limits
 

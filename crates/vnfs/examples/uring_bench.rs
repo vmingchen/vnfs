@@ -38,7 +38,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use std::{
         num::NonZeroUsize, os::fd::AsRawFd, os::unix::fs::FileExt, path::Path, time::Instant,
     };
-    use vnfs::{OpenFlags, OpenOp, ReadOp, ReadOptions, Vfsi, VfsiExt, WriteOp, WriteOptions};
+    use vnfs::files::{
+        OpenFlags, OpenOp, ReadOp, ReadOptions, Vfsi, VfsiExt, WriteOp, WriteOptions,
+    };
 
     enum Mode {
         Read,
