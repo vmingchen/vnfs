@@ -373,7 +373,13 @@ visible when the TTL expires or when the caller requests a refresh. Use
   `read_stream_pipelined()` reconnect their affected session and retry once by
   default. Mutations are never replayed automatically because the server may
   already have completed an ambiguously failed request. Set
-  `auto_reconnect=False` to disable automatic read recovery.
+  `auto_reconnect=False` to disable automatic read recovery in both the Python
+  and native layers. This requires a native adapter with recovery control;
+  an older adapter raises `ImportError` with upgrade instructions before
+  connecting. Upgrade `nfs4fs` and `vfsi-fsspec` together. If native recovery
+  cannot complete a read on an update-mode
+  handle (`rb+`, `wb+`, `ab+`, or `xb+`), the handle becomes unusable and must be
+  closed; Python never reopens it with potentially destructive creation flags.
 - A process fork is detected before the next operation and creates a fresh
   native session in the child without sending protocol teardown over the
   parent's inherited connection. Do not fork while an operation is in flight
@@ -412,7 +418,10 @@ visible when the TTL expires or when the caller requests a refresh. Use
   rename. This prevents partial file contents from becoming visible. Like
   fsspec transactions generally, a multi-file commit is staged rather than a
   server-wide atomic transaction: a server failure during the final rename
-  batch can expose a prefix of the batch.
+  batch can expose a prefix of the batch. Transactional `xb` writes publish
+  through an atomic hard link from the staging file, so a concurrent creator
+  causes `FileExistsError` instead of being overwritten. Backends without hard
+  links reject that publication; they do not fall back to overwriting rename.
 - `pipe_file(..., mode="create")` and create-mode `put` use an exclusive server
   create, so concurrent creators cannot silently overwrite one another.
 
