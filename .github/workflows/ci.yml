@@ -94,17 +94,20 @@ jobs:
         run: |
           DOCS_RS=1 RUSTDOCFLAGS="-D warnings" \
             cargo doc -p vnfs -p vfsi-nfs --all-features --no-deps
-          test -f target/doc/vnfs/struct.Nfs.html
-          test -f target/doc/vnfs/struct.NfsClient.html
-          for module in nfs files directory error examples; do
+          test -f target/doc/vnfs/nfs/struct.Nfs.html
+          test -f target/doc/vnfs/nfs/struct.NfsClient.html
+          for module in nfs files directory error uring; do
             test -f "target/doc/vnfs/$module/index.html"
           done
-          for example in bulk_files open_handles stream_file directories; do
-            test -f "target/doc/vnfs/examples/$example/index.html"
+          for example in bulk-files open-handles bounded-streaming; do
+            grep -q "id=\"$example\"" target/doc/vnfs/files/index.html
           done
-          for guide in standard_io failure_recovery authentication operations; do
-            test -f "target/doc/vnfs/guides/$guide/index.html"
+          grep -q 'id="runnable-example"' target/doc/vnfs/directory/index.html
+          for guide in standard-rust-io-and-handle-lifecycle failure-partial-progress-and-recovery optional-kerberos-authentication streaming-resource-limits-and-mount-routing; do
+            grep -q "id=\"$guide\"" target/doc/vnfs/nfs/index.html
           done
+          grep -q 'id="execution-and-limits"' target/doc/vnfs/uring/index.html
+          grep -q 'id="reproduce-the-comparison"' target/doc/vnfs/uring/index.html
           test -f target/doc/vfsi_nfs/nfs/struct.NfsVecFs.html
       - name: Run the repository Rust test suite
         run: ./scripts/test-rust.sh

@@ -264,7 +264,12 @@ run_uring() {
   cargo test -p vfsi-uring --locked
   cargo test -p vnfs --locked --no-default-features --features uring --test uring
   cargo test -p vnfs --locked --no-default-features --features uring,posix --example uring_bench
-  cargo test -p vnfs --locked --no-default-features --features uring --doc guides::uring
+  local guide_log="$state_dir/uring-guide.log"
+  cargo test -p vnfs --locked --no-default-features --features uring --doc uring 2>&1 | tee "$guide_log"
+  grep -Eq '^test result: ok\. [1-9][0-9]* passed;' "$guide_log" || {
+    echo 'io_uring guide doctests did not execute; check the documentation inclusion and selector.' >&2
+    return 1
+  }
 }
 
 run_python() {

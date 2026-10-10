@@ -152,6 +152,7 @@ pub(crate) use facade::{Posix, PosixDir, PosixFile};
 
 /// Batched local descriptor I/O through Linux io_uring (opt-in `uring` feature).
 #[cfg(all(feature = "uring", target_os = "linux"))]
+#[doc = include_str!("guides/uring.md")]
 pub mod uring {
     pub use crate::facade::{Uring, UringDir, UringFile};
     pub use vfsi_uring::{Options, Stats, Telemetry};

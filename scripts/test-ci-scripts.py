@@ -128,7 +128,19 @@ class RustQuickTests(unittest.TestCase):
         self.assertIn("test -p vfsi-uring --locked", calls[0])
         self.assertIn("--no-default-features --features uring --test uring", calls[1])
         self.assertIn("--features uring,posix --example uring_bench", calls[2])
-        self.assertIn("--no-default-features --features uring --doc guides::uring", calls[3])
+        self.assertIn("--no-default-features --features uring --doc uring", calls[3])
+
+    def test_uring_rejects_empty_documentation_selection(self):
+        uname = self.bin / "uname"
+        uname.write_text('#!/bin/sh\nprintf "Linux\\n"\n')
+        uname.chmod(0o755)
+        result = self.run_script(
+            "test-ci-local.sh", "uring",
+            TEST_OUTPUT="test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out",
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("io_uring guide doctests did not execute", result.stderr)
+        self.assertEqual(len(self.log.read_text().splitlines()), 4)
 
     def test_failures_propagate_and_are_recorded(self):
         result = self.run_script("test-rust.sh", "--quick", FAIL_STATUS="17")
