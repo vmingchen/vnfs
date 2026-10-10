@@ -118,13 +118,16 @@ mod tests {
                 .follow_symlinks(false)])
             .unwrap();
         let attrs = file.attrs().unwrap();
-        assert_eq!(attrs.len(), 3);
+        assert_eq!(attrs.len(), Some(3));
         assert_eq!(attrs.modified(), Some(modified));
-        assert_eq!(attrs.permissions().mode() & 0o7777, 0o640);
+        assert_eq!(attrs.permissions().unwrap().mode() & 0o7777, 0o640);
         file.truncate(5).unwrap();
         file.chmod(Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(file.attrs().unwrap().len(), 5);
-        assert_eq!(file.attrs().unwrap().permissions().mode() & 0o7777, 0o600);
+        assert_eq!(file.attrs().unwrap().len().unwrap(), 5);
+        assert_eq!(
+            file.attrs().unwrap().permissions().unwrap().mode() & 0o7777,
+            0o600
+        );
         assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"replacement");
         file.close().unwrap();
     }

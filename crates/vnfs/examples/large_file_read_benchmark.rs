@@ -124,11 +124,11 @@ fn read_once(
     let started = Instant::now();
     client.read_stream_with_options(
         path,
-        StreamOptions::new().chunk_size(chunk_size),
+        StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(chunk_size).unwrap()),
         |_, data| {
             bytes += data.len() as u64;
             chunks += 1;
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         },
     )?;
     Ok((started.elapsed(), bytes, chunks))
@@ -141,7 +141,7 @@ fn read_pipelined_once(pool: &mut NfsReadPool, path: &str) -> Result<(Duration, 
     pool.read_stream(path, |_, data| {
         bytes += data.len() as u64;
         chunks += 1;
-        Ok(true)
+        Ok(std::ops::ControlFlow::Continue(()))
     })?;
     Ok((started.elapsed(), bytes, chunks))
 }

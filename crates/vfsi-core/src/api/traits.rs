@@ -5,38 +5,17 @@ use crate::api::{
     Attrs, CopyOption, DirectoryListing, MkDirOp, OpenOp, ResourceLimits, Result, SetAttrsOp,
     WriteResult,
 };
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 /// Owned application file. Borrowed requests preserve the file's lifetime;
 /// clients validate connection ownership before dispatching a vector.
 ///
-/// Clients validate ownership before I/O and report positional progress without
-/// changing the cursor. `ReadOp` borrows handles directly; constructing it does no I/O.
+/// Clients validate ownership before I/O and report positional progress.
+/// Standard-I/O adapters manage their own independent cursors. `ReadOp` borrows handles directly; constructing it does no I/O.
 /// A backend must retain ownership of live descriptors through cleanup failures.
-pub trait FileHandle: Read + Write + Seek {
+pub trait FileHandle {
     /// Diagnostic name captured at open; not current path or object identity.
     fn path(&self) -> &Path;
-    /// Query the opened object, even if its original pathname was renamed.
-    fn attrs(&self) -> Result<Attrs>;
-    /// Read up to the buffer's length without changing the cursor; may be short.
-    fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize>;
-    /// Write up to the input's length without changing the cursor; may be short.
-    fn write_at(&self, buffer: &[u8], offset: u64) -> Result<usize>;
-    /// Cursor-based read retaining structured errors, unlike the `Read` adapter.
-    fn read_native(&mut self, buffer: &mut [u8]) -> Result<usize>;
-    /// Collect from the current cursor with a caller-selected payload budget.
-    /// A failed read may advance the cursor; exceeding the limit is an error,
-    /// not successful truncation. Standard `Read::read_to_end` is not bounded.
-    fn read_to_end_with_limit(&mut self, max_bytes: usize) -> Result<Vec<u8>>;
-    /// Cursor-based possibly short write retaining structured errors.
-    fn write_native(&mut self, buffer: &[u8]) -> Result<usize>;
-    /// Change the cursor, retaining structured errors unlike `Seek`.
-    fn seek_native(&mut self, position: SeekFrom) -> Result<u64>;
-    /// Request durability of file data; errors are not discarded.
-    fn sync_data(&self) -> Result<()>;
-    /// Request durability of file data and metadata supported by the backend.
-    fn sync_all(&self) -> Result<()>;
     /// Close without surrendering cleanup ownership on failure. After an
     /// ambiguous failure, reconcile/close rather than resume ordinary I/O.
     fn try_close(&mut self) -> Result<()>;
@@ -45,6 +24,22 @@ pub trait FileHandle: Read + Write + Seek {
     /// Consuming close: on failure the handle is lost and Drop retries cleanup
     /// best-effort on a later operation or cleanup drain. Prefer `try_close` when
     /// cleanup failures need reconciliation.
+    fn close(self) -> Result<()>
+    where
+        Self: Sized;
+}
+
+/// Owned directory retaining the opened object's identity after rename or path
+/// replacement. Paths are diagnostic only; clients validate ownership and live
+/// state before handle-rooted operations. Failed `try_close` retains cleanup ownership.
+pub trait DirHandle {
+    /// Diagnostic name captured at open, not current path or identity.
+    fn path(&self) -> &Path;
+    /// Close while retaining cleanup ownership on failure.
+    fn try_close(&mut self) -> Result<()>;
+    /// Local close ownership, not proof of remote liveness after failure.
+    fn is_closed(&self) -> bool;
+    /// Consuming close; on failure Drop queues best-effort cleanup.
     fn close(self) -> Result<()>
     where
         Self: Sized;
@@ -98,8 +93,8 @@ pub trait FileHandle: Read + Write + Seek {
 /// per-call options override them; neither is a process-wide memory cap.
 /// Calls are synchronous. Callback methods invoke user code outside the backend
 /// lock and propagate callback errors, but do not provide a filesystem snapshot.
-/// Writes are not automatically durable: use [`FileHandle::sync_data`] or
-/// [`FileHandle::sync_all`] on an open handle when required. Drop queues handle cleanup
+/// Writes are not automatically durable: use [`Vfsi::vfsync`] on open handles
+/// when required. Drop queues handle cleanup
 /// best-effort; explicit close methods let applications observe cleanup errors.
 pub trait Vfsi {
     /// Query filesystems for paths (following symlinks) and retained open handles.
@@ -109,7 +104,10 @@ pub trait Vfsi {
         targets: &[P],
     ) -> Result<Vec<crate::FilesystemStats>>;
 
-    /// Query metadata in input order with selected fields and final-symlink behavior.
+    /// Query paths and retained handles in input order with selected fields.
+    /// Final-symlink behavior applies to paths; handles retain their opened
+    /// identity after rename/unlink. Preflight every handle's ownership and live
+    /// state before dispatching any query. Empty vectors perform no I/O.
     /// Backend execution must preserve vector batching. Ancestor symlinks use
     /// ordinary namespace resolution; this is not a snapshot or confinement API.
     ///
@@ -123,11 +121,17 @@ pub trait Vfsi {
     /// # Ok(())
     /// # }
     /// ```
-    fn vgetattrs<P: AsRef<Path>>(
+    fn vgetattrs<P: crate::AsTarget<Self::File>>(
         &self,
         paths: &[P],
         options: crate::api::AttrsOptions,
     ) -> Result<Vec<Attrs>>;
+
+    /// Synchronize retained handles in input order. All handles must belong to
+    /// this client and be live; validate the entire vector before dispatch.
+    /// Errors may follow completed synchronization of earlier handles. Empty
+    /// vectors succeed without I/O; ambiguous failures must not be replayed.
+    fn vfsync(&self, files: &[&Self::File], mode: crate::api::SyncMode) -> Result<()>;
 
     /// Update selected attributes for paths or open handles using native batching.
     /// Every handle is validated before dispatch, including ownership and closure.
@@ -187,6 +191,37 @@ pub trait Vfsi {
     /// Cross-filesystem links can fail. Errors may follow partial creation.
     fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()>;
 
+    /// Owned directory handle for this client's retained namespace objects.
+    type Dir: DirHandle + 'static;
+
+    /// Open genuine directory handles in input order without following final
+    /// symlinks. Path-only backends must report unsupported. On error, opened
+    /// handles are cleaned up; an empty vector performs no I/O.
+    fn vopen_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<Self::Dir>> {
+        if paths.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(crate::api::Error::unsupported(0))
+        }
+    }
+
+    /// Remove contents anchored to retained directories, preserving the roots.
+    /// Validate every handle's ownership and live state before any mutation.
+    /// Never reopen diagnostic paths. Errors can follow partial mutation; an
+    /// index identifies an input, not a committed prefix. Do not replay failures.
+    fn vremove_dir_contents(
+        &self,
+        dirs: &[&Self::Dir],
+        options: crate::RemoveOptions,
+    ) -> Result<()> {
+        let _ = options;
+        if dirs.is_empty() {
+            Ok(())
+        } else {
+            Err(crate::api::Error::unsupported(0))
+        }
+    }
+
     /// Owned handle; vectors must contain handles belonging to this client.
     type File: FileHandle + 'static;
 
@@ -199,8 +234,8 @@ pub trait Vfsi {
     /// use vfsi_core::api::Vfsi;
     /// # fn example(fs: &impl Vfsi) {
     /// let limits = fs.limits();
-    /// println!("owned-read budget: {} bytes", limits.max_read_bytes);
-    /// println!("walk depth: {}", limits.max_walk_depth);
+    /// println!("owned-read budget: {} bytes", limits.read_byte_limit());
+    /// println!("walk depth: {}", limits.walk_depth_limit());
     /// # }
     /// ```
     fn limits(&self) -> ResourceLimits;
@@ -246,7 +281,7 @@ pub trait Vfsi {
     /// Construction does no I/O. Results retain input order and never borrow
     /// caller storage. Whole files complete or fail; ranges may return short
     /// progress. Only `buffer[..result.read]` is valid after a buffered read.
-    /// The default aggregate budget comes from `limits().max_read_bytes`.
+    /// The default aggregate budget comes from `limits().read_byte_limit()`.
     /// All range and buffer lengths must fit before dispatch. Buffer reads run
     /// first, then allocating ranges, then whole paths, in batched phases.
     /// Errors retain original indices; buffers may already contain partial
@@ -281,6 +316,7 @@ pub trait Vfsi {
     /// Backend failures can still follow mutations; aliasing paths are the
     /// caller's responsibility and do not imply transactional ordering.
     ///
+    /// Handles opened for append select EOF regardless of the requested offset.
     /// With completion enabled, success means every request's payload was written.
     /// Short writes are completed at their remaining offsets; this does not
     /// authorize replay after an ambiguous failure or guarantee durability.
@@ -446,16 +482,16 @@ pub trait Vfsi {
 
     /// Stream files through bounded chunks without collecting whole contents.
     /// The callback receives the input index, byte offset, and borrowed chunk.
-    /// False stops the whole vector; results contain its completed/stopped prefix.
+    /// `ControlFlow::Break(())` stops the whole vector; results contain its completed/stopped prefix.
     /// Backends may process streams sequentially; this is not a parallelism promise.
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, StreamOptions};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.vstream(&["/large-1", "/large-2"],
-    ///     StreamOptions::new().chunk_size(1024 * 1024), |index, offset, data| {
+    ///     StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()), |index, offset, data| {
     ///         println!("{index}: {} bytes at {offset}", data.len());
-    ///         Ok(true)
+    ///         Ok(std::ops::ControlFlow::Continue(()))
     ///     })?;
     /// # Ok(())
     /// # }
@@ -464,7 +500,7 @@ pub trait Vfsi {
         &self,
         paths: &[P],
         options: crate::api::StreamOptions,
-        callback: impl FnMut(usize, u64, &[u8]) -> Result<bool>,
+        callback: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<Vec<crate::api::StreamCompletion>>;
 }
 
@@ -500,16 +536,25 @@ pub trait Vfsi {
 /// bounded paging, or recovery semantics. Singular convenience is not a promise
 /// of one RPC, and vector execution is not a promise of atomicity.
 pub trait VfsiExt: Vfsi {
+    /// Open one genuine, retained directory through the portable vector engine.
+    fn open_dir_handle(&self, path: impl AsRef<Path>) -> Result<Self::Dir> {
+        single_completion(self.vopen_dirs(&[path])?, "vopen_dirs")
+    }
+    /// Remove a retained directory's contents without resolving its old name.
+    fn remove_dir_contents_handle(&self, dir: &Self::Dir) -> Result<()> {
+        self.remove_dir_contents_handle_with_options(dir, crate::RemoveOptions::default())
+    }
+    fn remove_dir_contents_handle_with_options(
+        &self,
+        dir: &Self::Dir,
+        options: crate::RemoveOptions,
+    ) -> Result<()> {
+        self.vremove_dir_contents(&[dir], options)
+    }
+
     /// Build reusable open options for this client.
     fn open_options(&self) -> super::OpenOptions<'_, Self> {
         super::OpenOptions::new(self)
-    }
-    /// Build selected metadata changes for a path or retained open handle.
-    fn set_metadata<T: super::AsTarget<Self::File>>(
-        &self,
-        target: T,
-    ) -> super::SetMetadata<'_, Self, T> {
-        super::SetMetadata::new(self, target)
     }
 
     /// Query one target through the vector filesystem-statistics engine.
@@ -523,17 +568,17 @@ pub trait VfsiExt: Vfsi {
     /// Open read-only. Paths are relative to this client's configured namespace.
     ///
     /// Use [`open_with`](VfsiExt::open_with) for write/create flags, or
-    /// [`vopen`](Vfsi::vopen) to batch many opens. The returned handle implements
-    /// `std::io::Read`/`Write`/`Seek`; use native methods to retain structured errors.
+    /// [`vopen`](Vfsi::vopen) to batch many opens. The returned handle owns
+    /// lifecycle only; use vectors or [`file_io`](VfsiExt::file_io) for I/O.
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// let mut file = fs.open("/config")?;
+    /// let file = fs.open("/config")?;
     /// let mut header = [0_u8; 128];
-    /// let result = file.read_native(&mut header); // May be short.
+    /// let result = fs.vread([vfsi_core::api::ReadOp::into(&file, 0, &mut header)], Default::default());
     /// let close = file.close();
-    /// let bytes = result?;
+    /// let bytes = result?[0].read();
     /// close?;
     /// println!("read {bytes} bytes");
     /// # Ok(())
@@ -634,7 +679,7 @@ pub trait VfsiExt: Vfsi {
     }
     /// Read complete files in input order using vectorized whole-file reads.
     ///
-    /// The aggregate payload is bounded by `limits().max_read_bytes`.
+    /// The aggregate payload is bounded by `limits().read_byte_limit()`.
     /// Use [`Self::read_files_with_options`] to override it, or stream large files.
     /// A failure returns an error, not a successful partial collection.
     ///
@@ -746,14 +791,14 @@ pub trait VfsiExt: Vfsi {
     /// Single-target convenience. For multiple files, prefer [`Vfsi::vstream`]. Backends may process streams sequentially.
     ///
     /// Stream a file using the client's bounded chunk size instead of collecting it.
-    /// Return `Ok(false)` to stop successfully; the callback runs outside the lock.
+    /// Return `Ok(ControlFlow::Break(()))` to stop successfully; the callback runs outside the lock.
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.read_stream("/large", |offset, bytes| {
     ///     println!("{} bytes at {offset}", bytes.len());
-    ///     Ok(true)
+    ///     Ok(std::ops::ControlFlow::Continue(()))
     /// })?;
     /// # Ok(())
     /// # }
@@ -761,18 +806,20 @@ pub trait VfsiExt: Vfsi {
     fn read_stream(
         &self,
         path: impl AsRef<Path>,
-        callback: impl FnMut(u64, &[u8]) -> Result<bool>,
+        callback: impl FnMut(u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<crate::api::StreamCompletion> {
         self.read_stream_with_options(
             path,
-            crate::api::StreamOptions::new().chunk_size(self.limits().stream_chunk_bytes),
+            crate::api::StreamOptions::new().chunk_size(
+                std::num::NonZeroUsize::new(self.limits().stream_chunk_size()).unwrap(),
+            ),
             callback,
         )
     }
 
     /// Single-target convenience. For multiple files, prefer [`Vfsi::vstream`]. Backends may process streams sequentially.
     ///
-    /// Stream from offset zero outside the backend lock. `false` stops after
+    /// Stream from offset zero outside the backend lock. `ControlFlow::Break(())` stops after
     /// the delivered chunk; completion reports the next offset. Not a snapshot.
     ///
     /// The callback borrows each chunk only for its invocation. Consume it
@@ -788,10 +835,14 @@ pub trait VfsiExt: Vfsi {
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let mut processed = 0_u64;
     /// let completion = fs.read_stream_with_options(
-    ///     "/large.bin", StreamOptions::new().chunk_size(1024 * 1024),
+    ///     "/large.bin", StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()),
     ///     |_offset, chunk| {
     ///         processed += chunk.len() as u64; // Process the borrowed bytes here.
-    ///         Ok(processed < 8 * 1024 * 1024) // Stop after a bounded sample.
+    ///         Ok(if processed < 8 * 1024 * 1024 {
+    ///             std::ops::ControlFlow::Continue(())
+    ///         } else {
+    ///             std::ops::ControlFlow::Break(())
+    ///         }) // Stop after a bounded sample.
     ///     },
     /// )?;
     /// match completion {
@@ -805,7 +856,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         path: impl AsRef<Path>,
         options: crate::api::StreamOptions,
-        callback: impl FnMut(u64, &[u8]) -> Result<bool>,
+        callback: impl FnMut(u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<crate::api::StreamCompletion> {
         let mut callback = callback;
         single_completion(
@@ -898,23 +949,40 @@ pub trait VfsiExt: Vfsi {
         close_result
     }
 
+    /// Borrow an explicit standard-I/O adapter with an independent cursor.
+    /// Reads/writes use this client's vectors; collecting reads enforce its
+    /// payload budget. The adapter does not own or close the file.
+    fn file_io<'a>(&'a self, file: &'a Self::File) -> crate::api::FileIo<'a, Self> {
+        crate::api::FileIo::new(self, file)
+    }
+
+    /// Synchronize one retained handle through [`Vfsi::vfsync`].
+    fn sync_data(&self, file: &Self::File) -> Result<()> {
+        self.vfsync(&[file], crate::api::SyncMode::Data)
+    }
+
+    /// Synchronize one retained handle's data and metadata through [`Vfsi::vfsync`].
+    fn sync_all(&self, file: &Self::File) -> Result<()> {
+        self.vfsync(&[file], crate::api::SyncMode::All)
+    }
+
     // Attrs
     /// Single-target convenience. For multiple paths, prefer [`Vfsi::vgetattrs`].
     ///
     /// Query a path following its final symlink; unavailable fields remain None.
     ///
     /// To inspect the symlink itself use [`symlink_attrs`](VfsiExt::symlink_attrs).
-    /// To identify an already opened object after rename, use [`FileHandle::attrs`].
+    /// To query an opened object after rename, pass [`crate::api::Target::file`].
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let attrs = fs.attrs("/file-1")?;
-    /// println!("{} bytes; directory={}", attrs.len(), attrs.is_dir());
+    /// println!("{:?} bytes; directory={}", attrs.len(), attrs.is_dir());
     /// # Ok(())
     /// # }
     /// ```
-    fn attrs(&self, path: impl AsRef<Path>) -> Result<Attrs> {
+    fn attrs<T: crate::AsTarget<Self::File>>(&self, path: T) -> Result<Attrs> {
         attrs_query(self, path, crate::api::AttrsOptions::new(), "attrs")
     }
 
@@ -939,9 +1007,9 @@ pub trait VfsiExt: Vfsi {
     /// # Ok(())
     /// # }
     /// ```
-    fn attrs_with_options(
+    fn attrs_with_options<T: crate::AsTarget<Self::File>>(
         &self,
-        path: impl AsRef<Path>,
+        path: T,
         options: crate::api::AttrsOptions,
     ) -> Result<Attrs> {
         attrs_query(self, path, options, "attrs_with_options")
@@ -1028,7 +1096,7 @@ pub trait VfsiExt: Vfsi {
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// for listing in fs.read_dirs(&["/input", "/output"])? {
     ///     for entry in listing.entries {
-    ///         println!("{}: {} bytes", entry.path().display(), entry.attrs().len());
+    ///         println!("{}: {:?} bytes", entry.path().display(), entry.attrs().len());
     ///     }
     /// }
     /// # Ok(())
@@ -1098,58 +1166,6 @@ pub trait VfsiExt: Vfsi {
             Ok(std::ops::ControlFlow::Continue(()))
         })?;
         Ok(trees)
-    }
-
-    /// Single-target convenience. For multiple roots, prefer [`VfsiExt::read_dirs_with_options`].
-    ///
-    /// Collect a no-follow tree using the client's entry, byte, and depth limits.
-    ///
-    /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// for listing in fs.walk("/project")? {
-    ///     println!("{}", listing.path.display());
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    fn walk(&self, root: impl AsRef<Path>) -> Result<Vec<DirectoryListing>> {
-        self.walk_with_options(
-            root,
-            crate::api::ListDirOptions::new().fields(crate::api::Attributes::stat()),
-        )
-    }
-
-    /// Single-target convenience. For multiple roots, prefer [`VfsiExt::read_dirs_with_options`] with one aggregate budget.
-    ///
-    /// Collect a bounded tree, without following symlinks; no snapshot promise.
-    ///
-    /// Returns directory listings, not one flattened entry vector. Budgets
-    /// apply across the walk; depth zero is the starting directory. Explicit
-    /// options override client defaults. This helper forces `recursive(true)`.
-    /// Use a visitor for incremental delivery
-    /// or [`listdir`](VfsiExt::listdir) for pruning and lifecycle events.
-    ///
-    /// ```no_run
-    /// use vfsi_core::api::{ListDirOptions, Vfsi, VfsiExt, Attributes, WriteOp};
-    /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
-    /// let listings = fs.walk_with_options(
-    ///     "/project", ListDirOptions::new().fields(Attributes::MODE | Attributes::SIZE)
-    ///         .max_entries(10_000).max_path_bytes(1024 * 1024).max_depth(8),
-    /// )?;
-    /// println!("{} directory listings", listings.len());
-    /// # Ok(())
-    /// # }
-    /// ```
-    fn walk_with_options(
-        &self,
-        path: impl AsRef<Path>,
-        options: crate::api::ListDirOptions,
-    ) -> Result<Vec<DirectoryListing>> {
-        single_completion(
-            self.read_dirs_with_options(&[path], options.recursive(true))?,
-            "walks",
-        )
     }
 
     // Visit directories
@@ -1246,7 +1262,8 @@ pub trait VfsiExt: Vfsi {
 
     /// Visit complete shallow listings in depth-first order with application policy.
     ///
-    /// `order` may reorder siblings (for example, locale-aware `ls` ordering).
+    /// `order` compares immutable siblings (for example, locale-aware `ls` ordering).
+    /// The shared workflow sorts them; callbacks cannot replace validated entries.
     /// `descend` selects directories before their contents are read; it does not
     /// filter entries delivered in their parent's listing. Symlinks are never
     /// traversed. `visitor` runs outside backend locks and may stop immediately
@@ -1264,7 +1281,7 @@ pub trait VfsiExt: Vfsi {
     /// # fn example(fs: &impl Vfsi) -> Result<()> {
     /// fs.visit_dirs_ordered("/input",
     ///     fs.limits().walk_options().fields(Attributes::MODE | Attributes::SIZE),
-    ///     |entries| entries.sort_by(|a, b| a.path().cmp(b.path())),
+    ///     |a, b| a.path().cmp(b.path()),
     ///     |entry| entry.file_name() != Some(std::ffi::OsStr::new(".git")),
     ///     |listing, depth| {
     ///         println!("{}: {} entries at depth {depth}", listing.path.display(), listing.entries.len());
@@ -1277,7 +1294,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         root: impl AsRef<Path>,
         options: crate::api::ListDirOptions,
-        mut order: impl FnMut(&mut [crate::api::DirEntry]),
+        mut order: impl FnMut(&crate::api::DirEntry, &crate::api::DirEntry) -> std::cmp::Ordering,
         mut descend: impl FnMut(&crate::api::DirEntry) -> bool,
         mut visitor: impl FnMut(DirectoryListing, usize) -> Result<crate::api::WalkControl>,
     ) -> Result<crate::api::TraversalCompletion> {
@@ -1316,7 +1333,7 @@ pub trait VfsiExt: Vfsi {
                         .with_context("visit_dirs_ordered", entry.path()));
                 }
             }
-            order(&mut entries);
+            entries.sort_by(&mut order);
             let listing = DirectoryListing { path, entries };
             let children: Vec<_> = listing
                 .entries
@@ -1665,13 +1682,17 @@ fn require_directory<C: Vfsi + ?Sized>(fs: &C, path: &Path, operation: &'static 
 }
 fn attrs_query<C: Vfsi + ?Sized>(
     client: &C,
-    path: impl AsRef<Path>,
+    target: impl crate::AsTarget<C::File>,
     options: crate::api::AttrsOptions,
     operation: &'static str,
 ) -> Result<Attrs> {
-    let path = path.as_ref();
+    let target = target.as_target();
+    let path = match target {
+        crate::Target::Path(path) => path,
+        crate::Target::File(file) => file.path(),
+    };
     let results = client
-        .vgetattrs(&[path], options)
+        .vgetattrs(&[target], options)
         .map_err(|error| error.with_context(operation, path))?;
     single_completion(results, "vgetattrs").map_err(|error| error.with_context(operation, path))
 }

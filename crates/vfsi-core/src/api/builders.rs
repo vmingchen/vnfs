@@ -1,7 +1,6 @@
 //! Builders shared by all application clients.
-use super::{AsTarget, OpenFlags, OpenOp, Result, SetAttrsOp, Vfsi, VfsiExt};
-use crate::Permissions;
-use std::{fmt, path::Path, time::SystemTime};
+use super::{OpenFlags, OpenOp, Result, Vfsi, VfsiExt};
+use std::{fmt, path::Path};
 
 /// `std::fs::OpenOptions`-style builder for any [`Vfsi`] client.
 pub struct OpenOptions<'a, C: Vfsi + ?Sized> {
@@ -87,79 +86,5 @@ impl<C: Vfsi + ?Sized> OpenOptions<'_, C> {
             .map(|path| OpenOp::new(path.as_ref(), self.flags).mode(self.mode))
             .collect();
         self.client.vopen(&requests)
-    }
-}
-
-/// Reusable metadata builder; application uses a singleton `vsetattrs` request.
-pub struct SetMetadata<'a, C: Vfsi + ?Sized, T: AsTarget<C::File>> {
-    client: &'a C,
-    target: T,
-    update: SetAttrsOp<()>,
-}
-
-impl<C: Vfsi + ?Sized, T: AsTarget<C::File> + Clone> Clone for SetMetadata<'_, C, T> {
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client,
-            target: self.target.clone(),
-            update: self.update,
-        }
-    }
-}
-
-impl<C: Vfsi + ?Sized, T: AsTarget<C::File> + fmt::Debug> fmt::Debug for SetMetadata<'_, C, T> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SetMetadata")
-            .field("target", &self.target)
-            .field("update", &self.update)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<'a, C: Vfsi + ?Sized, T: AsTarget<C::File>> SetMetadata<'a, C, T> {
-    pub(super) fn new(client: &'a C, target: T) -> Self {
-        Self {
-            client,
-            target,
-            update: SetAttrsOp::new(()),
-        }
-    }
-    pub fn permissions(&mut self, permissions: Permissions) -> &mut Self {
-        self.update = self.update.permissions(permissions);
-        self
-    }
-
-    pub fn len(&mut self, len: u64) -> &mut Self {
-        self.update = self.update.len(len);
-        self
-    }
-
-    pub fn accessed(&mut self, accessed: SystemTime) -> &mut Self {
-        self.update = self.update.accessed(accessed);
-        self
-    }
-
-    pub fn modified(&mut self, modified: SystemTime) -> &mut Self {
-        self.update = self.update.modified(modified);
-        self
-    }
-
-    pub fn follow_symlinks(&mut self, follow: bool) -> &mut Self {
-        self.update = self.update.follow_symlinks(follow);
-        self
-    }
-
-    pub fn uid(&mut self, uid: u32) -> &mut Self {
-        self.update = self.update.uid(uid);
-        self
-    }
-    pub fn gid(&mut self, gid: u32) -> &mut Self {
-        self.update = self.update.gid(gid);
-        self
-    }
-    pub fn apply(&self) -> Result<()> {
-        self.client
-            .vsetattrs(&[self.update.with_target(self.target.as_target())])
     }
 }

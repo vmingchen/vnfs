@@ -7,6 +7,7 @@
 //! ```
 
 use nfsv41_sys::nfsstat4_NFS4ERR_EXIST;
+use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -50,7 +51,7 @@ fn failed_gss_negotiation_does_not_fall_back_to_a_working_auth_sys_export() {
 }
 
 #[cfg(feature = "test-faults")]
-use std::io::{self, Read, Write};
+use std::io;
 #[cfg(feature = "test-faults")]
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 #[cfg(feature = "test-faults")]
@@ -360,14 +361,14 @@ fn rust_native_client_workflow_on_nfs() {
     assert_eq!(&second[..3], b"two");
     assert!(lengths.iter().all(|result| result.is_buffered()));
     assert_eq!(vfsi_nfs::compound::thread_compound_stats().0, 1);
-    assert_eq!(client.attrs(&paths[0]).unwrap().len(), 3);
+    assert_eq!(client.attrs(&paths[0]).unwrap().len().unwrap(), 3);
     assert_eq!(client.read_dir(&nested).unwrap().len(), 2);
     let mut visited = Vec::new();
     let mut held_during_visit = Some(client.open(&paths[0]).unwrap());
     client
         .listdir(&nested, vfsi_core::api::ListDirOptions::new(), |entry| {
             // The application callback must run outside the NFS session lock.
-            assert_eq!(client.attrs(entry.entry.path())?.len(), 3);
+            assert_eq!(client.attrs(entry.entry.path())?.len(), Some(3));
             drop(held_during_visit.take());
             visited.push(entry.entry.path().to_path_buf());
             Ok(vfsi_core::api::WalkControl::Continue)
@@ -383,9 +384,9 @@ fn rust_native_client_workflow_on_nfs() {
         .unwrap();
     assert_eq!(early_count, 1);
     let large = vec![0xa5; 2 * 1024 * 1024];
-    files[0].write_at(&large, 0).unwrap();
+    client.file_io(&files[0]).write_all(&large).unwrap();
     let mut large_buffer = vec![0; large.len() + 16];
-    let read = files[0].read_at(&mut large_buffer, 0).unwrap();
+    let read = client.file_io(&files[0]).read(&mut large_buffer).unwrap();
     assert_eq!(read, large.len());
     assert_eq!(&large_buffer[..read], large);
     client.close_files(files).unwrap();
@@ -418,7 +419,10 @@ fn rust_native_client_workflow_on_nfs() {
                     .follow_symlinks(follow),
             )
             .unwrap();
-        assert_eq!(attrs.iter().map(|m| m.len()).collect::<Vec<_>>(), [5, 6]);
+        assert_eq!(
+            attrs.iter().map(|m| m.len().unwrap()).collect::<Vec<_>>(),
+            [5, 6]
+        );
         assert_eq!(
             vfsi_nfs::compound::thread_compound_stats().0,
             1,
@@ -533,7 +537,7 @@ fn unified_directory_visits_on_nfs() {
             .visit_entries_with_options(&[&dir], options.recursive(recursive), |index, entry| {
                 assert_eq!(index, 0);
                 if entry.path() == Path::new(&file) {
-                    assert_eq!(entry.attrs().len(), 7);
+                    assert_eq!(entry.attrs().len().unwrap(), 7);
                 }
                 seen += 1;
                 assert!(client.attrs(entry.path()).is_ok());
@@ -595,7 +599,7 @@ fn application_collection_preserves_native_batching_and_root_groups() {
     for (index, tree) in listings.iter().enumerate() {
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].path, Path::new(&roots[index]));
-        assert_eq!(tree[0].entries[0].attrs().len(), 4);
+        assert_eq!(tree[0].entries[0].attrs().len().unwrap(), 4);
     }
     let error = client
         .read_dirs_with_options(&roots, ListDirOptions::new().fields(fields).max_entries(5))
@@ -630,10 +634,7 @@ fn whole_file_readv_honors_the_client_budget() {
     const BYTES: usize = 1024 * 1024 + 17;
     let client = Nfs::builder(host)
         .version(version)
-        .limits(vnfs::ResourceLimits {
-            max_read_bytes: BYTES,
-            ..Default::default()
-        })
+        .limits(vnfs::ResourceLimits::new().max_read_bytes(BYTES))
         .connect()
         .unwrap();
     let path = format!("{dir}/file");
@@ -680,17 +681,16 @@ fn rust_native_client_pool_uses_independent_sessions() {
     assert!(!pool.is_empty());
     assert!(pool.client(2).is_none());
     let first = pool.client(0).unwrap();
-    use std::io::Write;
     let paths: Vec<_> = (0..2).map(|index| format!("{dir}/file-{index}")).collect();
     for path in &paths {
-        let mut file = first
+        let file = first
             .open_options()
             .write(true)
             .create(true)
             .truncate(true)
             .open(path)
             .unwrap();
-        file.write_all(b"pool").unwrap();
+        first.file_io(&file).write_all(b"pool").unwrap();
         file.close().unwrap();
     }
     let threads: Vec<_> = paths
@@ -700,7 +700,7 @@ fn rust_native_client_pool_uses_independent_sessions() {
             std::thread::spawn(move || {
                 let file = client.open(&path).unwrap();
                 let mut bytes = [0; 4];
-                assert_eq!(file.read_at(&mut bytes, 0).unwrap(), 4);
+                assert_eq!(client.file_io(&file).read(&mut bytes).unwrap(), 4);
                 assert_eq!(&bytes, b"pool");
             })
         })
@@ -812,7 +812,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
             assert_eq!(offset, next_offset, "callbacks are delivered in order");
             next_offset += data.len() as u64;
             actual.extend_from_slice(data);
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .expect("stream complete file");
     assert_eq!(completion, vnfs::StreamCompletion::Complete);
@@ -822,7 +822,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
     let completion = pool
         .read_stream(&path, |_, _| {
             callbacks += 1;
-            Ok(false)
+            Ok(std::ops::ControlFlow::Break(()))
         })
         .expect("cancel stream");
     assert_eq!(
@@ -834,7 +834,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
     assert_eq!(callbacks, 1);
 
     let callback_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = pool.read_stream(&path, |_, _| -> vnfs::Result<bool> {
+        let _ = pool.read_stream(&path, |_, _| -> vnfs::Result<std::ops::ControlFlow<()>> {
             panic!("injected callback panic")
         });
     }));
@@ -848,7 +848,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
     let mut reread = Vec::with_capacity(expected.len());
     pool.read_stream(&path, |_, data| {
         reread.extend_from_slice(data);
-        Ok(true)
+        Ok(std::ops::ControlFlow::Continue(()))
     })
     .expect("reuse pool after cancellation");
     assert_eq!(reread, expected);
@@ -1740,7 +1740,7 @@ fn scalar_write_follows_final_symlink_chains_and_creates_dangling_targets() {
     fs.write(&dangling, b"created").unwrap();
     assert_eq!(fs.read_files(&[&missing]).unwrap(), [b"created".to_vec()]);
     fs.write(&link, b"").unwrap();
-    assert_eq!(fs.attrs(&target).unwrap().len(), 0);
+    assert_eq!(fs.attrs(&target).unwrap().len().unwrap(), 0);
     for path in [&link, &chain, &dangling] {
         assert!(fs.symlink_attrs(path).unwrap().is_symlink());
     }
@@ -2413,7 +2413,7 @@ fn pipelined_read_recovers_after_a_lost_read_reply() {
             proxy.arm();
         }
         actual.extend_from_slice(data);
-        Ok(true)
+        Ok(std::ops::ControlFlow::Continue(()))
     })
     .expect("read should recover after the lost read response");
     proxy.wait_for_drop();
@@ -3033,8 +3033,7 @@ fn owned_directory_handle_survives_rename_and_exposes_options() {
 
     let handle = c.open_dir_handle(&original).unwrap();
     c.rename(&original, &moved).unwrap();
-    handle
-        .remove_contents_with_options(RemoveOptions::new().batch(2))
+    c.remove_dir_contents_handle_with_options(&handle, RemoveOptions::new().batch(2))
         .unwrap();
     assert_eq!(handle.path(), Path::new(&original));
     assert!(c.read_dir(&moved).unwrap().is_empty());
@@ -4496,4 +4495,45 @@ fn copy_options_nfs_mixed_source_symlinks_and_extents() {
     fs.vcopy_impl(&[], options).unwrap();
     fs.remove_paths_impl(&[Path::new(&directory)], true)
         .unwrap();
+}
+
+#[path = "support/directory_handles.rs"]
+mod portable_directory_handles;
+
+#[test]
+fn portable_directory_vectors_preflight_and_retain_identity() {
+    let root = setup_dir("portable_directory_vectors");
+    let fs = Nfs::builder(test_host())
+        .root(root.as_str())
+        .connect()
+        .unwrap();
+    let other = Nfs::builder(test_host())
+        .root(root.as_str())
+        .connect()
+        .unwrap();
+    portable_directory_handles::check(&fs, &other, &fs, &fs);
+    drop(other);
+    drop(fs);
+    let mut c = client();
+    c.remove_impl(Path::new(&root), true).unwrap();
+}
+
+#[cfg(all(feature = "auto", target_os = "linux"))]
+#[test]
+#[ignore = "requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount"]
+fn portable_auto_directory_vectors_preflight_and_retain_identity() {
+    let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
+    let root = tempfile::tempdir_in(mount).unwrap();
+    let fs = vnfs::Auto::new(root.path()).unwrap();
+    let other = vnfs::Auto::new(root.path()).unwrap();
+    assert!(matches!(
+        fs.route_for("/"),
+        vnfs::AutoRoute::DirectNfs { .. }
+    ));
+    // Create and rename through the kernel namespace so Auto's host-side route
+    // discovery observes its own fixture changes. Check post-removal state via
+    // direct NFS to avoid assuming kernel/direct-client cache coherence.
+    let namespace = vnfs::Mounted::new(root.path()).unwrap();
+    let verify = Nfs::from_mount(root.path()).unwrap();
+    portable_directory_handles::check(&fs, &other, &namespace, &verify);
 }

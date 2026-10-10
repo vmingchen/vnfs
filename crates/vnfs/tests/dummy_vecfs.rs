@@ -83,10 +83,7 @@ fn native_paged_tree_honors_budget_overrides_and_allows_reentry() {
     use vfsi_sync::FsClient;
     use vnfs::{ListDirOptions, ResourceLimits, TraversalCompletion};
     let (_root, backend) = dummy();
-    let client = FsClient::new(backend).with_limits(ResourceLimits {
-        max_directory_entries: 3,
-        ..Default::default()
-    });
+    let client = FsClient::new(backend).with_limits(ResourceLimits::new().max_directory_entries(3));
     client.create_dir_all("/tree/sub").unwrap();
     client.write("/tree/a", b"a").unwrap();
     client.write("/tree/sub/b", b"b").unwrap();
@@ -214,7 +211,7 @@ fn application_directory_vectors_preserve_fields_and_limits() {
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0][0].path, Path::new("/a"));
     assert_eq!(listed[0][0].entries[0].path(), Path::new("/a/one"));
-    assert_eq!(listed[1][0].entries[0].attrs().len(), 2);
+    assert_eq!(listed[1][0].entries[0].attrs().len().unwrap(), 2);
     assert!(listed[0][0].entries[0].attrs().mode().is_some());
     assert!(listed[0][0].entries[0].attrs().blocks().is_some());
     assert_eq!(listed[0][0].entries[0].attrs().device_id(), None);
@@ -240,7 +237,8 @@ fn application_directory_vectors_preserve_fields_and_limits() {
     assert_eq!(error.index(), Some(1));
 
     let tree = client
-        .walk_with_options("/", ListDirOptions::new().recursive(true).fields(fields))
+        .read_dirs_with_options(&["/"], ListDirOptions::new().fields(fields).recursive(true))
+        .map(|mut trees| trees.remove(0))
         .unwrap();
     assert!(
         tree.iter()
@@ -251,13 +249,14 @@ fn application_directory_vectors_preserve_fields_and_limits() {
             .any(|directory| directory.path == Path::new("/b"))
     );
     let error = client
-        .walk_with_options(
-            "/",
+        .read_dirs_with_options(
+            &["/"],
             ListDirOptions::new()
-                .recursive(true)
                 .max_entries(1)
-                .fields(fields),
+                .fields(fields)
+                .recursive(true),
         )
+        .map(|mut trees| trees.remove(0))
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
 }
@@ -371,14 +370,14 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     client
         .read_stream_with_options(
             "/stream",
-            StreamOptions::new().chunk_size(64 * 1024),
+            StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(64 * 1024).unwrap()),
             |offset, chunk| {
                 assert_eq!(offset, next_offset);
                 assert!(!chunk.is_empty());
                 assert!(chunk.len() <= 64 * 1024);
                 next_offset += chunk.len() as u64;
                 actual.extend_from_slice(chunk);
-                Ok(true)
+                Ok(std::ops::ControlFlow::Continue(()))
             },
         )
         .unwrap();
@@ -390,7 +389,7 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
             assert_eq!(offset, default_bytes as u64);
             assert!(chunk.len() <= vfsi_sync::DEFAULT_READ_STREAM_CHUNK_BYTES);
             default_bytes += chunk.len();
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap();
     assert_eq!(default_bytes, payload.len());
@@ -399,10 +398,10 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     client
         .read_stream_with_options(
             "/stream",
-            StreamOptions::new().chunk_size(1234),
+            StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(1234).unwrap()),
             |_, chunk| {
                 seen += chunk.len();
-                Ok(false)
+                Ok(std::ops::ControlFlow::Break(()))
             },
         )
         .unwrap();
@@ -418,19 +417,10 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     client
         .read_stream("/empty", |_, _| {
             empty_callbacks += 1;
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap();
     assert_eq!(empty_callbacks, 0);
-
-    let error = client
-        .read_stream_with_options(
-            "/does-not-exist",
-            StreamOptions::new().chunk_size(0),
-            |_, _| Ok(true),
-        )
-        .unwrap_err();
-    assert_eq!(error.err_no(), libc::EINVAL as u32);
 }
 
 #[test]
@@ -896,8 +886,8 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
 
     let metadata = client.attrs("/tree/nested/file").unwrap();
     assert!(metadata.is_file());
-    assert_eq!(metadata.len(), 5);
-    assert!(!metadata.permissions().readonly());
+    assert_eq!(metadata.len(), Some(5));
+    assert!(!metadata.permissions().unwrap().readonly());
 
     let entries = client.read_dir("/tree/nested").unwrap();
     assert_eq!(entries.len(), 1);
@@ -914,22 +904,21 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
     let mut bytes = [0; 5];
     assert_eq!(file.read_at(&mut bytes, 0).unwrap(), 5);
     assert_eq!(&bytes, b"hallo");
-    assert_eq!(file.attrs().unwrap().len(), 5);
+    assert_eq!(file.attrs().unwrap().len().unwrap(), 5);
     file.truncate(4).unwrap();
     file.chmod(vnfs::Permissions::from_mode(0o600)).unwrap();
     let metadata = file.attrs().unwrap();
-    assert_eq!(metadata.len(), 4);
-    assert_eq!(metadata.permissions().mode(), 0o600);
+    assert_eq!(metadata.len(), Some(4));
+    assert_eq!(metadata.permissions().unwrap().mode(), 0o600);
     file.close().unwrap();
     client
-        .set_metadata("/tree/nested/file")
-        .permissions(vnfs::Permissions::from_mode(0o400))
-        .len(4)
-        .apply()
+        .vsetattrs(&[vnfs::SetAttrsOp::new("/tree/nested/file")
+            .permissions(vnfs::Permissions::from_mode(0o400))
+            .len(4)])
         .unwrap();
     let metadata = client.attrs("/tree/nested/file").unwrap();
-    assert_eq!(metadata.len(), 4);
-    assert_eq!(metadata.permissions().mode(), 0o400);
+    assert_eq!(metadata.len(), Some(4));
+    assert_eq!(metadata.permissions().unwrap().mode(), 0o400);
 
     client
         .rename("/tree/nested/file", "/tree/nested/renamed")
@@ -1308,7 +1297,7 @@ fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
         let result = client.listdir("/tree", vfsi_core::api::ListDirOptions::new(), |entry| {
             // Both operations acquire the same backend mutex. In particular,
             // dropping an owned file must not block directory enumeration.
-            assert_eq!(client.attrs(entry.entry.path())?.len(), 1);
+            assert_eq!(client.attrs(entry.entry.path())?.len(), Some(1));
             if let Some(file) = held_file.take() {
                 drop(file);
             }

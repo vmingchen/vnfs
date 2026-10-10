@@ -101,7 +101,7 @@ fn native_directory_visitor_reenters_client_across_snapshot_pages() {
                 &remote_dir,
                 vfsi_core::api::ListDirOptions::new().sort_by_name(sort),
                 |entry| {
-                    assert_eq!(client.attrs(entry.entry.path())?.len(), 1);
+                    assert_eq!(client.attrs(entry.entry.path())?.len(), Some(1));
                     seen.push(entry.entry.path().to_path_buf());
                     Ok(vfsi_core::api::WalkControl::Continue)
                 },

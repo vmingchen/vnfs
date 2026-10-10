@@ -195,7 +195,7 @@ Use `Mounted::new("/")?` to **always** use the kernel client, or
 `Nfs::builder(server).root(export).connect()?` for a fully explicit direct
 connection. `Auto` selects a backend before dispatch; it never replays a
 possibly completed write through a different backend. Open handles remain
-pinned to their selected backend. `Auto::with_limits(ResourceLimits { .. })`
+pinned to their selected backend. `Auto::with_limits(ResourceLimits::new().max_read_bytes(bytes))`
 configures the same client resource policy as `NfsBuilder::limits`;
 file `Read` calls
 are chunked to 1 MiB.
@@ -262,8 +262,8 @@ cargo run --release -p vnfs --example small_files_benchmark -- \
 ## Is vnfs a fit?
 
 `vnfs` is a strong fit when a Linux service touches many independent NFS files
-and can express that work in batches. It also provides familiar scalar
-`Read`, `Write`, and `Seek` support when only part of a data path benefits from
+and can express that work in batches. It also provides explicit adapters for
+familiar scalar `Read`, `Write`, and `Seek` support when only part of a data path benefits from
 vectorization.
 
 The crate is currently beta and synchronous. It uses NFSv4.1/4.2 over TCP,
@@ -275,28 +275,33 @@ from bounded blocking workers.
 ## Idiomatic scalar I/O
 
 `NfsClient` is cheaply cloneable and its owned `NfsFile` handles can coexist or
-move to worker threads. A handle implements `Read`, `Write`, and `Seek` and
-closes its remote descriptor on drop. Call `close()` explicitly when a close
-error must be observed, and `sync_data()`/`sync_all()` when durability errors
-must be observed before close.
+move to worker threads. Handles expose lifecycle operations; file I/O and
+metadata go through `Vfsi`. Call `close()` explicitly to observe cleanup errors,
+and `fs.sync_data(&file)` or `fs.sync_all(&file)` to observe durability errors.
+
+Use an explicit `fs.file_io(&file)` adapter for generic `std::io` code. It borrows
+the client and handle, maintains its own cursor starting at zero, and delegates
+reads, writes, metadata and synchronization to the vector engine. Collecting
+reads enforce the client's payload budget.
 
 ```rust,no_run
+use std::io::Read;
 use vnfs::prelude::*;
 
-fn main() -> vnfs::Result<()> {
+fn main() -> std::io::Result<()> {
     let fs = Nfs::connect("nfs.example.com")?;
-    let mut file = fs.open("/file-1")?;
-    let mut contents = vec![0; fs.attrs("/file-1")?.len() as usize];
-    file.read_at(&mut contents, 0)?;
-    file.try_close()?;
+    let file = fs.open("/file-1")?;
+    let mut contents = Vec::new();
+    fs.file_io(&file).read_to_end(&mut contents)?;
+    file.close()?;
     Ok(())
 }
 ```
 
-The native methods return structured `VfError` values with protocol domain,
-path, operation, vector index, and retry information. The standard `Read`,
-`Write`, and `Seek` implementations remain available when integration with
-generic `std::io` code is more important than retaining that detail.
+Vector operations preserve structured errors. Standard-I/O adapters convert
+these to `std::io::Error` for interoperability. Sparse metadata getters such as
+`Attrs::len()` and `permissions()` return `None` when the backend did not return
+the corresponding field; missing values never imply zero size or mode zero.
 
 `VfsiExt::listdir(root, ListDirOptions::new(), callback)` invokes a callback
 with one `WalkEventKind::Entry` per child without retaining the full listing
@@ -323,13 +328,13 @@ fn main() -> vnfs::Result<()> {
     let mut bytes_seen = 0u64;
     fs.vstream(
         &["/dataset/large.bin"],
-        StreamOptions::new().chunk_size(4 * 1024 * 1024),
+        StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(4 * 1024 * 1024).unwrap()),
         |index, offset, chunk| {
             assert_eq!(index, 0);
             assert_eq!(offset, bytes_seen);
             // Consume/process this chunk here; do not retain it to keep memory bounded.
             bytes_seen += chunk.len() as u64;
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         },
     )?;
     println!("read {bytes_seen} bytes");
@@ -393,7 +398,7 @@ fn main() -> vnfs::Result<()> {
     pool.read_stream("/dataset/large.bin", |offset, chunk| {
         // Consume chunks in order; false cancels after this chunk.
         println!("received {} bytes at {offset}", chunk.len());
-        Ok(true)
+        Ok(std::ops::ControlFlow::Continue(()))
     })?;
     Ok(())
 }
@@ -451,12 +456,28 @@ is 16 MiB, shared by scalar whole-file reads and aggregate vector reads. Explici
 per-call options override these defaults. Limits bound logical data/path bytes,
 not allocator rounding, result metadata, RPC envelopes, or all process memory.
 Read pools have their own explicit concurrency/buffer options.
+Configure resource policies through builders such as
+`ResourceLimits::new().max_read_bytes(1024).max_walk_depth(8)` and inspect
+values through accessors. Zero read, entry, path-byte, and depth limits remain
+valid. `stream_chunk_bytes` takes `NonZeroUsize` to ensure forward progress.
+`OpenOp`, `RemoveOptions`, and `NfsRecoveryPolicy` also keep their fields private;
+use their constructors, builders, and accessors.
+
+Use `SetAttrsOp` with `vsetattrs` for metadata changes, including mixed path and
+handle targets. The singular `truncate`, `chmod`, and `chown` helpers delegate
+to that engine. Recursive collection uses
+`read_dirs_with_options(&[root], ListDirOptions::new().recursive(true))`, returning
+one tree per root; `listdir` provides incremental traversal. All portable reads
+return `ReadResult`, with `data()` for owned reads and `read()` for buffered reads.
+
 `max_read_bytes` is a collection/batch policy, not a cap on all reads or
-process memory. In particular, standard `Read::read_to_end` can keep growing
-its caller-owned buffer. For an already-open file, use
-`file.read_to_end_with_limit(bytes)` to collect from its current cursor with
-an explicit bound. At the limit it may consume one extra EOF-probe byte;
-failure does not roll back the cursor or return the partial buffer.
+process memory. The explicit `fs.file_io(&file)` adapter bounds collecting reads
+using the client's read budget. Repeated reads into caller-managed buffers remain caller-managed.
+Retain the adapter to preserve its cursor across calls; each new
+`fs.file_io(&file)` starts at zero. Use `adapter.read_to_end(&mut buffer)` to
+collect from its current cursor with the client's bound. At the limit it may consume one extra EOF-probe byte;
+failure does not roll back the cursor, and `read_to_end` retains the bytes already
+appended to its caller's buffer.
 Changing Auto limits also updates cached connections; existing Auto handles
 use the current policy for grouped reads. Directory path-byte limits apply to
 the public Auto paths, including mount prefixes.
@@ -564,7 +585,7 @@ partial progress and restart at an application-defined checkpoint.
 
 ### Recursive removal and path-entry races
 
-`rm`, `rm_contents`, and `ensure_empty_dir` take paths. Between the caller
+`remove_dir_all` and `remove_dir_contents` take paths. Between the caller
 naming a path and the backend starting work, a concurrent actor can replace a
 path component with a symbolic link, so a privileged process may remove an
 unintended tree. This is the entry-point TOCTOU described by
@@ -580,16 +601,20 @@ For privileged or attacker-influenced paths, root the removal at an
 already-open directory instead of a path:
 
 ```rust,no_run
+use vnfs::VfsiExt;
 # fn example(fs: &vnfs::NfsClient) -> vnfs::Result<()> {
 let mut dir = fs.open_dir_handle("/attacker/controlled")?;
-dir.remove_contents()?; // rooted at the resolved directory handle
+fs.remove_dir_contents_handle(&dir)?; // rooted at the resolved directory handle
 dir.try_close()?;       // Retains cleanup ownership if explicit close fails
 # Ok(())
 # }
 ```
 
 `open_dir_handle` rejects backends without a genuine handle and does not follow
-a final symlink. It empties the directory while keeping that directory itself.
+a final symlink. `remove_dir_contents_handle` empties that retained directory
+while preserving its root, through `Vfsi::vremove_dir_contents`. Use
+`Vfsi::vopen_dirs` to open multiple directories. Import `DirHandle` for generic
+handle lifecycle methods.
 `remove_dir_all_with_options`, `remove_dir_contents_with_options`, and
 `Vfsi::vremove(paths, mode, options)` accept a `RemoveOptions` value choosing best-effort vs
 fail-fast removal (`continue_on_error`, defaulting to fail-fast), a vector batch-size cap

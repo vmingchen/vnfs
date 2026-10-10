@@ -136,8 +136,10 @@ client, preventing accidental cross-session descriptor use.
 Application code should connect through `Nfs::builder`, which directly
 returns the concrete `NfsClient` alias. `NfsVecFs` and `NfsClientBuilder`
 remain available in `vfsi-nfs` for backend embedding. `NfsClient::open_options`
-mirrors `std::fs::OpenOptions`; direct `read_at` and `write_at` perform
-positional I/O. Prepare vector requests without issuing I/O using
+mirrors `std::fs::OpenOptions`. File handles expose lifecycle operations;
+I/O runs through `Vfsi` vectors. Use `fs.file_io(&file)` for an explicit
+`std::io::{Read, Write, Seek}` adapter with its own cursor. Prepare vector
+requests without issuing I/O using
 `ReadOp::range(&file, offset, length)`, `ReadOp::into(&file, offset, &mut buffer)`,
 and `WriteOp::at(&file, offset, data)`. `read_files` performs bounded
 path-based vector reads without remote OPEN/CLOSE phases; `write_files` batches
@@ -149,8 +151,8 @@ one close per dropped handle.
 Real application ports also need metadata-rich traversal and namespace
 operations without constructing `VfAttrs` or calling backend traits directly.
 `Attributes` selects only needed attributes; `Attrs` reports optional
-fields such as allocated blocks, device ID, full mode, and named-attribute
-presence as `Option` so an absent value is not confused with zero. Use
+fields such as size, permissions, allocated blocks, device ID, full mode,
+and named-attribute presence as `Option` so an absent value is not confused with zero. Use
 `attrs_with_options` with `AttrsOptions::follow_symlinks(false)` for a no-follow query,
 `vlistdirs` to visit pages for several directory operands, with
 `ListDirOptions::recursive(true)` for bounded recursive trees. Use the
@@ -212,23 +214,24 @@ policy even for previously opened handles. Auto traversal quotas count paths
 after translation into the public namespace, including mount prefixes.
 
 `vread` range requests are bounded by their caller-supplied lengths and the
-aggregate budget. Scalar `NfsFile::read_at` is bounded by the caller's buffer.
-Applications processing larger or untrusted files
-should use `Vfsi::vstream`, `VfsiExt::read_stream`, a file's `Read` adapter, or repeated positional
-reads instead of raising a whole-file allocation limit without bound.
-These limits bound logical payloads, not process RSS or arbitrary
-`std::io::Read::read_to_end` calls. For an already-open file, use
-`read_to_end_with_limit(max_bytes)`: it reads from the current cursor without
-reopening the path. An overflow returns an error and discards the collected
-buffer; the cursor can advance, including a one-byte EOF probe. It is not a
-cursor-rollback operation.
+aggregate budget. Applications processing larger or untrusted files can use
+`Vfsi::vstream`, `VfsiExt::read_stream`, `fs.file_io(&file)`, or repeated
+positional vectors. The adapter uses singleton `vread`, `vwrite`, `vgetattrs`,
+and `vfsync` calls against the retained handle; rename does not redirect it.
+Each adapter has an independent cursor. Its `read_to_end` and `read_to_string`
+limit newly collected bytes to the client's read budget. On overflow,
+`read_to_end` retains the appended prefix, while `read_to_string` leaves the
+string unchanged. The cursor can advance, including a one-byte EOF probe;
+these methods do not roll back the cursor. These limits bound logical payloads,
+not process RSS or collection performed by arbitrary standard-I/O wrappers.
 
 Allocating directory APIs are bounded for the same reason. `NfsClient::read_dir`
 uses finite entry and combined-path-byte defaults; `read_dir_with_options` and
 `ListDirOptions` select tighter limits or explicitly opt into unlimited
 collection. `read_dirs_with_options` applies these limits across the entire
-returned vector. Recursive `NfsClient::walk_with_options` additionally has a
-default depth limit and accepts `ListDirOptions`. NFS multi-directory listing
+returned vector. Use `read_dirs_with_options(&[root], ListDirOptions::new().recursive(true))`
+for recursive collection with the default depth limit. The result contains
+one tree per input root. NFS multi-directory listing
 delivers each bounded READDIR page before requesting continuation pages, so
 early-stop callbacks no longer retain the whole remote listing. Applications
 needing to consume one directory incrementally can use `listdir`
@@ -241,8 +244,13 @@ siblings; those modes retain bounded directory buffers. The default entry-only
 mode stays paged and retains native anchored child cursors and batching. With
 lifecycle events enabled, `SkipSubtree` on Enter prevents descent.
 `visit_dirs_ordered` still supplies custom ordering and complete listings.
-`vgetattrs` accepts any `AsRef<Path>` inputs,
-including strings and `PathBuf`, consistently with the other path vectors.
+`vgetattrs` accepts paths and retained handles through `AsTarget`, including
+mixed vectors of `Target::path(...)` and `Target::file(...)`. Handle queries
+retain object identity; unsupported backends return an error instead of
+resolving the original path. `vfsync` batches retained handles with
+`SyncMode::Data` or `SyncMode::All`; scalar `sync_data` and `sync_all` delegate
+to it. Ownership queries must explicitly request `Attributes::UID` and
+`Attributes::GID`.
 The application visitor starts with one entry, then delivers at most 128 entries per page
 and releases its backend lock before invoking the application callback, which
 may safely reenter the same client or drop its files. NFS retains a resolved

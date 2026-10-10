@@ -7,33 +7,6 @@ macro_rules! __vfsi_file_methods {
         fn path(&self) -> &Path {
             <$file>::path(self)
         }
-        fn attrs(&self) -> Result<Attrs> {
-            <$file>::attrs(self)
-        }
-        fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize> {
-            <$file>::read_at(self, buffer, offset)
-        }
-        fn write_at(&self, buffer: &[u8], offset: u64) -> Result<usize> {
-            <$file>::write_at(self, buffer, offset)
-        }
-        fn read_native(&mut self, buffer: &mut [u8]) -> Result<usize> {
-            <$file>::read_native(self, buffer)
-        }
-        fn read_to_end_with_limit(&mut self, max_bytes: usize) -> Result<Vec<u8>> {
-            <$file>::read_to_end_with_limit(self, max_bytes)
-        }
-        fn write_native(&mut self, buffer: &[u8]) -> Result<usize> {
-            <$file>::write_native(self, buffer)
-        }
-        fn seek_native(&mut self, position: SeekFrom) -> Result<u64> {
-            <$file>::seek_native(self, position)
-        }
-        fn sync_data(&self) -> Result<()> {
-            <$file>::sync_data(self)
-        }
-        fn sync_all(&self) -> Result<()> {
-            <$file>::sync_all(self)
-        }
         fn try_close(&mut self) -> Result<()> {
             <$file>::try_close(self)
         }
@@ -121,7 +94,7 @@ macro_rules! __vfsi_client_methods {
             &self,
             paths: &[P],
             options: $crate::StreamOptions,
-            mut callback: impl FnMut(usize, u64, &[u8]) -> Result<bool>,
+            mut callback: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
         ) -> Result<Vec<$crate::StreamCompletion>> {
             let mut output = Vec::new();
             for (index, path) in paths.iter().enumerate() {
@@ -161,7 +134,10 @@ macro_rules! __vfsi_client_methods {
         ) -> Result<()> {
             <$client>::$setattrs($receiver(self), updates)
         }
-        fn vgetattrs<P: AsRef<Path>>(
+        fn vfsync(&self, files: &[&Self::File], mode: vfsi_core::api::SyncMode) -> Result<()> {
+            <$client>::vfsync_impl($receiver(self), files, mode)
+        }
+        fn vgetattrs<P: vfsi_core::AsTarget<Self::File>>(
             &self,
             paths: &[P],
             options: vfsi_core::api::AttrsOptions,
@@ -172,6 +148,12 @@ macro_rules! __vfsi_client_methods {
             <$client>::$limits($receiver(self))
         }
 
+        fn vopen_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<Self::Dir>> {
+            <$client>::vopen_dirs_impl($receiver(self), paths)
+        }
+        fn vremove_dir_contents(&self, dirs: &[&Self::Dir], options: $crate::RemoveOptions) -> Result<()> {
+            <$client>::vremove_dir_contents_impl($receiver(self), dirs, options)
+        }
         fn vopen(&self, requests: &[OpenOp]) -> Result<Vec<Self::File>> {
             if requests.len() == 1 {
                 // Preserve native symlink resolution and independent-handle state.

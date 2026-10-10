@@ -22,12 +22,12 @@ pub fn copy_to_writer(
                 Error::client(0, error.raw_os_error().unwrap_or(libc::EIO) as u32)
                     .with_context("copy_to_writer", path),
             );
-            return Ok(false);
+            return Ok(std::ops::ControlFlow::Break(()));
         }
         written = written
             .checked_add(data.len() as u64)
             .ok_or_else(|| Error::client(0, libc::EOVERFLOW as u32))?;
-        Ok(true)
+        Ok(std::ops::ControlFlow::Continue(()))
     });
     if let Some(error) = write_error {
         return Err(error);

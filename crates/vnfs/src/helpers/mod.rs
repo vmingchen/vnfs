@@ -19,6 +19,6 @@ pub use stats::{TreeStats, tree_stats};
 mod session;
 #[cfg(all(feature = "nfs", target_os = "linux"))]
 pub use session::NfsMountSession;
-pub use session::{MountSession, ResolvePath};
+pub use session::{PathMapper, ResolvePath};
 mod data;
 pub use data::copy_to_writer;

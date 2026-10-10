@@ -1,5 +1,4 @@
 //! Native execution of the portable VFSI contract.
-use std::io::SeekFrom;
 use std::path::Path;
 use vfsi_core::api::*;
 #[doc(hidden)]
@@ -248,8 +247,13 @@ impl<F: crate::FileSystem> FileHandle for crate::FsFile<F> {
     crate::__vfsi_file_methods!(crate::FsFile<F>);
 }
 
+impl<F: crate::Backend> vfsi_core::api::DirHandle for crate::FsDir<F> {
+    crate::__vfsi_file_methods!(crate::FsDir<F>);
+}
+
 impl<F: crate::Backend + 'static> Vfsi for crate::FsClient<F> {
     type File = crate::FsFile<F>;
+    type Dir = crate::FsDir<F>;
     crate::__vfsi_client_methods!(
         crate::FsClient<F>,
         std::convert::identity,
@@ -293,7 +297,7 @@ pub(crate) fn read_backend<'a, F: crate::Backend + 'static>(
 ) -> Result<Vec<ReadResult>> {
     consume_ops(
         ops,
-        options.limit_or(client.limits().max_read_bytes),
+        options.limit_or(client.limits().read_byte_limit()),
         crate::FsFile::read_request_at,
         crate::FsFile::read_request_at_into,
         |requests, options| read_backend_owned(client, requests, options),
@@ -334,7 +338,7 @@ where
     client.vwrite_all_mapped_native(ops, |op| op.file().write_request_at(op.offset(), op.data()))
 }
 
-pub(crate) fn metadata_backend<F, P: AsRef<std::path::Path>>(
+pub(crate) fn metadata_backend<F, P: vfsi_core::AsTarget<crate::FsFile<F>>>(
     client: &crate::FsClient<F>,
     paths: &[P],
     options: AttrsOptions,

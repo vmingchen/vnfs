@@ -37,7 +37,39 @@ impl WriteOptions {
 /// A positional write borrowing its handle and payload without copying either.
 /// Construction performs no I/O or allocation. Does not change the file cursor.
 /// Uses the same storage definition as the native [`crate::WriteOp`].
-pub type WriteOp<'a, H> = crate::internal::WriteRequest<&'a H, &'a [u8], u64, ()>;
+#[repr(transparent)]
+pub struct WriteOp<'a, H>(crate::internal::WriteRequest<&'a H, &'a [u8], u64, ()>);
+
+impl<H> Copy for WriteOp<'_, H> {}
+impl<H> Clone for WriteOp<'_, H> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<H> std::fmt::Debug for WriteOp<'_, H> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl<'a, H> WriteOp<'a, H> {
+    /// Borrow a handle and payload at an absolute byte offset.
+    pub fn new(file: &'a H, offset: u64, data: &'a [u8]) -> Self {
+        Self(crate::internal::WriteRequest::new(file, offset, data))
+    }
+    /// Borrow a handle and payload at an absolute byte offset.
+    pub fn at(file: &'a H, offset: u64, data: &'a [u8]) -> Self {
+        Self::new(file, offset, data)
+    }
+    pub fn file(&self) -> &'a H {
+        self.0.file()
+    }
+    pub fn offset(&self) -> u64 {
+        self.0.offset()
+    }
+    pub fn data(&self) -> &'a [u8] {
+        self.0.data()
+    }
+}
 
 #[cfg(test)]
 mod option_layout_tests {

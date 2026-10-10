@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 use vnfs::{
-    helpers::{MountSession, ResolvePath, copy_to_writer},
+    helpers::{PathMapper, ResolvePath, copy_to_writer},
     *,
 };
 
@@ -14,7 +14,7 @@ fn mapping_preserves_final_links_and_rejects_escapes_and_destructive_dot_paths()
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("file"), b"outside").unwrap();
     std::os::unix::fs::symlink(outside.path().join("file"), root.path().join("link")).unwrap();
-    let session = MountSession::new((), root.path()).unwrap();
+    let session = PathMapper::new(root.path()).unwrap();
     assert_eq!(
         session
             .map(root.path().join("new"), ResolvePath::NoFollow)
@@ -78,7 +78,13 @@ fn writer_bridge_handles_short_writes_and_never_replays_failed_output() {
         calls: 0,
     };
     assert_eq!(
-        copy_to_writer(&fs, "/source", &mut ok, StreamOptions::new().chunk_size(3)).unwrap(),
+        copy_to_writer(
+            &fs,
+            "/source",
+            &mut ok,
+            StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(3).unwrap())
+        )
+        .unwrap(),
         10
     );
     assert_eq!(ok.bytes, b"0123456789");
@@ -87,8 +93,13 @@ fn writer_bridge_handles_short_writes_and_never_replays_failed_output() {
         fail_after: 4,
         calls: 0,
     };
-    let err =
-        copy_to_writer(&fs, "/source", &mut bad, StreamOptions::new().chunk_size(3)).unwrap_err();
+    let err = copy_to_writer(
+        &fs,
+        "/source",
+        &mut bad,
+        StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(3).unwrap()),
+    )
+    .unwrap_err();
     assert_eq!(err.err_no(), libc::ENOSPC as u32);
     assert_eq!(bad.bytes, b"0123");
     assert_eq!(bad.calls, 4);
@@ -110,7 +121,7 @@ fn ordered_walk_preserves_sorting_prunes_before_io_and_callbacks_are_unlocked() 
             ListDirOptions::new()
                 .recursive(true)
                 .fields(Attributes::MODE),
-            |entries| entries.sort_by(|a, b| b.path().cmp(a.path())),
+            |a, b| b.path().cmp(a.path()),
             |entry| {
                 if entry.path() == Path::new("/prune") {
                     // A prefetch would fail if it tried to list this now-missing child.
@@ -145,7 +156,7 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
             ListDirOptions::new()
                 .recursive(true)
                 .fields(Attributes::MODE),
-            |_| {},
+            |a, b| a.path().cmp(b.path()),
             |_| true,
             |_, _| panic!("symlink root must not be followed")
         )
@@ -160,7 +171,7 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
                 ListDirOptions::new()
                     .recursive(true)
                     .fields(Attributes::MODE),
-                |_| {},
+                |a, b| a.path().cmp(b.path()),
                 |_| true,
                 |listing, _| {
                     calls += 1;
@@ -190,7 +201,7 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
                 .recursive(true)
                 .max_entries(1)
                 .fields(Attributes::MODE),
-            |_| {},
+            |a, b| a.path().cmp(b.path()),
             |_| false,
             |_, _| {
                 calls += 1;
@@ -209,7 +220,7 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
                 .recursive(true)
                 .max_path_bytes(1)
                 .fields(Attributes::MODE),
-            |_| {},
+            |a, b| a.path().cmp(b.path()),
             |_| false,
             |_, _| panic!("over-budget snapshot must not be delivered")
         )

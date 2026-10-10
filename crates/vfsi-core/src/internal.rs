@@ -8,6 +8,19 @@ pub use crate::write::WriteRequest;
 
 use crate::{VfError, VfResult};
 
+/// Reject malformed open flags for the entire batch before routing or I/O.
+/// The native flag translator remains the single source of flag semantics.
+pub fn validate_open_requests(requests: &[crate::OpenOp]) -> VfResult<()> {
+    for (index, request) in requests.iter().enumerate() {
+        crate::open_flags_to_libc(request.flags()).map_err(|error| {
+            error
+                .with_index(index)
+                .with_context("vopen", request.path())
+        })?;
+    }
+    Ok(())
+}
+
 /// Ordered partial results produced by a native backend outcome hook, such as
 /// `vfsi_sync::Backend::vopen_outcomes_impl`.
 ///

@@ -16,28 +16,23 @@ pub enum ResolvePath {
     NoFollow,
 }
 
-/// An owned filesystem and its corresponding local namespace root.
-///
-/// Reuse a session across operands rather than reconnecting for each call.
-/// The filesystem must be rooted at `local_root`. Mapping is a namespace
+/// Standalone local-to-root-relative path mapping. It owns no filesystem and
+/// makes no claim that a client is rooted here. For a validated direct NFS
+/// connection plus mapping, use `NfsMountSession`. Mapping is a namespace
 /// convention, not race-free confinement or kernel/direct-client coherence.
 #[derive(Debug)]
-pub struct MountSession<F> {
-    fs: F,
+pub struct PathMapper {
     local_root: PathBuf,
 }
-impl<F> MountSession<F> {
-    pub fn new(fs: F, local_root: impl AsRef<Path>) -> Result<Self> {
+impl PathMapper {
+    pub fn new(local_root: impl AsRef<Path>) -> Result<Self> {
         let requested = local_root.as_ref();
         let local_root =
             std::fs::canonicalize(requested).map_err(|error| io_error(requested, error))?;
         if !local_root.is_dir() {
             return Err(Error::client(0, libc::ENOTDIR as u32));
         }
-        Ok(Self { fs, local_root })
-    }
-    pub fn fs(&self) -> &F {
-        &self.fs
+        Ok(Self { local_root })
     }
     pub fn local_root(&self) -> &Path {
         &self.local_root
@@ -105,7 +100,8 @@ impl<F> MountSession<F> {
 #[derive(Debug)]
 pub struct NfsMountSession {
     mount: crate::NfsMount,
-    paths: MountSession<crate::NfsClient>,
+    fs: crate::NfsClient,
+    paths: PathMapper,
 }
 
 #[cfg(all(feature = "nfs", target_os = "linux"))]
@@ -151,16 +147,15 @@ impl NfsMountSession {
             .connect()?;
         // Discovery already canonicalized and validated this path, so avoid a
         // second host filesystem lookup while creating the mapping.
-        let paths = MountSession {
-            fs,
+        let paths = PathMapper {
             local_root: mount.local_path().to_path_buf(),
         };
-        Ok(Self { mount, paths })
+        Ok(Self { mount, fs, paths })
     }
 
     /// The validated direct NFS client.
     pub fn fs(&self) -> &crate::NfsClient {
-        self.paths.fs()
+        &self.fs
     }
 
     /// Information about the discovered kernel mount.
@@ -181,16 +176,5 @@ impl NfsMountSession {
     /// Map a root-relative backend path back into the local namespace.
     pub fn local_path(&self, path: impl AsRef<Path>) -> Result<PathBuf> {
         self.paths.local_path(path)
-    }
-}
-
-#[cfg(all(feature = "nfs", target_os = "linux"))]
-impl MountSession<crate::NfsClient> {
-    /// Infer the supported mount configuration and open one direct connection
-    /// rooted at `directory`. Security/version/port validation is delegated to
-    /// the existing discovery API; unsupported mounts are errors, not downgrades.
-    pub fn from_mount(directory: impl AsRef<Path>) -> Result<Self> {
-        let fs = crate::Nfs::from_mount(directory.as_ref())?;
-        Self::new(fs, directory)
     }
 }

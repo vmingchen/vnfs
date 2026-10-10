@@ -25,8 +25,14 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
     let metadata = fs.vgetattrs(&paths, options).unwrap();
     assert_eq!(metadata.len(), paths.len());
     for (i, item) in metadata.iter().enumerate() {
-        assert_eq!(item.permissions().mode() & 0o7777, 0o600 | ((i % 8) as u32));
-        assert_eq!(item.len(), if i % 2 == 0 { 3 } else { 100 + i as u64 });
+        assert_eq!(
+            item.permissions().unwrap().mode() & 0o7777,
+            0o600 | ((i % 8) as u32)
+        );
+        assert_eq!(
+            item.len(),
+            Some(if i % 2 == 0 { 3 } else { 100 + i as u64 })
+        );
         assert_eq!(item.modified(), Some(modified));
     }
     // Size-only mutations preserve permissions and retain zero as a valid size.
@@ -42,8 +48,11 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
     fs.vsetattrs(&sizes).unwrap();
     let metadata = fs.vgetattrs(&paths, options).unwrap();
     for (i, item) in metadata.iter().enumerate() {
-        assert_eq!(item.len(), i as u64);
-        assert_eq!(item.permissions().mode() & 0o7777, 0o600 | ((i % 8) as u32));
+        assert_eq!(item.len(), Some(i as u64));
+        assert_eq!(
+            item.permissions().unwrap().mode() & 0o7777,
+            0o600 | ((i % 8) as u32)
+        );
     }
     let missing = format!("{directory}/missing");
     let error = fs
@@ -75,8 +84,8 @@ fn check_mixed_policies(fs: &impl Vfsi, directory: &str) {
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
-    assert_eq!(fs.attrs(&first).unwrap().len(), 2);
-    assert_eq!(fs.attrs(&last).unwrap().len(), 10);
+    assert_eq!(fs.attrs(&first).unwrap().len().unwrap(), 2);
+    assert_eq!(fs.attrs(&last).unwrap().len().unwrap(), 10);
     // Do not regroup nonadjacent equal policies: these updates alias one object.
     fs.vsetattrs(&[
         SetAttrsOp::new(&link).len(5),
@@ -84,7 +93,7 @@ fn check_mixed_policies(fs: &impl Vfsi, directory: &str) {
         SetAttrsOp::new(&link).len(7),
     ])
     .unwrap();
-    assert_eq!(fs.attrs(&first).unwrap().len(), 7);
+    assert_eq!(fs.attrs(&first).unwrap().len().unwrap(), 7);
     assert!(fs.symlink_attrs(&link).unwrap().is_symlink());
     // Validation spans policy boundaries and must precede the first mutation.
     let error = fs
@@ -95,7 +104,7 @@ fn check_mixed_policies(fs: &impl Vfsi, directory: &str) {
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EINVAL as u32);
-    assert_eq!(fs.attrs(&first).unwrap().len(), 7);
+    assert_eq!(fs.attrs(&first).unwrap().len().unwrap(), 7);
 }
 
 /// Open objects remain targets even when their original names are reused.
@@ -140,27 +149,36 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
     // no-follow must still address the opened objects.
     fs.vsetattrs(&updates).unwrap();
     for (i, file) in files.iter().enumerate() {
-        let attrs = file.attrs().unwrap();
-        assert_eq!(attrs.len(), i as u64);
-        assert_eq!(attrs.permissions().mode() & 0o7777, 0o640);
-        assert_eq!(fs.attrs(&paths[i]).unwrap().len(), 11);
+        let attrs = fs.attrs(Target::file(file)).unwrap();
+        assert_eq!(attrs.len(), Some(i as u64));
+        assert_eq!(attrs.permissions().unwrap().mode() & 0o7777, 0o640);
+        assert_eq!(fs.attrs(&paths[i]).unwrap().len().unwrap(), 11);
     }
     fs.vsetattrs(&[
         vnfs::SetAttrsOp::new(Target::File(&files[0])).len(13),
         vnfs::SetAttrsOp::new(Target::Path(std::path::Path::new(&paths[0]))).len(17),
     ])
     .unwrap();
-    assert_eq!(files[0].attrs().unwrap().len(), 13);
-    assert_eq!(fs.attrs(&paths[0]).unwrap().len(), 17);
-    fs.set_metadata(Target::File(&files[0]))
-        .len(19)
-        .apply()
+    assert_eq!(
+        fs.attrs(Target::file(&files[0])).unwrap().len().unwrap(),
+        13
+    );
+    assert_eq!(fs.attrs(&paths[0]).unwrap().len().unwrap(), 17);
+    fs.vsetattrs(&[vnfs::SetAttrsOp::new(Target::File(&files[0])).len(19)])
         .unwrap();
     fs.chmod(Target::File(&files[0]), Permissions::from_mode(0o600))
         .unwrap();
-    assert_eq!(files[0].attrs().unwrap().len(), 19);
     assert_eq!(
-        files[0].attrs().unwrap().permissions().mode() & 0o7777,
+        fs.attrs(Target::file(&files[0])).unwrap().len().unwrap(),
+        19
+    );
+    assert_eq!(
+        fs.attrs(Target::file(&files[0]))
+            .unwrap()
+            .permissions()
+            .unwrap()
+            .mode()
+            & 0o7777,
         0o600
     );
     files[1].try_close().unwrap();
@@ -172,7 +190,10 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EBADF as u32);
-    assert_eq!(files[0].attrs().unwrap().len(), 19);
+    assert_eq!(
+        fs.attrs(Target::file(&files[0])).unwrap().len().unwrap(),
+        19
+    );
     for file in &mut files {
         if !file.is_closed() {
             file.try_close().unwrap();
@@ -199,13 +220,13 @@ pub fn check_foreign<F: Vfsi>(fs: &F, other: &F, path: &str) {
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EINVAL as u32);
-    assert_eq!(own.attrs().unwrap().len(), 8);
+    assert_eq!(fs.attrs(Target::file(&own)).unwrap().len().unwrap(), 8);
     own.try_close().unwrap();
     foreign.try_close().unwrap();
 }
 
 pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
-    use vnfs::{FileHandle, OpenFlags, OpenOp, Target};
+    use vnfs::{OpenFlags, OpenOp, Target};
     let paths: Vec<_> = (0..64).map(|i| format!("{directory}/owner-{i}")).collect();
     fs.write_files(
         &paths
@@ -233,7 +254,7 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
     for attrs in fs.vgetattrs(&paths, options).unwrap() {
         assert_eq!(attrs.uid(), Some(new_uid));
         assert_eq!(attrs.gid(), Some(gid));
-        assert_eq!(attrs.len(), 9);
+        assert_eq!(attrs.len(), Some(9));
     }
     fs.vsetattrs(
         &paths
@@ -270,16 +291,26 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
         })
         .collect();
     fs.vsetattrs(&updates).unwrap();
-    for file in &files {
-        let attrs = file.attrs().unwrap();
+    let targets: Vec<_> = files.iter().map(Target::file).collect();
+    for attrs in fs.vgetattrs(&targets, options).unwrap() {
         assert_eq!(attrs.uid(), Some(uid));
         assert_eq!(attrs.gid(), Some(gid));
-        assert_eq!(attrs.permissions().mode() & 0o7777, 0o640);
+        assert_eq!(attrs.permissions().unwrap().mode() & 0o7777, 0o640);
     }
     fs.chown(Target::File(&files[0]), Some(new_uid), None)
         .unwrap();
-    assert_eq!(files[0].attrs().unwrap().uid(), Some(new_uid));
-    assert_eq!(files[0].attrs().unwrap().gid(), Some(gid));
+    assert_eq!(
+        fs.attrs_with_options(Target::file(&files[0]), options)
+            .unwrap()
+            .uid(),
+        Some(new_uid)
+    );
+    assert_eq!(
+        fs.attrs_with_options(Target::file(&files[0]), options)
+            .unwrap()
+            .gid(),
+        Some(gid)
+    );
     fs.chown(&paths[0], None, Some(new_gid)).unwrap();
     assert_eq!(attrs(&paths[0], true).uid(), Some(uid));
     assert_eq!(attrs(&paths[0], true).gid(), Some(new_gid));
@@ -303,7 +334,7 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.err_no(), libc::EINVAL as u32);
-    assert_eq!(files[0].attrs().unwrap().len(), 9);
+    assert_eq!(fs.attrs(Target::file(&files[0])).unwrap().len().unwrap(), 9);
     let missing = format!("{directory}/owner-missing");
     let error = fs
         .vsetattrs(&[

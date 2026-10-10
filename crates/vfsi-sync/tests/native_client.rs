@@ -18,11 +18,11 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
         ..ScalarOnly::default()
     };
     let read_calls = Arc::clone(&backend.read_calls);
-    let client = FsClient::new(backend).with_limits(vfsi_sync::ResourceLimits {
-        max_read_bytes: 3,
-        stream_chunk_bytes: 2,
-        ..vfsi_sync::ResourceLimits::default()
-    });
+    let client = FsClient::new(backend).with_limits(
+        vfsi_sync::ResourceLimits::new()
+            .max_read_bytes(3)
+            .stream_chunk_bytes(std::num::NonZeroUsize::new(2).unwrap()),
+    );
     assert_eq!(client.clone().limits(), client.limits());
     assert_eq!(client.capabilities().unwrap(), Capabilities::empty());
     assert_eq!(
@@ -66,7 +66,11 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
     let result = client
         .read_stream("/file", |offset, bytes| {
             offsets.push((offset, bytes.len()));
-            Ok(offset == 0)
+            Ok(if offset == 0 {
+                std::ops::ControlFlow::Continue(())
+            } else {
+                std::ops::ControlFlow::Break(())
+            })
         })
         .unwrap();
     assert_eq!(offsets, [(0, 2), (2, 2)]);
@@ -75,7 +79,9 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
         vfsi_sync::StreamCompletion::Stopped { next_offset: 4 }
     );
     assert_eq!(
-        client.read_stream("/file", |_, _| Ok(true)).unwrap(),
+        client
+            .read_stream("/file", |_, _| Ok(std::ops::ControlFlow::Continue(())))
+            .unwrap(),
         vfsi_sync::StreamCompletion::Complete
     );
 }
@@ -104,10 +110,15 @@ fn scalar_read_uses_bounded_whole_file_api_without_opening_a_handle() {
 }
 
 type Notifications = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
+type MetadataCalls = Arc<Mutex<Vec<(bool, Vec<VfFile>)>>>;
+type SyncCalls = Arc<Mutex<Vec<(vfsi_core::api::SyncMode, Vec<VfFile>)>>>;
+
 type AttributeCalls = Arc<Mutex<Vec<(bool, Vec<Option<u64>>)>>>;
 
 #[derive(Default)]
 struct ScalarOnly {
+    sync_calls: SyncCalls,
+    sync_failure: Option<VfError>,
     attrs_calls: AttributeCalls,
     attrs_failure: Option<(usize, VfError)>,
     stats_calls: Arc<AtomicUsize>,
@@ -133,6 +144,7 @@ struct ScalarOnly {
     read_calls: Arc<AtomicUsize>,
     write_calls: Arc<AtomicUsize>,
     max_write_once: Option<usize>,
+    interrupt_write_call: Option<usize>,
     directory_entries: usize,
     directory_page_sizes: Arc<Mutex<Vec<usize>>>,
     directory_fields: Arc<Mutex<Vec<vfsi_sync::AttrMask>>>,
@@ -145,10 +157,7 @@ fn opened_file_read_to_end_has_explicit_limits_and_cursor_semantics() {
             data: b"abcdef".to_vec(),
             ..Default::default()
         })
-        .with_limits(vfsi_sync::ResourceLimits {
-            max_read_bytes: 1,
-            ..Default::default()
-        });
+        .with_limits(vfsi_sync::ResourceLimits::new().max_read_bytes(1));
         let mut file = client.open("/file").unwrap();
         let result = file.read_to_end_with_limit(limit);
         if limit < 6 {
@@ -398,6 +407,16 @@ macro_rules! handle_contract {
             fn close_impl(&mut self, file: &VfFile) -> VfResult<()> {
                 self.scalar.close_impl(file)
             }
+            fn vfsync_impl(
+                &mut self,
+                files: &[VfFile],
+                mode: vfsi_core::api::SyncMode,
+            ) -> VfResult<()> {
+                self.scalar.vfsync_impl(files, mode)
+            }
+            fn sync_all(&mut self, file: &VfFile) -> VfResult<()> {
+                self.scalar.sync_all(file)
+            }
             fn sync_data(&mut self, file: &VfFile) -> VfResult<()> {
                 self.scalar.sync_data(file)
             }
@@ -485,8 +504,11 @@ struct WriteObservation {
 #[derive(Default)]
 struct WriteBoundaryProbe {
     scalar: ScalarOnly,
+    append_end: Option<u64>,
+    append_gap: u64,
     calls: Arc<Mutex<Vec<Vec<WriteObservation>>>>,
     failure: Option<VfError>,
+    failure_after: usize,
 }
 handle_contract!(WriteBoundaryProbe);
 impl Backend for WriteBoundaryProbe {
@@ -506,7 +528,9 @@ impl Backend for WriteBoundaryProbe {
                 })
                 .collect(),
         );
-        if let Some(error) = &self.failure {
+        if let Some(error) = &self.failure
+            && self.calls.lock().unwrap().len() > self.failure_after
+        {
             return Err(error.clone());
         }
         Ok(writes
@@ -514,6 +538,12 @@ impl Backend for WriteBoundaryProbe {
             .map(|op| WriteResult {
                 file: op.file().clone(),
                 offset: match op.offset() {
+                    VfOffset::End => {
+                        let end = self.append_end.as_mut().expect("append target configured");
+                        let offset = *end;
+                        *end += op.data().len().min(2) as u64 + self.append_gap;
+                        offset
+                    }
                     VfOffset::At(offset) => offset,
                     _ => 0,
                 },
@@ -615,6 +645,7 @@ fn consolidated_write_dispatch_retries_only_successful_short_writes_without_copy
 
 #[derive(Default)]
 struct AttrsBackend {
+    metadata_calls: MetadataCalls,
     scalar: ScalarOnly,
     calls: Vec<(bool, Vec<VfAttrs>)>,
     failure: Option<(usize, VfError)>,
@@ -626,11 +657,19 @@ impl Backend for AttrsBackend {
         Err(VfError::unsupported(0))
     }
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfResult<()> {
+        self.metadata_calls
+            .lock()
+            .unwrap()
+            .push((true, attrs.iter().map(|a| a.file.clone()).collect()));
         self.queries
             .push((true, attrs[0].file.clone(), attrs[0].masks));
         Ok(())
     }
     fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> VfResult<()> {
+        self.metadata_calls
+            .lock()
+            .unwrap()
+            .push((false, attrs.iter().map(|a| a.file.clone()).collect()));
         self.queries
             .push((false, attrs[0].file.clone(), attrs[0].masks));
         Ok(())
@@ -1158,6 +1197,10 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
 }
 
 impl FileSystem for ScalarOnly {
+    fn vfsync_impl(&mut self, files: &[VfFile], mode: vfsi_core::api::SyncMode) -> VfResult<()> {
+        self.sync_calls.lock().unwrap().push((mode, files.to_vec()));
+        self.sync_failure.clone().map_or(Ok(()), Err)
+    }
     fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, VfFile>>]) -> VfResult<()> {
         let mut calls = self.attrs_calls.lock().unwrap();
         calls.push((
@@ -1281,7 +1324,10 @@ impl FileSystem for ScalarOnly {
     }
 
     fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
-        self.write_calls.fetch_add(1, Ordering::SeqCst);
+        let call = self.write_calls.fetch_add(1, Ordering::SeqCst);
+        if self.interrupt_write_call == Some(call) {
+            return Err(VfError::client(0, libc::EINTR as u32));
+        }
         if self.oversized_write_count {
             return Ok(WriteResult {
                 file: request.file().clone(),
@@ -1856,13 +1902,13 @@ fn stream_callback_can_reenter_client_and_drop_another_file() {
     client
         .read_stream_with_options(
             "/file",
-            vfsi_sync::StreamOptions::new().chunk_size(2),
+            vfsi_sync::StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(2).unwrap()),
             |_, data| {
                 drop(other.take());
                 let file = client.open("/nested")?;
                 file.close()?;
                 received.extend_from_slice(data);
-                Ok(true)
+                Ok(std::ops::ControlFlow::Continue(()))
             },
         )
         .unwrap();
@@ -2200,4 +2246,401 @@ fn filesystem_statistics_validate_backend_shape_and_preflight_all_handles() {
     ];
     assert_eq!(client.vstatfs(&targets).unwrap_err().index(), Some(1));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn portable_handle_queries_and_sync_batch_and_preflight_every_handle() {
+    use vfsi_core::api::{AttrsOptions, SyncMode};
+    let backend = AttrsBackend::default();
+    let queries = Arc::clone(&backend.metadata_calls);
+    let syncs = Arc::clone(&backend.scalar.sync_calls);
+    let fs = FsClient::new(backend);
+    let a = fs.open("/a").unwrap();
+    let mut b = fs.open("/b").unwrap();
+    fs.vgetattrs(
+        &[
+            Target::file(&a),
+            Target::Path(std::path::Path::new("/path")),
+            Target::file(&b),
+        ],
+        AttrsOptions::new(),
+    )
+    .unwrap();
+    assert_eq!(queries.lock().unwrap()[0].1.len(), 3);
+    assert!(queries.lock().unwrap()[0].1[0].is_descriptor());
+    // No-follow applies to path operands, not retained objects.
+    fs.vgetattrs(
+        &[
+            Target::file(&a),
+            Target::Path(std::path::Path::new("/link")),
+            Target::file(&b),
+        ],
+        AttrsOptions::new().follow_symlinks(false),
+    )
+    .unwrap();
+    assert_eq!(
+        queries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|c| c.0)
+            .collect::<Vec<_>>(),
+        [true, true, false, true]
+    );
+    fs.vfsync(&[&a, &b], SyncMode::All).unwrap();
+    assert_eq!(syncs.lock().unwrap()[0].0, SyncMode::All);
+    assert_eq!(syncs.lock().unwrap()[0].1.len(), 2);
+    let foreign_fs = FsClient::new(AttrsBackend::default());
+    let foreign = foreign_fs.open("/foreign").unwrap();
+    let before = queries.lock().unwrap().len();
+    assert_eq!(
+        fs.vgetattrs(
+            &[Target::file(&a), Target::file(&foreign)],
+            AttrsOptions::new()
+        )
+        .unwrap_err()
+        .index(),
+        Some(1)
+    );
+    assert_eq!(
+        fs.vfsync(&[&a, &foreign], SyncMode::Data)
+            .unwrap_err()
+            .index(),
+        Some(1)
+    );
+    b.try_close().unwrap();
+    assert_eq!(
+        fs.vgetattrs(&[Target::file(&a), Target::file(&b)], AttrsOptions::new())
+            .unwrap_err()
+            .index(),
+        Some(1)
+    );
+    assert_eq!(
+        fs.vfsync(&[&a, &b], SyncMode::All).unwrap_err().index(),
+        Some(1)
+    );
+    assert_eq!(queries.lock().unwrap().len(), before);
+    assert_eq!(syncs.lock().unwrap().len(), 1);
+    fs.vgetattrs::<&str>(&[], AttrsOptions::new()).unwrap();
+    fs.vfsync(&[], SyncMode::All).unwrap();
+    assert_eq!(queries.lock().unwrap().len(), before);
+    assert_eq!(syncs.lock().unwrap().len(), 1);
+}
+#[test]
+fn sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices() {
+    use vfsi_core::api::SyncMode;
+    for index in [None, Some(1), Some(2)] {
+        let error = index.map_or_else(
+            || VfError::transport(None, "lost sync reply"),
+            |i| VfError::client(i, libc::EIO as u32),
+        );
+        let fs = FsClient::new(DefaultBackend {
+            scalar: ScalarOnly {
+                sync_failure: Some(error),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let a = fs.open("/a").unwrap();
+        let b = fs.open("/b").unwrap();
+        let error = fs.vfsync(&[&a, &b], SyncMode::Data).unwrap_err();
+        if index == Some(1) {
+            assert_eq!(error.index(), Some(1));
+            assert_eq!(error.path(), Some(std::path::Path::new("/b")));
+        } else {
+            assert!(error.is_transport());
+            assert_eq!(error.index(), None);
+        }
+    }
+}
+
+#[test]
+fn file_io_write_all_retries_interruptions_without_replaying_progress() {
+    for append in [false, true] {
+        for interrupt_write_call in 0..3 {
+            let backend = ScalarOnly {
+                data: b"abc".to_vec(),
+                max_write_once: Some(2),
+                interrupt_write_call: Some(interrupt_write_call),
+                ..Default::default()
+            };
+            let calls = Arc::clone(&backend.write_calls);
+            let client = FsClient::new(backend);
+            let file = client
+                .open_options()
+                .write(true)
+                .append(append)
+                .open("/file")
+                .unwrap();
+            let mut io = client.file_io(&file);
+            io.seek(SeekFrom::Start(3)).unwrap();
+            io.write_all(b"abcdef").unwrap();
+            assert_eq!(io.position(), 9);
+            assert_eq!(calls.load(Ordering::SeqCst), 4);
+            // An empty completion must issue no I/O or change the cursor.
+            io.write_all(b"").unwrap();
+            assert_eq!(io.position(), 9);
+            assert_eq!(calls.load(Ordering::SeqCst), 4);
+            file.close().unwrap();
+            assert_eq!(client.into_inner().unwrap().data, b"abcabcdef");
+        }
+    }
+}
+
+#[test]
+fn file_io_write_all_reports_write_zero_without_retrying() {
+    let backend = ScalarOnly {
+        data: b"abc".to_vec(),
+        max_write_once: Some(0),
+        ..Default::default()
+    };
+    let calls = Arc::clone(&backend.write_calls);
+    let client = FsClient::new(backend);
+    let file = client.open_options().append(true).open("/file").unwrap();
+    let mut io = client.file_io(&file);
+    io.seek(SeekFrom::Start(3)).unwrap();
+    assert_eq!(
+        io.write_all(b"data").unwrap_err().kind(),
+        std::io::ErrorKind::WriteZero
+    );
+    assert_eq!(io.position(), 3);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    file.close().unwrap();
+    assert_eq!(client.into_inner().unwrap().data, b"abc");
+}
+
+#[test]
+fn append_adapters_share_completion_and_report_actual_end_after_short_writes() {
+    for vector_open in [false, true] {
+        let client = FsClient::new(ScalarOnly {
+            data: b"abc".to_vec(),
+            max_write_once: Some(2),
+            ..Default::default()
+        });
+        let file = if vector_open {
+            client
+                .vopen(&[OpenOp::new("/file", OpenFlags::READ | OpenFlags::APPEND)])
+                .unwrap()
+                .remove(0)
+        } else {
+            client
+                .open_options()
+                .read(true)
+                .append(true)
+                .open("/file")
+                .unwrap()
+        };
+        let mut io = client.file_io(&file);
+        assert_eq!(io.write(b"XY").unwrap(), 2);
+        assert_eq!(io.position(), 5);
+        io.seek(SeekFrom::Start(0)).unwrap();
+        let mut prefix = [0; 3];
+        io.read_exact(&mut prefix).unwrap();
+        assert_eq!(&prefix, b"abc");
+        io.write_all(b"12345").unwrap();
+        assert_eq!(io.position(), 10);
+        io.write_all(b"").unwrap();
+        assert_eq!(io.position(), 10);
+        file.close().unwrap();
+        assert_eq!(client.into_inner().unwrap().data, b"abcXY12345");
+    }
+    // Interleaving outside appends must not leave the adapter at first-offset
+    // plus payload length instead of the last acknowledged end.
+    let client = FsClient::new(WriteBoundaryProbe {
+        append_end: Some(3),
+        append_gap: 3,
+        ..Default::default()
+    });
+    let file = client.open_options().append(true).open("/file").unwrap();
+    let mut io = client.file_io(&file);
+    io.write_all(b"abcdef").unwrap();
+    assert_eq!(io.position(), 15); // [3..5), [8..10), [13..15)
+}
+
+#[test]
+fn complete_append_vectors_order_short_writes_and_never_replay_failures() {
+    let client = FsClient::new(ScalarOnly {
+        data: b"abc".to_vec(),
+        max_write_once: Some(2),
+        ..Default::default()
+    });
+    let file = client.open_options().append(true).open("/file").unwrap();
+    let results = client
+        .vwrite(
+            &[
+                vfsi_core::api::WriteOp::at(&file, 0, b"AAAA"),
+                vfsi_core::api::WriteOp::at(&file, 100, b"BBBB"),
+            ],
+            vfsi_core::api::WriteOptions::new().write_all(true),
+        )
+        .unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|r| (r.offset, r.written))
+            .collect::<Vec<_>>(),
+        [(3, 4), (7, 4)]
+    );
+    file.close().unwrap();
+    assert_eq!(client.into_inner().unwrap().data, b"abcAAAABBBB");
+    for failure_after in [0, 1] {
+        for error in [
+            VfError::client(0, libc::ENOSPC as u32),
+            VfError::transport(None, "lost append reply"),
+        ] {
+            let backend = WriteBoundaryProbe {
+                append_end: Some(3),
+                failure_after,
+                failure: Some(error.clone()),
+                ..Default::default()
+            };
+            let calls = Arc::clone(&backend.calls);
+            let client = FsClient::new(backend);
+            let file = client.open_options().append(true).open("/file").unwrap();
+            let data = b"abcdef";
+            let mut io = client.file_io(&file);
+            let actual = io.write_all(data).unwrap_err();
+            assert_eq!(io.position(), if failure_after == 0 { 0 } else { 5 });
+            assert_eq!(actual.kind(), error.kind());
+            let calls = calls.lock().unwrap();
+            assert_eq!(calls.len(), failure_after + 1);
+            for (wave, call) in calls.iter().enumerate() {
+                assert_eq!(call[0].offset, VfOffset::End);
+                assert_eq!(call[0].pointer, data[2 * wave..].as_ptr() as usize);
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct DirectoryProbe {
+    scalar: ScalarOnly,
+    removed: Arc<Mutex<Vec<i32>>>,
+    closed: Arc<Mutex<Vec<i32>>>,
+    failure: Option<(i32, VfError)>,
+}
+handle_contract!(DirectoryProbe);
+impl Backend for DirectoryProbe {
+    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        unreachable!("directory test must not issue file reads")
+    }
+    fn open_dir_impl(&mut self, path: &std::path::Path) -> VfResult<vfsi_sync::VfDir> {
+        let fd = path
+            .to_str()
+            .unwrap()
+            .trim_start_matches('/')
+            .parse::<i32>()
+            .map_err(|_| VfError::client(0, libc::ENOENT as u32))?;
+        Ok(vfsi_sync::VfDir::Descriptor { fd, owner: 1 })
+    }
+    fn remove_dir_contents_handle_with_options_impl(
+        &mut self,
+        dir: &vfsi_sync::VfDir,
+        _: vfsi_sync::RemoveOptions,
+    ) -> VfResult<()> {
+        let vfsi_sync::VfDir::Descriptor { fd, .. } = dir else {
+            panic!("path fallback");
+        };
+        self.removed.lock().unwrap().push(*fd);
+        if let Some((failed, error)) = &self.failure
+            && fd == failed
+        {
+            return Err(error.clone());
+        }
+        Ok(())
+    }
+    fn close_dir_impl(&mut self, dir: &vfsi_sync::VfDir) -> VfResult<()> {
+        let vfsi_sync::VfDir::Descriptor { fd, .. } = dir else {
+            panic!("path fallback");
+        };
+        self.closed.lock().unwrap().push(*fd);
+        Ok(())
+    }
+}
+
+#[test]
+fn directory_vectors_preflight_all_handles_and_singular_helpers_use_retained_descriptors() {
+    use vfsi_sync::RemoveOptions;
+    let backend = DirectoryProbe::default();
+    let removed = Arc::clone(&backend.removed);
+    let closed = Arc::clone(&backend.closed);
+    let fs = FsClient::new(backend);
+    assert!(fs.vopen_dirs::<&str>(&[]).unwrap().is_empty());
+    fs.vremove_dir_contents(&[], RemoveOptions::default())
+        .unwrap();
+    let mut dirs = fs.vopen_dirs(&["/0", "/1"]).unwrap();
+    let other = FsClient::new(DirectoryProbe::default());
+    let foreign = other.open_dir_handle("/1").unwrap();
+    let error = fs
+        .vremove_dir_contents(&[&dirs[0], &foreign], RemoveOptions::default())
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert!(removed.lock().unwrap().is_empty());
+    dirs[1].try_close().unwrap();
+    let error = fs
+        .vremove_dir_contents(
+            &[&dirs[0], &dirs[1]],
+            RemoveOptions::new().continue_on_error(true),
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert!(removed.lock().unwrap().is_empty());
+    let second = fs.open_dir_handle("/2").unwrap();
+    fs.clone()
+        .vremove_dir_contents(&[&dirs[0], &second], RemoveOptions::default())
+        .unwrap();
+    fs.remove_dir_contents_handle_with_options(&second, RemoveOptions::new().batch(1))
+        .unwrap();
+    assert_eq!(*removed.lock().unwrap(), [0, 2, 2]);
+    for dir in dirs {
+        dir.close().unwrap();
+    }
+    second.close().unwrap();
+    assert_eq!(*closed.lock().unwrap(), [1, 0, 2]);
+}
+
+#[test]
+fn directory_vector_errors_preserve_index_and_do_not_replay_transport_failures() {
+    for (keep_going, transport, expected) in [
+        (false, false, vec![0, 1]),
+        (true, false, vec![0, 1, 2]),
+        (true, true, vec![0, 1]),
+    ] {
+        let backend = DirectoryProbe {
+            failure: Some((
+                1,
+                if transport {
+                    VfError::transport(Some(0), "reply lost")
+                } else {
+                    VfError::client(0, libc::EACCES as u32)
+                },
+            )),
+            ..Default::default()
+        };
+        let removed = Arc::clone(&backend.removed);
+        let fs = FsClient::new(backend);
+        let dirs = fs.vopen_dirs(&["/0", "/1", "/2"]).unwrap();
+        let error = fs
+            .vremove_dir_contents(
+                &dirs.iter().collect::<Vec<_>>(),
+                vfsi_sync::RemoveOptions::new().continue_on_error(keep_going),
+            )
+            .unwrap_err();
+        assert_eq!(error.index(), Some(1));
+        assert_eq!(error.path(), Some(std::path::Path::new("/1")));
+        assert_eq!(*removed.lock().unwrap(), expected);
+    }
+}
+
+#[test]
+fn failed_directory_open_cleans_up_the_opened_prefix() {
+    let backend = DirectoryProbe::default();
+    let closed = Arc::clone(&backend.closed);
+    let fs = FsClient::new(backend);
+    assert_eq!(
+        fs.vopen_dirs(&["/0", "/missing"]).unwrap_err().index(),
+        Some(1)
+    );
+    fs.drain_cleanup().unwrap();
+    assert_eq!(*closed.lock().unwrap(), [0]);
 }

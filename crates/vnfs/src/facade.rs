@@ -9,13 +9,24 @@ macro_rules! owned_client {
             pub(crate) inner: vfsi_sync::FsClient<$backend>,
         }
         impl $client {
-            /// Vector metadata with selected attributes and final-symlink handling.
-            pub(crate) fn vgetattrs_impl<P: AsRef<Path>>(
+            /// Query paths and retained handles through the native metadata vector.
+            pub(crate) fn vgetattrs_impl<P: vfsi_core::AsTarget<$file>>(
                 &self,
-                paths: &[P],
+                targets: &[P],
                 options: AttrsOptions,
             ) -> Result<Vec<Attrs>> {
-                crate::metadata::metadata_backend(&self.inner, paths, options)
+                let targets: Vec<_> = targets
+                    .iter()
+                    .map(|target| match target.as_target() {
+                        Target::Path(path) => Target::Path(path),
+                        Target::File(file) => Target::File(&file.inner),
+                    })
+                    .collect();
+                self.inner.vgetattrs(&targets, options)
+            }
+            pub(crate) fn vfsync_impl(&self, files: &[&$file], mode: SyncMode) -> Result<()> {
+                let files: Vec<_> = files.iter().map(|file| &file.inner).collect();
+                self.inner.vfsync(&files, mode)
             }
             /// Query filesystem statistics for paths and this client's open handles.
             pub(crate) fn vstatfs_impl<P: vfsi_core::AsTarget<$file>>(
@@ -124,11 +135,6 @@ macro_rules! owned_client {
                     follow_symlinks,
                 )
             }
-            /// Create `path` if missing, otherwise empty it. Errors if it exists and is
-            /// not a directory (a symlink to a directory is not a directory here).
-            pub fn ensure_empty_dir(&self, path: impl AsRef<Path>) -> Result<()> {
-                self.inner.ensure_empty_dir(path)
-            }
             /// Empty a directory while keeping it, with explicit removal policy.
             pub(crate) fn remove_dir_contents_impl(
                 &self,
@@ -165,11 +171,18 @@ macro_rules! owned_client {
                     .vopen(requests)
                     .map(|files| files.into_iter().map(|inner| $file { inner }).collect())
             }
-            /// Open a *genuine* directory handle for race-resistant, handle-rooted
-            /// removal. Backends that only return a path fail instead of silently
-            /// losing the handle safety guarantee.
-            pub fn open_dir_handle(&self, path: impl AsRef<std::path::Path>) -> Result<$dir> {
-                self.inner.open_dir_handle(path).map(|inner| $dir { inner })
+            pub(crate) fn vopen_dirs_impl<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<$dir>> {
+                self.inner
+                    .vopen_dirs(paths)
+                    .map(|dirs| dirs.into_iter().map(|inner| $dir { inner }).collect())
+            }
+            pub(crate) fn vremove_dir_contents_impl(
+                &self,
+                dirs: &[&$dir],
+                options: RemoveOptions,
+            ) -> Result<()> {
+                let dirs: Vec<_> = dirs.iter().map(|dir| &dir.inner).collect();
+                self.inner.vremove_dir_contents(&dirs, options)
             }
             /// Try to close a group through one vector operation without consuming
             /// the handles. On failure, all handles remain armed: the backend may
@@ -189,7 +202,7 @@ macro_rules! owned_client {
             ) -> Result<Vec<ReadResult>> {
                 crate::read::consume_ops(
                     ops,
-                    options.limit_or(self.limits().max_read_bytes),
+                    options.limit_or(self.limits().read_byte_limit()),
                     |file, offset, length| file.inner.read_request_at(offset, length),
                     |file, offset, buffer| file.inner.read_request_at_into(offset, buffer),
                     |requests, budget| {
@@ -229,7 +242,7 @@ macro_rules! owned_client {
                 &self,
                 path: impl AsRef<Path>,
                 options: StreamOptions,
-                callback: impl FnMut(u64, &[u8]) -> Result<bool>,
+                callback: impl FnMut(u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
             ) -> Result<StreamCompletion> {
                 self.inner.read_stream_with_options(path, options, callback)
             }
@@ -248,74 +261,14 @@ macro_rules! owned_client {
             pub fn path(&self) -> &Path {
                 self.inner.path()
             }
-            /// Query metadata for the open object without resolving its path again.
-            pub fn attrs(&self) -> Result<Attrs> {
-                self.inner.attrs()
-            }
-            /// Positional read which does not alter the file cursor.
-            pub fn read_at(&self, buffer: &mut [u8], offset: u64) -> Result<usize> {
-                self.inner.read_at(buffer, offset)
-            }
-            /// Positional write which does not alter the file cursor.
-            pub fn write_at(&self, buffer: &[u8], offset: u64) -> Result<usize> {
-                self.inner.write_at(buffer, offset)
-            }
-            /// Read at the current cursor, retaining the native structured error.
-            pub fn read_native(&mut self, buffer: &mut [u8]) -> Result<usize> {
-                self.inner.read_native(buffer)
-            }
-            /// Collect the remaining bytes from this opened object, starting at its
-            /// cursor, with an explicit logical payload limit. This does not reopen
-            /// its path. Unlike standard `Read::read_to_end`, allocation is bounded.
-            ///
-            /// An exact-limit read uses at most a one-byte EOF probe. On overflow or
-            /// I/O failure no buffer is returned and the cursor may have advanced,
-            /// including the probe byte; this operation does not restore the cursor.
-            pub fn read_to_end_with_limit(&mut self, max_bytes: usize) -> Result<Vec<u8>> {
-                self.inner.read_to_end_with_limit(max_bytes)
-            }
-            /// Write at the current cursor, retaining the native structured error.
-            pub fn write_native(&mut self, buffer: &[u8]) -> Result<usize> {
-                self.inner.write_native(buffer)
-            }
-            /// Request durable file data from the backend.
-            pub fn sync_data(&self) -> Result<()> {
-                self.inner.sync_data()
-            }
-            /// Request durable file data and metadata from the backend.
-            pub fn sync_all(&self) -> Result<()> {
-                self.inner.sync_all()
-            }
             /// Keep cleanup ownership on failure so the caller can retry explicitly.
             pub fn try_close(&mut self) -> Result<()> {
                 self.inner.try_close()
-            }
-            /// Seek while retaining `VfError` protocol and path information.
-            pub fn seek_native(&mut self, position: std::io::SeekFrom) -> Result<u64> {
-                self.inner.seek_native(position)
             }
             /// Consume and close the handle. On failure, `Drop` queues cleanup
             /// for a later operation or drain; use `try_close` to retain control.
             pub fn close(self) -> Result<()> {
                 self.inner.close()
-            }
-        }
-        impl std::io::Read for $file {
-            fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
-                std::io::Read::read(&mut self.inner, b)
-            }
-        }
-        impl std::io::Write for $file {
-            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-                std::io::Write::write(&mut self.inner, b)
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                std::io::Write::flush(&mut self.inner)
-            }
-        }
-        impl std::io::Seek for $file {
-            fn seek(&mut self, p: std::io::SeekFrom) -> std::io::Result<u64> {
-                std::io::Seek::seek(&mut self.inner, p)
             }
         }
         /// An opened directory, never a publicly extractable backend token.
@@ -331,12 +284,6 @@ macro_rules! owned_client {
             /// Whether explicit close has completed successfully on this handle.
             pub fn is_closed(&self) -> bool {
                 self.inner.is_closed()
-            }
-            pub fn remove_contents(&self) -> Result<()> {
-                self.inner.remove_contents()
-            }
-            pub fn remove_contents_with_options(&self, options: RemoveOptions) -> Result<()> {
-                self.inner.remove_contents_with_options(options)
             }
             /// Keep cleanup ownership on failure so the caller can retry explicitly.
             pub fn try_close(&mut self) -> Result<()> {

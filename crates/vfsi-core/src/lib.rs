@@ -31,4 +31,4 @@ pub use types::*;
 
 /// Portable application contracts, operations, options, and extension workflows.
 pub mod api;
-pub use api::{AsTarget, FileHandle, MkDirOp, SetAttrsOp, Target, Vfsi, VfsiExt};
+pub use api::{AsTarget, DirHandle, FileHandle, MkDirOp, SetAttrsOp, Target, Vfsi, VfsiExt};

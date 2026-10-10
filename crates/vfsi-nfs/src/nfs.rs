@@ -493,13 +493,13 @@ pub trait NfsObserver: Send + Sync + 'static {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NfsRecoveryPolicy {
     /// Hard cap on connection/session creation attempts, including the first.
-    pub reconnect_attempts: usize,
+    reconnect_attempts: usize,
     /// Delay after the first unsuccessful reconnect.
-    pub initial_backoff: Duration,
+    initial_backoff: Duration,
     /// Maximum delay between attempts.
-    pub max_backoff: Duration,
+    max_backoff: Duration,
     /// Total retry window. One attempt is still made when this is zero.
-    pub max_elapsed: Duration,
+    max_elapsed: Duration,
 }
 
 impl Default for NfsRecoveryPolicy {
@@ -512,6 +512,44 @@ impl Default for NfsRecoveryPolicy {
             max_backoff: Duration::from_secs(1),
             max_elapsed: Duration::from_secs(120),
         }
+    }
+}
+
+impl NfsRecoveryPolicy {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Set the attempt cap, including the first attempt. Zero also makes one attempt.
+    pub fn reconnect_attempts(mut self, value: usize) -> Self {
+        self.reconnect_attempts = value.max(1);
+        self
+    }
+    pub const fn attempt_limit(self) -> usize {
+        self.reconnect_attempts
+    }
+    /// Set the initial delay; execution clamps it to the maximum delay and remaining window.
+    pub fn initial_backoff(mut self, value: Duration) -> Self {
+        self.initial_backoff = value;
+        self
+    }
+    pub const fn initial_delay(self) -> Duration {
+        self.initial_backoff
+    }
+    /// Set the maximum delay; zero disables sleeping between attempts.
+    pub fn max_backoff(mut self, value: Duration) -> Self {
+        self.max_backoff = value;
+        self
+    }
+    pub const fn maximum_delay(self) -> Duration {
+        self.max_backoff
+    }
+    /// Set the retry window; zero still permits the first attempt.
+    pub fn max_elapsed(mut self, value: Duration) -> Self {
+        self.max_elapsed = value;
+        self
+    }
+    pub const fn retry_window(self) -> Duration {
+        self.max_elapsed
     }
 }
 
@@ -1623,7 +1661,7 @@ impl NfsVecFs {
             mount.check_local()?;
         }
         self.notify(NfsEvent::ReconnectStarted);
-        let attempts = self.recovery_policy.reconnect_attempts.max(1);
+        let attempts = self.recovery_policy.attempt_limit();
         let mut backoff = self.recovery_policy.initial_backoff;
         let started = std::time::Instant::now();
         let mut last = None;
@@ -3722,7 +3760,8 @@ impl NfsVecFs {
                     return Ok(());
                 }
                 Err(error)
-                    if remove_status_is_retryable(error.status) && attempts < options.retries =>
+                    if remove_status_is_retryable(error.status)
+                        && attempts < options.retry_limit() =>
                 {
                     attempts += 1;
                     std::thread::sleep(remove_backoff(attempts));
@@ -3882,7 +3921,7 @@ impl NfsVecFs {
             let take = removal_batch_take(
                 names.len() - start,
                 self.nfs.remove_batch_capacity(),
-                options.batch,
+                options.batch_size(),
             );
             match self.nfs.remove_many(dir, &names[start..start + take]) {
                 Ok(()) => {
@@ -3937,7 +3976,7 @@ impl NfsVecFs {
             let take = removal_batch_take(
                 entries.len() - start,
                 self.nfs.remove_batch_capacity(),
-                options.batch,
+                options.batch_size(),
             );
             let chunk = &entries[start..start + take];
             let names: Vec<Vec<u8>> = chunk.iter().map(|(name, _)| name.clone()).collect();
@@ -3999,7 +4038,7 @@ impl NfsVecFs {
             let take = removal_batch_take(
                 names.len() - start,
                 self.nfs.lookup_batch_capacity(),
-                options.batch,
+                options.batch_size(),
             );
             let chunk = &names[start..start + take];
             let ops: Vec<(WireFileHandle, Vec<u8>)> = chunk
@@ -4056,7 +4095,7 @@ impl NfsVecFs {
         // The caller already made the initial attempt. `retries` counts
         // additional attempts, not an unconditional extra call plus retries.
         let mut last_error = initial_error;
-        for attempt in 0..options.retries {
+        for attempt in 0..options.retry_limit() {
             std::thread::sleep(remove_backoff(attempt.saturating_add(1)));
             match self.nfs.remove_many(dir, std::slice::from_ref(&owned)) {
                 Ok(()) => return Ok(true),
@@ -4263,6 +4302,14 @@ impl FileSystem for NfsVecFs {
                 Err(vfsi_core::error_from_rpc(error, 0))
             }
         }
+    }
+
+    fn vfsync_impl(&mut self, files: &[VfFile], _mode: vfsi_core::api::SyncMode) -> VfRes {
+        for (index, file) in files.iter().enumerate() {
+            self.sync_data(file)
+                .map_err(|error| error.map_index(|_| index))?;
+        }
+        Ok(())
     }
 
     fn sync_data(&mut self, tcf: &VfFile) -> VfResult<()> {
@@ -6588,10 +6635,7 @@ mod tests {
 
     #[test]
     fn builder_collects_connection_and_runtime_configuration() {
-        let policy = NfsRecoveryPolicy {
-            reconnect_attempts: 3,
-            ..NfsRecoveryPolicy::default()
-        };
+        let policy = NfsRecoveryPolicy::new().reconnect_attempts(3);
         let builder = NfsClientBuilder::new("server:2049")
             .root("/export/app")
             .minor_version(Some(1))

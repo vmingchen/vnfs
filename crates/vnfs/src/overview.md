@@ -89,7 +89,7 @@ helpers, not core execution methods. Import both with `vnfs::prelude::*`.
 - `vread` defaults to the client’s 16 MiB aggregate byte budget.
   Adjust [`ResourceLimits`] or [`ReadOptions`],
   or stream instead. Directory collection and traversal have separate budgets.
-  These are not a process-wide peak-memory cap. Standard `std::io::Read::read_to_end`
+  These are not a process-wide peak-memory cap. The explicit `FileIo` adapter bounds collecting reads; caller-managed buffering
   does not inherit an allocation limit.
 - `vread` range requests and `vwrite` may return short progress. Whole-file
   requests complete or fail; they never silently truncate. Use `vwrite`

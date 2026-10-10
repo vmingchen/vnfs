@@ -174,16 +174,16 @@ impl ListDirOptions {
         let entries = if self.entries.is_some() || self.flags.entries_unlimited() {
             self.entry_limit()
         } else {
-            limits.max_directory_entries
+            limits.directory_entry_limit()
         };
         let bytes = if self.bytes.is_some() || self.flags.bytes_unlimited() {
             self.path_byte_limit()
         } else {
-            limits.max_directory_path_bytes
+            limits.directory_path_byte_limit()
         };
         self.depth = Some(
             self.depth
-                .unwrap_or_else(|| DepthLimit::new(limits.max_walk_depth)),
+                .unwrap_or_else(|| DepthLimit::new(limits.walk_depth_limit())),
         );
         self.max_entries(entries).max_path_bytes(bytes)
     }
@@ -213,12 +213,10 @@ mod option_layout_tests {
     fn compact_traversal_options_preserve_zero_overrides_and_independent_bits() {
         assert_eq!(std::mem::size_of::<VisitFlags>(), 1);
         assert!(std::mem::size_of::<ListDirOptions>() < std::mem::size_of::<PreviousLayout>());
-        let limits = ResourceLimits {
-            max_directory_entries: usize::MAX,
-            max_directory_path_bytes: 13,
-            max_walk_depth: 3,
-            ..ResourceLimits::default()
-        };
+        let limits = ResourceLimits::new()
+            .max_directory_entries(usize::MAX)
+            .max_directory_path_bytes(13)
+            .max_walk_depth(3);
         let inherited = ListDirOptions::new().walk_options(limits);
         assert!(!ListDirOptions::new().emits_enter_leave());
         assert!(!ListDirOptions::new().sorts_by_name());

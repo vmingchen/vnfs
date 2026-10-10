@@ -4,14 +4,14 @@ pub fn run(fs: &impl Vfsi, path: &str) -> vnfs::Result<u64> {
     let mut bytes = 0_u64;
     fs.vstream(
         &[path],
-        StreamOptions::new().chunk_size(1024 * 1024),
+        StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()),
         |index, offset, chunk| {
             // Process the borrowed chunk here; it is valid only in this callback.
             // Do not collect chunks: that would defeat the memory bound.
             assert_eq!(index, 0);
             assert_eq!(offset, bytes);
             bytes += chunk.len() as u64;
-            Ok(true) // false stops successfully; callback errors propagate.
+            Ok(std::ops::ControlFlow::Continue(())) // false stops successfully; callback errors propagate.
         },
     )?;
     Ok(bytes)

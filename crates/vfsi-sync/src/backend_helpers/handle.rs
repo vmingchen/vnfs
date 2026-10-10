@@ -64,11 +64,11 @@ pub fn native_open_impl_default<F: FileSystem + ?Sized>(
 ) -> VfResult<VfFile> {
     backend
         .open_raw_impl(
-            request.path.as_path(),
-            vfsi_core::open_flags_to_libc(request.flags)?,
-            request.mode,
+            request.path(),
+            vfsi_core::open_flags_to_libc(request.flags())?,
+            request.creation_mode(),
         )
-        .map_err(|error| error.with_context("open", &request.path))
+        .map_err(|error| error.with_context("open", request.path()))
 }
 
 pub fn native_seek_impl_default<F: FileSystem + ?Sized>(

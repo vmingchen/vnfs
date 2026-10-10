@@ -1,7 +1,6 @@
 //! This target depends only on vfsi-core: extensions must not require a backend.
 use std::{
     cell::{Cell, RefCell},
-    io,
     path::{Path, PathBuf},
 };
 use vfsi_core::api::*;
@@ -9,54 +8,9 @@ use vfsi_core::{Vfsi, VfsiExt};
 
 #[derive(Debug)]
 struct TestFile;
-impl io::Read for TestFile {
-    fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-        panic!("unexpected scalar I/O")
-    }
-}
-impl io::Write for TestFile {
-    fn write(&mut self, _: &[u8]) -> io::Result<usize> {
-        panic!("unexpected scalar I/O")
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        panic!("unexpected scalar I/O")
-    }
-}
-impl io::Seek for TestFile {
-    fn seek(&mut self, _: io::SeekFrom) -> io::Result<u64> {
-        panic!("unexpected scalar I/O")
-    }
-}
 impl FileHandle for TestFile {
     fn path(&self) -> &Path {
         Path::new("/file")
-    }
-    fn attrs(&self) -> Result<Attrs> {
-        panic!("unexpected scalar metadata")
-    }
-    fn read_at(&self, _: &mut [u8], _: u64) -> Result<usize> {
-        panic!("unexpected scalar I/O")
-    }
-    fn write_at(&self, _: &[u8], _: u64) -> Result<usize> {
-        panic!("unexpected scalar I/O")
-    }
-    fn read_native(&mut self, _: &mut [u8]) -> Result<usize> {
-        panic!("unexpected scalar I/O")
-    }
-    fn read_to_end_with_limit(&mut self, _: usize) -> Result<Vec<u8>> {
-        panic!("unexpected scalar I/O")
-    }
-    fn write_native(&mut self, _: &[u8]) -> Result<usize> {
-        panic!("unexpected scalar I/O")
-    }
-    fn seek_native(&mut self, _: io::SeekFrom) -> Result<u64> {
-        panic!("unexpected scalar I/O")
-    }
-    fn sync_data(&self) -> Result<()> {
-        panic!("unexpected scalar I/O")
-    }
-    fn sync_all(&self) -> Result<()> {
-        panic!("unexpected scalar I/O")
     }
     fn try_close(&mut self) -> Result<()> {
         Ok(())
@@ -104,6 +58,9 @@ impl Vfsi for PortableFs {
             Err(vfsi_core::VfError::unsupported(0))
         }
     }
+    fn vfsync(&self, _: &[&Self::File], _: SyncMode) -> Result<()> {
+        Ok(())
+    }
     fn vsetattrs<P: vfsi_core::AsTarget<Self::File>>(
         &self,
         _: &[vfsi_core::SetAttrsOp<P>],
@@ -112,16 +69,31 @@ impl Vfsi for PortableFs {
     }
 
     type File = TestFile;
+    type Dir = TestFile;
     fn limits(&self) -> ResourceLimits {
         ResourceLimits::default()
     }
-    fn vgetattrs<P: AsRef<Path>>(&self, paths: &[P], options: AttrsOptions) -> Result<Vec<Attrs>> {
+    fn vgetattrs<P: AsTarget<Self::File>>(
+        &self,
+        paths: &[P],
+        options: AttrsOptions,
+    ) -> Result<Vec<Attrs>> {
         assert!(self.tree.get(), "unexpected metadata");
         assert!(!options.follows_symlinks());
         self.metadata.set(self.metadata.get() + 1);
         Ok(paths
             .iter()
-            .map(|path| tree_entry(path.as_ref(), true).attrs().clone())
+            .map(|path| {
+                tree_entry(
+                    match path.as_target() {
+                        Target::Path(path) => path,
+                        Target::File(file) => FileHandle::path(file),
+                    },
+                    true,
+                )
+                .attrs()
+                .clone()
+            })
             .collect())
     }
     fn vopen(&self, requests: &[OpenOp]) -> Result<Vec<TestFile>> {
@@ -189,7 +161,7 @@ impl Vfsi for PortableFs {
         &self,
         _: &[P],
         _: StreamOptions,
-        _: impl FnMut(usize, u64, &[u8]) -> Result<bool>,
+        _: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<Vec<StreamCompletion>> {
         panic!("unexpected stream")
     }
@@ -555,4 +527,19 @@ fn consuming_reads_release_caller_buffers_and_owned_counts_are_derived() {
     buffer.fill(42); // Results retain no borrow of caller storage.
     let owned = ReadResult::owned(2, vec![1, 2, 3], true);
     assert_eq!(owned.read(), owned.data().unwrap().len());
+}
+
+impl DirHandle for TestFile {
+    fn path(&self) -> &Path {
+        FileHandle::path(self)
+    }
+    fn try_close(&mut self) -> Result<()> {
+        FileHandle::try_close(self)
+    }
+    fn is_closed(&self) -> bool {
+        FileHandle::is_closed(self)
+    }
+    fn close(self) -> Result<()> {
+        FileHandle::close(self)
+    }
 }
