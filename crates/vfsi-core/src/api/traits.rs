@@ -29,6 +29,22 @@ pub trait FileHandle {
         Self: Sized;
 }
 
+/// Owned directory retaining the opened object's identity after rename or path
+/// replacement. Paths are diagnostic only; clients validate ownership and live
+/// state before handle-rooted operations. Failed `try_close` retains cleanup ownership.
+pub trait DirHandle {
+    /// Diagnostic name captured at open, not current path or identity.
+    fn path(&self) -> &Path;
+    /// Close while retaining cleanup ownership on failure.
+    fn try_close(&mut self) -> Result<()>;
+    /// Local close ownership, not proof of remote liveness after failure.
+    fn is_closed(&self) -> bool;
+    /// Consuming close; on failure Drop queues best-effort cleanup.
+    fn close(self) -> Result<()>
+    where
+        Self: Sized;
+}
+
 /// Vectorized filesystem operations for direct and routed application clients.
 /// Construction, builders and protocol-specific diagnostics stay concrete.
 /// Vectors are strict, ordered results on success, not transactions: errors
@@ -174,6 +190,37 @@ pub trait Vfsi {
     /// Sources are not followed when the final component is a symlink.
     /// Cross-filesystem links can fail. Errors may follow partial creation.
     fn vhardlink<P: AsRef<Path>, Q: AsRef<Path>>(&self, pairs: &[(P, Q)]) -> Result<()>;
+
+    /// Owned directory handle for this client's retained namespace objects.
+    type Dir: DirHandle + 'static;
+
+    /// Open genuine directory handles in input order without following final
+    /// symlinks. Path-only backends must report unsupported. On error, opened
+    /// handles are cleaned up; an empty vector performs no I/O.
+    fn vopen_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<Self::Dir>> {
+        if paths.is_empty() {
+            Ok(Vec::new())
+        } else {
+            Err(crate::api::Error::unsupported(0))
+        }
+    }
+
+    /// Remove contents anchored to retained directories, preserving the roots.
+    /// Validate every handle's ownership and live state before any mutation.
+    /// Never reopen diagnostic paths. Errors can follow partial mutation; an
+    /// index identifies an input, not a committed prefix. Do not replay failures.
+    fn vremove_dir_contents(
+        &self,
+        dirs: &[&Self::Dir],
+        options: crate::RemoveOptions,
+    ) -> Result<()> {
+        let _ = options;
+        if dirs.is_empty() {
+            Ok(())
+        } else {
+            Err(crate::api::Error::unsupported(0))
+        }
+    }
 
     /// Owned handle; vectors must contain handles belonging to this client.
     type File: FileHandle + 'static;
@@ -435,16 +482,16 @@ pub trait Vfsi {
 
     /// Stream files through bounded chunks without collecting whole contents.
     /// The callback receives the input index, byte offset, and borrowed chunk.
-    /// False stops the whole vector; results contain its completed/stopped prefix.
+    /// `ControlFlow::Break(())` stops the whole vector; results contain its completed/stopped prefix.
     /// Backends may process streams sequentially; this is not a parallelism promise.
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, StreamOptions};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.vstream(&["/large-1", "/large-2"],
-    ///     StreamOptions::new().chunk_size(1024 * 1024), |index, offset, data| {
+    ///     StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()), |index, offset, data| {
     ///         println!("{index}: {} bytes at {offset}", data.len());
-    ///         Ok(true)
+    ///         Ok(std::ops::ControlFlow::Continue(()))
     ///     })?;
     /// # Ok(())
     /// # }
@@ -453,7 +500,7 @@ pub trait Vfsi {
         &self,
         paths: &[P],
         options: crate::api::StreamOptions,
-        callback: impl FnMut(usize, u64, &[u8]) -> Result<bool>,
+        callback: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<Vec<crate::api::StreamCompletion>>;
 }
 
@@ -489,6 +536,22 @@ pub trait Vfsi {
 /// bounded paging, or recovery semantics. Singular convenience is not a promise
 /// of one RPC, and vector execution is not a promise of atomicity.
 pub trait VfsiExt: Vfsi {
+    /// Open one genuine, retained directory through the portable vector engine.
+    fn open_dir_handle(&self, path: impl AsRef<Path>) -> Result<Self::Dir> {
+        single_completion(self.vopen_dirs(&[path])?, "vopen_dirs")
+    }
+    /// Remove a retained directory's contents without resolving its old name.
+    fn remove_dir_contents_handle(&self, dir: &Self::Dir) -> Result<()> {
+        self.remove_dir_contents_handle_with_options(dir, crate::RemoveOptions::default())
+    }
+    fn remove_dir_contents_handle_with_options(
+        &self,
+        dir: &Self::Dir,
+        options: crate::RemoveOptions,
+    ) -> Result<()> {
+        self.vremove_dir_contents(&[dir], options)
+    }
+
     /// Build reusable open options for this client.
     fn open_options(&self) -> super::OpenOptions<'_, Self> {
         super::OpenOptions::new(self)
@@ -728,14 +791,14 @@ pub trait VfsiExt: Vfsi {
     /// Single-target convenience. For multiple files, prefer [`Vfsi::vstream`]. Backends may process streams sequentially.
     ///
     /// Stream a file using the client's bounded chunk size instead of collecting it.
-    /// Return `Ok(false)` to stop successfully; the callback runs outside the lock.
+    /// Return `Ok(ControlFlow::Break(()))` to stop successfully; the callback runs outside the lock.
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.read_stream("/large", |offset, bytes| {
     ///     println!("{} bytes at {offset}", bytes.len());
-    ///     Ok(true)
+    ///     Ok(std::ops::ControlFlow::Continue(()))
     /// })?;
     /// # Ok(())
     /// # }
@@ -743,18 +806,20 @@ pub trait VfsiExt: Vfsi {
     fn read_stream(
         &self,
         path: impl AsRef<Path>,
-        callback: impl FnMut(u64, &[u8]) -> Result<bool>,
+        callback: impl FnMut(u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<crate::api::StreamCompletion> {
         self.read_stream_with_options(
             path,
-            crate::api::StreamOptions::new().chunk_size(self.limits().stream_chunk_size()),
+            crate::api::StreamOptions::new().chunk_size(
+                std::num::NonZeroUsize::new(self.limits().stream_chunk_size()).unwrap(),
+            ),
             callback,
         )
     }
 
     /// Single-target convenience. For multiple files, prefer [`Vfsi::vstream`]. Backends may process streams sequentially.
     ///
-    /// Stream from offset zero outside the backend lock. `false` stops after
+    /// Stream from offset zero outside the backend lock. `ControlFlow::Break(())` stops after
     /// the delivered chunk; completion reports the next offset. Not a snapshot.
     ///
     /// The callback borrows each chunk only for its invocation. Consume it
@@ -770,10 +835,14 @@ pub trait VfsiExt: Vfsi {
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let mut processed = 0_u64;
     /// let completion = fs.read_stream_with_options(
-    ///     "/large.bin", StreamOptions::new().chunk_size(1024 * 1024),
+    ///     "/large.bin", StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()),
     ///     |_offset, chunk| {
     ///         processed += chunk.len() as u64; // Process the borrowed bytes here.
-    ///         Ok(processed < 8 * 1024 * 1024) // Stop after a bounded sample.
+    ///         Ok(if processed < 8 * 1024 * 1024 {
+    ///             std::ops::ControlFlow::Continue(())
+    ///         } else {
+    ///             std::ops::ControlFlow::Break(())
+    ///         }) // Stop after a bounded sample.
     ///     },
     /// )?;
     /// match completion {
@@ -787,7 +856,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         path: impl AsRef<Path>,
         options: crate::api::StreamOptions,
-        callback: impl FnMut(u64, &[u8]) -> Result<bool>,
+        callback: impl FnMut(u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<crate::api::StreamCompletion> {
         let mut callback = callback;
         single_completion(
@@ -1193,7 +1262,8 @@ pub trait VfsiExt: Vfsi {
 
     /// Visit complete shallow listings in depth-first order with application policy.
     ///
-    /// `order` may reorder siblings (for example, locale-aware `ls` ordering).
+    /// `order` compares immutable siblings (for example, locale-aware `ls` ordering).
+    /// The shared workflow sorts them; callbacks cannot replace validated entries.
     /// `descend` selects directories before their contents are read; it does not
     /// filter entries delivered in their parent's listing. Symlinks are never
     /// traversed. `visitor` runs outside backend locks and may stop immediately
@@ -1211,7 +1281,7 @@ pub trait VfsiExt: Vfsi {
     /// # fn example(fs: &impl Vfsi) -> Result<()> {
     /// fs.visit_dirs_ordered("/input",
     ///     fs.limits().walk_options().fields(Attributes::MODE | Attributes::SIZE),
-    ///     |entries| entries.sort_by(|a, b| a.path().cmp(b.path())),
+    ///     |a, b| a.path().cmp(b.path()),
     ///     |entry| entry.file_name() != Some(std::ffi::OsStr::new(".git")),
     ///     |listing, depth| {
     ///         println!("{}: {} entries at depth {depth}", listing.path.display(), listing.entries.len());
@@ -1224,7 +1294,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         root: impl AsRef<Path>,
         options: crate::api::ListDirOptions,
-        mut order: impl FnMut(&mut [crate::api::DirEntry]),
+        mut order: impl FnMut(&crate::api::DirEntry, &crate::api::DirEntry) -> std::cmp::Ordering,
         mut descend: impl FnMut(&crate::api::DirEntry) -> bool,
         mut visitor: impl FnMut(DirectoryListing, usize) -> Result<crate::api::WalkControl>,
     ) -> Result<crate::api::TraversalCompletion> {
@@ -1263,7 +1333,7 @@ pub trait VfsiExt: Vfsi {
                         .with_context("visit_dirs_ordered", entry.path()));
                 }
             }
-            order(&mut entries);
+            entries.sort_by(&mut order);
             let listing = DirectoryListing { path, entries };
             let children: Vec<_> = listing
                 .entries

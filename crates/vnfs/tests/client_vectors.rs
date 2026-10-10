@@ -190,3 +190,123 @@ fn consolidated_metadata_fields_and_symlinks_on_mounted_and_auto() {
         }
     }
 }
+
+struct ChangingTarget<'a, F> {
+    first: vnfs::Target<'a, F>,
+    later: vnfs::Target<'a, F>,
+    calls: std::cell::Cell<usize>,
+}
+impl<'a, F> ChangingTarget<'a, F> {
+    fn new(first: vnfs::Target<'a, F>, later: vnfs::Target<'a, F>) -> Self {
+        Self {
+            first,
+            later,
+            calls: std::cell::Cell::new(0),
+        }
+    }
+}
+impl<F> vnfs::AsTarget<F> for ChangingTarget<'_, F> {
+    fn as_target(&self) -> vnfs::Target<'_, F> {
+        let calls = self.calls.replace(self.calls.get() + 1);
+        if calls == 0 { self.first } else { self.later }
+    }
+}
+
+fn stable_targets<C: Vfsi>(fs: &C, other: &C) {
+    use vnfs::{FileHandle, SetAttrsOp, Target};
+    let file = fs.create("/original").unwrap();
+    fs.vwrite(&[WriteOp::at(&file, 0, b"original")], Default::default())
+        .unwrap();
+    let foreign = other.create("/foreign").unwrap();
+    let targets = [ChangingTarget::new(
+        Target::File(&file),
+        Target::File(&foreign),
+    )];
+    assert_eq!(
+        fs.vgetattrs(&targets, AttrsOptions::new()).unwrap()[0].len(),
+        Some(8)
+    );
+    assert_eq!(targets[0].calls.get(), 1);
+    targets[0].calls.set(0);
+    assert_eq!(fs.vstatfs(&targets).unwrap().len(), 1);
+    assert_eq!(targets[0].calls.get(), 1);
+    let updates = [SetAttrsOp::new(ChangingTarget::new(
+        Target::File(&file),
+        Target::File(&foreign),
+    ))
+    .len(2)];
+    fs.vsetattrs(&updates).unwrap();
+    assert_eq!(updates[0].target().calls.get(), 1);
+    assert_eq!(fs.attrs("/original").unwrap().len(), Some(2));
+    assert_eq!(other.attrs("/foreign").unwrap().len(), Some(0));
+
+    // Error context must use the same prepared operand, too.
+    let missing = std::path::Path::new("/missing");
+    let targets = [ChangingTarget::new(
+        Target::Path(missing),
+        Target::File(&file),
+    )];
+    let error = fs.vgetattrs(&targets, AttrsOptions::new()).unwrap_err();
+    assert_eq!(error.path(), Some(missing));
+    assert_eq!(targets[0].calls.get(), 1);
+    targets[0].calls.set(0);
+    let error = fs.vstatfs(&targets).unwrap_err();
+    assert_eq!(error.path(), Some(missing));
+    assert_eq!(targets[0].calls.get(), 1);
+    let updates = [SetAttrsOp::new(ChangingTarget::new(
+        Target::Path(missing),
+        Target::File(&file),
+    ))
+    .len(0)];
+    let error = fs.vsetattrs(&updates).unwrap_err();
+    assert_eq!(error.path(), Some(missing));
+    assert_eq!(updates[0].target().calls.get(), 1);
+    assert_eq!(fs.attrs("/original").unwrap().len(), Some(2));
+    file.close().unwrap();
+    foreign.close().unwrap();
+}
+
+#[test]
+fn custom_targets_are_prepared_once_on_mounted_and_auto() {
+    for auto in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        if auto {
+            stable_targets(
+                &vnfs::Auto::new(root.path()).unwrap(),
+                &vnfs::Auto::new(root.path()).unwrap(),
+            );
+        } else {
+            stable_targets(
+                &vnfs::Mounted::new(root.path()).unwrap(),
+                &vnfs::Mounted::new(root.path()).unwrap(),
+            );
+        }
+    }
+}
+
+#[test]
+fn portable_directory_open_preserves_path_only_backend_rejection() {
+    fn check(fs: &impl Vfsi) {
+        fs.create_dir("/dir").unwrap();
+        fs.write("/dir/keep", b"keep").unwrap();
+        assert!(fs.vopen_dirs::<&str>(&[]).unwrap().is_empty());
+        assert_eq!(
+            fs.open_dir_handle("/dir").err().unwrap().kind(),
+            vnfs::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            fs.vopen_dirs(&["/dir"]).err().unwrap().kind(),
+            vnfs::ErrorKind::Unsupported
+        );
+        fs.vremove_dir_contents(&[], Default::default()).unwrap();
+        assert_eq!(fs.read("/dir/keep").unwrap(), b"keep");
+    }
+    for auto in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        if auto {
+            check(&vnfs::Auto::new(root.path()).unwrap());
+        } else {
+            check(&vnfs::Mounted::new(root.path()).unwrap());
+        }
+    }
+}

@@ -59,6 +59,7 @@ impl Harness {
 }
 impl Vfsi for Harness {
     type File = <Mounted as Vfsi>::File;
+    type Dir = <Mounted as Vfsi>::Dir;
     fn capabilities(&self) -> Result<Capabilities> {
         self.fs.capabilities()
     }
@@ -230,7 +231,7 @@ impl Vfsi for Harness {
         &self,
         p: &[P],
         o: StreamOptions,
-        c: impl FnMut(usize, u64, &[u8]) -> Result<bool>,
+        c: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<Vec<StreamCompletion>> {
         self.fs.vstream(p, o, c)
     }

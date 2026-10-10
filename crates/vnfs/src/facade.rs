@@ -171,11 +171,18 @@ macro_rules! owned_client {
                     .vopen(requests)
                     .map(|files| files.into_iter().map(|inner| $file { inner }).collect())
             }
-            /// Open a *genuine* directory handle for race-resistant, handle-rooted
-            /// removal. Backends that only return a path fail instead of silently
-            /// losing the handle safety guarantee.
-            pub fn open_dir_handle(&self, path: impl AsRef<std::path::Path>) -> Result<$dir> {
-                self.inner.open_dir_handle(path).map(|inner| $dir { inner })
+            pub(crate) fn vopen_dirs_impl<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<$dir>> {
+                self.inner
+                    .vopen_dirs(paths)
+                    .map(|dirs| dirs.into_iter().map(|inner| $dir { inner }).collect())
+            }
+            pub(crate) fn vremove_dir_contents_impl(
+                &self,
+                dirs: &[&$dir],
+                options: RemoveOptions,
+            ) -> Result<()> {
+                let dirs: Vec<_> = dirs.iter().map(|dir| &dir.inner).collect();
+                self.inner.vremove_dir_contents(&dirs, options)
             }
             /// Try to close a group through one vector operation without consuming
             /// the handles. On failure, all handles remain armed: the backend may
@@ -235,7 +242,7 @@ macro_rules! owned_client {
                 &self,
                 path: impl AsRef<Path>,
                 options: StreamOptions,
-                callback: impl FnMut(u64, &[u8]) -> Result<bool>,
+                callback: impl FnMut(u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
             ) -> Result<StreamCompletion> {
                 self.inner.read_stream_with_options(path, options, callback)
             }
@@ -277,12 +284,6 @@ macro_rules! owned_client {
             /// Whether explicit close has completed successfully on this handle.
             pub fn is_closed(&self) -> bool {
                 self.inner.is_closed()
-            }
-            pub fn remove_contents(&self) -> Result<()> {
-                self.inner.remove_contents()
-            }
-            pub fn remove_contents_with_options(&self, options: RemoveOptions) -> Result<()> {
-                self.inner.remove_contents_with_options(options)
             }
             /// Keep cleanup ownership on failure so the caller can retry explicitly.
             pub fn try_close(&mut self) -> Result<()> {

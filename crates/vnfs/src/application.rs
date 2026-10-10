@@ -51,6 +51,7 @@ impl FileHandle for crate::NfsFile {
 #[cfg(feature = "nfs")]
 impl Vfsi for crate::NfsClient {
     type File = crate::NfsFile;
+    type Dir = crate::NfsDir;
     client_methods!(crate::NfsClient, std::convert::identity);
 }
 
@@ -62,11 +63,13 @@ mod routed {
     }
     impl Vfsi for crate::Auto {
         type File = crate::AutoFile;
+        type Dir = crate::AutoDir;
         client_methods!(crate::Auto, std::convert::identity);
     }
 
     impl Vfsi for crate::Mounted {
         type File = crate::MountedFile;
+        type Dir = crate::MountedDir;
         client_methods!(crate::Mounted, std::convert::identity);
     }
 
@@ -505,6 +508,7 @@ mod extension_tests {
     }
     impl Vfsi for Probe {
         type File = crate::MountedFile;
+        type Dir = crate::MountedDir;
         client_methods!(
             crate::Mounted,
             Probe::inner,
@@ -621,6 +625,7 @@ mod extension_tests {
     }
     impl Vfsi for WritePolicyProbe {
         type File = crate::MountedFile;
+        type Dir = crate::MountedDir;
         client_methods!(
             crate::Mounted,
             WritePolicyProbe::inner,
@@ -732,7 +737,7 @@ mod extension_tests {
             // Reenter the same client from its callback.
             assert_eq!(fs.attrs("/dir/a")?.len(), Some(3));
             payload.extend_from_slice(bytes);
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap();
         assert_eq!(payload, b"abc");
@@ -1011,12 +1016,12 @@ mod extension_tests {
         let completion = fs
             .vstream(
                 &["/one/moved", "/absent"],
-                crate::StreamOptions::new().chunk_size(2),
+                crate::StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(2).unwrap()),
                 |index, offset, data| {
                     assert_eq!((index, offset), (0, 0));
                     assert_eq!(data, b"ab");
                     seen.push(index);
-                    Ok(false)
+                    Ok(std::ops::ControlFlow::Break(()))
                 },
             )
             .unwrap();
@@ -1029,7 +1034,7 @@ mod extension_tests {
             .vstream(
                 &["/one/moved", "/absent"],
                 crate::StreamOptions::new(),
-                |_, _, _| Ok(true),
+                |_, _, _| Ok(std::ops::ControlFlow::Continue(())),
             )
             .unwrap_err();
         assert_eq!(error.index(), Some(1));
@@ -1047,4 +1052,17 @@ mod extension_tests {
         fs.remove_dir_all("/one").unwrap();
         assert!(fs.read_dir("/").unwrap().is_empty());
     }
+}
+
+#[cfg(feature = "nfs")]
+impl crate::DirHandle for crate::NfsDir {
+    vfsi_sync::__vfsi_file_methods!(crate::NfsDir);
+}
+#[cfg(all(feature = "auto", target_os = "linux"))]
+impl crate::DirHandle for crate::MountedDir {
+    vfsi_sync::__vfsi_file_methods!(crate::MountedDir);
+}
+#[cfg(all(feature = "auto", target_os = "linux"))]
+impl crate::DirHandle for crate::AutoDir {
+    vfsi_sync::__vfsi_file_methods!(crate::AutoDir);
 }

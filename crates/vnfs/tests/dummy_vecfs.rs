@@ -370,14 +370,14 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     client
         .read_stream_with_options(
             "/stream",
-            StreamOptions::new().chunk_size(64 * 1024),
+            StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(64 * 1024).unwrap()),
             |offset, chunk| {
                 assert_eq!(offset, next_offset);
                 assert!(!chunk.is_empty());
                 assert!(chunk.len() <= 64 * 1024);
                 next_offset += chunk.len() as u64;
                 actual.extend_from_slice(chunk);
-                Ok(true)
+                Ok(std::ops::ControlFlow::Continue(()))
             },
         )
         .unwrap();
@@ -389,7 +389,7 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
             assert_eq!(offset, default_bytes as u64);
             assert!(chunk.len() <= vfsi_sync::DEFAULT_READ_STREAM_CHUNK_BYTES);
             default_bytes += chunk.len();
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap();
     assert_eq!(default_bytes, payload.len());
@@ -398,10 +398,10 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     client
         .read_stream_with_options(
             "/stream",
-            StreamOptions::new().chunk_size(1234),
+            StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(1234).unwrap()),
             |_, chunk| {
                 seen += chunk.len();
-                Ok(false)
+                Ok(std::ops::ControlFlow::Break(()))
             },
         )
         .unwrap();
@@ -417,19 +417,10 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     client
         .read_stream("/empty", |_, _| {
             empty_callbacks += 1;
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .unwrap();
     assert_eq!(empty_callbacks, 0);
-
-    let error = client
-        .read_stream_with_options(
-            "/does-not-exist",
-            StreamOptions::new().chunk_size(0),
-            |_, _| Ok(true),
-        )
-        .unwrap_err();
-    assert_eq!(error.err_no(), libc::EINVAL as u32);
 }
 
 #[test]

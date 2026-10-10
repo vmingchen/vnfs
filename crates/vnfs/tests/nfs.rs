@@ -812,7 +812,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
             assert_eq!(offset, next_offset, "callbacks are delivered in order");
             next_offset += data.len() as u64;
             actual.extend_from_slice(data);
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         })
         .expect("stream complete file");
     assert_eq!(completion, vnfs::StreamCompletion::Complete);
@@ -822,7 +822,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
     let completion = pool
         .read_stream(&path, |_, _| {
             callbacks += 1;
-            Ok(false)
+            Ok(std::ops::ControlFlow::Break(()))
         })
         .expect("cancel stream");
     assert_eq!(
@@ -834,7 +834,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
     assert_eq!(callbacks, 1);
 
     let callback_panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = pool.read_stream(&path, |_, _| -> vnfs::Result<bool> {
+        let _ = pool.read_stream(&path, |_, _| -> vnfs::Result<std::ops::ControlFlow<()>> {
             panic!("injected callback panic")
         });
     }));
@@ -848,7 +848,7 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
     let mut reread = Vec::with_capacity(expected.len());
     pool.read_stream(&path, |_, data| {
         reread.extend_from_slice(data);
-        Ok(true)
+        Ok(std::ops::ControlFlow::Continue(()))
     })
     .expect("reuse pool after cancellation");
     assert_eq!(reread, expected);
@@ -2413,7 +2413,7 @@ fn pipelined_read_recovers_after_a_lost_read_reply() {
             proxy.arm();
         }
         actual.extend_from_slice(data);
-        Ok(true)
+        Ok(std::ops::ControlFlow::Continue(()))
     })
     .expect("read should recover after the lost read response");
     proxy.wait_for_drop();
@@ -3033,8 +3033,7 @@ fn owned_directory_handle_survives_rename_and_exposes_options() {
 
     let handle = c.open_dir_handle(&original).unwrap();
     c.rename(&original, &moved).unwrap();
-    handle
-        .remove_contents_with_options(RemoveOptions::new().batch(2))
+    c.remove_dir_contents_handle_with_options(&handle, RemoveOptions::new().batch(2))
         .unwrap();
     assert_eq!(handle.path(), Path::new(&original));
     assert!(c.read_dir(&moved).unwrap().is_empty());
@@ -4496,4 +4495,45 @@ fn copy_options_nfs_mixed_source_symlinks_and_extents() {
     fs.vcopy_impl(&[], options).unwrap();
     fs.remove_paths_impl(&[Path::new(&directory)], true)
         .unwrap();
+}
+
+#[path = "support/directory_handles.rs"]
+mod portable_directory_handles;
+
+#[test]
+fn portable_directory_vectors_preflight_and_retain_identity() {
+    let root = setup_dir("portable_directory_vectors");
+    let fs = Nfs::builder(test_host())
+        .root(root.as_str())
+        .connect()
+        .unwrap();
+    let other = Nfs::builder(test_host())
+        .root(root.as_str())
+        .connect()
+        .unwrap();
+    portable_directory_handles::check(&fs, &other, &fs, &fs);
+    drop(other);
+    drop(fs);
+    let mut c = client();
+    c.remove_impl(Path::new(&root), true).unwrap();
+}
+
+#[cfg(all(feature = "auto", target_os = "linux"))]
+#[test]
+#[ignore = "requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount"]
+fn portable_auto_directory_vectors_preflight_and_retain_identity() {
+    let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
+    let root = tempfile::tempdir_in(mount).unwrap();
+    let fs = vnfs::Auto::new(root.path()).unwrap();
+    let other = vnfs::Auto::new(root.path()).unwrap();
+    assert!(matches!(
+        fs.route_for("/"),
+        vnfs::AutoRoute::DirectNfs { .. }
+    ));
+    // Create and rename through the kernel namespace so Auto's host-side route
+    // discovery observes its own fixture changes. Check post-removal state via
+    // direct NFS to avoid assuming kernel/direct-client cache coherence.
+    let namespace = vnfs::Mounted::new(root.path()).unwrap();
+    let verify = Nfs::from_mount(root.path()).unwrap();
+    portable_directory_handles::check(&fs, &other, &namespace, &verify);
 }

@@ -5,10 +5,11 @@ and `FileHandle` contracts. It is part of `vnfs`, not a separate dependency.
 
 ## Application bridges
 
-`helpers::MountSession` pairs one reusable client with its local namespace root.
+`helpers::PathMapper` maps local paths to a root-relative namespace without owning
+a filesystem. Use `NfsMountSession` to bind a validated NFS connection to a mapping.
 Use `ResolvePath::Follow` for existing source operands and `NoFollow` for links,
 removal operands and new destinations. Mapping preserves non-UTF-8 paths and
-rejects operands outside the session root. It is not race-free confinement or a
+rejects operands outside the mapping root. It is not race-free confinement or a
 kernel/direct-client cache-coherence mechanism. Keep mount configuration stable
 for the session's lifetime.
 
@@ -21,7 +22,8 @@ coherent with concurrent kernel-mounted access.
 
 `VfsiExt::visit_dirs_ordered` provides lazy, application-ordered directory
 listings with entry/path/depth budgets and admission before child-directory I/O.
-It lets tools such as `ls` retain their sort and display policy without owning a
+Its comparator borrows immutable entries, so sorting cannot rewrite validated
+paths or metadata. It lets tools such as `ls` retain their sort and display policy without owning a
 second traversal engine. Use `listdir` with `enter_leave(true)` for pre/post-order entry
 events and `vlistdirs` to batch independent, already-approved directories.
 
@@ -32,13 +34,13 @@ flushing remain application policy. For a shared filesystem destination, prefer
 the existing vectorized `copy_items` workflows.
 
 ```rust,no_run
-use vnfs::{StreamOptions, helpers::{MountSession, ResolvePath, copy_to_writer}};
+use vnfs::{StreamOptions, helpers::{NfsMountSession, ResolvePath, copy_to_writer}};
 
-let session = MountSession::from_mount("/mnt/data")?;
+let session = NfsMountSession::from_mount("/mnt/data")?;
 let source = session.map("/mnt/data/input", ResolvePath::Follow)?;
 let mut output = std::fs::File::create("output")?;
 copy_to_writer(session.fs(), source, &mut output,
-    StreamOptions::new().chunk_size(1024 * 1024))?;
+    StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()))?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 

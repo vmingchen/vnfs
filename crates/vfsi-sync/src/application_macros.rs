@@ -94,7 +94,7 @@ macro_rules! __vfsi_client_methods {
             &self,
             paths: &[P],
             options: $crate::StreamOptions,
-            mut callback: impl FnMut(usize, u64, &[u8]) -> Result<bool>,
+            mut callback: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
         ) -> Result<Vec<$crate::StreamCompletion>> {
             let mut output = Vec::new();
             for (index, path) in paths.iter().enumerate() {
@@ -148,6 +148,12 @@ macro_rules! __vfsi_client_methods {
             <$client>::$limits($receiver(self))
         }
 
+        fn vopen_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<Self::Dir>> {
+            <$client>::vopen_dirs_impl($receiver(self), paths)
+        }
+        fn vremove_dir_contents(&self, dirs: &[&Self::Dir], options: $crate::RemoveOptions) -> Result<()> {
+            <$client>::vremove_dir_contents_impl($receiver(self), dirs, options)
+        }
         fn vopen(&self, requests: &[OpenOp]) -> Result<Vec<Self::File>> {
             if requests.len() == 1 {
                 // Preserve native symlink resolution and independent-handle state.

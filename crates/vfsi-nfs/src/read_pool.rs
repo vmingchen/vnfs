@@ -245,14 +245,14 @@ impl NfsReadPool {
 
     /// Stream a file in order while independent sessions fetch ranges ahead.
     ///
-    /// Return `Ok(false)` to cancel successfully. Callback errors propagate.
+    /// Return `Ok(std::ops::ControlFlow::Break(()))` to cancel successfully. Callback errors propagate.
     /// Cancellation waits for already-scheduled reads to finish before
     /// returning, so outstanding memory remains bounded by the configured
     /// in-flight and byte limits. The callback must not reenter this pool.
     pub fn read_stream(
         &mut self,
         path: impl AsRef<Path>,
-        mut callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
+        mut callback: impl FnMut(u64, &[u8]) -> VfResult<std::ops::ControlFlow<()>>,
     ) -> VfResult<StreamCompletion> {
         let path = path.as_ref().to_path_buf();
         let stream_id = self.next_stream_id;
@@ -429,8 +429,10 @@ impl NfsReadPool {
                             while let Some(data) = pending.remove(&next_delivery) {
                                 let start = next_delivery * chunk_size as u64;
                                 match catch_unwind(AssertUnwindSafe(|| callback(start, &data))) {
-                                    Ok(Ok(true)) => next_delivery += 1,
-                                    Ok(Ok(false)) => {
+                                    Ok(Ok(std::ops::ControlFlow::Continue(()))) => {
+                                        next_delivery += 1
+                                    }
+                                    Ok(Ok(std::ops::ControlFlow::Break(()))) => {
                                         next_delivery += 1;
                                         cancelled = true;
                                         break;

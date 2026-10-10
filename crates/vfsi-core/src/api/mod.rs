@@ -34,7 +34,7 @@ pub use io::{FileIo, SyncMode};
 mod builders;
 pub use builders::OpenOptions;
 mod traits;
-pub use traits::{FileHandle, Vfsi, VfsiExt};
+pub use traits::{DirHandle, FileHandle, Vfsi, VfsiExt};
 mod metadata;
 pub use metadata::{AttrsOptions, SetAttrsOp};
 mod mkdir;
@@ -81,10 +81,10 @@ pub mod internal {
 /// Common imports for backend-independent application code.
 pub mod prelude {
     pub use super::{
-        AsTarget, Attributes, AttrsOptions, ControlFlow, CopyOption, FileHandle, ListDirOptions,
-        MkDirOp, OpenFlags, OpenOp, ReadOp, ReadOptions, ReadResult, RemoveMode, RemoveOptions,
-        RenameOptions, ResourceLimits, SetAttrsOp, StreamOptions, SyncMode, Target, Vfsi, VfsiExt,
-        WriteOp, WriteOptions,
+        AsTarget, Attributes, AttrsOptions, ControlFlow, CopyOption, DirHandle, FileHandle,
+        ListDirOptions, MkDirOp, OpenFlags, OpenOp, ReadOp, ReadOptions, ReadResult, RemoveMode,
+        RemoveOptions, RenameOptions, ResourceLimits, SetAttrsOp, StreamOptions, SyncMode, Target,
+        Vfsi, VfsiExt, WriteOp, WriteOptions,
     };
 }
 
@@ -113,8 +113,8 @@ impl<F> Target<'_, F> {
 }
 /// Borrow a target for metadata queries, attribute updates or filesystem statistics.
 /// Paths can be passed directly; use [`Target`] for handles or mixed vectors.
-/// Conversion performs no I/O. Implementations must return the same operand
-/// throughout a call so preflight and execution address the same object.
+/// Conversion performs no I/O. Clients convert each operand once at preflight
+/// and retain that target for routing, execution, and error context.
 pub trait AsTarget<F> {
     fn as_target(&self) -> Target<'_, F>;
 }

@@ -199,7 +199,9 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         b"aXY"
     );
     assert_eq!(
-        client.read_stream("/sub/a", |_, _| Ok(false)).unwrap(),
+        client
+            .read_stream("/sub/a", |_, _| Ok(std::ops::ControlFlow::Break(())))
+            .unwrap(),
         vnfs::StreamCompletion::Stopped { next_offset: 2 }
     );
     assert_eq!(

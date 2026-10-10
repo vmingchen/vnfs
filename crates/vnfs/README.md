@@ -328,13 +328,13 @@ fn main() -> vnfs::Result<()> {
     let mut bytes_seen = 0u64;
     fs.vstream(
         &["/dataset/large.bin"],
-        StreamOptions::new().chunk_size(4 * 1024 * 1024),
+        StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(4 * 1024 * 1024).unwrap()),
         |index, offset, chunk| {
             assert_eq!(index, 0);
             assert_eq!(offset, bytes_seen);
             // Consume/process this chunk here; do not retain it to keep memory bounded.
             bytes_seen += chunk.len() as u64;
-            Ok(true)
+            Ok(std::ops::ControlFlow::Continue(()))
         },
     )?;
     println!("read {bytes_seen} bytes");
@@ -398,7 +398,7 @@ fn main() -> vnfs::Result<()> {
     pool.read_stream("/dataset/large.bin", |offset, chunk| {
         // Consume chunks in order; false cancels after this chunk.
         println!("received {} bytes at {offset}", chunk.len());
-        Ok(true)
+        Ok(std::ops::ControlFlow::Continue(()))
     })?;
     Ok(())
 }
@@ -601,16 +601,20 @@ For privileged or attacker-influenced paths, root the removal at an
 already-open directory instead of a path:
 
 ```rust,no_run
+use vnfs::VfsiExt;
 # fn example(fs: &vnfs::NfsClient) -> vnfs::Result<()> {
 let mut dir = fs.open_dir_handle("/attacker/controlled")?;
-dir.remove_contents()?; // rooted at the resolved directory handle
+fs.remove_dir_contents_handle(&dir)?; // rooted at the resolved directory handle
 dir.try_close()?;       // Retains cleanup ownership if explicit close fails
 # Ok(())
 # }
 ```
 
 `open_dir_handle` rejects backends without a genuine handle and does not follow
-a final symlink. It empties the directory while keeping that directory itself.
+a final symlink. `remove_dir_contents_handle` empties that retained directory
+while preserving its root, through `Vfsi::vremove_dir_contents`. Use
+`Vfsi::vopen_dirs` to open multiple directories. Import `DirHandle` for generic
+handle lifecycle methods.
 `remove_dir_all_with_options`, `remove_dir_contents_with_options`, and
 `Vfsi::vremove(paths, mode, options)` accept a `RemoveOptions` value choosing best-effort vs
 fail-fast removal (`continue_on_error`, defaulting to fail-fast), a vector batch-size cap

@@ -69,6 +69,7 @@ impl Vfsi for PortableFs {
     }
 
     type File = TestFile;
+    type Dir = TestFile;
     fn limits(&self) -> ResourceLimits {
         ResourceLimits::default()
     }
@@ -86,7 +87,7 @@ impl Vfsi for PortableFs {
                 tree_entry(
                     match path.as_target() {
                         Target::Path(path) => path,
-                        Target::File(file) => file.path(),
+                        Target::File(file) => FileHandle::path(file),
                     },
                     true,
                 )
@@ -160,7 +161,7 @@ impl Vfsi for PortableFs {
         &self,
         _: &[P],
         _: StreamOptions,
-        _: impl FnMut(usize, u64, &[u8]) -> Result<bool>,
+        _: impl FnMut(usize, u64, &[u8]) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<Vec<StreamCompletion>> {
         panic!("unexpected stream")
     }
@@ -526,4 +527,19 @@ fn consuming_reads_release_caller_buffers_and_owned_counts_are_derived() {
     buffer.fill(42); // Results retain no borrow of caller storage.
     let owned = ReadResult::owned(2, vec![1, 2, 3], true);
     assert_eq!(owned.read(), owned.data().unwrap().len());
+}
+
+impl DirHandle for TestFile {
+    fn path(&self) -> &Path {
+        FileHandle::path(self)
+    }
+    fn try_close(&mut self) -> Result<()> {
+        FileHandle::try_close(self)
+    }
+    fn is_closed(&self) -> bool {
+        FileHandle::is_closed(self)
+    }
+    fn close(self) -> Result<()> {
+        FileHandle::close(self)
+    }
 }

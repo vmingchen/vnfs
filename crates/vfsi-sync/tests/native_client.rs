@@ -66,7 +66,11 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
     let result = client
         .read_stream("/file", |offset, bytes| {
             offsets.push((offset, bytes.len()));
-            Ok(offset == 0)
+            Ok(if offset == 0 {
+                std::ops::ControlFlow::Continue(())
+            } else {
+                std::ops::ControlFlow::Break(())
+            })
         })
         .unwrap();
     assert_eq!(offsets, [(0, 2), (2, 2)]);
@@ -75,7 +79,9 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
         vfsi_sync::StreamCompletion::Stopped { next_offset: 4 }
     );
     assert_eq!(
-        client.read_stream("/file", |_, _| Ok(true)).unwrap(),
+        client
+            .read_stream("/file", |_, _| Ok(std::ops::ControlFlow::Continue(())))
+            .unwrap(),
         vfsi_sync::StreamCompletion::Complete
     );
 }
@@ -1892,13 +1898,13 @@ fn stream_callback_can_reenter_client_and_drop_another_file() {
     client
         .read_stream_with_options(
             "/file",
-            vfsi_sync::StreamOptions::new().chunk_size(2),
+            vfsi_sync::StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(2).unwrap()),
             |_, data| {
                 drop(other.take());
                 let file = client.open("/nested")?;
                 file.close()?;
                 received.extend_from_slice(data);
-                Ok(true)
+                Ok(std::ops::ControlFlow::Continue(()))
             },
         )
         .unwrap();
@@ -2443,4 +2449,137 @@ fn complete_append_vectors_order_short_writes_and_never_replay_failures() {
             }
         }
     }
+}
+
+#[derive(Default)]
+struct DirectoryProbe {
+    scalar: ScalarOnly,
+    removed: Arc<Mutex<Vec<i32>>>,
+    closed: Arc<Mutex<Vec<i32>>>,
+    failure: Option<(i32, VfError)>,
+}
+handle_contract!(DirectoryProbe);
+impl Backend for DirectoryProbe {
+    fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        unreachable!("directory test must not issue file reads")
+    }
+    fn open_dir_impl(&mut self, path: &std::path::Path) -> VfResult<vfsi_sync::VfDir> {
+        let fd = path
+            .to_str()
+            .unwrap()
+            .trim_start_matches('/')
+            .parse::<i32>()
+            .map_err(|_| VfError::client(0, libc::ENOENT as u32))?;
+        Ok(vfsi_sync::VfDir::Descriptor { fd, owner: 1 })
+    }
+    fn remove_dir_contents_handle_with_options_impl(
+        &mut self,
+        dir: &vfsi_sync::VfDir,
+        _: vfsi_sync::RemoveOptions,
+    ) -> VfResult<()> {
+        let vfsi_sync::VfDir::Descriptor { fd, .. } = dir else {
+            panic!("path fallback");
+        };
+        self.removed.lock().unwrap().push(*fd);
+        if let Some((failed, error)) = &self.failure
+            && fd == failed
+        {
+            return Err(error.clone());
+        }
+        Ok(())
+    }
+    fn close_dir_impl(&mut self, dir: &vfsi_sync::VfDir) -> VfResult<()> {
+        let vfsi_sync::VfDir::Descriptor { fd, .. } = dir else {
+            panic!("path fallback");
+        };
+        self.closed.lock().unwrap().push(*fd);
+        Ok(())
+    }
+}
+
+#[test]
+fn directory_vectors_preflight_all_handles_and_singular_helpers_use_retained_descriptors() {
+    use vfsi_sync::RemoveOptions;
+    let backend = DirectoryProbe::default();
+    let removed = Arc::clone(&backend.removed);
+    let closed = Arc::clone(&backend.closed);
+    let fs = FsClient::new(backend);
+    assert!(fs.vopen_dirs::<&str>(&[]).unwrap().is_empty());
+    fs.vremove_dir_contents(&[], RemoveOptions::default())
+        .unwrap();
+    let mut dirs = fs.vopen_dirs(&["/0", "/1"]).unwrap();
+    let other = FsClient::new(DirectoryProbe::default());
+    let foreign = other.open_dir_handle("/1").unwrap();
+    let error = fs
+        .vremove_dir_contents(&[&dirs[0], &foreign], RemoveOptions::default())
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert!(removed.lock().unwrap().is_empty());
+    dirs[1].try_close().unwrap();
+    let error = fs
+        .vremove_dir_contents(
+            &[&dirs[0], &dirs[1]],
+            RemoveOptions::new().continue_on_error(true),
+        )
+        .unwrap_err();
+    assert_eq!(error.index(), Some(1));
+    assert!(removed.lock().unwrap().is_empty());
+    let second = fs.open_dir_handle("/2").unwrap();
+    fs.clone()
+        .vremove_dir_contents(&[&dirs[0], &second], RemoveOptions::default())
+        .unwrap();
+    fs.remove_dir_contents_handle_with_options(&second, RemoveOptions::new().batch(1))
+        .unwrap();
+    assert_eq!(*removed.lock().unwrap(), [0, 2, 2]);
+    for dir in dirs {
+        dir.close().unwrap();
+    }
+    second.close().unwrap();
+    assert_eq!(*closed.lock().unwrap(), [1, 0, 2]);
+}
+
+#[test]
+fn directory_vector_errors_preserve_index_and_do_not_replay_transport_failures() {
+    for (keep_going, transport, expected) in [
+        (false, false, vec![0, 1]),
+        (true, false, vec![0, 1, 2]),
+        (true, true, vec![0, 1]),
+    ] {
+        let backend = DirectoryProbe {
+            failure: Some((
+                1,
+                if transport {
+                    VfError::transport(Some(0), "reply lost")
+                } else {
+                    VfError::client(0, libc::EACCES as u32)
+                },
+            )),
+            ..Default::default()
+        };
+        let removed = Arc::clone(&backend.removed);
+        let fs = FsClient::new(backend);
+        let dirs = fs.vopen_dirs(&["/0", "/1", "/2"]).unwrap();
+        let error = fs
+            .vremove_dir_contents(
+                &dirs.iter().collect::<Vec<_>>(),
+                vfsi_sync::RemoveOptions::new().continue_on_error(keep_going),
+            )
+            .unwrap_err();
+        assert_eq!(error.index(), Some(1));
+        assert_eq!(error.path(), Some(std::path::Path::new("/1")));
+        assert_eq!(*removed.lock().unwrap(), expected);
+    }
+}
+
+#[test]
+fn failed_directory_open_cleans_up_the_opened_prefix() {
+    let backend = DirectoryProbe::default();
+    let closed = Arc::clone(&backend.closed);
+    let fs = FsClient::new(backend);
+    assert_eq!(
+        fs.vopen_dirs(&["/0", "/missing"]).unwrap_err().index(),
+        Some(1)
+    );
+    fs.drain_cleanup().unwrap();
+    assert_eq!(*closed.lock().unwrap(), [0]);
 }

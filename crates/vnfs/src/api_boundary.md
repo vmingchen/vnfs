@@ -362,7 +362,7 @@ fn listdir(fs: &impl Vfsi) {
 ```compile_fail,E0599
 use vnfs::Vfsi;
 fn read_stream_with_options(fs: &impl Vfsi) {
-    let _ = fs.read_stream_with_options("/file", vnfs::StreamOptions::new(), |_, _| Ok(true));
+    let _ = fs.read_stream_with_options("/file", vnfs::StreamOptions::new(), |_, _| Ok(std::ops::ControlFlow::Continue(())));
 }
 ```
 
@@ -513,4 +513,41 @@ options.retries = 0;
 ```compile_fail,E0616
 let mut policy = vnfs::NfsRecoveryPolicy::new();
 policy.reconnect_attempts = 0;
+```
+
+Ordering policy compares immutable entries; it cannot replace validated paths:
+
+```compile_fail,E0594
+use vnfs::{Vfsi, VfsiExt, DirEntry, ListDirOptions, WalkControl};
+fn rewrite(fs: &impl Vfsi, replacement: DirEntry) {
+    let _ = fs.visit_dirs_ordered("/", ListDirOptions::new(),
+        |a, b| { *a = replacement.clone(); a.path().cmp(b.path()) },
+        |_| true, |_, _| Ok(WalkControl::Continue));
+}
+```
+
+Directory mutation is submitted to the client's portable vector engine:
+
+```compile_fail,E0599
+use vnfs::VfsiExt;
+fn bypass_client(dir: &vnfs::NfsDir) { let _ = dir.remove_contents(); }
+```
+
+```compile_fail,E0599
+fn inherent_directory_open(client: &vnfs::NfsClient) {
+    let _ = client.open_dir_handle("/dir");
+}
+```
+
+Path-only mapping cannot claim that an arbitrary client owns its namespace:
+
+```compile_fail,E0432
+use vnfs::helpers::MountSession;
+```
+
+Streaming callbacks use the same control type as directory visitors:
+
+```compile_fail,E0308
+use vnfs::{Vfsi, VfsiExt};
+fn bool_callback(fs: &impl Vfsi) { let _ = fs.read_stream("/file", |_, _| Ok(false)); }
 ```

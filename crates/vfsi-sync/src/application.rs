@@ -247,8 +247,13 @@ impl<F: crate::FileSystem> FileHandle for crate::FsFile<F> {
     crate::__vfsi_file_methods!(crate::FsFile<F>);
 }
 
+impl<F: crate::Backend> vfsi_core::api::DirHandle for crate::FsDir<F> {
+    crate::__vfsi_file_methods!(crate::FsDir<F>);
+}
+
 impl<F: crate::Backend + 'static> Vfsi for crate::FsClient<F> {
     type File = crate::FsFile<F>;
+    type Dir = crate::FsDir<F>;
     crate::__vfsi_client_methods!(
         crate::FsClient<F>,
         std::convert::identity,

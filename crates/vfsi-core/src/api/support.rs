@@ -13,27 +13,32 @@ pub const DEFAULT_READ_ALLV_MAX_TOTAL_BYTES: usize = DEFAULT_READ_MAX_BYTES;
 /// Tuning options for bounded single-file streaming reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StreamOptions {
-    chunk_size: usize,
+    chunk_size: std::num::NonZeroUsize,
 }
 
 impl StreamOptions {
     pub const fn new() -> Self {
         Self {
-            chunk_size: DEFAULT_READ_STREAM_CHUNK_BYTES,
+            chunk_size: std::num::NonZeroUsize::new(DEFAULT_READ_STREAM_CHUNK_BYTES).unwrap(),
         }
     }
 
-    /// Set the maximum bytes delivered to the callback at once.
+    /// Set the nonzero maximum bytes delivered to the callback at once.
+    ///
+    /// ```compile_fail
+    /// use vfsi_core::api::StreamOptions;
+    /// let options = StreamOptions::new().chunk_size(0);
+    /// ```
     ///
     /// NFS and other backends may return smaller chunks due to negotiated
     /// protocol limits. A larger setting does not bypass those limits.
-    pub const fn chunk_size(mut self, bytes: usize) -> Self {
+    pub const fn chunk_size(mut self, bytes: std::num::NonZeroUsize) -> Self {
         self.chunk_size = bytes;
         self
     }
 
     pub const fn chunk_size_bytes(self) -> usize {
-        self.chunk_size
+        self.chunk_size.get()
     }
 }
 

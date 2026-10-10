@@ -187,19 +187,105 @@ impl Auto {
         result
     }
 
-    pub fn open_dir_handle(&self, path: impl AsRef<Path>) -> VfResult<AutoDir> {
-        let route = self.resolve_tree(path.as_ref());
-        let inner = match &route.route {
-            Route::Mounted => AutoDirInner::Mounted(self.mounted.open_dir_handle(&route.path)?),
-            Route::Nfs(connection) => {
-                AutoDirInner::Nfs(connection.client.open_dir_handle(&route.path)?)
+    pub(crate) fn vopen_dirs_impl<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<AutoDir>> {
+        let resolved: Vec<_> = paths
+            .iter()
+            .map(|path| self.resolve_tree(path.as_ref()))
+            .collect();
+        let mut output = Vec::with_capacity(paths.len());
+        let mut start = 0;
+        while start < paths.len() {
+            let end = cohort_end(&resolved, start);
+            let batch: Vec<_> = resolved[start..end].iter().map(|r| &r.path).collect();
+            let dirs: Vec<_> = match &resolved[start].route {
+                Route::Mounted => self
+                    .mounted
+                    .vopen_dirs(&batch)
+                    .map(|dirs| dirs.into_iter().map(AutoDirInner::Mounted).collect()),
+                Route::Nfs(connection) => connection
+                    .client
+                    .vopen_dirs(&batch)
+                    .map(|dirs| dirs.into_iter().map(AutoDirInner::Nfs).collect()),
             }
-        };
-        Ok(AutoDir {
-            path: path.as_ref().to_path_buf(),
-            route: route.route,
-            inner,
-        })
+            .map_err(|error| {
+                let error = indexed(error, start);
+                match error.index().and_then(|index| paths.get(index)) {
+                    Some(path) => error.with_context("vopen_dirs", path.as_ref()),
+                    None => error,
+                }
+            })?;
+            for (index, inner) in (start..end).zip(dirs) {
+                output.push(AutoDir {
+                    path: paths[index].as_ref().to_path_buf(),
+                    route: resolved[index].route.clone(),
+                    inner,
+                    owner: Arc::clone(&self.owner),
+                });
+            }
+            start = end;
+        }
+        Ok(output)
+    }
+
+    pub(crate) fn vremove_dir_contents_impl(
+        &self,
+        dirs: &[&AutoDir],
+        options: crate::RemoveOptions,
+    ) -> VfResult<()> {
+        let mut resolved = Vec::with_capacity(dirs.len());
+        for (index, dir) in dirs.iter().enumerate() {
+            if !Arc::ptr_eq(&self.owner, &dir.owner) || dir.is_closed() {
+                return Err(VfError::client(index, libc::EBADF as u32)
+                    .with_context("vremove_dir_contents", &dir.path));
+            }
+            if let Route::Nfs(connection) = &dir.route
+                && AuthSysIdentity::current().as_ref() != Some(&connection.credentials)
+            {
+                return Err(VfError::client(index, libc::EACCES as u32)
+                    .with_context("auto_auth", &dir.path));
+            }
+            resolved.push(Resolved {
+                route: dir.route.clone(),
+                path: dir.path.clone(),
+            });
+        }
+        let mut first_error = None;
+        let mut start = 0;
+        while start < dirs.len() {
+            let end = cohort_end(&resolved, start);
+            macro_rules! batch {
+                ($variant:ident) => {
+                    dirs[start..end]
+                        .iter()
+                        .map(|dir| match &dir.inner {
+                            AutoDirInner::$variant(inner) => inner,
+                            _ => unreachable!("validated route"),
+                        })
+                        .collect::<Vec<_>>()
+                };
+            }
+            let result = match &resolved[start].route {
+                Route::Mounted => self.mounted.vremove_dir_contents(&batch!(Mounted), options),
+                Route::Nfs(connection) => connection
+                    .client
+                    .vremove_dir_contents(&batch!(Nfs), options),
+            }
+            .map_err(|e| {
+                let error = indexed(e, start);
+                match error.index().and_then(|i| dirs.get(i)) {
+                    Some(dir) => error.with_context("vremove_dir_contents", &dir.path),
+                    None => error,
+                }
+            });
+            if let Err(error) = result {
+                if error.is_transport() || !options.continues_on_error() {
+                    return Err(error);
+                }
+                first_error.get_or_insert(error);
+            }
+            start = end;
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     /// Common routed capabilities. Server-copy acceleration is route-specific
@@ -280,13 +366,14 @@ impl Auto {
         targets: &[P],
     ) -> VfResult<Vec<crate::FilesystemStats>> {
         use vfsi_core::Target;
+        let targets: Vec<_> = targets.iter().map(vfsi_core::AsTarget::as_target).collect();
         if targets.is_empty() {
             return Ok(Vec::new());
         }
         let mounts = read_mounts(false);
         let mut resolved = Vec::with_capacity(targets.len());
         for (index, target) in targets.iter().enumerate() {
-            let route = match target.as_target() {
+            let route = match *target {
                 Target::Path(path) => self.resolve(path, &mounts),
                 Target::File(file) => {
                     self.check_owner(file, index)?;
@@ -309,7 +396,7 @@ impl Auto {
             macro_rules! batch {
                 ($variant:ident) => {{
                     (start..end)
-                        .map(|index| match targets[index].as_target() {
+                        .map(|index| match targets[index] {
                             Target::Path(_) => Target::Path(resolved[index].path.as_path()),
                             Target::File(file) => match &file.inner {
                                 AutoFileInner::$variant(inner) => Target::File(inner),
@@ -327,7 +414,7 @@ impl Auto {
                 let error = indexed(error, start);
                 match error.index().and_then(|index| targets.get(index)) {
                     Some(target) => {
-                        let path = match target.as_target() {
+                        let path = match *target {
                             Target::Path(path) => path,
                             Target::File(file) => file.path.as_path(),
                         };
@@ -347,6 +434,10 @@ impl Auto {
         updates: &[crate::SetAttrsOp<P>],
     ) -> VfResult<()> {
         use vfsi_core::Target;
+        let updates: Vec<_> = updates
+            .iter()
+            .map(|op| op.with_target(op.target().as_target()))
+            .collect();
         if updates.is_empty() {
             return Ok(());
         }
@@ -355,7 +446,7 @@ impl Auto {
         for (index, op) in updates.iter().enumerate() {
             let target = op.target();
             // Preflight all inputs before any route is allowed to mutate.
-            let route = match target.as_target() {
+            let route = match *target {
                 Target::Path(path) => self.resolve(path, &mounts),
                 Target::File(file) => {
                     self.check_owner(file, index)?;
@@ -400,7 +491,7 @@ impl Auto {
                 ($variant:ident) => {{
                     (start..end)
                         .map(|index| {
-                            let target = match updates[index].target().as_target() {
+                            let target = match *updates[index].target() {
                                 Target::Path(_) => Target::Path(resolved[index].path.as_path()),
                                 Target::File(file) => match &file.inner {
                                     AutoFileInner::$variant(inner) => Target::File(inner),
@@ -420,7 +511,7 @@ impl Auto {
                 let error = indexed(error, start);
                 match error.index().and_then(|index| updates.get(index)) {
                     Some(op) => {
-                        let path = match op.target().as_target() {
+                        let path = match *op.target() {
                             Target::Path(path) => path,
                             Target::File(file) => file.path.as_path(),
                         };
@@ -440,13 +531,14 @@ impl Auto {
         options: crate::AttrsOptions,
     ) -> VfResult<Vec<crate::Attrs>> {
         use vfsi_core::Target;
+        let targets: Vec<_> = targets.iter().map(vfsi_core::AsTarget::as_target).collect();
         if targets.is_empty() {
             return Ok(Vec::new());
         }
         let mounts = read_mounts(false);
         let mut resolved = Vec::with_capacity(targets.len());
         for (index, target) in targets.iter().enumerate() {
-            let route = match target.as_target() {
+            let route = match *target {
                 Target::Path(path) => self.resolve(path, &mounts),
                 Target::File(file) => {
                     self.check_owner(file, index)?;
@@ -469,7 +561,7 @@ impl Auto {
             macro_rules! batch {
                 ($variant:ident) => {{
                     (start..end)
-                        .map(|index| match targets[index].as_target() {
+                        .map(|index| match targets[index] {
                             Target::Path(_) => Target::Path(resolved[index].path.as_path()),
                             Target::File(file) => match &file.inner {
                                 AutoFileInner::$variant(inner) => Target::File(inner),
@@ -487,7 +579,7 @@ impl Auto {
                 let error = indexed(error, start);
                 match error.index().and_then(|index| targets.get(index)) {
                     Some(target) => {
-                        let path = match target.as_target() {
+                        let path = match *target {
                             Target::Path(path) => path,
                             Target::File(file) => file.path.as_path(),
                         };
@@ -890,7 +982,7 @@ impl Auto {
         &self,
         path: impl AsRef<Path>,
         options: crate::StreamOptions,
-        callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
+        callback: impl FnMut(u64, &[u8]) -> VfResult<std::ops::ControlFlow<()>>,
     ) -> VfResult<crate::StreamCompletion> {
         let route = self.resolve(path.as_ref(), &read_mounts(false));
         match route.route {
@@ -1633,6 +1725,7 @@ pub struct AutoDir {
     path: PathBuf,
     route: Route,
     inner: AutoDirInner,
+    owner: Arc<()>,
 }
 
 impl std::fmt::Debug for AutoDir {
@@ -1651,22 +1744,6 @@ impl AutoDir {
         match &self.inner {
             AutoDirInner::Mounted(dir) => dir.is_closed(),
             AutoDirInner::Nfs(dir) => dir.is_closed(),
-        }
-    }
-    pub fn remove_contents(&self) -> VfResult<()> {
-        self.remove_contents_with_options(crate::RemoveOptions::default())
-    }
-    pub fn remove_contents_with_options(&self, options: crate::RemoveOptions) -> VfResult<()> {
-        if let Route::Nfs(connection) = &self.route
-            && AuthSysIdentity::current().as_ref() != Some(&connection.credentials)
-        {
-            return Err(
-                VfError::client(0, libc::EACCES as u32).with_context("auto_auth", &self.path)
-            );
-        }
-        match &self.inner {
-            AutoDirInner::Mounted(dir) => dir.remove_contents_with_options(options),
-            AutoDirInner::Nfs(dir) => dir.remove_contents_with_options(options),
         }
     }
     pub fn try_close(&mut self) -> VfResult<()> {
@@ -2670,6 +2747,34 @@ mod tests {
             "walk={walk:?}; dir={dir:?}; tree={tree:?}"
         );
         assert!(dir_bytes <= backend_entries && tree_bytes <= backend_total);
+    }
+
+    #[test]
+    #[ignore = "requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount"]
+    fn live_directory_open_errors_report_application_operands() {
+        let mount = std::env::var("VFSI_AUTO_TEST_MOUNT").expect("NFS mount fixture");
+        let root = tempfile::tempdir_in(mount).unwrap();
+        // Kernel-created fixtures are visible to Auto's host-side route discovery.
+        std::fs::create_dir(root.path().join("first")).unwrap();
+        std::fs::write(root.path().join("file"), b"keep").unwrap();
+        let fs = crate::Auto::new(root.path()).unwrap();
+        for path in ["/first", "/missing", "/file"] {
+            require_live_direct_route(&fs, Path::new(path));
+        }
+        let error = fs.vopen_dirs(&["/first", "/missing"]).unwrap_err();
+        assert_eq!(error.index(), Some(1));
+        assert_eq!(error.path(), Some(Path::new("/missing")));
+        assert_eq!(error.operation(), Some("vopen_dirs"));
+        assert_eq!(error.kind(), crate::ErrorKind::NotFound);
+        fs.drain_cleanup().unwrap();
+
+        let error = fs.open_dir_handle("/file").unwrap_err();
+        assert_eq!(error.index(), Some(0));
+        assert_eq!(error.path(), Some(Path::new("/file")));
+        assert_eq!(error.operation(), Some("vopen_dirs"));
+        assert_eq!(error.kind(), crate::ErrorKind::NotADirectory);
+        assert_eq!(std::fs::read(root.path().join("file")).unwrap(), b"keep");
+        fs.open_dir_handle("/first").unwrap().close().unwrap();
     }
 
     #[test]

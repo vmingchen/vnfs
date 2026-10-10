@@ -48,9 +48,10 @@ pub mod files {
 pub mod directory {
     #[doc(inline)]
     pub use crate::{
-        Attributes, Attrs, AttrsOptions, ControlFlow, DepthLimit, DirEntry, DirectoryListing,
-        FileType, ListDirOptions, MkDirOp, Permissions, RemoveMode, RemoveOptions, RenameOptions,
-        SetAttrsOp, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
+        Attributes, Attrs, AttrsOptions, ControlFlow, DepthLimit, DirEntry, DirHandle,
+        DirectoryListing, FileType, ListDirOptions, MkDirOp, Permissions, RemoveMode,
+        RemoveOptions, RenameOptions, SetAttrsOp, TraversalCompletion, WalkControl, WalkEvent,
+        WalkEventKind,
     };
 }
 
@@ -88,7 +89,7 @@ pub type Error = vfsi_core::VfError;
 
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod application;
-pub use vfsi_core::{AsTarget, FileHandle, Target, Vfsi, VfsiExt};
+pub use vfsi_core::{AsTarget, DirHandle, FileHandle, Target, Vfsi, VfsiExt};
 #[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
 mod read;
 #[cfg(all(feature = "auto", target_os = "linux"))]
@@ -173,7 +174,7 @@ pub use auto::{Auto, AutoDir, AutoFile, AutoRoute};
 pub mod prelude {
     pub use crate::Attributes;
     pub use crate::{
-        AsTarget, AttrsOptions, ControlFlow, CopyOption, FileHandle, FilesystemStats,
+        AsTarget, AttrsOptions, ControlFlow, CopyOption, DirHandle, FileHandle, FilesystemStats,
         ListDirOptions, MkDirOp, ReadOp, ReadOptions, ReadResult, RemoveMode, ResourceLimits,
         SetAttrsOp, StreamCompletion, SyncMode, Target, TraversalCompletion, Vfsi, VfsiExt,
         WriteOp, WriteOptions,

@@ -286,20 +286,16 @@ impl<F: FileSystem> FsClient<F> {
     /// Stream one file using an explicit maximum chunk size.
     ///
     /// The callback runs without holding the backend lock, so it may use this
-    /// client or drop other files owned by it. Return `Ok(false)` to stop
+    /// client or drop other files owned by it. Return `Ok(std::ops::ControlFlow::Break(()))` to stop
     /// successfully. Callback errors propagate. At most one requested chunk is
     /// buffered at once, and the file closes on success, cancellation, or error.
     pub(crate) fn read_stream_with_options(
         &self,
         path: impl AsRef<Path>,
         options: StreamOptions,
-        mut callback: impl FnMut(u64, &[u8]) -> VfResult<bool>,
+        mut callback: impl FnMut(u64, &[u8]) -> VfResult<std::ops::ControlFlow<()>>,
     ) -> VfResult<StreamCompletion> {
         let chunk_size = options.chunk_size_bytes();
-        if chunk_size == 0 {
-            return Err(VfError::failure(0, crate::ERR_INVAL));
-        }
-
         let file = self.open(path)?;
         let raw_file = file.raw()?.clone();
         let operation = (|| -> VfResult<StreamCompletion> {
@@ -317,7 +313,7 @@ impl<F: FileSystem> FsClient<F> {
                     result
                 };
                 let length = result.data.len();
-                if !result.data.is_empty() && !callback(offset, &result.data)? {
+                if !result.data.is_empty() && callback(offset, &result.data)?.is_break() {
                     return Ok(StreamCompletion::Stopped {
                         next_offset: offset
                             .checked_add(length as u64)
@@ -589,22 +585,61 @@ impl<F: Backend> FsClient<F> {
             .map_err(|error| error.with_context("remove_dir_contents", path))
     }
 
-    /// Open a *genuine* directory handle for race-resistant, handle-rooted
-    /// removal. Backends that only return a path fail instead of silently
-    /// losing the handle safety guarantee.
-    pub fn open_dir_handle(&self, path: impl AsRef<Path>) -> VfResult<FsDir<F>> {
-        let path = path.as_ref();
-        let mut backend = self.lock()?;
-        let dir = backend.open_dir_impl(path)?;
-        if !matches!(dir, VfDir::Descriptor { .. }) {
-            let _ = backend.close_dir_impl(&dir);
-            return Err(VfError::unsupported(0).with_context("open_dir_handle", path));
+    pub(crate) fn vopen_dirs_impl<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<FsDir<F>>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(FsDir {
-            inner: Arc::clone(&self.inner),
-            dir: Some(dir),
-            path: path.to_path_buf(),
-        })
+        let mut backend = self.lock()?;
+        let mut output = Vec::with_capacity(paths.len());
+        for (index, path) in paths.iter().enumerate() {
+            let path = path.as_ref();
+            let dir = backend.open_dir_impl(path).map_err(|error| {
+                crate::application::vector_index(error, index).with_context("vopen_dirs", path)
+            })?;
+            if !matches!(dir, VfDir::Descriptor { .. }) {
+                let _ = backend.close_dir_impl(&dir);
+                return Err(VfError::unsupported(index).with_context("vopen_dirs", path));
+            }
+            output.push(FsDir {
+                inner: Arc::clone(&self.inner),
+                dir: Some(dir),
+                path: path.to_path_buf(),
+            });
+        }
+        Ok(output)
+    }
+
+    /// Preflight the entire vector before acquiring the mutation lock.
+    pub(crate) fn vremove_dir_contents_impl(
+        &self,
+        dirs: &[&FsDir<F>],
+        options: RemoveOptions,
+    ) -> VfResult<()> {
+        for (index, dir) in dirs.iter().enumerate() {
+            if !Arc::ptr_eq(&self.inner, &dir.inner) || dir.is_closed() {
+                return Err(VfError::client(index, crate::ERR_EBADF)
+                    .with_context("vremove_dir_contents", &dir.path));
+            }
+        }
+        if dirs.is_empty() {
+            return Ok(());
+        }
+        let mut backend = self.lock()?;
+        let mut first_error = None;
+        for (index, dir) in dirs.iter().enumerate() {
+            if let Err(error) = backend.remove_dir_contents_handle_with_options_impl(
+                dir.dir.as_ref().expect("preflighted"),
+                options,
+            ) {
+                let error = crate::application::vector_index(error, index)
+                    .with_context("vremove_dir_contents", &dir.path);
+                if error.is_transport() || !options.continues_on_error() {
+                    return Err(error);
+                }
+                first_error.get_or_insert(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 }
 
@@ -632,22 +667,6 @@ impl<F: Backend> FsDir<F> {
     /// Name used at open, retained for diagnostics; not updated after rename.
     pub fn path(&self) -> &Path {
         &self.path
-    }
-
-    pub fn remove_contents(&self) -> VfResult<()> {
-        self.remove_contents_with_options(RemoveOptions::default())
-    }
-
-    pub fn remove_contents_with_options(&self, options: RemoveOptions) -> VfResult<()> {
-        let dir = self
-            .dir
-            .as_ref()
-            .ok_or_else(|| VfError::client(0, crate::ERR_EBADF))?;
-        self.inner
-            .lock()
-            .map_err(|_| poisoned())?
-            .remove_dir_contents_handle_with_options_impl(dir, options)
-            .map_err(|error| error.with_context("remove_dir_contents", &self.path))
     }
 
     pub fn close(mut self) -> VfResult<()> {
