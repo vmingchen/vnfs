@@ -861,6 +861,39 @@ impl SmbVecFs {
         ))
     }
 
+    /// Query the retained object, never its possibly stale saved pathname.
+    fn query_handle_info(&mut self, file_id: FileId) -> VfResult<smb2::client::FileInfo> {
+        let requests =
+            [(FILE_BASIC_INFORMATION, 40), (5, 24)].map(|(class, length)| QueryInfoRequest {
+                info_type: smb2::msg::query_info::InfoType::File,
+                file_info_class: class,
+                output_buffer_length: length,
+                additional_information: 0,
+                flags: 0,
+                file_id,
+                input_buffer: Vec::new(),
+            });
+        let operations = requests.each_ref().map(|request| CompoundOp {
+            command: Command::QueryInfo,
+            body: request,
+            tree_id: Some(self.tree.tree_id),
+            credit_charge: CreditCharge(1),
+        });
+        let responses = self
+            .runtime
+            .block_on(self.client.connection_mut().execute_compound(&operations))
+            .map_err(|error| smb_error(error, 0))?;
+        let responses = collect_compound(responses, operations.len())?;
+        for response in &responses {
+            require_status(response, Command::QueryInfo, 0)?;
+        }
+        let basic = QueryInfoResponse::unpack(&mut ReadCursor::new(&responses[0].body))
+            .map_err(|error| smb_error(error, 0))?;
+        let standard = QueryInfoResponse::unpack(&mut ReadCursor::new(&responses[1].body))
+            .map_err(|error| smb_error(error, 0))?;
+        handle_info(&basic.output_buffer, &standard.output_buffer)
+    }
+
     fn set_size_handle(&mut self, file_id: FileId, size: u64) -> VfResult<()> {
         let request = SetInfoRequest {
             info_type: InfoType::File,
@@ -1784,12 +1817,6 @@ impl VectorBackend for SmbVecFs {
     }
 
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
-        // This engine queries paths; reopening a retained handle's old name
-        // after rename/unlink would query another object. Fail closed until a
-        // handle-based QUERY_INFO engine is available.
-        if let Some(index) = attrs.iter().position(|attrs| attrs.file.is_descriptor()) {
-            return Err(VfError::unsupported(index));
-        }
         if attrs.len() > 1
             && !self.tree.is_dfs
             && attrs.iter().all(|attrs| !attrs.file.is_descriptor())
@@ -1833,6 +1860,19 @@ impl VectorBackend for SmbVecFs {
             return Ok(());
         }
         for (index, attrs) in attrs.iter_mut().enumerate() {
+            if let VfFile::Descriptor(fd) = attrs.file {
+                let file_id = self
+                    .open_files
+                    .get(&fd)
+                    .ok_or_else(|| VfError::failure(index, ERR_EBADF))?
+                    .file_id;
+                // No pathname reopen/retry: a lost handle must surface an error.
+                let info = self
+                    .query_handle_info(file_id)
+                    .map_err(|error| error.with_index(index))?;
+                Self::fill_attrs(attrs, &info);
+                continue;
+            }
             let path = self
                 .path_string(
                     &self
@@ -2300,6 +2340,24 @@ fn paths_are_independent(paths: &[PathBuf]) -> bool {
     true
 }
 
+fn handle_info(basic: &[u8], standard: &[u8]) -> VfResult<smb2::client::FileInfo> {
+    if basic.len() < 40 || standard.len() < 24 {
+        return Err(VfError::transport(
+            None,
+            "short SMB handle metadata response",
+        ));
+    }
+    let value = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().expect("length checked"));
+    Ok(smb2::client::FileInfo {
+        created: FileTime(value(&basic[0..8])),
+        accessed: FileTime(value(&basic[8..16])),
+        modified: FileTime(value(&basic[16..24])),
+        size: value(&standard[8..16]),
+        is_directory: standard[21] != 0
+            || u32::from_le_bytes(basic[32..36].try_into().expect("length checked")) & 0x10 != 0,
+    })
+}
+
 fn identities_are_independent(identities: &[u64]) -> bool {
     let mut unique = HashSet::with_capacity(identities.len());
     identities.iter().all(|identity| unique.insert(*identity))
@@ -2734,6 +2792,42 @@ mod tests {
     fn concurrent_writes_require_distinct_server_file_identities() {
         assert!(identities_are_independent(&[10, 20, 30]));
         assert!(!identities_are_independent(&[10, 20, 10]));
+    }
+
+    #[test]
+    fn handle_metadata_checks_lengths_and_decodes_only_reported_fields() {
+        let mut basic = [0; 40];
+        let mut standard = [0; 24];
+        for (offset, ticks) in [(0, 1u64), (8, 2), (16, 3)] {
+            basic[offset..offset + 8].copy_from_slice(&ticks.to_le_bytes());
+        }
+        standard[8..16].copy_from_slice(&123u64.to_le_bytes());
+        for length in 0..basic.len() {
+            assert!(
+                handle_info(&basic[..length], &standard)
+                    .unwrap_err()
+                    .is_transport()
+            );
+        }
+        for length in 0..standard.len() {
+            assert!(
+                handle_info(&basic, &standard[..length])
+                    .unwrap_err()
+                    .is_transport()
+            );
+        }
+        let info = handle_info(&basic, &standard).unwrap();
+        assert_eq!(
+            (info.created.0, info.accessed.0, info.modified.0),
+            (1, 2, 3)
+        );
+        assert_eq!(info.size, 123);
+        assert!(!info.is_directory);
+        basic[32] = 0x10;
+        assert!(handle_info(&basic, &standard).unwrap().is_directory);
+        basic[32] = 0;
+        standard[21] = 1;
+        assert!(handle_info(&basic, &standard).unwrap().is_directory);
     }
 
     #[test]

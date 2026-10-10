@@ -159,6 +159,7 @@ fn borrowed(file: vnfs::NfsFile) {
 ```
 
 ```compile_fail,E0382
+use vnfs::Vfsi;
 fn consumed(client: &vnfs::NfsClient, file: &vnfs::NfsFile) {
     let ops = [vnfs::ReadOp::range(file, 0, 1)];
     let _ = client.vread(ops, Default::default());
@@ -450,7 +451,7 @@ Portable reads have one result type and metadata updates use vector requests.
 use vnfs::ReadIntoResult;
 ```
 
-```compile_fail,E0603
+```compile_fail,E0432
 use vnfs::files::ReadIntoResult;
 ```
 

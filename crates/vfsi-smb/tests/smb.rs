@@ -272,6 +272,40 @@ fn rust_native_file_workflow_on_smb() {
     cleanup_test_tree(&root);
 }
 
+#[test]
+fn descriptor_metadata_never_reopens_a_replaced_path() {
+    let Some(mut fs) = connect() else {
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-retained-{}", std::process::id()));
+    cleanup_test_tree(&root);
+    fs.create_dir_impl(&root, 0o755).unwrap();
+    let original = root.join("original");
+    let renamed = root.join("renamed");
+    let file = fs
+        .open_raw_impl(&original, libc::O_CREAT | libc::O_RDWR, 0o644)
+        .unwrap();
+    fs.write_raw_impl(&file, 0, b"original").unwrap();
+    assert_eq!(fs.fstat_impl(&file).unwrap().size, 8);
+    fs.vrename_impl(&[(
+        VfFile::from_os_path(&original),
+        VfFile::from_os_path(&renamed),
+    )])
+    .unwrap();
+    fs.vwrite_impl(&borrow_writes(&[WriteOp::from_os_path(
+        &original,
+        VfOffset::At(0),
+        b"replacement".to_vec(),
+    )
+    .with_creation()]))
+        .unwrap();
+    assert_eq!(fs.fstat_impl(&file).unwrap().size, 8);
+    assert_eq!(fs.read_raw_impl(&file, 0, 8).unwrap(), b"original");
+    assert_eq!(fs.stat_impl(&original).unwrap().size, 11);
+    fs.close_impl(&file).unwrap();
+    cleanup_test_tree(&root);
+}
+
 #[cfg(feature = "test-faults")]
 #[test]
 fn smb_openv_injected_registration_failure_closes_all_successes() {

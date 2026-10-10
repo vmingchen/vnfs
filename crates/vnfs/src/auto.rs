@@ -2757,24 +2757,29 @@ mod tests {
         // Kernel-created fixtures are visible to Auto's host-side route discovery.
         std::fs::create_dir(root.path().join("first")).unwrap();
         std::fs::write(root.path().join("file"), b"keep").unwrap();
-        let fs = crate::Auto::new(root.path()).unwrap();
-        for path in ["/first", "/missing", "/file"] {
-            require_live_direct_route(&fs, Path::new(path));
+        // Use the stable host root; freshly created kernel NFS directories can
+        // briefly fail metadata probes while the server fixture settles.
+        let fs = crate::Auto::new("/").unwrap();
+        let first = root.path().join("first");
+        let missing = root.path().join("missing");
+        let file = root.path().join("file");
+        for path in [&first, &missing, &file] {
+            require_live_direct_route(&fs, path);
         }
-        let error = fs.vopen_dirs(&["/first", "/missing"]).unwrap_err();
+        let error = fs.vopen_dirs(&[&first, &missing]).unwrap_err();
         assert_eq!(error.index(), Some(1));
-        assert_eq!(error.path(), Some(Path::new("/missing")));
+        assert_eq!(error.path(), Some(missing.as_path()));
         assert_eq!(error.operation(), Some("vopen_dirs"));
         assert_eq!(error.kind(), crate::ErrorKind::NotFound);
         fs.drain_cleanup().unwrap();
 
-        let error = fs.open_dir_handle("/file").unwrap_err();
+        let error = fs.open_dir_handle(&file).unwrap_err();
         assert_eq!(error.index(), Some(0));
-        assert_eq!(error.path(), Some(Path::new("/file")));
+        assert_eq!(error.path(), Some(file.as_path()));
         assert_eq!(error.operation(), Some("vopen_dirs"));
         assert_eq!(error.kind(), crate::ErrorKind::NotADirectory);
-        assert_eq!(std::fs::read(root.path().join("file")).unwrap(), b"keep");
-        fs.open_dir_handle("/first").unwrap().close().unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"keep");
+        fs.open_dir_handle(&first).unwrap().close().unwrap();
     }
 
     #[test]
