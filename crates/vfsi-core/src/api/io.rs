@@ -18,7 +18,10 @@ pub enum SyncMode {
 /// Every I/O request uses the supplied client's vector engine. The file stays
 /// owned by the caller. `read_to_end` and `read_to_string` bound newly collected
 /// bytes by the client's read budget; on failure the cursor may have advanced.
-/// Explicitly allocated caller buffers remain caller-managed.
+/// Explicitly allocated caller buffers remain caller-managed. `write_all` uses
+/// the standard `Write` loop over single-wave vector writes: acknowledged short
+/// writes advance the cursor, and interruption retries only the remaining bytes.
+/// Transport failures stop the loop without replaying the failed request.
 pub struct FileIo<'a, C: Vfsi + ?Sized> {
     client: &'a C,
     file: &'a C::File,
@@ -73,18 +76,18 @@ impl<'a, C: Vfsi + ?Sized> FileIo<'a, C> {
             }
         }
     }
-    fn write_at(&mut self, buffer: &[u8], complete: bool) -> Result<usize> {
+    fn write_at(&mut self, buffer: &[u8]) -> Result<usize> {
         self.position
             .checked_add(buffer.len() as u64)
             .ok_or_else(|| Error::client(0, libc::EOVERFLOW as u32))?;
         let values = self.client.vwrite(
             &[WriteOp::at(self.file, self.position, buffer)],
-            WriteOptions::new().write_all(complete),
+            WriteOptions::new(),
         )?;
         let [value] = values.as_slice() else {
             return Err(invalid("invalid write count"));
         };
-        if value.written > buffer.len() || (complete && value.written != buffer.len()) {
+        if value.written > buffer.len() {
             return Err(invalid("invalid write progress"));
         }
         // Append descriptors report the actual position selected by the backend.
@@ -150,10 +153,7 @@ impl<C: Vfsi + ?Sized> Read for FileIo<'_, C> {
 }
 impl<C: Vfsi + ?Sized> Write for FileIo<'_, C> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.write_at(buffer, false).map_err(Into::into)
-    }
-    fn write_all(&mut self, buffer: &[u8]) -> io::Result<()> {
-        self.write_at(buffer, true).map(|_| ()).map_err(Into::into)
+        self.write_at(buffer).map_err(Into::into)
     }
     fn flush(&mut self) -> io::Result<()> {
         self.client

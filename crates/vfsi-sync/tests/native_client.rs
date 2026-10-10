@@ -144,6 +144,7 @@ struct ScalarOnly {
     read_calls: Arc<AtomicUsize>,
     write_calls: Arc<AtomicUsize>,
     max_write_once: Option<usize>,
+    interrupt_write_call: Option<usize>,
     directory_entries: usize,
     directory_page_sizes: Arc<Mutex<Vec<usize>>>,
     directory_fields: Arc<Mutex<Vec<vfsi_sync::AttrMask>>>,
@@ -1323,7 +1324,10 @@ impl FileSystem for ScalarOnly {
     }
 
     fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
-        self.write_calls.fetch_add(1, Ordering::SeqCst);
+        let call = self.write_calls.fetch_add(1, Ordering::SeqCst);
+        if self.interrupt_write_call == Some(call) {
+            return Err(VfError::client(0, libc::EINTR as u32));
+        }
         if self.oversized_write_count {
             return Ok(WriteResult {
                 file: request.file().clone(),
@@ -2351,6 +2355,61 @@ fn sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices() {
 }
 
 #[test]
+fn file_io_write_all_retries_interruptions_without_replaying_progress() {
+    for append in [false, true] {
+        for interrupt_write_call in 0..3 {
+            let backend = ScalarOnly {
+                data: b"abc".to_vec(),
+                max_write_once: Some(2),
+                interrupt_write_call: Some(interrupt_write_call),
+                ..Default::default()
+            };
+            let calls = Arc::clone(&backend.write_calls);
+            let client = FsClient::new(backend);
+            let file = client
+                .open_options()
+                .write(true)
+                .append(append)
+                .open("/file")
+                .unwrap();
+            let mut io = client.file_io(&file);
+            io.seek(SeekFrom::Start(3)).unwrap();
+            io.write_all(b"abcdef").unwrap();
+            assert_eq!(io.position(), 9);
+            assert_eq!(calls.load(Ordering::SeqCst), 4);
+            // An empty completion must issue no I/O or change the cursor.
+            io.write_all(b"").unwrap();
+            assert_eq!(io.position(), 9);
+            assert_eq!(calls.load(Ordering::SeqCst), 4);
+            file.close().unwrap();
+            assert_eq!(client.into_inner().unwrap().data, b"abcabcdef");
+        }
+    }
+}
+
+#[test]
+fn file_io_write_all_reports_write_zero_without_retrying() {
+    let backend = ScalarOnly {
+        data: b"abc".to_vec(),
+        max_write_once: Some(0),
+        ..Default::default()
+    };
+    let calls = Arc::clone(&backend.write_calls);
+    let client = FsClient::new(backend);
+    let file = client.open_options().append(true).open("/file").unwrap();
+    let mut io = client.file_io(&file);
+    io.seek(SeekFrom::Start(3)).unwrap();
+    assert_eq!(
+        io.write_all(b"data").unwrap_err().kind(),
+        std::io::ErrorKind::WriteZero
+    );
+    assert_eq!(io.position(), 3);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    file.close().unwrap();
+    assert_eq!(client.into_inner().unwrap().data, b"abc");
+}
+
+#[test]
 fn append_adapters_share_completion_and_report_actual_end_after_short_writes() {
     for vector_open in [false, true] {
         let client = FsClient::new(ScalarOnly {
@@ -2439,7 +2498,9 @@ fn complete_append_vectors_order_short_writes_and_never_replay_failures() {
             let client = FsClient::new(backend);
             let file = client.open_options().append(true).open("/file").unwrap();
             let data = b"abcdef";
-            let actual = client.file_io(&file).write_all(data).unwrap_err();
+            let mut io = client.file_io(&file);
+            let actual = io.write_all(data).unwrap_err();
+            assert_eq!(io.position(), if failure_after == 0 { 0 } else { 5 });
             assert_eq!(actual.kind(), error.kind());
             let calls = calls.lock().unwrap();
             assert_eq!(calls.len(), failure_after + 1);
