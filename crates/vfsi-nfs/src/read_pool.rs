@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vfsi_core::{VfError, VfResult};
-use vfsi_sync::{FsClient, FsFile, StreamCompletion, VfsiExt};
+use vfsi_sync::{FsClient, FsFile, StreamCompletion, Vfsi, VfsiExt};
 
 use super::{NfsClientBuilder, NfsVecFs};
 
@@ -743,7 +743,7 @@ fn worker_main(
             } => {
                 let result = match active.as_ref() {
                     Some((active_id, file)) if *active_id == stream_id => {
-                        read_range(file, offset, length).map_err(|error| {
+                        read_range(&client, file, offset, length).map_err(|error| {
                             error.with_index(usize::try_from(index).unwrap_or(usize::MAX))
                         })
                     }
@@ -788,14 +788,28 @@ fn worker_main(
     }
 }
 
-fn read_range(file: &FsFile<NfsVecFs>, offset: u64, length: usize) -> VfResult<Vec<u8>> {
+fn read_range(
+    client: &FsClient<NfsVecFs>,
+    file: &FsFile<NfsVecFs>,
+    offset: u64,
+    length: usize,
+) -> VfResult<Vec<u8>> {
     let mut data = vec![0; length];
     let mut filled = 0;
     while filled < length {
         let current_offset = offset
             .checked_add(filled as u64)
             .ok_or_else(|| VfError::client(0, libc::EOVERFLOW as u32))?;
-        let count = file.read_at(&mut data[filled..], current_offset)?;
+        let results = client.vread(
+            [vfsi_core::api::ReadOp::into(
+                file,
+                current_offset,
+                &mut data[filled..],
+            )],
+            vfsi_core::api::ReadOptions::new()
+                .max_total_bytes(std::num::NonZeroUsize::new(length - filled)),
+        )?;
+        let count = results[0].read();
         if count == 0 {
             return Err(
                 VfError::client(0, libc::EIO as u32).with_context("read_pipeline", file.path())

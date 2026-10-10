@@ -120,7 +120,7 @@ per-operation mount lookups to the resulting direct NFS client and does not
 share the kernel client's caches.
 
 The `vnfs` crate root exposes the NFS application API. Native `FileSystem` and
-`Backend` contracts, `VfFile`, `Fd`, `VfAttrs`, `VfOpenOptions`, raw libc flags,
+`Backend` contracts, `VfFile`, `Fd`, `VfAttrs`, raw libc flags,
 and NFS protocol modules live in the corresponding `vfsi-*` crates; they are
 not republished by `vnfs`. The former `VecFs` trait has been removed. New
 application code can start with:
@@ -134,11 +134,12 @@ requests made through `NfsClient` verify that every file belongs to that same
 client, preventing accidental cross-session descriptor use.
 
 Application code should connect through `Nfs::builder`, which directly
-returns the concrete `NfsClient` alias. `NfsVecFs` and `NfsClientBuilder`
-remain available in `vfsi-nfs` for backend embedding. `NfsClient::open_options`
-mirrors `std::fs::OpenOptions`. File handles expose lifecycle operations;
-I/O runs through `Vfsi` vectors. Use `fs.file_io(&file)` for an explicit
-`std::io::{Read, Write, Seek}` adapter with its own cursor. Prepare vector
+returns the concrete `NfsClient`. `NfsVecFs` and `NfsClientBuilder`
+remain available in `vfsi-nfs` for backend embedding. `VfsiExt::open_options`
+is the shared builder for every client and mirrors `std::fs::OpenOptions`. File handles expose lifecycle operations;
+I/O runs through `Vfsi` vectors. Use `fs.std_io(&file)` for an explicit
+`std::io::{Read, Write, Seek}` adapter with its own cursor. Its concrete type
+is private; use `Seek::stream_position` to query the cursor. Prepare vector
 requests without issuing I/O using
 `ReadOp::range(&file, offset, length)`, `ReadOp::into(&file, offset, &mut buffer)`,
 and `WriteOp::at(&file, offset, data)`. `read_files` performs bounded
@@ -215,7 +216,7 @@ after translation into the public namespace, including mount prefixes.
 
 `vread` range requests are bounded by their caller-supplied lengths and the
 aggregate budget. Applications processing larger or untrusted files can use
-`Vfsi::vstream`, `VfsiExt::read_stream`, `fs.file_io(&file)`, or repeated
+`Vfsi::vstream`, `VfsiExt::read_stream`, `fs.std_io(&file)`, or repeated
 positional vectors. The adapter uses singleton `vread`, `vwrite`, `vgetattrs`,
 and `vfsync` calls against the retained handle; rename does not redirect it.
 Each adapter has an independent cursor. Its `read_to_end` and `read_to_string`

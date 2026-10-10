@@ -384,9 +384,9 @@ fn rust_native_client_workflow_on_nfs() {
         .unwrap();
     assert_eq!(early_count, 1);
     let large = vec![0xa5; 2 * 1024 * 1024];
-    client.file_io(&files[0]).write_all(&large).unwrap();
+    client.std_io(&files[0]).write_all(&large).unwrap();
     let mut large_buffer = vec![0; large.len() + 16];
-    let read = client.file_io(&files[0]).read(&mut large_buffer).unwrap();
+    let read = client.std_io(&files[0]).read(&mut large_buffer).unwrap();
     assert_eq!(read, large.len());
     assert_eq!(&large_buffer[..read], large);
     client.close_files(files).unwrap();
@@ -690,7 +690,7 @@ fn rust_native_client_pool_uses_independent_sessions() {
             .truncate(true)
             .open(path)
             .unwrap();
-        first.file_io(&file).write_all(b"pool").unwrap();
+        first.std_io(&file).write_all(b"pool").unwrap();
         file.close().unwrap();
     }
     let threads: Vec<_> = paths
@@ -700,7 +700,7 @@ fn rust_native_client_pool_uses_independent_sessions() {
             std::thread::spawn(move || {
                 let file = client.open(&path).unwrap();
                 let mut bytes = [0; 4];
-                assert_eq!(client.file_io(&file).read(&mut bytes).unwrap(), 4);
+                assert_eq!(client.std_io(&file).read(&mut bytes).unwrap(), 4);
                 assert_eq!(&bytes, b"pool");
             })
         })

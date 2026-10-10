@@ -22,21 +22,18 @@ pub enum SyncMode {
 /// the standard `Write` loop over single-wave vector writes: acknowledged short
 /// writes advance the cursor, and interruption retries only the remaining bytes.
 /// Transport failures stop the loop without replaying the failed request.
-pub struct FileIo<'a, C: Vfsi + ?Sized> {
+pub(super) struct StdIo<'a, C: Vfsi + ?Sized> {
     client: &'a C,
     file: &'a C::File,
     position: u64,
 }
-impl<'a, C: Vfsi + ?Sized> FileIo<'a, C> {
+impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
     pub(super) fn new(client: &'a C, file: &'a C::File) -> Self {
         Self {
             client,
             file,
             position: 0,
         }
-    }
-    pub fn position(&self) -> u64 {
-        self.position
     }
 
     fn read_at(&mut self, buffer: &mut [u8], budget: usize) -> Result<(usize, bool)> {
@@ -101,7 +98,7 @@ impl<'a, C: Vfsi + ?Sized> FileIo<'a, C> {
 fn invalid(message: &'static str) -> Error {
     Error::transport_with_kind(None, crate::TransportKind::InvalidReply, message)
 }
-impl<C: Vfsi + ?Sized> Read for FileIo<'_, C> {
+impl<C: Vfsi + ?Sized> Read for StdIo<'_, C> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if buffer.is_empty() {
             return Ok(0);
@@ -151,7 +148,7 @@ impl<C: Vfsi + ?Sized> Read for FileIo<'_, C> {
         Ok(count)
     }
 }
-impl<C: Vfsi + ?Sized> Write for FileIo<'_, C> {
+impl<C: Vfsi + ?Sized> Write for StdIo<'_, C> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         self.write_at(buffer).map_err(Into::into)
     }
@@ -161,7 +158,7 @@ impl<C: Vfsi + ?Sized> Write for FileIo<'_, C> {
             .map_err(Into::into)
     }
 }
-impl<C: Vfsi + ?Sized> Seek for FileIo<'_, C> {
+impl<C: Vfsi + ?Sized> Seek for StdIo<'_, C> {
     fn seek(&mut self, position: SeekFrom) -> io::Result<u64> {
         let (base, offset) = match position {
             SeekFrom::Start(position) => {

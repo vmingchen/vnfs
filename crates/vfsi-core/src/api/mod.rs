@@ -30,7 +30,7 @@ pub enum RenameOptions {
 pub use std::io::ErrorKind;
 pub use std::ops::ControlFlow;
 mod io;
-pub use io::{FileIo, SyncMode};
+pub use io::SyncMode;
 mod builders;
 pub use builders::OpenOptions;
 mod traits;

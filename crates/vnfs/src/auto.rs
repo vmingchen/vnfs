@@ -2587,7 +2587,7 @@ mod tests {
                     .unwrap_err();
                 let mut first = [0; 8];
                 assert_eq!(
-                    client.file_io(&files[0]).read(&mut first).unwrap(),
+                    client.std_io(&files[0]).read(&mut first).unwrap(),
                     first.len()
                 );
                 let second = client.read(paths[1]).unwrap();
@@ -2810,7 +2810,7 @@ mod tests {
         let file = client.open(&path).unwrap();
         assert_eq!(file.route(), AutoRoute::Mounted);
         let mut contents = String::new();
-        client.file_io(&file).read_to_string(&mut contents).unwrap();
+        client.std_io(&file).read_to_string(&mut contents).unwrap();
         assert_eq!(contents, "bind source\n");
         file.close().unwrap();
     }

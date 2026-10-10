@@ -569,7 +569,7 @@ pub trait VfsiExt: Vfsi {
     ///
     /// Use [`open_with`](VfsiExt::open_with) for write/create flags, or
     /// [`vopen`](Vfsi::vopen) to batch many opens. The returned handle owns
-    /// lifecycle only; use vectors or [`file_io`](VfsiExt::file_io) for I/O.
+    /// lifecycle only; use vectors or [`std_io`](VfsiExt::std_io) for I/O.
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, WriteOp};
@@ -949,11 +949,14 @@ pub trait VfsiExt: Vfsi {
         close_result
     }
 
-    /// Borrow an explicit standard-I/O adapter with an independent cursor.
+    /// Borrow a standard-I/O adapter with an independent cursor, initially zero.
     /// Reads/writes use this client's vectors; collecting reads enforce its
     /// payload budget. The adapter does not own or close the file.
-    fn file_io<'a>(&'a self, file: &'a Self::File) -> crate::api::FileIo<'a, Self> {
-        crate::api::FileIo::new(self, file)
+    fn std_io<'a>(
+        &'a self,
+        file: &'a Self::File,
+    ) -> impl std::io::Read + std::io::Write + std::io::Seek + 'a {
+        super::io::StdIo::new(self, file)
     }
 
     /// Synchronize one retained handle through [`Vfsi::vfsync`].

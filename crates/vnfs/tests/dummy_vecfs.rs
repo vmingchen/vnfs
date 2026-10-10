@@ -56,21 +56,36 @@ fn application_walk_prunes_before_io_selects_metadata_and_allows_reentry() {
 
 #[test]
 fn bounded_open_file_collection_keeps_identity_across_rename_and_replacement() {
+    use std::io::Read;
     let (_root, backend) = dummy();
-    let client = vfsi_sync::FsClient::new(backend);
+    let client =
+        vfsi_sync::FsClient::new(backend).with_limits(ResourceLimits::new().max_read_bytes(6));
     client.write("/original", b"opened").unwrap();
-    let mut file = client.open("/original").unwrap();
+    let file = client.open("/original").unwrap();
     client.rename("/original", "/moved").unwrap();
     client.write("/original", b"replacement").unwrap();
-    assert_eq!(file.read_to_end_with_limit(6).unwrap(), b"opened");
-    assert_eq!(file.read_to_end_with_limit(0).unwrap(), b"");
-    file.seek_native(std::io::SeekFrom::Start(0)).unwrap();
+    let mut io = client.std_io(&file);
+    let mut output = Vec::new();
+    assert_eq!(io.read_to_end(&mut output).unwrap(), 6);
+    assert_eq!(output, b"opened");
+    assert_eq!(io.read_to_end(&mut output).unwrap(), 0);
+    let limited = client
+        .clone()
+        .with_limits(ResourceLimits::new().max_read_bytes(5));
     assert_eq!(
-        file.read_to_end_with_limit(5).unwrap_err().kind(),
+        limited
+            .std_io(&file)
+            .read_to_end(&mut Vec::new())
+            .unwrap_err()
+            .kind(),
         vnfs::ErrorKind::FileTooLarge
     );
-    file.try_close().unwrap();
-    assert_eq!(client.read("/original").unwrap(), b"replacement");
+    drop(io);
+    file.close().unwrap();
+    assert_eq!(
+        std::fs::read(_root.path().join("original")).unwrap(),
+        b"replacement"
+    );
 }
 
 #[test]
@@ -737,75 +752,90 @@ fn generic_remover_rejects_options_it_cannot_honor() {
 }
 
 #[test]
-fn standard_io_handle_is_raii_and_seekable() {
+fn standard_io_adapter_borrows_an_owned_raii_handle() {
     use std::io::{Read, Seek, SeekFrom, Write};
-    use vfsi_sync::VfOpenOptions;
-
-    let (_root, mut fs) = dummy();
-    let descriptor;
+    let (_root, backend) = dummy();
+    let client = FsClient::new(backend);
     {
-        let mut options = VfOpenOptions::new();
-        options.read(true).write(true).create(true).truncate(true);
-        let mut file = options.open(&mut fs, "/standard-io").unwrap();
-        descriptor = file.descriptor().clone();
-        file.write_all(b"abcdef").unwrap();
-        file.seek(SeekFrom::Start(2)).unwrap();
-        let mut out = [0; 3];
-        file.read_exact(&mut out).unwrap();
-        assert_eq!(&out, b"cde");
+        let file = client
+            .open_options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open("/standard-io")
+            .unwrap();
+        {
+            let mut io = client.std_io(&file);
+            io.write_all(b"abcdef").unwrap();
+            io.seek(SeekFrom::Start(2)).unwrap();
+            let mut out = [0; 3];
+            io.read_exact(&mut out).unwrap();
+            assert_eq!(&out, b"cde");
+        }
+        assert!(!file.is_closed());
+        assert_eq!(client.attrs(Target::file(&file)).unwrap().len(), Some(6));
     }
-    assert_eq!(
-        fs.close_impl(&descriptor).unwrap_err().err_no(),
-        libc::EBADF as u32
-    );
+    // Dropped handles release their ownership and allow deferred close to drain.
+    assert!(client.into_inner().is_ok());
 }
 
 #[test]
-fn legacy_handle_try_close_leaves_an_inert_handle() {
+fn closed_handle_rejects_standard_io() {
     use std::io::{Read, Write};
-    use vfsi_sync::VfOpenOptions;
-
-    let (_root, mut fs) = dummy();
-    let mut options = VfOpenOptions::new();
-    options.read(true).write(true).create(true);
-    let mut file = options.open(&mut fs, "/try-close").unwrap();
+    let (_root, backend) = dummy();
+    let client = FsClient::new(backend);
+    let mut file = client
+        .open_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open("/try-close")
+        .unwrap();
     file.try_close().unwrap();
     file.try_close().unwrap();
-    assert!(file.try_descriptor().is_err());
-    assert_eq!(
-        file.read(&mut [0u8; 1]).unwrap_err().kind(),
-        std::io::ErrorKind::InvalidInput
-    );
-    assert_eq!(
-        file.write(b"x").unwrap_err().kind(),
-        std::io::ErrorKind::InvalidInput
-    );
+    assert!(file.is_closed());
+    for error in [
+        client.std_io(&file).read(&mut [0u8; 1]).unwrap_err(),
+        client.std_io(&file).write(b"x").unwrap_err(),
+    ] {
+        assert_eq!(
+            error
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<VfError>()
+                .unwrap()
+                .err_no(),
+            libc::EBADF as u32
+        );
+    }
 }
 
 #[test]
 fn standard_open_options_validate_access_modes() {
-    use vfsi_sync::VfOpenOptions;
-
-    let (_root, mut fs) = dummy();
+    let (_root, backend) = dummy();
+    let client = FsClient::new(backend);
     assert_eq!(
-        VfOpenOptions::new()
-            .open(&mut fs, "/invalid")
-            .err()
-            .unwrap()
+        client.open_options().open("/invalid").unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert_eq!(
+        client
+            .open_options()
+            .read(true)
+            .truncate(true)
+            .open("/invalid")
+            .unwrap_err()
             .kind(),
         std::io::ErrorKind::InvalidInput
     );
-    let mut options = VfOpenOptions::new();
-    options.read(true).truncate(true);
     assert_eq!(
-        options.open(&mut fs, "/invalid").err().unwrap().kind(),
-        std::io::ErrorKind::InvalidInput
-    );
-
-    let mut options = VfOpenOptions::new();
-    options.read(true);
-    assert_eq!(
-        options.open(&mut fs, "/missing").err().unwrap().kind(),
+        client
+            .open_options()
+            .read(true)
+            .open("/missing")
+            .unwrap_err()
+            .kind(),
         std::io::ErrorKind::NotFound
     );
 }
@@ -819,8 +849,8 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
     let (_root, backend) = dummy();
     let client = FsClient::new(backend);
     let flags = OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
-    let mut first = client.open_with(OpenOp::new("/first", flags)).unwrap();
-    let mut second = client.open_with(OpenOp::new("/second", flags)).unwrap();
+    let first = client.open_with(OpenOp::new("/first", flags)).unwrap();
+    let second = client.open_with(OpenOp::new("/second", flags)).unwrap();
 
     client
         .vwrite_native(&[
@@ -856,16 +886,20 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
             .err_no(),
         vfsi_sync::ERR_INVAL
     );
-    first.flush().unwrap();
-    second.flush().unwrap();
-    first.seek(SeekFrom::Start(0)).unwrap();
-    second.seek(SeekFrom::Start(0)).unwrap();
+    let mut first_io = client.std_io(&first);
+    let mut second_io = client.std_io(&second);
+    first_io.flush().unwrap();
+    second_io.flush().unwrap();
+    first_io.seek(SeekFrom::Start(0)).unwrap();
+    second_io.seek(SeekFrom::Start(0)).unwrap();
     let mut one = String::new();
     let mut two = String::new();
-    first.read_to_string(&mut one).unwrap();
-    second.read_to_string(&mut two).unwrap();
+    first_io.read_to_string(&mut one).unwrap();
+    second_io.read_to_string(&mut two).unwrap();
     assert_eq!((one.as_str(), two.as_str()), ("one", "two"));
 
+    drop(first_io);
+    drop(second_io);
     first.close().unwrap();
     second.close().unwrap();
 }
@@ -900,14 +934,41 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
         .write(true)
         .open("/tree/nested/file")
         .unwrap();
-    assert_eq!(file.write_at(b"a", 1).unwrap(), 1);
+    assert_eq!(
+        client
+            .vwrite(&[vnfs::WriteOp::at(&file, 1, b"a")], Default::default())
+            .unwrap()[0]
+            .written,
+        1
+    );
     let mut bytes = [0; 5];
-    assert_eq!(file.read_at(&mut bytes, 0).unwrap(), 5);
+    assert_eq!(
+        client
+            .vread(
+                [vnfs::ReadOp::into(&file, 0, &mut bytes)],
+                Default::default()
+            )
+            .unwrap()[0]
+            .read(),
+        5
+    );
     assert_eq!(&bytes, b"hallo");
-    assert_eq!(file.attrs().unwrap().len().unwrap(), 5);
-    file.truncate(4).unwrap();
-    file.chmod(vnfs::Permissions::from_mode(0o600)).unwrap();
-    let metadata = file.attrs().unwrap();
+    assert_eq!(
+        client
+            .attrs(vfsi_core::Target::file(&file))
+            .unwrap()
+            .len()
+            .unwrap(),
+        5
+    );
+    client.truncate(vfsi_core::Target::file(&file), 4).unwrap();
+    client
+        .chmod(
+            vfsi_core::Target::file(&file),
+            vnfs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    let metadata = client.attrs(vfsi_core::Target::file(&file)).unwrap();
     assert_eq!(metadata.len(), Some(4));
     assert_eq!(metadata.permissions().unwrap().mode(), 0o600);
     file.close().unwrap();

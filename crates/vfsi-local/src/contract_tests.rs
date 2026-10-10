@@ -117,15 +117,42 @@ mod tests {
                 .modified(modified)
                 .follow_symlinks(false)])
             .unwrap();
-        let attrs = file.attrs().unwrap();
+        let attrs = client
+            .attrs_with_options(
+                vfsi_core::Target::file(&file),
+                vfsi_core::api::AttrsOptions::new().fields(
+                    vfsi_core::AttrMask::MODE
+                        | vfsi_core::AttrMask::SIZE
+                        | vfsi_core::AttrMask::MTIME,
+                ),
+            )
+            .unwrap();
         assert_eq!(attrs.len(), Some(3));
         assert_eq!(attrs.modified(), Some(modified));
         assert_eq!(attrs.permissions().unwrap().mode() & 0o7777, 0o640);
-        file.truncate(5).unwrap();
-        file.chmod(Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(file.attrs().unwrap().len().unwrap(), 5);
+        client.truncate(vfsi_core::Target::file(&file), 5).unwrap();
+        client
+            .chmod(
+                vfsi_core::Target::file(&file),
+                Permissions::from_mode(0o600),
+            )
+            .unwrap();
         assert_eq!(
-            file.attrs().unwrap().permissions().unwrap().mode() & 0o7777,
+            client
+                .attrs(vfsi_core::Target::file(&file))
+                .unwrap()
+                .len()
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            client
+                .attrs(vfsi_core::Target::file(&file))
+                .unwrap()
+                .permissions()
+                .unwrap()
+                .mode()
+                & 0o7777,
             0o600
         );
         assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"replacement");

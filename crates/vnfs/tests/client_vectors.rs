@@ -24,7 +24,7 @@ fn writes<C: Vfsi>(fs: &C) {
         [(3, 7), (0, 3)]
     );
     assert_eq!(
-        std::io::Seek::stream_position(&mut fs.file_io(&files[0])).unwrap(),
+        std::io::Seek::stream_position(&mut fs.std_io(&files[0])).unwrap(),
         0
     );
     fs.vwrite(

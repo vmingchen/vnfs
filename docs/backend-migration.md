@@ -141,9 +141,17 @@ its operation engines directly.
 
 ## Caller migration
 
-`FsClient` uses `FileSystem` for owned-handle operations and `Backend` for
-vectors and namespace workflows. `VfFileHandle` uses `Backend`. Scalar-only
-clients remain usable through `FileSystem`; they do not need `Backend`.
+`FsClient` retains `FileSystem` for connection and handle lifecycle; its
+application `Vfsi` implementation requires `Backend`. `FsFile` owns the open
+resource and cleanup obligation, while operations use the owning client's
+vectors. Direct handle I/O, metadata, synchronization, and the borrowed
+`VfFileHandle`/`VfOpenOptions` adapter have been removed.
+
+`VfsiExt::std_io` returns an opaque `Read + Write + Seek` adapter borrowing the
+client and handle, with its own cursor initially zero. It replaces `file_io`
+and the public `FileIo` type. Use `Seek::stream_position` for cursor queries.
+`VfsiExt::open_options` is the only open builder implementation; both `open`
+and `vopen` dispatch through `Vfsi::vopen`, including on `FsClient`.
 
 Application vectors use `vopen`, `vclose`, `vrename`, `vmkdir`, and `vcopy`.
 `vmkdir` accepts `MkDirOp::new(path, mode)` operations; `vsetattrs` accepts

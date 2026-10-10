@@ -38,9 +38,9 @@ pub mod mounted {
 pub mod files {
     #[doc(inline)]
     pub use crate::{
-        Capabilities, FileHandle, FileIo, OpenFlags, OpenOp, OpenOptions, ReadOp, ReadOptions,
-        ReadResult, ResourceLimits, StreamCompletion, StreamOptions, SyncMode, Vfsi, VfsiExt,
-        WriteOp, WriteOptions, WriteResult,
+        Capabilities, FileHandle, OpenFlags, OpenOp, OpenOptions, ReadOp, ReadOptions, ReadResult,
+        ResourceLimits, StreamCompletion, StreamOptions, SyncMode, Vfsi, VfsiExt, WriteOp,
+        WriteOptions, WriteResult,
     };
 }
 
@@ -98,7 +98,7 @@ pub use vfsi_core::api::ListDirOptions;
 pub use vfsi_core::api::RenameOptions;
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_core::api::internal::OwnedReadResult;
-pub use vfsi_core::api::{AttrsOptions, FileIo, OpenOptions, SyncMode};
+pub use vfsi_core::api::{AttrsOptions, OpenOptions, SyncMode};
 pub use vfsi_core::api::{ReadOp, ReadOptions, ReadResult};
 pub use vfsi_core::api::{WriteOp, WriteOptions};
 

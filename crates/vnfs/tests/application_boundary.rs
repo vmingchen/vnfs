@@ -218,7 +218,7 @@ fn opaque_requests_preserve_owner_preflight_and_error_sources() {
     assert!(!file.is_closed());
     owner.vclose(std::slice::from_mut(&mut file)).unwrap();
     assert!(file.is_closed());
-    let error = std::io::Read::read(&mut owner.file_io(&file), &mut [0; 1]).unwrap_err();
+    let error = std::io::Read::read(&mut owner.std_io(&file), &mut [0; 1]).unwrap_err();
     assert!(
         error
             .get_ref()

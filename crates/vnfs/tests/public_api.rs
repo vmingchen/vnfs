@@ -231,7 +231,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     client.vclose(&mut files).unwrap();
     assert!(files.iter().all(|file| file.is_closed()));
     client.vclose(&mut files).unwrap();
-    assert!(client.file_io(&files[0]).read(&mut a).is_err());
+    assert!(client.std_io(&files[0]).read(&mut a).is_err());
     let foreign = vnfs::Auto::new(&root).unwrap();
     let file = client.open("/sub/a").unwrap();
     assert!(
@@ -378,10 +378,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
                 .all(|result| result.read() == 3 && result.eof())
         );
         let mut contents = Vec::new();
-        client
-            .file_io(&files[0])
-            .read_to_end(&mut contents)
-            .unwrap();
+        client.std_io(&files[0]).read_to_end(&mut contents).unwrap();
         assert_eq!(contents, b"abc");
         files[0].try_close()?;
         client.vclose(&mut files)?;
@@ -675,14 +672,14 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
         assert_eq!(sparse.len(), None);
         assert_eq!(sparse.is_empty(), None);
         assert!(sparse.permissions().is_some());
-        let mut io = fs.file_io(&file);
+        let mut io = fs.std_io(&file);
         let mut output = vec![9];
         assert_eq!(
             io.read_to_end(&mut output).unwrap_err().kind(),
             std::io::ErrorKind::FileTooLarge
         );
         assert_eq!(output, [9, b'a', b'b', b'c']);
-        assert_eq!(io.position(), 4); // bounded EOF probe
+        assert_eq!(io.stream_position().unwrap(), 4); // bounded EOF probe
         io.seek(SeekFrom::Start(0)).unwrap();
         let mut text = String::from("prefix");
         assert_eq!(
@@ -692,10 +689,10 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
         assert_eq!(text, "prefix");
         assert_eq!(io.seek(SeekFrom::End(-2)).unwrap(), 4);
         assert!(io.seek(SeekFrom::Current(-5)).is_err());
-        assert_eq!(io.position(), 4);
+        assert_eq!(io.stream_position().unwrap(), 4);
         let exact = fs.open("/exact").unwrap();
         let mut output = Vec::new();
-        assert_eq!(fs.file_io(&exact).read_to_end(&mut output).unwrap(), 3);
+        assert_eq!(fs.std_io(&exact).read_to_end(&mut output).unwrap(), 3);
         assert_eq!(output, b"abc");
         let writable = fs
             .open_options()
@@ -703,7 +700,7 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
             .write(true)
             .open("/exact")
             .unwrap();
-        let mut io = fs.file_io(&writable);
+        let mut io = fs.std_io(&writable);
         io.seek(SeekFrom::Start(1)).unwrap();
         io.write_all(b"XY").unwrap();
         io.flush().unwrap();
@@ -727,7 +724,7 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
             Some(1)
         );
         let mut buffer = [0; 1];
-        assert!(fs.file_io(&closed).read(&mut buffer).is_err());
+        assert!(fs.std_io(&closed).read(&mut buffer).is_err());
         fs.vfsync(&[&file, &exact, &writable], vnfs::SyncMode::Data)
             .unwrap();
         // Both concrete and routed clients keep append behavior behind vectors.
@@ -738,12 +735,12 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
             .append(true)
             .open("/append")
             .unwrap();
-        let mut io = fs.file_io(&append);
+        let mut io = fs.std_io(&append);
         assert_eq!(io.write(b"d").unwrap(), 1);
-        assert_eq!(io.position(), 4);
+        assert_eq!(io.stream_position().unwrap(), 4);
         io.seek(SeekFrom::Start(0)).unwrap();
         io.write_all(b"ef").unwrap();
-        assert_eq!(io.position(), 6);
+        assert_eq!(io.stream_position().unwrap(), 6);
         let mut output = [0; 6];
         io.seek(SeekFrom::Start(0)).unwrap();
         io.read_exact(&mut output).unwrap();
@@ -764,11 +761,11 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
         .with_limits(vnfs::ResourceLimits::new().max_read_bytes(0));
     fs.write("/empty", b"").unwrap();
     let file = fs.open("/empty").unwrap();
-    assert_eq!(fs.file_io(&file).read_to_end(&mut Vec::new()).unwrap(), 0);
+    assert_eq!(fs.std_io(&file).read_to_end(&mut Vec::new()).unwrap(), 0);
     fs.write("/nonempty", b"x").unwrap();
     let file = fs.open("/nonempty").unwrap();
     assert_eq!(
-        fs.file_io(&file)
+        fs.std_io(&file)
             .read_to_end(&mut Vec::new())
             .unwrap_err()
             .kind(),

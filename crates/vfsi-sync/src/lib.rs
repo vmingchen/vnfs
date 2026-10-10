@@ -12,12 +12,10 @@ pub mod path {
 
 mod traits;
 pub use traits::{BackendDirectoryPage, DirPageCursor, DirectoryPage, ReadAllOptions};
-mod io;
-pub use io::{VfFileHandle, VfOpenOptions};
 mod application_macros;
 mod client;
 mod traversal;
-pub use client::{FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite, OpenOptions};
+pub use client::{FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite};
 pub use traversal::walk_events;
 #[doc(hidden)]
 pub mod backend_helpers;
@@ -53,7 +51,7 @@ pub use vfsi_core::api::{
     DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
     DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
     DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirectoryListing,
-    ListDirOptions, ReadIntoResult as FsReadIntoResult, ReadOptions, ResourceLimits,
+    ListDirOptions, OpenOptions, ReadIntoResult as FsReadIntoResult, ReadOptions, ResourceLimits,
     StreamCompletion, StreamOptions, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
     WriteResult as FsWriteResult,
 };

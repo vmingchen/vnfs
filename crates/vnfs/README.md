@@ -279,10 +279,12 @@ move to worker threads. Handles expose lifecycle operations; file I/O and
 metadata go through `Vfsi`. Call `close()` explicitly to observe cleanup errors,
 and `fs.sync_data(&file)` or `fs.sync_all(&file)` to observe durability errors.
 
-Use an explicit `fs.file_io(&file)` adapter for generic `std::io` code. It borrows
+Use an explicit `fs.std_io(&file)` adapter for generic `std::io` code. It borrows
 the client and handle, maintains its own cursor starting at zero, and delegates
 reads, writes, metadata and synchronization to the vector engine. Collecting
-reads enforce the client's payload budget.
+reads enforce the client's payload budget. The adapter's concrete type is private;
+use `Seek::stream_position` to query its cursor. All clients share the
+`VfsiExt::open_options` builder, whose `open` and `vopen` methods use `Vfsi::vopen`.
 
 ```rust,no_run
 use std::io::Read;
@@ -292,7 +294,7 @@ fn main() -> std::io::Result<()> {
     let fs = Nfs::connect("nfs.example.com")?;
     let file = fs.open("/file-1")?;
     let mut contents = Vec::new();
-    fs.file_io(&file).read_to_end(&mut contents)?;
+    fs.std_io(&file).read_to_end(&mut contents)?;
     file.close()?;
     Ok(())
 }
@@ -471,10 +473,10 @@ one tree per root; `listdir` provides incremental traversal. All portable reads
 return `ReadResult`, with `data()` for owned reads and `read()` for buffered reads.
 
 `max_read_bytes` is a collection/batch policy, not a cap on all reads or
-process memory. The explicit `fs.file_io(&file)` adapter bounds collecting reads
+process memory. The explicit `fs.std_io(&file)` adapter bounds collecting reads
 using the client's read budget. Repeated reads into caller-managed buffers remain caller-managed.
 Retain the adapter to preserve its cursor across calls; each new
-`fs.file_io(&file)` starts at zero. Use `adapter.read_to_end(&mut buffer)` to
+`fs.std_io(&file)` starts at zero. Use `adapter.read_to_end(&mut buffer)` to
 collect from its current cursor with the client's bound. At the limit it may consume one extra EOF-probe byte;
 failure does not roll back the cursor, and `read_to_end` retains the bytes already
 appended to its caller's buffer.
