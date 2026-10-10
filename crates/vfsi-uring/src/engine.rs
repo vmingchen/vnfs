@@ -403,9 +403,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("file"), b"abcdef").unwrap();
         let (engine, telemetry) = Engine::new(Options::default()).unwrap();
-        let mut fs = vfsi_local::DummyVecFs::try_new(root.path().to_path_buf())
-            .unwrap()
-            .with_io_engine(engine);
+        let mut fs = vfsi_local::LocalBackend::new(root.path().to_path_buf(), engine).unwrap();
         let file = fs
             .open_raw_impl(std::path::Path::new("/file"), libc::O_RDWR, 0)
             .unwrap();

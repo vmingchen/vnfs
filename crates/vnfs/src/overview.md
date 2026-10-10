@@ -118,7 +118,7 @@ helpers, not core execution methods. Import both with `vnfs::prelude::*`.
 | `server-copy` (default) | NFS server-side copy when supported |
 | `auto` (default) | Linux mounted clients and conservative direct-NFS routing |
 | `rpcsec-gss` | Optional Kerberos authentication or integrity protection |
-| `dummy` | Local backend for development/testing |
+| `posix` | Rooted kernel filesystem access through ordinary POSIX syscalls |
 | `test-faults` | Fault injection for tests, not normal application use |
 
 SMB is provided by the separate `vfsi-smb` library, not this crate.

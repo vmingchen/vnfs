@@ -263,7 +263,7 @@ run_uring() {
   [[ $(uname -s) == Linux ]] || { echo 'uring tests require Linux' >&2; return 1; }
   cargo test -p vfsi-uring --locked
   cargo test -p vnfs --locked --no-default-features --features uring --test uring
-  cargo test -p vnfs --locked --no-default-features --features uring,dummy --example uring_bench
+  cargo test -p vnfs --locked --no-default-features --features uring,posix --example uring_bench
   cargo test -p vnfs --locked --no-default-features --features uring --doc guides::uring
 }
 

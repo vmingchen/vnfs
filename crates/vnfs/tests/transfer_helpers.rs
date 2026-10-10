@@ -40,7 +40,7 @@ struct Calls {
     max_files: usize,
 }
 struct Harness {
-    fs: Mounted,
+    fs: Posix,
     read_failure: Cell<Option<(usize, u32)>>,
     calls: RefCell<Calls>,
     fault: Cell<Fault>,
@@ -48,7 +48,7 @@ struct Harness {
 impl Harness {
     fn new(path: &Path) -> Self {
         Self {
-            fs: Mounted::new(path)
+            fs: Posix::new(path)
                 .unwrap()
                 .with_limits(ResourceLimits::new().max_read_bytes(64)),
             read_failure: Cell::new(None),
@@ -58,8 +58,8 @@ impl Harness {
     }
 }
 impl Vfsi for Harness {
-    type File = <Mounted as Vfsi>::File;
-    type Dir = <Mounted as Vfsi>::Dir;
+    type File = <Posix as Vfsi>::File;
+    type Dir = <Posix as Vfsi>::Dir;
     fn capabilities(&self) -> Result<Capabilities> {
         self.fs.capabilities()
     }
@@ -694,7 +694,7 @@ fn bulk_move_renames_independent_roots_in_one_vector() {
 #[test]
 fn no_replace_is_atomic_and_reports_existing_destination() {
     let t = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(t.path()).unwrap();
+    let fs = Posix::new(t.path()).unwrap();
     std::fs::write(t.path().join("source"), b"source").unwrap();
     std::fs::write(t.path().join("exists"), b"existing").unwrap();
     let error = fs
@@ -711,7 +711,7 @@ fn no_replace_is_atomic_and_reports_existing_destination() {
 #[test]
 fn exchange_swaps_names_atomically() {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path()).unwrap();
+    let fs = Posix::new(root.path()).unwrap();
     std::fs::write(root.path().join("left"), b"left data").unwrap();
     std::fs::write(root.path().join("right"), b"right data").unwrap();
 
@@ -731,7 +731,7 @@ fn exchange_swaps_names_atomically() {
 #[test]
 fn exchange_requires_both_names_to_exist() {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path()).unwrap();
+    let fs = Posix::new(root.path()).unwrap();
     std::fs::write(root.path().join("source"), b"source data").unwrap();
 
     let error = fs
@@ -749,7 +749,7 @@ fn exchange_requires_both_names_to_exist() {
 #[test]
 fn no_replace_vector_reports_the_failing_pair_after_a_successful_prefix() {
     let t = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(t.path()).unwrap();
+    let fs = Posix::new(t.path()).unwrap();
     std::fs::write(t.path().join("a"), b"a").unwrap();
     std::fs::write(t.path().join("b"), b"b").unwrap();
     std::fs::write(t.path().join("exists"), b"old").unwrap();

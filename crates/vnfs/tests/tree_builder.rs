@@ -1,12 +1,12 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
 
 use vnfs::VfsiExt;
-use vnfs::{ErrorKind, Mounted, Vfsi, helpers::TreeBuilder};
+use vnfs::{ErrorKind, Posix, Vfsi, helpers::TreeBuilder};
 
 #[test]
 fn duplicate_directories_do_not_consume_planned_entry_slots() {
     let temp = tempfile::tempdir().unwrap();
-    let client = Mounted::new(temp.path()).unwrap();
+    let client = Posix::new(temp.path()).unwrap();
     TreeBuilder::new()
         .max_entries(1)
         .add_directory("a")
@@ -40,7 +40,7 @@ fn duplicate_directories_do_not_consume_planned_entry_slots() {
 #[test]
 fn duplicate_directories_do_not_consume_path_storage_budget() {
     let temp = tempfile::tempdir().unwrap();
-    let client = Mounted::new(temp.path()).unwrap();
+    let client = Posix::new(temp.path()).unwrap();
     let mut builder = TreeBuilder::new().max_total_bytes("/fixture/a".len());
     for _ in 0..32 {
         builder = builder.add_directory("./a");
@@ -52,7 +52,7 @@ fn duplicate_directories_do_not_consume_path_storage_budget() {
 #[test]
 fn original_error_indices_include_suppressed_directory_declarations() {
     let temp = tempfile::tempdir().unwrap();
-    let client = Mounted::new(temp.path()).unwrap();
+    let client = Posix::new(temp.path()).unwrap();
     let builders = [
         (
             TreeBuilder::new()
@@ -88,7 +88,7 @@ fn original_error_indices_include_suppressed_directory_declarations() {
 #[test]
 fn builds_nested_binary_empty_and_directory_entries_without_implicit_cleanup() {
     let temp = tempfile::tempdir().unwrap();
-    let client = Mounted::new(temp.path()).unwrap();
+    let client = Posix::new(temp.path()).unwrap();
     let tree = TreeBuilder::new()
         .batch_size(2)
         .add_file("config/./app.conf", "host = localhost")
@@ -145,7 +145,7 @@ fn builds_nested_binary_empty_and_directory_entries_without_implicit_cleanup() {
 #[test]
 fn rejects_invalid_paths_and_collisions_before_creating_root() {
     let temp = tempfile::tempdir().unwrap();
-    let client = Mounted::new(temp.path()).unwrap();
+    let client = Posix::new(temp.path()).unwrap();
     for path in ["../outside", "a/../../outside", "/outside", "", ".", "a\0b"] {
         let error = TreeBuilder::new()
             .add_file("valid", "ok")
@@ -179,7 +179,7 @@ fn rejects_invalid_paths_and_collisions_before_creating_root() {
 #[test]
 fn budgets_include_implicit_directories_payloads_and_planned_path_bytes() {
     let temp = tempfile::tempdir().unwrap();
-    let client = Mounted::new(temp.path()).unwrap();
+    let client = Posix::new(temp.path()).unwrap();
     let builders = [
         TreeBuilder::new().max_entries(2).add_file("a/b/c", ""),
         TreeBuilder::new().max_total_bytes(5).add_file("f", "12345"),
@@ -216,7 +216,7 @@ fn budgets_include_implicit_directories_payloads_and_planned_path_bytes() {
 fn existing_root_is_not_overwritten_or_cleaned_up_even_if_it_is_a_symlink() {
     use std::os::unix::fs::symlink;
     let temp = tempfile::tempdir().unwrap();
-    let client = Mounted::new(temp.path()).unwrap();
+    let client = Posix::new(temp.path()).unwrap();
     client.create_dir("/existing").unwrap();
     client.write("/existing/keep", b"original").unwrap();
     symlink("existing", temp.path().join("link")).unwrap();
@@ -245,7 +245,7 @@ fn existing_root_is_not_overwritten_or_cleaned_up_even_if_it_is_a_symlink() {
 #[test]
 fn empty_tree_and_missing_root_parent_have_explicit_semantics() {
     let temp = tempfile::tempdir().unwrap();
-    let client = Mounted::new(temp.path()).unwrap();
+    let client = Posix::new(temp.path()).unwrap();
     TreeBuilder::new().create(&client, "/empty").unwrap();
     assert!(client.read_dir("/empty").unwrap().is_empty());
     let error = TreeBuilder::new()
@@ -259,7 +259,7 @@ fn empty_tree_and_missing_root_parent_have_explicit_semantics() {
 #[test]
 fn bulk_directory_creation_preserves_error_index_path_and_completed_prefix() {
     let temp = tempfile::tempdir().unwrap();
-    let client = Mounted::new(temp.path()).unwrap();
+    let client = Posix::new(temp.path()).unwrap();
     client.create_dir("/taken").unwrap();
     let error = client
         .vmkdir(&[

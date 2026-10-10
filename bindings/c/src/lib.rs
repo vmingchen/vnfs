@@ -14,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
-use vfsi_local::DummyVecFs;
+use vfsi_local::LocalBackend;
 use vfsi_nfs::nfs::NfsVecFs;
 use vfsi_smb::SmbVecFs;
 use vfsi_sync::{
@@ -829,7 +829,7 @@ pub unsafe extern "C" fn vfsi_dummy_open(root: *const c_char, out: *mut *mut vfs
         let Some(root) = cstr_path(root) else {
             return libc::EINVAL;
         };
-        let fs = match DummyVecFs::try_new(root) {
+        let fs = match vfsi_posix::backend(root) {
             Ok(fs) => Box::new(fs) as Box<dyn BindingBackend>,
             Err(error) => return error.err_no() as c_int,
         };
@@ -855,7 +855,7 @@ pub unsafe extern "C" fn vfsi_dummy_open_mount(
         let (Some(root), Some(mountpoint)) = (cstr_path(root), cstr_path(mountpoint)) else {
             return libc::EINVAL;
         };
-        let fs = match DummyVecFs::try_new(root) {
+        let fs = match vfsi_posix::backend(root) {
             Ok(fs) => Box::new(fs) as Box<dyn BindingBackend>,
             Err(error) => return error.err_no() as c_int,
         };
@@ -2580,7 +2580,7 @@ trait BindingBackend: vfsi_sync::backend::VectorBackend {
         None
     }
 }
-impl BindingBackend for DummyVecFs {}
+impl BindingBackend for LocalBackend {}
 impl BindingBackend for NfsVecFs {
     fn nfs_minorversion(&self) -> Option<u32> {
         Some(self.minorversion())
@@ -3706,9 +3706,9 @@ mod tests {
     #[test]
     fn mount_mapping_includes_backend_root_and_rejects_escape() {
         let (_root, root) = temp_root();
-        let backend = Box::new(DummyVecFs::new(PathBuf::from(
-            root.to_string_lossy().into_owned(),
-        ))) as Box<dyn BindingBackend>;
+        let backend = Box::new(
+            vfsi_posix::backend(PathBuf::from(root.to_string_lossy().into_owned())).unwrap(),
+        ) as Box<dyn BindingBackend>;
         let raw = make_fs(
             backend,
             PathBuf::from("/mnt/repos"),

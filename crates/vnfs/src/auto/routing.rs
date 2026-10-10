@@ -29,14 +29,14 @@ use vfsi_nfs::mount::{AuthSysIdentity, decode_mount_field, path_mount_id};
 
 #[derive(Clone)]
 pub(super) enum Route {
-    Mounted,
+    Posix,
     Nfs(NfsConnection),
 }
 
 impl Route {
     pub(super) fn same_backend(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Mounted, Self::Mounted) => true,
+            (Self::Posix, Self::Posix) => true,
             (Self::Nfs(a), Self::Nfs(b)) => Arc::ptr_eq(&a.identity, &b.identity),
             _ => false,
         }
@@ -44,7 +44,7 @@ impl Route {
 
     pub(super) fn public(&self) -> AutoRoute {
         match self {
-            Self::Mounted => AutoRoute::Mounted,
+            Self::Posix => AutoRoute::Posix,
             Self::Nfs(connection) => AutoRoute::DirectNfs {
                 mount_point: connection.spec.mount_point.clone(),
                 server: connection.spec.server.clone(),
@@ -76,7 +76,7 @@ impl Auto {
                 .any(|point| point != &host && point.starts_with(&host))
         }) {
             return Resolved {
-                route: Route::Mounted,
+                route: Route::Posix,
                 path: path.to_path_buf(),
             };
         }
@@ -84,7 +84,7 @@ impl Auto {
     }
 
     /// Inspect the currently eligible path route. An individual operation
-    /// can still choose Mounted (for example, when its target is a symlink).
+    /// can still choose Posix (for example, when its target is a symlink).
     /// Inspect an opened [`AutoFile`] to see the route actually used.
     pub fn route_for(&self, path: impl AsRef<Path>) -> AutoRoute {
         let mounts = read_mounts(false);
@@ -104,7 +104,7 @@ impl Auto {
 
     pub(super) fn resolve(&self, path: &Path, mounts: &MountTable) -> Resolved {
         let mounted = || Resolved {
-            route: Route::Mounted,
+            route: Route::Posix,
             path: path.to_path_buf(),
         };
         let Some(host_path) = self.host_path(path) else {
@@ -205,7 +205,7 @@ impl Auto {
             .iter()
             .map(|request| {
                 let fallback = || Resolved {
-                    route: Route::Mounted,
+                    route: Route::Posix,
                     path: request.path().to_path_buf(),
                 };
                 let Some(host) = self.host_path(request.path()) else {
@@ -277,7 +277,7 @@ impl Auto {
                             for (index, item) in checked.into_iter().zip(attrs) {
                                 if item.file_type() == crate::FileType::Symlink {
                                     resolved[index] = Resolved {
-                                        route: Route::Mounted,
+                                        route: Route::Posix,
                                         path: requests[index].path().to_path_buf(),
                                     };
                                 }
@@ -286,7 +286,7 @@ impl Auto {
                         _ => {
                             for index in start..end {
                                 resolved[index] = Resolved {
-                                    route: Route::Mounted,
+                                    route: Route::Posix,
                                     path: requests[index].path().to_path_buf(),
                                 };
                             }

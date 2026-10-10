@@ -1,9 +1,7 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
 use std::ops::ControlFlow;
 use std::path::Path;
-use vnfs::{
-    ListDirOptions, Mounted, TraversalCompletion, Vfsi, VfsiExt, WalkControl, WalkEventKind,
-};
+use vnfs::{ListDirOptions, Posix, TraversalCompletion, Vfsi, VfsiExt, WalkControl, WalkEventKind};
 
 fn collect(
     fs: &impl Vfsi,
@@ -16,7 +14,7 @@ fn collect(
 #[test]
 fn blanket_collection_preserves_empty_roots_children_duplicates_and_multi_page_entries() {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path()).unwrap();
+    let fs = Posix::new(root.path()).unwrap();
     fs.create_dir_all("/tree/empty").unwrap();
     fs.create_dir("/empty").unwrap();
     for i in 0..300 {
@@ -37,7 +35,7 @@ fn blanket_collection_preserves_empty_roots_children_duplicates_and_multi_page_e
 #[test]
 fn page_delivery_is_bounded_reentrant_and_reports_empty_directory_cancellation() {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path()).unwrap();
+    let fs = Posix::new(root.path()).unwrap();
     fs.create_dir("/empty").unwrap();
     assert_eq!(
         fs.vlistdirs(
@@ -72,7 +70,7 @@ fn page_delivery_is_bounded_reentrant_and_reports_empty_directory_cancellation()
 #[test]
 fn recursive_roots_and_entries_never_follow_final_symlinks() {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path()).unwrap();
+    let fs = Posix::new(root.path()).unwrap();
     fs.create_dir("/target").unwrap();
     fs.write("/target/file", b"x").unwrap();
     fs.symlink("/target", "/link").unwrap();
@@ -90,7 +88,7 @@ fn recursive_roots_and_entries_never_follow_final_symlinks() {
 #[test]
 fn collection_limits_and_errors_keep_the_input_root_index() {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path()).unwrap();
+    let fs = Posix::new(root.path()).unwrap();
     fs.create_dir("/a").unwrap();
     fs.create_dir("/b").unwrap();
     fs.write("/a/f", b"x").unwrap();
@@ -124,13 +122,13 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
         return;
     }
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path()).unwrap();
+    let fs = Posix::new(root.path()).unwrap();
     fs.create_dir_all("/tree/sub").unwrap();
     fs.create_dir("/tree/empty").unwrap();
     fs.write("/tree/top", b"a").unwrap();
     fs.write("/tree/sub/leaf", b"b").unwrap();
     fs.symlink("sub", "/tree/link").unwrap();
-    let limited = Mounted::new(root.path())
+    let limited = Posix::new(root.path())
         .unwrap()
         .with_limits(vnfs::ResourceLimits::new().max_directory_entries(1));
     for (name, recursive, lifecycle, sort) in [
@@ -299,7 +297,7 @@ fn buffered_local_walk_never_follows_replaced_children_or_ancestors() {
             ("ancestor", "/tree", "outside", "/outside/child"),
         ] {
             let root = tempfile::tempdir().unwrap();
-            let fs = Mounted::new(root.path()).unwrap();
+            let fs = Posix::new(root.path()).unwrap();
             fs.create_dir_all("/tree/child").unwrap();
             fs.create_dir_all(outside).unwrap();
             fs.write(format!("{outside}/secret"), b"never traverse this")
@@ -326,7 +324,7 @@ fn buffered_local_walk_never_follows_replaced_children_or_ancestors() {
 #[test]
 fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path())
+    let fs = Posix::new(root.path())
         .unwrap()
         .with_limits(vnfs::ResourceLimits::new().max_directory_entries(1));
     fs.create_dir_all("/tree/sub").unwrap();

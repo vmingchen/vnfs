@@ -70,14 +70,14 @@ completions, and peak scratch bytes. They exclude the ordinary syscall paths.
 
 ```sh
 ./scripts/test-ci-local.sh uring
-cargo run --release -p vnfs --no-default-features --features uring,dummy \
+cargo run --release -p vnfs --no-default-features --features uring,posix \
   --example uring_bench -- 200
 ```
 
 An optional second argument selects an existing scratch parent directory.
 The default is `target`, because `/tmp` can be RAM-backed. The benchmark uses
-identical `FsClient` adapters over the same root, comparing the ordinary local
-executor (`DummyVecFs`, real local files) against the ring executor. It validates
+identical `FsClient` adapters over the same root, comparing `vfsi-posix` against
+`vfsi-uring`, both over shared `LocalBackend` machinery. It validates
 distinct file/range patterns, poisons read buffers before each call, changes
 write payloads every round, and independently reads written files through the
 standard filesystem API. Validation and source reset stay outside timing. It

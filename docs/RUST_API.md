@@ -51,7 +51,7 @@ delegates to native anchored removal, never a list-then-delete extension loop.
 The vector call preserves indexed failures and may leave partial mutations.
 
 `NfsClient`, `NfsFile`, `NfsDir`, and their borrowed vector requests are opaque
-application handles. `Mounted` provides the corresponding local/kernel-backed
+application handles. `Posix` provides the corresponding local/kernel-backed
 handles. Clients do not dereference to backend owners, expose locks, accept raw
 backends, or provide backend extraction. Builder operations return application
 clients, not protocol implementations. Cloning remains cheap and shares the
@@ -97,7 +97,7 @@ and `VfsiExt` on clients instead:
 
 Application paths are relative to the client's namespace root, including
 paths beginning with `/`. For example, `NfsBuilder::root("/export/project")`
-maps `/a` to the NFS-visible `/export/project/a`; `Mounted::new("/work")`
+maps `/a` to the NFS-visible `/export/project/a`; `Posix::new("/work")`
 maps `/a` to the host path `/work/a`. A mount-derived client rooted at
 `/mnt/nfs/project` maps `/a` into that remote project directory. Namespace
 rooting is not a race-resistant security sandbox.
@@ -105,7 +105,7 @@ rooting is not a race-resistant security sandbox.
 `Auto` and mount-derived direct NFS connections are independent clients:
 they neither share nor invalidate the kernel NFS client's caches. Mixing
 direct and kernel accesses, including through aliases, can expose stale reads
-or delayed writes. Use `Mounted` when kernel cache coordination is required.
+or delayed writes. Use `Posix` when kernel cache coordination is required.
 
 On Linux, `Nfs::from_mount(path)` constructs the same concrete `NfsClient`
 from an existing NFS-mounted directory. `NfsBuilder::from_mount(path)` supports

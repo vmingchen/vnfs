@@ -76,7 +76,9 @@ crates/
   vfsi-sync/            scalar and vectorized synchronous interfaces
   vfsi-nfs/             NFSv4.1 and NFSv4.2 backend
   vfsi-smb/             optional SMB2 and SMB3 backend
-  vfsi-local/           local backend and future io_uring implementation
+  vfsi-local/           shared local namespace, handles and executor contract
+  vfsi-posix/           ordered POSIX syscall executor and backend factory
+  vfsi-uring/           bounded, batched Linux io_uring executor and factory
   nfsv41-sys/           generated NFS protocol bindings
 bindings/
   c/                    vfsi-c package and checked-in public header
@@ -135,7 +137,8 @@ The dependency direction is deliberately one-way:
 ```text
 vfsi-core -> vfsi-sync -> vfsi-nfs -> vnfs
                        -> vfsi-smb
-                       -> vfsi-local
+                       -> vfsi-local -> vfsi-posix
+                                     -> vfsi-uring
 
 vnfs + vfsi-smb -------------------> vfsi-c
 vfsi-python + vfsi-fsspec ---------> nfs4fs / vsmb / vsmbfs
@@ -157,8 +160,21 @@ Protocol-specific keywords remain on their owning packages: for example,
 `vfsi-smb`, `vsmb`, and `vsmbfs`. Third-party packages keep their upstream
 metadata.
 
-io_uring belongs in the local backend because it is an execution mechanism,
-not a network filesystem protocol. Cloud object-store support belongs in
+`vfsi-local` owns rooted path resolution, descriptor/cursor ownership,
+validation, namespace operations, traversal and ordered dependent-I/O helpers.
+It requires an explicit `DescriptorIo` executor; it has no implicit POSIX mode.
+`vfsi-posix` selects ordinary ordered syscalls; `vfsi-uring` selects bounded ring
+batches for independent descriptor I/O. Both depend on `vfsi-local`, not on each
+other. Shared syscall helpers let the ring backend preserve append/dependency
+ordering without depending on the POSIX executor crate. Application operations
+and traits remain in `vfsi-core`, not in the executor interface.
+
+Applications use `vnfs::Posix` with the `posix` feature or `vnfs::Uring` with
+`uring`; `Auto` uses `Posix` for kernel routing. Python's `dummy` backend and
+the C dummy constructors retain their test-fixture names and select POSIX.
+
+io_uring is an execution mechanism, not a network filesystem protocol.
+Cloud object-store support belongs in
 backend packages, split by provider only when semantics or release ownership
 requires it.
 

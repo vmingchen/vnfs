@@ -51,7 +51,7 @@ fn portable_writes_on_mounted_and_auto() {
         if auto {
             writes(&vnfs::Auto::new(root.path()).unwrap());
         } else {
-            writes(&vnfs::Mounted::new(root.path()).unwrap());
+            writes(&vnfs::Posix::new(root.path()).unwrap());
         }
     }
 }
@@ -59,8 +59,8 @@ fn portable_writes_on_mounted_and_auto() {
 #[test]
 fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
     let root = tempfile::tempdir().unwrap();
-    let fs = vnfs::Mounted::new(root.path()).unwrap();
-    let other = vnfs::Mounted::new(root.path()).unwrap();
+    let fs = vnfs::Posix::new(root.path()).unwrap();
+    let other = vnfs::Posix::new(root.path()).unwrap();
     let file = fs.create("/a").unwrap();
     fs.vwrite(
         &[WriteOp::at(&file, 0, b"keep")],
@@ -186,7 +186,7 @@ fn consolidated_metadata_fields_and_symlinks_on_mounted_and_auto() {
         if auto {
             attrs_query(&vnfs::Auto::new(root.path()).unwrap());
         } else {
-            attrs_query(&vnfs::Mounted::new(root.path()).unwrap());
+            attrs_query(&vnfs::Posix::new(root.path()).unwrap());
         }
     }
 }
@@ -277,8 +277,8 @@ fn custom_targets_are_prepared_once_on_mounted_and_auto() {
             );
         } else {
             stable_targets(
-                &vnfs::Mounted::new(root.path()).unwrap(),
-                &vnfs::Mounted::new(root.path()).unwrap(),
+                &vnfs::Posix::new(root.path()).unwrap(),
+                &vnfs::Posix::new(root.path()).unwrap(),
             );
         }
     }
@@ -306,7 +306,7 @@ fn portable_directory_open_preserves_path_only_backend_rejection() {
         if auto {
             check(&vnfs::Auto::new(root.path()).unwrap());
         } else {
-            check(&vnfs::Mounted::new(root.path()).unwrap());
+            check(&vnfs::Posix::new(root.path()).unwrap());
         }
     }
 }

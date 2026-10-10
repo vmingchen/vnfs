@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) enum AutoDirInner {
-    Mounted(vfsi_sync::FsDir<DummyVecFs>),
+    Posix(vfsi_sync::FsDir<LocalBackend>),
     Nfs(vfsi_sync::FsDir<vfsi_nfs::NfsVecFs>),
 }
 
@@ -30,13 +30,13 @@ impl AutoDir {
     }
     pub fn is_closed(&self) -> bool {
         match &self.inner {
-            AutoDirInner::Mounted(dir) => dir.is_closed(),
+            AutoDirInner::Posix(dir) => dir.is_closed(),
             AutoDirInner::Nfs(dir) => dir.is_closed(),
         }
     }
     pub fn try_close(&mut self) -> VfResult<()> {
         match &mut self.inner {
-            AutoDirInner::Mounted(dir) => dir.try_close(),
+            AutoDirInner::Posix(dir) => dir.try_close(),
             AutoDirInner::Nfs(dir) => dir.try_close(),
         }
     }
@@ -46,7 +46,7 @@ impl AutoDir {
 }
 
 pub(super) enum AutoFileInner {
-    Mounted(FsFile<DummyVecFs>),
+    Posix(FsFile<LocalBackend>),
     Nfs(NfsFile),
 }
 
@@ -71,7 +71,7 @@ impl std::fmt::Debug for AutoFile {
 impl AutoFile {
     pub fn is_closed(&self) -> bool {
         match &self.inner {
-            AutoFileInner::Mounted(file) => file.is_closed(),
+            AutoFileInner::Posix(file) => file.is_closed(),
             AutoFileInner::Nfs(file) => file.is_closed(),
         }
     }
@@ -104,13 +104,13 @@ impl AutoFile {
 
     pub fn try_close(&mut self) -> VfResult<()> {
         match &mut self.inner {
-            AutoFileInner::Mounted(file) => file.try_close(),
+            AutoFileInner::Posix(file) => file.try_close(),
             AutoFileInner::Nfs(file) => file.try_close(),
         }
     }
     pub fn close(self) -> VfResult<()> {
         match self.inner {
-            AutoFileInner::Mounted(file) => file.close(),
+            AutoFileInner::Posix(file) => file.close(),
             AutoFileInner::Nfs(file) => file.close(),
         }
     }

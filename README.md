@@ -171,7 +171,8 @@ and mirror-promotion policies.
 
 Use `vnfs` for the NFS-focused application crate, `vfsi-core` and
 `vfsi-sync` for backend-neutral interfaces, and the protocol crates
-`vfsi-nfs`, `vfsi-smb`, and `vfsi-local` when selecting backends directly.
+`vfsi-nfs`, `vfsi-smb`, `vfsi-posix`, and `vfsi-uring` when selecting backends
+directly. `vfsi-local` supplies shared local machinery, not a default executor.
 This keeps protocol dependencies out of packages that do not use them.
 
 NFS connections negotiate NFSv4.2 and fall back to NFSv4.1. Rust clients use

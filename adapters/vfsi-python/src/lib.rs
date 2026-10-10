@@ -24,7 +24,7 @@ use vfsi_core::{
     VF_ERR_UNSUPPORTED, VfAttrs, VfError, VfFile, VfOffset, VfType, WriteOp, WriteResult,
 };
 #[cfg(feature = "dummy")]
-use vfsi_local::DummyVecFs;
+use vfsi_local::LocalBackend;
 #[cfg(feature = "nfs-rpcsec-gss")]
 use vfsi_nfs::RpcsecGssProtection;
 #[cfg(feature = "nfs")]
@@ -730,7 +730,7 @@ impl NfsClient {
                     std::fs::create_dir_all(&root_path)
                         .map_err(|e| PyOSError::new_err(format!("create dummy root: {}", e)))?;
                     Box::new(
-                        DummyVecFs::try_new(root_path)
+                        vfsi_posix::backend(root_path)
                             .map_err(|error| PyOSError::new_err(error.to_string()))?,
                     ) as Box<dyn BindingBackend + Send>
                 }
@@ -2002,7 +2002,7 @@ trait BindingBackend: vfsi_sync::backend::VectorBackend {
     }
 }
 #[cfg(feature = "dummy")]
-impl BindingBackend for DummyVecFs {}
+impl BindingBackend for LocalBackend {}
 #[cfg(feature = "nfs")]
 impl BindingBackend for vfsi_nfs::NfsVecFs {
     fn nfs_minorversion(&self) -> Option<u32> {

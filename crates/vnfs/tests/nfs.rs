@@ -4534,7 +4534,7 @@ fn portable_auto_directory_vectors_preflight_and_retain_identity() {
     // Create and rename through the kernel namespace so Auto's host-side route
     // discovery observes its own fixture changes. Check post-removal state via
     // direct NFS to avoid assuming kernel/direct-client cache coherence.
-    let namespace = vnfs::Mounted::new(root.path()).unwrap();
+    let namespace = vnfs::Posix::new(root.path()).unwrap();
     let verify = Nfs::from_mount(root.path()).unwrap();
     portable_directory_handles::check(&fs, &other, &namespace, &verify);
 }

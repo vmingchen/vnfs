@@ -1336,6 +1336,7 @@ dependencies = [
  "tempfile",
  "vfsi-local",
  "vfsi-nfs",
+ "vfsi-posix",
  "vfsi-smb",
  "vfsi-sync",
  "vnfs",
@@ -1375,6 +1376,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vfsi-posix"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "vfsi-core",
+ "vfsi-local",
+ "vfsi-sync",
+]
+
+[[package]]
 name = "vfsi-smb"
 version = "0.1.6"
 dependencies = [
@@ -1405,6 +1416,7 @@ dependencies = [
  "tempfile",
  "vfsi-core",
  "vfsi-local",
+ "vfsi-posix",
  "vfsi-sync",
 ]
 
@@ -1419,6 +1431,7 @@ dependencies = [
  "vfsi-core",
  "vfsi-local",
  "vfsi-nfs",
+ "vfsi-posix",
  "vfsi-sync",
  "vfsi-uring",
 ]

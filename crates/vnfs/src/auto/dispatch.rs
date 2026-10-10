@@ -38,10 +38,10 @@ impl Auto {
             let end = cohort_end(&resolved, start);
             let batch: Vec<_> = resolved[start..end].iter().map(|r| &r.path).collect();
             let dirs: Vec<_> = match &resolved[start].route {
-                Route::Mounted => self
+                Route::Posix => self
                     .mounted
                     .vopen_dirs(&batch)
-                    .map(|dirs| dirs.into_iter().map(AutoDirInner::Mounted).collect()),
+                    .map(|dirs| dirs.into_iter().map(AutoDirInner::Posix).collect()),
                 Route::Nfs(connection) => connection
                     .client
                     .vopen_dirs(&batch)
@@ -105,7 +105,7 @@ impl Auto {
                 };
             }
             let result = match &resolved[start].route {
-                Route::Mounted => self.mounted.vremove_dir_contents(&batch!(Mounted), options),
+                Route::Posix => self.mounted.vremove_dir_contents(&batch!(Posix), options),
                 Route::Nfs(connection) => connection
                     .client
                     .vremove_dir_contents(&batch!(Nfs), options),
@@ -169,11 +169,11 @@ impl Auto {
         for (index, (source, link)) in sources.iter_mut().zip(&mut links).enumerate() {
             if !source.route.same_backend(&link.route) {
                 *source = Resolved {
-                    route: Route::Mounted,
+                    route: Route::Posix,
                     path: pairs[index].0.as_ref().to_path_buf(),
                 };
                 *link = Resolved {
-                    route: Route::Mounted,
+                    route: Route::Posix,
                     path: pairs[index].1.as_ref().to_path_buf(),
                 };
             }
@@ -185,7 +185,7 @@ impl Auto {
                 .map(|index| (sources[index].path.as_path(), links[index].path.as_path()))
                 .collect();
             match &sources[start].route {
-                Route::Mounted => self.mounted.vhardlink(&batch),
+                Route::Posix => self.mounted.vhardlink(&batch),
                 Route::Nfs(connection) => connection.client.vhardlink(&batch),
             }
             .map_err(|error| {
@@ -247,7 +247,7 @@ impl Auto {
                 }};
             }
             let result = match &resolved[start].route {
-                Route::Mounted => self.mounted.vstatfs(&batch!(Mounted)),
+                Route::Posix => self.mounted.vstatfs(&batch!(Posix)),
                 Route::Nfs(connection) => connection.client.vstatfs(&batch!(Nfs)),
             }
             .map_err(|error| {
@@ -327,7 +327,7 @@ impl Auto {
                 }};
             }
             match &resolved[start].route {
-                Route::Mounted => self.mounted.vsetattrs(&batch!(Mounted)),
+                Route::Posix => self.mounted.vsetattrs(&batch!(Posix)),
                 Route::Nfs(connection) => connection.client.vsetattrs(&batch!(Nfs)),
             }
             .map_err(|error| {
@@ -395,7 +395,7 @@ impl Auto {
                 }};
             }
             let result = match &resolved[start].route {
-                Route::Mounted => self.mounted.vgetattrs(&batch!(Mounted), options),
+                Route::Posix => self.mounted.vgetattrs(&batch!(Posix), options),
                 Route::Nfs(connection) => connection.client.vgetattrs(&batch!(Nfs), options),
             }
             .map_err(|error| {
@@ -445,7 +445,7 @@ impl Auto {
                 }};
             }
             match &resolved[start].route {
-                Route::Mounted => self.mounted.vfsync(&batch!(Mounted), mode),
+                Route::Posix => self.mounted.vfsync(&batch!(Posix), mode),
                 Route::Nfs(connection) => connection.client.vfsync(&batch!(Nfs), mode),
             }
             .map_err(|error| {
@@ -489,7 +489,7 @@ impl Auto {
                 .map(|(route, op)| crate::MkDirOp::new(route.path.as_path(), op.mode()))
                 .collect();
             let result = match &resolved[start].route {
-                Route::Mounted => self.mounted.vmkdir(&batch),
+                Route::Posix => self.mounted.vmkdir(&batch),
                 Route::Nfs(connection) => connection.client.vmkdir(&batch),
             };
             result.map_err(|error| {
@@ -524,7 +524,7 @@ impl Auto {
                     })
                 {
                     Resolved {
-                        route: Route::Mounted,
+                        route: Route::Posix,
                         path: path.to_path_buf(),
                     }
                 } else {
@@ -540,7 +540,7 @@ impl Auto {
                 .map(|route| route.path.as_path())
                 .collect();
             match &resolved[start].route {
-                Route::Mounted => self.mounted.vremove_impl(&batch, recursive, options),
+                Route::Posix => self.mounted.vremove_impl(&batch, recursive, options),
                 Route::Nfs(connection) => {
                     connection.client.vremove_impl(&batch, recursive, options)
                 }
@@ -567,7 +567,7 @@ impl Auto {
                 } else {
                     (
                         Resolved {
-                            route: Route::Mounted,
+                            route: Route::Posix,
                             path: source.as_ref().to_path_buf(),
                         },
                         destination.as_ref().to_path_buf(),
@@ -586,7 +586,7 @@ impl Auto {
                 .map(|(source, destination)| (source.path.as_path(), destination.as_path()))
                 .collect();
             match &pairs[start].0.route {
-                Route::Mounted => self.mounted.vcopy(&batch, options),
+                Route::Posix => self.mounted.vcopy(&batch, options),
                 Route::Nfs(connection) => connection.client.vcopy(&batch, options),
             }
             .map_err(|error| indexed(error, start))?;
@@ -605,7 +605,7 @@ impl Auto {
             .map(|path| self.resolve(path, &mounts))
             .collect();
         match &routes[0].route {
-            Route::Mounted => Ok(1),
+            Route::Posix => Ok(1),
             Route::Nfs(connection) => {
                 Ok(cohort_end(&routes, 0).min(connection.client.directory_page_batch_size()?))
             }
@@ -690,7 +690,7 @@ impl Auto {
                 .map(|state| state.1.as_path())
                 .collect();
             let pages = match &states[start].0 {
-                Route::Mounted => self.mounted.read_dir_pages_with_fields(
+                Route::Posix => self.mounted.read_dir_pages_with_fields(
                     &batch,
                     fields,
                     cursors,
@@ -738,7 +738,7 @@ impl Auto {
                     .into_iter()
                     .map(|(backend_path, cursor)| {
                         let public_path = match &states[index].0 {
-                            Route::Mounted => backend_path.clone(),
+                            Route::Posix => backend_path.clone(),
                             Route::Nfs(connection) => {
                                 self.public_path(connection, &backend_path)?
                             }
@@ -786,7 +786,7 @@ impl Auto {
                 .collect();
             let options = crate::ReadAllOptions::new().max_total_bytes(remaining);
             let buffers = match &resolved[start].route {
-                Route::Mounted => self.mounted.read_files_native(&batch, options),
+                Route::Posix => self.mounted.read_files_native(&batch, options),
                 Route::Nfs(connection) => connection.client.read_files_native(&batch, options),
             }
             .map_err(|error| indexed(error, start))?;
@@ -809,7 +809,7 @@ impl Auto {
     ) -> VfResult<crate::StreamCompletion> {
         let route = self.resolve(path.as_ref(), &read_mounts(false));
         match route.route {
-            Route::Mounted => self
+            Route::Posix => self
                 .mounted
                 .read_stream_with_options(&route.path, options, callback),
             Route::Nfs(connection) => {
@@ -827,7 +827,7 @@ impl Auto {
     ) -> VfResult<()> {
         let route = self.resolve_tree(path.as_ref());
         match route.route {
-            Route::Mounted => self
+            Route::Posix => self
                 .mounted
                 .remove_dir_contents_with_options(&route.path, options),
             Route::Nfs(connection) => connection
@@ -861,13 +861,13 @@ impl Auto {
                 .collect();
             let route = resolved[start].route.clone();
             match &route {
-                Route::Mounted => {
+                Route::Posix => {
                     let files = self.mounted.vopen(&batch).map_err(|e| indexed(e, start))?;
                     for (index, file) in files.into_iter().enumerate() {
                         output.push(AutoFile::new(
                             requests[start + index].path().to_path_buf(),
                             route.clone(),
-                            AutoFileInner::Mounted(file),
+                            AutoFileInner::Posix(file),
                             &self.owner,
                         ));
                     }
@@ -974,12 +974,12 @@ impl Auto {
                 end += 1;
             }
             match &project(&requests[start]).file.route {
-                Route::Mounted => {
+                Route::Posix => {
                     let batch: Vec<_> = requests[start..end]
                         .iter()
                         .map(&project)
                         .map(|request| {
-                            let AutoFileInner::Mounted(file) = &request.file.inner else {
+                            let AutoFileInner::Posix(file) = &request.file.inner else {
                                 unreachable!()
                             };
                             file.read_request_at(request.offset, request.length)
@@ -1039,11 +1039,11 @@ impl Auto {
                 end += 1;
             }
             match &route {
-                Route::Mounted => {
+                Route::Posix => {
                     let mut batch: Vec<_> = requests[start..end]
                         .iter_mut()
                         .map(|request| {
-                            let AutoFileInner::Mounted(file) = &request.file.inner else {
+                            let AutoFileInner::Posix(file) = &request.file.inner else {
                                 unreachable!()
                             };
                             file.read_request_at_into(request.offset, &mut *request.buffer)
@@ -1144,7 +1144,7 @@ impl Auto {
                 }};
             }
             let result = match &requests[start].file().route {
-                Route::Mounted => dispatch!(self.mounted, Mounted),
+                Route::Posix => dispatch!(self.mounted, Posix),
                 Route::Nfs(connection) => dispatch!(connection.client, Nfs),
             };
             output.extend(result.map_err(|error| indexed(error, start))?);
@@ -1174,9 +1174,9 @@ impl Auto {
                 end += 1;
             }
             match &route {
-                Route::Mounted => {
+                Route::Posix => {
                     let batch = files[start..end].iter_mut().map(|file| {
-                        let AutoFileInner::Mounted(file) = &mut file.inner else {
+                        let AutoFileInner::Posix(file) = &mut file.inner else {
                             unreachable!()
                         };
                         file
@@ -1218,7 +1218,7 @@ impl Auto {
             for (index, (source, destination)) in pairs.iter().enumerate() {
                 let a = self.resolve(source.as_ref(), &mounts);
                 let b = self.resolve(destination.as_ref(), &mounts);
-                if !matches!((&a.route, &b.route), (Route::Mounted, Route::Mounted)) {
+                if !matches!((&a.route, &b.route), (Route::Posix, Route::Posix)) {
                     return Err(
                         vfsi_sync::VfError::client(index, vfsi_core::VF_ERR_UNSUPPORTED)
                             .with_context("vrename", source.as_ref()),
@@ -1256,7 +1256,7 @@ impl Auto {
                 .map(|i| (sources[i].path.as_path(), targets[i].path.as_path()))
                 .collect();
             match &sources[start].route {
-                Route::Mounted => self.mounted.vrename(&batch, options),
+                Route::Posix => self.mounted.vrename(&batch, options),
                 Route::Nfs(connection) => connection.client.vrename(&batch, options),
             }
             .map_err(|error| indexed(error, start))?;

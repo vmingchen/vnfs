@@ -77,16 +77,17 @@ mod routed {
         type Dir = crate::AutoDir;
         client_methods!(crate::Auto, std::convert::identity);
     }
+}
 
-    impl Vfsi for crate::Mounted {
-        type File = crate::MountedFile;
-        type Dir = crate::MountedDir;
-        client_methods!(crate::Mounted, std::convert::identity);
-    }
-
-    impl FileHandle for crate::MountedFile {
-        vfsi_sync::__vfsi_file_methods!(crate::MountedFile);
-    }
+#[cfg(all(feature = "posix", unix))]
+impl Vfsi for crate::Posix {
+    type File = crate::PosixFile;
+    type Dir = crate::PosixDir;
+    client_methods!(crate::Posix, std::convert::identity);
+}
+#[cfg(all(feature = "posix", unix))]
+impl FileHandle for crate::PosixFile {
+    vfsi_sync::__vfsi_file_methods!(crate::PosixFile);
 }
 
 #[cfg(all(test, feature = "auto", target_os = "linux"))]
@@ -96,9 +97,9 @@ mod extension_tests;
 impl crate::DirHandle for crate::NfsDir {
     vfsi_sync::__vfsi_file_methods!(crate::NfsDir);
 }
-#[cfg(all(feature = "auto", target_os = "linux"))]
-impl crate::DirHandle for crate::MountedDir {
-    vfsi_sync::__vfsi_file_methods!(crate::MountedDir);
+#[cfg(all(feature = "posix", unix))]
+impl crate::DirHandle for crate::PosixDir {
+    vfsi_sync::__vfsi_file_methods!(crate::PosixDir);
 }
 #[cfg(all(feature = "auto", target_os = "linux"))]
 impl crate::DirHandle for crate::AutoDir {

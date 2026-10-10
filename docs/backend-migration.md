@@ -33,7 +33,7 @@ replay. NFS/SMB wire-operation structs remain protocol-internal representations,
 not additional application contracts.
 
 The `VecFs` and `VecFsExt` traits and their blanket native adapters have been
-removed in a deliberate breaking Rust migration. Concrete types `DummyVecFs`,
+removed in a deliberate breaking Rust migration. Concrete types `LocalBackend`,
 `NfsVecFs`, and `SmbVecFs` keep their names. The native contracts are now
 `HandleBackend` (the minimum owned-handle contract) and `VectorBackend: HandleBackend`
 (native vector engines and overridable workflows). The intermediate operation-

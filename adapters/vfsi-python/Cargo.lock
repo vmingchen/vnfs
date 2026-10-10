@@ -1029,6 +1029,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vfsi-posix"
+version = "0.1.0"
+dependencies = [
+ "vfsi-core",
+ "vfsi-local",
+ "vfsi-sync",
+]
+
+[[package]]
 name = "vfsi-python-native"
 version = "0.1.2"
 dependencies = [
@@ -1037,6 +1046,7 @@ dependencies = [
  "vfsi-core",
  "vfsi-local",
  "vfsi-nfs",
+ "vfsi-posix",
  "vfsi-smb",
  "vfsi-sync",
 ]

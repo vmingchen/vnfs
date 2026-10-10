@@ -15,9 +15,7 @@ fn read_write_sync_vectors_are_bounded_and_match_local() {
         .queue_depth(NonZeroU32::new(3).unwrap())
         .max_batch_bytes(NonZeroUsize::new(80).unwrap());
     let (fs, telemetry) = connect_with_telemetry(root.path(), options).unwrap();
-    let local = vfsi_sync::FsClient::new(
-        vfsi_local::DummyVecFs::try_new(root.path().to_path_buf()).unwrap(),
-    );
+    let local = vfsi_posix::connect(root.path()).unwrap();
     let opens: Vec<_> = paths
         .iter()
         .map(|p| OpenOp::new(p, OpenFlags::READ | OpenFlags::WRITE))

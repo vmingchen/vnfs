@@ -1,7 +1,9 @@
-//! A [`VectorBackend`] implementation backed by the local filesystem (`std::fs`), so
-//! the vectorized API also works on non-NFS filesystems.
+//! Shared local namespace, handle ownership and ordering machinery.
 //!
-//! `"/"` maps to the `root` directory passed to [`DummyVecFs::new`]; all
+//! Backend implementers supply a descriptor executor to [`LocalBackend::new`].
+//! Applications normally use `vfsi-posix` or `vfsi-uring` instead.
+//!
+//! `"/"` maps to the `root` directory passed to [`LocalBackend::new`]; all
 //! writes stay under that root. Paths are normalized lexically (`.` and `..`
 //! cannot escape the root), and path-based file operations resolve symlinks
 //! and refuse targets outside the root (`ERR_ACCES`). Operations that never
@@ -97,7 +99,7 @@ fn noreplace_error_code(
 }
 
 /// Open state for a descriptor on the local filesystem.
-struct DummyOpen {
+struct LocalOpen {
     file: Arc<File>,
     path: PathBuf,
     cur_offset: u64,
@@ -138,8 +140,8 @@ impl std::ops::Deref for AnchoredPath {
 }
 
 /// A local-filesystem [`VectorBackend`]. `"/"` is the `root` directory.
-pub struct DummyVecFs {
-    io: Option<Box<dyn io::DescriptorIo>>,
+pub struct LocalBackend {
+    io: Box<dyn io::DescriptorIo>,
     root: PathBuf,
     /// Canonical form of `root`, used for containment checks on platforms
     /// without Linux's dirfd-relative `openat2` resolution.
@@ -149,12 +151,12 @@ pub struct DummyVecFs {
     root_dir: File,
     cwd: PathBuf,
     next_fd: i32,
-    open_files: HashMap<i32, DummyOpen>,
+    open_files: HashMap<i32, LocalOpen>,
     #[cfg(feature = "test-faults")]
     fault_injector: Option<Arc<dyn FaultInjector>>,
 }
 
-impl DummyVecFs {
+impl LocalBackend {
     /// Hold the entire directory, resolving every component in one no-symlink
     /// openat2. Reading through its procfs descriptor closes validation races.
     fn strict_directory_path(&self, dir: &Path) -> VfResult<AnchoredPath> {
@@ -267,24 +269,16 @@ impl DummyVecFs {
         Ok(())
     }
 
-    /// Create a client rooted at `root` (created if missing).
-    ///
-    /// This compatibility constructor panics if the root cannot be prepared.
-    /// New applications should prefer [`Self::try_new`].
-    pub fn new(root: PathBuf) -> DummyVecFs {
-        Self::try_new(root).expect("prepare dummy root")
-    }
-
-    /// Fallibly create a client rooted at `root` (created if missing).
-    pub fn try_new(root: PathBuf) -> VfResult<DummyVecFs> {
+    /// Prepare a root (created if missing) with an explicit synchronous executor.
+    pub fn new(root: PathBuf, engine: impl io::DescriptorIo + 'static) -> VfResult<Self> {
         std::fs::create_dir_all(&root).map_err(|error| VfError::failure(0, Self::errno(&error)))?;
         let root_canon = std::fs::canonicalize(&root)
             .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
         #[cfg(target_os = "linux")]
         let root_dir =
             File::open(&root_canon).map_err(|error| VfError::failure(0, Self::errno(&error)))?;
-        Ok(DummyVecFs {
-            io: None,
+        Ok(LocalBackend {
+            io: Box::new(engine),
             root: root_canon.clone(),
             #[cfg(not(target_os = "linux"))]
             root_canon,
@@ -296,13 +290,6 @@ impl DummyVecFs {
             #[cfg(feature = "test-faults")]
             fault_injector: None,
         })
-    }
-
-    /// Install a synchronous batch executor without changing local namespace
-    /// semantics. Intended for backend implementers, not application callers.
-    pub fn with_io_engine(mut self, engine: impl io::DescriptorIo + 'static) -> Self {
-        self.io = Some(Box::new(engine));
-        self
     }
 
     #[cfg(feature = "test-faults")]
@@ -324,7 +311,7 @@ impl DummyVecFs {
             .map_or(Ok(()), |injector| injector.check(&point))
     }
 
-    fn insert_open_file(&mut self, open: DummyOpen) -> VfResult<Fd> {
+    fn insert_open_file(&mut self, open: LocalOpen) -> VfResult<Fd> {
         vfsi_core::insert_fd(&mut self.next_fd, &mut self.open_files, open)
     }
 
@@ -1076,9 +1063,9 @@ impl DummyVecFs {
     }
 }
 
-impl HandleBackend for DummyVecFs {
+impl HandleBackend for LocalBackend {
     fn vfsync_impl(&mut self, files: &[VfFile], mode: vfsi_core::api::SyncMode) -> VfRes {
-        if let Some(engine) = self.io.as_mut() {
+        {
             let files: Vec<_> = files
                 .iter()
                 .enumerate()
@@ -1092,23 +1079,17 @@ impl HandleBackend for DummyVecFs {
                         .ok_or_else(|| VfError::failure(index, ERR_EBADF))
                 })
                 .collect::<VfResult<_>>()?;
-            let results = engine.sync(&files, matches!(mode, vfsi_core::api::SyncMode::Data));
+            let results = self
+                .io
+                .sync(&files, matches!(mode, vfsi_core::api::SyncMode::Data));
             if results.len() != files.len() {
                 return Err(VfError::client(0, VF_ERR_RPC));
             }
             for (index, result) in results.into_iter().enumerate() {
                 result.map_err(|error| VfError::failure(index, Self::errno(&error)))?;
             }
-            return Ok(());
+            Ok(())
         }
-        for (index, file) in files.iter().enumerate() {
-            match mode {
-                vfsi_core::api::SyncMode::Data => self.sync_data(file),
-                vfsi_core::api::SyncMode::All => self.sync_all(file),
-            }
-            .map_err(|error| error.with_index(index))?;
-        }
-        Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -1209,7 +1190,7 @@ impl HandleBackend for DummyVecFs {
             file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
         }
-        let fd = self.insert_open_file(DummyOpen {
+        let fd = self.insert_open_file(LocalOpen {
             file: Arc::new(file),
             path: pathname.to_path_buf(),
             cur_offset: 0,
@@ -1331,7 +1312,7 @@ impl HandleBackend for DummyVecFs {
     }
 }
 
-impl VectorBackend for DummyVecFs {
+impl VectorBackend for LocalBackend {
     fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeCleanup { index: _index })?;
@@ -1380,7 +1361,7 @@ impl VectorBackend for DummyVecFs {
     }
 
     fn vread_impl(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
-        if self.io.is_some() && reads.iter().all(|op| op.file.is_descriptor()) {
+        if reads.iter().all(|op| op.file.is_descriptor()) {
             let mut storage: Vec<_> = reads.iter().map(|op| vec![0; op.length]).collect();
             let mut buffers: Vec<_> = storage.iter_mut().map(Vec::as_mut_slice).collect();
             let results = self.vread_into_impl(reads, &mut buffers)?;
@@ -1420,7 +1401,7 @@ impl VectorBackend for DummyVecFs {
             op.file.is_descriptor()
                 && (!matches!(op.offset, VfOffset::Cur) || cursors.insert(op.file.fd()))
         });
-        if self.io.is_some() && independent {
+        if independent {
             let mut operations = Vec::with_capacity(reads.len());
             for (index, (op, buffer)) in reads.iter().zip(buffers.iter_mut()).enumerate() {
                 if op.length != buffer.len() {
@@ -1446,7 +1427,7 @@ impl VectorBackend for DummyVecFs {
                 });
             }
             let offsets: Vec<_> = operations.iter().map(|op| op.offset).collect();
-            let results = self.io.as_mut().unwrap().read(&mut operations);
+            let results = self.io.read(&mut operations);
             drop(operations);
             if results.len() != reads.len() {
                 return Err(VfError::client(0, VF_ERR_RPC));
@@ -1489,15 +1470,15 @@ impl VectorBackend for DummyVecFs {
     }
 
     fn vwrite_impl(&mut self, writes: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
-        if let Some(engine) = self.io.as_mut()
-            && writes
-                .iter()
-                .all(|op| op.file().is_descriptor() && matches!(op.offset(), VfOffset::At(_)))
+        if writes
+            .iter()
+            .all(|op| op.file().is_descriptor() && matches!(op.offset(), VfOffset::At(_)))
         {
             let mut operations = Vec::with_capacity(writes.len());
             let mut ranges = Vec::with_capacity(writes.len());
             let mut identities = HashMap::new();
             let mut independent = true;
+            let ordered = self.io.ordered();
             for (index, op) in writes.iter().enumerate() {
                 let fd = op.file().fd().unwrap();
                 let open = self
@@ -1512,27 +1493,29 @@ impl VectorBackend for DummyVecFs {
                     unreachable!()
                 };
                 let end = checked_offset(offset, op.data().len() as u64, index)?;
-                let identity = if let Some(identity) = identities.get(&fd) {
-                    *identity
-                } else {
-                    let md = open
-                        .file
-                        .metadata()
-                        .map_err(|e| VfError::failure(index, Self::errno(&e)))?;
-                    let identity = (md.dev(), md.ino());
-                    identities.insert(fd, identity);
-                    identity
-                };
-                ranges.push((identity, offset, end));
+                if !ordered {
+                    let identity = if let Some(identity) = identities.get(&fd) {
+                        *identity
+                    } else {
+                        let md = open
+                            .file
+                            .metadata()
+                            .map_err(|e| VfError::failure(index, Self::errno(&e)))?;
+                        let identity = (md.dev(), md.ino());
+                        identities.insert(fd, identity);
+                        identity
+                    };
+                    ranges.push((identity, offset, end));
+                }
                 operations.push(io::Write {
                     file: &open.file,
                     offset,
                     data: op.data(),
                 });
             }
-            if independent && !writes_overlap(&mut ranges) {
+            if independent && (ordered || !writes_overlap(&mut ranges)) {
                 let offsets: Vec<_> = operations.iter().map(|op| op.offset).collect();
-                let results = engine.write(&operations);
+                let results = self.io.write(&operations);
                 if results.len() != writes.len() {
                     return Err(VfError::client(0, VF_ERR_RPC));
                 }
@@ -2002,11 +1985,6 @@ impl VectorBackend for DummyVecFs {
     }
 }
 
-/// Compatibility module matching the historical `vnfs::dummy_vecfs` path.
-pub mod dummy_vecfs {
-    pub use super::DummyVecFs;
-}
-
 #[cfg(test)]
 mod contract_tests;
 
@@ -2016,7 +1994,7 @@ fn local_filesystem_stats(fd: std::os::fd::RawFd, index: usize) -> VfResult<File
     if unsafe { libc::fstatvfs(fd, &mut raw) } != 0 {
         return Err(VfError::failure(
             index,
-            DummyVecFs::errno(&std::io::Error::last_os_error()),
+            LocalBackend::errno(&std::io::Error::last_os_error()),
         ));
     }
     let bytes = |blocks: u64| {

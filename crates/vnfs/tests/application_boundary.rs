@@ -2,7 +2,7 @@
 #![cfg(target_os = "linux")]
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
-use vnfs::{Mounted, OpenFlags, OpenOp};
+use vnfs::{OpenFlags, OpenOp, Posix};
 use vnfs::{Vfsi, VfsiExt};
 
 thread_local! {
@@ -51,7 +51,7 @@ fn measured<T>(f: impl FnOnce() -> T) -> (T, (usize, usize)) {
 fn auto_range_only_reads_keep_the_legacy_routing_allocation_cost() {
     let root = tempfile::tempdir().unwrap();
     let auto = vnfs::Auto::new(root.path()).unwrap();
-    let mounted = Mounted::new(root.path()).unwrap();
+    let mounted = Posix::new(root.path()).unwrap();
     mounted
         .write_files(&[("/a", b"abc"), ("/b", b"def")])
         .unwrap();
@@ -70,10 +70,10 @@ fn auto_range_only_reads_keep_the_legacy_routing_allocation_cost() {
     let (expected, baseline) = measured(|| mounted.vread(reads, Default::default()).unwrap());
     assert_eq!(actual, expected);
     // Legacy Auto routing needs only a result vector and one backend request
-    // vector beyond Mounted. Partition/index/scatter vectors are unnecessary.
+    // vector beyond Posix. Partition/index/scatter vectors are unnecessary.
     let routing_bytes = paths.len()
         * (std::mem::size_of::<vnfs::ReadResult>()
-            + std::mem::size_of::<vfsi_sync::FsRead<'_, vfsi_local::DummyVecFs>>());
+            + std::mem::size_of::<vfsi_sync::FsRead<'_, vfsi_local::LocalBackend>>());
     assert_eq!(cost.0, baseline.0 + 2);
     assert!(cost.1 <= baseline.1 + routing_bytes);
 }
@@ -81,7 +81,7 @@ fn auto_range_only_reads_keep_the_legacy_routing_allocation_cost() {
 #[test]
 fn unified_operation_construction_does_not_allocate() {
     let temp = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(temp.path()).unwrap();
+    let fs = Posix::new(temp.path()).unwrap();
     fs.write("/a", b"abc").unwrap();
     let file = fs.open("/a").unwrap();
     let mut buffer = [0; 1];
@@ -100,11 +100,10 @@ fn unified_operation_construction_does_not_allocate() {
 
 #[test]
 fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
-    use vfsi_local::DummyVecFs;
     use vfsi_sync::FsClient;
     let root = tempfile::TempDir::new().unwrap();
-    let mounted = Mounted::new(root.path()).unwrap();
-    let raw = FsClient::new(DummyVecFs::try_new(root.path().to_path_buf()).unwrap());
+    let mounted = Posix::new(root.path()).unwrap();
+    let raw = FsClient::new(vfsi_posix::backend(root.path()).unwrap());
     let paths = ["/a", "/b", "/c"];
     mounted
         .write_files(&paths.map(|path| (path, b"payload")))
@@ -194,8 +193,8 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
 #[test]
 fn opaque_requests_preserve_owner_preflight_and_error_sources() {
     let root = tempfile::TempDir::new().unwrap();
-    let owner = Mounted::new(root.path()).unwrap();
-    let other = Mounted::new(root.path()).unwrap();
+    let owner = Posix::new(root.path()).unwrap();
+    let other = Posix::new(root.path()).unwrap();
     owner.write("/a", b"original").unwrap();
     let mut file = owner
         .open_options()
@@ -236,12 +235,12 @@ fn handles_remain_send_sync_and_clients_remain_cheaply_cloneable() {
     send_sync::<vnfs::NfsClient>();
     send_sync::<vnfs::NfsFile>();
     send_sync::<vnfs::NfsDir>();
-    send_sync::<vnfs::Mounted>();
-    send_sync::<vnfs::MountedFile>();
+    send_sync::<vnfs::Posix>();
+    send_sync::<vnfs::PosixFile>();
     cloneable::<vnfs::NfsClient>();
-    cloneable::<vnfs::Mounted>();
+    cloneable::<vnfs::Posix>();
     let root = tempfile::TempDir::new().unwrap();
-    let client = Mounted::new(root.path()).unwrap();
+    let client = Posix::new(root.path()).unwrap();
     let (clone, allocations) = measured(|| client.clone());
     assert_eq!(allocations, (0, 0), "client clone must share its backend");
     client.write("/shared", b"data").unwrap();

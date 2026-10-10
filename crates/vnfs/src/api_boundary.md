@@ -177,7 +177,7 @@ fn exclusive(file: &vnfs::NfsFile) {
 ```
 
 ```compile_fail,E0308
-fn mounted(client: &vnfs::Mounted) -> &vfsi_sync::FsClient<vfsi_local::DummyVecFs> { client }
+fn mounted(client: &vnfs::Posix) -> &vfsi_sync::FsClient<vfsi_local::LocalBackend> { client }
 ```
 
 ```no_run

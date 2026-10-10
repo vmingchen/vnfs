@@ -26,12 +26,19 @@ pub mod nfs {
 }
 
 /// Linux-mounted paths and opt-in automatic direct NFS routing.
-/// [`Mounted`] always uses the kernel. [`Auto`] can use a separate direct NFS
+/// [`crate::Posix`] always uses the kernel. [`Auto`] can use a separate direct NFS
 /// client; it does **not** provide cache coherence with kernel access.
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub mod mounted {
     #[doc(inline)]
-    pub use crate::{Auto, AutoDir, AutoFile, AutoRoute, Mounted, MountedDir, MountedFile};
+    pub use crate::{Auto, AutoDir, AutoFile, AutoRoute};
+}
+
+/// Rooted filesystem access through ordinary POSIX syscalls (`posix` feature).
+#[cfg(all(feature = "posix", unix))]
+pub mod posix {
+    #[doc(inline)]
+    pub use crate::{Posix, PosixDir, PosixFile};
 }
 
 /// Backend-independent file I/O, allocation budgets, and vector result types.
@@ -110,12 +117,14 @@ pub type Error = vfsi_core::VfError;
 
 #[cfg(any(
     feature = "nfs",
+    all(feature = "posix", unix),
     all(any(feature = "auto", feature = "uring"), target_os = "linux")
 ))]
 mod application;
 pub use vfsi_core::{AsTarget, DirHandle, FileHandle, Target, Vfsi, VfsiExt};
 #[cfg(any(
     feature = "nfs",
+    all(feature = "posix", unix),
     all(any(feature = "auto", feature = "uring"), target_os = "linux")
 ))]
 mod read;
@@ -144,15 +153,16 @@ mod readme_examples {}
 
 #[cfg(any(
     feature = "nfs",
+    all(feature = "posix", unix),
     all(any(feature = "auto", feature = "uring"), target_os = "linux")
 ))]
 mod facade;
 /// High-level filesystem workflows built on the application API.
 pub mod helpers;
-#[cfg(all(feature = "auto", target_os = "linux"))]
-pub use facade::{Mounted, MountedDir, MountedFile};
 #[cfg(feature = "nfs")]
 pub use facade::{NfsClient, NfsDir, NfsFile};
+#[cfg(all(feature = "posix", unix))]
+pub use facade::{Posix, PosixDir, PosixFile};
 
 /// Batched local descriptor I/O through Linux io_uring (opt-in `uring` feature).
 #[cfg(all(feature = "uring", target_os = "linux"))]
@@ -212,6 +222,10 @@ pub use auto::{Auto, AutoDir, AutoFile, AutoRoute};
 /// Common application imports.
 pub mod prelude {
     pub use crate::Attributes;
+    #[cfg(all(feature = "auto", target_os = "linux"))]
+    pub use crate::Auto;
+    #[cfg(all(feature = "posix", unix))]
+    pub use crate::Posix;
     #[cfg(all(feature = "uring", target_os = "linux"))]
     pub use crate::Uring;
     pub use crate::{
@@ -220,8 +234,6 @@ pub mod prelude {
         SetAttrsOp, StreamCompletion, SyncMode, Target, TraversalCompletion, Vfsi, VfsiExt,
         WriteOp, WriteOptions,
     };
-    #[cfg(all(feature = "auto", target_os = "linux"))]
-    pub use crate::{Auto, Mounted};
     #[cfg(feature = "nfs")]
     pub use crate::{Nfs, NfsAuthentication, NfsBuilder, NfsClient, NfsFile, NfsVersion};
     pub use vfsi_core::api::{DepthLimit, StreamOptions};
@@ -258,5 +270,5 @@ pub use vfsi_nfs::{
     NfsAuthentication, NfsEvent, NfsObserver, NfsReadPool, NfsReadPoolOptions, NfsRecoveryPolicy,
 };
 
-#[cfg(any(feature = "nfs", all(feature = "auto", target_os = "linux")))]
+#[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_core::api::ReadIntoResult;

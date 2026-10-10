@@ -1,14 +1,15 @@
-# io_uring versus the local VFSI backend
+# io_uring versus the POSIX VFSI backend
 
-Initial measurement on the development Linux VM: ARM64, Linux
+Measurement after the executor split on the development Linux VM: ARM64, Linux
 `7.0.0-28-generic`, ext4 on `/dev/sda1`, optimized Cargo release profile.
 No NFS server, artificial latency, direct I/O, SQPOLL or privileged cache drops.
-Both clients use the same `FsClient`/`Vfsi` adapter over the same local root.
+Both clients use the same `FsClient`/`Vfsi` adapter and `LocalBackend` machinery
+over the same local root. The benchmark's `local/` labels select `vfsi-posix`.
 
 Command:
 
 ```sh
-cargo run --release -p vnfs --no-default-features --features uring,dummy \
+cargo run --release -p vnfs --no-default-features --features uring,posix \
   --example uring_bench -- 200
 ```
 
@@ -20,17 +21,17 @@ payloads change every round, and written contents are checked through independen
 standard-filesystem reads. Opens/closes, setup, checksum verification and cold-cache preparation
 are excluded from I/O timing. Writes are buffered, not durable/fsync throughput.
 
-| Workload | Local | io_uring | Local time / ring time |
+| Workload | POSIX | io_uring | POSIX time / ring time |
 |---|---:|---:|---:|
-| Warm read: 256 × 4 KiB files | 247.1 µs | 194.5 µs | 1.27× |
-| Warm write: 256 × 4 KiB files | 345.0 µs | 560.5 µs | 0.62× |
-| Warm read: one 16 MiB file, 128 × 128 KiB ranges | 3,393.3 µs | 4,946.7 µs | 0.69× |
-| Warm write: same large-file ranges | 2,152.8 µs | 3,992.8 µs | 0.54× |
-| Advisory-cold read: 256 × 4 KiB files | 45,873.2 µs | 1,020.5 µs | 44.95× |
-| Advisory-cold read: large-file ranges | 5,122.9 µs | 5,881.1 µs | 0.87× |
+| Warm read: 256 × 4 KiB files | 159.5 µs | 192.8 µs | 0.83× |
+| Warm write: 256 × 4 KiB files | 192.1 µs | 553.4 µs | 0.35× |
+| Warm read: one 16 MiB file, 128 × 128 KiB ranges | 3,933.5 µs | 5,467.2 µs | 0.72× |
+| Warm write: same large-file ranges | 2,344.7 µs | 4,334.6 µs | 0.54× |
+| Advisory-cold read: 256 × 4 KiB files | 46,224.1 µs | 769.4 µs | 60.08× |
+| Advisory-cold read: large-file ranges | 5,102.9 µs | 5,908.2 µs | 0.86× |
 
 Directory enumeration (16 directories, each containing 16 files) averaged
-836.1 µs local versus 869.5 µs ring. It uses the same ordinary syscall path,
+894.0 µs POSIX versus 863.7 µs ring. It uses the same ordinary syscall path,
 so this is a control, not an io_uring directory acceleration claim.
 
 Actual ring counters: 870 waves, 167,040 submitted SQEs, 167,040 completions,
@@ -51,8 +52,8 @@ above use ext4, but advisory eviction does not guarantee cold physical media,
 and this VM's hypervisor/device caches remain warm. These are indicative results
 from one VM, not general performance promises. Re-run on deployment storage.
 
-Earlier runs used uniform contents and weaker validation; their timings are
-superseded by the content-validated run above. No tests or builds ran concurrently
+Earlier runs, including the pre-split backend, are superseded by the
+content-validated run above. No tests or builds ran concurrently
 with this measurement. Validation is outside timing but changes CPU-cache state;
 warm means kernel page-cache resident, not a guarantee of CPU-cache residency.
 

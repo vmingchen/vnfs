@@ -305,33 +305,31 @@ mod nfs {
 }
 #[cfg(feature = "nfs")]
 pub use nfs::*;
-#[cfg(all(feature = "auto", target_os = "linux"))]
-mod mounted {
+#[cfg(all(feature = "posix", unix))]
+mod posix {
     use super::*;
     use std::path::Path;
-    owned_client!(Mounted, MountedFile, MountedDir, vfsi_local::DummyVecFs);
-    impl Mounted {
+    owned_client!(Posix, PosixFile, PosixDir, vfsi_local::LocalBackend);
+    impl Posix {
         /// Access this host directory through kernel filesystem operations.
         /// Namespace rooting is not a security sandbox.
         pub fn new(root: impl AsRef<Path>) -> Result<Self> {
             let root = root.as_ref();
             if !root.is_dir() {
-                return Err(Error::client(0, libc::ENOTDIR as u32).with_context("mounted", root));
+                return Err(Error::client(0, libc::ENOTDIR as u32).with_context("posix", root));
             }
-            vfsi_local::DummyVecFs::try_new(root.to_path_buf())
-                .map(vfsi_sync::FsClient::new)
-                .map(|inner| Self { inner })
+            vfsi_posix::connect(root).map(|inner| Self { inner })
         }
     }
 }
-#[cfg(all(feature = "auto", target_os = "linux"))]
-pub use mounted::*;
+#[cfg(all(feature = "posix", unix))]
+pub use posix::*;
 
 #[cfg(all(feature = "uring", target_os = "linux"))]
 mod uring {
     use super::*;
     use std::path::Path;
-    owned_client!(Uring, UringFile, UringDir, vfsi_local::DummyVecFs);
+    owned_client!(Uring, UringFile, UringDir, vfsi_local::LocalBackend);
     impl Uring {
         /// Open a Linux local backend with bounded io_uring descriptor batches.
         /// Setup errors are reported; no implicit syscall-backend fallback.

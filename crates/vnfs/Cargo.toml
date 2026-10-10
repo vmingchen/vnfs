@@ -16,9 +16,9 @@ all-features = true
 [features]
 default = ["nfs", "server-copy", "auto"]
 nfs = ["dep:nfsv41-sys", "dep:vfsi-nfs"]
-dummy = ["dep:vfsi-local"]
+posix = ["dep:vfsi-posix", "dep:vfsi-local"]
 uring = ["dep:vfsi-uring", "dep:vfsi-local"]
-auto = ["nfs", "dummy"]
+auto = ["nfs", "posix"]
 server-copy = ["vfsi-nfs?/server-copy"]
 rpcsec-gss = ["nfs", "vfsi-nfs/rpcsec-gss"]
 test-faults = [
@@ -34,6 +34,7 @@ libc = { workspace = true }
 nfsv41-sys = { workspace = true, optional = true }
 vfsi-core = { workspace = true }
 vfsi-local = { workspace = true, optional = true }
+vfsi-posix = { workspace = true, optional = true }
 vfsi-nfs = { workspace = true, optional = true }
 vfsi-sync = { workspace = true }
 
@@ -46,11 +47,11 @@ vfsi-sync = { workspace = true, features = ["test-support"] }
 
 [[example]]
 name = "uring_bench"
-required-features = ["uring", "dummy"]
+required-features = ["uring", "posix"]
 
 [[test]]
-name = "dummy_vecfs"
-required-features = ["dummy"]
+name = "posix_backend"
+required-features = ["posix"]
 
 [[test]]
 name = "application_boundary"

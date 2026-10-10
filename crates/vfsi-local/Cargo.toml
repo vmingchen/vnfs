@@ -4,7 +4,7 @@ version = "0.1.7"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-description = "Local filesystem backend for VFSI"
+description = "Shared local namespace, handles and execution interface for VFSI"
 repository = "https://github.com/vmingchen/vnfs"
 keywords = ["filesystem", "vectorized", "local", "vfsi"]
 

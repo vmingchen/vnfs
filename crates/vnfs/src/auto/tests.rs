@@ -294,7 +294,7 @@ fn mount_id_prevents_prefix_based_misrouting() {
                 }
             )
             .route,
-        Route::Mounted
+        Route::Posix
     ));
 }
 
@@ -307,7 +307,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
     ));
     fs::create_dir_all(&root).unwrap();
     let client = Auto::new(&root).unwrap();
-    assert_eq!(client.route_for("/file"), AutoRoute::Mounted);
+    assert_eq!(client.route_for("/file"), AutoRoute::Posix);
     let files = client
         .vopen(&[
             OpenOp::new(
@@ -474,7 +474,7 @@ fn live_nfs_mount_uses_direct_connection() {
     let first = mount.join(format!("{unique}-1"));
     let second = mount.join(format!("{unique}-2"));
     let local = std::env::temp_dir().join(format!("{unique}-local"));
-    assert_eq!(client.route_for(&local), AutoRoute::Mounted);
+    assert_eq!(client.route_for(&local), AutoRoute::Posix);
     let requests = [first.as_path(), second.as_path(), local.as_path()].map(|path| {
         OpenOp::new(
             path,
@@ -484,7 +484,7 @@ fn live_nfs_mount_uses_direct_connection() {
     let files = client.vopen(&requests).unwrap();
     assert!(matches!(files[0].route(), AutoRoute::DirectNfs { .. }));
     assert!(matches!(files[1].route(), AutoRoute::DirectNfs { .. }));
-    assert_eq!(files[2].route(), AutoRoute::Mounted);
+    assert_eq!(files[2].route(), AutoRoute::Posix);
     client
         .vwrite(
             &[
@@ -585,7 +585,7 @@ fn live_nfs_mount_uses_direct_connection() {
     let link = mount.join(format!("{unique}-symlink"));
     std::os::unix::fs::symlink(&local, &link).unwrap();
     let linked = client.open(&link).unwrap();
-    assert_eq!(linked.route(), AutoRoute::Mounted);
+    assert_eq!(linked.route(), AutoRoute::Posix);
     linked.close().unwrap();
     let entries = client.read_dir(&mount).unwrap();
     assert!(entries.iter().any(|entry| entry.path() == first));
@@ -939,7 +939,7 @@ fn live_file_bind_mount_uses_covering_mount() {
         .expect("VFSI_AUTO_TEST_BIND is required for this ignored integration test");
     let client = Auto::new("/").unwrap();
     let file = client.open(&path).unwrap();
-    assert_eq!(file.route(), AutoRoute::Mounted);
+    assert_eq!(file.route(), AutoRoute::Posix);
     let mut contents = String::new();
     client.std_io(&file).read_to_string(&mut contents).unwrap();
     assert_eq!(contents, "bind source\n");

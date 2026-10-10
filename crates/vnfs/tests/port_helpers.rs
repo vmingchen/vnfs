@@ -70,7 +70,7 @@ fn writer_bridge_handles_short_writes_and_never_replays_failed_output() {
         }
     }
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path()).unwrap();
+    let fs = Posix::new(root.path()).unwrap();
     fs.write("/source", b"0123456789").unwrap();
     let mut ok = Writer {
         bytes: vec![],
@@ -108,7 +108,7 @@ fn writer_bridge_handles_short_writes_and_never_replays_failed_output() {
 #[test]
 fn ordered_walk_preserves_sorting_prunes_before_io_and_callbacks_are_unlocked() {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path()).unwrap();
+    let fs = Posix::new(root.path()).unwrap();
     for p in ["/a", "/b", "/prune", "/empty"] {
         fs.create_dir(p).unwrap();
     }
@@ -146,7 +146,7 @@ fn ordered_walk_preserves_sorting_prunes_before_io_and_callbacks_are_unlocked() 
 #[test]
 fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path()).unwrap();
+    let fs = Posix::new(root.path()).unwrap();
     fs.create_dir("/child").unwrap();
     fs.write("/child/file", b"x").unwrap();
     fs.symlink("/child", "/link").unwrap();

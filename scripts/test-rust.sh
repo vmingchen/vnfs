@@ -34,11 +34,11 @@ if [[ -n "$package$target$filter" ]]; then
     bad_args 'Focused mode requires a package and one target, without --quick'
   focused=(cargo test -p "$package")
   case "$package" in
-    vfsi-core|vfsi-local) focused+=(--features test-faults) ;;
+    vfsi-core|vfsi-local|vfsi-posix) focused+=(--features test-faults) ;;
     vfsi-sync) focused+=(--features 'test-faults test-support') ;;
-    vnfs) focused+=(--features 'dummy test-faults') ;;
+    vnfs) focused+=(--features 'posix test-faults') ;;
     vfsi-nfs) focused+=(--all-features) ;;
-    vfsi-smb|nfsv41-sys|vfsi-c) ;;
+    vfsi-smb|vfsi-uring|nfsv41-sys|vfsi-c) ;;
     *) bad_args "Unknown root-workspace package: $package (use cargo directly for detached adapters)" ;;
   esac
   if [[ "$target" == --lib ]]; then focused+=(--lib); else focused+=(--test "$target"); fi
@@ -95,9 +95,9 @@ fi
 if ((quick)); then
   # Keep deterministic fault coverage and public API contract tests. Skip live
   # servers, backend-wide suites, doctests, FFI and detached Python workspaces.
-  run cargo test -p vfsi-core -p vfsi-sync -p vfsi-local --lib \
+  run cargo test -p vfsi-core -p vfsi-sync -p vfsi-local -p vfsi-posix --lib \
     --features "vfsi-core/test-faults vfsi-sync/test-faults vfsi-sync/test-support vfsi-local/test-faults"
-  run cargo test -p vnfs --features "dummy test-faults" --lib \
+  run cargo test -p vnfs --features "posix test-faults" --lib \
     --test public_api --test application_boundary --test tree_builder \
     --test canonical_examples --test readv --test client_vectors --test port_helpers
   exit 0
@@ -107,17 +107,17 @@ fi
 # sets, and the live NFS/SMB integration suites run in their dedicated jobs.
 # Enable deterministic fault injection in the fast suites too; otherwise
 # cfg(feature = "test-faults") regressions are silently omitted.
-run cargo test -p vfsi-core -p vfsi-sync -p vfsi-local \
+run cargo test -p vfsi-core -p vfsi-sync -p vfsi-local -p vfsi-posix \
   --features "vfsi-core/test-faults vfsi-sync/test-faults vfsi-sync/test-support vfsi-local/test-faults"
 run cargo test -p vfsi-nfs --lib --all-features
 run cargo test -p vfsi-smb --lib
 run cargo test -p nfsv41-sys
 run ./scripts/test-libntirpc.sh
 run cargo test -p vnfs --features test-faults --lib
-run cargo test -p vnfs --features "dummy test-faults" --test dummy_vecfs
+run cargo test -p vnfs --features "posix test-faults" --test posix_backend
 run cargo test -p vnfs --test public_api --test application_boundary --test tree_builder \
   --test transfer_helpers --test canonical_examples --test readv --test client_vectors \
-  --test directory_pages --test port_helpers
+  --test directory_pages --test port_helpers --test posix
 run cargo test -p vnfs --doc
 run cargo test -p vfsi-c --lib
 

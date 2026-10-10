@@ -330,19 +330,18 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
-    use vfsi_local::DummyVecFs;
     use vfsi_sync::FsClient;
 
     #[test]
     fn failed_open_preserves_original_index_and_partial_tree_without_replay_or_leaks() {
         let root = tempfile::tempdir().unwrap();
-        let mut backend = DummyVecFs::try_new(root.path().to_path_buf()).unwrap();
+        let mut backend = vfsi_posix::backend(root.path()).unwrap();
         let script = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforeRegister { index: 1 },
             Error::transport_with_kind(777, crate::TransportKind::Timeout, "injected OPEN failure"),
         ));
         backend.set_fault_injector(script.clone());
-        let client = crate::Mounted {
+        let client = crate::Posix {
             inner: FsClient::new(backend),
         };
         // Planning sorts names: a is first and b is second, but b was declared
@@ -378,13 +377,13 @@ mod tests {
     #[test]
     fn failed_directory_batch_maps_inferred_parent_to_original_declaration() {
         let root = tempfile::tempdir().unwrap();
-        let mut backend = DummyVecFs::try_new(root.path().to_path_buf()).unwrap();
+        let mut backend = vfsi_posix::backend(root.path()).unwrap();
         let script = Arc::new(FaultScript::one(
             OpenFaultPoint::BeforeSetPermissions { index: 1 },
             Error::client(1, libc::EACCES as u32),
         ));
         backend.set_fault_injector(script.clone());
-        let client = crate::Mounted {
+        let client = crate::Posix {
             inner: FsClient::new(backend),
         };
         let error = TreeBuilder::new()

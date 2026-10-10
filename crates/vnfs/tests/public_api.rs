@@ -35,7 +35,7 @@ fn concrete_and_extension_directory_visitors_borrow_entries_consistently() {
     let _ = direct; // Compile-check direct NFS without requiring a connection.
     let root = tempfile_root();
     std::fs::write(root.join("file"), b"data").unwrap();
-    let mounted = vnfs::Mounted::new(&root).unwrap();
+    let mounted = vnfs::Posix::new(&root).unwrap();
     let auto = vnfs::Auto::new(&root).unwrap();
     let concrete: &vnfs::Auto = &auto;
     assert_eq!(
@@ -411,7 +411,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
     // Compile the identical function against direct NFS without connecting.
     let _ = workflow::<vnfs::NfsClient>;
     let root = tempfile_root();
-    let mounted = vnfs::Mounted::new(&root).unwrap();
+    let mounted = vnfs::Posix::new(&root).unwrap();
     workflow(&mounted, "/mounted").unwrap();
     let auto = vnfs::Auto::new(&root).unwrap();
     workflow(&auto, "/auto").unwrap();
@@ -422,7 +422,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
 fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
     use vnfs::{Attributes, ListDirOptions, ResourceLimits};
     let root = tempfile::tempdir().unwrap();
-    let fs = vnfs::Mounted::new(root.path()).unwrap();
+    let fs = vnfs::Posix::new(root.path()).unwrap();
     fs.create_dir_all("/tree/child").unwrap();
     fs.write("/tree/child/file", b"x").unwrap();
     for depth in [201, 254, 255, 256, 500, usize::MAX - 1, usize::MAX] {
@@ -442,7 +442,7 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
             .unwrap();
         assert_eq!(explicit.len(), 2);
         assert_eq!(direct[0].len(), 2);
-        let inherited = vnfs::Mounted::new(root.path())
+        let inherited = vnfs::Posix::new(root.path())
             .unwrap()
             .with_limits(ResourceLimits::new().max_walk_depth(depth));
         assert_eq!(
@@ -517,8 +517,8 @@ fn portable_traits_and_options_are_reexports_not_parallel_contracts() {
         accepts_core_extension(fs);
     }
     // Prove bounds in both directions without opening a connection.
-    let _ = accepts_core::<vfsi_sync::FsClient<vfsi_local::DummyVecFs>>;
-    let _ = accepts_vnfs_extension::<vfsi_sync::FsClient<vfsi_local::DummyVecFs>>;
+    let _ = accepts_core::<vfsi_sync::FsClient<vfsi_local::LocalBackend>>;
+    let _ = accepts_vnfs_extension::<vfsi_sync::FsClient<vfsi_local::LocalBackend>>;
     let core: vfsi_core::api::ReadOptions = vnfs::ReadOptions::new();
     let _: vnfs::ReadOptions = core;
     let core: vfsi_core::api::ListDirOptions = vnfs::ListDirOptions::new();
@@ -535,13 +535,13 @@ fn vsetattrs_many_local_and_routed_files() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("mounted")).unwrap();
     std::fs::create_dir(root.path().join("auto")).unwrap();
-    let mounted = vnfs::Mounted::new(root.path()).unwrap();
+    let mounted = vnfs::Posix::new(root.path()).unwrap();
     vsetattrs_support::check_many(&mounted, "/mounted");
     vsetattrs_support::check_handles(&mounted, "/mounted");
     vsetattrs_support::check_ownership(&mounted, "/mounted");
     vsetattrs_support::check_foreign(
         &mounted,
-        &vnfs::Mounted::new(root.path()).unwrap(),
+        &vnfs::Posix::new(root.path()).unwrap(),
         "/mounted/foreign",
     );
     let auto = vnfs::Auto::new(root.path()).unwrap();
@@ -585,7 +585,7 @@ fn vector_links_modes_and_capabilities_work_generically_on_local_and_auto() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("local")).unwrap();
     std::fs::create_dir(root.path().join("auto")).unwrap();
-    let mounted = vnfs::Mounted::new(root.path()).unwrap();
+    let mounted = vnfs::Posix::new(root.path()).unwrap();
     links_support::check_links_and_modes(&mounted, "/local");
     let auto = vnfs::Auto::new(root.path()).unwrap();
     links_support::check_links_and_modes(&auto, "/auto");
@@ -604,8 +604,8 @@ fn filesystem_stats_local_and_routed_handles() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("local")).unwrap();
     std::fs::create_dir(root.path().join("auto")).unwrap();
-    let mounted = vnfs::Mounted::new(root.path()).unwrap();
-    let other = vnfs::Mounted::new(root.path()).unwrap();
+    let mounted = vnfs::Posix::new(root.path()).unwrap();
+    let other = vnfs::Posix::new(root.path()).unwrap();
     statfs_support::check(&mounted, &other, "/local");
     let auto = vnfs::Auto::new(root.path()).unwrap();
     statfs_support::check(&auto, &vnfs::Auto::new(root.path()).unwrap(), "/auto");
@@ -753,11 +753,11 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
         if auto {
             check(&vnfs::Auto::new(root.path()).unwrap().with_limits(limits));
         } else {
-            check(&vnfs::Mounted::new(root.path()).unwrap().with_limits(limits));
+            check(&vnfs::Posix::new(root.path()).unwrap().with_limits(limits));
         }
     }
     let root = tempfile::tempdir().unwrap();
-    let fs = vnfs::Mounted::new(root.path())
+    let fs = vnfs::Posix::new(root.path())
         .unwrap()
         .with_limits(vnfs::ResourceLimits::new().max_read_bytes(0));
     fs.write("/empty", b"").unwrap();
@@ -844,6 +844,6 @@ fn invalid_open_batch_cannot_create_or_truncate_earlier_files() {
         fs.close_files(vec![file]).unwrap();
     }
     let root = tempfile::tempdir().unwrap();
-    check(&vnfs::Mounted::new(root.path()).unwrap(), root.path());
+    check(&vnfs::Posix::new(root.path()).unwrap(), root.path());
     check(&vnfs::Auto::new(root.path()).unwrap(), root.path());
 }

@@ -107,7 +107,7 @@ class RustQuickTests(unittest.TestCase):
         self.assertIn("--test readv", calls[2])
         self.assertIn("--test application_boundary", calls[2])
         self.assertIn("--test port_helpers", calls[2])
-        self.assertIn("dummy test-faults", calls[2])
+        self.assertIn("posix test-faults", calls[2])
         self.assertFalse(any("--manifest-path" in call or "--test nfs" in call
                              or "--test smb" in call or "--doc" in call for call in calls))
 
@@ -127,7 +127,7 @@ class RustQuickTests(unittest.TestCase):
         self.assertEqual(len(calls), 4)
         self.assertIn("test -p vfsi-uring --locked", calls[0])
         self.assertIn("--no-default-features --features uring --test uring", calls[1])
-        self.assertIn("--features uring,dummy --example uring_bench", calls[2])
+        self.assertIn("--features uring,posix --example uring_bench", calls[2])
         self.assertIn("--no-default-features --features uring --doc guides::uring", calls[3])
 
     def test_failures_propagate_and_are_recorded(self):
@@ -147,7 +147,9 @@ class RustQuickTests(unittest.TestCase):
             ("vfsi-core", "test-faults"),
             ("vfsi-sync", "test-faults test-support"),
             ("vfsi-local", "test-faults"),
-            ("vnfs", "dummy test-faults"),
+            ("vfsi-posix", "test-faults"),
+            ("vfsi-uring", ""),
+            ("vnfs", "posix test-faults"),
             ("vfsi-nfs", None),
             ("vfsi-smb", ""),
             ("nfsv41-sys", ""),

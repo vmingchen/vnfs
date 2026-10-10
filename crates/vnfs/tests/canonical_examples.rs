@@ -14,7 +14,7 @@ mod open_handles;
 mod stream_file;
 
 use vnfs::VfsiExt;
-use vnfs::{Mounted, Result, Vfsi};
+use vnfs::{Posix, Result, Vfsi};
 
 #[test]
 fn grouped_namespaces_use_the_same_application_types() {
@@ -22,13 +22,13 @@ fn grouped_namespaces_use_the_same_application_types() {
     let _: vnfs::files::ResourceLimits = vnfs::ResourceLimits::default();
     let _: vnfs::directory::ListDirOptions = vnfs::ListDirOptions::new();
     let _: vnfs::error::Result<()> = Ok::<(), vnfs::Error>(());
-    let _: vnfs::mounted::AutoRoute = vnfs::AutoRoute::Mounted;
+    let _: vnfs::mounted::AutoRoute = vnfs::AutoRoute::Posix;
 }
 
 #[test]
 fn bulk_roundtrip_cleanup_and_existing_directory_protection() -> Result<()> {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path())?;
+    let fs = Posix::new(root.path())?;
     assert_eq!(
         bulk_files::run(&fs, "/fresh")?,
         [b"hello".to_vec(), b"world".to_vec()]
@@ -58,7 +58,7 @@ fn bulk_roundtrip_cleanup_and_existing_directory_protection() -> Result<()> {
 #[test]
 fn handle_ranges_preserve_order_for_empty_short_and_large_files() -> Result<()> {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path())?;
+    let fs = Posix::new(root.path())?;
     fs.write_files(&[
         ("/empty", &[][..]),
         ("/short", b"hello"),
@@ -76,7 +76,7 @@ fn handle_ranges_preserve_order_for_empty_short_and_large_files() -> Result<()> 
 #[test]
 fn stream_multiple_chunks_and_empty_file() -> Result<()> {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path())?;
+    let fs = Posix::new(root.path())?;
     let bytes = 2 * 1024 * 1024 + 7;
     fs.write("/large", &vec![37; bytes])?;
     fs.write("/empty", &[])?;
@@ -89,7 +89,7 @@ fn stream_multiple_chunks_and_empty_file() -> Result<()> {
 #[test]
 fn directory_batches_and_no_follow_walk() -> Result<()> {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path())?;
+    let fs = Posix::new(root.path())?;
     fs.create_dir_all("/tree/sub")?;
     fs.write("/tree/sub/file", b"data")?;
     fs.create_dir("/outside")?;

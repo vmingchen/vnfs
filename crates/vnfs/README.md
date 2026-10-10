@@ -91,7 +91,7 @@ adds scalar conveniences without replacing the vector engine. Start with the
 [compiled examples][examples] or the [API overview][api].
 
 Already mounted on Linux? `Nfs::from_mount("/mnt/data")?` discovers a supported
-NFSv4 TCP AUTH_SYS connection. `Mounted` always uses the kernel; opt-in `Auto`
+NFSv4 TCP AUTH_SYS connection. `Posix` always uses the kernel; opt-in `Auto`
 can route suitable mounts directly. **Direct clients do not share or invalidate
 kernel caches.** See [mount discovery and routing][operations] before mixing them.
 

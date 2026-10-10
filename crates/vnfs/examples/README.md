@@ -29,7 +29,7 @@ leave the example's directory behind. The other examples are read-only.
 For declarative tree creation, see `vnfs::helpers::TreeBuilder` and its compiled
 documentation example. For mount discovery, use
 `vnfs::Nfs::from_mount("/absolute/mount/project")?`; this opens a separate
-direct NFS connection, not a cache-coherent kernel handle. `Mounted` always
+direct NFS connection, not a cache-coherent kernel handle. `Posix` always
 uses the kernel; `Auto` may bypass it. Generic example functions accept
 `impl Vfsi` to share application logic across client types.
 

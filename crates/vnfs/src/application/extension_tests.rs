@@ -78,7 +78,7 @@ fn page_faults_do_not_replay_transport_failures_and_reject_malformed_shapes() {
 fn directory_continuations_run_in_vector_waves_and_cancellation_marks_unfinished_roots() {
     use crate::{ControlFlow, ListDirOptions, ResourceLimits};
     let temp = tempfile::tempdir().unwrap();
-    let mounted = crate::Mounted::new(temp.path()).unwrap();
+    let mounted = crate::Posix::new(temp.path()).unwrap();
     mounted.write("/f", b"x").unwrap();
     let metadata = mounted.attrs("/f").unwrap();
     for stop in [false, true] {
@@ -139,7 +139,7 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
     use crate::{Attributes, ListDirOptions};
     let root = tempfile::tempdir().unwrap();
     let fs = Probe {
-        mounted: crate::Mounted::new(root.path()).unwrap(),
+        mounted: crate::Posix::new(root.path()).unwrap(),
         calls: Cell::new(0),
         shape: Cell::new(0),
     };
@@ -227,7 +227,7 @@ fn unified_visiting_preserves_depth_defaults_fields_and_failures() {
     use crate::{Attributes, ControlFlow, ListDirOptions, TraversalCompletion};
     let root = tempfile::tempdir().unwrap();
     let fs = Probe {
-        mounted: crate::Mounted::new(root.path())
+        mounted: crate::Posix::new(root.path())
             .unwrap()
             .with_limits(ResourceLimits::new().max_directory_entries(1)),
         calls: Cell::new(0),
@@ -319,7 +319,7 @@ fn removal_modes_preserve_roots_symlinks_and_vector_indices() {
     use std::os::unix::fs::symlink;
     let root = tempfile::tempdir().unwrap();
     let fs = Probe {
-        mounted: crate::Mounted::new(root.path()).unwrap(),
+        mounted: crate::Posix::new(root.path()).unwrap(),
         calls: Cell::new(0),
         shape: Cell::new(0),
     };
@@ -383,17 +383,17 @@ fn removal_modes_preserve_roots_symlinks_and_vector_indices() {
 
 // No inherent conveniences or explicit VfsiExt implementation.
 struct Probe {
-    mounted: crate::Mounted,
+    mounted: crate::Posix,
     calls: Cell<usize>,
     shape: Cell<u8>,
 }
 impl Probe {
-    fn inner(&self) -> &crate::Mounted {
+    fn inner(&self) -> &crate::Posix {
         &self.mounted
     }
     fn read<'a>(
         &self,
-        ops: impl IntoIterator<Item = crate::ReadOp<'a, crate::MountedFile>>,
+        ops: impl IntoIterator<Item = crate::ReadOp<'a, crate::PosixFile>>,
         options: crate::ReadOptions,
     ) -> Result<Vec<crate::ReadResult>> {
         self.calls.set(self.calls.get() + 1);
@@ -427,10 +427,10 @@ impl Probe {
     }
 }
 impl Vfsi for Probe {
-    type File = crate::MountedFile;
-    type Dir = crate::MountedDir;
+    type File = crate::PosixFile;
+    type Dir = crate::PosixDir;
     client_methods!(
-        crate::Mounted,
+        crate::Posix,
         Probe::inner,
         Probe::read,
         std::convert::identity
@@ -441,7 +441,7 @@ impl Vfsi for Probe {
 fn blanket_helpers_preserve_order_empty_files_limits_and_error_indices() {
     let root = tempfile::tempdir().unwrap();
     let fs = Probe {
-        mounted: crate::Mounted::new(root.path())
+        mounted: crate::Posix::new(root.path())
             .unwrap()
             .with_limits(ResourceLimits::new().max_read_bytes(5)),
         calls: Cell::new(0),
@@ -508,16 +508,16 @@ fn blanket_helpers_preserve_order_empty_files_limits_and_error_indices() {
 // Native short-write waves and zero-progress checks have separate coverage
 // in vfsi-sync/tests/native_client.rs.
 struct WritePolicyProbe {
-    mounted: crate::Mounted,
+    mounted: crate::Posix,
     partial_calls: Cell<usize>,
     complete_calls: Cell<usize>,
     lose_reply: Cell<bool>,
 }
 impl WritePolicyProbe {
-    fn inner(&self) -> &crate::Mounted {
+    fn inner(&self) -> &crate::Posix {
         &self.mounted
     }
-    fn partial(&self, ops: &[crate::WriteOp<'_, crate::MountedFile>]) -> Result<Vec<WriteResult>> {
+    fn partial(&self, ops: &[crate::WriteOp<'_, crate::PosixFile>]) -> Result<Vec<WriteResult>> {
         self.partial_calls.set(self.partial_calls.get() + 1);
         let short: Vec<_> = ops
             .iter()
@@ -527,7 +527,7 @@ impl WritePolicyProbe {
             .collect();
         self.mounted.vwrite(&short, Default::default())
     }
-    fn complete(&self, ops: &[crate::WriteOp<'_, crate::MountedFile>]) -> Result<Vec<WriteResult>> {
+    fn complete(&self, ops: &[crate::WriteOp<'_, crate::PosixFile>]) -> Result<Vec<WriteResult>> {
         self.complete_calls.set(self.complete_calls.get() + 1);
         if self.lose_reply.get() {
             self.partial(ops)?; // The server mutated data before the reply was lost.
@@ -538,16 +538,16 @@ impl WritePolicyProbe {
     }
 }
 impl Vfsi for WritePolicyProbe {
-    type File = crate::MountedFile;
-    type Dir = crate::MountedDir;
+    type File = crate::PosixFile;
+    type Dir = crate::PosixDir;
     client_methods!(
-        crate::Mounted,
+        crate::Posix,
         WritePolicyProbe::inner,
-        crate::Mounted::vread_impl,
+        crate::Posix::vread_impl,
         WritePolicyProbe::inner,
         WritePolicyProbe::partial,
         WritePolicyProbe::complete,
-        crate::Mounted::vgetattrs_impl,
+        crate::Posix::vgetattrs_impl,
         std::convert::identity
     );
 }
@@ -556,7 +556,7 @@ impl Vfsi for WritePolicyProbe {
 fn write_options_select_completion_without_replaying_ambiguous_errors() {
     let root = tempfile::tempdir().unwrap();
     let fs = WritePolicyProbe {
-        mounted: crate::Mounted::new(root.path()).unwrap(),
+        mounted: crate::Posix::new(root.path()).unwrap(),
         partial_calls: Cell::new(0),
         complete_calls: Cell::new(0),
         lose_reply: Cell::new(false),
@@ -600,7 +600,7 @@ fn write_options_select_completion_without_replaying_ambiguous_errors() {
 fn read_files_rejects_malformed_replies_and_never_replays_transport_errors() {
     let root = tempfile::tempdir().unwrap();
     let fs = Probe {
-        mounted: crate::Mounted::new(root.path()).unwrap(),
+        mounted: crate::Posix::new(root.path()).unwrap(),
         calls: Cell::new(0),
         shape: Cell::new(0),
     };
@@ -622,7 +622,7 @@ fn read_files_rejects_malformed_replies_and_never_replays_transport_errors() {
 fn default_listing_and_stream_helpers_respect_client_limits_and_reentry() {
     let root = tempfile::tempdir().unwrap();
     let fs = Probe {
-        mounted: crate::Mounted::new(root.path()).unwrap().with_limits(
+        mounted: crate::Posix::new(root.path()).unwrap().with_limits(
             ResourceLimits::new()
                 .max_directory_entries(1)
                 .stream_chunk_bytes(std::num::NonZeroUsize::new(2).unwrap()),
@@ -665,7 +665,7 @@ fn default_listing_and_stream_helpers_respect_client_limits_and_reentry() {
 fn vector_walk_budgets_count_entries_not_listing_containers() {
     let root = tempfile::tempdir().unwrap();
     let fs = Probe {
-        mounted: crate::Mounted::new(root.path()).unwrap(),
+        mounted: crate::Posix::new(root.path()).unwrap(),
         calls: Cell::new(0),
         shape: Cell::new(0),
     };
@@ -720,7 +720,7 @@ fn vector_walk_budgets_count_entries_not_listing_containers() {
 fn vector_walk_visitors_charge_root_paths_once_and_honor_cancellation() {
     let root = tempfile::tempdir().unwrap();
     let fs = Probe {
-        mounted: crate::Mounted::new(root.path()).unwrap(),
+        mounted: crate::Posix::new(root.path()).unwrap(),
         calls: Cell::new(0),
         shape: Cell::new(0),
     };
@@ -782,7 +782,7 @@ fn vector_walk_visitors_charge_root_paths_once_and_honor_cancellation() {
 fn singleton_walk_reports_the_root_index_not_an_entry_index() {
     let root = tempfile::tempdir().unwrap();
     let fs = Probe {
-        mounted: crate::Mounted::new(root.path()).unwrap(),
+        mounted: crate::Posix::new(root.path()).unwrap(),
         calls: Cell::new(0),
         shape: Cell::new(0),
     };
@@ -815,7 +815,7 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
     let root = tempfile::tempdir().unwrap();
     // Probe implements only Vfsi; no explicit VfsiExt implementation is possible.
     let fs = Probe {
-        mounted: crate::Mounted::new(root.path()).unwrap(),
+        mounted: crate::Posix::new(root.path()).unwrap(),
         calls: Cell::new(0),
         shape: Cell::new(0),
     };

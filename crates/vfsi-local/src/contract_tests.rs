@@ -36,7 +36,7 @@ mod tests {
             }
         }
     }
-    use crate::DummyVecFs;
+    use crate::LocalBackend;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -65,9 +65,9 @@ mod tests {
     }
 
     /// A fresh dummy backend rooted at a unique temp directory.
-    fn fs(tag: &str) -> (TempRoot, DummyVecFs) {
+    fn fs(tag: &str) -> (TempRoot, LocalBackend) {
         let root = TempRoot::new(tag);
-        let fs = DummyVecFs::new(root.0.clone());
+        let fs = LocalBackend::new(root.0.clone(), ()).unwrap();
         (root, fs)
     }
 
@@ -166,14 +166,14 @@ mod tests {
         std::fs::create_dir(&root.0).unwrap();
         let not_a_directory = root.0.join("file");
         std::fs::write(&not_a_directory, b"not a directory").unwrap();
-        let error = DummyVecFs::try_new(not_a_directory).err().unwrap();
+        let error = LocalBackend::new(not_a_directory, ()).err().unwrap();
         assert!(matches!(
             error.err_no(),
             value if value == libc::EEXIST as u32 || value == libc::ENOTDIR as u32
         ));
     }
 
-    fn write(fs: &mut DummyVecFs, path: &str, data: &[u8]) {
+    fn write(fs: &mut LocalBackend, path: &str, data: &[u8]) {
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
             VfFile::from_path(path),
             0,
@@ -815,7 +815,7 @@ mod tests {
         // Insert the leaf after resolution; the host kernel would follow this
         // absolute target outside the configured client root.
         std::os::unix::fs::symlink(&victim, &missing).unwrap();
-        let error = DummyVecFs::chown_path(&update, &anchored, true, 3).unwrap_err();
+        let error = LocalBackend::chown_path(&update, &anchored, true, 3).unwrap_err();
         assert_eq!(error.err_no(), ERR_NOENT);
         assert_eq!(error.index(), Some(3));
         let after = std::fs::metadata(&victim).unwrap();
@@ -850,7 +850,7 @@ mod tests {
         assert!(!anchored.nofollow_on_open);
         std::fs::rename(&original, &moved).unwrap();
         std::os::unix::fs::symlink(&victim, &original).unwrap();
-        DummyVecFs::chown_path(&update, &anchored, true, 0).unwrap();
+        LocalBackend::chown_path(&update, &anchored, true, 0).unwrap();
         assert_eq!(std::fs::metadata(&moved).unwrap().uid(), uid);
         let after = std::fs::metadata(&victim).unwrap();
         assert_eq!((after.uid(), after.gid()), (before.uid(), before.gid()));
@@ -870,7 +870,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside.0, root.0.join("inside")).unwrap();
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        DummyVecFs::protect_create_open(&anchored, &mut options);
+        LocalBackend::protect_create_open(&anchored, &mut options);
         options.open(&anchored).unwrap();
 
         assert!(root.0.join("moved/new").exists());

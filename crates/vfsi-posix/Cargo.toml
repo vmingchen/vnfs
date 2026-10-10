@@ -1,20 +1,21 @@
 [package]
-name = "vfsi-uring"
+name = "vfsi-posix"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
-description = "Batched Linux io_uring filesystem backend for VFSI"
+description = "POSIX syscall executor and rooted filesystem backend for VFSI"
 repository = "https://github.com/vmingchen/vnfs"
-keywords = ["filesystem", "vectorized", "io-uring", "vfsi"]
+keywords = ["filesystem", "vectorized", "posix", "vfsi"]
 
-[target.'cfg(target_os = "linux")'.dependencies]
-io-uring = "0.7.15"
-libc = { workspace = true }
+[features]
+default = []
+test-faults = ["vfsi-local/test-faults"]
+
+[dependencies]
 vfsi-core = { workspace = true }
 vfsi-local = { workspace = true }
 vfsi-sync = { workspace = true }
 
 [dev-dependencies]
-vfsi-posix = { workspace = true }
 tempfile = "3"

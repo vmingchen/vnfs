@@ -119,11 +119,15 @@ jobs:
           fi
       - name: Verify every published Rust package from coordinated crate archives
         run: |
+          # The vfsi-uring archive tests must execute real rings, just like
+          # the dedicated uring job, rather than fail under runner defaults.
+          sudo sysctl -w kernel.io_uring_disabled=0
           package_list=$(mktemp)
           cat >"$package_list" <<'PACKAGES'
           vfsi-core crates/vfsi-core/Cargo.toml
           vfsi-sync crates/vfsi-sync/Cargo.toml
           vfsi-local crates/vfsi-local/Cargo.toml
+          vfsi-posix crates/vfsi-posix/Cargo.toml
           vfsi-uring crates/vfsi-uring/Cargo.toml
           vfsi-nfs crates/vfsi-nfs/Cargo.toml
           vfsi-smb crates/vfsi-smb/Cargo.toml
@@ -179,7 +183,7 @@ jobs:
               # the exact crate archive here.
               cargo "${patches[@]}" test --locked --offline --manifest-path "$archive_manifest" --lib
               cargo "${patches[@]}" test --locked --offline --manifest-path "$archive_manifest" \
-                --features dummy --test dummy_vecfs
+                --features posix --test posix_backend --test posix
               cargo "${patches[@]}" test --locked --offline --manifest-path "$archive_manifest" \
                 --test public_api
             else
@@ -217,7 +221,8 @@ jobs:
           cargo check -p vfsi-smb --no-default-features
           cargo check -p vfsi-smb --all-features
           cargo check -p vnfs --lib --no-default-features
-          cargo check -p vnfs --lib --no-default-features --features dummy
+          cargo check -p vnfs --lib --no-default-features --features posix
+          cargo test -p vnfs --no-default-features --features posix --test posix
           cargo check -p vnfs --lib --no-default-features --features nfs
       - name: Verify the documented Rust 1.88 MSRV
         run: |
@@ -230,11 +235,16 @@ jobs:
             echo "SMB dependencies must live in the vfsi-smb package" >&2
             exit 1
           fi
-          # The default auto feature intentionally includes vfsi-local as a
+          # The default auto feature intentionally includes vfsi-posix as a
           # mounted-path fallback; the NFS-only feature set must not.
           if cargo tree -p vnfs --no-default-features --features nfs \
-              --edges normal --prefix none | grep -Eq '^vfsi-local '; then
-            echo "the NFS-only feature set must not include vfsi-local" >&2
+              --edges normal --prefix none | grep -Eq '^(vfsi-local|vfsi-posix) '; then
+            echo "the NFS-only feature set must not include local backends" >&2
+            exit 1
+          fi
+          if cargo tree -p vfsi-posix --edges normal --prefix none | \
+              grep -Eq '^(vfsi-uring|io-uring|vfsi-nfs|vfsi-smb|libntirpc-sys) '; then
+            echo "the POSIX backend must not include ring or network backends" >&2
             exit 1
           fi
       - name: Verify checked-in C header and smoke test

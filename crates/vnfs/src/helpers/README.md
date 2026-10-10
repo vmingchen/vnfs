@@ -164,7 +164,7 @@ entries retains the source (which can leave two copies). No ambiguous write or
 rename is replayed by these helpers.
 
 `Vfsi::vrename_with_options` also offers `RenameOptions::NoReplace` for callers
-that need an atomic absent-destination check. The Linux `Mounted` backend uses
+that need an atomic absent-destination check. The Linux `Posix` backend uses
 `renameat2`; direct NFS and SMB backends currently return `Unsupported` because
 their exposed rename operations cannot promise that guarantee. `move_items`
 falls back to its copy/delete path only after an explicit Unsupported, EEXIST, or

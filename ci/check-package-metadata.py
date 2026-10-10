@@ -16,6 +16,8 @@ PUBLIC_RUST_PACKAGES = (
     "crates/vfsi-nfs/Cargo.toml",
     "crates/vfsi-smb/Cargo.toml",
     "crates/vfsi-local/Cargo.toml",
+    "crates/vfsi-posix/Cargo.toml",
+    "crates/vfsi-uring/Cargo.toml",
     "bindings/c/Cargo.toml",
 )
 

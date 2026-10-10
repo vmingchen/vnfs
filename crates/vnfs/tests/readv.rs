@@ -1,5 +1,5 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
-use vnfs::{ErrorKind, FileHandle, Mounted, ReadOp, ReadOptions, ResourceLimits, Vfsi, VfsiExt};
+use vnfs::{ErrorKind, FileHandle, Posix, ReadOp, ReadOptions, ResourceLimits, Vfsi, VfsiExt};
 
 fn mixed<C: Vfsi>(fs: &C) {
     fs.write_files(&[
@@ -42,13 +42,13 @@ fn mixed<C: Vfsi>(fs: &C) {
 #[test]
 fn mixed_destinations_on_mounted_and_auto() {
     let temp = tempfile::tempdir().unwrap();
-    mixed(&Mounted::new(temp.path()).unwrap());
+    mixed(&Posix::new(temp.path()).unwrap());
     mixed(&vnfs::Auto::new(temp.path()).unwrap());
 }
 #[test]
 fn budgets_are_shared_and_preflight_buffer_lengths() {
     let temp = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(temp.path())
+    let fs = Posix::new(temp.path())
         .unwrap()
         .with_limits(ResourceLimits::new().max_read_bytes(4));
     fs.write_files(&[("/a", b"abc"), ("/b", b"xyz")]).unwrap();
@@ -100,7 +100,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
 #[test]
 fn failure_indices_and_buffer_borrows_survive_consumption() {
     let temp = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(temp.path()).unwrap();
+    let fs = Posix::new(temp.path()).unwrap();
     fs.write("/a", b"abc").unwrap();
     let file = fs.open("/a").unwrap();
     let mut buffer = [0; 1];
@@ -117,7 +117,7 @@ fn failure_indices_and_buffer_borrows_survive_consumption() {
     assert_eq!(error.kind(), ErrorKind::NotFound);
     assert_eq!(error.index(), Some(2));
     buffer.fill(7);
-    let other = Mounted::new(temp.path()).unwrap();
+    let other = Posix::new(temp.path()).unwrap();
     let foreign = other.open("/a").unwrap();
     let error = fs
         .vread(
@@ -134,7 +134,7 @@ fn failure_indices_and_buffer_borrows_survive_consumption() {
 #[test]
 fn zero_length_buffers_and_owned_reads_keep_distinct_data_ownership() {
     let temp = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(temp.path()).unwrap();
+    let fs = Posix::new(temp.path()).unwrap();
     fs.write("/a", b"abc").unwrap();
     let file = fs.open("/a").unwrap();
     let results = fs
@@ -151,7 +151,7 @@ fn zero_length_buffers_and_owned_reads_keep_distinct_data_ownership() {
 #[test]
 fn path_conversions_and_iterators_construct_whole_file_operations() {
     let temp = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(temp.path()).unwrap();
+    let fs = Posix::new(temp.path()).unwrap();
     fs.write_files(&[("/a", b"abc"), ("/b", b"xyz")]).unwrap();
     let results = fs
         .vread(
@@ -172,10 +172,10 @@ fn path_conversions_and_iterators_construct_whole_file_operations() {
 #[test]
 fn external_clients_can_inspect_sources_without_private_fields() {
     let temp = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(temp.path()).unwrap();
+    let fs = Posix::new(temp.path()).unwrap();
     fs.write("/a", b"abc").unwrap();
     let file = fs.open("/a").unwrap();
-    let whole: ReadOp<'_, vnfs::MountedFile> = ReadOp::whole("/a");
+    let whole: ReadOp<'_, vnfs::PosixFile> = ReadOp::whole("/a");
     assert_eq!(whole.whole_file_path(), Some(std::path::Path::new("/a")));
     assert!(whole.range_parts().is_none());
     let range = ReadOp::range(&file, 0, 1);
@@ -214,7 +214,7 @@ fn result_constructors_preserve_storage_invariants_without_retaining_borrows() {
 #[test]
 fn an_exhausted_internal_budget_never_restores_the_default() {
     let root = tempfile::tempdir().unwrap();
-    let fs = Mounted::new(root.path())
+    let fs = Posix::new(root.path())
         .unwrap()
         .with_limits(vnfs::ResourceLimits::new().max_read_bytes(3));
     fs.write("/a", b"abc").unwrap();
@@ -260,7 +260,7 @@ fn an_exhausted_internal_budget_never_restores_the_default() {
 #[test]
 fn text_options_inherit_or_override_budgets_and_preserve_utf8_errors() {
     let root = tempfile::tempdir().unwrap();
-    let fs = vnfs::Mounted::new(root.path())
+    let fs = vnfs::Posix::new(root.path())
         .unwrap()
         .with_limits(vnfs::ResourceLimits::new().max_read_bytes(2));
     fs.write("/text", b"hello").unwrap();

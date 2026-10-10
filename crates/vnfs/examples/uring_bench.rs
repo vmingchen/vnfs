@@ -187,7 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::write(dir.join(format!("file-{j}")), b"directory")?;
         }
     }
-    let local = vfsi_sync::FsClient::new(vfsi_local::DummyVecFs::try_new(root.to_path_buf())?);
+    let local = vfsi_posix::connect(root)?;
     // Identical FsClient adapters: compare execution engines rather than an
     // opaque facade on one side and a native adapter on the other.
     let (uring, telemetry) = vfsi_uring::connect_with_telemetry(root, Default::default())?;

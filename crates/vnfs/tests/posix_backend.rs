@@ -1,4 +1,4 @@
-//! Tests for the `std::fs`-backed [`DummyVecFs`]. These need no NFS server:
+//! Tests for the `std::fs`-backed [`LocalBackend`]. These need no NFS server:
 //! the suite runs against a temporary directory, proving the `VectorBackend` API
 //! works on non-NFS filesystems too.
 
@@ -9,7 +9,7 @@ use vfsi_sync::*;
 
 use std::path::Path;
 use tempfile::TempDir;
-use vfsi_local::DummyVecFs;
+use vfsi_local::LocalBackend;
 use vfsi_sync::VfOffset;
 
 #[test]
@@ -144,10 +144,10 @@ use std::sync::Arc;
 #[cfg(feature = "test-faults")]
 use vfsi_sync::internal::faults::{FaultScript, OpenFaultPoint};
 
-/// A `DummyVecFs` rooted at a fresh unique temp directory.
-fn dummy() -> (TempDir, DummyVecFs) {
+/// A `LocalBackend` rooted at a fresh unique temp directory.
+fn dummy() -> (TempDir, LocalBackend) {
     let root = TempDir::new().unwrap();
-    let backend = DummyVecFs::new(root.path().to_path_buf());
+    let backend = vfsi_posix::backend(root.path()).unwrap();
     (root, backend)
 }
 
@@ -489,7 +489,7 @@ fn dummy_stays_under_root() {
     let name = format!("vnfs_root_{}", std::process::id());
     let root = std::env::temp_dir().join(&name);
     let _ = std::fs::remove_dir_all(&root);
-    let mut fs = DummyVecFs::new(root.clone());
+    let mut fs = vfsi_posix::backend(root.clone()).unwrap();
 
     fs.ensure_dir_impl(Path::new(&format!("/{}", name)), 0o755)
         .unwrap();

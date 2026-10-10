@@ -12,10 +12,10 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::{
-    DirEntry, Error as VfError, Mounted, Nfs, OpenFlags, OpenOp, OwnedReadResult as ReadResult,
+    DirEntry, Error as VfError, Nfs, OpenFlags, OpenOp, OwnedReadResult as ReadResult, Posix,
     ReadIntoResult, ResourceLimits, Result as VfResult, WriteResult,
 };
-use vfsi_local::DummyVecFs;
+use vfsi_local::LocalBackend;
 use vfsi_sync::{FsClient, FsFile};
 type NfsClient = FsClient<vfsi_nfs::NfsVecFs>;
 type NfsFile = FsFile<vfsi_nfs::NfsVecFs>;
@@ -31,7 +31,7 @@ impl Auto {
             return Err(VfError::client(0, libc::ENOTDIR as u32));
         }
         Ok(Self {
-            mounted: Mounted::new(&root)?.inner,
+            mounted: Posix::new(&root)?.inner,
             root,
             connections: Mutex::new(HashMap::new()),
             owner: Arc::new(()),
@@ -60,7 +60,7 @@ impl Auto {
 /// connection was successfully established and its root identity verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutoRoute {
-    Mounted,
+    Posix,
     DirectNfs {
         mount_point: PathBuf,
         server: String,
@@ -82,17 +82,17 @@ struct Resolved {
     path: PathBuf,
 }
 
-/// Opt into mount-aware direct NFS acceleration. Unlike [`Mounted`], eligible
+/// Opt into mount-aware direct NFS acceleration. Unlike [`Posix`], eligible
 /// NFSv4 AUTH_SYS mounts use a separate client and vectorized COMPOUNDs.
 ///
 /// # Consistency
 /// Direct operations do not share or invalidate the kernel client's caches.
 /// Mixing them with kernel I/O on the same objects (including path aliases)
 /// can expose stale data or delayed writes. This is not a transparent caching
-/// acceleration. Use `Mounted` when kernel coherency semantics are required.
+/// acceleration. Use `Posix` when kernel coherency semantics are required.
 pub struct Auto {
     root: PathBuf,
-    mounted: FsClient<DummyVecFs>,
+    mounted: FsClient<LocalBackend>,
     connections: Mutex<HashMap<u64, NfsConnection>>,
     owner: Arc<()>,
     limits: ResourceLimits,

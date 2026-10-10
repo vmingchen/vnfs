@@ -14,7 +14,7 @@ mod tests {
     #[test]
     fn consuming_dispatch_rejects_bad_reply_shapes_and_does_not_replay() {
         for count in [0, 2] {
-            let error = consume_ops::<crate::MountedFile, (), ()>(
+            let error = consume_ops::<crate::PosixFile, (), ()>(
                 [ReadOp::whole("/a")],
                 16,
                 |_, _, _| (),
@@ -34,7 +34,7 @@ mod tests {
             assert!(error.is_transport());
         }
         let temp = tempfile::tempdir().unwrap();
-        let fs = crate::Mounted::new(temp.path()).unwrap();
+        let fs = crate::Posix::new(temp.path()).unwrap();
         fs.write("/a", b"abc").unwrap();
         let file = fs.open("/a").unwrap();
         for (count, read) in [(0, 1), (2, 1), (1, 17)] {

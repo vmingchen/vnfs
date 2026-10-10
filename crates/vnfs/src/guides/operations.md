@@ -88,7 +88,7 @@ discovered configurations remain pinned to the mount.
 combines a connection with mapping host-local operands to remote paths.
 Neither discovery nor connection establishes coherence with kernel caches.
 
-`Mounted` always uses the kernel. Opt-in `Auto` groups suitable read-write
+`Posix` always uses the kernel. Opt-in `Auto` groups suitable read-write
 AUTH_SYS NFS mounts for direct I/O and leaves local, SMB, Kerberos, and unsafe
 mappings on the kernel route. Final symlinks and ambiguous create-if-missing
 opens remain on the kernel route; supported exclusive creates may go direct.
@@ -98,7 +98,7 @@ backend. Direct credentials are captured per connection; direct handle use
 after a filesystem identity change is rejected.
 
 **Direct NFS clients do not share or invalidate kernel caches.** Aliases can
-reach the same objects. Prefer `Mounted` for exact kernel semantics or warm
+reach the same objects. Prefer `Posix` for exact kernel semantics or warm
 page-cache reuse; coordinate caches explicitly when mixing direct and kernel I/O.
 
 ## Diagnostics
