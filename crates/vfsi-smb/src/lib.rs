@@ -2230,74 +2230,27 @@ impl VectorBackend for SmbVecFs {
         _symlinks: bool,
         use_server_side_copy: bool,
     ) -> VfRes {
-        if !self.exists_impl(destination)? {
-            self.ensure_dir_impl(destination, 0o755)?;
-        }
-        let masks = AttrMask::MODE | AttrMask::SIZE;
-        let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
-        while let Some((source_dir, destination_dir)) = pending.pop() {
-            let entries = self.listdir_impl(&source_dir, masks, 0, false)?;
-            let mut directories = Vec::new();
-            for entry in entries {
-                let name = entry
-                    .file
-                    .path()
-                    .and_then(Path::file_name)
-                    .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
-                let source_child = source_dir.join(name);
-                let destination_child = destination_dir.join(name);
-                if entry.ftype == VfType::Directory {
-                    self.ensure_dir_impl(&destination_child, 0o755)?;
-                    directories.push((source_child, destination_child));
+        vfsi_sync::backend::helpers::copy_tree_with(
+            self,
+            source,
+            destination,
+            false,
+            AttrMask::MODE | AttrMask::SIZE,
+            |backend, pair| {
+                let pairs = std::slice::from_ref(pair);
+                if use_server_side_copy {
+                    backend.vcopy_impl(pairs, vfsi_core::CopyOption::new())
                 } else {
-                    let pair =
-                        ExtentPair::from_os_paths(&source_child, 0, &destination_child, 0, None);
-                    if use_server_side_copy {
-                        self.vcopy_impl(&[pair], vfsi_core::CopyOption::new())?;
-                    } else {
-                        self.vcopy_data_impl(&[pair])?;
-                    }
+                    backend.vcopy_data_impl(pairs)
                 }
-            }
-            for directory in directories.into_iter().rev() {
-                pending.push(directory);
-            }
-        }
-        Ok(())
+            },
+            std::convert::identity,
+        )
     }
     fn vwrite_adb_impl(&mut self, patterns: &[Adb]) -> VfResult<Vec<usize>> {
         let mut counts = Vec::with_capacity(patterns.len());
         for (index, pattern) in patterns.iter().enumerate() {
-            let mut layout = Vec::with_capacity(pattern.adb_block_count);
-            let pattern_len = u64::try_from(pattern.adb_pattern_data.len())
-                .map_err(|_| VfError::failure(index, libc::EOVERFLOW as u32))?;
-            for block in 0..pattern.adb_block_count {
-                let relative = (block as u64)
-                    .checked_mul(pattern.adb_block_size)
-                    .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
-                let base = checked_offset(pattern.adb_offset, relative, index)?;
-                let block_number = pattern
-                    .adb_block_num
-                    .checked_add(block as u64)
-                    .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
-                let number_offset = pattern
-                    .adb_reloff_blocknum
-                    .map(|relative| {
-                        let offset = checked_offset(base, relative, index)?;
-                        checked_offset(offset, 8, index)?;
-                        Ok(offset)
-                    })
-                    .transpose()?;
-                let pattern_offset = pattern
-                    .adb_reloff_pattern
-                    .map(|relative| {
-                        let offset = checked_offset(base, relative, index)?;
-                        checked_offset(offset, pattern_len, index)?;
-                        Ok(offset)
-                    })
-                    .transpose()?;
-                layout.push((block_number, number_offset, pattern_offset));
-            }
+            let layout = vfsi_core::internal::adb_layout(pattern, index)?;
             let file = self
                 .open_raw_impl(&pattern.path, libc::O_WRONLY | libc::O_CREAT, 0o666)
                 .map_err(|e| e.with_index(index))?;

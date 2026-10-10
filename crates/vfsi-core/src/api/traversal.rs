@@ -1,6 +1,6 @@
 //! Incremental, no-follow traversal shared by application adapters.
 use crate::api::{DirEntry, ListDirOptions, TraversalCompletion};
-use crate::{VfError, VfResult};
+use crate::{VfError, VfResult, internal::TraversalBudget};
 use std::path::Path;
 
 /// Callback decision. Pruning never reads the directory's contents.
@@ -36,11 +36,8 @@ pub fn walk_events(
     mut read_dir: impl FnMut(&Path, ListDirOptions) -> VfResult<Vec<DirEntry>>,
     mut callback: impl FnMut(&WalkEvent) -> VfResult<WalkControl>,
 ) -> VfResult<TraversalCompletion> {
-    let mut count = 1usize;
-    let mut bytes = root.path().as_os_str().len();
-    if count > options.entry_limit() || bytes > options.path_byte_limit() {
-        return Err(VfError::client(0, libc::EFBIG as u32));
-    }
+    let mut budget = TraversalBudget::new(options.entry_limit(), options.path_byte_limit());
+    budget.charge(root.path())?;
     let kind = if root.attrs().is_dir() {
         WalkEventKind::Enter
     } else {
@@ -65,21 +62,13 @@ pub fn walk_events(
                 if event.depth >= options.depth_limit() && options.truncates_at_depth_limit() {
                     continue;
                 }
-                let remaining = ListDirOptions::new()
-                    .max_entries(options.entry_limit().saturating_sub(count))
-                    .max_path_bytes(options.path_byte_limit().saturating_sub(bytes));
+                let remaining = budget.remaining_options(ListDirOptions::new());
                 let mut entries = read_dir(event.entry.path(), remaining)?;
                 for entry in &entries {
-                    count = count
-                        .checked_add(1)
-                        .ok_or_else(|| VfError::client(0, libc::EFBIG as u32))?;
-                    bytes = bytes
-                        .checked_add(entry.path().as_os_str().len())
-                        .ok_or_else(|| VfError::client(0, libc::EFBIG as u32))?;
-                    if count > options.entry_limit()
-                        || bytes > options.path_byte_limit()
-                        || event.depth >= options.depth_limit()
-                    {
+                    budget
+                        .charge(entry.path())
+                        .map_err(|error| error.with_context("walk_events", entry.path()))?;
+                    if event.depth >= options.depth_limit() {
                         return Err(VfError::client(0, libc::EFBIG as u32)
                             .with_context("walk_events", entry.path()));
                     }

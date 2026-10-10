@@ -659,28 +659,6 @@ pub(crate) fn metadata_mask() -> AttrMask {
         | AttrMask::CHANGE
 }
 
-pub(crate) fn system_time_parts(time: std::time::SystemTime) -> VfResult<(i64, u32)> {
-    match time.duration_since(std::time::UNIX_EPOCH) {
-        Ok(duration) => Ok((
-            i64::try_from(duration.as_secs())
-                .map_err(|_| VfError::client(0, libc::EOVERFLOW as u32))?,
-            duration.subsec_nanos(),
-        )),
-        Err(error) => {
-            let duration = error.duration();
-            let seconds = i64::try_from(duration.as_secs())
-                .map_err(|_| VfError::client(0, libc::EOVERFLOW as u32))?;
-            if duration.subsec_nanos() == 0 {
-                Ok((-seconds, 0))
-            } else {
-                let seconds = seconds
-                    .checked_add(1)
-                    .ok_or_else(|| VfError::client(0, libc::EOVERFLOW as u32))?;
-                Ok((-seconds, 1_000_000_000 - duration.subsec_nanos()))
-            }
-        }
-    }
-}
 #[cfg(unix)]
 pub(crate) fn bytes_to_path(bytes: Vec<u8>) -> PathBuf {
     use std::os::unix::ffi::OsStringExt;

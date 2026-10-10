@@ -9,33 +9,7 @@ pub fn vector_index(error: vfsi_core::api::Error, index: usize) -> vfsi_core::ap
         error
     }
 }
-struct VectorBudget {
-    entries: usize,
-    bytes: usize,
-}
-impl VectorBudget {
-    fn new(entries: usize, bytes: usize) -> Self {
-        Self { entries, bytes }
-    }
-    fn charge(&mut self, path: &Path) -> Result<()> {
-        if self.entries == 0 {
-            return Err(vfsi_core::api::Error::client(0, libc::EFBIG as u32)
-                .with_context("vector traversal", path));
-        }
-        self.charge_path(path)?;
-        self.entries -= 1;
-        Ok(())
-    }
-    fn charge_path(&mut self, path: &Path) -> Result<()> {
-        let bytes = path.as_os_str().len();
-        if bytes > self.bytes {
-            return Err(vfsi_core::api::Error::client(0, libc::EFBIG as u32)
-                .with_context("vector traversal", path));
-        }
-        self.bytes -= bytes;
-        Ok(())
-    }
-}
+use vfsi_core::internal::TraversalBudget;
 pub fn visit_directory_pages<P: AsRef<Path>>(
     roots: &[P],
     policy: vfsi_core::api::ListDirOptions,
@@ -52,7 +26,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
 ) -> Result<Vec<crate::TraversalCompletion>> {
     let directory = policy.directory_options(limits);
     let walk = policy.walk_options(limits);
-    let mut budget = VectorBudget::new(directory.entry_limit(), directory.path_byte_limit());
+    let mut budget = TraversalBudget::new(directory.entry_limit(), directory.path_byte_limit());
     let mut completed = Vec::new();
     let mut pending = std::collections::VecDeque::new();
     for (index, root) in roots.iter().enumerate() {
@@ -89,7 +63,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
             .iter()
             .map(|(_, path, _, _)| path.as_path())
             .collect();
-        let requested = budget.entries.saturating_add(1);
+        let requested = budget.remaining_entries().saturating_add(1);
         let mut deferred_error = None;
         let pages = match fetch(&paths, cursors, 1, requested) {
             Ok(pages) => pages,
@@ -131,9 +105,9 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
             let mut continuations = Vec::new();
             for ((index, path, depth, first), (mut page, next, seeds)) in wave {
                 if first && policy.is_recursive() {
-                    budget
-                        .charge_path(&path)
-                        .map_err(|error| vector_index(error, index))?;
+                    budget.charge_path(&path).map_err(|error| {
+                        vector_index(error.with_context("vector traversal", &path), index)
+                    })?;
                 }
                 if page.path != path || (page.entries.is_empty() && next.is_some()) {
                     return Err(vfsi_core::api::Error::transport(
@@ -146,7 +120,10 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                 let mut accepted = 0;
                 for entry in &page.entries {
                     if let Err(error) = budget.charge(entry.path()) {
-                        page_error = Some(vector_index(error, index));
+                        page_error = Some(vector_index(
+                            error.with_context("vector traversal", entry.path()),
+                            index,
+                        ));
                         break;
                     }
                     accepted += 1;
@@ -212,7 +189,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                 .iter()
                 .map(|state| state.0.1.as_path())
                 .collect();
-            let requested = budget.entries.saturating_add(1);
+            let requested = budget.remaining_entries().saturating_add(1);
             let pages = fetch(&paths, cursors, requested.min(128), requested).map_err(|error| {
                 error.map_index(|i| continuations.get(i).map_or(i, |state| state.0.0))
             })?;

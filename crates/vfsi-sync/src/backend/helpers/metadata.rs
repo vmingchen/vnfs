@@ -115,9 +115,7 @@ pub fn native_set_metadata_path_impl_default<F: VectorBackend + ?Sized>(
 // Wire/raw masks and timestamp tuples are execution details, not a second
 // public mutation type. Convert and validate every operation before dispatch.
 fn setattrs_to_legacy(op: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<VfAttrs> {
-    if op.requested_uid() == Some(u32::MAX) || op.requested_gid() == Some(u32::MAX) {
-        return Err(VfError::client(0, ERR_INVAL));
-    }
+    let [accessed, modified] = vfsi_core::internal::validate_setattrs(op)?;
     let mut attrs = VfAttrs {
         file: match op.target() {
             Target::Path(path) => VfFile::from_os_path(path),
@@ -141,12 +139,12 @@ fn setattrs_to_legacy(op: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<VfAttrs> 
         attrs.masks |= AttrMask::SIZE;
         attrs.size = size;
     }
-    if let Some(time) = op.requested_accessed() {
-        (attrs.atime_sec, attrs.atime_nsec) = system_time_parts(time)?;
+    if let Some(time) = accessed {
+        (attrs.atime_sec, attrs.atime_nsec) = time;
         attrs.masks |= AttrMask::ATIME;
     }
-    if let Some(time) = op.requested_modified() {
-        (attrs.mtime_sec, attrs.mtime_nsec) = system_time_parts(time)?;
+    if let Some(time) = modified {
+        (attrs.mtime_sec, attrs.mtime_nsec) = time;
         attrs.masks |= AttrMask::MTIME;
     }
     Ok(attrs)

@@ -21,6 +21,40 @@ pub fn validate_open_requests(requests: &[crate::OpenOp]) -> VfResult<()> {
     Ok(())
 }
 
+/// Validate update values before any I/O and normalize access/modify timestamps.
+/// The returned values let backend conversion reuse the checked timestamps.
+pub fn validate_setattrs<P>(op: &crate::SetAttrsOp<P>) -> VfResult<[Option<(i64, u32)>; 2]> {
+    if op.requested_uid() == Some(u32::MAX) || op.requested_gid() == Some(u32::MAX) {
+        return Err(VfError::client(0, crate::ERR_INVAL));
+    }
+    Ok([
+        op.requested_accessed().map(system_time_parts).transpose()?,
+        op.requested_modified().map(system_time_parts).transpose()?,
+    ])
+}
+
+fn system_time_parts(time: std::time::SystemTime) -> VfResult<(i64, u32)> {
+    match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => Ok((
+            i64::try_from(duration.as_secs())
+                .map_err(|_| VfError::client(0, libc::EOVERFLOW as u32))?,
+            duration.subsec_nanos(),
+        )),
+        Err(error) => {
+            let duration = error.duration();
+            let seconds = i64::try_from(duration.as_secs())
+                .map_err(|_| VfError::client(0, libc::EOVERFLOW as u32))?;
+            if duration.subsec_nanos() == 0 {
+                Ok((-seconds, 0))
+            } else {
+                let seconds = seconds
+                    .checked_add(1)
+                    .ok_or_else(|| VfError::client(0, libc::EOVERFLOW as u32))?;
+                Ok((-seconds, 1_000_000_000 - duration.subsec_nanos()))
+            }
+        }
+    }
+}
 /// Ordered partial results produced by a native backend outcome hook, such as
 /// `vfsi_sync::backend::VectorBackend::vopen_outcomes_impl`.
 ///
@@ -244,3 +278,12 @@ pub mod faults {
         }
     }
 }
+
+#[cfg(test)]
+mod metadata_tests;
+
+mod adb;
+pub use adb::adb_layout;
+
+mod budget;
+pub use budget::TraversalBudget;

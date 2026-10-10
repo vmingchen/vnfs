@@ -1381,6 +1381,60 @@ mod tests {
     }
 
     #[test]
+    fn shared_tree_copy_preserves_symlinks_and_uses_the_copy_strategy() {
+        let (root, mut backend) = fs("shared-tree-copy");
+        std::fs::create_dir_all(root.0.join("source/sub")).unwrap();
+        std::fs::write(root.0.join("source/file"), b"root").unwrap();
+        std::fs::write(root.0.join("source/sub/leaf"), b"child").unwrap();
+        std::os::unix::fs::symlink("file", root.0.join("source/link")).unwrap();
+        let mut copied = Vec::new();
+        vfsi_sync::backend::helpers::copy_tree_with(
+            &mut backend,
+            Path::new("/source"),
+            Path::new("/copy"),
+            true,
+            AttrMask::MODE | AttrMask::SIZE,
+            |backend, pair| {
+                copied.push(pair.src_path.clone());
+                backend.vcopy_data_impl(std::slice::from_ref(pair))
+            },
+            std::convert::identity,
+        )
+        .unwrap();
+        assert_eq!(
+            copied,
+            [Path::new("/source/file"), Path::new("/source/sub/leaf")]
+        );
+        assert_eq!(
+            std::fs::read(root.0.join("copy/sub/leaf")).unwrap(),
+            b"child"
+        );
+        assert_eq!(
+            std::fs::read_link(root.0.join("copy/link")).unwrap(),
+            Path::new("file")
+        );
+        for (destination, reindex) in [("/failed", false), ("/indexed", true)] {
+            let mut calls = 0;
+            let error = vfsi_sync::backend::helpers::copy_tree_with(
+                &mut backend,
+                Path::new("/source"),
+                Path::new(destination),
+                true,
+                AttrMask::MODE,
+                |_, _| {
+                    calls += 1;
+                    Err(VfError::transport(None, "lost reply"))
+                },
+                |error| if reindex { error.with_index(0) } else { error },
+            )
+            .unwrap_err();
+            assert_eq!(calls, 1, "never replay a failed copy strategy");
+            assert!(error.is_transport());
+            assert_eq!(error.index(), reindex.then_some(0));
+        }
+    }
+
+    #[test]
     fn deep_recursive_operations_use_bounded_call_stack() {
         const DEPTH: usize = 384;
         let (_root, mut fs) = fs("deep-iterative");
