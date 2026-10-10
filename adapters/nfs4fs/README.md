@@ -62,6 +62,16 @@ them in one network round trip. The following `cat()` also preserves the batch;
 it currently uses one compound for bounded size discovery and one for the
 reads.
 
+
+### Append and concurrent writers
+
+Append mode writes at the file size observed by the client before its WRITE.
+That sequence is not atomic across independent NFS sessions or clients.
+Use one writer for each append file, or coordinate writers with an external
+lock. This includes writers opened through different filesystem instances,
+processes, or pooled sessions; a successful append call does not guarantee
+that another client's bytes were preserved.
+
 The client negotiates NFSv4.2 and falls back to NFSv4.1. Set
 `minor_version=1` or `minor_version=2` to require a specific version. Select
 `auth="auth_sys"` explicitly to use AUTH_SYS. For Kerberos-backed RPCSEC_GSS,

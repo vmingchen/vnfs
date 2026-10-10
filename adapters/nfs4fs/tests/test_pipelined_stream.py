@@ -243,8 +243,11 @@ def test_pipelined_stream_recovers_size_probe(fs, monkeypatch):
         == 8
     )
     assert chunks == [(0, b"abcd"), (4, b"efgh")]
-    assert len(attempts) == 2
-    assert attempts[0] != attempts[1]
+    # The first descriptor retries its dropped probe; every worker then gets
+    # its own successful identity probe.
+    assert len(attempts) == 4
+    assert attempts[0] == attempts[1]
+    assert len(set(attempts[1:])) == 3
 
 
 def test_pipelined_stream_respects_disabled_reconnect(fs, monkeypatch):

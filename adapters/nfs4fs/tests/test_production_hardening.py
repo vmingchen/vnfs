@@ -293,9 +293,11 @@ def test_bulk_reads_are_bounded_by_items_and_bytes(tmp_path):
     calls = []
     original = fs._client.read_all_many
 
-    def recording_read_all_many(paths):
+    def recording_read_all_many(paths, max_total_bytes=None):
         calls.append(len(paths))
-        return original(paths)
+        if max_total_bytes is None:
+            return original(paths)
+        return original(paths, max_total_bytes)
 
     fs._client.read_all_many = recording_read_all_many
     result = fs.cat([f"/f{i}" for i in range(5)])

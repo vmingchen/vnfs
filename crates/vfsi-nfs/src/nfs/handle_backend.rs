@@ -140,7 +140,7 @@ impl HandleBackend for NfsVecFs {
             Ok(())
         })();
         if let Err(error) = setup {
-            let _ = self.nfs.close_path(&fh, &stateid);
+            let _ = self.nfs.close(&fh, &stateid);
             return Err(error);
         }
         let open = OpenFile {
@@ -157,7 +157,7 @@ impl HandleBackend for NfsVecFs {
         match self.insert_open_file(open) {
             Ok(fd) => Ok(VfFile::from_fd(fd)),
             Err(error) => {
-                let _ = self.nfs.close_path(&fh, &stateid);
+                let _ = self.nfs.close(&fh, &stateid);
                 Err(error)
             }
         }

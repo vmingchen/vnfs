@@ -38,8 +38,8 @@ class _MemoryClient:
         self.calls.append(("exists_many", list(paths)))
         return [path in self.files for path in paths]
 
-    def read_all_many(self, paths):
-        self.calls.append(("read_all_many", list(paths)))
+    def read_all_many(self, paths, max_total_bytes=None):
+        self.calls.append(("read_all_many", list(paths), max_total_bytes))
         values = []
         errors = {}
         for index, path in enumerate(paths):
@@ -99,7 +99,11 @@ def test_vector_reads_use_the_backend_batch_contract():
     finally:
         fs.close()
 
-    assert ("read_all_many", ["/alpha", "/beta"]) in client.calls
+    assert (
+        "read_all_many",
+        ["/alpha", "/beta"],
+        fs.read_all_max_total_bytes,
+    ) in client.calls
     assert (
         "read_many",
         ["/alpha", "/beta"],

@@ -880,7 +880,8 @@ impl NfsClient {
 
     /// Write at the descriptor's current position and return
     /// `(written, resulting_position)`. For O_APPEND descriptors the backend
-    /// reports the actual EOF offset selected atomically for this write.
+    /// resolves EOF before issuing a positional write. This is not atomic
+    /// across NFS sessions or clients; callers must serialize writers.
     fn write_positioned(&self, py: Python<'_>, fd: i64, data: Vec<u8>) -> PyResult<(usize, u64)> {
         self.with_fs(py, move |fs| {
             let op = WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, data);
@@ -1056,7 +1057,9 @@ impl NfsClient {
     }
 
     /// Append to open O_APPEND descriptors in one vector operation, returning
-    /// each byte count and resulting position.
+    /// each byte count and resulting position. The server WRITE follows an EOF
+    /// query and is not atomic across clients; callers must use one writer per
+    /// file or coordinate writers externally.
     fn append_many(
         &self,
         py: Python<'_>,
@@ -1358,9 +1361,18 @@ impl NfsClient {
     }
 
     /// Read every file in full (offset 0 to EOF) in batched, no-stat reads.
-    /// Returns per-path bytes (None on failure) and an errno map.
-    fn read_all_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<ReadManyResult> {
-        let max_total_bytes = self.read_all_max_total_bytes;
+    /// Returns per-path bytes (None on failure) and an errno map. An optional
+    /// per-call limit can further reduce the configured aggregate allocation cap.
+    #[pyo3(signature = (paths, max_total_bytes=None))]
+    fn read_all_many(
+        &self,
+        py: Python<'_>,
+        paths: Vec<PathBuf>,
+        max_total_bytes: Option<usize>,
+    ) -> PyResult<ReadManyResult> {
+        let max_total_bytes = max_total_bytes
+            .unwrap_or(self.read_all_max_total_bytes)
+            .min(self.read_all_max_total_bytes);
         self.with_fs(py, move |fs| {
             read_allv_impl(fs, &paths, max_total_bytes).map_err(|e| to_py_err(e, None))
         })
