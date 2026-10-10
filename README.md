@@ -22,7 +22,7 @@ difficult then. With today's agentic coding tools, we can make them practical.
 
 The repository provides:
 
-- composable scalar (`sfsi`) and vectorized (`vfsi`) Rust API facets;
+- portable vector operations through `Vfsi` and singular helpers through `VfsiExt`;
 - NFSv4.1, NFSv4.2, optional SMB2/3, and local backends;
 - the [`nfs4fs`](https://pypi.org/project/nfs4fs/) NFS fsspec package, the
   low-level Python [`vsmb`](https://pypi.org/project/vsmb/) client, and the
@@ -94,10 +94,13 @@ to the vector operation. Shared backend methods add `_impl`, such as
 or `_smb`, such as `vstatfs_nfs`. Scalar backend operations omit `v`, for
 example `open_impl`. Modifiers precede the suffix, as in `vread_into_impl`.
 
-Concrete backends implement two native contracts: `FileSystem` for owned
-handles and `Backend: FileSystem` for vector engines and workflow overrides.
-`Backend` supports object-safe dispatch in bindings. Shared algorithms live in
-`vfsi-sync::backend_helpers`. `Vfsi` and `VfsiExt` remain the application APIs.
+Backend implementers import `vfsi_sync::backend::{HandleBackend, VectorBackend}`.
+`HandleBackend` defines handle I/O, metadata, and lifecycle hooks;
+`VectorBackend: HandleBackend` adds vector engines and workflow overrides.
+Both are object-safe execution contracts. Shared defaults live in
+`vfsi_sync::backend::helpers`. Applications use `Vfsi` for vector operations
+and `VfsiExt` for singular helpers and composed workflows. The old `FileSystem`
+and `Backend` names and `sfsi`/`vfsi` namespace aliases are removed.
 Lifecycle/configuration methods keep descriptive names, and protocol internals
 keep their wire vocabulary. `VfsiExt` also provides bulk composed workflows.
 

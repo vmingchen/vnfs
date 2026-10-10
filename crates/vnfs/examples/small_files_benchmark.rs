@@ -6,7 +6,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use vfsi_sync::*;
+use vfsi_sync::backend::VectorBackend;
 
 use vfsi_nfs::NfsVecFs;
 use vfsi_sync::{ReadOp, VfOffset, WriteOp};

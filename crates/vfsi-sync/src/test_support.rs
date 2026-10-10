@@ -1,9 +1,10 @@
 #![doc = "Shared backend contract assertions for VFSI integration tests."]
 
-//! A capability-aware shared test suite run against every [`Backend`]
+//! A capability-aware shared test suite run against every [`VectorBackend`]
 //! implementation. Portable behavior must match on all backends; optional
 //! Unix semantics are asserted only when advertised.
 
+use crate::backend::VectorBackend;
 use crate::*;
 use std::path::{Path, PathBuf};
 
@@ -54,7 +55,7 @@ pub fn supervise_with_deadline(test: &str) -> bool {
 
 /// Run a broad set of vectorized-filesystem assertions against `fs`, using
 /// paths under `base` (which must be unique per caller).
-pub fn run_suite(fs: &mut impl Backend, base: &str) {
+pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     let capabilities = fs.capabilities();
     let posix_metadata = capabilities.contains(Capabilities::POSIX_METADATA);
     let symlinks = capabilities.contains(Capabilities::SYMLINKS);

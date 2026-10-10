@@ -35,7 +35,7 @@ fn mixed<C: Vfsi>(fs: &C) {
     buffer.fill(0); // No result retains the borrow, even while results remain live.
     assert_eq!(results[2].read(), 1);
     let mut first = [0];
-    std::io::Read::read_exact(&mut fs.file_io(&file), &mut first).unwrap();
+    std::io::Read::read_exact(&mut fs.std_io(&file), &mut first).unwrap();
     assert_eq!(&first, b"a");
     file.close().unwrap();
 }

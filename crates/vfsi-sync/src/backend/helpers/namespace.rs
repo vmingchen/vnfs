@@ -1,15 +1,21 @@
 use super::*;
 
-pub fn unlink_impl_default<F: Backend + ?Sized>(backend: &mut F, pathname: &Path) -> VfResult<()> {
+pub fn unlink_impl_default<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    pathname: &Path,
+) -> VfResult<()> {
     backend.vremove_impl(&[VfFile::from_os_path(pathname)])
 }
 
-pub fn vunlink_impl_default<F: Backend + ?Sized>(backend: &mut F, pathnames: &[&Path]) -> VfRes {
+pub fn vunlink_impl_default<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    pathnames: &[&Path],
+) -> VfRes {
     let files: Vec<VfFile> = pathnames.iter().map(|p| VfFile::from_os_path(p)).collect();
     backend.vremove_impl(&files)
 }
 
-pub fn mkdir_raw_impl_default<F: Backend + ?Sized>(
+pub fn mkdir_raw_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     path: &Path,
     mode: u32,
@@ -23,7 +29,7 @@ pub fn mkdir_raw_impl_default<F: Backend + ?Sized>(
     backend.vmkdir_impl(std::slice::from_ref(&a))
 }
 
-pub fn ensure_dir_impl_default<F: Backend + ?Sized>(
+pub fn ensure_dir_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     dir: &Path,
     mode: u32,
@@ -44,7 +50,7 @@ pub fn ensure_dir_impl_default<F: Backend + ?Sized>(
     Ok(())
 }
 
-pub fn native_create_dir_impl_default<F: Backend + ?Sized>(
+pub fn native_create_dir_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     path: &std::path::Path,
     mode: u32,
@@ -54,7 +60,7 @@ pub fn native_create_dir_impl_default<F: Backend + ?Sized>(
         .map_err(|error| error.with_context("create_dir", path))
 }
 
-pub fn native_rename_impl_default<F: Backend + ?Sized>(
+pub fn native_rename_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     from: &std::path::Path,
     to: &std::path::Path,

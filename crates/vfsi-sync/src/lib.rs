@@ -1,7 +1,8 @@
 //! Synchronous filesystem contracts.
 //!
-//! `FileSystem` supports owned handles. `Backend` adds vector engines and
-//! overridable workflows; shared helpers compose those engines.
+//! Application code uses [`Vfsi`] and [`VfsiExt`]. Backend implementers use
+//! [`backend::HandleBackend`] and [`backend::VectorBackend`]; shared defaults
+//! live in [`backend::helpers`].
 
 pub use vfsi_core::*;
 
@@ -12,37 +13,14 @@ pub mod path {
 
 mod traits;
 pub use traits::{BackendDirectoryPage, DirPageCursor, DirectoryPage, ReadAllOptions};
-mod io;
-pub use io::{VfFileHandle, VfOpenOptions};
 mod application_macros;
 mod client;
 mod traversal;
-pub use client::{FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite, OpenOptions};
+pub use client::{FsClient, FsDir, FsFile, FsRead, FsReadInto, FsWrite};
 pub use traversal::walk_events;
-#[doc(hidden)]
-pub mod backend_helpers;
-mod native;
-pub use native::{Backend, FileSystem};
-
-/// Scalar/singular view of the synchronous interface.
-pub mod sfsi {
-    pub use crate::{
-        DepthLimit, DirPageCursor, FileSystem, FsClient, FsFile, ListDirOptions, OpenOptions,
-        StreamOptions,
-    };
-    pub use vfsi_core::{Fd, VfAttrs, VfError, VfFile, VfOffset, VfResult, VfType};
-}
-
-/// Vectorized view of the synchronous interface.
-pub mod vfsi {
-    pub use crate::{
-        Backend, DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
-        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
-        DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirPageCursor, ListDirOptions, ReadAllOptions,
-        StreamOptions,
-    };
-    pub use vfsi_core::*;
-}
+/// Native execution contracts for backend implementers and language bindings.
+/// Application callers use [`Vfsi`] and [`VfsiExt`].
+pub mod backend;
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
@@ -53,7 +31,7 @@ pub use vfsi_core::api::{
     DEFAULT_DIRECTORY_MAX_ENTRIES, DEFAULT_DIRECTORY_MAX_PATH_BYTES,
     DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, DEFAULT_READ_STREAM_CHUNK_BYTES,
     DEFAULT_READV_MAX_TOTAL_BYTES, DEFAULT_WALK_MAX_DEPTH, DepthLimit, DirectoryListing,
-    ListDirOptions, ReadIntoResult as FsReadIntoResult, ReadOptions, ResourceLimits,
+    ListDirOptions, OpenOptions, ReadIntoResult as FsReadIntoResult, ReadOptions, ResourceLimits,
     StreamCompletion, StreamOptions, TraversalCompletion, WalkControl, WalkEvent, WalkEventKind,
     WriteResult as FsWriteResult,
 };

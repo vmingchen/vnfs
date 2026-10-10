@@ -1,4 +1,4 @@
-//! NFSv4.1 implementation of the vectorized [`Backend`] API.
+//! NFSv4.1 implementation of the vectorized [`VectorBackend`] API.
 //!
 //! [`NfsVecFs`] is the analog of the C `tc_init()` module handle: it connects
 //! to an NFSv4.1 server, coalesces vector operations into as few compounds as
@@ -14,6 +14,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use std::time::Duration;
+use vfsi_sync::backend::{HandleBackend, VectorBackend};
 
 use nfsv41_sys::*;
 use vfsi_core::internal::ManyResults;
@@ -125,7 +126,7 @@ struct NfsChildDirectoryCursor {
 /// `fh` addresses the directory itself (for READDIR and child LOOKUPs), while
 /// `parent`/`name` address its entry in the parent for the final REMOVE. No
 /// path is re-resolved after the operand's parent is resolved once. A `None`
-/// parent keeps the directory (used by [`Backend::remove_dir_contents_path_impl`]).
+/// parent keeps the directory (used by [`VectorBackend::remove_dir_contents_path_impl`]).
 struct RemoveDir {
     fh: WireFileHandle,
     parent: Option<WireFileHandle>,
@@ -439,7 +440,7 @@ impl NfsClientBuilder {
             minor_version: filesystem.minorversion(),
         });
         // Construction has not installed the backend behind a client lock.
-        for callback in FileSystem::take_notifications(&mut filesystem) {
+        for callback in HandleBackend::take_notifications(&mut filesystem) {
             callback();
         }
         Ok(filesystem)
@@ -480,7 +481,7 @@ pub enum NfsEvent {
 /// reentrant client operations. Callbacks run synchronously and should be short.
 /// Owned-client delivery isolates callback panics from filesystem results.
 /// Store weak client references to avoid an observer/client ownership cycle.
-/// Direct backend users must drain `FileSystem::take_notifications` outside locks.
+/// Direct backend users must drain `HandleBackend::take_notifications` outside locks.
 pub trait NfsObserver: Send + Sync + 'static {
     fn on_event(&self, event: &NfsEvent);
 }
@@ -566,7 +567,7 @@ pub struct NfsServerCopyStats {
     pub fallbacks: u64,
 }
 
-/// An NFSv4 client exposing the vectorized [`Backend`] API.
+/// An NFSv4 client exposing the vectorized [`VectorBackend`] API.
 pub struct NfsVecFs {
     nfs: NfsClient,
     connection: ConnectionConfig,
@@ -772,7 +773,7 @@ fn check_mount_write(read_only: bool, count: usize) -> VfResult<()> {
     }
 }
 
-/// Root-relative application path for `path`, per the `FileSystem::abs_path`
+/// Root-relative application path for `path`, per the `HandleBackend::abs_path`
 /// contract: absolute inputs are taken relative to the application root and
 /// relative inputs resolve against `cwd`; neither includes the export prefix.
 fn namespace_path(cwd: &Path, path: &Path) -> PathBuf {
@@ -887,7 +888,7 @@ impl NfsVecFs {
     /// Close all descriptors and explicitly tear down NFS session state.
     /// `Drop` remains a best-effort fallback when this result is not needed.
     pub fn shutdown(mut self) -> VfResult<()> {
-        for callback in FileSystem::take_notifications(&mut self) {
+        for callback in HandleBackend::take_notifications(&mut self) {
             callback();
         }
         let observer = self.observer.clone();
@@ -938,7 +939,7 @@ impl NfsVecFs {
         server_path_for(&self.connection.root, &self.cwd, path)
     }
 
-    /// Server-path equivalent of [`FileSystem::vf_path`]. Descriptors and the
+    /// Server-path equivalent of [`HandleBackend::vf_path`]. Descriptors and the
     /// saved/cwd sentinels have no path.
     fn server_vf_path(&self, file: &VfFile) -> VfResult<PathBuf> {
         match file {
@@ -1617,7 +1618,7 @@ impl NfsVecFs {
                 .collect();
             let flags: Vec<i32> = snapshots.iter().map(|(_, open, _, _)| open.flags).collect();
             let modes: Vec<u32> = snapshots.iter().map(|(_, open, _, _)| open.mode).collect();
-            let reopened = Backend::vopen_raw_impl(&mut replacement, &paths, &flags, &modes)?;
+            let reopened = VectorBackend::vopen_raw_impl(&mut replacement, &paths, &flags, &modes)?;
             // Validate every identity before removing any handle from the
             // replacement's cleanup map or publishing the new session.
             for ((_, recipe, _, original), file) in snapshots.iter().zip(&reopened) {
@@ -4119,13 +4120,13 @@ impl NfsVecFs {
     }
 }
 
-impl FileSystem for NfsVecFs {
+impl HandleBackend for NfsVecFs {
     fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<FilesystemStats>> {
         if files.is_empty() {
             return Ok(Vec::new());
         }
         if !self.recovery_in_progress {
-            return self.read_with_recovery(|client| FileSystem::vstatfs_impl(client, files));
+            return self.read_with_recovery(|client| HandleBackend::vstatfs_impl(client, files));
         }
         let refs: Vec<_> = files.iter().collect();
         let resolved = self.resolve_files_nfs(&refs, true)?;
@@ -4192,7 +4193,7 @@ impl FileSystem for NfsVecFs {
             }
     }
 
-    /// Namespace-relative path (no leading `/`), per the [`FileSystem::abs_path`]
+    /// Namespace-relative path (no leading `/`), per the [`HandleBackend::abs_path`]
     /// contract. The export root (`connection.root`) is not included; use
     /// `NfsVecFs::server_path` for the path sent to the NFS server.
     fn abs_path(&self, path: &Path) -> PathBuf {
@@ -4376,39 +4377,39 @@ impl FileSystem for NfsVecFs {
         Ok(new as i64)
     }
     fn read_file_impl(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
-        vfsi_sync::backend_helpers::native_read_file_impl_default(self, file, max_bytes)
+        vfsi_sync::backend::helpers::native_read_file_impl_default(self, file, max_bytes)
     }
     fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
-        vfsi_sync::backend_helpers::native_open_impl_default(self, request)
+        vfsi_sync::backend::helpers::native_open_impl_default(self, request)
     }
     fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
-        vfsi_sync::backend_helpers::native_read_impl_default(self, request)
+        vfsi_sync::backend::helpers::native_read_impl_default(self, request)
     }
     fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
-        vfsi_sync::backend_helpers::native_read_into_impl_default(self, request, buffer)
+        vfsi_sync::backend::helpers::native_read_into_impl_default(self, request, buffer)
     }
     fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
-        vfsi_sync::backend_helpers::native_write_impl_default(self, request)
+        vfsi_sync::backend::helpers::native_write_impl_default(self, request)
     }
     fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {
-        vfsi_sync::backend_helpers::native_seek_impl_default(self, file, position)
+        vfsi_sync::backend::helpers::native_seek_impl_default(self, file, position)
     }
     fn metadata_impl(
         &mut self,
         target: Target<'_, VfFile>,
         options: vfsi_core::api::AttrsOptions,
     ) -> VfResult<VfAttrs> {
-        vfsi_sync::backend_helpers::native_metadata_impl_default(self, target, options)
+        vfsi_sync::backend::helpers::native_metadata_impl_default(self, target, options)
     }
     fn set_attributes_impl(&mut self, update: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<()> {
-        vfsi_sync::backend_helpers::native_set_attributes_impl_default(self, update)
+        vfsi_sync::backend::helpers::native_set_attributes_impl_default(self, update)
     }
     fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, VfFile>>]) -> VfResult<()> {
-        vfsi_sync::backend_helpers::vsetattrs_typed_default(self, updates)
+        vfsi_sync::backend::helpers::vsetattrs_typed_default(self, updates)
     }
 }
 
-impl Backend for NfsVecFs {
+impl VectorBackend for NfsVecFs {
     fn vopen_outcomes_impl(
         &mut self,
         paths: &[&Path],

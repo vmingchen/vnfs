@@ -5,10 +5,11 @@ use std::sync::{
 };
 
 use vfsi_sync::api::ReadOptions;
+use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::{
-    Backend, Capabilities, DirEntry, DirPageCursor, FileSystem, FsClient, ListDirOptions,
-    OpenFlags, OpenOp, ReadIntoResult, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfError,
-    VfFile, VfOffset, VfResult, Vfsi, VfsiExt, WriteOp, WriteResult,
+    Capabilities, DirEntry, DirPageCursor, FsClient, ListDirOptions, OpenFlags, OpenOp,
+    ReadIntoResult, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfError, VfFile, VfOffset,
+    VfResult, Vfsi, VfsiExt, WriteOp, WriteResult,
 };
 
 #[test]
@@ -145,45 +146,43 @@ struct ScalarOnly {
     write_calls: Arc<AtomicUsize>,
     max_write_once: Option<usize>,
     interrupt_write_call: Option<usize>,
+    open_requests: Arc<Mutex<Vec<OpenOp>>>,
     directory_entries: usize,
     directory_page_sizes: Arc<Mutex<Vec<usize>>>,
     directory_fields: Arc<Mutex<Vec<vfsi_sync::AttrMask>>>,
 }
 
 #[test]
-fn opened_file_read_to_end_has_explicit_limits_and_cursor_semantics() {
+fn std_io_collection_obeys_client_limits_and_retains_cursor() {
     for limit in [0, 3, 6, 7] {
         let client = FsClient::new(ScalarOnly {
             data: b"abcdef".to_vec(),
             ..Default::default()
         })
-        .with_limits(vfsi_sync::ResourceLimits::new().max_read_bytes(1));
+        .with_limits(vfsi_sync::ResourceLimits::new().max_read_bytes(limit));
         let mut file = client.open("/file").unwrap();
-        let result = file.read_to_end_with_limit(limit);
+        let mut io = client.std_io(&file);
+        let mut output = Vec::new();
+        let result = io.read_to_end(&mut output);
         if limit < 6 {
-            let error = result.unwrap_err();
-            assert_eq!(error.kind(), std::io::ErrorKind::FileTooLarge);
-            assert_eq!(error.operation(), Some("read_to_end_with_limit"));
-            assert_eq!(
-                file.seek_native(SeekFrom::Current(0)).unwrap(),
-                (limit + 1) as u64
-            );
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::FileTooLarge);
+            assert_eq!(io.stream_position().unwrap(), (limit + 1) as u64);
+            assert_eq!(output, &b"abcdef"[..limit]);
         } else {
-            assert_eq!(result.unwrap(), b"abcdef");
-            assert_eq!(file.seek_native(SeekFrom::Current(0)).unwrap(), 6);
+            assert_eq!(result.unwrap(), 6);
+            assert_eq!(output, b"abcdef");
+            assert_eq!(io.stream_position().unwrap(), 6);
         }
-        file.seek_native(SeekFrom::Start(3)).unwrap();
-        assert_eq!(file.read_to_end_with_limit(3).unwrap(), b"def");
-        assert_eq!(file.read_to_end_with_limit(0).unwrap(), b"");
+        // EOF probing also works with a zero remaining collection budget.
+        io.seek(SeekFrom::Start(6)).unwrap();
+        assert_eq!(io.read_to_end(&mut Vec::new()).unwrap(), 0);
+        drop(io);
         file.try_close().unwrap();
-        assert_eq!(
-            file.read_to_end_with_limit(0).unwrap_err().err_no(),
-            libc::EBADF as u32
-        );
+        assert!(client.std_io(&file).read(&mut [0]).is_err());
     }
 }
 
-impl Backend for ScalarOnly {
+impl VectorBackend for ScalarOnly {
     fn vopen_impl(&mut self, requests: &[OpenOp]) -> VfResult<Vec<VfFile>> {
         if self.transport_failure {
             return Err(VfError::transport(None, "reply lost"));
@@ -372,11 +371,6 @@ impl Backend for ScalarOnly {
 /// These wrappers exercise the actual minimal contracts, independently of the
 /// full probe's vector/directory overrides.
 #[derive(Default)]
-struct HandleOnly {
-    scalar: ScalarOnly,
-}
-
-#[derive(Default)]
 struct DefaultBackend {
     scalar: ScalarOnly,
     vector_reads: usize,
@@ -390,7 +384,7 @@ struct PagedBackend {
 
 macro_rules! handle_contract {
     ($backend:ty) => {
-        impl FileSystem for $backend {
+        impl HandleBackend for $backend {
             fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
                 self.scalar.open_impl(request)
             }
@@ -446,7 +440,6 @@ macro_rules! handle_contract {
     };
 }
 
-handle_contract!(HandleOnly);
 handle_contract!(DefaultBackend);
 handle_contract!(PagedBackend);
 
@@ -456,7 +449,7 @@ struct LegacyDirectoryBackend {
     calls: usize,
 }
 handle_contract!(LegacyDirectoryBackend);
-impl Backend for LegacyDirectoryBackend {
+impl VectorBackend for LegacyDirectoryBackend {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         panic!("unexpected read")
     }
@@ -511,7 +504,7 @@ struct WriteBoundaryProbe {
     failure_after: usize,
 }
 handle_contract!(WriteBoundaryProbe);
-impl Backend for WriteBoundaryProbe {
+impl VectorBackend for WriteBoundaryProbe {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         Err(VfError::unsupported(0))
     }
@@ -558,7 +551,7 @@ impl Backend for WriteBoundaryProbe {
 fn shared_write_operations_keep_storage_borrowed_through_dynamic_vector_dispatch() {
     let mut concrete = WriteBoundaryProbe::default();
     let calls = Arc::clone(&concrete.calls);
-    let backend: &mut dyn Backend = &mut concrete;
+    let backend: &mut dyn VectorBackend = &mut concrete;
     let storage = [
         WriteOp::from_path("/created", VfOffset::At(0), b"abc".to_vec())
             .with_creation()
@@ -652,7 +645,7 @@ struct AttrsBackend {
     queries: Vec<(bool, VfFile, vfsi_core::AttrMask)>,
 }
 handle_contract!(AttrsBackend);
-impl Backend for AttrsBackend {
+impl VectorBackend for AttrsBackend {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         Err(VfError::unsupported(0))
     }
@@ -695,10 +688,10 @@ impl AttrsBackend {
 
 #[test]
 fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
-    use vfsi_sync::backend_helpers::{native_metadata_impl_default, vsetattrs_typed_default};
+    use vfsi_sync::backend::helpers::{native_metadata_impl_default, vsetattrs_typed_default};
     use vfsi_sync::{AttrMask, Permissions};
     let mut concrete = AttrsBackend::default();
-    let backend: &mut dyn Backend = &mut concrete;
+    let backend: &mut dyn VectorBackend = &mut concrete;
     let file = VfFile::from_fd(7);
     let op = SetAttrsOp::file(&file)
         .len(0)
@@ -779,7 +772,7 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
 
 #[test]
 fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
-    use vfsi_sync::backend_helpers::vsetattrs_typed_default;
+    use vfsi_sync::backend::helpers::vsetattrs_typed_default;
     let ops = [
         SetAttrsOp::new(Target::Path(std::path::Path::new("/a"))).len(1),
         SetAttrsOp::new(Target::Path(std::path::Path::new("/b")))
@@ -828,7 +821,7 @@ fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
     }
 }
 
-impl Backend for PagedBackend {
+impl VectorBackend for PagedBackend {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         panic!("directory paging must not issue reads")
     }
@@ -872,7 +865,7 @@ impl Backend for PagedBackend {
 #[test]
 fn minimal_backend_directory_defaults_return_unsupported() {
     let mut concrete = DefaultBackend::default();
-    let backend: &mut dyn Backend = &mut concrete;
+    let backend: &mut dyn VectorBackend = &mut concrete;
     let dir = std::path::Path::new("/tree");
     assert_eq!(
         backend
@@ -906,7 +899,7 @@ fn minimal_backend_directory_defaults_return_unsupported() {
 fn default_directory_pages_preserve_cursor_fields_and_bounds() {
     let mut concrete = PagedBackend::default();
     let calls = concrete.page_calls.clone();
-    let backend: &mut dyn Backend = &mut concrete;
+    let backend: &mut dyn VectorBackend = &mut concrete;
     let dir = std::path::Path::new("/tree");
     let (first, next) = backend.read_dir_page_impl(dir, None, 1, 3).unwrap();
     assert_eq!(first.len(), 1);
@@ -975,7 +968,7 @@ struct WorkflowOverride {
 }
 handle_contract!(WorkflowOverride);
 
-impl Backend for WorkflowOverride {
+impl VectorBackend for WorkflowOverride {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         panic!("specialized workflows must not fall back to generic vector reads")
     }
@@ -1040,7 +1033,7 @@ impl Backend for WorkflowOverride {
 #[test]
 fn shared_workflows_keep_dynamic_backend_overrides_reachable() {
     let mut concrete = WorkflowOverride::default();
-    let backend: &mut dyn Backend = &mut concrete;
+    let backend: &mut dyn VectorBackend = &mut concrete;
     let files = [VfFile::from_fd(1)];
     assert_eq!(
         backend.vread_all_impl(&files).unwrap(),
@@ -1082,7 +1075,7 @@ fn shared_workflows_keep_dynamic_backend_overrides_reachable() {
     );
 }
 
-impl Backend for DefaultBackend {
+impl VectorBackend for DefaultBackend {
     fn vread_impl(&mut self, requests: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         self.vector_reads += 1;
         requests
@@ -1101,7 +1094,7 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
         },
         ..Default::default()
     };
-    let backend: &mut dyn Backend = &mut concrete;
+    let backend: &mut dyn VectorBackend = &mut concrete;
     assert!(backend.vstatfs_impl(&[]).unwrap().is_empty());
     assert!(backend.take_notifications().is_empty());
     assert_eq!(backend.getcwd(), std::path::Path::new("/"));
@@ -1196,7 +1189,7 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
     assert!(concrete.vector_reads >= 5);
 }
 
-impl FileSystem for ScalarOnly {
+impl HandleBackend for ScalarOnly {
     fn vfsync_impl(&mut self, files: &[VfFile], mode: vfsi_core::api::SyncMode) -> VfResult<()> {
         self.sync_calls.lock().unwrap().push((mode, files.to_vec()));
         self.sync_failure.clone().map_or(Ok(()), Err)
@@ -1228,7 +1221,8 @@ impl FileSystem for ScalarOnly {
     fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
         std::mem::take(&mut *self.notifications.lock().unwrap())
     }
-    fn open_impl(&mut self, _: &OpenOp) -> VfResult<VfFile> {
+    fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
+        self.open_requests.lock().unwrap().push(request.clone());
         self.open = true;
         Ok(VfFile::from_fd(1))
     }
@@ -1455,58 +1449,68 @@ fn setattrs_ops_remap_later_run_failures_without_replaying_or_dispatching_suffix
 }
 
 #[test]
-fn owned_client_accepts_a_scalar_only_backend() {
-    // This wrapper implements FileSystem only, not Backend. Keeping the vector
-    // probe directly here would fail to guard the narrow handle boundary.
-    let client = FsClient::new(HandleOnly::default());
-    let mut options = client.open_options();
-    options.read(true).write(true).create(true);
-    let mut file = options.open("/file").unwrap();
-    file.write_all(b"scalar").unwrap();
-    file.seek(SeekFrom::Start(0)).unwrap();
-    let mut output = String::new();
-    file.read_to_string(&mut output).unwrap();
-    assert_eq!(output, "scalar");
+fn owned_handle_keeps_backend_alive_after_standard_io_adapter_is_dropped() {
+    let backend = ScalarOnly::default();
+    let closes = Arc::clone(&backend.close_observed);
+    let client = FsClient::new(backend);
+    let file = client
+        .open_options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open("/file")
+        .unwrap();
+    {
+        let mut io = client.std_io(&file);
+        io.write_all(b"vector").unwrap();
+        io.seek(SeekFrom::Start(0)).unwrap();
+        let mut output = String::new();
+        io.read_to_string(&mut output).unwrap();
+        assert_eq!(output, "vector");
+    }
+    assert!(!file.is_closed());
+    drop(client);
+    assert_eq!(closes.load(Ordering::SeqCst), 0);
     file.close().unwrap();
+    assert_eq!(closes.load(Ordering::SeqCst), 1);
 }
 
 #[test]
-fn owned_file_rejects_backend_results_that_violate_io_contracts() {
+fn std_io_rejects_backend_results_that_violate_io_contracts() {
     let client = FsClient::new(ScalarOnly {
         oversized_read: true,
-        ..ScalarOnly::default()
+        ..Default::default()
     });
-    let mut file = client
-        .open_with(OpenOp::new("/file", OpenFlags::READ))
-        .unwrap();
-    let error = file.read_native(&mut [0; 4]).unwrap_err();
+    let file = client.open("/file").unwrap();
+    let error = client.std_io(&file).read(&mut [0; 4]).unwrap_err();
+    let error = error.get_ref().unwrap().downcast_ref::<VfError>().unwrap();
     assert_eq!(error.err_no(), vfsi_sync::ERR_IO);
-    assert_eq!(error.operation(), Some("read"));
-    assert_eq!(error.path(), Some(std::path::Path::new("/file")));
 
     let client = FsClient::new(ScalarOnly {
         oversized_write_count: true,
-        ..ScalarOnly::default()
+        ..Default::default()
     });
-    let mut file = client
+    let file = client
         .open_with(OpenOp::new("/file", OpenFlags::WRITE))
         .unwrap();
-    let error = file.write_native(b"data").unwrap_err();
-    assert_eq!(error.err_no(), vfsi_sync::ERR_IO);
-    assert_eq!(error.operation(), Some("write"));
+    let error = client.std_io(&file).write(b"data").unwrap_err();
+    let error = error.get_ref().unwrap().downcast_ref::<VfError>().unwrap();
+    assert!(error.is_transport());
+    assert_eq!(error.operation(), Some("vwrite_native"));
     assert_eq!(error.path(), Some(std::path::Path::new("/file")));
 }
 
 #[test]
-fn native_file_errors_retain_operation_and_path_context() {
+fn std_io_errors_retain_vector_operation_and_path_context() {
     let client = FsClient::new(ScalarOnly {
         read_failure: true,
-        ..ScalarOnly::default()
+        ..Default::default()
     });
     let file = client.open("/important").unwrap();
-    let error = file.read_at(&mut [0; 1], 0).unwrap_err();
-    assert_eq!(error.err_no(), libc::EACCES as u32);
-    assert_eq!(error.operation(), Some("read"));
+    let error = client.std_io(&file).read(&mut [0; 1]).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    let error = error.get_ref().unwrap().downcast_ref::<VfError>().unwrap();
+    assert_eq!(error.operation(), Some("vread_into_native"));
     assert_eq!(error.path(), Some(std::path::Path::new("/important")));
 }
 
@@ -1877,12 +1881,13 @@ fn successfully_closed_handle_returns_ebadf_instead_of_panicking() {
     let client = FsClient::new(ScalarOnly::default());
     let mut file = client.open("/file").unwrap();
     file.try_close().unwrap();
-    let error = file.read_native(&mut [0u8; 1]).unwrap_err();
-    assert_eq!(error.err_no(), vfsi_sync::ERR_EBADF);
-    let error = file.write_native(b"x").unwrap_err();
-    assert_eq!(error.err_no(), vfsi_sync::ERR_EBADF);
-    let error = file.seek_native(SeekFrom::Start(0)).unwrap_err();
-    assert_eq!(error.err_no(), vfsi_sync::ERR_EBADF);
+    for error in [
+        client.std_io(&file).read(&mut [0u8; 1]).unwrap_err(),
+        client.std_io(&file).write(b"x").unwrap_err(),
+    ] {
+        let error = error.get_ref().unwrap().downcast_ref::<VfError>().unwrap();
+        assert_eq!(error.err_no(), vfsi_sync::ERR_EBADF);
+    }
 }
 
 #[test]
@@ -2049,7 +2054,9 @@ fn native_read_into_dispatches_without_owned_read_results() {
     assert_eq!(&first, b"abc");
     assert_eq!(&second, b"def");
     let mut scalar = [0u8; 2];
-    assert_eq!(file.read_at(&mut scalar, 2).unwrap(), 2);
+    let mut io = client.std_io(&file);
+    io.seek(SeekFrom::Start(2)).unwrap();
+    assert_eq!(io.read(&mut scalar).unwrap(), 2);
     assert_eq!(&scalar, b"cd");
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     let results = client
@@ -2138,9 +2145,10 @@ fn file_drop_never_waits_for_an_in_flight_rpc() {
     };
     let closes = backend.close_observed.clone();
     let client = FsClient::new(backend);
-    let mut reading = client.open("/file").unwrap();
+    let reading = client.open("/file").unwrap();
     let dropped = client.open("/other").unwrap();
-    let reader = std::thread::spawn(move || reading.read_native(&mut [0]).unwrap());
+    let read_client = client.clone();
+    let reader = std::thread::spawn(move || read_client.std_io(&reading).read(&mut [0]).unwrap());
     entered.wait();
     let (tx, rx) = std::sync::mpsc::channel();
     let dropper = std::thread::spawn(move || {
@@ -2355,7 +2363,7 @@ fn sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices() {
 }
 
 #[test]
-fn file_io_write_all_retries_interruptions_without_replaying_progress() {
+fn std_io_write_all_retries_interruptions_without_replaying_progress() {
     for append in [false, true] {
         for interrupt_write_call in 0..3 {
             let backend = ScalarOnly {
@@ -2372,15 +2380,16 @@ fn file_io_write_all_retries_interruptions_without_replaying_progress() {
                 .append(append)
                 .open("/file")
                 .unwrap();
-            let mut io = client.file_io(&file);
+            let mut io = client.std_io(&file);
             io.seek(SeekFrom::Start(3)).unwrap();
             io.write_all(b"abcdef").unwrap();
-            assert_eq!(io.position(), 9);
+            assert_eq!(io.stream_position().unwrap(), 9);
             assert_eq!(calls.load(Ordering::SeqCst), 4);
             // An empty completion must issue no I/O or change the cursor.
             io.write_all(b"").unwrap();
-            assert_eq!(io.position(), 9);
+            assert_eq!(io.stream_position().unwrap(), 9);
             assert_eq!(calls.load(Ordering::SeqCst), 4);
+            drop(io);
             file.close().unwrap();
             assert_eq!(client.into_inner().unwrap().data, b"abcabcdef");
         }
@@ -2388,7 +2397,7 @@ fn file_io_write_all_retries_interruptions_without_replaying_progress() {
 }
 
 #[test]
-fn file_io_write_all_reports_write_zero_without_retrying() {
+fn std_io_write_all_reports_write_zero_without_retrying() {
     let backend = ScalarOnly {
         data: b"abc".to_vec(),
         max_write_once: Some(0),
@@ -2397,14 +2406,15 @@ fn file_io_write_all_reports_write_zero_without_retrying() {
     let calls = Arc::clone(&backend.write_calls);
     let client = FsClient::new(backend);
     let file = client.open_options().append(true).open("/file").unwrap();
-    let mut io = client.file_io(&file);
+    let mut io = client.std_io(&file);
     io.seek(SeekFrom::Start(3)).unwrap();
     assert_eq!(
         io.write_all(b"data").unwrap_err().kind(),
         std::io::ErrorKind::WriteZero
     );
-    assert_eq!(io.position(), 3);
+    assert_eq!(io.stream_position().unwrap(), 3);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    drop(io);
     file.close().unwrap();
     assert_eq!(client.into_inner().unwrap().data, b"abc");
 }
@@ -2430,17 +2440,18 @@ fn append_adapters_share_completion_and_report_actual_end_after_short_writes() {
                 .open("/file")
                 .unwrap()
         };
-        let mut io = client.file_io(&file);
+        let mut io = client.std_io(&file);
         assert_eq!(io.write(b"XY").unwrap(), 2);
-        assert_eq!(io.position(), 5);
+        assert_eq!(io.stream_position().unwrap(), 5);
         io.seek(SeekFrom::Start(0)).unwrap();
         let mut prefix = [0; 3];
         io.read_exact(&mut prefix).unwrap();
         assert_eq!(&prefix, b"abc");
         io.write_all(b"12345").unwrap();
-        assert_eq!(io.position(), 10);
+        assert_eq!(io.stream_position().unwrap(), 10);
         io.write_all(b"").unwrap();
-        assert_eq!(io.position(), 10);
+        assert_eq!(io.stream_position().unwrap(), 10);
+        drop(io);
         file.close().unwrap();
         assert_eq!(client.into_inner().unwrap().data, b"abcXY12345");
     }
@@ -2452,9 +2463,9 @@ fn append_adapters_share_completion_and_report_actual_end_after_short_writes() {
         ..Default::default()
     });
     let file = client.open_options().append(true).open("/file").unwrap();
-    let mut io = client.file_io(&file);
+    let mut io = client.std_io(&file);
     io.write_all(b"abcdef").unwrap();
-    assert_eq!(io.position(), 15); // [3..5), [8..10), [13..15)
+    assert_eq!(io.stream_position().unwrap(), 15); // [3..5), [8..10), [13..15)
 }
 
 #[test]
@@ -2498,9 +2509,12 @@ fn complete_append_vectors_order_short_writes_and_never_replay_failures() {
             let client = FsClient::new(backend);
             let file = client.open_options().append(true).open("/file").unwrap();
             let data = b"abcdef";
-            let mut io = client.file_io(&file);
+            let mut io = client.std_io(&file);
             let actual = io.write_all(data).unwrap_err();
-            assert_eq!(io.position(), if failure_after == 0 { 0 } else { 5 });
+            assert_eq!(
+                io.stream_position().unwrap(),
+                if failure_after == 0 { 0 } else { 5 }
+            );
             assert_eq!(actual.kind(), error.kind());
             let calls = calls.lock().unwrap();
             assert_eq!(calls.len(), failure_after + 1);
@@ -2520,7 +2534,7 @@ struct DirectoryProbe {
     failure: Option<(i32, VfError)>,
 }
 handle_contract!(DirectoryProbe);
-impl Backend for DirectoryProbe {
+impl VectorBackend for DirectoryProbe {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         unreachable!("directory test must not issue file reads")
     }
@@ -2643,4 +2657,61 @@ fn failed_directory_open_cleans_up_the_opened_prefix() {
     );
     fs.drain_cleanup().unwrap();
     assert_eq!(*closed.lock().unwrap(), [0]);
+}
+
+#[test]
+fn portable_open_builder_preflights_and_preserves_all_flag_combinations() {
+    for bits in 0..64 {
+        let [read, write, append, truncate, create, exclusive] =
+            [0, 1, 2, 3, 4, 5].map(|bit| bits & (1 << bit) != 0);
+        let backend = ScalarOnly::default();
+        let opened = Arc::clone(&backend.open_requests);
+        let client = FsClient::new(backend);
+        // Both paths name the same portable builder type.
+        let mut options: vfsi_core::api::OpenOptions<'_, _> = client.open_options();
+        options
+            .read(read)
+            .write(write)
+            .append(append)
+            .truncate(truncate)
+            .create(create)
+            .create_new(exclusive)
+            .mode(0o640);
+        let cloned: vfsi_sync::OpenOptions<'_, _> = options.clone();
+        let one = options.open("/one");
+        let many = cloned.vopen(&["/two", "/three"]);
+        let writable = write || append;
+        if (!read && !writable) || ((truncate || create || exclusive) && !writable) {
+            assert_eq!(one.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(many.unwrap_err().kind(), std::io::ErrorKind::InvalidInput);
+            assert!(
+                opened.lock().unwrap().is_empty(),
+                "invalid flags reached backend"
+            );
+        } else {
+            one.unwrap().close().unwrap();
+            client.close_files(many.unwrap()).unwrap();
+            let opened = opened.lock().unwrap();
+            assert_eq!(
+                opened
+                    .iter()
+                    .map(|op| op.path().to_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["/one", "/two", "/three"]
+            );
+            for op in opened.iter() {
+                for (flag, enabled) in [
+                    (OpenFlags::READ, read),
+                    (OpenFlags::WRITE, write),
+                    (OpenFlags::APPEND, append),
+                    (OpenFlags::TRUNCATE, truncate),
+                    (OpenFlags::CREATE, create),
+                    (OpenFlags::CREATE_NEW, exclusive),
+                ] {
+                    assert_eq!(op.flags().contains(flag), enabled);
+                }
+                assert_eq!(op.creation_mode(), 0o640);
+            }
+        }
+    }
 }

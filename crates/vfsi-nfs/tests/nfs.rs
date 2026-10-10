@@ -3,6 +3,7 @@
 use std::path::Path;
 #[cfg(feature = "test-faults")]
 use std::{path::PathBuf, sync::Arc};
+use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::test_support::borrow_writes;
 use vfsi_sync::*;
 
@@ -212,7 +213,7 @@ fn assert_same_file_scatter_is_batched(write_all: bool, short: bool) {
     }
     let fs = vfsi_sync::FsClient::new(backend);
     let path = format!("/vfsi-scatter-{}-{write_all}-{short}", std::process::id());
-    let mut file = fs.create(&path).unwrap();
+    let file = fs.create(&path).unwrap();
     // Nonmonotonic offsets exercise overlap checks in both directions, with
     // holes between ranges to distinguish positional writes from appends.
     let indices = [7, 0, 15, 3, 11, 1, 9, 4, 14, 2, 10, 5, 13, 6, 12, 8];
@@ -232,7 +233,12 @@ fn assert_same_file_scatter_is_batched(write_all: bool, short: bool) {
         fs.vwrite_native(&requests).unwrap()
     };
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
-    let cursor = file.seek_native(std::io::SeekFrom::Current(0)).unwrap();
+    // Probe the backend descriptor after sampling the scatter RPC count.
+    // An independent std_io cursor cannot detect accidental cursor advances.
+    let cursor = fs
+        .vwrite_native(&[FsWrite::new(&file, VfOffset::Cur, &[])])
+        .unwrap()[0]
+        .offset;
     file.close().unwrap();
     let observed = fs.read(&path).unwrap();
     fs.remove_file(&path).unwrap();
@@ -621,45 +627,57 @@ fn descriptor_short_writes_preserve_contiguous_contents() {
 
 #[test]
 fn descriptor_positional_io_preserves_sequential_cursor() {
-    let Some(backend) = connect() else { return };
-    let fs = vfsi_sync::FsClient::new(backend);
+    let Some(mut backend) = connect() else { return };
     let path = format!("/vfsi-positional-cursor-{}", std::process::id());
-    fs.write(&path, b"abcdefgh").unwrap();
-    let mut file = fs
-        .open_with(vfsi_sync::OpenOp::new(
+    let file = backend
+        .open_impl(&vfsi_sync::OpenOp::new(
             &path,
-            vfsi_sync::OpenFlags::READ | vfsi_sync::OpenFlags::WRITE,
+            vfsi_sync::OpenFlags::READ
+                | vfsi_sync::OpenFlags::WRITE
+                | vfsi_sync::OpenFlags::CREATE
+                | vfsi_sync::OpenFlags::TRUNCATE,
         ))
         .unwrap();
+    backend
+        .write_impl(vfsi_sync::WriteOp::new(&file, VfOffset::At(0), b"abcdefgh"))
+        .unwrap();
     for kind in 0..5 {
-        file.seek_native(std::io::SeekFrom::Start(0)).unwrap();
+        backend
+            .seek_impl(&file, std::io::SeekFrom::Start(0))
+            .unwrap();
         let mut buffer = [0; 2];
+        let read = vfsi_sync::ReadOp::at(file.clone(), 4, 2);
+        let write = vfsi_sync::WriteOp::new(&file, VfOffset::At(4), &b"XY"[..]);
         match kind {
             0 => {
-                file.read_at(&mut buffer, 4).unwrap();
+                backend.read_into_impl(&read, &mut buffer).unwrap();
             }
             1 => {
-                fs.vread_native(&[file.read_request_at(4, 2)]).unwrap();
+                backend.vread_impl(&[read]).unwrap();
             }
             2 => {
-                fs.vread_into_native(&mut [file.read_request_at_into(4, &mut buffer)])
+                backend
+                    .vread_into_impl(&[read], &mut [&mut buffer])
                     .unwrap();
             }
             3 => {
-                file.write_at(b"XY", 4).unwrap();
+                backend.write_impl(write).unwrap();
             }
             _ => {
-                fs.vwrite_native(&[file.write_request_at(4, b"XY")])
-                    .unwrap();
+                backend.vwrite_impl(&[write]).unwrap();
             }
         }
-        let cursor = file.seek_native(std::io::SeekFrom::Current(0)).unwrap();
+        let cursor = backend
+            .seek_impl(&file, std::io::SeekFrom::Current(0))
+            .unwrap();
         assert_eq!(cursor, 0, "positional operation {kind} changed cursor");
-        assert_eq!(file.read_native(&mut buffer).unwrap(), 2);
-        assert_eq!(&buffer, b"ab");
+        let result = backend
+            .read_impl(&vfsi_sync::ReadOp::new(file.clone(), VfOffset::Cur, 2))
+            .unwrap();
+        assert_eq!(result.data, b"ab");
     }
-    file.close().unwrap();
-    fs.remove_file(&path).unwrap();
+    backend.close_impl(&file).unwrap();
+    backend.unlink_impl(Path::new(&path)).unwrap();
 }
 
 #[test]

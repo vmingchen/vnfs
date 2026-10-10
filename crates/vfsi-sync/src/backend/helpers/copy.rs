@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn vcopy_impl_default<F: Backend + ?Sized>(
+pub fn vcopy_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     pairs: &[ExtentPair],
     options: CopyOption,

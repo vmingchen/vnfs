@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use vfsi_core::*;
+use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::test_support::borrow_writes;
 use vfsi_sync::*;
 
@@ -117,15 +118,42 @@ mod tests {
                 .modified(modified)
                 .follow_symlinks(false)])
             .unwrap();
-        let attrs = file.attrs().unwrap();
+        let attrs = client
+            .attrs_with_options(
+                vfsi_core::Target::file(&file),
+                vfsi_core::api::AttrsOptions::new().fields(
+                    vfsi_core::AttrMask::MODE
+                        | vfsi_core::AttrMask::SIZE
+                        | vfsi_core::AttrMask::MTIME,
+                ),
+            )
+            .unwrap();
         assert_eq!(attrs.len(), Some(3));
         assert_eq!(attrs.modified(), Some(modified));
         assert_eq!(attrs.permissions().unwrap().mode() & 0o7777, 0o640);
-        file.truncate(5).unwrap();
-        file.chmod(Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(file.attrs().unwrap().len().unwrap(), 5);
+        client.truncate(vfsi_core::Target::file(&file), 5).unwrap();
+        client
+            .chmod(
+                vfsi_core::Target::file(&file),
+                Permissions::from_mode(0o600),
+            )
+            .unwrap();
         assert_eq!(
-            file.attrs().unwrap().permissions().unwrap().mode() & 0o7777,
+            client
+                .attrs(vfsi_core::Target::file(&file))
+                .unwrap()
+                .len()
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            client
+                .attrs(vfsi_core::Target::file(&file))
+                .unwrap()
+                .permissions()
+                .unwrap()
+                .mode()
+                & 0o7777,
             0o600
         );
         assert_eq!(std::fs::read(root.0.join("file")).unwrap(), b"replacement");
@@ -1188,14 +1216,14 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // openv length contract, listdir limits, walk via dyn Backend
+    // openv length contract, listdir limits, walk via dyn VectorBackend
     // ------------------------------------------------------------------
 
     #[test]
     fn openv_rejects_mismatched_lengths() {
         let (_root, mut fs) = fs("openv");
         use libc::O_CREAT;
-        let e = Backend::vopen_raw_impl(
+        let e = VectorBackend::vopen_raw_impl(
             &mut fs,
             &[Path::new("/a"), Path::new("/b")],
             &[O_CREAT],
@@ -1228,7 +1256,7 @@ mod tests {
         fs.mkdir_raw_impl(Path::new("/sub"), 0o755).unwrap();
         write(&mut fs, "/sub/a", b"1");
 
-        let mut dyn_fs: Box<dyn Backend> = Box::new(fs);
+        let mut dyn_fs: Box<dyn VectorBackend> = Box::new(fs);
         let mut visited: Vec<String> = Vec::new();
         let entries = dyn_fs
             .walk_impl(Path::new(""), AttrMask::stat(), &mut |dir, _| {

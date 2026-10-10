@@ -5,8 +5,8 @@
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::test_support::borrow_writes;
-use vfsi_sync::*;
 
 use vfsi_nfs::NfsVecFs;
 use vfsi_sync::{ReadOp, SeekFrom, VfFile, VfOffset, WriteOp};

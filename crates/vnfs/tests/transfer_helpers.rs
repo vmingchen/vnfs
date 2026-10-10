@@ -855,19 +855,19 @@ fn standard_io_adapter_uses_vectors_and_has_an_independent_retained_cursor() {
         .write(true)
         .open("/io")
         .unwrap();
-    let mut io = fs.file_io(&file);
+    let mut io = fs.std_io(&file);
     let mut prefix = [0; 2];
     io.read_exact(&mut prefix).unwrap();
     assert_eq!(&prefix, b"ab");
-    assert_eq!(io.position(), 2);
+    assert_eq!(io.stream_position().unwrap(), 2);
     assert_eq!(io.seek(SeekFrom::End(-2)).unwrap(), 4);
     io.write_all(b"XY").unwrap();
     io.flush().unwrap();
     assert_eq!(fs.calls.borrow().writes, 1);
     assert_eq!(fs.calls.borrow().syncs, [(SyncMode::Data, 1)]);
     assert_eq!(fs.calls.borrow().metadata, [1]);
-    assert_eq!(io.position(), 6);
-    assert_eq!(fs.file_io(&file).position(), 0);
+    assert_eq!(io.stream_position().unwrap(), 6);
+    assert_eq!(fs.std_io(&file).stream_position().unwrap(), 0);
     fs.rename("/io", "/retained").unwrap();
     fs.fs.write("/io", b"replacement").unwrap();
     assert_eq!(io.seek(SeekFrom::End(0)).unwrap(), 6);
@@ -880,19 +880,19 @@ fn standard_io_adapter_uses_vectors_and_has_an_independent_retained_cursor() {
     assert_eq!(fs.calls.borrow().syncs.last(), Some(&(SyncMode::All, 1)));
     let reads = fs.calls.borrow().reads;
     fs.fault.set(Fault::BadRead);
-    let mut bad_io = fs.file_io(&file);
+    let mut bad_io = fs.std_io(&file);
     assert_eq!(
         bad_io.read(&mut prefix).unwrap_err().kind(),
         std::io::ErrorKind::InvalidData
     );
-    assert_eq!(bad_io.position(), 0);
+    assert_eq!(bad_io.stream_position().unwrap(), 0);
     assert_eq!(fs.calls.borrow().reads, reads + 1);
     fs.fault.set(Fault::WrongOffset);
     assert!(bad_io.read(&mut prefix).is_err());
-    assert_eq!(bad_io.position(), 0);
+    assert_eq!(bad_io.stream_position().unwrap(), 0);
     fs.fault.set(Fault::BadWrite);
     assert!(bad_io.write_all(b"x").is_err());
-    assert_eq!(bad_io.position(), 0);
+    assert_eq!(bad_io.stream_position().unwrap(), 0);
 }
 #[test]
 fn absent_sizes_make_copy_and_tree_statistics_fail_instead_of_reporting_zero() {
@@ -918,7 +918,7 @@ fn absent_sizes_make_copy_and_tree_statistics_fail_instead_of_reporting_zero() {
 
 #[test]
 fn collecting_adapter_retries_interrupted_reads_and_exact_budget_probes() {
-    use std::io::Read;
+    use std::io::{Read, Seek};
     for string in [false, true] {
         for interrupted_at in [1, 2] {
             let root = tempfile::tempdir().unwrap();
@@ -928,7 +928,7 @@ fn collecting_adapter_retries_interrupted_reads_and_exact_budget_probes() {
             fs.read_failure
                 .set(Some((interrupted_at, libc::EINTR as u32)));
             let file = fs.open("/file").unwrap();
-            let mut io = fs.file_io(&file);
+            let mut io = fs.std_io(&file);
             if string {
                 let mut output = String::from("prefix");
                 assert_eq!(io.read_to_string(&mut output).unwrap(), 3);
@@ -938,7 +938,7 @@ fn collecting_adapter_retries_interrupted_reads_and_exact_budget_probes() {
                 assert_eq!(io.read_to_end(&mut output).unwrap(), 3);
                 assert_eq!(output, [9, b'a', b'b', b'c']);
             }
-            assert_eq!(io.position(), 3);
+            assert_eq!(io.stream_position().unwrap(), 3);
             assert_eq!(fs.calls.borrow().read_attempts, 3);
         }
     }
@@ -951,7 +951,7 @@ fn collecting_adapter_retries_interrupted_reads_and_exact_budget_probes() {
         fs.read_failure.set(Some((failed_at, libc::EIO as u32)));
         let file = fs.open("/file").unwrap();
         let mut output = vec![9];
-        let mut io = fs.file_io(&file);
+        let mut io = fs.std_io(&file);
         assert!(io.read_to_end(&mut output).is_err());
         assert_eq!(
             output,
@@ -961,7 +961,10 @@ fn collecting_adapter_retries_interrupted_reads_and_exact_budget_probes() {
                 vec![9, b'a', b'b', b'c']
             }
         );
-        assert_eq!(io.position(), if failed_at == 1 { 0 } else { 3 });
+        assert_eq!(
+            io.stream_position().unwrap(),
+            if failed_at == 1 { 0 } else { 3 }
+        );
         assert_eq!(fs.calls.borrow().read_attempts, failed_at);
     }
 }
@@ -978,7 +981,7 @@ fn collecting_adapter_uses_bounded_stream_chunks_without_small_read_waves() {
     let file = fs.open("/large").unwrap();
     let mut output = vec![9];
     assert_eq!(
-        fs.file_io(&file).read_to_end(&mut output).unwrap(),
+        fs.std_io(&file).read_to_end(&mut output).unwrap(),
         payload.len()
     );
     assert_eq!(&output[1..], payload);
@@ -987,4 +990,19 @@ fn collecting_adapter_uses_bounded_stream_chunks_without_small_read_waves() {
     assert_eq!(calls.reads, 2);
     assert_eq!(calls.max_files, 1);
     assert_eq!(calls.max_bytes, chunk);
+}
+
+#[test]
+fn shared_open_builder_dispatches_scalar_and_batch_opens_through_vfsi() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Harness::new(root.path());
+    let mut options = fs.open_options();
+    options.read(true).write(true).create_new(true);
+    let first = options.open("/one").unwrap();
+    assert_eq!(fs.calls.borrow().opens, 1);
+    let rest = options.clone().vopen(&["/two", "/three"]).unwrap();
+    assert_eq!(rest.len(), 2);
+    assert_eq!(fs.calls.borrow().opens, 2);
+    first.close().unwrap();
+    fs.close_files(rest).unwrap();
 }

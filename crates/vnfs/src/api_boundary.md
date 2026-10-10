@@ -551,3 +551,72 @@ Streaming callbacks use the same control type as directory visitors:
 use vnfs::{Vfsi, VfsiExt};
 fn bool_callback(fs: &impl Vfsi) { let _ = fs.read_stream("/file", |_, _| Ok(false)); }
 ```
+
+Standard I/O has one opaque adapter, obtained through `VfsiExt::std_io`.
+The old method, public adapter types, and native borrowed builder are absent:
+
+```compile_fail,E0599
+use vnfs::{Vfsi, VfsiExt};
+fn old_adapter<C: Vfsi>(fs: &C, file: &C::File) { let _ = fs.file_io(file); }
+```
+
+```compile_fail,E0432
+use vnfs::FileIo;
+```
+
+```compile_fail,E0432
+use vfsi_core::api::FileIo;
+```
+
+```compile_fail,E0432
+use vnfs::StdIo;
+```
+
+```compile_fail,E0432
+use vfsi_sync::VfOpenOptions;
+```
+
+```compile_fail,E0432
+use vfsi_sync::VfFileHandle;
+```
+
+```compile_fail,E0599
+use vnfs::{Vfsi, VfsiExt};
+fn custom_cursor<C: Vfsi>(fs: &C, file: &C::File) {
+    let _ = fs.std_io(file).position();
+}
+```
+
+Native owned handles provide ownership and cleanup; I/O uses the client:
+
+```compile_fail,E0277
+fn read<F: vfsi_sync::backend::HandleBackend>(file: &mut vfsi_sync::FsFile<F>) {
+    let _ = std::io::Read::read(file, &mut [0]);
+}
+```
+
+```compile_fail,E0277
+fn write<F: vfsi_sync::backend::HandleBackend>(file: &mut vfsi_sync::FsFile<F>) {
+    let _ = std::io::Write::write(file, b"data");
+}
+```
+
+```compile_fail,E0277
+fn seek<F: vfsi_sync::backend::HandleBackend>(file: &mut vfsi_sync::FsFile<F>) {
+    let _ = std::io::Seek::seek(file, std::io::SeekFrom::Start(0));
+}
+```
+
+```compile_fail,E0599
+fn positional_read<F: vfsi_sync::backend::HandleBackend>(file: &vfsi_sync::FsFile<F>) {
+    let _ = file.read_at(&mut [0], 0);
+}
+```
+
+The open builder is supplied by `VfsiExt`, with no inherent native alternative:
+
+```compile_fail,E0599
+fn native_builder<F: vfsi_sync::backend::VectorBackend + 'static>(client: &vfsi_sync::FsClient<F>) {
+    let _ = client.open_options();
+}
+```

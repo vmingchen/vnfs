@@ -6,7 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use vfsi_sync::*;
+use vfsi_sync::backend::VectorBackend;
 
 use vfsi_core::{AttrMask, VfAttrs, VfError, VfFile, VfResult};
 

@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::io::{self, Read, Seek, SeekFrom as IoSeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,11 +12,11 @@ use vfsi_core::api::{
     WriteResult as FsWriteResult,
 };
 
+use crate::backend::{HandleBackend, VectorBackend};
 use crate::traits::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::{
-    AttrMask, Attrs, Backend, Capabilities, DirEntry, FileSystem, OpenFlags, OpenOp, Permissions,
-    ReadAllOptions, ReadOp, ReadResult, RemoveOptions, StreamOptions, VfDir, VfError, VfFile,
-    VfOffset, VfResult, WriteOp, WriteResult,
+    AttrMask, Attrs, Capabilities, DirEntry, OpenFlags, OpenOp, ReadAllOptions, ReadOp, ReadResult,
+    RemoveOptions, StreamOptions, VfDir, VfError, VfFile, VfOffset, VfResult, WriteOp, WriteResult,
 };
 
 fn read_result(result: ReadResult) -> FsReadResult {
@@ -34,10 +33,6 @@ fn write_result(result: WriteResult) -> FsWriteResult {
         written: result.written,
         stable: result.stable,
     }
-}
-
-fn io_error(error: VfError) -> io::Error {
-    error.into()
 }
 
 fn poisoned() -> VfError {
@@ -63,12 +58,12 @@ struct PendingClose<F> {
 
 /// The cleanup queue has a separate short-held lock: handle Drop never waits
 /// for an RPC or for the backend mutex. Final-owner teardown remains synchronous.
-struct SharedBackend<F: FileSystem> {
+struct SharedBackend<F: HandleBackend> {
     backend: Mutex<Option<F>>,
     pending: Mutex<Vec<PendingClose<F>>>,
     has_pending: AtomicBool,
 }
-impl<F: FileSystem> SharedBackend<F> {
+impl<F: HandleBackend> SharedBackend<F> {
     fn new(backend: F) -> Self {
         Self {
             backend: Mutex::new(Some(backend)),
@@ -101,7 +96,7 @@ impl<F: FileSystem> SharedBackend<F> {
         Ok(guard)
     }
 }
-impl<F: FileSystem> Drop for SharedBackend<F> {
+impl<F: HandleBackend> Drop for SharedBackend<F> {
     fn drop(&mut self) {
         if let Some(backend) = self
             .backend
@@ -120,12 +115,12 @@ impl<F: FileSystem> Drop for SharedBackend<F> {
         }
     }
 }
-struct BackendGuard<'a, F: FileSystem> {
+struct BackendGuard<'a, F: HandleBackend> {
     guard: Option<std::sync::MutexGuard<'a, Option<F>>>,
     pending: &'a Mutex<Vec<PendingClose<F>>>,
     has_pending: &'a AtomicBool,
 }
-impl<F: FileSystem> std::ops::Deref for BackendGuard<'_, F> {
+impl<F: HandleBackend> std::ops::Deref for BackendGuard<'_, F> {
     type Target = F;
     fn deref(&self) -> &F {
         self.guard
@@ -135,7 +130,7 @@ impl<F: FileSystem> std::ops::Deref for BackendGuard<'_, F> {
             .expect("live backend")
     }
 }
-impl<F: FileSystem> std::ops::DerefMut for BackendGuard<'_, F> {
+impl<F: HandleBackend> std::ops::DerefMut for BackendGuard<'_, F> {
     fn deref_mut(&mut self) -> &mut F {
         self.guard
             .as_mut()
@@ -144,7 +139,7 @@ impl<F: FileSystem> std::ops::DerefMut for BackendGuard<'_, F> {
             .expect("live backend")
     }
 }
-impl<F: FileSystem> BackendGuard<'_, F> {
+impl<F: HandleBackend> BackendGuard<'_, F> {
     fn drain_cleanup(&mut self) -> VfResult<()> {
         if !self.has_pending.swap(false, Ordering::AcqRel) {
             return Ok(());
@@ -168,7 +163,7 @@ impl<F: FileSystem> BackendGuard<'_, F> {
         first.map_or(Ok(()), Err)
     }
 }
-impl<F: FileSystem> Drop for BackendGuard<'_, F> {
+impl<F: HandleBackend> Drop for BackendGuard<'_, F> {
     fn drop(&mut self) {
         let callbacks = self.take_notifications();
         drop(self.guard.take());
@@ -186,12 +181,12 @@ impl<F: FileSystem> Drop for BackendGuard<'_, F> {
 /// Handle Drop queues cleanup, drained before later operations or by
 /// `drain_cleanup`. Dropping the final backend owner performs synchronous
 /// teardown and may wait for pending closes and backend request timeouts.
-pub struct FsClient<F: FileSystem> {
+pub struct FsClient<F: HandleBackend> {
     inner: Arc<SharedBackend<F>>,
     limits: ResourceLimits,
 }
 
-impl<F: FileSystem> Clone for FsClient<F> {
+impl<F: HandleBackend> Clone for FsClient<F> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
@@ -200,13 +195,13 @@ impl<F: FileSystem> Clone for FsClient<F> {
     }
 }
 
-impl<F: FileSystem> fmt::Debug for FsClient<F> {
+impl<F: HandleBackend> fmt::Debug for FsClient<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("FsClient").finish_non_exhaustive()
     }
 }
 
-impl<F: FileSystem> FsClient<F> {
+impl<F: HandleBackend> FsClient<F> {
     pub fn new(filesystem: F) -> Self {
         Self {
             inner: Arc::new(SharedBackend::new(filesystem)),
@@ -257,7 +252,7 @@ impl<F: FileSystem> FsClient<F> {
     }
 }
 
-impl<F: FileSystem> FsClient<F> {
+impl<F: HandleBackend> FsClient<F> {
     pub(crate) fn capabilities(&self) -> VfResult<Capabilities> {
         Ok(self.lock()?.capabilities())
     }
@@ -276,13 +271,9 @@ impl<F: FileSystem> FsClient<F> {
             path: request.into_path(),
         })
     }
-
-    pub fn open_options(&self) -> OpenOptions<'_, F> {
-        OpenOptions::new(self)
-    }
 }
 
-impl<F: FileSystem> FsClient<F> {
+impl<F: HandleBackend> FsClient<F> {
     /// Stream one file using an explicit maximum chunk size.
     ///
     /// The callback runs without holding the backend lock, so it may use this
@@ -336,7 +327,7 @@ impl<F: FileSystem> FsClient<F> {
     }
 }
 
-impl<F: Backend> FsClient<F> {
+impl<F: VectorBackend> FsClient<F> {
     fn removal_metadata(&self, path: &Path, operation: &'static str) -> VfResult<Attrs> {
         let mut filesystem = self.lock()?;
         let follow = !filesystem.capabilities().contains(Capabilities::LSTAT);
@@ -346,7 +337,7 @@ impl<F: Backend> FsClient<F> {
     }
 }
 
-impl<F: Backend> FsClient<F> {
+impl<F: VectorBackend> FsClient<F> {
     /// Rename independent source/destination pairs in one vector phase.
     /// Requested atomic destination semantics are applied per pair; the vector
     /// is not transactional. Unsupported semantics are never emulated.
@@ -451,7 +442,7 @@ impl<F: Backend> FsClient<F> {
         }
         Ok(targets
             .into_iter()
-            .map(crate::native::bytes_to_path)
+            .map(crate::backend::bytes_to_path)
             .collect())
     }
 
@@ -558,7 +549,7 @@ impl<F: Backend> FsClient<F> {
     }
 }
 
-impl<F: Backend> FsClient<F> {
+impl<F: VectorBackend> FsClient<F> {
     /// Create `path` if missing, otherwise empty it. Errors if it exists and is
     /// not a directory (a symlink to a directory is not a directory here).
     pub fn ensure_empty_dir(&self, path: impl AsRef<Path>) -> VfResult<()> {
@@ -645,13 +636,13 @@ impl<F: Backend> FsClient<F> {
 
 /// Owned, handle-rooted directory. Dropping it queues backend cleanup;
 /// [`close`](Self::close) reports cleanup errors explicitly.
-pub struct FsDir<F: Backend> {
+pub struct FsDir<F: VectorBackend> {
     inner: Arc<SharedBackend<F>>,
     dir: Option<VfDir>,
     path: PathBuf,
 }
 
-impl<F: Backend> fmt::Debug for FsDir<F> {
+impl<F: VectorBackend> fmt::Debug for FsDir<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("FsDir")
@@ -660,7 +651,7 @@ impl<F: Backend> fmt::Debug for FsDir<F> {
     }
 }
 
-impl<F: Backend> FsDir<F> {
+impl<F: VectorBackend> FsDir<F> {
     pub fn is_closed(&self) -> bool {
         self.dir.is_none()
     }
@@ -687,7 +678,7 @@ impl<F: Backend> FsDir<F> {
     }
 }
 
-impl<F: Backend> Drop for FsDir<F> {
+impl<F: VectorBackend> Drop for FsDir<F> {
     fn drop(&mut self) {
         if let Some(dir) = self.dir.take() {
             self.inner.defer(
@@ -705,7 +696,7 @@ impl<F: Backend> Drop for FsDir<F> {
     }
 }
 
-impl<F: Backend> FsClient<F> {
+impl<F: VectorBackend> FsClient<F> {
     /// Copy whole files in request order. A successful prefix may remain if
     /// a later request fails; this operation does not provide atomicity.
     pub(crate) fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
@@ -827,7 +818,7 @@ impl<F: Backend> FsClient<F> {
     }
 }
 
-impl<F: Backend> FsClient<F> {
+impl<F: VectorBackend> FsClient<F> {
     /// Open an ordered vector of files.
     ///
     /// Success returns one RAII handle per request. Failure returns no
@@ -1316,7 +1307,7 @@ impl<F: Backend> FsClient<F> {
     }
 }
 
-impl<F: Backend> FsClient<F> {
+impl<F: VectorBackend> FsClient<F> {
     /// Native bounded whole-file reads for backend adapters.
     ///
     /// Applications should use [`VfsiExt::read_files_with_options`].
@@ -1351,99 +1342,13 @@ impl<F: Backend> FsClient<F> {
     }
 }
 
-/// `std::fs::OpenOptions`-style builder tied to an [`FsClient`].
-pub struct OpenOptions<'a, F: FileSystem> {
-    client: &'a FsClient<F>,
-    flags: OpenFlags,
-    mode: u32,
-}
-
-impl<F: FileSystem> Clone for OpenOptions<'_, F> {
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client,
-            flags: self.flags,
-            mode: self.mode,
-        }
-    }
-}
-
-impl<F: FileSystem> fmt::Debug for OpenOptions<'_, F> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("OpenOptions")
-            .field("flags", &self.flags)
-            .field("mode", &format_args!("{:#o}", self.mode))
-            .finish()
-    }
-}
-
-impl<'a, F: FileSystem> OpenOptions<'a, F> {
-    fn new(client: &'a FsClient<F>) -> Self {
-        Self {
-            client,
-            flags: OpenFlags::empty(),
-            mode: 0o666,
-        }
-    }
-
-    pub fn read(&mut self, enabled: bool) -> &mut Self {
-        self.flags.set(OpenFlags::READ, enabled);
-        self
-    }
-
-    pub fn write(&mut self, enabled: bool) -> &mut Self {
-        self.flags.set(OpenFlags::WRITE, enabled);
-        self
-    }
-
-    pub fn append(&mut self, enabled: bool) -> &mut Self {
-        self.flags.set(OpenFlags::APPEND, enabled);
-        self
-    }
-
-    pub fn truncate(&mut self, enabled: bool) -> &mut Self {
-        self.flags.set(OpenFlags::TRUNCATE, enabled);
-        self
-    }
-
-    pub fn create(&mut self, enabled: bool) -> &mut Self {
-        self.flags.set(OpenFlags::CREATE, enabled);
-        self
-    }
-
-    pub fn create_new(&mut self, enabled: bool) -> &mut Self {
-        self.flags.set(OpenFlags::CREATE_NEW, enabled);
-        self
-    }
-
-    pub fn mode(&mut self, mode: u32) -> &mut Self {
-        self.mode = mode;
-        self
-    }
-
-    pub fn open(&self, path: impl AsRef<Path>) -> VfResult<FsFile<F>> {
-        self.client
-            .open_with_native(OpenOp::new(path.as_ref(), self.flags).mode(self.mode))
-    }
-}
-
-impl<F: Backend> OpenOptions<'_, F> {
-    pub fn vopen<P: AsRef<Path>>(&self, paths: &[P]) -> VfResult<Vec<FsFile<F>>> {
-        let requests: Vec<OpenOp> = paths
-            .iter()
-            .map(|path| OpenOp::new(path.as_ref(), self.flags).mode(self.mode))
-            .collect();
-        self.client.vopen(&requests)
-    }
-}
-
 /// Owned RAII file which does not borrow the client.
 ///
-/// Dropping an open file attempts a best-effort CLOSE. This can block on the
-/// backend mutex and on network I/O; use [`FsFile::try_close`] when the close
-/// result matters or when its timing must be controlled.
-pub struct FsFile<F: FileSystem> {
+/// File operations use the owning client's `Vfsi` implementation. Dropping an
+/// open file queues cleanup without waiting for the backend lock. Dropping the
+/// final connection owner can perform synchronous teardown. Use `try_close`
+/// when the close result matters.
+pub struct FsFile<F: HandleBackend> {
     inner: Arc<SharedBackend<F>>,
     file: Option<VfFile>,
     // Retained open policy; never exposed through the portable handle API.
@@ -1451,7 +1356,7 @@ pub struct FsFile<F: FileSystem> {
     path: PathBuf,
 }
 
-impl<F: FileSystem> fmt::Debug for FsFile<F> {
+impl<F: HandleBackend> fmt::Debug for FsFile<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("FsFile")
@@ -1461,7 +1366,7 @@ impl<F: FileSystem> fmt::Debug for FsFile<F> {
     }
 }
 
-impl<F: FileSystem> FsFile<F> {
+impl<F: HandleBackend> FsFile<F> {
     /// Whether explicit close has completed successfully on this handle.
     pub fn is_closed(&self) -> bool {
         self.file.is_none()
@@ -1470,16 +1375,6 @@ impl<F: FileSystem> FsFile<F> {
         self.file
             .as_ref()
             .ok_or_else(|| VfError::client(0, crate::ERR_EBADF))
-    }
-
-    /// Positional read which does not alter the file cursor.
-    pub fn read_at(&self, buffer: &mut [u8], offset: u64) -> VfResult<usize> {
-        self.read_into(buffer, VfOffset::At(offset))
-    }
-
-    /// Positional write which does not alter the file cursor.
-    pub fn write_at(&self, buffer: &[u8], offset: u64) -> VfResult<usize> {
-        self.write_from(buffer, VfOffset::At(offset))
     }
 
     pub fn read_request_at(&self, offset: u64, length: usize) -> FsRead<'_, F> {
@@ -1497,49 +1392,6 @@ impl<F: FileSystem> FsFile<F> {
         &self.path
     }
 
-    /// Query metadata for the open object without resolving its path again.
-    pub fn attrs(&self) -> VfResult<Attrs> {
-        let attributes = AttrMask::MODE
-            | AttrMask::SIZE
-            | AttrMask::NLINK
-            | AttrMask::FILEID
-            | AttrMask::UID
-            | AttrMask::GID
-            | AttrMask::ATIME
-            | AttrMask::MTIME
-            | AttrMask::CTIME
-            | AttrMask::CHANGE;
-        self.inner
-            .lock()
-            .map_err(|_| poisoned())?
-            .metadata_impl(
-                vfsi_core::Target::File(self.raw()?),
-                vfsi_core::api::AttrsOptions::new().fields(attributes),
-            )
-            .map(vfsi_core::metadata_from_attrs)
-            .map_err(|error| error.with_context("metadata", &self.path))
-    }
-
-    /// Truncate or extend the open file.
-    pub fn truncate(&self, len: u64) -> VfResult<()> {
-        self.set_attrs_op(vfsi_core::SetAttrsOp::new(vfsi_core::Target::File(self)).len(len))
-    }
-
-    /// Change permissions on the open file through the shared vector engine.
-    pub fn chmod(&self, permissions: Permissions) -> VfResult<()> {
-        self.set_attrs_op(
-            vfsi_core::SetAttrsOp::new(vfsi_core::Target::File(self)).permissions(permissions),
-        )
-    }
-
-    fn set_attrs_op(&self, op: vfsi_core::SetAttrsOp<vfsi_core::Target<'_, Self>>) -> VfResult<()> {
-        let client = FsClient {
-            inner: Arc::clone(&self.inner),
-            limits: ResourceLimits::default(),
-        };
-        client.vsetattrs(&[op])
-    }
-
     pub fn write_request_at<'a>(&'a self, offset: u64, data: &'a [u8]) -> FsWrite<'a, F> {
         FsWrite::new(self, VfOffset::At(offset), data)
     }
@@ -1554,101 +1406,6 @@ impl<F: FileSystem> FsFile<F> {
             offset: VfOffset::At(offset),
             buffer,
         }
-    }
-
-    pub fn read_native(&mut self, buffer: &mut [u8]) -> VfResult<usize> {
-        self.read_into(buffer, VfOffset::Cur)
-    }
-
-    /// Collect the remaining bytes from this opened object, starting at its
-    /// cursor, with an explicit logical payload limit. This does not reopen
-    /// its path. Unlike standard `Read::read_to_end`, allocation is bounded.
-    ///
-    /// An exact-limit read uses at most a one-byte EOF probe. On overflow or
-    /// I/O failure no buffer is returned and the cursor may have advanced,
-    /// including the probe byte; this operation does not restore the cursor.
-    pub fn read_to_end_with_limit(&mut self, max_bytes: usize) -> VfResult<Vec<u8>> {
-        let mut data = Vec::new();
-        loop {
-            let remaining = max_bytes - data.len();
-            if remaining == 0 {
-                let mut probe = [0_u8; 1];
-                if self.read_native(&mut probe)? == 0 {
-                    return Ok(data);
-                }
-                return Err(VfError::client(0, libc::EFBIG as u32)
-                    .with_context("read_to_end_with_limit", &self.path));
-            }
-            let chunk = remaining.min(crate::DEFAULT_READ_STREAM_CHUNK_BYTES);
-            data.try_reserve(chunk).map_err(|_| {
-                VfError::client(0, libc::ENOMEM as u32)
-                    .with_context("read_to_end_with_limit", &self.path)
-            })?;
-            let start = data.len();
-            data.resize(start + chunk, 0);
-            let count = self.read_native(&mut data[start..])?;
-            data.truncate(start + count);
-            if count == 0 {
-                return Ok(data);
-            }
-        }
-    }
-
-    pub fn write_native(&mut self, buffer: &[u8]) -> VfResult<usize> {
-        self.write_from(buffer, VfOffset::Cur)
-    }
-
-    fn read_into(&self, buffer: &mut [u8], offset: VfOffset) -> VfResult<usize> {
-        if buffer.is_empty() {
-            return Ok(0);
-        }
-        let request = ReadOp::new(self.raw()?.clone(), offset, buffer.len());
-        let result = self
-            .inner
-            .lock()
-            .map_err(|_| poisoned())?
-            .read_into_impl(&request, buffer)
-            .map_err(|error| error.with_context("read", &self.path))?;
-        validate_read_into_results(
-            "read",
-            std::slice::from_ref(&request),
-            std::slice::from_ref(&result),
-        )
-        .map_err(|error| error.with_context("read", &self.path))?;
-        Ok(result.read)
-    }
-
-    fn write_from(&self, buffer: &[u8], offset: VfOffset) -> VfResult<usize> {
-        if buffer.is_empty() {
-            return Ok(0);
-        }
-        let file = self.raw()?.clone();
-        let result = self
-            .inner
-            .lock()
-            .map_err(|_| poisoned())?
-            .write_impl(WriteOp::new(&file, offset, buffer))
-            .map_err(|error| error.with_context("write", &self.path))?;
-        if result.written > buffer.len() {
-            return Err(VfError::client(0, crate::ERR_IO).with_context("write", &self.path));
-        }
-        Ok(result.written)
-    }
-
-    pub fn sync_data(&self) -> VfResult<()> {
-        self.inner
-            .lock()
-            .map_err(|_| poisoned())?
-            .sync_data(self.raw()?)
-            .map_err(|error| error.with_context("sync_data", &self.path))
-    }
-
-    pub fn sync_all(&self) -> VfResult<()> {
-        self.inner
-            .lock()
-            .map_err(|_| poisoned())?
-            .sync_all(self.raw()?)
-            .map_err(|error| error.with_context("sync_all", &self.path))
     }
 
     /// Attempt to close without consuming the handle. A failed close leaves
@@ -1675,41 +1432,10 @@ impl<F: FileSystem> FsFile<F> {
     pub fn close(mut self) -> VfResult<()> {
         self.try_close()
     }
-
-    /// Seek while retaining [`VfError`] protocol and path information.
-    pub fn seek_native(&mut self, position: IoSeekFrom) -> VfResult<u64> {
-        self.inner
-            .lock()
-            .map_err(|_| poisoned())?
-            .seek_impl(self.raw()?, position)
-            .map_err(|error| error.with_context("seek", &self.path))
-    }
-}
-
-impl<F: FileSystem> Read for FsFile<F> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.read_native(buffer).map_err(io_error)
-    }
-}
-
-impl<F: FileSystem> Write for FsFile<F> {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.write_native(buffer).map_err(io_error)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.sync_data().map_err(io_error)
-    }
-}
-
-impl<F: FileSystem> Seek for FsFile<F> {
-    fn seek(&mut self, position: IoSeekFrom) -> io::Result<u64> {
-        self.seek_native(position).map_err(io_error)
-    }
 }
 
 /// Typed read request for [`FsClient::vread_native`].
-pub struct FsRead<'a, F: FileSystem> {
+pub struct FsRead<'a, F: HandleBackend> {
     file: &'a FsFile<F>,
     offset: VfOffset,
     length: usize,
@@ -1719,13 +1445,13 @@ pub struct FsRead<'a, F: FileSystem> {
 pub type FsWrite<'a, F> = vfsi_core::internal::WriteRequest<&'a FsFile<F>, &'a [u8], VfOffset, ()>;
 
 /// Typed vector read into caller-provided storage.
-pub struct FsReadInto<'a, F: FileSystem> {
+pub struct FsReadInto<'a, F: HandleBackend> {
     file: &'a FsFile<F>,
     offset: VfOffset,
     buffer: &'a mut [u8],
 }
 
-impl<F: FileSystem> Drop for FsFile<F> {
+impl<F: HandleBackend> Drop for FsFile<F> {
     fn drop(&mut self) {
         if let Some(file) = self.file.take() {
             self.inner.defer(
@@ -1743,7 +1469,7 @@ impl<F: FileSystem> Drop for FsFile<F> {
     }
 }
 
-impl<F: FileSystem> FsClient<F> {
+impl<F: HandleBackend> FsClient<F> {
     /// Preflight every handle, then submit one synchronization vector.
     pub(crate) fn vfsync_impl(
         &self,
@@ -1864,7 +1590,7 @@ impl<F: FileSystem> FsClient<F> {
                 .into_iter()
                 .flatten()
             {
-                crate::native::system_time_parts(time)
+                crate::backend::system_time_parts(time)
                     .map_err(|e| e.with_index(index).with_context("vsetattrs", path))?;
             }
             attrs.push(op.with_target(raw));

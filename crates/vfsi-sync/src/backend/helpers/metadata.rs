@@ -1,6 +1,9 @@
 use super::*;
 
-pub fn stat_impl_default<F: Backend + ?Sized>(backend: &mut F, path: &Path) -> VfResult<VfAttrs> {
+pub fn stat_impl_default<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    path: &Path,
+) -> VfResult<VfAttrs> {
     let mut a = VfAttrs {
         file: VfFile::from_os_path(path),
         masks: AttrMask::stat(),
@@ -10,7 +13,10 @@ pub fn stat_impl_default<F: Backend + ?Sized>(backend: &mut F, path: &Path) -> V
     Ok(a)
 }
 
-pub fn lstat_impl_default<F: Backend + ?Sized>(backend: &mut F, path: &Path) -> VfResult<VfAttrs> {
+pub fn lstat_impl_default<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    path: &Path,
+) -> VfResult<VfAttrs> {
     let mut a = VfAttrs {
         file: VfFile::from_os_path(path),
         masks: AttrMask::stat(),
@@ -20,7 +26,10 @@ pub fn lstat_impl_default<F: Backend + ?Sized>(backend: &mut F, path: &Path) -> 
     Ok(a)
 }
 
-pub fn fstat_impl_default<F: Backend + ?Sized>(backend: &mut F, tcf: &VfFile) -> VfResult<VfAttrs> {
+pub fn fstat_impl_default<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    tcf: &VfFile,
+) -> VfResult<VfAttrs> {
     let mut a = VfAttrs {
         file: tcf.clone(),
         masks: AttrMask::stat(),
@@ -30,7 +39,10 @@ pub fn fstat_impl_default<F: Backend + ?Sized>(backend: &mut F, tcf: &VfFile) ->
     Ok(a)
 }
 
-pub fn exists_impl_default<F: Backend + ?Sized>(backend: &mut F, path: &Path) -> VfResult<bool> {
+pub fn exists_impl_default<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    path: &Path,
+) -> VfResult<bool> {
     match backend.lstat_impl(path) {
         Ok(_) => Ok(true),
         Err(e) if e.err_no() == ERR_NOENT => Ok(false),
@@ -38,14 +50,14 @@ pub fn exists_impl_default<F: Backend + ?Sized>(backend: &mut F, path: &Path) ->
     }
 }
 
-pub fn file_type_impl_default<F: Backend + ?Sized>(
+pub fn file_type_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     path: &Path,
 ) -> VfResult<VfType> {
     Ok(backend.lstat_impl(path)?.ftype)
 }
 
-pub fn native_metadata_impl_default<F: Backend + ?Sized>(
+pub fn native_metadata_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     target: Target<'_, VfFile>,
     options: vfsi_core::api::AttrsOptions,
@@ -75,7 +87,7 @@ pub fn native_metadata_impl_default<F: Backend + ?Sized>(
     Ok(attrs)
 }
 
-pub fn native_metadata_path_impl_default<F: Backend + ?Sized>(
+pub fn native_metadata_path_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     path: &std::path::Path,
     follow: bool,
@@ -90,7 +102,7 @@ pub fn native_metadata_path_impl_default<F: Backend + ?Sized>(
     .map(vfsi_core::metadata_from_attrs)
 }
 
-pub fn native_set_metadata_path_impl_default<F: Backend + ?Sized>(
+pub fn native_set_metadata_path_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     op: &SetAttrsOp<&std::path::Path>,
 ) -> VfResult<()> {
@@ -140,7 +152,7 @@ fn setattrs_to_legacy(op: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<VfAttrs> 
     Ok(attrs)
 }
 
-pub fn vsetattrs_typed_default<F: Backend + ?Sized>(
+pub fn vsetattrs_typed_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     updates: &[SetAttrsOp<Target<'_, VfFile>>],
 ) -> VfResult<()> {

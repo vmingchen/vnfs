@@ -875,7 +875,6 @@ dependencies = [
 name = "vfsi-sync"
 version = "0.1.8"
 dependencies = [
- "bitfields",
  "libc",
  "vfsi-core",
 ]

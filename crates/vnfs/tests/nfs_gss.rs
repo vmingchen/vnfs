@@ -6,7 +6,8 @@ use vfsi_sync::test_support::borrow_writes;
 
 use vfsi_nfs::NfsConnectOptions;
 use vfsi_nfs::NfsVecFs;
-use vfsi_sync::{Backend, ReadOp, VfFile, VfOffset, WriteOp};
+use vfsi_sync::backend::VectorBackend;
+use vfsi_sync::{ReadOp, VfFile, VfOffset, WriteOp};
 use vnfs::{NfsAuthentication, RpcsecGssProtection};
 
 fn options(protection: RpcsecGssProtection) -> NfsConnectOptions {

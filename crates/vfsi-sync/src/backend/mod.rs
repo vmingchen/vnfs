@@ -1,6 +1,37 @@
 //! Native synchronous backend contracts.
-//! `FileSystem` supports owned handles; `Backend` adds native vector engines
-//! and overridable workflows. Shared algorithms live in `backend_helpers`.
+//! `HandleBackend` supports owned handles; `VectorBackend` adds native vector engines
+//! and overridable workflows. Shared algorithms live in [`crate::backend::helpers`].
+//!
+//! These are execution hooks, not application traits. Use [`crate::Vfsi`] and
+//! [`crate::VfsiExt`] on a client for portable filesystem operations.
+//! The old root traits and scalar/vector namespace aliases are removed:
+//!
+//! ```compile_fail,E0432
+//! use vfsi_sync::FileSystem;
+//! ```
+//! ```compile_fail,E0432
+//! use vfsi_sync::Backend;
+//! ```
+//! ```compile_fail,E0432
+//! use vfsi_sync::HandleBackend;
+//! ```
+//! ```compile_fail,E0432
+//! use vfsi_sync::VectorBackend;
+//! ```
+//! ```compile_fail,E0432
+//! use vfsi_sync::sfsi;
+//! ```
+//! ```compile_fail,E0432
+//! use vfsi_sync::vfsi;
+//! ```
+//! ```compile_fail,E0432
+//! use vfsi_sync::backend_helpers;
+//! ```
+
+/// Shared execution defaults for backend implementers.
+#[doc(hidden)]
+pub mod helpers;
+
 use crate::*;
 use std::path::{Path, PathBuf};
 use vfsi_core::internal::ManyResults;
@@ -8,7 +39,7 @@ use vfsi_core::internal::ManyResults;
 /// Minimum contract for owned handles and descriptor lifecycle.
 /// This includes handle-level metadata/statistics hooks, but does not require
 /// namespace operations, directory enumeration, or native vector I/O.
-pub trait FileSystem {
+pub trait HandleBackend {
     fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<FilesystemStats>> {
         if files.is_empty() {
             Ok(Vec::new())
@@ -75,23 +106,23 @@ pub trait FileSystem {
     }
 
     fn vf_path(&self, file: &VfFile) -> VfResult<PathBuf> {
-        crate::backend_helpers::vf_path_default(self, file)
+        crate::backend::helpers::vf_path_default(self, file)
     }
 
     fn open_raw_impl(&mut self, pathname: &Path, flags: i32, mode: u32) -> VfResult<VfFile> {
-        crate::backend_helpers::open_raw_impl_default(self, pathname, flags, mode)
+        crate::backend::helpers::open_raw_impl_default(self, pathname, flags, mode)
     }
 
     fn read_raw_impl(&mut self, file: &VfFile, offset: u64, length: usize) -> VfResult<Vec<u8>> {
-        crate::backend_helpers::read_raw_impl_default(self, file, offset, length)
+        crate::backend::helpers::read_raw_impl_default(self, file, offset, length)
     }
 
     fn write_raw_impl(&mut self, file: &VfFile, offset: u64, data: &[u8]) -> VfResult<usize> {
-        crate::backend_helpers::write_raw_impl_default(self, file, offset, data)
+        crate::backend::helpers::write_raw_impl_default(self, file, offset, data)
     }
 
     fn read_file_impl(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
-        crate::backend_helpers::read_file_impl_default(self, file, max_bytes)
+        crate::backend::helpers::read_file_impl_default(self, file, max_bytes)
     }
 
     fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile>;
@@ -101,7 +132,7 @@ pub trait FileSystem {
     fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult>;
 
     fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
-        crate::backend_helpers::read_into_impl_default(self, request, buffer)
+        crate::backend::helpers::read_into_impl_default(self, request, buffer)
     }
 
     fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult>;
@@ -124,7 +155,7 @@ pub trait FileSystem {
     /// Each operation carries its own final-symlink policy; native backends
     /// batch contiguous equal-policy runs and validate all inputs before I/O.
     fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, VfFile>>]) -> VfResult<()> {
-        crate::backend_helpers::vsetattrs_impl_default(self, updates)
+        crate::backend::helpers::vsetattrs_impl_default(self, updates)
     }
 }
 
@@ -138,7 +169,7 @@ pub trait FileSystem {
 ///
 /// This trait is object-safe for C/Python dispatch. No blanket implementation
 /// synthesizes a complete backend from scalar methods.
-pub trait Backend: FileSystem {
+pub trait VectorBackend: HandleBackend {
     // Vector I/O and strict opens.
     fn vread_impl(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>>;
 
@@ -147,7 +178,7 @@ pub trait Backend: FileSystem {
         reads: &[ReadOp],
         buffers: &mut [&mut [u8]],
     ) -> VfResult<Vec<ReadIntoResult>> {
-        crate::backend_helpers::vread_into_impl_default(self, reads, buffers)
+        crate::backend::helpers::vread_into_impl_default(self, reads, buffers)
     }
     /// Execute a borrowed ordered vector. Payloads and target storage remain
     /// with the caller; implementations must not retain them after returning.
@@ -165,11 +196,11 @@ pub trait Backend: FileSystem {
         flags: &[i32],
         modes: &[u32],
     ) -> VfResult<ManyResults<VfFile>> {
-        crate::backend_helpers::vopen_outcomes_impl_default(self, paths, flags, modes)
+        crate::backend::helpers::vopen_outcomes_impl_default(self, paths, flags, modes)
     }
 
     fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
-        crate::backend_helpers::before_open_cleanup_default(self, _index, _file)
+        crate::backend::helpers::before_open_cleanup_default(self, _index, _file)
     }
 
     fn vopen_raw_impl(
@@ -178,7 +209,7 @@ pub trait Backend: FileSystem {
         flags: &[i32],
         modes: &[u32],
     ) -> VfResult<Vec<VfFile>> {
-        crate::backend_helpers::vopen_raw_impl_default(self, paths, flags, modes)
+        crate::backend::helpers::vopen_raw_impl_default(self, paths, flags, modes)
     }
 
     fn vopen_raw_simple_impl(
@@ -187,17 +218,17 @@ pub trait Backend: FileSystem {
         flags: i32,
         mode: u32,
     ) -> VfResult<Vec<VfFile>> {
-        crate::backend_helpers::vopen_raw_simple_impl_default(self, paths, flags, mode)
+        crate::backend::helpers::vopen_raw_simple_impl_default(self, paths, flags, mode)
     }
 
     fn vclose_impl(&mut self, files: &[VfFile]) -> VfRes {
-        crate::backend_helpers::vclose_impl_default(self, files)
+        crate::backend::helpers::vclose_impl_default(self, files)
     }
 
     /// Open every typed request or return an error, cleaning confirmed handles.
     /// Creation and truncation effects are not rolled back.
     fn vopen_impl(&mut self, requests: &[OpenOp]) -> VfResult<Vec<VfFile>> {
-        crate::backend_helpers::vopen_typed_default(self, requests)
+        crate::backend::helpers::vopen_typed_default(self, requests)
     }
 
     // Path metadata and vector attribute engines.
@@ -222,31 +253,31 @@ pub trait Backend: FileSystem {
     }
 
     fn stat_impl(&mut self, path: &Path) -> VfResult<VfAttrs> {
-        crate::backend_helpers::stat_impl_default(self, path)
+        crate::backend::helpers::stat_impl_default(self, path)
     }
 
     fn lstat_impl(&mut self, path: &Path) -> VfResult<VfAttrs> {
-        crate::backend_helpers::lstat_impl_default(self, path)
+        crate::backend::helpers::lstat_impl_default(self, path)
     }
 
     fn fstat_impl(&mut self, tcf: &VfFile) -> VfResult<VfAttrs> {
-        crate::backend_helpers::fstat_impl_default(self, tcf)
+        crate::backend::helpers::fstat_impl_default(self, tcf)
     }
 
     fn exists_impl(&mut self, path: &Path) -> VfResult<bool> {
-        crate::backend_helpers::exists_impl_default(self, path)
+        crate::backend::helpers::exists_impl_default(self, path)
     }
 
     fn file_type_impl(&mut self, path: &Path) -> VfResult<VfType> {
-        crate::backend_helpers::file_type_impl_default(self, path)
+        crate::backend::helpers::file_type_impl_default(self, path)
     }
 
     fn metadata_path_impl(&mut self, path: &std::path::Path, follow: bool) -> VfResult<Attrs> {
-        crate::backend_helpers::native_metadata_path_impl_default(self, path, follow)
+        crate::backend::helpers::native_metadata_path_impl_default(self, path, follow)
     }
 
     fn set_metadata_path_impl(&mut self, op: &SetAttrsOp<&std::path::Path>) -> VfResult<()> {
-        crate::backend_helpers::native_set_metadata_path_impl_default(self, op)
+        crate::backend::helpers::native_set_metadata_path_impl_default(self, op)
     }
 
     // Paged directory enumeration.
@@ -273,7 +304,7 @@ pub trait Backend: FileSystem {
         max_entries: usize,
         follow_symlinks: bool,
     ) -> VfResult<(Vec<VfAttrs>, Option<DirPageCursor>)> {
-        crate::backend_helpers::listdir_page_impl_default(
+        crate::backend::helpers::listdir_page_impl_default(
             self,
             dir,
             masks,
@@ -285,7 +316,7 @@ pub trait Backend: FileSystem {
     }
 
     fn directory_page_batch_size(&self) -> usize {
-        crate::backend_helpers::directory_page_batch_size_default(self)
+        crate::backend::helpers::directory_page_batch_size_default(self)
     }
 
     fn vlistdir_pages_impl(
@@ -297,7 +328,7 @@ pub trait Backend: FileSystem {
         max_entries: usize,
         follow_symlinks: bool,
     ) -> VfResult<Vec<BackendDirectoryPage>> {
-        crate::backend_helpers::vlistdir_pages_impl_default(
+        crate::backend::helpers::vlistdir_pages_impl_default(
             self,
             dirs,
             masks,
@@ -309,7 +340,7 @@ pub trait Backend: FileSystem {
     }
 
     fn create_dir_impl(&mut self, path: &std::path::Path, mode: u32) -> VfResult<()> {
-        crate::backend_helpers::native_create_dir_impl_default(self, path, mode)
+        crate::backend::helpers::native_create_dir_impl_default(self, path, mode)
     }
 
     fn read_dir_impl(
@@ -317,7 +348,7 @@ pub trait Backend: FileSystem {
         path: &std::path::Path,
         options: ListDirOptions,
     ) -> VfResult<Vec<DirEntry>> {
-        crate::backend_helpers::native_read_dir_impl_default(self, path, options)
+        crate::backend::helpers::native_read_dir_impl_default(self, path, options)
     }
 
     /// Adapt full-metadata paging through the field-aware hook below.
@@ -328,7 +359,7 @@ pub trait Backend: FileSystem {
         page_size: usize,
         max_entries: usize,
     ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
-        crate::backend_helpers::native_read_dir_page_impl_default(
+        crate::backend::helpers::native_read_dir_page_impl_default(
             self,
             path,
             cursor,
@@ -348,7 +379,7 @@ pub trait Backend: FileSystem {
         page_size: usize,
         max_entries: usize,
     ) -> VfResult<(Vec<DirEntry>, Option<DirPageCursor>)> {
-        crate::backend_helpers::native_read_dir_page_with_fields_impl_default(
+        crate::backend::helpers::native_read_dir_page_with_fields_impl_default(
             self,
             path,
             fields,
@@ -365,7 +396,7 @@ pub trait Backend: FileSystem {
         masks: AttrMask,
         sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<WalkEntry>> {
-        crate::backend_helpers::walk_impl_default(self, root, masks, sort)
+        crate::backend::helpers::walk_impl_default(self, root, masks, sort)
     }
 
     fn walk_with_options_impl(
@@ -375,7 +406,7 @@ pub trait Backend: FileSystem {
         options: ListDirOptions,
         sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
     ) -> VfResult<Vec<WalkEntry>> {
-        crate::backend_helpers::walk_with_options_impl_default(self, root, masks, options, sort)
+        crate::backend::helpers::walk_with_options_impl_default(self, root, masks, options, sort)
     }
 
     fn vlistdirs_impl(
@@ -386,7 +417,7 @@ pub trait Backend: FileSystem {
         recursive: bool,
         cb: &mut dyn FnMut(&VfAttrs, &Path) -> bool,
     ) -> VfRes {
-        crate::backend_helpers::vlistdirs_impl_default(
+        crate::backend::helpers::vlistdirs_impl_default(
             self,
             dirs,
             masks,
@@ -403,7 +434,7 @@ pub trait Backend: FileSystem {
         max_entries: usize,
         cb: &mut dyn FnMut(&VfAttrs) -> bool,
     ) -> VfRes {
-        crate::backend_helpers::visit_dir_impl_default(self, dir, masks, max_entries, cb)
+        crate::backend::helpers::visit_dir_impl_default(self, dir, masks, max_entries, cb)
     }
 
     // Namespace mutations and scalar adapters.
@@ -442,31 +473,31 @@ pub trait Backend: FileSystem {
     }
 
     fn unlink_impl(&mut self, pathname: &Path) -> VfResult<()> {
-        crate::backend_helpers::unlink_impl_default(self, pathname)
+        crate::backend::helpers::unlink_impl_default(self, pathname)
     }
 
     fn vunlink_impl(&mut self, pathnames: &[&Path]) -> VfRes {
-        crate::backend_helpers::vunlink_impl_default(self, pathnames)
+        crate::backend::helpers::vunlink_impl_default(self, pathnames)
     }
 
     fn mkdir_raw_impl(&mut self, path: &Path, mode: u32) -> VfResult<()> {
-        crate::backend_helpers::mkdir_raw_impl_default(self, path, mode)
+        crate::backend::helpers::mkdir_raw_impl_default(self, path, mode)
     }
 
     fn ensure_dir_impl(&mut self, dir: &Path, mode: u32) -> VfResult<()> {
-        crate::backend_helpers::ensure_dir_impl_default(self, dir, mode)
+        crate::backend::helpers::ensure_dir_impl_default(self, dir, mode)
     }
 
     fn remove_impl(&mut self, path: &std::path::Path, recursive: bool) -> VfResult<()> {
-        crate::backend_helpers::native_remove_impl_default(self, path, recursive)
+        crate::backend::helpers::native_remove_impl_default(self, path, recursive)
     }
 
     fn remove_dir_contents_impl(&mut self, path: &std::path::Path) -> VfResult<()> {
-        crate::backend_helpers::native_remove_dir_contents_impl_default(self, path)
+        crate::backend::helpers::native_remove_dir_contents_impl_default(self, path)
     }
 
     fn rename_impl(&mut self, from: &std::path::Path, to: &std::path::Path) -> VfResult<()> {
-        crate::backend_helpers::native_rename_impl_default(self, from, to)
+        crate::backend::helpers::native_rename_impl_default(self, from, to)
     }
 
     // Links.
@@ -486,23 +517,23 @@ pub trait Backend: FileSystem {
     }
 
     fn symlink_raw_impl(&mut self, oldpath: &Path, newpath: &Path) -> VfResult<()> {
-        crate::backend_helpers::symlink_raw_impl_default(self, oldpath, newpath)
+        crate::backend::helpers::symlink_raw_impl_default(self, oldpath, newpath)
     }
 
     fn readlink_raw_impl(&mut self, path: &Path) -> VfResult<Vec<u8>> {
-        crate::backend_helpers::readlink_raw_impl_default(self, path)
+        crate::backend::helpers::readlink_raw_impl_default(self, path)
     }
 
     fn symlink_impl(&mut self, target: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
-        crate::backend_helpers::native_symlink_impl_default(self, target, link)
+        crate::backend::helpers::native_symlink_impl_default(self, target, link)
     }
 
     fn hard_link_impl(&mut self, source: &std::path::Path, link: &std::path::Path) -> VfResult<()> {
-        crate::backend_helpers::native_hard_link_impl_default(self, source, link)
+        crate::backend::helpers::native_hard_link_impl_default(self, source, link)
     }
 
     fn read_link_impl(&mut self, path: &std::path::Path) -> VfResult<std::path::PathBuf> {
-        crate::backend_helpers::native_read_link_impl_default(self, path)
+        crate::backend::helpers::native_read_link_impl_default(self, path)
     }
 
     // Extent and tree copy.
@@ -512,7 +543,7 @@ pub trait Backend: FileSystem {
     }
 
     fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOption) -> VfRes {
-        crate::backend_helpers::vcopy_impl_default(self, pairs, options)
+        crate::backend::helpers::vcopy_impl_default(self, pairs, options)
     }
 
     fn copy_tree_impl(
@@ -528,7 +559,7 @@ pub trait Backend: FileSystem {
 
     // Bounded whole-file reads and streams.
     fn vread_all_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<Vec<u8>>> {
-        crate::backend_helpers::vread_all_impl_default(self, files)
+        crate::backend::helpers::vread_all_impl_default(self, files)
     }
 
     fn vread_all_with_options_impl(
@@ -536,7 +567,7 @@ pub trait Backend: FileSystem {
         files: &[VfFile],
         options: ReadAllOptions,
     ) -> VfResult<Vec<Vec<u8>>> {
-        crate::backend_helpers::vread_all_with_options_impl_default(self, files, options)
+        crate::backend::helpers::vread_all_with_options_impl_default(self, files, options)
     }
 
     fn vstream_impl(
@@ -546,16 +577,16 @@ pub trait Backend: FileSystem {
         memory_limit: usize,
         cb: &mut ReadStreamCallback<'_>,
     ) -> VfRes {
-        crate::backend_helpers::vstream_impl_default(self, files, chunk_size, memory_limit, cb)
+        crate::backend::helpers::vstream_impl_default(self, files, chunk_size, memory_limit, cb)
     }
 
     // Recursive removal and retained directory lifecycle.
     fn before_remove_type(&mut self, _index: usize) -> VfResult<()> {
-        crate::backend_helpers::before_remove_type_default(self, _index)
+        crate::backend::helpers::before_remove_type_default(self, _index)
     }
 
     fn remove_paths_impl(&mut self, objs: &[&Path], recursive: bool) -> VfRes {
-        crate::backend_helpers::remove_paths_impl_default(self, objs, recursive)
+        crate::backend::helpers::remove_paths_impl_default(self, objs, recursive)
     }
 
     fn remove_paths_with_options_impl(
@@ -564,17 +595,17 @@ pub trait Backend: FileSystem {
         recursive: bool,
         options: RemoveOptions,
     ) -> VfRes {
-        crate::backend_helpers::remove_paths_with_options_impl_default(
+        crate::backend::helpers::remove_paths_with_options_impl_default(
             self, objs, recursive, options,
         )
     }
 
     fn open_dir_impl(&mut self, path: &Path) -> VfResult<VfDir> {
-        crate::backend_helpers::open_dir_impl_default(self, path)
+        crate::backend::helpers::open_dir_impl_default(self, path)
     }
 
     fn remove_dir_contents_handle_impl(&mut self, dir: &VfDir) -> VfRes {
-        crate::backend_helpers::remove_dir_contents_handle_impl_default(self, dir)
+        crate::backend::helpers::remove_dir_contents_handle_impl_default(self, dir)
     }
 
     fn remove_dir_contents_handle_with_options_impl(
@@ -582,17 +613,17 @@ pub trait Backend: FileSystem {
         dir: &VfDir,
         options: RemoveOptions,
     ) -> VfRes {
-        crate::backend_helpers::remove_dir_contents_handle_with_options_impl_default(
+        crate::backend::helpers::remove_dir_contents_handle_with_options_impl_default(
             self, dir, options,
         )
     }
 
     fn close_dir_impl(&mut self, _dir: &VfDir) -> VfResult<()> {
-        crate::backend_helpers::close_dir_impl_default(self, _dir)
+        crate::backend::helpers::close_dir_impl_default(self, _dir)
     }
 
     fn remove_dir_contents_path_impl(&mut self, dir: &Path) -> VfRes {
-        crate::backend_helpers::remove_dir_contents_path_impl_default(self, dir)
+        crate::backend::helpers::remove_dir_contents_path_impl_default(self, dir)
     }
 
     fn remove_dir_contents_path_with_options_impl(
@@ -600,13 +631,13 @@ pub trait Backend: FileSystem {
         dir: &Path,
         options: RemoveOptions,
     ) -> VfRes {
-        crate::backend_helpers::remove_dir_contents_path_with_options_impl_default(
+        crate::backend::helpers::remove_dir_contents_path_with_options_impl_default(
             self, dir, options,
         )
     }
 
     fn ensure_empty_dir_impl(&mut self, dir: &Path) -> VfRes {
-        crate::backend_helpers::ensure_empty_dir_impl_default(self, dir)
+        crate::backend::helpers::ensure_empty_dir_impl_default(self, dir)
     }
 
     // Optional application-data-block writes.

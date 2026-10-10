@@ -1,6 +1,6 @@
 use super::*;
 
-pub fn listdir_page_impl_default<F: Backend + ?Sized>(
+pub fn listdir_page_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     dir: &Path,
     masks: AttrMask,
@@ -31,11 +31,11 @@ pub fn listdir_page_impl_default<F: Backend + ?Sized>(
     Ok((page, next))
 }
 
-pub fn directory_page_batch_size_default<F: Backend + ?Sized>(_backend: &F) -> usize {
+pub fn directory_page_batch_size_default<F: VectorBackend + ?Sized>(_backend: &F) -> usize {
     1
 }
 
-pub fn vlistdir_pages_impl_default<F: Backend + ?Sized>(
+pub fn vlistdir_pages_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     dirs: &[&Path],
     masks: AttrMask,
@@ -62,7 +62,7 @@ pub fn vlistdir_pages_impl_default<F: Backend + ?Sized>(
         .collect()
 }
 
-pub fn walk_impl_default<F: Backend + ?Sized>(
+pub fn walk_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     root: &Path,
     masks: AttrMask,
@@ -71,7 +71,7 @@ pub fn walk_impl_default<F: Backend + ?Sized>(
     backend.walk_with_options_impl(root, masks, ListDirOptions::default().recursive(true), sort)
 }
 
-pub fn walk_with_options_impl_default<F: Backend + ?Sized>(
+pub fn walk_with_options_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     root: &Path,
     masks: AttrMask,
@@ -130,7 +130,7 @@ pub fn walk_with_options_impl_default<F: Backend + ?Sized>(
     Ok(out)
 }
 
-pub fn vlistdirs_impl_default<F: Backend + ?Sized>(
+pub fn vlistdirs_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     dirs: &[&Path],
     masks: AttrMask,
@@ -171,7 +171,7 @@ pub fn vlistdirs_impl_default<F: Backend + ?Sized>(
         for e in &entries {
             /* A recursive list contains descendants too, so report each
              * entry's actual parent rather than attributing every row to the
-             * original root. Backend overrides follow the same contract. */
+             * original root. VectorBackend overrides follow the same contract. */
             let entry_dir = if recursive {
                 e.file.path().and_then(Path::parent).unwrap_or(d)
             } else {
@@ -186,7 +186,7 @@ pub fn vlistdirs_impl_default<F: Backend + ?Sized>(
     Ok(())
 }
 
-pub fn visit_dir_impl_default<F: Backend + ?Sized>(
+pub fn visit_dir_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     dir: &Path,
     masks: AttrMask,
@@ -202,7 +202,7 @@ pub fn visit_dir_impl_default<F: Backend + ?Sized>(
     Ok(())
 }
 
-pub fn native_read_dir_impl_default<F: Backend + ?Sized>(
+pub fn native_read_dir_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     path: &std::path::Path,
     options: ListDirOptions,
@@ -243,7 +243,7 @@ pub fn native_read_dir_impl_default<F: Backend + ?Sized>(
         .collect()
 }
 
-pub fn native_read_dir_page_impl_default<F: Backend + ?Sized>(
+pub fn native_read_dir_page_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     path: &std::path::Path,
     cursor: Option<DirPageCursor>,
@@ -253,7 +253,7 @@ pub fn native_read_dir_page_impl_default<F: Backend + ?Sized>(
     backend.read_dir_page_with_fields_impl(path, metadata_mask(), cursor, page_size, max_entries)
 }
 
-pub fn native_read_dir_page_with_fields_impl_default<F: Backend + ?Sized>(
+pub fn native_read_dir_page_with_fields_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     path: &std::path::Path,
     fields: AttrMask,
