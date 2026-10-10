@@ -19,8 +19,8 @@ use std::{
 };
 use vfsi_core::{VfError, VfResult};
 
-/// Bounds both in-flight SQEs and owned scratch storage. No SQPOLL thread is
-/// started. A large operation is split into bounded contiguous chunks.
+/// Bounds both in-flight SQEs and the reusable owned scratch arena. No SQPOLL
+/// thread is started. A large operation is split into bounded contiguous chunks.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     pub(crate) queue_depth: NonZeroU32,
@@ -31,7 +31,7 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             queue_depth: NonZeroU32::new(256).unwrap(),
-            max_batch_bytes: NonZeroUsize::new(16 * 1024 * 1024).unwrap(),
+            max_batch_bytes: NonZeroUsize::new(2 * 1024 * 1024).unwrap(),
         }
     }
 }
@@ -45,6 +45,8 @@ impl Options {
     }
     /// Maximum aggregate scratch bytes per wave, independent of caller-facing
     /// read allocation limits. Shared read limits still default to 16 MiB.
+    /// Defaults to 2 MiB to limit copy working sets while preserving many-file
+    /// concurrency; tune upward for storage that benefits from larger windows.
     pub fn max_batch_bytes(mut self, bytes: NonZeroUsize) -> Self {
         self.max_batch_bytes = bytes;
         self
@@ -64,8 +66,8 @@ pub fn connect(
 }
 
 /// Like [`connect`], retaining low-cost counters for actual submissions,
-/// completions, waves and peak scratch bytes. Counters do not include syscalls
-/// performed by the local namespace/ordering fallback.
+/// completions, waves, ring entries, arena growths and peak scratch bytes.
+/// Counters do not include syscalls performed by namespace/ordering fallbacks.
 pub fn connect_with_telemetry(
     root: impl AsRef<Path>,
     options: Options,

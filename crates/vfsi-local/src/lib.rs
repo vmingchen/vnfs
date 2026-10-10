@@ -1412,10 +1412,15 @@ impl VectorBackend for LocalBackend {
                     .get(&op.file.fd().unwrap())
                     .ok_or_else(|| VfError::failure(index, ERR_EBADF))?
                     .file;
-                let len = file
-                    .metadata()
-                    .map_err(|e| VfError::failure(index, Self::errno(&e)))?
-                    .len();
+                // Only EOF-relative offsets need the current file size. At/Cur
+                // reads determine EOF from the transfer, not a metadata probe.
+                let len = if matches!(op.offset, VfOffset::End) {
+                    file.metadata()
+                        .map_err(|e| VfError::failure(index, Self::errno(&e)))?
+                        .len()
+                } else {
+                    0
+                };
                 let offset = self
                     .resolve_offset(&op.file, op.offset, len)
                     .map_err(|e| e.with_index(index))?;

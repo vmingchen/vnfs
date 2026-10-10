@@ -35,7 +35,7 @@ crate. `vnfs::Uring` keeps backend handles opaque. Neither needs Tokio.
 
 Independent descriptor reads, positional writes, and fsyncs are submitted as
 multiple SQEs per wave. Completion IDs restore input order. Default bounds:
-256 SQEs and 16 MiB scratch per wave, configurable through
+256 SQEs and a reusable 2 MiB scratch arena, configurable through
 `vnfs::uring::Options::{queue_depth,max_batch_bytes}`. Queue depths must be
 1..=4096. Application read budgets remain independently controlled by
 `ReadOptions` and `ResourceLimits` (16 MiB by default). Large requests use bounded
@@ -64,7 +64,10 @@ but still pass through bounded kernel-facing scratch. Writes alone do not imply
 durability; call `vfsync` when required.
 
 `Uring::with_telemetry` returns counters for waves, actual submissions,
-completions, and peak scratch bytes. They exclude the ordinary syscall paths.
+completions, peak scratch bytes, ring entries, and arena growths. They exclude
+the ordinary syscall paths. The executor waits for a complete wave rather than
+waking for each completion; initialized scratch storage is reused only after
+every submitted operation has drained.
 
 ## Reproduce the comparison
 
@@ -75,6 +78,8 @@ cargo run --release -p vnfs --no-default-features --features uring,posix \
 ```
 
 An optional second argument selects an existing scratch parent directory.
+Further arguments select `both|posix|uring`, `all|warm|cold`, and queue depth
+(default 256), for example `-- 100 target uring warm 64` for focused profiling.
 The default is `target`, because `/tmp` can be RAM-backed. The benchmark uses
 identical `FsClient` adapters over the same root, comparing `vfsi-posix` against
 `vfsi-uring`, both over shared `LocalBackend` machinery. It validates

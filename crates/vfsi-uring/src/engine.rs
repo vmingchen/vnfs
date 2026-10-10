@@ -17,6 +17,8 @@ struct Counters {
     submissions: AtomicU64,
     completions: AtomicU64,
     peak_bytes: AtomicU64,
+    enters: AtomicU64,
+    scratch_growths: AtomicU64,
 }
 
 /// Cumulative execution counters; a snapshot may span an ongoing operation.
@@ -26,6 +28,10 @@ pub struct Stats {
     pub submissions: u64,
     pub completions: u64,
     pub peak_bytes: u64,
+    /// Calls to io_uring_enter, including interrupted attempts.
+    pub enters: u64,
+    /// Growths of the executor's reusable owned scratch arena.
+    pub scratch_growths: u64,
 }
 
 #[derive(Clone, Default)]
@@ -39,6 +45,8 @@ impl Telemetry {
             submissions: counters.submissions.load(Ordering::Relaxed),
             completions: counters.completions.load(Ordering::Relaxed),
             peak_bytes: counters.peak_bytes.load(Ordering::Relaxed),
+            enters: counters.enters.load(Ordering::Relaxed),
+            scratch_growths: counters.scratch_growths.load(Ordering::Relaxed),
         }
     }
 }
@@ -47,6 +55,7 @@ pub(crate) struct Engine {
     ring: Option<IoUring>,
     options: Options,
     telemetry: Telemetry,
+    scratch: Vec<u8>,
     #[cfg(test)]
     short_completion: Option<usize>,
     #[cfg(test)]
@@ -74,7 +83,7 @@ struct Pending {
     // buffers are never referenced by the kernel and can safely be released
     // even if an unrecoverable ring failure prevents draining completions.
     file: Arc<File>,
-    bytes: Vec<u8>,
+    bytes: std::ops::Range<usize>,
     offset: u64,
     kind: Kind,
     job: usize,
@@ -100,6 +109,7 @@ impl Engine {
                 ring: Some(ring),
                 options,
                 telemetry: telemetry.clone(),
+                scratch: Vec::new(),
                 #[cfg(test)]
                 short_completion: None,
                 #[cfg(test)]
@@ -113,6 +123,13 @@ impl Engine {
         let Some(ring) = self.ring.as_mut() else {
             return Err(io::Error::from_raw_os_error(libc::EIO));
         };
+        // Take ownership before publishing pointers. On success the arena is
+        // reused; on a catastrophic failure it is retained with the descriptors.
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let scratch_len = scratch.len();
+        // Derive all SQE pointers from one base pointer. Repeated mutable slice
+        // borrows could invalidate earlier pointers into this shared arena.
+        let scratch_ptr = scratch.as_mut_ptr();
         // Complete all allocation and fallible preparation before publishing
         // any pointers into the SQ. Vector storage is not moved/reallocated
         // until every CQE has arrived.
@@ -122,6 +139,10 @@ impl Engine {
             .map(|(index, op)| {
                 let fd = types::Fd(op.file.as_raw_fd());
                 let length = op.bytes.len() as u32;
+                debug_assert!(op.bytes.end <= scratch_len);
+                // SAFETY: disjoint ranges were bounded before allocation; the
+                // arena is neither borrowed nor resized until all CQEs drain.
+                let bytes = unsafe { scratch_ptr.add(op.bytes.start) };
                 // Inject an actual short transfer, not a fabricated CQE after
                 // the full payload has already reached the file.
                 #[cfg(test)]
@@ -129,10 +150,10 @@ impl Engine {
                     length.min(u32::try_from(limit).unwrap_or(u32::MAX))
                 });
                 let entry = match op.kind {
-                    Kind::Read => opcode::Read::new(fd, op.bytes.as_mut_ptr(), length)
+                    Kind::Read => opcode::Read::new(fd, bytes, length)
                         .offset(op.offset)
                         .build(),
-                    Kind::Write => opcode::Write::new(fd, op.bytes.as_ptr(), length)
+                    Kind::Write => opcode::Write::new(fd, bytes.cast_const(), length)
                         .offset(op.offset)
                         .build(),
                     Kind::Sync(data_only) => opcode::Fsync::new(fd)
@@ -165,7 +186,10 @@ impl Engine {
             }
             let mut remaining = entries.len();
             while remaining != 0 {
-                match ring.submit_and_wait(1) {
+                counters.enters.fetch_add(1, Ordering::Relaxed);
+                // The synchronous API cannot return before the whole wave is
+                // drained. Waiting for one CQE just adds wakeups and syscalls.
+                match ring.submit_and_wait(remaining) {
                     Ok(submitted) => {
                         counters
                             .submissions
@@ -197,8 +221,10 @@ impl Engine {
             // Normal negative CQEs are drained and do NOT leak resources.
             self.ring.take();
             std::mem::forget(pending);
+            std::mem::forget(scratch);
             return Err(error);
         }
+        self.scratch = scratch;
         Ok(pending
             .into_iter()
             .zip(results)
@@ -207,6 +233,12 @@ impl Engine {
     }
 
     fn execute(&mut self, jobs: &mut [Job<'_>]) -> Vec<io::Result<usize>> {
+        if self.ring.is_none() {
+            return jobs
+                .iter()
+                .map(|_| Err(io::Error::from_raw_os_error(libc::EIO)))
+                .collect();
+        }
         let mut progress = vec![0usize; jobs.len()];
         let mut done = vec![false; jobs.len()];
         let mut errors = vec![None; jobs.len()];
@@ -241,10 +273,8 @@ impl Engine {
                     continue;
                 };
                 let file = Arc::clone(job.file);
-                let bytes = match &job.buffer {
-                    Buffer::Write(data) => data[progress[index]..progress[index] + count].to_vec(),
-                    _ => vec![0; count],
-                };
+                let start = self.options.max_batch_bytes.get() - budget;
+                let bytes = start..start + count;
                 budget -= count;
                 pending.push(Pending {
                     file,
@@ -256,6 +286,25 @@ impl Engine {
             }
             if pending.is_empty() {
                 continue;
+            }
+            let bytes = self.options.max_batch_bytes.get() - budget;
+            if bytes > self.scratch.len() {
+                // reserve_exact avoids geometric growth beyond the configured
+                // byte budget. Already initialized read storage needs no reset:
+                // only bytes acknowledged by a CQE are copied to the caller.
+                self.scratch.reserve_exact(bytes - self.scratch.len());
+                self.scratch.resize(bytes, 0);
+                self.telemetry
+                    .0
+                    .scratch_growths
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            for op in &pending {
+                if let Buffer::Write(data) = &jobs[op.job].buffer {
+                    let start = progress[op.job];
+                    self.scratch[op.bytes.clone()]
+                        .copy_from_slice(&data[start..start + op.bytes.len()]);
+                }
             }
             match self.wave(pending) {
                 Ok(completed) => {
@@ -273,8 +322,9 @@ impl Engine {
                             continue;
                         }
                         if let Buffer::Read(buffer) = &mut jobs[index].buffer {
-                            buffer[progress[index]..progress[index] + count]
-                                .copy_from_slice(&op.bytes[..count]);
+                            buffer[progress[index]..progress[index] + count].copy_from_slice(
+                                &self.scratch[op.bytes.start..op.bytes.start + count],
+                            );
                         }
                         progress[index] += count;
                         // A short read ends this operation; no fixed-offset gap
@@ -359,6 +409,122 @@ mod tests {
     use super::*;
     use vfsi_core::{ReadOp, VfOffset, WriteOp};
     use vfsi_sync::backend::{HandleBackend, VectorBackend};
+
+    #[test]
+    fn waves_reuse_bounded_storage_and_wait_once_for_all_completions() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        std::fs::write(&path, b"0123456789").unwrap();
+        let file = Arc::new(File::options().read(true).write(true).open(&path).unwrap());
+        let (mut engine, telemetry) = Engine::new(
+            Options::default().max_batch_bytes(std::num::NonZeroUsize::new(7).unwrap()),
+        )
+        .unwrap();
+        for value in *b"abc" {
+            let bytes = [value; 10];
+            let results = engine.write(&[Write {
+                file: &file,
+                offset: 0,
+                data: &bytes,
+            }]);
+            assert_eq!(*results[0].as_ref().unwrap(), 10);
+            let mut actual = [0; 10];
+            let results = engine.read(&mut [Read {
+                file: &file,
+                offset: 0,
+                buffer: &mut actual,
+            }]);
+            assert_eq!(*results[0].as_ref().unwrap(), 10);
+            assert_eq!(actual, bytes);
+            assert!(engine.scratch.capacity() <= 7);
+        }
+        // Recycled storage must not leak stale bytes past a short/EOF read.
+        let mut tail = [99; 7];
+        let results = engine.read(&mut [Read {
+            file: &file,
+            offset: 8,
+            buffer: &mut tail,
+        }]);
+        assert_eq!(*results[0].as_ref().unwrap(), 2);
+        assert_eq!(tail, [b'c', b'c', 99, 99, 99, 99, 99]);
+        let stats = telemetry.snapshot();
+        assert_eq!(stats.scratch_growths, 1);
+        assert_eq!((stats.peak_bytes, stats.waves), (7, 13));
+        assert_eq!(
+            (stats.enters, stats.submissions, stats.completions),
+            (13, 13, 13)
+        );
+    }
+
+    #[test]
+    fn many_small_requests_share_one_arena_and_one_enter() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        std::fs::write(&path, vec![42; 1024]).unwrap();
+        let file = Arc::new(File::open(&path).unwrap());
+        let (mut engine, telemetry) = Engine::new(Options::default()).unwrap();
+        for _ in 0..3 {
+            let mut bytes = vec![[0; 4]; 256];
+            let mut operations: Vec<_> = bytes
+                .iter_mut()
+                .enumerate()
+                .map(|(i, buffer)| Read {
+                    file: &file,
+                    offset: (i * 4) as u64,
+                    buffer,
+                })
+                .collect();
+            let results = engine.read(&mut operations);
+            assert!(results.iter().all(|result| *result.as_ref().unwrap() == 4));
+            assert!(bytes.iter().all(|buffer| buffer == &[42; 4]));
+        }
+        let stats = telemetry.snapshot();
+        assert_eq!(
+            (stats.waves, stats.enters, stats.scratch_growths),
+            (3, 3, 1)
+        );
+        assert_eq!((stats.submissions, stats.completions), (768, 768));
+    }
+
+    #[test]
+    fn eof_relative_reads_observe_external_growth_and_truncation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        std::fs::write(&path, b"abc").unwrap();
+        let (engine, _) = Engine::new(Options::default()).unwrap();
+        let mut fs = vfsi_local::LocalBackend::new(root.path().to_path_buf(), engine).unwrap();
+        let file = fs
+            .open_raw_impl(std::path::Path::new("/file"), libc::O_RDONLY, 0)
+            .unwrap();
+        for bytes in [b"abcdefgh".as_slice(), b"x"] {
+            std::fs::write(&path, bytes).unwrap();
+            let results = fs
+                .vread_impl(&[
+                    ReadOp {
+                        file: file.clone(),
+                        offset: VfOffset::At(0),
+                        length: 10,
+                    },
+                    ReadOp {
+                        file: file.clone(),
+                        offset: VfOffset::End,
+                        length: 1,
+                    },
+                ])
+                .unwrap();
+            assert_eq!(results[0].data, bytes);
+            assert!(results[0].eof);
+            assert_eq!(results[1].offset, bytes.len() as u64);
+            assert!(results[1].eof);
+            assert!(results[1].data.is_empty());
+            assert_eq!(
+                fs.seek_raw_impl(&file, 0, vfsi_core::SeekFrom::Cur)
+                    .unwrap(),
+                0
+            );
+        }
+        fs.close_impl(&file).unwrap();
+    }
 
     #[test]
     fn injected_short_writes_complete_contiguous_suffixes_and_short_reads_stop() {
@@ -497,6 +663,10 @@ mod tests {
         assert_eq!(telemetry.snapshot().submissions, 1);
         assert_eq!(telemetry.snapshot().completions, 0);
         assert!(
+            engine.scratch.is_empty(),
+            "in-flight arena is retained, not reused"
+        );
+        assert!(
             engine.write(&[Write {
                 file: &file,
                 offset: 0,
@@ -505,6 +675,10 @@ mod tests {
                 .is_err()
         );
         assert_eq!(telemetry.snapshot().submissions, 1);
+        assert!(
+            engine.scratch.is_empty(),
+            "poisoned calls must not grow a new arena"
+        );
         drop(engine);
         drop(file);
         // This exceptional path deliberately retains the bounded wave:

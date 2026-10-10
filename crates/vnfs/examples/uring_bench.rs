@@ -86,18 +86,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 file.sync_all()?;
             }
         }
+        let expected = buffers.clone();
+        let mut alternate = Vec::new();
+        if write {
+            alternate = buffers.clone();
+            for (i, (buffer, offset)) in buffers.iter_mut().zip(offsets).enumerate() {
+                fill_pattern(buffer, i % files.len(), *offset, 1);
+                fill_pattern(&mut alternate[i], i % files.len(), *offset, 2);
+            }
+        }
         let mut generation = 0;
         for round in 0..rounds + 5 {
-            generation = if write { (round % 255 + 1) as u8 } else { 0 };
-            for (i, (buffer, offset)) in buffers.iter_mut().zip(offsets).enumerate() {
-                // Reads start with poison bytes; writes change every round.
-                // This work is deliberately outside the timed region.
-                fill_pattern(
-                    buffer,
-                    i % files.len(),
-                    *offset,
-                    if write { generation } else { 1 },
-                );
+            generation = if write { (round % 2 + 1) as u8 } else { 0 };
+            // Precompute distinguishable generations, then swap/compare them.
+            // Per-byte modulo in preparation/validation used to dominate CPU
+            // profiles despite being outside the measured operation.
+            if write && round != 0 {
+                std::mem::swap(&mut buffers, &mut alternate);
+            } else if !write {
+                for buffer in &mut buffers {
+                    buffer.fill(0xa5);
+                }
             }
             for file in source.iter().filter(|_| cold) {
                 // Outside the timed region. Advisory eviction is not a
@@ -134,8 +143,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 assert!(results.iter().all(|result| result.read() == size));
             }
             let elapsed = start.elapsed().as_secs_f64();
-            if !write {
-                verify_buffers(&buffers, offsets, files.len(), generation)?;
+            if !write && buffers != expected {
+                return Err("benchmark read contents differ".into());
             }
             if round >= 5 {
                 samples.push(elapsed);
@@ -171,6 +180,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // /tmp is often tmpfs; use disk-backed build storage by default. A second
     // argument can select another existing scratch parent/filesystem.
     let parent = std::env::args().nth(2).unwrap_or_else(|| "target".into());
+    let backend = std::env::args().nth(3).unwrap_or_else(|| "both".into());
+    let phase = std::env::args().nth(4).unwrap_or_else(|| "all".into());
+    if !matches!(backend.as_str(), "both" | "posix" | "uring")
+        || !matches!(phase.as_str(), "all" | "warm" | "cold")
+    {
+        return Err(
+            "usage: uring_bench [rounds] [parent] [both|posix|uring] [all|warm|cold] [queue_depth]"
+                .into(),
+        );
+    }
+    let depth = std::env::args()
+        .nth(5)
+        .map(|arg| arg.parse::<u32>())
+        .transpose()?
+        .unwrap_or(256);
+    let options = vfsi_uring::Options::default()
+        .queue_depth(std::num::NonZeroU32::new(depth).ok_or("queue_depth must be nonzero")?);
     let temp = tempfile::Builder::new()
         .prefix("vfsi-uring-bench-")
         .tempdir_in(parent)?;
@@ -190,7 +216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let local = vfsi_posix::connect(root)?;
     // Identical FsClient adapters: compare execution engines rather than an
     // opaque facade on one side and a native adapter on the other.
-    let (uring, telemetry) = vfsi_uring::connect_with_telemetry(root, Default::default())?;
+    let (uring, telemetry) = vfsi_uring::connect_with_telemetry(root, options)?;
     println!(
         "warm-cache, buffered I/O, no fsync, {} measured rounds; root={}",
         rounds,
@@ -256,55 +282,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         Ok(())
     }
-    cases(&local, root, "local", &paths, rounds)?;
-    cases(&uring, root, "uring", &paths, rounds)?;
+    if phase != "cold" {
+        if backend != "uring" {
+            cases(&local, root, "local", &paths, rounds)?;
+        }
+        if backend != "posix" {
+            cases(&uring, root, "uring", &paths, rounds)?;
+        }
+    }
+    if phase == "warm" {
+        let stats = telemetry.snapshot();
+        println!("ring: {stats:?}");
+        assert_eq!(stats.submissions, stats.completions);
+        return Ok(());
+    }
     println!("advisory page-cache eviction before each read; sync/eviction outside timing");
     let cold_rounds = rounds.min(20);
     let offsets = vec![0; paths.len()];
-    measure(
-        (&local, root),
-        "local/cold-small-read",
-        &paths,
-        &offsets,
-        4096,
-        cold_rounds,
-        Mode::ColdRead,
-    )?;
-    measure(
-        (&uring, root),
-        "uring/cold-small-read",
-        &paths,
-        &offsets,
-        4096,
-        cold_rounds,
-        Mode::ColdRead,
-    )?;
+    if backend != "uring" {
+        measure(
+            (&local, root),
+            "local/cold-small-read",
+            &paths,
+            &offsets,
+            4096,
+            cold_rounds,
+            Mode::ColdRead,
+        )?;
+    }
+    if backend != "posix" {
+        measure(
+            (&uring, root),
+            "uring/cold-small-read",
+            &paths,
+            &offsets,
+            4096,
+            cold_rounds,
+            Mode::ColdRead,
+        )?;
+    }
     let offsets: Vec<_> = (0..128).map(|i| i * 128 * 1024).collect();
-    measure(
-        (&local, root),
-        "local/cold-large-read",
-        &["/large".into()],
-        &offsets,
-        128 * 1024,
-        cold_rounds,
-        Mode::ColdRead,
-    )?;
-    measure(
-        (&uring, root),
-        "uring/cold-large-read",
-        &["/large".into()],
-        &offsets,
-        128 * 1024,
-        cold_rounds,
-        Mode::ColdRead,
-    )?;
+    if backend != "uring" {
+        measure(
+            (&local, root),
+            "local/cold-large-read",
+            &["/large".into()],
+            &offsets,
+            128 * 1024,
+            cold_rounds,
+            Mode::ColdRead,
+        )?;
+    }
+    if backend != "posix" {
+        measure(
+            (&uring, root),
+            "uring/cold-large-read",
+            &["/large".into()],
+            &offsets,
+            128 * 1024,
+            cold_rounds,
+            Mode::ColdRead,
+        )?;
+    }
     let stats = telemetry.snapshot();
     println!(
-        "ring: waves={} submissions={} completions={} peak_scratch_bytes={}",
-        stats.waves, stats.submissions, stats.completions, stats.peak_bytes
+        "ring: waves={} submissions={} completions={} peak_scratch_bytes={} enters={} scratch_growths={}",
+        stats.waves,
+        stats.submissions,
+        stats.completions,
+        stats.peak_bytes,
+        stats.enters,
+        stats.scratch_growths
     );
     assert_eq!(stats.submissions, stats.completions);
-    assert!(stats.submissions > stats.waves);
+    if backend != "posix" && depth > 1 {
+        assert!(stats.submissions > stats.waves);
+    }
     Ok(())
 }
 
