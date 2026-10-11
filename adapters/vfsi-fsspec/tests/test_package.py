@@ -180,8 +180,11 @@ def test_legacy_native_read_api_is_rejected_before_connect():
 def test_handle_identity_is_not_a_mutable_timestamp_or_version():
     from vfsi_fsspec._fs import _handle_identity
 
-    assert _handle_identity({"fileid": 0, "created_ns": 1}) == 0
-    assert _handle_identity({"fileid": 0, "created_ns": 2, "change": 3}) == 0
+    assert _handle_identity({"fs_id": 0, "fileid": 0, "created_ns": 1}) == (0, 0)
+    assert _handle_identity({"fs_id": 0, "fileid": 0, "created_ns": 2, "change": 3}) == (0, 0)
+    assert _handle_identity({"fs_id": 1, "fileid": 0}) != (0, 0)
+    assert _handle_identity({"fileid": 0}) is None
+    assert _handle_identity({"fs_id": 0}) is None
     assert _handle_identity({"created_ns": 1}) is None
 
 

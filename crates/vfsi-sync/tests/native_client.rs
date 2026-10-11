@@ -118,6 +118,11 @@ type AttributeCalls = Arc<Mutex<Vec<(bool, Vec<Option<u64>>)>>>;
 
 #[derive(Default)]
 struct ScalarOnly {
+    descriptor_objects: std::collections::HashMap<i32, u64>,
+    named_objects: std::collections::HashMap<std::path::PathBuf, u64>,
+    unknown_objects: bool,
+    unknown_object_fd: Option<i32>,
+    alias_objects: bool,
     sync_calls: SyncCalls,
     sync_failure: Option<VfError>,
     attrs_calls: AttributeCalls,
@@ -388,6 +393,12 @@ struct PagedBackend {
 macro_rules! handle_contract {
     ($backend:ty) => {
         impl HandleBackend for $backend {
+            fn open_object_ref(
+                &self,
+                file: &FileOperand,
+            ) -> VfResult<Option<vfsi_sync::backend::OpenObjectRef<'_>>> {
+                self.scalar.open_object_ref(file)
+            }
             fn open_impl(&mut self, request: &OpenOp) -> VfResult<FileOperand> {
                 self.scalar.open_impl(request)
             }
@@ -1202,6 +1213,21 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
 }
 
 impl HandleBackend for ScalarOnly {
+    fn open_object_ref(
+        &self,
+        file: &FileOperand,
+    ) -> VfResult<Option<vfsi_sync::backend::OpenObjectRef<'_>>> {
+        Ok(
+            if self.unknown_objects || self.unknown_object_fd == file.fd() {
+                None
+            } else {
+                self.descriptor_objects.get(&file.fd().unwrap()).map(|id| {
+                    vfsi_sync::backend::OpenObjectRef::Id(vfsi_sync::FsObjId::new(0, *id))
+                })
+            },
+        )
+    }
+
     fn vfsync_impl(
         &mut self,
         files: &[FileOperand],
@@ -1240,7 +1266,18 @@ impl HandleBackend for ScalarOnly {
     fn open_impl(&mut self, request: &OpenOp) -> VfResult<FileOperand> {
         self.open_requests.lock().unwrap().push(request.clone());
         self.open = true;
-        Ok(FileOperand::from_fd(1))
+        let fd = self.descriptor_objects.len() as i32 + 1;
+        let next = self.named_objects.len() as u64;
+        let object = if self.alias_objects {
+            0
+        } else {
+            *self
+                .named_objects
+                .entry(request.path().to_path_buf())
+                .or_insert(next)
+        };
+        self.descriptor_objects.insert(fd, object);
+        Ok(FileOperand::from_fd(fd))
     }
 
     fn close_impl(&mut self, _: &FileOperand) -> VfResult<()> {
@@ -3017,5 +3054,41 @@ fn portable_open_builder_preflights_and_preserves_all_flag_combinations() {
                 assert_eq!(op.creation_mode(), 0o640);
             }
         }
+    }
+}
+
+#[test]
+fn write_allv_orders_aliases_and_unknown_objects_across_short_writes() {
+    for (alias_objects, unknown_objects, unknown_object_fd) in [
+        (true, false, None),
+        (false, true, None),
+        (false, false, Some(2)),
+    ] {
+        let backend = WriteBoundaryProbe {
+            scalar: ScalarOnly {
+                alias_objects,
+                unknown_objects,
+                unknown_object_fd,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let calls = backend.calls.clone();
+        let client = FsClient::new(backend);
+        let first = client.open("/original").unwrap();
+        let alias = client.open("/renamed-or-hardlink").unwrap();
+        client
+            .vwrite_all_native(&[
+                first.write_request_at(0, b"AAAA"),
+                alias.write_request_at(2, b"BBBB"),
+            ])
+            .unwrap();
+        let waves = calls.lock().unwrap();
+        assert_eq!(waves.len(), 4);
+        assert!(waves.iter().all(|wave| wave.len() == 1));
+        assert_eq!(waves[0][0].offset, VfOffset::At(0));
+        assert_eq!(waves[1][0].offset, VfOffset::At(2));
+        assert_eq!(waves[2][0].offset, VfOffset::At(2));
+        assert_eq!(waves[3][0].offset, VfOffset::At(4));
     }
 }

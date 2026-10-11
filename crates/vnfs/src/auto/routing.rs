@@ -56,6 +56,20 @@ impl Route {
 }
 
 impl Auto {
+    pub(crate) fn same_object_namespace_impl(&self, left: &Path, right: &Path) -> bool {
+        let mounts = read_mounts(false);
+        match (
+            self.resolve(left, &mounts).route,
+            self.resolve(right, &mounts).route,
+        ) {
+            (Route::Posix, Route::Posix) => true,
+            (Route::Nfs(a), Route::Nfs(b)) => {
+                a.spec.server == b.spec.server && a.credentials == b.credentials
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn public_path(&self, connection: &NfsConnection, path: &Path) -> VfResult<PathBuf> {
         let suffix = path
             .strip_prefix("/")
@@ -164,15 +178,33 @@ impl Auto {
         {
             return Some(existing.clone());
         }
+        // Mount aliases to the same endpoint/root share one filesystem client.
+        // Route metadata retains each mount point solely for path translation.
+        let alias = self
+            .connections
+            .lock()
+            .ok()?
+            .values()
+            .find(|existing| {
+                existing.spec.server == spec.server
+                    && existing.spec.export == spec.export
+                    && existing.spec.minor == spec.minor
+                    && existing.credentials == credentials
+            })
+            .cloned();
         // Connection failure is a pre-dispatch fallback. Never replay a
         // possibly completed mutation through the mounted backend.
-        let client = Nfs::builder(spec.server.as_ref())
-            .root(&spec.export)
-            .version(crate::NfsVersion::try_from(Some(spec.minor)).ok()?)
-            .connect()
-            .ok()?
-            .with_limits(self.limits)
-            .inner;
+        let client = if let Some(existing) = &alias {
+            existing.client.clone()
+        } else {
+            Nfs::builder(spec.server.as_ref())
+                .root(&spec.export)
+                .version(crate::NfsVersion::try_from(Some(spec.minor)).ok()?)
+                .connect()
+                .ok()?
+                .with_limits(self.limits)
+                .inner
+        };
         let kernel_id = fs::metadata(&spec.mount_point).ok()?.ino();
         if client.attrs("/").ok()?.file_id() != Some(kernel_id) {
             return None;
@@ -183,7 +215,9 @@ impl Auto {
         let connection = Arc::new(NfsConnectionState {
             spec: spec.clone(),
             client,
-            identity: Arc::new(()),
+            identity: alias
+                .as_ref()
+                .map_or_else(|| Arc::new(()), |existing| existing.identity.clone()),
             credentials,
         });
         let mut cache = self.connections.lock().ok()?;
@@ -193,6 +227,23 @@ impl Auto {
         {
             return Some(existing.clone());
         }
+        // Resolve simultaneous discoveries of different aliases to one client
+        // before publishing either route to callers.
+        let connection = if let Some(existing) = cache.values().find(|existing| {
+            existing.spec.server == spec.server
+                && existing.spec.export == spec.export
+                && existing.spec.minor == spec.minor
+                && existing.credentials == connection.credentials
+        }) {
+            Arc::new(NfsConnectionState {
+                spec: spec.clone(),
+                client: existing.client.clone(),
+                identity: existing.identity.clone(),
+                credentials: connection.credentials.clone(),
+            })
+        } else {
+            connection
+        };
         cache.insert(spec.id, connection.clone());
         Some(connection)
     }

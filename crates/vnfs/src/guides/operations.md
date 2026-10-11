@@ -110,7 +110,13 @@ On Linux, `Nfs::from_mount` discovers an absolute directory under an ordinary
 NFSv4.1/4.2 TCP AUTH_SYS mount, verifies remote identity, preserves read-only
 restrictions, and creates a direct connection. `NfsBuilder::from_mount` permits
 tuning before connecting. Unsupported security or ambiguous mappings fail;
-discovered configurations remain pinned to the mount.
+after connection, discovered configurations pin the remote filesystem root,
+credentials, and read-only policy. Reconnect and new sessions made from a
+resolved configuration do not consult the original kernel mount or discovery
+path. `Auto` shares clients across equivalent endpoint/export/version/credential
+mount aliases. Cross-client links and renames return `EXDEV`; native COPY returns
+unsupported so helpers can stream through the resolved clients. These
+operations never switch to kernel I/O after resolution.
 
 `Nfs::discover_mount` inspects without connecting. `nfs::mount::NfsMountSession`
 combines a connection with mapping host-local operands to remote paths.

@@ -593,3 +593,47 @@ def test_cat_does_not_hide_read_errors_for_stat_zero_files(fs, monkeypatch, code
     assert isinstance(result["/empty"], OSError)
     assert result["/empty"].errno == code
     assert calls == [[fs._native_path("/empty")]]
+
+
+@pytest.mark.parametrize("reader_kind", ["scalar", "group"])
+def test_reader_recovery_rejects_same_fileid_in_different_filesystem(
+    dummy_fs, monkeypatch, reader_kind
+):
+    fs = dummy_fs
+    fs.pipe_file("/data", b"abcdef")
+    if reader_kind == "scalar":
+        reader = fs.open("/data", "rb", cache_type="none")
+    else:
+        reader = fs.open_many([OpenFile(fs, "/data", mode="rb")])[0]
+    try:
+        if reader_kind == "scalar":
+            assert reader.read(1) == b"a"
+            fs._client.reconnect()
+            fstat = fs._client.fstat
+
+            def different_fs(fd):
+                attrs = dict(fstat(fd))
+                attrs["fs_id"] += 1
+                return attrs
+
+            monkeypatch.setattr(fs._client, "fstat", different_fs)
+        else:
+            fstat_many = fs._client.fstat_many
+
+            def different_fs(fds):
+                attrs = [dict(attr) for attr in fstat_many(fds)]
+                for attr in attrs:
+                    attr["fs_id"] += 1
+                return attrs
+
+            monkeypatch.setattr(fs._client, "fstat_many", different_fs)
+
+            def failed_read(*args, **kwargs):
+                raise ConnectionError("injected grouped read transport failure")
+
+            monkeypatch.setattr(fs._client, "pread_many", failed_read)
+        with pytest.raises(OSError) as error:
+            reader.read(1)
+        assert error.value.errno == errno.ESTALE
+    finally:
+        reader.close()

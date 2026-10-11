@@ -325,6 +325,32 @@ impl Compound {
         });
     }
 
+    /// OPEN the current regular-file handle without looking up a saved name
+    /// or performing create/truncate effects (RFC 8881 section 18.16).
+    pub fn open_claim_fh(&mut self, access: u32, clientid: clientid4, owner_name: &[u8]) {
+        let (own_ptr, own_len) = self.keep(owner_name);
+        self.open(OPEN4args {
+            seqid: 0,
+            share_access: access,
+            share_deny: OPEN4_SHARE_DENY_NONE,
+            owner: state_owner4 {
+                clientid,
+                owner: state_owner4__bindgen_ty_1 {
+                    owner_len: own_len,
+                    owner_val: own_ptr,
+                },
+            },
+            openhow: openflag4 {
+                opentype: opentype4_OPEN4_NOCREATE,
+                openflag4_u: unsafe { std::mem::zeroed() },
+            },
+            claim: open_claim4 {
+                claim: open_claim_type4_CLAIM_FH,
+                open_claim4_u: unsafe { std::mem::zeroed() },
+            },
+        });
+    }
+
     /// Like [`open_claim_null`](Self::open_claim_null) but with an
     /// `OPEN4_CREATE`/`UNCHECKED4` openhow carrying a creation mode and/or a
     /// `size=0` truncation in its createattrs. The mode is applied by the

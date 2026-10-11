@@ -1023,3 +1023,62 @@ fn renamed_open_descriptors_and_operands_preserve_compatible_imports() {
     let error = fs.attrs(Target::file(&file)).unwrap_err();
     assert_eq!(error.err_no(), libc::EBADF as u32);
 }
+
+#[cfg(all(feature = "posix", unix))]
+#[test]
+fn complete_writes_order_hardlinks_and_renamed_open_instances() {
+    use std::os::unix::fs::FileExt;
+    use vfsi_local::io::{DescriptorIo, Read, Write};
+    struct ShortWriter;
+    impl DescriptorIo for ShortWriter {
+        fn ordered(&self) -> bool {
+            true
+        }
+        fn read(&mut self, requests: &mut [Read<'_>]) -> Vec<std::io::Result<usize>> {
+            vfsi_local::io::read_ordered(requests)
+        }
+        fn write(&mut self, requests: &[Write<'_>]) -> Vec<std::io::Result<usize>> {
+            requests
+                .iter()
+                .map(|r| r.file.write_at(&r.data[..r.data.len().min(2)], r.offset))
+                .collect()
+        }
+        fn sync(
+            &mut self,
+            files: &[&std::sync::Arc<std::fs::File>],
+            data: bool,
+        ) -> Vec<std::io::Result<usize>> {
+            vfsi_local::io::sync_ordered(files, data)
+        }
+    }
+    for rename in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let fs = vfsi_sync::FsClient::new(
+            vfsi_local::LocalBackend::new(root.path().to_path_buf(), ShortWriter).unwrap(),
+        );
+        fs.write("/object", b"......").unwrap();
+        let first = fs
+            .open_with(vnfs::files::OpenOp::new(
+                "/object",
+                vnfs::files::OpenFlags::WRITE,
+            ))
+            .unwrap();
+        if rename {
+            fs.rename("/object", "/alias").unwrap();
+        } else {
+            fs.hard_link("/object", "/alias").unwrap();
+        }
+        let second = fs
+            .open_with(vnfs::files::OpenOp::new(
+                "/alias",
+                vnfs::files::OpenFlags::WRITE,
+            ))
+            .unwrap();
+        fs.vwrite_all_native(&[
+            first.write_request_at(0, b"AAAA"),
+            second.write_request_at(2, b"BBBB"),
+        ])
+        .unwrap();
+        assert_eq!(fs.read("/alias").unwrap(), b"AABBBB");
+    }
+}

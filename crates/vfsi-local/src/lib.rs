@@ -1114,6 +1114,23 @@ impl LocalBackend {
 }
 
 impl HandleBackend for LocalBackend {
+    fn open_object_ref(
+        &self,
+        file: &FileOperand,
+    ) -> VfResult<Option<vfsi_sync::backend::OpenObjectRef<'_>>> {
+        let fd = file.fd().ok_or_else(|| VfError::client(0, ERR_INVAL))?;
+        let (device, inode) = self
+            .open_files
+            .get(&fd)
+            .ok_or_else(|| VfError::client(0, ERR_EBADF))?
+            .identity()
+            .map_err(|e| VfError::client(0, Self::errno(&e)))?;
+        Ok(Some(vfsi_sync::backend::OpenObjectRef::Id(FsObjId::new(
+            u128::from(device),
+            inode,
+        ))))
+    }
+
     fn vfsync_impl(&mut self, files: &[FileOperand], mode: vfsi_core::api::SyncMode) -> VfRes {
         {
             let files: Vec<_> = files

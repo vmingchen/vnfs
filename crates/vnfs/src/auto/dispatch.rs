@@ -158,24 +158,18 @@ impl Auto {
             return Ok(());
         }
         let mounts = read_mounts(false);
-        let mut sources: Vec<_> = pairs
+        let sources: Vec<_> = pairs
             .iter()
             .map(|(source, _)| self.resolve(source.as_ref(), &mounts))
             .collect();
-        let mut links: Vec<_> = pairs
+        let links: Vec<_> = pairs
             .iter()
             .map(|(_, link)| self.resolve(link.as_ref(), &mounts))
             .collect();
-        for (index, (source, link)) in sources.iter_mut().zip(&mut links).enumerate() {
+        for (index, (source, link)) in sources.iter().zip(&links).enumerate() {
             if !source.route.same_backend(&link.route) {
-                *source = Resolved {
-                    route: Route::Posix,
-                    path: pairs[index].0.as_ref().to_path_buf(),
-                };
-                *link = Resolved {
-                    route: Route::Posix,
-                    path: pairs[index].1.as_ref().to_path_buf(),
-                };
+                return Err(VfError::client(index, libc::EXDEV as u32)
+                    .with_context("vhardlink", pairs[index].1.as_ref()));
             }
         }
         let mut start = 0;
@@ -559,22 +553,16 @@ impl Auto {
         let mounts = read_mounts(false);
         let pairs: Vec<_> = pairs
             .iter()
-            .map(|(source, destination)| {
+            .enumerate()
+            .map(|(index, (source, destination))| {
                 let a = self.resolve(source.as_ref(), &mounts);
                 let b = self.resolve(destination.as_ref(), &mounts);
-                if a.route.same_backend(&b.route) {
-                    (a, b.path)
-                } else {
-                    (
-                        Resolved {
-                            route: Route::Posix,
-                            path: source.as_ref().to_path_buf(),
-                        },
-                        destination.as_ref().to_path_buf(),
-                    )
+                if !a.route.same_backend(&b.route) {
+                    return Err(VfError::unsupported(index));
                 }
+                Ok((a, b.path))
             })
-            .collect();
+            .collect::<VfResult<_>>()?;
         let mut start = 0;
         while start < pairs.len() {
             let mut end = start + 1;
@@ -846,6 +834,15 @@ impl Auto {
         vfsi_core::internal::validate_open_requests(requests)?;
         let mounts = read_mounts(true);
         let resolved = self.resolve_open_batch(requests, &mounts);
+        self.vopen_resolved(requests, &resolved)
+    }
+
+    // Dispatch already-resolved operands, keeping their individual public routes.
+    pub(super) fn vopen_resolved(
+        &self,
+        requests: &[OpenOp],
+        resolved: &[Resolved],
+    ) -> VfResult<Vec<AutoFile>> {
         let mut output = Vec::with_capacity(requests.len());
         let mut start = 0;
         while start < requests.len() {
@@ -859,14 +856,13 @@ impl Auto {
                         .mode(requests[index].creation_mode())
                 })
                 .collect();
-            let route = resolved[start].route.clone();
-            match &route {
+            match &resolved[start].route {
                 Route::Posix => {
                     let files = self.mounted.vopen(&batch).map_err(|e| indexed(e, start))?;
                     for (index, file) in files.into_iter().enumerate() {
                         output.push(AutoFile::new(
                             requests[start + index].path().to_path_buf(),
-                            route.clone(),
+                            resolved[start + index].route.clone(),
                             AutoFileInner::Posix(file),
                             &self.owner,
                         ));
@@ -880,7 +876,7 @@ impl Auto {
                     for (index, file) in files.into_iter().enumerate() {
                         output.push(AutoFile::new(
                             requests[start + index].path().to_path_buf(),
-                            route.clone(),
+                            resolved[start + index].route.clone(),
                             AutoFileInner::Nfs(file),
                             &self.owner,
                         ));
@@ -1239,11 +1235,8 @@ impl Auto {
         let mut start = 0;
         while start < pairs.len() {
             if !sources[start].route.same_backend(&targets[start].route) {
-                self.mounted
-                    .rename(pairs[start].0.as_ref(), pairs[start].1.as_ref())
-                    .map_err(|error| indexed(error, start))?;
-                start += 1;
-                continue;
+                return Err(VfError::client(start, libc::EXDEV as u32)
+                    .with_context("vrename", pairs[start].0.as_ref()));
             }
             let mut end = start + 1;
             while end < pairs.len()

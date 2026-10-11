@@ -35,6 +35,7 @@ pub struct NfsMount {
     device: u64,
     inode: u64,
     credentials: AuthSysIdentity,
+    resolved_root: Option<vfsi_core::FsObjId>,
 }
 
 impl NfsMount {
@@ -69,7 +70,14 @@ impl NfsMount {
             device: metadata.dev(),
             inode: metadata.ino(),
             credentials,
+            resolved_root: None,
         })
+    }
+
+    pub(crate) fn resolved(&self, identity: vfsi_core::FsObjId) -> Self {
+        let mut config = self.clone();
+        config.resolved_root = Some(identity);
+        config
     }
 
     pub fn host(&self) -> &str {
@@ -92,6 +100,41 @@ impl NfsMount {
     }
     pub fn read_only(&self) -> bool {
         self.info.read_only
+    }
+
+    #[cfg(test)]
+    pub(crate) fn forget_discovery_path_for_test(&mut self) {
+        self.local_path = PathBuf::from("/vnfs-nonexistent-discovery-path");
+    }
+
+    pub(crate) fn check_for_connect(&self) -> VfResult<()> {
+        if self.resolved_root.is_some() {
+            self.check_credentials()
+        } else {
+            self.check_local()
+        }
+    }
+
+    pub(crate) fn check_credentials(&self) -> VfResult<()> {
+        if AuthSysIdentity::current().as_ref() != Some(&self.credentials) {
+            return Err(VfError::client(0, libc::EACCES as u32));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn remote_identity(
+        &self,
+        filesystem: &mut NfsVecFs,
+    ) -> VfResult<vfsi_core::FsObjId> {
+        let mut attrs = [VfAttrs {
+            file: FileOperand::from_os_path(Path::new("/")),
+            masks: AttrMask::identity(),
+            ..VfAttrs::default()
+        }];
+        filesystem.vgetattrs_impl(&mut attrs)?;
+        vfsi_core::metadata_from_attrs(attrs.into_iter().next().unwrap())
+            .fs_obj_id()
+            .ok_or_else(|| self.stale())
     }
 
     pub(crate) fn check_local(&self) -> VfResult<()> {
@@ -123,21 +166,25 @@ impl NfsMount {
             return Err(VfError::client(0, libc::EINVAL as u32)
                 .with_context("conflicting mount connection options", &self.local_path));
         }
-        self.check_local()
+        if self.resolved_root.is_some() {
+            self.check_credentials()
+        } else {
+            self.check_local()
+        }
     }
 
-    pub(crate) fn verify(&self, filesystem: &mut NfsVecFs) -> VfResult<()> {
-        let mut attrs = [VfAttrs {
-            file: FileOperand::from_os_path(Path::new("/")),
-            masks: AttrMask::FILEID,
-            ..VfAttrs::default()
-        }];
-        filesystem.vgetattrs_impl(&mut attrs)?;
-        if !attrs[0].masks.contains(AttrMask::FILEID) {
-            return Err(self.stale());
+    pub(crate) fn verify(&self, filesystem: &mut NfsVecFs) -> VfResult<vfsi_core::FsObjId> {
+        self.check_credentials()?;
+        let identity = self.remote_identity(filesystem)?;
+        if let Some(original) = self.resolved_root {
+            if identity != original {
+                return Err(self.stale());
+            }
+        } else {
+            self.verify_file_id(identity.file_id())?;
+            self.check_local()?;
         }
-        self.verify_file_id(attrs[0].fileid)?;
-        self.check_local()
+        Ok(identity)
     }
 
     fn verify_file_id(&self, file_id: u64) -> VfResult<()> {
@@ -439,6 +486,7 @@ mod tests {
             info,
             device: 1,
             inode: 123,
+            resolved_root: None,
             credentials: AuthSysIdentity {
                 uid: 0,
                 gid: 0,

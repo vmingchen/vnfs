@@ -225,6 +225,7 @@ def main():
         validate_reuse_build(prior_build, configuration)
         if prior_build['binary_sha256'] != sha256(args.reuse_baseline.resolve()):
             raise RuntimeError('saved baseline executable hash differs')
+        baseline_harness_hash = prior['metadata'].get('baseline_harness_sha256', prior['metadata']['harness_sha256'])
         baseline_binary = output / 'baseline'
         shutil.copy2(args.reuse_baseline.resolve(), baseline_binary)
         builds.append({**prior_build, 'reused_from': str(args.reuse_baseline.resolve())})
@@ -236,9 +237,19 @@ def main():
             tar.extractall(snapshot, filter='data')
         archive.unlink()
         shutil.copy2(repo / harness, snapshot / harness)
+        # Earlier backends group the same synthetic objects by their names and
+        # have no optional object-reference hook. Remove only that method from
+        # their harness; baseline implementation files remain unmodified.
+        if 'fn open_object_ref' not in (snapshot / 'crates/vfsi-sync/src/backend/mod.rs').read_text():
+            harness_source = (snapshot / harness).read_text()
+            begin = harness_source.index('    // BEGIN OBJECT REFERENCE HOOK')
+            end = harness_source.index('    // END OBJECT REFERENCE HOOK', begin)
+            end = harness_source.index('\n', end) + 1
+            (snapshot / harness).write_text(harness_source[:begin] + harness_source[end:])
         # The harness adds no dependencies. Its manifest entry is identical in
         # both trees; all baseline implementation files come from the commit.
         shutil.copy2(repo / 'crates/vnfs/Cargo.toml', snapshot / 'crates/vnfs/Cargo.toml')
+        baseline_harness_hash = sha256(snapshot / harness)
         baseline_binary = build(snapshot, 'baseline')
     optimized_binary = build(repo, 'optimized')
     if builds[0].get('compiler_profiles') != builds[1]['compiler_profiles']:
@@ -252,6 +263,7 @@ def main():
         'baseline_commit': baseline_ref,
         'optimized_source_sha256': source_hash,
         'harness_sha256': sha256(repo / harness),
+        'baseline_harness_sha256': baseline_harness_hash,
         'runner_sha256': sha256(Path(__file__)),
         'rustc': toolchain,
         'cargo': cargo_version,

@@ -35,6 +35,28 @@ impl WriteSuccessors {
     }
 }
 
+type WriteRange = (usize, u64, u64, bool);
+
+fn add_write_dependencies(
+    range: WriteRange,
+    prior: &mut Vec<WriteRange>,
+    successors: &mut [WriteSuccessors],
+    remaining_dependencies: &mut [usize],
+    wave_indices: &mut Vec<usize>,
+) {
+    let (index, offset, end, append) = range;
+    for &(earlier, start, earlier_end, earlier_append) in prior.iter() {
+        if earlier_append || append || (offset < earlier_end && start < end) {
+            successors[earlier].push(index);
+            remaining_dependencies[index] += 1;
+        }
+    }
+    prior.push(range);
+    if remaining_dependencies[index] == 0 {
+        wave_indices.push(index);
+    }
+}
+
 impl<F: VectorBackend> FsClient<F> {
     #[doc(hidden)]
     pub fn vwrite_native(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
@@ -82,8 +104,8 @@ impl<F: VectorBackend> FsClient<F> {
     /// Write every byte in each positional request, retrying short writes in
     /// vector waves. Like `vwrite_native`, this is not transactional: an error may
     /// follow a successfully written prefix. Overlapping requests through the
-    /// same path complete in input order; different paths are presumed
-    /// independent (including hard-link aliases).
+    /// same object complete in input order, including different open instances
+    /// and hard-link aliases. Unknown identities are ordered conservatively.
     #[doc(hidden)]
     pub fn vwrite_all_native(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
         self.vwrite_all_mapped_native(requests, |request| *request)
@@ -100,12 +122,33 @@ impl<F: VectorBackend> FsClient<F> {
     where
         F: 'b,
     {
-        // Validate the entire batch before writing any prefix. In particular,
-        // empty requests must not conceal a foreign or already-closed file.
-        let mut prior_by_path: HashMap<&Path, Vec<(usize, u64, u64, bool)>> = HashMap::new();
-        // Scalar writes cannot have predecessors. For larger batches,
-        // allocate graph slots up front to keep the pairwise conflict loop small.
-        let graph_nodes = if requests.len() > 1 {
+        // Whole-batch validation precedes identity queries and all writes,
+        // including validation of empty requests and foreign/closed handles.
+        let mut offsets = Vec::with_capacity(requests.len());
+        let mut raw_files = Vec::with_capacity(requests.len());
+        for (index, request) in requests.iter().map(&project).enumerate() {
+            self.validate_owner(request.file(), index)?;
+            let raw = request.file().raw().map_err(|error| {
+                error
+                    .with_index(index)
+                    .with_context("vwrite_all_native", request.file().path())
+            })?;
+            let VfOffset::At(offset) = request.offset() else {
+                return Err(VfError::client(index, crate::ERR_INVAL)
+                    .with_context("vwrite_all_native", request.file().path()));
+            };
+            offset
+                .checked_add(request.data().len() as u64)
+                .ok_or_else(|| {
+                    VfError::client(index, libc::EOVERFLOW as u32)
+                        .with_context("vwrite_all_native", request.file().path())
+                })?;
+            offsets.push(offset);
+            if !request.data().is_empty() {
+                raw_files.push(raw);
+            }
+        }
+        let graph_nodes = if raw_files.len() > 1 {
             requests.len()
         } else {
             0
@@ -115,48 +158,107 @@ impl<F: VectorBackend> FsClient<F> {
             .collect();
         let mut remaining_dependencies = vec![0usize; graph_nodes];
         let mut wave_indices = Vec::new();
-        let mut offsets = Vec::with_capacity(requests.len());
-        for (index, request) in requests.iter().map(&project).enumerate() {
-            self.validate_owner(request.file(), index)?;
-            request.file().raw().map_err(|error| {
+        if raw_files.len() < 2 {
+            // A scalar nonempty request needs neither identity nor graph work.
+            wave_indices.extend(
+                requests
+                    .iter()
+                    .map(&project)
+                    .enumerate()
+                    .filter(|(_, request)| !request.data().is_empty())
+                    .map(|(index, _)| index),
+            );
+        } else {
+            let map_identity_error = |error: VfError| {
+                let error = error.map_index(|raw_index| {
+                    requests
+                        .iter()
+                        .map(&project)
+                        .enumerate()
+                        .filter(|(_, request)| !request.data().is_empty())
+                        .nth(raw_index)
+                        .map_or(raw_index, |(index, _)| index)
+                });
                 error
-                    .with_index(index)
-                    .with_context("vwrite_all_native", request.file().path())
-            })?;
-            let VfOffset::At(offset) = request.offset() else {
-                return Err(VfError::client(index, crate::ERR_INVAL)
-                    .with_context("vwrite_all_native", request.file().path()));
+                    .index()
+                    .and_then(|index| requests.get(index).map(&project))
+                    .map_or(error.clone(), |request| {
+                        error.with_context("vwrite_all_native", request.file().path())
+                    })
             };
-            let end = offset
-                .checked_add(request.data().len() as u64)
-                .ok_or_else(|| {
-                    VfError::client(index, libc::EOVERFLOW as u32)
-                        .with_context("vwrite_all_native", request.file().path())
-                })?;
-            offsets.push(offset);
-            // Empty requests are complete from the start, after the same
-            // whole-batch validation. They neither wait nor block successors.
-            if request.data().is_empty() {
-                continue;
-            }
-            // Non-overlapping positional writes commute. Append requests must
-            // wait for every earlier write to the same diagnostic path.
-            // Finish conflicting requests before dispatching later bytes, so
-            // short-write retries cannot overwrite or interleave their payloads.
-            let append = request.file().append;
-            let prior = prior_by_path.entry(request.file().path()).or_default();
-            for &(earlier, start, earlier_end, earlier_append) in prior.iter() {
-                if earlier_append || append || (offset < earlier_end && start < end) {
-                    successors[earlier].push(index);
-                    remaining_dependencies[index] += 1;
+            let mut backend = self.lock()?;
+            backend
+                .prepare_object_refs(&raw_files)
+                .map_err(&map_identity_error)?;
+            let mut unknown = false;
+            let mut prior_by_object = HashMap::new();
+            let mut prior_unknown = Vec::new();
+            for (index, request) in requests.iter().map(&project).enumerate() {
+                if request.data().is_empty() {
+                    continue;
                 }
-            }
-            prior.push((index, offset, end, append));
-            if remaining_dependencies.get(index).copied().unwrap_or(0) == 0 {
-                wave_indices.push(index);
+                let object = backend
+                    .open_object_ref(request.file().raw()?)
+                    .map_err(|error| {
+                        error
+                            .with_index(index)
+                            .with_context("vwrite_all_native", request.file().path())
+                    })?;
+                if object.is_none() && !unknown {
+                    // Unknown may alias any earlier object. Rebuild the prefix
+                    // as one group, without repeating identity queries. Known
+                    // batches need only one pass over backend references.
+                    unknown = true;
+                    prior_by_object.clear();
+                    for successors in successors.iter_mut() {
+                        *successors = WriteSuccessors::default();
+                    }
+                    remaining_dependencies.fill(0);
+                    wave_indices.clear();
+                    for (earlier, previous) in requests[..index].iter().map(&project).enumerate() {
+                        if previous.data().is_empty() {
+                            continue;
+                        }
+                        let offset = offsets[earlier];
+                        add_write_dependencies(
+                            (
+                                earlier,
+                                offset,
+                                offset + previous.data().len() as u64,
+                                previous.file().append,
+                            ),
+                            &mut prior_unknown,
+                            &mut successors,
+                            &mut remaining_dependencies,
+                            &mut wave_indices,
+                        );
+                    }
+                }
+                let prior = if unknown {
+                    &mut prior_unknown
+                } else {
+                    prior_by_object
+                        .entry(object.expect("known object reference"))
+                        .or_default()
+                };
+                let offset = offsets[index];
+                // Complete conflicting requests before dispatching later bytes,
+                // so retries cannot interleave aliases or overwrite their data.
+                add_write_dependencies(
+                    (
+                        index,
+                        offset,
+                        offset + request.data().len() as u64,
+                        request.file().append,
+                    ),
+                    prior,
+                    &mut successors,
+                    &mut remaining_dependencies,
+                    &mut wave_indices,
+                );
             }
         }
-        drop(prior_by_path);
+        drop(raw_files);
         let mut totals = vec![0usize; requests.len()];
         let mut stable = vec![true; requests.len()];
         let mut next_wave_indices = Vec::new();

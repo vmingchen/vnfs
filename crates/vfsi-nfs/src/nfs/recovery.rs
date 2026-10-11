@@ -135,6 +135,13 @@ impl NfsVecFs {
         Ok(filesystem)
     }
 
+    /// Resolved mount configuration for new sessions in this namespace.
+    /// It pins remote identity/policy and never revisits kernel mount discovery.
+    #[cfg(target_os = "linux")]
+    pub fn resolved_mount(&self) -> Option<crate::mount::NfsMount> {
+        self.mount_source.clone()
+    }
+
     fn connect_client(connection: &ConnectionConfig) -> VfResult<NfsClient> {
         match connection.minorversion {
             Some(version) => NfsClient::connect_minor_with_identity(
@@ -172,6 +179,8 @@ impl NfsVecFs {
             cwd,
             next_fd: 0,
             open_files: std::collections::HashMap::new(),
+            open_object_ids: std::collections::HashMap::new(),
+            object_refs_are_same_fh: false,
             open_dirs: std::collections::HashMap::new(),
             dir_owner: NEXT_DIR_OWNER.fetch_add(1, Ordering::Relaxed),
             deferred_descriptor_closes: Vec::new(),
@@ -210,7 +219,7 @@ impl NfsVecFs {
     fn reconnect_once(&mut self) -> VfResult<()> {
         #[cfg(target_os = "linux")]
         if let Some(mount) = &self.mount_source {
-            mount.check_local()?;
+            mount.check_credentials()?;
         }
         let snapshots: Vec<(i32, ReopenFile, u64, NfsFh)> = self
             .open_files
@@ -261,34 +270,36 @@ impl NfsVecFs {
         }
 
         if !snapshots.is_empty() {
-            let paths: Vec<&Path> = snapshots
+            let ops: Vec<_> = snapshots
                 .iter()
-                .map(|(_, open, _, _)| open.path.as_path())
+                .map(|(_, recipe, _, fh)| (fh.clone(), Self::flags_to_access(recipe.flags)))
                 .collect();
-            let flags: Vec<i32> = snapshots.iter().map(|(_, open, _, _)| open.flags).collect();
-            let modes: Vec<u32> = snapshots.iter().map(|(_, open, _, _)| open.mode).collect();
-            let reopened = VectorBackend::vopen_raw_impl(&mut replacement, &paths, &flags, &modes)?;
-            // Validate every identity before removing any handle from the
-            // replacement's cleanup map or publishing the new session.
-            for ((_, recipe, _, original), file) in snapshots.iter().zip(&reopened) {
-                let open = &replacement.open_files[&file.fd().expect("openv returns descriptors")];
-                if &open.fh != original {
-                    return Err(VfError::client(0, libc::ESTALE as u32)
-                        .with_context("reconnect changed file identity", &recipe.path));
+            let outcome = replacement
+                .nfs
+                .openv_handle_compound(&ops)
+                .map_err(vfsi_core::error_from_rpc_indexed)?;
+            for ((old_fd, recipe, offset, _), opened) in snapshots.iter().zip(outcome.opened) {
+                if let Some((fh, stateid)) = opened {
+                    replacement.open_files.insert(
+                        *old_fd,
+                        NfsOpenState {
+                            fh,
+                            stateid,
+                            cur_offset: *offset,
+                            append: recipe.flags & libc::O_APPEND != 0,
+                            reopen: Some(recipe.clone()),
+                        },
+                    );
                 }
             }
-            let mut restored = std::collections::HashMap::with_capacity(reopened.len());
-            for ((old_fd, _, offset, _), file) in snapshots.iter().zip(reopened) {
-                let new_fd = file.fd().expect("openv returns descriptors");
-                let mut open = replacement
-                    .open_files
-                    .remove(&new_fd)
-                    .expect("openv registered descriptor");
-                open.cur_offset = *offset;
-                restored.insert(*old_fd, open);
+            if let Some((index, status)) = outcome.failed {
+                return Err(VfError::nfs(index, status)
+                    .with_context("reconnect retained object", &snapshots[index].1.path));
             }
-            replacement.open_files = restored;
         }
+        replacement.next_fd = self.next_fd;
+        replacement.open_dirs = self.open_dirs.clone();
+        replacement.dir_owner = self.dir_owner;
 
         // Publish pending lifecycle events with the new session; a failed
         // reopen must leave them in the old backend for delivery on unlock.
@@ -302,13 +313,14 @@ impl NfsVecFs {
         Ok(())
     }
 
-    /// Establish a fresh session and reopen all live path-backed descriptors.
-    /// Descriptor numbers and current offsets are preserved. Reopen never
-    /// repeats create, exclusive-create, or truncate side effects.
+    /// Establish a fresh session and reopen retained objects with CLAIM_FH.
+    /// Descriptor numbers, independent OPEN owners, and offsets are preserved.
+    /// Saved names are diagnostic; recovery never creates/truncates or follows
+    /// a replacement pathname. Stale/expired object references fail closed.
     pub fn reconnect(&mut self) -> VfResult<()> {
         #[cfg(target_os = "linux")]
         if let Some(mount) = &self.mount_source {
-            mount.check_local()?;
+            mount.check_credentials()?;
         }
         self.notify(NfsEvent::ReconnectStarted);
         let attempts = self.recovery_policy.attempt_limit();

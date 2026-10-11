@@ -2,7 +2,85 @@
 
 use super::*;
 
+pub(super) fn object_ref_for_group<'a>(
+    fh: &'a [u8],
+    id: Option<FsObjId>,
+    same_fh: bool,
+) -> Option<vfsi_sync::backend::OpenObjectRef<'a>> {
+    if same_fh {
+        Some(vfsi_sync::backend::OpenObjectRef::Opaque(fh))
+    } else {
+        id.map(vfsi_sync::backend::OpenObjectRef::Id)
+    }
+}
+
 impl HandleBackend for NfsVecFs {
+    fn prepare_object_refs(&mut self, files: &[&FileOperand]) -> VfResult<()> {
+        self.open_object_ids
+            .retain(|fd, _| self.open_files.contains_key(fd));
+        let mut first = None;
+        let mut same = true;
+        for (index, file) in files.iter().enumerate() {
+            let fd = file.fd().ok_or_else(|| VfError::client(index, ERR_INVAL))?;
+            let fh = &self
+                .open_files
+                .get(&fd)
+                .ok_or_else(|| VfError::client(index, ERR_EBADF))?
+                .fh;
+            if let Some(original) = first {
+                same &= original == fh;
+            } else {
+                first = Some(fh);
+            }
+        }
+        self.object_refs_are_same_fh = same;
+        if same {
+            return Ok(());
+        }
+        // RFC 8881 section 9.11: unequal filehandles can refer to one object.
+        // Query complete IDs once per live descriptor, in a vector, then cache
+        // only immutable identity. Close/reuse and reconnect invalidate it.
+        let mut seen = std::collections::HashSet::new();
+        let mut indices = Vec::new();
+        let mut attrs = Vec::new();
+        for (index, file) in files.iter().enumerate() {
+            let fd = file.fd().unwrap();
+            if !self.open_object_ids.contains_key(&fd) && seen.insert(fd) {
+                indices.push(index);
+                attrs.push(VfAttrs {
+                    file: (*file).clone(),
+                    masks: AttrMask::identity(),
+                    ..Default::default()
+                });
+            }
+        }
+        self.vgetattrs_impl(&mut attrs).map_err(|error| {
+            error.map_index(|index| indices.get(index).copied().unwrap_or(index))
+        })?;
+        for attr in attrs {
+            let fd = attr.file.fd().unwrap();
+            self.open_object_ids
+                .insert(fd, vfsi_core::metadata_from_attrs(attr).fs_obj_id());
+        }
+        Ok(())
+    }
+
+    fn open_object_ref(
+        &self,
+        file: &FileOperand,
+    ) -> VfResult<Option<vfsi_sync::backend::OpenObjectRef<'_>>> {
+        let fd = file.fd().ok_or_else(|| VfError::client(0, ERR_INVAL))?;
+        let open = self
+            .open_files
+            .get(&fd)
+            .ok_or_else(|| VfError::client(0, ERR_EBADF))?;
+        Ok(object_ref_for_group(
+            open.fh.as_bytes(),
+            self.open_object_ids.get(&fd).copied().flatten(),
+            self.object_refs_are_same_fh,
+        ))
+    }
+
     fn vstatfs_impl(&mut self, files: &[FileOperand]) -> VfResult<Vec<FilesystemStats>> {
         if files.is_empty() {
             return Ok(Vec::new());
@@ -151,7 +229,6 @@ impl HandleBackend for NfsVecFs {
             reopen: Some(ReopenFile {
                 path: self.visible_path(&full),
                 flags: non_destructive_reopen_flags(flags),
-                mode,
             }),
         };
         match self.insert_open_file(open) {

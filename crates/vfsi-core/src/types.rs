@@ -1160,6 +1160,12 @@ pub struct FsObjId {
 pub type FileIdentity = FsObjId;
 
 impl FsObjId {
+    /// Construct a pair obtained from one backend/server identity namespace.
+    /// This does not make numeric IDs globally unique across unrelated servers.
+    pub const fn new(fs_id: u128, file_id: u64) -> Self {
+        Self { fs_id, file_id }
+    }
+
     /// Filesystem namespace component; Linux st_dev or packed NFS FSID.
     /// This is independent of the mount used to reach the object.
     pub const fn fs_id(self) -> u128 {

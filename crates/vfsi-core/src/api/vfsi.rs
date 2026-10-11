@@ -58,6 +58,14 @@ use super::{DirHandle, OpenFd};
 /// when required. Drop queues handle cleanup
 /// best-effort; explicit close methods let applications observe cleanup errors.
 pub trait Vfsi {
+    /// Whether object IDs from these paths share a backend/server namespace.
+    /// Single-backend clients use the default. Routers must override it;
+    /// equal numeric IDs from unrelated servers do not identify one object.
+    /// This is route discovery, not an object-equality or existence check.
+    fn same_object_namespace(&self, _left: &Path, _right: &Path) -> bool {
+        true
+    }
+
     /// Query filesystems for paths (following symlinks) and retained open handles.
     /// Results preserve input order. Unsupported fields are `None`.
     fn vstatfs<P: crate::AsTarget<Self::File>>(

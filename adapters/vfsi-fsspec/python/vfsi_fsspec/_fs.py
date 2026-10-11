@@ -68,6 +68,7 @@ def _info_dict(full_name, attrs):
         "gid": attrs.get("gid"),
         "nlink": attrs.get("nlink"),
         "fileid": attrs.get("fileid"),
+        "fs_id": attrs.get("fs_id"),
         "change": attrs.get("change"),
         "created": attrs.get("created"),
         "created_ns": attrs.get("created_ns"),
@@ -156,9 +157,11 @@ def _handle_identity(attrs):
 
     Native ``created`` fields currently contain POSIX ctime, which changes on
     writes and chmod. Never use them to identify an inode across reconnects.
-    Missing file IDs fail closed; timestamps alone cannot establish identity.
+    IDs are scoped to the configured backend/server. Both filesystem and
+    file ID are required; missing fields fail closed. Zero is a valid ID.
     """
-    return attrs.get("fileid")
+    fs_id, file_id = attrs.get("fs_id"), attrs.get("fileid")
+    return None if fs_id is None or file_id is None else (fs_id, file_id)
 
 
 def _stale_handle_error(path):

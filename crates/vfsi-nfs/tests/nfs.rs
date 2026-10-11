@@ -681,7 +681,7 @@ fn descriptor_positional_io_preserves_sequential_cursor() {
 }
 
 #[test]
-fn reconnect_rejects_replacement_of_an_open_file() {
+fn reconnect_keeps_renamed_object_when_original_path_is_replaced() {
     let Some(mut fs) = connect() else { return };
     let path = format!("/vfsi-reconnect-identity-{}", std::process::id());
     let saved = format!("{path}-original");
@@ -721,10 +721,10 @@ fn reconnect_rejects_replacement_of_an_open_file() {
         vfsi_sync::FileOperand::from_path(&saved),
     ])
     .unwrap();
-    assert_eq!(result.unwrap_err().err_no(), libc::ESTALE as u32);
+    result.unwrap();
     assert_eq!(
         old_contents[0].data, b"original",
-        "failed recovery must leave old handles intact"
+        "recovery must reopen the original object, not its replacement path"
     );
 }
 
@@ -1387,4 +1387,42 @@ fn failed_strict_open_quarantines_an_unconfirmed_cleanup_handle() {
     assert_eq!(fs.test_deferred_descriptor_close_count(), 0);
     fs.vclose_impl(&next).unwrap();
     fs.remove_paths_impl(&[root.as_path()], true).unwrap();
+}
+
+#[test]
+fn reconnect_restores_independent_opens_after_rename() {
+    let Some(mut fs) = connect() else { return };
+    let path = format!("/vfsi-reconnect-opens-{}", std::process::id());
+    let renamed = format!("{path}-renamed");
+    fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_path(
+        &path,
+        VfOffset::At(0),
+        b"abcdef".to_vec(),
+    )
+    .with_creation()
+    .with_truncate()]))
+        .unwrap();
+    let files = fs
+        .vopen_raw_simple_impl(&[Path::new(&path), Path::new(&path)], libc::O_RDONLY, 0)
+        .unwrap();
+    fs.vrename_impl(&[(
+        FileOperand::from_path(&path),
+        FileOperand::from_path(&renamed),
+    )])
+    .unwrap();
+    fs.seek_raw_impl(&files[0], 2, vfsi_sync::SeekFrom::Set)
+        .unwrap();
+    fs.reconnect().unwrap();
+    let read = fs
+        .vread_impl(&[vfsi_sync::ReadOp::new(files[0].clone(), VfOffset::Cur, 2)])
+        .unwrap();
+    assert_eq!(read[0].data, b"cd");
+    fs.vclose_impl(&files[..1]).unwrap();
+    let read = fs
+        .vread_impl(&[vfsi_sync::ReadOp::new(files[1].clone(), VfOffset::Cur, 6)])
+        .unwrap();
+    assert_eq!(read[0].data, b"abcdef");
+    fs.vclose_impl(&files[1..]).unwrap();
+    fs.vremove_impl(&[FileOperand::from_path(&renamed)])
+        .unwrap();
 }

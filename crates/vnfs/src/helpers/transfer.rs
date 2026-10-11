@@ -248,7 +248,7 @@ fn normalize(path: &Path, max: usize) -> Result<PathBuf> {
     Ok(out)
 }
 fn fields() -> Attributes {
-    Attributes::MODE | Attributes::SIZE | Attributes::FILEID
+    Attributes::MODE | Attributes::SIZE | Attributes::identity()
 }
 fn mapped(error: Error, tasks: &[impl std::borrow::Borrow<Task>]) -> Error {
     if let Some(task) = error
@@ -909,10 +909,16 @@ fn active_error(error: Error, active: &[usize], selected: &[usize], tasks: &[Tas
         error
     }
 }
-fn same_file(source: &Attrs, destination: &Attrs) -> bool {
-    // Conservative without a portable filesystem-id field: matching file IDs
-    // are rejected, even if two mounted filesystems could reuse the same ID.
-    source.file_id().is_some() && source.file_id() == destination.file_id()
+fn same_file(
+    fs: &impl Vfsi,
+    source_path: &Path,
+    source: &Attrs,
+    destination_path: &Path,
+    destination: &Attrs,
+) -> bool {
+    fs.same_object_namespace(source_path, destination_path)
+        && source.fs_obj_id().is_some()
+        && source.fs_obj_id() == destination.fs_obj_id()
 }
 fn prepare_replace(fs: &impl Vfsi, tasks: &[Task]) -> Result<()> {
     let mut existing = Vec::new();
@@ -921,7 +927,10 @@ fn prepare_replace(fs: &impl Vfsi, tasks: &[Task]) -> Result<()> {
             continue;
         }
         match fs.symlink_attrs(&task.destination) {
-            Ok(meta) if !meta.is_file() || same_file(&task.metadata, &meta) => {
+            Ok(meta)
+                if !meta.is_file()
+                    || same_file(fs, &task.source, &task.metadata, &task.destination, &meta) =>
+            {
                 return Err(invalid(task.root, &task.destination));
             }
             Ok(_) => existing.push(task.clone()),
@@ -1111,7 +1120,9 @@ fn reconcile_renames(
     for task in tasks {
         match fs.symlink_attrs(&task.source) {
             Ok(source) => {
-                if task.metadata.file_id().is_some() && !same_file(&task.metadata, &source) {
+                if task.metadata.fs_obj_id().is_some()
+                    && !same_file(fs, &task.source, &task.metadata, &task.source, &source)
+                {
                     return Err(invalid(task.root, &task.source));
                 }
                 match fs.symlink_attrs(&task.destination) {
@@ -1124,7 +1135,16 @@ fn reconcile_renames(
                         return Err(mapped(failure.clone(), tasks));
                     }
                     Err(error) => return Err(mapped(error, std::slice::from_ref(task))),
-                    Ok(target) if allow_fallback && !same_file(&task.metadata, &target) => {
+                    Ok(target)
+                        if allow_fallback
+                            && !same_file(
+                                fs,
+                                &task.source,
+                                &task.metadata,
+                                &task.destination,
+                                &target,
+                            ) =>
+                    {
                         copies.push(task.clone())
                     }
                     Ok(_) => return Err(mapped(failure.clone(), tasks)),
@@ -1134,7 +1154,7 @@ fn reconcile_renames(
                 let target = fs
                     .symlink_attrs(&task.destination)
                     .map_err(|error| mapped(error, std::slice::from_ref(task)))?;
-                if !same_file(&task.metadata, &target) {
+                if !same_file(fs, &task.source, &task.metadata, &task.destination, &target) {
                     return Err(mapped(failure.clone(), tasks));
                 }
                 summary.roots_renamed += 1;
@@ -1143,4 +1163,47 @@ fn reconcile_renames(
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "posix", unix))]
+mod object_identity_tests {
+    use super::*;
+    #[test]
+    fn same_file_requires_complete_filesystem_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let fs = crate::Posix::new(root.path()).unwrap();
+        let attrs = |fs_id, returned| {
+            vfsi_core::metadata_from_attrs(vfsi_core::VfAttrs {
+                fs_id,
+                fileid: 7,
+                returned,
+                ..Default::default()
+            })
+        };
+        let a = attrs(1, Attributes::identity());
+        let alias = attrs(1, Attributes::identity());
+        let other_fs = attrs(2, Attributes::identity());
+        let incomplete = attrs(1, Attributes::FILEID);
+        assert!(same_file(
+            &fs,
+            Path::new("/a"),
+            &a,
+            Path::new("/alias"),
+            &alias
+        ));
+        assert!(!same_file(
+            &fs,
+            Path::new("/a"),
+            &a,
+            Path::new("/other"),
+            &other_fs
+        ));
+        assert!(!same_file(
+            &fs,
+            Path::new("/a"),
+            &a,
+            Path::new("/unknown"),
+            &incomplete
+        ));
+    }
 }

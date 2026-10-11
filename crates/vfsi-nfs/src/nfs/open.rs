@@ -15,7 +15,9 @@ impl NfsVecFs {
     // -- private helpers ----------------------------------------------------
 
     pub(super) fn insert_open_file(&mut self, open: NfsOpenState) -> VfResult<i32> {
-        crate::vecfs::insert_fd(&mut self.next_fd, &mut self.open_files, open)
+        let fd = crate::vecfs::insert_fd(&mut self.next_fd, &mut self.open_files, open)?;
+        self.open_object_ids.remove(&fd);
+        Ok(fd)
     }
 
     pub(super) fn drain_deferred_descriptor_closes(&mut self) -> VfResult<()> {
@@ -158,7 +160,6 @@ impl NfsVecFs {
                 reopen: Some(ReopenFile {
                     path: self.visible_path(&self.server_path(paths[index])),
                     flags: non_destructive_reopen_flags(flags[index]),
-                    mode: modes[index],
                 }),
             };
             match self.insert_open_file(open) {

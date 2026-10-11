@@ -534,3 +534,50 @@ fn allocation_read_assembly_transfers_payloads_and_preserves_result_order() {
         assert_eq!(result.eof, index == 2);
     }
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires VFSI_NFS_TEST_MOUNT pointing to a direct NFS mount"]
+fn live_reconnect_uses_resolved_mount_after_discovery_path_disappears() {
+    let mount = std::env::var("VFSI_NFS_TEST_MOUNT").expect("mount fixture is required");
+    let mut backend = NfsClientBuilder::from_mount(&mount)
+        .unwrap()
+        .connect()
+        .unwrap();
+    backend
+        .mount_source
+        .as_mut()
+        .unwrap()
+        .forget_discovery_path_for_test();
+    NfsClientBuilder::from_mount_config(backend.resolved_mount().unwrap())
+        .unwrap()
+        .connect()
+        .unwrap();
+    // The original discovery route is deliberately unusable. Its remote root
+    // and authentication remain pinned; reconnect must not revisit that route.
+    backend.read_only = true;
+    backend.reconnect().unwrap();
+    assert!(backend.read_only);
+    assert_eq!(
+        backend
+            .open_path_impl(VfPathBase::Abs, Path::new("forbidden"), libc::O_WRONLY, 0)
+            .unwrap_err()
+            .err_no(),
+        libc::EROFS as u32
+    );
+}
+
+#[test]
+fn distinct_nfs_filehandles_can_group_as_the_same_filesystem_object() {
+    use super::handle_backend::object_ref_for_group;
+    let id = FsObjId::new(1, 7);
+    assert_eq!(
+        object_ref_for_group(&[1], Some(id), false),
+        object_ref_for_group(&[2], Some(id), false)
+    );
+    assert_ne!(
+        object_ref_for_group(&[1], Some(id), false),
+        object_ref_for_group(&[2], Some(FsObjId::new(2, 7)), false)
+    );
+    assert_eq!(object_ref_for_group(&[1], None, false), None);
+}

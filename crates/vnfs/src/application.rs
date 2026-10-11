@@ -71,6 +71,10 @@ mod routed {
         vfsi_sync::__vfsi_file_methods!(crate::AutoFile);
     }
     impl Vfsi for crate::Auto {
+        fn same_object_namespace(&self, left: &Path, right: &Path) -> bool {
+            self.same_object_namespace_impl(left, right)
+        }
+
         type File = crate::AutoFile;
         type Dir = crate::AutoDir;
         client_methods!(crate::Auto, std::convert::identity);

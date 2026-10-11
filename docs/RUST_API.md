@@ -229,7 +229,15 @@ allocation/copying and quadratic extraction work; they do not establish an
 end-to-end throughput improvement without workload measurements.
 
 Complete positional writes keep successor lists and outstanding dependency
-counts for conflicting requests through the same diagnostic path. A request
+counts for conflicting requests on the same underlying object. Local clients
+use cached device/inode pairs. NFS uses retained handle equality when every
+request shares one handle; otherwise it batches FSID/FILEID queries once per
+live descriptor and caches only complete object identity. Unequal NFS handles
+may still denote one object (RFC 8881 section 9.11). Separate opens and
+hard-link/renamed aliases therefore participate in the same ordering. Cached
+identities are invalidated on descriptor reuse and reconnect.
+Backends without object references conservatively order potentially conflicting
+requests across the whole batch; paths never establish independence. A request
 releases its successors only after every byte is acknowledged; short writes
 remain in subsequent ready waves. Ready waves retain input order, and their
 index buffers are reused. Empty requests still undergo whole-batch validation
@@ -271,7 +279,34 @@ and cleanup lifetimes. Operations through an open handle continue to address
 the opened object after rename or unlink; its saved path is diagnostic. Linux
 mount IDs select a path route in `Auto`; after open, `AutoFile` pins the
 chosen client/route. A mount-derived NFS connection resolves the mount when
-constructed, then uses that filesystem connection for later operations.
+constructed, then uses that filesystem connection for later operations,
+including reconnect. Recovery checks the pinned remote root identity and
+credentials, preserving read-only policy without consulting the original
+kernel mount or discovery path.
+
+Object comparisons require both components and a shared backend/server
+namespace. `Vfsi::same_object_namespace` exposes this boundary to generic
+helpers; routers override the single-backend default. Missing identity is
+unknown, and equal `file_id` values alone never prove object equality. Python
+metadata exposes optional `fs_id` alongside the existing `fileid`; reader
+restoration requires the complete pair and fails closed when either is missing.
+Neither ctime nor the change token participates in that check. Python reader
+restoration creates a new open instance by name after replacing a session;
+rename/unlink can therefore make restoration fail, but it never accepts a
+replacement object with a different identity.
+
+NFS reconnect uses batched `OPEN(CLAIM_FH)` on retained `NfsFh` references,
+with independent owners for each open instance. Saved names are used only for
+diagnostics, so renaming or replacing a pathname cannot retarget recovery.
+Expired/stale server references still cause an error; recovery never falls back
+to reopening a replacement name. Create/truncate effects are never replayed.
+
+`Auto` shares a filesystem client across equivalent endpoint/export/version/
+credential mount aliases. Cross-client link and rename return `EXDEV`, and
+cross-client native COPY returns unsupported so helpers can stream through the
+resolved clients. These operations do not switch to kernel I/O after resolution.
+Unsupported mounts/symlinks and nested-mount tree roots can still select the
+POSIX route during initial discovery; that is the selected underlying client.
 
 The [migration ledger](backend-migration.md#identity-and-open-descriptor-names)
 lists source changes and compatibility aliases. The

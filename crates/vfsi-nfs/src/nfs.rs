@@ -46,7 +46,7 @@ struct NfsOpenState {
     stateid: stateid4,
     cur_offset: u64,
     append: bool,
-    /// Root-relative absolute path and non-destructive reopen flags. Internal
+    /// Diagnostic original name and non-destructive open policy. Internal
     /// temporary descriptors deliberately have no reopen recipe.
     reopen: Option<ReopenFile>,
 }
@@ -55,7 +55,6 @@ struct NfsOpenState {
 struct ReopenFile {
     path: PathBuf,
     flags: i32,
-    mode: u32,
 }
 
 fn resource_status(status: u32) -> bool {
@@ -178,7 +177,7 @@ impl NfsClientBuilder {
     /// Use a previously discovered mount for independent pooled connections.
     #[cfg(target_os = "linux")]
     pub fn from_mount_config(mount: crate::mount::NfsMount) -> VfResult<Self> {
-        mount.check_local()?;
+        mount.check_for_connect()?;
         let mut builder = Self::new(mount.host())
             .root(mount.root())
             .minor_version(Some(mount.minor_version()));
@@ -272,9 +271,9 @@ impl NfsClientBuilder {
         let mut filesystem = NfsVecFs::connect_with_options(&self.host, self.options)?;
         #[cfg(target_os = "linux")]
         if let Some(mount) = &self.mount {
-            mount.verify(&mut filesystem)?;
+            let identity = mount.verify(&mut filesystem)?;
             filesystem.read_only = mount.read_only();
-            filesystem.mount_source = Some(mount.clone());
+            filesystem.mount_source = Some(mount.resolved(identity));
         }
         filesystem.observer = self.observer;
         filesystem.notify(NfsEvent::Connected {
@@ -418,6 +417,10 @@ pub struct NfsVecFs {
     next_fd: i32,
     /// Canonical open-file state, keyed by the client-assigned descriptor.
     open_files: std::collections::HashMap<i32, NfsOpenState>,
+    // Lazily cached object IDs for distinct-handle write batches; no per-open
+    // identity storage or extra query for a batch sharing one filehandle.
+    open_object_ids: std::collections::HashMap<i32, Option<FsObjId>>,
+    object_refs_are_same_fh: bool,
     /// Directory handles returned by `open_dir`, keyed by client-assigned id.
     open_dirs: std::collections::HashMap<i32, NfsFh>,
     /// Distinguishes directory descriptors from those of another client.

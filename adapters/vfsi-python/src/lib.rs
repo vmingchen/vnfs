@@ -237,11 +237,19 @@ fn descriptor(operation: &str, file: &FileOperand) -> PyResult<i64> {
 
 /// All attributes the Python layer wants for `ls`/`info` (skip NAMED_ATTR:
 /// it costs the server a per-entry xattr enumeration).
+// Native clients each represent one backend/server identity namespace.
+fn fs_obj_id(attrs: &VfAttrs) -> Option<vfsi_core::FsObjId> {
+    attrs
+        .returned
+        .contains(AttrMask::identity())
+        .then(|| vfsi_core::FsObjId::new(attrs.fs_id, attrs.fileid))
+}
+
 fn full_mask() -> AttrMask {
     AttrMask::MODE
         .union(AttrMask::SIZE)
         .union(AttrMask::NLINK)
-        .union(AttrMask::FILEID)
+        .union(AttrMask::identity())
         .union(AttrMask::BLOCKS)
         .union(AttrMask::UID)
         .union(AttrMask::GID)
@@ -288,6 +296,9 @@ fn attrs_to_dict(py: Python<'_>, a: &VfAttrs) -> PyResult<Py<PyDict>> {
     }
     if r.contains(AttrMask::FILEID) {
         d.set_item("fileid", a.fileid)?;
+    }
+    if r.contains(AttrMask::FS_ID) {
+        d.set_item("fs_id", a.fs_id)?;
     }
     if r.contains(AttrMask::CHANGE) {
         d.set_item("change", a.change)?;
@@ -480,12 +491,14 @@ fn mode_to_flags(mode: &str) -> PyResult<i32> {
 // The PyO3 client
 // ---------------------------------------------------------------------------
 
-/// One vectorized filesystem client behind a mutex.
+/// Mount discovery recipe and shared resolved filesystem configuration.
 #[pyclass(frozen, skip_from_py_object)]
 #[derive(Clone)]
 struct MountConfiguration {
     #[cfg(all(feature = "nfs", target_os = "linux"))]
     spec: vfsi_nfs::mount::NfsMount,
+    #[cfg(all(feature = "nfs", target_os = "linux"))]
+    resolved: std::sync::Arc<std::sync::OnceLock<vfsi_nfs::mount::NfsMount>>,
 }
 
 #[cfg(all(feature = "nfs", target_os = "linux"))]
@@ -520,7 +533,10 @@ fn discover_mount(py: Python<'_>, path: PathBuf) -> PyResult<MountConfiguration>
     {
         py.detach(|| {
             vfsi_nfs::mount::NfsMount::discover(&path)
-                .map(|spec| MountConfiguration { spec })
+                .map(|spec| MountConfiguration {
+                    spec,
+                    resolved: Default::default(),
+                })
                 .map_err(|error| mount_error(error, &path))
         })
     }
@@ -671,8 +687,10 @@ impl NfsClient {
                                 "host conflicts with discovered mount",
                             ));
                         }
-                        NfsClientBuilder::from_mount_config(config.spec.clone())
-                            .map_err(|error| mount_error(error, config.spec.local_path()))?
+                        NfsClientBuilder::from_mount_config(
+                            config.resolved.get().unwrap_or(&config.spec).clone(),
+                        )
+                        .map_err(|error| mount_error(error, config.spec.local_path()))?
                     } else {
                         NfsClientBuilder::new(host)
                     };
@@ -694,6 +712,12 @@ impl NfsClient {
                         }
                         to_py_err(e, Some(Path::new(host)))
                     })?;
+                    #[cfg(target_os = "linux")]
+                    if let Some(config) = &mount_config {
+                        config.resolved.get_or_init(|| {
+                            nfs.resolved_mount().expect("mount connection is resolved")
+                        });
+                    }
                     Box::new(nfs) as Box<dyn BindingBackend + Send>
                 }
                 #[cfg(feature = "smb")]
@@ -1760,9 +1784,8 @@ impl NfsClient {
                     let source = attrs[2 * pair_index].as_ref();
                     let destination = attrs[2 * pair_index + 1].as_ref();
                     if let (Some(source), Some(destination)) = (source, destination)
-                        && source.returned.contains(AttrMask::FILEID)
-                        && destination.returned.contains(AttrMask::FILEID)
-                        && source.fileid == destination.fileid
+                        && fs_obj_id(source).is_some()
+                        && fs_obj_id(source) == fs_obj_id(destination)
                     {
                         data[index] = None;
                         errors.insert(index, ERR_SAME_FILE);
@@ -1822,7 +1845,7 @@ impl NfsClient {
                 .iter()
                 .map(|&index| sources[index].clone())
                 .collect();
-            let identity_mask = AttrMask::SIZE | AttrMask::NLINK | AttrMask::FILEID;
+            let identity_mask = AttrMask::SIZE | AttrMask::NLINK | AttrMask::identity();
             let (attrs, stat_errors) = attrs_many_impl(fs, &oversized_sources, identity_mask, true)
                 .map_err(|e| to_py_err(e, None))?;
             for (subset_index, err_no) in stat_errors {
@@ -1830,15 +1853,18 @@ impl NfsClient {
             }
             let mut sizes = vec![None; n];
             let mut identity_candidates = Vec::new();
-            let mut source_fileids = HashMap::new();
+            let mut source_ids = HashMap::new();
             for (&index, attrs) in oversized.iter().zip(attrs) {
                 if let Some(attrs) = attrs {
                     sizes[index] = Some(attrs.size);
-                    if attrs.returned.contains(AttrMask::NLINK | AttrMask::FILEID)
+                    if attrs
+                        .returned
+                        .contains(AttrMask::NLINK | AttrMask::identity())
                         && attrs.nlink > 1
                     {
                         identity_candidates.push(index);
-                        source_fileids.insert(index, attrs.fileid);
+                        source_ids
+                            .insert(index, fs_obj_id(&attrs).expect("identity mask was checked"));
                     }
                 }
             }
@@ -1852,7 +1878,7 @@ impl NfsClient {
                     .map(|&index| dests[index].clone())
                     .collect();
                 let (dest_attrs, dest_errors) =
-                    attrs_many_impl(fs, &candidate_dests, AttrMask::FILEID, true)
+                    attrs_many_impl(fs, &candidate_dests, AttrMask::identity(), true)
                         .map_err(|e| to_py_err(e, None))?;
                 for (subset_index, err_no) in dest_errors {
                     if err_no != libc::ENOENT as u32 {
@@ -1863,8 +1889,7 @@ impl NfsClient {
                 }
                 for (&index, attrs) in identity_candidates.iter().zip(dest_attrs) {
                     if attrs.is_some_and(|attrs| {
-                        attrs.returned.contains(AttrMask::FILEID)
-                            && source_fileids.get(&index) == Some(&attrs.fileid)
+                        fs_obj_id(&attrs).is_some_and(|id| source_ids.get(&index) == Some(&id))
                     }) {
                         sizes[index] = None;
                         errors.insert(index, ERR_SAME_FILE);
@@ -2134,5 +2159,34 @@ mod tests {
     #[test]
     fn path_result_cannot_cross_the_descriptor_boundary() {
         assert!(descriptor("open", &FileOperand::from_path("/not-a-descriptor")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod object_identity_tests {
+    use super::*;
+    #[test]
+    fn fs_obj_id_distinguishes_filesystems_and_requires_both_returned_fields() {
+        let a = VfAttrs {
+            fs_id: 0,
+            fileid: 0,
+            returned: AttrMask::identity(),
+            ..Default::default()
+        };
+        let b = VfAttrs {
+            fs_id: 1,
+            ..a.clone()
+        };
+        assert_eq!(fs_obj_id(&a), Some(vfsi_core::FsObjId::new(0, 0)));
+        assert_ne!(fs_obj_id(&a), fs_obj_id(&b));
+        for returned in [AttrMask::FILEID, AttrMask::FS_ID, AttrMask::empty()] {
+            assert_eq!(
+                fs_obj_id(&VfAttrs {
+                    returned,
+                    ..a.clone()
+                }),
+                None
+            );
+        }
     }
 }

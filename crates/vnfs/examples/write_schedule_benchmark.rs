@@ -24,6 +24,17 @@ impl Sink {
 }
 
 impl HandleBackend for Sink {
+    // BEGIN OBJECT REFERENCE HOOK
+    fn open_object_ref(
+        &self,
+        file: &FileOperand,
+    ) -> VfResult<Option<vfsi_sync::backend::OpenObjectRef<'_>>> {
+        Ok(Some(vfsi_sync::backend::OpenObjectRef::Id(
+            vfsi_sync::FsObjId::new(0, file.fd().expect("sink descriptor") as u64),
+        )))
+    }
+    // END OBJECT REFERENCE HOOK
+
     fn open_impl(&mut self, _: &OpenOp) -> VfResult<FileOperand> {
         Ok(self.open())
     }

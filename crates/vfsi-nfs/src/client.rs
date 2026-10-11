@@ -49,6 +49,10 @@ enum OwnerSlot {
 }
 
 impl NfsFh {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
     fn as_nfs_fh(&self) -> nfs_fh4 {
         nfs_fh4 {
             nfs_fh4_len: self.bytes.len() as u32,
@@ -2866,6 +2870,77 @@ impl NfsClient {
             }
         }
         Ok(PathSetattrOutcome { types, failed })
+    }
+
+    /// Batched OPENs addressing retained objects, with one independent owner
+    /// per open instance. Confirmed prefixes remain owned on any failure.
+    pub(crate) fn openv_handle_compound(
+        &mut self,
+        ops: &[(NfsFh, u32)],
+    ) -> RpcResult<PathOpenOutcome> {
+        let owners: Vec<_> = (0..ops.len())
+            .map(|_| self.next_public_open_owner_name())
+            .collect();
+        let mut opened = vec![None; ops.len()];
+        let mut global = 0;
+        let mut max_items = usize::MAX;
+        let attempt = (|| -> RpcResult<Option<(usize, u32)>> {
+            while global < ops.len() {
+                let budget = self.op_budget_for(b"reopenfh", 3).merged_limit(0, 2);
+                let start = global;
+                let mut map = ExecutionMap::new();
+                let mut c = Compound::new();
+                c.tag(b"reopenfh");
+                while global < ops.len() && map.ranges.len() < max_items && map.next + 2 <= budget {
+                    map.begin(global);
+                    c.putfh(&ops[global].0.as_nfs_fh());
+                    c.open_claim_fh(ops[global].1, self.session.clientid, &owners[global]);
+                    map.note_ops(2);
+                    map.end();
+                    global += 1;
+                }
+                if map.ranges.is_empty() {
+                    return Ok(Some((start, nfsstat4_NFS4ERR_TOO_MANY_OPS)));
+                }
+                if self.merged_paths_need_repack(b"reopenfh", 3, &c, map.ranges.len())? {
+                    max_items = map.ranges.len() - 1;
+                    global = start;
+                    continue;
+                }
+                let res =
+                    self.call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)?;
+                if resource_rejected_before_mutation(&res)
+                    && self.can_retry_merged_resource(b"reopenfh", &res, budget, 0, 2)
+                {
+                    global = start;
+                    continue;
+                }
+                let failed = first_failed_range(&res, &map)?;
+                for &(caller, begin, _) in &map.ranges {
+                    if failed.is_some_and(|(index, _)| caller >= index) {
+                        break;
+                    }
+                    opened[caller] = Some((ops[caller].0.clone(), res.open(begin + 1).stateid));
+                }
+                if failed.is_some() {
+                    return Ok(failed);
+                }
+                max_items = usize::MAX;
+            }
+            Ok(None)
+        })();
+        match attempt {
+            Ok(failed) => Ok(PathOpenOutcome { opened, failed }),
+            Err(error) => {
+                let closes = opened
+                    .into_iter()
+                    .flatten()
+                    .map(|(fh, stateid)| CloseOp { fh, stateid })
+                    .collect();
+                self.close_path_or_defer(closes);
+                Err(error)
+            }
+        }
     }
 
     /// Batched path-based OPENs in one compound per chunk, returning the

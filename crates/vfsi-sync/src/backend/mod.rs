@@ -36,10 +36,35 @@ use crate::*;
 use std::path::{Path, PathBuf};
 use vfsi_core::internal::ManyResults;
 
+/// Object reference borrowed from a backend while grouping writes. Scoped to
+/// that backend; opaque references must establish object grouping, never OPEN
+/// state. Unequal noncanonical references do not prove distinct objects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum OpenObjectRef<'a> {
+    Id(FsObjId),
+    Opaque(&'a [u8]),
+}
+
 /// Minimum contract for owned handles and descriptor lifecycle.
 /// This includes handle-level metadata/statistics hooks, but does not require
 /// namespace operations, directory enumeration, or native vector I/O.
 pub trait HandleBackend {
+    /// Prepare object references in one backend batch when metadata is needed.
+    /// Inputs retain request order so failure indices remain attributable.
+    /// References returned for the batch must use a consistent, canonical
+    /// representation. Return `None` when potentially aliased objects cannot
+    /// be compared safely; unequal noncanonical filehandles are insufficient.
+    fn prepare_object_refs(&mut self, _files: &[&FileOperand]) -> VfResult<()> {
+        Ok(())
+    }
+
+    /// Reference to the object pinned by a live File Descriptor, if available.
+    /// Completion scheduling conservatively assumes aliasing when unknown.
+    /// Saved paths and OPEN stateids must never be used as object references.
+    fn open_object_ref(&self, _file: &FileOperand) -> VfResult<Option<OpenObjectRef<'_>>> {
+        Ok(None)
+    }
+
     fn vstatfs_impl(&mut self, files: &[FileOperand]) -> VfResult<Vec<FilesystemStats>> {
         if files.is_empty() {
             Ok(Vec::new())

@@ -1036,3 +1036,137 @@ fn live_file_bind_mount_uses_covering_mount() {
     assert_eq!(contents, "bind source\n");
     file.close().unwrap();
 }
+
+#[test]
+#[ignore = "requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount"]
+fn live_mount_alias_clients_share_identity_and_cross_routes_never_use_kernel_copy() {
+    let mount =
+        PathBuf::from(std::env::var("VFSI_AUTO_TEST_MOUNT").expect("mount fixture is required"));
+    let client = Auto::new("/").unwrap();
+    require_live_direct_route(&client, &mount);
+    let mounts = routing::read_mounts(false);
+    let original = client.resolve(&mount, &mounts);
+    let Route::Nfs(connection) = original.route else {
+        panic!("direct route required")
+    };
+    let mut alias_spec = connection.spec.clone();
+    alias_spec.id = u64::MAX;
+    let alias = client.connection(&alias_spec).unwrap();
+    assert!(Route::Nfs(connection.clone()).same_backend(&Route::Nfs(alias)));
+    let fixture = tempfile::tempdir().unwrap();
+    let source = mount.join(format!(".vfsi-route-identity-{}", std::process::id()));
+    let destination = fixture.path().join("destination");
+    client.write(&source, b"original").unwrap();
+    assert!(
+        client
+            .vcopy(&[(&source, &destination)], crate::CopyOption::default())
+            .unwrap_err()
+            .kind()
+            == std::io::ErrorKind::Unsupported
+    );
+    assert!(!destination.exists());
+    assert_eq!(
+        client
+            .vhardlink(&[(&source, &destination)])
+            .unwrap_err()
+            .err_no(),
+        libc::EXDEV as u32
+    );
+    assert_eq!(
+        client
+            .vrename(&[(&source, &destination)], Default::default())
+            .unwrap_err()
+            .err_no(),
+        libc::EXDEV as u32
+    );
+    client.remove_file(&source).unwrap();
+}
+
+#[test]
+#[ignore = "requires VFSI_AUTO_TEST_MOUNT pointing to a direct NFS mount"]
+fn live_vector_open_retains_each_mount_alias_route() {
+    let mount =
+        PathBuf::from(std::env::var("VFSI_AUTO_TEST_MOUNT").expect("mount fixture is required"));
+    let client = Auto::new("/").unwrap();
+    require_live_direct_route(&client, &mount);
+    let Route::Nfs(connection) = client.resolve(&mount, &routing::read_mounts(false)).route else {
+        panic!("direct route required")
+    };
+    // Supply distinct already-resolved mount aliases to the production dispatch
+    // path. Both use the live client, without requiring a second kernel mount.
+    let mut alias_spec = connection.spec.clone();
+    alias_spec.id = u64::MAX;
+    alias_spec.mount_point = PathBuf::from("/vnfs-test-mount-alias");
+    let alias = Arc::new(routing::NfsConnectionState {
+        spec: alias_spec,
+        client: connection.client.clone(),
+        identity: connection.identity.clone(),
+        credentials: connection.credentials.clone(),
+    });
+    let original_route = Route::Nfs(connection);
+    let alias_route = Route::Nfs(alias);
+    assert!(original_route.same_backend(&alias_route));
+    assert_ne!(original_route.public(), alias_route.public());
+
+    let remote_fixture = tempfile::tempdir_in(&mount).unwrap();
+    let remote = remote_fixture.path().join("file");
+    client.write(&remote, b"route").unwrap();
+    let backend_path = Path::new("/").join(remote.strip_prefix(&mount).unwrap());
+    let alias_path = Path::new("/vnfs-test-mount-alias").join(remote.strip_prefix(&mount).unwrap());
+    let local_fixture = tempfile::tempdir().unwrap();
+    let local = local_fixture.path().join("file");
+    fs::write(&local, b"route").unwrap();
+
+    // Include a POSIX prefix and another cohort so start + index is exercised,
+    // then reverse alias order in the second NFS cohort.
+    let public_paths = [&local, &remote, &alias_path, &local, &alias_path, &remote];
+    let routes = [
+        Route::Posix,
+        original_route.clone(),
+        alias_route.clone(),
+        Route::Posix,
+        alias_route,
+        original_route,
+    ];
+    let requests: Vec<_> = public_paths
+        .iter()
+        .map(|path| OpenOp::new(path, OpenFlags::READ))
+        .collect();
+    let resolved: Vec<_> = routes
+        .into_iter()
+        .zip(public_paths)
+        .map(|(route, path)| Resolved {
+            path: match &route {
+                Route::Posix => path.to_path_buf(),
+                Route::Nfs(_) => backend_path.clone(),
+            },
+            route,
+        })
+        .collect();
+    let files = client.vopen_resolved(&requests, &resolved).unwrap();
+    assert_eq!(files.len(), requests.len());
+    for (index, file) in files.iter().enumerate() {
+        assert_eq!(file.path(), public_paths[index]);
+        assert_eq!(file.route(), resolved[index].route.public(), "file {index}");
+        if let Route::Nfs(expected) = &resolved[index].route {
+            let Route::Nfs(actual) = &file.route else {
+                panic!("NFS file {index} lost its route")
+            };
+            assert!(Arc::ptr_eq(actual, expected));
+            assert!(format!("{file:?}").contains(expected.spec.mount_point.to_str().unwrap()));
+        }
+    }
+    let reads = client
+        .vread(
+            files.iter().map(|file| crate::ReadOp::range(file, 0, 5)),
+            Default::default(),
+        )
+        .unwrap();
+    assert!(
+        reads
+            .iter()
+            .all(|read| read.data() == Some(b"route".as_slice()))
+    );
+    client.close_files(files).unwrap();
+    client.remove_file(&remote).unwrap();
+}

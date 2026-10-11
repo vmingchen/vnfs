@@ -42,10 +42,16 @@ metadata queries once after supported transport or session failures. Reconnect
 attempts use bounded exponential backoff through `NfsRecoveryPolicy`.
 `set_auto_reconnect(false)` disables automatic recovery.
 
-Recovery reopens live path-backed descriptors in a vector, verifies original
-object identities, and preserves descriptor numbers and offsets. It fails if
-the saved path no longer identifies the original file—for example, after
-unlink, rename/replacement, or an identity or permission change.
+Recovery reopens retained NFS objects with batched `OPEN(CLAIM_FH)`, preserving
+descriptor numbers, offsets, and independent open owners. Saved paths are
+diagnostic: rename or pathname replacement cannot retarget recovery. Stale or
+expired filehandles and revoked permissions still fail. Mount-derived clients
+verify their pinned remote root and credentials, preserve read-only policy,
+and do not revisit kernel mount discovery when reconnecting.
+
+Python reader restoration creates new open instances by name after replacing
+a session. It checks the complete `(fs_id, fileid)` pair; missing identity or
+a different object fails closed. Rename or unlink can prevent that restoration.
 
 Lost replies to create, write, rename, copy, remove, and other mutations are
 not automatically replayed: the original operation may have succeeded.
