@@ -189,7 +189,7 @@ impl<F: VectorBackend> FsClient<F> {
             let mut backend = self.lock()?;
             backend
                 .prepare_object_refs(&raw_files)
-                .map_err(&map_identity_error)?;
+                .map_err(map_identity_error)?;
             let mut unknown = false;
             let mut prior_by_object = HashMap::new();
             let mut prior_unknown = Vec::new();
