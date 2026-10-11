@@ -107,7 +107,7 @@ jobs:
             '
       - name: Verify the wheel bundles the native NFS libraries
         run: python3 ci/check-wheel-bundling.py adapters/nfs4fs/dist/*.whl
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wheel-${{ matrix.target }}-${{ matrix.wheel-kind }}
           path: adapters/nfs4fs/dist/*.whl
@@ -123,7 +123,7 @@ jobs:
           python-version: "3.14"
       - run: python -m pip install maturin==1.14.1
       - run: python -m maturin sdist --manifest-path adapters/nfs4fs/Cargo.toml --out adapters/nfs4fs/dist
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sdist
           path: adapters/nfs4fs/dist/*.tar.gz
@@ -187,7 +187,7 @@ jobs:
             --output-reproducible \
             --output-format JSON \
             --output-file sbom/nfs4fs-python.cdx.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nfs4fs-sbom
           path: sbom/*.json
