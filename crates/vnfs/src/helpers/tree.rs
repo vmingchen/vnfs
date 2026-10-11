@@ -20,7 +20,7 @@ impl Tree {
 #[derive(Debug)]
 struct Entry {
     path: PathBuf,
-    data: Option<Vec<u8>>,
+    data: Option<Box<[u8]>>,
     declaration_index: usize,
 }
 
@@ -157,7 +157,7 @@ impl TreeBuilder {
             }
             self.entries.push(Entry {
                 path: normalized,
-                data: data.map(<[u8]>::to_vec),
+                data: data.map(Box::from),
                 declaration_index: index,
             });
             self.stored_bytes = bytes;
@@ -196,7 +196,7 @@ impl TreeBuilder {
         let mut planned: BTreeMap<PathBuf, (bool, usize)> = BTreeMap::new();
         let mut bytes = self.entries.iter().try_fold(0usize, |bytes, entry| {
             bytes
-                .checked_add(entry.data.as_ref().map_or(0, Vec::len))
+                .checked_add(entry.data.as_deref().map_or(0, <[u8]>::len))
                 .ok_or_else(|| error(0, libc::EFBIG, root))
         })?;
         for (position, entry) in self.entries.iter().enumerate() {
@@ -332,6 +332,27 @@ mod tests {
     use std::sync::Arc;
     use vfsi_core::internal::faults::{FaultScript, OpenFaultPoint};
     use vfsi_sync::FsClient;
+
+    #[test]
+    fn fixed_bytes_tree_contents_are_owned_and_preserve_empty_files() {
+        let mut contents = [0, 255, 17, 42];
+        let expected = contents;
+        let builder = TreeBuilder::new()
+            .add_file("data", contents.as_slice())
+            .add_empty_file("empty")
+            .add_directory("directory");
+        contents.fill(99);
+        assert_eq!(
+            builder.entries[0].data.as_deref(),
+            Some(expected.as_slice())
+        );
+        assert_eq!(builder.entries[1].data.as_deref(), Some(b"".as_slice()));
+        assert!(builder.entries[2].data.is_none());
+        assert_eq!(
+            builder.stored_bytes,
+            "dataemptydirectory".len() + expected.len()
+        );
+    }
 
     #[test]
     fn failed_open_preserves_original_index_and_partial_tree_without_replay_or_leaks() {

@@ -89,7 +89,7 @@ impl AdaptiveBatchSizer {
 #[derive(Debug)]
 pub(crate) struct AdaptiveCompoundLimits {
     negotiated_ops: usize,
-    shapes: HashMap<Vec<u8>, AdaptiveBatchSizer>,
+    shapes: HashMap<Box<[u8]>, AdaptiveBatchSizer>,
 }
 
 impl AdaptiveCompoundLimits {
@@ -131,7 +131,7 @@ impl AdaptiveCompoundLimits {
             self.negotiated_ops,
         );
         Self::record(&mut limit, sent_ops, status, reply_ops);
-        self.shapes.insert(tag.to_vec(), limit);
+        self.shapes.insert(Box::from(tag), limit);
     }
 
     fn record(limit: &mut AdaptiveBatchSizer, sent_ops: usize, status: u32, _reply_ops: usize) {

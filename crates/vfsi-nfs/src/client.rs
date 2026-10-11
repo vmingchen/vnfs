@@ -27,9 +27,12 @@ use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 /// This addresses the object for NFS operations; it is not the
 /// stateful open instance, which also involves NFS OPEN state such as a
 /// stateid.
+///
+/// Owns a fixed-length byte slice. Cloning copies the opaque bytes; it does
+/// not create or duplicate NFS OPEN state.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NfsFh {
-    bytes: Vec<u8>,
+    bytes: Box<[u8]>,
 }
 
 /// Compatibility name for the same opaque [`NfsFh`] object reference.
@@ -58,7 +61,7 @@ impl NfsFh {
             std::slice::from_raw_parts(fh.nfs_fh4_val as *const u8, fh.nfs_fh4_len as usize)
         };
         NfsFh {
-            bytes: slice.to_vec(),
+            bytes: Box::from(slice),
         }
     }
 
@@ -95,7 +98,7 @@ pub struct NfsClient {
     #[cfg(feature = "test-faults")]
     confirmed_path_closes: usize,
     #[cfg(feature = "test-faults")]
-    reject_next_compound_tag: Option<Vec<u8>>,
+    reject_next_compound_tag: Option<Box<[u8]>>,
 }
 
 /// Upper bound for the per-compound payload cap for merged path I/O; the
@@ -380,7 +383,7 @@ struct PathIoTarget<'a> {
     cursor: &'a mut CfhCursor,
     map: &'a mut ExecutionMap,
     close_in_compound: bool,
-    opened_path: &'a mut Option<Vec<u8>>,
+    opened_path: &'a mut Option<Box<[u8]>>,
     fh_at_opened: &'a mut bool,
     base_seq: u32,
     opens_in_chunk: &'a mut usize,
@@ -494,7 +497,7 @@ pub struct PathRenameOutcome {
 #[derive(Default)]
 struct CfhCursor {
     /// Root-relative path of the directory currently in the saved-fh slot.
-    saved_dir: Option<Vec<u8>>,
+    saved_dir: Option<Box<[u8]>>,
     /// Whether the compound's current fh currently equals the saved fh.
     at_saved: bool,
 }
@@ -519,13 +522,13 @@ impl CfhCursor {
             return Some((leaf, ops));
         }
         let mut ops = 0;
-        if let Some(saved) = self.saved_dir.clone() {
+        if let Some(saved) = self.saved_dir.as_deref() {
             if !self.at_saved {
                 c.restorefh();
                 ops += 1;
                 self.at_saved = true;
             }
-            let saved_comps = components_bytes(&saved);
+            let saved_comps = components_bytes(saved);
             let target_comps = components_bytes(&dir);
             let common = common_prefix_len(&saved_comps, &target_comps);
             let ups = saved_comps.len() - common;
@@ -541,7 +544,7 @@ impl CfhCursor {
                 }
                 c.savefh();
                 ops += 1;
-                self.saved_dir = Some(dir.clone());
+                self.saved_dir = Some(dir.into_boxed_slice());
                 self.at_saved = true;
                 return Some((leaf, ops));
             }
@@ -555,7 +558,7 @@ impl CfhCursor {
         }
         c.savefh();
         ops += 1;
-        self.saved_dir = Some(dir);
+        self.saved_dir = Some(dir.into_boxed_slice());
         self.at_saved = true;
         Some((leaf, ops))
     }
@@ -574,13 +577,13 @@ impl CfhCursor {
             return Some((leaf, ops));
         }
         let mut ops = 0;
-        if let Some(saved) = self.saved_dir.clone() {
+        if let Some(saved) = self.saved_dir.as_deref() {
             if !self.at_saved {
                 c.restorefh();
                 ops += 1;
                 self.at_saved = true;
             }
-            let saved_comps = components_bytes(&saved);
+            let saved_comps = components_bytes(saved);
             let target_comps = components_bytes(&dir);
             let common = common_prefix_len(&saved_comps, &target_comps);
             let ups = saved_comps.len() - common;
@@ -708,7 +711,7 @@ impl NfsClient {
     /// shape. Test-only: no request is sent and no mutation can have run.
     #[cfg(feature = "test-faults")]
     pub fn inject_resource_rejection_once(&mut self, tag: &[u8]) {
-        self.reject_next_compound_tag = Some(tag.to_vec());
+        self.reject_next_compound_tag = Some(Box::from(tag));
     }
 
     #[cfg(feature = "test-faults")]
@@ -761,13 +764,15 @@ impl NfsClient {
         Ok(())
     }
 
-    fn next_public_open_owner_name(&mut self) -> Vec<u8> {
+    fn next_public_open_owner_name(&mut self) -> Box<[u8]> {
         let id = self.next_public_open_owner_id;
         self.next_public_open_owner_id = id.wrapping_add(1);
-        let mut name = self.session.open_owner.name.clone();
+        let suffix = id.to_string();
+        let mut name = Vec::with_capacity(self.session.open_owner.name.len() + 1 + suffix.len());
+        name.extend_from_slice(&self.session.open_owner.name);
         name.push(b'-');
-        name.extend_from_slice(id.to_string().as_bytes());
-        name
+        name.extend_from_slice(suffix.as_bytes());
+        name.into_boxed_slice()
     }
 
     pub(crate) fn abandon(&mut self) {
@@ -1108,7 +1113,7 @@ impl NfsClient {
                     target.compound.getfh();
                     target.map.note_ops(1);
                 }
-                *target.opened_path = Some(path.clone());
+                *target.opened_path = Some(Box::from(path.as_slice()));
                 *target.fh_at_opened = true;
                 if open.truncate_existing {
                     target
@@ -1727,7 +1732,7 @@ impl NfsClient {
             OwnerSlot::Path => (
                 self.session.path_owner.seqid,
                 self.session.path_owner.verifier,
-                self.session.path_owner.name.clone(),
+                Box::from(self.session.path_owner.name.as_slice()),
             ),
         };
         let mut c = Compound::new();
@@ -2007,15 +2012,15 @@ impl NfsClient {
         slot: OwnerSlot,
     ) -> RpcResult<Vec<(NfsFh, stateid4)>> {
         let (base, verifier, owner_name) = match slot {
-            OwnerSlot::User => (0, self.session.open_owner.verifier, Vec::new()),
+            OwnerSlot::User => (0, self.session.open_owner.verifier, Box::<[u8]>::default()),
             OwnerSlot::Path => (
                 self.session.path_owner.seqid,
                 self.session.path_owner.verifier,
-                self.session.path_owner.name.clone(),
+                Box::from(self.session.path_owner.name.as_slice()),
             ),
         };
         let n = ops.len();
-        let public_owner_names: Vec<Vec<u8>> = if matches!(slot, OwnerSlot::User) {
+        let public_owner_names: Vec<Box<[u8]>> = if matches!(slot, OwnerSlot::User) {
             (0..n).map(|_| self.next_public_open_owner_name()).collect()
         } else {
             Vec::new()
@@ -2141,7 +2146,7 @@ impl NfsClient {
             let mut map = ExecutionMap::new();
             let mut c = Compound::new();
             c.tag(tag);
-            let mut opened_path: Option<Vec<u8>> = None;
+            let mut opened_path: Option<Box<[u8]>> = None;
             let mut fh_at_opened = false;
             let mut opens_in_chunk = 0usize;
             let base_seq = self.session.path_owner.seqid;
@@ -2396,7 +2401,7 @@ impl NfsClient {
             let mut map = ExecutionMap::new();
             let mut c = Compound::new();
             c.tag(tag);
-            let mut opened_path: Option<Vec<u8>> = None;
+            let mut opened_path: Option<Box<[u8]>> = None;
             let mut fh_at_opened = false;
             let mut opens_in_chunk = 0usize;
             let base_seq = self.session.path_owner.seqid;
@@ -2858,7 +2863,7 @@ impl NfsClient {
     pub fn openv_path_compound(&mut self, ops: &[PathOpenOp]) -> RpcResult<PathOpenOutcome> {
         let n = ops.len();
         self.drain_deferred_path_closes()?;
-        let public_owner_names: Vec<Vec<u8>> =
+        let public_owner_names: Vec<Box<[u8]>> =
             (0..n).map(|_| self.next_public_open_owner_name()).collect();
         let mut opened: Vec<Option<(NfsFh, stateid4)>> = vec![None; n];
         let mut failed: Option<(usize, u32)> = None;
@@ -3832,6 +3837,74 @@ fn make_open_how(create: OpenCreate, verifier: verifier4) -> openflag4 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fixed_bytes_filehandle_layout_and_wire_ownership() {
+        use std::collections::HashSet;
+        use std::mem::size_of;
+
+        assert_eq!(size_of::<super::NfsFh>(), size_of::<Box<[u8]>>());
+        assert_eq!(
+            size_of::<Vec<u8>>() - size_of::<super::NfsFh>(),
+            size_of::<usize>()
+        );
+
+        let mut source = [0, 255, 17, 0, 42];
+        let expected = source;
+        let wire = nfsv41_sys::nfs_fh4 {
+            nfs_fh4_len: source.len() as u32,
+            nfs_fh4_val: source.as_mut_ptr().cast(),
+        };
+        let handle = super::NfsFh::from_nfs_fh(&wire);
+        source.fill(99);
+        assert_eq!(&*handle.bytes, &expected);
+        assert_eq!(handle.len(), expected.len());
+        assert!(!handle.is_empty());
+
+        let cloned = handle.clone();
+        assert_eq!(cloned, handle);
+        assert_ne!(cloned.bytes.as_ptr(), handle.bytes.as_ptr());
+        let mut set = HashSet::new();
+        set.insert(handle);
+        assert!(set.contains(&cloned));
+        drop(set);
+        let cloned_wire = cloned.as_nfs_fh();
+        assert_eq!(cloned_wire.nfs_fh4_len as usize, expected.len());
+        let bytes = unsafe {
+            std::slice::from_raw_parts(cloned_wire.nfs_fh4_val.cast::<u8>(), expected.len())
+        };
+        assert_eq!(bytes, expected);
+
+        let empty: [u8; 0] = [];
+        let empty_handle = super::NfsFh::from_nfs_fh(&nfsv41_sys::nfs_fh4 {
+            nfs_fh4_len: 0,
+            nfs_fh4_val: empty.as_ptr() as *mut std::ffi::c_char,
+        });
+        assert!(empty_handle.is_empty());
+        assert_eq!(empty_handle.len(), 0);
+    }
+
+    #[test]
+    fn fixed_bytes_cursor_preserves_saved_parent_reuse() {
+        let mut cursor = super::CfhCursor::default();
+        let mut compound = crate::compound::Compound::new();
+        let (leaf, first_ops) = cursor.set_parent(&mut compound, b"a/b/first").unwrap();
+        assert_eq!(leaf, b"first");
+        assert_eq!(first_ops, 4); // PUTROOTFH, LOOKUP a/b, SAVEFH
+        assert_eq!(cursor.saved_dir.as_deref(), Some(b"a/b".as_slice()));
+        cursor.at_saved = false;
+        let (leaf, ops) = cursor.set_parent(&mut compound, b"a/b/second").unwrap();
+        assert_eq!(leaf, b"second");
+        assert_eq!(ops, 1); // RESTOREFH
+        let (_, ops) = cursor.set_parent(&mut compound, b"a/c/third").unwrap();
+        assert_eq!(ops, 3); // LOOKUPP, LOOKUP c, SAVEFH
+        assert_eq!(cursor.saved_dir.as_deref(), Some(b"a/c".as_slice()));
+        let (_, ops) = cursor
+            .set_current_parent(&mut compound, b"a/c/fourth")
+            .unwrap();
+        assert_eq!(ops, 0);
+        assert_eq!(cursor.saved_dir.as_deref(), Some(b"a/c".as_slice()));
+    }
+
     #[test]
     fn statistics_resource_retries_preserve_complete_items() {
         use nfsv41_sys::{nfsstat4_NFS4ERR_RESOURCE, nfsstat4_NFS4ERR_TOO_MANY_OPS};

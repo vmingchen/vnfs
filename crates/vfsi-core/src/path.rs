@@ -61,14 +61,15 @@ pub fn join_path_bytes(dir: &[u8], name: &[u8]) -> Vec<u8> {
 
 /// Lexically normalize a root-relative byte path.
 pub fn normalize_bytes(path: &[u8]) -> Vec<u8> {
-    let mut parts: Vec<Vec<u8>> = Vec::new();
+    // Components only live for this call; borrow them from the input.
+    let mut parts: Vec<&[u8]> = Vec::new();
     for comp in trim_slashes(path).split(|&b| b == b'/') {
         match comp {
             [] | b"." => {}
             b".." => {
                 parts.pop();
             }
-            c => parts.push(c.to_vec()),
+            c => parts.push(c),
         }
     }
     let mut out = Vec::new();
@@ -110,6 +111,23 @@ fn trim_slashes(path: &[u8]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_bytes_normalization_preserves_component_and_parent_rules() {
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"", b""),
+            (b"////", b""),
+            (b"./../..", b""),
+            (b"../../a", b"a"),
+            (b"/a//b/./../c///", b"a/c"),
+            (b"a/b/../../c/..", b""),
+            (b"a/\xff/../\xfe", b"a/\xfe"),
+            (b"a/\x00/b", b"a/\x00/b"),
+        ];
+        for &(input, expected) in cases {
+            assert_eq!(normalize_bytes(input), expected, "input={input:?}");
+        }
+    }
 
     #[test]
     fn non_utf8_components_roundtrip() {

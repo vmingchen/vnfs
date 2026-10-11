@@ -41,7 +41,7 @@ pub struct Session {
     /// operations, so closing an internal open never revokes a stateid the
     /// caller still holds (kernel nfsd reuses one stateid per owner+file).
     pub path_owner: OpenOwner,
-    client_owner: Option<Vec<u8>>,
+    client_owner: Option<Box<[u8]>>,
 }
 
 impl Session {
@@ -138,7 +138,7 @@ impl Session {
                 seqid: 0,
                 verifier: make_verifier(),
             },
-            client_owner: client_owner.map(<[u8]>::to_vec),
+            client_owner: client_owner.map(Box::from),
         };
         s.exchange_id(client_verifier)?;
         s.create_session()?;
@@ -153,7 +153,7 @@ impl Session {
         // table and replace each other's confirmed clients mid-flight.
         let generated;
         let owner_id = if let Some(owner) = &self.client_owner {
-            owner.as_slice()
+            owner.as_ref()
         } else {
             generated = format!(
                 "vnfs-client-{}-{:x}",

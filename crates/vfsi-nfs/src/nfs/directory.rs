@@ -12,7 +12,7 @@ pub(super) struct NfsDirectoryCursor {
 /// A child resolved relative to the observed parent, never by its full path.
 pub(super) struct NfsChildDirectoryCursor {
     pub(super) parent: NfsFh,
-    pub(super) name: Vec<u8>,
+    pub(super) name: Box<[u8]>,
 }
 
 /// A directory held by filehandle during vectorized recursive removal.
@@ -24,7 +24,7 @@ pub(super) struct NfsChildDirectoryCursor {
 pub(super) struct RemoveDir {
     pub(super) fh: NfsFh,
     pub(super) parent: Option<NfsFh>,
-    pub(super) name: Vec<u8>,
+    pub(super) name: Box<[u8]>,
     /// Operand index this directory belongs to, for error attribution.
     pub(super) root: usize,
 }
@@ -35,7 +35,7 @@ pub(super) enum RmTask {
     /// out to be a non-empty directory, resolve it and enter it instead.
     RemoveOrEnter {
         parent: NfsFh,
-        name: Vec<u8>,
+        name: Box<[u8]>,
         root: usize,
         expand: bool,
     },
@@ -232,8 +232,7 @@ impl NfsVecFs {
         first_error: &mut Option<VfError>,
         options: RemoveOptions,
     ) -> VfResult<()> {
-        let mut ready: std::collections::HashMap<NfsFh, Vec<(Vec<u8>, usize)>> =
-            std::collections::HashMap::new();
+        let mut ready: std::collections::HashMap<NfsFh, Vec<_>> = std::collections::HashMap::new();
         let mut changed_parents = std::collections::HashSet::new();
         while let Some(task) = stack.pop() {
             match task {
@@ -339,7 +338,7 @@ impl NfsVecFs {
                                 dir: RemoveDir {
                                     fh,
                                     parent: Some(parent.clone()),
-                                    name: owned,
+                                    name: owned.into_boxed_slice(),
                                     root,
                                 },
                                 cookie: 0,
@@ -568,7 +567,7 @@ impl NfsVecFs {
     fn remove_list(
         &mut self,
         parent: &NfsFh,
-        entries: &[(Vec<u8>, usize)],
+        entries: &[(Box<[u8]>, usize)],
         first_error: &mut Option<VfError>,
         options: RemoveOptions,
     ) -> VfResult<bool> {
@@ -581,7 +580,7 @@ impl NfsVecFs {
                 options.batch_size(),
             );
             let chunk = &entries[start..start + take];
-            let names: Vec<Vec<u8>> = chunk.iter().map(|(name, _)| name.clone()).collect();
+            let names: Vec<Vec<u8>> = chunk.iter().map(|(name, _)| name.to_vec()).collect();
             match self.nfs.remove_many(parent, &names) {
                 Ok(()) => {
                     removed = true;
@@ -633,7 +632,7 @@ impl NfsVecFs {
         root: usize,
         first_error: &mut Option<VfError>,
         options: RemoveOptions,
-    ) -> VfResult<Vec<(NfsFh, Vec<u8>)>> {
+    ) -> VfResult<Vec<(NfsFh, Box<[u8]>)>> {
         let mut children = Vec::new();
         let mut start = 0;
         while start < names.len() {
@@ -658,9 +657,9 @@ impl NfsVecFs {
                         // retried in smaller pieces without replay concerns.
                         continue;
                     }
-                    for (name, result) in chunk.iter().cloned().zip(results) {
+                    for (name, result) in chunk.iter().zip(results) {
                         match result {
-                            Ok(fh) => children.push((fh, name)),
+                            Ok(fh) => children.push((fh, Box::from(name.as_slice()))),
                             Err(nfsstat4_NFS4ERR_NOENT) => {}
                             Err(status) => {
                                 note_error(first_error, VfError::nfs(root, status), options)?;

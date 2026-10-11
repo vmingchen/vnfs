@@ -114,7 +114,7 @@ impl NfsVecFs {
             connect_timeout: options.connect_timeout,
             request_timeout: options.request_timeout,
             authentication: options.authentication,
-            client_owner: options.client_owner,
+            client_owner: options.client_owner.map(Vec::into_boxed_slice),
             client_verifier: make_verifier(),
         };
         let nfs = Self::connect_client(&connection)?;

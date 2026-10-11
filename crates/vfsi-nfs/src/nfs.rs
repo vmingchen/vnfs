@@ -73,7 +73,7 @@ struct ConnectionConfig {
     connect_timeout: Duration,
     request_timeout: Duration,
     authentication: NfsAuthentication,
-    client_owner: Option<Vec<u8>>,
+    client_owner: Option<Box<[u8]>>,
     /// Stable for the lifetime of this client, including reconnects. A
     /// changed verifier tells an NFS server that the client rebooted.
     client_verifier: verifier4,

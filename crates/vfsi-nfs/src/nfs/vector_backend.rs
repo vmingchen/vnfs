@@ -483,7 +483,7 @@ impl VectorBackend for NfsVecFs {
                 Some(cursor) if cursor.is::<NfsChildDirectoryCursor>() => {
                     let child = cursor.into_state::<NfsChildDirectoryCursor>()?;
                     child_indices.push(index);
-                    children.push((child.parent.clone(), child.name));
+                    children.push((child.parent.clone(), child.name.into_vec()));
                     // Filled by the anchored LOOKUP + READDIR wave below.
                     NfsDirectoryCursor {
                         fh: child.parent,
@@ -571,7 +571,7 @@ impl VectorBackend for NfsVecFs {
                     seeds.push((attrs.ftype == VfType::Directory).then(|| {
                         DirPageCursor::new(NfsChildDirectoryCursor {
                             parent: state.fh.clone(),
-                            name: entry.name,
+                            name: entry.name.into_boxed_slice(),
                         })
                     }));
                     output.push(attrs);
@@ -1356,7 +1356,7 @@ impl VectorBackend for NfsVecFs {
             match self.remove_parent_handle(path) {
                 Ok((parent, name)) => stack.push(RmTask::RemoveOrEnter {
                     parent,
-                    name,
+                    name: name.into_boxed_slice(),
                     root,
                     expand: recursive,
                 }),
@@ -1433,7 +1433,7 @@ impl VectorBackend for NfsVecFs {
             dir: RemoveDir {
                 fh,
                 parent: None,
-                name: Vec::new(),
+                name: Box::default(),
                 root: 0,
             },
             cookie: 0,

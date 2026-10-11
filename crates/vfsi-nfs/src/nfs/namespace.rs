@@ -67,7 +67,7 @@ impl NfsVecFs {
     ) -> VfResult<Vec<Result<(NfsFh, u32), u32>>> {
         use std::collections::{BTreeMap, HashMap};
         // Group by parent directory.
-        let mut groups: BTreeMap<Vec<u8>, Vec<(usize, Vec<u8>)>> = BTreeMap::new();
+        let mut groups: BTreeMap<Box<[u8]>, Vec<_>> = BTreeMap::new();
         let mut out: Vec<Result<(NfsFh, u32), u32>> =
             vec![Err(nfsstat4_NFS4ERR_NOENT); files.len()];
         for (i, f) in files.iter().enumerate() {
@@ -88,9 +88,12 @@ impl NfsVecFs {
             let path_bytes = path_bytes(&path);
             let (dir, name) =
                 split_path_bytes(path_bytes).map_err(|_| VfError::failure(i, ERR_NOENT))?;
-            groups.entry(dir).or_default().push((i, name));
+            groups
+                .entry(dir.into_boxed_slice())
+                .or_default()
+                .push((i, name));
         }
-        let mut dir_cache: HashMap<Vec<u8>, NfsFh> = HashMap::new();
+        let mut dir_cache: HashMap<Box<[u8]>, NfsFh> = HashMap::new();
         for (dir, entries) in groups {
             let dirfh = match dir_cache.get(&dir) {
                 Some(fh) => fh.clone(),
@@ -322,9 +325,9 @@ impl NfsVecFs {
 
     /// The legacy phased renamev (cached parent resolution + rename_many).
     pub(super) fn renamev_phased(&mut self, pairs: &[(FileOperand, FileOperand)]) -> VfRes {
-        let mut src_cache: std::collections::HashMap<Vec<u8>, NfsFh> =
+        let mut src_cache: std::collections::HashMap<Box<[u8]>, NfsFh> =
             std::collections::HashMap::new();
-        let mut dst_cache: std::collections::HashMap<Vec<u8>, NfsFh> =
+        let mut dst_cache: std::collections::HashMap<Box<[u8]>, NfsFh> =
             std::collections::HashMap::new();
         let mut ops = Vec::with_capacity(pairs.len());
         for (i, (src, dst)) in pairs.iter().enumerate() {
@@ -334,23 +337,23 @@ impl NfsVecFs {
                 split_path_bytes(path_bytes(&s)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
             let (ddir, dname) =
                 split_path_bytes(path_bytes(&d)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
-            let sdirfh = match src_cache.get(&sdir) {
+            let sdirfh = match src_cache.get(sdir.as_slice()) {
                 Some(fh) => fh.clone(),
                 None => {
                     let fh = self
                         .resolve_path(&path_from_bytes(&sdir), true)
                         .map_err(|e| e.with_index(i))?;
-                    src_cache.insert(sdir.clone(), fh.clone());
+                    src_cache.insert(sdir.into_boxed_slice(), fh.clone());
                     fh
                 }
             };
-            let ddirfh = match dst_cache.get(&ddir) {
+            let ddirfh = match dst_cache.get(ddir.as_slice()) {
                 Some(fh) => fh.clone(),
                 None => {
                     let fh = self
                         .resolve_path(&path_from_bytes(&ddir), true)
                         .map_err(|e| e.with_index(i))?;
-                    dst_cache.insert(ddir.clone(), fh.clone());
+                    dst_cache.insert(ddir.into_boxed_slice(), fh.clone());
                     fh
                 }
             };
@@ -370,12 +373,12 @@ impl NfsVecFs {
     pub(super) fn removev_phased(&mut self, files: &[FileOperand]) -> VfRes {
         use std::collections::BTreeMap;
         // Group by parent directory to batch REMOVEs.
-        let mut groups: BTreeMap<Vec<u8>, Vec<Vec<u8>>> = BTreeMap::new();
+        let mut groups: BTreeMap<Box<[u8]>, Vec<Vec<u8>>> = BTreeMap::new();
         for (i, f) in files.iter().enumerate() {
             let path = self.server_vf_path(f).map_err(|e| e.with_index(i))?;
             let (dir, name) =
                 split_path_bytes(path_bytes(&path)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
-            groups.entry(dir).or_default().push(name);
+            groups.entry(dir.into_boxed_slice()).or_default().push(name);
         }
         for (dir, names) in &groups {
             let dirfh = self

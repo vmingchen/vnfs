@@ -62,7 +62,9 @@ unsafe extern "C" fn wrap_compound4res(xdrs: *mut libntirpc_sys::XDR, objp: *mut
 pub struct Compound {
     pub args: COMPOUND4args,
     ops: Vec<nfs_argop4>,
-    keep: Vec<Vec<u8>>,
+    // Each fixed payload owns its allocation, so growing this list preserves
+    // the pointers installed in the wire operations.
+    keep: Vec<Box<[u8]>>,
     tag_index: Option<usize>,
     // Reuse a builder's final XDR preflight at dispatch, but never after a
     // change to the compound's operations or backing data.
@@ -186,7 +188,7 @@ impl Compound {
 
     fn keep(&mut self, bytes: &[u8]) -> (*mut c_char, u32) {
         self.size_check.set(None);
-        let buf = bytes.to_vec();
+        let buf = Box::<[u8]>::from(bytes);
         let ptr = buf.as_ptr() as *mut c_char;
         let len = buf.len() as u32;
         self.keep.push(buf);
@@ -1485,6 +1487,28 @@ mod request_size_tests {
                 assert_eq!(compound.encoded_len_up_to(expected - 1).unwrap(), None);
             }
         }
+    }
+
+    #[test]
+    fn fixed_bytes_compound_payload_pointers_survive_growth() {
+        let mut compound = Compound::new();
+        let mut source = [0, 255, 17, 42];
+        let expected = source;
+        let (ptr, len) = compound.keep(&source);
+        source.fill(99);
+        compound.tag(b"retained-tag");
+        let tag_ptr = compound.args.tag.utf8string_val;
+        // Force growth of the outer list without moving its boxed payloads.
+        let capacity = compound.keep.capacity();
+        for _ in 0..=capacity {
+            compound.keep(b"another payload");
+        }
+        assert!(compound.keep.capacity() > capacity);
+        assert_eq!(compound.args.tag.utf8string_val, tag_ptr);
+        assert_eq!(compound.tag_bytes(), b"retained-tag");
+        let retained = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len as usize) };
+        assert_eq!(retained, expected);
+        assert_eq!(compound.keep(&[]).1, 0);
     }
 
     #[test]

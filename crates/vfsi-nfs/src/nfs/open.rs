@@ -213,7 +213,7 @@ impl NfsVecFs {
         // Resolve each parent directory once per distinct dir, then look up
         // every final component in one tolerant batch (which also reports the
         // type, so symlinks can be followed only when actually present).
-        let mut dir_cache: std::collections::HashMap<Vec<u8>, NfsFh> =
+        let mut dir_cache: std::collections::HashMap<Box<[u8]>, NfsFh> =
             std::collections::HashMap::new();
         let mut lookups: Vec<(usize, NfsFh, Vec<u8>)> = Vec::new();
         for (i, f) in files.iter().enumerate() {
@@ -230,13 +230,13 @@ impl NfsVecFs {
             let full = self.server_vf_path(f).map_err(|e| e.with_index(i))?;
             let (dir, name) =
                 split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
-            let dirfh = match dir_cache.get(&dir) {
+            let dirfh = match dir_cache.get(dir.as_slice()) {
                 Some(fh) => fh.clone(),
                 None => {
                     let fh = self
                         .resolve_path(&path_from_bytes(&dir), true)
                         .map_err(|e| e.with_index(i))?;
-                    dir_cache.insert(dir.clone(), fh.clone());
+                    dir_cache.insert(dir.into_boxed_slice(), fh.clone());
                     fh
                 }
             };

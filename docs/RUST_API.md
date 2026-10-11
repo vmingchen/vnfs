@@ -171,6 +171,26 @@ File Descriptor slot. `NfsFh` addresses an NFS object, and `NfsOpenState`
 retains the NFS client's state for an open instance. These IDs are scoped to
 the backend/server identity namespace. Object IDs may be reused after deletion.
 
+`NfsFh` privately owns `Box<[u8]>`: its length is fixed and callers cannot
+modify its opaque bytes. `Clone` still copies the bytes and does not perform
+NFS OPEN or CLOSE. On a 64-bit target the stored slice uses 16 bytes, versus
+24 bytes for a `Vec<u8>` header, saving 8 bytes per handle. This is a storage
+layout observation, not a public ABI guarantee or a reduction in the payload
+length. A boxed slice permits mutation in Rust; immutability here comes from
+the type's private field and its API.
+
+Private fixed byte storage also uses boxed slices for compound backing
+payloads, adaptive compound tag keys, saved/opened path snapshots, generated
+OPEN-owner tokens, established client-owner IDs, namespace cache/group keys,
+retained directory cursor/removal names, and `TreeBuilder` file contents.
+Compound payload allocations remain stable as the outer operation/buffer
+lists grow. Vectors remain for growing or reusable I/O/XDR/path buffers and
+for public byte-vector interfaces (including connect options and protocol
+request/result fields). Those public types retain their ownership and mutation
+behavior; bytes are boxed when they enter private fixed storage. Path
+normalization borrows immutable components from its input for the duration of the call,
+avoiding a separate allocation for every component.
+
 | Canonical name | Meaning | Linux, NFS, and GCS equivalent | Previous spelling / compatibility |
 |---|---|---|---|
 | `FsObjId`; `Attrs::fs_obj_id()` | Composite underlying object ID: `(fs_id, file_id)`. | Linux: (`st_dev`, `st_ino`). NFS: (`FATTR4_FSID`, `FATTR4_FILEID`); opaque filehandle is separate. GCS: `(bucket, object name, generation)` identifies an object version. | `FileIdentity` and `file_identity()` remain compatibility aliases. |
