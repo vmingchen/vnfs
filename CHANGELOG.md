@@ -5,6 +5,15 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## Python release - 2026-10-10
+
+- nfs4fs 0.3.6 with vfsi-fsspec 0.1.6. Upgrade the protocol package and
+  shared engine together; older native extensions lack per-call read budgets.
+- Bounded reads include growth after stat, recovery verifies descriptor
+  identity, and disabling automatic reconnect also disables native recovery.
+- Shared directory removal uses capability-aware metadata, retaining NFS
+  no-follow checks while supporting SMB without scalar lstat.
+
 ## Rust release - 2026-10-10
 
 - vnfs 0.0.21, vfsi-core 0.1.9, vfsi-sync 0.1.10, vfsi-local 0.1.8,

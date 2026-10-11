@@ -1,8 +1,36 @@
-# Python release build-time baseline
+# Release build-time baseline
 
 These are observed GitHub Actions timings, retained for a separate release-speed
 investigation. Durations are wall-clock job or step times from the GitHub Actions
 API, not estimates of CPU time. Jobs run concurrently.
+
+## 2026-10-10 Rust publications
+
+All crates were published from the clean checkout of
+`a5fd95fa1c6bb8f72bf8ee267224902b55413489`, after its
+[18-job CI run](https://github.com/vmingchen/vnfs/actions/runs/38104685358)
+succeeded. These measurements used the VM's existing build cache, not a cold
+build. Publications ran sequentially in dependency order.
+
+Verification times are Cargo's reported `dev` build durations. Total times
+are measured wall time for packaging, verification, upload, and registry
+indexing wait; they must not be interpreted as compilation time alone.
+
+| Crate | Verification build | Total publish command |
+| --- | ---: | ---: |
+| vfsi-core 0.1.9 | 1.01s | 2.09s |
+| vfsi-sync 0.1.10 | 2.34s | 3.18s |
+| vfsi-local 0.1.8 | 3.76s | 64.16s |
+| vfsi-posix 0.1.0 | 1.64s | 3.37s |
+| vfsi-uring 0.1.0 | 1.32s | 3.12s |
+| vfsi-nfs 0.1.9 | 5.50s | 7.90s |
+| vfsi-smb 0.1.7 | 4.77s | 6.68s |
+| vnfs 0.0.21 | 5.06s | 7.39s |
+
+The vfsi-local upload succeeded but its indexing wait timed out. The next
+crate successfully downloaded that version from crates.io and verified
+against it; no upload was repeated. Runs occurred on October 11 UTC
+(October 10 in America/New_York).
 
 ## 2026-10-04 coordinated releases
 
