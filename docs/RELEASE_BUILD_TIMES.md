@@ -4,6 +4,69 @@ These are observed GitHub Actions timings, retained for a separate release-speed
 investigation. Durations are wall-clock job or step times from the GitHub Actions
 API, not estimates of CPU time. Jobs run concurrently.
 
+## 2026-10-10 Python publications
+
+All four releases used `50ec71ee12c95d36a2b401f59041af28dfd83405`.
+Workflow wall time includes runner queueing; job durations exclude runner wait
+time. Runs occurred on October 11 UTC (October 10 in America/New_York).
+
+| Release run | Wall time | Result |
+| --- | ---: | --- |
+| [vsmb 0.1.3](https://github.com/vmingchen/vnfs/actions/runs/38106861340) | 2m 50s | Success |
+| [vfsi-fsspec 0.1.6](https://github.com/vmingchen/vnfs/actions/runs/38107073398) | 1m 16s | Success |
+| [vsmbfs 0.1.3](https://github.com/vmingchen/vnfs/actions/runs/38107165724) | 1m 55s | Success |
+| [nfs4fs 0.3.6](https://github.com/vmingchen/vnfs/actions/runs/38107165564) | 22m 48s | Success |
+
+| Release | Job | Duration |
+| --- | --- | ---: |
+| vsmb 0.1.3 | Verify CI | 5s |
+| vsmb 0.1.3 | Source distribution | 21s |
+| vsmb 0.1.3 | SBOM | 1m 17s |
+| vsmb 0.1.3 | x86_64 abi3 wheel | 1m 20s |
+| vsmb 0.1.3 | x86_64 CPython 3.14 free-threaded wheel | 1m 20s |
+| vsmb 0.1.3 | aarch64 abi3 wheel | 2m 10s |
+| vsmb 0.1.3 | Publish | 30s |
+| vfsi-fsspec 0.1.6 | Verify CI | 4s |
+| vfsi-fsspec 0.1.6 | Build and test | 34s |
+| vfsi-fsspec 0.1.6 | Publish | 37s |
+| vsmbfs 0.1.3 | Verify CI | 7s |
+| vsmbfs 0.1.3 | Build and test | 34s |
+| vsmbfs 0.1.3 | Publish | 27s |
+| nfs4fs 0.3.6 | Verify CI | 5s |
+| nfs4fs 0.3.6 | Source distribution | 20s |
+| nfs4fs 0.3.6 | SBOM | 1m 15s |
+| nfs4fs 0.3.6 | x86_64 abi3 wheel | 2m 32s |
+| nfs4fs 0.3.6 | x86_64 CPython 3.14 free-threaded wheel | 2m 33s |
+| nfs4fs 0.3.6 | aarch64 abi3 wheel under QEMU | 21m 37s |
+| nfs4fs 0.3.6 | Installed wheel against live NFS RPCSEC_GSS | 28s |
+| nfs4fs 0.3.6 | Publish | 34s |
+
+The vsmb wheel build steps took 1m 11s on each x86_64 variant and 1m 16s
+on aarch64; the corresponding installed-wheel checks took 4s, 4s, and 42s.
+For the pure-Python packages, distribution builds took 11s (vfsi-fsspec) and
+10s (vsmbfs); installed-wheel checks took 5s and 6s respectively.
+
+The nfs4fs portable-wheel build steps took 2m 21s (x86_64 abi3), 2m 22s
+(x86_64 free-threaded), and **21m 01s** (aarch64 under QEMU). Their repaired-wheel
+checks took 3s, 4s, and 26s respectively. The emulated aarch64 build dominated
+the release's critical path.
+
+The source [CI run](https://github.com/vmingchen/vnfs/actions/runs/38106414359)
+passed on attempt 2. Its initial NFSv4.1 latency benchmark failed with
+`NFS4ERR_STALE_CLIENTID` (10022). Only the failed job was rerun, on unchanged
+source, and passed; no check was weakened. This is an observed intermittent
+failure, not a demonstrated fix. All four release-tag CI runs passed.
+
+After publication, all four Python packages were installed from PyPI into a
+fresh VM virtualenv and tested outside the checkout: 131 tests passed with live
+NFSv4.2 (including required server COPY), 104 with live NFSv4.1, and 21 for
+SMB/shared-engine package interoperability. The externally coordinated server
+restart test was excluded from both local NFS runs; no selected tests skipped.
+Dependency validation also passed.
+
+These are observed timings, not a controlled performance comparison. No build
+strategy was changed.
+
 ## 2026-10-10 Rust publications
 
 All crates were published from the clean checkout of
