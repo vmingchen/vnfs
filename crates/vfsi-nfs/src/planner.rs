@@ -225,8 +225,11 @@ impl ExecutionMap {
         }
     }
 
-    pub(crate) fn range(&self, caller: usize) -> Option<(usize, usize, usize)> {
-        self.ranges.iter().copied().find(|r| r.0 == caller)
+    /// Successful items are a prefix in execution order: analyze stops at
+    /// the first failing operation. Borrow their ranges directly instead of
+    /// searching once per completed caller (which makes extraction quadratic).
+    pub(crate) fn completed_ranges(&self, report: &ExecutionReport) -> &[(usize, usize, usize)] {
+        &self.ranges[..report.completed.len()]
     }
 
     pub(crate) fn analyze<R: ReplyView>(
@@ -483,6 +486,52 @@ mod tests {
             map.end();
         }
         map
+    }
+
+    #[test]
+    fn allocation_completed_ranges_follow_execution_prefix_for_sparse_callers() {
+        let mut map = ExecutionMap::new();
+        // Execution order, not numeric caller order, defines the prefix.
+        for caller in [71, 3, 999] {
+            map.begin(caller);
+            map.note_ops(2);
+            map.end();
+        }
+        for successful_items in 0..3 {
+            let mut ops = vec![0; 2 + 2 * successful_items];
+            *ops.last_mut().unwrap() = 5;
+            let report = map.analyze(&MockReply { status: 5, ops }).unwrap();
+            assert_eq!(
+                map.completed_ranges(&report),
+                &map.ranges[..successful_items]
+            );
+            assert_eq!(
+                report.failure.unwrap().caller,
+                [71, 3, 999][successful_items]
+            );
+        }
+        let report = map
+            .analyze(&MockReply {
+                status: 0,
+                ops: vec![0; 7],
+            })
+            .unwrap();
+        assert_eq!(map.completed_ranges(&report), map.ranges);
+        let report = map
+            .analyze(&MockReply {
+                status: 5,
+                ops: vec![5],
+            })
+            .unwrap();
+        assert!(map.completed_ranges(&report).is_empty());
+        let report = map
+            .analyze(&MockReply {
+                status: 5,
+                ops: vec![0, 0, 0, 0, 0, 0, 0, 5],
+            })
+            .unwrap();
+        assert_eq!(map.completed_ranges(&report), map.ranges);
+        assert_eq!(report.compound_failure_op, Some(7));
     }
 
     #[test]

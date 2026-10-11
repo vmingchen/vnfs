@@ -30,19 +30,13 @@ pub fn split_path_bytes(path: &[u8]) -> Result<(Vec<u8>, Vec<u8>), ()> {
     if trimmed.is_empty() {
         return Err(());
     }
-    let mut parts: Vec<&[u8]> = trimmed.split(|&b| b == b'/').collect();
-    let name = parts.pop().unwrap_or_default().to_vec();
-    while parts.last().is_some_and(|p| p.is_empty()) {
-        parts.pop();
-    }
-    let mut dir = Vec::new();
-    for (i, part) in parts.iter().enumerate() {
-        if i > 0 {
-            dir.push(b'/');
-        }
-        dir.extend_from_slice(part);
-    }
-    Ok((dir, name))
+    // Only the two returned buffers need ownership. Preserve interior
+    // separators while dropping those immediately before the final component.
+    let (dir, name) = match trimmed.iter().rposition(|&b| b == b'/') {
+        Some(split) => (&trimmed[..split], &trimmed[split + 1..]),
+        None => (&b""[..], trimmed),
+    };
+    Ok((trim_slashes(dir).to_vec(), name.to_vec()))
 }
 
 /// Join a directory path and a component name.
@@ -51,8 +45,10 @@ pub fn join_path_bytes(dir: &[u8], name: &[u8]) -> Vec<u8> {
     if dir.is_empty() {
         return name.to_vec();
     }
-    let mut out = dir.to_vec();
-    if out.last() != Some(&b'/') {
+    let separator = dir.last() != Some(&b'/');
+    let mut out = Vec::with_capacity(dir.len() + usize::from(separator) + name.len());
+    out.extend_from_slice(dir);
+    if separator {
         out.push(b'/');
     }
     out.extend_from_slice(name);
@@ -126,6 +122,33 @@ mod tests {
         ];
         for &(input, expected) in cases {
             assert_eq!(normalize_bytes(input), expected, "input={input:?}");
+        }
+    }
+
+    #[test]
+    fn allocation_path_split_preserves_separators_and_arbitrary_bytes() {
+        let cases: &[(&[u8], &[u8], &[u8])] = &[
+            (b"leaf", b"", b"leaf"),
+            (b"///leaf///", b"", b"leaf"),
+            (b"/a///b", b"a", b"b"),
+            (b"a//b///c/", b"a//b", b"c"),
+            (b"a/./../b", b"a/./..", b"b"),
+            (b"a/\xff//\x00/\xfe", b"a/\xff//\x00", b"\xfe"),
+        ];
+        for &(input, expected_dir, expected_name) in cases {
+            let (dir, name) = split_path_bytes(input).unwrap();
+            assert_eq!(dir, expected_dir, "input={input:?}");
+            assert_eq!(name, expected_name, "input={input:?}");
+        }
+        assert!(split_path_bytes(b"").is_err());
+        assert!(split_path_bytes(b"////").is_err());
+        for &(dir, name, expected) in &[
+            (&b""[..], &b"leaf"[..], &b"leaf"[..]),
+            (&b"a"[..], &b""[..], &b"a/"[..]),
+            (&b"a//"[..], &b"\xff"[..], &b"a//\xff"[..]),
+            (&b"a\x00"[..], &b"\xfe"[..], &b"a\x00/\xfe"[..]),
+        ] {
+            assert_eq!(join_path_bytes(dir, name), expected);
         }
     }
 

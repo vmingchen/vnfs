@@ -10,27 +10,31 @@ const MAX_NSS_BUFFER: usize = 1024 * 1024;
 
 #[derive(Default)]
 struct IdentityCache {
-    values: HashMap<(Box<str>, bool), Option<u32>>,
+    // Separate namespaces allow HashMap's borrowed str lookup, so a
+    // cache hit never allocates a temporary owned name.
+    values: [HashMap<Box<str>, Option<u32>>; 2],
     order: VecDeque<(Box<str>, bool)>,
 }
 
 impl IdentityCache {
-    fn get(&self, key: &(Box<str>, bool)) -> Option<Option<u32>> {
-        self.values.get(key).copied()
+    fn get(&self, name: &str, is_group: bool) -> Option<Option<u32>> {
+        self.values[usize::from(is_group)].get(name).copied()
     }
 
     fn insert(&mut self, key: (Box<str>, bool), value: Option<u32>) {
-        if let Some(cached) = self.values.get_mut(&key) {
+        let namespace = usize::from(key.1);
+        if let Some(cached) = self.values[namespace].get_mut(key.0.as_ref()) {
             *cached = value;
             return;
         }
-        while self.values.len() >= CACHE_CAPACITY {
-            if let Some(oldest) = self.order.pop_front() {
-                self.values.remove(&oldest);
+        // The FIFO covers both namespaces and retains the shared capacity.
+        while self.order.len() >= CACHE_CAPACITY {
+            if let Some((name, is_group)) = self.order.pop_front() {
+                self.values[usize::from(is_group)].remove(name.as_ref());
             }
         }
         self.order.push_back(key.clone());
-        self.values.insert(key, value);
+        self.values[namespace].insert(key.0, value);
     }
 }
 
@@ -49,15 +53,18 @@ pub(crate) fn name_to_id(value: &[u8], is_group: bool) -> Option<u32> {
     if let Ok(id) = name.parse::<u32>() {
         return Some(id);
     }
-    let key = (Box::<str>::from(name), is_group);
-    if let Some(value) = cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+    if let Some(value) = cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(name, is_group)
+    {
         return value;
     }
-    let value = lookup(&key.0, is_group);
+    let value = lookup(name, is_group);
     cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(key, value);
+        .insert((Box::from(name), is_group), value);
     value
 }
 
@@ -148,18 +155,49 @@ mod tests {
         let mut cache = IdentityCache::default();
         cache.insert(owner.clone(), Some(1001));
         cache.insert(group.clone(), None);
-        assert_eq!(cache.get(&owner), Some(Some(1001)));
-        assert_eq!(cache.get(&group), Some(None));
+        assert_eq!(cache.get(&owner.0, owner.1), Some(Some(1001)));
+        assert_eq!(cache.get(&group.0, group.1), Some(None));
         assert_eq!(cache.order.len(), 2);
         assert_eq!(cache.order[0].0.as_ref(), "míng@vfsi.invalid");
 
         cache.insert(owner.clone(), Some(1002));
-        assert_eq!(cache.get(&owner), Some(Some(1002)));
+        assert_eq!(cache.get(&owner.0, owner.1), Some(Some(1002)));
         assert_eq!(cache.order.len(), 2); // Updates keep FIFO position.
         let cloned = owner.clone();
         assert_ne!(cloned.0.as_ptr(), owner.0.as_ptr());
         drop(owner);
-        assert_eq!(cache.get(&cloned), Some(Some(1002)));
+        assert_eq!(cache.get(&cloned.0, cloned.1), Some(Some(1002)));
+    }
+
+    #[test]
+    fn allocation_cache_borrows_lookup_names_and_bounds_both_namespaces() {
+        let name = "míng@vfsi.invalid";
+        let mut cache = IdentityCache::default();
+        cache.insert((Box::from(name), false), Some(1001));
+        cache.insert((Box::from(name), true), None);
+        let borrowed = String::from(name);
+        assert_eq!(cache.get(&borrowed, false), Some(Some(1001)));
+        assert_eq!(cache.get(&borrowed, true), Some(None));
+        assert_eq!(cache.get("missing", true), None);
+        cache.insert((Box::from(name), true), Some(1002));
+        assert_eq!(cache.get(name, true), Some(Some(1002)));
+        assert_eq!(cache.order.len(), 2);
+        for index in 0..CACHE_CAPACITY {
+            cache.insert(
+                (format!("entry-{index}").into_boxed_str(), index % 2 != 0),
+                Some(index as u32),
+            );
+        }
+        assert_eq!(cache.order.len(), CACHE_CAPACITY);
+        assert_eq!(
+            cache.values.iter().map(HashMap::len).sum::<usize>(),
+            CACHE_CAPACITY
+        );
+        assert_eq!(cache.get(name, false), None);
+        assert_eq!(cache.get(name, true), None);
+        assert_eq!(cache.get("entry-0", false), Some(Some(0)));
+        assert_eq!(cache.get("entry-1", true), Some(Some(1)));
+        assert_eq!(cache.get("entry-1", false), None);
     }
 
     #[test]
@@ -183,16 +221,15 @@ mod tests {
                 Some(index as u32),
             );
         }
-        assert_eq!(cache.values.len(), CACHE_CAPACITY);
-        assert!(
-            !cache
-                .values
-                .contains_key(&(Box::<str>::from("user-0"), false))
+        assert_eq!(
+            cache.values.iter().map(HashMap::len).sum::<usize>(),
+            CACHE_CAPACITY
         );
-        assert!(cache.values.contains_key(&(
-            format!("user-{}", CACHE_CAPACITY + 36).into_boxed_str(),
-            false
-        )));
+        assert_eq!(cache.get("user-0", false), None);
+        assert_eq!(
+            cache.get(&format!("user-{}", CACHE_CAPACITY + 36), false),
+            Some(Some((CACHE_CAPACITY + 36) as u32))
+        );
     }
 
     #[test]

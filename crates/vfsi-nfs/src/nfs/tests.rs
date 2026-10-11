@@ -499,3 +499,38 @@ fn fs_id_and_fileid_decode_as_one_fs_obj_id() {
     let legacy: Option<vfsi_core::FileIdentity> = attrs.file_identity();
     assert_eq!(legacy, Some(id));
 }
+
+#[test]
+fn allocation_read_assembly_transfers_payloads_and_preserves_result_order() {
+    let reads = [
+        ReadOp::at(FileOperand::from_path("/first"), 10, 4),
+        ReadOp::at(FileOperand::from_path("/missing"), 20, 4),
+        ReadOp::at(FileOperand::from_fd(42), 30, 4),
+    ];
+    let mut first = Vec::with_capacity(32);
+    first.extend_from_slice(b"a\x00\xffb");
+    let first_pointer = first.as_ptr();
+    let first_capacity = first.capacity();
+    let third = b"tail".to_vec();
+    let third_pointer = third.as_ptr();
+    let mut payloads = [Some(first), None, Some(third)];
+    let output = NfsVecFs::assemble_reads(
+        &reads,
+        &[10, 20, 30],
+        &mut payloads,
+        &[Some(false), None, Some(true)],
+    );
+    assert_eq!(output.len(), reads.len());
+    assert!(payloads.iter().all(Option::is_none));
+    assert_eq!(output[0].data.as_ptr(), first_pointer);
+    assert_eq!(output[0].data.capacity(), first_capacity);
+    assert_eq!(output[0].data, b"a\x00\xffb");
+    assert!(output[1].data.is_empty());
+    assert_eq!(output[2].data.as_ptr(), third_pointer);
+    assert_eq!(output[2].data, b"tail");
+    for (index, result) in output.iter().enumerate() {
+        assert_eq!(result.file, reads[index].file);
+        assert_eq!(result.offset, [10, 20, 30][index]);
+        assert_eq!(result.eof, index == 2);
+    }
+}

@@ -203,6 +203,34 @@ options, and text-I/O results/buffers retain their existing `String` types.
 Growing string builders and strings transferred into those public types also
 keep `String`.
 
+Private Auto routes share one `Arc` connection snapshot rather than cloning
+its mount paths, endpoint, credentials, and client policy for every operand,
+file, or directory cursor. Changing Auto's limits replaces the cached client
+view using copy-on-write and preserves its separate route identity; already-open
+handles retain their connection and cleanup ownership. The shared allocation
+adds reference-count bookkeeping once per connection. Object sizes are Rust
+implementation details, not public ABI guarantees.
+
+NFS path planning borrows component slices while constructing compounds; the
+compound owns the wire payloads it needs. It restores a saved handle only for
+a relative walk, avoiding a redundant RESTOREFH before a root walk and keeping
+the reported operation count equal to the compound built. Byte-path splitting allocates only
+the returned parent/name buffers, and joining reserves the final length once.
+Attribute decoding borrows padded owner/group fields from the reply, and
+identity-cache hits borrow names without creating owned keys. The owner and
+group namespaces remain distinct under one shared FIFO capacity of 1024 entries.
+
+Merged NFS reads copy wire bytes directly into the growing result buffer and
+transfer that buffer into the owned result. Completed compound items form a
+prefix in execution order, so result extraction scans that prefix once instead
+of searching for each caller. Failure attribution, fallback, retry policy,
+ordering, and public request/result types remain unchanged. These reduce local
+allocation/copying and quadratic extraction work; they do not establish an
+end-to-end throughput improvement without workload measurements.
+
+The [Rust allocation and layout audit](RUST_PERFORMANCE.md) records measured
+layouts, implementation evidence, tradeoffs, and remaining optimization candidates.
+
 | Canonical name | Meaning | Linux, NFS, and GCS equivalent | Previous spelling / compatibility |
 |---|---|---|---|
 | `FsObjId`; `Attrs::fs_obj_id()` | Composite underlying object ID: `(fs_id, file_id)`. | Linux: (`st_dev`, `st_ino`). NFS: (`FATTR4_FSID`, `FATTR4_FILEID`); opaque filehandle is separate. GCS: `(bucket, object name, generation)` identifies an object version. | `FileIdentity` and `file_identity()` remain compatibility aliases. |

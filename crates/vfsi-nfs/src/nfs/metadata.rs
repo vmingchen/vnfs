@@ -107,10 +107,10 @@ pub(super) fn parse_attr_list(ids: &[u32], list: &[u8]) -> VfResult<AttrValues> 
                 v.nlink = Some(read_u32(list, &mut off)?);
             }
             FATTR4_OWNER => {
-                v.uid = crate::identity::name_to_id(&read_str(list, &mut off)?, false);
+                v.uid = crate::identity::name_to_id(read_str(list, &mut off)?, false);
             }
             FATTR4_OWNER_GROUP => {
-                v.gid = crate::identity::name_to_id(&read_str(list, &mut off)?, true);
+                v.gid = crate::identity::name_to_id(read_str(list, &mut off)?, true);
             }
             FATTR4_RAWDEV => {
                 let major = read_u32(list, &mut off)?;
@@ -294,7 +294,7 @@ fn read_nfstime(buf: &[u8], off: &mut usize) -> VfResult<(i64, u32)> {
 }
 
 /// Read an XDR `utf8string`: length + padded bytes.
-fn read_str(buf: &[u8], off: &mut usize) -> VfResult<Vec<u8>> {
+fn read_str<'a>(buf: &'a [u8], off: &mut usize) -> VfResult<&'a [u8]> {
     let len = read_u32(buf, off)? as usize;
     let padded = len.checked_add(3).ok_or_else(attr_decode_error)? & !3;
     let end = off.checked_add(padded).ok_or_else(attr_decode_error)?;
@@ -302,7 +302,7 @@ fn read_str(buf: &[u8], off: &mut usize) -> VfResult<Vec<u8>> {
     if end > buf.len() {
         return Err(attr_decode_error());
     }
-    let s = buf[*off..data_end].to_vec();
+    let s = &buf[*off..data_end];
     *off = end;
     Ok(s)
 }
@@ -715,5 +715,37 @@ impl NfsVecFs {
             .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
         let mut off = 0;
         read_u64(&list, &mut off)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocation_attribute_strings_borrow_wire_and_check_padding() {
+        for length in 0..10u32 {
+            let mut wire = length.to_be_bytes().to_vec();
+            wire.extend(std::iter::repeat_n(0xff, length as usize));
+            wire.resize(4 + (length as usize).div_ceil(4) * 4, 0);
+            let field_end = wire.len();
+            wire.extend_from_slice(&17u32.to_be_bytes());
+            let mut offset = 0;
+            let bytes = read_str(&wire, &mut offset).unwrap();
+            assert_eq!(bytes, &wire[4..4 + length as usize]);
+            assert_eq!(bytes.as_ptr(), wire[4..].as_ptr());
+            assert_eq!(offset, field_end);
+            assert_eq!(read_u32(&wire, &mut offset).unwrap(), 17);
+            assert_eq!(offset, wire.len());
+            for cut in 0..field_end {
+                assert!(read_str(&wire[..cut], &mut 0).is_err());
+            }
+        }
+        let wire = [
+            0, 0, 0, 4, b' ', b'4', b'2', b' ', 0, 0, 0, 2, b'9', b'9', 0, 0,
+        ];
+        let values = parse_attr_list(&[FATTR4_OWNER, FATTR4_OWNER_GROUP], &wire).unwrap();
+        assert_eq!(values.uid, Some(42));
+        assert_eq!(values.gid, Some(99));
     }
 }

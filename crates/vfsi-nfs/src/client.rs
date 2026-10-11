@@ -13,7 +13,7 @@ use nfsv41_sys::*;
 
 use crate::compound::{Compound, CompoundRes};
 use crate::error::{RpcError, RpcResult};
-use crate::path::{components_bytes, split_path_bytes};
+use crate::path::split_path_bytes;
 use crate::planner::{
     AdaptiveCompoundLimits, ExecutionMap, FailureCause, RecoveryAction, RequestSafety,
     recovery_action, resource_rejected_before_mutation,
@@ -523,22 +523,29 @@ impl CfhCursor {
         }
         let mut ops = 0;
         if let Some(saved) = self.saved_dir.as_deref() {
-            if !self.at_saved {
-                c.restorefh();
-                ops += 1;
-                self.at_saved = true;
-            }
-            let saved_comps = components_bytes(saved);
-            let target_comps = components_bytes(&dir);
-            let common = common_prefix_len(&saved_comps, &target_comps);
-            let ups = saved_comps.len() - common;
-            let downs = target_comps.len() - common;
-            if ups + downs < 1 + target_comps.len() {
+            let saved_comps = path_components(saved);
+            let target_comps = path_components(&dir);
+            let common = saved_comps
+                .clone()
+                .zip(target_comps.clone())
+                .take_while(|(saved, target)| saved == target)
+                .count();
+            let ups = saved_comps.count() - common;
+            let target_count = target_comps.clone().count();
+            let downs = target_count - common;
+            if ups + downs < 1 + target_count {
+                // Restore only for a walk relative to the saved directory.
+                // A root walk replaces the current handle directly.
+                if !self.at_saved {
+                    c.restorefh();
+                    ops += 1;
+                    self.at_saved = true;
+                }
                 for _ in 0..ups {
                     c.lookupp();
                     ops += 1;
                 }
-                for comp in &target_comps[common..] {
+                for comp in target_comps.skip(common) {
                     c.lookup(comp);
                     ops += 1;
                 }
@@ -552,8 +559,8 @@ impl CfhCursor {
         // Resolve the parent directory from the export root.
         let mut ops = 1; // PUTROOTFH
         c.putrootfh();
-        for comp in components_bytes(&dir) {
-            c.lookup(&comp);
+        for comp in path_components(&dir) {
+            c.lookup(comp);
             ops += 1;
         }
         c.savefh();
@@ -578,22 +585,29 @@ impl CfhCursor {
         }
         let mut ops = 0;
         if let Some(saved) = self.saved_dir.as_deref() {
-            if !self.at_saved {
-                c.restorefh();
-                ops += 1;
-                self.at_saved = true;
-            }
-            let saved_comps = components_bytes(saved);
-            let target_comps = components_bytes(&dir);
-            let common = common_prefix_len(&saved_comps, &target_comps);
-            let ups = saved_comps.len() - common;
-            let downs = target_comps.len() - common;
-            if ups + downs < 1 + target_comps.len() {
+            let saved_comps = path_components(saved);
+            let target_comps = path_components(&dir);
+            let common = saved_comps
+                .clone()
+                .zip(target_comps.clone())
+                .take_while(|(saved, target)| saved == target)
+                .count();
+            let ups = saved_comps.count() - common;
+            let target_count = target_comps.clone().count();
+            let downs = target_count - common;
+            if ups + downs < 1 + target_count {
+                // Restore only for a walk relative to the saved directory.
+                // A root walk replaces the current handle directly.
+                if !self.at_saved {
+                    c.restorefh();
+                    ops += 1;
+                    self.at_saved = true;
+                }
                 for _ in 0..ups {
                     c.lookupp();
                     ops += 1;
                 }
-                for comp in &target_comps[common..] {
+                for comp in target_comps.skip(common) {
                     c.lookup(comp);
                     ops += 1;
                 }
@@ -603,8 +617,8 @@ impl CfhCursor {
         }
         let mut ops = 1; // PUTROOTFH
         c.putrootfh();
-        for comp in components_bytes(&dir) {
-            c.lookup(&comp);
+        for comp in path_components(&dir) {
+            c.lookup(comp);
             ops += 1;
         }
         self.at_saved = false; // current fh differs from the saved one
@@ -649,8 +663,9 @@ fn batch_resource_progress(
     }
 }
 
-fn common_prefix_len<T: PartialEq>(a: &[T], b: &[T]) -> usize {
-    a.iter().zip(b.iter()).take_while(|(x, y)| x == y).count()
+fn path_components(path: &[u8]) -> impl Iterator<Item = &[u8]> + Clone {
+    path.split(|&byte| byte == b'/')
+        .filter(|component| !component.is_empty())
 }
 
 /// Lengths of the per-op chunks covering `[start, end)` when each op carries
@@ -1347,8 +1362,7 @@ impl NfsClient {
                 return Err(RpcError::op(cursor, status));
             }
 
-            for caller in report.completed {
-                let (_, start, _) = map.range(caller).expect("reported range must exist");
+            for &(caller, start, _) in map.completed_ranges(&report) {
                 let fh = NfsFh::from_nfs_fh(res.getfh(start + 2));
                 let bytes = res.getattr_bytes(start + 3);
                 let ftype = if bytes.len() >= 4 {
@@ -1439,8 +1453,7 @@ impl NfsClient {
                 }
                 return Err(RpcError::op(cursor, status));
             }
-            for caller in report.completed {
-                let (_, start, _) = map.range(caller).expect("reported range must exist");
+            for &(caller, start, _) in map.completed_ranges(&report) {
                 out[caller] = Some(Ok(NfsFh::from_nfs_fh(res.getfh(start + 2))));
             }
             if let Some(failure) = report.failure {
@@ -1472,7 +1485,7 @@ impl NfsClient {
     /// within each compound, with long paths split at the learned operation
     /// limit; a server-side resource rejection rebuilds the current chunk.
     pub fn resolve(&mut self, path: &[u8]) -> RpcResult<NfsFh> {
-        let components = crate::path::components_bytes(path);
+        let components: Vec<_> = path_components(path).collect();
         if components.is_empty() {
             return Ok(self.root.clone());
         }
@@ -2306,10 +2319,7 @@ impl NfsClient {
                 }
             }
             // Extract results and opened stateids from the resarray.
-            for (caller, s, e) in &map.ranges {
-                if !report.completed.contains(caller) {
-                    continue;
-                }
+            for (caller, s, e) in map.completed_ranges(&report) {
                 for j in *s..(*e).min(res.nops()) {
                     let ro = res.op(j);
                     unsafe {
@@ -2546,10 +2556,7 @@ impl NfsClient {
                     eof[i] = None;
                 }
             }
-            for (caller, s, e) in &map.ranges {
-                if !report.completed.contains(caller) {
-                    continue;
-                }
+            for (caller, s, e) in map.completed_ranges(&report) {
                 for j in *s..(*e).min(res.nops()) {
                     let ro = res.op(j);
                     unsafe {
@@ -2557,13 +2564,16 @@ impl NfsClient {
                             nfs_opnum4_NFS4_OP_READ => {
                                 let ok = ro.nfs_resop4_u.opread.READ4res_u.resok4;
                                 let len = ok.data.data_len as usize;
+                                // Borrow the XDR reply while it is alive and
+                                // copy once into the final growing result buffer.
                                 let bytes = if len == 0 {
-                                    Vec::new()
+                                    &[]
                                 } else {
                                     std::slice::from_raw_parts(ok.data.data_val as *const u8, len)
-                                        .to_vec()
                                 };
-                                data[*caller].get_or_insert_with(Vec::new).extend(bytes);
+                                data[*caller]
+                                    .get_or_insert_with(Vec::new)
+                                    .extend_from_slice(bytes);
                                 eof[*caller] = Some(ok.eof != 0);
                             }
                             nfs_opnum4_NFS4_OP_OPEN if !close_in_compound => {
@@ -3881,6 +3891,41 @@ mod tests {
         });
         assert!(empty_handle.is_empty());
         assert_eq!(empty_handle.len(), 0);
+    }
+
+    #[test]
+    fn allocation_path_components_borrow_input_and_preserve_cursor_navigation() {
+        let input = b"///a//\xff/.././leaf///";
+        let components: Vec<_> = super::path_components(input).collect();
+        assert_eq!(
+            components,
+            [&b"a"[..], &b"\xff"[..], &b".."[..], &b"."[..], &b"leaf"[..]]
+        );
+        assert_eq!(components[0].as_ptr(), input[3..].as_ptr());
+        assert_eq!(components[1].as_ptr(), input[6..].as_ptr());
+        let mut cursor = super::CfhCursor::default();
+        let mut compound = crate::compound::Compound::new();
+        let (_, ops) = cursor.set_parent(&mut compound, b"a/\xff/first").unwrap();
+        assert_eq!(ops, 4);
+        cursor.descend();
+        let (_, ops) = cursor
+            .set_current_parent(&mut compound, b"a/\xfe/second")
+            .unwrap();
+        assert_eq!(ops, 3); // RESTOREFH, LOOKUPP, LOOKUP
+        assert_eq!(cursor.saved_dir.as_deref(), Some(&b"a/\xff"[..]));
+        let before = compound.op_count();
+        let (_, ops) = cursor.set_parent(&mut compound, b"z/deep/third").unwrap();
+        assert_eq!(compound.op_count() - before, ops);
+        assert_eq!(ops, 4); // Root walk beats climbing the unrelated saved path.
+        assert_eq!(cursor.saved_dir.as_deref(), Some(&b"z/deep"[..]));
+        cursor.descend();
+        let before = compound.op_count();
+        let (_, ops) = cursor
+            .set_current_parent(&mut compound, b"other/new/fourth")
+            .unwrap();
+        assert_eq!(compound.op_count() - before, ops);
+        assert_eq!(ops, 3);
+        assert_eq!(cursor.saved_dir.as_deref(), Some(&b"z/deep"[..]));
     }
 
     #[test]

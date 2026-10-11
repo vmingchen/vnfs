@@ -6,6 +6,36 @@ use std::io::Read;
 use vfsi_nfs::mount::decode_mount_field;
 use vfsi_sync::DEFAULT_READ_ALLV_MAX_TOTAL_BYTES;
 
+#[test]
+fn allocation_auto_routes_retain_one_shared_pointer() {
+    use super::routing::NfsConnectionState;
+    use std::mem::size_of;
+
+    #[allow(dead_code)]
+    enum InlineRoute {
+        Posix,
+        Nfs(NfsConnectionState),
+    }
+    #[allow(dead_code)]
+    struct InlineAutoFile {
+        path: PathBuf,
+        route: InlineRoute,
+        inner: AutoFileInner,
+        owner: Arc<()>,
+    }
+    assert_eq!(size_of::<NfsConnection>(), size_of::<usize>());
+    assert!(size_of::<Route>() <= 2 * size_of::<usize>());
+    assert!(size_of::<Route>() < size_of::<InlineRoute>());
+    assert!(size_of::<AutoFile>() < size_of::<InlineAutoFile>());
+    println!(
+        "retained layout: Route {} -> {} bytes; AutoFile {} -> {} bytes",
+        size_of::<InlineRoute>(),
+        size_of::<Route>(),
+        size_of::<InlineAutoFile>(),
+        size_of::<AutoFile>(),
+    );
+}
+
 fn require_live_direct_route(client: &Auto, path: &Path) {
     // Ganesha/kernel mount setup can briefly return EREMOTEIO. Retry only
     // the read-only eligibility probe, never an application mutation.
@@ -647,7 +677,34 @@ fn live_changed_auto_limits_apply_to_cached_connections_and_open_handles() {
             .with_limits(ResourceLimits::new().max_read_bytes(4));
         let file = client.open(&path).unwrap();
         assert!(matches!(file.route(), AutoRoute::DirectNfs { .. }));
+        let Route::Nfs(pinned) = &file.route else {
+            panic!("expected NFS handle")
+        };
+        let cached = client
+            .connections
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        assert!(Arc::ptr_eq(pinned, &cached));
+        assert_eq!(pinned.spec.server.as_ptr(), cached.spec.server.as_ptr());
         let client = client.with_limits(ResourceLimits::new().max_read_bytes(8));
+        let updated = client
+            .connections
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        assert!(!Arc::ptr_eq(&cached, &updated));
+        assert!(Route::Nfs(cached.clone()).same_backend(&Route::Nfs(updated.clone())));
+        assert_eq!(cached.client.limits().read_byte_limit(), 4);
+        assert_eq!(updated.client.limits().read_byte_limit(), 8);
+        assert_eq!(cached.spec, updated.spec);
+        assert_eq!(cached.credentials, updated.credentials);
         let file = if reopen {
             file.close().unwrap();
             client.open(&path).unwrap()

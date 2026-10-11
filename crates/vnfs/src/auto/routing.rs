@@ -17,8 +17,10 @@ pub(super) struct MountTable {
     pub(super) mount_points: HashSet<PathBuf>,
 }
 
+pub(super) type NfsConnection = Arc<NfsConnectionState>;
+
 #[derive(Clone)]
-pub(super) struct NfsConnection {
+pub(super) struct NfsConnectionState {
     pub(super) spec: MountSpec,
     pub(super) client: NfsClient,
     pub(super) identity: Arc<()>,
@@ -178,12 +180,12 @@ impl Auto {
         if AuthSysIdentity::current().as_ref() != Some(&credentials) {
             return None;
         }
-        let connection = NfsConnection {
+        let connection = Arc::new(NfsConnectionState {
             spec: spec.clone(),
             client,
             identity: Arc::new(()),
             credentials,
-        };
+        });
         let mut cache = self.connections.lock().ok()?;
         if let Some(existing) = cache.get(&spec.id)
             && existing.spec == *spec

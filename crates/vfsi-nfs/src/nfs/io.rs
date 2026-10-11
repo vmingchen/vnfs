@@ -754,12 +754,13 @@ impl NfsVecFs {
         offsets: &[u64],
     ) -> VfResult<Vec<ReadResult>> {
         match self.nfs.readv_path_compound(path_ops, false) {
-            Ok(outcome) => {
+            Ok(mut outcome) => {
                 if let Some((i, _st)) = outcome.failed {
                     self.close_path_opens(&outcome.opened);
                     // Prefix [0..i) succeeded; resume [i..] via the phased
                     // path, re-attributing its error to the original index.
-                    let mut out = self.assemble_reads(reads, offsets, &outcome.data, &outcome.eof);
+                    let mut out =
+                        Self::assemble_reads(reads, offsets, &mut outcome.data, &outcome.eof);
                     match self.vread_path_fallback_nfs(&reads[i..]) {
                         Ok(suffix) => {
                             for (k, r) in suffix.into_iter().enumerate() {
@@ -773,7 +774,12 @@ impl NfsVecFs {
                     }
                 }
                 self.close_path_opens(&outcome.opened);
-                Ok(self.assemble_reads(reads, offsets, &outcome.data, &outcome.eof))
+                Ok(Self::assemble_reads(
+                    reads,
+                    offsets,
+                    &mut outcome.data,
+                    &outcome.eof,
+                ))
             }
             Err(error) if error.is_transport() => Err(vfsi_core::error_from_rpc(error, None)),
             Err(_) => self.vread_path_fallback_nfs(reads),
@@ -790,7 +796,7 @@ impl NfsVecFs {
         offsets: &[u64],
     ) -> VfResult<Vec<ReadResult>> {
         match self.nfs.readv_path_compound(path_ops, true) {
-            Ok(outcome) => {
+            Ok(mut outcome) => {
                 if let Some((i, st)) = outcome.failed {
                     if Self::is_stateid_error(st) {
                         // The special stateid itself is rejected: disable the
@@ -798,7 +804,8 @@ impl NfsVecFs {
                         self.merged_mode = MergedIoMode::Off;
                     }
                     self.close_path_opens(&outcome.opened);
-                    let mut out = self.assemble_reads(reads, offsets, &outcome.data, &outcome.eof);
+                    let mut out =
+                        Self::assemble_reads(reads, offsets, &mut outcome.data, &outcome.eof);
                     match self.vread_path_fallback_nfs(&reads[i..]) {
                         Ok(suffix) => {
                             for (k, r) in suffix.into_iter().enumerate() {
@@ -815,18 +822,22 @@ impl NfsVecFs {
                     self.merged_mode = MergedIoMode::OpenWrite;
                     return self.vread_path_openwrite_nfs(reads, path_ops, offsets);
                 }
-                Ok(self.assemble_reads(reads, offsets, &outcome.data, &outcome.eof))
+                Ok(Self::assemble_reads(
+                    reads,
+                    offsets,
+                    &mut outcome.data,
+                    &outcome.eof,
+                ))
             }
             Err(error) if error.is_transport() => Err(vfsi_core::error_from_rpc(error, None)),
             Err(_) => self.vread_path_fallback_nfs(reads),
         }
     }
 
-    fn assemble_reads(
-        &self,
+    pub(super) fn assemble_reads(
         reads: &[ReadOp],
         offsets: &[u64],
-        data: &[Option<Vec<u8>>],
+        data: &mut [Option<Vec<u8>>],
         eof: &[Option<bool>],
     ) -> Vec<ReadResult> {
         reads
@@ -835,7 +846,7 @@ impl NfsVecFs {
             .map(|(i, r)| ReadResult {
                 file: r.file.clone(),
                 offset: offsets[i],
-                data: data[i].clone().unwrap_or_default(),
+                data: data[i].take().unwrap_or_default(),
                 eof: eof[i].unwrap_or(false),
             })
             .collect()

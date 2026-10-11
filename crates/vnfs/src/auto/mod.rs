@@ -50,6 +50,7 @@ impl Auto {
             .unwrap_or_else(|error| error.into_inner())
             .values_mut()
         {
+            let connection = Arc::make_mut(connection);
             connection.client = connection.client.clone().with_limits(limits);
         }
         self
