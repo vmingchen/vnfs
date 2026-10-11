@@ -3310,6 +3310,8 @@ class VfsiFileSystem(AbstractFileSystem):
             try:
                 self._client.close(fd)
             except BaseException:
+                # This helper has no file object to retain cleanup ownership.
+                self._client.defer_close_many([fd])
                 # Preserve the mutation error if both the write and CLOSE fail.
                 if write_error is None:
                     raise
@@ -3614,10 +3616,12 @@ class VfsiFileSystem(AbstractFileSystem):
         sizes = [os.path.getsize(local_path) for local_path, _ in pairs]
 
         def upload_streamed(local_path, remote_path, size):
-            remote = self.open(remote_path, "xb" if mode == "create" else "wb")
             with callback.branched(local_path, remote_path) as child:
                 child.set_size(size)
-                with remote, open(local_path, "rb") as source:
+                # Finish fallible local setup before creating/truncating remote.
+                with open(local_path, "rb") as source, self.open(
+                    remote_path, "xb" if mode == "create" else "wb"
+                ) as remote:
                     while True:
                         chunk = source.read(
                             min(self.transfer_chunk_size, self.max_batch_bytes)

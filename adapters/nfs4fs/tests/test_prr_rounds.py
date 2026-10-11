@@ -76,3 +76,79 @@ def test_grouped_read_rejects_directory_and_closes_siblings(fs, cache_type):
         fs.commit_many(opened)
     assert not fs._client._fds
     assert fs.cat_file("/file") == b"original"
+
+
+@pytest.mark.parametrize("write_fails", [False, True])
+def test_exclusive_transfer_retains_failed_close_for_cleanup(
+    fs, monkeypatch, write_fails
+):
+    import errno
+
+    failed_fds = []
+
+    def fail_close(fd):
+        failed_fds.append(fd)
+        raise OSError(errno.EIO, "injected close failure")
+
+    def fail_write(*args):
+        raise OSError(errno.ENOSPC, "injected write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fs._client, "close", fail_close)
+        if write_fails:
+            patch.setattr(fs._client, "pwrite", fail_write)
+        with pytest.raises(OSError) as error:
+            fs.pipe_file("/exclusive", b"payload", mode="create")
+        assert error.value.errno == (errno.ENOSPC if write_fails else errno.EIO)
+    assert len(failed_fds) == 1
+    # Every still-open token must have an owner that will retry cleanup.
+    assert set(fs._client._fds) <= fs._client._deferred_close
+    assert fs.exists("/exclusive") == (not write_fails)
+    assert not fs._client._fds
+    if not write_fails:
+        assert fs.cat_file("/exclusive") == b"payload"
+
+
+@pytest.mark.parametrize("failure", ["branch", "enter", "set_size", "source_open"])
+def test_streamed_upload_setup_failure_preserves_destination(
+    fs, tmp_path, monkeypatch, failure
+):
+    import builtins
+
+    from fsspec.callbacks import Callback
+
+    fs.max_batch_bytes = 4
+    source = tmp_path / "upload-source"
+    source.write_bytes(b"more than four bytes")
+    fs.pipe_file("/destination", b"original")
+
+    class FailingCallback(Callback):
+        def branched(self, *args, **kwargs):
+            if failure == "branch":
+                raise RuntimeError("injected setup failure")
+            return Child()
+
+    class Child(Callback):
+        def __enter__(self):
+            if failure == "enter":
+                raise RuntimeError("injected setup failure")
+            return super().__enter__()
+
+        def set_size(self, size):
+            if failure == "set_size":
+                raise RuntimeError("injected setup failure")
+            return super().set_size(size)
+
+    original_open = builtins.open
+
+    def fail_source_open(path, mode="r", *args, **kwargs):
+        if str(path) == str(source) and mode == "rb":
+            raise RuntimeError("injected setup failure")
+        return original_open(path, mode, *args, **kwargs)
+
+    if failure == "source_open":
+        monkeypatch.setattr(builtins, "open", fail_source_open)
+    with pytest.raises(RuntimeError, match="injected setup failure"):
+        fs.put(str(source), "/destination", callback=FailingCallback())
+    assert not fs._client._fds
+    assert fs.cat_file("/destination") == b"original"
