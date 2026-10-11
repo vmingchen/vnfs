@@ -1,4 +1,4 @@
-//! Reproducible warm page-cache comparison; no cache-dropping or host tuning.
+//! Reproducible buffered-I/O comparison; only advisory per-file cache eviction.
 #[cfg(target_os = "linux")]
 fn pattern_byte(file: usize, offset: u64, generation: u8) -> u8 {
     ((file as u64 * 67 + offset % 251) as u8).wrapping_add(generation)
@@ -46,6 +46,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Read,
         Write,
         ColdRead,
+        MixedRead,
+        OwnedRead(bool),
     }
 
     fn measure(
@@ -58,7 +60,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mode: Mode,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let write = matches!(mode, Mode::Write);
-        let cold = matches!(mode, Mode::ColdRead);
+        let cold = matches!(
+            mode,
+            Mode::ColdRead | Mode::MixedRead | Mode::OwnedRead(true)
+        );
+        let owned = matches!(mode, Mode::OwnedRead(_));
+        let mixed = matches!(mode, Mode::MixedRead);
         let files = fs.vopen(
             &paths
                 .iter()
@@ -110,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     buffer.fill(0xa5);
                 }
             }
-            for file in source.iter().filter(|_| cold) {
+            for file in source.iter().skip(usize::from(mixed)).filter(|_| cold) {
                 // Outside the timed region. Advisory eviction is not a
                 // guarantee of cold media or eviction of device/controller caches.
                 let result = unsafe {
@@ -131,6 +138,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let results = fs.vwrite(&ops, WriteOptions::new().write_all(true))?;
                 assert_eq!(results.len(), offsets.len());
                 assert!(results.iter().all(|result| result.written == size));
+            } else if owned {
+                let results = fs.vread(
+                    offsets
+                        .iter()
+                        .enumerate()
+                        .map(|(i, offset)| ReadOp::range(&files[i % files.len()], *offset, size)),
+                    budget,
+                )?;
+                assert_eq!(results.len(), offsets.len());
+                assert!(results.iter().all(|result| result.read() == size));
+                buffers = results
+                    .into_iter()
+                    .map(|result| result.into_data().unwrap())
+                    .collect();
             } else {
                 let ops: Vec<_> = offsets
                     .iter()
@@ -184,11 +205,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let parent = std::env::args().nth(2).unwrap_or_else(|| "target".into());
     let backend = std::env::args().nth(3).unwrap_or_else(|| "both".into());
     let phase = std::env::args().nth(4).unwrap_or_else(|| "all".into());
-    if !matches!(backend.as_str(), "both" | "posix" | "uring")
-        || !matches!(phase.as_str(), "all" | "warm" | "cold")
-    {
+    if !matches!(
+        backend.as_str(),
+        "both" | "both-reverse" | "posix" | "uring"
+    ) || !matches!(
+        phase.as_str(),
+        "all"
+            | "warm"
+            | "cold"
+            | "large-write"
+            | "small-write"
+            | "small-read"
+            | "large-read"
+            | "mixed-read"
+            | "write-shapes"
+            | "owned-read"
+            | "owned-large-read"
+            | "owned-cold-read"
+            | "owned-cold-large-read"
+    ) {
         return Err(
-            "usage: uring_bench [rounds] [parent] [both|posix|uring] [all|warm|cold] [queue_depth]"
+            "usage: uring_bench [rounds] [parent] [both|both-reverse|posix|uring] [all|warm|cold|small-read|small-write|large-read|large-write|mixed-read|write-shapes|owned-read|owned-large-read|owned-cold-read|owned-cold-large-read] [queue_depth] [max_batch_bytes] [ring|cached|adaptive]"
                 .into(),
         );
     }
@@ -197,8 +234,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|arg| arg.parse::<u32>())
         .transpose()?
         .unwrap_or(256);
+    let bytes = std::env::args()
+        .nth(6)
+        .map(|arg| arg.parse::<usize>())
+        .transpose()?
+        .unwrap_or(2 * 1024 * 1024);
+    let read_mode = std::env::args().nth(7).unwrap_or_else(|| "ring".into());
+    if !matches!(read_mode.as_str(), "ring" | "cached" | "adaptive") {
+        return Err("execution mode must be ring, cached or adaptive".into());
+    }
     let options = vfsi_uring::Options::default()
-        .queue_depth(std::num::NonZeroU32::new(depth).ok_or("queue_depth must be nonzero")?);
+        .cached_reads(read_mode != "ring")
+        .syscall_writes(read_mode == "adaptive")
+        .queue_depth(std::num::NonZeroU32::new(depth).ok_or("queue_depth must be nonzero")?)
+        .max_batch_bytes(NonZeroUsize::new(bytes).ok_or("max_batch_bytes must be nonzero")?);
     let temp = tempfile::Builder::new()
         .prefix("vfsi-uring-bench-")
         .tempdir_in(parent)?;
@@ -220,17 +269,91 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // opaque facade on one side and a native adapter on the other.
     let (uring, telemetry) = vfsi_uring::connect_with_telemetry(root, options)?;
     println!(
-        "warm-cache, buffered I/O, no fsync, {} measured rounds; root={}",
+        "phase={phase}, buffered I/O, no fsync, {} measured rounds; queue_depth={depth} max_batch_bytes={bytes} execution_mode={read_mode}; root={}",
         rounds,
         root.display()
     );
+    if phase == "mixed-read" {
+        println!("first file warm, advisory eviction of the other 255 files outside timing");
+    }
     fn cases(
         fs: &impl Vfsi,
         root: &Path,
         name: &str,
         paths: &[String],
         rounds: usize,
+        phase: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        if phase.starts_with("owned-") {
+            let large = phase.contains("large");
+            let cold = phase.contains("cold");
+            let offsets: Vec<_> = if large {
+                (0..128).map(|i| i * 128 * 1024).collect()
+            } else {
+                vec![0; paths.len()]
+            };
+            let large_path = ["/large".into()];
+            return measure(
+                (fs, root),
+                &format!("{name}/{phase}"),
+                if large { &large_path } else { paths },
+                &offsets,
+                if large { 128 * 1024 } else { 4096 },
+                if cold { rounds.min(20) } else { rounds },
+                Mode::OwnedRead(cold),
+            );
+        }
+        if phase == "write-shapes" {
+            // Equal 16 MiB payloads distinguish one large request, contiguous
+            // requests on one inode, and independent requests on many inodes.
+            for (size, count, independent, label) in [
+                (16 * 1024 * 1024, 1, false, "single-16m-write"),
+                (128 * 1024, 128, false, "large-write"),
+                (64 * 1024, paths.len(), true, "many-64k-write"),
+            ] {
+                let offsets: Vec<_> = (0..count)
+                    .map(|i| if independent { 0 } else { (i * size) as u64 })
+                    .collect();
+                let large_path = ["/large".into()];
+                measure(
+                    (fs, root),
+                    &format!("{name}/{label}"),
+                    if independent { paths } else { &large_path },
+                    &offsets,
+                    size,
+                    rounds,
+                    Mode::Write,
+                )?;
+            }
+            return Ok(());
+        }
+        if matches!(
+            phase,
+            "small-read" | "small-write" | "large-read" | "large-write" | "mixed-read"
+        ) {
+            let large = phase.starts_with("large");
+            let offsets: Vec<_> = if large {
+                (0..128).map(|i| i * 128 * 1024).collect()
+            } else {
+                vec![0; paths.len()]
+            };
+            let large_path = ["/large".into()];
+            return measure(
+                (fs, root),
+                &format!("{name}/{phase}"),
+                if large { &large_path } else { paths },
+                &offsets,
+                if large { 128 * 1024 } else { 4096 },
+                rounds,
+                if phase == "mixed-read" {
+                    Mode::MixedRead
+                } else if phase.ends_with("write") {
+                    Mode::Write
+                } else {
+                    Mode::Read
+                },
+            );
+        }
         let offsets = vec![0; paths.len()];
         measure(
             (fs, root),
@@ -284,15 +407,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         Ok(())
     }
+    let backends = if backend == "both-reverse" {
+        [(&uring, "uring"), (&local, "local")]
+    } else {
+        [(&local, "local"), (&uring, "uring")]
+    };
+    let selected = |name: &str| match backend.as_str() {
+        "posix" => name == "local",
+        "uring" => name == "uring",
+        _ => true,
+    };
     if phase != "cold" {
-        if backend != "uring" {
-            cases(&local, root, "local", &paths, rounds)?;
-        }
-        if backend != "posix" {
-            cases(&uring, root, "uring", &paths, rounds)?;
+        for (fs, name) in backends.iter().filter(|(_, name)| selected(name)) {
+            cases(*fs, root, name, &paths, rounds, &phase)?;
         }
     }
-    if phase == "warm" {
+    if matches!(
+        phase.as_str(),
+        "warm"
+            | "small-read"
+            | "small-write"
+            | "large-read"
+            | "large-write"
+            | "mixed-read"
+            | "write-shapes"
+            | "owned-read"
+            | "owned-large-read"
+            | "owned-cold-read"
+            | "owned-cold-large-read"
+    ) {
         let stats = telemetry.snapshot();
         println!("ring: {stats:?}");
         assert_eq!(stats.submissions, stats.completions);
@@ -301,21 +444,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("advisory page-cache eviction before each read; sync/eviction outside timing");
     let cold_rounds = rounds.min(20);
     let offsets = vec![0; paths.len()];
-    if backend != "uring" {
+    for (fs, name) in backends.iter().filter(|(_, name)| selected(name)) {
         measure(
-            (&local, root),
-            "local/cold-small-read",
-            &paths,
-            &offsets,
-            4096,
-            cold_rounds,
-            Mode::ColdRead,
-        )?;
-    }
-    if backend != "posix" {
-        measure(
-            (&uring, root),
-            "uring/cold-small-read",
+            (*fs, root),
+            &format!("{name}/cold-small-read"),
             &paths,
             &offsets,
             4096,
@@ -324,21 +456,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
     }
     let offsets: Vec<_> = (0..128).map(|i| i * 128 * 1024).collect();
-    if backend != "uring" {
+    for (fs, name) in backends.iter().filter(|(_, name)| selected(name)) {
         measure(
-            (&local, root),
-            "local/cold-large-read",
-            &["/large".into()],
-            &offsets,
-            128 * 1024,
-            cold_rounds,
-            Mode::ColdRead,
-        )?;
-    }
-    if backend != "posix" {
-        measure(
-            (&uring, root),
-            "uring/cold-large-read",
+            (*fs, root),
+            &format!("{name}/cold-large-read"),
             &["/large".into()],
             &offsets,
             128 * 1024,
@@ -348,13 +469,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let stats = telemetry.snapshot();
     println!(
-        "ring: waves={} submissions={} completions={} peak_scratch_bytes={} enters={} scratch_growths={}",
+        "ring: waves={} submissions={} completions={} peak_transfer_bytes={} enters={} scratch_growths={} copied_read_bytes={}",
         stats.waves,
         stats.submissions,
         stats.completions,
         stats.peak_bytes,
         stats.enters,
-        stats.scratch_growths
+        stats.scratch_growths,
+        stats.copied_read_bytes
+    );
+    println!(
+        "cache: probes={} hits={} ring_fallbacks={} syscall_reads={} syscall_writes={}",
+        stats.cache_probes,
+        stats.cache_hits,
+        stats.cache_misses,
+        stats.syscall_reads,
+        stats.syscall_writes
     );
     assert_eq!(stats.submissions, stats.completions);
     if backend != "posix" && depth > 1 {

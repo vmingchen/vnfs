@@ -101,9 +101,24 @@ fn noreplace_error_code(
 /// Open state for a descriptor on the local filesystem.
 struct LocalOpen {
     file: Arc<File>,
+    // Device/inode identity cannot change while this descriptor pins the object.
+    // Cache only identity, never size/timestamps or pathname-based metadata.
+    identity: std::cell::Cell<Option<(u64, u64)>>,
     path: PathBuf,
     cur_offset: u64,
     append: bool,
+}
+
+impl LocalOpen {
+    fn identity(&self) -> std::io::Result<(u64, u64)> {
+        if let Some(identity) = self.identity.get() {
+            return Ok(identity);
+        }
+        let metadata = self.file.metadata()?;
+        let identity = (metadata.dev(), metadata.ino());
+        self.identity.set(Some(identity));
+        Ok(identity)
+    }
 }
 
 /// Owned iterator retained while application callbacks run without the lock.
@@ -836,6 +851,38 @@ impl LocalBackend {
         })
     }
 
+    // Duplicate cursor requests need sequential offset resolution. Independent
+    // borrowed and owned reads share the same descriptor/offset preflight.
+    fn independent_reads(reads: &[ReadOp]) -> bool {
+        let mut cursors = std::collections::HashSet::new();
+        reads.iter().all(|op| {
+            op.file.is_descriptor()
+                && (!matches!(op.offset, VfOffset::Cur) || cursors.insert(op.file.fd()))
+        })
+    }
+
+    fn prepare_read<'a>(
+        open_files: &'a HashMap<i32, LocalOpen>,
+        op: &ReadOp,
+        index: usize,
+    ) -> VfResult<(&'a Arc<File>, u64)> {
+        let open = open_files
+            .get(&op.file.fd().unwrap())
+            .ok_or_else(|| VfError::failure(index, ERR_EBADF))?;
+        let file = &open.file;
+        let offset = match op.offset {
+            VfOffset::At(offset) => offset,
+            VfOffset::Cur => open.cur_offset,
+            VfOffset::End => file
+                .metadata()
+                .map_err(|e| VfError::failure(index, Self::errno(&e)))?
+                .len(),
+            _ => return Err(VfError::failure(index, ERR_INVAL)),
+        };
+        checked_offset(offset, op.length as u64, index)?;
+        Ok((file, offset))
+    }
+
     fn readv_one_into(&mut self, op: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
         if op.length != buffer.len() {
             return Err(VfError::client(0, ERR_INVAL));
@@ -1192,6 +1239,7 @@ impl HandleBackend for LocalBackend {
         }
         let fd = self.insert_open_file(LocalOpen {
             file: Arc::new(file),
+            identity: std::cell::Cell::new(None),
             path: pathname.to_path_buf(),
             cur_offset: 0,
             append: flags & libc::O_APPEND != 0,
@@ -1361,6 +1409,64 @@ impl VectorBackend for LocalBackend {
     }
 
     fn vread_impl(&mut self, reads: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
+        let owned = self.io.owned_read_window().is_some_and(|limit| {
+            reads
+                .iter()
+                .try_fold(0usize, |total, op| total.checked_add(op.length))
+                .is_some_and(|total| total <= limit)
+        });
+        if owned && Self::independent_reads(reads) {
+            let prepared: Vec<_> = reads
+                .iter()
+                .enumerate()
+                .map(|(index, op)| Self::prepare_read(&self.open_files, op, index))
+                .collect::<VfResult<_>>()?;
+            let operations = prepared
+                .iter()
+                .zip(reads)
+                .map(|((file, offset), op)| io::OwnedRead {
+                    file: Arc::clone(file),
+                    offset: *offset,
+                    buffer: vec![0; op.length],
+                })
+                .collect();
+            let offsets: Vec<_> = prepared.iter().map(|(_, offset)| *offset).collect();
+            drop(prepared);
+            let results = self.io.read_owned(operations);
+            if results.len() != reads.len() {
+                return Err(VfError::client(0, VF_ERR_RPC));
+            }
+            let mut out = Vec::with_capacity(reads.len());
+            let mut failure = None;
+            for (index, ((op, offset), result)) in
+                reads.iter().zip(offsets).zip(results).enumerate()
+            {
+                match result {
+                    Ok(data) if data.len() <= op.length => {
+                        if matches!(op.offset, VfOffset::Cur) {
+                            self.advance_offset(&op.file, offset + data.len() as u64);
+                        }
+                        out.push(ReadResult {
+                            file: op.file.clone(),
+                            offset,
+                            eof: data.len() < op.length,
+                            data,
+                        });
+                    }
+                    Ok(_) => {
+                        failure.get_or_insert(VfError::client(index, VF_ERR_RPC));
+                    }
+                    Err(error) => {
+                        failure.get_or_insert(if error.kind() == std::io::ErrorKind::InvalidData {
+                            VfError::client(index, VF_ERR_RPC)
+                        } else {
+                            VfError::failure(index, Self::errno(&error))
+                        });
+                    }
+                }
+            }
+            return failure.map_or(Ok(out), Err);
+        }
         if reads.iter().all(|op| op.file.is_descriptor()) {
             let mut storage: Vec<_> = reads.iter().map(|op| vec![0; op.length]).collect();
             let mut buffers: Vec<_> = storage.iter_mut().map(Vec::as_mut_slice).collect();
@@ -1394,37 +1500,15 @@ impl VectorBackend for LocalBackend {
         if reads.len() != buffers.len() {
             return Err(VfError::client(0, ERR_INVAL));
         }
-        // Positional requests on the same descriptor are independent. Multiple
-        // cursor requests are ordered by the existing scalar implementation.
-        let mut cursors = std::collections::HashSet::new();
-        let independent = reads.iter().all(|op| {
-            op.file.is_descriptor()
-                && (!matches!(op.offset, VfOffset::Cur) || cursors.insert(op.file.fd()))
-        });
-        if independent {
+        for (index, (op, buffer)) in reads.iter().zip(buffers.iter()).enumerate() {
+            if op.length != buffer.len() {
+                return Err(VfError::client(index, ERR_INVAL));
+            }
+        }
+        if Self::independent_reads(reads) {
             let mut operations = Vec::with_capacity(reads.len());
             for (index, (op, buffer)) in reads.iter().zip(buffers.iter_mut()).enumerate() {
-                if op.length != buffer.len() {
-                    return Err(VfError::client(index, ERR_INVAL));
-                }
-                let file = &self
-                    .open_files
-                    .get(&op.file.fd().unwrap())
-                    .ok_or_else(|| VfError::failure(index, ERR_EBADF))?
-                    .file;
-                // Only EOF-relative offsets need the current file size. At/Cur
-                // reads determine EOF from the transfer, not a metadata probe.
-                let len = if matches!(op.offset, VfOffset::End) {
-                    file.metadata()
-                        .map_err(|e| VfError::failure(index, Self::errno(&e)))?
-                        .len()
-                } else {
-                    0
-                };
-                let offset = self
-                    .resolve_offset(&op.file, op.offset, len)
-                    .map_err(|e| e.with_index(index))?;
-                checked_offset(offset, op.length as u64, index)?;
+                let (file, offset) = Self::prepare_read(&self.open_files, op, index)?;
                 operations.push(io::Read {
                     file,
                     offset,
@@ -1480,10 +1564,10 @@ impl VectorBackend for LocalBackend {
             .all(|op| op.file().is_descriptor() && matches!(op.offset(), VfOffset::At(_)))
         {
             let mut operations = Vec::with_capacity(writes.len());
-            let mut ranges = Vec::with_capacity(writes.len());
-            let mut identities = HashMap::new();
-            let mut independent = true;
             let ordered = self.io.ordered();
+            // Ordered executors never need an alias/overlap scan.
+            let mut ranges = Vec::with_capacity(if ordered { 0 } else { writes.len() });
+            let mut independent = true;
             for (index, op) in writes.iter().enumerate() {
                 let fd = op.file().fd().unwrap();
                 let open = self
@@ -1499,17 +1583,9 @@ impl VectorBackend for LocalBackend {
                 };
                 let end = checked_offset(offset, op.data().len() as u64, index)?;
                 if !ordered {
-                    let identity = if let Some(identity) = identities.get(&fd) {
-                        *identity
-                    } else {
-                        let md = open
-                            .file
-                            .metadata()
-                            .map_err(|e| VfError::failure(index, Self::errno(&e)))?;
-                        let identity = (md.dev(), md.ino());
-                        identities.insert(fd, identity);
-                        identity
-                    };
+                    let identity = open
+                        .identity()
+                        .map_err(|e| VfError::failure(index, Self::errno(&e)))?;
                     ranges.push((identity, offset, end));
                 }
                 operations.push(io::Write {
@@ -1519,17 +1595,16 @@ impl VectorBackend for LocalBackend {
                 });
             }
             if independent && (ordered || !writes_overlap(&mut ranges)) {
-                let offsets: Vec<_> = operations.iter().map(|op| op.offset).collect();
                 let results = self.io.write(&operations);
                 if results.len() != writes.len() {
                     return Err(VfError::client(0, VF_ERR_RPC));
                 }
                 return writes
                     .iter()
-                    .zip(offsets)
+                    .zip(operations)
                     .zip(results)
                     .enumerate()
-                    .map(|(index, ((op, offset), result))| {
+                    .map(|(index, ((op, request), result))| {
                         let written =
                             result.map_err(|e| VfError::failure(index, Self::errno(&e)))?;
                         if written > op.data().len() {
@@ -1537,7 +1612,7 @@ impl VectorBackend for LocalBackend {
                         }
                         Ok(WriteResult {
                             file: op.file().clone(),
-                            offset,
+                            offset: request.offset,
                             written,
                             stable: true,
                         })

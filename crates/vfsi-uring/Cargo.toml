@@ -9,6 +9,7 @@ repository = "https://github.com/vmingchen/vnfs"
 keywords = ["filesystem", "vectorized", "io-uring", "vfsi"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
+bitfields = { workspace = true }
 io-uring = "0.7.15"
 libc = { workspace = true }
 vfsi-core = { workspace = true }

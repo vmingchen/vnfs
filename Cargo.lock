@@ -1411,6 +1411,7 @@ dependencies = [
 name = "vfsi-uring"
 version = "0.1.0"
 dependencies = [
+ "bitfields",
  "io-uring",
  "libc",
  "tempfile",

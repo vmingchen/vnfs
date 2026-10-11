@@ -6,66 +6,70 @@ use vfsi_uring::{Options, connect, connect_with_telemetry};
 
 #[test]
 fn read_write_sync_vectors_are_bounded_and_match_local() {
-    let root = tempfile::tempdir().unwrap();
-    let paths: Vec<_> = (0..7).map(|i| format!("/file-{i}")).collect();
-    for (i, path) in paths.iter().enumerate() {
-        std::fs::write(root.path().join(&path[1..]), vec![i as u8; 100 + i]).unwrap();
-    }
-    let options = Options::default()
-        .queue_depth(NonZeroU32::new(3).unwrap())
-        .max_batch_bytes(NonZeroUsize::new(80).unwrap());
-    let (fs, telemetry) = connect_with_telemetry(root.path(), options).unwrap();
-    let local = vfsi_posix::connect(root.path()).unwrap();
-    let opens: Vec<_> = paths
-        .iter()
-        .map(|p| OpenOp::new(p, OpenFlags::READ | OpenFlags::WRITE))
-        .collect();
-    let files = fs.vopen(&opens).unwrap();
-    let oracle = local.vopen(&opens).unwrap();
-    let actual = fs
-        .vread(
-            files.iter().map(|file| ReadOp::range(file, 3, 200)),
-            ReadOptions::new(),
-        )
-        .unwrap();
-    let expected = local
-        .vread(
-            oracle.iter().map(|file| ReadOp::range(file, 3, 200)),
-            ReadOptions::new(),
-        )
-        .unwrap();
-    assert_eq!(actual, expected);
-    let data: Vec<_> = (0..7).map(|i| vec![20 + i; 133]).collect();
-    let writes: Vec<_> = files
-        .iter()
-        .zip(&data)
-        .map(|(f, b)| WriteOp::at(f, 0, b))
-        .collect();
-    assert!(
-        fs.vwrite(&writes, WriteOptions::new().write_all(true))
-            .unwrap()
+    for adaptive in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = (0..7).map(|i| format!("/file-{i}")).collect();
+        for (i, path) in paths.iter().enumerate() {
+            std::fs::write(root.path().join(&path[1..]), vec![i as u8; 100 + i]).unwrap();
+        }
+        let options = Options::default()
+            .cached_reads(adaptive)
+            .syscall_writes(adaptive)
+            .queue_depth(NonZeroU32::new(3).unwrap())
+            .max_batch_bytes(NonZeroUsize::new(80).unwrap());
+        let (fs, telemetry) = connect_with_telemetry(root.path(), options).unwrap();
+        let local = vfsi_posix::connect(root.path()).unwrap();
+        let opens: Vec<_> = paths
             .iter()
-            .all(|r| r.written == 133)
-    );
-    fs.vfsync(&files.iter().collect::<Vec<_>>(), SyncMode::Data)
-        .unwrap();
-    fs.vfsync(&files.iter().collect::<Vec<_>>(), SyncMode::All)
-        .unwrap();
-    let actual = fs
-        .vread(
-            files.iter().map(|file| ReadOp::range(file, 0, 200)),
-            ReadOptions::new(),
-        )
-        .unwrap();
-    for (result, data) in actual.iter().zip(&data) {
-        assert_eq!(result.data(), Some(data.as_slice()));
+            .map(|p| OpenOp::new(p, OpenFlags::READ | OpenFlags::WRITE))
+            .collect();
+        let files = fs.vopen(&opens).unwrap();
+        let oracle = local.vopen(&opens).unwrap();
+        let actual = fs
+            .vread(
+                files.iter().map(|file| ReadOp::range(file, 3, 200)),
+                ReadOptions::new(),
+            )
+            .unwrap();
+        let expected = local
+            .vread(
+                oracle.iter().map(|file| ReadOp::range(file, 3, 200)),
+                ReadOptions::new(),
+            )
+            .unwrap();
+        assert_eq!(actual, expected);
+        let data: Vec<_> = (0..7).map(|i| vec![20 + i; 133]).collect();
+        let writes: Vec<_> = files
+            .iter()
+            .zip(&data)
+            .map(|(f, b)| WriteOp::at(f, 0, b))
+            .collect();
+        assert!(
+            fs.vwrite(&writes, WriteOptions::new().write_all(true))
+                .unwrap()
+                .iter()
+                .all(|r| r.written == 133)
+        );
+        fs.vfsync(&files.iter().collect::<Vec<_>>(), SyncMode::Data)
+            .unwrap();
+        fs.vfsync(&files.iter().collect::<Vec<_>>(), SyncMode::All)
+            .unwrap();
+        let actual = fs
+            .vread(
+                files.iter().map(|file| ReadOp::range(file, 0, 200)),
+                ReadOptions::new(),
+            )
+            .unwrap();
+        for (result, data) in actual.iter().zip(&data) {
+            assert_eq!(result.data(), Some(data.as_slice()));
+        }
+        fs.close_files(files).unwrap();
+        local.close_files(oracle).unwrap();
+        let stats = telemetry.snapshot();
+        assert_eq!(stats.submissions, stats.completions);
+        assert!(stats.peak_bytes <= 80);
+        assert!(stats.submissions > stats.waves, "syncs must be batched");
     }
-    fs.close_files(files).unwrap();
-    local.close_files(oracle).unwrap();
-    let stats = telemetry.snapshot();
-    assert_eq!(stats.submissions, stats.completions);
-    assert!(stats.peak_bytes <= 80);
-    assert!(stats.submissions > stats.waves, "syncs must be batched");
 }
 
 #[test]
@@ -93,6 +97,16 @@ fn single_file_ranges_and_caller_buffers_are_batched_without_gaps() {
     assert_eq!(buffers.concat(), bytes);
     assert_eq!(telemetry.snapshot().waves, 1);
     assert_eq!(telemetry.snapshot().submissions, 16);
+    assert_eq!(telemetry.snapshot().copied_read_bytes, 4096);
+    let owned = fs
+        .vread([ReadOp::range(&files[0], 0, 4096)], ReadOptions::new())
+        .unwrap();
+    assert_eq!(owned[0].data(), Some(bytes.as_slice()));
+    assert_eq!(
+        telemetry.snapshot().copied_read_bytes,
+        4096,
+        "bounded owned reads must not copy through scratch"
+    );
     let results = fs
         .vread(
             [
@@ -105,6 +119,26 @@ fn single_file_ranges_and_caller_buffers_are_batched_without_gaps() {
     assert!(results[0].eof());
     assert_eq!(results[0].read(), 0);
     assert_eq!(results[1].read(), 0);
+    let mut caller = [99; 4];
+    let mixed = fs
+        .vread(
+            [
+                ReadOp::range(&files[0], 0, 4),
+                ReadOp::into(&files[0], 4, &mut caller),
+                ReadOp::range(&files[0], 8, 4),
+            ],
+            ReadOptions::new(),
+        )
+        .unwrap();
+    assert_eq!(mixed[0].data(), Some(&bytes[..4]));
+    assert!(mixed[1].data().is_none());
+    assert_eq!(caller, bytes[4..8]);
+    assert_eq!(mixed[2].data(), Some(&bytes[8..12]));
+    assert_eq!(
+        telemetry.snapshot().copied_read_bytes,
+        4100,
+        "only the borrowed destination copies"
+    );
     fs.close_files(files).unwrap();
 }
 
@@ -319,7 +353,58 @@ fn disjoint_writes_to_one_file_are_batched_at_their_actual_offsets() {
     let stats = telemetry.snapshot();
     assert_eq!(
         (stats.waves, stats.submissions, stats.completions),
-        (1, 4, 4)
+        (1, 1, 1),
+        "adjacent writes to one descriptor must share one kernel transfer"
     );
     fs.close_files(files).unwrap();
+}
+
+#[test]
+fn write_coalescing_respects_gaps_order_descriptors_and_wave_limits() {
+    for (offsets, owners, depth, budget, waves, submissions) in [
+        ([0, 3, 6], [0, 0, 0], 256, 32, 1, 1),
+        ([0, 4, 8], [0, 0, 0], 256, 32, 1, 3),
+        ([6, 3, 0], [0, 0, 0], 256, 32, 1, 3),
+        ([0, 3, 6], [0, 1, 0], 256, 32, 1, 3),
+        ([0, 3, 6], [0, 0, 0], 2, 32, 2, 2),
+        ([0, 3, 6], [0, 0, 0], 256, 5, 2, 2),
+        ([0, 3, 6], [0, 0, 0], 256, 1, 9, 9),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        std::fs::write(&path, [0; 16]).unwrap();
+        let (fs, telemetry) = connect_with_telemetry(
+            root.path(),
+            Options::default()
+                .queue_depth(NonZeroU32::new(depth).unwrap())
+                .max_batch_bytes(NonZeroUsize::new(budget).unwrap()),
+        )
+        .unwrap();
+        // Two opens of the same inode must not be merged across descriptors.
+        let files = fs
+            .vopen(&[
+                OpenOp::new("/file", OpenFlags::WRITE),
+                OpenOp::new("/file", OpenFlags::WRITE),
+            ])
+            .unwrap();
+        let blocks = [*b"abc", *b"DEF", *b"ghi"];
+        let writes: Vec<_> = (0..3)
+            .map(|i| WriteOp::at(&files[owners[i]], offsets[i], &blocks[i]))
+            .collect();
+        let results = fs.vwrite(&writes, Default::default()).unwrap();
+        let mut expected = [0; 16];
+        for i in 0..3 {
+            assert_eq!((results[i].offset, results[i].written), (offsets[i], 3));
+            let start = offsets[i] as usize;
+            expected[start..start + 3].copy_from_slice(&blocks[i]);
+        }
+        assert_eq!(std::fs::read(path).unwrap(), expected);
+        let stats = telemetry.snapshot();
+        assert_eq!(
+            (stats.waves, stats.submissions, stats.completions),
+            (waves, submissions, submissions)
+        );
+        assert!(stats.peak_bytes <= budget as u64);
+        fs.close_files(files).unwrap();
+    }
 }

@@ -72,6 +72,28 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_identity_cache_stays_with_the_open_object_not_its_path() {
+        let (root, mut backend) = fs("descriptor-identity");
+        let path = root.0.join("file");
+        std::fs::write(&path, b"old").unwrap();
+        let handle = backend
+            .open_raw_impl(Path::new("/file"), libc::O_RDONLY, 0)
+            .unwrap();
+        let open = backend.open_files.get(&handle.fd().unwrap()).unwrap();
+        assert_eq!(open.identity.get(), None);
+        let original = open.identity().unwrap();
+        assert_eq!(open.identity.get(), Some(original));
+        std::fs::rename(&path, root.0.join("old")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        assert_eq!(open.identity().unwrap(), original);
+        use std::os::unix::fs::MetadataExt;
+        let replacement = std::fs::metadata(path).unwrap();
+        assert_ne!(original, (replacement.dev(), replacement.ino()));
+        assert_eq!(open.file.metadata().unwrap().len(), 3);
+        backend.close_impl(&handle).unwrap();
+    }
+
+    #[test]
     fn vfsi_vsetattrs_batches_permissions_and_sizes() {
         let (root, backend) = fs("vsetattrs-many");
         let client = FsClient::new(backend);
