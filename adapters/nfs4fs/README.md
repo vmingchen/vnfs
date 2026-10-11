@@ -418,10 +418,22 @@ visible when the TTL expires or when the caller requests a refresh. Use
   identity and connection, so size the pool deliberately.
 - APIs that materialize complete remote results have independent safety
   limits. `read_all_max_total_bytes` bounds every bytes-returning read,
-  including whole-file reads, buffered `read(-1)`, `cat`, and `cat_ranges` (16
+  including whole-file reads, buffered `read(-1)`, binary `readline`/`readuntil`,
+  `cat`, and `cat_ranges` (16
   MiB); `directory_max_entries` (100,000), `directory_max_path_bytes` (16
   MiB), and `walk_max_depth` (128) bound listings and recursive walks. These
   limits are configurable per filesystem instance and survive reconnects.
+- `with fs.transaction:` stages scalar and grouped write/append/exclusive
+  opens, `pipe`, and file uploads through `put`, independently of file size.
+  Update modes containing `+` and directory uploads are rejected within a
+  transaction before mutation. Other namespace operations such as `mkdir`
+  and `rm` are not transactional. Remote staging files are created privately
+  with mode `0600`; replacement preserves the destination's ordinary permission
+  bits before publication. New transactional files remain private. Replacement
+  creates a new inode; ownership and ACL preservation are not provided.
+  Transaction writes require a native adapter with private-create support;
+  an older adapter raises an upgrade error before allocating a write spool.
+  Ordinary reads and writes remain available with otherwise compatible adapters.
 - Transaction writes use a disk-backed spool after
   `transaction_spool_threshold` (8 MiB), upload to unpredictable temporary
   names in each destination directory, then expose the batch with a vectorized
