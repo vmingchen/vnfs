@@ -1002,6 +1002,8 @@ class VfsiFile(AbstractBufferedFile):
     ):
         self._raw = _RawVfsiFile(fs, path, mode, fd=fd, identity=identity)
         self._base_mode = _normalize_mode(mode)
+        if fd is not None and self._base_mode in ("a", "a+") and size is not None:
+            self._raw._pos = size
         self._buffered_read = self._base_mode == "r" and cache_type not in (
             None,
             "none",
@@ -3795,20 +3797,23 @@ class VfsiFileSystem(AbstractFileSystem):
             metadata_indices = [
                 index
                 for index, mode in enumerate(modes)
-                if _normalize_mode(mode) == "r"
-                or (
-                    _normalize_mode(mode) == "a"
-                    and effective_write_buffering
-                    and discovered_sizes[index] is None
-                )
+                if _normalize_mode(mode) in ("r", "a", "a+")
             ]
             if metadata_indices:
                 attrs = self._client.fstat_many(
                     [fds[index] for index in metadata_indices]
                 )
                 for index, attr in zip(metadata_indices, attrs):
+                    if attr["type"] == "directory":
+                        raise IsADirectoryError(
+                            errno.EISDIR, "Is a directory", paths[index]
+                        )
                     identities[index] = _handle_identity(attr)
-                    if discovered_sizes[index] is None:
+                    # Append positions come from the opened handle, never a
+                    # caller-supplied size hint that may already be stale.
+                    if discovered_sizes[index] is None or _normalize_mode(
+                        modes[index]
+                    ) in ("a", "a+"):
                         discovered_sizes[index] = attr["size"]
             files = [
                 VfsiFile(
