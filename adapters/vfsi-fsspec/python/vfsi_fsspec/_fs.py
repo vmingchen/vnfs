@@ -1929,10 +1929,9 @@ class _DeferredWriteFile:
         self._prepared = False
         self._published = False
         parent = posixpath.dirname(path) or "/"
-        name = posixpath.basename(path) or "root"
-        self.temp_path = posixpath.join(
-            parent, f".nfs4fs-txn-{uuid.uuid4().hex}-{name}"
-        )
+        # Keep the staging component independent of the destination length;
+        # a valid NAME_MAX-sized basename must still be writable atomically.
+        self.temp_path = posixpath.join(parent, f".nfs4fs-txn-{uuid.uuid4().hex}")
         if "a" in mode and fs.exists(path):
             fs._copy_remote_to_fileobj(path, self._spool)
             self._spool.seek(0, io.SEEK_END)
