@@ -1601,12 +1601,17 @@ class _BufferGroup:
             file._raw._fd = fd
             file._raw._fd_generation = self.fs._client.generation
 
-    def _pread_many(self, files, offsets, lengths):
+    def _pread_many(self, files, offsets, lengths, *, required=None):
         data, errors = self._pread_many_once(files, offsets, lengths)
+        # Speculation gets one wave. Complete only required cache fills;
+        # internal callers without a selected file require every result.
         partial = {
             index: bytearray(value)
             for index, value in enumerate(data)
-            if index not in errors and value and len(value) < lengths[index]
+            if index not in errors
+            and value
+            and len(value) < lengths[index]
+            and (required is None or files[index] is required)
         }
         pending = list(partial)
         while pending:
@@ -1647,6 +1652,8 @@ class _BufferGroup:
             return self.fs._client.pread_many(fds, offsets, lengths)
 
     def fetch(self, current, start, end):
+        if end <= start:
+            return b""  # mmap may request an empty block exactly at EOF.
         with self._lock:
             key = (id(current), start, end)
             prefetched = self._take_speculative(False, key)
@@ -1705,7 +1712,7 @@ class _BufferGroup:
                 lengths.append(length)
                 total += length
 
-            data, errors = self._pread_many(files, offsets, lengths)
+            data, errors = self._pread_many(files, offsets, lengths, required=current)
             current_data = None
             for index, (file, length, value) in enumerate(zip(files, lengths, data)):
                 if index in errors:
@@ -1715,7 +1722,8 @@ class _BufferGroup:
                 value = value or b""
                 if file is current:
                     current_data = value
-                else:
+                elif len(value) == length:
+                    # Never mark a short speculative prefix as a full block.
                     self._store_speculative(
                         False, (id(file), start, start + length), value
                     )
@@ -1759,9 +1767,11 @@ class _BufferGroup:
                 files.append(file)
                 lengths.append(length)
                 total += length
-            data, errors = self._pread_many(files, [0] * len(files), lengths)
+            data, errors = self._pread_many(
+                files, [0] * len(files), lengths, required=current
+            )
             current_data = None
-            for index, (file, value) in enumerate(zip(files, data)):
+            for index, (file, length, value) in enumerate(zip(files, lengths, data)):
                 if index in errors:
                     if file is current:
                         raise _oserror(errors[index], current.path)
@@ -1769,9 +1779,9 @@ class _BufferGroup:
                 value = value or b""
                 if file is current:
                     current_data = value
-                elif len(value) == file.size:
+                elif len(value) == length == file.size:
                     self._store_speculative(True, id(file), value)
-                else:
+                elif len(value) == length:
                     self._store_speculative(False, (id(file), 0, len(value)), value)
             if current_data is None:
                 raise OSError(errno.EIO, "buffered read returned no data", current.path)

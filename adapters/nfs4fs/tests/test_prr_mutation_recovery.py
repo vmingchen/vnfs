@@ -91,6 +91,50 @@ def test_cached_reads_complete_short_native_results(
     assert not fs._client._fds
 
 
+@pytest.mark.parametrize("cache", ["readahead", "blockcache", "mmap"])
+@pytest.mark.parametrize("whole", [False, True])
+def test_completed_read_does_not_drain_short_speculative_sibling(
+    fs, monkeypatch, cache, whole
+):
+    from fsspec.core import OpenFile
+
+    fs.block_size = 128
+    fs.cache_type = cache
+    fs.pipe({"/current": b"a" * 128, "/sibling": b"b" * 128})
+    files = fs.open_many(
+        [OpenFile(fs, path, "rb") for path in ["/current", "/sibling"]]
+    )
+    current, sibling = files
+    sibling_fd = sibling._fd
+    native_read = fs._client.pread_many
+    requests = []
+
+    def short_sibling(fds, offsets, lengths):
+        requests.append(tuple(fds))
+        # The requested file completes immediately. Only the speculative
+        # sibling produces valid positive short reads, never false EOF.
+        return native_read(
+            fds,
+            offsets,
+            [
+                min(length, 1) if fd == sibling_fd else length
+                for fd, length in zip(fds, lengths)
+            ],
+        )
+
+    monkeypatch.setattr(fs._client, "pread_many", short_sibling)
+    try:
+        assert current.read(-1 if whole else 1) == b"a" * (128 if whole else 1)
+        assert len(requests) == 1, "completed read waited for speculative-only I/O"
+        assert requests[0] == (current._fd, sibling_fd)  # Keep initial fan-out.
+        # A fix must not mark a short speculative prefix as a complete block.
+        assert sibling.read(1) == b"b"
+        assert sibling.read() == b"b" * 127
+    finally:
+        fs.commit_many(files)
+    assert not fs._client._fds
+
+
 @pytest.mark.parametrize("outcome", ["eof", "error", "reconnect"])
 def test_grouped_short_read_continuation_preserves_completed_results(
     fs, monkeypatch, outcome
