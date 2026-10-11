@@ -7,7 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Python release - 2026-10-10
 
-- nfs4fs 0.3.6 with vfsi-fsspec 0.1.6. Upgrade the protocol package and
+- nfs4fs 0.3.6, vsmb 0.1.3, vsmbfs 0.1.3, and vfsi-fsspec 0.1.6.
+  Upgrade the protocol package and
   shared engine together; older native extensions lack per-call read budgets.
 - Bounded reads include growth after stat, recovery verifies descriptor
   identity, and disabling automatic reconnect also disables native recovery.
