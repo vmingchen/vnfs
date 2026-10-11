@@ -204,7 +204,7 @@ pub(crate) fn validate_read_into_results(
 
 pub(crate) fn validate_write_results(
     operation: &str,
-    requests: &[WriteOp<&VfFile, &[u8]>],
+    requests: &[WriteOp<&FileOperand, &[u8]>],
     results: &[WriteResult],
 ) -> VfResult<()> {
     if results.len() != requests.len() {
@@ -264,12 +264,12 @@ mod contract_tests {
     }
 
     fn request() -> ReadOp {
-        ReadOp::at(VfFile::from_path("/file"), 0, 1)
+        ReadOp::at(FileOperand::from_path("/file"), 0, 1)
     }
 
     fn result() -> ReadResult {
         ReadResult {
-            file: VfFile::from_path("/file"),
+            file: FileOperand::from_path("/file"),
             offset: 0,
             data: vec![1],
             eof: true,
@@ -297,7 +297,7 @@ mod contract_tests {
     fn read_result_identity_offset_progress_and_size_are_checked() {
         let request = request();
         validate_read_results("test", std::slice::from_ref(&request), &[result()]).unwrap();
-        let larger = ReadOp::at(VfFile::from_path("/file"), 0, 4);
+        let larger = ReadOp::at(FileOperand::from_path("/file"), 0, 4);
         validate_read_results(
             "test",
             &[larger],
@@ -319,7 +319,7 @@ mod contract_tests {
         .unwrap();
         for malformed in [
             ReadResult {
-                file: VfFile::from_path("/other"),
+                file: FileOperand::from_path("/other"),
                 ..result()
             },
             ReadResult {
@@ -353,8 +353,8 @@ mod contract_tests {
 
     #[test]
     fn write_result_identity_offset_size_and_cardinality_are_checked() {
-        let file = VfFile::from_path("/file");
-        let request: WriteOp<&VfFile, &[u8]> = WriteOp::new(&file, VfOffset::At(0), b"x");
+        let file = FileOperand::from_path("/file");
+        let request: WriteOp<&FileOperand, &[u8]> = WriteOp::new(&file, VfOffset::At(0), b"x");
         let valid = WriteResult {
             file: file.clone(),
             offset: 0,
@@ -387,7 +387,7 @@ mod contract_tests {
         );
         for malformed in [
             WriteResult {
-                file: VfFile::from_path("/other"),
+                file: FileOperand::from_path("/other"),
                 ..valid.clone()
             },
             WriteResult {

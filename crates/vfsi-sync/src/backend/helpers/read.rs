@@ -2,14 +2,14 @@ use super::*;
 
 pub fn vread_all_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
-    files: &[VfFile],
+    files: &[FileOperand],
 ) -> VfResult<Vec<Vec<u8>>> {
     backend.vread_all_with_options_impl(files, ReadAllOptions::default())
 }
 
 pub fn vread_all_with_options_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
-    files: &[VfFile],
+    files: &[FileOperand],
     options: ReadAllOptions,
 ) -> VfResult<Vec<Vec<u8>>> {
     let mut out: Vec<Vec<u8>> = files.iter().map(|_| Vec::new()).collect();
@@ -45,7 +45,7 @@ pub fn vread_all_with_options_impl_default<F: VectorBackend + ?Sized>(
 
 pub fn vstream_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
-    files: &[VfFile],
+    files: &[FileOperand],
     chunk_size: usize,
     memory_limit: usize,
     cb: &mut ReadStreamCallback<'_>,
@@ -104,7 +104,7 @@ pub fn vstream_impl_default<F: VectorBackend + ?Sized>(
 
 pub fn native_read_file_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
-    file: &VfFile,
+    file: &FileOperand,
     max_bytes: usize,
 ) -> VfResult<Vec<u8>> {
     backend

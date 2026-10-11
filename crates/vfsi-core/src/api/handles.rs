@@ -1,13 +1,21 @@
 use super::Result;
 use std::path::Path;
 
-/// Owned application file. Borrowed requests preserve the file's lifetime;
-/// clients validate connection ownership before dispatching a vector.
+/// Owned File Descriptor interface to one open file instance.
+///
+/// A descriptor is the handle to the instance; this contract does not require
+/// exposing a numeric OS descriptor. [`crate::Fd`] is a backend-assigned numeric
+/// slot, while implementations such as `vfsi_sync::OpenFile` own cleanup.
+///
+/// This is neither an underlying filesystem-object ID nor a protocol
+/// filehandle such as an NFS filehandle. Separate opens of the same object
+/// yield separate instances. Borrowed requests preserve the instance's
+/// lifetime; clients validate connection ownership before dispatch.
 ///
 /// Clients validate ownership before I/O and report positional progress.
 /// Standard-I/O adapters manage their own independent cursors. `ReadOp` borrows handles directly; constructing it does no I/O.
 /// A backend must retain ownership of live descriptors through cleanup failures.
-pub trait FileHandle {
+pub trait OpenFd {
     /// Diagnostic name captured at open; not current path or object identity.
     fn path(&self) -> &Path;
     /// Close without surrendering cleanup ownership on failure. After an
@@ -22,6 +30,10 @@ pub trait FileHandle {
     where
         Self: Sized;
 }
+
+/// Compatibility name for the same [`OpenFd`] trait.
+#[deprecated(note = "Use OpenFd instead")]
+pub use OpenFd as FileHandle;
 
 /// Owned directory retaining the opened object's identity after rename or path
 /// replacement. Paths are diagnostic only; clients validate ownership and live

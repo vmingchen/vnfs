@@ -10,9 +10,9 @@
 pub type Result<T> = crate::VfResult<T>;
 pub type Error = crate::VfError;
 pub use crate::{
-    AttrMask as Attributes, Attrs, Capabilities, CopyOption, DirEntry, ErrorDomain,
-    FilesystemStats, OpenFlags, OpenOp, Permissions, RemoveOptions, StatusCode, TransportKind,
-    VfType as FileType,
+    AttrMask as Attributes, Attrs, Capabilities, CopyOption, DirEntry, ErrorDomain, FileIdentity,
+    FilesystemStats, FsObjId, OpenFlags, OpenOp, Permissions, RemoveOptions, StatusCode,
+    TransportKind, VfType as FileType,
 };
 /// Per-pair rename semantics requested by [`Vfsi::vrename`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -34,7 +34,9 @@ pub use io::SyncMode;
 mod builders;
 pub use builders::OpenOptions;
 mod handles;
-pub use handles::{DirHandle, FileHandle};
+#[allow(deprecated)]
+pub use handles::FileHandle;
+pub use handles::{DirHandle, OpenFd};
 mod vfsi;
 pub use vfsi::Vfsi;
 mod extensions;
@@ -84,9 +86,11 @@ pub mod internal {
 
 /// Common imports for backend-independent application code.
 pub mod prelude {
+    #[allow(deprecated)]
+    pub use super::FileHandle;
     pub use super::{
-        AsTarget, Attributes, AttrsOptions, ControlFlow, CopyOption, DirHandle, FileHandle,
-        ListDirOptions, MkDirOp, OpenFlags, OpenOp, ReadOp, ReadOptions, ReadResult, RemoveMode,
+        AsTarget, Attributes, AttrsOptions, ControlFlow, CopyOption, DirHandle, ListDirOptions,
+        MkDirOp, OpenFd, OpenFlags, OpenOp, ReadOp, ReadOptions, ReadResult, RemoveMode,
         RemoveOptions, RenameOptions, ResourceLimits, SetAttrsOp, StreamOptions, SyncMode, Target,
         Vfsi, VfsiExt, WriteOp, WriteOptions,
     };

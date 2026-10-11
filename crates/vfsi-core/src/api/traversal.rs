@@ -98,12 +98,12 @@ pub fn walk_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AttrMask, VfAttrs, VfFile, VfType};
+    use crate::{AttrMask, FileOperand, VfAttrs, VfType};
     fn entry(path: &str, dir: bool) -> DirEntry {
         DirEntry::new(
             path.into(),
             crate::metadata_from_attrs(VfAttrs {
-                file: VfFile::from_path(path),
+                file: FileOperand::from_path(path),
                 masks: AttrMask::MODE,
                 ftype: if dir {
                     VfType::Directory

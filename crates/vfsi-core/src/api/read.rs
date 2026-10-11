@@ -4,15 +4,15 @@ use std::path::Path;
 
 /// One consuming read operation. Construction performs no I/O or allocation.
 /// Caller buffers are borrowed only until `Vfsi::vread` returns, including on errors.
-pub struct ReadOp<'a, H: crate::api::FileHandle + 'a> {
+pub struct ReadOp<'a, H: crate::api::OpenFd + 'a> {
     source: OpSource<'a, H>,
 }
-enum OpSource<'a, H: crate::api::FileHandle + 'a> {
+enum OpSource<'a, H: crate::api::OpenFd + 'a> {
     Whole(&'a Path),
     Range(&'a H, u64, usize),
     Into(&'a H, u64, &'a mut [u8]),
 }
-impl<H: crate::api::FileHandle> std::fmt::Debug for ReadOp<'_, H> {
+impl<H: crate::api::OpenFd> std::fmt::Debug for ReadOp<'_, H> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.source {
             OpSource::Whole(path) => formatter.debug_tuple("ReadOp::whole").field(path).finish(),
@@ -27,17 +27,17 @@ impl<H: crate::api::FileHandle> std::fmt::Debug for ReadOp<'_, H> {
         }
     }
 }
-impl<'a, H: crate::api::FileHandle + 'a> From<&'a str> for ReadOp<'a, H> {
+impl<'a, H: crate::api::OpenFd + 'a> From<&'a str> for ReadOp<'a, H> {
     fn from(path: &'a str) -> Self {
         Self::whole(path)
     }
 }
-impl<'a, H: crate::api::FileHandle + 'a> From<&'a Path> for ReadOp<'a, H> {
+impl<'a, H: crate::api::OpenFd + 'a> From<&'a Path> for ReadOp<'a, H> {
     fn from(path: &'a Path) -> Self {
         Self::whole(path)
     }
 }
-impl<'a, H: crate::api::FileHandle + 'a> ReadOp<'a, H> {
+impl<'a, H: crate::api::OpenFd + 'a> ReadOp<'a, H> {
     /// Collect a complete file; fail instead of truncating at the byte budget.
     pub fn whole<P: AsRef<Path> + ?Sized>(path: &'a P) -> Self {
         Self {
@@ -170,7 +170,7 @@ impl Default for ReadOptions {
         Self::new()
     }
 }
-pub fn consume_ops<'a, H: crate::api::FileHandle + 'a, R, B>(
+pub fn consume_ops<'a, H: crate::api::OpenFd + 'a, R, B>(
     ops: impl IntoIterator<Item = ReadOp<'a, H>>,
     budget: usize,
     range: impl Fn(&'a H, u64, usize) -> R,

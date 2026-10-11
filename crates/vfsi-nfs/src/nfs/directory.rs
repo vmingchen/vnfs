@@ -4,14 +4,14 @@ use super::*;
 
 /// READDIR continuation retained across unlocked application callbacks.
 pub(super) struct NfsDirectoryCursor {
-    pub(super) fh: WireFileHandle,
+    pub(super) fh: NfsFh,
     pub(super) cookie: u64,
     pub(super) buffered: VecDeque<crate::client::DirEntry>,
 }
 
 /// A child resolved relative to the observed parent, never by its full path.
 pub(super) struct NfsChildDirectoryCursor {
-    pub(super) parent: WireFileHandle,
+    pub(super) parent: NfsFh,
     pub(super) name: Vec<u8>,
 }
 
@@ -22,8 +22,8 @@ pub(super) struct NfsChildDirectoryCursor {
 /// path is re-resolved after the operand's parent is resolved once. A `None`
 /// parent keeps the directory (used by [`VectorBackend::remove_dir_contents_path_impl`]).
 pub(super) struct RemoveDir {
-    pub(super) fh: WireFileHandle,
-    pub(super) parent: Option<WireFileHandle>,
+    pub(super) fh: NfsFh,
+    pub(super) parent: Option<NfsFh>,
     pub(super) name: Vec<u8>,
     /// Operand index this directory belongs to, for error attribution.
     pub(super) root: usize,
@@ -34,7 +34,7 @@ pub(super) enum RmTask {
     /// REMOVE `name` from `parent`. When `expand` is set and the entry turns
     /// out to be a non-empty directory, resolve it and enter it instead.
     RemoveOrEnter {
-        parent: WireFileHandle,
+        parent: NfsFh,
         name: Vec<u8>,
         root: usize,
         expand: bool,
@@ -132,7 +132,7 @@ pub(super) fn append_bounded_walk_page(
             VfError::failure(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
         })?;
         let mut attrs = VfAttrs {
-            file: VfFile::from_os_path(&path),
+            file: FileOperand::from_os_path(&path),
             masks,
             ..VfAttrs::default()
         };
@@ -190,7 +190,7 @@ impl NfsVecFs {
                     }
                     let path = current.join(path_from_bytes(&entry.name));
                     let mut attrs = VfAttrs {
-                        file: VfFile::from_os_path(&path),
+                        file: FileOperand::from_os_path(&path),
                         masks,
                         ..VfAttrs::default()
                     };
@@ -214,11 +214,8 @@ impl NfsVecFs {
     }
 
     /// Resolve a path operand to its parent handle and final component name.
-    pub(super) fn remove_parent_handle(
-        &mut self,
-        path: &Path,
-    ) -> VfResult<(WireFileHandle, Vec<u8>)> {
-        let full = self.server_vf_path(&VfFile::from_os_path(path))?;
+    pub(super) fn remove_parent_handle(&mut self, path: &Path) -> VfResult<(NfsFh, Vec<u8>)> {
+        let full = self.server_vf_path(&FileOperand::from_os_path(path))?;
         let (dir, name) =
             split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(0, ERR_NOENT))?;
         let parent = self.resolve_path(&path_from_bytes(&dir), true)?;
@@ -235,7 +232,7 @@ impl NfsVecFs {
         first_error: &mut Option<VfError>,
         options: RemoveOptions,
     ) -> VfResult<()> {
-        let mut ready: std::collections::HashMap<WireFileHandle, Vec<(Vec<u8>, usize)>> =
+        let mut ready: std::collections::HashMap<NfsFh, Vec<(Vec<u8>, usize)>> =
             std::collections::HashMap::new();
         let mut changed_parents = std::collections::HashSet::new();
         while let Some(task) = stack.pop() {
@@ -318,7 +315,7 @@ impl NfsVecFs {
     #[allow(clippy::too_many_arguments)]
     fn remove_or_enter(
         &mut self,
-        parent: &WireFileHandle,
+        parent: &NfsFh,
         name: &[u8],
         root: usize,
         expand: bool,
@@ -383,7 +380,7 @@ impl NfsVecFs {
     /// descended into without an extra lookup while files are removed directly.
     fn readdir_typed(
         &mut self,
-        fh: &WireFileHandle,
+        fh: &NfsFh,
         cookie: u64,
     ) -> Result<Vec<crate::client::DirEntry>, RpcError> {
         const REMOVE_READDIR_MAX_BYTES: usize = 32 * 1024;
@@ -412,7 +409,7 @@ impl NfsVecFs {
         cookie: u64,
         pass_changed: bool,
         stack: &mut Vec<RmTask>,
-        changed_parents: &mut std::collections::HashSet<WireFileHandle>,
+        changed_parents: &mut std::collections::HashSet<NfsFh>,
         first_error: &mut Option<VfError>,
         options: RemoveOptions,
     ) -> VfResult<()> {
@@ -513,7 +510,7 @@ impl NfsVecFs {
     /// per-entry failures are recorded and skipped; transport errors abort.
     fn remove_names(
         &mut self,
-        dir: &WireFileHandle,
+        dir: &NfsFh,
         names: &[Vec<u8>],
         root: usize,
         first_error: &mut Option<VfError>,
@@ -570,7 +567,7 @@ impl NfsVecFs {
     /// directories are known to be empty. Errors are recorded and skipped.
     fn remove_list(
         &mut self,
-        parent: &WireFileHandle,
+        parent: &NfsFh,
         entries: &[(Vec<u8>, usize)],
         first_error: &mut Option<VfError>,
         options: RemoveOptions,
@@ -631,12 +628,12 @@ impl NfsVecFs {
     /// (removed concurrently) are skipped; transport errors abort.
     fn lookup_children(
         &mut self,
-        dir: &WireFileHandle,
+        dir: &NfsFh,
         names: &[Vec<u8>],
         root: usize,
         first_error: &mut Option<VfError>,
         options: RemoveOptions,
-    ) -> VfResult<Vec<(WireFileHandle, Vec<u8>)>> {
+    ) -> VfResult<Vec<(NfsFh, Vec<u8>)>> {
         let mut children = Vec::new();
         let mut start = 0;
         while start < names.len() {
@@ -646,7 +643,7 @@ impl NfsVecFs {
                 options.batch_size(),
             );
             let chunk = &names[start..start + take];
-            let ops: Vec<(WireFileHandle, Vec<u8>)> = chunk
+            let ops: Vec<(NfsFh, Vec<u8>)> = chunk
                 .iter()
                 .map(|name| (dir.clone(), name.clone()))
                 .collect();
@@ -689,7 +686,7 @@ impl NfsVecFs {
     /// persists. Transport errors abort because the outcome is ambiguous.
     fn retry_remove_name(
         &mut self,
-        dir: &WireFileHandle,
+        dir: &NfsFh,
         name: &[u8],
         root: usize,
         first_error: &mut Option<VfError>,

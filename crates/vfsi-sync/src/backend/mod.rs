@@ -40,7 +40,7 @@ use vfsi_core::internal::ManyResults;
 /// This includes handle-level metadata/statistics hooks, but does not require
 /// namespace operations, directory enumeration, or native vector I/O.
 pub trait HandleBackend {
-    fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<FilesystemStats>> {
+    fn vstatfs_impl(&mut self, files: &[FileOperand]) -> VfResult<Vec<FilesystemStats>> {
         if files.is_empty() {
             Ok(Vec::new())
         } else {
@@ -48,7 +48,7 @@ pub trait HandleBackend {
         }
     }
 
-    fn close_deferred(&mut self, file: &VfFile) -> VfResult<()> {
+    fn close_deferred(&mut self, file: &FileOperand) -> VfResult<()> {
         self.close_impl(file)
     }
 
@@ -70,13 +70,13 @@ pub trait HandleBackend {
         _pathname: &Path,
         _flags: i32,
         _mode: u32,
-    ) -> VfResult<VfFile> {
+    ) -> VfResult<FileOperand> {
         Err(VfError::unsupported(0))
     }
 
     /// One backend synchronization vector. POSIX backends may loop under one
     /// lock because fsync has no vector syscall; protocol backends may batch.
-    fn vfsync_impl(&mut self, files: &[VfFile], mode: vfsi_core::api::SyncMode) -> VfRes {
+    fn vfsync_impl(&mut self, files: &[FileOperand], mode: vfsi_core::api::SyncMode) -> VfRes {
         for (index, file) in files.iter().enumerate() {
             match mode {
                 vfsi_core::api::SyncMode::Data => self.sync_data(file),
@@ -87,9 +87,9 @@ pub trait HandleBackend {
         Ok(())
     }
 
-    fn sync_data(&mut self, tcf: &VfFile) -> VfResult<()>;
+    fn sync_data(&mut self, tcf: &FileOperand) -> VfResult<()>;
 
-    fn sync_all(&mut self, tcf: &VfFile) -> VfResult<()> {
+    fn sync_all(&mut self, tcf: &FileOperand) -> VfResult<()> {
         self.sync_data(tcf)
     }
 
@@ -101,33 +101,43 @@ pub trait HandleBackend {
         PathBuf::from("/")
     }
 
-    fn seek_raw_impl(&mut self, _tcf: &VfFile, _offset: i64, _whence: SeekFrom) -> VfResult<i64> {
+    fn seek_raw_impl(
+        &mut self,
+        _tcf: &FileOperand,
+        _offset: i64,
+        _whence: SeekFrom,
+    ) -> VfResult<i64> {
         Err(VfError::unsupported(0))
     }
 
-    fn vf_path(&self, file: &VfFile) -> VfResult<PathBuf> {
+    fn vf_path(&self, file: &FileOperand) -> VfResult<PathBuf> {
         crate::backend::helpers::vf_path_default(self, file)
     }
 
-    fn open_raw_impl(&mut self, pathname: &Path, flags: i32, mode: u32) -> VfResult<VfFile> {
+    fn open_raw_impl(&mut self, pathname: &Path, flags: i32, mode: u32) -> VfResult<FileOperand> {
         crate::backend::helpers::open_raw_impl_default(self, pathname, flags, mode)
     }
 
-    fn read_raw_impl(&mut self, file: &VfFile, offset: u64, length: usize) -> VfResult<Vec<u8>> {
+    fn read_raw_impl(
+        &mut self,
+        file: &FileOperand,
+        offset: u64,
+        length: usize,
+    ) -> VfResult<Vec<u8>> {
         crate::backend::helpers::read_raw_impl_default(self, file, offset, length)
     }
 
-    fn write_raw_impl(&mut self, file: &VfFile, offset: u64, data: &[u8]) -> VfResult<usize> {
+    fn write_raw_impl(&mut self, file: &FileOperand, offset: u64, data: &[u8]) -> VfResult<usize> {
         crate::backend::helpers::write_raw_impl_default(self, file, offset, data)
     }
 
-    fn read_file_impl(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
+    fn read_file_impl(&mut self, file: &FileOperand, max_bytes: usize) -> VfResult<Vec<u8>> {
         crate::backend::helpers::read_file_impl_default(self, file, max_bytes)
     }
 
-    fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile>;
+    fn open_impl(&mut self, request: &OpenOp) -> VfResult<FileOperand>;
 
-    fn close_impl(&mut self, file: &VfFile) -> VfResult<()>;
+    fn close_impl(&mut self, file: &FileOperand) -> VfResult<()>;
 
     fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult>;
 
@@ -135,26 +145,27 @@ pub trait HandleBackend {
         crate::backend::helpers::read_into_impl_default(self, request, buffer)
     }
 
-    fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult>;
+    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult>;
 
-    fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64>;
+    fn seek_impl(&mut self, file: &FileOperand, position: std::io::SeekFrom) -> VfResult<u64>;
 
     /// Query a raw backend target with the same field/symlink options used by
     /// the application interface. Returned attributes retain target identity.
     fn metadata_impl(
         &mut self,
-        target: Target<'_, VfFile>,
+        target: Target<'_, FileOperand>,
         options: vfsi_core::api::AttrsOptions,
     ) -> VfResult<VfAttrs>;
 
     /// Apply one shared attribute operation. Raw timestamps and masks are
     /// converted by the backend, not exposed through a second mutation type.
-    fn set_attributes_impl(&mut self, update: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<()>;
+    fn set_attributes_impl(&mut self, update: &SetAttrsOp<Target<'_, FileOperand>>)
+    -> VfResult<()>;
 
     /// Borrow an ordered batch without transferring request ownership.
     /// Each operation carries its own final-symlink policy; native backends
     /// batch contiguous equal-policy runs and validate all inputs before I/O.
-    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, VfFile>>]) -> VfResult<()> {
+    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, FileOperand>>]) -> VfResult<()> {
         crate::backend::helpers::vsetattrs_impl_default(self, updates)
     }
 }
@@ -182,7 +193,10 @@ pub trait VectorBackend: HandleBackend {
     }
     /// Execute a borrowed ordered vector. Payloads and target storage remain
     /// with the caller; implementations must not retain them after returning.
-    fn vwrite_impl(&mut self, writes: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_impl(
+        &mut self,
+        writes: &[WriteOp<&FileOperand, &[u8]>],
+    ) -> VfResult<Vec<WriteResult>> {
         let _ = writes;
         Err(VfError::unsupported(0))
     }
@@ -195,11 +209,11 @@ pub trait VectorBackend: HandleBackend {
         paths: &[&Path],
         flags: &[i32],
         modes: &[u32],
-    ) -> VfResult<ManyResults<VfFile>> {
+    ) -> VfResult<ManyResults<FileOperand>> {
         crate::backend::helpers::vopen_outcomes_impl_default(self, paths, flags, modes)
     }
 
-    fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
+    fn before_open_cleanup(&mut self, _index: usize, _file: &FileOperand) -> VfResult<()> {
         crate::backend::helpers::before_open_cleanup_default(self, _index, _file)
     }
 
@@ -208,7 +222,7 @@ pub trait VectorBackend: HandleBackend {
         paths: &[&Path],
         flags: &[i32],
         modes: &[u32],
-    ) -> VfResult<Vec<VfFile>> {
+    ) -> VfResult<Vec<FileOperand>> {
         crate::backend::helpers::vopen_raw_impl_default(self, paths, flags, modes)
     }
 
@@ -217,17 +231,17 @@ pub trait VectorBackend: HandleBackend {
         paths: &[&Path],
         flags: i32,
         mode: u32,
-    ) -> VfResult<Vec<VfFile>> {
+    ) -> VfResult<Vec<FileOperand>> {
         crate::backend::helpers::vopen_raw_simple_impl_default(self, paths, flags, mode)
     }
 
-    fn vclose_impl(&mut self, files: &[VfFile]) -> VfRes {
+    fn vclose_impl(&mut self, files: &[FileOperand]) -> VfRes {
         crate::backend::helpers::vclose_impl_default(self, files)
     }
 
     /// Open every typed request or return an error, cleaning confirmed handles.
     /// Creation and truncation effects are not rolled back.
-    fn vopen_impl(&mut self, requests: &[OpenOp]) -> VfResult<Vec<VfFile>> {
+    fn vopen_impl(&mut self, requests: &[OpenOp]) -> VfResult<Vec<FileOperand>> {
         crate::backend::helpers::vopen_typed_default(self, requests)
     }
 
@@ -260,7 +274,7 @@ pub trait VectorBackend: HandleBackend {
         crate::backend::helpers::lstat_impl_default(self, path)
     }
 
-    fn fstat_impl(&mut self, tcf: &VfFile) -> VfResult<VfAttrs> {
+    fn fstat_impl(&mut self, tcf: &FileOperand) -> VfResult<VfAttrs> {
         crate::backend::helpers::fstat_impl_default(self, tcf)
     }
 
@@ -438,7 +452,7 @@ pub trait VectorBackend: HandleBackend {
     }
 
     // Namespace mutations and scalar adapters.
-    fn vrename_impl(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
+    fn vrename_impl(&mut self, pairs: &[(FileOperand, FileOperand)]) -> VfRes {
         let _ = (pairs,);
         Err(VfError::unsupported(0))
     }
@@ -446,7 +460,7 @@ pub trait VectorBackend: HandleBackend {
     /// Native atomic rename policy; never emulate no-replace with an existence check.
     fn vrename_with_options_impl(
         &mut self,
-        pairs: &[(VfFile, VfFile)],
+        pairs: &[(FileOperand, FileOperand)],
         options: vfsi_core::api::RenameOptions,
     ) -> VfRes {
         match options {
@@ -462,7 +476,7 @@ pub trait VectorBackend: HandleBackend {
         }
     }
 
-    fn vremove_impl(&mut self, files: &[VfFile]) -> VfRes {
+    fn vremove_impl(&mut self, files: &[FileOperand]) -> VfRes {
         let _ = (files,);
         Err(VfError::unsupported(0))
     }
@@ -558,13 +572,13 @@ pub trait VectorBackend: HandleBackend {
     }
 
     // Bounded whole-file reads and streams.
-    fn vread_all_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<Vec<u8>>> {
+    fn vread_all_impl(&mut self, files: &[FileOperand]) -> VfResult<Vec<Vec<u8>>> {
         crate::backend::helpers::vread_all_impl_default(self, files)
     }
 
     fn vread_all_with_options_impl(
         &mut self,
-        files: &[VfFile],
+        files: &[FileOperand],
         options: ReadAllOptions,
     ) -> VfResult<Vec<Vec<u8>>> {
         crate::backend::helpers::vread_all_with_options_impl_default(self, files, options)
@@ -572,7 +586,7 @@ pub trait VectorBackend: HandleBackend {
 
     fn vstream_impl(
         &mut self,
-        files: &[VfFile],
+        files: &[FileOperand],
         chunk_size: usize,
         memory_limit: usize,
         cb: &mut ReadStreamCallback<'_>,
@@ -651,6 +665,7 @@ pub(crate) fn metadata_mask() -> AttrMask {
         | AttrMask::SIZE
         | AttrMask::NLINK
         | AttrMask::FILEID
+        | AttrMask::FS_ID
         | AttrMask::UID
         | AttrMask::GID
         | AttrMask::ATIME

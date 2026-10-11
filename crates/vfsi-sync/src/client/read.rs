@@ -222,7 +222,7 @@ impl<F: VectorBackend> FsClient<F> {
     ) -> VfResult<Vec<Vec<u8>>> {
         let files: Vec<_> = paths
             .iter()
-            .map(|path| VfFile::from_os_path(path.as_ref()))
+            .map(|path| FileOperand::from_os_path(path.as_ref()))
             .collect();
         let result = self
             .lock()?

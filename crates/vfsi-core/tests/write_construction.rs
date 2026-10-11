@@ -1,12 +1,12 @@
-use vfsi_core::{VfFile, VfOffset, WriteOp};
+use vfsi_core::{FileOperand, VfOffset, WriteOp};
 
 #[test]
 fn owned_native_constructors_infer_without_expected_types_or_flag_builders() {
-    let current = WriteOp::new(VfFile::from_fd(7), VfOffset::Cur, vec![1, 2]);
+    let current = WriteOp::new(FileOperand::from_fd(7), VfOffset::Cur, vec![1, 2]);
     assert_eq!(current.offset(), VfOffset::Cur);
     assert_eq!(current.data(), &[1, 2]);
 
-    let positional = WriteOp::at(VfFile::from_fd(7), 11, vec![3, 4]);
+    let positional = WriteOp::at(FileOperand::from_fd(7), 11, vec![3, 4]);
     assert_eq!(positional.offset(), VfOffset::At(11));
     assert_eq!(positional.data(), &[3, 4]);
     assert_eq!(
@@ -17,7 +17,7 @@ fn owned_native_constructors_infer_without_expected_types_or_flag_builders() {
 
 #[test]
 fn borrowed_native_constructors_infer_without_a_backend_call() {
-    let file = VfFile::from_fd(7);
+    let file = FileOperand::from_fd(7);
     let payload = &b"payload"[..];
     let current = WriteOp::new(&file, VfOffset::End, payload);
     assert!(std::ptr::eq(current.file(), &file));

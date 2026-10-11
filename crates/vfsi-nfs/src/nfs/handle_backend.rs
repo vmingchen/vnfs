@@ -3,7 +3,7 @@
 use super::*;
 
 impl HandleBackend for NfsVecFs {
-    fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<FilesystemStats>> {
+    fn vstatfs_impl(&mut self, files: &[FileOperand]) -> VfResult<Vec<FilesystemStats>> {
         if files.is_empty() {
             return Ok(Vec::new());
         }
@@ -37,7 +37,7 @@ impl HandleBackend for NfsVecFs {
             .collect()
     }
 
-    fn close_deferred(&mut self, file: &VfFile) -> VfResult<()> {
+    fn close_deferred(&mut self, file: &FileOperand) -> VfResult<()> {
         let fd = file.fd().ok_or_else(|| VfError::client(0, ERR_INVAL))?;
         if self.open_files.contains_key(&fd) {
             self.close_impl(file)
@@ -88,7 +88,7 @@ impl HandleBackend for NfsVecFs {
         pathname: &Path,
         flags: i32,
         mode: u32,
-    ) -> VfResult<VfFile> {
+    ) -> VfResult<FileOperand> {
         use libc::{O_APPEND, O_CREAT, O_EXCL, O_TRUNC};
         if open_flags_mutate(flags) {
             self.ensure_writable(1)?;
@@ -143,7 +143,7 @@ impl HandleBackend for NfsVecFs {
             let _ = self.nfs.close_unregistered(&fh, &stateid);
             return Err(error);
         }
-        let open = OpenFile {
+        let open = NfsOpenState {
             fh: fh.clone(),
             stateid,
             cur_offset: 0,
@@ -155,7 +155,7 @@ impl HandleBackend for NfsVecFs {
             }),
         };
         match self.insert_open_file(open) {
-            Ok(fd) => Ok(VfFile::from_fd(fd)),
+            Ok(fd) => Ok(FileOperand::from_fd(fd)),
             Err(error) => {
                 let _ = self.nfs.close_unregistered(&fh, &stateid);
                 Err(error)
@@ -163,8 +163,8 @@ impl HandleBackend for NfsVecFs {
         }
     }
 
-    fn close_impl(&mut self, tcf: &VfFile) -> VfResult<()> {
-        if !tcf.is_descriptor() {
+    fn close_impl(&mut self, tcf: &FileOperand) -> VfResult<()> {
+        if !tcf.is_fd() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
         let fd = tcf.fd().unwrap();
@@ -187,7 +187,7 @@ impl HandleBackend for NfsVecFs {
         }
     }
 
-    fn vfsync_impl(&mut self, files: &[VfFile], _mode: vfsi_core::api::SyncMode) -> VfRes {
+    fn vfsync_impl(&mut self, files: &[FileOperand], _mode: vfsi_core::api::SyncMode) -> VfRes {
         for (index, file) in files.iter().enumerate() {
             self.sync_data(file)
                 .map_err(|error| error.map_index(|_| index))?;
@@ -195,7 +195,7 @@ impl HandleBackend for NfsVecFs {
         Ok(())
     }
 
-    fn sync_data(&mut self, tcf: &VfFile) -> VfResult<()> {
+    fn sync_data(&mut self, tcf: &FileOperand) -> VfResult<()> {
         let fd = tcf.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
         if self.open_files.contains_key(&fd) {
             // All writes request NFS FILE_SYNC4 stability. Validate the
@@ -219,11 +219,11 @@ impl HandleBackend for NfsVecFs {
         Path::new("/").join(&self.cwd)
     }
 
-    fn seek_raw_impl(&mut self, tcf: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
+    fn seek_raw_impl(&mut self, tcf: &FileOperand, offset: i64, whence: SeekFrom) -> VfResult<i64> {
         if !self.recovery_in_progress {
             return self.read_with_recovery(|client| client.seek_raw_impl(tcf, offset, whence));
         }
-        if !tcf.is_descriptor() {
+        if !tcf.is_fd() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
         let cur = self
@@ -258,10 +258,10 @@ impl HandleBackend for NfsVecFs {
         self.advance_offset(tcf, new);
         Ok(new as i64)
     }
-    fn read_file_impl(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
+    fn read_file_impl(&mut self, file: &FileOperand, max_bytes: usize) -> VfResult<Vec<u8>> {
         vfsi_sync::backend::helpers::native_read_file_impl_default(self, file, max_bytes)
     }
-    fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
+    fn open_impl(&mut self, request: &OpenOp) -> VfResult<FileOperand> {
         vfsi_sync::backend::helpers::native_open_impl_default(self, request)
     }
     fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
@@ -270,23 +270,26 @@ impl HandleBackend for NfsVecFs {
     fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
         vfsi_sync::backend::helpers::native_read_into_impl_default(self, request, buffer)
     }
-    fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
         vfsi_sync::backend::helpers::native_write_impl_default(self, request)
     }
-    fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {
+    fn seek_impl(&mut self, file: &FileOperand, position: std::io::SeekFrom) -> VfResult<u64> {
         vfsi_sync::backend::helpers::native_seek_impl_default(self, file, position)
     }
     fn metadata_impl(
         &mut self,
-        target: Target<'_, VfFile>,
+        target: Target<'_, FileOperand>,
         options: vfsi_core::api::AttrsOptions,
     ) -> VfResult<VfAttrs> {
         vfsi_sync::backend::helpers::native_metadata_impl_default(self, target, options)
     }
-    fn set_attributes_impl(&mut self, update: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<()> {
+    fn set_attributes_impl(
+        &mut self,
+        update: &SetAttrsOp<Target<'_, FileOperand>>,
+    ) -> VfResult<()> {
         vfsi_sync::backend::helpers::native_set_attributes_impl_default(self, update)
     }
-    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, VfFile>>]) -> VfResult<()> {
+    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, FileOperand>>]) -> VfResult<()> {
         vfsi_sync::backend::helpers::vsetattrs_typed_default(self, updates)
     }
 }

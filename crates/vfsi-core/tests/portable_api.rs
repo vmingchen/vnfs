@@ -8,7 +8,7 @@ use vfsi_core::{Vfsi, VfsiExt};
 
 #[derive(Debug)]
 struct TestFile;
-impl FileHandle for TestFile {
+impl OpenFd for TestFile {
     fn path(&self) -> &Path {
         Path::new("/file")
     }
@@ -87,7 +87,7 @@ impl Vfsi for PortableFs {
                 tree_entry(
                     match path.as_target() {
                         Target::Path(path) => path,
-                        Target::File(file) => FileHandle::path(file),
+                        Target::File(file) => OpenFd::path(file),
                     },
                     true,
                 )
@@ -252,7 +252,7 @@ fn tree_entry(path: &Path, directory: bool) -> DirEntry {
     DirEntry::new(
         path.to_owned(),
         vfsi_core::metadata_from_attrs(vfsi_core::VfAttrs {
-            file: vfsi_core::VfFile::from_path(path.to_str().unwrap()),
+            file: vfsi_core::FileOperand::from_path(path.to_str().unwrap()),
             masks: vfsi_core::AttrMask::MODE,
             ftype: if directory {
                 vfsi_core::VfType::Directory
@@ -267,7 +267,7 @@ fn tree_symlink() -> DirEntry {
     DirEntry::new(
         "/tree/link".into(),
         vfsi_core::metadata_from_attrs(vfsi_core::VfAttrs {
-            file: vfsi_core::VfFile::from_path("/tree/link"),
+            file: vfsi_core::FileOperand::from_path("/tree/link"),
             masks: vfsi_core::AttrMask::MODE,
             ftype: vfsi_core::VfType::Symlink,
             ..Default::default()
@@ -531,15 +531,15 @@ fn consuming_reads_release_caller_buffers_and_owned_counts_are_derived() {
 
 impl DirHandle for TestFile {
     fn path(&self) -> &Path {
-        FileHandle::path(self)
+        OpenFd::path(self)
     }
     fn try_close(&mut self) -> Result<()> {
-        FileHandle::try_close(self)
+        OpenFd::try_close(self)
     }
     fn is_closed(&self) -> bool {
-        FileHandle::is_closed(self)
+        OpenFd::is_closed(self)
     }
     fn close(self) -> Result<()> {
-        FileHandle::close(self)
+        OpenFd::close(self)
     }
 }

@@ -1,4 +1,4 @@
-use crate::{Fd, VfFile, VfOffset};
+use crate::{Fd, FileOperand, VfOffset};
 use std::path::Path;
 
 #[bitfields::bitfield(u8)]
@@ -14,18 +14,18 @@ struct NativeWriteFlags {
 /// The fixed policy types let constructors infer storage without annotations.
 ///
 /// ```
-/// use vfsi_core::{VfFile, VfOffset, WriteOp};
-/// let current = WriteOp::new(VfFile::from_fd(7), VfOffset::Cur, vec![1, 2]);
-/// let positional = WriteOp::at(VfFile::from_fd(7), 11, vec![3, 4]);
+/// use vfsi_core::{FileOperand, VfOffset, WriteOp};
+/// let current = WriteOp::new(FileOperand::from_fd(7), VfOffset::Cur, vec![1, 2]);
+/// let positional = WriteOp::at(FileOperand::from_fd(7), 11, vec![3, 4]);
 /// assert_eq!(current.offset(), VfOffset::Cur);
 /// assert_eq!(positional.offset(), VfOffset::At(11));
 /// assert_eq!(positional.borrowed().data(), &[3, 4]);
 /// ```
-pub type WriteOp<T = VfFile, D = Vec<u8>> = WriteRequest<T, D, VfOffset, u8>;
+pub type WriteOp<T = FileOperand, D = Vec<u8>> = WriteRequest<T, D, VfOffset, u8>;
 
 /// One write operation, independent of how its target and payload are stored.
 ///
-/// Native adapters may own a `VfFile` and `Vec<u8>` while preparing a batch;
+/// Native adapters may own a `FileOperand` and `Vec<u8>` while preparing a batch;
 /// execution borrows both through [`WriteRequest::borrowed`]. The portable API uses
 /// an opaque wrapper over this storage with a borrowed application handle and an absolute `u64`
 /// offset. Borrowing for dispatch never clones a handle or copies payload bytes.
@@ -97,9 +97,9 @@ impl<T, D, O: Copy, P> WriteRequest<T, D, O, P> {
     }
 }
 
-impl<D, O, P> WriteRequest<VfFile, D, O, P> {
+impl<D, O, P> WriteRequest<FileOperand, D, O, P> {
     /// Target storage owned while preparing a native request.
-    pub fn file(&self) -> &VfFile {
+    pub fn file(&self) -> &FileOperand {
         &self.file
     }
 }
@@ -144,13 +144,13 @@ impl<T, D, O: From<u64>, P: Default> WriteRequest<T, D, O, P> {
 
 impl WriteOp {
     pub fn from_path(path: &str, offset: VfOffset, data: Vec<u8>) -> Self {
-        Self::new(VfFile::from_path(path), offset, data)
+        Self::new(FileOperand::from_path(path), offset, data)
     }
     pub fn from_os_path(path: &Path, offset: VfOffset, data: Vec<u8>) -> Self {
-        Self::new(VfFile::from_os_path(path), offset, data)
+        Self::new(FileOperand::from_os_path(path), offset, data)
     }
     pub fn from_fd(fd: Fd, offset: VfOffset, data: Vec<u8>) -> Self {
-        Self::new(VfFile::from_fd(fd), offset, data)
+        Self::new(FileOperand::from_fd(fd), offset, data)
     }
 }
 
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn owned_storage_is_borrowed_without_copying_or_losing_native_options() {
-        let file = VfFile::from_os_path(Path::new("/output"));
+        let file = FileOperand::from_os_path(Path::new("/output"));
         for offset in [VfOffset::At(7), VfOffset::Cur, VfOffset::End] {
             for (create, truncate) in [(false, false), (true, false), (false, true), (true, true)] {
                 let mut op = WriteOp::new(file.clone(), offset, vec![0x5a; 1024]);
@@ -179,7 +179,7 @@ mod tests {
                 if truncate {
                     op = op.with_truncate();
                 }
-                let native: WriteOp<&VfFile, &[u8]> = op.borrowed();
+                let native: WriteOp<&FileOperand, &[u8]> = op.borrowed();
                 assert!(std::ptr::eq(native.file(), op.file()));
                 assert_eq!(native.data().as_ptr(), op.data().as_ptr());
                 assert_eq!(native.data().len(), op.data().len());

@@ -36,19 +36,19 @@ impl NfsVecFs {
 
     /// Server-path equivalent of [`HandleBackend::vf_path`]. Descriptors and the
     /// saved/cwd sentinels have no path.
-    pub(super) fn server_vf_path(&self, file: &VfFile) -> VfResult<PathBuf> {
+    pub(super) fn server_vf_path(&self, file: &FileOperand) -> VfResult<PathBuf> {
         match file {
-            VfFile::Path {
+            FileOperand::Path {
                 base: VfPathBase::Abs,
                 path,
             } => Ok(self.server_path(&Path::new("/").join(path))),
-            VfFile::Path {
+            FileOperand::Path {
                 base: VfPathBase::Cwd,
                 path,
             }
-            | VfFile::CwdPath(path) => Ok(self.server_path(path)),
-            VfFile::Cwd => Ok(self.server_path(Path::new(""))),
-            VfFile::Descriptor(_) | VfFile::Saved => Err(VfError::failure(0, ERR_INVAL)),
+            | FileOperand::CwdPath(path) => Ok(self.server_path(path)),
+            FileOperand::Cwd => Ok(self.server_path(Path::new(""))),
+            FileOperand::Fd(_) | FileOperand::Saved => Err(VfError::failure(0, ERR_INVAL)),
             _ => Err(VfError::failure(0, ERR_INVAL)),
         }
     }
@@ -62,16 +62,16 @@ impl NfsVecFs {
     /// resolver. Descriptors resolve straight from the open-file table.
     pub(super) fn resolve_files_nfs(
         &mut self,
-        files: &[&VfFile],
+        files: &[&FileOperand],
         follow: bool,
-    ) -> VfResult<Vec<Result<(WireFileHandle, u32), u32>>> {
+    ) -> VfResult<Vec<Result<(NfsFh, u32), u32>>> {
         use std::collections::{BTreeMap, HashMap};
         // Group by parent directory.
         let mut groups: BTreeMap<Vec<u8>, Vec<(usize, Vec<u8>)>> = BTreeMap::new();
-        let mut out: Vec<Result<(WireFileHandle, u32), u32>> =
+        let mut out: Vec<Result<(NfsFh, u32), u32>> =
             vec![Err(nfsstat4_NFS4ERR_NOENT); files.len()];
         for (i, f) in files.iter().enumerate() {
-            if f.is_descriptor() {
+            if f.is_fd() {
                 let fd = f.fd().unwrap();
                 out[i] = match self.open_files.get(&fd) {
                     Some(o) => Ok((o.fh.clone(), 0)),
@@ -90,7 +90,7 @@ impl NfsVecFs {
                 split_path_bytes(path_bytes).map_err(|_| VfError::failure(i, ERR_NOENT))?;
             groups.entry(dir).or_default().push((i, name));
         }
-        let mut dir_cache: HashMap<Vec<u8>, WireFileHandle> = HashMap::new();
+        let mut dir_cache: HashMap<Vec<u8>, NfsFh> = HashMap::new();
         for (dir, entries) in groups {
             let dirfh = match dir_cache.get(&dir) {
                 Some(fh) => fh.clone(),
@@ -111,7 +111,7 @@ impl NfsVecFs {
                     }
                 },
             };
-            let ops: Vec<(WireFileHandle, Vec<u8>)> = entries
+            let ops: Vec<(NfsFh, Vec<u8>)> = entries
                 .iter()
                 .map(|(_, name)| (dirfh.clone(), name.clone()))
                 .collect();
@@ -146,7 +146,7 @@ impl NfsVecFs {
         &mut self,
         dir: &Path,
         follow_symlinks: bool,
-    ) -> VfResult<WireFileHandle> {
+    ) -> VfResult<NfsFh> {
         let path = self.server_path(dir);
         if follow_symlinks {
             self.resolve_path(&path, true)
@@ -165,11 +165,7 @@ impl NfsVecFs {
     /// reports `NFS4ERR_SYMLINK` mid-path, resolution falls back to a
     /// component-wise walk that follows each symlink with READLINK, splicing
     /// its target into the remaining path (hop-capped at 40).
-    pub(super) fn resolve_path(
-        &mut self,
-        root_rel: &Path,
-        follow_final: bool,
-    ) -> VfResult<WireFileHandle> {
+    pub(super) fn resolve_path(&mut self, root_rel: &Path, follow_final: bool) -> VfResult<NfsFh> {
         let mut path = normalize_bytes(path_bytes(root_rel));
         let mut hops = 0usize;
         loop {
@@ -249,14 +245,14 @@ impl NfsVecFs {
         }
     }
 
-    pub(super) fn resolve_tcfile(&mut self, f: &VfFile, follow: bool) -> VfResult<WireFileHandle> {
+    pub(super) fn resolve_tcfile(&mut self, f: &FileOperand, follow: bool) -> VfResult<NfsFh> {
         match f {
-            VfFile::Descriptor(fd) => self
+            FileOperand::Fd(fd) => self
                 .open_files
                 .get(fd)
                 .map(|o| o.fh.clone())
                 .ok_or_else(|| VfError::failure(0, ERR_EBADF)),
-            VfFile::Path { .. } | VfFile::Cwd | VfFile::CwdPath(_) => {
+            FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_) => {
                 let path = self.server_vf_path(f)?;
                 if follow {
                     self.resolve_follow(&path)
@@ -264,7 +260,7 @@ impl NfsVecFs {
                     self.resolve_path(&path, false)
                 }
             }
-            VfFile::Saved => Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL)),
+            FileOperand::Saved => Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL)),
             _ => Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL)),
         }
     }
@@ -320,15 +316,15 @@ impl NfsVecFs {
         }
     }
 
-    pub(super) fn resolve_follow(&mut self, path: &Path) -> VfResult<WireFileHandle> {
+    pub(super) fn resolve_follow(&mut self, path: &Path) -> VfResult<NfsFh> {
         self.resolve_path(path, true)
     }
 
     /// The legacy phased renamev (cached parent resolution + rename_many).
-    pub(super) fn renamev_phased(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
-        let mut src_cache: std::collections::HashMap<Vec<u8>, WireFileHandle> =
+    pub(super) fn renamev_phased(&mut self, pairs: &[(FileOperand, FileOperand)]) -> VfRes {
+        let mut src_cache: std::collections::HashMap<Vec<u8>, NfsFh> =
             std::collections::HashMap::new();
-        let mut dst_cache: std::collections::HashMap<Vec<u8>, WireFileHandle> =
+        let mut dst_cache: std::collections::HashMap<Vec<u8>, NfsFh> =
             std::collections::HashMap::new();
         let mut ops = Vec::with_capacity(pairs.len());
         for (i, (src, dst)) in pairs.iter().enumerate() {
@@ -371,7 +367,7 @@ impl NfsVecFs {
     }
 
     /// The legacy phased removev (grouped per parent + remove_many).
-    pub(super) fn removev_phased(&mut self, files: &[VfFile]) -> VfRes {
+    pub(super) fn removev_phased(&mut self, files: &[FileOperand]) -> VfRes {
         use std::collections::BTreeMap;
         // Group by parent directory to batch REMOVEs.
         let mut groups: BTreeMap<Vec<u8>, Vec<Vec<u8>>> = BTreeMap::new();
@@ -410,8 +406,8 @@ impl NfsVecFs {
         if paths.is_empty() {
             return Ok(());
         }
-        let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_os_path(p)).collect();
-        let refs: Vec<&VfFile> = files.iter().collect();
+        let files: Vec<FileOperand> = paths.iter().map(|p| FileOperand::from_os_path(p)).collect();
+        let refs: Vec<&FileOperand> = files.iter().collect();
         let resolved = match self.resolve_files_nfs(&refs, true) {
             Ok(r) => r,
             Err(e) => {

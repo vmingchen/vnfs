@@ -8,7 +8,7 @@ impl VectorBackend for NfsVecFs {
         paths: &[&Path],
         flags: &[i32],
         modes: &[u32],
-    ) -> VfResult<ManyResults<VfFile>> {
+    ) -> VfResult<ManyResults<FileOperand>> {
         if paths.len() != flags.len() || paths.len() != modes.len() {
             return Err(VfError::failure(0, nfsstat4_NFS4ERR_INVAL));
         }
@@ -24,17 +24,17 @@ impl VectorBackend for NfsVecFs {
         self.openv_merged(paths, flags, modes)
     }
 
-    fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
+    fn before_open_cleanup(&mut self, _index: usize, _file: &FileOperand) -> VfResult<()> {
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeCleanup { index: _index })?;
         Ok(())
     }
 
-    fn vclose_impl(&mut self, files: &[VfFile]) -> VfRes {
+    fn vclose_impl(&mut self, files: &[FileOperand]) -> VfRes {
         let mut ops = Vec::with_capacity(files.len());
         let mut fds = Vec::with_capacity(files.len());
         for (i, f) in files.iter().enumerate() {
-            if !f.is_descriptor() {
+            if !f.is_fd() {
                 return Err(VfError::failure(i, nfsstat4_NFS4ERR_INVAL));
             }
             let fd = f.fd().unwrap();
@@ -90,7 +90,7 @@ impl VectorBackend for NfsVecFs {
         if reads.is_empty() {
             return Ok(Vec::new());
         }
-        if reads.iter().all(|r| r.file.is_descriptor()) {
+        if reads.iter().all(|r| r.file.is_fd()) {
             return self.vread_batch_nfs(reads);
         }
         // Path-based (and mixed descriptor/path) batches: resolve offsets and
@@ -120,7 +120,7 @@ impl VectorBackend for NfsVecFs {
             off.checked_add(length)
                 .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
             offsets.push(off);
-            let file = if r.file.is_descriptor() {
+            let file = if r.file.is_fd() {
                 let fd = r.file.fd().unwrap();
                 let open = self
                     .open_files
@@ -152,7 +152,7 @@ impl VectorBackend for NfsVecFs {
         }?;
         // Advance descriptor cursors for Cur-offset reads.
         for (i, r) in reads.iter().enumerate() {
-            if r.offset == VfOffset::Cur && r.file.is_descriptor() {
+            if r.offset == VfOffset::Cur && r.file.is_fd() {
                 let new = out[i]
                     .offset
                     .checked_add(out[i].data.len() as u64)
@@ -179,7 +179,7 @@ impl VectorBackend for NfsVecFs {
         if !self.recovery_in_progress {
             return self.read_with_recovery(|client| client.vread_into_impl(reads, buffers));
         }
-        if reads.iter().all(|read| read.file.is_descriptor()) {
+        if reads.iter().all(|read| read.file.is_fd()) {
             return self.vread_batch_into_nfs(reads, buffers);
         }
         // Path-based reads still use the merged path planner; its owned
@@ -218,12 +218,15 @@ impl VectorBackend for NfsVecFs {
         Ok(output)
     }
 
-    fn vwrite_impl(&mut self, writes: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_impl(
+        &mut self,
+        writes: &[WriteOp<&FileOperand, &[u8]>],
+    ) -> VfResult<Vec<WriteResult>> {
         self.ensure_writable(writes.len())?;
         if writes.is_empty() {
             return Ok(Vec::new());
         }
-        if writes.iter().all(|w| w.file().is_descriptor()) {
+        if writes.iter().all(|w| w.file().is_fd()) {
             return self.vwrite_batch_nfs(writes);
         }
         let mut path_ops = Vec::with_capacity(writes.len());
@@ -251,7 +254,7 @@ impl VectorBackend for NfsVecFs {
             off.checked_add(length)
                 .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
             offsets.push(off);
-            let file = if w.file().is_descriptor() {
+            let file = if w.file().is_fd() {
                 let fd = w.file().fd().unwrap();
                 let open = self
                     .open_files
@@ -270,8 +273,8 @@ impl VectorBackend for NfsVecFs {
                 file,
                 offset: off,
                 data: w.data(),
-                create: w.creates() && !w.file().is_descriptor(),
-                truncate: w.truncates() && !w.file().is_descriptor(),
+                create: w.creates() && !w.file().is_fd(),
+                truncate: w.truncates() && !w.file().is_fd(),
                 stateid: w
                     .file()
                     .fd()
@@ -285,7 +288,7 @@ impl VectorBackend for NfsVecFs {
         }?;
         // Advance descriptor cursors for Cur-offset writes.
         for (i, w) in writes.iter().enumerate() {
-            if w.offset() == VfOffset::Cur && w.file().is_descriptor() {
+            if w.offset() == VfOffset::Cur && w.file().is_fd() {
                 let new = out[i]
                     .offset
                     .checked_add(out[i].written as u64)
@@ -387,7 +390,7 @@ impl VectorBackend for NfsVecFs {
             };
             let path = dir.join(path_from_bytes(&entry.name));
             let mut attrs = VfAttrs {
-                file: VfFile::from_os_path(&path),
+                file: FileOperand::from_os_path(&path),
                 masks,
                 ..VfAttrs::default()
             };
@@ -457,7 +460,7 @@ impl VectorBackend for NfsVecFs {
         } else if !fresh.is_empty() {
             let files: Vec<_> = fresh
                 .iter()
-                .map(|&i| VfFile::from_os_path(dirs[i]))
+                .map(|&i| FileOperand::from_os_path(dirs[i]))
                 .collect();
             let refs: Vec<_> = files.iter().collect();
             let resolved = self
@@ -556,7 +559,9 @@ impl VectorBackend for NfsVecFs {
                 let mut seeds = Vec::new();
                 for entry in state.buffered.drain(..state.buffered.len().min(page_size)) {
                     let mut attrs = VfAttrs {
-                        file: VfFile::from_os_path(&dirs[index].join(path_from_bytes(&entry.name))),
+                        file: FileOperand::from_os_path(
+                            &dirs[index].join(path_from_bytes(&entry.name)),
+                        ),
                         masks,
                         ..VfAttrs::default()
                     };
@@ -622,7 +627,7 @@ impl VectorBackend for NfsVecFs {
                 }
                 let path = dir.join(path_from_bytes(&entry.name));
                 let mut attrs = VfAttrs {
-                    file: VfFile::from_os_path(&path),
+                    file: FileOperand::from_os_path(&path),
                     masks,
                     ..VfAttrs::default()
                 };
@@ -668,14 +673,13 @@ impl VectorBackend for NfsVecFs {
                 return Ok(());
             }
             // Batch-resolve this level's directories.
-            let files: Vec<VfFile> = level_paths
+            let files: Vec<FileOperand> = level_paths
                 .iter()
-                .map(|p| VfFile::from_os_path(p))
+                .map(|p| FileOperand::from_os_path(p))
                 .collect();
-            let refs: Vec<&VfFile> = files.iter().collect();
+            let refs: Vec<&FileOperand> = files.iter().collect();
             let resolved = self.resolve_files_nfs(&refs, true)?;
-            let mut level: Vec<(WireFileHandle, PathBuf, usize)> =
-                Vec::with_capacity(level_paths.len());
+            let mut level: Vec<(NfsFh, PathBuf, usize)> = Vec::with_capacity(level_paths.len());
             for (i, r) in resolved.iter().enumerate() {
                 let owner = level_owners[i];
                 match r {
@@ -689,8 +693,7 @@ impl VectorBackend for NfsVecFs {
                 }
             }
             // First pages for all directories in one compound.
-            let ops: Vec<(WireFileHandle, u64)> =
-                level.iter().map(|(fh, _, _)| (fh.clone(), 0)).collect();
+            let ops: Vec<(NfsFh, u64)> = level.iter().map(|(fh, _, _)| (fh.clone(), 0)).collect();
             let results = self.nfs.readdir_pages(&ops, &ids).map_err(|error| {
                 remap_active_error(vfsi_core::error_from_rpc_indexed(error), &level_owners)
             })?;
@@ -715,7 +718,7 @@ impl VectorBackend for NfsVecFs {
                         }
                         let path = dir.join(path_from_bytes(&e.name));
                         let mut a = VfAttrs {
-                            file: VfFile::from_os_path(&path),
+                            file: FileOperand::from_os_path(&path),
                             masks,
                             ..VfAttrs::default()
                         };
@@ -746,7 +749,7 @@ impl VectorBackend for NfsVecFs {
                 }
             }
             while !pending.is_empty() {
-                let cont_ops: Vec<(WireFileHandle, u64)> = pending
+                let cont_ops: Vec<(NfsFh, u64)> = pending
                     .iter()
                     .map(|(_, fh, cookie)| (fh.clone(), *cookie))
                     .collect();
@@ -834,7 +837,7 @@ impl VectorBackend for NfsVecFs {
 
         // Preserve the parent filehandle so resolving and reading each child
         // directory can share one compound instead of re-walking full paths.
-        let mut frontier: Vec<(WireFileHandle, PathBuf)> = root_attrs
+        let mut frontier: Vec<(NfsFh, PathBuf)> = root_attrs
             .iter()
             .filter(|entry| entry.ftype == VfType::Directory)
             .filter_map(|entry| {
@@ -847,7 +850,7 @@ impl VectorBackend for NfsVecFs {
         collected.insert(root.to_path_buf(), root_attrs);
 
         while !frontier.is_empty() {
-            let operations: Vec<(WireFileHandle, Vec<u8>)> = frontier
+            let operations: Vec<(NfsFh, Vec<u8>)> = frontier
                 .iter()
                 .map(|(parent, path)| {
                     (
@@ -883,7 +886,7 @@ impl VectorBackend for NfsVecFs {
             }
 
             while !pending.is_empty() {
-                let operations: Vec<(WireFileHandle, u64)> = pending
+                let operations: Vec<(NfsFh, u64)> = pending
                     .iter()
                     .map(|(_, handle, cookie)| (handle.clone(), *cookie))
                     .collect();
@@ -949,15 +952,12 @@ impl VectorBackend for NfsVecFs {
         Ok(out)
     }
 
-    fn vrename_impl(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
+    fn vrename_impl(&mut self, pairs: &[(FileOperand, FileOperand)]) -> VfRes {
         self.ensure_writable(pairs.len())?;
         if pairs.is_empty() {
             return Ok(());
         }
-        if pairs
-            .iter()
-            .any(|(s, d)| s.is_descriptor() || d.is_descriptor())
-        {
+        if pairs.iter().any(|(s, d)| s.is_fd() || d.is_fd()) {
             return self.renamev_phased(pairs);
         }
         let mut prs = Vec::with_capacity(pairs.len());
@@ -985,12 +985,12 @@ impl VectorBackend for NfsVecFs {
         }
     }
 
-    fn vremove_impl(&mut self, files: &[VfFile]) -> VfRes {
+    fn vremove_impl(&mut self, files: &[FileOperand]) -> VfRes {
         self.ensure_writable(files.len())?;
         if files.is_empty() {
             return Ok(());
         }
-        if files.iter().any(|f| f.is_descriptor()) {
+        if files.iter().any(|f| f.is_fd()) {
             return self.removev_phased(files);
         }
         let mut paths = Vec::with_capacity(files.len());
@@ -1027,8 +1027,11 @@ impl VectorBackend for NfsVecFs {
             parents.push(self.visible_path(&path_from_bytes(&dir)));
             names.push(name);
         }
-        let files: Vec<VfFile> = parents.iter().map(|p| VfFile::from_os_path(p)).collect();
-        let refs: Vec<&VfFile> = files.iter().collect();
+        let files: Vec<FileOperand> = parents
+            .iter()
+            .map(|p| FileOperand::from_os_path(p))
+            .collect();
+        let refs: Vec<&FileOperand> = files.iter().collect();
         let resolved = self.resolve_files_nfs(&refs, true)?;
         let mut creates = Vec::with_capacity(dirs.len());
         for (i, (r, name)) in resolved.iter().zip(&names).enumerate() {
@@ -1072,8 +1075,11 @@ impl VectorBackend for NfsVecFs {
             parents.push(self.visible_path(&path_from_bytes(&dir)));
             names.push(name);
         }
-        let files: Vec<VfFile> = parents.iter().map(|p| VfFile::from_os_path(p)).collect();
-        let refs: Vec<&VfFile> = files.iter().collect();
+        let files: Vec<FileOperand> = parents
+            .iter()
+            .map(|p| FileOperand::from_os_path(p))
+            .collect();
+        let refs: Vec<&FileOperand> = files.iter().collect();
         let resolved = self.resolve_files_nfs(&refs, true)?;
         let mut ops = Vec::with_capacity(oldpaths.len());
         for (i, ((r, name), old)) in resolved.iter().zip(&names).zip(oldpaths).enumerate() {
@@ -1104,8 +1110,8 @@ impl VectorBackend for NfsVecFs {
         }
         // Batch-resolve the links themselves (no final-component follow),
         // then READLINK in one compound.
-        let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_os_path(p)).collect();
-        let refs: Vec<&VfFile> = files.iter().collect();
+        let files: Vec<FileOperand> = paths.iter().map(|p| FileOperand::from_os_path(p)).collect();
+        let refs: Vec<&FileOperand> = files.iter().collect();
         let resolved = self.resolve_files_nfs(&refs, false)?;
         let mut ops = Vec::with_capacity(paths.len());
         for (i, r) in resolved.iter().enumerate() {
@@ -1129,8 +1135,11 @@ impl VectorBackend for NfsVecFs {
         }
         // Batch-resolve the sources (no follow) and destination parents
         // (follow), then LINK in one compound.
-        let src_files: Vec<VfFile> = oldpaths.iter().map(|p| VfFile::from_os_path(p)).collect();
-        let src_refs: Vec<&VfFile> = src_files.iter().collect();
+        let src_files: Vec<FileOperand> = oldpaths
+            .iter()
+            .map(|p| FileOperand::from_os_path(p))
+            .collect();
+        let src_refs: Vec<&FileOperand> = src_files.iter().collect();
         let src_resolved = self.resolve_files_nfs(&src_refs, false)?;
         let mut parents: Vec<PathBuf> = Vec::with_capacity(newpaths.len());
         let mut names: Vec<Vec<u8>> = Vec::with_capacity(newpaths.len());
@@ -1141,8 +1150,11 @@ impl VectorBackend for NfsVecFs {
             parents.push(self.visible_path(&path_from_bytes(&dir)));
             names.push(name);
         }
-        let files: Vec<VfFile> = parents.iter().map(|p| VfFile::from_os_path(p)).collect();
-        let refs: Vec<&VfFile> = files.iter().collect();
+        let files: Vec<FileOperand> = parents
+            .iter()
+            .map(|p| FileOperand::from_os_path(p))
+            .collect();
+        let refs: Vec<&FileOperand> = files.iter().collect();
         let dst_resolved = self.resolve_files_nfs(&refs, true)?;
         let mut ops = Vec::with_capacity(oldpaths.len());
         for (i, (((sr, dr), name), _old)) in src_resolved
@@ -1201,7 +1213,7 @@ impl VectorBackend for NfsVecFs {
             .iter()
             .map(|p| {
                 VfAttrs {
-                    file: VfFile::from_os_path(&p.src_path),
+                    file: FileOperand::from_os_path(&p.src_path),
                     masks: AttrMask::empty(), // type is always requested
                     ..VfAttrs::default()
                 }
@@ -1272,7 +1284,7 @@ impl VectorBackend for NfsVecFs {
     }
     fn vread_all_with_options_impl(
         &mut self,
-        files: &[VfFile],
+        files: &[FileOperand],
         options: ReadAllOptions,
     ) -> VfResult<Vec<Vec<u8>>> {
         if !self.recovery_in_progress {
@@ -1367,7 +1379,7 @@ impl VectorBackend for NfsVecFs {
     }
 
     fn open_dir_impl(&mut self, path: &Path) -> VfResult<VfDir> {
-        let full = self.server_vf_path(&VfFile::from_os_path(path))?;
+        let full = self.server_vf_path(&FileOperand::from_os_path(path))?;
         let fh = if normalize_bytes(path_bytes(&full)).is_empty() {
             self.nfs.root().clone()
         } else {

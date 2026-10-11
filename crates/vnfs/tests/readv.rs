@@ -1,6 +1,6 @@
 #![cfg(all(feature = "auto", target_os = "linux"))]
 use vnfs::error::ErrorKind;
-use vnfs::files::{FileHandle, ReadOp, ReadOptions, ResourceLimits, Vfsi, VfsiExt};
+use vnfs::files::{OpenFd, ReadOp, ReadOptions, ResourceLimits, Vfsi, VfsiExt};
 use vnfs::posix::Posix;
 
 fn mixed<C: Vfsi>(fs: &C) {

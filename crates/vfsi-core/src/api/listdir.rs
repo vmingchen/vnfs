@@ -100,7 +100,7 @@ fn buffered<F: Vfsi + ?Sized>(
         // The entry-only root is never exposed. READDIR validates its type;
         // avoid an unnecessary stat and a no-follow requirement on SMB.
         crate::metadata_from_attrs(crate::VfAttrs {
-            file: crate::VfFile::from_os_path(root),
+            file: crate::FileOperand::from_os_path(root),
             masks: crate::AttrMask::MODE,
             ftype: crate::VfType::Directory,
             ..Default::default()

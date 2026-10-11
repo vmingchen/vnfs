@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(super) enum CleanupTarget {
-    File(VfFile, PathBuf),
+    File(FileOperand, PathBuf),
     Directory(VfDir, PathBuf),
 }
 struct PendingClose<F> {

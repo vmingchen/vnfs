@@ -14,6 +14,7 @@ pub(super) struct AttrValues {
     pub(super) mode: Option<u32>,
     pub(super) size: Option<u64>,
     pub(super) nlink: Option<u32>,
+    pub(super) fs_id: Option<u128>,
     pub(super) fileid: Option<u64>,
     pub(super) uid: Option<u32>,
     pub(super) gid: Option<u32>,
@@ -27,11 +28,12 @@ pub(super) struct AttrValues {
 
 /// The full set of supported FATTR4 ids, in wire (increasing) order. Must
 /// match `crate::client::READDIR_ATTRS`.
-const FULL_ATTR_IDS: [u32; 14] = [
+const FULL_ATTR_IDS: [u32; 15] = [
     FATTR4_TYPE,
     FATTR4_CHANGE,
     FATTR4_SIZE,
     FATTR4_NAMED_ATTR,
+    FATTR4_FSID,
     FATTR4_FILEID,
     FATTR4_MODE,
     FATTR4_NUMLINKS,
@@ -51,6 +53,7 @@ pub(super) fn request_mask_to_attr_list(masks: &AttrMask) -> Vec<u32> {
             FATTR4_TYPE => true, // always fetch type (cheap, aids listdir)
             FATTR4_CHANGE => masks.contains(AttrMask::CHANGE),
             FATTR4_SIZE => masks.contains(AttrMask::SIZE),
+            FATTR4_FSID => masks.contains(AttrMask::FS_ID),
             FATTR4_NAMED_ATTR => masks.contains(AttrMask::NAMED_ATTR),
             FATTR4_FILEID => masks.contains(AttrMask::FILEID),
             FATTR4_MODE => masks.contains(AttrMask::MODE),
@@ -85,6 +88,11 @@ pub(super) fn parse_attr_list(ids: &[u32], list: &[u8]) -> VfResult<AttrValues> 
             }
             FATTR4_SIZE => {
                 v.size = Some(read_u64(list, &mut off)?);
+            }
+            FATTR4_FSID => {
+                let major = read_u64(list, &mut off)?;
+                let minor = read_u64(list, &mut off)?;
+                v.fs_id = Some((u128::from(major) << 64) | u128::from(minor));
             }
             FATTR4_NAMED_ATTR => {
                 v.has_named_attr = Some(read_u32(list, &mut off)? != 0);
@@ -180,6 +188,12 @@ pub(super) fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
     {
         a.fileid = fileid;
         a.returned.insert(AttrMask::FILEID);
+    }
+    if a.masks.contains(AttrMask::FS_ID)
+        && let Some(fs_id) = v.fs_id
+    {
+        a.fs_id = fs_id;
+        a.returned.insert(AttrMask::FS_ID);
     }
     if a.masks.contains(AttrMask::CHANGE)
         && let Some(change) = v.change
@@ -371,7 +385,7 @@ impl NfsVecFs {
         }
         let mut ops = Vec::with_capacity(attrs.len());
         for (i, a) in attrs.iter().enumerate() {
-            let file = if a.file.is_descriptor() {
+            let file = if a.file.is_fd() {
                 let fd = a.file.fd().unwrap();
                 let open = self
                     .open_files
@@ -465,7 +479,7 @@ impl NfsVecFs {
                 return Err(VfError::unsupported(i));
             }
         }
-        let files: Vec<&VfFile> = attrs.iter().map(|a| &a.file).collect();
+        let files: Vec<&FileOperand> = attrs.iter().map(|a| &a.file).collect();
         let resolved = self.resolve_files_nfs(&files, follow)?;
         let mut ops = Vec::with_capacity(attrs.len());
         for (i, a) in attrs.iter().enumerate() {
@@ -524,7 +538,7 @@ impl NfsVecFs {
         }
         let mut ops = Vec::with_capacity(attrs.len());
         for (i, a) in attrs.iter().enumerate() {
-            let file = if a.file.is_descriptor() {
+            let file = if a.file.is_fd() {
                 let fd = a.file.fd().unwrap();
                 let open = self
                     .open_files
@@ -600,7 +614,7 @@ impl NfsVecFs {
 
     /// The legacy phased getattrsv (resolve_many_tcfile + getattr_many).
     fn getattrsv_phased(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
-        let files: Vec<&VfFile> = attrs.iter().map(|a| &a.file).collect();
+        let files: Vec<&FileOperand> = attrs.iter().map(|a| &a.file).collect();
         let resolved = self.resolve_files_nfs(&files, follow)?;
         let mut ops = Vec::with_capacity(attrs.len());
         let mut ids_list = Vec::with_capacity(attrs.len());
@@ -694,7 +708,7 @@ impl NfsVecFs {
     }
 
     /// The size in bytes of `fh`.
-    pub(super) fn file_size(&mut self, fh: &WireFileHandle) -> VfResult<u64> {
+    pub(super) fn file_size(&mut self, fh: &NfsFh) -> VfResult<u64> {
         let list = self
             .nfs
             .getattr(fh, &[FATTR4_SIZE])

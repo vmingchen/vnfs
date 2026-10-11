@@ -89,7 +89,7 @@ fn recursive_remove_does_not_restart_each_page_after_a_persistent_entry_failure(
         &paths
             .iter()
             .map(|path| {
-                vfsi_sync::WriteOp::at(vfsi_sync::VfFile::from_path(path), 0, b"x".to_vec())
+                vfsi_sync::WriteOp::at(vfsi_sync::FileOperand::from_path(path), 0, b"x".to_vec())
                     .with_creation()
             })
             .collect::<Vec<_>>(),
@@ -153,7 +153,7 @@ fn recursive_remove_retries_a_transient_entry_only_when_configured() {
         let path = format!("{root}/transient");
         fs.ensure_dir_impl(Path::new(&root), 0o755).unwrap();
         fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::at(
-            vfsi_sync::VfFile::from_path(&path),
+            vfsi_sync::FileOperand::from_path(&path),
             0,
             b"x".to_vec(),
         )
@@ -324,7 +324,7 @@ fn same_file_dependent_writes_remain_serialized() {
                 .vread_impl(&[vfsi_sync::ReadOp::at(files[0].clone(), 0, 16)])
                 .unwrap();
             fs.vclose_impl(&files).unwrap();
-            fs.vremove_impl(&[vfsi_sync::VfFile::from_path(&path)])
+            fs.vremove_impl(&[vfsi_sync::FileOperand::from_path(&path)])
                 .unwrap();
             // End and append also perform the two eager size validations and
             // refresh the second request's position after the first finishes.
@@ -417,7 +417,7 @@ fn short_read_recovery_preserves_every_cursor_and_range() {
             fs.vremove_impl(
                 &paths
                     .iter()
-                    .map(|path| vfsi_sync::VfFile::from_path(path))
+                    .map(|path| vfsi_sync::FileOperand::from_path(path))
                     .collect::<Vec<_>>(),
             )
             .unwrap();
@@ -490,7 +490,7 @@ fn short_write_failure_does_not_dispatch_a_later_file() {
         fs.vremove_impl(
             &paths
                 .iter()
-                .map(|path| vfsi_sync::VfFile::from_path(path))
+                .map(|path| vfsi_sync::FileOperand::from_path(path))
                 .collect::<Vec<_>>(),
         )
         .unwrap();
@@ -545,7 +545,7 @@ fn ordered_write_waves_still_batch_independent_small_files() {
     fs.vremove_impl(
         &paths
             .iter()
-            .map(|path| vfsi_sync::VfFile::from_path(path))
+            .map(|path| vfsi_sync::FileOperand::from_path(path))
             .collect::<Vec<_>>(),
     )
     .unwrap();
@@ -588,7 +588,7 @@ fn descriptor_short_reads_preserve_contiguous_contents() {
             fs.vread_impl(&[request]).unwrap().remove(0).data
         };
         fs.vclose_impl(&files).unwrap();
-        fs.vremove_impl(&[vfsi_sync::VfFile::from_path(&path)])
+        fs.vremove_impl(&[vfsi_sync::FileOperand::from_path(&path)])
             .unwrap();
         assert_eq!(
             observed.len(),
@@ -699,8 +699,8 @@ fn reconnect_rejects_replacement_of_an_open_file() {
     // Also exercise the successful unchanged-identity recovery path.
     fs.reconnect().unwrap();
     fs.vrename_impl(&[(
-        vfsi_sync::VfFile::from_path(&path),
-        vfsi_sync::VfFile::from_path(&saved),
+        vfsi_sync::FileOperand::from_path(&path),
+        vfsi_sync::FileOperand::from_path(&saved),
     )])
     .unwrap();
     fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_path(
@@ -717,8 +717,8 @@ fn reconnect_rejects_replacement_of_an_open_file() {
         .unwrap();
     fs.vclose_impl(&files).unwrap();
     fs.vremove_impl(&[
-        vfsi_sync::VfFile::from_path(&path),
-        vfsi_sync::VfFile::from_path(&saved),
+        vfsi_sync::FileOperand::from_path(&path),
+        vfsi_sync::FileOperand::from_path(&saved),
     ])
     .unwrap();
     assert_eq!(result.unwrap_err().err_no(), libc::ESTALE as u32);
@@ -773,14 +773,14 @@ fn short_writes_do_not_reorder_overlapping_or_cursor_requests() {
         );
         fs.vclose_impl(&files).unwrap();
         let observed = fs
-            .vread_all_impl(&[vfsi_sync::VfFile::from_path(&path)])
+            .vread_all_impl(&[vfsi_sync::FileOperand::from_path(&path)])
             .unwrap();
         let expected = if cursor {
             [first, second].concat()
         } else {
             [second.clone(), first[second.len()..].to_vec()].concat()
         };
-        fs.vremove_impl(&[vfsi_sync::VfFile::from_path(&path)])
+        fs.vremove_impl(&[vfsi_sync::FileOperand::from_path(&path)])
             .unwrap();
         assert!(
             observed[0] == expected,
@@ -833,11 +833,11 @@ fn descriptor_zero_progress_is_an_error_not_a_retry_loop() {
             );
             fs.vclose_impl(&files).unwrap();
             assert_eq!(
-                fs.vread_all_impl(&[vfsi_sync::VfFile::from_path(&path)])
+                fs.vread_all_impl(&[vfsi_sync::FileOperand::from_path(&path)])
                     .unwrap()[0],
                 b"contents"
             );
-            fs.vremove_impl(&[vfsi_sync::VfFile::from_path(&path)])
+            fs.vremove_impl(&[vfsi_sync::FileOperand::from_path(&path)])
                 .unwrap();
         }
     }
@@ -879,7 +879,7 @@ fn short_reads_handle_eof_and_requests_beyond_the_file() {
             (result.data, result.eof)
         };
         fs.vclose_impl(&files).unwrap();
-        fs.vremove_impl(&[vfsi_sync::VfFile::from_path(&path)])
+        fs.vremove_impl(&[vfsi_sync::FileOperand::from_path(&path)])
             .unwrap();
         assert!(observed == payload);
         assert!(eof);

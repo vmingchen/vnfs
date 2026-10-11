@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 /// Borrow fixture storage for one vector dispatch without copying payloads.
 /// Only available with `test-support`; this adds no production backend hook.
-pub fn borrow_writes(writes: &[WriteOp]) -> Vec<WriteOp<&VfFile, &[u8]>> {
+pub fn borrow_writes(writes: &[WriteOp]) -> Vec<WriteOp<&FileOperand, &[u8]>> {
     writes.iter().map(WriteOp::borrowed).collect()
 }
 
@@ -84,11 +84,14 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     let whole_a = format!("{}/whole-a", dir);
     let whole_b = format!("{}/whole-b", dir);
     fs.vwrite_impl(&borrow_writes(&[
-        WriteOp::at(VfFile::from_path(&whole_a), 0, b"abc".to_vec()).with_creation(),
-        WriteOp::at(VfFile::from_path(&whole_b), 0, b"def".to_vec()).with_creation(),
+        WriteOp::at(FileOperand::from_path(&whole_a), 0, b"abc".to_vec()).with_creation(),
+        WriteOp::at(FileOperand::from_path(&whole_b), 0, b"def".to_vec()).with_creation(),
     ]))
     .unwrap();
-    let whole_files = [VfFile::from_path(&whole_a), VfFile::from_path(&whole_b)];
+    let whole_files = [
+        FileOperand::from_path(&whole_a),
+        FileOperand::from_path(&whole_b),
+    ];
     // Exercise a real cross-file vector, not a loop of singleton reads.
     let ranges = fs
         .vread_impl(&[
@@ -136,7 +139,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     // backends; exact values depend on the filesystem clock semantics.
     if posix_metadata {
         let mut t = VfAttrs {
-            file: VfFile::from_path(&f),
+            file: FileOperand::from_path(&f),
             masks: AttrMask::ATIME | AttrMask::MTIME | AttrMask::CTIME,
             ..VfAttrs::default()
         };
@@ -152,14 +155,14 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     if posix_metadata {
         let big = format!("{}/big.bin", dir);
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path(&big),
+            FileOperand::from_path(&big),
             0,
             vec![b'x'; 4096],
         )
         .with_creation()]))
             .unwrap();
         let mut b = VfAttrs {
-            file: VfFile::from_path(&big),
+            file: FileOperand::from_path(&big),
             masks: AttrMask::BLOCKS,
             ..VfAttrs::default()
         };
@@ -172,7 +175,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
 
     // setattrs: truncate to 5 bytes, then mode.
     fs.vsetattrs_raw_impl(&[VfAttrs {
-        file: VfFile::from_path(&f),
+        file: FileOperand::from_path(&f),
         masks: AttrMask::SIZE,
         size: 5,
         ..VfAttrs::default()
@@ -260,8 +263,8 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     // rename.
     let renamed = format!("{}/renamed.txt", dir);
     fs.vrename_impl(&[(
-        VfFile::from_os_path(Path::new(&f)),
-        VfFile::from_os_path(Path::new(&renamed)),
+        FileOperand::from_os_path(Path::new(&f)),
+        FileOperand::from_os_path(Path::new(&renamed)),
     )])
     .expect("renamev");
     assert!(fs.exists_impl(Path::new(&renamed)).unwrap());
@@ -319,14 +322,14 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     let short = format!("{}/short.txt", dir);
     let long = format!("{}/long.txt", dir);
     fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-        VfFile::from_path(&short),
+        FileOperand::from_path(&short),
         0,
         b"ab".to_vec(),
     )
     .with_creation()]))
         .unwrap();
     fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-        VfFile::from_path(&long),
+        FileOperand::from_path(&long),
         0,
         b"abcdef".to_vec(),
     )
@@ -337,7 +340,8 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     let st = fs.stat_impl(Path::new(&long)).unwrap();
     assert_eq!(st.size, 2, "dupv truncates the destination");
     assert_eq!(
-        fs.read_raw_impl(&VfFile::from_path(&long), 0, 8).unwrap(),
+        fs.read_raw_impl(&FileOperand::from_path(&long), 0, 8)
+            .unwrap(),
         b"ab"
     );
 
@@ -382,9 +386,13 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
 
     // "Current position" offsets are invalid for path-based operations.
     assert_eq!(
-        fs.vread_impl(&[ReadOp::new(VfFile::from_path(&renamed), VfOffset::Cur, 1)])
-            .unwrap_err()
-            .err_no(),
+        fs.vread_impl(&[ReadOp::new(
+            FileOperand::from_path(&renamed),
+            VfOffset::Cur,
+            1
+        )])
+        .unwrap_err()
+        .err_no(),
         ERR_INVAL
     );
 
@@ -395,12 +403,12 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     let mixed = fs
         .vread_impl(&[
             ReadOp::new(rfd.clone(), VfOffset::At(0), 2),
-            ReadOp::at(VfFile::from_path(&copy), 0, 2),
+            ReadOp::at(FileOperand::from_path(&copy), 0, 2),
         ])
         .unwrap();
     assert_eq!(mixed[0].data.len(), 2);
     assert_eq!(mixed[1].data.len(), 2);
-    assert!(mixed[0].file.is_descriptor(), "result echoes the fd op");
+    assert!(mixed[0].file.is_fd(), "result echoes the fd op");
     assert!(mixed[1].file.path().is_some(), "result echoes the path op");
     fs.close_impl(&rfd).unwrap();
 
@@ -411,7 +419,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     fs.close_impl(&bad).unwrap();
     let e = fs
         .vread_impl(&[
-            ReadOp::at(VfFile::from_path(&copy), 0, 1),
+            ReadOp::at(FileOperand::from_path(&copy), 0, 1),
             ReadOp::new(bad, VfOffset::At(0), 1),
         ])
         .unwrap_err();
@@ -439,7 +447,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     let nonempty = format!("{}/nonempty", dir);
     fs.ensure_dir_impl(Path::new(&nonempty), 0o755).unwrap();
     fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-        VfFile::from_os_path(Path::new(&format!("{}/x", nonempty))),
+        FileOperand::from_os_path(Path::new(&format!("{}/x", nonempty))),
         0,
         b"x".to_vec(),
     )
@@ -459,7 +467,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         .expect("write_adb");
     assert_eq!(a.adb_block_count, 2);
     let adb = fs
-        .read_raw_impl(&VfFile::from_path(&adbf), 0, 2048)
+        .read_raw_impl(&FileOperand::from_path(&adbf), 0, 2048)
         .unwrap();
     assert_eq!(&adb[0..8], &100u64.to_be_bytes(), "ADBN block 0");
     assert_eq!(&adb[1024..1032], &101u64.to_be_bytes(), "ADBN block 1");
@@ -508,7 +516,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         );
         assert_eq!(
             fs.read_raw_impl(
-                &VfFile::from_os_path(Path::new(&format!("{}/inner/link", cpflat))),
+                &FileOperand::from_os_path(Path::new(&format!("{}/inner/link", cpflat))),
                 0,
                 3
             )
@@ -566,7 +574,9 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         b"cd".to_vec(),
     )]))
     .unwrap();
-    let got = fs.read_raw_impl(&VfFile::from_path(&app), 0, 8).unwrap();
+    let got = fs
+        .read_raw_impl(&FileOperand::from_path(&app), 0, 8)
+        .unwrap();
     assert_eq!(got, b"abcd", "O_APPEND appends regardless of offset");
     // Cursor-based append reports and advances to the real append position,
     // independently of the initial cursor value.
@@ -581,7 +591,8 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     assert_eq!(fs.seek_raw_impl(&afd, 0, SeekFrom::Cur).unwrap(), 5);
     fs.close_impl(&afd).unwrap();
     assert_eq!(
-        fs.read_raw_impl(&VfFile::from_path(&app), 0, 8).unwrap(),
+        fs.read_raw_impl(&FileOperand::from_path(&app), 0, 8)
+            .unwrap(),
         b"abcde"
     );
 
@@ -591,7 +602,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         let dup_copy = format!("{}/dup_copy", dir);
         let dup_target = format!("{}/dup_target", dir);
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path(&dup_target),
+            FileOperand::from_path(&dup_target),
             0,
             b"linkdata".to_vec(),
         )
@@ -610,14 +621,14 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         assert_eq!(st.ftype, VfType::Regular, "dupv copies target data");
         assert_eq!(st.size, 8);
         assert_eq!(
-            fs.read_raw_impl(&VfFile::from_path(&dup_copy), 0, 8)
+            fs.read_raw_impl(&FileOperand::from_path(&dup_copy), 0, 8)
                 .unwrap(),
             b"linkdata"
         );
 
         // lsetattrsv refuses symlinks instead of pretending to set them.
         let lsa = VfAttrs {
-            file: VfFile::from_path(&dup_link),
+            file: FileOperand::from_path(&dup_link),
             masks: AttrMask::MODE,
             mode: 0o600,
             ..VfAttrs::default()
@@ -656,7 +667,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     fs.close_impl(&f2).unwrap();
     assert_eq!(
         fs.read_raw_impl(
-            &VfFile::from_os_path(Path::new(&format!("/{}", abs_rel))),
+            &FileOperand::from_os_path(Path::new(&format!("/{}", abs_rel))),
             0,
             2
         )
@@ -667,7 +678,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     // Writing through `Current(None)` (the cwd itself) is not a file op.
     assert_eq!(
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::cwd(),
+            FileOperand::cwd(),
             0,
             b"x".to_vec()
         )
@@ -686,7 +697,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         let subp = format!("{}/{}", wroot, sub);
         fs.ensure_dir_impl(Path::new(&subp), 0o755).unwrap();
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_os_path(Path::new(&format!("{}/{}", subp, file))),
+            FileOperand::from_os_path(Path::new(&format!("{}/{}", subp, file))),
             0,
             b"x".to_vec(),
         )

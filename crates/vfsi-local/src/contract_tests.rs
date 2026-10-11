@@ -197,7 +197,7 @@ mod tests {
 
     fn write(fs: &mut LocalBackend, path: &str, data: &[u8]) {
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path(path),
+            FileOperand::from_path(path),
             0,
             data.to_vec(),
         )
@@ -267,8 +267,8 @@ mod tests {
     #[test]
     fn borrowed_write_and_direct_read_into_preserve_offsets_and_eof() {
         let (_root, mut fs) = fs("borrowed-io");
-        let file = VfFile::from_path("/f");
-        let write: WriteOp<&VfFile, &[u8]> =
+        let file = FileOperand::from_path("/f");
+        let write: WriteOp<&FileOperand, &[u8]> =
             WriteOp::new(&file, VfOffset::At(0), &b"hello"[..]).with_creation();
         let written = fs.vwrite_impl(&[write]).unwrap();
         assert_eq!(written[0].written, 5);
@@ -309,14 +309,18 @@ mod tests {
 
         // A read positioned at End starts at the file size, so it is at EOF.
         let r = fs
-            .vread_impl(&[ReadOp::new(VfFile::from_path("/f"), VfOffset::End, 5)])
+            .vread_impl(&[ReadOp::new(FileOperand::from_path("/f"), VfOffset::End, 5)])
             .unwrap();
         assert_eq!(r[0].offset, 12); // the resolved start is the file size
         assert!(r[0].data.is_empty());
         assert!(r[0].eof);
 
         let r = fs
-            .vread_impl(&[ReadOp::new(VfFile::from_path("/f"), VfOffset::End, 100)])
+            .vread_impl(&[ReadOp::new(
+                FileOperand::from_path("/f"),
+                VfOffset::End,
+                100,
+            )])
             .unwrap();
         assert!(r[0].eof);
         assert_eq!(fs.stat_impl(Path::new("/f")).unwrap().size, 12);
@@ -327,7 +331,7 @@ mod tests {
         let (_root, mut fs) = fs("writev-truncate");
         write(&mut fs, "/f", b"longer-than-needed");
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path("/f"),
+            FileOperand::from_path("/f"),
             0,
             b"hi".to_vec(),
         )
@@ -335,20 +339,22 @@ mod tests {
             .unwrap();
         // O_TRUNC semantics: the stale tail is gone.
         assert_eq!(
-            fs.read_raw_impl(&VfFile::from_path("/f"), 0, 100).unwrap(),
+            fs.read_raw_impl(&FileOperand::from_path("/f"), 0, 100)
+                .unwrap(),
             b"hi"
         );
 
         // A plain overwrite keeps the tail (pwrite semantics).
         write(&mut fs, "/g", b"abcdef");
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path("/g"),
+            FileOperand::from_path("/g"),
             0,
             b"xy".to_vec(),
         )]))
         .unwrap();
         assert_eq!(
-            fs.read_raw_impl(&VfFile::from_path("/g"), 0, 100).unwrap(),
+            fs.read_raw_impl(&FileOperand::from_path("/g"), 0, 100)
+                .unwrap(),
             b"xycdef"
         );
     }
@@ -359,20 +365,20 @@ mod tests {
         write(&mut fs, "/f", b"abc");
 
         let r = fs
-            .vread_impl(&[ReadOp::at(VfFile::from_path("/f"), 0, 3)])
+            .vread_impl(&[ReadOp::at(FileOperand::from_path("/f"), 0, 3)])
             .unwrap();
         assert_eq!(r[0].data, b"abc");
         assert!(!r[0].eof);
 
         let r = fs
-            .vread_impl(&[ReadOp::at(VfFile::from_path("/f"), 0, 4)])
+            .vread_impl(&[ReadOp::at(FileOperand::from_path("/f"), 0, 4)])
             .unwrap();
         assert_eq!(r[0].data, b"abc");
         assert!(r[0].eof);
 
         // Zero-length reads never report EOF.
         let r = fs
-            .vread_impl(&[ReadOp::at(VfFile::from_path("/f"), 0, 0)])
+            .vread_impl(&[ReadOp::at(FileOperand::from_path("/f"), 0, 0)])
             .unwrap();
         assert!(r[0].data.is_empty());
         assert!(!r[0].eof);
@@ -439,7 +445,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // VfFile base/cwd resolution is honored by every path-taking method
+    // FileOperand base/cwd resolution is honored by every path-taking method
     // ------------------------------------------------------------------
 
     #[test]
@@ -468,11 +474,11 @@ mod tests {
         fs.chdir(Path::new("sub")).unwrap();
 
         // base Abs with a non-slash path is root-relative even after chdir.
-        let abs_src = VfFile::Path {
+        let abs_src = FileOperand::Path {
             base: VfPathBase::Abs,
             path: PathBuf::from("src"),
         };
-        let abs_dst = VfFile::Path {
+        let abs_dst = FileOperand::Path {
             base: VfPathBase::Abs,
             path: PathBuf::from("dst"),
         };
@@ -481,11 +487,11 @@ mod tests {
         assert!(fs.exists_impl(Path::new("/dst")).unwrap());
 
         // base Cwd resolves against the cwd.
-        let cwd_src = VfFile::Path {
+        let cwd_src = FileOperand::Path {
             base: VfPathBase::Cwd,
             path: PathBuf::from("src2"),
         };
-        let cwd_dst = VfFile::Path {
+        let cwd_dst = FileOperand::Path {
             base: VfPathBase::Cwd,
             path: PathBuf::from("dst2"),
         };
@@ -548,8 +554,8 @@ mod tests {
         let error = fs
             .vrename_with_options_impl(
                 &[(
-                    VfFile::from_path("/source"),
-                    VfFile::from_path("/source/child/moved"),
+                    FileOperand::from_path("/source"),
+                    FileOperand::from_path("/source/child/moved"),
                 )],
                 vfsi_core::api::RenameOptions::NoReplace,
             )
@@ -583,28 +589,28 @@ mod tests {
         write(&mut fs, "/sub/f", b"x");
 
         // `cwd()` is the cwd itself; `cwd_path` is relative to it.
-        assert_eq!(fs.vf_path(&VfFile::cwd()).unwrap(), Path::new(""));
+        assert_eq!(fs.vf_path(&FileOperand::cwd()).unwrap(), Path::new(""));
         assert_eq!(
-            VfFile::cwd_path("f").path(),
+            FileOperand::cwd_path("f").path(),
             Some(std::path::Path::new("f"))
         );
         fs.chdir(Path::new("/sub")).unwrap();
-        assert_eq!(fs.vf_path(&VfFile::cwd()).unwrap(), Path::new("sub"));
+        assert_eq!(fs.vf_path(&FileOperand::cwd()).unwrap(), Path::new("sub"));
         assert_eq!(
-            fs.vf_path(&VfFile::cwd_path("f")).unwrap(),
+            fs.vf_path(&FileOperand::cwd_path("f")).unwrap(),
             Path::new("sub/f")
         );
 
         // The cwd is a stat target but not a file for read/write.
         let mut a = VfAttrs {
-            file: VfFile::cwd(),
+            file: FileOperand::cwd(),
             masks: AttrMask::stat(),
             ..VfAttrs::default()
         };
         fs.vgetattrs_impl(std::slice::from_mut(&mut a)).unwrap();
         assert_eq!(a.ftype, VfType::Directory);
         assert_eq!(
-            fs.vread_impl(&[ReadOp::new(VfFile::cwd(), VfOffset::At(0), 1)])
+            fs.vread_impl(&[ReadOp::new(FileOperand::cwd(), VfOffset::At(0), 1)])
                 .unwrap_err()
                 .err_no(),
             ERR_ISDIR
@@ -621,7 +627,7 @@ mod tests {
 
         // Writing through ".." lands inside the root, not in its parent.
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path("/../escape"),
+            FileOperand::from_path("/../escape"),
             0,
             b"x".to_vec(),
         )
@@ -634,7 +640,7 @@ mod tests {
         let st = fs.stat_impl(Path::new("/..")).unwrap();
         assert_eq!(st.ftype, VfType::Directory);
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path("/../sub1/../../sub2"),
+            FileOperand::from_path("/../sub1/../../sub2"),
             0,
             b"y".to_vec(),
         )
@@ -645,8 +651,11 @@ mod tests {
 
         // A lexical "a/../b" path resolves to b.
         write(&mut fs, "/a", b"");
-        fs.vrename_impl(&[(VfFile::from_path("/a"), VfFile::from_path("/x/../b"))])
-            .unwrap();
+        fs.vrename_impl(&[(
+            FileOperand::from_path("/a"),
+            FileOperand::from_path("/x/../b"),
+        )])
+        .unwrap();
         assert!(fs.exists_impl(Path::new("/b")).unwrap());
         assert!(!fs.exists_impl(Path::new("/x")).unwrap());
     }
@@ -661,7 +670,7 @@ mod tests {
         fs.symlink_raw_impl(Path::new("/target"), Path::new("/abs-link"))
             .unwrap();
         assert_eq!(
-            fs.read_raw_impl(&VfFile::from_path("/abs-link"), 0, 6)
+            fs.read_raw_impl(&FileOperand::from_path("/abs-link"), 0, 6)
                 .unwrap(),
             b"inside"
         );
@@ -669,7 +678,7 @@ mod tests {
         fs.symlink_raw_impl(Path::new("/sub/../target"), Path::new("/dotdot-link"))
             .unwrap();
         assert_eq!(
-            fs.read_raw_impl(&VfFile::from_path("/dotdot-link"), 0, 6)
+            fs.read_raw_impl(&FileOperand::from_path("/dotdot-link"), 0, 6)
                 .unwrap(),
             b"inside"
         );
@@ -688,7 +697,7 @@ mod tests {
         fs.symlink_raw_impl(Path::new(&outside), Path::new("/evil"))
             .unwrap();
         assert_eq!(
-            fs.vread_impl(&[ReadOp::at(VfFile::from_path("/evil"), 0, 8)])
+            fs.vread_impl(&[ReadOp::at(FileOperand::from_path("/evil"), 0, 8)])
                 .unwrap_err()
                 .err_no(),
             ERR_NOENT,
@@ -702,14 +711,14 @@ mod tests {
         fs.symlink_raw_impl(Path::new("/subdir/created-inside"), Path::new("/evil3"))
             .unwrap();
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path("/evil3"),
+            FileOperand::from_path("/evil3"),
             0,
             b"x".to_vec(),
         )
         .with_creation()]))
             .unwrap();
         assert_eq!(
-            fs.read_raw_impl(&VfFile::from_path("/subdir/created-inside"), 0, 1)
+            fs.read_raw_impl(&FileOperand::from_path("/subdir/created-inside"), 0, 1)
                 .unwrap(),
             b"x"
         );
@@ -729,7 +738,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-                VfFile::from_path("/evil2"),
+                FileOperand::from_path("/evil2"),
                 0,
                 b"x".to_vec()
             )
@@ -748,14 +757,14 @@ mod tests {
         fs.symlink_raw_impl(Path::new("internal-target"), Path::new("/ok-link"))
             .unwrap();
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path("/ok-link"),
+            FileOperand::from_path("/ok-link"),
             0,
             b"z".to_vec(),
         )
         .with_creation()]))
             .unwrap();
         assert_eq!(
-            fs.read_raw_impl(&VfFile::from_path("/internal-target"), 0, 1)
+            fs.read_raw_impl(&FileOperand::from_path("/internal-target"), 0, 1)
                 .unwrap(),
             b"z"
         );
@@ -771,11 +780,11 @@ mod tests {
         std::os::unix::fs::symlink(&outside.0, root.0.join("pivot")).unwrap();
 
         for error in [
-            fs.vremove_impl(&[VfFile::from_path("/pivot/victim")])
+            fs.vremove_impl(&[FileOperand::from_path("/pivot/victim")])
                 .unwrap_err(),
             fs.vrename_impl(&[(
-                VfFile::from_path("/pivot/victim"),
-                VfFile::from_path("/renamed"),
+                FileOperand::from_path("/pivot/victim"),
+                FileOperand::from_path("/renamed"),
             )])
             .unwrap_err(),
             fs.listdir_impl(Path::new("/pivot"), AttrMask::stat(), 0, false)
@@ -993,14 +1002,14 @@ mod tests {
         fs.chdir(Path::new("/a")).unwrap();
 
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path("../x"),
+            FileOperand::from_path("../x"),
             0,
             b"1".to_vec(),
         )
         .with_creation()]))
             .unwrap();
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path("a/../y"),
+            FileOperand::from_path("a/../y"),
             0,
             b"2".to_vec(),
         )
@@ -1016,7 +1025,7 @@ mod tests {
         // ".." from the root clamps at the root instead of escaping.
         fs.chdir(Path::new("/")).unwrap();
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path("../z"),
+            FileOperand::from_path("../z"),
             0,
             b"3".to_vec(),
         )
@@ -1060,7 +1069,7 @@ mod tests {
         assert_eq!(rc, 0, "setxattr");
 
         let mut a = VfAttrs {
-            file: VfFile::from_path("/f"),
+            file: FileOperand::from_path("/f"),
             masks: AttrMask::NAMED_ATTR,
             ..VfAttrs::default()
         };
@@ -1110,7 +1119,7 @@ mod tests {
         assert!(a.returned.contains(AttrMask::MODE));
 
         let mut a = VfAttrs {
-            file: VfFile::from_path("/f"),
+            file: FileOperand::from_path("/f"),
             masks: AttrMask::MODE | AttrMask::SIZE | AttrMask::MTIME,
             ..VfAttrs::default()
         };
@@ -1130,7 +1139,7 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
         let mut a = VfAttrs {
-            file: VfFile::from_path("/f"),
+            file: FileOperand::from_path("/f"),
             masks: AttrMask::BLOCKS,
             mode: 0o640,
             size: 0,
@@ -1166,7 +1175,7 @@ mod tests {
         write(&mut fs, "/f", b"contents");
 
         let update = VfAttrs {
-            file: VfFile::from_path("/f"),
+            file: FileOperand::from_path("/f"),
             masks: AttrMask::ATIME | AttrMask::MTIME,
             atime_sec: 1_700_000_001,
             atime_nsec: 123_456_789,
@@ -1178,7 +1187,7 @@ mod tests {
             .unwrap();
 
         let mut actual = VfAttrs {
-            file: VfFile::from_path("/f"),
+            file: FileOperand::from_path("/f"),
             masks: AttrMask::ATIME | AttrMask::MTIME | AttrMask::SIZE,
             ..VfAttrs::default()
         };
@@ -1208,7 +1217,7 @@ mod tests {
         // No portable lchmod: the dummy backend refuses symlinks instead of
         // silently following them.
         let a = VfAttrs {
-            file: VfFile::from_path("/link"),
+            file: FileOperand::from_path("/link"),
             masks: AttrMask::MODE,
             mode: 0o600,
             ..VfAttrs::default()
@@ -1235,7 +1244,7 @@ mod tests {
 
         // Regular files are set normally.
         let a = VfAttrs {
-            file: VfFile::from_path("/target"),
+            file: FileOperand::from_path("/target"),
             masks: AttrMask::MODE,
             mode: 0o600,
             ..VfAttrs::default()
@@ -1353,7 +1362,7 @@ mod tests {
             VfType::Regular
         );
         assert_eq!(
-            fs.read_raw_impl(&VfFile::from_path("/link-dup"), 0, 4)
+            fs.read_raw_impl(&FileOperand::from_path("/link-dup"), 0, 4)
                 .unwrap(),
             b"data"
         );
@@ -1372,7 +1381,7 @@ mod tests {
         ];
         fs.vcopy_impl(&pairs, options).unwrap();
         assert_eq!(
-            fs.read_raw_impl(&VfFile::from_path("/data-copy"), 0, 4)
+            fs.read_raw_impl(&FileOperand::from_path("/data-copy"), 0, 4)
                 .unwrap(),
             b"2345"
         );
@@ -1486,7 +1495,7 @@ mod tests {
                 .expect("leaf remains below source"),
         );
         assert_eq!(
-            fs.read_raw_impl(&VfFile::from_os_path(&copied_leaf), 0, 4)
+            fs.read_raw_impl(&FileOperand::from_os_path(&copied_leaf), 0, 4)
                 .unwrap(),
             b"deep"
         );

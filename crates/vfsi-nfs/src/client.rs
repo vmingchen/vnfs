@@ -22,11 +22,19 @@ use crate::session::Session;
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
-/// An NFS file handle owned by the client.
+/// Opaque NFS protocol reference to a server-side filesystem object.
+///
+/// This addresses the object for NFS operations; it is not the
+/// stateful open instance, which also involves NFS OPEN state such as a
+/// stateid.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct FileHandle {
+pub struct NfsFh {
     bytes: Vec<u8>,
 }
+
+/// Compatibility name for the same opaque [`NfsFh`] object reference.
+#[deprecated(note = "Use NfsFh instead")]
+pub use NfsFh as FileHandle;
 
 /// Which open owner a client operation uses: the user-visible descriptor
 /// owner, or the internal path-op owner whose stateids never collide with
@@ -37,7 +45,7 @@ enum OwnerSlot {
     Path,
 }
 
-impl FileHandle {
+impl NfsFh {
     fn as_nfs_fh(&self) -> nfs_fh4 {
         nfs_fh4 {
             nfs_fh4_len: self.bytes.len() as u32,
@@ -45,11 +53,11 @@ impl FileHandle {
         }
     }
 
-    fn from_nfs_fh(fh: &nfs_fh4) -> FileHandle {
+    fn from_nfs_fh(fh: &nfs_fh4) -> NfsFh {
         let slice = unsafe {
             std::slice::from_raw_parts(fh.nfs_fh4_val as *const u8, fh.nfs_fh4_len as usize)
         };
-        FileHandle {
+        NfsFh {
             bytes: slice.to_vec(),
         }
     }
@@ -65,7 +73,7 @@ impl FileHandle {
 
 pub struct NfsClient {
     session: Session,
-    root: FileHandle,
+    root: NfsFh,
     /// Caller cap for an encoded request, including a reserved RPC/auth
     /// envelope. The effective cap never exceeds CREATE_SESSION's confirmed
     /// `ca_maxrequestsize`.
@@ -133,14 +141,14 @@ pub struct DirEntry {
 
 /// A directory's listing (entries so far and the cookie to continue).
 pub struct ChildListing {
-    pub fh: FileHandle,
+    pub fh: NfsFh,
     pub entries: Vec<DirEntry>,
     pub cookie: u64,
 }
 
 /// One READ of a batched compound, `[PUTFH, READ]`.
 pub struct ReadOp {
-    pub fh: FileHandle,
+    pub fh: NfsFh,
     pub stateid: stateid4,
     pub offset: u64,
     pub count: u32,
@@ -148,7 +156,7 @@ pub struct ReadOp {
 
 /// One WRITE of a batched compound, `[PUTFH, WRITE]`.
 pub struct WriteOp<'a> {
-    pub fh: FileHandle,
+    pub fh: NfsFh,
     pub stateid: stateid4,
     pub offset: u64,
     pub data: &'a [u8],
@@ -156,13 +164,13 @@ pub struct WriteOp<'a> {
 
 /// One GETATTR of a batched compound, `[PUTFH, GETATTR]`.
 pub struct GetattrOp {
-    pub fh: FileHandle,
+    pub fh: NfsFh,
     pub attrs: Vec<u32>,
 }
 
 /// One SETATTR of a batched compound, `[PUTFH, SETATTR]`.
 pub struct SetattrOp {
-    pub fh: FileHandle,
+    pub fh: NfsFh,
     pub mode: Option<u32>,
     pub uid: Option<u32>,
     pub gid: Option<u32>,
@@ -173,20 +181,20 @@ pub struct SetattrOp {
 
 /// One READLINK of a batched compound, `[PUTFH, READLINK]`.
 pub struct ReadlinkOp {
-    pub fh: FileHandle,
+    pub fh: NfsFh,
 }
 
 /// One RENAME of a batched compound: `[PUTFH src, SAVEFH, PUTFH dst, RENAME]`.
 pub struct RenameOp {
-    pub srcdir: FileHandle,
+    pub srcdir: NfsFh,
     pub oldname: Vec<u8>,
-    pub dstdir: FileHandle,
+    pub dstdir: NfsFh,
     pub newname: Vec<u8>,
 }
 
 /// One CREATE of a batched compound, `[PUTFH dir, CREATE]` (mkdir / symlink).
 pub struct CreateOp {
-    pub dir: FileHandle,
+    pub dir: NfsFh,
     pub name: Vec<u8>,
     pub ftype: nfs_ftype4,
     pub linkdata: Option<Vec<u8>>,
@@ -194,14 +202,14 @@ pub struct CreateOp {
 
 /// One LINK of a batched compound: `[PUTFH src, SAVEFH, PUTFH dst, LINK]`.
 pub struct LinkOp {
-    pub dstdir: FileHandle,
-    pub src: FileHandle,
+    pub dstdir: NfsFh,
+    pub src: NfsFh,
     pub newname: Vec<u8>,
 }
 
 /// One OPEN of a batched compound, `[PUTFH dir, OPEN, GETFH]`.
 pub struct OpenOp {
-    pub dir: FileHandle,
+    pub dir: NfsFh,
     pub name: Vec<u8>,
     pub access: u32,
     pub create: OpenCreate,
@@ -209,15 +217,15 @@ pub struct OpenOp {
 
 /// One CLOSE of a batched compound, `[PUTFH fh, CLOSE]`.
 pub struct CloseOp {
-    pub fh: FileHandle,
+    pub fh: NfsFh,
     pub stateid: stateid4,
 }
 
 /// One NFSv4.2 COPY: `[PUTFH src, SAVEFH, PUTFH dst, COPY]`.
 pub struct CopyOp {
-    pub src_fh: FileHandle,
+    pub src_fh: NfsFh,
     pub src_stateid: stateid4,
-    pub dst_fh: FileHandle,
+    pub dst_fh: NfsFh,
     pub dst_stateid: stateid4,
     pub src_offset: u64,
     pub dst_offset: u64,
@@ -300,11 +308,12 @@ fn checked_offset(base: u64, delta: usize, op_index: usize) -> RpcResult<u64> {
 /// FATTR4_TIME_CREATE is intentionally absent (ganesha omits it, and it maps
 /// to creation time, not stat's ctime). FATTR4_NAMED_ATTR is the per-object
 /// "has a non-empty named attribute directory" boolean (RFC 5661 s5.8.1.8).
-pub const READDIR_ATTRS: [u32; 14] = [
+pub const READDIR_ATTRS: [u32; 15] = [
     FATTR4_TYPE,
     FATTR4_CHANGE,
     FATTR4_SIZE,
     FATTR4_NAMED_ATTR,
+    FATTR4_FSID,
     FATTR4_FILEID,
     FATTR4_MODE,
     FATTR4_NUMLINKS,
@@ -326,7 +335,7 @@ pub const READDIR_ATTRS: [u32; 14] = [
 /// compound with PUTFH).
 pub enum FileRef {
     Path(Vec<u8>),
-    Handle(FileHandle),
+    Handle(NfsFh),
 }
 
 /// One path-based WRITE for a merged compound. The path is root-relative
@@ -398,7 +407,7 @@ pub struct PathWriteOutcome {
     pub committed: Vec<Option<u32>>,
     /// Open stateids (with their filehandles) created by the compound; used
     /// by the separate-close form and for best-effort cleanup on failure.
-    pub opened: Vec<(FileHandle, stateid4)>,
+    pub opened: Vec<(NfsFh, stateid4)>,
     /// First failing caller-relative op index + NFS status, if any.
     pub failed: Option<(usize, u32)>,
     /// The trailing in-compound CLOSE failed (special stateid unsupported).
@@ -409,7 +418,7 @@ pub struct PathWriteOutcome {
 pub struct PathReadOutcome {
     pub data: Vec<Option<Vec<u8>>>,
     pub eof: Vec<Option<bool>>,
-    pub opened: Vec<(FileHandle, stateid4)>,
+    pub opened: Vec<(NfsFh, stateid4)>,
     pub failed: Option<(usize, u32)>,
     pub close_failed: Option<u32>,
 }
@@ -458,7 +467,7 @@ pub struct PathOpenOp {
 
 pub struct PathOpenOutcome {
     /// (filehandle, stateid) per op; None for ops that did not complete.
-    pub opened: Vec<Option<(FileHandle, stateid4)>>,
+    pub opened: Vec<Option<(NfsFh, stateid4)>>,
     pub failed: Option<(usize, u32)>,
 }
 
@@ -601,7 +610,7 @@ impl CfhCursor {
 
     /// Make the current fh a known open-file handle (descriptor ops). The
     /// saved fh is untouched, so a later path op can still RESTOREFH back.
-    fn set_handle(&mut self, c: &mut Compound, fh: &FileHandle) {
+    fn set_handle(&mut self, c: &mut Compound, fh: &NfsFh) {
         c.putfh(&fh.as_nfs_fh());
         self.at_saved = false;
     }
@@ -985,7 +994,7 @@ impl NfsClient {
         (dircount, maxcount.max(1))
     }
 
-    pub fn root(&self) -> &FileHandle {
+    pub fn root(&self) -> &NfsFh {
         &self.root
     }
 
@@ -1242,7 +1251,7 @@ impl NfsClient {
     }
 
     /// Look up a single component below `dir`.
-    pub fn lookup(&mut self, dir: &FileHandle, name: &[u8]) -> RpcResult<FileHandle> {
+    pub fn lookup(&mut self, dir: &NfsFh, name: &[u8]) -> RpcResult<NfsFh> {
         let mut c = Compound::new();
         c.tag(b"lookup");
         c.putfh(&dir.as_nfs_fh());
@@ -1250,17 +1259,13 @@ impl NfsClient {
         c.getfh();
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
-        Ok(FileHandle::from_nfs_fh(res.getfh(3)))
+        Ok(NfsFh::from_nfs_fh(res.getfh(3)))
     }
 
     /// Look up `name` below `dir`, returning the child handle and its
     /// FATTR4_TYPE in one compound (`[PUTFH, LOOKUP, GETFH, GETATTR]`).
     /// A symlink is returned as-is (type `NF4LNK`), so callers can follow it.
-    pub fn lookup_getattr(
-        &mut self,
-        dir: &FileHandle,
-        name: &[u8],
-    ) -> RpcResult<(FileHandle, u32)> {
+    pub fn lookup_getattr(&mut self, dir: &NfsFh, name: &[u8]) -> RpcResult<(NfsFh, u32)> {
         let mut c = Compound::new();
         c.tag(b"lookup_getattr");
         c.putfh(&dir.as_nfs_fh());
@@ -1269,7 +1274,7 @@ impl NfsClient {
         c.getattr(&[FATTR4_TYPE]);
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
-        let fh = FileHandle::from_nfs_fh(res.getfh(3));
+        let fh = NfsFh::from_nfs_fh(res.getfh(3));
         let t = res.getattr_bytes(4);
         let ftype = if t.len() >= 4 {
             u32::from_be_bytes(t[0..4].try_into().unwrap())
@@ -1285,12 +1290,12 @@ impl NfsClient {
     /// failures abort the whole call.
     pub fn lookup_getattr_many(
         &mut self,
-        ops: &[(FileHandle, Vec<u8>)],
-    ) -> RpcResult<Vec<Result<(FileHandle, u32), u32>>> {
+        ops: &[(NfsFh, Vec<u8>)],
+    ) -> RpcResult<Vec<Result<(NfsFh, u32), u32>>> {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
-        let mut out: Vec<Option<Result<(FileHandle, u32), u32>>> =
+        let mut out: Vec<Option<Result<(NfsFh, u32), u32>>> =
             (0..ops.len()).map(|_| None).collect();
         let mut cursor = 0usize;
         let mut max_items = usize::MAX;
@@ -1339,7 +1344,7 @@ impl NfsClient {
 
             for caller in report.completed {
                 let (_, start, _) = map.range(caller).expect("reported range must exist");
-                let fh = FileHandle::from_nfs_fh(res.getfh(start + 2));
+                let fh = NfsFh::from_nfs_fh(res.getfh(start + 2));
                 let bytes = res.getattr_bytes(start + 3);
                 let ftype = if bytes.len() >= 4 {
                     u32::from_be_bytes(bytes[0..4].try_into().unwrap())
@@ -1385,14 +1390,11 @@ impl NfsClient {
     /// only transport / compound-level failures abort the whole call. The
     /// returned error index, when one is produced, is the element's position
     /// in `ops`.
-    pub fn lookup_many(
-        &mut self,
-        ops: &[(FileHandle, Vec<u8>)],
-    ) -> RpcResult<Vec<Result<FileHandle, u32>>> {
+    pub fn lookup_many(&mut self, ops: &[(NfsFh, Vec<u8>)]) -> RpcResult<Vec<Result<NfsFh, u32>>> {
         if ops.is_empty() {
             return Ok(Vec::new());
         }
-        let mut out: Vec<Option<Result<FileHandle, u32>>> = (0..ops.len()).map(|_| None).collect();
+        let mut out: Vec<Option<Result<NfsFh, u32>>> = (0..ops.len()).map(|_| None).collect();
         let mut cursor = 0usize;
         let mut max_items = usize::MAX;
         while cursor < ops.len() {
@@ -1434,7 +1436,7 @@ impl NfsClient {
             }
             for caller in report.completed {
                 let (_, start, _) = map.range(caller).expect("reported range must exist");
-                out[caller] = Some(Ok(FileHandle::from_nfs_fh(res.getfh(start + 2))));
+                out[caller] = Some(Ok(NfsFh::from_nfs_fh(res.getfh(start + 2))));
             }
             if let Some(failure) = report.failure {
                 if matches!(
@@ -1464,7 +1466,7 @@ impl NfsClient {
     /// Resolve a slash-separated path from the export root. LOOKUPs chain
     /// within each compound, with long paths split at the learned operation
     /// limit; a server-side resource rejection rebuilds the current chunk.
-    pub fn resolve(&mut self, path: &[u8]) -> RpcResult<FileHandle> {
+    pub fn resolve(&mut self, path: &[u8]) -> RpcResult<NfsFh> {
         let components = crate::path::components_bytes(path);
         if components.is_empty() {
             return Ok(self.root.clone());
@@ -1504,7 +1506,7 @@ impl NfsClient {
                 continue;
             }
             self.session.expect_all_ok(&res)?;
-            current = FileHandle::from_nfs_fh(res.getfh(2 + take));
+            current = NfsFh::from_nfs_fh(res.getfh(2 + take));
             cursor += take;
         }
         Ok(current)
@@ -1627,7 +1629,7 @@ impl NfsClient {
 
     /// REMOVE several names from `dir` in one compound. REMOVE leaves the
     /// current filehandle on `dir`, so consecutive REMOVEs chain.
-    pub fn remove_many(&mut self, dir: &FileHandle, names: &[Vec<u8>]) -> RpcResult<()> {
+    pub fn remove_many(&mut self, dir: &NfsFh, names: &[Vec<u8>]) -> RpcResult<()> {
         let mut start = 0usize;
         let mut max_items = usize::MAX;
         while start < names.len() {
@@ -1689,11 +1691,11 @@ impl NfsClient {
     /// the file handle and the open stateid.
     pub fn open(
         &mut self,
-        dir: &FileHandle,
+        dir: &NfsFh,
         name: &[u8],
         access: u32,
         create: OpenCreate,
-    ) -> RpcResult<(FileHandle, stateid4)> {
+    ) -> RpcResult<(NfsFh, stateid4)> {
         self.open_slot(dir, name, access, create, OwnerSlot::User)
     }
 
@@ -1701,22 +1703,22 @@ impl NfsClient {
     /// stateids never collide with caller-held descriptors.
     pub fn open_path(
         &mut self,
-        dir: &FileHandle,
+        dir: &NfsFh,
         name: &[u8],
         access: u32,
         create: OpenCreate,
-    ) -> RpcResult<(FileHandle, stateid4)> {
+    ) -> RpcResult<(NfsFh, stateid4)> {
         self.open_slot(dir, name, access, create, OwnerSlot::Path)
     }
 
     fn open_slot(
         &mut self,
-        dir: &FileHandle,
+        dir: &NfsFh,
         name: &[u8],
         access: u32,
         create: OpenCreate,
         slot: OwnerSlot,
-    ) -> RpcResult<(FileHandle, stateid4)> {
+    ) -> RpcResult<(NfsFh, stateid4)> {
         let (seqid, verifier, owner_name) = match slot {
             OwnerSlot::User => {
                 let verifier = self.session.open_owner.verifier;
@@ -1749,7 +1751,7 @@ impl NfsClient {
         if matches!(slot, OwnerSlot::Path) {
             self.session.path_owner.seqid += 1;
         }
-        Ok((FileHandle::from_nfs_fh(fh), stateid))
+        Ok((NfsFh::from_nfs_fh(fh), stateid))
     }
 
     /// Run a batch of same-shaped operations across as few compounds as
@@ -1990,12 +1992,12 @@ impl NfsClient {
     /// OPEN several files in as few compounds as possible; each is
     /// `[PUTFH dir, OPEN, GETFH]`. Open-owner seqids are assigned
     /// consecutively across the batch.
-    pub fn open_many(&mut self, ops: &[OpenOp]) -> RpcResult<Vec<(FileHandle, stateid4)>> {
+    pub fn open_many(&mut self, ops: &[OpenOp]) -> RpcResult<Vec<(NfsFh, stateid4)>> {
         self.open_many_slot(ops, OwnerSlot::User)
     }
 
     /// Like [`open_many`](Self::open_many) but using the path-op open owner.
-    pub fn open_many_path(&mut self, ops: &[OpenOp]) -> RpcResult<Vec<(FileHandle, stateid4)>> {
+    pub fn open_many_path(&mut self, ops: &[OpenOp]) -> RpcResult<Vec<(NfsFh, stateid4)>> {
         self.open_many_slot(ops, OwnerSlot::Path)
     }
 
@@ -2003,7 +2005,7 @@ impl NfsClient {
         &mut self,
         ops: &[OpenOp],
         slot: OwnerSlot,
-    ) -> RpcResult<Vec<(FileHandle, stateid4)>> {
+    ) -> RpcResult<Vec<(NfsFh, stateid4)>> {
         let (base, verifier, owner_name) = match slot {
             OwnerSlot::User => (0, self.session.open_owner.verifier, Vec::new()),
             OwnerSlot::Path => (
@@ -2045,7 +2047,7 @@ impl NfsClient {
             |res, i| {
                 let stateid = res.open(2 + 3 * i).stateid;
                 let fh = res.getfh(3 + 3 * i);
-                (FileHandle::from_nfs_fh(fh), stateid)
+                (NfsFh::from_nfs_fh(fh), stateid)
             },
         )?;
         if matches!(slot, OwnerSlot::Path) {
@@ -2110,7 +2112,7 @@ impl NfsClient {
         let n = ops.len();
         let mut counts: Vec<Option<u32>> = vec![None; n];
         let mut committed: Vec<Option<u32>> = vec![None; n];
-        let mut opened: Vec<(FileHandle, stateid4)> = Vec::new();
+        let mut opened: Vec<(NfsFh, stateid4)> = Vec::new();
         let mut failed: Option<(usize, u32)> = None;
         let mut close_failed: Option<u32> = None;
         // Worst case per file: RESTOREFH + CLOSE + OPEN (+GETFH) + WRITE.
@@ -2317,7 +2319,7 @@ impl NfsClient {
                                 // Paired with the GETFH right after it.
                                 let stateid = res.open(j).stateid;
                                 let fh = res.getfh(j + 1);
-                                opened.push((FileHandle::from_nfs_fh(fh), stateid));
+                                opened.push((NfsFh::from_nfs_fh(fh), stateid));
                             }
                             _ => {}
                         }
@@ -2367,7 +2369,7 @@ impl NfsClient {
         let n = ops.len();
         let mut data: Vec<Option<Vec<u8>>> = vec![None; n];
         let mut eof: Vec<Option<bool>> = vec![None; n];
-        let mut opened: Vec<(FileHandle, stateid4)> = Vec::new();
+        let mut opened: Vec<(NfsFh, stateid4)> = Vec::new();
         let mut failed: Option<(usize, u32)> = None;
         let mut close_failed: Option<u32> = None;
         let per_file = 4;
@@ -2562,7 +2564,7 @@ impl NfsClient {
                             nfs_opnum4_NFS4_OP_OPEN if !close_in_compound => {
                                 let stateid = res.open(j).stateid;
                                 let fh = res.getfh(j + 1);
-                                opened.push((FileHandle::from_nfs_fh(fh), stateid));
+                                opened.push((NfsFh::from_nfs_fh(fh), stateid));
                             }
                             _ => {}
                         }
@@ -2858,7 +2860,7 @@ impl NfsClient {
         self.drain_deferred_path_closes()?;
         let public_owner_names: Vec<Vec<u8>> =
             (0..n).map(|_| self.next_public_open_owner_name()).collect();
-        let mut opened: Vec<Option<(FileHandle, stateid4)>> = vec![None; n];
+        let mut opened: Vec<Option<(NfsFh, stateid4)>> = vec![None; n];
         let mut failed: Option<(usize, u32)> = None;
         let per_file = 6; // RESTOREFH + OPEN + GETFH + [SETATTR x2] + margin
         let reserve = 16;
@@ -2992,7 +2994,7 @@ impl NfsClient {
                         if res.op(j).resop == nfs_opnum4_NFS4_OP_OPEN {
                             let stateid = res.open(j).stateid;
                             let fh = res.getfh(j + 1);
-                            opened[*c] = Some((FileHandle::from_nfs_fh(fh), stateid));
+                            opened[*c] = Some((NfsFh::from_nfs_fh(fh), stateid));
                         }
                     }
                 }
@@ -3003,7 +3005,7 @@ impl NfsClient {
                     if res.op(j).resop == nfs_opnum4_NFS4_OP_OPEN {
                         let stateid = res.open(j).stateid;
                         let fh = res.getfh(j + 1);
-                        opened[*caller] = Some((FileHandle::from_nfs_fh(fh), stateid));
+                        opened[*caller] = Some((NfsFh::from_nfs_fh(fh), stateid));
                     }
                 }
             }
@@ -3247,7 +3249,7 @@ impl NfsClient {
     /// EOF flag.
     pub fn read(
         &mut self,
-        fh: &FileHandle,
+        fh: &NfsFh,
         stateid: &stateid4,
         offset: u64,
         count: u32,
@@ -3274,7 +3276,7 @@ impl NfsClient {
     /// written and committed.
     pub fn write(
         &mut self,
-        fh: &FileHandle,
+        fh: &NfsFh,
         stateid: &stateid4,
         offset: u64,
         data: &[u8],
@@ -3319,26 +3321,22 @@ impl NfsClient {
     }
 
     /// CLOSE the open file.
-    pub fn close(&mut self, fh: &FileHandle, stateid: &stateid4) -> RpcResult<()> {
+    pub fn close(&mut self, fh: &NfsFh, stateid: &stateid4) -> RpcResult<()> {
         self.close_slot(fh, stateid, OwnerSlot::User)
     }
 
     /// Like [`close`](Self::close) but using the path-op open owner.
-    pub fn close_path(&mut self, fh: &FileHandle, stateid: &stateid4) -> RpcResult<()> {
+    pub fn close_path(&mut self, fh: &NfsFh, stateid: &stateid4) -> RpcResult<()> {
         self.close_cleanup_slot(fh, stateid, OwnerSlot::Path)
     }
 
-    pub(crate) fn close_unregistered(
-        &mut self,
-        fh: &FileHandle,
-        stateid: &stateid4,
-    ) -> RpcResult<()> {
+    pub(crate) fn close_unregistered(&mut self, fh: &NfsFh, stateid: &stateid4) -> RpcResult<()> {
         self.close_cleanup_slot(fh, stateid, OwnerSlot::User)
     }
 
     fn close_cleanup_slot(
         &mut self,
-        fh: &FileHandle,
+        fh: &NfsFh,
         stateid: &stateid4,
         slot: OwnerSlot,
     ) -> RpcResult<()> {
@@ -3356,12 +3354,7 @@ impl NfsClient {
         Ok(())
     }
 
-    fn close_slot(
-        &mut self,
-        fh: &FileHandle,
-        stateid: &stateid4,
-        slot: OwnerSlot,
-    ) -> RpcResult<()> {
+    fn close_slot(&mut self, fh: &NfsFh, stateid: &stateid4, slot: OwnerSlot) -> RpcResult<()> {
         let seqid = match slot {
             OwnerSlot::User => 1,
             OwnerSlot::Path => self.session.path_owner.seqid,
@@ -3383,11 +3376,11 @@ impl NfsClient {
     /// of the new object.
     fn create(
         &mut self,
-        dir: &FileHandle,
+        dir: &NfsFh,
         name: &str,
         ftype: nfs_ftype4,
         linkdata: Option<&str>,
-    ) -> RpcResult<FileHandle> {
+    ) -> RpcResult<NfsFh> {
         let mut c = Compound::new();
         c.tag(b"create");
         c.putfh(&dir.as_nfs_fh());
@@ -3395,21 +3388,21 @@ impl NfsClient {
         c.getfh();
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
-        Ok(FileHandle::from_nfs_fh(res.getfh(3)))
+        Ok(NfsFh::from_nfs_fh(res.getfh(3)))
     }
 
     /// Create a directory `name` below `dir`.
-    pub fn mkdir(&mut self, dir: &FileHandle, name: &str) -> RpcResult<FileHandle> {
+    pub fn mkdir(&mut self, dir: &NfsFh, name: &str) -> RpcResult<NfsFh> {
         self.create(dir, name, nfs_ftype4_NF4DIR, None)
     }
 
     /// Create a symbolic link `name` below `dir` pointing at `target`.
-    pub fn symlink(&mut self, dir: &FileHandle, name: &str, target: &str) -> RpcResult<FileHandle> {
+    pub fn symlink(&mut self, dir: &NfsFh, name: &str, target: &str) -> RpcResult<NfsFh> {
         self.create(dir, name, nfs_ftype4_NF4LNK, Some(target))
     }
 
     /// Read the target of the symlink at `fh`.
-    pub fn readlink(&mut self, fh: &FileHandle) -> RpcResult<Vec<u8>> {
+    pub fn readlink(&mut self, fh: &NfsFh) -> RpcResult<Vec<u8>> {
         let mut c = Compound::new();
         c.tag(b"readlink");
         c.putfh(&fh.as_nfs_fh());
@@ -3421,7 +3414,7 @@ impl NfsClient {
 
     /// GETATTR the requested FATTR4 attributes of `fh`; returns the raw XDR
     /// attribute list in request order.
-    pub fn getattr(&mut self, fh: &FileHandle, attrs: &[u32]) -> RpcResult<Vec<u8>> {
+    pub fn getattr(&mut self, fh: &NfsFh, attrs: &[u32]) -> RpcResult<Vec<u8>> {
         let mut c = Compound::new();
         c.tag(b"getattr");
         c.putfh(&fh.as_nfs_fh());
@@ -3432,12 +3425,7 @@ impl NfsClient {
     }
 
     /// SETATTR mode and/or size on `fh`.
-    pub fn setattr(
-        &mut self,
-        fh: &FileHandle,
-        mode: Option<u32>,
-        size: Option<u64>,
-    ) -> RpcResult<()> {
+    pub fn setattr(&mut self, fh: &NfsFh, mode: Option<u32>, size: Option<u64>) -> RpcResult<()> {
         let mut c = Compound::new();
         c.tag(b"setattr");
         c.putfh(&fh.as_nfs_fh());
@@ -3450,7 +3438,7 @@ impl NfsClient {
     /// SETATTR mode, size, and/or access/modify timestamps on `fh`.
     pub fn setattr_values(
         &mut self,
-        fh: &FileHandle,
+        fh: &NfsFh,
         mode: Option<u32>,
         size: Option<u64>,
         atime: Option<(i64, u32)>,
@@ -3477,7 +3465,7 @@ impl NfsClient {
     /// SETATTR including numeric owner/group IDs.
     pub fn setattr_ownership(
         &mut self,
-        fh: &FileHandle,
+        fh: &NfsFh,
         mode: Option<u32>,
         size: Option<u64>,
         ownership: (Option<u32>, Option<u32>),
@@ -3507,12 +3495,7 @@ impl NfsClient {
     /// cookies, and requested attributes. Skips "." and "..".
     /// READDIR `dir` from `cookie`, requesting the given FATTR4 attributes
     /// for each entry.
-    pub fn readdir(
-        &mut self,
-        dir: &FileHandle,
-        cookie: u64,
-        attrs: &[u32],
-    ) -> RpcResult<Vec<DirEntry>> {
+    pub fn readdir(&mut self, dir: &NfsFh, cookie: u64, attrs: &[u32]) -> RpcResult<Vec<DirEntry>> {
         self.readdir_bounded(dir, cookie, attrs, usize::MAX)
     }
 
@@ -3521,7 +3504,7 @@ impl NfsClient {
     /// raised to 4 KiB so a valid reply can hold at least one entry.
     pub fn readdir_bounded(
         &mut self,
-        dir: &FileHandle,
+        dir: &NfsFh,
         cookie: u64,
         attrs: &[u32],
         max_response_bytes: usize,
@@ -3593,7 +3576,7 @@ impl NfsClient {
     /// READDIR requesting `attrs` per entry.
     pub fn readdir_children(
         &mut self,
-        ops: &[(FileHandle, Vec<u8>)],
+        ops: &[(NfsFh, Vec<u8>)],
         attrs: &[u32],
     ) -> RpcResult<Vec<ChildListing>> {
         self.readdir_children_bounded(ops, attrs, usize::MAX)
@@ -3601,7 +3584,7 @@ impl NfsClient {
 
     pub(crate) fn readdir_children_bounded(
         &mut self,
-        ops: &[(FileHandle, Vec<u8>)],
+        ops: &[(NfsFh, Vec<u8>)],
         attrs: &[u32],
         max_page_bytes: usize,
     ) -> RpcResult<Vec<ChildListing>> {
@@ -3654,7 +3637,7 @@ impl NfsClient {
                 let fh = res.getfh(3 + 4 * i);
                 let (entries, cookie) = Self::collect_readdir(res.readdir(4 + 4 * i))?;
                 out.push(ChildListing {
-                    fh: FileHandle::from_nfs_fh(fh),
+                    fh: NfsFh::from_nfs_fh(fh),
                     entries,
                     cookie,
                 });
@@ -3668,7 +3651,7 @@ impl NfsClient {
     /// READDIR requesting `attrs` per entry.
     pub fn readdir_pages(
         &mut self,
-        ops: &[(FileHandle, u64)],
+        ops: &[(NfsFh, u64)],
         attrs: &[u32],
     ) -> RpcResult<Vec<(Vec<DirEntry>, u64)>> {
         self.readdir_pages_bounded(ops, attrs, usize::MAX)
@@ -3677,7 +3660,7 @@ impl NfsClient {
     /// One bounded wire page per directory; negotiated response limits still apply.
     pub(crate) fn readdir_pages_bounded(
         &mut self,
-        ops: &[(FileHandle, u64)],
+        ops: &[(NfsFh, u64)],
         attrs: &[u32],
         max_page_bytes: usize,
     ) -> RpcResult<Vec<(Vec<DirEntry>, u64)>> {
@@ -3728,7 +3711,7 @@ impl NfsClient {
     }
 
     /// REMOVE `name` from directory `dir`.
-    pub fn remove(&mut self, dir: &FileHandle, name: &str) -> RpcResult<()> {
+    pub fn remove(&mut self, dir: &NfsFh, name: &str) -> RpcResult<()> {
         let mut c = Compound::new();
         c.tag(b"remove");
         c.putfh(&dir.as_nfs_fh());
@@ -3743,9 +3726,9 @@ impl NfsClient {
     /// source dir, SAVEFH it, then PUTFH the target dir before the RENAME op.
     pub fn rename(
         &mut self,
-        srcdir: &FileHandle,
+        srcdir: &NfsFh,
         oldname: &str,
-        dstdir: &FileHandle,
+        dstdir: &NfsFh,
         newname: &str,
     ) -> RpcResult<()> {
         let mut c = Compound::new();
@@ -3761,7 +3744,7 @@ impl NfsClient {
 
     /// Create a hard link named `newname` in directory `dir` to `src`.
     /// Requires the saved-fh trick: SAVEFH the source, then LINK into `dir`.
-    pub fn link(&mut self, dir: &FileHandle, src: &FileHandle, newname: &str) -> RpcResult<()> {
+    pub fn link(&mut self, dir: &NfsFh, src: &NfsFh, newname: &str) -> RpcResult<()> {
         let mut c = Compound::new();
         c.tag(b"link");
         c.putfh(&src.as_nfs_fh());
@@ -3774,14 +3757,14 @@ impl NfsClient {
     }
 }
 
-fn session_mount_root(session: &mut Session) -> RpcResult<FileHandle> {
+fn session_mount_root(session: &mut Session) -> RpcResult<NfsFh> {
     let mut c = Compound::new();
     c.tag(b"mount");
     c.putrootfh();
     c.getfh();
     let res = session.compound(&mut c)?;
     session.expect_all_ok(&res)?;
-    Ok(FileHandle::from_nfs_fh(res.getfh(2)))
+    Ok(NfsFh::from_nfs_fh(res.getfh(2)))
 }
 
 /// Build the `openflag4` for an OPEN based on the create mode.

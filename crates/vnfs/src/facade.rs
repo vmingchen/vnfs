@@ -250,7 +250,7 @@ macro_rules! owned_client {
         /// Opened object with private backend ownership; closes best-effort on Drop.
         #[derive(Debug)]
         pub struct $file {
-            pub(crate) inner: vfsi_sync::FsFile<$backend>,
+            pub(crate) inner: vfsi_sync::OpenFile<$backend>,
         }
         impl $file {
             /// Whether explicit close has completed successfully on this handle.

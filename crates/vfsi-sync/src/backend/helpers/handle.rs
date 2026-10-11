@@ -1,18 +1,21 @@
 use super::*;
 
-pub fn vf_path_default<F: HandleBackend + ?Sized>(backend: &F, file: &VfFile) -> VfResult<PathBuf> {
+pub fn vf_path_default<F: HandleBackend + ?Sized>(
+    backend: &F,
+    file: &FileOperand,
+) -> VfResult<PathBuf> {
     match file {
-        VfFile::Path {
+        FileOperand::Path {
             base: VfPathBase::Abs,
             path,
         } => Ok(backend.abs_path(&Path::new("/").join(path))),
-        VfFile::Path {
+        FileOperand::Path {
             base: VfPathBase::Cwd,
             path,
         }
-        | VfFile::CwdPath(path) => Ok(backend.abs_path(path)),
-        VfFile::Cwd => Ok(backend.abs_path(Path::new(""))),
-        VfFile::Descriptor(_) | VfFile::Saved => Err(VfError::failure(0, ERR_INVAL)),
+        | FileOperand::CwdPath(path) => Ok(backend.abs_path(path)),
+        FileOperand::Cwd => Ok(backend.abs_path(Path::new(""))),
+        FileOperand::Fd(_) | FileOperand::Saved => Err(VfError::failure(0, ERR_INVAL)),
         _ => Err(VfError::failure(0, ERR_INVAL)),
     }
 }
@@ -22,13 +25,13 @@ pub fn open_raw_impl_default<F: HandleBackend + ?Sized>(
     pathname: &Path,
     flags: i32,
     mode: u32,
-) -> VfResult<VfFile> {
+) -> VfResult<FileOperand> {
     backend.open_path_impl(VfPathBase::Cwd, pathname, flags, mode)
 }
 
 pub fn read_raw_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
-    file: &VfFile,
+    file: &FileOperand,
     offset: u64,
     length: usize,
 ) -> VfResult<Vec<u8>> {
@@ -44,7 +47,7 @@ pub fn read_raw_impl_default<F: HandleBackend + ?Sized>(
 
 pub fn write_raw_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
-    file: &VfFile,
+    file: &FileOperand,
     offset: u64,
     data: &[u8],
 ) -> VfResult<usize> {
@@ -61,7 +64,7 @@ pub fn write_raw_impl_default<F: HandleBackend + ?Sized>(
 pub fn native_open_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
     request: &OpenOp,
-) -> VfResult<VfFile> {
+) -> VfResult<FileOperand> {
     backend
         .open_raw_impl(
             request.path(),
@@ -73,7 +76,7 @@ pub fn native_open_impl_default<F: HandleBackend + ?Sized>(
 
 pub fn native_seek_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
-    file: &VfFile,
+    file: &FileOperand,
     position: std::io::SeekFrom,
 ) -> VfResult<u64> {
     let (offset, whence) = match position {
@@ -90,7 +93,7 @@ pub fn native_seek_impl_default<F: HandleBackend + ?Sized>(
 
 pub fn native_set_attributes_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
-    update: &SetAttrsOp<Target<'_, VfFile>>,
+    update: &SetAttrsOp<Target<'_, FileOperand>>,
 ) -> VfResult<()> {
     let path = match update.target() {
         Target::Path(path) => Some(*path),
@@ -105,7 +108,7 @@ pub fn native_set_attributes_impl_default<F: HandleBackend + ?Sized>(
 
 pub fn read_file_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
-    file: &VfFile,
+    file: &FileOperand,
     max_bytes: usize,
 ) -> VfResult<Vec<u8>> {
     let mut output = Vec::new();
@@ -163,7 +166,7 @@ pub fn read_into_impl_default<F: HandleBackend + ?Sized>(
 
 pub fn vsetattrs_impl_default<F: HandleBackend + ?Sized>(
     backend: &mut F,
-    updates: &[SetAttrsOp<Target<'_, VfFile>>],
+    updates: &[SetAttrsOp<Target<'_, FileOperand>>],
 ) -> VfResult<()> {
     match updates.len() {
         0 => Ok(()),

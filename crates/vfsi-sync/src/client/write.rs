@@ -182,7 +182,7 @@ impl<F: VectorBackend> FsClient<F> {
         &self,
         requests: &'a [T],
         project: impl Fn(&T) -> FsWrite<'b, F>,
-    ) -> VfResult<Vec<WriteOp<&'a VfFile, &'a [u8]>>>
+    ) -> VfResult<Vec<WriteOp<&'a FileOperand, &'a [u8]>>>
     where
         F: 'b,
         'b: 'a,

@@ -266,6 +266,6 @@ fn handles_remain_send_sync_and_clients_remain_cheaply_cloneable() {
     );
     assert_eq!(
         std::mem::size_of::<vnfs::nfs::NfsFile>(),
-        std::mem::size_of::<vfsi_sync::FsFile<vfsi_nfs::NfsVecFs>>()
+        std::mem::size_of::<vfsi_sync::OpenFile<vfsi_nfs::NfsVecFs>>()
     );
 }

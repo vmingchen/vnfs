@@ -80,6 +80,30 @@ batching without guaranteeing depth-first order. Callbacks may reenter the
 client; errors/stops can leave events undelivered. Concurrent mutation can
 invalidate continuation cookies.
 
+## Filesystem object identity and open instances
+
+`file_id()` alone is scoped to a filesystem and can repeat on another
+filesystem. Request `Attributes::identity()` and use `Attrs::fs_obj_id()` to compare
+`(fs_id, file_id)` where the backend supplies both. `fs_id()` reports the
+filesystem component; it is independent of the mount used to reach the object. The local backend
+reports (`st_dev`, `st_ino`); NFS reports its filesystem ID and file ID. These
+values are scoped to a backend identity namespace, not globally unique across
+unrelated servers or clients, and can be reused after deletion. A backend that cannot report both parts returns
+no `FsObjId`. The previous `file_identity()` accessor and `FileIdentity` type
+remain as compatibility aliases.
+
+`OpenFd` is the owned File Descriptor handle to one open instance. The
+generic concrete type is `vfsi_sync::OpenFile<F>`; `Fd` is a numeric backend
+slot, and `FileOperand::Fd` references that slot without owning cleanup. Opening the same
+object twice produces the same `FsObjId` and separate handles; closing one does
+not close the other. Handle operations continue to address the opened object after
+rename or unlink. A saved pathname is for diagnostics only.
+
+Mount IDs and mount paths select a route; they are not file identities.
+`Auto` resolves a path to an eligible underlying filesystem before dispatch,
+then pins the chosen client on each opened handle. `Nfs::from_mount` resolves
+the mounted path to a direct NFS client when the client is created.
+
 ## Existing mounts
 
 On Linux, `Nfs::from_mount` discovers an absolute directory under an ordinary

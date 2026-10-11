@@ -108,16 +108,16 @@ impl NfsVecFs {
     }
 
     fn copy_extents_server_side(&mut self, pairs: &[ExtentPair]) -> VfRes {
-        let src_files: Vec<VfFile> = pairs
+        let src_files: Vec<FileOperand> = pairs
             .iter()
-            .map(|p| VfFile::from_os_path(&p.src_path))
+            .map(|p| FileOperand::from_os_path(&p.src_path))
             .collect();
-        let dst_files: Vec<VfFile> = pairs
+        let dst_files: Vec<FileOperand> = pairs
             .iter()
-            .map(|p| VfFile::from_os_path(&p.dst_path))
+            .map(|p| FileOperand::from_os_path(&p.dst_path))
             .collect();
-        let src_refs: Vec<&VfFile> = src_files.iter().collect();
-        let dst_refs: Vec<&VfFile> = dst_files.iter().collect();
+        let src_refs: Vec<&FileOperand> = src_files.iter().collect();
+        let dst_refs: Vec<&FileOperand> = dst_files.iter().collect();
         let no_create = vec![false; pairs.len()];
         let create = vec![true; pairs.len()];
         let no_truncate = vec![false; pairs.len()];
@@ -140,7 +140,7 @@ impl NfsVecFs {
             let mut source_attrs: Vec<VfAttrs> = explicit
                 .iter()
                 .map(|&i| VfAttrs {
-                    file: VfFile::from_fd(src_tmp[i].expect("path source was opened")),
+                    file: FileOperand::from_fd(src_tmp[i].expect("path source was opened")),
                     masks: AttrMask::SIZE,
                     ..VfAttrs::default()
                 })

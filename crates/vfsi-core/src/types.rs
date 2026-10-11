@@ -529,29 +529,12 @@ impl VfError {
 /// Callback used by vectorized streaming reads.
 pub type ReadStreamCallback<'a> = dyn FnMut(usize, u64, &[u8], bool) -> bool + 'a;
 
-/// An open file descriptor (backend-assigned), the Rust spelling of the C
-/// `int` fd.
-pub type Fd = std::os::fd::RawFd;
-
-/// Opaque identifier for a backend-owned open file.
+/// Backend-assigned numeric File Descriptor, represented as a C `int`.
 ///
-/// New APIs use this instead of exposing `RawFd`, which could be confused
-/// with a process file descriptor. The legacy compatibility API continues to
-/// use [`Fd`] until its next breaking release.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct HandleId(Fd);
-
-impl HandleId {
-    #[doc(hidden)]
-    pub fn from_legacy(fd: Fd) -> Self {
-        Self(fd)
-    }
-
-    #[doc(hidden)]
-    pub fn as_legacy(self) -> Fd {
-        self.0
-    }
-}
+/// Local backends can use OS descriptors; remote backends use client-side
+/// slots. The number is scoped to its owning backend and does not own the open
+/// instance or identify the underlying filesystem object.
+pub type Fd = std::os::fd::RawFd;
 
 bitflags::bitflags! {
     /// Typed file-open behavior for the Rust-native API.
@@ -681,21 +664,23 @@ pub enum SeekFrom {
     End,
 }
 
-/// A reference to a file: an open descriptor, a path, or a special
-/// pseudo-file. This is the Rust-native form of the C `tc_file` tagged
-/// struct (`type` + `fd` + `path`), where the variant *is* the tag.
+/// Native backend operand: a File Descriptor, path, or special directory target.
+///
+/// This selects an operation target without owning its open instance. Cloning
+/// a File Descriptor operand neither duplicates the open instance nor acquires
+/// cleanup ownership. Application callers use [`crate::api::Target`] instead.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum VfFile {
+pub enum FileOperand {
     /// The client's current working directory (a stat target, but not a file
     /// for read/write). Also the `Default` placeholder.
     #[default]
     Cwd,
-    /// An open file descriptor (backend-assigned).
-    Descriptor(Fd),
+    /// Backend-assigned File Descriptor referring to an existing open instance.
+    Fd(Fd),
     /// A path; the [`VfPathBase`] records whether it is absolute or relative
     /// to the client's cwd. Note that the raw path (see
-    /// [`path`](VfFile::path)) does not itself record the base; the filesystem
+    /// [`path`](FileOperand::path)) does not itself record the base; the filesystem
     /// resolves it while honoring this field.
     Path { base: VfPathBase, path: PathBuf },
     /// A path relative to the client's current working directory.
@@ -705,57 +690,67 @@ pub enum VfFile {
     Saved,
 }
 
-impl VfFile {
-    pub fn from_path(path: &str) -> VfFile {
+/// Compatibility name for [`FileOperand`]. Use `FileOperand::Fd` for descriptors.
+#[deprecated(note = "Use FileOperand instead; Descriptor is now Fd")]
+pub use FileOperand as VfFile;
+
+impl FileOperand {
+    pub fn from_path(path: &str) -> FileOperand {
         Self::from_path_bytes(path.as_bytes())
     }
 
     /// Construct from arbitrary Unix path bytes.
     #[cfg(unix)]
-    pub fn from_path_bytes(path: &[u8]) -> VfFile {
+    pub fn from_path_bytes(path: &[u8]) -> FileOperand {
         let base = if path.starts_with(b"/") {
             VfPathBase::Abs
         } else {
             VfPathBase::Cwd
         };
-        VfFile::Path {
+        FileOperand::Path {
             base,
             path: path_from_bytes(path),
         }
     }
 
     /// Construct from a native Unix path.
-    pub fn from_os_path(path: &Path) -> VfFile {
+    pub fn from_os_path(path: &Path) -> FileOperand {
         Self::from_path_bytes(crate::path::path_bytes(path))
     }
 
-    pub fn from_fd(fd: Fd) -> VfFile {
-        VfFile::Descriptor(fd)
+    pub fn from_fd(fd: Fd) -> FileOperand {
+        FileOperand::Fd(fd)
     }
 
     /// VF_FILE_CURRENT: the client's current working directory itself.
-    pub fn cwd() -> VfFile {
-        VfFile::Cwd
+    pub fn cwd() -> FileOperand {
+        FileOperand::Cwd
     }
 
     /// A path relative to the client's current working directory.
-    pub fn cwd_path(path: impl Into<PathBuf>) -> VfFile {
-        VfFile::CwdPath(path.into())
+    pub fn cwd_path(path: impl Into<PathBuf>) -> FileOperand {
+        FileOperand::CwdPath(path.into())
     }
 
-    pub fn saved() -> VfFile {
-        VfFile::Saved
+    pub fn saved() -> FileOperand {
+        FileOperand::Saved
     }
 
-    /// Whether this references an open descriptor.
+    /// Whether this references an open File Descriptor.
+    pub fn is_fd(&self) -> bool {
+        matches!(self, FileOperand::Fd(_))
+    }
+
+    /// Compatibility predicate. Prefer [`Self::is_fd`].
+    #[deprecated(note = "Use is_fd() instead")]
     pub fn is_descriptor(&self) -> bool {
-        matches!(self, VfFile::Descriptor(_))
+        self.is_fd()
     }
 
-    /// The open descriptor, if this is a `Descriptor`.
+    /// The File Descriptor, if this operand is [`Self::Fd`].
     pub fn fd(&self) -> Option<Fd> {
         match self {
-            VfFile::Descriptor(fd) => Some(*fd),
+            FileOperand::Fd(fd) => Some(*fd),
             _ => None,
         }
     }
@@ -764,8 +759,8 @@ impl VfFile {
     /// `VfPathBase` or the client working directory.
     pub fn path(&self) -> Option<&Path> {
         match self {
-            VfFile::Path { path, .. } => Some(path),
-            VfFile::CwdPath(p) => Some(p),
+            FileOperand::Path { path, .. } => Some(path),
+            FileOperand::CwdPath(p) => Some(p),
             _ => None,
         }
     }
@@ -850,14 +845,14 @@ impl From<u64> for VfOffset {
 /// input and output fields in a single mutable struct).
 #[derive(Debug, Clone)]
 pub struct ReadOp {
-    pub file: VfFile,
+    pub file: FileOperand,
     pub offset: VfOffset,
     /// Number of bytes to fetch.
     pub length: usize,
 }
 
 impl ReadOp {
-    pub fn new(file: VfFile, offset: VfOffset, length: usize) -> ReadOp {
+    pub fn new(file: FileOperand, offset: VfOffset, length: usize) -> ReadOp {
         ReadOp {
             file,
             offset,
@@ -866,23 +861,23 @@ impl ReadOp {
     }
 
     /// A read at an absolute offset.
-    pub fn at(file: VfFile, offset: u64, length: usize) -> ReadOp {
+    pub fn at(file: FileOperand, offset: u64, length: usize) -> ReadOp {
         ReadOp::new(file, VfOffset::At(offset), length)
     }
 
     pub fn from_path(path: &str, offset: VfOffset, length: usize) -> ReadOp {
-        ReadOp::new(VfFile::from_path(path), offset, length)
+        ReadOp::new(FileOperand::from_path(path), offset, length)
     }
 
     /// Construct a read from a native path.
     pub fn from_os_path(path: &Path, offset: VfOffset, length: usize) -> ReadOp {
-        ReadOp::new(VfFile::from_os_path(path), offset, length)
+        ReadOp::new(FileOperand::from_os_path(path), offset, length)
     }
 
     /// A read from an open descriptor, typically at [`VfOffset::Cur`]
     /// (sequential) reads.
     pub fn from_fd(fd: Fd, offset: VfOffset, length: usize) -> ReadOp {
-        ReadOp::new(VfFile::from_fd(fd), offset, length)
+        ReadOp::new(FileOperand::from_fd(fd), offset, length)
     }
 }
 
@@ -891,7 +886,7 @@ impl ReadOp {
 /// to mixed fd/path inputs without reordering assumptions.
 #[derive(Debug, Clone)]
 pub struct ReadResult {
-    pub file: VfFile,
+    pub file: FileOperand,
     /// The resolved offset the read actually started at (never `Cur`/`End`
     /// sentinels).
     pub offset: u64,
@@ -907,7 +902,7 @@ pub struct ReadResult {
 /// Metadata for a read placed directly into caller-provided storage.
 #[derive(Debug, Clone)]
 pub struct ReadIntoResult {
-    pub file: VfFile,
+    pub file: FileOperand,
     pub offset: u64,
     pub read: usize,
     pub eof: bool,
@@ -916,7 +911,7 @@ pub struct ReadIntoResult {
 /// The result of one [`crate::WriteOp`]. `file` echoes the request's file reference.
 #[derive(Debug, Clone)]
 pub struct WriteResult {
-    pub file: VfFile,
+    pub file: FileOperand,
     /// The resolved offset the write actually started at (never `Cur`/`End`
     /// sentinels).
     pub offset: u64,
@@ -1039,13 +1034,26 @@ bitflags::bitflags! {
         /// available (NFS FATTR4_CHANGE). This is stronger than timestamps for
         /// cache invalidation because rapid, same-size writes still change it.
         const CHANGE = 1 << 12;
+        /// Request the backend's filesystem identity (POSIX st_dev or the
+        /// NFS filesystem ID). Pair with FILEID to identify an object.
+        const FS_ID = 1 << 13;
     }
 }
 
 impl AttrMask {
-    /// The attributes a scalar stat operation needs (mode, size, links, fileid).
+    /// Compatibility spelling of [`Self::FS_ID`]; it has the same bit value.
+    #[deprecated(note = "Use AttrMask::FS_ID instead")]
+    pub const FILESYSTEM_ID: Self = Self::FS_ID;
+
+    /// The attributes a scalar stat operation needs, including a filesystem-
+    /// scoped object identity when the backend provides one.
     pub fn stat() -> AttrMask {
-        AttrMask::MODE | AttrMask::SIZE | AttrMask::NLINK | AttrMask::FILEID
+        AttrMask::MODE | AttrMask::SIZE | AttrMask::NLINK | AttrMask::FILEID | AttrMask::FS_ID
+    }
+
+    /// Request both parts of an underlying filesystem object identity.
+    pub fn identity() -> AttrMask {
+        AttrMask::FILEID | AttrMask::FS_ID
     }
 }
 
@@ -1062,7 +1070,7 @@ pub struct WalkEntry {
 /// fields hold seconds and nanoseconds.
 #[derive(Debug, Clone, Default)]
 pub struct VfAttrs {
-    pub file: VfFile,
+    pub file: FileOperand,
     /// Requested attributes for a get/set call; also which attributes the
     /// caller cares about.
     pub masks: AttrMask,
@@ -1076,6 +1084,10 @@ pub struct VfAttrs {
     pub size: u64,
     pub nlink: u32,
     pub fileid: u64,
+    /// Opaque identity for the containing filesystem. Compare together with
+    /// fileid, and only within the backend's identity namespace. This is not
+    /// a mount ID or the special-file device number stored in `rdev`.
+    pub fs_id: u128,
     /// Backend file-version token. NFS supplies FATTR4_CHANGE; other
     /// backends leave this absent by not setting [`AttrMask::CHANGE`] in
     /// `returned`.
@@ -1117,6 +1129,56 @@ impl Permissions {
     }
 }
 
+/// Filesystem-scoped identifier for an underlying filesystem object.
+///
+/// This combines a filesystem ID and that filesystem's file ID. It is suitable
+/// for comparing objects reported by the same backend identity namespace; it
+/// is not a global ID across servers or unrelated backend clients. IDs can be
+/// reused after deletion, so this is not a durable globally unique identifier.
+/// It does not identify an open instance; see [`crate::api::OpenFd`] for that.
+///
+/// Request both components before comparing underlying objects:
+///
+/// ```
+/// use vfsi_core::{api::AttrsOptions, AttrMask, FsObjId, VfResult, Vfsi, VfsiExt};
+///
+/// fn object_id<C: Vfsi>(fs: &C) -> VfResult<Option<FsObjId>> {
+///     let attrs = fs.attrs_with_options(
+///         "/file",
+///         AttrsOptions::new().fields(AttrMask::identity()),
+///     )?;
+///     Ok(attrs.fs_obj_id())
+/// }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FsObjId {
+    fs_id: u128,
+    file_id: u64,
+}
+
+/// Compatibility name for [`FsObjId`]. Prefer `FsObjId` in new code.
+pub type FileIdentity = FsObjId;
+
+impl FsObjId {
+    /// Filesystem namespace component; Linux st_dev or packed NFS FSID.
+    /// This is independent of the mount used to reach the object.
+    pub const fn fs_id(self) -> u128 {
+        self.fs_id
+    }
+
+    /// Compatibility accessor. Prefer [`Self::fs_id`].
+    #[deprecated(note = "Use fs_id() instead")]
+    pub const fn filesystem_id(self) -> u128 {
+        self.fs_id()
+    }
+
+    /// File-number component, meaningful within [`Self::fs_id`] and its
+    /// backend/server identity namespace (Linux st_ino or NFS FILEID).
+    pub const fn file_id(self) -> u64 {
+        self.file_id
+    }
+}
+
 /// Idiomatic metadata returned by the Rust-native path API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attrs {
@@ -1132,6 +1194,7 @@ pub struct Attrs {
     accessed: Option<std::time::SystemTime>,
     changed: Option<std::time::SystemTime>,
     nlink: Option<u32>,
+    fs_id: Option<u128>,
     file_id: Option<u64>,
     change_id: Option<u64>,
     uid: Option<u32>,
@@ -1227,8 +1290,36 @@ impl Attrs {
         self.nlink
     }
 
+    /// Backend file number, when returned; combine with [`Self::fs_id`]
+    /// rather than comparing this number across filesystems.
     pub fn file_id(&self) -> Option<u64> {
         self.file_id
+    }
+
+    /// Backend filesystem ID, when returned. Pair it with file_id; it is
+    /// not globally unique across servers or unrelated backend clients. NFS
+    /// packs the FSID major part in the high 64 bits and minor part in the low.
+    pub fn fs_id(&self) -> Option<u128> {
+        self.fs_id
+    }
+
+    /// Compatibility accessor. Prefer [`Self::fs_id`].
+    #[deprecated(note = "Use fs_id() instead")]
+    pub fn filesystem_id(&self) -> Option<u128> {
+        self.fs_id()
+    }
+
+    /// The underlying filesystem object ID when both components were returned.
+    pub fn fs_obj_id(&self) -> Option<FsObjId> {
+        Some(FsObjId {
+            fs_id: self.fs_id?,
+            file_id: self.file_id?,
+        })
+    }
+
+    /// Compatibility accessor. Prefer [`Self::fs_obj_id`].
+    pub fn file_identity(&self) -> Option<FsObjId> {
+        self.fs_obj_id()
     }
 
     pub fn change_id(&self) -> Option<u64> {
@@ -1285,6 +1376,9 @@ pub fn metadata_from_attrs(attributes: VfAttrs) -> Attrs {
         nlink: returned
             .contains(AttrMask::NLINK)
             .then_some(attributes.nlink),
+        fs_id: returned
+            .contains(AttrMask::FS_ID)
+            .then_some(attributes.fs_id),
         file_id: returned
             .contains(AttrMask::FILEID)
             .then_some(attributes.fileid),

@@ -21,7 +21,7 @@ use vfsi_core::internal::ManyResults;
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
-use crate::client::{FileHandle as WireFileHandle, NfsClient, OpenCreate};
+use crate::client::{NfsClient, NfsFh, OpenCreate};
 use crate::path::{
     components_bytes, join_path_bytes, normalize_bytes, path_bytes, path_from_bytes,
     split_path_bytes,
@@ -36,12 +36,13 @@ pub use crate::rpc::NfsAuthentication;
 pub use crate::rpc::RpcsecGssProtection;
 pub use crate::vecfs::*;
 
-/// An open file on the NFS server: resolved handle, open stateid, the current
-/// read/write offset (for `tc_fseek`), and whether it was opened with
-/// `O_APPEND` (writes then always go to the end of the file).
+/// Client state for one NFS open instance: opaque object filehandle, OPEN
+/// stateid, cursor, append policy, and optional reopen recipe. Backend File
+/// Descriptor slots refer to this record; neither its stateid nor its filehandle
+/// is a portable open-instance ID.
 #[derive(Debug, Clone)]
-struct OpenFile {
-    fh: WireFileHandle,
+struct NfsOpenState {
+    fh: NfsFh,
     stateid: stateid4,
     cur_offset: u64,
     append: bool,
@@ -418,13 +419,13 @@ pub struct NfsVecFs {
     cwd: PathBuf,
     next_fd: i32,
     /// Canonical open-file state, keyed by the client-assigned descriptor.
-    open_files: std::collections::HashMap<i32, OpenFile>,
+    open_files: std::collections::HashMap<i32, NfsOpenState>,
     /// Directory handles returned by `open_dir`, keyed by client-assigned id.
-    open_dirs: std::collections::HashMap<i32, WireFileHandle>,
+    open_dirs: std::collections::HashMap<i32, NfsFh>,
     /// Distinguishes directory descriptors from those of another client.
     dir_owner: u64,
     /// Handles no longer visible to callers whose CLOSE was not confirmed.
-    deferred_descriptor_closes: Vec<OpenFile>,
+    deferred_descriptor_closes: Vec<NfsOpenState>,
     server_copy_enabled: bool,
     server_copy_stats: NfsServerCopyStats,
     /// How path-based bulk I/O is issued: one compound per batch including

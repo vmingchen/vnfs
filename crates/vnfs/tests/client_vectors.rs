@@ -215,7 +215,7 @@ impl<F> vnfs::files::AsTarget<F> for ChangingTarget<'_, F> {
 
 fn stable_targets<C: Vfsi>(fs: &C, other: &C) {
     use vnfs::directory::SetAttrsOp;
-    use vnfs::files::{FileHandle, Target};
+    use vnfs::files::{OpenFd, Target};
     let file = fs.create("/original").unwrap();
     fs.vwrite(&[WriteOp::at(&file, 0, b"original")], Default::default())
         .unwrap();

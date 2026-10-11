@@ -107,7 +107,7 @@ fn lock(client: &vnfs::nfs::NfsClient) { let _ = client.lock(); }
 
 ```compile_fail,E0432
 use vnfs::FsClient;
-use vnfs::FsFile;
+use vnfs::OpenFile;
 use vnfs::FsDir;
 use vnfs::FsRead;
 use vnfs::FsWrite;
@@ -138,7 +138,7 @@ fn conversion(result: vfsi_core::ReadResult) -> vnfs::files::ReadResult { result
 ```
 
 ```compile_fail,E0308
-fn coercion(file: &vnfs::nfs::NfsFile) -> &vfsi_sync::FsFile<vfsi_nfs::NfsVecFs> { file }
+fn coercion(file: &vnfs::nfs::NfsFile) -> &vfsi_sync::OpenFile<vfsi_nfs::NfsVecFs> { file }
 ```
 
 Explicit backend users can still opt into the low-level layer:
@@ -600,25 +600,25 @@ fn custom_cursor<C: Vfsi>(fs: &C, file: &C::File) {
 Native owned handles provide ownership and cleanup; I/O uses the client:
 
 ```compile_fail,E0277
-fn read<F: vfsi_sync::backend::HandleBackend>(file: &mut vfsi_sync::FsFile<F>) {
+fn read<F: vfsi_sync::backend::HandleBackend>(file: &mut vfsi_sync::OpenFile<F>) {
     let _ = std::io::Read::read(file, &mut [0]);
 }
 ```
 
 ```compile_fail,E0277
-fn write<F: vfsi_sync::backend::HandleBackend>(file: &mut vfsi_sync::FsFile<F>) {
+fn write<F: vfsi_sync::backend::HandleBackend>(file: &mut vfsi_sync::OpenFile<F>) {
     let _ = std::io::Write::write(file, b"data");
 }
 ```
 
 ```compile_fail,E0277
-fn seek<F: vfsi_sync::backend::HandleBackend>(file: &mut vfsi_sync::FsFile<F>) {
+fn seek<F: vfsi_sync::backend::HandleBackend>(file: &mut vfsi_sync::OpenFile<F>) {
     let _ = std::io::Seek::seek(file, std::io::SeekFrom::Start(0));
 }
 ```
 
 ```compile_fail,E0599
-fn positional_read<F: vfsi_sync::backend::HandleBackend>(file: &vfsi_sync::FsFile<F>) {
+fn positional_read<F: vfsi_sync::backend::HandleBackend>(file: &vfsi_sync::OpenFile<F>) {
     let _ = file.read_at(&mut [0], 0);
 }
 ```

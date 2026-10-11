@@ -64,36 +64,39 @@ impl<F: VectorBackend> Drop for FsDir<F> {
     }
 }
 
-/// Owned RAII file which does not borrow the client.
+/// Owned File Descriptor handle to one open instance, implementing [`crate::OpenFd`].
+///
+/// This RAII value does not borrow the client. It owns the backend handle and
+/// cleanup obligation; borrowed requests keep that instance alive.
 ///
 /// File operations use the owning client's `Vfsi` implementation. Dropping an
 /// open file queues cleanup without waiting for the backend lock. Dropping the
 /// final connection owner can perform synchronous teardown. Use `try_close`
 /// when the close result matters.
-pub struct FsFile<F: HandleBackend> {
+pub struct OpenFile<F: HandleBackend> {
     pub(super) inner: Arc<SharedBackend<F>>,
-    pub(super) file: Option<VfFile>,
+    pub(super) file: Option<FileOperand>,
     // Retained open policy; never exposed through the portable handle API.
     pub(super) append: bool,
     pub(super) path: PathBuf,
 }
 
-impl<F: HandleBackend> fmt::Debug for FsFile<F> {
+impl<F: HandleBackend> fmt::Debug for OpenFile<F> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("FsFile")
+            .debug_struct("OpenFile")
             .field("path", &self.path)
             .field("is_open", &self.file.is_some())
             .finish()
     }
 }
 
-impl<F: HandleBackend> FsFile<F> {
+impl<F: HandleBackend> OpenFile<F> {
     /// Whether explicit close has completed successfully on this handle.
     pub fn is_closed(&self) -> bool {
         self.file.is_none()
     }
-    pub(super) fn raw(&self) -> VfResult<&VfFile> {
+    pub(super) fn raw(&self) -> VfResult<&FileOperand> {
         self.file
             .as_ref()
             .ok_or_else(|| VfError::client(0, crate::ERR_EBADF))
@@ -158,22 +161,23 @@ impl<F: HandleBackend> FsFile<F> {
 
 /// Typed read request for [`FsClient::vread_native`].
 pub struct FsRead<'a, F: HandleBackend> {
-    pub(super) file: &'a FsFile<F>,
+    pub(super) file: &'a OpenFile<F>,
     pub(super) offset: VfOffset,
     pub(super) length: usize,
 }
 
 /// Typed borrowed write request for [`FsClient::vwrite_native`].
-pub type FsWrite<'a, F> = vfsi_core::internal::WriteRequest<&'a FsFile<F>, &'a [u8], VfOffset, ()>;
+pub type FsWrite<'a, F> =
+    vfsi_core::internal::WriteRequest<&'a OpenFile<F>, &'a [u8], VfOffset, ()>;
 
 /// Typed vector read into caller-provided storage.
 pub struct FsReadInto<'a, F: HandleBackend> {
-    pub(super) file: &'a FsFile<F>,
+    pub(super) file: &'a OpenFile<F>,
     pub(super) offset: VfOffset,
     pub(super) buffer: &'a mut [u8],
 }
 
-impl<F: HandleBackend> Drop for FsFile<F> {
+impl<F: HandleBackend> Drop for OpenFile<F> {
     fn drop(&mut self) {
         if let Some(file) = self.file.take() {
             self.inner.defer(

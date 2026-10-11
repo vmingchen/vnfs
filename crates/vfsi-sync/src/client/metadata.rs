@@ -6,7 +6,7 @@ impl<F: HandleBackend> FsClient<F> {
     /// Preflight every handle, then submit one synchronization vector.
     pub(crate) fn vfsync_impl(
         &self,
-        files: &[&FsFile<F>],
+        files: &[&OpenFile<F>],
         mode: vfsi_core::api::SyncMode,
     ) -> VfResult<()> {
         if files.is_empty() {
@@ -39,7 +39,7 @@ impl<F: HandleBackend> FsClient<F> {
     }
 
     /// Query filesystems using one native vector of paths and retained handles.
-    pub(crate) fn vstatfs<P: vfsi_core::AsTarget<FsFile<F>>>(
+    pub(crate) fn vstatfs<P: vfsi_core::AsTarget<OpenFile<F>>>(
         &self,
         targets: &[P],
     ) -> VfResult<Vec<crate::FilesystemStats>> {
@@ -51,7 +51,7 @@ impl<F: HandleBackend> FsClient<F> {
         let mut paths = Vec::with_capacity(targets.len());
         for (index, target) in targets.iter().enumerate() {
             let (raw, path) = match target.as_target() {
-                Target::Path(path) => (VfFile::from_os_path(path), path),
+                Target::Path(path) => (FileOperand::from_os_path(path), path),
                 Target::File(file) => {
                     if !Arc::ptr_eq(&self.inner, &file.inner) {
                         return Err(VfError::client(index, crate::ERR_INVAL)
@@ -88,7 +88,7 @@ impl<F: HandleBackend> FsClient<F> {
     }
 
     /// Update paths and open objects with one native attribute vector.
-    pub(crate) fn vsetattrs<P: vfsi_core::AsTarget<FsFile<F>>>(
+    pub(crate) fn vsetattrs<P: vfsi_core::AsTarget<OpenFile<F>>>(
         &self,
         updates: &[vfsi_core::SetAttrsOp<P>],
     ) -> VfResult<()> {
@@ -154,7 +154,7 @@ impl<F: VectorBackend> FsClient<F> {
     /// Vector metadata query with explicit fields and final-symlink handling.
     /// Ancestor symlinks follow the backend's normal namespace semantics.
     #[doc(hidden)]
-    pub fn vgetattrs_native<P: vfsi_core::AsTarget<FsFile<F>>>(
+    pub fn vgetattrs_native<P: vfsi_core::AsTarget<OpenFile<F>>>(
         &self,
         targets: &[P],
         fields: AttrMask,
@@ -169,7 +169,7 @@ impl<F: VectorBackend> FsClient<F> {
         let mut policies = Vec::with_capacity(targets.len());
         for (index, target) in targets.iter().enumerate() {
             let (raw, path, follows) = match target.as_target() {
-                Target::Path(path) => (VfFile::from_os_path(path), path, follow),
+                Target::Path(path) => (FileOperand::from_os_path(path), path, follow),
                 Target::File(file) => {
                     self.validate_owner(file, index)
                         .map_err(|e| e.with_context("vgetattrs", &file.path))?;

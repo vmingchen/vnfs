@@ -46,7 +46,7 @@ impl AutoDir {
 }
 
 pub(super) enum AutoFileInner {
-    Posix(FsFile<LocalBackend>),
+    Posix(OpenFile<LocalBackend>),
     Nfs(NfsFile),
 }
 

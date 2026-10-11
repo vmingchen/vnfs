@@ -445,11 +445,11 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
 fn read_allv_default_rejects_more_than_sixteen_mibibytes() {
     use vfsi_sync::FsClient;
     use vfsi_sync::{
-        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, VfFile, VfOffset, WriteOp,
+        DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, DEFAULT_READ_MAX_BYTES, FileOperand, VfOffset, WriteOp,
     };
 
     let (_root, mut fs) = dummy();
-    let path = VfFile::from_path("/too-large");
+    let path = FileOperand::from_path("/too-large");
     fs.vwrite_impl(&borrow_writes(&[WriteOp::new(
         path.clone(),
         VfOffset::At(0),
@@ -1238,7 +1238,7 @@ fn mkdir_mode_failure_is_reported_instead_of_ignored() {
 
 #[test]
 fn strict_vectors_report_failure_index_without_rollback() {
-    use vfsi_sync::VfFile;
+    use vfsi_sync::FileOperand;
 
     let (_root, mut fs) = dummy();
     fs.vwrite_impl(&borrow_writes(&[
@@ -1248,9 +1248,9 @@ fn strict_vectors_report_failure_index_without_rollback() {
     .unwrap();
     let error = fs
         .vremove_impl(&[
-            VfFile::from_path("/first"),
-            VfFile::from_path("/missing"),
-            VfFile::from_path("/third"),
+            FileOperand::from_path("/first"),
+            FileOperand::from_path("/missing"),
+            FileOperand::from_path("/third"),
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));

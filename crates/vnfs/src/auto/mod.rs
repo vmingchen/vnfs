@@ -16,9 +16,9 @@ use crate::{
     ReadIntoResult, ResourceLimits, Result as VfResult, WriteResult,
 };
 use vfsi_local::LocalBackend;
-use vfsi_sync::{FsClient, FsFile};
+use vfsi_sync::{FsClient, OpenFile};
 type NfsClient = FsClient<vfsi_nfs::NfsVecFs>;
-type NfsFile = FsFile<vfsi_nfs::NfsVecFs>;
+type NfsFile = OpenFile<vfsi_nfs::NfsVecFs>;
 
 impl Auto {
     /// Root all application paths at this existing host directory. For example,

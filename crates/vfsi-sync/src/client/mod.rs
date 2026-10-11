@@ -14,8 +14,9 @@ use vfsi_core::api::{
 use crate::backend::{HandleBackend, VectorBackend};
 use crate::traits::{validate_read_into_results, validate_read_results, validate_write_results};
 use crate::{
-    AttrMask, Attrs, Capabilities, DirEntry, OpenFlags, OpenOp, ReadAllOptions, ReadOp, ReadResult,
-    RemoveOptions, StreamOptions, VfDir, VfError, VfFile, VfOffset, VfResult, WriteOp, WriteResult,
+    AttrMask, Attrs, Capabilities, DirEntry, FileOperand, OpenFlags, OpenOp, ReadAllOptions,
+    ReadOp, ReadResult, RemoveOptions, StreamOptions, VfDir, VfError, VfOffset, VfResult, WriteOp,
+    WriteResult,
 };
 
 fn read_result(result: ReadResult) -> FsReadResult {
@@ -128,14 +129,14 @@ impl<F: HandleBackend> FsClient<F> {
         Ok(self.lock()?.capabilities())
     }
     /// Open a path read-only.
-    pub(crate) fn open(&self, path: impl AsRef<Path>) -> VfResult<FsFile<F>> {
+    pub(crate) fn open(&self, path: impl AsRef<Path>) -> VfResult<OpenFile<F>> {
         self.open_with_native(OpenOp::new(path.as_ref(), OpenFlags::READ))
     }
 
-    pub(crate) fn open_with_native(&self, request: OpenOp) -> VfResult<FsFile<F>> {
+    pub(crate) fn open_with_native(&self, request: OpenOp) -> VfResult<OpenFile<F>> {
         vfsi_core::internal::validate_open_requests(std::slice::from_ref(&request))?;
         let file = self.lock()?.open_impl(&request)?;
-        Ok(FsFile {
+        Ok(OpenFile {
             inner: Arc::clone(&self.inner),
             file: Some(file),
             append: request.flags().contains(OpenFlags::APPEND),
@@ -150,7 +151,7 @@ impl<F: VectorBackend> FsClient<F> {
     /// Success returns one RAII handle per request. Failure returns no
     /// handles; VFSI does not promise transactional rollback of other
     /// filesystem effects such as file creation.
-    pub(crate) fn vopen(&self, requests: &[OpenOp]) -> VfResult<Vec<FsFile<F>>> {
+    pub(crate) fn vopen(&self, requests: &[OpenOp]) -> VfResult<Vec<OpenFile<F>>> {
         vfsi_core::internal::validate_open_requests(requests)?;
         let mut filesystem = self.lock()?;
         let files = filesystem.vopen_impl(requests).map_err(|error| {
@@ -172,7 +173,7 @@ impl<F: VectorBackend> FsClient<F> {
         Ok(files
             .into_iter()
             .zip(requests)
-            .map(|(file, request)| FsFile {
+            .map(|(file, request)| OpenFile {
                 inner: Arc::clone(&self.inner),
                 file: Some(file),
                 append: request.flags().contains(OpenFlags::APPEND),
@@ -185,7 +186,7 @@ impl<F: VectorBackend> FsClient<F> {
     /// the handles. On failure, all handles remain armed: the backend may
     /// have closed a prefix, so callers must reconcile before retrying.
     #[doc(hidden)]
-    pub fn vclose<'a>(&self, files: impl IntoIterator<Item = &'a mut FsFile<F>>) -> VfResult<()>
+    pub fn vclose<'a>(&self, files: impl IntoIterator<Item = &'a mut OpenFile<F>>) -> VfResult<()>
     where
         F: 'a,
     {
@@ -202,7 +203,7 @@ impl<F: VectorBackend> FsClient<F> {
         if files.is_empty() {
             return Ok(());
         }
-        let descriptors: Vec<VfFile> = files
+        let descriptors: Vec<FileOperand> = files
             .iter()
             .map(|file| file.raw().cloned())
             .collect::<VfResult<_>>()?;
@@ -227,11 +228,11 @@ impl<F: VectorBackend> FsClient<F> {
     /// best-effort scalar cleanup attempts. Use [`vclose`](Self::vclose)
     /// to retain the handles after an error.
     #[doc(hidden)]
-    pub fn vclose_owned(&self, mut files: Vec<FsFile<F>>) -> VfResult<()> {
+    pub fn vclose_owned(&self, mut files: Vec<OpenFile<F>>) -> VfResult<()> {
         self.vclose(&mut files)
     }
 
-    fn validate_owner(&self, file: &FsFile<F>, index: usize) -> VfResult<()> {
+    fn validate_owner(&self, file: &OpenFile<F>, index: usize) -> VfResult<()> {
         if Arc::ptr_eq(&self.inner, &file.inner) {
             Ok(())
         } else {
@@ -251,7 +252,7 @@ fn link_error(error: VfError, paths: &[&Path], operation: &'static str) -> VfErr
 mod shared;
 use shared::{BackendGuard, CleanupTarget, SharedBackend};
 mod handles;
-pub use handles::{FsDir, FsFile, FsRead, FsReadInto, FsWrite};
+pub use handles::{FsDir, FsRead, FsReadInto, FsWrite, OpenFile};
 mod directory;
 mod metadata;
 mod namespace;

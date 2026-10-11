@@ -18,8 +18,8 @@ impl<F: VectorBackend> FsClient<F> {
             .iter()
             .map(|(from, to)| {
                 (
-                    VfFile::from_os_path(from.as_ref()),
-                    VfFile::from_os_path(to.as_ref()),
+                    FileOperand::from_os_path(from.as_ref()),
+                    FileOperand::from_os_path(to.as_ref()),
                 )
             })
             .collect();
@@ -55,7 +55,7 @@ impl<F: VectorBackend> FsClient<F> {
         let dirs: Vec<_> = directories
             .iter()
             .map(|op| crate::VfAttrs {
-                file: VfFile::from_os_path(op.path()),
+                file: FileOperand::from_os_path(op.path()),
                 masks: AttrMask::MODE,
                 mode: op.mode(),
                 ..Default::default()

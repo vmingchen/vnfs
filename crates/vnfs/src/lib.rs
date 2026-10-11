@@ -58,12 +58,14 @@ pub mod posix {
 )]
 #[cfg_attr(feature = "nfs", doc = concat!("\n```no_run\n", include_str!("../examples/stream_file.rs"), "\n```\n"))]
 pub mod files {
+    #[allow(deprecated)]
+    pub use vfsi_core::FileHandle;
     pub use vfsi_core::api::{
         OpenOptions, ReadOp, ReadOptions, ReadResult, ResourceLimits, StreamCompletion,
         StreamOptions, SyncMode, WriteOp, WriteOptions, WriteResult,
     };
     pub use vfsi_core::{
-        AsTarget, Capabilities, CopyOption, FileHandle, FilesystemStats, OpenFlags, OpenOp, Target,
+        AsTarget, Capabilities, CopyOption, FilesystemStats, OpenFd, OpenFlags, OpenOp, Target,
         Vfsi, VfsiExt,
     };
 }
@@ -81,7 +83,9 @@ pub mod directory {
         RemoveOptions, RenameOptions, SetAttrsOp, TraversalCompletion, WalkControl, WalkEvent,
         WalkEventKind,
     };
-    pub use vfsi_core::{AttrMask as Attributes, Attrs, DirEntry, Permissions, VfType as FileType};
+    pub use vfsi_core::{
+        AttrMask as Attributes, Attrs, DirEntry, FsObjId, Permissions, VfType as FileType,
+    };
 }
 
 /// Error classification without losing protocol status or the failing input index.
@@ -107,7 +111,7 @@ mod application;
 // Other public types have one canonical path under files, directory, error,
 // or a backend-specific namespace. Crate-private aliases keep implementation
 // modules concise without expanding the external API.
-pub(crate) use vfsi_core::{DirHandle, FileHandle, Target};
+pub(crate) use vfsi_core::{DirHandle, OpenFd, Target};
 pub use vfsi_core::{Vfsi, VfsiExt};
 #[cfg(any(
     feature = "nfs",

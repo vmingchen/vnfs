@@ -7,8 +7,8 @@ use std::sync::{
 use vfsi_sync::api::ReadOptions;
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::{
-    Capabilities, DirEntry, DirPageCursor, FsClient, ListDirOptions, OpenFlags, OpenOp,
-    ReadIntoResult, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfError, VfFile, VfOffset,
+    Capabilities, DirEntry, DirPageCursor, FileOperand, FsClient, ListDirOptions, OpenFlags,
+    OpenOp, ReadIntoResult, ReadOp, ReadResult, SetAttrsOp, Target, VfAttrs, VfError, VfOffset,
     VfResult, Vfsi, VfsiExt, WriteOp, WriteResult,
 };
 
@@ -111,8 +111,8 @@ fn scalar_read_uses_bounded_whole_file_api_without_opening_a_handle() {
 }
 
 type Notifications = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
-type MetadataCalls = Arc<Mutex<Vec<(bool, Vec<VfFile>)>>>;
-type SyncCalls = Arc<Mutex<Vec<(vfsi_core::api::SyncMode, Vec<VfFile>)>>>;
+type MetadataCalls = Arc<Mutex<Vec<(bool, Vec<FileOperand>)>>>;
+type SyncCalls = Arc<Mutex<Vec<(vfsi_core::api::SyncMode, Vec<FileOperand>)>>>;
 
 type AttributeCalls = Arc<Mutex<Vec<(bool, Vec<Option<u64>>)>>>;
 
@@ -183,7 +183,7 @@ fn std_io_collection_obeys_client_limits_and_retains_cursor() {
 }
 
 impl VectorBackend for ScalarOnly {
-    fn vopen_impl(&mut self, requests: &[OpenOp]) -> VfResult<Vec<VfFile>> {
+    fn vopen_impl(&mut self, requests: &[OpenOp]) -> VfResult<Vec<FileOperand>> {
         if self.transport_failure {
             return Err(VfError::transport(None, "reply lost"));
         }
@@ -199,7 +199,7 @@ impl VectorBackend for ScalarOnly {
             .collect()
     }
 
-    fn vclose_impl(&mut self, files: &[VfFile]) -> VfResult<()> {
+    fn vclose_impl(&mut self, files: &[FileOperand]) -> VfResult<()> {
         for file in files {
             self.close_impl(file)?;
         }
@@ -230,7 +230,7 @@ impl VectorBackend for ScalarOnly {
         let end = start.saturating_add(page_size).min(count);
         let entries = (start..end)
             .map(|index| VfAttrs {
-                file: VfFile::from_os_path(&dir.join(format!("item-{index:04}"))),
+                file: FileOperand::from_os_path(&dir.join(format!("item-{index:04}"))),
                 masks,
                 mode: 0o100644,
                 size: index as u64,
@@ -253,7 +253,7 @@ impl VectorBackend for ScalarOnly {
             .collect::<VfResult<_>>()?;
         if let Some(result) = results.first_mut() {
             if self.wrong_result_file {
-                result.file = VfFile::from_fd(999);
+                result.file = FileOperand::from_fd(999);
             }
             if self.wrong_result_offset {
                 result.offset = result.offset.saturating_add(1);
@@ -287,7 +287,7 @@ impl VectorBackend for ScalarOnly {
             .collect::<VfResult<_>>()?;
         if let Some(result) = results.first_mut() {
             if self.wrong_result_file {
-                result.file = VfFile::from_fd(999);
+                result.file = FileOperand::from_fd(999);
             }
             if self.wrong_result_offset {
                 result.offset = result.offset.saturating_add(1);
@@ -296,7 +296,10 @@ impl VectorBackend for ScalarOnly {
         Ok(results)
     }
 
-    fn vwrite_impl(&mut self, requests: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_impl(
+        &mut self,
+        requests: &[WriteOp<&FileOperand, &[u8]>],
+    ) -> VfResult<Vec<WriteResult>> {
         let limit = self
             .vector_result_limit
             .lock()
@@ -309,7 +312,7 @@ impl VectorBackend for ScalarOnly {
             .collect::<VfResult<_>>()?;
         if let Some(result) = results.first_mut() {
             if self.wrong_result_file {
-                result.file = VfFile::from_fd(999);
+                result.file = FileOperand::from_fd(999);
             }
             if self.wrong_result_offset {
                 result.offset = result.offset.saturating_add(1);
@@ -385,7 +388,7 @@ struct PagedBackend {
 macro_rules! handle_contract {
     ($backend:ty) => {
         impl HandleBackend for $backend {
-            fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
+            fn open_impl(&mut self, request: &OpenOp) -> VfResult<FileOperand> {
                 self.scalar.open_impl(request)
             }
             fn open_path_impl(
@@ -394,45 +397,48 @@ macro_rules! handle_contract {
                 path: &std::path::Path,
                 flags: i32,
                 mode: u32,
-            ) -> VfResult<VfFile> {
+            ) -> VfResult<FileOperand> {
                 let _ = (base, flags, mode);
                 self.open_impl(&OpenOp::new(path, OpenFlags::READ))
             }
-            fn close_impl(&mut self, file: &VfFile) -> VfResult<()> {
+            fn close_impl(&mut self, file: &FileOperand) -> VfResult<()> {
                 self.scalar.close_impl(file)
             }
             fn vfsync_impl(
                 &mut self,
-                files: &[VfFile],
+                files: &[FileOperand],
                 mode: vfsi_core::api::SyncMode,
             ) -> VfResult<()> {
                 self.scalar.vfsync_impl(files, mode)
             }
-            fn sync_all(&mut self, file: &VfFile) -> VfResult<()> {
+            fn sync_all(&mut self, file: &FileOperand) -> VfResult<()> {
                 self.scalar.sync_all(file)
             }
-            fn sync_data(&mut self, file: &VfFile) -> VfResult<()> {
+            fn sync_data(&mut self, file: &FileOperand) -> VfResult<()> {
                 self.scalar.sync_data(file)
             }
             fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
                 self.scalar.read_impl(request)
             }
-            fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
+            fn write_impl(
+                &mut self,
+                request: WriteOp<&FileOperand, &[u8]>,
+            ) -> VfResult<WriteResult> {
                 self.scalar.write_impl(request)
             }
-            fn seek_impl(&mut self, file: &VfFile, position: SeekFrom) -> VfResult<u64> {
+            fn seek_impl(&mut self, file: &FileOperand, position: SeekFrom) -> VfResult<u64> {
                 self.scalar.seek_impl(file, position)
             }
             fn metadata_impl(
                 &mut self,
-                target: Target<'_, VfFile>,
+                target: Target<'_, FileOperand>,
                 options: vfsi_core::api::AttrsOptions,
             ) -> VfResult<VfAttrs> {
                 self.scalar.metadata_impl(target, options)
             }
             fn set_attributes_impl(
                 &mut self,
-                update: &SetAttrsOp<Target<'_, VfFile>>,
+                update: &SetAttrsOp<Target<'_, FileOperand>>,
             ) -> VfResult<()> {
                 self.scalar.set_attributes_impl(update)
             }
@@ -508,7 +514,10 @@ impl VectorBackend for WriteBoundaryProbe {
     fn vread_impl(&mut self, _: &[ReadOp]) -> VfResult<Vec<ReadResult>> {
         Err(VfError::unsupported(0))
     }
-    fn vwrite_impl(&mut self, writes: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_impl(
+        &mut self,
+        writes: &[WriteOp<&FileOperand, &[u8]>],
+    ) -> VfResult<Vec<WriteResult>> {
         self.calls.lock().unwrap().push(
             writes
                 .iter()
@@ -642,7 +651,7 @@ struct AttrsBackend {
     scalar: ScalarOnly,
     calls: Vec<(bool, Vec<VfAttrs>)>,
     failure: Option<(usize, VfError)>,
-    queries: Vec<(bool, VfFile, vfsi_core::AttrMask)>,
+    queries: Vec<(bool, FileOperand, vfsi_core::AttrMask)>,
 }
 handle_contract!(AttrsBackend);
 impl VectorBackend for AttrsBackend {
@@ -692,7 +701,7 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
     use vfsi_sync::{AttrMask, Permissions};
     let mut concrete = AttrsBackend::default();
     let backend: &mut dyn VectorBackend = &mut concrete;
-    let file = VfFile::from_fd(7);
+    let file = FileOperand::from_fd(7);
     let op = SetAttrsOp::file(&file)
         .len(0)
         .permissions(Permissions::from_mode(0o640))
@@ -744,7 +753,7 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
         concrete.queries,
         [
             (false, file, fields),
-            (true, VfFile::from_path("/link"), AttrMask::SIZE),
+            (true, FileOperand::from_path("/link"), AttrMask::SIZE),
         ]
     );
     let client = FsClient::new(concrete);
@@ -766,7 +775,7 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
     );
     assert_eq!(
         backend.queries[2],
-        (false, VfFile::from_path("/link"), AttrMask::MODE)
+        (false, FileOperand::from_path("/link"), AttrMask::MODE)
     );
 }
 
@@ -851,7 +860,7 @@ impl VectorBackend for PagedBackend {
         let end = start.saturating_add(page_size).min(count);
         let entries = (start..end)
             .map(|index| VfAttrs {
-                file: VfFile::from_os_path(&dir.join(format!("item-{index}"))),
+                file: FileOperand::from_os_path(&dir.join(format!("item-{index}"))),
                 masks,
                 mode: 0o100644,
                 size: index as u64,
@@ -989,7 +998,7 @@ impl VectorBackend for WorkflowOverride {
 
     fn vstream_impl(
         &mut self,
-        _: &[VfFile],
+        _: &[FileOperand],
         _: usize,
         _: usize,
         callback: &mut vfsi_sync::ReadStreamCallback<'_>,
@@ -1034,7 +1043,7 @@ impl VectorBackend for WorkflowOverride {
 fn shared_workflows_keep_dynamic_backend_overrides_reachable() {
     let mut concrete = WorkflowOverride::default();
     let backend: &mut dyn VectorBackend = &mut concrete;
-    let files = [VfFile::from_fd(1)];
+    let files = [FileOperand::from_fd(1)];
     assert_eq!(
         backend.vread_all_impl(&files).unwrap(),
         [b"override".to_vec()]
@@ -1106,7 +1115,7 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
     );
     assert_eq!(
         backend
-            .seek_raw_impl(&VfFile::from_fd(0), 0, vfsi_sync::SeekFrom::Set)
+            .seek_raw_impl(&FileOperand::from_fd(0), 0, vfsi_sync::SeekFrom::Set)
             .unwrap_err()
             .kind(),
         std::io::ErrorKind::Unsupported
@@ -1146,7 +1155,10 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
         .unwrap();
     assert_eq!(buffer, *b"cde");
     assert_eq!(result[0].read, 3);
-    let paths = [(VfFile::from_path("/source"), VfFile::from_path("/target"))];
+    let paths = [(
+        FileOperand::from_path("/source"),
+        FileOperand::from_path("/target"),
+    )];
     assert_eq!(
         backend
             .rename_impl(
@@ -1190,11 +1202,15 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
 }
 
 impl HandleBackend for ScalarOnly {
-    fn vfsync_impl(&mut self, files: &[VfFile], mode: vfsi_core::api::SyncMode) -> VfResult<()> {
+    fn vfsync_impl(
+        &mut self,
+        files: &[FileOperand],
+        mode: vfsi_core::api::SyncMode,
+    ) -> VfResult<()> {
         self.sync_calls.lock().unwrap().push((mode, files.to_vec()));
         self.sync_failure.clone().map_or(Ok(()), Err)
     }
-    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, VfFile>>]) -> VfResult<()> {
+    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, FileOperand>>]) -> VfResult<()> {
         let mut calls = self.attrs_calls.lock().unwrap();
         calls.push((
             updates[0].follows_symlinks(),
@@ -1207,7 +1223,7 @@ impl HandleBackend for ScalarOnly {
         }
         Ok(())
     }
-    fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<vfsi_sync::FilesystemStats>> {
+    fn vstatfs_impl(&mut self, files: &[FileOperand]) -> VfResult<Vec<vfsi_sync::FilesystemStats>> {
         self.stats_calls.fetch_add(1, Ordering::SeqCst);
         if let Some(index) = self.stats_error_index {
             return Err(VfError::client(index, libc::ENOENT as u32));
@@ -1221,13 +1237,13 @@ impl HandleBackend for ScalarOnly {
     fn take_notifications(&mut self) -> Vec<Box<dyn FnOnce() + Send>> {
         std::mem::take(&mut *self.notifications.lock().unwrap())
     }
-    fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
+    fn open_impl(&mut self, request: &OpenOp) -> VfResult<FileOperand> {
         self.open_requests.lock().unwrap().push(request.clone());
         self.open = true;
-        Ok(VfFile::from_fd(1))
+        Ok(FileOperand::from_fd(1))
     }
 
-    fn close_impl(&mut self, _: &VfFile) -> VfResult<()> {
+    fn close_impl(&mut self, _: &FileOperand) -> VfResult<()> {
         self.close_calls += 1;
         self.close_observed.fetch_add(1, Ordering::SeqCst);
         if self.close_failures_remaining != 0 {
@@ -1237,10 +1253,10 @@ impl HandleBackend for ScalarOnly {
         self.open = false;
         Ok(())
     }
-    fn sync_data(&mut self, _: &VfFile) -> VfResult<()> {
+    fn sync_data(&mut self, _: &FileOperand) -> VfResult<()> {
         Ok(())
     }
-    fn sync_all(&mut self, _: &VfFile) -> VfResult<()> {
+    fn sync_all(&mut self, _: &FileOperand) -> VfResult<()> {
         Ok(())
     }
 
@@ -1317,7 +1333,7 @@ impl HandleBackend for ScalarOnly {
         })
     }
 
-    fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
         let call = self.write_calls.fetch_add(1, Ordering::SeqCst);
         if self.interrupt_write_call == Some(call) {
             return Err(VfError::client(0, libc::EINTR as u32));
@@ -1352,7 +1368,7 @@ impl HandleBackend for ScalarOnly {
         })
     }
 
-    fn seek_impl(&mut self, _: &VfFile, position: SeekFrom) -> VfResult<u64> {
+    fn seek_impl(&mut self, _: &FileOperand, position: SeekFrom) -> VfResult<u64> {
         let next = match position {
             SeekFrom::Start(value) => value as i128,
             SeekFrom::Current(value) => self.cursor as i128 + value as i128,
@@ -1367,13 +1383,13 @@ impl HandleBackend for ScalarOnly {
 
     fn metadata_impl(
         &mut self,
-        _: Target<'_, VfFile>,
+        _: Target<'_, FileOperand>,
         _: vfsi_core::api::AttrsOptions,
     ) -> VfResult<vfsi_sync::VfAttrs> {
         Err(VfError::unsupported(0))
     }
 
-    fn set_attributes_impl(&mut self, _: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<()> {
+    fn set_attributes_impl(&mut self, _: &SetAttrsOp<Target<'_, FileOperand>>) -> VfResult<()> {
         Err(VfError::unsupported(0))
     }
 }
@@ -2275,7 +2291,7 @@ fn portable_handle_queries_and_sync_batch_and_preflight_every_handle() {
     )
     .unwrap();
     assert_eq!(queries.lock().unwrap()[0].1.len(), 3);
-    assert!(queries.lock().unwrap()[0].1[0].is_descriptor());
+    assert!(queries.lock().unwrap()[0].1[0].is_fd());
     // No-follow applies to path operands, not retained objects.
     fs.vgetattrs(
         &[

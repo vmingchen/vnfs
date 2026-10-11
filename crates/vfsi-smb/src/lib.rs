@@ -55,8 +55,8 @@ use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 use crate::path::{normalize_bytes, path_bytes, path_from_bytes};
 use crate::vecfs::{
     Adb, AttrMask, CopyOption, ERR_ACCES, ERR_EBADF, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT,
-    ERR_NOTDIR, ExtentPair, Fd, ReadOp, ReadResult, SeekFrom, SetAttrsOp, Target, VfAttrs, VfError,
-    VfFile, VfOffset, VfPathBase, VfRes, VfResult, VfType, WriteOp, WriteResult,
+    ERR_NOTDIR, ExtentPair, Fd, FileOperand, ReadOp, ReadResult, SeekFrom, SetAttrsOp, Target,
+    VfAttrs, VfError, VfOffset, VfPathBase, VfRes, VfResult, VfType, WriteOp, WriteResult,
 };
 
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
@@ -349,14 +349,14 @@ impl SmbVecFs {
             .map_err(|_| VfError::failure(0, libc::EILSEQ as u32))
     }
 
-    fn file_path(&self, file: &VfFile) -> VfResult<PathBuf> {
+    fn file_path(&self, file: &FileOperand) -> VfResult<PathBuf> {
         match file {
-            VfFile::Descriptor(fd) => self
+            FileOperand::Fd(fd) => self
                 .open_files
                 .get(fd)
                 .map(|open| open.path.clone())
                 .ok_or_else(|| VfError::failure(0, ERR_EBADF)),
-            VfFile::Saved => Err(VfError::unsupported(0)),
+            FileOperand::Saved => Err(VfError::unsupported(0)),
             _ => self.vf_path(file),
         }
     }
@@ -1081,7 +1081,7 @@ impl SmbVecFs {
                 }
                 let child = current.join(&entry.name);
                 let mut attrs = VfAttrs {
-                    file: VfFile::Path {
+                    file: FileOperand::Path {
                         base: VfPathBase::Abs,
                         path: Path::new("/").join(&child),
                     },
@@ -1123,8 +1123,8 @@ impl SmbVecFs {
     }
 
     fn read_one(&mut self, op: &ReadOp) -> VfResult<ReadResult> {
-        if !op.file.is_descriptor() {
-            if matches!(op.file, VfFile::Saved) {
+        if !op.file.is_fd() {
+            if matches!(op.file, FileOperand::Saved) {
                 return Err(VfError::unsupported(0));
             }
             let path = self.path_string(&self.file_path(&op.file)?)?;
@@ -1156,7 +1156,7 @@ impl SmbVecFs {
             });
         }
         let (file_id, temporary, descriptor) = match &op.file {
-            VfFile::Descriptor(fd) => {
+            FileOperand::Fd(fd) => {
                 let open = self
                     .open_files
                     .get(fd)
@@ -1166,7 +1166,7 @@ impl SmbVecFs {
                 }
                 (open.file_id, false, Some(*fd))
             }
-            VfFile::Saved => return Err(VfError::unsupported(0)),
+            FileOperand::Saved => return Err(VfError::unsupported(0)),
             _ => {
                 let path = self.path_string(&self.file_path(&op.file)?)?;
                 let (id, _) = self.raw_open(&path, libc::O_RDONLY)?;
@@ -1199,9 +1199,9 @@ impl SmbVecFs {
         })
     }
 
-    fn write_one(&mut self, op: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
-        if !op.file().is_descriptor() {
-            if matches!(op.file(), VfFile::Saved) {
+    fn write_one(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
+        if !op.file().is_fd() {
+            if matches!(op.file(), FileOperand::Saved) {
                 return Err(VfError::unsupported(0));
             }
             let path = self.path_string(&self.file_path(op.file())?)?;
@@ -1221,7 +1221,7 @@ impl SmbVecFs {
             });
         }
         let (file_id, temporary, descriptor, append) = match op.file() {
-            VfFile::Descriptor(fd) => {
+            FileOperand::Fd(fd) => {
                 let open = self
                     .open_files
                     .get(fd)
@@ -1231,7 +1231,7 @@ impl SmbVecFs {
                 }
                 (open.file_id, false, Some(*fd), open.append)
             }
-            VfFile::Saved => return Err(VfError::unsupported(0)),
+            FileOperand::Saved => return Err(VfError::unsupported(0)),
             _ => {
                 let path = self.path_string(&self.file_path(op.file())?)?;
                 let mut flags = libc::O_WRONLY;
@@ -1348,7 +1348,7 @@ impl HandleBackend for SmbVecFs {
         pathname: &Path,
         flags: i32,
         _mode: u32,
-    ) -> VfResult<VfFile> {
+    ) -> VfResult<FileOperand> {
         let path = match base {
             VfPathBase::Abs => path_from_bytes(&normalize_bytes(path_bytes(pathname))),
             VfPathBase::Cwd => self.abs_path(pathname),
@@ -1370,7 +1370,7 @@ impl HandleBackend for SmbVecFs {
             writable: access_mode != libc::O_RDONLY,
         };
         match self.insert_open_file(open) {
-            Ok(fd) => Ok(VfFile::from_fd(fd)),
+            Ok(fd) => Ok(FileOperand::from_fd(fd)),
             Err(error) => {
                 let _ = self.raw_close(file_id);
                 Err(error)
@@ -1378,7 +1378,7 @@ impl HandleBackend for SmbVecFs {
         }
     }
 
-    fn close_impl(&mut self, file: &VfFile) -> VfResult<()> {
+    fn close_impl(&mut self, file: &FileOperand) -> VfResult<()> {
         let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
         let open = self
             .open_files
@@ -1400,7 +1400,7 @@ impl HandleBackend for SmbVecFs {
         }
     }
 
-    fn sync_data(&mut self, file: &VfFile) -> VfResult<()> {
+    fn sync_data(&mut self, file: &FileOperand) -> VfResult<()> {
         let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
         let file_id = self
             .open_files
@@ -1423,7 +1423,12 @@ impl HandleBackend for SmbVecFs {
         Path::new("/").join(&self.cwd)
     }
 
-    fn seek_raw_impl(&mut self, file: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
+    fn seek_raw_impl(
+        &mut self,
+        file: &FileOperand,
+        offset: i64,
+        whence: SeekFrom,
+    ) -> VfResult<i64> {
         let fd = file.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
         let open = self
             .open_files
@@ -1445,10 +1450,10 @@ impl HandleBackend for SmbVecFs {
             .cur_offset = new as u64;
         Ok(new as i64)
     }
-    fn read_file_impl(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
+    fn read_file_impl(&mut self, file: &FileOperand, max_bytes: usize) -> VfResult<Vec<u8>> {
         vfsi_sync::backend::helpers::native_read_file_impl_default(self, file, max_bytes)
     }
-    fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
+    fn open_impl(&mut self, request: &OpenOp) -> VfResult<FileOperand> {
         vfsi_sync::backend::helpers::native_open_impl_default(self, request)
     }
     fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
@@ -1457,23 +1462,26 @@ impl HandleBackend for SmbVecFs {
     fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
         vfsi_sync::backend::helpers::native_read_into_impl_default(self, request, buffer)
     }
-    fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
         vfsi_sync::backend::helpers::native_write_impl_default(self, request)
     }
-    fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {
+    fn seek_impl(&mut self, file: &FileOperand, position: std::io::SeekFrom) -> VfResult<u64> {
         vfsi_sync::backend::helpers::native_seek_impl_default(self, file, position)
     }
     fn metadata_impl(
         &mut self,
-        target: Target<'_, VfFile>,
+        target: Target<'_, FileOperand>,
         options: vfsi_core::api::AttrsOptions,
     ) -> VfResult<VfAttrs> {
         vfsi_sync::backend::helpers::native_metadata_impl_default(self, target, options)
     }
-    fn set_attributes_impl(&mut self, update: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<()> {
+    fn set_attributes_impl(
+        &mut self,
+        update: &SetAttrsOp<Target<'_, FileOperand>>,
+    ) -> VfResult<()> {
         vfsi_sync::backend::helpers::native_set_attributes_impl_default(self, update)
     }
-    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, VfFile>>]) -> VfResult<()> {
+    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, FileOperand>>]) -> VfResult<()> {
         vfsi_sync::backend::helpers::vsetattrs_typed_default(self, updates)
     }
 }
@@ -1484,7 +1492,7 @@ impl VectorBackend for SmbVecFs {
         paths: &[&Path],
         flags: &[i32],
         modes: &[u32],
-    ) -> VfResult<ManyResults<VfFile>> {
+    ) -> VfResult<ManyResults<FileOperand>> {
         if paths.len() != flags.len() || paths.len() != modes.len() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
@@ -1583,7 +1591,7 @@ impl VectorBackend for SmbVecFs {
                     continue;
                 }
             };
-            let file = VfFile::from_fd(fd);
+            let file = FileOperand::from_fd(fd);
             #[cfg(feature = "test-faults")]
             if let Err(error) = self.inject_open_fault(OpenFaultPoint::AfterRegister { index }) {
                 let _ = self.close_impl(&file);
@@ -1595,13 +1603,13 @@ impl VectorBackend for SmbVecFs {
         Ok(ManyResults::new(paths.len(), output))
     }
 
-    fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
+    fn before_open_cleanup(&mut self, _index: usize, _file: &FileOperand) -> VfResult<()> {
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeCleanup { index: _index })?;
         Ok(())
     }
 
-    fn vclose_impl(&mut self, files: &[VfFile]) -> VfRes {
+    fn vclose_impl(&mut self, files: &[FileOperand]) -> VfRes {
         let mut file_ids = Vec::with_capacity(files.len());
         let mut fds = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
@@ -1656,8 +1664,8 @@ impl VectorBackend for SmbVecFs {
             .unwrap_or(65_536);
         let concurrent = reads.len() > 1
             && reads.iter().all(|read| {
-                !read.file.is_descriptor()
-                    && !matches!(read.file, VfFile::Saved)
+                !read.file.is_fd()
+                    && !matches!(read.file, FileOperand::Saved)
                     && matches!(read.offset, VfOffset::At(_))
                     && read.length > 0
                     && read.length <= max_read
@@ -1722,7 +1730,10 @@ impl VectorBackend for SmbVecFs {
         Ok(output)
     }
 
-    fn vwrite_impl(&mut self, writes: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_impl(
+        &mut self,
+        writes: &[WriteOp<&FileOperand, &[u8]>],
+    ) -> VfResult<Vec<WriteResult>> {
         #[cfg(feature = "test-faults")]
         {
             self.last_writev_was_concurrent = false;
@@ -1734,8 +1745,8 @@ impl VectorBackend for SmbVecFs {
             .unwrap_or(65_536);
         let concurrent = writes.len() > 1
             && writes.iter().all(|write| {
-                !write.file().is_descriptor()
-                    && !matches!(write.file(), VfFile::Saved)
+                !write.file().is_fd()
+                    && !matches!(write.file(), FileOperand::Saved)
                     && matches!(write.offset(), VfOffset::At(_))
                     && !write.creates()
                     && !write.truncates()
@@ -1817,10 +1828,7 @@ impl VectorBackend for SmbVecFs {
     }
 
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> VfRes {
-        if attrs.len() > 1
-            && !self.tree.is_dfs
-            && attrs.iter().all(|attrs| !attrs.file.is_descriptor())
-        {
+        if attrs.len() > 1 && !self.tree.is_dfs && attrs.iter().all(|attrs| !attrs.file.is_fd()) {
             let connection = self.client.connection_mut().clone();
             let tree = self.tree.clone();
             let mut jobs = Vec::with_capacity(attrs.len());
@@ -1860,7 +1868,7 @@ impl VectorBackend for SmbVecFs {
             return Ok(());
         }
         for (index, attrs) in attrs.iter_mut().enumerate() {
-            if let VfFile::Descriptor(fd) = attrs.file {
+            if let FileOperand::Fd(fd) = attrs.file {
                 let file_id = self
                     .open_files
                     .get(&fd)
@@ -1923,7 +1931,7 @@ impl VectorBackend for SmbVecFs {
             }
             if attrs.masks.contains(AttrMask::SIZE) {
                 match attrs.file {
-                    VfFile::Descriptor(fd) => {
+                    FileOperand::Fd(fd) => {
                         let id = self
                             .open_files
                             .get(&fd)
@@ -1951,7 +1959,7 @@ impl VectorBackend for SmbVecFs {
                     .contains(AttrMask::MTIME)
                     .then_some((attrs.mtime_sec, attrs.mtime_nsec));
                 match attrs.file {
-                    VfFile::Descriptor(fd) => {
+                    FileOperand::Fd(fd) => {
                         let id = self
                             .open_files
                             .get(&fd)
@@ -1990,7 +1998,7 @@ impl VectorBackend for SmbVecFs {
         Ok(output)
     }
 
-    fn vrename_impl(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
+    fn vrename_impl(&mut self, pairs: &[(FileOperand, FileOperand)]) -> VfRes {
         let mut prepared = Vec::with_capacity(pairs.len());
         let mut dependency_paths = Vec::with_capacity(pairs.len() * 2);
         for (index, (source, destination)) in pairs.iter().enumerate() {
@@ -2034,7 +2042,7 @@ impl VectorBackend for SmbVecFs {
         Ok(())
     }
 
-    fn vremove_impl(&mut self, files: &[VfFile]) -> VfRes {
+    fn vremove_impl(&mut self, files: &[FileOperand]) -> VfRes {
         let mut prepared = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
             let path = self.file_path(file).map_err(|e| e.with_index(index))?;

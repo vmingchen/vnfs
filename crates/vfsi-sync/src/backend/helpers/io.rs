@@ -35,7 +35,7 @@ pub fn vopen_outcomes_impl_default<F: VectorBackend + ?Sized>(
     paths: &[&Path],
     flags: &[i32],
     modes: &[u32],
-) -> VfResult<ManyResults<VfFile>> {
+) -> VfResult<ManyResults<FileOperand>> {
     if paths.len() != flags.len() || paths.len() != modes.len() {
         return Err(VfError::failure(0, ERR_INVAL));
     }
@@ -55,7 +55,7 @@ pub fn vopen_outcomes_impl_default<F: VectorBackend + ?Sized>(
 pub fn before_open_cleanup_default<F: VectorBackend + ?Sized>(
     _backend: &mut F,
     _index: usize,
-    _file: &VfFile,
+    _file: &FileOperand,
 ) -> VfResult<()> {
     Ok(())
 }
@@ -65,7 +65,7 @@ pub fn vopen_raw_impl_default<F: VectorBackend + ?Sized>(
     paths: &[&Path],
     flags: &[i32],
     modes: &[u32],
-) -> VfResult<Vec<VfFile>> {
+) -> VfResult<Vec<FileOperand>> {
     let results = backend.vopen_outcomes_impl(paths, flags, modes)?;
     results.try_collect_with_cleanup(paths.len(), |index, file| {
         let injected = backend.before_open_cleanup(index, file);
@@ -79,13 +79,16 @@ pub fn vopen_raw_simple_impl_default<F: VectorBackend + ?Sized>(
     paths: &[&Path],
     flags: i32,
     mode: u32,
-) -> VfResult<Vec<VfFile>> {
+) -> VfResult<Vec<FileOperand>> {
     let flags_v = vec![flags; paths.len()];
     let modes_v = vec![mode; paths.len()];
     backend.vopen_raw_impl(paths, &flags_v, &modes_v)
 }
 
-pub fn vclose_impl_default<F: VectorBackend + ?Sized>(backend: &mut F, files: &[VfFile]) -> VfRes {
+pub fn vclose_impl_default<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    files: &[FileOperand],
+) -> VfRes {
     for (i, f) in files.iter().enumerate() {
         backend.close_impl(f).map_err(|e| e.with_index(i))?;
     }
@@ -95,7 +98,7 @@ pub fn vclose_impl_default<F: VectorBackend + ?Sized>(backend: &mut F, files: &[
 pub fn vopen_typed_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     requests: &[OpenOp],
-) -> VfResult<Vec<VfFile>> {
+) -> VfResult<Vec<FileOperand>> {
     let paths: Vec<&std::path::Path> = requests.iter().map(|request| request.path()).collect();
     let flags = translate_open_flags(requests)?;
     let modes: Vec<u32> = requests
@@ -126,7 +129,7 @@ pub fn native_read_into_impl_default<F: VectorBackend + ?Sized>(
 
 pub fn native_write_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
-    request: WriteOp<&VfFile, &[u8]>,
+    request: WriteOp<&FileOperand, &[u8]>,
 ) -> VfResult<WriteResult> {
     let mut results = backend.vwrite_impl(std::slice::from_ref(&request))?;
     validate_write_results("write_impl", std::slice::from_ref(&request), &results)?;

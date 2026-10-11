@@ -14,7 +14,7 @@ pub(super) fn open_flags_mutate(flags: i32) -> bool {
 impl NfsVecFs {
     // -- private helpers ----------------------------------------------------
 
-    pub(super) fn insert_open_file(&mut self, open: OpenFile) -> VfResult<i32> {
+    pub(super) fn insert_open_file(&mut self, open: NfsOpenState) -> VfResult<i32> {
         crate::vecfs::insert_fd(&mut self.next_fd, &mut self.open_files, open)
     }
 
@@ -64,7 +64,7 @@ impl NfsVecFs {
         access: u32,
         create: bool,
         excl: bool,
-    ) -> VfResult<(WireFileHandle, stateid4)> {
+    ) -> VfResult<(NfsFh, stateid4)> {
         let dirfh = self.resolve_path(dir, true).map_err(|e| e.with_index(0))?;
         let mode = match (create, excl) {
             (false, _) => OpenCreate::NoCreate,
@@ -85,7 +85,7 @@ impl NfsVecFs {
         paths: &[&Path],
         flags: &[i32],
         modes: &[u32],
-    ) -> VfResult<ManyResults<VfFile>> {
+    ) -> VfResult<ManyResults<FileOperand>> {
         use libc::{O_APPEND, O_CREAT, O_EXCL, O_TRUNC};
         let mut ops = Vec::with_capacity(paths.len());
         for (i, p) in paths.iter().enumerate() {
@@ -150,7 +150,7 @@ impl NfsVecFs {
                 results.push(Err(error));
                 break;
             }
-            let open = OpenFile {
+            let open = NfsOpenState {
                 fh: fh.clone(),
                 stateid,
                 cur_offset: 0,
@@ -163,7 +163,7 @@ impl NfsVecFs {
             };
             match self.insert_open_file(open) {
                 Ok(fd) => {
-                    let file = VfFile::from_fd(fd);
+                    let file = FileOperand::from_fd(fd);
                     #[cfg(feature = "test-faults")]
                     if let Err(error) =
                         self.inject_open_fault(OpenFaultPoint::AfterRegister { index })
@@ -205,7 +205,7 @@ impl NfsVecFs {
     /// op index.
     pub(super) fn open_path_batch(
         &mut self,
-        files: &[&VfFile],
+        files: &[&FileOperand],
         creation: &[bool],
         for_write: bool,
         truncate: &[bool],
@@ -213,18 +213,18 @@ impl NfsVecFs {
         // Resolve each parent directory once per distinct dir, then look up
         // every final component in one tolerant batch (which also reports the
         // type, so symlinks can be followed only when actually present).
-        let mut dir_cache: std::collections::HashMap<Vec<u8>, WireFileHandle> =
+        let mut dir_cache: std::collections::HashMap<Vec<u8>, NfsFh> =
             std::collections::HashMap::new();
-        let mut lookups: Vec<(usize, WireFileHandle, Vec<u8>)> = Vec::new();
+        let mut lookups: Vec<(usize, NfsFh, Vec<u8>)> = Vec::new();
         for (i, f) in files.iter().enumerate() {
-            if f.is_descriptor() {
+            if f.is_fd() {
                 continue;
             }
             match f {
-                VfFile::Cwd => return Err(VfError::failure(i, ERR_ISDIR)),
-                VfFile::Saved => return Err(VfError::failure(i, ERR_NOENT)),
-                VfFile::Path { .. } | VfFile::CwdPath(_) => {}
-                VfFile::Descriptor(_) => unreachable!(),
+                FileOperand::Cwd => return Err(VfError::failure(i, ERR_ISDIR)),
+                FileOperand::Saved => return Err(VfError::failure(i, ERR_NOENT)),
+                FileOperand::Path { .. } | FileOperand::CwdPath(_) => {}
+                FileOperand::Fd(_) => unreachable!(),
                 _ => return Err(VfError::unsupported(i)),
             }
             let full = self.server_vf_path(f).map_err(|e| e.with_index(i))?;
@@ -245,7 +245,7 @@ impl NfsVecFs {
         if lookups.is_empty() {
             return Ok(vec![None; files.len()]);
         }
-        let probe: Vec<(WireFileHandle, Vec<u8>)> = lookups
+        let probe: Vec<(NfsFh, Vec<u8>)> = lookups
             .iter()
             .map(|(_, dir, name)| (dir.clone(), name.clone()))
             .collect();
@@ -365,7 +365,7 @@ impl NfsVecFs {
         }
         let mut tmp = vec![None; files.len()];
         for (orig, (fh, stateid)) in subset.iter().zip(results) {
-            let fd = self.insert_open_file(OpenFile {
+            let fd = self.insert_open_file(NfsOpenState {
                 fh,
                 stateid,
                 cur_offset: 0,
@@ -397,7 +397,7 @@ impl NfsVecFs {
     }
 
     /// Best-effort close of stateids opened by a merged path compound.
-    pub(super) fn close_path_opens(&mut self, opens: &[(WireFileHandle, stateid4)]) {
+    pub(super) fn close_path_opens(&mut self, opens: &[(NfsFh, stateid4)]) {
         if opens.is_empty() {
             return;
         }

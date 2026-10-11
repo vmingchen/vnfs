@@ -220,8 +220,8 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
     Ok(completed)
 }
 
-impl<F: crate::backend::HandleBackend> FileHandle for crate::FsFile<F> {
-    crate::__vfsi_file_methods!(crate::FsFile<F>);
+impl<F: crate::backend::HandleBackend> OpenFd for crate::OpenFile<F> {
+    crate::__vfsi_file_methods!(crate::OpenFile<F>);
 }
 
 impl<F: crate::backend::VectorBackend> vfsi_core::api::DirHandle for crate::FsDir<F> {
@@ -229,7 +229,7 @@ impl<F: crate::backend::VectorBackend> vfsi_core::api::DirHandle for crate::FsDi
 }
 
 impl<F: crate::backend::VectorBackend + 'static> Vfsi for crate::FsClient<F> {
-    type File = crate::FsFile<F>;
+    type File = crate::OpenFile<F>;
     type Dir = crate::FsDir<F>;
     crate::__vfsi_client_methods!(
         crate::FsClient<F>,
@@ -269,14 +269,14 @@ pub fn read_backend_owned<F: crate::backend::VectorBackend + 'static>(
 }
 pub(crate) fn read_backend<'a, F: crate::backend::VectorBackend + 'static>(
     client: &crate::FsClient<F>,
-    ops: impl IntoIterator<Item = ReadOp<'a, crate::FsFile<F>>>,
+    ops: impl IntoIterator<Item = ReadOp<'a, crate::OpenFile<F>>>,
     options: ReadOptions,
 ) -> Result<Vec<ReadResult>> {
     consume_ops(
         ops,
         options.limit_or(client.limits().read_byte_limit()),
-        crate::FsFile::read_request_at,
-        crate::FsFile::read_request_at_into,
+        crate::OpenFile::read_request_at,
+        crate::OpenFile::read_request_at_into,
         |requests, options| read_backend_owned(client, requests, options),
         |requests, bytes| client.vread_into_with_limit_native(requests, bytes),
     )
@@ -297,7 +297,7 @@ pub fn public_write_error(error: vfsi_core::api::Error) -> vfsi_core::api::Error
 
 pub(crate) fn write_backend<'a, F>(
     client: &crate::FsClient<F>,
-    ops: &[WriteOp<'a, crate::FsFile<F>>],
+    ops: &[WriteOp<'a, crate::OpenFile<F>>],
 ) -> vfsi_core::api::Result<Vec<vfsi_core::api::WriteResult>>
 where
     F: crate::backend::VectorBackend + 'static,
@@ -307,7 +307,7 @@ where
 
 pub(crate) fn write_backend_all<'a, F>(
     client: &crate::FsClient<F>,
-    ops: &[WriteOp<'a, crate::FsFile<F>>],
+    ops: &[WriteOp<'a, crate::OpenFile<F>>],
 ) -> vfsi_core::api::Result<Vec<vfsi_core::api::WriteResult>>
 where
     F: crate::backend::VectorBackend + 'static,
@@ -315,7 +315,7 @@ where
     client.vwrite_all_mapped_native(ops, |op| op.file().write_request_at(op.offset(), op.data()))
 }
 
-pub(crate) fn metadata_backend<F, P: vfsi_core::AsTarget<crate::FsFile<F>>>(
+pub(crate) fn metadata_backend<F, P: vfsi_core::AsTarget<crate::OpenFile<F>>>(
     client: &crate::FsClient<F>,
     paths: &[P],
     options: AttrsOptions,
@@ -334,7 +334,7 @@ use vfsi_core::api::internal::{OwnedReadResult, ReadRequest, consume_ops, read_b
 #[cfg(test)]
 mod traversal_tests {
     use super::*;
-    use crate::{AttrMask, DirEntry, DirPageCursor, VfAttrs, VfFile, VfType};
+    use crate::{AttrMask, DirEntry, DirPageCursor, FileOperand, VfAttrs, VfType};
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -375,7 +375,7 @@ mod traversal_tests {
                             .map(|index| {
                                 let path = path.join(format!("entry-{index}"));
                                 let attrs = VfAttrs {
-                                    file: VfFile::from_os_path(&path),
+                                    file: FileOperand::from_os_path(&path),
                                     ftype: if index == 0 && depth < 5 {
                                         VfType::Directory
                                     } else {

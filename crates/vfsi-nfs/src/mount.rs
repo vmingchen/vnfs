@@ -8,7 +8,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use vfsi_sync::backend::VectorBackend;
 
-use vfsi_core::{AttrMask, VfAttrs, VfError, VfFile, VfResult};
+use vfsi_core::{AttrMask, FileOperand, VfAttrs, VfError, VfResult};
 
 use crate::{NfsAuthentication, NfsVecFs};
 
@@ -128,7 +128,7 @@ impl NfsMount {
 
     pub(crate) fn verify(&self, filesystem: &mut NfsVecFs) -> VfResult<()> {
         let mut attrs = [VfAttrs {
-            file: VfFile::from_os_path(Path::new("/")),
+            file: FileOperand::from_os_path(Path::new("/")),
             masks: AttrMask::FILEID,
             ..VfAttrs::default()
         }];

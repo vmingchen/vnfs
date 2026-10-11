@@ -9,7 +9,7 @@ use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::test_support::borrow_writes;
 
 use vfsi_nfs::NfsVecFs;
-use vfsi_sync::{ReadOp, SeekFrom, VfFile, VfOffset, WriteOp};
+use vfsi_sync::{FileOperand, ReadOp, SeekFrom, VfOffset, WriteOp};
 
 fn client() -> NfsVecFs {
     let minor = match std::env::var("VNFS_TEST_MINOR").as_deref() {
@@ -104,10 +104,10 @@ fn read_recovers_after_server_restart_and_reopens_live_descriptor() {
 
     fs.vclose_impl(&files).expect("close recovered descriptors");
     fs.vremove_impl(&[
-        VfFile::from_path(&first_path),
-        VfFile::from_path(&second_path),
+        FileOperand::from_path(&first_path),
+        FileOperand::from_path(&second_path),
     ])
     .expect("remove recovery files");
-    fs.vremove_impl(&[VfFile::from_path(&dir)])
+    fs.vremove_impl(&[FileOperand::from_path(&dir)])
         .expect("remove recovery directory");
 }

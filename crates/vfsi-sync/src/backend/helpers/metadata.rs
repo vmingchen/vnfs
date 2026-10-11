@@ -5,7 +5,7 @@ pub fn stat_impl_default<F: VectorBackend + ?Sized>(
     path: &Path,
 ) -> VfResult<VfAttrs> {
     let mut a = VfAttrs {
-        file: VfFile::from_os_path(path),
+        file: FileOperand::from_os_path(path),
         masks: AttrMask::stat(),
         ..VfAttrs::default()
     };
@@ -18,7 +18,7 @@ pub fn lstat_impl_default<F: VectorBackend + ?Sized>(
     path: &Path,
 ) -> VfResult<VfAttrs> {
     let mut a = VfAttrs {
-        file: VfFile::from_os_path(path),
+        file: FileOperand::from_os_path(path),
         masks: AttrMask::stat(),
         ..VfAttrs::default()
     };
@@ -28,7 +28,7 @@ pub fn lstat_impl_default<F: VectorBackend + ?Sized>(
 
 pub fn fstat_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
-    tcf: &VfFile,
+    tcf: &FileOperand,
 ) -> VfResult<VfAttrs> {
     let mut a = VfAttrs {
         file: tcf.clone(),
@@ -59,11 +59,11 @@ pub fn file_type_impl_default<F: VectorBackend + ?Sized>(
 
 pub fn native_metadata_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
-    target: Target<'_, VfFile>,
+    target: Target<'_, FileOperand>,
     options: vfsi_core::api::AttrsOptions,
 ) -> VfResult<VfAttrs> {
     let file = match target {
-        Target::Path(path) => VfFile::from_os_path(path),
+        Target::Path(path) => FileOperand::from_os_path(path),
         Target::File(file) => file.clone(),
     };
     let path = match target {
@@ -114,11 +114,11 @@ pub fn native_set_metadata_path_impl_default<F: VectorBackend + ?Sized>(
 
 // Wire/raw masks and timestamp tuples are execution details, not a second
 // public mutation type. Convert and validate every operation before dispatch.
-fn setattrs_to_legacy(op: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<VfAttrs> {
+fn setattrs_to_legacy(op: &SetAttrsOp<Target<'_, FileOperand>>) -> VfResult<VfAttrs> {
     let [accessed, modified] = vfsi_core::internal::validate_setattrs(op)?;
     let mut attrs = VfAttrs {
         file: match op.target() {
-            Target::Path(path) => VfFile::from_os_path(path),
+            Target::Path(path) => FileOperand::from_os_path(path),
             Target::File(file) => (*file).clone(),
         },
         ..VfAttrs::default()
@@ -152,7 +152,7 @@ fn setattrs_to_legacy(op: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<VfAttrs> 
 
 pub fn vsetattrs_typed_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
-    updates: &[SetAttrsOp<Target<'_, VfFile>>],
+    updates: &[SetAttrsOp<Target<'_, FileOperand>>],
 ) -> VfResult<()> {
     let attrs = updates
         .iter()

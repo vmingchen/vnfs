@@ -152,7 +152,7 @@ its operation engines directly.
 ## Caller migration
 
 `FsClient` retains `HandleBackend` for connection and handle lifecycle; its
-application `Vfsi` implementation requires `VectorBackend`. `FsFile` owns the open
+application `Vfsi` implementation requires `VectorBackend`. `OpenFile` owns the open
 resource and cleanup obligation, while operations use the owning client's
 vectors. Direct handle I/O, metadata, synchronization, and the borrowed
 `VfFileHandle`/`VfOpenOptions` adapter have been removed.
@@ -171,8 +171,8 @@ Paths and opened objects use the shared `Target` enum and `AsTarget` conversion
 trait; paths remain directly accepted without an explicit wrapper.
 `SetAttrsOp::file(&file)` prepares a handle update. `MetadataTarget`,
 `MetadataOperand`, `MetadataQuery`, and `SetAttributes` are removed rather than
-retained as compatibility aliases. Native `metadata_impl` takes `Target<'_, VfFile>` plus
-`AttrsOptions`, and native attribute setters borrow `SetAttrsOp<Target<'_, VfFile>>` operations
+retained as compatibility aliases. Native `metadata_impl` takes `Target<'_, FileOperand>` plus
+`AttrsOptions`, and native attribute setters borrow `SetAttrsOp<Target<'_, FileOperand>>` operations
 or slices. Timestamp/mask conversion is an execution detail; it does not require
 a second public mutation type. C/Python entry points and wire formats are unchanged.
 The native `FsClient` also has `vmkdir_default` and `vclose_owned` compatibility
@@ -219,3 +219,63 @@ injection, live SMB copy/cleanup, and separately built Python adapter features.
 Three specialized mount tests were not run: read-only mount policy, nested-mount
 removal, and file bind-mount routing. Their dedicated fixtures were not configured.
 The dummy-only Python build retains its pre-existing unused `host` warning.
+
+
+## Identity and open descriptor names
+
+The canonical vocabulary separates underlying object identity, an owned File
+Descriptor handle, a numeric backend slot, and NFS protocol state:
+
+| Previous spelling | Canonical spelling | Migration |
+|---|---|---|
+| Core `FileHandle` trait | `OpenFd` | Deprecated re-export at the existing core/API/prelude and `vnfs::files` paths. It is the same trait, so existing implementations satisfy new bounds. |
+| `vfsi_sync::FsFile<F>` | `vfsi_sync::OpenFile<F>` | Deprecated re-export of the same owned type. |
+| NFS `client::FileHandle` | `client::NfsFh` | Deprecated module-scoped re-export of the same opaque protocol reference. |
+| `VfFile` | `FileOperand` | Deprecated re-export; unchanged constructors/path variants still work. |
+| `VfFile::Descriptor(fd)` | `FileOperand::Fd(fd)` | Update expressions and pattern matches; variants have no alias. |
+| `is_descriptor()` | `is_fd()` | Deprecated forwarding method; `from_fd()` and `fd()` remain. |
+| `Attrs::filesystem_id()` / `FsObjId::filesystem_id()` | `fs_id()` | Deprecated forwarding accessors with unchanged return types and `const` behavior. |
+| `AttrMask::FILESYSTEM_ID` | `AttrMask::FS_ID` | Same bit value; old associated constant is deprecated and is not a duplicate named flag. |
+| `VfAttrs.filesystem_id` | `VfAttrs.fs_id` | Update field access and struct literals; Rust fields have no alias. |
+| `HandleId` | Removed | No repository consumers; downstream imports must be removed. |
+| Private NFS `OpenFile` | `NfsOpenState` | Internal rename, without a public alias. |
+
+`FsObjId` / `fs_obj_id()` remain primary; existing `FileIdentity` /
+`file_identity()` compatibility names remain available. The variant/field
+changes and unused public type removal require a Rust source migration even
+with the retained aliases. C exported names/layouts and Python public method
+names retain their contracts.
+
+`OpenFd` is the owned File Descriptor interface to an open instance; it does
+not promise an OS raw descriptor. `OpenFile<F>` owns the backend handle and
+cleanup obligation. `Fd` is a numeric backend-assigned File Descriptor slot;
+`FileOperand::Fd` refers to it without owning or duplicating it. `NfsFh`
+addresses an NFS object; `NfsOpenState` holds filehandle, OPEN stateid, cursor,
+and policy. A stateid is not an object ID or a globally unique open-instance ID.
+
+`FsObjId` combines `(fs_id, file_id)` within a backend/server identity
+namespace. Linux reports (`st_dev`, `st_ino`), NFS reports FSID and FILEID;
+filesystem IDs differ from mount IDs and from a special file's `device_id`.
+IDs can be reused after deletion. Mount discovery selects the filesystem for
+`Auto` or a mount-derived connection; open handles retain that connection for
+later operations. Mount identity is not included in the object ID.
+
+```rust
+use vfsi_core::{api::AttrsOptions, AttrMask, FileOperand, VfAttrs, Vfsi, VfsiExt};
+
+fn object_fs_id<C: Vfsi>(fs: &C) -> vfsi_core::VfResult<Option<u128>> {
+    let attrs = fs.attrs_with_options(
+        "/file",
+        AttrsOptions::new().fields(AttrMask::identity()),
+    )?;
+    Ok(attrs.fs_obj_id().map(|id| id.fs_id()))
+}
+
+let operand = FileOperand::Fd(7);
+assert_eq!(operand.fd(), Some(7));
+let native = VfAttrs {
+    fs_id: 42,
+    ..Default::default()
+};
+assert_eq!(native.fs_id, 42);
+```

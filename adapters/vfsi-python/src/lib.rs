@@ -19,9 +19,9 @@ use pyo3::types::{PyDict, PyString};
 
 use vfsi_core::{
     AttrMask, Capabilities, ERR_ACCES, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT, ERR_NOTDIR,
-    ExtentPair, ReadOp, ReadResult, SeekFrom, VF_CAP_HARDLINKS, VF_CAP_LSTAT,
+    ExtentPair, FileOperand, ReadOp, ReadResult, SeekFrom, VF_CAP_HARDLINKS, VF_CAP_LSTAT,
     VF_CAP_NON_UTF8_PATHS, VF_CAP_POSIX_METADATA, VF_CAP_SERVER_COPY, VF_CAP_SYMLINKS,
-    VF_ERR_UNSUPPORTED, VfAttrs, VfError, VfFile, VfOffset, VfType, WriteOp, WriteResult,
+    VF_ERR_UNSUPPORTED, VfAttrs, VfError, VfOffset, VfType, WriteOp, WriteResult,
 };
 #[cfg(feature = "dummy")]
 use vfsi_local::LocalBackend;
@@ -225,7 +225,7 @@ fn validate_write_results(
     Ok(results)
 }
 
-fn descriptor(operation: &str, file: &VfFile) -> PyResult<i64> {
+fn descriptor(operation: &str, file: &FileOperand) -> PyResult<i64> {
     file.fd()
         .map(i64::from)
         .ok_or_else(|| contract_error(operation, "backend did not return a descriptor"))
@@ -352,7 +352,7 @@ fn attrs_many_impl(
         let mut attrs: Vec<VfAttrs> = remaining
             .iter()
             .map(|&i| VfAttrs {
-                file: VfFile::from_os_path(&paths[i]),
+                file: FileOperand::from_os_path(&paths[i]),
                 masks,
                 ..VfAttrs::default()
             })
@@ -395,12 +395,12 @@ fn read_allv_impl(
     paths: &[PathBuf],
     max_total_bytes: usize,
 ) -> Result<ReadManyResult, VfError> {
-    let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_os_path(p)).collect();
+    let files: Vec<FileOperand> = paths.iter().map(|p| FileOperand::from_os_path(p)).collect();
     let mut results: Vec<Option<Vec<u8>>> = vec![None; paths.len()];
     let mut errors: ErrnoMap = HashMap::new();
     let mut remaining: Vec<usize> = (0..paths.len()).collect();
     while !remaining.is_empty() {
-        let subset: Vec<VfFile> = remaining.iter().map(|&i| files[i].clone()).collect();
+        let subset: Vec<FileOperand> = remaining.iter().map(|&i| files[i].clone()).collect();
         match fs.vread_all_with_options_impl(
             &subset,
             ReadAllOptions::new().max_total_bytes(max_total_bytes),
@@ -807,7 +807,7 @@ impl NfsClient {
     /// Stat `path` (follows symlinks), returning an attribute dict.
     fn stat(&self, py: Python<'_>, path: PathBuf) -> PyResult<Py<PyDict>> {
         let mut a = VfAttrs {
-            file: VfFile::from_os_path(&path),
+            file: FileOperand::from_os_path(&path),
             masks: full_mask(),
             ..VfAttrs::default()
         };
@@ -822,7 +822,7 @@ impl NfsClient {
     /// lstat `path` (does not follow symlinks).
     fn lstat(&self, py: Python<'_>, path: PathBuf) -> PyResult<Py<PyDict>> {
         let mut a = VfAttrs {
-            file: VfFile::from_os_path(&path),
+            file: FileOperand::from_os_path(&path),
             masks: full_mask(),
             ..VfAttrs::default()
         };
@@ -851,7 +851,7 @@ impl NfsClient {
 
     fn close(&self, py: Python<'_>, fd: i64) -> PyResult<()> {
         self.with_fs(py, move |fs| {
-            fs.close_impl(&VfFile::from_fd(fd as i32))
+            fs.close_impl(&FileOperand::from_fd(fd as i32))
                 .map_err(|e| to_py_err(e, None))
         })
     }
@@ -859,7 +859,7 @@ impl NfsClient {
     /// Read `length` bytes at the descriptor's current position (advances it).
     fn read(&self, py: Python<'_>, fd: i64, length: usize) -> PyResult<Vec<u8>> {
         self.with_fs(py, move |fs| {
-            let op = ReadOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, length);
+            let op = ReadOp::new(FileOperand::from_fd(fd as i32), VfOffset::Cur, length);
             let r = fs
                 .vread_impl(std::slice::from_ref(&op))
                 .map_err(|e| to_py_err(e, None))?;
@@ -870,7 +870,7 @@ impl NfsClient {
     /// Write `data` at the descriptor's current position (advances it).
     fn write(&self, py: Python<'_>, fd: i64, data: Vec<u8>) -> PyResult<usize> {
         self.with_fs(py, move |fs| {
-            let op = WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, data);
+            let op = WriteOp::new(FileOperand::from_fd(fd as i32), VfOffset::Cur, data);
             let w = fs
                 .vwrite_impl(std::slice::from_ref(&op.borrowed()))
                 .map_err(|e| to_py_err(e, None))?;
@@ -884,7 +884,7 @@ impl NfsClient {
     /// across NFS sessions or clients; callers must serialize writers.
     fn write_positioned(&self, py: Python<'_>, fd: i64, data: Vec<u8>) -> PyResult<(usize, u64)> {
         self.with_fs(py, move |fs| {
-            let op = WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, data);
+            let op = WriteOp::new(FileOperand::from_fd(fd as i32), VfOffset::Cur, data);
             let w = fs
                 .vwrite_impl(std::slice::from_ref(&op.borrowed()))
                 .map_err(|e| to_py_err(e, None))?;
@@ -900,7 +900,11 @@ impl NfsClient {
     /// Read `length` bytes at an absolute offset (does not move the position).
     fn pread(&self, py: Python<'_>, fd: i64, length: usize, offset: u64) -> PyResult<Vec<u8>> {
         self.with_fs(py, move |fs| {
-            let op = ReadOp::new(VfFile::from_fd(fd as i32), VfOffset::At(offset), length);
+            let op = ReadOp::new(
+                FileOperand::from_fd(fd as i32),
+                VfOffset::At(offset),
+                length,
+            );
             let r = fs
                 .vread_impl(std::slice::from_ref(&op))
                 .map_err(|e| to_py_err(e, None))?;
@@ -911,7 +915,7 @@ impl NfsClient {
     /// Write `data` at an absolute offset.
     fn pwrite(&self, py: Python<'_>, fd: i64, data: Vec<u8>, offset: u64) -> PyResult<usize> {
         self.with_fs(py, move |fs| {
-            let op = WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::At(offset), data);
+            let op = WriteOp::new(FileOperand::from_fd(fd as i32), VfOffset::At(offset), data);
             let w = fs
                 .vwrite_impl(std::slice::from_ref(&op.borrowed()))
                 .map_err(|e| to_py_err(e, None))?;
@@ -928,14 +932,14 @@ impl NfsClient {
             _ => return Err(PyValueError::new_err("whence must be 0, 1 or 2")),
         };
         self.with_fs(py, move |fs| {
-            fs.seek_raw_impl(&VfFile::from_fd(fd as i32), offset, whence)
+            fs.seek_raw_impl(&FileOperand::from_fd(fd as i32), offset, whence)
                 .map_err(|e| to_py_err(e, None))
         })
     }
 
     fn fstat(&self, py: Python<'_>, fd: i64) -> PyResult<Py<PyDict>> {
         let mut a = VfAttrs {
-            file: VfFile::from_fd(fd as i32),
+            file: FileOperand::from_fd(fd as i32),
             masks: full_mask(),
             ..VfAttrs::default()
         };
@@ -952,7 +956,7 @@ impl NfsClient {
         let mut attrs: Vec<VfAttrs> = fds
             .into_iter()
             .map(|fd| VfAttrs {
-                file: VfFile::from_fd(fd as i32),
+                file: FileOperand::from_fd(fd as i32),
                 masks: full_mask(),
                 ..VfAttrs::default()
             })
@@ -989,7 +993,7 @@ impl NfsClient {
                     .iter()
                     .map(|&index| {
                         ReadOp::new(
-                            VfFile::from_fd(fds[index] as i32),
+                            FileOperand::from_fd(fds[index] as i32),
                             VfOffset::At(offsets[index]),
                             lengths[index],
                         )
@@ -1040,7 +1044,7 @@ impl NfsClient {
             .zip(offsets)
             .zip(datas)
             .map(|((fd, offset), data)| {
-                WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::At(offset), data)
+                WriteOp::new(FileOperand::from_fd(fd as i32), VfOffset::At(offset), data)
             })
             .collect();
         self.with_fs(py, move |fs| {
@@ -1074,7 +1078,7 @@ impl NfsClient {
         let ops: Vec<WriteOp> = fds
             .into_iter()
             .zip(datas)
-            .map(|(fd, data)| WriteOp::new(VfFile::from_fd(fd as i32), VfOffset::Cur, data))
+            .map(|(fd, data)| WriteOp::new(FileOperand::from_fd(fd as i32), VfOffset::Cur, data))
             .collect();
         self.with_fs(py, move |fs| {
             let writes = fs
@@ -1100,7 +1104,7 @@ impl NfsClient {
 
     fn truncate(&self, py: Python<'_>, path: PathBuf, size: u64) -> PyResult<()> {
         let a = VfAttrs {
-            file: VfFile::from_os_path(&path),
+            file: FileOperand::from_os_path(&path),
             masks: AttrMask::SIZE,
             size,
             ..VfAttrs::default()
@@ -1116,7 +1120,7 @@ impl NfsClient {
     /// rename or replacement of its directory entry.
     fn ftruncate(&self, py: Python<'_>, fd: i64, size: u64) -> PyResult<()> {
         let a = VfAttrs {
-            file: VfFile::from_fd(fd as i32),
+            file: FileOperand::from_fd(fd as i32),
             masks: AttrMask::SIZE,
             size,
             ..VfAttrs::default()
@@ -1132,7 +1136,7 @@ impl NfsClient {
             .duration_since(UNIX_EPOCH)
             .map_err(|_| PyOSError::new_err("system clock is before the Unix epoch"))?;
         let a = VfAttrs {
-            file: VfFile::from_os_path(&path),
+            file: FileOperand::from_os_path(&path),
             masks: AttrMask::ATIME | AttrMask::MTIME,
             atime_sec: now.as_secs().min(i64::MAX as u64) as i64,
             atime_nsec: now.subsec_nanos(),
@@ -1148,7 +1152,7 @@ impl NfsClient {
 
     fn chmod(&self, py: Python<'_>, path: PathBuf, mode: u32) -> PyResult<()> {
         let a = VfAttrs {
-            file: VfFile::from_os_path(&path),
+            file: FileOperand::from_os_path(&path),
             masks: AttrMask::MODE,
             mode,
             ..VfAttrs::default()
@@ -1333,7 +1337,9 @@ impl NfsClient {
             while !remaining.is_empty() {
                 let ops: Vec<ReadOp> = remaining
                     .iter()
-                    .map(|&i| ReadOp::at(VfFile::from_os_path(&paths[i]), starts[i], lengths[i]))
+                    .map(|&i| {
+                        ReadOp::at(FileOperand::from_os_path(&paths[i]), starts[i], lengths[i])
+                    })
                     .collect();
                 match fs.vread_impl(&ops) {
                     Ok(res) => {
@@ -1397,7 +1403,7 @@ impl NfsClient {
             .iter()
             .zip(datas)
             .map(|(p, d)| {
-                let op = WriteOp::at(VfFile::from_os_path(p), 0, d).with_creation();
+                let op = WriteOp::at(FileOperand::from_os_path(p), 0, d).with_creation();
                 if truncate { op.with_truncate() } else { op }
             })
             .collect();
@@ -1423,7 +1429,7 @@ impl NfsClient {
             .iter()
             .zip(sizes)
             .map(|(p, s)| VfAttrs {
-                file: VfFile::from_os_path(p),
+                file: FileOperand::from_os_path(p),
                 masks: AttrMask::SIZE,
                 size: s,
                 ..VfAttrs::default()
@@ -1440,7 +1446,7 @@ impl NfsClient {
         let attrs: Vec<VfAttrs> = paths
             .iter()
             .map(|p| VfAttrs {
-                file: VfFile::from_os_path(p),
+                file: FileOperand::from_os_path(p),
                 masks: AttrMask::MODE,
                 mode,
                 ..VfAttrs::default()
@@ -1487,7 +1493,10 @@ impl NfsClient {
 
     /// Close many descriptors through `VectorBackend::vclose_impl`.
     fn close_many(&self, py: Python<'_>, fds: Vec<i64>) -> PyResult<()> {
-        let files: Vec<VfFile> = fds.iter().map(|&fd| VfFile::from_fd(fd as i32)).collect();
+        let files: Vec<FileOperand> = fds
+            .iter()
+            .map(|&fd| FileOperand::from_fd(fd as i32))
+            .collect();
         self.with_fs(py, move |fs| {
             fs.vclose_impl(&files).map_err(|e| to_py_err(e, None))
         })
@@ -1617,9 +1626,9 @@ impl NfsClient {
     /// Remove paths through `VectorBackend::vremove_impl`. NFS groups siblings by
     /// parent and splits compounds to respect negotiated limits.
     fn remove_many(&self, py: Python<'_>, paths: Vec<PathBuf>) -> PyResult<()> {
-        let files: Vec<VfFile> = paths
+        let files: Vec<FileOperand> = paths
             .iter()
-            .map(|path| VfFile::from_os_path(path.as_path()))
+            .map(|path| FileOperand::from_os_path(path.as_path()))
             .collect();
         self.with_fs(py, move |fs| {
             fs.vremove_impl(&files)
@@ -1629,9 +1638,9 @@ impl NfsClient {
 
     /// Rename pairs through one `VectorBackend::vrename_impl` vector batch.
     fn rename_many(&self, py: Python<'_>, pairs: Vec<(PathBuf, PathBuf)>) -> PyResult<()> {
-        let files: Vec<(VfFile, VfFile)> = pairs
+        let files: Vec<(FileOperand, FileOperand)> = pairs
             .iter()
-            .map(|(a, b)| (VfFile::from_os_path(a), VfFile::from_os_path(b)))
+            .map(|(a, b)| (FileOperand::from_os_path(a), FileOperand::from_os_path(b)))
             .collect();
         self.with_fs(py, move |fs| {
             fs.vrename_impl(&files).map_err(|e| {
@@ -1768,7 +1777,7 @@ impl NfsClient {
                     .iter()
                     .map(|&index| {
                         WriteOp::at(
-                            VfFile::from_os_path(&dests[index]),
+                            FileOperand::from_os_path(&dests[index]),
                             0,
                             data[index].clone().unwrap_or_default(),
                         )
@@ -2043,14 +2052,14 @@ mod tests {
 
     #[test]
     fn scalar_read_result_contract_is_validated() {
-        let op = ReadOp::at(VfFile::from_fd(7), 11, 3);
+        let op = ReadOp::at(FileOperand::from_fd(7), 11, 3);
         assert!(one_read_result("pread", &op, Vec::new()).is_err());
         assert!(
             one_read_result(
                 "pread",
                 &op,
                 vec![ReadResult {
-                    file: VfFile::from_fd(8),
+                    file: FileOperand::from_fd(8),
                     offset: 11,
                     data: vec![1],
                     eof: false,
@@ -2059,7 +2068,7 @@ mod tests {
             .is_err()
         );
 
-        let second = ReadOp::at(VfFile::from_fd(8), 0, 1);
+        let second = ReadOp::at(FileOperand::from_fd(8), 0, 1);
         let swapped = vec![
             ReadResult {
                 file: second.file.clone(),
@@ -2080,7 +2089,7 @@ mod tests {
                 "pread",
                 &op,
                 vec![ReadResult {
-                    file: VfFile::from_fd(7),
+                    file: FileOperand::from_fd(7),
                     offset: 12,
                     data: vec![1],
                     eof: false,
@@ -2093,7 +2102,7 @@ mod tests {
                 "pread",
                 &op,
                 vec![ReadResult {
-                    file: VfFile::from_fd(7),
+                    file: FileOperand::from_fd(7),
                     offset: 11,
                     data: vec![1; 4],
                     eof: false,
@@ -2105,14 +2114,14 @@ mod tests {
 
     #[test]
     fn scalar_write_result_contract_is_validated() {
-        let op = WriteOp::at(VfFile::from_fd(7), 11, vec![1, 2, 3]);
+        let op = WriteOp::at(FileOperand::from_fd(7), 11, vec![1, 2, 3]);
         assert!(one_write_result("pwrite", &op, Vec::new()).is_err());
         assert!(
             one_write_result(
                 "pwrite",
                 &op,
                 vec![WriteResult {
-                    file: VfFile::from_fd(7),
+                    file: FileOperand::from_fd(7),
                     offset: 11,
                     written: 4,
                     stable: true,
@@ -2124,6 +2133,6 @@ mod tests {
 
     #[test]
     fn path_result_cannot_cross_the_descriptor_boundary() {
-        assert!(descriptor("open", &VfFile::from_path("/not-a-descriptor")).is_err());
+        assert!(descriptor("open", &FileOperand::from_path("/not-a-descriptor")).is_err());
     }
 }

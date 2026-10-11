@@ -15,7 +15,7 @@ use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::test_support::borrow_writes;
 use vfsi_sync::*;
 use vfsi_sync::{
-    AttrMask, Capabilities, ExtentPair, ReadOp, VF_ERR_UNSUPPORTED, VfAttrs, VfFile, VfOffset,
+    AttrMask, Capabilities, ExtentPair, FileOperand, ReadOp, VF_ERR_UNSUPPORTED, VfAttrs, VfOffset,
     WriteOp,
 };
 
@@ -171,7 +171,7 @@ fn concurrent_write_preflight_detects_hard_link_aliases() {
     assert!(!client.test_last_writev_was_concurrent());
     assert_eq!(
         client
-            .vread_all_impl(&[VfFile::from_os_path(&first)])
+            .vread_all_impl(&[FileOperand::from_os_path(&first)])
             .unwrap()[0],
         b"2222"
     );
@@ -288,8 +288,8 @@ fn descriptor_metadata_never_reopens_a_replaced_path() {
     fs.write_raw_impl(&file, 0, b"original").unwrap();
     assert_eq!(fs.fstat_impl(&file).unwrap().size, 8);
     fs.vrename_impl(&[(
-        VfFile::from_os_path(&original),
-        VfFile::from_os_path(&renamed),
+        FileOperand::from_os_path(&original),
+        FileOperand::from_os_path(&renamed),
     )])
     .unwrap();
     fs.vwrite_impl(&borrow_writes(&[WriteOp::from_os_path(
@@ -550,7 +550,7 @@ fn samba_round_trip_and_copy() {
     let dir_attrs: Vec<VfAttrs> = batch_dirs
         .iter()
         .map(|path| VfAttrs {
-            file: VfFile::from_os_path(path),
+            file: FileOperand::from_os_path(path),
             masks: AttrMask::MODE,
             mode: 0o755,
             ..VfAttrs::default()
@@ -566,23 +566,23 @@ fn samba_round_trip_and_copy() {
     let renamed_files = [batch_dirs[0].join("renamed"), batch_dirs[1].join("renamed")];
     fs.vrename_impl(&[
         (
-            VfFile::from_os_path(&batch_files[0]),
-            VfFile::from_os_path(&renamed_files[0]),
+            FileOperand::from_os_path(&batch_files[0]),
+            FileOperand::from_os_path(&renamed_files[0]),
         ),
         (
-            VfFile::from_os_path(&batch_files[1]),
-            VfFile::from_os_path(&renamed_files[1]),
+            FileOperand::from_os_path(&batch_files[1]),
+            FileOperand::from_os_path(&renamed_files[1]),
         ),
     ])
     .expect("concurrent renamev");
     fs.vremove_impl(&[
-        VfFile::from_os_path(&renamed_files[0]),
-        VfFile::from_os_path(&renamed_files[1]),
+        FileOperand::from_os_path(&renamed_files[0]),
+        FileOperand::from_os_path(&renamed_files[1]),
     ])
     .expect("concurrent removev files");
     fs.vremove_impl(&[
-        VfFile::from_os_path(&batch_dirs[0]),
-        VfFile::from_os_path(&batch_dirs[1]),
+        FileOperand::from_os_path(&batch_dirs[0]),
+        FileOperand::from_os_path(&batch_dirs[1]),
     ])
     .expect("concurrent removev directories");
 
@@ -602,8 +602,8 @@ fn samba_round_trip_and_copy() {
     assert_eq!(path_read[0].data, b"hello over smb");
 
     fs.vrename_impl(&[(
-        VfFile::from_os_path(&source),
-        VfFile::from_os_path(&renamed),
+        FileOperand::from_os_path(&source),
+        FileOperand::from_os_path(&renamed),
     )])
     .unwrap();
     fs.vcopy_impl(
@@ -612,14 +612,16 @@ fn samba_round_trip_and_copy() {
     )
     .unwrap();
     assert_eq!(
-        fs.vread_all_impl(&[VfFile::from_os_path(&copied)]).unwrap()[0],
+        fs.vread_all_impl(&[FileOperand::from_os_path(&copied)])
+            .unwrap()[0],
         b"hello over smb"
     );
 
     let patch = WriteOp::from_os_path(&copied, VfOffset::At(6), b"SMB3".to_vec());
     fs.vwrite_impl(&borrow_writes(&[patch])).unwrap();
     assert_eq!(
-        fs.vread_all_impl(&[VfFile::from_os_path(&copied)]).unwrap()[0],
+        fs.vread_all_impl(&[FileOperand::from_os_path(&copied)])
+            .unwrap()[0],
         b"hello SMB3 smb"
     );
     assert_eq!(
@@ -627,7 +629,7 @@ fn samba_round_trip_and_copy() {
         VF_ERR_UNSUPPORTED
     );
     let no_follow_mode = VfAttrs {
-        file: VfFile::from_os_path(&copied),
+        file: FileOperand::from_os_path(&copied),
         masks: AttrMask::MODE,
         mode: 0o600,
         ..VfAttrs::default()
@@ -652,7 +654,7 @@ fn samba_round_trip_and_copy() {
     .with_truncate()]))
         .expect("large SMB write");
     assert_eq!(
-        fs.vread_all_impl(&[VfFile::from_os_path(&large)])
+        fs.vread_all_impl(&[FileOperand::from_os_path(&large)])
             .expect("large SMB read")[0],
         large_data
     );

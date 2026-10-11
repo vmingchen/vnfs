@@ -183,7 +183,7 @@ fn read_all_round_remaps_failures_and_rejects_zero_progress() {
     let mut out = vec![Vec::new(); 6];
     let mut offsets = vec![0; 6];
     let stalled = [ReadResult {
-        file: VfFile::from_path("/f"),
+        file: FileOperand::from_path("/f"),
         offset: 7,
         data: Vec::new(),
         eof: false,
@@ -200,13 +200,13 @@ fn read_all_round_preserves_original_positions_after_cohort_shrinks() {
     let mut offsets = vec![0; 3];
     let results = [
         ReadResult {
-            file: VfFile::from_path("/one"),
+            file: FileOperand::from_path("/one"),
             offset: 0,
             data: b"a".to_vec(),
             eof: true,
         },
         ReadResult {
-            file: VfFile::from_path("/two"),
+            file: FileOperand::from_path("/two"),
             offset: 4,
             data: b"bc".to_vec(),
             eof: false,
@@ -422,4 +422,45 @@ fn client_pool_validates_size_and_gives_explicit_owners_distinct_ids() {
     assert_ne!(first, second);
     assert_ne!(first, next_pool);
     assert!(first.len() <= 1024);
+}
+
+#[test]
+fn fs_id_and_fileid_decode_as_one_fs_obj_id() {
+    let major = 0x0102_0304_0506_0708u64;
+    let minor = 0x1112_1314_1516_1718u64;
+    let fileid = 0x2122_2324_2526_2728u64;
+    let mut wire = Vec::new();
+    wire.extend_from_slice(&major.to_be_bytes());
+    wire.extend_from_slice(&minor.to_be_bytes());
+    wire.extend_from_slice(&fileid.to_be_bytes());
+
+    let ids = [FATTR4_FSID, FATTR4_FILEID];
+    assert_eq!(
+        request_mask_to_attr_list(&AttrMask::identity()),
+        [FATTR4_TYPE, FATTR4_FSID, FATTR4_FILEID]
+    );
+    assert_eq!(
+        request_mask_to_attr_list(&(AttrMask::identity() | AttrMask::NAMED_ATTR)),
+        [FATTR4_TYPE, FATTR4_NAMED_ATTR, FATTR4_FSID, FATTR4_FILEID]
+    );
+    assert!(
+        crate::client::READDIR_ATTRS
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+    );
+    let values = parse_attr_list(&ids, &wire).unwrap();
+    let mut attrs = VfAttrs {
+        masks: AttrMask::identity(),
+        ..VfAttrs::default()
+    };
+    apply_attrs(&mut attrs, &values);
+    assert_eq!(attrs.returned, AttrMask::identity());
+    let attrs = vfsi_core::metadata_from_attrs(attrs);
+    let id = attrs.fs_obj_id().unwrap();
+    assert_eq!(id.fs_id(), (u128::from(major) << 64) | u128::from(minor));
+    assert_eq!(id.file_id(), fileid);
+
+    // Preserve the previous type and accessor for callers migrating gradually.
+    let legacy: Option<vfsi_core::FileIdentity> = attrs.file_identity();
+    assert_eq!(legacy, Some(id));
 }

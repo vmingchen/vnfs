@@ -1,7 +1,7 @@
 # Rust workflow helpers
 
 `vnfs::helpers` contains high-level workflows built only on the public `Vfsi`
-and `FileHandle` contracts. It is part of `vnfs`, not a separate dependency.
+and `OpenFd` contracts. It is part of `vnfs`, not a separate dependency.
 
 ## Application bridges
 

@@ -8,7 +8,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vfsi_core::{VfError, VfResult};
-use vfsi_sync::{FsClient, FsFile, StreamCompletion, Vfsi, VfsiExt};
+use vfsi_sync::{FsClient, OpenFile, StreamCompletion, Vfsi, VfsiExt};
 
 use super::{NfsClientBuilder, NfsVecFs};
 
@@ -707,7 +707,7 @@ fn worker_main(
         return;
     }
 
-    let mut active: Option<(u64, FsFile<NfsVecFs>)> = None;
+    let mut active: Option<(u64, OpenFile<NfsVecFs>)> = None;
     while let Ok(command) = commands.recv() {
         match command {
             WorkerCommand::Start { stream_id, path } => {
@@ -790,7 +790,7 @@ fn worker_main(
 
 fn read_range(
     client: &FsClient<NfsVecFs>,
-    file: &FsFile<NfsVecFs>,
+    file: &OpenFile<NfsVecFs>,
     offset: u64,
     length: usize,
 ) -> VfResult<Vec<u8>> {

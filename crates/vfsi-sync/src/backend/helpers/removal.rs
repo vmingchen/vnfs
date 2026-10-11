@@ -28,7 +28,7 @@ pub fn remove_paths_with_options_impl_default<F: VectorBackend + ?Sized>(
         return Ok(());
     }
     if !recursive {
-        let files: Vec<VfFile> = objs.iter().map(|p| VfFile::from_os_path(p)).collect();
+        let files: Vec<FileOperand> = objs.iter().map(|p| FileOperand::from_os_path(p)).collect();
         return backend.vremove_impl(&files);
     }
 
@@ -36,7 +36,7 @@ pub fn remove_paths_with_options_impl_default<F: VectorBackend + ?Sized>(
         backend.before_remove_type(root_index)?;
         // Classify the root (no-follow); a non-directory is just removed.
         let mut root_attrs = VfAttrs {
-            file: VfFile::from_os_path(root),
+            file: FileOperand::from_os_path(root),
             masks: AttrMask::default(),
             ..VfAttrs::default()
         };
@@ -45,7 +45,7 @@ pub fn remove_paths_with_options_impl_default<F: VectorBackend + ?Sized>(
             .map_err(|error| error.map_index(|_| root_index))?;
         if root_attrs.ftype != VfType::Directory {
             backend
-                .vremove_impl(&[VfFile::from_os_path(root)])
+                .vremove_impl(&[FileOperand::from_os_path(root)])
                 .map_err(|error| error.map_index(|_| root_index))?;
             continue;
         }
@@ -73,7 +73,7 @@ pub fn remove_paths_with_options_impl_default<F: VectorBackend + ?Sized>(
 
             let mut next: Vec<PathBuf> = Vec::new();
             for entries in per_dir {
-                let mut files: Vec<VfFile> = Vec::new();
+                let mut files: Vec<FileOperand> = Vec::new();
                 for attrs in entries {
                     if attrs.ftype == VfType::Directory {
                         if let Some(path) = attrs.file.path() {
@@ -94,9 +94,9 @@ pub fn remove_paths_with_options_impl_default<F: VectorBackend + ?Sized>(
         }
 
         for level in dir_levels.iter().rev() {
-            let dirs: Vec<VfFile> = level
+            let dirs: Vec<FileOperand> = level
                 .iter()
-                .map(|path| VfFile::from_os_path(path))
+                .map(|path| FileOperand::from_os_path(path))
                 .collect();
             backend
                 .vremove_impl(&dirs)
@@ -111,7 +111,7 @@ pub fn open_dir_impl_default<F: VectorBackend + ?Sized>(
     path: &Path,
 ) -> VfResult<VfDir> {
     let mut attrs = VfAttrs {
-        file: VfFile::from_os_path(path),
+        file: FileOperand::from_os_path(path),
         masks: AttrMask::default(),
         ..VfAttrs::default()
     };
@@ -165,7 +165,7 @@ pub fn remove_dir_contents_path_with_options_impl_default<F: VectorBackend + ?Si
     let entries = backend
         .listdir_impl(dir, AttrMask::default(), 0, false)
         .map_err(|error| error.with_index(0))?;
-    let mut files: Vec<VfFile> = Vec::new();
+    let mut files: Vec<FileOperand> = Vec::new();
     let mut dirs: Vec<PathBuf> = Vec::new();
     for attrs in entries {
         if attrs.ftype == VfType::Directory {
@@ -197,7 +197,7 @@ pub fn ensure_empty_dir_impl_default<F: VectorBackend + ?Sized>(
         Ok(()) => Ok(()),
         Err(error) if error.err_no() == ERR_EXIST => {
             let mut attrs = VfAttrs {
-                file: VfFile::from_os_path(dir),
+                file: FileOperand::from_os_path(dir),
                 masks: AttrMask::default(),
                 ..VfAttrs::default()
             };

@@ -21,6 +21,12 @@ fn application_surface_is_small_and_typed() {
     let _: Option<vnfs::nfs::NfsClient> = None;
     let _: Option<vnfs::nfs::NfsFile> = None;
     let _: Option<vnfs::Result<()>> = None;
+    // The protocol compatibility alias names the same opaque object reference.
+    #[allow(deprecated)]
+    fn nfs_fh(fh: vfsi_nfs::client::FileHandle) -> vfsi_nfs::client::NfsFh {
+        fh
+    }
+    let _: fn(vfsi_nfs::client::NfsFh) -> vfsi_nfs::client::NfsFh = nfs_fh;
 }
 
 #[cfg(all(feature = "auto", target_os = "linux"))]
@@ -71,6 +77,14 @@ fn concrete_and_extension_directory_visitors_borrow_entries_consistently() {
     );
     std::fs::remove_file(root.join("file")).unwrap();
     std::fs::remove_dir(root).unwrap();
+}
+
+#[test]
+fn fs_obj_id_is_available_from_the_application_metadata_module() {
+    fn get_id(attrs: &vnfs::directory::Attrs) -> Option<vnfs::directory::FsObjId> {
+        attrs.fs_obj_id()
+    }
+    let _ = get_id;
 }
 
 #[test]
@@ -138,9 +152,9 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
 #[test]
 fn backend_implementers_depend_on_lower_level_crates() {
     use vfsi_sync::backend::VectorBackend;
-    use vfsi_sync::{ReadOp, VfFile, VfOffset};
+    use vfsi_sync::{FileOperand, ReadOp, VfOffset};
 
-    let _ = ReadOp::new(VfFile::from_path("/file"), VfOffset::At(0), 1);
+    let _ = ReadOp::new(FileOperand::from_path("/file"), VfOffset::At(0), 1);
     fn accepts_backend<T: VectorBackend + ?Sized>(_: &mut T) {}
     let _ = accepts_backend::<dyn VectorBackend>;
 }
@@ -354,7 +368,7 @@ fn tempfile_root() -> std::path::PathBuf {
 #[cfg(all(feature = "auto", target_os = "linux"))]
 #[test]
 fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types() {
-    use vnfs::files::{FileHandle, Vfsi, VfsiExt};
+    use vnfs::files::{OpenFd, Vfsi, VfsiExt};
     fn workflow<C: Vfsi>(client: &C, prefix: &str) -> vnfs::Result<()> {
         client.create_dir_all(prefix)?;
         let paths = [format!("{prefix}/a"), format!("{prefix}/b")];
@@ -677,7 +691,7 @@ fn filesystem_stats_local_and_routed_handles() {
 #[test]
 fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity() {
     use std::io::{Read, Seek, SeekFrom, Write};
-    use vnfs::files::FileHandle;
+    use vnfs::files::OpenFd;
     fn check<C: Vfsi>(fs: &C) {
         fs.write("/original", b"abcdef").unwrap();
         fs.write("/exact", b"abc").unwrap();
@@ -891,4 +905,121 @@ fn invalid_open_batch_cannot_create_or_truncate_earlier_files() {
     let root = tempfile::tempdir().unwrap();
     check(&vnfs::posix::Posix::new(root.path()).unwrap(), root.path());
     check(&vnfs::mounted::Auto::new(root.path()).unwrap(), root.path());
+}
+
+#[cfg(all(feature = "posix", feature = "auto", target_os = "linux"))]
+#[test]
+fn object_identity_and_open_instances_are_distinct_concepts() {
+    use vnfs::directory::{Attributes, AttrsOptions};
+    use vnfs::files::{OpenFd, ReadOp, ReadOptions, Target};
+
+    fn check<C: Vfsi + VfsiExt>(fs: &C) {
+        fs.write("/object", b"payload").unwrap();
+        fs.hard_link("/object", "/alias").unwrap();
+        fs.write("/other", b"separate").unwrap();
+
+        let fields = Attributes::identity();
+        let query = || AttrsOptions::new().fields(fields);
+        let object = fs.attrs_with_options("/object", query()).unwrap();
+        let alias = fs.attrs_with_options("/alias", query()).unwrap();
+        let other = fs.attrs_with_options("/other", query()).unwrap();
+        let object_id = object.fs_obj_id().expect("local backend reports identity");
+        assert_eq!(object_id, alias.fs_obj_id().unwrap());
+        assert_ne!(object_id, other.fs_obj_id().unwrap());
+        assert_eq!(object_id.file_id(), object.file_id().unwrap());
+        assert_eq!(Some(object_id.fs_id()), object.fs_id());
+
+        let first = fs.open("/object").unwrap();
+        let second = fs.open("/alias").unwrap();
+        let opened_obj_id = fs
+            .attrs_with_options(Target::file(&first), query())
+            .unwrap()
+            .fs_obj_id()
+            .unwrap();
+        assert_eq!(object_id, opened_obj_id);
+        assert_eq!(
+            opened_obj_id,
+            fs.attrs_with_options(Target::file(&second), query())
+                .unwrap()
+                .fs_obj_id()
+                .unwrap()
+        );
+
+        fs.rename("/object", "/renamed").unwrap();
+        assert_eq!(
+            object_id,
+            fs.attrs_with_options(Target::file(&first), query())
+                .unwrap()
+                .fs_obj_id()
+                .unwrap()
+        );
+        assert_eq!(Some(object_id), fs.attrs("/renamed").unwrap().fs_obj_id());
+
+        // Each open is an independent instance: closing one leaves the other
+        // usable, even though both refer to the same filesystem object.
+        first.close().unwrap();
+        let bytes = fs
+            .vread([ReadOp::range(&second, 0, 7)], ReadOptions::default())
+            .unwrap();
+        assert_eq!(bytes[0].data().unwrap(), b"payload");
+    }
+
+    let posix_root = tempfile::tempdir().unwrap();
+    check(&vnfs::posix::Posix::new(posix_root.path()).unwrap());
+    let auto_root = tempfile::tempdir().unwrap();
+    check(&vnfs::mounted::Auto::new(auto_root.path()).unwrap());
+}
+
+#[cfg(all(feature = "posix", unix))]
+#[test]
+#[allow(deprecated)] // This test intentionally exercises the compatibility surface.
+fn renamed_open_descriptors_and_operands_preserve_compatible_imports() {
+    use vfsi_core::{AttrMask, FileOperand, Target};
+    use vnfs::directory::AttrsOptions;
+    use vnfs::files::OpenFd;
+
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("file"), b"retained").unwrap();
+    let fs = vfsi_posix::connect(root.path()).unwrap();
+    let opened: vfsi_sync::OpenFile<_> = fs.open("/file").unwrap();
+    let legacy: vfsi_sync::FsFile<_> = opened;
+    let mut file: vfsi_sync::OpenFile<_> = legacy;
+
+    // Every old trait import is the same contract, including trait objects.
+    let legacy: &dyn vnfs::files::FileHandle = &file;
+    let legacy: &dyn vfsi_core::FileHandle = legacy;
+    let legacy: &dyn vfsi_core::api::FileHandle = legacy;
+    let legacy: &dyn vfsi_core::api::prelude::FileHandle = legacy;
+    let canonical: &dyn OpenFd = legacy;
+    assert_eq!(canonical.path(), std::path::Path::new("/file"));
+
+    let attrs = fs
+        .attrs_with_options(
+            Target::file(&file),
+            AttrsOptions::new().fields(AttrMask::FILESYSTEM_ID | AttrMask::FILEID),
+        )
+        .unwrap();
+    let object_id = attrs.fs_obj_id().unwrap();
+    assert_eq!(attrs.fs_id(), attrs.filesystem_id());
+    assert_eq!(object_id.fs_id(), object_id.filesystem_id());
+    // The old mask constant must not add a duplicate named flag.
+    assert_eq!(
+        AttrMask::FS_ID
+            .iter_names()
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>(),
+        ["FS_ID"]
+    );
+
+    let operand: vfsi_core::VfFile = FileOperand::Fd(7);
+    assert!(matches!(operand, FileOperand::Fd(7)));
+    assert!(operand.is_fd() && operand.is_descriptor());
+    assert_eq!(operand.fd(), Some(7));
+
+    // Passing through the compatibility type does not acquire another open or
+    // cleanup owner. Closing through the old trait closes the canonical value.
+    vfsi_core::FileHandle::try_close(&mut file).unwrap();
+    assert!(OpenFd::is_closed(&file));
+    let error = fs.attrs(Target::file(&file)).unwrap_err();
+    assert_eq!(error.err_no(), libc::EBADF as u32);
 }

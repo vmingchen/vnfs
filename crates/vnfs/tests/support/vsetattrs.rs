@@ -110,7 +110,7 @@ fn check_mixed_policies(fs: &impl Vfsi, directory: &str) {
 
 /// Open objects remain targets even when their original names are reused.
 pub fn check_handles(fs: &impl Vfsi, directory: &str) {
-    use vnfs::files::{FileHandle, OpenFlags, OpenOp, Target};
+    use vnfs::files::{OpenFd, OpenFlags, OpenOp, Target};
     let paths: Vec<_> = (0..64).map(|i| format!("{directory}/handle-{i}")).collect();
     fs.write_files(
         &paths
@@ -203,7 +203,7 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
 }
 
 pub fn check_foreign<F: Vfsi>(fs: &F, other: &F, path: &str) {
-    use vnfs::files::{FileHandle, OpenFlags, OpenOp, Target};
+    use vnfs::files::{OpenFd, OpenFlags, OpenOp, Target};
     fs.write_files(&[(path, b"original".as_slice())]).unwrap();
     let mut own = fs
         .vopen(&[OpenOp::new(path, OpenFlags::READ | OpenFlags::WRITE)])

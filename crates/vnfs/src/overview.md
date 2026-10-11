@@ -56,7 +56,7 @@ are in the [package README](https://github.com/vmingchen/vnfs/tree/main/crates/v
 | Large trees without collecting everything | [`Vfsi::vlistdirs`] with [`ListDirOptions::recursive`] | [Directories](directory/index.html#runnable-example) |
 | Declarative fresh directory tree | `helpers::TreeBuilder` | [Builder example](helpers::TreeBuilder) |
 | Existing Linux NFS mount | `nfs::mount::NfsMountSession::from_mount` for a connection plus local-path mapping; `nfs::Nfs::from_mount` for a connection only | [Mount discovery](nfs::Nfs::from_mount) |
-| Backend-independent application code | `Vfsi`, `VfsiExt`, `FileHandle` | [Generic workflows](files/index.html) |
+| Backend-independent application code | `Vfsi`, `VfsiExt`, `OpenFd` | [Generic workflows](files/index.html) |
 
 `Vfsi` and `VfsiExt` are defined in `vfsi-core` and re-exported here;
 applications using `vnfs` need no additional dependency or import path.

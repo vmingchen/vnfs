@@ -873,7 +873,7 @@ fn open_by_path_and_close() {
     let tf = c
         .open_raw_impl(Path::new(&f), libc::O_CREAT | libc::O_RDWR, 0o644)
         .expect("open/create");
-    assert!(tf.is_descriptor());
+    assert!(tf.is_fd());
     c.close_impl(&tf).expect("close");
 }
 
@@ -951,7 +951,7 @@ fn openv_append_writes_at_end() {
             "append via openv"
         );
         assert_eq!(
-            c.read_raw_impl(&VfFile::from_path(p), 0, 4).unwrap(),
+            c.read_raw_impl(&FileOperand::from_path(p), 0, 4).unwrap(),
             b"abcd"
         );
     }
@@ -1052,7 +1052,7 @@ fn getattrsv() {
         .with_creation()]))
             .unwrap();
         attrs.push(VfAttrs {
-            file: VfFile::from_path(&f),
+            file: FileOperand::from_path(&f),
             masks: AttrMask::MODE | AttrMask::SIZE | AttrMask::NLINK | AttrMask::FILEID,
             ..VfAttrs::default()
         });
@@ -1074,7 +1074,7 @@ fn setattrsv_mode() {
     let f = format!("{}/perm.txt", dir);
     let mut c = make_file(&f, b"data");
     c.vsetattrs_raw_impl(&[VfAttrs {
-        file: VfFile::from_path(&f),
+        file: FileOperand::from_path(&f),
         masks: AttrMask::MODE,
         mode: 0o600,
         ..VfAttrs::default()
@@ -1090,7 +1090,7 @@ fn lsetattrsv() {
     let f = format!("{}/l.txt", dir);
     let mut c = make_file(&f, b"data");
     c.vsetattrs_raw_nofollow_impl(&[VfAttrs {
-        file: VfFile::from_path(&f),
+        file: FileOperand::from_path(&f),
         masks: AttrMask::MODE,
         mode: 0o640,
         ..VfAttrs::default()
@@ -1195,7 +1195,7 @@ fn renamev() {
     let f = format!("{}/old.txt", dir);
     let g = format!("{}/new.txt", dir);
     let mut c = make_file(&f, b"rename me");
-    let pairs = [(VfFile::from_path(&f), VfFile::from_path(&g))];
+    let pairs = [(FileOperand::from_path(&f), FileOperand::from_path(&g))];
     c.vrename_impl(&pairs).expect("renamev");
     assert!(!c.exists_impl(Path::new(&f)).unwrap(), "old name gone");
     assert!(c.exists_impl(Path::new(&g)).unwrap(), "new name present");
@@ -1253,7 +1253,8 @@ fn removev() {
     )
     .with_creation()]))
         .unwrap();
-    c.vremove_impl(&[VfFile::from_path(&f)]).expect("removev");
+    c.vremove_impl(&[FileOperand::from_path(&f)])
+        .expect("removev");
     assert!(!c.exists_impl(Path::new(&f)).unwrap());
 }
 
@@ -1267,7 +1268,7 @@ fn mkdirv() {
     let d = format!("{}/nd", dir);
     let mut c = client();
     c.vmkdir_impl(&[VfAttrs {
-        file: VfFile::from_path(&d),
+        file: FileOperand::from_path(&d),
         masks: AttrMask::MODE,
         mode: 0o750,
         ..VfAttrs::default()
@@ -1367,7 +1368,7 @@ fn path_readv_is_batched() {
     let _ = vfsi_nfs::compound::thread_compound_stats(); // reset counters
     let ops: Vec<ReadOp> = paths
         .iter()
-        .map(|p| ReadOp::at(VfFile::from_path(p), 0, 1))
+        .map(|p| ReadOp::at(FileOperand::from_path(p), 0, 1))
         .collect();
     let res = c.vread_impl(&ops).unwrap();
     assert_eq!(res.len(), 5);
@@ -1389,7 +1390,7 @@ fn writev_path_is_one_compound_per_dir() {
     let _ = vfsi_nfs::compound::thread_compound_stats(); // reset counters
     let ops: Vec<WriteOp> = paths
         .iter()
-        .map(|p| WriteOp::at(VfFile::from_path(p), 0, b"x".to_vec()).with_creation())
+        .map(|p| WriteOp::at(FileOperand::from_path(p), 0, b"x".to_vec()).with_creation())
         .collect();
     let res = c.vwrite_impl(&borrow_writes(&ops)).unwrap();
     assert_eq!(res.len(), 5);
@@ -1420,7 +1421,7 @@ fn readv_path_is_one_compound_per_dir() {
     let ops: Vec<ReadOp> = paths
         .iter()
         .zip(&payloads)
-        .map(|(p, d)| ReadOp::at(VfFile::from_path(p), 0, d.len()))
+        .map(|(p, d)| ReadOp::at(FileOperand::from_path(p), 0, d.len()))
         .collect();
     let res = c.vread_impl(&ops).unwrap();
     assert_eq!(res.len(), 5);
@@ -1447,7 +1448,7 @@ fn writev_path_openwrite_form_is_two_compounds() {
     let ops: Vec<WriteOp> = paths
         .iter()
         .zip(&payloads)
-        .map(|(p, d)| WriteOp::at(VfFile::from_path(p), 0, d.clone()).with_creation())
+        .map(|(p, d)| WriteOp::at(FileOperand::from_path(p), 0, d.clone()).with_creation())
         .collect();
     let res = c.vwrite_impl(&borrow_writes(&ops)).unwrap();
     assert_eq!(res.len(), 5);
@@ -1463,7 +1464,7 @@ fn writev_path_openwrite_form_is_two_compounds() {
             &paths
                 .iter()
                 .zip(&payloads)
-                .map(|(p, d)| ReadOp::at(VfFile::from_path(p), 0, d.len()))
+                .map(|(p, d)| ReadOp::at(FileOperand::from_path(p), 0, d.len()))
                 .collect::<Vec<_>>(),
         )
         .unwrap();
@@ -1493,7 +1494,9 @@ fn phased_create_batch_continues_after_missing_middle_lookup() {
     let writes: Vec<WriteOp> = paths
         .iter()
         .zip(&payloads)
-        .map(|(path, data)| WriteOp::at(VfFile::from_path(path), 0, data.clone()).with_creation())
+        .map(|(path, data)| {
+            WriteOp::at(FileOperand::from_path(path), 0, data.clone()).with_creation()
+        })
         .collect();
     let results = c
         .vwrite_impl(&borrow_writes(&writes))
@@ -1503,7 +1506,7 @@ fn phased_create_batch_continues_after_missing_middle_lookup() {
     let reads: Vec<ReadOp> = paths
         .iter()
         .zip(&payloads)
-        .map(|(path, data)| ReadOp::at(VfFile::from_path(path), 0, data.len()))
+        .map(|(path, data)| ReadOp::at(FileOperand::from_path(path), 0, data.len()))
         .collect();
     let roundtrip = c.vread_impl(&reads).expect("read mixed existence batch");
     for (result, expected) in roundtrip.iter().zip(&payloads) {
@@ -1525,7 +1528,7 @@ fn readv_path_openwrite_form_is_two_compounds() {
     let ops: Vec<ReadOp> = paths
         .iter()
         .zip(&payloads)
-        .map(|(p, d)| ReadOp::at(VfFile::from_path(p), 0, d.len()))
+        .map(|(p, d)| ReadOp::at(FileOperand::from_path(p), 0, d.len()))
         .collect();
     let res = c.vread_impl(&ops).unwrap();
     assert_eq!(res.len(), 5);
@@ -1552,7 +1555,7 @@ fn getattrsv_path_is_one_compound() {
     let mut attrs: Vec<VfAttrs> = paths
         .iter()
         .map(|p| VfAttrs {
-            file: VfFile::from_path(p),
+            file: FileOperand::from_path(p),
             masks: AttrMask::stat(),
             ..VfAttrs::default()
         })
@@ -1582,7 +1585,7 @@ fn setattrsv_path_is_one_compound() {
     let attrs: Vec<VfAttrs> = paths
         .iter()
         .map(|p| VfAttrs {
-            file: VfFile::from_path(p),
+            file: FileOperand::from_path(p),
             masks: AttrMask::SIZE,
             size: 3,
             ..VfAttrs::default()
@@ -1638,7 +1641,7 @@ fn removev_path_is_one_compound() {
     for p in &paths {
         write_file(&mut c, Path::new(p), b"x");
     }
-    let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_path(p)).collect();
+    let files: Vec<FileOperand> = paths.iter().map(|p| FileOperand::from_path(p)).collect();
     let _ = vfsi_nfs::compound::thread_compound_stats(); // reset counters
     c.vremove_impl(&files).unwrap();
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
@@ -1661,10 +1664,10 @@ fn renamev_path_is_one_compound() {
     for p in &srcs {
         write_file(&mut c, Path::new(p), b"x");
     }
-    let pairs: Vec<(VfFile, VfFile)> = srcs
+    let pairs: Vec<(FileOperand, FileOperand)> = srcs
         .iter()
         .zip(&dsts)
-        .map(|(s, d)| (VfFile::from_path(s), VfFile::from_path(d)))
+        .map(|(s, d)| (FileOperand::from_path(s), FileOperand::from_path(d)))
         .collect();
     let _ = vfsi_nfs::compound::thread_compound_stats(); // reset counters
     c.vrename_impl(&pairs).unwrap();
@@ -1696,18 +1699,19 @@ fn path_writev_follows_final_symlink() {
     c.symlink_raw_impl(Path::new(&rel), Path::new(&link))
         .unwrap();
     c.vwrite_impl(&borrow_writes(&[WriteOp::at(
-        VfFile::from_path(&link),
+        FileOperand::from_path(&link),
         0,
         b"via-link".to_vec(),
     )]))
     .unwrap();
     assert_eq!(
-        c.read_raw_impl(&VfFile::from_path(&target), 0, 8).unwrap(),
+        c.read_raw_impl(&FileOperand::from_path(&target), 0, 8)
+            .unwrap(),
         b"via-link"
     );
     // And a readv through the link reads the target.
     let r = c
-        .vread_impl(&[ReadOp::at(VfFile::from_path(&link), 0, 8)])
+        .vread_impl(&[ReadOp::at(FileOperand::from_path(&link), 0, 8)])
         .unwrap();
     assert_eq!(r[0].data, b"via-link");
 }
@@ -1768,9 +1772,9 @@ fn writev_path_compresses_shared_prefix() {
     let _ = vfsi_nfs::compound::thread_compound_stats(); // reset counters
     let res = c
         .vwrite_impl(&borrow_writes(&[
-            WriteOp::at(VfFile::from_path(&f0), 0, b"0".to_vec()).with_creation(),
-            WriteOp::at(VfFile::from_path(&f1), 0, b"1".to_vec()).with_creation(),
-            WriteOp::at(VfFile::from_path(&f2), 0, b"2".to_vec()).with_creation(),
+            WriteOp::at(FileOperand::from_path(&f0), 0, b"0".to_vec()).with_creation(),
+            WriteOp::at(FileOperand::from_path(&f1), 0, b"1".to_vec()).with_creation(),
+            WriteOp::at(FileOperand::from_path(&f2), 0, b"2".to_vec()).with_creation(),
         ]))
         .unwrap();
     assert_eq!(res.len(), 3);
@@ -1784,7 +1788,7 @@ fn writev_path_compresses_shared_prefix() {
         ops
     );
     assert_eq!(
-        c.read_raw_impl(&VfFile::from_path(&f2), 0, 1).unwrap(),
+        c.read_raw_impl(&FileOperand::from_path(&f2), 0, 1).unwrap(),
         b"2"
     );
 }
@@ -1803,7 +1807,7 @@ fn readv_writev_mixes_descriptors_and_paths() {
     let w = c
         .vwrite_impl(&borrow_writes(&[
             WriteOp::new(fd.clone(), VfOffset::At(0), b"fd-data".to_vec()),
-            WriteOp::at(VfFile::from_path(&fpath), 0, b"path-data".to_vec()).with_creation(),
+            WriteOp::at(FileOperand::from_path(&fpath), 0, b"path-data".to_vec()).with_creation(),
         ]))
         .unwrap();
     assert_eq!(w.len(), 2);
@@ -1814,12 +1818,12 @@ fn readv_writev_mixes_descriptors_and_paths() {
     let r = c
         .vread_impl(&[
             ReadOp::new(fd.clone(), VfOffset::At(0), 7),
-            ReadOp::at(VfFile::from_path(&fpath), 0, 9),
+            ReadOp::at(FileOperand::from_path(&fpath), 0, 9),
         ])
         .unwrap();
     assert_eq!(r[0].data, b"fd-data");
     assert_eq!(r[1].data, b"path-data");
-    assert!(r[0].file.is_descriptor(), "result echoes the descriptor op");
+    assert!(r[0].file.is_fd(), "result echoes the descriptor op");
     assert!(r[1].file.path().is_some(), "result echoes the path op");
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     assert_eq!(compounds, 1, "mixed readv must be one compound");
@@ -1837,7 +1841,7 @@ fn writev_respects_compound_size_limit() {
     let _ = vfsi_nfs::compound::thread_compound_stats(); // reset counters
     let ops: Vec<WriteOp> = paths
         .iter()
-        .map(|p| WriteOp::at(VfFile::from_path(p), 0, payload.clone()).with_creation())
+        .map(|p| WriteOp::at(FileOperand::from_path(p), 0, payload.clone()).with_creation())
         .collect();
     let res = c.vwrite_impl(&borrow_writes(&ops)).unwrap();
     assert_eq!(res.len(), 4);
@@ -1864,9 +1868,9 @@ fn writev_partial_failure_reports_failing_index() {
     let f2 = format!("{}/f2", dir);
     let e = c
         .vwrite_impl(&borrow_writes(&[
-            WriteOp::at(VfFile::from_path(&f0), 0, b"x".to_vec()).with_creation(),
-            WriteOp::at(VfFile::from_path(&missing), 0, b"y".to_vec()).with_creation(),
-            WriteOp::at(VfFile::from_path(&f2), 0, b"z".to_vec()).with_creation(),
+            WriteOp::at(FileOperand::from_path(&f0), 0, b"x".to_vec()).with_creation(),
+            WriteOp::at(FileOperand::from_path(&missing), 0, b"y".to_vec()).with_creation(),
+            WriteOp::at(FileOperand::from_path(&f2), 0, b"z".to_vec()).with_creation(),
         ]))
         .unwrap_err();
     assert_eq!(
@@ -2351,7 +2355,7 @@ fn directory_visit_does_not_replay_after_delivering_an_entry() {
     // continuation, rather than an unnecessary EOF probe.
     let writes: Vec<_> = names
         .iter()
-        .map(|name| WriteOp::at(VfFile::from_path(name), 0, b"x".to_vec()).with_creation())
+        .map(|name| WriteOp::at(FileOperand::from_path(name), 0, b"x".to_vec()).with_creation())
         .collect();
     admin.vwrite_impl(&borrow_writes(&writes)).unwrap();
 
@@ -2424,7 +2428,9 @@ fn pipelined_read_recovers_after_a_lost_read_reply() {
     .expect("read should recover after the lost read response");
     proxy.wait_for_drop();
     assert_eq!(actual, expected);
-    admin.vremove_impl(&[VfFile::from_path(&path)]).unwrap();
+    admin
+        .vremove_impl(&[FileOperand::from_path(&path)])
+        .unwrap();
 }
 
 #[test]
@@ -2440,9 +2446,9 @@ fn removev_partial_failure_resumes_from_failing_index() {
     for p in [&f0, &f2] {
         write_file(&mut c, Path::new(p), b"x");
     }
-    let files: Vec<VfFile> = [f0.as_str(), bad.as_str(), f2.as_str()]
+    let files: Vec<FileOperand> = [f0.as_str(), bad.as_str(), f2.as_str()]
         .iter()
-        .map(|p| VfFile::from_path(p))
+        .map(|p| FileOperand::from_path(p))
         .collect();
     let e = c.vremove_impl(&files).unwrap_err();
     assert_eq!(e.index(), Some(1), "resume must fail at the missing path");
@@ -2554,7 +2560,7 @@ fn large_writev_readv_roundtrip() {
     let _ = vfsi_nfs::compound::thread_compound_stats(); // reset counters
     let w = c
         .vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path(&p),
+            FileOperand::from_path(&p),
             0,
             data.clone(),
         )
@@ -2568,7 +2574,7 @@ fn large_writev_readv_roundtrip() {
     );
     let _ = vfsi_nfs::compound::thread_compound_stats(); // reset counters
     let r = c
-        .vread_impl(&[ReadOp::at(VfFile::from_path(&p), 0, data.len())])
+        .vread_impl(&[ReadOp::at(FileOperand::from_path(&p), 0, data.len())])
         .unwrap();
     assert_eq!(r[0].data, data);
     assert_eq!(
@@ -2591,7 +2597,7 @@ fn read_allv_is_no_stat_whole_file_read() {
         let p = format!("{}/f{}.bin", dir, i);
         let data = vec![b'a' + i as u8; 2 * 1024 * 1024 + 123];
         c.vwrite_impl(&borrow_writes(&[WriteOp::at(
-            VfFile::from_path(&p),
+            FileOperand::from_path(&p),
             0,
             data.clone(),
         )
@@ -2599,7 +2605,10 @@ fn read_allv_is_no_stat_whole_file_read() {
             .unwrap();
         files.push((p, data));
     }
-    let refs: Vec<VfFile> = files.iter().map(|(p, _)| VfFile::from_path(p)).collect();
+    let refs: Vec<FileOperand> = files
+        .iter()
+        .map(|(p, _)| FileOperand::from_path(p))
+        .collect();
     let _ = vfsi_nfs::compound::thread_compound_stats(); // reset counters
     let out = c.vread_all_impl(&refs).unwrap();
     for (i, (_, data)) in files.iter().enumerate() {
@@ -2626,7 +2635,7 @@ fn read_allv_many_files_respects_aggregate_reply_budget() {
         write_file(&mut c, Path::new(&p), &data);
         paths.push(p);
     }
-    let files: Vec<VfFile> = paths.iter().map(|p| VfFile::from_path(p)).collect();
+    let files: Vec<FileOperand> = paths.iter().map(|p| FileOperand::from_path(p)).collect();
     c.set_max_compound_bytes(256 * 1024);
     let out = c.vread_all_impl(&files).expect("read_allv many files");
     assert_eq!(out.len(), files.len());
@@ -2641,7 +2650,7 @@ fn mkdirv_batches_parent_resolution() {
     let attrs: Vec<VfAttrs> = paths
         .iter()
         .map(|p| VfAttrs {
-            file: VfFile::from_path(p),
+            file: FileOperand::from_path(p),
             masks: AttrMask::MODE,
             mode: 0o751,
             ..VfAttrs::default()
@@ -2673,7 +2682,7 @@ fn mkdirv_partial_failure_applies_prefix_modes() {
     let attrs: Vec<VfAttrs> = [d0.as_str(), d1.as_str(), d2.as_str()]
         .iter()
         .map(|p| VfAttrs {
-            file: VfFile::from_path(p),
+            file: FileOperand::from_path(p),
             masks: AttrMask::MODE,
             mode: 0o711,
             ..VfAttrs::default()
@@ -3796,7 +3805,7 @@ fn batch_exceeds_compound_op_limit() {
     let mut attrs: Vec<VfAttrs> = paths
         .iter()
         .map(|p| VfAttrs {
-            file: VfFile::from_path(p),
+            file: FileOperand::from_path(p),
             masks: AttrMask::MODE | AttrMask::SIZE,
             ..VfAttrs::default()
         })

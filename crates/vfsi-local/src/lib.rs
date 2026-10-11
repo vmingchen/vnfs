@@ -250,7 +250,7 @@ impl LocalBackend {
 
     fn getattrsv_impl(&mut self, attrs: &mut [VfAttrs], follow: bool) -> VfRes {
         for (i, a) in attrs.iter_mut().enumerate() {
-            if let VfFile::Descriptor(fd) = &a.file {
+            if let FileOperand::Fd(fd) = &a.file {
                 let open = self
                     .open_files
                     .get(fd)
@@ -581,26 +581,26 @@ impl LocalBackend {
         o
     }
 
-    /// The real path a `VfFile` refers to.
-    fn tcfile_path(&self, f: &VfFile) -> VfResult<PathBuf> {
+    /// The real path a `FileOperand` refers to.
+    fn tcfile_path(&self, f: &FileOperand) -> VfResult<PathBuf> {
         match f {
-            VfFile::Descriptor(fd) => {
+            FileOperand::Fd(fd) => {
                 let open = self
                     .open_files
                     .get(fd)
                     .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
                 Ok(self.resolve(&open.path))
             }
-            VfFile::Path { .. } | VfFile::Cwd | VfFile::CwdPath(_) => {
+            FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_) => {
                 let path = self.vf_path(f)?;
                 Ok(self.root.join(path))
             }
-            VfFile::Saved => Err(VfError::unsupported(0)),
+            FileOperand::Saved => Err(VfError::unsupported(0)),
             _ => Err(VfError::unsupported(0)),
         }
     }
 
-    fn resolve_offset(&self, file: &VfFile, off: VfOffset, len: u64) -> VfResult<u64> {
+    fn resolve_offset(&self, file: &FileOperand, off: VfOffset, len: u64) -> VfResult<u64> {
         match off {
             VfOffset::At(offset) => Ok(offset),
             VfOffset::Cur => match file.fd() {
@@ -612,7 +612,7 @@ impl LocalBackend {
         }
     }
 
-    fn advance_offset(&mut self, file: &VfFile, new: u64) {
+    fn advance_offset(&mut self, file: &FileOperand, new: u64) {
         if let Some(fd) = file.fd()
             && let Some(o) = self.open_files.get_mut(&fd)
         {
@@ -668,6 +668,10 @@ impl LocalBackend {
         if a.masks.contains(AttrMask::FILEID) {
             a.fileid = md.ino();
             a.returned.insert(AttrMask::FILEID);
+        }
+        if a.masks.contains(AttrMask::FS_ID) {
+            a.fs_id = u128::from(md.dev());
+            a.returned.insert(AttrMask::FS_ID);
         }
         if a.masks.contains(AttrMask::UID) {
             a.uid = md.uid();
@@ -762,7 +766,7 @@ impl LocalBackend {
     }
 
     fn setattr_one(&mut self, a: &VfAttrs, i: usize) -> VfResult<()> {
-        if let VfFile::Descriptor(fd) = &a.file {
+        if let FileOperand::Fd(fd) = &a.file {
             let open = self
                 .open_files
                 .get(fd)
@@ -856,8 +860,7 @@ impl LocalBackend {
     fn independent_reads(reads: &[ReadOp]) -> bool {
         let mut cursors = std::collections::HashSet::new();
         reads.iter().all(|op| {
-            op.file.is_descriptor()
-                && (!matches!(op.offset, VfOffset::Cur) || cursors.insert(op.file.fd()))
+            op.file.is_fd() && (!matches!(op.offset, VfOffset::Cur) || cursors.insert(op.file.fd()))
         })
     }
 
@@ -888,7 +891,7 @@ impl LocalBackend {
             return Err(VfError::client(0, ERR_INVAL));
         }
         let (file, off, descriptor) = match &op.file {
-            VfFile::Descriptor(fd) => {
+            FileOperand::Fd(fd) => {
                 let o = self
                     .open_files
                     .get(fd)
@@ -905,7 +908,7 @@ impl LocalBackend {
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 (f, off, true)
             }
-            VfFile::Path { .. } | VfFile::Cwd | VfFile::CwdPath(_) => {
+            FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_) => {
                 let p = self.real_path(&self.tcfile_path(&op.file)?)?;
                 let mut options = OpenOptions::new();
                 options.read(true);
@@ -920,7 +923,7 @@ impl LocalBackend {
                 let off = self.resolve_offset(&op.file, op.offset, len)?;
                 (f, off, false)
             }
-            VfFile::Saved => {
+            FileOperand::Saved => {
                 return Err(VfError::unsupported(0));
             }
             _ => return Err(VfError::unsupported(0)),
@@ -942,9 +945,9 @@ impl LocalBackend {
         })
     }
 
-    fn writev_one(&mut self, op: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
+    fn writev_one(&mut self, op: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
         let (file, off, descriptor) = match op.file() {
-            VfFile::Descriptor(fd) => {
+            FileOperand::Fd(fd) => {
                 let o = self
                     .open_files
                     .get(fd)
@@ -967,7 +970,7 @@ impl LocalBackend {
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 (f, off, true)
             }
-            VfFile::Path { .. } | VfFile::Cwd | VfFile::CwdPath(_) => {
+            FileOperand::Path { .. } | FileOperand::Cwd | FileOperand::CwdPath(_) => {
                 let p = self.real_path(&self.tcfile_path(op.file())?)?;
                 let mut opts = OpenOptions::new();
                 opts.write(true);
@@ -988,7 +991,7 @@ impl LocalBackend {
                 let off = self.resolve_offset(op.file(), op.offset(), len)?;
                 (f, off, false)
             }
-            VfFile::Saved => {
+            FileOperand::Saved => {
                 return Err(VfError::unsupported(0));
             }
             _ => return Err(VfError::unsupported(0)),
@@ -1039,7 +1042,7 @@ impl LocalBackend {
                 let name = entry.file_name().as_bytes().to_vec();
                 let path = current.join(path_from_bytes(&name));
                 let mut attrs = VfAttrs {
-                    file: VfFile::from_os_path(&path),
+                    file: FileOperand::from_os_path(&path),
                     masks,
                     ..VfAttrs::default()
                 };
@@ -1111,7 +1114,7 @@ impl LocalBackend {
 }
 
 impl HandleBackend for LocalBackend {
-    fn vfsync_impl(&mut self, files: &[VfFile], mode: vfsi_core::api::SyncMode) -> VfRes {
+    fn vfsync_impl(&mut self, files: &[FileOperand], mode: vfsi_core::api::SyncMode) -> VfRes {
         {
             let files: Vec<_> = files
                 .iter()
@@ -1140,12 +1143,12 @@ impl HandleBackend for LocalBackend {
     }
 
     #[cfg(target_os = "linux")]
-    fn vstatfs_impl(&mut self, files: &[VfFile]) -> VfResult<Vec<FilesystemStats>> {
+    fn vstatfs_impl(&mut self, files: &[FileOperand]) -> VfResult<Vec<FilesystemStats>> {
         use std::os::fd::AsRawFd;
         let mut results = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
             let anchored;
-            let fd = if let VfFile::Descriptor(fd) = file {
+            let fd = if let FileOperand::Fd(fd) = file {
                 self.open_files
                     .get(fd)
                     .ok_or_else(|| VfError::failure(index, ERR_EBADF))?
@@ -1188,7 +1191,7 @@ impl HandleBackend for LocalBackend {
         pathname: &Path,
         flags: i32,
         mode: u32,
-    ) -> VfResult<VfFile> {
+    ) -> VfResult<FileOperand> {
         use libc::O_CREAT;
         // `VfPathBase::Abs` treats the path as root-relative (like NFS);
         // `Cwd` resolves against the current directory.
@@ -1244,11 +1247,11 @@ impl HandleBackend for LocalBackend {
             cur_offset: 0,
             append: flags & libc::O_APPEND != 0,
         })?;
-        Ok(VfFile::from_fd(fd))
+        Ok(FileOperand::from_fd(fd))
     }
 
-    fn close_impl(&mut self, tcf: &VfFile) -> VfResult<()> {
-        if !tcf.is_descriptor() {
+    fn close_impl(&mut self, tcf: &FileOperand) -> VfResult<()> {
+        if !tcf.is_fd() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
         self.open_files
@@ -1257,7 +1260,7 @@ impl HandleBackend for LocalBackend {
             .ok_or_else(|| VfError::failure(0, ERR_EBADF))
     }
 
-    fn sync_data(&mut self, tcf: &VfFile) -> VfResult<()> {
+    fn sync_data(&mut self, tcf: &FileOperand) -> VfResult<()> {
         let fd = tcf.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
         self.open_files
             .get(&fd)
@@ -1267,7 +1270,7 @@ impl HandleBackend for LocalBackend {
             .map_err(|error| VfError::failure(0, Self::errno(&error)))
     }
 
-    fn sync_all(&mut self, tcf: &VfFile) -> VfResult<()> {
+    fn sync_all(&mut self, tcf: &FileOperand) -> VfResult<()> {
         let fd = tcf.fd().ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
         self.open_files
             .get(&fd)
@@ -1290,8 +1293,8 @@ impl HandleBackend for LocalBackend {
         Path::new("/").join(&self.cwd)
     }
 
-    fn seek_raw_impl(&mut self, tcf: &VfFile, offset: i64, whence: SeekFrom) -> VfResult<i64> {
-        if !tcf.is_descriptor() {
+    fn seek_raw_impl(&mut self, tcf: &FileOperand, offset: i64, whence: SeekFrom) -> VfResult<i64> {
+        if !tcf.is_fd() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
         let cur = self
@@ -1327,10 +1330,10 @@ impl HandleBackend for LocalBackend {
         self.advance_offset(tcf, new);
         Ok(reported)
     }
-    fn read_file_impl(&mut self, file: &VfFile, max_bytes: usize) -> VfResult<Vec<u8>> {
+    fn read_file_impl(&mut self, file: &FileOperand, max_bytes: usize) -> VfResult<Vec<u8>> {
         vfsi_sync::backend::helpers::native_read_file_impl_default(self, file, max_bytes)
     }
-    fn open_impl(&mut self, request: &OpenOp) -> VfResult<VfFile> {
+    fn open_impl(&mut self, request: &OpenOp) -> VfResult<FileOperand> {
         vfsi_sync::backend::helpers::native_open_impl_default(self, request)
     }
     fn read_impl(&mut self, request: &ReadOp) -> VfResult<ReadResult> {
@@ -1339,29 +1342,32 @@ impl HandleBackend for LocalBackend {
     fn read_into_impl(&mut self, request: &ReadOp, buffer: &mut [u8]) -> VfResult<ReadIntoResult> {
         vfsi_sync::backend::helpers::native_read_into_impl_default(self, request, buffer)
     }
-    fn write_impl(&mut self, request: WriteOp<&VfFile, &[u8]>) -> VfResult<WriteResult> {
+    fn write_impl(&mut self, request: WriteOp<&FileOperand, &[u8]>) -> VfResult<WriteResult> {
         vfsi_sync::backend::helpers::native_write_impl_default(self, request)
     }
-    fn seek_impl(&mut self, file: &VfFile, position: std::io::SeekFrom) -> VfResult<u64> {
+    fn seek_impl(&mut self, file: &FileOperand, position: std::io::SeekFrom) -> VfResult<u64> {
         vfsi_sync::backend::helpers::native_seek_impl_default(self, file, position)
     }
     fn metadata_impl(
         &mut self,
-        target: Target<'_, VfFile>,
+        target: Target<'_, FileOperand>,
         options: vfsi_core::api::AttrsOptions,
     ) -> VfResult<VfAttrs> {
         vfsi_sync::backend::helpers::native_metadata_impl_default(self, target, options)
     }
-    fn set_attributes_impl(&mut self, update: &SetAttrsOp<Target<'_, VfFile>>) -> VfResult<()> {
+    fn set_attributes_impl(
+        &mut self,
+        update: &SetAttrsOp<Target<'_, FileOperand>>,
+    ) -> VfResult<()> {
         vfsi_sync::backend::helpers::native_set_attributes_impl_default(self, update)
     }
-    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, VfFile>>]) -> VfResult<()> {
+    fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, FileOperand>>]) -> VfResult<()> {
         vfsi_sync::backend::helpers::vsetattrs_typed_default(self, updates)
     }
 }
 
 impl VectorBackend for LocalBackend {
-    fn before_open_cleanup(&mut self, _index: usize, _file: &VfFile) -> VfResult<()> {
+    fn before_open_cleanup(&mut self, _index: usize, _file: &FileOperand) -> VfResult<()> {
         #[cfg(feature = "test-faults")]
         self.inject_open_fault(OpenFaultPoint::BeforeCleanup { index: _index })?;
         Ok(())
@@ -1372,7 +1378,7 @@ impl VectorBackend for LocalBackend {
         paths: &[&Path],
         flags: &[i32],
         modes: &[u32],
-    ) -> VfResult<ManyResults<VfFile>> {
+    ) -> VfResult<ManyResults<FileOperand>> {
         if paths.len() != flags.len() || paths.len() != modes.len() {
             return Err(VfError::failure(0, ERR_INVAL));
         }
@@ -1467,7 +1473,7 @@ impl VectorBackend for LocalBackend {
             }
             return failure.map_or(Ok(out), Err);
         }
-        if reads.iter().all(|op| op.file.is_descriptor()) {
+        if reads.iter().all(|op| op.file.is_fd()) {
             let mut storage: Vec<_> = reads.iter().map(|op| vec![0; op.length]).collect();
             let mut buffers: Vec<_> = storage.iter_mut().map(Vec::as_mut_slice).collect();
             let results = self.vread_into_impl(reads, &mut buffers)?;
@@ -1558,10 +1564,13 @@ impl VectorBackend for LocalBackend {
         Ok(out)
     }
 
-    fn vwrite_impl(&mut self, writes: &[WriteOp<&VfFile, &[u8]>]) -> VfResult<Vec<WriteResult>> {
+    fn vwrite_impl(
+        &mut self,
+        writes: &[WriteOp<&FileOperand, &[u8]>],
+    ) -> VfResult<Vec<WriteResult>> {
         if writes
             .iter()
-            .all(|op| op.file().is_descriptor() && matches!(op.offset(), VfOffset::At(_)))
+            .all(|op| op.file().is_fd() && matches!(op.offset(), VfOffset::At(_)))
         {
             let mut operations = Vec::with_capacity(writes.len());
             let ordered = self.io.ordered();
@@ -1662,7 +1671,7 @@ impl VectorBackend for LocalBackend {
             if !a.masks.difference(SETTABLE).is_empty() {
                 return Err(VfError::unsupported(i));
             }
-            if a.file.is_descriptor() {
+            if a.file.is_fd() {
                 self.setattr_one(a, i)?;
                 continue;
             }
@@ -1740,7 +1749,7 @@ impl VectorBackend for LocalBackend {
             let entry = entry.map_err(|error| VfError::failure(0, Self::errno(&error)))?;
             let path = state.virtual_dir.join(entry.file_name());
             let mut attrs = VfAttrs {
-                file: VfFile::from_os_path(&path),
+                file: FileOperand::from_os_path(&path),
                 masks,
                 ..VfAttrs::default()
             };
@@ -1775,7 +1784,7 @@ impl VectorBackend for LocalBackend {
             let entry = entry.map_err(|error| VfError::failure(0, Self::errno(&error)))?;
             let path = dir.join(entry.file_name());
             let mut attrs = VfAttrs {
-                file: VfFile::from_os_path(&path),
+                file: FileOperand::from_os_path(&path),
                 masks,
                 ..VfAttrs::default()
             };
@@ -1790,7 +1799,7 @@ impl VectorBackend for LocalBackend {
         Ok(())
     }
 
-    fn vrename_impl(&mut self, pairs: &[(VfFile, VfFile)]) -> VfRes {
+    fn vrename_impl(&mut self, pairs: &[(FileOperand, FileOperand)]) -> VfRes {
         for (i, (src, dst)) in pairs.iter().enumerate() {
             let sp = self.vf_path(src).map_err(|e| e.with_index(i))?;
             let sp = self
@@ -1807,7 +1816,7 @@ impl VectorBackend for LocalBackend {
 
     fn vrename_with_options_impl(
         &mut self,
-        pairs: &[(VfFile, VfFile)],
+        pairs: &[(FileOperand, FileOperand)],
         options: vfsi_core::api::RenameOptions,
     ) -> VfRes {
         if pairs.is_empty() {
@@ -1895,7 +1904,7 @@ impl VectorBackend for LocalBackend {
         }
     }
 
-    fn vremove_impl(&mut self, files: &[VfFile]) -> VfRes {
+    fn vremove_impl(&mut self, files: &[FileOperand]) -> VfRes {
         for (i, f) in files.iter().enumerate() {
             let p = self
                 .no_follow_path(

@@ -462,7 +462,7 @@ impl NfsVecFs {
     }
 
     /// Resolve a [`VfOffset`] to a concrete file offset.
-    fn resolve_offset(&mut self, file: &VfFile, off: VfOffset) -> VfResult<u64> {
+    fn resolve_offset(&mut self, file: &FileOperand, off: VfOffset) -> VfResult<u64> {
         match off {
             VfOffset::At(offset) => Ok(offset),
             VfOffset::Cur => match file.fd() {
@@ -480,7 +480,7 @@ impl NfsVecFs {
     /// The offset a write should use: like [`resolve_offset`](Self::resolve_offset),
     /// but descriptors opened with `O_APPEND` always write at the end of the
     /// file (one extra size query per write).
-    fn write_offset(&mut self, file: &VfFile, off: VfOffset) -> VfResult<u64> {
+    fn write_offset(&mut self, file: &FileOperand, off: VfOffset) -> VfResult<u64> {
         let offset = self.resolve_offset(file, off)?;
         let append_fh = match file.fd() {
             Some(fd) => self
@@ -497,7 +497,7 @@ impl NfsVecFs {
     }
 
     /// Record the new read/write offset of an open (descriptor) file.
-    pub(super) fn advance_offset(&mut self, file: &VfFile, new_offset: u64) {
+    pub(super) fn advance_offset(&mut self, file: &FileOperand, new_offset: u64) {
         if let Some(fd) = file.fd()
             && let Some(o) = self.open_files.get_mut(&fd)
         {
@@ -508,7 +508,7 @@ impl NfsVecFs {
     /// Batched writev for open (descriptor) ops.
     pub(super) fn vwrite_batch_nfs(
         &mut self,
-        writes: &[WriteOp<&VfFile, &[u8]>],
+        writes: &[WriteOp<&FileOperand, &[u8]>],
     ) -> VfResult<Vec<WriteResult>> {
         let per = self.nfs.per_op_bytes();
         let mut ops = Vec::new();
@@ -708,7 +708,7 @@ impl NfsVecFs {
         let mut needs_open = false;
         for (i, r) in reads.iter().enumerate() {
             files.push(&r.file);
-            if !r.file.is_descriptor() {
+            if !r.file.is_fd() {
                 needs_open = true;
                 if r.offset == VfOffset::Cur {
                     // "current position" only exists for open descriptors.
@@ -729,7 +729,7 @@ impl NfsVecFs {
             .enumerate()
             .map(|(i, r)| ReadOp {
                 file: match tmp[i] {
-                    Some(fd) => VfFile::from_fd(fd),
+                    Some(fd) => FileOperand::from_fd(fd),
                     None => r.file.clone(),
                 },
                 offset: r.offset,
@@ -844,7 +844,7 @@ impl NfsVecFs {
     /// The legacy phased path-based writev.
     pub(super) fn vwrite_path_fallback_nfs(
         &mut self,
-        writes: &[WriteOp<&VfFile, &[u8]>],
+        writes: &[WriteOp<&FileOperand, &[u8]>],
     ) -> VfResult<Vec<WriteResult>> {
         if writes.is_empty() {
             return Ok(Vec::new());
@@ -856,7 +856,7 @@ impl NfsVecFs {
         for (i, w) in writes.iter().enumerate() {
             files.push(w.file());
             creation.push(w.creates());
-            if !w.file().is_descriptor() {
+            if !w.file().is_fd() {
                 needs_open = true;
                 if w.offset() == VfOffset::Cur {
                     return Err(VfError::failure(i, ERR_INVAL));
@@ -867,15 +867,15 @@ impl NfsVecFs {
             let truncation: Vec<bool> = writes.iter().map(|w| w.truncates()).collect();
             tmp = self.open_path_batch(&files, &creation, true, &truncation)?;
         }
-        let remapped_files: Vec<VfFile> = writes
+        let remapped_files: Vec<FileOperand> = writes
             .iter()
             .enumerate()
             .map(|(i, w)| match tmp[i] {
-                Some(fd) => VfFile::from_fd(fd),
+                Some(fd) => FileOperand::from_fd(fd),
                 None => w.file().clone(),
             })
             .collect();
-        let remapped: Vec<WriteOp<&VfFile, &[u8]>> = writes
+        let remapped: Vec<WriteOp<&FileOperand, &[u8]>> = writes
             .iter()
             .zip(&remapped_files)
             .map(|(w, file)| WriteOp::new(file, w.offset(), w.data()))
@@ -891,7 +891,7 @@ impl NfsVecFs {
 
     pub(super) fn vwrite_path_openwrite_nfs(
         &mut self,
-        writes: &[WriteOp<&VfFile, &[u8]>],
+        writes: &[WriteOp<&FileOperand, &[u8]>],
         path_ops: &[crate::client::PathWriteOp<'_>],
         offsets: &[u64],
     ) -> VfResult<Vec<WriteResult>> {
@@ -923,7 +923,7 @@ impl NfsVecFs {
 
     pub(super) fn vwrite_path_full_nfs(
         &mut self,
-        writes: &[WriteOp<&VfFile, &[u8]>],
+        writes: &[WriteOp<&FileOperand, &[u8]>],
         path_ops: &[crate::client::PathWriteOp<'_>],
         offsets: &[u64],
     ) -> VfResult<Vec<WriteResult>> {
@@ -961,7 +961,7 @@ impl NfsVecFs {
 
     fn assemble_writes(
         &self,
-        writes: &[WriteOp<&VfFile, &[u8]>],
+        writes: &[WriteOp<&FileOperand, &[u8]>],
         offsets: &[u64],
         counts: &[Option<u32>],
         committed: &[Option<u32>],

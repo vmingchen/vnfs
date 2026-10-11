@@ -41,7 +41,7 @@ fn vopen_outcomes_impl(
     paths: &[&Path],
     flags: &[i32],
     modes: &[u32],
-) -> Result<ManyResults<VfFile>, VfError>;
+) -> Result<ManyResults<FileOperand>, VfError>;
 ```
 
 `ManyResults<T>` is deliberately hidden from the application facade. Entry

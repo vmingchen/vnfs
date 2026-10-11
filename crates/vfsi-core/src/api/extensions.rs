@@ -1,7 +1,7 @@
 use crate::api::{Attrs, CopyOption, DirectoryListing, MkDirOp, OpenOp, Result, SetAttrsOp};
 use std::path::Path;
 
-use super::{FileHandle, Vfsi};
+use super::{OpenFd, Vfsi};
 
 /// Scalar operations and convenience workflows alongside the [`Vfsi`] vectors.
 ///
@@ -71,7 +71,7 @@ pub trait VfsiExt: Vfsi {
     /// lifecycle only; use vectors or [`std_io`](VfsiExt::std_io) for I/O.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, WriteOp};
+    /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFd, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let file = fs.open("/config")?;
     /// let mut header = [0_u8; 128];
@@ -95,7 +95,7 @@ pub trait VfsiExt: Vfsi {
     /// use [`open_with`](VfsiExt::open_with) with `WRITE | CREATE_NEW` instead.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, WriteOp};
+    /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFd, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let file = fs.create("/output")?;
     /// let result = fs.vwrite(&[WriteOp::at(&file, 0, b"complete contents")], vfsi_core::api::WriteOptions::new().write_all(true));
@@ -124,7 +124,7 @@ pub trait VfsiExt: Vfsi {
     /// symlink resolution and independently opened handles for singleton vectors.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{Vfsi, VfsiExt, FileHandle, OpenFlags, OpenOp, WriteOp};
+    /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFd, OpenFlags, OpenOp, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let file = fs.open_with(OpenOp::new(
     ///     "/new-file", OpenFlags::WRITE | OpenFlags::CREATE_NEW,

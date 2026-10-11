@@ -18,7 +18,7 @@ use vfsi_local::LocalBackend;
 use vfsi_nfs::nfs::NfsVecFs;
 use vfsi_smb::SmbVecFs;
 use vfsi_sync::{
-    AttrMask, ExtentPair, ReadOp, VfAttrs, VfError, VfFile, WriteOp, ERR_EBADF, ERR_NOENT,
+    AttrMask, ExtentPair, FileOperand, ReadOp, VfAttrs, VfError, WriteOp, ERR_EBADF, ERR_NOENT,
     VF_ERR_UNSUPPORTED,
 };
 
@@ -91,7 +91,7 @@ macro_rules! fail_batch {
 /// Opaque filesystem handle owned by C.
 pub struct vfsi_fs {
     fs: Mutex<Box<dyn BindingBackend>>,
-    files: Mutex<std::collections::HashMap<i32, VfFile>>,
+    files: Mutex<std::collections::HashMap<i32, FileOperand>>,
     next_fd: AtomicI32,
     /// Kernel mountpoint used by application-visible paths.
     mountpoint: PathBuf,
@@ -792,8 +792,8 @@ fn make_fs(
 
 fn insert_c_file(
     fs: &vfsi_fs,
-    files: &mut std::collections::HashMap<i32, VfFile>,
-    file: VfFile,
+    files: &mut std::collections::HashMap<i32, FileOperand>,
+    file: FileOperand,
 ) -> Result<i32, VfError> {
     for _ in 0..i32::MAX {
         let fd = loop {
@@ -1499,8 +1499,10 @@ pub unsafe extern "C" fn vfsi_rename(
         let result: Result<(), VfError> = (|| {
             let old = vpath_for(fs, &old)?;
             let new = vpath_for(fs, &new)?;
-            lock_or_io(&fs.fs)?
-                .vrename_impl(&[(VfFile::from_os_path(&old), VfFile::from_os_path(&new))])
+            lock_or_io(&fs.fs)?.vrename_impl(&[(
+                FileOperand::from_os_path(&old),
+                FileOperand::from_os_path(&new),
+            )])
         })();
         match result {
             Ok(()) => 0,
@@ -1750,7 +1752,7 @@ pub unsafe extern "C" fn vfsi_statv(
                 ),
             };
             attrs.push(VfAttrs {
-                file: VfFile::from_os_path(&path),
+                file: FileOperand::from_os_path(&path),
                 masks: mask(),
                 ..VfAttrs::default()
             });
@@ -1818,7 +1820,7 @@ pub unsafe extern "C" fn vfsi_setattrv(
                 );
             };
             attrs.push(VfAttrs {
-                file: VfFile::from_os_path(&path),
+                file: FileOperand::from_os_path(&path),
                 masks,
                 mode: op.mode,
                 size: op.size,
@@ -1981,7 +1983,7 @@ pub unsafe extern "C" fn vfsi_pwritev(
         // All handles and buffers are validated before dispatch. The C caller
         // owns payload storage until this synchronous call returns; no copy is
         // needed, and a zero-length buffer need not have a non-null pointer.
-        let writes: Vec<WriteOp<&VfFile, &[u8]>> = ops
+        let writes: Vec<WriteOp<&FileOperand, &[u8]>> = ops
             .iter()
             .zip(&files)
             .map(|(op, file)| {
@@ -2054,7 +2056,7 @@ pub unsafe extern "C" fn vfsi_mkdirv(
                 ),
             };
             dirs.push(VfAttrs {
-                file: VfFile::from_os_path(&path),
+                file: FileOperand::from_os_path(&path),
                 masks: AttrMask::MODE,
                 mode: op.mode,
                 ..VfAttrs::default()
@@ -2114,7 +2116,7 @@ pub unsafe extern "C" fn vfsi_removev(
                     false
                 ),
             };
-            files.push(VfFile::from_os_path(&path));
+            files.push(FileOperand::from_os_path(&path));
         }
         let mut backend = match lock_or_io(&fs.fs) {
             Ok(backend) => backend,
@@ -2178,8 +2180,8 @@ pub unsafe extern "C" fn vfsi_renamev(
                 }
             };
             pairs.push((
-                VfFile::from_os_path(&oldpath),
-                VfFile::from_os_path(&newpath),
+                FileOperand::from_os_path(&oldpath),
+                FileOperand::from_os_path(&newpath),
             ));
         }
         let mut backend = match lock_or_io(&fs.fs) {
@@ -2309,7 +2311,7 @@ pub unsafe extern "C" fn vfsi_read_streamv(
                 Err(error) => return vfsi_result::from_error(error.with_index(index)),
             };
             cpaths.push(cpath);
-            files.push(VfFile::from_os_path(&vpath));
+            files.push(FileOperand::from_os_path(&vpath));
         }
         let mut backend = match lock_or_io(&fs.fs) {
             Ok(backend) => backend,
@@ -2545,7 +2547,10 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
             let vpaths: Result<Vec<PathBuf>, VfError> =
                 kernel_paths.iter().map(|p| vpath_for(fs, p)).collect();
             let vpaths = vpaths?;
-            let files: Vec<VfFile> = vpaths.iter().map(|p| VfFile::from_os_path(p)).collect();
+            let files: Vec<FileOperand> = vpaths
+                .iter()
+                .map(|p| FileOperand::from_os_path(p))
+                .collect();
             let datas = lock_or_io(&fs.fs)?.vread_all_with_options_impl(
                 &files,
                 vfsi_sync::ReadAllOptions::new().max_total_bytes(max_bytes),
@@ -2618,13 +2623,13 @@ mod tests {
     }
 
     impl vfsi_sync::backend::HandleBackend for ListingBackend {
-        fn sync_data(&mut self, _: &VfFile) -> vfsi_sync::VfResult<()> {
+        fn sync_data(&mut self, _: &FileOperand) -> vfsi_sync::VfResult<()> {
             Err(VfError::unsupported(0))
         }
-        fn open_impl(&mut self, _: &vfsi_sync::OpenOp) -> vfsi_sync::VfResult<VfFile> {
+        fn open_impl(&mut self, _: &vfsi_sync::OpenOp) -> vfsi_sync::VfResult<FileOperand> {
             Err(VfError::unsupported(0))
         }
-        fn close_impl(&mut self, _: &VfFile) -> vfsi_sync::VfResult<()> {
+        fn close_impl(&mut self, _: &FileOperand) -> vfsi_sync::VfResult<()> {
             Err(VfError::unsupported(0))
         }
         fn read_impl(&mut self, _: &ReadOp) -> vfsi_sync::VfResult<vfsi_sync::ReadResult> {
@@ -2632,23 +2637,23 @@ mod tests {
         }
         fn write_impl(
             &mut self,
-            _: vfsi_sync::WriteOp<&VfFile, &[u8]>,
+            _: vfsi_sync::WriteOp<&FileOperand, &[u8]>,
         ) -> vfsi_sync::VfResult<vfsi_sync::WriteResult> {
             Err(VfError::unsupported(0))
         }
-        fn seek_impl(&mut self, _: &VfFile, _: std::io::SeekFrom) -> vfsi_sync::VfResult<u64> {
+        fn seek_impl(&mut self, _: &FileOperand, _: std::io::SeekFrom) -> vfsi_sync::VfResult<u64> {
             Err(VfError::unsupported(0))
         }
         fn metadata_impl(
             &mut self,
-            _: vfsi_sync::Target<'_, VfFile>,
+            _: vfsi_sync::Target<'_, FileOperand>,
             _: vfsi_sync::api::AttrsOptions,
         ) -> vfsi_sync::VfResult<VfAttrs> {
             Err(VfError::unsupported(0))
         }
         fn set_attributes_impl(
             &mut self,
-            _: &vfsi_sync::SetAttrsOp<vfsi_sync::Target<'_, VfFile>>,
+            _: &vfsi_sync::SetAttrsOp<vfsi_sync::Target<'_, FileOperand>>,
         ) -> vfsi_sync::VfResult<()> {
             Err(VfError::unsupported(0))
         }
@@ -2661,7 +2666,7 @@ mod tests {
 
         fn vwrite_impl(
             &mut self,
-            writes: &[WriteOp<&VfFile, &[u8]>],
+            writes: &[WriteOp<&FileOperand, &[u8]>],
         ) -> vfsi_sync::VfResult<Vec<vfsi_sync::WriteResult>> {
             let calls = self
                 .write_calls
@@ -2719,7 +2724,7 @@ mod tests {
                         masks
                     };
                     let attrs = VfAttrs {
-                        file: VfFile::from_os_path(&dir.join(format!("entry-{entry}"))),
+                        file: FileOperand::from_os_path(&dir.join(format!("entry-{entry}"))),
                         masks,
                         returned,
                         mode: libc::S_IFREG | 0o644,
@@ -2836,12 +2841,12 @@ mod tests {
             .files
             .lock()
             .unwrap()
-            .insert(10, VfFile::from_fd(100));
+            .insert(10, FileOperand::from_fd(100));
         fs_ref
             .files
             .lock()
             .unwrap()
-            .insert(11, VfFile::from_fd(101));
+            .insert(11, FileOperand::from_fd(101));
         let data = b"payload owned by C caller";
         let mut ops = [
             vfsi_pwrite_op {
@@ -3065,7 +3070,7 @@ mod tests {
                 for _ in 0..100 {
                     visited += 1;
                     if !cb(&VfAttrs {
-                        file: VfFile::from_path("/long-name"),
+                        file: FileOperand::from_path("/long-name"),
                         ..Default::default()
                     }) {
                         break;
@@ -3085,7 +3090,7 @@ mod tests {
     #[test]
     fn bounded_directory_accepts_exact_limits_and_rejects_only_the_probe() {
         let entry = VfAttrs {
-            file: VfFile::from_path("/a"),
+            file: FileOperand::from_path("/a"),
             ..Default::default()
         };
         let exact = collect_bounded_entries(1, 2, |cb| {

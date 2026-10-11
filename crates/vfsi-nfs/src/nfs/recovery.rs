@@ -212,7 +212,7 @@ impl NfsVecFs {
         if let Some(mount) = &self.mount_source {
             mount.check_local()?;
         }
-        let snapshots: Vec<(i32, ReopenFile, u64, WireFileHandle)> = self
+        let snapshots: Vec<(i32, ReopenFile, u64, NfsFh)> = self
             .open_files
             .iter()
             .map(|(&fd, open)| {

@@ -5,7 +5,7 @@ implementation contracts and the historical POSIX/C compatibility surface.
 
 ## Application boundary and migration
 
-`vfsi-core::api` owns `Vfsi`, `VfsiExt`, `FileHandle`, and their portable
+`vfsi-core::api` owns `Vfsi`, `VfsiExt`, `OpenFd`, and their portable
 requests, results, options, and traversal helpers. It depends on no backend,
 RPC library, or async runtime. `vnfs` re-exports these same types; its concrete
 NFS and mounted clients implement the core contract. `vfsi-sync` implements
@@ -58,7 +58,7 @@ clients, not protocol implementations. Cloning remains cheap and shares the
 connection; files retain their existing ownership, cleanup, and error semantics.
 
 Custom backend implementers depend on `vfsi-sync` for `FsClient`,
-`FsFile`, `FsDir`, and backend traits, plus the corresponding protocol crate. Construct and extract backend owners there
+`OpenFile`, `FsDir`, and backend traits, plus the corresponding protocol crate. Construct and extract backend owners there
 instead of using `connect_backend` or extracting an application client. Protocol
 conversion helpers also live in those implementation crates, not on application metadata,
 flags, results, or errors. There are no historical root aliases: applications use
@@ -121,7 +121,7 @@ per-operation mount lookups to the resulting direct NFS client and does not
 share the kernel client's caches.
 
 The `vnfs` crate root exposes the NFS application API. Native `HandleBackend` and
-`VectorBackend` contracts, `VfFile`, `Fd`, `VfAttrs`, raw libc flags,
+`VectorBackend` contracts, `FileOperand`, `Fd`, `VfAttrs`, raw libc flags,
 and NFS protocol modules live in the corresponding `vfsi-*` crates; they are
 not republished by `vnfs`. The former `VecFs` trait has been removed. New
 application code can start with:
@@ -161,6 +161,49 @@ and named-attribute presence as `Option` so an absent value is not confused with
 `VfsiExt::read_dirs_with_options` collector only when retained listings are needed. `DirectoryListing` carries
 paths and already-fetched entry metadata. `vcopy` and `vremove`
 perform ordered batches without promising transactionality.
+
+## Object IDs, open instances, and mount routes
+
+`FsObjId` identifies an underlying filesystem object. `OpenFd` is the owned
+File Descriptor interface to one open instance; `vfsi_sync::OpenFile<F>` is
+its generic concrete implementation. A numeric `Fd` is a backend-assigned
+File Descriptor slot. `NfsFh` addresses an NFS object, and `NfsOpenState`
+retains the NFS client's state for an open instance. These IDs are scoped to
+the backend/server identity namespace. Object IDs may be reused after deletion.
+
+| Canonical name | Meaning | Linux, NFS, and GCS equivalent | Previous spelling / compatibility |
+|---|---|---|---|
+| `FsObjId`; `Attrs::fs_obj_id()` | Composite underlying object ID: `(fs_id, file_id)`. | Linux: (`st_dev`, `st_ino`). NFS: (`FATTR4_FSID`, `FATTR4_FILEID`); opaque filehandle is separate. GCS: `(bucket, object name, generation)` identifies an object version. | `FileIdentity` and `file_identity()` remain compatibility aliases. |
+| `fs_id` fields/accessors on `VfAttrs`, `Attrs`, and `FsObjId`; `AttrMask::FS_ID` | Filesystem namespace component, optional in `Attrs` when unavailable. | Linux: `st_dev`. NFS: FSID major/minor packed into the existing `u128`. GCS: bucket is the nearest namespace boundary, but is not a filesystem ID. | `filesystem_id()` and `FILESYSTEM_ID` remain deprecated aliases; migrate the public `VfAttrs.filesystem_id` field to `.fs_id`. |
+| `Attrs::file_id()`; `FsObjId::file_id()` | Backend file number, meaningful with filesystem ID and backend namespace. | Linux: `st_ino`. NFS: `FATTR4_FILEID`. GCS has no inode number; object name and generation identify a version within a bucket. | Unchanged. |
+| Core `OpenFd` trait; `vfsi_sync::OpenFile<F>` | Owned File Descriptor handle to one open instance and its cleanup obligation. | Linux: a descriptor refers to an open file description (`struct file`); separate `open()` calls create separate descriptions, while `dup()` shares one. NFS: client descriptor maps to filehandle and OPEN state. GCS: client reader/writer state without server-side OPEN. | Core `FileHandle` and sync `FsFile` are deprecated re-exports of the same trait/type. Backend wrappers such as `NfsFile` and `AutoFile` keep their names. |
+| `vfsi_nfs::client::NfsFh` | Opaque protocol reference addressing an NFS object independently of OPEN state. | Linux: closest to an exportfs filehandle. NFS: opaque server object reference with server-defined persistence. GCS: object resource key/version is the nearest equivalent. | NFS `client::FileHandle` remains a deprecated alias. The internal `WireFileHandle` alias is removed. |
+| `Fd`; `FileOperand::Fd(Fd)` | Numeric backend File Descriptor slot, without cleanup ownership. | Linux: numeric process fd references an open file description. NFS: client slot maps to filehandle plus open state. GCS: any descriptor would be client bookkeeping. | `Fd` is unchanged and means File Descriptor. Unused `HandleId` is removed. Migrate `VfFile::Descriptor` patterns/expressions to `FileOperand::Fd`. |
+| `FileOperand` | Native backend operand: path, File Descriptor, current-directory target, or saved-directory sentinel. Cloning does not duplicate an open instance or acquire cleanup ownership. | Linux: path/fd/directory-relative operands. NFS: client resolves operands to protocol references. GCS: analogous key/version or client-handle operands; no GCS adapter exists here. | `VfFile` remains a deprecated alias. Path/sentinel variants retain their behavior. Application code uses `Target` for borrowed paths/handles. |
+| Private NFS `NfsOpenState` | Filehandle, stateid, cursor, append policy, and optional reopen recipe for a client open instance. | Linux: analogous client state around an open file description. NFS: OPEN state plus filehandle/client bookkeeping. GCS: stream state without remote OPEN. | Formerly private `OpenFile`; renamed directly without an alias. |
+| `AutoRoute`, `NfsMount`, `MountInfo`, `NfsMountSession` | Discovery and selection of the underlying filesystem client/route. | Linux: mount ID and namespace determine path routing. NFS: server FSID differs from client mount ID. GCS has no mount identity. | Unchanged; mount IDs are not part of `FsObjId`. |
+| `ResolvePath::{Follow, NoFollow}` | Final-component symlink policy. | Linux: follow or leave the final symlink unresolved. NFS: final-component lookup behavior. GCS has no POSIX symlink semantics by default. | Unchanged. |
+| `Attrs::change_id()` | Optional backend change/version token, separate from object identity. | Linux has no universal inode change token. NFS: `FATTR4_CHANGE`. GCS: generation tracks data versions; metageneration tracks metadata versions. | Unchanged. |
+
+The local backend builds `FsObjId` from (`st_dev`, `st_ino`); NFS uses FSID
+and FILEID. The current SMB adapter cannot report the complete pair, so it
+returns no `FsObjId`. GCS is a conceptual comparison, not an implemented
+adapter or a proposed numeric encoding. See [Linux inode fields](https://man7.org/linux/man-pages/man7/inode.7.html),
+[Linux open-file descriptions](https://man7.org/linux/man-pages/man2/open.2.html),
+[NFSv4.1](https://www.rfc-editor.org/rfc/rfc8881.html), and
+[Cloud Storage objects and generations](https://docs.cloud.google.com/storage/docs/objects).
+
+Two opens of one object have equal `FsObjId` values but distinct open state
+and cleanup lifetimes. Operations through an open handle continue to address
+the opened object after rename or unlink; its saved path is diagnostic. Linux
+mount IDs select a path route in `Auto`; after open, `AutoFile` pins the
+chosen client/route. A mount-derived NFS connection resolves the mount when
+constructed, then uses that filesystem connection for later operations.
+
+The [migration ledger](backend-migration.md#identity-and-open-descriptor-names)
+lists source changes and compatibility aliases. The
+[rename implementation record](IDENTITY_HANDLE_RENAME_PLAN.md) records scope
+and verification.
 
 ## Durability and failure rules
 
@@ -210,9 +253,9 @@ configured policy. Scalar and vector whole-file reads share the optimized
 backend path. `vread` with `ReadOp::into` returns byte counts, offsets and EOF,
 with no owned data in those results, and also enforces the aggregate policy
 because a backend may use an owned-buffer fallback. The same `ReadOptions`
-selects an explicit per-call buffer budget. Auto
+selects an explicit per-call buffer budget. `Auto`
 updates cached connection policies when its limits change and uses its current
-policy even for previously opened handles. Auto traversal quotas count paths
+policy even for previously opened handles. `Auto` traversal quotas count paths
 after translation into the public namespace, including mount prefixes.
 
 `vread` range requests are bounded by their caller-supplied lengths and the
