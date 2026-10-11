@@ -22,3 +22,8 @@ print(fs.ls("/"))
 
 Bulk fsspec operations and coordinated `open_files` buffering use VFSI vector
 operations so independent SMB requests can be issued in bounded batches.
+
+Transactional writes are currently unsupported: the SMB backend cannot enforce
+private creation permissions or preserve POSIX modes. They raise
+`NotImplementedError` before allocating a write spool or changing remote files.
+Ordinary reads, writes, uploads, and vector buffering remain supported.

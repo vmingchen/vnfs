@@ -187,6 +187,47 @@ def test_readuntil_cross_block_delimiter_and_nonzero_offset(fs, cache):
         assert file.read(4) == b"tail"
 
 
+@pytest.mark.parametrize("cache", ["none", "readahead"])
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("method", ["readline", "readuntil", "__next__"])
+@pytest.mark.parametrize("data,offset", [(b"", 0), (b"line\n", 0), (b"line\n", 5)])
+def test_zero_budget_line_reads_distinguish_eof(
+    fs, cache, grouped, method, data, offset
+):
+    fs.pipe_file("/zero-budget", data)
+    fs.read_all_max_total_bytes = 0
+    fs.cache_type = cache
+    context = (
+        OpenFiles([OpenFile(fs, "/zero-budget", "rb")], mode="rb", fs=fs)
+        if grouped
+        else fs.open("/zero-budget", "rb")
+    )
+    with context as opened:
+        file = opened[0] if grouped else opened
+        file.seek(offset)
+        if offset < len(data):
+            with pytest.raises(OSError) as error:
+                getattr(file, method)()
+            assert error.value.errno == errno.EFBIG
+        elif method == "__next__":
+            with pytest.raises(StopIteration):
+                next(file)
+        else:
+            assert getattr(file, method)() == b""
+        assert file.tell() == offset
+
+
+def test_zero_budget_uncached_line_probe_observes_growth(fs):
+    fs.pipe_file("/growing-line", b"")
+    fs.read_all_max_total_bytes = 0
+    with fs.open("/growing-line", "rb", cache_type="none") as file:
+        fs.pipe_file("/growing-line", b"grown\n")
+        with pytest.raises(OSError) as error:
+            file.readline()
+        assert error.value.errno == errno.EFBIG
+        assert file.tell() == 0
+
+
 @pytest.mark.parametrize("alias", ["same", "hardlink", "symlink", "directory"])
 def test_oversized_copy_alias_never_modifies_source(fs, alias):
     fs.mkdir("/real")

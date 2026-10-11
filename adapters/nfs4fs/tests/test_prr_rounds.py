@@ -3,6 +3,55 @@
 import pytest
 
 
+@pytest.mark.parametrize("failure", [OSError, KeyboardInterrupt])
+@pytest.mark.parametrize("second_failure", [False, True])
+def test_transaction_group_close_failure_still_closes_all_siblings(
+    fs, monkeypatch, failure, second_failure
+):
+    from fsspec.core import OpenFile
+
+    fs.pipe_file("/reader", b"original")
+    error = failure("first close failure")
+    attempted = []
+    with pytest.raises(failure) as caught:
+        with fs.transaction:
+            files = fs.open_many(
+                [
+                    OpenFile(fs, "/writer", "wb"),
+                    OpenFile(fs, "/reader", "rb"),
+                    OpenFile(fs, "/reader", "rb"),
+                ]
+            )
+            files[0].write(b"pending")
+            for index, file in enumerate(files):
+                close = file.close
+
+                def record_close(index=index, close=close):
+                    attempted.append(index)
+                    close()
+                    if index == 0:
+                        raise error
+                    if index == 1 and second_failure:
+                        raise OSError("second close failure")
+
+                monkeypatch.setattr(file, "close", record_close)
+            fs.commit_many(files)
+    try:
+        assert caught.value is error
+        assert attempted == [0, 1, 2]
+        assert all(file.closed for file in files)
+        assert not fs._client._fds
+        assert not fs.exists("/writer")
+    finally:
+        # Keep a pre-fix failure from leaking its readers into other tests.
+        for file in files:
+            if not file.closed:
+                try:
+                    file.close()
+                except OSError:
+                    pass
+
+
 @pytest.fixture(params=["dummy_fs", "nfs_fs"])
 def fs(request):
     return request.getfixturevalue(request.param)

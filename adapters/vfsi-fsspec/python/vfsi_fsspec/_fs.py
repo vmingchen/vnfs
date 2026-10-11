@@ -1216,6 +1216,17 @@ class VfsiFile(AbstractBufferedFile):
         if block_size <= 0:
             raise ValueError("blocks must be positive")
         limit = self.fs.read_all_max_total_bytes
+        if limit == 0:
+            self.read(0)  # Validate closed/readable state without consuming data.
+            # Cached readers retain their per-open EOF. Uncached readers need
+            # a one-byte positional probe, not an unconditional read(0) EOF.
+            remaining = (
+                self.tell() < self.size
+                if self._has_read_cache()
+                else bool(self._raw._pread_at(self.tell(), 1))
+            )
+            self.fs._check_read_allocation(int(remaining), self.path)
+            return b""
         data = bytearray()
         while True:
             previous = len(data)
@@ -1915,10 +1926,18 @@ class _DeferredWriteFile:
     """Disk-spooled transactional write staged beside its destination."""
 
     def __init__(self, fs, path, mode="wb"):
-        if not fs._supports_private_create:
+        if not fs._native_has_create_permissions:
             raise ImportError(
                 "transactional writes require native private-create support; "
                 "upgrade nfs4fs or vsmb alongside vfsi-fsspec"
+            )
+        permission_capability = getattr(fs._native_module, "CAP_POSIX_METADATA", 0)
+        if not permission_capability or not (
+            fs._client.capabilities() & permission_capability
+        ):
+            raise NotImplementedError(
+                "transactional writes require backend private-create and "
+                "POSIX permission support"
             )
         self.fs = fs
         self.path = path  # internal path
@@ -2354,12 +2373,12 @@ class VfsiFileSystem(AbstractFileSystem):
                 "upgrade nfs4fs or vsmbfs alongside vfsi-fsspec"
             )
         try:
-            self._supports_private_create = (
+            self._native_has_create_permissions = (
                 "permissions"
                 in inspect.signature(native_module.NfsClient.open).parameters
             )
         except (AttributeError, TypeError, ValueError):
-            self._supports_private_create = False
+            self._native_has_create_permissions = False
         self._client = _ClientPool(
             native_module,
             factory_args,
@@ -3877,8 +3896,14 @@ class VfsiFileSystem(AbstractFileSystem):
         group = getattr(open_files[0], "_buffer_group", None) if open_files else None
         if group is not None:
             return group.finish(open_files)
+        error = None
         for file in open_files:
-            file.close()
+            try:
+                file.close()
+            except BaseException as exc:
+                error = error or exc
+        if error is not None:
+            raise error
 
     # -- mutation ----------------------------------------------------------
 
