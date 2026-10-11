@@ -1123,7 +1123,18 @@ class VfsiFile(AbstractBufferedFile):
         self.fs._check_read_allocation(max(0, end - start), self.path)
         if self._buffer_group is not None and self.fs.vectorized_buffering:
             return self._buffer_group.fetch(self, start, end)
-        return self._raw._pread_at(start, max(0, end - start))
+        data = self._raw._pread_at(start, max(0, end - start))
+        if not data or len(data) >= end - start:
+            return data
+        # A positive short native read is not EOF. Fixed-block caches must
+        # receive the complete range before marking its blocks as populated.
+        result = bytearray(data)
+        while len(result) < end - start:
+            chunk = self._raw._pread_at(start + len(result), end - start - len(result))
+            if not chunk:
+                break
+            result.extend(chunk)
+        return bytes(result)
 
     def _initiate_upload(self):
         # Creation/truncation and append positioning happen when the raw
@@ -1591,6 +1602,35 @@ class _BufferGroup:
             file._raw._fd_generation = self.fs._client.generation
 
     def _pread_many(self, files, offsets, lengths):
+        data, errors = self._pread_many_once(files, offsets, lengths)
+        partial = {
+            index: bytearray(value)
+            for index, value in enumerate(data)
+            if index not in errors and value and len(value) < lengths[index]
+        }
+        pending = list(partial)
+        while pending:
+            more, failures = self._pread_many_once(
+                [files[index] for index in pending],
+                [offsets[index] + len(partial[index]) for index in pending],
+                [lengths[index] - len(partial[index]) for index in pending],
+            )
+            remaining = []
+            for position, index in enumerate(pending):
+                if position in failures:
+                    errors[index] = failures[position]
+                    data[index] = None
+                elif more[position]:
+                    partial[index].extend(more[position])
+                    if len(partial[index]) < lengths[index]:
+                        remaining.append(index)
+            pending = remaining
+        for index, value in partial.items():
+            if index not in errors:
+                data[index] = bytes(value)
+        return data, errors
+
+    def _pread_many_once(self, files, offsets, lengths):
         if self.fs.auto_reconnect and any(
             file._raw._fd is None or not self.fs._client.descriptor_valid(file._raw._fd)
             for file in files
@@ -3638,9 +3678,12 @@ class VfsiFileSystem(AbstractFileSystem):
             with callback.branched(local_path, remote_path) as child:
                 child.set_size(size)
                 # Finish fallible local setup before creating/truncating remote.
-                with open(local_path, "rb") as source, self.open(
-                    remote_path, "xb" if mode == "create" else "wb"
-                ) as remote:
+                with (
+                    open(local_path, "rb") as source,
+                    self.open(
+                        remote_path, "xb" if mode == "create" else "wb"
+                    ) as remote,
+                ):
                     while True:
                         chunk = source.read(
                             min(self.transfer_chunk_size, self.max_batch_bytes)
