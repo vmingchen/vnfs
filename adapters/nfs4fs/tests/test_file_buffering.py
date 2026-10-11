@@ -556,7 +556,7 @@ def test_open_files_flushes_writes_in_vector_waves(tmp_path, monkeypatch):
         assert all(len(call[0][0]) == 3 for call in calls)
 
 
-def test_grouped_append_uses_atomic_vector_path(tmp_path, monkeypatch):
+def test_grouped_append_uses_vector_path(tmp_path, monkeypatch):
     with fsspec.filesystem(
         "nfs4",
         backend="dummy",

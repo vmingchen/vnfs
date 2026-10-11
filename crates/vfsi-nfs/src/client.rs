@@ -81,6 +81,7 @@ pub struct NfsClient {
     configured_max_request_bytes: Option<std::num::NonZeroUsize>,
     rpc_envelope_reserve: usize,
     deferred_path_closes: Vec<CloseOp>,
+    next_public_open_owner_id: u64,
     #[cfg(feature = "test-faults")]
     fault_injector: Option<Arc<dyn FaultInjector>>,
     #[cfg(feature = "test-faults")]
@@ -725,7 +726,7 @@ impl NfsClient {
         if closes.is_empty() {
             return;
         }
-        if self.close_many_path(&closes).is_err() {
+        if self.close_unregistered_many(&closes).is_err() {
             self.deferred_path_closes.extend(closes);
         }
     }
@@ -734,7 +735,7 @@ impl NfsClient {
         let mut remaining = std::mem::take(&mut self.deferred_path_closes);
         while !remaining.is_empty() {
             let close = remaining.remove(0);
-            match self.close_path(&close.fh, &close.stateid) {
+            match self.close_unregistered(&close.fh, &close.stateid) {
                 Ok(()) => {}
                 Err(error)
                     if matches!(
@@ -749,6 +750,15 @@ impl NfsClient {
             }
         }
         Ok(())
+    }
+
+    fn next_public_open_owner_name(&mut self) -> Vec<u8> {
+        let id = self.next_public_open_owner_id;
+        self.next_public_open_owner_id = id.wrapping_add(1);
+        let mut name = self.session.open_owner.name.clone();
+        name.push(b'-');
+        name.extend_from_slice(id.to_string().as_bytes());
+        name
     }
 
     pub(crate) fn abandon(&mut self) {
@@ -904,6 +914,7 @@ impl NfsClient {
             configured_max_request_bytes,
             rpc_envelope_reserve,
             deferred_path_closes: Vec::new(),
+            next_public_open_owner_id: 0,
             #[cfg(feature = "test-faults")]
             fault_injector: None,
             #[cfg(feature = "test-faults")]
@@ -1707,11 +1718,10 @@ impl NfsClient {
         slot: OwnerSlot,
     ) -> RpcResult<(FileHandle, stateid4)> {
         let (seqid, verifier, owner_name) = match slot {
-            OwnerSlot::User => (
-                self.session.open_owner.seqid,
-                self.session.open_owner.verifier,
-                self.session.open_owner.name.clone(),
-            ),
+            OwnerSlot::User => {
+                let verifier = self.session.open_owner.verifier;
+                (0, verifier, self.next_public_open_owner_name())
+            }
             OwnerSlot::Path => (
                 self.session.path_owner.seqid,
                 self.session.path_owner.verifier,
@@ -1736,9 +1746,8 @@ impl NfsClient {
         self.session.expect_all_ok(&res)?;
         let stateid = res.open(2).stateid;
         let fh = res.getfh(3);
-        match slot {
-            OwnerSlot::User => self.session.open_owner.seqid += 1,
-            OwnerSlot::Path => self.session.path_owner.seqid += 1,
+        if matches!(slot, OwnerSlot::Path) {
+            self.session.path_owner.seqid += 1;
         }
         Ok((FileHandle::from_nfs_fh(fh), stateid))
     }
@@ -1996,19 +2005,20 @@ impl NfsClient {
         slot: OwnerSlot,
     ) -> RpcResult<Vec<(FileHandle, stateid4)>> {
         let (base, verifier, owner_name) = match slot {
-            OwnerSlot::User => (
-                self.session.open_owner.seqid,
-                self.session.open_owner.verifier,
-                self.session.open_owner.name.clone(),
-            ),
+            OwnerSlot::User => (0, self.session.open_owner.verifier, Vec::new()),
             OwnerSlot::Path => (
                 self.session.path_owner.seqid,
                 self.session.path_owner.verifier,
                 self.session.path_owner.name.clone(),
             ),
         };
-        let clientid = self.session.clientid;
         let n = ops.len();
+        let public_owner_names: Vec<Vec<u8>> = if matches!(slot, OwnerSlot::User) {
+            (0..n).map(|_| self.next_public_open_owner_name()).collect()
+        } else {
+            Vec::new()
+        };
+        let clientid = self.session.clientid;
         let out = self.batch_ops(
             b"openv",
             3,
@@ -2016,12 +2026,17 @@ impl NfsClient {
             |c, op, gi| {
                 c.putfh(&op.dir.as_nfs_fh());
                 let openhow = make_open_how(op.create, verifier);
+                let (seqid, owner) = if matches!(slot, OwnerSlot::User) {
+                    (0, &public_owner_names[gi])
+                } else {
+                    (base + gi as u32, &owner_name)
+                };
                 c.open_claim_null(
-                    base + gi as u32,
+                    seqid,
                     op.access,
                     OPEN4_SHARE_DENY_NONE,
                     clientid,
-                    &owner_name,
+                    owner,
                     openhow,
                     &op.name,
                 );
@@ -2033,28 +2048,37 @@ impl NfsClient {
                 (FileHandle::from_nfs_fh(fh), stateid)
             },
         )?;
-        match slot {
-            OwnerSlot::User => self.session.open_owner.seqid = base + n as u32,
-            OwnerSlot::Path => self.session.path_owner.seqid = base + n as u32,
+        if matches!(slot, OwnerSlot::Path) {
+            self.session.path_owner.seqid = base + n as u32;
         }
         Ok(out)
     }
 
-    /// CLOSE several files in as few compounds as possible. Close seqids are
-    /// assigned consecutively across the batch.
+    /// CLOSE public descriptors in as few compounds as possible. Each has an
+    /// independent OPEN owner, so each CLOSE uses seqid 1.
     pub fn close_many(&mut self, ops: &[CloseOp]) -> RpcResult<()> {
         self.close_many_slot(ops, OwnerSlot::User)
     }
 
     /// Like [`close_many`](Self::close_many) but using the path-op open owner.
     pub fn close_many_path(&mut self, ops: &[CloseOp]) -> RpcResult<()> {
+        self.close_many_cleanup_slot(ops, OwnerSlot::Path)
+    }
+
+    /// Cleanup confirmed public OPENs that were not transferred to descriptors.
+    /// Preserve cleanup fault hooks independently of the chosen OPEN owner.
+    pub(crate) fn close_unregistered_many(&mut self, ops: &[CloseOp]) -> RpcResult<()> {
+        self.close_many_cleanup_slot(ops, OwnerSlot::User)
+    }
+
+    fn close_many_cleanup_slot(&mut self, ops: &[CloseOp], slot: OwnerSlot) -> RpcResult<()> {
         #[cfg(feature = "test-faults")]
         if let Some(injector) = &self.fault_injector
             && let Err(error) = injector.check(&OpenFaultPoint::BeforePathCloseBatch)
         {
             return Err(RpcError::transport(error.to_string()));
         }
-        self.close_many_slot(ops, OwnerSlot::Path)?;
+        self.close_many_slot(ops, slot)?;
         #[cfg(feature = "test-faults")]
         {
             self.confirmed_path_closes += ops.len();
@@ -2830,8 +2854,10 @@ impl NfsClient {
     /// Batched path-based OPENs in one compound per chunk, returning the
     /// opened (filehandle, stateid) pairs (the caller keeps them open).
     pub fn openv_path_compound(&mut self, ops: &[PathOpenOp]) -> RpcResult<PathOpenOutcome> {
-        self.drain_deferred_path_closes()?;
         let n = ops.len();
+        self.drain_deferred_path_closes()?;
+        let public_owner_names: Vec<Vec<u8>> =
+            (0..n).map(|_| self.next_public_open_owner_name()).collect();
         let mut opened: Vec<Option<(FileHandle, stateid4)>> = vec![None; n];
         let mut failed: Option<(usize, u32)> = None;
         let per_file = 6; // RESTOREFH + OPEN + GETFH + [SETATTR x2] + margin
@@ -2849,8 +2875,6 @@ impl NfsClient {
             let mut map = ExecutionMap::new();
             let mut c = Compound::new();
             c.tag(b"openv1");
-            let mut opens_in_chunk = 0usize;
-            let base_seq = self.session.path_owner.seqid;
             let mut payload = 0usize;
             while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
                 let op = &ops[global];
@@ -2875,27 +2899,26 @@ impl NfsClient {
                     OpenCreate::Unchecked => {
                         let mode = op.mode.unwrap_or(0o644);
                         c.open_claim_null_create_mode(
-                            base_seq + opens_in_chunk as u32,
+                            0,
                             op.access,
                             OPEN4_SHARE_DENY_NONE,
                             self.session.clientid,
-                            &self.session.path_owner.name,
+                            &public_owner_names[global],
                             &leaf,
                             Some(mode),
                             op.truncate,
                         );
                     }
                     create => c.open_claim_null(
-                        base_seq + opens_in_chunk as u32,
+                        0,
                         op.access,
                         OPEN4_SHARE_DENY_NONE,
                         self.session.clientid,
-                        &self.session.path_owner.name,
+                        &public_owner_names[global],
                         make_open_how(create, self.session.path_owner.verifier),
                         &leaf,
                     ),
                 }
-                opens_in_chunk += 1;
                 map.note_ops(1);
                 c.getfh();
                 map.note_ops(1);
@@ -2938,7 +2961,6 @@ impl NfsClient {
                 self.close_path_or_defer(closes);
                 return Err(RpcError::transport(error.to_string()));
             }
-            self.session.path_owner.seqid = base_seq + opens_in_chunk as u32;
             let res = match self
                 .call_compound_with_safety(&mut c, RequestSafety::NonIdempotentMutation)
             {
@@ -2953,12 +2975,11 @@ impl NfsClient {
                     return Err(error);
                 }
             };
-            if resource_rejected_before_mutation(&res) {
-                self.session.path_owner.seqid = base_seq;
-                if self.can_retry_merged_resource(b"openv1", &res, budget, reserve, per_file) {
-                    global = chunk_start;
-                    continue;
-                }
+            if resource_rejected_before_mutation(&res)
+                && self.can_retry_merged_resource(b"openv1", &res, budget, reserve, per_file)
+            {
+                global = chunk_start;
+                continue;
             }
             if let Some((caller, st)) = first_failed_range(&res, &map)? {
                 failed = Some((caller, st));
@@ -3197,7 +3218,7 @@ impl NfsClient {
 
     fn close_many_slot(&mut self, ops: &[CloseOp], slot: OwnerSlot) -> RpcResult<()> {
         let base = match slot {
-            OwnerSlot::User => self.session.open_owner.seqid,
+            OwnerSlot::User => 1,
             OwnerSlot::Path => self.session.path_owner.seqid,
         };
         let n = ops.len();
@@ -3207,13 +3228,17 @@ impl NfsClient {
             ops,
             |c, op, gi| {
                 c.putfh(&op.fh.as_nfs_fh());
-                c.close(base + gi as u32, &op.stateid);
+                let seqid = if matches!(slot, OwnerSlot::User) {
+                    base
+                } else {
+                    base + gi as u32
+                };
+                c.close(seqid, &op.stateid);
             },
             |_, _| (),
         )?;
-        match slot {
-            OwnerSlot::User => self.session.open_owner.seqid = base + n as u32,
-            OwnerSlot::Path => self.session.path_owner.seqid = base + n as u32,
+        if matches!(slot, OwnerSlot::Path) {
+            self.session.path_owner.seqid = base + n as u32;
         }
         Ok(())
     }
@@ -3300,13 +3325,30 @@ impl NfsClient {
 
     /// Like [`close`](Self::close) but using the path-op open owner.
     pub fn close_path(&mut self, fh: &FileHandle, stateid: &stateid4) -> RpcResult<()> {
+        self.close_cleanup_slot(fh, stateid, OwnerSlot::Path)
+    }
+
+    pub(crate) fn close_unregistered(
+        &mut self,
+        fh: &FileHandle,
+        stateid: &stateid4,
+    ) -> RpcResult<()> {
+        self.close_cleanup_slot(fh, stateid, OwnerSlot::User)
+    }
+
+    fn close_cleanup_slot(
+        &mut self,
+        fh: &FileHandle,
+        stateid: &stateid4,
+        slot: OwnerSlot,
+    ) -> RpcResult<()> {
         #[cfg(feature = "test-faults")]
         if let Some(injector) = &self.fault_injector
             && let Err(error) = injector.check(&OpenFaultPoint::BeforePathClose)
         {
             return Err(RpcError::transport(error.to_string()));
         }
-        self.close_slot(fh, stateid, OwnerSlot::Path)?;
+        self.close_slot(fh, stateid, slot)?;
         #[cfg(feature = "test-faults")]
         {
             self.confirmed_path_closes += 1;
@@ -3321,7 +3363,7 @@ impl NfsClient {
         slot: OwnerSlot,
     ) -> RpcResult<()> {
         let seqid = match slot {
-            OwnerSlot::User => self.session.open_owner.seqid,
+            OwnerSlot::User => 1,
             OwnerSlot::Path => self.session.path_owner.seqid,
         };
         let mut c = Compound::new();
@@ -3330,9 +3372,8 @@ impl NfsClient {
         c.close(seqid, stateid);
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
-        match slot {
-            OwnerSlot::User => self.session.open_owner.seqid += 1,
-            OwnerSlot::Path => self.session.path_owner.seqid += 1,
+        if matches!(slot, OwnerSlot::Path) {
+            self.session.path_owner.seqid += 1;
         }
         Ok(())
     }

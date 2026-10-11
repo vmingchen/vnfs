@@ -2,6 +2,7 @@
 
 import errno
 import inspect
+from collections import deque
 from types import SimpleNamespace
 
 import pytest
@@ -38,8 +39,8 @@ class _MemoryClient:
         self.calls.append(("exists_many", list(paths)))
         return [path in self.files for path in paths]
 
-    def read_all_many(self, paths):
-        self.calls.append(("read_all_many", list(paths)))
+    def read_all_many(self, paths, max_total_bytes=None):
+        self.calls.append(("read_all_many", list(paths), max_total_bytes))
         values = []
         errors = {}
         for index, path in enumerate(paths):
@@ -99,7 +100,11 @@ def test_vector_reads_use_the_backend_batch_contract():
     finally:
         fs.close()
 
-    assert ("read_all_many", ["/alpha", "/beta"]) in client.calls
+    assert (
+        "read_all_many",
+        ["/alpha", "/beta"],
+        fs.read_all_max_total_bytes,
+    ) in client.calls
     assert (
         "read_many",
         ["/alpha", "/beta"],
@@ -155,3 +160,50 @@ def test_legacy_nfs_constructor_compatibility(reconnect):
         with pytest.raises(ImportError, match="upgrade nfs4fs alongside vfsi-fsspec"):
             LegacyFs(**kwargs)
         assert not LegacyClient.instances, "fail before opening a connection"
+
+
+def test_legacy_native_read_api_is_rejected_before_connect():
+    class LegacyReadClient(_MemoryClient):
+        instances = []
+
+        def read_all_many(self, paths):
+            return super().read_all_many(paths)
+
+    class LegacyReadFs(_MemoryFileSystem):
+        _native_module = SimpleNamespace(NfsClient=LegacyReadClient)
+
+    with pytest.raises(ImportError, match="bounded.*read.*upgrade"):
+        LegacyReadFs(backend="memory", skip_instance_cache=True)
+    assert LegacyReadClient.instances == []
+
+
+def test_handle_identity_is_not_a_mutable_timestamp_or_version():
+    from vfsi_fsspec._fs import _handle_identity
+
+    assert _handle_identity({"fileid": 0, "created_ns": 1}) == 0
+    assert _handle_identity({"fileid": 0, "created_ns": 2, "change": 3}) == 0
+    assert _handle_identity({"created_ns": 1}) is None
+
+
+def test_bulk_read_queue_consumes_each_path_once_in_bounded_batches(monkeypatch):
+    import vfsi_fsspec._fs as implementation
+
+    consumed = 0
+
+    class CountingQueue(deque):
+        def popleft(self):
+            nonlocal consumed
+            consumed += 1
+            return super().popleft()
+
+    monkeypatch.setattr(implementation, "deque", CountingQueue, raising=False)
+    with _MemoryFileSystem(
+        backend="memory", batch_size=64, skip_instance_cache=True
+    ) as fs:
+        native = _MemoryClient.instances[-1]
+        native.files = {f"/f{i}": b"x" for i in range(1025)}
+        assert fs.cat(list(native.files)) == native.files
+        batches = [call[1] for call in native.calls if call[0] == "read_all_many"]
+        assert [len(batch) for batch in batches] == [64] * 16 + [1]
+        assert [path for batch in batches for path in batch] == list(native.files)
+    assert consumed == 1025

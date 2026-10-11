@@ -121,7 +121,7 @@ impl NfsVecFs {
                 .map(|(fh, stateid)| crate::client::CloseOp { fh, stateid })
                 .collect();
             if !closes.is_empty() {
-                let _ = self.nfs.close_many_path(&closes);
+                let _ = self.nfs.close_unregistered_many(&closes);
             }
             return Err(error);
         }
@@ -146,7 +146,7 @@ impl NfsVecFs {
                         .take()
                         .map(|(fh, stateid)| crate::client::CloseOp { fh, stateid })
                 }));
-                let _ = self.nfs.close_many_path(&closes);
+                let _ = self.nfs.close_unregistered_many(&closes);
                 results.push(Err(error));
                 break;
             }
@@ -175,7 +175,7 @@ impl NfsVecFs {
                             .map(|(fh, stateid)| crate::client::CloseOp { fh, stateid })
                             .collect();
                         if !closes.is_empty() {
-                            let _ = self.nfs.close_many_path(&closes);
+                            let _ = self.nfs.close_unregistered_many(&closes);
                         }
                         results.push(Err(error));
                         break;
@@ -189,7 +189,7 @@ impl NfsVecFs {
                             .take()
                             .map(|(fh, stateid)| crate::client::CloseOp { fh, stateid })
                     }));
-                    let _ = self.nfs.close_many_path(&closes);
+                    let _ = self.nfs.close_unregistered_many(&closes);
                     results.push(Err(error));
                     break;
                 }

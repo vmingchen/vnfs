@@ -9,7 +9,7 @@ from contextlib import ExitStack
 
 from vfsi_fsspec import VfsiFile
 from vfsi_fsspec import VfsiFileSystem as _VfsiFileSystem
-from vfsi_fsspec._fs import _RawVfsiFile
+from vfsi_fsspec._fs import _handle_identity, _RawVfsiFile, _stale_handle_error
 
 from . import _native
 
@@ -153,13 +153,30 @@ class Nfs4FileSystem(_VfsiFileSystem):
                         except BaseException:
                             self._client.defer_close_many([fd])
                 raise
-            try:
-                size = self._client.fstat(readers[0]._ensure_open())["size"]
-            except ConnectionError:
-                if not self.auto_reconnect:
-                    raise
-                self._client.reconnect_descriptor(readers[0]._fd)
-                size = self._client.fstat(readers[0]._ensure_open())["size"]
+            attrs_by_reader = []
+            for reader in readers:
+                fd = reader._ensure_open()
+                try:
+                    attrs = self._client.fstat(fd)
+                except ConnectionError:
+                    if not self.auto_reconnect:
+                        raise
+                    try:
+                        # A dropped reply may leave the original descriptor usable.
+                        # Retry metadata on that descriptor before deciding that
+                        # its identity cannot be recovered.
+                        attrs = self._client.fstat(fd)
+                    except ConnectionError:
+                        self._client.reconnect_descriptor(fd)
+                        # OPEN pinned an object before metadata failed. Since its
+                        # identity still could not be captured, reopening by path
+                        # could switch to a replacement file.
+                        raise _stale_handle_error(internal)
+                reader._last_attrs = attrs
+                reader._identity = _handle_identity(attrs)
+                reader._identity_required = True
+                attrs_by_reader.append(attrs)
+            size = attrs_by_reader[0]["size"]
 
             def read_exact(reader, offset, length):
                 data = bytearray(length)

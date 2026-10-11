@@ -14,7 +14,7 @@ import tempfile
 import threading
 import uuid
 import weakref
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from glob import has_magic
@@ -23,6 +23,8 @@ from urllib.parse import unquote, urlsplit
 
 from fsspec.caching import caches
 from fsspec.callbacks import DEFAULT_CALLBACK, Callback
+from fsspec.compression import compr
+from fsspec.core import PickleableTextIOWrapper
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 from fsspec.transaction import Transaction
 
@@ -147,6 +149,20 @@ def _allocation_error(path, requested, limit):
         f"read would allocate {requested} bytes, exceeding the {limit}-byte limit",
         path,
     )
+
+
+def _handle_identity(attrs):
+    """Object identity within this filesystem, not a file-version token.
+
+    Native ``created`` fields currently contain POSIX ctime, which changes on
+    writes and chmod. Never use them to identify an inode across reconnects.
+    Missing file IDs fail closed; timestamps alone cannot establish identity.
+    """
+    return attrs.get("fileid")
+
+
+def _stale_handle_error(path):
+    return OSError(errno.ESTALE, "cannot safely restore the original file handle", path)
 
 
 def _write_fully(file, data, callback=None):
@@ -652,20 +668,22 @@ class _RawVfsiFile(io.RawIOBase):
     ``wb`` truncates and ``ab`` appends at open time, matching POSIX ``open()``.
     """
 
-    def __init__(self, fs, path, mode="rb", fd=None):
+    def __init__(self, fs, path, mode="rb", fd=None, identity=None):
         super().__init__()
         # Set these first so close()/__del__ are safe even if later
         # initialization (e.g. an unsupported mode) raises.
         self._closed = False
         self._fd = fd  # None until the first I/O (read modes) or __init__ (w/a)
         self._fd_generation = fs._client.generation if fd is not None else None
+        self._identity = identity
+        self._identity_required = fd is not None
+        self._last_attrs = None
         self._broken = False
         self.fs = fs
         self.path = fs._checked_strip_protocol(path)
         self.mode = mode
         self._base_mode = _normalize_mode(mode)
         self._pos = 0
-        self._cached_size = None
         self._readable = self._base_mode in ("r", "r+", "w+", "a+", "x+")
         self._writable = self._base_mode in ("r+", "w", "w+", "a", "a+", "x", "x+")
         if fd is None and self._base_mode in ("w", "w+", "a", "a+", "x", "x+"):
@@ -702,15 +720,46 @@ class _RawVfsiFile(io.RawIOBase):
                 raise ConnectionError(
                     "write handle is unusable after its native session reconnects"
                 )
+            if self._identity_required and self._identity is None:
+                raise _stale_handle_error(self.path)
         if self._fd is None:
-            self._fd = self.fs._client.open(
-                self.fs._native_path(self.path), self._native_mode()
-            )
+            try:
+                fd = self.fs._client.open(
+                    self.fs._native_path(self.path), self._native_mode()
+                )
+            except FileNotFoundError:
+                if self._identity_required:
+                    raise _stale_handle_error(self.path) from None
+                raise
+            attrs = None
+            identity = None
+            try:
+                if self._readable or self._base_mode.startswith("a"):
+                    attrs = self.fs._client.fstat(fd)
+                    if self._readable:
+                        identity = _handle_identity(attrs)
+                        if self._identity_required and (
+                            identity is None or identity != self._identity
+                        ):
+                            raise _stale_handle_error(self.path)
+            except BaseException:
+                # Do not publish a reopened descriptor until its identity has
+                # been checked. A later call must retry this check, not trust a
+                # descriptor whose metadata probe failed.
+                try:
+                    self.fs._client.close(fd)
+                except BaseException:
+                    self.fs._client.defer_close_many([fd])
+                raise
+            self._fd = fd
             self._fd_generation = self.fs._client.generation
-            if self._base_mode.startswith("a"):
-                attrs = self.fs._client.fstat(self._fd)
-                self._pos = attrs["size"]
-                self._cached_size = attrs["size"]
+            if attrs is not None:
+                self._last_attrs = attrs
+                if self._readable and not self._identity_required:
+                    self._identity = identity
+                    self._identity_required = identity is not None
+                if self._base_mode.startswith("a"):
+                    self._pos = attrs["size"]
         return self._fd
 
     def _pread_at(self, offset, length):
@@ -741,12 +790,11 @@ class _RawVfsiFile(io.RawIOBase):
         return self._pread_at(self._pos, length)
 
     def _size(self):
-        if self._cached_size is None:
-            if self._fd is not None:
-                self._cached_size = self.fs._client.fstat(self._ensure_open())["size"]
-            else:
-                self._cached_size = self.fs.size(self.path)
-        return self._cached_size
+        # Uncached/update handles must observe growth and truncation, including
+        # changes through another descriptor. Cached readers keep their own size.
+        if self._fd is not None:
+            return self.fs._client.fstat(self._ensure_open())["size"]
+        return self.fs.size(self.path)
 
     # -- io.RawIOBase ------------------------------------------------------
 
@@ -800,7 +848,6 @@ class _RawVfsiFile(io.RawIOBase):
                     raise _oserror(errors[0], self.path)
                 buf = data[0] or b""
                 self._pos = len(buf)
-                self._cached_size = len(buf)
                 return buf
             # One size fetch + one read loop instead of readall()'s
             # doubling-chunk preads.
@@ -850,8 +897,6 @@ class _RawVfsiFile(io.RawIOBase):
                 self._fd = None
                 self._fd_generation = None
             raise
-        if self._cached_size is not None:
-            self._cached_size = max(self._cached_size, new_pos)
         self._pos = new_pos
         return n
 
@@ -895,7 +940,6 @@ class _RawVfsiFile(io.RawIOBase):
             # was lost. Never replay it on a potentially different handle.
             self._broken = True
             raise
-        self._cached_size = size
         return size
 
     def flush(self):
@@ -946,8 +990,9 @@ class VfsiFile(AbstractBufferedFile):
         write_buffering=False,
         size=None,
         defer_cache=False,
+        identity=None,
     ):
-        self._raw = _RawVfsiFile(fs, path, mode, fd=fd)
+        self._raw = _RawVfsiFile(fs, path, mode, fd=fd, identity=identity)
         self._base_mode = _normalize_mode(mode)
         self._buffered_read = self._base_mode == "r" and cache_type not in (
             None,
@@ -984,11 +1029,11 @@ class VfsiFile(AbstractBufferedFile):
                     {} if self._deferred_cache_type is not None else self._cache_options
                 ),
                 size=size,
+                identity=identity,
             )
             if self._buffered_write and self._base_mode == "a":
                 append_size = self._raw.tell() if size is None else size
                 self._raw._pos = append_size
-                self._raw._cached_size = append_size
                 self._buffer_size = append_size
                 self.loc = append_size
         else:
@@ -1018,7 +1063,7 @@ class VfsiFile(AbstractBufferedFile):
 
     @property
     def size(self):
-        if self._buffer_size is not None:
+        if self._has_read_cache() and self._buffer_size is not None:
             return self._buffer_size
         return self._raw.size
 
@@ -1128,7 +1173,7 @@ class VfsiFile(AbstractBufferedFile):
                 # read_all_many could switch to a replacement inode after a
                 # rename, even on a handle that was already read once.
                 self._raw.seek(0)
-                data = self._raw.read()
+                data = self._raw.read(self.size)
             else:
                 data, errors = self.fs._client.read_all_many(
                     [self.fs._native_path(self.path)]
@@ -1159,12 +1204,12 @@ class VfsiFile(AbstractBufferedFile):
         return super().readinto(b)
 
     def write(self, data):
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
         if not self._using_buffer:
             return self._raw.write(data)
         if not self._buffered_write:
             return super().write(data)
-        if self.closed:
-            raise ValueError("I/O operation on closed file")
         if isinstance(data, str):
             raise TypeError("a bytes-like object is required, not 'str'")
         if self._write_failed:
@@ -1200,6 +1245,8 @@ class VfsiFile(AbstractBufferedFile):
         return written
 
     def seek(self, offset, whence=0):
+        if not self._has_read_cache() and not self._buffered_write:
+            return self._raw.seek(offset, whence)
         requested = operator.index(offset)
         whence = operator.index(whence)
         if whence == 0:
@@ -1212,8 +1259,6 @@ class VfsiFile(AbstractBufferedFile):
             position = 0
         if whence in (0, 1, 2) and position < 0:
             raise OSError(errno.EINVAL, "Invalid argument")
-        if not self._has_read_cache() and not self._buffered_write:
-            return self._raw.seek(requested, whence)
         return super().seek(requested, whence)
 
     def tell(self):
@@ -1256,7 +1301,8 @@ class VfsiFile(AbstractBufferedFile):
                 return None
             self.forced = True
         self._stage_buffer()
-        self._buffer_group.flush_files([self])
+        if not self._buffer_group._finalizing_wrappers:
+            self._buffer_group.flush_files([self])
         return None
 
     def readable(self):
@@ -1275,6 +1321,13 @@ class VfsiFile(AbstractBufferedFile):
         return super().seekable()
 
     def close(self):
+        group = self._buffer_group
+        if group is not None and group._finalizing_wrappers and self._raw.writable():
+            # Encoders can close their sink while still producing final bytes.
+            # Keep native handles live until the group has drained all spools.
+            if self._buffered_write and not self.closed and not self._write_failed:
+                self._stage_buffer()
+            return
         if self.closed:
             group = self._buffer_group
             if group is not None and not group._group_closed:
@@ -1329,6 +1382,40 @@ class VfsiFile(AbstractBufferedFile):
             self._write_spool = None
 
 
+class _WrappedFiles(list):
+    """Grouped binary handles and their fsspec text/compression wrappers."""
+
+    def __init__(self, raw_files, open_files):
+        super().__init__()
+        self.raw_files = raw_files
+        self.open_files = open_files
+        self.group = raw_files[0]._buffer_group
+        self.group._wrapped_files = self
+
+    def wrap(self):
+        for file, open_file in zip(self.raw_files, self.open_files):
+            if "r" not in open_file.mode:
+                # OpenFiles explicitly invokes each entry's __exit__ before
+                # commit_many. Hand that phase to the existing coordinator;
+                # leave close() and the standalone context-manager protocol alone.
+                open_file._vfsi_previous_exit = open_file.__dict__.get("__exit__")
+                open_file.__exit__ = self.group._exit_wrapped
+            open_file.fobjects = [file]
+            if open_file.compression is not None:
+                file = compr[open_file.compression](file, mode=open_file.mode[0])
+                open_file.fobjects.append(file)
+            if "b" not in open_file.mode:
+                file = PickleableTextIOWrapper(
+                    file,
+                    encoding=open_file.encoding,
+                    errors=open_file.errors,
+                    newline=open_file.newline,
+                )
+                open_file.fobjects.append(file)
+            self.append(file)
+        return self
+
+
 class _BufferGroup:
     """Coordinate cache misses and buffered flushes across OpenFiles."""
 
@@ -1342,6 +1429,10 @@ class _BufferGroup:
         self._speculative_bytes = 0
         self._close_requested = set()
         self._group_closed = False
+        self._wrapped_files = None
+        self._finalizing_wrappers = False
+        self._finalized = False
+        self._finalization_error = None
         for file in self.files:
             file._attach_group(self)
 
@@ -1413,23 +1504,51 @@ class _BufferGroup:
                         spool.rollover()
 
     def _reopen_readers(self):
-        active = [file for file in self.files if not file.closed and file.readable()]
+        active = [
+            file
+            for file in self.files
+            if not file.closed and file.readable() and not file._raw.writable()
+        ]
         if not active:
             return
         descriptor = next(
-            (file._raw._fd for file in active if file._raw._fd is not None), None
+            (
+                file._raw._fd
+                for file in active
+                if file._raw._fd is not None
+                and self.fs._client.descriptor_valid(file._raw._fd)
+            ),
+            None,
         )
-        if descriptor is not None and self.fs._client.descriptor_valid(descriptor):
+        if descriptor is not None:
             self.fs._client.reconnect_descriptor(descriptor)
         fds = self.fs._client.open_many(
             [self.fs._native_path(file.path) for file in active],
-            [file._raw._native_mode() for file in active],
+            ["rb"] * len(active),
         )
+        try:
+            attrs = self.fs._client.fstat_many(fds)
+            for file, attr in zip(active, attrs):
+                identity = _handle_identity(attr)
+                if file._raw._identity is None or identity != file._raw._identity:
+                    raise _stale_handle_error(file.path)
+        except BaseException:
+            try:
+                self.fs._client.close_many(fds)
+            except BaseException:
+                self.fs._client.defer_close_many(fds)
+            raise
         for file, fd in zip(active, fds):
             file._raw._fd = fd
             file._raw._fd_generation = self.fs._client.generation
 
     def _pread_many(self, files, offsets, lengths):
+        if self.fs.auto_reconnect and any(
+            file._raw._fd is None
+            or not self.fs._client.descriptor_valid(file._raw._fd)
+            for file in files
+        ):
+            self._reopen_readers()
         fds = [file._raw._ensure_open() for file in files]
         try:
             return self.fs._client.pread_many(fds, offsets, lengths)
@@ -1575,7 +1694,8 @@ class _BufferGroup:
         pending = [
             file
             for file in files
-            if file._write_spool is not None
+            if not file._write_failed
+            and file._write_spool is not None
             and file._spool_read_offset < file._write_spool.seek(0, io.SEEK_END)
         ]
         while pending:
@@ -1590,7 +1710,8 @@ class _BufferGroup:
                 if not data:
                     continue
                 if wave and (
-                    len(wave) >= self.fs.batch_size
+                    (file._base_mode == "a") != (wave[0]._base_mode == "a")
+                    or len(wave) >= self.fs.batch_size
                     or total + len(data) > self.fs.max_batch_bytes
                 ):
                     continue
@@ -1607,7 +1728,6 @@ class _BufferGroup:
                         if written != len(data):
                             raise OSError(errno.EIO, "short buffered append", file.path)
                         file._raw._pos = position
-                        file._raw._cached_size = position
                         file._spool_read_offset += written
                 else:
                     offsets = [file._raw._pos for file in wave]
@@ -1616,10 +1736,6 @@ class _BufferGroup:
                         if written != len(data):
                             raise OSError(errno.EIO, "short buffered write", file.path)
                         file._raw._pos += written
-                        if file._raw._cached_size is not None:
-                            file._raw._cached_size = max(
-                                file._raw._cached_size, file._raw._pos
-                            )
                         file._spool_read_offset += written
                 for file in wave:
                     self.fs._invalidate_parent_listing(file.path)
@@ -1641,6 +1757,72 @@ class _BufferGroup:
                 if file._spool_read_offset < file._write_spool.seek(0, io.SEEK_END)
             ]
 
+    def _exit_wrapped(self, *exc):
+        self.finish()
+
+    def finish(self, files=None):
+        """Finalize encoders once, drain bounded write waves, then close all."""
+        with self._lock:
+            if not self._finalized:
+                try:
+                    if self._wrapped_files is not None:
+                        self._finalize_wrappers()
+                    buffered = [
+                        file
+                        for file in (self.files if files is None else files)
+                        if file._buffered_write and not file.closed
+                    ]
+                    for file in buffered:
+                        if file._write_failed:
+                            file._raise_write_failure()
+                        file._stage_buffer()
+                    self.flush_files(buffered)
+                except BaseException as error:
+                    self._finalization_error = self._finalization_error or error
+                finally:
+                    self._finalized = True
+                    if self._wrapped_files is not None:
+                        # Encoders have finished even when native CLOSE needs a
+                        # retry. Reject new writes; retain descriptors for cleanup.
+                        for file in self.files:
+                            if file._raw.writable():
+                                file._closed = True
+            try:
+                self.close_all()
+            except BaseException as cleanup_error:
+                if self._finalization_error is not None:
+                    raise self._finalization_error from cleanup_error
+                raise
+            if self._finalization_error is not None:
+                raise self._finalization_error
+
+    def _finalize_wrappers(self):
+        self._finalizing_wrappers = True
+        try:
+            for file, entry in zip(self.files, self._wrapped_files.open_files):
+                try:
+                    # Continue down the chain after an encoder fails, and then
+                    # continue with every sibling. Never retry failed encoders.
+                    for stream in reversed(entry.fobjects):
+                        try:
+                            if not stream.closed:
+                                stream.close()
+                        except BaseException as error:
+                            self._finalization_error = self._finalization_error or error
+                            file._write_failed = True
+                            file._raw._broken = True
+                finally:
+                    entry.fobjects.clear()
+                    if hasattr(entry, "_vfsi_previous_exit"):
+                        previous = entry._vfsi_previous_exit
+                        if previous is None:
+                            del entry.__exit__
+                        else:
+                            entry.__exit__ = previous
+                        del entry._vfsi_previous_exit
+        finally:
+            self._finalizing_wrappers = False
+
     def request_close(self, file):
         with self._lock:
             if self._group_closed:
@@ -1654,24 +1836,34 @@ class _BufferGroup:
         with self._lock:
             if self._group_closed:
                 return
-            members = [
-                member
-                for member in self.files
-                if member._raw._fd is not None
-                and self.fs._client.descriptor_valid(member._raw._fd)
-            ]
-            fds = [member._raw._fd for member in members]
-            if fds and not self.fs._client.closed:
-                # Do not disarm members until the entire vector CLOSE has
-                # succeeded. A failed close remains explicitly retryable.
-                try:
-                    self.fs._client.close_many(fds)
-                except BaseException as error:
-                    completed = getattr(error, "index", 0)
-                    if isinstance(completed, int) and 0 <= completed <= len(members):
-                        for member in members[:completed]:
-                            member._finish_group_close()
-                    raise
+            by_owner = OrderedDict()
+            for member in self.files:
+                fd = member._raw._fd
+                if fd is None or not self.fs._client.descriptor_valid(fd):
+                    continue
+                owner, _, _ = self.fs._client._resolve(fd)
+                by_owner.setdefault(owner, []).append(member)
+
+            first_error = None
+            if not self.fs._client.closed:
+                for members in by_owner.values():
+                    for start in range(0, len(members), self.fs.batch_size):
+                        batch = members[start : start + self.fs.batch_size]
+                        fds = [member._raw._fd for member in batch]
+                        try:
+                            self.fs._client.close_many(fds)
+                        except BaseException as error:
+                            completed = getattr(error, "index", 0)
+                            if isinstance(completed, int) and 0 <= completed <= len(batch):
+                                for member in batch[:completed]:
+                                    member._finish_group_close()
+                            first_error = first_error or error
+                        else:
+                            for member in batch:
+                                member._finish_group_close()
+            if first_error is not None:
+                raise first_error
+
             self._group_closed = True
             for member in self.files:
                 member._finish_group_close()
@@ -1718,6 +1910,8 @@ class _DeferredWriteFile:
             raise ValueError("I/O operation on closed file")
         if isinstance(data, str):
             raise TypeError("a bytes-like object is required, not 'str'")
+        if "a" in self.mode:
+            self._spool.seek(0, io.SEEK_END)
         return self._spool.write(data)
 
     def seek(self, offset, whence=0):
@@ -1743,6 +1937,17 @@ class _DeferredWriteFile:
     def close(self):
         # The spool is retained until the transaction prepares or discards it.
         self._closed = True
+
+    @staticmethod
+    def discard_many(files):
+        error = None
+        for file in files:
+            try:
+                file.discard()
+            except BaseException as exc:
+                error = error or exc
+        if error is not None:
+            raise error
 
     def prepare(self):
         """Upload to a same-directory temporary file without exposing target."""
@@ -1827,8 +2032,7 @@ class _VfsiTransaction(Transaction):
         fs = self.fs
         try:
             if not commit:
-                for file in files:
-                    file.discard()
+                _DeferredWriteFile.discard_many(files)
                 return
             prepared = []
             try:
@@ -1836,11 +2040,11 @@ class _VfsiTransaction(Transaction):
                     file.prepare()
                     prepared.append(file)
                 _DeferredWriteFile.finalize_many(prepared)
-            except Exception:
-                for file in prepared:
-                    file.discard()
-                for file in files[len(prepared) :]:
-                    file.discard()
+            except BaseException as error:
+                try:
+                    _DeferredWriteFile.discard_many(files)
+                except BaseException as cleanup_error:
+                    raise error from cleanup_error
                 raise
         finally:
             if fs is not None:
@@ -2083,6 +2287,18 @@ class VfsiFileSystem(AbstractFileSystem):
                     "control; upgrade nfs4fs alongside vfsi-fsspec"
                 )
             factory_args += (False,)
+        try:
+            bounded_reads = (
+                "max_total_bytes"
+                in inspect.signature(native_module.NfsClient.read_all_many).parameters
+            )
+        except (AttributeError, TypeError, ValueError):
+            bounded_reads = False
+        if not bounded_reads:
+            raise ImportError(
+                "bounded vector reads require a compatible native adapter; "
+                "upgrade nfs4fs or vsmbfs alongside vfsi-fsspec"
+            )
         self._client = _ClientPool(
             native_module,
             factory_args,
@@ -2627,56 +2843,114 @@ class VfsiFileSystem(AbstractFileSystem):
         reported = set()
         valid = [index for index in range(len(paths)) if index not in failures]
         valid_sizes = [stats[index].get("size", 0) for index in valid]
+        limit = self.read_all_max_total_bytes
         self._check_read_allocation(sum(valid_sizes), paths[0] if paths else None)
-        for positions in _bounded_batches(
-            valid_sizes, self.batch_size, self.max_batch_bytes
-        ):
-            batch = [valid[position] for position in positions]
-            if len(batch) == 1 and valid_sizes[positions[0]] > self.max_batch_bytes:
-                index = batch[0]
-                try:
-                    with callback.branched(paths[index], _MEMORY_PATH) as child:
-                        child.set_size(valid_sizes[positions[0]])
-                        data[index] = self._read_one_streamed(
-                            paths[index], callback=child
-                        )
-                except OSError as exc:
-                    failures[index] = exc
-                callback.relative_update()
-                reported.add(index)
+        retained = 0
+
+        def read_streamed(index, size, budget):
+            nonlocal retained
+            try:
+                with callback.branched(paths[index], _MEMORY_PATH) as child:
+                    child.set_size(size)
+                    value = self._read_one_streamed(
+                        paths[index],
+                        callback=child,
+                        max_bytes=budget,
+                        allocation_base=retained,
+                        allocation_limit=limit,
+                    )
+                if retained + len(value) > limit:
+                    raise _allocation_error(paths[index], retained + len(value), limit)
+                data[index] = value
+                retained += len(value)
+            except OSError as exc:
+                failures[index] = exc
+            callback.relative_update()
+            reported.add(index)
+
+        pending = deque(zip(valid, valid_sizes))
+        while pending:
+            remaining = limit - retained
+
+            batch = []
+            estimated = 0
+            oversized = False
+            byte_limit = min(self.max_batch_bytes, remaining)
+            while pending and len(batch) < self.batch_size:
+                index, size = pending[0]
+                if batch and estimated + size > byte_limit:
+                    break
+                if not batch and (size > self.max_batch_bytes or size > remaining):
+                    pending.popleft()
+                    batch = [(index, size)]
+                    oversized = True
+                    break
+                pending.popleft()
+                batch.append((index, size))
+                estimated += size
+            if not batch:
                 continue
+
+            if oversized:
+                index, size = batch[0]
+                read_streamed(index, size, remaining)
+                continue
+
+            # Stat sizes are planning hints, not permission checks or EOF.
+            # A zero remaining budget still permits the native bounded EOF
+            # probe, so a formerly empty file cannot silently bypass the cap.
             dat, batch_errors = self._client.read_all_many(
-                [native[index] for index in batch]
+                [native[index] for index, _ in batch], remaining
             )
-            for position, value in enumerate(dat):
-                index = batch[position]
-                if value is not None:
-                    data[index] = value
-            for position, code in batch_errors.items():
-                index = batch[position]
-                failures[index] = _oserror(code, paths[index])
+            for position, (index, _size) in enumerate(batch):
+                if position in batch_errors:
+                    failures[index] = _oserror(batch_errors[position], paths[index])
+                    continue
+                value = dat[position] or b""
+                if retained + len(value) > limit:
+                    failures[index] = _allocation_error(
+                        paths[index], retained + len(value), limit
+                    )
+                    continue
+                data[index] = value
+                retained += len(value)
+
         out = {}
-        for i, p in enumerate(paths):
+        for i, path in enumerate(paths):
             if i not in reported:
                 if i in failures:
                     callback.relative_update()
                 else:
-                    _complete_child(callback, p, _MEMORY_PATH, len(data[i]))
+                    _complete_child(callback, path, _MEMORY_PATH, len(data[i]))
             if i in failures:
                 exc = failures[i]
                 if on_error == "raise":
                     raise exc
                 if on_error == "return":
-                    out[p] = exc
+                    out[path] = exc
                 # "omit": skip the failed key
             else:
-                out[p] = data[i]
+                out[path] = data[i]
         return out
 
-    def _read_one_streamed(self, path, callback=DEFAULT_CALLBACK):
+    def _read_one_streamed(
+        self,
+        path,
+        callback=DEFAULT_CALLBACK,
+        max_bytes=None,
+        allocation_base=0,
+        allocation_limit=None,
+    ):
         """Read one result incrementally within the public allocation cap."""
         output = io.BytesIO()
-        self._copy_remote_to_fileobj(path, output, callback=callback)
+        self._copy_remote_to_fileobj(
+            path,
+            output,
+            callback=callback,
+            max_bytes=max_bytes,
+            allocation_base=allocation_base,
+            allocation_limit=allocation_limit,
+        )
         return output.getvalue()
 
     def cat(
@@ -2984,6 +3258,8 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def _write_spooled(self, path, spool):
         """Stream a seekable local spool to one remote path."""
+        if self.auto_mkdir:
+            self._ensure_dirs([posixpath.dirname(path) or "/"])
         spool.seek(0)
         with VfsiFile(self, path, "xb") as remote:
             while True:
@@ -2992,14 +3268,45 @@ class VfsiFileSystem(AbstractFileSystem):
                     break
                 _write_fully(remote, chunk)
 
-    def _copy_remote_to_fileobj(self, path, output, callback=None):
+    def _copy_remote_to_fileobj(
+        self,
+        path,
+        output,
+        callback=None,
+        max_bytes=None,
+        allocation_base=0,
+        allocation_limit=None,
+    ):
         """Stream one remote file into a writable local file object."""
+        streamed = 0
         with self.open(path, "rb", cache_type="none") as remote:
+            if max_bytes == 0:
+                if remote.size:
+                    limit = (
+                        self.read_all_max_total_bytes
+                        if allocation_limit is None
+                        else allocation_limit
+                    )
+                    raise _allocation_error(path, allocation_base + 1, limit)
+                return
             while True:
-                chunk = remote.read(self._stream_read_size())
+                request = self._stream_read_size()
+                if max_bytes is not None:
+                    request = min(request, max_bytes - streamed + 1)
+                chunk = remote.read(request)
                 if not chunk:
                     break
+                if max_bytes is not None and streamed + len(chunk) > max_bytes:
+                    limit = (
+                        max_bytes
+                        if allocation_limit is None
+                        else allocation_limit
+                    )
+                    raise _allocation_error(
+                        path, allocation_base + streamed + len(chunk), limit
+                    )
                 output.write(chunk)
+                streamed += len(chunk)
                 if callback is not None:
                     callback.relative_update(len(chunk))
 
@@ -3322,6 +3629,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 self._ensure_dirs([parent], 0o755)
         base_mode = _normalize_mode(mode)
         fd = None
+        identity = None
         try:
             if base_mode in ("r", "r+"):
                 # A scalar open is the point at which Python promises a file
@@ -3333,6 +3641,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 attrs = self._client.fstat(fd)
                 if attrs["type"] == "directory":
                     raise IsADirectoryError(errno.EISDIR, "Is a directory", internal)
+                identity = _handle_identity(attrs)
                 if size is None:
                     size = attrs["size"]
             file = VfsiFile(
@@ -3351,9 +3660,8 @@ class VfsiFileSystem(AbstractFileSystem):
                     else bool(write_buffering)
                 ),
                 size=size,
+                identity=identity,
             )
-            if fd is not None:
-                file._raw._cached_size = attrs["size"]
             return file
         except BaseException:
             if fd is not None and self._client.descriptor_valid(fd):
@@ -3375,7 +3683,7 @@ class VfsiFileSystem(AbstractFileSystem):
     ):
         """Open a list of ``OpenFile`` objects in one openv batch."""
         paths = [self._checked_strip_protocol(f.path) for f in open_files]
-        modes = [f.mode for f in open_files]
+        modes = [f.mode.replace("t", "").replace("b", "") + "b" for f in open_files]
         effective_block_size = self.block_size if block_size is None else block_size
         effective_cache_type = self.cache_type if cache_type is None else cache_type
         effective_cache_options = (
@@ -3404,14 +3712,11 @@ class VfsiFileSystem(AbstractFileSystem):
         fds = self._client.open_many([self._native_path(p) for p in paths], modes)
         files = []
         try:
+            identities = [None] * len(paths)
             metadata_indices = [
                 index
                 for index, mode in enumerate(modes)
-                if (
-                    _normalize_mode(mode) == "r"
-                    and effective_cache_type not in (None, "none")
-                    and discovered_sizes[index] is None
-                )
+                if _normalize_mode(mode) == "r"
                 or (
                     _normalize_mode(mode) == "a"
                     and effective_write_buffering
@@ -3423,7 +3728,9 @@ class VfsiFileSystem(AbstractFileSystem):
                     [fds[index] for index in metadata_indices]
                 )
                 for index, attr in zip(metadata_indices, attrs):
-                    discovered_sizes[index] = attr["size"]
+                    identities[index] = _handle_identity(attr)
+                    if discovered_sizes[index] is None:
+                        discovered_sizes[index] = attr["size"]
             files = [
                 VfsiFile(
                     self,
@@ -3436,8 +3743,11 @@ class VfsiFileSystem(AbstractFileSystem):
                     write_buffering=effective_write_buffering,
                     size=size,
                     defer_cache=True,
+                    identity=identity,
                 )
-                for path, mode, fd, size in zip(paths, modes, fds, discovered_sizes)
+                for path, mode, fd, size, identity in zip(
+                    paths, modes, fds, discovered_sizes, identities
+                )
             ]
             _BufferGroup(self, files)
         except BaseException as setup_error:
@@ -3453,6 +3763,16 @@ class VfsiFileSystem(AbstractFileSystem):
             if cleanup_error is not None:
                 raise setup_error from cleanup_error
             raise
+        if any(f.compression is not None or "b" not in f.mode for f in open_files):
+            wrapped = _WrappedFiles(files, open_files)
+            try:
+                return wrapped.wrap()
+            except BaseException as error:
+                try:
+                    self.commit_many(wrapped)
+                except BaseException as cleanup_error:
+                    raise error from cleanup_error
+                raise
         # Read-mode OpenFiles contexts do not call commit_many on exit;
         # register the opened files on their OpenFile objects so
         # OpenFile.__exit__ closes them (matching per-file opens on other
@@ -3464,24 +3784,11 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def commit_many(self, open_files):
         """Flush and close a list of files in one closev batch."""
+        if isinstance(open_files, _WrappedFiles):
+            return open_files.group.finish()
         group = open_files[0]._buffer_group if open_files else None
         if group is not None:
-            error = None
-            try:
-                buffered = [file for file in open_files if file._buffered_write]
-                for file in buffered:
-                    file._stage_buffer()
-                group.flush_files(buffered)
-            except BaseException as exc:
-                error = exc
-            try:
-                group.close_all()
-            except BaseException:
-                if error is None:
-                    raise
-            if error is not None:
-                raise error
-            return
+            return group.finish(open_files)
         fds = [f._fd for f in open_files if not f.closed and f._fd is not None]
         if fds:
             self._client.close_many(fds)
@@ -3510,6 +3817,9 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def rmdir(self, path):
         internal = self._checked_strip_protocol(path)
+        attrs = self._client.lstat(self._native_path(internal))
+        if attrs["type"] != "directory":
+            raise NotADirectoryError(errno.ENOTDIR, "Not a directory", internal)
         self._invalidate_namespace([internal])
         self._client.remove_many([self._native_path(internal)])
 
