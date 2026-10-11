@@ -637,3 +637,97 @@ def test_reader_recovery_rejects_same_fileid_in_different_filesystem(
         assert error.value.errno == errno.ESTALE
     finally:
         reader.close()
+
+
+@pytest.mark.parametrize("start,end", [(1, None), (-3, None), (1, 0)])
+@pytest.mark.parametrize("replacement", [b"abcdefghijklmnop", b"ab"])
+def test_cat_file_freezes_checked_range_before_file_changes(
+    fs, monkeypatch, start, end, replacement
+):
+    fs.read_all_max_total_bytes = 8
+    fs.pipe_file("/range", b"abcd")
+    stat_many = fs._client.stat_many
+
+    def stat_then_change(paths):
+        result = stat_many(paths)
+        fs.pipe_file("/range", replacement)
+        return result
+
+    monkeypatch.setattr(fs._client, "stat_many", stat_then_change)
+    assert fs.cat_file("/range", start=start, end=end) == replacement[1:4]
+
+
+@pytest.mark.parametrize("batch_size", [2, 3])
+@pytest.mark.parametrize("on_error", ["raise", "return"])
+def test_cat_ranges_freezes_aggregate_bounds_and_keeps_vector_batches(
+    fs, monkeypatch, batch_size, on_error
+):
+    fs.read_all_max_total_bytes = 9
+    fs.batch_size = batch_size
+    fs.max_batch_bytes = batch_size * 3
+    paths = ["/range-a", "/range-b", "/range-c"]
+    fs.pipe(dict.fromkeys(paths, b"abcd"))
+    stat_many = fs._client.stat_many
+    read_many = fs._client.read_many
+    batches = []
+
+    def stat_then_grow(native_paths):
+        result = stat_many(native_paths)
+        fs.pipe(dict.fromkeys(paths, b"abcdefghijklmnop"))
+        return result
+
+    def record_read(native_paths, starts, ends):
+        batches.append((list(starts), list(ends)))
+        return read_many(native_paths, starts, ends)
+
+    monkeypatch.setattr(fs._client, "stat_many", stat_then_grow)
+    monkeypatch.setattr(fs._client, "read_many", record_read)
+    result = fs.cat_ranges(paths, [1, -3, 1], [None, None, 0], on_error=on_error)
+    assert result == [b"bcd"] * 3
+    assert sum(map(len, result)) == fs.read_all_max_total_bytes
+    widths = [2, 1] if batch_size == 2 else [3]
+    assert batches == [([1] * width, [4] * width) for width in widths]
+
+
+@pytest.mark.parametrize(
+    "api,start", [("cat_file", 1), ("cat_ranges", 0), ("cat_ranges", 1)]
+)
+def test_open_ended_range_with_zero_budget_excludes_later_growth(
+    fs, monkeypatch, api, start
+):
+    fs.read_all_max_total_bytes = 0
+    fs.pipe_file("/empty-range", b"")
+    stat_many = fs._client.stat_many
+
+    def stat_then_grow(paths):
+        result = stat_many(paths)
+        fs.pipe_file("/empty-range", b"later")
+        return result
+
+    monkeypatch.setattr(fs._client, "stat_many", stat_then_grow)
+    if api == "cat_file":
+        assert fs.cat_file("/empty-range", start=start) == b""
+    else:
+        assert fs.cat_ranges(["/empty-range"], [start], [None]) == [b""]
+
+
+@pytest.mark.parametrize("on_error", ["return", "raise"])
+def test_bounded_range_growth_preserves_missing_path_errors(fs, monkeypatch, on_error):
+    fs.read_all_max_total_bytes = 3
+    fs.pipe_file("/range", b"abcd")
+    stat_many = fs._client.stat_many
+
+    def stat_then_grow(paths):
+        result = stat_many(paths)
+        fs.pipe_file("/range", b"abcdefghijklmnop")
+        return result
+
+    monkeypatch.setattr(fs._client, "stat_many", stat_then_grow)
+    paths = ["/range", "/missing-range"]
+    if on_error == "raise":
+        with pytest.raises(FileNotFoundError):
+            fs.cat_ranges(paths, 1, None, on_error=on_error)
+    else:
+        result = fs.cat_ranges(paths, 1, None, on_error=on_error)
+        assert result[0] == b"bcd"
+        assert isinstance(result[1], FileNotFoundError)

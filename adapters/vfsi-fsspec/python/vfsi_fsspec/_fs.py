@@ -3005,10 +3005,10 @@ class VfsiFileSystem(AbstractFileSystem):
             return result
         if end is None:
             size = self.size(internal) if size is None else size
-            requested = max(0, size - start)
-        else:
-            requested = max(0, end - start)
-        self._check_read_allocation(requested, internal)
+            # Freeze EOF at the checked size; a second native size query
+            # could otherwise enlarge this allocation after concurrent growth.
+            end = max(start, size)
+        self._check_read_allocation(max(0, end - start), internal)
         data, errors = self._client.read_many(
             [self._native_path(internal)], [start], [end]
         )
@@ -3062,7 +3062,10 @@ class VfsiFileSystem(AbstractFileSystem):
                 normalized.append((0, 0))
                 continue
             try:
-                normalized.append(_normalize_range(start, end, sizes[i]))
+                start, end = _normalize_range(start, end, sizes[i])
+                # Use the same EOF for budgeting and execution, including
+                # fsspec's end=start-1 spelling of an open-ended read.
+                normalized.append((start, max(start, sizes[i]) if end is None else end))
             except ValueError as exc:
                 try:
                     info = self.info(internals[i])
@@ -3083,14 +3086,7 @@ class VfsiFileSystem(AbstractFileSystem):
             if i not in errors and i not in validation_errors
         ]
         data = [None] * len(paths)
-        lengths = [
-            max(
-                0,
-                (sizes[i] if normalized[i][1] is None else normalized[i][1])
-                - normalized[i][0],
-            )
-            for i in valid
-        ]
+        lengths = [normalized[i][1] - normalized[i][0] for i in valid]
         self._check_read_allocation(
             sum(lengths), internals[valid[0]] if valid else None
         )
