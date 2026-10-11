@@ -4213,15 +4213,23 @@ class VfsiFileSystem(AbstractFileSystem):
         copied, errors = self._client.copy_many(native_pairs)
         if errors and all(err == 2 for err in errors.values()):
             if self.auto_mkdir:
-                # Missing destination parents: create them once, then retry.
-                parents = {posixpath.dirname(b) for _, b in native_pairs}
+                # Successful pairs may have overwritten another source in
+                # this batch. Never replay them while recovering missing parents.
+                failed = sorted(errors)
+                retry_pairs = [native_pairs[index] for index in failed]
+                parents = {posixpath.dirname(b) for _, b in retry_pairs}
                 internal_parents = [
                     self._internalize(parent)
                     for parent in sorted(parents)
                     if parent not in ("", "/")
                 ]
                 self._ensure_dirs(internal_parents, 0o755)
-                copied, errors = self._client.copy_many(native_pairs)
+                retried, retry_errors = self._client.copy_many(retry_pairs)
+                for position, index in enumerate(failed):
+                    copied[index] = retried[position]
+                errors = {
+                    failed[position]: code for position, code in retry_errors.items()
+                }
         if callback is not None:
             for i, (src, dst) in enumerate(pairs):
                 if i in errors or copied[i] is None:
