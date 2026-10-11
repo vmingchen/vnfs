@@ -1686,6 +1686,294 @@ fn owned_vector_reads_reject_oversized_batches_before_backend_io() {
 }
 
 #[test]
+fn write_allv_dependency_schedule_visits_requests_only_when_ready() {
+    let backend = WriteBoundaryProbe::default();
+    let calls = Arc::clone(&backend.calls);
+    let client = FsClient::new(backend);
+    let file = client.open("/same").unwrap();
+    let payloads: Vec<_> = (0..128).map(|index| [index as u8]).collect();
+    let requests: Vec<_> = payloads
+        .iter()
+        .map(|payload| file.write_request_at(0, payload))
+        .collect();
+    let projections = std::cell::Cell::new(0usize);
+    let results = client
+        .vwrite_all_mapped_native(&requests, |request| {
+            projections.set(projections.get() + 1);
+            *request
+        })
+        .unwrap();
+    assert!(results.iter().all(|result| result.written == 1));
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), requests.len());
+    for (index, wave) in calls.iter().enumerate() {
+        assert_eq!(
+            wave.len(),
+            1,
+            "conflicting requests complete in input order"
+        );
+        assert_eq!(wave[0].pointer, payloads[index].as_ptr() as usize);
+        assert_eq!(wave[0].offset, VfOffset::At(0));
+    }
+    println!(
+        "128 conflicting writes: {} request projections",
+        projections.get()
+    );
+    assert!(
+        projections.get() <= 8 * requests.len(),
+        "blocked requests must not be projected again in every readiness scan: {}",
+        projections.get()
+    );
+}
+
+#[test]
+fn write_allv_dependency_schedule_orders_newly_ready_and_partial_requests() {
+    let backend = WriteBoundaryProbe::default();
+    let calls = Arc::clone(&backend.calls);
+    let client = FsClient::new(backend);
+    let a = client.open("/a").unwrap();
+    let b = client.open("/b").unwrap();
+    let payloads: [&[u8]; 4] = [b"AA", b"BBBB", b"CCCCCC", b"dddddd"];
+    let requests = [
+        a.write_request_at(0, payloads[0]),
+        a.write_request_at(4, payloads[1]),
+        b.write_request_at(10, payloads[2]),
+        a.write_request_at(1, payloads[3]),
+    ];
+    let results = client.vwrite_all_native(&requests).unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.written)
+            .collect::<Vec<_>>(),
+        [2, 4, 6, 6]
+    );
+    assert!(results.iter().all(|result| result.stable));
+    // Request 3 waits for both overlapping predecessors, including every
+    // short-write retry of request 1. It then joins request 2's final retry.
+    let expected: &[&[(usize, usize, u64)]] = &[
+        &[(0, 0, 0), (1, 0, 4), (2, 0, 10)],
+        &[(1, 2, 6), (2, 2, 12)],
+        &[(2, 4, 14), (3, 0, 1)],
+        &[(3, 2, 3)],
+        &[(3, 4, 5)],
+    ];
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls.len(), expected.len());
+    for (wave, expected) in calls.iter().zip(expected) {
+        assert_eq!(wave.len(), expected.len());
+        for (op, &(index, start, offset)) in wave.iter().zip(*expected) {
+            assert_eq!(op.pointer, payloads[index][start..].as_ptr() as usize);
+            assert_eq!(op.length, payloads[index].len() - start);
+            assert_eq!(op.offset, VfOffset::At(offset));
+        }
+    }
+}
+
+#[test]
+fn write_allv_dependency_schedule_treats_validated_empty_requests_as_complete() {
+    let backend = WriteBoundaryProbe::default();
+    let calls = Arc::clone(&backend.calls);
+    let client = FsClient::new(backend);
+    let file = client.open("/same").unwrap();
+    let append = client.open_options().append(true).open("/same").unwrap();
+    let data = b"AAAA";
+    let later = b"BB";
+    let independent = b"CC";
+    let results = client
+        .vwrite_all_native(&[
+            append.write_request_at(u64::MAX, b""),
+            file.write_request_at(0, data),
+            file.write_request_at(2, b""),
+            file.write_request_at(0, later),
+            file.write_request_at(10, b""),
+            file.write_request_at(20, independent),
+        ])
+        .unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| (result.offset, result.written))
+            .collect::<Vec<_>>(),
+        [(u64::MAX, 0), (0, 4), (2, 0), (0, 2), (10, 0), (20, 2)]
+    );
+    assert!(results.iter().all(|result| result.stable));
+    let observations = calls.lock().unwrap();
+    assert_eq!(
+        observations.iter().map(Vec::len).collect::<Vec<_>>(),
+        [2, 1, 1]
+    );
+    assert_eq!(observations[0][0].pointer, data.as_ptr() as usize);
+    assert_eq!(observations[0][1].pointer, independent.as_ptr() as usize);
+    assert_eq!(observations[1][0].pointer, data[2..].as_ptr() as usize);
+    assert_eq!(observations[2][0].pointer, later.as_ptr() as usize);
+    drop(observations);
+    let results = client
+        .vwrite_all_native(&[
+            file.write_request_at(3, b""),
+            append.write_request_at(7, b""),
+        ])
+        .unwrap();
+    assert_eq!(
+        results
+            .iter()
+            .map(|result| result.written)
+            .collect::<Vec<_>>(),
+        [0, 0]
+    );
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        3,
+        "empty batches perform no writes"
+    );
+}
+
+#[test]
+fn write_allv_dependency_schedule_matches_reference_waves() {
+    let mut state = 0x4d59_5df4_d0f3_3173u64;
+    for case in 0..64 {
+        let specifications: Vec<_> = (0..8)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                (
+                    (state & 1) as usize,
+                    state & 4 != 0,
+                    (state >> 8) % 12,
+                    ((state >> 16) % 7) as usize,
+                )
+            })
+            .collect();
+        let payloads: Vec<_> = specifications
+            .iter()
+            .map(|&(_, _, _, length)| vec![case as u8; length])
+            .collect();
+        // Reference the previous readiness rule, including completed empty
+        // requests. Small deterministic batches cover mixed paths, intervals,
+        // append handles, empty payloads, and multiple short-write waves.
+        let mut totals = [0usize; 8];
+        let mut expected = Vec::new();
+        while specifications
+            .iter()
+            .enumerate()
+            .any(|(index, &(_, _, _, length))| totals[index] < length)
+        {
+            let wave: Vec<_> = specifications
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &(path, append, offset, length))| {
+                    if totals[index] == length {
+                        return None;
+                    }
+                    let ready = specifications[..index].iter().enumerate().all(
+                        |(earlier, &(prior_path, prior_append, start, prior_length))| {
+                            prior_path != path
+                                || !(append
+                                    || prior_append
+                                    || (offset < start + prior_length as u64
+                                        && start < offset + length as u64))
+                                || totals[earlier] == prior_length
+                        },
+                    );
+                    ready.then_some(index)
+                })
+                .collect();
+            assert!(!wave.is_empty());
+            expected.push(
+                wave.iter()
+                    .map(|&index| {
+                        (
+                            payloads[index][totals[index]..].as_ptr() as usize,
+                            payloads[index].len() - totals[index],
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            for index in wave {
+                totals[index] += (payloads[index].len() - totals[index]).min(2);
+            }
+        }
+        let backend = WriteBoundaryProbe {
+            append_end: Some(0),
+            ..Default::default()
+        };
+        let calls = Arc::clone(&backend.calls);
+        let client = FsClient::new(backend);
+        let files = [client.open("/a").unwrap(), client.open("/b").unwrap()];
+        let appends = [
+            client.open_options().append(true).open("/a").unwrap(),
+            client.open_options().append(true).open("/b").unwrap(),
+        ];
+        let requests: Vec<_> = specifications
+            .iter()
+            .enumerate()
+            .map(|(index, &(path, append, offset, _))| {
+                let file = if append { &appends[path] } else { &files[path] };
+                file.write_request_at(offset, &payloads[index])
+            })
+            .collect();
+        let results = client.vwrite_all_native(&requests).unwrap();
+        for (result, &(_, append, offset, length)) in results.iter().zip(&specifications) {
+            assert_eq!(result.written, length);
+            if !append || length == 0 {
+                assert_eq!(result.offset, offset);
+            }
+        }
+        let actual: Vec<Vec<_>> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|wave| wave.iter().map(|op| (op.pointer, op.length)).collect())
+            .collect();
+        assert_eq!(actual, expected, "case {case}: {specifications:?}");
+    }
+}
+
+#[test]
+fn write_allv_dependency_schedule_maps_later_wave_errors_without_replay() {
+    for error in [
+        VfError::client(0, libc::ENOSPC as u32),
+        VfError::client(1, libc::ENOSPC as u32),
+        VfError::transport(None, "lost write reply"),
+    ] {
+        let backend = WriteBoundaryProbe {
+            failure: Some(error.clone()),
+            failure_after: 1,
+            ..Default::default()
+        };
+        let calls = Arc::clone(&backend.calls);
+        let client = FsClient::new(backend);
+        let a = client.open("/a").unwrap();
+        let b = client.open("/b").unwrap();
+        let payloads: [&[u8]; 4] = [b"AA", b"BB", b"CCCC", b"DD"];
+        let actual = client
+            .vwrite_all_native(&[
+                a.write_request_at(0, payloads[0]),
+                a.write_request_at(0, payloads[1]),
+                b.write_request_at(0, payloads[2]),
+                a.write_request_at(0, payloads[3]),
+            ])
+            .unwrap_err();
+        assert_eq!(actual.index(), error.index().map(|index| index + 1));
+        assert_eq!(actual.is_transport(), error.is_transport());
+        if let Some(index) = error.index() {
+            assert_eq!(
+                actual.path(),
+                Some(std::path::Path::new(if index == 0 { "/a" } else { "/b" }))
+            );
+        }
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "a failed wave must not be replayed");
+        assert_eq!(calls.iter().map(Vec::len).collect::<Vec<_>>(), [2, 2]);
+        assert_eq!(calls[0][0].pointer, payloads[0].as_ptr() as usize);
+        assert_eq!(calls[0][1].pointer, payloads[2].as_ptr() as usize);
+        assert_eq!(calls[1][0].pointer, payloads[1].as_ptr() as usize);
+        assert_eq!(calls[1][1].pointer, payloads[2][2..].as_ptr() as usize);
+    }
+}
+
+#[test]
 fn write_allv_retries_short_writes_in_vector_waves() {
     let write_calls = Arc::new(AtomicUsize::new(0));
     let client = FsClient::new(ScalarOnly {

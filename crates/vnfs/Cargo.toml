@@ -84,3 +84,7 @@ required-features = ["nfs"]
 [[example]]
 name = "large_file_read_benchmark"
 required-features = ["nfs"]
+
+[[example]]
+name = "write_schedule_benchmark"
+required-features = ["posix"]

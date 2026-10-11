@@ -228,6 +228,19 @@ ordering, and public request/result types remain unchanged. These reduce local
 allocation/copying and quadratic extraction work; they do not establish an
 end-to-end throughput improvement without workload measurements.
 
+Complete positional writes keep successor lists and outstanding dependency
+counts for conflicting requests through the same diagnostic path. A request
+releases its successors only after every byte is acknowledged; short writes
+remain in subsequent ready waves. Ready waves retain input order, and their
+index buffers are reused. Empty requests still undergo whole-batch validation
+and are complete without dispatch. Append ordering, error indices, and failure
+replay rules remain unchanged. Pairwise conflict construction can still be
+quadratic, but blocked requests are no longer rescanned on every wave. The
+first successor is stored inline to avoid a single-edge allocation; graph arrays
+are prepared before conflict comparisons for batches of two or more requests.
+Scalar writes need no graph arrays. The [scheduler benchmark](write-scheduler-benchmark.md)
+records release comparisons, sparse-case tradeoffs and measurement limits.
+
 The [Rust allocation and layout audit](RUST_PERFORMANCE.md) records measured
 layouts, implementation evidence, tradeoffs, and remaining optimization candidates.
 

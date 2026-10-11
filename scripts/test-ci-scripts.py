@@ -266,5 +266,173 @@ class RustQuickTests(unittest.TestCase):
                 self.log.unlink()
 
 
+class BenchmarkBuildTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        cls.module_path = Path(__file__).with_name("benchmark-write-scheduler.py")
+        spec = importlib.util.spec_from_file_location("write_scheduler_benchmark", cls.module_path)
+        cls.benchmark = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.benchmark)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        self.manifest = self.workspace / "Cargo.toml"
+        self.manifest.write_text('[workspace]\nmembers=[]\n')
+        self.environment = {"HOME": str(self.root), "CARGO_HOME": str(self.root / "cargo-home")}
+        self.command = ["cargo", "build", "--release"]
+
+    def configuration(self, environment=None):
+        return self.benchmark.build_configuration(
+            self.workspace, self.environment if environment is None else environment,
+            self.command, "rustc test-version", "cargo test-version")
+
+    def test_reuses_matching_build_configuration(self):
+        self.benchmark.validate_reuse_build(
+            {"build_configuration": self.configuration()}, self.configuration())
+
+    def test_rejects_changed_optimization_flags(self):
+        prior = {"build_configuration": self.configuration()}
+        for name, value in [
+            ("CARGO_PROFILE_RELEASE_OPT_LEVEL", "0"),
+            ("RUSTFLAGS", "-C opt-level=0"),
+            ("CARGO_ENCODED_RUSTFLAGS", "-C\x1fopt-level=0"),
+            ("CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS", "-C opt-level=0"),
+        ]:
+            with self.subTest(name=name):
+                expected = self.configuration(dict(self.environment, **{name: value}))
+                with self.assertRaisesRegex(RuntimeError, "configuration differs.*environment"):
+                    self.benchmark.validate_reuse_build(prior, expected)
+
+    def test_rejects_changed_profile_and_compiler_overrides(self):
+        prior = {"build_configuration": self.configuration()}
+        for name, value in [
+            ("CARGO_PROFILE_RELEASE_LTO", "true"),
+            ("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1"),
+            ("CARGO_BUILD_RUSTFLAGS", "-C target-cpu=native"),
+            ("RUSTC_WRAPPER", "/compiler-wrapper"),
+            ("RUSTC_WORKSPACE_WRAPPER", "/workspace-wrapper"),
+            ("RUSTC", "/different-rustc"),
+        ]:
+            with self.subTest(name=name):
+                with self.assertRaises(RuntimeError):
+                    self.benchmark.validate_reuse_build(
+                        prior, self.configuration(dict(self.environment, **{name: value})))
+
+    def test_rejects_changed_workspace_profile(self):
+        prior = {"build_configuration": self.configuration()}
+        self.manifest.write_text('[workspace]\nmembers=[]\n[profile.release]\nopt-level=2\n')
+        with self.assertRaisesRegex(RuntimeError, "workspace_profiles"):
+            self.benchmark.validate_reuse_build(prior, self.configuration())
+
+    def test_rejects_project_parent_and_home_configuration_changes(self):
+        for directory in [self.workspace / ".cargo", self.root / ".cargo",
+                          self.root / "cargo-home"]:
+            with self.subTest(directory=directory):
+                directory.mkdir(exist_ok=True)
+                config = directory / "config.toml"
+                prior = {"build_configuration": self.configuration()}
+                config.write_text('[profile.release]\nopt-level=2\n')
+                with self.assertRaisesRegex(RuntimeError, "cargo_configs"):
+                    self.benchmark.validate_reuse_build(prior, self.configuration())
+                config.unlink()
+
+    def test_rejects_included_configuration_changes_and_optional_creation(self):
+        directory = self.workspace / ".cargo"
+        directory.mkdir()
+        (directory / "config.toml").write_text(
+            'include=[{path="release.toml",optional=true}]\n')
+        prior = {"build_configuration": self.configuration()}
+        included = directory / "release.toml"
+        included.write_text('[profile.release]\nopt-level=3\n')
+        with self.assertRaisesRegex(RuntimeError, "cargo_configs"):
+            self.benchmark.validate_reuse_build(prior, self.configuration())
+        prior = {"build_configuration": self.configuration()}
+        included.write_text('[profile.release]\nopt-level=2\n')
+        with self.assertRaises(RuntimeError):
+            self.benchmark.validate_reuse_build(prior, self.configuration())
+
+    def test_matches_cargo_legacy_configuration_precedence(self):
+        directory = self.workspace / ".cargo"
+        directory.mkdir()
+        legacy = directory / "config"
+        legacy.write_text('[profile.release]\nopt-level=3\n')
+        toml = directory / "config.toml"
+        toml.write_text('[profile.release]\nopt-level=0\n')
+        prior = {"build_configuration": self.configuration()}
+        toml.write_text('[profile.release]\nopt-level=2\n')
+        self.benchmark.validate_reuse_build(prior, self.configuration())
+        legacy.unlink()
+        with self.assertRaises(RuntimeError):
+            self.benchmark.validate_reuse_build(prior, self.configuration())
+
+    def test_rejects_legacy_results_without_build_configuration(self):
+        with self.assertRaisesRegex(RuntimeError, "no verified build configuration.*rebuild"):
+            self.benchmark.validate_reuse_build({"binary_sha256": "hash"}, self.configuration())
+
+    def test_rejects_changed_tool_versions_and_build_command(self):
+        prior = {"build_configuration": self.configuration()}
+        for key, value in [("rustc", "other compiler"), ("cargo", "other cargo"),
+                           ("command", ["cargo", "build"])]:
+            with self.subTest(key=key):
+                expected = dict(self.configuration(), **{key: value})
+                with self.assertRaises(RuntimeError):
+                    self.benchmark.validate_reuse_build(prior, expected)
+
+    def test_keeps_credentials_and_cache_locations_out_of_configuration(self):
+        environment = dict(self.environment, CARGO_REGISTRY_TOKEN="placeholder-token",
+                           CARGO_TARGET_DIR="/different-cache")
+        self.assertEqual(self.configuration(environment), self.configuration())
+        directory = self.workspace / ".cargo"
+        directory.mkdir()
+        (directory / "config.toml").write_text('[registry]\ntoken="placeholder-token"\n')
+        self.assertNotIn("placeholder-token", json.dumps(self.configuration(environment)))
+
+    def test_reuse_checks_survive_python_optimization(self):
+        import sys
+        code = f"""
+import importlib.util
+spec = importlib.util.spec_from_file_location('benchmark', {str(self.module_path)!r})
+benchmark = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(benchmark)
+try:
+    benchmark.validate_reuse_build(
+        {{'build_configuration': {{'environment': {{}}}}}},
+        {{'environment': {{'RUSTFLAGS': '-C opt-level=0'}}}})
+except RuntimeError:
+    raise SystemExit(0)
+raise SystemExit(1)
+"""
+        result = subprocess.run([sys.executable, "-O", "-c", code], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_reads_effective_profiles_from_cached_artifacts(self):
+        profile = {"opt_level": "3", "debug_assertions": False, "overflow_checks": False,
+                   "debuginfo": 0, "test": False}
+        messages = [json.dumps({"reason": "compiler-artifact", "fresh": True,
+                               "target": {"name": name, "kind": [kind]}, "profile": profile})
+                    for name, kind in [("vfsi_sync", "lib"), ("write_schedule_benchmark", "example")]]
+        profiles = self.benchmark.compiler_profiles("Cargo progress\n" + "\n".join(messages))
+        self.assertEqual(profiles["vfsi_sync"]["opt_level"], "3")
+        self.assertEqual(profiles["write_schedule_benchmark"], profile)
+
+    def test_selects_cargo_executable_for_a_configured_target(self):
+        executable = "/cache/aarch64-unknown-linux-gnu/release/examples/write_schedule_benchmark"
+        message = json.dumps({"reason": "compiler-artifact", "fresh": True,
+                              "target": {"name": "write_schedule_benchmark"},
+                              "executable": executable})
+        self.assertEqual(self.benchmark.benchmark_executable(message), Path(executable))
+        with self.assertRaisesRegex(RuntimeError, "missing the benchmark executable"):
+            self.benchmark.benchmark_executable('{"reason":"build-finished","success":true}')
+
+    def test_rejects_missing_compiler_profile_evidence(self):
+        with self.assertRaisesRegex(RuntimeError, "missing scheduler/example"):
+            self.benchmark.compiler_profiles('{"reason":"build-finished","success":true}\n')
+
+
 if __name__ == "__main__":
     unittest.main()

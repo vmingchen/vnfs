@@ -2,6 +2,39 @@
 
 use super::*;
 
+// Sparse conflicts commonly give a request just one successor. Retain it
+// inline; allocate a vector only when the request has additional successors.
+struct WriteSuccessors {
+    first: usize,
+    more: Vec<usize>,
+}
+
+impl Default for WriteSuccessors {
+    fn default() -> Self {
+        Self {
+            first: usize::MAX,
+            more: Vec::new(),
+        }
+    }
+}
+
+impl WriteSuccessors {
+    fn push(&mut self, successor: usize) {
+        if self.first == usize::MAX {
+            self.first = successor;
+        } else {
+            self.more.push(successor);
+        }
+    }
+
+    fn take(&mut self) -> impl Iterator<Item = usize> {
+        let first = std::mem::replace(&mut self.first, usize::MAX);
+        std::iter::once(first)
+            .filter(|&successor| successor != usize::MAX)
+            .chain(std::mem::take(&mut self.more))
+    }
+}
+
 impl<F: VectorBackend> FsClient<F> {
     #[doc(hidden)]
     pub fn vwrite_native(&self, requests: &[FsWrite<'_, F>]) -> VfResult<Vec<FsWriteResult>> {
@@ -70,7 +103,18 @@ impl<F: VectorBackend> FsClient<F> {
         // Validate the entire batch before writing any prefix. In particular,
         // empty requests must not conceal a foreign or already-closed file.
         let mut prior_by_path: HashMap<&Path, Vec<(usize, u64, u64, bool)>> = HashMap::new();
-        let mut blocked_by = vec![Vec::new(); requests.len()];
+        // Scalar writes cannot have predecessors. For larger batches,
+        // allocate graph slots up front to keep the pairwise conflict loop small.
+        let graph_nodes = if requests.len() > 1 {
+            requests.len()
+        } else {
+            0
+        };
+        let mut successors: Vec<WriteSuccessors> = (0..graph_nodes)
+            .map(|_| WriteSuccessors::default())
+            .collect();
+        let mut remaining_dependencies = vec![0usize; graph_nodes];
+        let mut wave_indices = Vec::new();
         let mut offsets = Vec::with_capacity(requests.len());
         for (index, request) in requests.iter().map(&project).enumerate() {
             self.validate_owner(request.file(), index)?;
@@ -90,33 +134,34 @@ impl<F: VectorBackend> FsClient<F> {
                         .with_context("vwrite_all_native", request.file().path())
                 })?;
             offsets.push(offset);
+            // Empty requests are complete from the start, after the same
+            // whole-batch validation. They neither wait nor block successors.
+            if request.data().is_empty() {
+                continue;
+            }
             // Non-overlapping positional writes commute. Append requests must
             // wait for every earlier write to the same diagnostic path.
             // Finish conflicting requests before dispatching later bytes, so
             // short-write retries cannot overwrite or interleave their payloads.
+            let append = request.file().append;
             let prior = prior_by_path.entry(request.file().path()).or_default();
-            for &(earlier, start, earlier_end, append) in prior.iter() {
-                if append || request.file().append || (offset < earlier_end && start < end) {
-                    blocked_by[index].push(earlier);
+            for &(earlier, start, earlier_end, earlier_append) in prior.iter() {
+                if earlier_append || append || (offset < earlier_end && start < end) {
+                    successors[earlier].push(index);
+                    remaining_dependencies[index] += 1;
                 }
             }
-            prior.push((index, offset, end, request.file().append));
+            prior.push((index, offset, end, append));
+            if remaining_dependencies.get(index).copied().unwrap_or(0) == 0 {
+                wave_indices.push(index);
+            }
         }
+        drop(prior_by_path);
         let mut totals = vec![0usize; requests.len()];
         let mut stable = vec![true; requests.len()];
-        let mut pending: Vec<usize> = (0..requests.len())
-            .filter(|&index| !project(&requests[index]).data().is_empty())
-            .collect();
-        while !pending.is_empty() {
-            let wave_indices: Vec<usize> = pending
-                .iter()
-                .copied()
-                .filter(|&index| {
-                    blocked_by[index]
-                        .iter()
-                        .all(|&earlier| totals[earlier] == project(&requests[earlier]).data().len())
-                })
-                .collect();
+        let mut next_wave_indices = Vec::new();
+        while !wave_indices.is_empty() {
+            next_wave_indices.clear();
             let wave: Vec<_> = wave_indices
                 .iter()
                 .map(|&index| {
@@ -140,14 +185,13 @@ impl<F: VectorBackend> FsClient<F> {
                 error.map_index(|index| wave_indices.get(index).copied().unwrap_or(index))
             })?;
             for (&index, result) in wave_indices.iter().zip(results) {
+                let request = project(&requests[index]);
                 if result.written == 0 {
-                    return Err(VfError::client(index, crate::ERR_IO).with_context(
-                        "vwrite_all_native",
-                        project(&requests[index]).file().path(),
-                    ));
+                    return Err(VfError::client(index, crate::ERR_IO)
+                        .with_context("vwrite_all_native", request.file().path()));
                 }
                 totals[index] += result.written;
-                if project(&requests[index]).file().append {
+                if request.file().append {
                     // Preserve the last reported end even when outside writers
                     // append between short-write waves. This is an aggregate
                     // completion offset, not a guarantee of a contiguous extent.
@@ -164,8 +208,27 @@ impl<F: VectorBackend> FsClient<F> {
                         })?;
                 }
                 stable[index] &= result.stable;
+                if totals[index] == request.data().len() {
+                    // Release each edge once, only after all bytes of its
+                    // predecessor are acknowledged. Never rescan blocked items.
+                    if let Some(successors) = successors.get_mut(index) {
+                        for successor in successors.take() {
+                            remaining_dependencies[successor] -= 1;
+                            if remaining_dependencies[successor] == 0 {
+                                next_wave_indices.push(successor);
+                            }
+                        }
+                    }
+                } else {
+                    next_wave_indices.push(index);
+                }
             }
-            pending.retain(|&index| totals[index] < project(&requests[index]).data().len());
+            // Newly released successors may precede or follow ongoing short
+            // writes. Match the original input order within every vector wave.
+            if !next_wave_indices.is_sorted() {
+                next_wave_indices.sort_unstable();
+            }
+            std::mem::swap(&mut wave_indices, &mut next_wave_indices);
         }
         Ok(offsets
             .into_iter()

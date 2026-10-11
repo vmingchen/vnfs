@@ -26,14 +26,134 @@ and cleanup behavior; existing handles remain valid. Public request/result and
 string/byte-container APIs stay compatible. No new unsafe allocation or packed
 representation is introduced.
 
-These are layout and local-copy/allocation improvements. No end-to-end
-throughput or latency increase is claimed without workload measurements.
+The allocation and layout changes above have no end-to-end measurements in
+this audit. The write scheduler follow-up below was benchmarked separately.
+
+## Write dependency scheduling follow-up
+
+This follow-up starts from commit `4b9ff87`. In
+`crates/vfsi-sync/src/client/write.rs`, complete positional writes previously
+rescanned each pending request's earlier conflicts on every wave. For a fully
+conflicting batch, increasingly long completed prefixes made readiness checking
+cubic even when each request succeeded in one backend call.
+
+The scheduler now stores successor lists and outstanding dependency counts.
+Each fully acknowledged request releases its outgoing edges once. Short writes
+remain ready and keep their successors blocked until completion. Newly ready
+requests join the next wave; the wave is sorted only when needed to preserve
+input order. The two ready-index vectors reuse their capacities, completed
+successor vectors are freed, and construction-only path records are dropped
+before dispatch. Empty requests retain whole-batch validation and are considered
+complete from the start, so they do not create blocking edges. Each successor
+list keeps its first index inline and allocates an edge vector only for additional
+successors. Graph arrays are allocated before the pairwise loop for batches of
+two or more requests; scalar writes need neither array. The append flag is read
+once per request before comparing earlier ranges. On this 64-bit build a
+successor slot occupies 32 bytes instead of a 24-byte vector header, plus an
+eight-byte dependency counter. This increases per-node storage but removes
+single-edge allocations, and was retained after measuring the sparse cases.
+
+For `n` requests, `E` dependency edges, and `D` dispatched request occurrences
+(including short-write retries), scheduling costs `O(n + E + D log(n + 1))` in the worst
+case, including ready-wave sorting. Every dependency edge is visited once after
+construction; already ordered waves need only a linear order check. Pairwise
+same-path conflict construction remains `O(n²)` in the worst case and graph
+storage remains `O(n + E)`. A fully conflicting one-call-per-request batch now
+has quadratic total local work, with one-item waves needing no sorting.
+
+A deterministic regression uses 128 one-byte writes to the same offset. The
+previous implementation projected requests 366,400 times; the new implementation
+projects them 384 times while preserving the same 128 ordered backend calls.
+This measures repeated request work, not end-to-end throughput or latency.
+Four additional regressions cover mixed ready/short-write waves, completed empty
+requests, later-wave error remapping without replay, and comparison with the
+previous readiness rule across 64 deterministic batches containing mixed paths,
+overlaps, appends, empty payloads and short writes. Existing public APIs,
+acknowledged-progress handling, stability aggregation and append offsets are
+preserved.
+
+### Scheduler benchmarks
+
+Release comparisons against `4b9ff87` cover 35 sink/POSIX cases with nine
+alternating paired samples, followed by six longer confirmations with 21 pairs.
+Buffered POSIX overlap batches improved by 8.671× at 256 requests and 20.175×
+at 512; the 256-request confirmation measured 8.910×. Sink scheduling improved
+by 48.841× at 1,024 fully conflicting writes and 1.131× for the 256-request
+mixed short-write case (1.132× in confirmation). Independent POSIX controls
+were effectively flat. No final case had a speedup interval entirely below 1.
+The initial sparse-graph refinement's scatter regression was fixed before these
+runs. See [the benchmark report](write-scheduler-benchmark.md) for all cases,
+confidence intervals, raw samples, source hashes, reproduction commands and
+measurement limits. No NFS throughput or durable storage improvement is claimed.
+
+### Baseline reuse and release verification
+
+The benchmark runner now records build configuration and compares it before
+baseline reuse, rejecting legacy results with missing configuration evidence.
+It captures Rust/Cargo flags and versions, wrappers, workspace profiles and
+Cargo configuration hashes, and compares the Cargo-reported artifact profiles.
+Checks remain enabled under `python3 -O`. Artifact selection uses Cargo's actual
+executable path. Four real CLI rejection cases and matching reuse passed;
+14 new regressions and all 30 script tests passed. The normal release build and
+fresh baseline/optimized builds report `opt_level=3` for all five runtime library
+targets and the benchmark executable, with no active code-generation overrides.
+The newly verified comparison binary hashes exactly match the original two
+benchmark datasets. This fix changes benchmark tooling and evidence only.
+See [release verification](write-scheduler-benchmark.md#baseline-reuse-fix-and-release-verification)
+for commands, timings, guard cases, profiles and raw records. Smoke and check
+were rerun; the 11 ignored fixtures and omitted full/live suites remain outside
+that selection.
+
+### Scheduler validation
+
+The new `write_allv_dependency_schedule` filter was run first against the
+previous scheduler: three semantic cases passed and the readiness-work bound
+failed with 366,400 projections. After the change, all five new tests pass,
+including the reference-wave comparison. They were rerun first after each
+refinement and report 384 projections for 128 conflicting writes. The final
+measured implementation was then validated as follows. Focused selections reuse
+`test-faults test-support` for `vfsi-sync` and `posix test-faults` for `vnfs`.
+Live selections retain all NFS features and fault coverage.
+
+| Command or selection | Result | Runner wall time |
+|---|---|---|
+| `./scripts/test-rust.sh --package vfsi-sync --test native_client` | 61 passed | 0.69 s |
+| `./scripts/test-rust.sh --package vfsi-sync --lib` | 8 passed | 1.45 s |
+| `./scripts/test-rust.sh --package vnfs --test client_vectors` | 5 passed | 4.74 s |
+| `./scripts/test-rust.sh --package vnfs --test application_boundary` | 5 passed | 1.81 s |
+| `./scripts/test-rust.sh --package vnfs --test public_api` | 18 passed | 3.50 s |
+| Live NFS 4.1: `same_file_` | 4 passed | 4.31 s |
+| Live NFS 4.1: `descriptor_short_writes_preserve_contiguous_contents` | 1 passed | 0.85 s |
+| Live NFS 4.2: `same_file_` | 4 passed | 0.86 s |
+| Live NFS 4.2: `descriptor_short_writes_preserve_contiguous_contents` | 1 passed | 0.84 s |
+| `./scripts/test-ci-local.sh smoke` | 167 passed; 11 fixture tests ignored | 10.52 s |
+| `./scripts/test-ci-local.sh check` | Formatting and Clippy passed | 5.46 s |
+
+For each live row, the command is `./scripts/test-rust.sh --package vfsi-nfs
+--test nfs --filter FILTER`, using `VFSI_NFS_SERVER=127.0.0.1:2049`,
+`VFSI_NFS_MINOR=1` or `2`, and `RUST_TEST_THREADS=1`. The runner requires the
+server and checks that tests actually execute. Ten selected live test runs
+passed, preserving batching and compound-count assertions. The 97 focused
+tests passed; the five new tests are included in the 61-test native target.
+Smoke overlaps public/library selections and does not cover its 11 ignored
+fixtures. Check covers the workspace and detached Python adapter formatting
+and Clippy jobs, including the new benchmark example. At that validation point, each test-runner
+invocation also checked its 16 script regressions. The benchmark runner completed the full
+matrix and baseline-reuse confirmation; its Python syntax and `git diff --check`
+were checked separately.
+
+Logs and command/result/timing records are on the VM under
+`/tmp/vnfs-write-scheduler-*.log` and
+`/tmp/vnfs-write-scheduler-{focused,live,checks}-results.json`.
+The configured NFS fixture was reused without service changes. No access
+limitation occurred. Full CI, remaining live suites, live SMB and real io_uring
+were not run for this follow-up. Benchmarks and correctness tests ran separately.
 
 ## Follow-up candidates
 
 | Priority | Location | Evidence and next step |
 |---|---|---|
-| High | `crates/vfsi-sync/src/client/write.rs`: `vwrite_all_mapped_native` | Pairwise same-path conflict construction retains up to quadratic dependency edges. Each successive wave rescans dependencies of every pending item; a fully conflicting batch can make readiness checking cubic. First profile large same-path batches, then use successor lists and outstanding dependency counts; consider an interval index for conflict construction. Preserve whole-batch validation, short-write repair, append semantics and input-order conflicts. |
+| High | `crates/vfsi-sync/src/client/write.rs`: conflict construction in `vwrite_all_mapped_native` | Readiness scans have been replaced with successor releases. Pairwise same-path conflict construction still compares up to quadratic pairs and retains up to quadratic edges. Profile large same-path batches before adding an interval index or reducing redundant edges. Preserve whole-batch validation, short-write repair, append semantics and input-order conflicts. |
 | Medium | `crates/vfsi-sync/src/backend/helpers/removal.rs`: default recursive removal | The callback clones and retains complete `VfAttrs` records by directory, while classification uses only file type and operand. Retain those two fields instead, then consider bounded pages rather than whole breadth-first levels. Verify default-backend removal ordering and failure behavior, including SMB. |
 | Medium | `crates/vfsi-nfs/src/nfs/open.rs`, `namespace.rs`, `directory.rs` | Batched low-level requests repeatedly clone `NfsFh` payloads and names to construct owned protocol request vectors. Add private borrowed request adapters where their lifetimes end at synchronous dispatch, while keeping the existing public owned request types. Measure before considering `Arc` for every opaque filehandle: it changes allocation/refcount costs. |
 | Medium | `crates/vfsi-sync/src/backend/helpers/read.rs`: `vstream_impl_default` | Each streaming wave creates fresh index and request vectors. Reuse cleared, bounded-capacity vectors where ownership allows it. Check cancellation, error remapping, memory limits and fairness across files. |
@@ -46,7 +166,7 @@ asynchronous protocol messages; shrinking their headers alone would not remove
 the ownership copy. Public `Vec`, `String` and native path APIs are not general
 replacement targets merely because their values are often read-only.
 
-## Validation scope
+## Allocation and layout validation scope
 
 Seven new deterministic regressions cover layout, borrowed storage, ownership
 transfer, byte-path rules, identity-cache bounds and completed-prefix extraction.
