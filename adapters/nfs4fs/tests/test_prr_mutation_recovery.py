@@ -133,3 +133,42 @@ def test_grouped_short_read_continuation_preserves_completed_results(
     finally:
         fs.commit_many(files)
     assert not fs._client._fds
+
+
+@pytest.mark.parametrize("failure", ["write", "callback", "interrupt"])
+def test_exclusive_failure_never_unlinks_replacement_file(fs, monkeypatch, failure):
+    original_write = fs._client.pwrite
+    replaced = False
+    error = (
+        KeyboardInterrupt()
+        if failure == "interrupt"
+        else OSError(errno.ENOSPC, "injected failure")
+    )
+
+    def replace_destination():
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            fs.mv("/exclusive", "/original-inode")
+            fs.pipe_file("/exclusive", b"other writer")
+
+    def interrupted_write(fd, data, offset):
+        written = original_write(fd, data, offset)
+        if failure != "callback":
+            replace_destination()
+            raise error
+        return written
+
+    class ReplacingCallback(Callback):
+        def relative_update(self, inc=1):
+            replace_destination()
+            raise error
+
+    monkeypatch.setattr(fs._client, "pwrite", interrupted_write)
+    callback = ReplacingCallback() if failure == "callback" else None
+    with pytest.raises(type(error)) as caught:
+        fs.pipe_file("/exclusive", b"original data", mode="create", callback=callback)
+    assert caught.value is error
+    assert fs.cat_file("/exclusive") == b"other writer"
+    assert fs.cat_file("/original-inode") == b"original data"
+    assert not fs._client._fds

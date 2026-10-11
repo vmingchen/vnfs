@@ -3341,7 +3341,6 @@ class VfsiFileSystem(AbstractFileSystem):
         if self.auto_mkdir and parent not in ("", "/"):
             self._ensure_dirs([parent], 0o755)
         fd = self._client.open(self._native_path(internal), "xb")
-        completed = False
         write_error = None
         try:
             view = memoryview(value)
@@ -3354,14 +3353,6 @@ class VfsiFileSystem(AbstractFileSystem):
                 offset += written
                 if callback is not None:
                     callback.relative_update(written)
-            completed = True
-        except ConnectionError as exc:
-            # The server may have completed the create or the last write.
-            # A compensating remove could delete a later creator's file, so
-            # leave resolution of this ambiguous result to the caller.
-            completed = True
-            write_error = exc
-            raise
         except BaseException as exc:
             write_error = exc
             raise
@@ -3374,12 +3365,8 @@ class VfsiFileSystem(AbstractFileSystem):
                 # Preserve the mutation error if both the write and CLOSE fail.
                 if write_error is None:
                     raise
-            finally:
-                if not completed:
-                    try:
-                        self.rm(internal)
-                    except OSError:
-                        pass
+            # The path may now name another writer's file. Retain partial
+            # output on failure rather than unlinking a name we no longer own.
 
     def _write_spooled(self, path, spool):
         """Stream a seekable local spool to one remote path."""

@@ -446,6 +446,9 @@ visible when the TTL expires or when the caller requests a refresh. Use
   links reject that publication; they do not fall back to overwriting rename.
 - `pipe_file(..., mode="create")` and create-mode `put` use an exclusive server
   create, so concurrent creators cannot silently overwrite one another.
+  Outside a transaction, a later write or callback failure can leave an empty
+  or partially written file. Cleanup closes the descriptor but does not unlink
+  the destination, which may have been replaced by another writer.
 
 ## Local development
 
