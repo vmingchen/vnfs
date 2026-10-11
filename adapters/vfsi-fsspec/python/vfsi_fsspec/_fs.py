@@ -1544,8 +1544,7 @@ class _BufferGroup:
 
     def _pread_many(self, files, offsets, lengths):
         if self.fs.auto_reconnect and any(
-            file._raw._fd is None
-            or not self.fs._client.descriptor_valid(file._raw._fd)
+            file._raw._fd is None or not self.fs._client.descriptor_valid(file._raw._fd)
             for file in files
         ):
             self._reopen_readers()
@@ -1854,7 +1853,9 @@ class _BufferGroup:
                             self.fs._client.close_many(fds)
                         except BaseException as error:
                             completed = getattr(error, "index", 0)
-                            if isinstance(completed, int) and 0 <= completed <= len(batch):
+                            if isinstance(completed, int) and 0 <= completed <= len(
+                                batch
+                            ):
                                 for member in batch[:completed]:
                                     member._finish_group_close()
                             first_error = first_error or error
@@ -3297,11 +3298,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 if not chunk:
                     break
                 if max_bytes is not None and streamed + len(chunk) > max_bytes:
-                    limit = (
-                        max_bytes
-                        if allocation_limit is None
-                        else allocation_limit
-                    )
+                    limit = max_bytes if allocation_limit is None else allocation_limit
                     raise _allocation_error(
                         path, allocation_base + streamed + len(chunk), limit
                     )
@@ -3817,7 +3814,12 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def rmdir(self, path):
         internal = self._checked_strip_protocol(path)
-        attrs = self._client.lstat(self._native_path(internal))
+        # Use the same capability-aware metadata path as rm and makedirs:
+        # NFS/local retain no-follow semantics; SMB has no LSTAT capability.
+        stats, errors = self._client.lstat_many([self._native_path(internal)])
+        attrs = stats[0]
+        if attrs is None:
+            raise _oserror(errors.get(0, errno.EIO), internal)
         if attrs["type"] != "directory":
             raise NotADirectoryError(errno.ENOTDIR, "Not a directory", internal)
         self._invalidate_namespace([internal])
