@@ -863,11 +863,12 @@ impl NfsClient {
     }
 
     /// Open a file; returns the backend descriptor (an int).
-    fn open(&self, py: Python<'_>, path: PathBuf, mode: &str) -> PyResult<i64> {
+    #[pyo3(signature = (path, mode, *, permissions=0o644))]
+    fn open(&self, py: Python<'_>, path: PathBuf, mode: &str, permissions: u32) -> PyResult<i64> {
         let flags = mode_to_flags(mode)?;
         self.with_fs(py, move |fs| {
             let f = fs
-                .open_raw_impl(&path, flags, 0o644)
+                .open_raw_impl(&path, flags, permissions)
                 .map_err(|e| to_py_err(e, Some(path.as_path())))?;
             descriptor("open", &f)
         })
@@ -1845,7 +1846,7 @@ impl NfsClient {
                 .iter()
                 .map(|&index| sources[index].clone())
                 .collect();
-            let identity_mask = AttrMask::SIZE | AttrMask::NLINK | AttrMask::identity();
+            let identity_mask = AttrMask::SIZE | AttrMask::identity();
             let (attrs, stat_errors) = attrs_many_impl(fs, &oversized_sources, identity_mask, true)
                 .map_err(|e| to_py_err(e, None))?;
             for (subset_index, err_no) in stat_errors {
@@ -1857,11 +1858,7 @@ impl NfsClient {
             for (&index, attrs) in oversized.iter().zip(attrs) {
                 if let Some(attrs) = attrs {
                     sizes[index] = Some(attrs.size);
-                    if attrs
-                        .returned
-                        .contains(AttrMask::NLINK | AttrMask::identity())
-                        && attrs.nlink > 1
-                    {
+                    if attrs.returned.contains(AttrMask::identity()) {
                         identity_candidates.push(index);
                         source_ids
                             .insert(index, fs_obj_id(&attrs).expect("identity mask was checked"));
@@ -1869,9 +1866,8 @@ impl NfsClient {
                 }
             }
 
-            // A different pathname can still name the source inode. Limit the
-            // extra destination stat to multiply-linked oversized sources, the
-            // only files that enter the destructive extent-copy path here.
+            // Symlink aliases do not increase nlink. Check every oversized
+            // source before any extent can truncate the shared inode.
             if !identity_candidates.is_empty() {
                 let candidate_dests: Vec<PathBuf> = identity_candidates
                     .iter()

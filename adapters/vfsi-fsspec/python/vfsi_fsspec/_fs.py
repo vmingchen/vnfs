@@ -114,6 +114,11 @@ def _normalize_range(start, end, size=None):
     return start, end
 
 
+def _validate_write_mode(mode):
+    if mode not in ("overwrite", "create"):
+        raise ValueError("mode must be 'overwrite' or 'create'")
+
+
 def _bounded_batches(sizes, max_items, max_bytes):
     """Yield index lists bounded by both item count and aggregate bytes."""
     batch = []
@@ -490,12 +495,12 @@ class _ClientPool:
         if error is not None:
             raise error
 
-    def open(self, path, mode):
+    def open(self, path, mode, **kwargs):
         self.ensure_ready()
         self._retry_deferred_closes()
         owner, client = self._choose()
         with self._client_locks[owner]:
-            return self._register(owner, client.open(path, mode))
+            return self._register(owner, client.open(path, mode, **kwargs))
 
     def open_many(self, paths, modes):
         self.ensure_ready()
@@ -997,6 +1002,8 @@ class VfsiFile(AbstractBufferedFile):
     ):
         self._raw = _RawVfsiFile(fs, path, mode, fd=fd, identity=identity)
         self._base_mode = _normalize_mode(mode)
+        if fd is not None and self._base_mode in ("a", "a+") and size is not None:
+            self._raw._pos = size
         self._buffered_read = self._base_mode == "r" and cache_type not in (
             None,
             "none",
@@ -1200,6 +1207,44 @@ class VfsiFile(AbstractBufferedFile):
             return super().read(size)
         finally:
             self._requested_read_end = None
+
+    def readuntil(self, char=b"\n", blocks=None):
+        """Read through a delimiter without exceeding the returned-data budget."""
+        if not char:
+            raise ValueError("delimiter must not be empty")
+        block_size = self.blocksize if blocks is None else operator.index(blocks)
+        if block_size <= 0:
+            raise ValueError("blocks must be positive")
+        limit = self.fs.read_all_max_total_bytes
+        if limit == 0:
+            self.read(0)  # Validate closed/readable state without consuming data.
+            # Cached readers retain their per-open EOF. Uncached readers need
+            # a one-byte positional probe, not an unconditional read(0) EOF.
+            remaining = (
+                self.tell() < self.size
+                if self._has_read_cache()
+                else bool(self._raw._pread_at(self.tell(), 1))
+            )
+            self.fs._check_read_allocation(int(remaining), self.path)
+            return b""
+        data = bytearray()
+        while True:
+            previous = len(data)
+            start = self.tell()
+            part = self.read(min(block_size, limit - previous + 1, limit))
+            if not part:
+                return bytes(data)
+            data.extend(part)
+            found = data.find(char, max(0, previous - len(char) + 1))
+            if found >= 0:
+                end = found + len(char)
+                self.fs._check_read_allocation(end, self.path)
+                self.seek(start + end - previous)
+                return bytes(data[:end])
+            self.fs._check_read_allocation(len(data), self.path)
+
+    def readline(self):
+        return self.readuntil()
 
     def readinto(self, b):
         if not self._has_read_cache():
@@ -1881,6 +1926,19 @@ class _DeferredWriteFile:
     """Disk-spooled transactional write staged beside its destination."""
 
     def __init__(self, fs, path, mode="wb"):
+        if not fs._native_has_create_permissions:
+            raise ImportError(
+                "transactional writes require native private-create support; "
+                "upgrade nfs4fs or vsmb alongside vfsi-fsspec"
+            )
+        permission_capability = getattr(fs._native_module, "CAP_POSIX_METADATA", 0)
+        if not permission_capability or not (
+            fs._client.capabilities() & permission_capability
+        ):
+            raise NotImplementedError(
+                "transactional writes require backend private-create and "
+                "POSIX permission support"
+            )
         self.fs = fs
         self.path = path  # internal path
         self.mode = mode
@@ -1892,10 +1950,9 @@ class _DeferredWriteFile:
         self._prepared = False
         self._published = False
         parent = posixpath.dirname(path) or "/"
-        name = posixpath.basename(path) or "root"
-        self.temp_path = posixpath.join(
-            parent, f".nfs4fs-txn-{uuid.uuid4().hex}-{name}"
-        )
+        # Keep the staging component independent of the destination length;
+        # a valid NAME_MAX-sized basename must still be writable atomically.
+        self.temp_path = posixpath.join(parent, f".nfs4fs-txn-{uuid.uuid4().hex}")
         if "a" in mode and fs.exists(path):
             fs._copy_remote_to_fileobj(path, self._spool)
             self._spool.seek(0, io.SEEK_END)
@@ -1960,8 +2017,16 @@ class _DeferredWriteFile:
         if "x" in self.mode and self.fs.exists(self.path):
             raise FileExistsError(errno.EEXIST, "File exists", self.path)
         try:
+            permissions = (
+                self.fs._client.stat(self.fs._native_path(self.path))["mode"] & 0o777
+            )
+        except FileNotFoundError:
+            permissions = None  # New transactional files stay private.
+        try:
             self.fs._write_spooled(self.temp_path, self._spool)
-        except Exception:
+            if permissions is not None:
+                self.fs._client.chmod(self.fs._native_path(self.temp_path), permissions)
+        except BaseException:
             try:
                 self.fs.rm(self.temp_path)
             except OSError:
@@ -2034,6 +2099,10 @@ class _VfsiTransaction(Transaction):
         files = list(self.files)
         self.files.clear()
         fs = self.fs
+        # Enrollment ends before preparation; callbacks cannot enqueue writes
+        # into the already-drained transaction.
+        if fs is not None:
+            fs._intrans = False
         try:
             if not commit:
                 _DeferredWriteFile.discard_many(files)
@@ -2303,6 +2372,13 @@ class VfsiFileSystem(AbstractFileSystem):
                 "bounded vector reads require a compatible native adapter; "
                 "upgrade nfs4fs or vsmbfs alongside vfsi-fsspec"
             )
+        try:
+            self._native_has_create_permissions = (
+                "permissions"
+                in inspect.signature(native_module.NfsClient.open).parameters
+            )
+        except (AttributeError, TypeError, ValueError):
+            self._native_has_create_permissions = False
         self._client = _ClientPool(
             native_module,
             factory_args,
@@ -3130,6 +3206,7 @@ class VfsiFileSystem(AbstractFileSystem):
         callback=None,
         callback_pairs=None,
     ):
+        _validate_write_mode(mode)
         self._invalidate_namespace(paths)
         native = [self._native_path(p) for p in paths]
         datas = [v if isinstance(v, bytes) else bytes(v) for v in values]
@@ -3156,6 +3233,18 @@ class VfsiFileSystem(AbstractFileSystem):
             else:
                 action(callback)
 
+        if self._intrans:
+            for index, path in enumerate(paths):
+                report(
+                    index,
+                    lambda child, i=index, p=path: self._write_one_streamed(
+                        p,
+                        datas[i],
+                        callback=child,
+                        mode="xb" if mode == "create" else "wb",
+                    ),
+                )
+            return
         if mode == "create":
             for index, path in enumerate(paths):
                 report(
@@ -3165,8 +3254,6 @@ class VfsiFileSystem(AbstractFileSystem):
                     ),
                 )
             return
-        if mode != "overwrite":
-            raise ValueError("mode must be 'overwrite' or 'create'")
         for batch in _bounded_batches(
             [len(data) for data in datas], self.batch_size, self.max_batch_bytes
         ):
@@ -3196,14 +3283,10 @@ class VfsiFileSystem(AbstractFileSystem):
             for index in batch:
                 report(index)
 
-    def _write_one_streamed(self, path, value, callback=None):
-        """Overwrite one in-memory value with bounded native write calls."""
-        internal = self._checked_strip_protocol(path)
-        parent = posixpath.dirname(internal)
-        if self.auto_mkdir and parent not in ("", "/"):
-            self._ensure_dirs([parent], 0o755)
+    def _write_one_streamed(self, path, value, callback=None, mode="wb"):
+        """Write one in-memory value through the existing scalar/deferred path."""
         view = memoryview(value)
-        with VfsiFile(self, internal, "wb") as remote:
+        with self.open(path, mode) as remote:
             for offset in range(0, len(view), self.transfer_chunk_size):
                 _write_fully(
                     remote,
@@ -3246,6 +3329,8 @@ class VfsiFileSystem(AbstractFileSystem):
             try:
                 self._client.close(fd)
             except BaseException:
+                # This helper has no file object to retain cleanup ownership.
+                self._client.defer_close_many([fd])
                 # Preserve the mutation error if both the write and CLOSE fail.
                 if write_error is None:
                     raise
@@ -3261,7 +3346,8 @@ class VfsiFileSystem(AbstractFileSystem):
         if self.auto_mkdir:
             self._ensure_dirs([posixpath.dirname(path) or "/"])
         spool.seek(0)
-        with VfsiFile(self, path, "xb") as remote:
+        fd = self._client.open(self._native_path(path), "xb", permissions=0o600)
+        with VfsiFile(self, path, "xb", fd=fd) as remote:
             while True:
                 chunk = spool.read(self.transfer_chunk_size)
                 if not chunk:
@@ -3482,6 +3568,8 @@ class VfsiFileSystem(AbstractFileSystem):
     ):
         """Copy local files to remote, writing every file in one writev batch
         instead of one round trip per file."""
+        mode = kwargs.get("mode", "overwrite")
+        _validate_write_mode(mode)
         callback = Callback.as_callback(callback)
         from fsspec.implementations.local import (
             LocalFileSystem,
@@ -3537,17 +3625,22 @@ class VfsiFileSystem(AbstractFileSystem):
             else:
                 pairs.append((local_path, remote_path))
         if remote_dirs:
+            if self._intrans:
+                raise NotImplementedError(
+                    "transactional directory uploads are unsupported"
+                )
             self._makedirs_batched(remote_dirs, exist_ok=True)
         if not pairs:
             return
-        mode = kwargs.get("mode", "overwrite")
         sizes = [os.path.getsize(local_path) for local_path, _ in pairs]
 
         def upload_streamed(local_path, remote_path, size):
-            remote = self.open(remote_path, "xb" if mode == "create" else "wb")
             with callback.branched(local_path, remote_path) as child:
                 child.set_size(size)
-                with remote, open(local_path, "rb") as source:
+                # Finish fallible local setup before creating/truncating remote.
+                with open(local_path, "rb") as source, self.open(
+                    remote_path, "xb" if mode == "create" else "wb"
+                ) as remote:
                     while True:
                         chunk = source.read(
                             min(self.transfer_chunk_size, self.max_batch_bytes)
@@ -3616,6 +3709,9 @@ class VfsiFileSystem(AbstractFileSystem):
         **kwargs,
     ):
         internal = self._checked_strip_protocol(path)
+        base_mode = _normalize_mode(mode)
+        if not autocommit and "+" in base_mode:
+            raise NotImplementedError("transactional update modes are unsupported")
         if not autocommit and any(c in mode for c in "wax"):
             # fsspec transactions: defer the write until commit()/discard().
             return _DeferredWriteFile(self, internal, mode)
@@ -3623,7 +3719,6 @@ class VfsiFileSystem(AbstractFileSystem):
             parent = self._parent(path)
             if parent not in ("", "/"):
                 self._ensure_dirs([parent], 0o755)
-        base_mode = _normalize_mode(mode)
         fd = None
         identity = None
         try:
@@ -3694,6 +3789,19 @@ class VfsiFileSystem(AbstractFileSystem):
             discovered_sizes = list(sizes)
             if len(discovered_sizes) != len(paths):
                 raise ValueError("sizes must have one entry per open file")
+        if self._intrans and any(_normalize_mode(mode) != "r" for mode in modes):
+            if any("+" in _normalize_mode(mode) for mode in modes):
+                raise NotImplementedError("transactional update modes are unsupported")
+            # OpenFile already handles text/compression finalization and scalar
+            # transaction enrollment. Reuse it instead of a second coordinator.
+            with ExitStack() as stack:
+                files = []
+                for entry in open_files:
+                    # __enter__ can open a handle before wrapper setup fails.
+                    stack.push(entry)
+                    files.append(entry.__enter__())
+                stack.pop_all()
+            return files
         if self.auto_mkdir and any(any(c in m for c in "wax") for m in modes):
             parents = {
                 posixpath.dirname(p) for p in paths if posixpath.dirname(p) != "/"
@@ -3712,20 +3820,23 @@ class VfsiFileSystem(AbstractFileSystem):
             metadata_indices = [
                 index
                 for index, mode in enumerate(modes)
-                if _normalize_mode(mode) == "r"
-                or (
-                    _normalize_mode(mode) == "a"
-                    and effective_write_buffering
-                    and discovered_sizes[index] is None
-                )
+                if _normalize_mode(mode) in ("r", "a", "a+")
             ]
             if metadata_indices:
                 attrs = self._client.fstat_many(
                     [fds[index] for index in metadata_indices]
                 )
                 for index, attr in zip(metadata_indices, attrs):
+                    if attr["type"] == "directory":
+                        raise IsADirectoryError(
+                            errno.EISDIR, "Is a directory", paths[index]
+                        )
                     identities[index] = _handle_identity(attr)
-                    if discovered_sizes[index] is None:
+                    # Append positions come from the opened handle, never a
+                    # caller-supplied size hint that may already be stale.
+                    if discovered_sizes[index] is None or _normalize_mode(
+                        modes[index]
+                    ) in ("a", "a+"):
                         discovered_sizes[index] = attr["size"]
             files = [
                 VfsiFile(
@@ -3782,15 +3893,17 @@ class VfsiFileSystem(AbstractFileSystem):
         """Flush and close a list of files in one closev batch."""
         if isinstance(open_files, _WrappedFiles):
             return open_files.group.finish()
-        group = open_files[0]._buffer_group if open_files else None
+        group = getattr(open_files[0], "_buffer_group", None) if open_files else None
         if group is not None:
             return group.finish(open_files)
-        fds = [f._fd for f in open_files if not f.closed and f._fd is not None]
-        if fds:
-            self._client.close_many(fds)
-        for f in open_files:
-            f._fd = None
-            f.close()
+        error = None
+        for file in open_files:
+            try:
+                file.close()
+            except BaseException as exc:
+                error = error or exc
+        if error is not None:
+            raise error
 
     # -- mutation ----------------------------------------------------------
 

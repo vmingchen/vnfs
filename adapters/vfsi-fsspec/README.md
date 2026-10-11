@@ -17,3 +17,8 @@ truncation may produce a short read. This bounds the range, not a snapshot of
 its contents.
 Whole-file `cat_file` reads (normalized start zero, no end) retain the native
 read-to-EOF fast path, which enforces the allocation budget while reading.
+
+Transactional writes require both a native creation-permissions API and a backend
+with POSIX permission support. Unsupported backends, including current SMB,
+reject transactional writes before allocating a spool or creating staging files;
+ordinary I/O remains supported. A method signature alone is not a capability.
