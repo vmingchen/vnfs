@@ -5,6 +5,16 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## Rust release - 2026-10-10
+
+- vnfs 0.0.21, vfsi-core 0.1.9, vfsi-sync 0.1.10, vfsi-local 0.1.8,
+  vfsi-nfs 0.1.9, and vfsi-smb 0.1.7. First releases of vfsi-posix 0.1.0
+  and vfsi-uring 0.1.0; nfsv41-sys and libntirpc-sys are unchanged.
+- Separated shared local filesystem machinery from POSIX and batched Linux
+  io_uring executors, with direct caller-buffer reads and bounded ring batches.
+- Hardened NFS recovery, descriptor cleanup, bounded reads, and Python
+  batching; kept regression and fault-injection coverage across backends.
+
 ## Coordinated patch release - 2026-10-05
 
 - Rust: vnfs 0.0.19, vfsi-core 0.1.7, vfsi-sync 0.1.8, vfsi-local 0.1.6, vfsi-nfs 0.1.7, vfsi-smb 0.1.5, and vfsi-c 0.3.5.

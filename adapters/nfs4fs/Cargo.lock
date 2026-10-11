@@ -465,7 +465,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "vfsi-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "bitfields",
  "bitflags",
@@ -474,7 +474,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-local"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "libc",
  "vfsi-core",
@@ -483,7 +483,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-nfs"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "bitfields",
  "libc",
@@ -517,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-sync"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "libc",
  "vfsi-core",

@@ -18,7 +18,7 @@ vfsi-sync = { workspace = true }
 vfsi-nfs = { workspace = true }
 vfsi-local = { workspace = true }
 vfsi-posix = { workspace = true }
-vnfs = { path = "../../crates/vnfs", version = "0.0.20", features = ["posix"] }
+vnfs = { path = "../../crates/vnfs", version = "0.0.21", features = ["posix"] }
 vfsi-smb = { workspace = true, features = ["server-copy"] }
 
 [build-dependencies]

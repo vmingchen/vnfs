@@ -1344,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-core"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "bitfields",
  "bitflags",
@@ -1354,7 +1354,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-local"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "libc",
  "proptest",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-nfs"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "bitfields",
  "libc",
@@ -1387,7 +1387,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-smb"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bitfields",
  "futures-util",
@@ -1401,7 +1401,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-sync"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "libc",
  "vfsi-core",
@@ -1423,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "vnfs"
-version = "0.0.20"
+version = "0.0.21"
 dependencies = [
  "bitfields",
  "libc",
