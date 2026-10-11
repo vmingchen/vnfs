@@ -62,6 +62,9 @@ def test_mount_configuration_is_reused_by_pool_and_reconnect(monkeypatch):
         return config
 
     class Native:
+        def read_all_many(self, paths, max_total_bytes=None):
+            pytest.fail("mount configuration must not read file contents")
+
         def __init__(self, *args):
             connections.append(args)
 

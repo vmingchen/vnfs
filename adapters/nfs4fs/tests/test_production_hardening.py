@@ -491,6 +491,9 @@ class _FakeNativeClient:
     fail_reads = True
     fail_writes = True
 
+    def read_all_many(self, paths, max_total_bytes=None):
+        pytest.fail("this recovery test must not read file contents")
+
     def __init__(self, *args):
         self.shutdown_calls = 0
         self.abandon_calls = 0

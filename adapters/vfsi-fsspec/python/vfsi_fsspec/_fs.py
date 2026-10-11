@@ -14,7 +14,7 @@ import tempfile
 import threading
 import uuid
 import weakref
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from glob import has_magic
@@ -152,12 +152,13 @@ def _allocation_error(path, requested, limit):
 
 
 def _handle_identity(attrs):
-    """Return stable metadata for recognizing one opened object after reconnect."""
-    fileid = attrs.get("fileid")
-    created = attrs.get("created_ns", attrs.get("created"))
-    if fileid is None and created is None:
-        return None
-    return fileid, created
+    """Object identity within this filesystem, not a file-version token.
+
+    Native ``created`` fields currently contain POSIX ctime, which changes on
+    writes and chmod. Never use them to identify an inode across reconnects.
+    Missing file IDs fail closed; timestamps alone cannot establish identity.
+    """
+    return attrs.get("fileid")
 
 
 def _stale_handle_error(path):
@@ -2286,6 +2287,18 @@ class VfsiFileSystem(AbstractFileSystem):
                     "control; upgrade nfs4fs alongside vfsi-fsspec"
                 )
             factory_args += (False,)
+        try:
+            bounded_reads = (
+                "max_total_bytes"
+                in inspect.signature(native_module.NfsClient.read_all_many).parameters
+            )
+        except (AttributeError, TypeError, ValueError):
+            bounded_reads = False
+        if not bounded_reads:
+            raise ImportError(
+                "bounded vector reads require a compatible native adapter; "
+                "upgrade nfs4fs or vsmbfs alongside vfsi-fsspec"
+            )
         self._client = _ClientPool(
             native_module,
             factory_args,
@@ -2855,16 +2868,9 @@ class VfsiFileSystem(AbstractFileSystem):
             callback.relative_update()
             reported.add(index)
 
-        pending = list(zip(valid, valid_sizes))
+        pending = deque(zip(valid, valid_sizes))
         while pending:
             remaining = limit - retained
-            if remaining <= 0:
-                for index, size in pending:
-                    if size:
-                        failures[index] = _allocation_error(
-                            paths[index], retained + size, limit
-                        )
-                break
 
             batch = []
             estimated = 0
@@ -2875,11 +2881,11 @@ class VfsiFileSystem(AbstractFileSystem):
                 if batch and estimated + size > byte_limit:
                     break
                 if not batch and (size > self.max_batch_bytes or size > remaining):
-                    pending.pop(0)
+                    pending.popleft()
                     batch = [(index, size)]
                     oversized = True
                     break
-                pending.pop(0)
+                pending.popleft()
                 batch.append((index, size))
                 estimated += size
             if not batch:
@@ -2890,16 +2896,13 @@ class VfsiFileSystem(AbstractFileSystem):
                 read_streamed(index, size, remaining)
                 continue
 
-            active = [(index, size) for index, size in batch if size]
-            for index, size in batch:
-                if size == 0:
-                    data[index] = b""
-            if not active:
-                continue
+            # Stat sizes are planning hints, not permission checks or EOF.
+            # A zero remaining budget still permits the native bounded EOF
+            # probe, so a formerly empty file cannot silently bypass the cap.
             dat, batch_errors = self._client.read_all_many(
-                [native[index] for index, _ in active], remaining
+                [native[index] for index, _ in batch], remaining
             )
-            for position, (index, _size) in enumerate(active):
+            for position, (index, _size) in enumerate(batch):
                 if position in batch_errors:
                     failures[index] = _oserror(batch_errors[position], paths[index])
                     continue

@@ -726,7 +726,7 @@ impl NfsClient {
         if closes.is_empty() {
             return;
         }
-        if self.close_many(&closes).is_err() {
+        if self.close_unregistered_many(&closes).is_err() {
             self.deferred_path_closes.extend(closes);
         }
     }
@@ -735,7 +735,7 @@ impl NfsClient {
         let mut remaining = std::mem::take(&mut self.deferred_path_closes);
         while !remaining.is_empty() {
             let close = remaining.remove(0);
-            match self.close(&close.fh, &close.stateid) {
+            match self.close_unregistered(&close.fh, &close.stateid) {
                 Ok(()) => {}
                 Err(error)
                     if matches!(
@@ -2054,21 +2054,31 @@ impl NfsClient {
         Ok(out)
     }
 
-    /// CLOSE several files in as few compounds as possible. Close seqids are
-    /// assigned consecutively across the batch.
+    /// CLOSE public descriptors in as few compounds as possible. Each has an
+    /// independent OPEN owner, so each CLOSE uses seqid 1.
     pub fn close_many(&mut self, ops: &[CloseOp]) -> RpcResult<()> {
         self.close_many_slot(ops, OwnerSlot::User)
     }
 
     /// Like [`close_many`](Self::close_many) but using the path-op open owner.
     pub fn close_many_path(&mut self, ops: &[CloseOp]) -> RpcResult<()> {
+        self.close_many_cleanup_slot(ops, OwnerSlot::Path)
+    }
+
+    /// Cleanup confirmed public OPENs that were not transferred to descriptors.
+    /// Preserve cleanup fault hooks independently of the chosen OPEN owner.
+    pub(crate) fn close_unregistered_many(&mut self, ops: &[CloseOp]) -> RpcResult<()> {
+        self.close_many_cleanup_slot(ops, OwnerSlot::User)
+    }
+
+    fn close_many_cleanup_slot(&mut self, ops: &[CloseOp], slot: OwnerSlot) -> RpcResult<()> {
         #[cfg(feature = "test-faults")]
         if let Some(injector) = &self.fault_injector
             && let Err(error) = injector.check(&OpenFaultPoint::BeforePathCloseBatch)
         {
             return Err(RpcError::transport(error.to_string()));
         }
-        self.close_many_slot(ops, OwnerSlot::Path)?;
+        self.close_many_slot(ops, slot)?;
         #[cfg(feature = "test-faults")]
         {
             self.confirmed_path_closes += ops.len();
@@ -3315,13 +3325,30 @@ impl NfsClient {
 
     /// Like [`close`](Self::close) but using the path-op open owner.
     pub fn close_path(&mut self, fh: &FileHandle, stateid: &stateid4) -> RpcResult<()> {
+        self.close_cleanup_slot(fh, stateid, OwnerSlot::Path)
+    }
+
+    pub(crate) fn close_unregistered(
+        &mut self,
+        fh: &FileHandle,
+        stateid: &stateid4,
+    ) -> RpcResult<()> {
+        self.close_cleanup_slot(fh, stateid, OwnerSlot::User)
+    }
+
+    fn close_cleanup_slot(
+        &mut self,
+        fh: &FileHandle,
+        stateid: &stateid4,
+        slot: OwnerSlot,
+    ) -> RpcResult<()> {
         #[cfg(feature = "test-faults")]
         if let Some(injector) = &self.fault_injector
             && let Err(error) = injector.check(&OpenFaultPoint::BeforePathClose)
         {
             return Err(RpcError::transport(error.to_string()));
         }
-        self.close_slot(fh, stateid, OwnerSlot::Path)?;
+        self.close_slot(fh, stateid, slot)?;
         #[cfg(feature = "test-faults")]
         {
             self.confirmed_path_closes += 1;

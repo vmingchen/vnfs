@@ -488,3 +488,108 @@ def test_cat_passes_remaining_budget_to_native_batch_when_file_grows(fs, monkeyp
         fs.cat(["/a", "/b"])
     assert error.value.errno == errno.EFBIG
     assert budgets == [8, 6]
+
+
+@pytest.mark.parametrize("mutation", ["append", "chmod"])
+@pytest.mark.parametrize("reader_kind", ["scalar", "group", "pipeline"])
+def test_recovery_identity_survives_in_place_mutation(fs, mutation, reader_kind):
+    fs.pipe_file("/data", b"abcdefgh")
+
+    def mutate_and_reconnect():
+        before = fs.info("/data")
+        if mutation == "append":
+            with fs.open("/data", "ab") as writer:
+                writer.write(b"tail")
+        else:
+            fs._client.chmod(fs._native_path("/data"), 0o600)
+        after = fs.info("/data")
+        assert before["fileid"] == after["fileid"]
+        assert before["created_ns"] != after["created_ns"]
+        fs._client.reconnect()
+
+    if reader_kind == "pipeline":
+        chunks = []
+
+        def receive(offset, data):
+            chunks.append(data)
+            if offset == 0:
+                mutate_and_reconnect()
+
+        assert (
+            fs.read_stream_pipelined(
+                "/data",
+                receive,
+                workers=1,
+                chunk_size=2,
+                max_in_flight=1,
+                max_buffered_bytes=2,
+            )
+            == 8
+        )
+        assert b"".join(chunks) == b"abcdefgh"
+    else:
+        files = (
+            fs.open_many([OpenFile(fs, "/data", mode="rb")], block_size=2)
+            if reader_kind == "group"
+            else [fs.open("/data", "rb", cache_type="none")]
+        )
+        try:
+            assert files[0].read(2) == b"ab"
+            mutate_and_reconnect()
+            assert files[0].read(6) == b"cdefgh"
+        finally:
+            fs.commit_many(files)
+    assert not fs._client._fds
+
+
+@pytest.mark.parametrize("exhausted", [False, True])
+@pytest.mark.parametrize("grow", [False, True])
+def test_cat_verifies_stat_zero_files_even_after_budget_is_exhausted(
+    fs, monkeypatch, exhausted, grow
+):
+    fs.read_all_max_total_bytes = 4
+    fs.batch_size = 1
+    fs.pipe({"/first": b"full" if exhausted else b"a", "/empty": b""})
+    original_stat = fs._client.stat_many
+    original_read = fs._client.read_all_many
+    reads = []
+
+    def stat_then_grow(paths):
+        stats = original_stat(paths)
+        if grow:
+            fs.pipe_file("/empty", b"x")
+        return stats
+
+    def record_read(paths, budget=None):
+        reads.append((list(paths), budget))
+        return original_read(paths, budget)
+
+    monkeypatch.setattr(fs._client, "stat_many", stat_then_grow)
+    monkeypatch.setattr(fs._client, "read_all_many", record_read)
+    result = fs.cat(["/first", "/empty"], on_error="return")
+    assert result["/first"] == (b"full" if exhausted else b"a")
+    if exhausted and grow:
+        assert isinstance(result["/empty"], OSError)
+        assert result["/empty"].errno == errno.EFBIG
+    else:
+        assert result["/empty"] == (b"x" if grow else b"")
+    assert reads == [
+        ([fs._native_path("/first")], 4),
+        ([fs._native_path("/empty")], 0 if exhausted else 3),
+    ]
+
+
+@pytest.mark.parametrize("code", [errno.EACCES, errno.EISDIR])
+def test_cat_does_not_hide_read_errors_for_stat_zero_files(fs, monkeypatch, code):
+    fs.pipe_file("/empty", b"")
+    calls = []
+
+    def fail_read(paths, budget=None):
+        calls.append(list(paths))
+        return [None], {0: code}
+
+    monkeypatch.setattr(fs._client, "read_all_many", fail_read)
+    result = fs.cat(["/empty"], on_error="return")
+    assert isinstance(result["/empty"], OSError)
+    assert result["/empty"].errno == code
+    assert calls == [[fs._native_path("/empty")]]
