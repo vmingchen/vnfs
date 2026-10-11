@@ -364,6 +364,41 @@ fn connection_options_preserve_auth_sys_as_the_compatible_default() {
 }
 
 #[test]
+fn fixed_text_builder_owns_compact_endpoints_and_preserves_input_compatibility() {
+    use std::mem::{size_of, size_of_val};
+
+    let mut source = String::with_capacity(256);
+    source.push_str("[2001:db8::7]:2049");
+    let expected = source.clone();
+    let builders = [
+        NfsClientBuilder::new(source.clone()),
+        NfsClientBuilder::new(&source),
+        NfsClientBuilder::new(source.as_str()),
+        NfsClientBuilder::new(source.clone().into_boxed_str()),
+    ];
+    source.clear();
+    for builder in builders {
+        assert_eq!(builder.host.as_ref(), expected);
+        assert_eq!(size_of_val(&builder.host), size_of::<Box<str>>());
+        assert_eq!(
+            size_of::<String>() - size_of_val(&builder.host),
+            size_of::<usize>()
+        );
+        let cloned = builder.clone();
+        assert_eq!(cloned.host, builder.host);
+        assert_ne!(cloned.host.as_ptr(), builder.host.as_ptr());
+        drop(builder);
+        assert_eq!(cloned.host.as_ref(), expected);
+    }
+    // Validation errors retain the endpoint as their public path context.
+    let error = NfsClientBuilder::new(expected.clone())
+        .connect_pool(0)
+        .err()
+        .unwrap();
+    assert_eq!(error.path(), Some(Path::new(&expected)));
+}
+
+#[test]
 fn builder_collects_connection_and_runtime_configuration() {
     let policy = NfsRecoveryPolicy::new().reconnect_attempts(3);
     let builder = NfsClientBuilder::new("server:2049")
@@ -374,7 +409,7 @@ fn builder_collects_connection_and_runtime_configuration() {
         .recovery_policy(policy)
         .auto_reconnect(false)
         .max_compound_bytes(64 * 1024);
-    assert_eq!(builder.host, "server:2049");
+    assert_eq!(builder.host.as_ref(), "server:2049");
     assert_eq!(builder.options.root, Path::new("/export/app"));
     assert_eq!(builder.options.minorversion, Some(1));
     assert_eq!(

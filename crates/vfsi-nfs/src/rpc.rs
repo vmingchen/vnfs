@@ -16,7 +16,7 @@ pub const NFS4_PROGRAM: rpcprog_t = 100003;
 pub const NFS_V4: rpcvers_t = 4;
 pub const NFSPROC4_COMPOUND: rpcproc_t = 1;
 
-static SVC_INIT: OnceLock<Result<(), String>> = OnceLock::new();
+static SVC_INIT: OnceLock<Result<(), &'static str>> = OnceLock::new();
 
 /// Authentication used for the NFS RPC connection.
 ///
@@ -105,12 +105,12 @@ pub fn svc_init_once() -> RpcResult<()> {
         if svc_init(&mut params) {
             Ok(())
         } else {
-            Err("libntirpc svc_init failed".to_string())
+            Err("libntirpc svc_init failed")
         }
     });
     match result {
         Ok(()) => Ok(()),
-        Err(message) => Err(RpcError::transport(message.clone())),
+        Err(message) => Err(RpcError::transport(*message)),
     }
 }
 

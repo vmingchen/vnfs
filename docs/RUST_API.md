@@ -191,6 +191,18 @@ behavior; bytes are boxed when they enter private fixed storage. Path
 normalization borrows immutable components from its input for the duration of the call,
 avoiding a separate allocation for every component.
 
+Fixed private UTF-8 text uses `Box<str>` for NFS builder/reconnection endpoints,
+Auto's retained mount-spec endpoint, and owner/group identity-cache keys and
+their eviction queue. The stored string occupies 16 bytes on a 64-bit target,
+versus 24 bytes for `String`; the text allocation remains separate. These
+fields retain their contents and value-based equality, and cloning still
+copies their text. The fixed RPC initialization diagnostic uses `&'static str`
+and requires no retained heap allocation. Public `Into<String>` endpoint
+inputs, `AutoRoute`/`MountInfo` server fields, error messages, authentication
+options, and text-I/O results/buffers retain their existing `String` types.
+Growing string builders and strings transferred into those public types also
+keep `String`.
+
 | Canonical name | Meaning | Linux, NFS, and GCS equivalent | Previous spelling / compatibility |
 |---|---|---|---|
 | `FsObjId`; `Attrs::fs_obj_id()` | Composite underlying object ID: `(fs_id, file_id)`. | Linux: (`st_dev`, `st_ino`). NFS: (`FATTR4_FSID`, `FATTR4_FILEID`); opaque filehandle is separate. GCS: `(bucket, object name, generation)` identifies an object version. | `FileIdentity` and `file_identity()` remain compatibility aliases. |

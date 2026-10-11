@@ -7,7 +7,7 @@ pub(super) struct MountSpec {
     pub(super) id: u64,
     pub(super) mount_point: PathBuf,
     pub(super) export: PathBuf,
-    pub(super) server: String,
+    pub(super) server: Box<str>,
     pub(super) minor: u32,
 }
 
@@ -47,7 +47,7 @@ impl Route {
             Self::Posix => AutoRoute::Posix,
             Self::Nfs(connection) => AutoRoute::DirectNfs {
                 mount_point: connection.spec.mount_point.clone(),
-                server: connection.spec.server.clone(),
+                server: connection.spec.server.to_string(),
             },
         }
     }
@@ -164,7 +164,7 @@ impl Auto {
         }
         // Connection failure is a pre-dispatch fallback. Never replay a
         // possibly completed mutation through the mounted backend.
-        let client = Nfs::builder(&spec.server)
+        let client = Nfs::builder(spec.server.as_ref())
             .root(&spec.export)
             .version(crate::NfsVersion::try_from(Some(spec.minor)).ok()?)
             .connect()
@@ -330,7 +330,7 @@ pub(super) fn parse_mount(line: &[u8]) -> Option<MountSpec> {
         id: info.id,
         mount_point: info.mount_point,
         export: info.export,
-        server: info.server,
+        server: info.server.into_boxed_str(),
         minor: info.minor,
     })
 }

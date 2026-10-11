@@ -10,16 +10,16 @@ const MAX_NSS_BUFFER: usize = 1024 * 1024;
 
 #[derive(Default)]
 struct IdentityCache {
-    values: HashMap<(String, bool), Option<u32>>,
-    order: VecDeque<(String, bool)>,
+    values: HashMap<(Box<str>, bool), Option<u32>>,
+    order: VecDeque<(Box<str>, bool)>,
 }
 
 impl IdentityCache {
-    fn get(&self, key: &(String, bool)) -> Option<Option<u32>> {
+    fn get(&self, key: &(Box<str>, bool)) -> Option<Option<u32>> {
         self.values.get(key).copied()
     }
 
-    fn insert(&mut self, key: (String, bool), value: Option<u32>) {
+    fn insert(&mut self, key: (Box<str>, bool), value: Option<u32>) {
         if let Some(cached) = self.values.get_mut(&key) {
             *cached = value;
             return;
@@ -45,11 +45,11 @@ fn cache() -> &'static Mutex<IdentityCache> {
 /// arbitrary `@domain` can map a remote principal to an unrelated local
 /// account with the same short name.
 pub(crate) fn name_to_id(value: &[u8], is_group: bool) -> Option<u32> {
-    let name = std::str::from_utf8(value).ok()?.trim().to_owned();
+    let name = std::str::from_utf8(value).ok()?.trim();
     if let Ok(id) = name.parse::<u32>() {
         return Some(id);
     }
-    let key = (name, is_group);
+    let key = (Box::<str>::from(name), is_group);
     if let Some(value) = cache().lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
         return value;
     }
@@ -136,9 +136,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn fixed_text_cache_keys_preserve_namespaces_updates_and_negative_results() {
+        use std::mem::size_of;
+
+        assert_eq!(
+            size_of::<(String, bool)>() - size_of::<(Box<str>, bool)>(),
+            size_of::<usize>()
+        );
+        let owner = (Box::<str>::from("míng@vfsi.invalid"), false);
+        let group = (owner.0.clone(), true);
+        let mut cache = IdentityCache::default();
+        cache.insert(owner.clone(), Some(1001));
+        cache.insert(group.clone(), None);
+        assert_eq!(cache.get(&owner), Some(Some(1001)));
+        assert_eq!(cache.get(&group), Some(None));
+        assert_eq!(cache.order.len(), 2);
+        assert_eq!(cache.order[0].0.as_ref(), "míng@vfsi.invalid");
+
+        cache.insert(owner.clone(), Some(1002));
+        assert_eq!(cache.get(&owner), Some(Some(1002)));
+        assert_eq!(cache.order.len(), 2); // Updates keep FIFO position.
+        let cloned = owner.clone();
+        assert_ne!(cloned.0.as_ptr(), owner.0.as_ptr());
+        drop(owner);
+        assert_eq!(cache.get(&cloned), Some(Some(1002)));
+    }
+
+    #[test]
     fn numeric_ids_do_not_require_nss() {
         assert_eq!(name_to_id(b"4294967295", false), Some(u32::MAX));
         assert_eq!(name_to_id(b"42", true), Some(42));
+        assert_eq!(name_to_id(b" 42 \n", true), Some(42));
     }
 
     #[test]
@@ -150,15 +178,21 @@ mod tests {
     fn cache_is_bounded() {
         let mut cache = IdentityCache::default();
         for index in 0..CACHE_CAPACITY + 37 {
-            cache.insert((format!("user-{index}"), false), Some(index as u32));
+            cache.insert(
+                (format!("user-{index}").into_boxed_str(), false),
+                Some(index as u32),
+            );
         }
         assert_eq!(cache.values.len(), CACHE_CAPACITY);
-        assert!(!cache.values.contains_key(&("user-0".to_owned(), false)));
         assert!(
-            cache
+            !cache
                 .values
-                .contains_key(&(format!("user-{}", CACHE_CAPACITY + 36), false))
+                .contains_key(&(Box::<str>::from("user-0"), false))
         );
+        assert!(cache.values.contains_key(&(
+            format!("user-{}", CACHE_CAPACITY + 36).into_boxed_str(),
+            false
+        )));
     }
 
     #[test]

@@ -67,7 +67,7 @@ fn resource_status(status: u32) -> bool {
 
 #[derive(Debug, Clone)]
 struct ConnectionConfig {
-    host: String,
+    host: Box<str>,
     root: PathBuf,
     minorversion: Option<u32>,
     connect_timeout: Duration,
@@ -140,7 +140,7 @@ impl NfsConnectOptions {
 /// Builder for a completely configured NFS client.
 #[derive(Clone)]
 pub struct NfsClientBuilder {
-    host: String,
+    host: Box<str>,
     options: NfsConnectOptions,
     observer: Option<Arc<dyn NfsObserver>>,
     #[cfg(target_os = "linux")]
@@ -161,7 +161,7 @@ impl std::fmt::Debug for NfsClientBuilder {
 impl NfsClientBuilder {
     pub fn new(host: impl Into<String>) -> Self {
         Self {
-            host: host.into(),
+            host: host.into().into_boxed_str(),
             options: NfsConnectOptions::default(),
             observer: None,
             #[cfg(target_os = "linux")]
@@ -248,9 +248,8 @@ impl NfsClientBuilder {
     pub fn connect_pool(self, size: usize) -> VfResult<Vec<NfsVecFs>> {
         self.validate()?;
         if !(1..=64).contains(&size) {
-            return Err(
-                VfError::client(0, ERR_INVAL).with_context("connect_pool", Path::new(&self.host))
-            );
+            return Err(VfError::client(0, ERR_INVAL)
+                .with_context("connect_pool", Path::new(self.host.as_ref())));
         }
         let pool_id = NEXT_CLIENT_POOL_ID.fetch_add(1, Ordering::Relaxed);
         (0..size)
@@ -299,9 +298,8 @@ impl NfsClientBuilder {
             .as_ref()
             .is_some_and(|owner| owner.is_empty() || owner.len() > 1024)
         {
-            return Err(
-                VfError::client(0, ERR_INVAL).with_context("connect", Path::new(&self.host))
-            );
+            return Err(VfError::client(0, ERR_INVAL)
+                .with_context("connect", Path::new(self.host.as_ref())));
         }
         Ok(())
     }

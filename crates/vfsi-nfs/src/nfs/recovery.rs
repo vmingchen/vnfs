@@ -108,7 +108,7 @@ impl NfsVecFs {
     pub fn connect_with_options(host: &str, options: NfsConnectOptions) -> VfResult<NfsVecFs> {
         let root = path_from_bytes(&normalize_bytes(path_bytes(&options.root)));
         let connection = ConnectionConfig {
-            host: host.to_owned(),
+            host: Box::from(host),
             root,
             minorversion: options.minorversion,
             connect_timeout: options.connect_timeout,

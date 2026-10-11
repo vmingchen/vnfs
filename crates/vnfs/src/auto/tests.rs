@@ -226,11 +226,44 @@ fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
 }
 
 #[test]
+fn fixed_text_mount_specs_keep_endpoints_and_public_strings() {
+    use std::mem::{size_of, size_of_val};
+
+    let line = b"46 49 0:45 / /mnt/nfs rw,relatime - nfs4 server:/export rw,vers=4.2,proto=tcp,sec=sys,addr=2001:db8::7";
+    let spec = parse_mount(line).unwrap();
+    assert_eq!(spec.server.as_ref(), "[2001:db8::7]:2049");
+    assert_eq!(
+        size_of::<String>() - size_of_val(&spec.server),
+        size_of::<usize>()
+    );
+    let cloned = spec.clone();
+    assert_eq!(cloned, spec);
+    assert_ne!(cloned.server.as_ptr(), spec.server.as_ptr());
+    drop(spec);
+    assert_eq!(cloned.server.as_ref(), "[2001:db8::7]:2049");
+
+    // The public parsed mount report retains its mutable String field.
+    let mut info = vfsi_nfs::mount::parse_mount(line).unwrap();
+    let public_server: &mut String = &mut info.server;
+    public_server.push_str("-edited");
+    assert_eq!(cloned.server.as_ref(), "[2001:db8::7]:2049");
+    let report = AutoRoute::DirectNfs {
+        mount_point: cloned.mount_point,
+        server: cloned.server.into_string(),
+    };
+    let AutoRoute::DirectNfs { mut server, .. } = report else {
+        unreachable!()
+    };
+    server.push_str("-edited");
+    assert_eq!(server, "[2001:db8::7]:2049-edited");
+}
+
+#[test]
 fn parses_only_unambiguous_supported_mounts() {
     let line = b"46 49 0:45 / /mnt/nfs rw,relatime - nfs4 server:/export rw,vers=4.2,proto=tcp,sec=sys,addr=192.0.2.7";
     let spec = parse_mount(line).unwrap();
     assert_eq!(spec.mount_point, Path::new("/mnt/nfs"));
-    assert_eq!(spec.server, "192.0.2.7:2049");
+    assert_eq!(spec.server.as_ref(), "192.0.2.7:2049");
     assert_eq!(spec.export, Path::new("/export"));
     assert_eq!(spec.minor, 2);
     let line = std::str::from_utf8(line).unwrap();
@@ -258,7 +291,8 @@ fn parses_only_unambiguous_supported_mounts() {
                 .as_bytes()
         )
         .unwrap()
-        .server,
+        .server
+        .as_ref(),
         "[2001:db8::7]:2049"
     );
 }
