@@ -1528,9 +1528,20 @@ impl NfsClient {
     }
 
     /// List one directory; returns entry attribute dicts.
-    fn listdir(&self, py: Python<'_>, path: PathBuf) -> PyResult<Vec<Py<PyDict>>> {
-        let max_entries = self.directory_max_entries;
-        let max_path_bytes = self.directory_max_path_bytes;
+    #[pyo3(signature = (path, *, max_entries=None, max_path_bytes=None))]
+    fn listdir(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        max_entries: Option<usize>,
+        max_path_bytes: Option<usize>,
+    ) -> PyResult<Vec<Py<PyDict>>> {
+        let max_entries = max_entries
+            .unwrap_or(self.directory_max_entries)
+            .min(self.directory_max_entries);
+        let max_path_bytes = max_path_bytes
+            .unwrap_or(self.directory_max_path_bytes)
+            .min(self.directory_max_path_bytes);
         let entries = self.with_fs(py, move |fs| {
             let entries = fs
                 .listdir_impl(&path, full_mask(), max_entries.saturating_add(1), false)
@@ -1543,15 +1554,24 @@ impl NfsClient {
     }
 
     /// List several directories; one native call for the Python side.
-    #[pyo3(signature = (paths, recursive=false))]
+    #[pyo3(signature = (paths, recursive=false, *, max_entries=None, max_path_bytes=None))]
     fn listdir_many(
         &self,
         py: Python<'_>,
         paths: Vec<PathBuf>,
         recursive: bool,
+        max_entries: Option<usize>,
+        max_path_bytes: Option<usize>,
     ) -> PyResult<Vec<Vec<Py<PyDict>>>> {
-        let max_entries = self.directory_max_entries;
-        let max_path_bytes = self.directory_max_path_bytes;
+        // Walk callers pass a shared remaining budget; other callers retain
+        // the existing independent per-directory limits.
+        let aggregate = max_entries.is_some() || max_path_bytes.is_some();
+        let mut max_entries = max_entries
+            .unwrap_or(self.directory_max_entries)
+            .min(self.directory_max_entries);
+        let mut max_path_bytes = max_path_bytes
+            .unwrap_or(self.directory_max_path_bytes)
+            .min(self.directory_max_path_bytes);
         let max_depth = self.walk_max_depth;
         let groups = self.with_fs(py, move |fs| {
             let mut groups = Vec::with_capacity(paths.len());
@@ -1580,6 +1600,13 @@ impl NfsClient {
                         .map_err(|e| to_py_err(e, Some(p.as_path())))?;
                     entries
                 };
+                if aggregate {
+                    max_entries -= entries.len();
+                    max_path_bytes -= entries
+                        .iter()
+                        .map(|entry| entry.file.path().map_or(0, |path| path.as_os_str().len()))
+                        .sum::<usize>();
+                }
                 groups.push(entries);
             }
             Ok(groups)

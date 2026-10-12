@@ -110,9 +110,20 @@ class NfsClient:
     def mkdir_many(self, paths: List[str], mode: int) -> None: ...
     def open_many(self, paths: List[str], modes: List[str]) -> List[int]: ...
     def close_many(self, fds: List[int]) -> None: ...
-    def listdir(self, path: str) -> List[dict]: ...
+    def listdir(
+        self,
+        path: str,
+        *,
+        max_entries: Optional[int] = None,
+        max_path_bytes: Optional[int] = None,
+    ) -> List[dict]: ...
     def listdir_many(
-        self, paths: List[str], recursive: bool = False
+        self,
+        paths: List[str],
+        recursive: bool = False,
+        *,
+        max_entries: Optional[int] = None,
+        max_path_bytes: Optional[int] = None,
     ) -> List[List[dict]]: ...
     def walk(
         self,

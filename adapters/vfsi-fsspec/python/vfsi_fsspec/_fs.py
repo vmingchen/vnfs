@@ -91,9 +91,7 @@ def _timestamp_datetime(info, attribute):
     nanoseconds = info.get(f"{attribute}_ns")
     if nanoseconds is not None:
         seconds, fraction = divmod(int(nanoseconds), 1_000_000_000)
-        value = datetime.datetime.fromtimestamp(
-            seconds, tz=datetime.timezone.utc
-        )
+        value = datetime.datetime.fromtimestamp(seconds, tz=datetime.timezone.utc)
         return value + datetime.timedelta(microseconds=fraction // 1_000)
     seconds = info.get(attribute)
     if seconds is None:
@@ -106,6 +104,43 @@ def _depth(path):
     if path == "/":
         return 0
     return path.count("/")
+
+
+class _WalkBudget:
+    """One traversal's remaining materialized-entry and native-path budgets."""
+
+    def __init__(self, fs, root):
+        self.fs = fs
+        self.root = root
+        self.entries = fs.directory_max_entries
+        self.path_bytes = fs.directory_max_path_bytes
+        self.prefetched = {}
+        self.generation = fs._client.generation
+
+    def native_options(self):
+        return {"max_entries": self.entries, "max_path_bytes": self.path_bytes}
+
+    def sync(self):
+        self.fs._sync_dircache_generation()
+        generation = self.fs._client.generation
+        if generation != self.generation:
+            for infos in self.prefetched.values():
+                self.account(infos, direction=-1)
+            self.prefetched.clear()
+            self.generation = generation
+
+    def account(self, infos, direction=1):
+        self.entries -= direction * len(infos)
+        self.path_bytes -= direction * sum(
+            len(
+                os.fsencode(
+                    self.fs._native_path(self.fs._checked_strip_protocol(info["name"]))
+                )
+            )
+            for info in infos
+        )
+        if self.entries < 0 or self.path_bytes < 0:
+            raise _oserror(errno.EFBIG, self.fs._fullpath(self.root))
 
 
 def _normalize_range(start, end, size=None):
@@ -2772,11 +2807,13 @@ class VfsiFileSystem(AbstractFileSystem):
         limit = None if maxdepth is None else _depth(root) + maxdepth - 1
         tree = []
         pending = [root]
+        budget = _WalkBudget(self, root)
         while pending:
             directory = pending.pop()
             infos = self._cached_listing(directory)
             if infos is None:
                 return None
+            budget.account(infos)
             tree.append((directory, infos))
             children = []
             for info in infos:
@@ -2820,27 +2857,33 @@ class VfsiFileSystem(AbstractFileSystem):
             self._store_listing(directory, infos, fill_epoch)
         return tree
 
-    def _prefetch_walk_children(self, children, on_error):
-        """Cache one selected sibling level without descending into it."""
+    def _prefetch_walk_children(self, children, on_error, budget):
+        """Retain bounded sibling listings until visited, independently of TTL cache."""
         if not children or on_error == "raise":
             return
         uncached = [child for child in children if self._cached_listing(child) is None]
         if not uncached:
             return
-        fill_epoch = self._dircache_epoch_snapshot()
-        try:
-            groups = self._client.listdir_many(
-                [self._native_path(child) for child in uncached], recursive=False
-            )
-        except (FileNotFoundError, OSError):
-            # Retry each path during normal traversal so errors are attributed
-            # to the correct child and passed to the caller's on_error handler.
-            return
-        self._sync_dircache_generation()
-        for child, entries in zip(uncached, groups):
-            self._store_listing(
-                child, self._infos_from_native_entries(entries), fill_epoch
-            )
+        for start in range(0, len(uncached), self.batch_size):
+            cohort = uncached[start : start + self.batch_size]
+            fill_epoch = self._dircache_epoch_snapshot()
+            try:
+                groups = self._client.listdir_many(
+                    [self._native_path(child) for child in cohort],
+                    recursive=False,
+                    **budget.native_options(),
+                )
+            except (FileNotFoundError, OSError) as error:
+                if getattr(error, "errno", None) == errno.EFBIG:
+                    raise
+                # Normal traversal attributes semantic errors to each child.
+                continue
+            budget.sync()
+            for child, entries in zip(cohort, groups):
+                infos = self._infos_from_native_entries(entries)
+                budget.account(infos)
+                budget.prefetched[child] = infos
+                self._store_listing(child, infos, fill_epoch)
 
     def _best_effort_walk_tree(self, root, maxdepth, on_error):
         """Walk one directory at a time after a failed native traversal."""
@@ -2855,10 +2898,13 @@ class VfsiFileSystem(AbstractFileSystem):
         hard_limit = requested_depth is None or requested_depth > self.walk_max_depth
         tree = []
         pending = [root]
+        budget = _WalkBudget(self, root)
         while pending:
             directory = pending.pop()
             try:
-                infos = self.ls(directory, detail=True, refresh=True)
+                infos = self.ls(
+                    directory, detail=True, refresh=True, _walk_budget=budget
+                )
             except (FileNotFoundError, OSError) as error:
                 if getattr(error, "errno", None) == errno.EFBIG:
                     raise
@@ -2867,6 +2913,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 if callable(on_error):
                     on_error(error)
                 continue
+            budget.account(infos)
             tree.append((directory, infos))
             children = [
                 self._checked_strip_protocol(info["name"])
@@ -2966,6 +3013,14 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def ls(self, path, detail=True, refresh=False, **kwargs):
         internal = self._checked_strip_protocol(path)
+        budget = kwargs.pop("_walk_budget", None)
+        if budget is not None and internal in budget.prefetched:
+            infos = budget.prefetched.pop(internal)
+            return (
+                self._copy_listing(infos)
+                if detail
+                else [info["name"] for info in infos]
+            )
         if not refresh:
             cached = self._cached_listing(internal)
             if cached is not None:
@@ -2976,7 +3031,10 @@ class VfsiFileSystem(AbstractFileSystem):
             self._evict_dircache(exact={internal})
         fill_epoch = self._dircache_epoch_snapshot()
         try:
-            entries = self._client.listdir(self._native_path(internal))
+            entries = self._client.listdir(
+                self._native_path(internal),
+                **({} if budget is None else budget.native_options()),
+            )
         except NotADirectoryError:
             # The path is a file (or symlink to one): report it directly.
             info = self.info(internal, **kwargs)
@@ -4481,9 +4539,7 @@ class VfsiFileSystem(AbstractFileSystem):
         refresh = kwargs.pop("refresh", False)
         internal = self._checked_strip_protocol(path)
         tree = (
-            None
-            if refresh or topdown
-            else self._cached_walk_tree(internal, maxdepth)
+            None if refresh or topdown else self._cached_walk_tree(internal, maxdepth)
         )
         if tree is None:
             if not topdown or refresh:
@@ -4503,10 +4559,18 @@ class VfsiFileSystem(AbstractFileSystem):
                     requested_depth is None or requested_depth > self.walk_max_depth
                 )
                 pending = [internal]
+                budget = _WalkBudget(self, internal)
                 while pending:
                     directory = pending.pop()
+                    budget.sync()
+                    prepaid = directory in budget.prefetched
                     try:
-                        if directory == internal and self._cached_listing(directory) is None:
+                        if prepaid:
+                            infos = self.ls(directory, detail=True, _walk_budget=budget)
+                        elif (
+                            directory == internal
+                            and self._cached_listing(directory) is None
+                        ):
                             try:
                                 root_tree = self._native_walk_tree(
                                     internal,
@@ -4514,17 +4578,25 @@ class VfsiFileSystem(AbstractFileSystem):
                                     maxdepth=1,
                                 )
                             except NotADirectoryError:
-                                infos = self.ls(directory, detail=True)
+                                infos = self.ls(
+                                    directory, detail=True, _walk_budget=budget
+                                )
                             except (FileNotFoundError, OSError) as error:
                                 if getattr(error, "errno", None) == errno.EFBIG:
                                     raise
-                                infos = self.ls(directory, detail=True)
+                                infos = self.ls(
+                                    directory, detail=True, _walk_budget=budget
+                                )
                             else:
-                                infos = root_tree[0][1] if root_tree else self.ls(
-                                    directory, detail=True
+                                infos = (
+                                    root_tree[0][1]
+                                    if root_tree
+                                    else self.ls(
+                                        directory, detail=True, _walk_budget=budget
+                                    )
                                 )
                         else:
-                            infos = self.ls(directory, detail=True)
+                            infos = self.ls(directory, detail=True, _walk_budget=budget)
                     except (FileNotFoundError, OSError) as error:
                         if getattr(error, "errno", None) == errno.EFBIG:
                             raise
@@ -4533,6 +4605,8 @@ class VfsiFileSystem(AbstractFileSystem):
                         if callable(on_error):
                             on_error(error)
                         continue
+                    if not prepaid:
+                        budget.account(infos)
                     if (
                         directory == internal
                         and len(infos) == 1
@@ -4570,7 +4644,7 @@ class VfsiFileSystem(AbstractFileSystem):
                             raise _oserror(errno.EFBIG, self._fullpath(internal))
                         if not hard_limit:
                             continue
-                    self._prefetch_walk_children(children, on_error)
+                    self._prefetch_walk_children(children, on_error, budget)
                     pending.extend(reversed(children))
                 return
             # Bottom-up order requires discovering all descendants before the
