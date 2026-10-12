@@ -2,6 +2,22 @@
 
 use super::*;
 
+fn open_adb_path(
+    index: usize,
+    mut open: impl FnMut(
+        crate::client::OpenCreate,
+    ) -> crate::error::RpcResult<(NfsFh, nfsv41_sys::stateid4)>,
+) -> VfResult<(NfsFh, nfsv41_sys::stateid4)> {
+    match open(crate::client::OpenCreate::NoCreate) {
+        Ok(opened) => Ok(opened),
+        Err(error) if error.status == nfsstat4_NFS4ERR_NOENT => {
+            open(crate::client::OpenCreate::Guarded)
+                .map_err(|error| vfsi_core::error_from_rpc(error, index))
+        }
+        Err(error) => Err(vfsi_core::error_from_rpc(error, index)),
+    }
+}
+
 impl VectorBackend for NfsVecFs {
     fn vopen_outcomes_impl(
         &mut self,
@@ -1457,34 +1473,45 @@ impl VectorBackend for NfsVecFs {
                 Ok(fh) => fh,
                 Err(e) => return Err(e.with_index(i)),
             };
-            let (fh, sid) = match self
-                .nfs
-                .open_path(
-                    &dirfh,
-                    &name,
-                    OPEN4_SHARE_ACCESS_WRITE,
-                    crate::client::OpenCreate::Guarded,
-                )
-                .map_err(|e| vfsi_core::error_from_rpc(e, 0))
-            {
-                Ok(x) => x,
-                Err(e) => return Err(e.with_index(i)),
-            };
+            let (fh, sid) = open_adb_path(i, |create| {
+                self.nfs
+                    .open_path(&dirfh, &name, OPEN4_SHARE_ACCESS_WRITE, create)
+            })?;
             let mut written = 0usize;
             let mut failed: Option<VfError> = None;
             for (block_number, number_offset, pattern_offset) in layout {
                 if let Some(offset) = number_offset {
                     let adbn = block_number.to_be_bytes();
-                    if let Err(e) = self.nfs.write(&fh, &sid, offset, &adbn) {
-                        failed = Some(vfsi_core::error_from_rpc(e, i));
+                    if let Err(error) = super::io::write_all_at(
+                        &mut self.nfs,
+                        i,
+                        offset,
+                        &adbn,
+                        |nfs, offset, data| {
+                            nfs.write(&fh, &sid, offset, data)
+                                .map(|(written, _)| written as usize)
+                                .map_err(|error| vfsi_core::error_from_rpc(error, i))
+                        },
+                    ) {
+                        failed = Some(error);
                         break;
                     }
                 }
                 if let Some(offset) = pattern_offset
                     && !p.adb_pattern_data.is_empty()
-                    && let Err(e) = self.nfs.write(&fh, &sid, offset, &p.adb_pattern_data)
+                    && let Err(error) = super::io::write_all_at(
+                        &mut self.nfs,
+                        i,
+                        offset,
+                        &p.adb_pattern_data,
+                        |nfs, offset, data| {
+                            nfs.write(&fh, &sid, offset, data)
+                                .map(|(written, _)| written as usize)
+                                .map_err(|error| vfsi_core::error_from_rpc(error, i))
+                        },
+                    )
                 {
-                    failed = Some(vfsi_core::error_from_rpc(e, i));
+                    failed = Some(error);
                     break;
                 }
                 written += 1;
@@ -1496,5 +1523,58 @@ impl VectorBackend for NfsVecFs {
             counts.push(written);
         }
         Ok(counts)
+    }
+}
+
+#[cfg(test)]
+mod adb_path_tests {
+    use super::*;
+    use crate::client::NfsFh;
+    use nfsv41_sys::stateid4;
+
+    fn opened() -> (NfsFh, stateid4) {
+        (
+            NfsFh::test_from_bytes([1u8, 2]),
+            stateid4 {
+                seqid: 3,
+                other: [4; 12],
+            },
+        )
+    }
+
+    #[test]
+    fn adb_reuses_existing_path_and_only_creates_after_noent() {
+        let expected = opened();
+        let mut calls = Vec::new();
+        let actual = open_adb_path(5, |create| {
+            calls.push(create);
+            assert_eq!(create, crate::client::OpenCreate::NoCreate);
+            Ok(expected.clone())
+        })
+        .unwrap();
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(calls, [crate::client::OpenCreate::NoCreate]);
+
+        let expected = opened();
+        let mut calls = Vec::new();
+        let actual = open_adb_path(7, |create| {
+            calls.push(create);
+            match create {
+                crate::client::OpenCreate::NoCreate => {
+                    Err(crate::error::RpcError::op(0, nfsstat4_NFS4ERR_NOENT))
+                }
+                crate::client::OpenCreate::Guarded => Ok(expected.clone()),
+                _ => unreachable!(),
+            }
+        })
+        .unwrap();
+        assert_eq!(actual.0, expected.0);
+        assert_eq!(
+            calls,
+            [
+                crate::client::OpenCreate::NoCreate,
+                crate::client::OpenCreate::Guarded,
+            ]
+        );
     }
 }

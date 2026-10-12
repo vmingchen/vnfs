@@ -2,6 +2,54 @@
 
 use super::*;
 
+fn copy_extent_data<C>(
+    client: &mut C,
+    src_offset: u64,
+    dst_offset: u64,
+    length: Option<u64>,
+    mut read: impl FnMut(&mut C, u64, u32) -> VfResult<(Vec<u8>, bool)>,
+    mut write: impl FnMut(&mut C, u64, &[u8]) -> VfResult<usize>,
+) -> VfResult<u64> {
+    let mut so = src_offset;
+    let mut doff = dst_offset;
+    let mut copied = 0u64;
+    loop {
+        if length.is_some_and(|length| copied >= length) {
+            return Ok(doff);
+        }
+        let remaining = length.map_or(u64::MAX, |length| length - copied);
+        let chunk_len = remaining.min(1 << 20) as u32;
+        let (chunk, eof) = read(client, so, chunk_len)?;
+        if chunk.len() > chunk_len as usize {
+            return Err(VfError::client(0, ERR_IO));
+        }
+        if chunk.is_empty() {
+            return if eof {
+                Ok(doff)
+            } else {
+                Err(VfError::client(0, ERR_IO))
+            };
+        }
+        let chunk_size =
+            u64::try_from(chunk.len()).map_err(|_| VfError::failure(0, libc::EOVERFLOW as u32))?;
+        super::io::write_all_at(client, 0, doff, &chunk, |client, offset, suffix| {
+            write(client, offset, suffix)
+        })?;
+        so = so
+            .checked_add(chunk_size)
+            .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
+        doff = doff
+            .checked_add(chunk_size)
+            .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
+        copied = copied
+            .checked_add(chunk_size)
+            .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
+        if eof {
+            return Ok(doff);
+        }
+    }
+}
+
 impl NfsVecFs {
     pub(super) fn copy_extent(
         &mut self,
@@ -56,46 +104,27 @@ impl NfsVecFs {
             }
         };
 
-        let mut so = p.src_offset;
-        let mut doff = p.dst_offset;
-        let mut copied: u64 = 0;
-        let result = loop {
-            if let Some(length) = p.length
-                && copied >= length
-            {
-                break Ok(());
-            }
-            let remaining = p.length.map_or(u64::MAX, |l| l - copied);
-            let chunk_len = remaining.min(1 << 20) as u32;
-            let chunk = match self.nfs.read(&sfh, &ssid, so, chunk_len) {
-                Ok((c, _)) => c,
-                Err(e) => break Err(vfsi_core::error_from_rpc(e, 0)),
-            };
-            if chunk.is_empty() {
-                break Ok(()); // EOF
-            }
-            let n = match self.nfs.write(&dfh, &dsid, doff, &chunk) {
-                Ok((n, _)) => n as u64,
-                Err(e) => break Err(vfsi_core::error_from_rpc(e, 0)),
-            };
-            so = so
-                .checked_add(n)
-                .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
-            doff = doff
-                .checked_add(n)
-                .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
-            copied = copied
-                .checked_add(n)
-                .ok_or_else(|| VfError::failure(0, libc::EOVERFLOW as u32))?;
-        };
-        let result = if result.is_ok() {
+        let result = copy_extent_data(
+            &mut self.nfs,
+            p.src_offset,
+            p.dst_offset,
+            p.length,
+            |nfs, offset, count| {
+                nfs.read(&sfh, &ssid, offset, count)
+                    .map_err(|error| vfsi_core::error_from_rpc(error, 0))
+            },
+            |nfs, offset, data| {
+                nfs.write(&dfh, &dsid, offset, data)
+                    .map(|(written, _)| written as usize)
+                    .map_err(|error| vfsi_core::error_from_rpc(error, 0))
+            },
+        )
+        .and_then(|final_size| {
             // Truncate any stale tail beyond what was copied (cp semantics).
             self.nfs
-                .setattr(&dfh, None, Some(doff))
-                .map_err(|e| vfsi_core::error_from_rpc(e, 0))
-        } else {
-            result
-        };
+                .setattr(&dfh, None, Some(final_size))
+                .map_err(|error| vfsi_core::error_from_rpc(error, 0))
+        });
         let source_close = self
             .nfs
             .close_path(&sfh, &ssid)
@@ -289,5 +318,89 @@ impl NfsVecFs {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_fallback_accepts_eof_and_returns_final_destination_size() {
+        let mut client = ();
+        let mut reads = 0;
+        let mut writes = Vec::new();
+        let final_size = copy_extent_data(
+            &mut client,
+            40,
+            12,
+            None,
+            |_, offset, _| {
+                reads += 1;
+                assert_eq!(offset, 40);
+                Ok((b"abc".to_vec(), true))
+            },
+            |_, offset, data| {
+                writes.push((offset, data.to_vec()));
+                Ok(data.len())
+            },
+        )
+        .unwrap();
+        assert_eq!(final_size, 15);
+        assert_eq!(reads, 1);
+        assert_eq!(writes, [(12, b"abc".to_vec())]);
+
+        let final_size = copy_extent_data(
+            &mut client,
+            40,
+            24,
+            None,
+            |_, _, _| Ok((Vec::new(), true)),
+            |_, _, _| panic!("EOF must not write"),
+        )
+        .unwrap();
+        assert_eq!(final_size, 24);
+    }
+
+    #[test]
+    fn copy_fallback_rejects_empty_non_eof_read() {
+        let mut client = ();
+        let mut writes = 0;
+        let error = copy_extent_data(
+            &mut client,
+            0,
+            0,
+            None,
+            |_, _, _| Ok((Vec::new(), false)),
+            |_, _, data| {
+                writes += 1;
+                Ok(data.len())
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.err_no(), ERR_IO);
+        assert_eq!(writes, 0);
+    }
+
+    #[test]
+    fn copy_fallback_rejects_zero_progress_write() {
+        let mut client = ();
+        let mut writes = 0;
+        let error = copy_extent_data(
+            &mut client,
+            0,
+            0,
+            None,
+            |_, _, _| Ok((b"data".to_vec(), false)),
+            |_, _, _| {
+                writes += 1;
+                Ok(0)
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.err_no(), ERR_IO);
+        assert_eq!(writes, 1);
     }
 }

@@ -2,6 +2,34 @@
 
 use super::*;
 
+pub(super) fn write_all_at<C>(
+    client: &mut C,
+    index: usize,
+    offset: u64,
+    data: &[u8],
+    mut write: impl FnMut(&mut C, u64, &[u8]) -> VfResult<usize>,
+) -> VfResult<()> {
+    let data_len =
+        u64::try_from(data.len()).map_err(|_| VfError::failure(index, libc::EOVERFLOW as u32))?;
+    offset
+        .checked_add(data_len)
+        .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
+
+    let mut progress = 0usize;
+    while progress < data.len() {
+        let current = offset
+            .checked_add(progress as u64)
+            .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))?;
+        let remaining = &data[progress..];
+        let written = write(client, current, remaining)?;
+        if written == 0 || written > remaining.len() {
+            return Err(VfError::client(index, ERR_IO));
+        }
+        progress += written;
+    }
+    Ok(())
+}
+
 struct DescriptorReadPlan {
     ops: Vec<crate::client::ReadOp>,
     owners: Vec<usize>,
@@ -987,5 +1015,38 @@ impl NfsVecFs {
                 stable: committed[i].unwrap_or(0) == stable_how4_FILE_SYNC4,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod path_write_tests {
+    use super::*;
+
+    #[test]
+    fn path_write_retries_short_counts_and_rejects_zero_progress() {
+        let mut calls = Vec::new();
+        write_all_at(&mut calls, 0, 10, b"abcdefg", |calls, offset, suffix| {
+            let count = suffix.len().min(3);
+            calls.push((offset, suffix.to_vec()));
+            Ok(count)
+        })
+        .unwrap();
+        assert_eq!(
+            calls,
+            vec![
+                (10, b"abcdefg".to_vec()),
+                (13, b"defg".to_vec()),
+                (16, b"g".to_vec()),
+            ]
+        );
+
+        let mut attempts = 0;
+        let error = write_all_at(&mut attempts, 0, 0, b"x", |attempts, _, _| {
+            *attempts += 1;
+            Ok(0)
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(error.err_no(), ERR_IO);
     }
 }
