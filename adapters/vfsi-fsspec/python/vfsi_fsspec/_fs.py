@@ -2072,8 +2072,21 @@ class _DeferredWriteFile:
             )
         except FileNotFoundError:
             permissions = None  # New transactional files stay private.
+        if self.fs.auto_mkdir:
+            self.fs._ensure_dirs([posixpath.dirname(self.temp_path) or "/"])
+        self._spool.seek(0)
+        # Cleanup is permitted only after exclusive OPEN acknowledges creation.
+        # A collision or lost OPEN reply does not establish ownership of the name.
+        fd = self.fs._client.open(
+            self.fs._native_path(self.temp_path), "xb", permissions=0o600
+        )
         try:
-            self.fs._write_spooled(self.temp_path, self._spool)
+            with VfsiFile(self.fs, self.temp_path, "xb", fd=fd) as remote:
+                while True:
+                    chunk = self._spool.read(self.fs.transfer_chunk_size)
+                    if not chunk:
+                        break
+                    _write_fully(remote, chunk)
             if permissions is not None:
                 self.fs._client.chmod(self.fs._native_path(self.temp_path), permissions)
         except BaseException:
@@ -3377,19 +3390,6 @@ class VfsiFileSystem(AbstractFileSystem):
                     raise
             # The path may now name another writer's file. Retain partial
             # output on failure rather than unlinking a name we no longer own.
-
-    def _write_spooled(self, path, spool):
-        """Stream a seekable local spool to one remote path."""
-        if self.auto_mkdir:
-            self._ensure_dirs([posixpath.dirname(path) or "/"])
-        spool.seek(0)
-        fd = self._client.open(self._native_path(path), "xb", permissions=0o600)
-        with VfsiFile(self, path, "xb", fd=fd) as remote:
-            while True:
-                chunk = spool.read(self.transfer_chunk_size)
-                if not chunk:
-                    break
-                _write_fully(remote, chunk)
 
     def _copy_remote_to_fileobj(
         self,
