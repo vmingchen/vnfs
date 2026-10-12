@@ -4025,13 +4025,15 @@ class VfsiFileSystem(AbstractFileSystem):
         self.rm(path, recursive=False)
 
     def rm(self, path, recursive=False, maxdepth=None):
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
         if isinstance(path, str):
             paths = [self._checked_strip_protocol(path)]
         else:
             paths = [self._checked_strip_protocol(p) for p in path]
         self._invalidate_namespace(paths)
         if recursive:
-            self._rm_recursive(paths)
+            self._rm_recursive(paths, maxdepth=maxdepth)
         else:
             # Like LocalFileSystem, non-recursive rm must not remove
             # directories (lstat so symlinks-to-directories are removed as
@@ -4044,7 +4046,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     raise ValueError("Cannot delete directory, set recursive=True")
             self._client.remove_many([self._native_path(p) for p in paths])
 
-    def _rm_recursive(self, paths):
+    def _rm_recursive(self, paths, maxdepth=None):
         """Recursively remove ``paths`` with a batched walk + removev."""
         native_paths = [self._native_path(p) for p in paths]
         lstats, lerrs = self._client.lstat_many(native_paths)
@@ -4054,11 +4056,38 @@ class VfsiFileSystem(AbstractFileSystem):
 
         remove_files = []
         remove_dirs = []
+        remove_empty_dirs = []
         for i, p in enumerate(paths):
             if lstats[i] is None:
                 continue
             if lstats[i]["type"] != "directory":
                 remove_files.append(native_paths[i])
+                continue
+            if maxdepth is not None:
+                tree = self._client.walk(
+                    native_paths[i],
+                    sort=True,
+                    max_depth=min(self.walk_max_depth, maxdepth - 1),
+                )
+                root_depth = _depth(paths[i])
+                if maxdepth > self.walk_max_depth + 1 and any(
+                    entry["type"] == "directory"
+                    and _depth(self._internalize(entry["name"])) - root_depth
+                    > self.walk_max_depth
+                    for _, entries in tree
+                    for entry in entries
+                ):
+                    raise _oserror(errno.EFBIG, paths[i])
+                remove_empty_dirs.append(native_paths[i])
+                for _, entries in tree:
+                    for entry in entries:
+                        internal = self._internalize(entry["name"])
+                        relative_depth = _depth(internal) - root_depth
+                        if entry["type"] == "directory":
+                            if relative_depth <= maxdepth:
+                                remove_empty_dirs.append(entry["name"])
+                        elif relative_depth <= maxdepth:
+                            remove_files.append(entry["name"])
                 continue
             remove_dirs.append(native_paths[i])
             tree = self._client.walk(native_paths[i])
@@ -4071,6 +4100,12 @@ class VfsiFileSystem(AbstractFileSystem):
 
         if remove_files:
             self._client.remove_many(list(dict.fromkeys(remove_files)))
+        remove_empty_dirs = list(dict.fromkeys(remove_empty_dirs))
+        remove_empty_dirs.sort(key=lambda p: p.count("/"), reverse=True)
+        for directory in remove_empty_dirs:
+            tree = self._client.walk(directory, sort=True, max_depth=0)
+            if tree and not tree[0][1]:
+                self._client.remove_many([directory])
         remove_dirs = list(dict.fromkeys(remove_dirs))
         remove_dirs.sort(key=lambda p: p.count("/"), reverse=True)
         if remove_dirs:

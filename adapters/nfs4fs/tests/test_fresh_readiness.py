@@ -489,3 +489,86 @@ def test_walk_fallback_keeps_hard_depth_limit(tmp_path, monkeypatch):
         assert exc_info.value.errno == errno.EFBIG
     finally:
         fs.close()
+
+
+def test_recursive_rm_respects_maxdepth(dummy_fs):
+    root = "/rm-maxdepth"
+    dummy_fs.mkdir(f"{root}/child/deep", create_parents=True)
+    dummy_fs.pipe(
+        {
+            f"{root}/root.txt": b"root",
+            f"{root}/child/child.txt": b"child",
+            f"{root}/child/deep/deep.txt": b"deep",
+        }
+    )
+
+    dummy_fs.rm(root, recursive=True, maxdepth=1)
+
+    assert not dummy_fs.exists(f"{root}/root.txt")
+    assert dummy_fs.exists(f"{root}/child/child.txt")
+    assert dummy_fs.exists(f"{root}/child/deep/deep.txt")
+
+
+def test_recursive_rm_rejects_zero_maxdepth_without_mutation(dummy_fs):
+    dummy_fs.pipe_file("/rm-invalid-depth", b"keep")
+
+    with pytest.raises(ValueError, match="maxdepth"):
+        dummy_fs.rm("/rm-invalid-depth", recursive=True, maxdepth=0)
+
+    assert dummy_fs.cat_file("/rm-invalid-depth") == b"keep"
+
+
+def test_recursive_rm_maxdepth_removes_emptied_root(dummy_fs):
+    root = "/rm-maxdepth-empty-root"
+    dummy_fs.mkdir(root, create_parents=True)
+    dummy_fs.pipe_file(f"{root}/root.txt", b"root")
+
+    dummy_fs.rm(root, recursive=True, maxdepth=1)
+
+    assert not dummy_fs.exists(root)
+
+
+def test_recursive_rm_maxdepth_removes_empty_shallow_child(dummy_fs):
+    root = "/rm-maxdepth-empty-child"
+    empty_child = f"{root}/empty"
+    deep_file = f"{root}/keep/deep/file.txt"
+    dummy_fs.mkdir(empty_child, create_parents=True)
+    dummy_fs.mkdir(f"{root}/keep/deep", create_parents=True)
+    dummy_fs.pipe_file(deep_file, b"keep")
+
+    dummy_fs.rm(root, recursive=True, maxdepth=1)
+
+    assert not dummy_fs.exists(empty_child)
+    assert dummy_fs.exists(root)
+    assert dummy_fs.cat_file(deep_file) == b"keep"
+
+
+def test_recursive_rm_maxdepth_rejects_depth_beyond_walk_limit(tmp_path):
+    import fsspec
+
+    fs = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "rm-hard-depth"),
+        walk_max_depth=1,
+        skip_instance_cache=True,
+    )
+    root = "/rm-hard-depth"
+    fs.mkdir(f"{root}/one/two", create_parents=True)
+    fs.pipe(
+        {
+            f"{root}/root.txt": b"root",
+            f"{root}/one/one.txt": b"one",
+            f"{root}/one/two/two.txt": b"two",
+        }
+    )
+
+    try:
+        with pytest.raises(OSError) as exc_info:
+            fs.rm(root, recursive=True, maxdepth=3)
+        assert exc_info.value.errno == errno.EFBIG
+        assert fs.exists(f"{root}/root.txt")
+        assert fs.exists(f"{root}/one/one.txt")
+        assert fs.exists(f"{root}/one/two/two.txt")
+    finally:
+        fs.close()
