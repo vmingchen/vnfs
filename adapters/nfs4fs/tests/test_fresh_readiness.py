@@ -416,3 +416,17 @@ def test_transaction_rejects_old_native_before_spooling(
         assert target.cat_file("/existing") == b"original"
         assert not target.exists("/missing")
         assert not target._client._fds
+
+
+@pytest.mark.parametrize("withdirs", [False, True])
+def test_du_maxdepth_excludes_deeper_files(dummy_fs, withdirs):
+    root = "/du-maxdepth"
+    dummy_fs.mkdir(f"{root}/child", create_parents=True)
+    dummy_fs.pipe_file(f"{root}/root.txt", b"r")
+    dummy_fs.pipe_file(f"{root}/child/deeper.txt", b"d")
+    expected = {"nfs4:///du-maxdepth/root.txt": 1}
+    if withdirs:
+        expected["nfs4:///du-maxdepth"] = dummy_fs.info(root)["size"]
+        expected["nfs4:///du-maxdepth/child"] = dummy_fs.info(f"{root}/child")["size"]
+
+    assert dummy_fs.du(root, total=False, withdirs=withdirs, maxdepth=1) == expected

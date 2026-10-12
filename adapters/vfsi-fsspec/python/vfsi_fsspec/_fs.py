@@ -4431,6 +4431,8 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def du(self, path, total=True, maxdepth=None, withdirs=False, **kwargs):
         internal = self._checked_strip_protocol(path)
+        root_depth = _depth(internal)
+        max_entry_depth = None if maxdepth is None else root_depth + maxdepth
         sizes = {}
         if withdirs and self.isdir(internal):
             info = self.info(internal)
@@ -4439,10 +4441,14 @@ class VfsiFileSystem(AbstractFileSystem):
             internal, maxdepth=maxdepth, detail=True, **kwargs
         ):
             for info in files.values():
-                sizes[info["name"]] = info.get("size") or 0
+                entry = self._checked_strip_protocol(info["name"])
+                if max_entry_depth is None or _depth(entry) <= max_entry_depth:
+                    sizes[info["name"]] = info.get("size") or 0
             if withdirs:
                 for info in dirs.values():
-                    sizes[info["name"]] = info.get("size") or 0
+                    entry = self._checked_strip_protocol(info["name"])
+                    if max_entry_depth is None or _depth(entry) <= max_entry_depth:
+                        sizes[info["name"]] = info.get("size") or 0
         if not sizes and self.isfile(internal):
             info = self.info(internal)
             sizes[info["name"]] = info.get("size") or 0
