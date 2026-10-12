@@ -2784,6 +2784,43 @@ class VfsiFileSystem(AbstractFileSystem):
             tree.append((directory, infos))
         return tree
 
+    def _best_effort_walk_tree(self, root, maxdepth, on_error):
+        """Walk one directory at a time after a failed native traversal."""
+        root_depth = _depth(root)
+        depth_limit = (
+            self.walk_max_depth
+            if maxdepth is None
+            else min(self.walk_max_depth, maxdepth)
+        )
+        max_entry_depth = root_depth + depth_limit
+        hard_limit = maxdepth is None or maxdepth > self.walk_max_depth
+        tree = []
+        pending = [root]
+        while pending:
+            directory = pending.pop()
+            try:
+                infos = self.ls(directory, detail=True, refresh=True)
+            except (FileNotFoundError, OSError) as error:
+                if getattr(error, "errno", None) == errno.EFBIG:
+                    raise
+                if on_error == "raise":
+                    raise
+                if callable(on_error):
+                    on_error(error)
+                continue
+            tree.append((directory, infos))
+            children = [
+                self._checked_strip_protocol(info["name"])
+                for info in infos
+                if info["type"] == "directory"
+            ]
+            if _depth(directory) >= max_entry_depth:
+                if hard_limit and children:
+                    raise _oserror(errno.EFBIG, self._fullpath(directory))
+                continue
+            pending.extend(reversed(children))
+        return tree
+
     # -- batched directory creation ---------------------------------------
 
     def _ensure_dirs(self, paths, mode=0o755):
@@ -4380,9 +4417,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     return
                 if on_error == "raise":
                     raise
-                if callable(on_error):
-                    on_error(e)
-                return
+                tree = self._best_effort_walk_tree(internal, maxdepth, on_error)
         by_dir = {}
         for directory, infos in tree:
             dirs = {}

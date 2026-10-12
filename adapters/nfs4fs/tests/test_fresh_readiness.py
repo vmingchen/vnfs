@@ -430,3 +430,62 @@ def test_du_maxdepth_excludes_deeper_files(dummy_fs, withdirs):
         expected["nfs4:///du-maxdepth/child"] = dummy_fs.info(f"{root}/child")["size"]
 
     assert dummy_fs.du(root, total=False, withdirs=withdirs, maxdepth=1) == expected
+
+
+def test_walk_error_handler_reaches_unreadable_subdirectory(dummy_fs, monkeypatch):
+    root = "/walk-on-error"
+    locked = f"{root}/top/locked"
+    readable = f"{root}/top/readable"
+    dummy_fs.mkdir(locked, create_parents=True)
+    dummy_fs.mkdir(readable, create_parents=True)
+
+    def fail_bulk_walk(internal, fill_epoch, maxdepth=None):
+        raise PermissionError(f"no access to {locked}")
+
+    monkeypatch.setattr(dummy_fs, "_native_walk_tree", fail_bulk_walk)
+    original_ls = dummy_fs.ls
+
+    def ls(path, detail=True, refresh=False, **kwargs):
+        if dummy_fs._checked_strip_protocol(path) == locked:
+            raise PermissionError(f"no access to {locked}")
+        return original_ls(path, detail=detail, refresh=refresh, **kwargs)
+
+    monkeypatch.setattr(dummy_fs, "ls", ls)
+    expected = [
+        (root, ["top"], []),
+        (f"{root}/top", ["locked", "readable"], []),
+        (readable, [], []),
+    ]
+
+    assert list(dummy_fs.walk(root, refresh=True)) == expected
+    with pytest.raises(PermissionError, match=f"no access to {locked}"):
+        list(dummy_fs.walk(root, on_error="raise", refresh=True))
+
+    handled = []
+    assert list(dummy_fs.walk(root, on_error=handled.append, refresh=True)) == expected
+    assert [str(error) for error in handled] == [f"no access to {locked}"]
+
+
+def test_walk_fallback_keeps_hard_depth_limit(tmp_path, monkeypatch):
+    import fsspec
+
+    fs = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "walk-hard-depth"),
+        walk_max_depth=1,
+        skip_instance_cache=True,
+    )
+    fs.mkdir("/one/two", create_parents=True)
+    fs.pipe_file("/one/two/file", b"x")
+
+    def fail_bulk_walk(internal, fill_epoch, maxdepth=None):
+        raise PermissionError("injected nested traversal failure")
+
+    monkeypatch.setattr(fs, "_native_walk_tree", fail_bulk_walk)
+    try:
+        with pytest.raises(OSError) as exc_info:
+            list(fs.walk("/"))
+        assert exc_info.value.errno == errno.EFBIG
+    finally:
+        fs.close()
