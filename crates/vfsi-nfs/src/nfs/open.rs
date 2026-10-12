@@ -11,6 +11,42 @@ pub(super) fn open_flags_mutate(flags: i32) -> bool {
         || flags & (libc::O_CREAT | libc::O_TRUNC | libc::O_APPEND) != 0
 }
 
+trait PathBatchTruncateClient {
+    fn setattr_many(&mut self, ops: &[crate::client::SetattrOp]) -> crate::error::RpcResult<()>;
+    fn close_many_path(&mut self, ops: &[crate::client::CloseOp]) -> crate::error::RpcResult<()>;
+}
+
+impl PathBatchTruncateClient for crate::client::NfsClient {
+    fn setattr_many(&mut self, ops: &[crate::client::SetattrOp]) -> crate::error::RpcResult<()> {
+        crate::client::NfsClient::setattr_many(self, ops)
+    }
+
+    fn close_many_path(&mut self, ops: &[crate::client::CloseOp]) -> crate::error::RpcResult<()> {
+        crate::client::NfsClient::close_many_path(self, ops)
+    }
+}
+
+fn truncate_path_opens<C: PathBatchTruncateClient>(
+    client: &mut C,
+    opened: &[(NfsFh, stateid4)],
+    setattr_ops: &[crate::client::SetattrOp],
+    subset: &[usize],
+) -> VfResult<()> {
+    crate::client::prepare_path_opens(
+        opened,
+        client,
+        |client| {
+            client.setattr_many(setattr_ops).map_err(|error| {
+                let error = vfsi_core::error_from_rpc_indexed(error);
+                error.map_index(|relative| subset.get(relative).copied().unwrap_or(relative))
+            })
+        },
+        |client, closes| {
+            let _ = client.close_many_path(closes);
+        },
+    )
+}
+
 impl NfsVecFs {
     // -- private helpers ----------------------------------------------------
 
@@ -359,10 +395,7 @@ impl NfsVecFs {
             }
         }
         if !setattr_ops.is_empty() {
-            self.nfs.setattr_many(&setattr_ops).map_err(|e| {
-                let e = vfsi_core::error_from_rpc_indexed(e);
-                e.map_index(|relative| subset.get(relative).copied().unwrap_or(relative))
-            })?;
+            truncate_path_opens(&mut self.nfs, &results, &setattr_ops, &subset)?;
         }
         let mut tmp = vec![None; files.len()];
         for (orig, (fh, stateid)) in subset.iter().zip(results) {
@@ -410,5 +443,80 @@ impl NfsVecFs {
             })
             .collect();
         let _ = self.nfs.close_many_path(&ops);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::{CloseOp, NfsFh, SetattrOp};
+    use nfsv41_sys::{nfsstat4_NFS4ERR_ACCESS, stateid4};
+    use std::cell::Cell;
+
+    struct FailingTruncateClient {
+        setattr_calls: Cell<usize>,
+        closed: Vec<(Vec<u8>, u32, [u8; 12])>,
+    }
+
+    impl PathBatchTruncateClient for FailingTruncateClient {
+        fn setattr_many(&mut self, ops: &[SetattrOp]) -> crate::error::RpcResult<()> {
+            self.setattr_calls.set(self.setattr_calls.get() + 1);
+            assert_eq!(ops.len(), 1);
+            Err(crate::error::RpcError::op(0, nfsstat4_NFS4ERR_ACCESS))
+        }
+
+        fn close_many_path(&mut self, ops: &[CloseOp]) -> crate::error::RpcResult<()> {
+            self.closed.extend(ops.iter().map(|op| {
+                (
+                    op.fh.as_bytes().to_vec(),
+                    op.stateid.seqid,
+                    op.stateid.other,
+                )
+            }));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn truncate_setattr_failure_closes_open_path_state_and_keeps_mapped_error() {
+        let opened = vec![
+            (
+                NfsFh::test_from_bytes([1u8, 2]),
+                stateid4 {
+                    seqid: 3,
+                    other: [4; 12],
+                },
+            ),
+            (
+                NfsFh::test_from_bytes([5u8]),
+                stateid4 {
+                    seqid: 6,
+                    other: [7; 12],
+                },
+            ),
+        ];
+        let setattr_ops = [SetattrOp {
+            fh: opened[0].0.clone(),
+            mode: None,
+            uid: None,
+            gid: None,
+            size: Some(0),
+            atime: None,
+            mtime: None,
+        }];
+        let mut client = FailingTruncateClient {
+            setattr_calls: Cell::new(0),
+            closed: Vec::new(),
+        };
+
+        let error = truncate_path_opens(&mut client, &opened, &setattr_ops, &[8, 13]).unwrap_err();
+
+        assert_eq!(client.setattr_calls.get(), 1);
+        assert_eq!(error.index(), Some(8));
+        assert_eq!(error.err_no(), nfsstat4_NFS4ERR_ACCESS);
+        assert_eq!(
+            client.closed,
+            vec![(vec![1, 2], 3, [4; 12]), (vec![5], 6, [7; 12])]
+        );
     }
 }

@@ -3340,7 +3340,15 @@ class VfsiFileSystem(AbstractFileSystem):
                 self._ensure_dirs(list(parents), 0o755)
             # A failed vector can have completed mutations. Prepare parents
             # first and never replay writes, even for an indexed ENOENT.
-            self._client.write_many(batch_native, batch_datas, truncate=True)
+            written = self._client.write_many(batch_native, batch_datas, truncate=True)
+            for position, index in enumerate(batch):
+                expected = len(datas[index])
+                if written[position] != expected:
+                    raise OSError(
+                        errno.EIO,
+                        f"short write: wrote {written[position]} of {expected} bytes",
+                        paths[index],
+                    )
             for index in batch:
                 report(index)
 

@@ -49,6 +49,13 @@ enum OwnerSlot {
 }
 
 impl NfsFh {
+    #[cfg(test)]
+    pub(crate) fn test_from_bytes(bytes: impl Into<Box<[u8]>>) -> Self {
+        Self {
+            bytes: bytes.into(),
+        }
+    }
+
     pub(crate) fn as_bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -226,6 +233,28 @@ pub struct OpenOp {
 pub struct CloseOp {
     pub fh: NfsFh,
     pub stateid: stateid4,
+}
+
+/// Close path-batch OPENs if a later preparation step fails, while preserving
+/// the original failure if best-effort cleanup also fails.
+pub(crate) fn prepare_path_opens<C, T, E>(
+    opened: &[(NfsFh, stateid4)],
+    client: &mut C,
+    prepare: impl FnOnce(&mut C) -> Result<T, E>,
+    close: impl FnOnce(&mut C, &[CloseOp]),
+) -> Result<T, E> {
+    let result = prepare(client);
+    if result.is_err() && !opened.is_empty() {
+        let closes: Vec<_> = opened
+            .iter()
+            .map(|(fh, stateid)| CloseOp {
+                fh: fh.clone(),
+                stateid: *stateid,
+            })
+            .collect();
+        close(client, &closes);
+    }
+    result
 }
 
 /// One NFSv4.2 COPY: `[PUTFH src, SAVEFH, PUTFH dst, COPY]`.
@@ -4165,6 +4194,54 @@ mod tests {
         assert_eq!(
             effective_request_limit(negotiated, std::num::NonZeroUsize::new(16 * 1024)),
             16 * 1024
+        );
+    }
+
+    #[test]
+    fn failed_path_batch_preparation_closes_every_open_and_keeps_primary_error() {
+        let opened = vec![
+            (
+                NfsFh {
+                    bytes: Box::from([1u8, 2]),
+                },
+                nfsv41_sys::stateid4 {
+                    seqid: 3,
+                    other: [4; 12],
+                },
+            ),
+            (
+                NfsFh {
+                    bytes: Box::from([5u8]),
+                },
+                nfsv41_sys::stateid4 {
+                    seqid: 6,
+                    other: [7; 12],
+                },
+            ),
+        ];
+        let primary_error = "SETATTR failed";
+        let mut closed = Vec::new();
+
+        let mut client = ();
+        let result = super::prepare_path_opens::<_, (), _>(
+            &opened,
+            &mut client,
+            |_| Err(primary_error),
+            |_, ops| {
+                closed.extend(
+                    ops.iter()
+                        .map(|op| (op.fh.clone(), op.stateid.seqid, op.stateid.other)),
+                );
+            },
+        );
+
+        assert_eq!(result, Err(primary_error));
+        assert_eq!(
+            closed,
+            vec![
+                (opened[0].0.clone(), 3, [4; 12]),
+                (opened[1].0.clone(), 6, [7; 12]),
+            ]
         );
     }
 }

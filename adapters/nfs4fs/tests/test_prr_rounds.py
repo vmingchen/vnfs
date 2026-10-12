@@ -200,3 +200,22 @@ def test_streamed_upload_setup_failure_preserves_destination(
         fs.put(str(source), "/destination", callback=FailingCallback())
     assert not fs._client._fds
     assert fs.cat_file("/destination") == b"original"
+
+
+def test_path_batch_write_rejects_short_successful_write(dummy_fs, monkeypatch):
+    import errno
+
+    write_many = dummy_fs._client.write_many
+
+    def short_write(paths, datas, truncate=True):
+        prefixes = [data[:3] for data in datas]
+        return write_many(paths, prefixes, truncate=truncate)
+
+    monkeypatch.setattr(dummy_fs._client, "write_many", short_write)
+
+    with pytest.raises(OSError) as error:
+        dummy_fs.pipe_file("/short", b"complete")
+
+    assert error.value.errno == errno.EIO
+    assert error.value.filename == "/short"
+    assert dummy_fs.cat_file("/short") == b"com"
