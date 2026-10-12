@@ -3331,18 +3331,16 @@ class VfsiFileSystem(AbstractFileSystem):
                 continue
             batch_native = [native[i] for i in batch]
             batch_datas = [datas[i] for i in batch]
-            try:
-                self._client.write_many(batch_native, batch_datas, truncate=True)
-            except FileNotFoundError:
-                if not self.auto_mkdir:
-                    raise
+            if self.auto_mkdir:
                 parents = {
                     posixpath.dirname(paths[i])
                     for i in batch
                     if posixpath.dirname(paths[i]) != "/"
                 }
                 self._ensure_dirs(list(parents), 0o755)
-                self._client.write_many(batch_native, batch_datas, truncate=True)
+            # A failed vector can have completed mutations. Prepare parents
+            # first and never replay writes, even for an indexed ENOENT.
+            self._client.write_many(batch_native, batch_datas, truncate=True)
             for index in batch:
                 report(index)
 
