@@ -115,19 +115,18 @@ class _WalkBudget:
         self.entries = fs.directory_max_entries
         self.path_bytes = fs.directory_max_path_bytes
         self.prefetched = {}
-        self.generation = fs._client.generation
+        self.epoch = fs._dircache_epoch_snapshot()
 
     def native_options(self):
         return {"max_entries": self.entries, "max_path_bytes": self.path_bytes}
 
     def sync(self):
-        self.fs._sync_dircache_generation()
-        generation = self.fs._client.generation
-        if generation != self.generation:
+        epoch = self.fs._dircache_epoch_snapshot()
+        if epoch != self.epoch:
             for infos in self.prefetched.values():
                 self.account(infos, direction=-1)
             self.prefetched.clear()
-            self.generation = generation
+            self.epoch = epoch
 
     def account(self, infos, direction=1):
         self.entries -= direction * len(infos)
@@ -2866,7 +2865,8 @@ class VfsiFileSystem(AbstractFileSystem):
             return
         for start in range(0, len(uncached), self.batch_size):
             cohort = uncached[start : start + self.batch_size]
-            fill_epoch = self._dircache_epoch_snapshot()
+            budget.sync()
+            fill_epoch = budget.epoch
             try:
                 groups = self._client.listdir_many(
                     [self._native_path(child) for child in cohort],
@@ -2875,10 +2875,17 @@ class VfsiFileSystem(AbstractFileSystem):
                 )
             except (FileNotFoundError, OSError) as error:
                 if getattr(error, "errno", None) == errno.EFBIG:
+                    budget.sync()
+                    if fill_epoch != budget.epoch:
+                        continue
                     raise
                 # Normal traversal attributes semantic errors to each child.
                 continue
             budget.sync()
+            if fill_epoch != budget.epoch:
+                # Namespace changes or reconnects while fetching invalidate
+                # these results too. Normal traversal will fetch them afresh.
+                continue
             for child, entries in zip(cohort, groups):
                 infos = self._infos_from_native_entries(entries)
                 budget.account(infos)

@@ -195,3 +195,82 @@ def test_walk_prefetch_obeys_client_generation_and_close(tmp_path, event):
             assert list(iterator) == []
     finally:
         fs.close()
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize(
+    "action", ["create", "rename", "remove", "invalidate", "refresh"]
+)
+def test_walk_prefetch_obeys_namespace_invalidation(tmp_path, cached, action):
+    fs = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path),
+        directory_max_entries=6,
+        directory_max_path_bytes=20,
+        use_listings_cache=cached,
+        skip_instance_cache=True,
+    )
+    try:
+        fs.mkdir("/a")
+        fs.mkdir("/b")
+        fs.pipe({"/a/x": b"x", "/b/x": b"x", "/b/y": b"y"})
+        iterator = fs.walk("/")
+        assert next(iterator)[0] == "/"
+        assert next(iterator)[0] == "/a"  # /b is now prefetched and charged.
+        expected = ["x", "z"]
+        if action == "create":
+            fs.pipe_file("/b/z", b"z")
+            expected = ["x", "y", "z"]
+        elif action == "rename":
+            fs.mv("/b/y", "/b/z")
+        elif action == "remove":
+            fs.rm("/b/y")
+            expected = ["x"]
+        else:
+            (tmp_path / "b" / "y").rename(tmp_path / "b" / "z")
+            if action == "invalidate":
+                fs.invalidate_cache("/b")
+            else:
+                fs.ls("/b", refresh=True)
+        assert next(iterator) == ("/b", [], expected)
+        assert list(iterator) == []
+    finally:
+        fs.close()
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("stale_limit_error", [False, True])
+def test_walk_discards_prefetch_invalidated_while_fetching(
+    tmp_path, monkeypatch, cached, stale_limit_error
+):
+    fs = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path),
+        directory_max_entries=5,
+        directory_max_path_bytes=16,
+        use_listings_cache=cached,
+        skip_instance_cache=True,
+    )
+    try:
+        fs.mkdir("/a")
+        fs.mkdir("/b")
+        fs.pipe({"/a/x": b"x", "/b/x": b"x", "/b/y": b"y"})
+        original = fs._client.listdir_many
+
+        def invalidated_fetch(paths, **kwargs):
+            groups = original(paths, **kwargs)
+            fs.mv("/b/y", "/b/z")
+            if stale_limit_error:
+                raise OSError(errno.EFBIG, "limit from invalidated fetch")
+            return groups
+
+        monkeypatch.setattr(fs._client, "listdir_many", invalidated_fetch)
+        assert list(fs.walk("/")) == [
+            ("/", ["a", "b"], []),
+            ("/a", [], ["x"]),
+            ("/b", [], ["x", "z"]),
+        ]
+    finally:
+        fs.close()
