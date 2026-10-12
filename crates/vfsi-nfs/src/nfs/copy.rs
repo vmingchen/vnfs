@@ -2,6 +2,49 @@
 
 use super::*;
 
+struct CopyBatchFailure {
+    error: VfError,
+    fallback_safe: bool,
+}
+
+impl CopyBatchFailure {
+    fn without_fallback(error: VfError) -> Self {
+        Self {
+            error,
+            fallback_safe: false,
+        }
+    }
+}
+
+impl From<VfError> for CopyBatchFailure {
+    fn from(error: VfError) -> Self {
+        let fallback_safe = is_server_copy_fallback_status(error.err_no());
+        Self {
+            error,
+            fallback_safe,
+        }
+    }
+}
+
+fn is_server_copy_fallback_status(status: u32) -> bool {
+    matches!(
+        status,
+        nfsstat4_NFS4ERR_NOTSUPP
+            | nfsstat4_NFS4ERR_OP_ILLEGAL
+            | nfsstat4_NFS4ERR_OFFLOAD_DENIED
+            | nfsstat4_NFS4ERR_OFFLOAD_NO_REQS
+            | nfsstat4_NFS4ERR_STALE_STATEID
+            | nfsstat4_NFS4ERR_OLD_STATEID
+            | nfsstat4_NFS4ERR_BAD_STATEID
+    )
+}
+
+fn server_copy_failure_allows_fallback(status: u32, active_index: usize, totals: &[u64]) -> bool {
+    is_server_copy_fallback_status(status)
+        && active_index == 0
+        && totals.iter().all(|&total| total == 0)
+}
+
 fn copy_extent_data<C>(
     client: &mut C,
     src_offset: u64,
@@ -136,7 +179,7 @@ impl NfsVecFs {
         result.and(source_close).and(destination_close)
     }
 
-    fn copy_extents_server_side(&mut self, pairs: &[ExtentPair]) -> VfRes {
+    fn copy_extents_server_side(&mut self, pairs: &[ExtentPair]) -> Result<(), CopyBatchFailure> {
         let src_files: Vec<FileOperand> = pairs
             .iter()
             .map(|p| FileOperand::from_os_path(&p.src_path))
@@ -151,16 +194,18 @@ impl NfsVecFs {
         let create = vec![true; pairs.len()];
         let no_truncate = vec![false; pairs.len()];
 
-        let src_tmp = self.open_path_batch(&src_refs, &no_create, false, &no_truncate)?;
+        let src_tmp = self
+            .open_path_batch(&src_refs, &no_create, false, &no_truncate)
+            .map_err(CopyBatchFailure::from)?;
         let dst_tmp = match self.open_path_batch(&dst_refs, &create, true, &no_truncate) {
             Ok(tmp) => tmp,
             Err(e) => {
                 self.close_tmp(&src_tmp);
-                return Err(e);
+                return Err(CopyBatchFailure::from(e));
             }
         };
 
-        let result = (|| {
+        let result = (|| -> Result<(), CopyBatchFailure> {
             let explicit: Vec<usize> = pairs
                 .iter()
                 .enumerate()
@@ -230,10 +275,24 @@ impl NfsVecFs {
                     })
                     .collect();
                 self.server_copy_stats.requests += 1;
-                let counts = self.nfs.copy_many(&active).map_err(|e| {
-                    let original = pending.get(e.op_index).copied().unwrap_or(0);
-                    vfsi_core::error_from_rpc_indexed(e.with_op_index(original))
-                })?;
+                let counts = match self.nfs.copy_many(&active) {
+                    Ok(counts) => counts,
+                    Err(error) => {
+                        let active_index = error.op_index;
+                        let original = pending.get(active_index).copied().unwrap_or(0);
+                        let fallback_safe = server_copy_failure_allows_fallback(
+                            error.status,
+                            active_index,
+                            &totals,
+                        );
+                        let error =
+                            vfsi_core::error_from_rpc_indexed(error.with_op_index(original));
+                        return Err(CopyBatchFailure {
+                            error,
+                            fallback_safe,
+                        });
+                    }
+                };
                 self.server_copy_stats.operations += counts.len() as u64;
                 let mut next = Vec::new();
                 for (&i, n) in pending.iter().zip(counts) {
@@ -281,6 +340,7 @@ impl NfsVecFs {
             self.nfs
                 .setattr_many(&attrs)
                 .map_err(vfsi_core::error_from_rpc_indexed)
+                .map_err(CopyBatchFailure::without_fallback)
         })();
         self.close_tmp(&src_tmp);
         self.close_tmp(&dst_tmp);
@@ -296,17 +356,8 @@ impl NfsVecFs {
         // bounded while still amortizing OPEN, COPY, SETATTR, and CLOSE.
         const FILES_PER_COPY_BATCH: usize = 8;
         for (base, batch) in pairs.chunks(FILES_PER_COPY_BATCH).enumerate() {
-            if let Err(e) = self.copy_extents_server_side(batch) {
-                if matches!(
-                    e.err_no(),
-                    nfsstat4_NFS4ERR_NOTSUPP
-                        | nfsstat4_NFS4ERR_OP_ILLEGAL
-                        | nfsstat4_NFS4ERR_OFFLOAD_DENIED
-                        | nfsstat4_NFS4ERR_OFFLOAD_NO_REQS
-                        | nfsstat4_NFS4ERR_STALE_STATEID
-                        | nfsstat4_NFS4ERR_OLD_STATEID
-                        | nfsstat4_NFS4ERR_BAD_STATEID
-                ) {
+            if let Err(failure) = self.copy_extents_server_side(batch) {
+                if failure.fallback_safe {
                     self.server_copy_enabled = false;
                     self.server_copy_stats.fallbacks += 1;
                     let start = base * FILES_PER_COPY_BATCH;
@@ -314,7 +365,9 @@ impl NfsVecFs {
                         .vcopy_data_impl(&pairs[start..])
                         .map_err(|fallback| fallback.map_index(|index| start + index));
                 }
-                return Err(e.map_index(|index| base * FILES_PER_COPY_BATCH + index));
+                return Err(failure
+                    .error
+                    .map_index(|index| base * FILES_PER_COPY_BATCH + index));
             }
         }
         Ok(())
@@ -324,6 +377,30 @@ impl NfsVecFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_copy_fallback_requires_no_completed_prefix() {
+        assert!(server_copy_failure_allows_fallback(
+            nfsstat4_NFS4ERR_OFFLOAD_DENIED,
+            0,
+            &[0, 0, 0],
+        ));
+        assert!(!server_copy_failure_allows_fallback(
+            nfsstat4_NFS4ERR_OFFLOAD_DENIED,
+            2,
+            &[0, 0, 0],
+        ));
+        assert!(!server_copy_failure_allows_fallback(
+            nfsstat4_NFS4ERR_OFFLOAD_DENIED,
+            0,
+            &[8, 0, 0],
+        ));
+        assert!(!server_copy_failure_allows_fallback(
+            nfsstat4_NFS4ERR_ACCESS,
+            0,
+            &[0, 0, 0],
+        ));
+    }
 
     #[test]
     fn copy_fallback_accepts_eof_and_returns_final_destination_size() {
