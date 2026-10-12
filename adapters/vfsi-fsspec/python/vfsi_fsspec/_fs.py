@@ -4290,11 +4290,26 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def touch(self, path, truncate=True, **kwargs):
         internal = self._checked_strip_protocol(path)
-        if not truncate and self.exists(internal):
-            self._invalidate_namespace([internal])
-            self._client.touch(self._native_path(internal))
+        if truncate:
+            self._write_batch([internal], [b""])
             return
-        self._write_batch([internal], [b""])
+        self._invalidate_namespace([internal])
+        native = self._native_path(internal)
+        try:
+            self._client.touch(native)
+        except FileNotFoundError:
+            if self._intrans:
+                # Existing staged content already creates/touches this name.
+                # Otherwise publish exclusively to preserve concurrent creators.
+                if not any(file.path == internal for file in self.transaction.files):
+                    self._write_batch([internal], [b""], mode="create")
+            else:
+                if self.auto_mkdir:
+                    self._ensure_dirs([posixpath.dirname(internal)], 0o755)
+                # The name may now exist. Empty nontruncating writes also
+                # preserve the target of a symlink installed by another writer.
+                self._client.write_many([native], [b""], truncate=False)
+                self._client.touch(native)
 
     def symlink(self, target, path, **kwargs):
         self._invalidate_namespace([path])
