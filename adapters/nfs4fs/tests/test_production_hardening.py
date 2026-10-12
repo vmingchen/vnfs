@@ -165,8 +165,8 @@ def test_per_call_maxdepth_stops_native_traversal_before_materialization(
         return original(root, sort=sort, max_depth=max_depth)
 
     monkeypatch.setattr(fs._client, "walk", recording_walk)
-    walked = list(fs.walk("/", maxdepth=1))
-    assert [directory for directory, _, _ in walked] == ["/", "/one"]
+    walked = list(fs.walk("/", maxdepth=2, topdown=False))
+    assert [directory for directory, _, _ in walked] == ["/one", "/"]
     assert calls == [1]
     fs.close()
 

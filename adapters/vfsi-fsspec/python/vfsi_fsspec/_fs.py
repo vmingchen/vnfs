@@ -86,6 +86,21 @@ def _info_dict(full_name, attrs):
     return {k: v for k, v in info.items() if v is not None or k in {"uid", "gid"}}
 
 
+def _timestamp_datetime(info, attribute):
+    """Return an aware UTC datetime using available nanosecond metadata."""
+    nanoseconds = info.get(f"{attribute}_ns")
+    if nanoseconds is not None:
+        seconds, fraction = divmod(int(nanoseconds), 1_000_000_000)
+        value = datetime.datetime.fromtimestamp(
+            seconds, tz=datetime.timezone.utc
+        )
+        return value + datetime.timedelta(microseconds=fraction // 1_000)
+    seconds = info.get(attribute)
+    if seconds is None:
+        return None
+    return datetime.datetime.fromtimestamp(seconds, tz=datetime.timezone.utc)
+
+
 def _depth(path):
     """Number of components below the root for an internal path."""
     if path == "/":
@@ -2546,9 +2561,16 @@ class VfsiFileSystem(AbstractFileSystem):
         protos = (cls.protocol,) if isinstance(cls.protocol, str) else cls.protocol
         parsed = urlsplit(path)
         if parsed.scheme in protos:
-            if parsed.query or parsed.fragment:
-                raise ValueError("query strings and fragments are not supported")
-            path = unquote(parsed.path)
+            if parsed.netloc:
+                if parsed.query or parsed.fragment:
+                    raise ValueError("query strings and fragments are not supported")
+                path = unquote(parsed.path)
+            elif "://" in path:
+                # Protocol paths produced by _fullpath have an empty authority.
+                # Preserve literal query/fragment characters in their filename.
+                path = unquote(path.split("://", 1)[1])
+            else:
+                path = unquote(parsed.path)
         for protocol in protos:
             if path.startswith(protocol + "://"):
                 path = path[len(protocol) + 3 :]
@@ -2746,8 +2768,8 @@ class VfsiFileSystem(AbstractFileSystem):
         return infos
 
     def _cached_walk_tree(self, root, maxdepth):
-        """Return a complete cached subtree, or ``None`` on any cache miss."""
-        limit = None if maxdepth is None else _depth(root) + maxdepth
+        """Return a complete cached subtree, or None on any cache miss."""
+        limit = None if maxdepth is None else _depth(root) + maxdepth - 1
         tree = []
         pending = [root]
         while pending:
@@ -2767,33 +2789,70 @@ class VfsiFileSystem(AbstractFileSystem):
         return tree
 
     def _native_walk_tree(self, internal, fill_epoch, maxdepth=None):
-        if maxdepth is None:
+        requested_depth = None if maxdepth is None else maxdepth - 1
+        if requested_depth is None:
             native_tree = self._client.walk(self._native_path(internal), sort=True)
         else:
             native_tree = self._client.walk(
                 self._native_path(internal),
                 sort=True,
-                max_depth=min(self.walk_max_depth, maxdepth),
+                max_depth=min(self.walk_max_depth, requested_depth),
             )
         self._sync_dircache_generation()
         tree = []
         for native_dir, entries in native_tree:
             directory = self._internalize(native_dir)
             infos = self._infos_from_native_entries(entries)
-            self._store_listing(directory, infos, fill_epoch)
             tree.append((directory, infos))
+
+        root_depth = _depth(internal)
+        hard_limit = requested_depth is None or requested_depth > self.walk_max_depth
+        if hard_limit and any(
+            info["type"] == "directory"
+            and _depth(self._checked_strip_protocol(info["name"]))
+            > root_depth + self.walk_max_depth
+            for _, infos in tree
+            for info in infos
+        ):
+            raise _oserror(errno.EFBIG, self._fullpath(internal))
+
+        for directory, infos in tree:
+            self._store_listing(directory, infos, fill_epoch)
         return tree
+
+    def _prefetch_walk_children(self, children, on_error):
+        """Cache one selected sibling level without descending into it."""
+        if not children or on_error == "raise":
+            return
+        uncached = [child for child in children if self._cached_listing(child) is None]
+        if not uncached:
+            return
+        fill_epoch = self._dircache_epoch_snapshot()
+        try:
+            groups = self._client.listdir_many(
+                [self._native_path(child) for child in uncached], recursive=False
+            )
+        except (FileNotFoundError, OSError):
+            # Retry each path during normal traversal so errors are attributed
+            # to the correct child and passed to the caller's on_error handler.
+            return
+        self._sync_dircache_generation()
+        for child, entries in zip(uncached, groups):
+            self._store_listing(
+                child, self._infos_from_native_entries(entries), fill_epoch
+            )
 
     def _best_effort_walk_tree(self, root, maxdepth, on_error):
         """Walk one directory at a time after a failed native traversal."""
         root_depth = _depth(root)
+        requested_depth = None if maxdepth is None else maxdepth - 1
         depth_limit = (
             self.walk_max_depth
-            if maxdepth is None
-            else min(self.walk_max_depth, maxdepth)
+            if requested_depth is None
+            else min(self.walk_max_depth, requested_depth)
         )
         max_entry_depth = root_depth + depth_limit
-        hard_limit = maxdepth is None or maxdepth > self.walk_max_depth
+        hard_limit = requested_depth is None or requested_depth > self.walk_max_depth
         tree = []
         pending = [root]
         while pending:
@@ -2816,7 +2875,7 @@ class VfsiFileSystem(AbstractFileSystem):
             ]
             if _depth(directory) >= max_entry_depth:
                 if hard_limit and children:
-                    raise _oserror(errno.EFBIG, self._fullpath(directory))
+                    raise _oserror(errno.EFBIG, self._fullpath(root))
                 continue
             pending.extend(reversed(children))
         return tree
@@ -2964,20 +3023,10 @@ class VfsiFileSystem(AbstractFileSystem):
         return out
 
     def created(self, path):
-        ts = self.info(path).get("created")
-        return (
-            datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
-            if ts is not None
-            else None
-        )
+        return _timestamp_datetime(self.info(path), "created")
 
     def modified(self, path):
-        ts = self.info(path).get("modified")
-        return (
-            datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
-            if ts is not None
-            else None
-        )
+        return _timestamp_datetime(self.info(path), "modified")
 
     def ukey(self, path):
         return self._ukey_from_info(self.info(path))
@@ -4431,19 +4480,106 @@ class VfsiFileSystem(AbstractFileSystem):
         detail = kwargs.pop("detail", False)
         refresh = kwargs.pop("refresh", False)
         internal = self._checked_strip_protocol(path)
-        tree = None if refresh else self._cached_walk_tree(internal, maxdepth)
+        tree = (
+            None
+            if refresh or topdown
+            else self._cached_walk_tree(internal, maxdepth)
+        )
         if tree is None:
-            # A native miss refreshes the complete subtree in one vectorized
-            # walk and removes cached descendants no longer present remotely.
-            self.invalidate_cache(internal)
+            if not topdown or refresh:
+                self.invalidate_cache(internal)
+            if topdown:
+                # Fetch each directory only after its parent has been yielded.
+                # This lets callers prune the mutable dirs collection before
+                # an inaccessible or expensive child is listed.
+                root_depth = _depth(internal)
+                requested_depth = None if maxdepth is None else maxdepth - 1
+                descend_limit = (
+                    self.walk_max_depth
+                    if requested_depth is None
+                    else min(self.walk_max_depth, requested_depth)
+                )
+                hard_limit = (
+                    requested_depth is None or requested_depth > self.walk_max_depth
+                )
+                pending = [internal]
+                while pending:
+                    directory = pending.pop()
+                    try:
+                        if directory == internal and self._cached_listing(directory) is None:
+                            try:
+                                root_tree = self._native_walk_tree(
+                                    internal,
+                                    self._dircache_epoch_snapshot(),
+                                    maxdepth=1,
+                                )
+                            except NotADirectoryError:
+                                infos = self.ls(directory, detail=True)
+                            except (FileNotFoundError, OSError) as error:
+                                if getattr(error, "errno", None) == errno.EFBIG:
+                                    raise
+                                infos = self.ls(directory, detail=True)
+                            else:
+                                infos = root_tree[0][1] if root_tree else self.ls(
+                                    directory, detail=True
+                                )
+                        else:
+                            infos = self.ls(directory, detail=True)
+                    except (FileNotFoundError, OSError) as error:
+                        if getattr(error, "errno", None) == errno.EFBIG:
+                            raise
+                        if on_error == "raise":
+                            raise
+                        if callable(on_error):
+                            on_error(error)
+                        continue
+                    if (
+                        directory == internal
+                        and len(infos) == 1
+                        and infos[0]["type"] != "directory"
+                        and self._checked_strip_protocol(infos[0]["name"]) == internal
+                    ):
+                        file_info = dict(infos[0])
+                        files = {"": file_info} if detail else [""]
+                        yield internal, [], files
+                        return
+                    dirs = {}
+                    files = {}
+                    for info in infos:
+                        entry_internal = self._checked_strip_protocol(info["name"])
+                        name = posixpath.basename(entry_internal.rstrip("/"))
+                        (dirs if info["type"] == "directory" else files)[name] = dict(
+                            info
+                        )
+                    children_by_name = {
+                        name: posixpath.join(directory, name) for name in dirs
+                    }
+                    yielded_dirs = dirs if detail else list(dirs)
+                    yielded_files = files if detail else list(files)
+                    yield directory, yielded_dirs, yielded_files
+                    names = yielded_dirs.keys() if detail else yielded_dirs
+                    children = [
+                        children_by_name[name]
+                        for name in names
+                        if name in children_by_name
+                    ]
+                    if _depth(directory) - root_depth >= descend_limit:
+                        if hard_limit and any(
+                            self._cached_listing(child) is None for child in children
+                        ):
+                            raise _oserror(errno.EFBIG, self._fullpath(internal))
+                        if not hard_limit:
+                            continue
+                    self._prefetch_walk_children(children, on_error)
+                    pending.extend(reversed(children))
+                return
+            # Bottom-up order requires discovering all descendants before the
+            # first result can be yielded, so retain the native bulk traversal.
             fill_epoch = self._dircache_epoch_snapshot()
             try:
                 tree = self._native_walk_tree(internal, fill_epoch, maxdepth=maxdepth)
-            except (FileNotFoundError, OSError) as e:
-                # Resource-limit failures mean the materialized result would
-                # be incomplete. Never turn them into an apparently empty
-                # tree, even when ordinary traversal errors are omitted.
-                if getattr(e, "errno", None) == errno.EFBIG:
+            except (FileNotFoundError, OSError) as error:
+                if getattr(error, "errno", None) == errno.EFBIG:
                     raise
                 if self.isfile(internal):
                     info = self.info(internal)
@@ -4463,17 +4599,52 @@ class VfsiFileSystem(AbstractFileSystem):
                 (dirs if info["type"] == "directory" else files)[name] = dict(info)
             by_dir[directory] = (dirs, files)
         root_depth = _depth(internal)
-        order = [
-            d for d in by_dir if maxdepth is None or _depth(d) <= root_depth + maxdepth
-        ]
-        if not topdown:
-            order = list(reversed(order))
-        for d in order:
-            dirs, files = by_dir[d]
-            if not detail:
-                dirs = list(dirs)
-                files = list(files)
-            yield d, dirs, files
+        depth_limit = None if maxdepth is None else root_depth + maxdepth - 1
+        visible = {
+            directory
+            for directory in by_dir
+            if depth_limit is None or _depth(directory) <= depth_limit
+        }
+        if topdown:
+            pending = [internal]
+            while pending:
+                directory = pending.pop()
+                if directory not in visible:
+                    continue
+                dirs, files = by_dir[directory]
+                yielded_dirs = dirs if detail else list(dirs)
+                yielded_files = files if detail else list(files)
+                yield directory, yielded_dirs, yielded_files
+                names = yielded_dirs.keys() if detail else yielded_dirs
+                children = [
+                    posixpath.join(directory, name)
+                    for name in names
+                    if posixpath.join(directory, name) in visible
+                ]
+                pending.extend(reversed(children))
+        else:
+            order = []
+            pending = [(internal, False)]
+            while pending:
+                directory, visited = pending.pop()
+                if directory not in visible:
+                    continue
+                if visited:
+                    order.append(directory)
+                    continue
+                pending.append((directory, True))
+                children = [
+                    self._checked_strip_protocol(info["name"])
+                    for info in by_dir.get(directory, ({}, {}))[0].values()
+                    if self._checked_strip_protocol(info["name"]) in visible
+                ]
+                pending.extend((child, False) for child in reversed(children))
+            for directory in order:
+                dirs, files = by_dir[directory]
+                if not detail:
+                    dirs = list(dirs)
+                    files = list(files)
+                yield directory, dirs, files
 
     def find(self, path, maxdepth=None, withdirs=False, detail=False, **kwargs):
         internal = self._checked_strip_protocol(path)

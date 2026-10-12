@@ -485,7 +485,155 @@ def test_walk_fallback_keeps_hard_depth_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(fs, "_native_walk_tree", fail_bulk_walk)
     try:
         with pytest.raises(OSError) as exc_info:
-            list(fs.walk("/"))
+            list(fs.walk("/", topdown=False))
+        assert exc_info.value.errno == errno.EFBIG
+    finally:
+        fs.close()
+
+
+def test_walk_matches_fsspec_depth_and_bottomup_order(dummy_fs):
+    root = "/walk-contract/dir1"
+    dir11 = f"{root}/dir11"
+    dir12 = f"{root}/dir12"
+    dir111 = f"{dir11}/dir111"
+    dummy_fs.mkdir(dir111, create_parents=True)
+    dummy_fs.mkdir(dir12, create_parents=True)
+    dummy_fs.pipe_file(f"{root}/file11", b"")
+    dummy_fs.pipe_file(f"{dir11}/file111", b"")
+    dummy_fs.pipe_file(f"{dir12}/file121", b"")
+    dummy_fs.pipe_file(f"{dir111}/file1111", b"")
+
+    expected_topdown = [
+        (root, ["dir11", "dir12"], ["file11"]),
+        (dir11, ["dir111"], ["file111"]),
+        (dir111, [], ["file1111"]),
+        (dir12, [], ["file121"]),
+    ]
+    assert list(dummy_fs.walk(root, topdown=True)) == expected_topdown
+    assert list(dummy_fs.walk(root, topdown=False)) == [
+        (dir111, [], ["file1111"]),
+        (dir11, ["dir111"], ["file111"]),
+        (dir12, [], ["file121"]),
+        (root, ["dir11", "dir12"], ["file11"]),
+    ]
+    assert list(dummy_fs.walk(root, maxdepth=2)) == [
+        (root, ["dir11", "dir12"], ["file11"]),
+        (dir11, ["dir111"], ["file111"]),
+        (dir12, [], ["file121"]),
+    ]
+    assert list(dummy_fs.walk(root, maxdepth=1)) == [
+        (root, ["dir11", "dir12"], ["file11"]),
+    ]
+
+    def prune_dir111():
+        for path, dirs, files in dummy_fs.walk(root):
+            yield path, dirs.copy(), files
+            if "dir111" in dirs:
+                dirs.remove("dir111")
+
+    assert list(prune_dir111()) == [
+        (root, ["dir11", "dir12"], ["file11"]),
+        (dir11, ["dir111"], ["file111"]),
+        (dir12, [], ["file121"]),
+    ]
+
+    def reverse_dirs(topdown):
+        for path, dirs, files in dummy_fs.walk(root, topdown=topdown):
+            yield path, dirs.copy(), files
+            dirs.reverse()
+
+    assert [path for path, _, _ in reverse_dirs(topdown=True)] == [
+        root,
+        dir12,
+        dir11,
+        dir111,
+    ]
+    assert [path for path, _, _ in reverse_dirs(topdown=False)] == [
+        dir111,
+        dir11,
+        dir12,
+        root,
+    ]
+
+
+def test_walk_pruning_defers_child_listing(tmp_path, monkeypatch):
+    import fsspec
+
+    dummy_fs = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path),
+        use_listings_cache=True,
+        skip_instance_cache=True,
+    )
+    root = "/walk-pruned"
+    blocked = f"{root}/blocked"
+    dummy_fs.mkdir(blocked, create_parents=True)
+    dummy_fs.pipe_file(f"{blocked}/file", b"x")
+    original_ls = dummy_fs.ls
+    # A complete cached subtree must still defer child reads until after yield.
+    original_ls(root, detail=True, refresh=True)
+    original_ls(blocked, detail=True, refresh=True)
+    assert dummy_fs._cached_listing(root) is not None
+    assert dummy_fs._cached_listing(blocked) is not None
+    visited = []
+
+    def ls(path, *args, **kwargs):
+        visited.append(path)
+        if path == blocked:
+            raise PermissionError(f"no access to {blocked}")
+        return original_ls(path, *args, **kwargs)
+
+    monkeypatch.setattr(dummy_fs, "ls", ls)
+    iterator = dummy_fs.walk(root, on_error="raise")
+    path, dirs, files = next(iterator)
+    assert path == root
+    assert dirs == ["blocked"]
+    dirs.clear()
+    assert list(iterator) == []
+    assert visited == [root]
+
+    iterator = dummy_fs.walk(root, on_error="raise")
+    assert next(iterator)[0] == root
+    assert visited == [root, root]
+    with pytest.raises(PermissionError, match="blocked"):
+        next(iterator)
+    assert visited == [root, root, blocked]
+    dummy_fs.close()
+
+
+def test_expand_path_preserves_literal_query_and_fragment_chars(dummy_fs):
+    root = "/expand-special"
+    dummy_fs.mkdir(root)
+    names = ["file[1].txt", "file?.txt", "file#.txt", "normal.txt"]
+    for name in names:
+        dummy_fs.pipe_file(f"{root}/{name}", b"x")
+
+    assert sorted(dummy_fs.expand_path(root, recursive=True)) == sorted(
+        [root, *(f"{root}/{name}" for name in names)]
+    )
+    assert sorted(dummy_fs.expand_path(f"{root}/file*.txt", recursive=True)) == sorted(
+        f"{root}/{name}" for name in names[:3]
+    )
+
+
+def test_walk_rejects_depth_beyond_hard_limit_without_silent_truncation(tmp_path):
+    import fsspec
+
+    fs = fsspec.filesystem(
+        "nfs4",
+        backend="dummy",
+        dummy_root=str(tmp_path / "walk-hard-depth"),
+        walk_max_depth=1,
+        skip_instance_cache=True,
+    )
+    root = "/walk-hard-depth"
+    fs.mkdir(f"{root}/one/two", create_parents=True)
+    fs.pipe_file(f"{root}/one/two/file", b"x")
+
+    try:
+        with pytest.raises(OSError) as exc_info:
+            list(fs.walk(root, maxdepth=3))
         assert exc_info.value.errno == errno.EFBIG
     finally:
         fs.close()
@@ -572,3 +720,22 @@ def test_recursive_rm_maxdepth_rejects_depth_beyond_walk_limit(tmp_path):
         assert fs.exists(f"{root}/one/two/two.txt")
     finally:
         fs.close()
+
+
+def test_created_modified_use_subsecond_metadata(dummy_fs, monkeypatch):
+    import datetime
+
+    metadata = {
+        "created": 1_700_000_000,
+        "created_ns": 1_700_000_000_123_456_789,
+        "modified": 1_700_000_001,
+        "modified_ns": 1_700_000_001_987_654_321,
+    }
+    monkeypatch.setattr(dummy_fs, "info", lambda path: metadata)
+
+    assert dummy_fs.created("/timestamp") == datetime.datetime(
+        2023, 11, 14, 22, 13, 20, 123456, tzinfo=datetime.timezone.utc
+    )
+    assert dummy_fs.modified("/timestamp") == datetime.datetime(
+        2023, 11, 14, 22, 13, 21, 987654, tzinfo=datetime.timezone.utc
+    )
