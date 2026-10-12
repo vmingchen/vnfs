@@ -440,12 +440,16 @@ visible when the TTL expires or when the caller requests a refresh. Use
   rename. This prevents partial file contents from becoming visible. Like
   fsspec transactions generally, a multi-file commit is staged rather than a
   server-wide atomic transaction: a server failure during the final rename
-  batch can expose a prefix of the batch. Transactional `xb` writes publish
-  through an atomic hard link from the staging file, so a concurrent creator
-  causes `FileExistsError` instead of being overwritten. Backends without hard
+  batch can expose a prefix of the batch. Transactional `xb` writes and
+  `touch(truncate=False)` of missing files publish through an atomic hard link
+  from the staging file, so a concurrent creator causes `FileExistsError`
+  instead of being overwritten. Backends without hard
   links reject that publication; they do not fall back to overwriting rename.
 - `pipe_file(..., mode="create")` and create-mode `put` use an exclusive server
   create, so concurrent creators cannot silently overwrite one another.
+  Outside a transaction, a later write or callback failure can leave an empty
+  or partially written file. Cleanup closes the descriptor but does not unlink
+  the destination, which may have been replaced by another writer.
 
 ## Local development
 

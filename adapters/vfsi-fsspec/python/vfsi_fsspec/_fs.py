@@ -1123,7 +1123,18 @@ class VfsiFile(AbstractBufferedFile):
         self.fs._check_read_allocation(max(0, end - start), self.path)
         if self._buffer_group is not None and self.fs.vectorized_buffering:
             return self._buffer_group.fetch(self, start, end)
-        return self._raw._pread_at(start, max(0, end - start))
+        data = self._raw._pread_at(start, max(0, end - start))
+        if not data or len(data) >= end - start:
+            return data
+        # A positive short native read is not EOF. Fixed-block caches must
+        # receive the complete range before marking its blocks as populated.
+        result = bytearray(data)
+        while len(result) < end - start:
+            chunk = self._raw._pread_at(start + len(result), end - start - len(result))
+            if not chunk:
+                break
+            result.extend(chunk)
+        return bytes(result)
 
     def _initiate_upload(self):
         # Creation/truncation and append positioning happen when the raw
@@ -1590,7 +1601,41 @@ class _BufferGroup:
             file._raw._fd = fd
             file._raw._fd_generation = self.fs._client.generation
 
-    def _pread_many(self, files, offsets, lengths):
+    def _pread_many(self, files, offsets, lengths, *, required=None):
+        data, errors = self._pread_many_once(files, offsets, lengths)
+        # Speculation gets one wave. Complete only required cache fills;
+        # internal callers without a selected file require every result.
+        partial = {
+            index: bytearray(value)
+            for index, value in enumerate(data)
+            if index not in errors
+            and value
+            and len(value) < lengths[index]
+            and (required is None or files[index] is required)
+        }
+        pending = list(partial)
+        while pending:
+            more, failures = self._pread_many_once(
+                [files[index] for index in pending],
+                [offsets[index] + len(partial[index]) for index in pending],
+                [lengths[index] - len(partial[index]) for index in pending],
+            )
+            remaining = []
+            for position, index in enumerate(pending):
+                if position in failures:
+                    errors[index] = failures[position]
+                    data[index] = None
+                elif more[position]:
+                    partial[index].extend(more[position])
+                    if len(partial[index]) < lengths[index]:
+                        remaining.append(index)
+            pending = remaining
+        for index, value in partial.items():
+            if index not in errors:
+                data[index] = bytes(value)
+        return data, errors
+
+    def _pread_many_once(self, files, offsets, lengths):
         if self.fs.auto_reconnect and any(
             file._raw._fd is None or not self.fs._client.descriptor_valid(file._raw._fd)
             for file in files
@@ -1607,6 +1652,8 @@ class _BufferGroup:
             return self.fs._client.pread_many(fds, offsets, lengths)
 
     def fetch(self, current, start, end):
+        if end <= start:
+            return b""  # mmap may request an empty block exactly at EOF.
         with self._lock:
             key = (id(current), start, end)
             prefetched = self._take_speculative(False, key)
@@ -1665,7 +1712,7 @@ class _BufferGroup:
                 lengths.append(length)
                 total += length
 
-            data, errors = self._pread_many(files, offsets, lengths)
+            data, errors = self._pread_many(files, offsets, lengths, required=current)
             current_data = None
             for index, (file, length, value) in enumerate(zip(files, lengths, data)):
                 if index in errors:
@@ -1675,7 +1722,8 @@ class _BufferGroup:
                 value = value or b""
                 if file is current:
                     current_data = value
-                else:
+                elif len(value) == length:
+                    # Never mark a short speculative prefix as a full block.
                     self._store_speculative(
                         False, (id(file), start, start + length), value
                     )
@@ -1719,9 +1767,11 @@ class _BufferGroup:
                 files.append(file)
                 lengths.append(length)
                 total += length
-            data, errors = self._pread_many(files, [0] * len(files), lengths)
+            data, errors = self._pread_many(
+                files, [0] * len(files), lengths, required=current
+            )
             current_data = None
-            for index, (file, value) in enumerate(zip(files, data)):
+            for index, (file, length, value) in enumerate(zip(files, lengths, data)):
                 if index in errors:
                     if file is current:
                         raise _oserror(errors[index], current.path)
@@ -1729,9 +1779,9 @@ class _BufferGroup:
                 value = value or b""
                 if file is current:
                     current_data = value
-                elif len(value) == file.size:
+                elif len(value) == length == file.size:
                     self._store_speculative(True, id(file), value)
-                else:
+                elif len(value) == length:
                     self._store_speculative(False, (id(file), 0, len(value)), value)
             if current_data is None:
                 raise OSError(errno.EIO, "buffered read returned no data", current.path)
@@ -2022,8 +2072,21 @@ class _DeferredWriteFile:
             )
         except FileNotFoundError:
             permissions = None  # New transactional files stay private.
+        if self.fs.auto_mkdir:
+            self.fs._ensure_dirs([posixpath.dirname(self.temp_path) or "/"])
+        self._spool.seek(0)
+        # Cleanup is permitted only after exclusive OPEN acknowledges creation.
+        # A collision or lost OPEN reply does not establish ownership of the name.
+        fd = self.fs._client.open(
+            self.fs._native_path(self.temp_path), "xb", permissions=0o600
+        )
         try:
-            self.fs._write_spooled(self.temp_path, self._spool)
+            with VfsiFile(self.fs, self.temp_path, "xb", fd=fd) as remote:
+                while True:
+                    chunk = self._spool.read(self.fs.transfer_chunk_size)
+                    if not chunk:
+                        break
+                    _write_fully(remote, chunk)
             if permissions is not None:
                 self.fs._client.chmod(self.fs._native_path(self.temp_path), permissions)
         except BaseException:
@@ -3268,18 +3331,16 @@ class VfsiFileSystem(AbstractFileSystem):
                 continue
             batch_native = [native[i] for i in batch]
             batch_datas = [datas[i] for i in batch]
-            try:
-                self._client.write_many(batch_native, batch_datas, truncate=True)
-            except FileNotFoundError:
-                if not self.auto_mkdir:
-                    raise
+            if self.auto_mkdir:
                 parents = {
                     posixpath.dirname(paths[i])
                     for i in batch
                     if posixpath.dirname(paths[i]) != "/"
                 }
                 self._ensure_dirs(list(parents), 0o755)
-                self._client.write_many(batch_native, batch_datas, truncate=True)
+            # A failed vector can have completed mutations. Prepare parents
+            # first and never replay writes, even for an indexed ENOENT.
+            self._client.write_many(batch_native, batch_datas, truncate=True)
             for index in batch:
                 report(index)
 
@@ -3301,7 +3362,6 @@ class VfsiFileSystem(AbstractFileSystem):
         if self.auto_mkdir and parent not in ("", "/"):
             self._ensure_dirs([parent], 0o755)
         fd = self._client.open(self._native_path(internal), "xb")
-        completed = False
         write_error = None
         try:
             view = memoryview(value)
@@ -3314,14 +3374,6 @@ class VfsiFileSystem(AbstractFileSystem):
                 offset += written
                 if callback is not None:
                     callback.relative_update(written)
-            completed = True
-        except ConnectionError as exc:
-            # The server may have completed the create or the last write.
-            # A compensating remove could delete a later creator's file, so
-            # leave resolution of this ambiguous result to the caller.
-            completed = True
-            write_error = exc
-            raise
         except BaseException as exc:
             write_error = exc
             raise
@@ -3334,25 +3386,8 @@ class VfsiFileSystem(AbstractFileSystem):
                 # Preserve the mutation error if both the write and CLOSE fail.
                 if write_error is None:
                     raise
-            finally:
-                if not completed:
-                    try:
-                        self.rm(internal)
-                    except OSError:
-                        pass
-
-    def _write_spooled(self, path, spool):
-        """Stream a seekable local spool to one remote path."""
-        if self.auto_mkdir:
-            self._ensure_dirs([posixpath.dirname(path) or "/"])
-        spool.seek(0)
-        fd = self._client.open(self._native_path(path), "xb", permissions=0o600)
-        with VfsiFile(self, path, "xb", fd=fd) as remote:
-            while True:
-                chunk = spool.read(self.transfer_chunk_size)
-                if not chunk:
-                    break
-                _write_fully(remote, chunk)
+            # The path may now name another writer's file. Retain partial
+            # output on failure rather than unlinking a name we no longer own.
 
     def _copy_remote_to_fileobj(
         self,
@@ -3638,9 +3673,12 @@ class VfsiFileSystem(AbstractFileSystem):
             with callback.branched(local_path, remote_path) as child:
                 child.set_size(size)
                 # Finish fallible local setup before creating/truncating remote.
-                with open(local_path, "rb") as source, self.open(
-                    remote_path, "xb" if mode == "create" else "wb"
-                ) as remote:
+                with (
+                    open(local_path, "rb") as source,
+                    self.open(
+                        remote_path, "xb" if mode == "create" else "wb"
+                    ) as remote,
+                ):
                     while True:
                         chunk = source.read(
                             min(self.transfer_chunk_size, self.max_batch_bytes)
@@ -4213,15 +4251,23 @@ class VfsiFileSystem(AbstractFileSystem):
         copied, errors = self._client.copy_many(native_pairs)
         if errors and all(err == 2 for err in errors.values()):
             if self.auto_mkdir:
-                # Missing destination parents: create them once, then retry.
-                parents = {posixpath.dirname(b) for _, b in native_pairs}
+                # Successful pairs may have overwritten another source in
+                # this batch. Never replay them while recovering missing parents.
+                failed = sorted(errors)
+                retry_pairs = [native_pairs[index] for index in failed]
+                parents = {posixpath.dirname(b) for _, b in retry_pairs}
                 internal_parents = [
                     self._internalize(parent)
                     for parent in sorted(parents)
                     if parent not in ("", "/")
                 ]
                 self._ensure_dirs(internal_parents, 0o755)
-                copied, errors = self._client.copy_many(native_pairs)
+                retried, retry_errors = self._client.copy_many(retry_pairs)
+                for position, index in enumerate(failed):
+                    copied[index] = retried[position]
+                errors = {
+                    failed[position]: code for position, code in retry_errors.items()
+                }
         if callback is not None:
             for i, (src, dst) in enumerate(pairs):
                 if i in errors or copied[i] is None:
@@ -4244,11 +4290,26 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def touch(self, path, truncate=True, **kwargs):
         internal = self._checked_strip_protocol(path)
-        if not truncate and self.exists(internal):
-            self._invalidate_namespace([internal])
-            self._client.touch(self._native_path(internal))
+        if truncate:
+            self._write_batch([internal], [b""])
             return
-        self._write_batch([internal], [b""])
+        self._invalidate_namespace([internal])
+        native = self._native_path(internal)
+        try:
+            self._client.touch(native)
+        except FileNotFoundError:
+            if self._intrans:
+                # Existing staged content already creates/touches this name.
+                # Otherwise publish exclusively to preserve concurrent creators.
+                if not any(file.path == internal for file in self.transaction.files):
+                    self._write_batch([internal], [b""], mode="create")
+            else:
+                if self.auto_mkdir:
+                    self._ensure_dirs([posixpath.dirname(internal)], 0o755)
+                # The name may now exist. Empty nontruncating writes also
+                # preserve the target of a symlink installed by another writer.
+                self._client.write_many([native], [b""], truncate=False)
+                self._client.touch(native)
 
     def symlink(self, target, path, **kwargs):
         self._invalidate_namespace([path])

@@ -152,10 +152,9 @@ def test_exclusive_transfer_retains_failed_close_for_cleanup(
     assert len(failed_fds) == 1
     # Every still-open token must have an owner that will retry cleanup.
     assert set(fs._client._fds) <= fs._client._deferred_close
-    assert fs.exists("/exclusive") == (not write_fails)
+    assert fs.exists("/exclusive")
     assert not fs._client._fds
-    if not write_fails:
-        assert fs.cat_file("/exclusive") == b"payload"
+    assert fs.cat_file("/exclusive") == (b"" if write_fails else b"payload")
 
 
 @pytest.mark.parametrize("failure", ["branch", "enter", "set_size", "source_open"])
