@@ -3722,8 +3722,10 @@ class VfsiFileSystem(AbstractFileSystem):
                 with callback.branched(remote_path, local_path) as child:
                     child.set_size(size)
                     local.makedirs(local._parent(local_path), exist_ok=True)
-                    with open(local_path, "wb") as out:
-                        with self.open(remote_path, "rb", cache_type="none") as remote:
+                    # Validate and own the source before truncating a local
+                    # destination; failed remote OPEN must preserve old data.
+                    with self.open(remote_path, "rb", cache_type="none") as remote:
+                        with open(local_path, "wb") as out:
                             while True:
                                 chunk = remote.read(self._stream_read_size())
                                 if not chunk:
