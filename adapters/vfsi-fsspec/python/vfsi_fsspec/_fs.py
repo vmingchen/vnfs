@@ -224,13 +224,14 @@ def _stale_handle_error(path):
 
 
 def _close_reader_on_exit(reader, exc_type, primary_error, traceback):
-    """ExitStack cleanup: preserve primary failures and own failed CLOSE tokens."""
+    """Preserve file failures and retain native cleanup ownership on exit."""
     raw = getattr(reader, "_raw", reader)
-    fd = raw._fd
+    fd = getattr(raw, "_fd", None)
     try:
         reader.close()
     except BaseException as cleanup_error:
-        raw.fs._client.defer_close_many([fd])
+        if fd is not None:
+            raw.fs._client.defer_close_many([fd])
         if primary_error is not None:
             raise primary_error from cleanup_error
         raise
@@ -2146,7 +2147,9 @@ class _DeferredWriteFile:
         )
         self._stage_owned = True
         try:
-            with VfsiFile(self.fs, self.temp_path, "xb", fd=fd) as remote:
+            with ExitStack() as stack:
+                remote = VfsiFile(self.fs, self.temp_path, "xb", fd=fd)
+                stack.push(partial(_close_reader_on_exit, remote))
                 while True:
                     chunk = self._spool.read(self.fs.transfer_chunk_size)
                     if not chunk:
@@ -3531,7 +3534,9 @@ class VfsiFileSystem(AbstractFileSystem):
     def _write_one_streamed(self, path, value, callback=None, mode="wb"):
         """Write one in-memory value through the existing scalar/deferred path."""
         view = memoryview(value)
-        with self.open(path, mode) as remote:
+        with ExitStack() as stack:
+            remote = self.open(path, mode)
+            stack.push(partial(_close_reader_on_exit, remote))
             for offset in range(0, len(view), self.transfer_chunk_size):
                 _write_fully(
                     remote,
@@ -3584,7 +3589,9 @@ class VfsiFileSystem(AbstractFileSystem):
     ):
         """Stream one remote file into a writable local file object."""
         streamed = 0
-        with self.open(path, "rb", cache_type="none") as remote:
+        with ExitStack() as stack:
+            remote = self.open(path, "rb", cache_type="none")
+            stack.push(partial(_close_reader_on_exit, remote))
             if max_bytes == 0:
                 if remote.size:
                     limit = (
@@ -3861,12 +3868,10 @@ class VfsiFileSystem(AbstractFileSystem):
             with callback.branched(local_path, remote_path) as child:
                 child.set_size(size)
                 # Finish fallible local setup before creating/truncating remote.
-                with (
-                    open(local_path, "rb") as source,
-                    self.open(
-                        remote_path, "xb" if mode == "create" else "wb"
-                    ) as remote,
-                ):
+                with ExitStack() as stack:
+                    source = stack.enter_context(open(local_path, "rb"))
+                    remote = self.open(remote_path, "xb" if mode == "create" else "wb")
+                    stack.push(partial(_close_reader_on_exit, remote))
                     while True:
                         chunk = source.read(
                             min(self.transfer_chunk_size, self.max_batch_bytes)
