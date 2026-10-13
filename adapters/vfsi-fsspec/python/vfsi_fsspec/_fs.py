@@ -919,7 +919,8 @@ class _RawVfsiFile(io.RawIOBase):
             if self._fd is None and self._pos == 0:
                 # Whole-file read: one batched read, no size stat, no OPEN.
                 data, errors = self.fs._client.read_all_many(
-                    [self.fs._native_path(self.path)]
+                    [self.fs._native_path(self.path)],
+                    self.fs.read_all_max_total_bytes,
                 )
                 if errors:
                     raise _oserror(errors[0], self.path)
@@ -1269,7 +1270,8 @@ class VfsiFile(AbstractBufferedFile):
                 data = self._raw.read(self.size)
             else:
                 data, errors = self.fs._client.read_all_many(
-                    [self.fs._native_path(self.path)]
+                    [self.fs._native_path(self.path)],
+                    self.fs.read_all_max_total_bytes,
                 )
                 if errors:
                     raise _oserror(errors[0], self.path)
@@ -3191,8 +3193,7 @@ class VfsiFileSystem(AbstractFileSystem):
         change = info.get("change")
         if change is not None:
             return (
-                f"fs_id:{info.get('fs_id')}:change:{change}:"
-                f"fileid:{info.get('fileid')}"
+                f"fs_id:{info.get('fs_id')}:change:{change}:fileid:{info.get('fileid')}"
             )
         return (
             f"fs_id:{info.get('fs_id')}:fileid:{info.get('fileid')}:"
@@ -3422,7 +3423,9 @@ class VfsiFileSystem(AbstractFileSystem):
             raise
         if start == 0 and end is None:
             # Whole file: read_allv skips the size stat entirely.
-            data, errors = self._client.read_all_many([self._native_path(internal)])
+            data, errors = self._client.read_all_many(
+                [self._native_path(internal)], self.read_all_max_total_bytes
+            )
             if errors:
                 raise _oserror(errors[0], internal)
             result = data[0] or b""
@@ -3885,7 +3888,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 self._native_path(self._checked_strip_protocol(remote_path))
                 for remote_path, _, _ in selected
             ]
-            data, errors = self._client.read_all_many(native)
+            data, errors = self._client.read_all_many(native, read_batch_bytes)
             for i, ((remote_path, local_path, _), buf) in enumerate(
                 zip(selected, data)
             ):

@@ -101,7 +101,7 @@ class NfsClient:
         ends: Optional[List[Optional[int]]] = None,
     ) -> Tuple[List[Optional[bytes]], Dict[int, int]]: ...
     def read_all_many(
-        self, paths: List[str]
+        self, paths: List[str], max_total_bytes: Optional[int] = None
     ) -> Tuple[List[Optional[bytes]], Dict[int, int]]: ...
     def write_many(
         self, paths: List[str], datas: List[bytes], truncate: bool = True
