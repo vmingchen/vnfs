@@ -1928,7 +1928,7 @@ class _BufferGroup:
     def _exit_wrapped(self, *exc):
         self.finish()
 
-    def finish(self, files=None):
+    def finish(self):
         """Finalize encoders once, drain bounded write waves, then close all."""
         with self._lock:
             if not self._finalized:
@@ -1937,7 +1937,7 @@ class _BufferGroup:
                         self._finalize_wrappers()
                     buffered = [
                         file
-                        for file in (self.files if files is None else files)
+                        for file in self.files
                         if file._buffered_write and not file.closed
                     ]
                     for file in buffered:
@@ -4166,13 +4166,18 @@ class VfsiFileSystem(AbstractFileSystem):
         """Flush and close a list of files in one closev batch."""
         if isinstance(open_files, _WrappedFiles):
             return open_files.group.finish()
-        group = getattr(open_files[0], "_buffer_group", None) if open_files else None
-        if group is not None:
-            return group.finish(open_files)
         error = None
+        finalized_groups = set()
         for file in open_files:
+            group = getattr(file, "_buffer_group", None)
             try:
-                file.close()
+                if group is None:
+                    file.close()
+                elif id(group) not in finalized_groups:
+                    finalized_groups.add(id(group))
+                    # Group finalization closes every owned handle, so flush
+                    # every sibling and keep other groups on their own owner.
+                    group.finish()
             except BaseException as exc:
                 error = error or exc
         if error is not None:
