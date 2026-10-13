@@ -3340,16 +3340,35 @@ class VfsiFileSystem(AbstractFileSystem):
                 start=kwargs.get("start"),
                 end=kwargs.get("end"),
             )
-        paths = []
-        for entry in path:
-            internal = self._checked_strip_protocol(entry)
-            if has_magic(internal) and not kwargs.get("assume_literal", False):
-                expanded = self.expand_path(internal, recursive=recursive, **kwargs)
-                paths.extend(p for p in expanded if not recursive or not self.isdir(p))
-            elif recursive:
-                paths.extend(self.find(internal, withdirs=False, **kwargs))
-            else:
-                paths.append(internal)
+        internals = [self._checked_strip_protocol(entry) for entry in path]
+        # Expand the whole selection together: an unmatched glob is not a
+        # missing literal, and overlapping selections must consume the read
+        # budget and report progress only once per canonical path.
+        literal = kwargs.get("assume_literal", False) or not any(
+            has_magic(entry) for entry in internals
+        )
+        if recursive and literal:
+            # find already selects files from directory-entry metadata; do not
+            # add a scalar stat per descendant just to exclude directories.
+            paths = sorted(
+                {
+                    p
+                    for entry in internals
+                    for p in self.find(entry, withdirs=False, **kwargs)
+                }
+            )
+        elif literal:
+            # Preserve caller order and the no-expansion fast path for literal
+            # vectors while deduplicating canonical aliases.
+            paths = list(dict.fromkeys(internals))
+        else:
+            paths = (
+                self.expand_path(internals, recursive=recursive, **kwargs)
+                if internals
+                else []
+            )
+            if recursive:
+                paths = [p for p in paths if not self.isdir(p)]
         return self._cat_batch(
             paths,
             on_error,
