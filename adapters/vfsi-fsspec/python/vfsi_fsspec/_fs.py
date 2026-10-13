@@ -44,6 +44,14 @@ def _normalize_mode(mode):
     return base
 
 
+def _writable_byte_view(buffer):
+    """Validate a readinto destination before any data is consumed."""
+    view = memoryview(buffer)
+    if view.readonly:
+        raise TypeError("readinto() requires a writable buffer")
+    return view.cast("B")
+
+
 def _oserror(errno_code, path):
     """Rebuild a Python exception from a native errno (for batched results)."""
     if errno_code == _ERR_UNSUPPORTED:
@@ -224,13 +232,14 @@ def _stale_handle_error(path):
 
 
 def _close_reader_on_exit(reader, exc_type, primary_error, traceback):
-    """ExitStack cleanup: preserve primary failures and own failed CLOSE tokens."""
+    """Preserve file failures and retain native cleanup ownership on exit."""
     raw = getattr(reader, "_raw", reader)
-    fd = raw._fd
+    fd = getattr(raw, "_fd", None)
     try:
         reader.close()
     except BaseException as cleanup_error:
-        raw.fs._client.defer_close_many([fd])
+        if fd is not None:
+            raw.fs._client.defer_close_many([fd])
         if primary_error is not None:
             raise primary_error from cleanup_error
         raise
@@ -889,10 +898,7 @@ class _RawVfsiFile(io.RawIOBase):
             raise ValueError("I/O operation on closed file")
         if not self._readable:
             raise io.UnsupportedOperation("not readable")
-        view = memoryview(b)
-        if view.readonly:
-            raise TypeError("readinto() requires a writable buffer")
-        view = view.cast("B")
+        view = _writable_byte_view(b)
         if len(view) == 0:
             return 0
         length = min(len(view), self._MAX_READ)
@@ -965,8 +971,11 @@ class _RawVfsiFile(io.RawIOBase):
                 # Preserve the ambiguous mutation error; reconnect is cleanup.
                 pass
             finally:
-                self._fd = None
-                self._fd_generation = None
+                # A disabled or failed reconnect can leave the original token
+                # live. Retain it for CLOSE; _broken prevents mutation replay.
+                if not self.fs._client.descriptor_valid(fd):
+                    self._fd = None
+                    self._fd_generation = None
             raise
         self._pos = new_pos
         return n
@@ -1323,7 +1332,9 @@ class VfsiFile(AbstractBufferedFile):
     def readinto(self, b):
         if not self._has_read_cache():
             return self._raw.readinto(b)
-        return super().readinto(b)
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        return super().readinto(_writable_byte_view(b))
 
     def write(self, data):
         if self.closed:
@@ -1476,7 +1487,17 @@ class VfsiFile(AbstractBufferedFile):
             self._closed = True
             return
         if self._buffered_write:
-            self.flush(force=True)
+            try:
+                self.flush(force=True)
+            except BaseException as error:
+                # A final upload may commit a prefix before failing. Close the
+                # native handle without replaying data, and preserve the write
+                # error if cleanup also fails.
+                _close_reader_on_exit(
+                    self._raw, type(error), error, error.__traceback__
+                )
+                self._closed = True
+                raise
         elif self._has_read_cache():
             cache = getattr(self, "cache", None)
             close = getattr(cache, "close", None)
@@ -1920,7 +1941,7 @@ class _BufferGroup:
     def _exit_wrapped(self, *exc):
         self.finish()
 
-    def finish(self, files=None):
+    def finish(self):
         """Finalize encoders once, drain bounded write waves, then close all."""
         with self._lock:
             if not self._finalized:
@@ -1929,7 +1950,7 @@ class _BufferGroup:
                         self._finalize_wrappers()
                     buffered = [
                         file
-                        for file in (self.files if files is None else files)
+                        for file in self.files
                         if file._buffered_write and not file.closed
                     ]
                     for file in buffered:
@@ -2146,7 +2167,9 @@ class _DeferredWriteFile:
         )
         self._stage_owned = True
         try:
-            with VfsiFile(self.fs, self.temp_path, "xb", fd=fd) as remote:
+            with ExitStack() as stack:
+                remote = VfsiFile(self.fs, self.temp_path, "xb", fd=fd)
+                stack.push(partial(_close_reader_on_exit, remote))
                 while True:
                     chunk = self._spool.read(self.fs.transfer_chunk_size)
                     if not chunk:
@@ -2574,7 +2597,10 @@ class VfsiFileSystem(AbstractFileSystem):
         # get(), copy(), and cat() may pass through this base method before
         # their own backend operations see the path.
         self._checked_strip_protocol(path)
-        return super().expand_path(path, *args, **kwargs)
+        # The fsspec scalar branch does not forward assume_literal to its
+        # recursive list call. Enter the list branch directly to retain it.
+        paths = [path] if isinstance(path, (str, os.PathLike)) else path
+        return super().expand_path(paths, *args, **kwargs)
 
     def smb_dialect(self):
         """Return the negotiated SMB dialect revision, or ``None``."""
@@ -2633,8 +2659,9 @@ class VfsiFileSystem(AbstractFileSystem):
                 path = path[len(protocol) + 3 :]
             elif path.startswith(protocol + "::"):
                 path = path[len(protocol) + 2 :]
-        if not path.startswith("/"):
-            path = "/" + path
+        # The server/share is configured separately; export paths have one
+        # root separator. normpath alone preserves exactly two leading slashes.
+        path = "/" + path.lstrip("/")
         path = posixpath.normpath(path).rstrip("/")
         return path or cls.root_marker
 
@@ -3135,9 +3162,13 @@ class VfsiFileSystem(AbstractFileSystem):
         """Best available identity for one version of a filesystem object."""
         change = info.get("change")
         if change is not None:
-            return f"change:{change}:fileid:{info.get('fileid')}"
+            return (
+                f"fs_id:{info.get('fs_id')}:change:{change}:"
+                f"fileid:{info.get('fileid')}"
+            )
         return (
-            f"fileid:{info.get('fileid')}:mtime_ns:{info.get('modified_ns')}:"
+            f"fs_id:{info.get('fs_id')}:fileid:{info.get('fileid')}:"
+            f"mtime_ns:{info.get('modified_ns')}:"
             f"ctime_ns:{info.get('created_ns')}:size:{info.get('size')}"
         )
 
@@ -3150,8 +3181,24 @@ class VfsiFileSystem(AbstractFileSystem):
 
     # -- bulk read / write -------------------------------------------------
 
-    def _cat_batch(self, paths, on_error, callback=DEFAULT_CALLBACK):
+    def _cat_batch(
+        self, paths, on_error, callback=DEFAULT_CALLBACK, start=None, end=None
+    ):
         """Read path groups bounded by both item count and aggregate bytes."""
+        if start is not None or end is not None:
+            values = self.cat_ranges(
+                paths, start, end, on_error="return", callback=callback
+            )
+            out = {}
+            for path, value in zip(paths, values):
+                if isinstance(value, Exception):
+                    if on_error == "raise":
+                        raise value
+                    if on_error == "return":
+                        out[path] = value
+                else:
+                    out[path] = value
+            return out
         callback.set_size(len(paths))
         native = [self._native_path(path) for path in paths]
         stats, stat_errors = self._client.stat_many(native)
@@ -3286,14 +3333,49 @@ class VfsiFileSystem(AbstractFileSystem):
             if len(paths) == 1 and paths[0] == self._checked_strip_protocol(path):
                 # Single literal path: cat_file semantics (raise on error).
                 return self.cat_file(paths[0], callback=callback, **kwargs)
-            return self._cat_batch(paths, on_error, callback=callback)
-        paths = [self._checked_strip_protocol(p) for p in path]
-        if recursive:
-            expanded = []
-            for p in paths:
-                expanded.extend(self.find(p, withdirs=False))
-            paths = expanded
-        return self._cat_batch(paths, on_error, callback=callback)
+            return self._cat_batch(
+                paths,
+                on_error,
+                callback=callback,
+                start=kwargs.get("start"),
+                end=kwargs.get("end"),
+            )
+        internals = [self._checked_strip_protocol(entry) for entry in path]
+        # Expand the whole selection together: an unmatched glob is not a
+        # missing literal, and overlapping selections must consume the read
+        # budget and report progress only once per canonical path.
+        literal = kwargs.get("assume_literal", False) or not any(
+            has_magic(entry) for entry in internals
+        )
+        if recursive and literal:
+            # find already selects files from directory-entry metadata; do not
+            # add a scalar stat per descendant just to exclude directories.
+            paths = sorted(
+                {
+                    p
+                    for entry in internals
+                    for p in self.find(entry, withdirs=False, **kwargs)
+                }
+            )
+        elif literal:
+            # Preserve caller order and the no-expansion fast path for literal
+            # vectors while deduplicating canonical aliases.
+            paths = list(dict.fromkeys(internals))
+        else:
+            paths = (
+                self.expand_path(internals, recursive=recursive, **kwargs)
+                if internals
+                else []
+            )
+            if recursive:
+                paths = [p for p in paths if not self.isdir(p)]
+        return self._cat_batch(
+            paths,
+            on_error,
+            callback=callback,
+            start=kwargs.get("start"),
+            end=kwargs.get("end"),
+        )
 
     def cat_file(self, path, start=None, end=None, callback=DEFAULT_CALLBACK, **kwargs):
         callback = Callback.as_callback(callback)
@@ -3531,7 +3613,9 @@ class VfsiFileSystem(AbstractFileSystem):
     def _write_one_streamed(self, path, value, callback=None, mode="wb"):
         """Write one in-memory value through the existing scalar/deferred path."""
         view = memoryview(value)
-        with self.open(path, mode) as remote:
+        with ExitStack() as stack:
+            remote = self.open(path, mode)
+            stack.push(partial(_close_reader_on_exit, remote))
             for offset in range(0, len(view), self.transfer_chunk_size):
                 _write_fully(
                     remote,
@@ -3584,7 +3668,9 @@ class VfsiFileSystem(AbstractFileSystem):
     ):
         """Stream one remote file into a writable local file object."""
         streamed = 0
-        with self.open(path, "rb", cache_type="none") as remote:
+        with ExitStack() as stack:
+            remote = self.open(path, "rb", cache_type="none")
+            stack.push(partial(_close_reader_on_exit, remote))
             if max_bytes == 0:
                 if remote.size:
                     limit = (
@@ -3861,12 +3947,10 @@ class VfsiFileSystem(AbstractFileSystem):
             with callback.branched(local_path, remote_path) as child:
                 child.set_size(size)
                 # Finish fallible local setup before creating/truncating remote.
-                with (
-                    open(local_path, "rb") as source,
-                    self.open(
-                        remote_path, "xb" if mode == "create" else "wb"
-                    ) as remote,
-                ):
+                with ExitStack() as stack:
+                    source = stack.enter_context(open(local_path, "rb"))
+                    remote = self.open(remote_path, "xb" if mode == "create" else "wb")
+                    stack.push(partial(_close_reader_on_exit, remote))
                     while True:
                         chunk = source.read(
                             min(self.transfer_chunk_size, self.max_batch_bytes)
@@ -4119,13 +4203,18 @@ class VfsiFileSystem(AbstractFileSystem):
         """Flush and close a list of files in one closev batch."""
         if isinstance(open_files, _WrappedFiles):
             return open_files.group.finish()
-        group = getattr(open_files[0], "_buffer_group", None) if open_files else None
-        if group is not None:
-            return group.finish(open_files)
         error = None
+        finalized_groups = set()
         for file in open_files:
+            group = getattr(file, "_buffer_group", None)
             try:
-                file.close()
+                if group is None:
+                    file.close()
+                elif id(group) not in finalized_groups:
+                    finalized_groups.add(id(group))
+                    # Group finalization closes every owned handle, so flush
+                    # every sibling and keep other groups on their own owner.
+                    group.finish()
             except BaseException as exc:
                 error = error or exc
         if error is not None:
@@ -4269,9 +4358,9 @@ class VfsiFileSystem(AbstractFileSystem):
         else:
             src = self._checked_strip_protocol(path1)
             dst = self._checked_strip_protocol(path2)
-            if src == dst:
-                return
-            if self.isdir(dst):
+            # Same-path moves still reach rename so a missing source cannot
+            # report success. Do not reinterpret that directory as its child.
+            if src != dst and self.isdir(dst):
                 # Like shutil.move / base copy+rm: moving onto an existing
                 # directory moves the source inside it.
                 dst = posixpath.join(dst, posixpath.basename(src))
