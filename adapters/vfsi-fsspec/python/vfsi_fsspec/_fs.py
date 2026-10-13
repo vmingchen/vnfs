@@ -971,8 +971,11 @@ class _RawVfsiFile(io.RawIOBase):
                 # Preserve the ambiguous mutation error; reconnect is cleanup.
                 pass
             finally:
-                self._fd = None
-                self._fd_generation = None
+                # A disabled or failed reconnect can leave the original token
+                # live. Retain it for CLOSE; _broken prevents mutation replay.
+                if not self.fs._client.descriptor_valid(fd):
+                    self._fd = None
+                    self._fd_generation = None
             raise
         self._pos = new_pos
         return n
@@ -1484,7 +1487,17 @@ class VfsiFile(AbstractBufferedFile):
             self._closed = True
             return
         if self._buffered_write:
-            self.flush(force=True)
+            try:
+                self.flush(force=True)
+            except BaseException as error:
+                # A final upload may commit a prefix before failing. Close the
+                # native handle without replaying data, and preserve the write
+                # error if cleanup also fails.
+                _close_reader_on_exit(
+                    self._raw, type(error), error, error.__traceback__
+                )
+                self._closed = True
+                raise
         elif self._has_read_cache():
             cache = getattr(self, "cache", None)
             close = getattr(cache, "close", None)
