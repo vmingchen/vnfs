@@ -4085,6 +4085,8 @@ class VfsiFileSystem(AbstractFileSystem):
         """Open a list of ``OpenFile`` objects in one openv batch."""
         paths = [self._checked_strip_protocol(f.path) for f in open_files]
         modes = [f.mode.replace("t", "").replace("b", "") + "b" for f in open_files]
+        for mode in modes:
+            _normalize_mode(mode)
         effective_block_size = self.block_size if block_size is None else block_size
         effective_cache_type = self.cache_type if cache_type is None else cache_type
         effective_cache_options = (
