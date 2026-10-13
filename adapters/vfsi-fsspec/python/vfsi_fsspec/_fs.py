@@ -3148,9 +3148,13 @@ class VfsiFileSystem(AbstractFileSystem):
         """Best available identity for one version of a filesystem object."""
         change = info.get("change")
         if change is not None:
-            return f"change:{change}:fileid:{info.get('fileid')}"
+            return (
+                f"fs_id:{info.get('fs_id')}:change:{change}:"
+                f"fileid:{info.get('fileid')}"
+            )
         return (
-            f"fileid:{info.get('fileid')}:mtime_ns:{info.get('modified_ns')}:"
+            f"fs_id:{info.get('fs_id')}:fileid:{info.get('fileid')}:"
+            f"mtime_ns:{info.get('modified_ns')}:"
             f"ctime_ns:{info.get('created_ns')}:size:{info.get('size')}"
         )
 
