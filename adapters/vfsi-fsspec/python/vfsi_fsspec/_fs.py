@@ -18,6 +18,7 @@ from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from glob import has_magic
+from functools import partial
 from itertools import groupby
 from urllib.parse import unquote, urlsplit
 
@@ -220,6 +221,19 @@ def _handle_identity(attrs):
 
 def _stale_handle_error(path):
     return OSError(errno.ESTALE, "cannot safely restore the original file handle", path)
+
+
+def _close_reader_on_exit(reader, exc_type, primary_error, traceback):
+    """ExitStack cleanup: preserve primary failures and own failed CLOSE tokens."""
+    raw = getattr(reader, "_raw", reader)
+    fd = raw._fd
+    try:
+        reader.close()
+    except BaseException as cleanup_error:
+        raw.fs._client.defer_close_many([fd])
+        if primary_error is not None:
+            raise primary_error from cleanup_error
+        raise
 
 
 def _write_fully(file, data, callback=None):
@@ -2047,6 +2061,7 @@ class _DeferredWriteFile:
         self._closed = False
         self._committed = False
         self._prepared = False
+        self._stage_owned = False
         self._published = False
         parent = posixpath.dirname(path) or "/"
         # Keep the staging component independent of the destination length;
@@ -2129,6 +2144,7 @@ class _DeferredWriteFile:
         fd = self.fs._client.open(
             self.fs._native_path(self.temp_path), "xb", permissions=0o600
         )
+        self._stage_owned = True
         try:
             with VfsiFile(self.fs, self.temp_path, "xb", fd=fd) as remote:
                 while True:
@@ -2141,8 +2157,13 @@ class _DeferredWriteFile:
         except BaseException:
             try:
                 self.fs.rm(self.temp_path)
+            except FileNotFoundError:
+                self._stage_owned = False
             except OSError:
+                # Retain ownership so transaction/manual discard can retry.
                 pass
+            else:
+                self._stage_owned = False
             raise
         self._prepared = True
 
@@ -2178,6 +2199,7 @@ class _DeferredWriteFile:
                 )
                 for file in batch:
                     file._prepared = False
+                    file._stage_owned = False
                     file.discard()
 
     def commit(self):
@@ -2188,11 +2210,12 @@ class _DeferredWriteFile:
 
     def discard(self):
         try:
-            if self._prepared:
+            if self._stage_owned:
                 try:
                     self.fs.rm(self.temp_path)
                 except FileNotFoundError:
                     pass
+                self._stage_owned = False
                 self._prepared = False
         finally:
             self._spool.close()
@@ -2652,7 +2675,9 @@ class VfsiFileSystem(AbstractFileSystem):
     def _fullpath(self, internal):
         """Internal ('/a/b') -> a full path for this registered protocol."""
         protocol = self.protocol if isinstance(self.protocol, str) else self.protocol[0]
-        return protocol + "://" + internal
+        # Protocol stripping decodes URL escapes. Quote literal percent
+        # signs so metadata names still identify the original backend path.
+        return protocol + "://" + internal.replace("%", "%25")
 
     # -- directory listing cache -----------------------------------------
 
@@ -3722,8 +3747,12 @@ class VfsiFileSystem(AbstractFileSystem):
                 with callback.branched(remote_path, local_path) as child:
                     child.set_size(size)
                     local.makedirs(local._parent(local_path), exist_ok=True)
-                    with open(local_path, "wb") as out:
-                        with self.open(remote_path, "rb", cache_type="none") as remote:
+                    # Validate and own the source before truncating a local
+                    # destination; failed remote OPEN must preserve old data.
+                    with ExitStack() as stack:
+                        remote = self.open(remote_path, "rb", cache_type="none")
+                        stack.push(partial(_close_reader_on_exit, remote))
+                        with open(local_path, "wb") as out:
                             while True:
                                 chunk = remote.read(self._stream_read_size())
                                 if not chunk:

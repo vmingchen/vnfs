@@ -6,10 +6,16 @@ import os
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from functools import partial
 
 from vfsi_fsspec import VfsiFile
 from vfsi_fsspec import VfsiFileSystem as _VfsiFileSystem
-from vfsi_fsspec._fs import _handle_identity, _RawVfsiFile, _stale_handle_error
+from vfsi_fsspec._fs import (
+    _close_reader_on_exit,
+    _handle_identity,
+    _RawVfsiFile,
+    _stale_handle_error,
+)
 
 from . import _native
 
@@ -89,8 +95,9 @@ class Nfs4FileSystem(_VfsiFileSystem):
         exceptions propagate after all outstanding reads are drained. At most
         ``min(max_in_flight, workers) * chunk_size`` bytes are requested at a
         time, with only one request in flight per worker-owned descriptor.
-        This is not a snapshot: concurrent changes can produce mixed data.
-        Use for stable files, or check application-level version metadata.
+        Worker handles must pin the same filesystem object. In-place
+        concurrent changes can still produce mixed data; this is not a content
+        snapshot. Use stable files or check application-level version metadata.
         By default, use up to three sessions from ``connection_pool_size``.
         """
         if self.closed:
@@ -142,7 +149,8 @@ class Nfs4FileSystem(_VfsiFileSystem):
                 for fd in fds:
                     reader = _RawVfsiFile(self, internal, "rb", fd=fd)
                     readers.append(reader)
-                    stack.callback(reader.close)
+
+                    stack.push(partial(_close_reader_on_exit, reader))
             except BaseException:
                 # Close handles not yet transferred to a reader; callbacks
                 # already registered on the ExitStack own the earlier ones.
@@ -176,9 +184,17 @@ class Nfs4FileSystem(_VfsiFileSystem):
                 reader._identity = _handle_identity(attrs)
                 reader._identity_required = True
                 attrs_by_reader.append(attrs)
+            identity = readers[0]._identity
             size = attrs_by_reader[0]["size"]
 
             def read_exact(reader, offset, length):
+                # Restore this worker's own pinned handle first. Then ensure
+                # independent OPENs did not switch objects between workers.
+                reader._ensure_open()
+                if len(readers) > 1 and (
+                    identity is None or reader._identity != identity
+                ):
+                    raise _stale_handle_error(internal)
                 data = bytearray(length)
                 filled = 0
                 while filled < length:
