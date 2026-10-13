@@ -2577,7 +2577,10 @@ class VfsiFileSystem(AbstractFileSystem):
         # get(), copy(), and cat() may pass through this base method before
         # their own backend operations see the path.
         self._checked_strip_protocol(path)
-        return super().expand_path(path, *args, **kwargs)
+        # The fsspec scalar branch does not forward assume_literal to its
+        # recursive list call. Enter the list branch directly to retain it.
+        paths = [path] if isinstance(path, (str, os.PathLike)) else path
+        return super().expand_path(paths, *args, **kwargs)
 
     def smb_dialect(self):
         """Return the negotiated SMB dialect revision, or ``None``."""
@@ -3153,8 +3156,24 @@ class VfsiFileSystem(AbstractFileSystem):
 
     # -- bulk read / write -------------------------------------------------
 
-    def _cat_batch(self, paths, on_error, callback=DEFAULT_CALLBACK):
+    def _cat_batch(
+        self, paths, on_error, callback=DEFAULT_CALLBACK, start=None, end=None
+    ):
         """Read path groups bounded by both item count and aggregate bytes."""
+        if start is not None or end is not None:
+            values = self.cat_ranges(
+                paths, start, end, on_error="return", callback=callback
+            )
+            out = {}
+            for path, value in zip(paths, values):
+                if isinstance(value, Exception):
+                    if on_error == "raise":
+                        raise value
+                    if on_error == "return":
+                        out[path] = value
+                else:
+                    out[path] = value
+            return out
         callback.set_size(len(paths))
         native = [self._native_path(path) for path in paths]
         stats, stat_errors = self._client.stat_many(native)
@@ -3289,14 +3308,30 @@ class VfsiFileSystem(AbstractFileSystem):
             if len(paths) == 1 and paths[0] == self._checked_strip_protocol(path):
                 # Single literal path: cat_file semantics (raise on error).
                 return self.cat_file(paths[0], callback=callback, **kwargs)
-            return self._cat_batch(paths, on_error, callback=callback)
-        paths = [self._checked_strip_protocol(p) for p in path]
-        if recursive:
-            expanded = []
-            for p in paths:
-                expanded.extend(self.find(p, withdirs=False))
-            paths = expanded
-        return self._cat_batch(paths, on_error, callback=callback)
+            return self._cat_batch(
+                paths,
+                on_error,
+                callback=callback,
+                start=kwargs.get("start"),
+                end=kwargs.get("end"),
+            )
+        paths = []
+        for entry in path:
+            internal = self._checked_strip_protocol(entry)
+            if has_magic(internal) and not kwargs.get("assume_literal", False):
+                expanded = self.expand_path(internal, recursive=recursive, **kwargs)
+                paths.extend(p for p in expanded if not recursive or not self.isdir(p))
+            elif recursive:
+                paths.extend(self.find(internal, withdirs=False, **kwargs))
+            else:
+                paths.append(internal)
+        return self._cat_batch(
+            paths,
+            on_error,
+            callback=callback,
+            start=kwargs.get("start"),
+            end=kwargs.get("end"),
+        )
 
     def cat_file(self, path, start=None, end=None, callback=DEFAULT_CALLBACK, **kwargs):
         callback = Callback.as_callback(callback)
