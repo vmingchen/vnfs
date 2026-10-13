@@ -143,7 +143,19 @@ class Nfs4FileSystem(_VfsiFileSystem):
                 for fd in fds:
                     reader = _RawVfsiFile(self, internal, "rb", fd=fd)
                     readers.append(reader)
-                    stack.callback(reader.close)
+
+                    def close_reader(exc_type, primary_error, traceback, reader=reader):
+                        try:
+                            reader.close()
+                        except BaseException as cleanup_error:
+                            # The stream will release its reader references.
+                            # Keep failed CLOSE tokens owned by the pool.
+                            self._client.defer_close_many([reader._fd])
+                            if primary_error is not None:
+                                raise primary_error from cleanup_error
+                            raise
+
+                    stack.push(close_reader)
             except BaseException:
                 # Close handles not yet transferred to a reader; callbacks
                 # already registered on the ExitStack own the earlier ones.
