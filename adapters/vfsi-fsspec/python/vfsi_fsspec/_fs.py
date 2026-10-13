@@ -2646,8 +2646,9 @@ class VfsiFileSystem(AbstractFileSystem):
                 path = path[len(protocol) + 3 :]
             elif path.startswith(protocol + "::"):
                 path = path[len(protocol) + 2 :]
-        if not path.startswith("/"):
-            path = "/" + path
+        # The server/share is configured separately; export paths have one
+        # root separator. normpath alone preserves exactly two leading slashes.
+        path = "/" + path.lstrip("/")
         path = posixpath.normpath(path).rstrip("/")
         return path or cls.root_marker
 
