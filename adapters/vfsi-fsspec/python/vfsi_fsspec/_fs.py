@@ -4325,9 +4325,9 @@ class VfsiFileSystem(AbstractFileSystem):
         else:
             src = self._checked_strip_protocol(path1)
             dst = self._checked_strip_protocol(path2)
-            if src == dst:
-                return
-            if self.isdir(dst):
+            # Same-path moves still reach rename so a missing source cannot
+            # report success. Do not reinterpret that directory as its child.
+            if src != dst and self.isdir(dst):
                 # Like shutil.move / base copy+rm: moving onto an existing
                 # directory moves the source inside it.
                 dst = posixpath.join(dst, posixpath.basename(src))
