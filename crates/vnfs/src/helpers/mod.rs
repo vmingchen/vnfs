@@ -1,4 +1,4 @@
-//! High-level, protocol-independent workflows using [`crate::Vfsi`].
+//! High-level, protocol-independent workflows and rooted path mapping using [`crate::Vfsi`].
 //!
 //! Helpers plan work locally and preserve vector operations where possible.
 //! They do not provide transactions, rollback, or a security sandbox.
@@ -18,3 +18,6 @@ mod stats;
 pub use stats::{TreeStats, tree_stats};
 mod data;
 pub use data::copy_to_writer;
+
+mod path;
+pub use path::{PathMapper, ResolvePath};

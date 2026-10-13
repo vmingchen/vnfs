@@ -386,7 +386,7 @@ mod mount_tests {
             session
                 .map(
                     directory.join("file-1"),
-                    crate::nfs::mount::ResolvePath::NoFollow
+                    crate::helpers::ResolvePath::NoFollow
                 )
                 .unwrap(),
             Path::new("/file-1")

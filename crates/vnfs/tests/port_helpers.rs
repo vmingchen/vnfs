@@ -3,7 +3,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
 };
-use vnfs::nfs::mount::{PathMapper, ResolvePath};
+use vnfs::helpers::{PathMapper, ResolvePath};
 use vnfs::{directory::*, files::*, helpers::*, posix::*};
 
 #[test]

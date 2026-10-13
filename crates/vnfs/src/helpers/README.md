@@ -5,9 +5,9 @@ and `OpenFd` contracts. It is part of `vnfs`, not a separate dependency.
 
 ## Application bridges
 
-`nfs::mount::PathMapper` maps local paths to a root-relative namespace without owning
+`helpers::PathMapper` maps local paths to a root-relative namespace without owning
 a filesystem. Use `nfs::mount::NfsMountSession` to bind a validated NFS connection to a mapping.
-Use `nfs::mount::ResolvePath::Follow` for existing source operands and `NoFollow` for links,
+Use `helpers::ResolvePath::Follow` for existing source operands and `NoFollow` for links,
 removal operands and new destinations. Mapping preserves non-UTF-8 paths and
 rejects operands outside the mapping root. It is not race-free confinement or a
 kernel/direct-client cache-coherence mechanism. Keep mount configuration stable
@@ -35,7 +35,8 @@ the existing vectorized `copy_items` workflows.
 
 ```rust,no_run
 use vnfs::files::{StreamOptions};
-use vnfs::nfs::mount::{NfsMountSession, ResolvePath};
+use vnfs::helpers::ResolvePath;
+use vnfs::nfs::mount::NfsMountSession;
 use vnfs::helpers::copy_to_writer;
 
 let session = NfsMountSession::from_mount("/mnt/data")?;
@@ -52,7 +53,8 @@ instead of separately discovering the mount and constructing a path mapper:
 ```rust,no_run
 use vnfs::directory::{Attributes, AttrsOptions};
 use vnfs::files::{Vfsi, VfsiExt};
-use vnfs::nfs::mount::{NfsMountSession, ResolvePath};
+use vnfs::helpers::ResolvePath;
+use vnfs::nfs::mount::NfsMountSession;
 
 let session = NfsMountSession::from_mount("/mnt/nfs/project")?;
 let path = session.map("/mnt/nfs/project/README", ResolvePath::Follow)?;
