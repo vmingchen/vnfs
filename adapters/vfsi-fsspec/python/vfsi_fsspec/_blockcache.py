@@ -129,8 +129,8 @@ def _save_writable_metadata(cache_fs):
     cache_fs._cache_size = None
 
 
-def _backing_path(cache_fs, detail):
-    storage = os.path.realpath(cache_fs.storage[-1])
+def _backing_path(cache_fs, detail, storage=None):
+    storage = os.path.realpath(cache_fs.storage[-1] if storage is None else storage)
     candidate = os.path.join(storage, detail["fn"])
     if (
         os.path.islink(candidate)
@@ -140,17 +140,34 @@ def _backing_path(cache_fs, detail):
     return candidate
 
 
+def _record_backing_path(cache_fs, path, detail, filename):
+    """Validate the cache location selected by fsspec, including read-only ones."""
+    for storage, records in zip(cache_fs.storage, cache_fs._metadata.cached_files):
+        selected = records.get(path)
+        if (
+            selected is not None
+            and selected.get("fn") == detail["fn"]
+            and os.path.join(storage, detail["fn"]) == filename
+        ):
+            return _backing_path(cache_fs, detail, storage=storage)
+    raise ValueError("unsafe path in fsspec block-cache metadata")
+
+
 def _reset_stale_generation(cache_fs, path):
     raw = cache_fs._metadata.check_file(path, None)
     if not raw:
         return
-    raw_detail, _ = raw
+    raw_detail, filename = raw
+    _record_backing_path(cache_fs, path, raw_detail, filename)
+    valid = cache_fs._check_file(path)
+    if valid:
+        detail, filename = valid
+        _record_backing_path(cache_fs, path, detail, filename)
     writable_detail = cache_fs._metadata.cached_files[-1].get(path)
     if writable_detail is None or writable_detail.get("fn") != raw_detail.get("fn"):
         return
 
     backing_file = _backing_path(cache_fs, writable_detail)
-    valid = cache_fs._check_file(path)
     compatible = writable_detail.get(
         _CACHE_FORMAT_KEY
     ) == _CACHE_FORMAT and os.path.getsize(backing_file) == writable_detail.get("size")
@@ -450,6 +467,7 @@ def _raw_cache_records(cache_fs, paths):
         compatible = False
         expired = False
         if detail is not None:
+            filename = _record_backing_path(cache_fs, path, detail, filename)
             try:
                 compatible = detail.get(
                     _CACHE_FORMAT_KEY
