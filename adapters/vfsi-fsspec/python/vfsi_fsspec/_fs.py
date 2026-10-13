@@ -3671,7 +3671,12 @@ class VfsiFileSystem(AbstractFileSystem):
         with ExitStack() as stack:
             remote = self.open(path, "rb", cache_type="none")
             stack.push(partial(_close_reader_on_exit, remote))
-            if max_bytes == 0:
+            if max_bytes == 0 or (
+                max_bytes is None and self.read_all_max_total_bytes == 0
+            ):
+                # A zero-byte budget still permits an EOF probe. The pinned
+                # handle's size distinguishes empty files without requesting
+                # a one-byte buffer that would exceed the limit.
                 if remote.size:
                     limit = (
                         self.read_all_max_total_bytes
