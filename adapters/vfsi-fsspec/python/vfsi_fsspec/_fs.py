@@ -44,6 +44,14 @@ def _normalize_mode(mode):
     return base
 
 
+def _writable_byte_view(buffer):
+    """Validate a readinto destination before any data is consumed."""
+    view = memoryview(buffer)
+    if view.readonly:
+        raise TypeError("readinto() requires a writable buffer")
+    return view.cast("B")
+
+
 def _oserror(errno_code, path):
     """Rebuild a Python exception from a native errno (for batched results)."""
     if errno_code == _ERR_UNSUPPORTED:
@@ -890,10 +898,7 @@ class _RawVfsiFile(io.RawIOBase):
             raise ValueError("I/O operation on closed file")
         if not self._readable:
             raise io.UnsupportedOperation("not readable")
-        view = memoryview(b)
-        if view.readonly:
-            raise TypeError("readinto() requires a writable buffer")
-        view = view.cast("B")
+        view = _writable_byte_view(b)
         if len(view) == 0:
             return 0
         length = min(len(view), self._MAX_READ)
@@ -1324,7 +1329,9 @@ class VfsiFile(AbstractBufferedFile):
     def readinto(self, b):
         if not self._has_read_cache():
             return self._raw.readinto(b)
-        return super().readinto(b)
+        if self.closed:
+            raise ValueError("I/O operation on closed file")
+        return super().readinto(_writable_byte_view(b))
 
     def write(self, data):
         if self.closed:
