@@ -89,8 +89,9 @@ class Nfs4FileSystem(_VfsiFileSystem):
         exceptions propagate after all outstanding reads are drained. At most
         ``min(max_in_flight, workers) * chunk_size`` bytes are requested at a
         time, with only one request in flight per worker-owned descriptor.
-        This is not a snapshot: concurrent changes can produce mixed data.
-        Use for stable files, or check application-level version metadata.
+        Worker handles must pin the same filesystem object. In-place
+        concurrent changes can still produce mixed data; this is not a content
+        snapshot. Use stable files or check application-level version metadata.
         By default, use up to three sessions from ``connection_pool_size``.
         """
         if self.closed:
@@ -176,9 +177,17 @@ class Nfs4FileSystem(_VfsiFileSystem):
                 reader._identity = _handle_identity(attrs)
                 reader._identity_required = True
                 attrs_by_reader.append(attrs)
+            identity = readers[0]._identity
             size = attrs_by_reader[0]["size"]
 
             def read_exact(reader, offset, length):
+                # Restore this worker's own pinned handle first. Then ensure
+                # independent OPENs did not switch objects between workers.
+                reader._ensure_open()
+                if len(readers) > 1 and (
+                    identity is None or reader._identity != identity
+                ):
+                    raise _stale_handle_error(internal)
                 data = bytearray(length)
                 filled = 0
                 while filled < length:
