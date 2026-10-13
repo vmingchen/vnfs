@@ -18,6 +18,7 @@ from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from glob import has_magic
+from functools import partial
 from itertools import groupby
 from urllib.parse import unquote, urlsplit
 
@@ -220,6 +221,19 @@ def _handle_identity(attrs):
 
 def _stale_handle_error(path):
     return OSError(errno.ESTALE, "cannot safely restore the original file handle", path)
+
+
+def _close_reader_on_exit(reader, exc_type, primary_error, traceback):
+    """ExitStack cleanup: preserve primary failures and own failed CLOSE tokens."""
+    raw = getattr(reader, "_raw", reader)
+    fd = raw._fd
+    try:
+        reader.close()
+    except BaseException as cleanup_error:
+        raw.fs._client.defer_close_many([fd])
+        if primary_error is not None:
+            raise primary_error from cleanup_error
+        raise
 
 
 def _write_fully(file, data, callback=None):
@@ -3735,7 +3749,9 @@ class VfsiFileSystem(AbstractFileSystem):
                     local.makedirs(local._parent(local_path), exist_ok=True)
                     # Validate and own the source before truncating a local
                     # destination; failed remote OPEN must preserve old data.
-                    with self.open(remote_path, "rb", cache_type="none") as remote:
+                    with ExitStack() as stack:
+                        remote = self.open(remote_path, "rb", cache_type="none")
+                        stack.push(partial(_close_reader_on_exit, remote))
                         with open(local_path, "wb") as out:
                             while True:
                                 chunk = remote.read(self._stream_read_size())

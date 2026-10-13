@@ -6,10 +6,16 @@ import os
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from functools import partial
 
 from vfsi_fsspec import VfsiFile
 from vfsi_fsspec import VfsiFileSystem as _VfsiFileSystem
-from vfsi_fsspec._fs import _handle_identity, _RawVfsiFile, _stale_handle_error
+from vfsi_fsspec._fs import (
+    _close_reader_on_exit,
+    _handle_identity,
+    _RawVfsiFile,
+    _stale_handle_error,
+)
 
 from . import _native
 
@@ -144,18 +150,7 @@ class Nfs4FileSystem(_VfsiFileSystem):
                     reader = _RawVfsiFile(self, internal, "rb", fd=fd)
                     readers.append(reader)
 
-                    def close_reader(exc_type, primary_error, traceback, reader=reader):
-                        try:
-                            reader.close()
-                        except BaseException as cleanup_error:
-                            # The stream will release its reader references.
-                            # Keep failed CLOSE tokens owned by the pool.
-                            self._client.defer_close_many([reader._fd])
-                            if primary_error is not None:
-                                raise primary_error from cleanup_error
-                            raise
-
-                    stack.push(close_reader)
+                    stack.push(partial(_close_reader_on_exit, reader))
             except BaseException:
                 # Close handles not yet transferred to a reader; callbacks
                 # already registered on the ExitStack own the earlier ones.
