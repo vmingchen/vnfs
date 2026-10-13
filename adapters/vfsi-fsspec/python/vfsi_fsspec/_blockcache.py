@@ -18,6 +18,8 @@ from fsspec.caching import MMapCache
 from fsspec.exceptions import BlocksizeMismatchError
 from fsspec.implementations.cached import CachingFileSystem
 
+from ._fs import _RawVfsiFile
+
 _CACHE_FORMAT_KEY = "nfs4fs_blockcache_format"
 _CACHE_FORMAT = 1
 _PATCH_MARKER = "_nfs4fs_blockcache_compat"
@@ -387,9 +389,22 @@ def _enter_individually(open_files):
     try:
         for open_file in open_files:
             entered.append(open_file.__enter__())
-    except BaseException:
-        for open_file in reversed(open_files[: len(entered)]):
-            open_file.__exit__(None, None, None)
+    except BaseException as primary_error:
+        cleanup_error = None
+        # The failing entry may already own a handle before wrapper setup fails.
+        for open_file in reversed(open_files[: len(entered) + 1]):
+            try:
+                open_file.__exit__(
+                    type(primary_error), primary_error, primary_error.__traceback__
+                )
+            except BaseException as error:
+                cleanup_error = cleanup_error or error
+                for stream in open_file.fobjects:
+                    raw = getattr(stream, "_raw", stream)
+                    if isinstance(raw, _RawVfsiFile):
+                        raw.fs._client.defer_close_many([raw._fd])
+        if cleanup_error is not None:
+            raise primary_error from cleanup_error
         raise
     return entered
 
