@@ -2047,6 +2047,7 @@ class _DeferredWriteFile:
         self._closed = False
         self._committed = False
         self._prepared = False
+        self._stage_owned = False
         self._published = False
         parent = posixpath.dirname(path) or "/"
         # Keep the staging component independent of the destination length;
@@ -2129,6 +2130,7 @@ class _DeferredWriteFile:
         fd = self.fs._client.open(
             self.fs._native_path(self.temp_path), "xb", permissions=0o600
         )
+        self._stage_owned = True
         try:
             with VfsiFile(self.fs, self.temp_path, "xb", fd=fd) as remote:
                 while True:
@@ -2141,8 +2143,13 @@ class _DeferredWriteFile:
         except BaseException:
             try:
                 self.fs.rm(self.temp_path)
+            except FileNotFoundError:
+                self._stage_owned = False
             except OSError:
+                # Retain ownership so transaction/manual discard can retry.
                 pass
+            else:
+                self._stage_owned = False
             raise
         self._prepared = True
 
@@ -2178,6 +2185,7 @@ class _DeferredWriteFile:
                 )
                 for file in batch:
                     file._prepared = False
+                    file._stage_owned = False
                     file.discard()
 
     def commit(self):
@@ -2188,11 +2196,12 @@ class _DeferredWriteFile:
 
     def discard(self):
         try:
-            if self._prepared:
+            if self._stage_owned:
                 try:
                     self.fs.rm(self.temp_path)
                 except FileNotFoundError:
                     pass
+                self._stage_owned = False
                 self._prepared = False
         finally:
             self._spool.close()
