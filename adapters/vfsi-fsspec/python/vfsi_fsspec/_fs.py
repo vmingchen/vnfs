@@ -3013,7 +3013,35 @@ class VfsiFileSystem(AbstractFileSystem):
         ]
         self._invalidate_namespace(internal_missing)
         for depth in sorted(by_depth):
-            self._client.mkdir_many(by_depth[depth], mode)
+            pending = by_depth[depth]
+            while pending:
+                try:
+                    self._client.mkdir_many(pending, mode)
+                    break
+                except FileExistsError:
+                    # A concurrent mkdir-p may have won after exists_many.
+                    # Accept only paths that now resolve to directories and
+                    # retry siblings that remain absent.
+                    stats, errors = self._client.stat_many(pending)
+                    missing = []
+                    found_directory = False
+                    for index, native in enumerate(pending):
+                        if index in errors:
+                            if errors[index] == errno.ENOENT:
+                                missing.append(native)
+                                continue
+                            raise _oserror(
+                                errors[index], self._internalize(native)
+                            ) from None
+                        attrs = stats[index]
+                        if attrs is None or attrs["type"] != "directory":
+                            raise
+                        found_directory = True
+                    if not missing:
+                        break
+                    if not found_directory:
+                        raise
+                    pending = missing
 
     def _makedirs_batched(self, paths, exist_ok=False):
         """fsspec ``makedirs`` semantics for many paths, batched."""
