@@ -2661,7 +2661,9 @@ class VfsiFileSystem(AbstractFileSystem):
     def _fullpath(self, internal):
         """Internal ('/a/b') -> a full path for this registered protocol."""
         protocol = self.protocol if isinstance(self.protocol, str) else self.protocol[0]
-        return protocol + "://" + internal
+        # Protocol stripping decodes URL escapes. Quote literal percent
+        # signs so metadata names still identify the original backend path.
+        return protocol + "://" + internal.replace("%", "%25")
 
     # -- directory listing cache -----------------------------------------
 
