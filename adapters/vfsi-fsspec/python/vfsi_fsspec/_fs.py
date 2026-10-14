@@ -294,6 +294,107 @@ def _write_fully(file, data, callback=None):
             callback.relative_update(written)
 
 
+class _TextIOWrapper(io.TextIOWrapper):
+    """Preserve application failures when text-stream cleanup also fails."""
+
+    def __exit__(self, *args):
+        _close_reader_on_exit(self, *args)
+
+
+class _OwnedStream(io.IOBase):
+    """A codec stream whose close also releases its explicitly owned file."""
+
+    def __init__(self, stream, owner):
+        self._stream = stream
+        self._owner = owner
+        self._raw = getattr(owner, "_raw", owner)
+        self._closed = False
+
+    def _check_open(self):
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
+
+    def __getattr__(self, name):
+        attribute = getattr(self._stream, name)
+        if not callable(attribute):
+            return attribute
+
+        def call(*args, **kwargs):
+            self._check_open()
+            return attribute(*args, **kwargs)
+
+        return call
+
+    @property
+    def closed(self):
+        return self._closed
+
+    def close(self):
+        if self._closed:
+            return
+        # Finalization can emit bytes. Never repeat it after an ambiguous
+        # error; the underlying file's cleanup helper owns any deferred CLOSE.
+        self._closed = True
+        with ExitStack() as stack:
+            stack.push(partial(_close_reader_on_exit, self._owner))
+            self._stream.close()
+
+    def __enter__(self):
+        self._check_open()
+        return self
+
+    def __exit__(self, *args):
+        _close_reader_on_exit(self, *args)
+
+    def __iter__(self):
+        self._check_open()
+        return self
+
+    def __next__(self):
+        self._check_open()
+        return next(self._stream)
+
+    def readable(self):
+        self._check_open()
+        return self._stream.readable()
+
+    def writable(self):
+        self._check_open()
+        return self._stream.writable()
+
+    def seekable(self):
+        self._check_open()
+        return self._stream.seekable()
+
+    def seek(self, offset, whence=0):
+        self._check_open()
+        return self._stream.seek(offset, whence)
+
+    def tell(self):
+        self._check_open()
+        return self._stream.tell()
+
+    def truncate(self, size=None):
+        self._check_open()
+        return self._stream.truncate(size)
+
+    def flush(self):
+        self._check_open()
+        return self._stream.flush()
+
+    def fileno(self):
+        self._check_open()
+        return self._stream.fileno()
+
+    def readline(self, size=-1):
+        self._check_open()
+        return self._stream.readline(size)
+
+    def readlines(self, hint=-1):
+        self._check_open()
+        return self._stream.readlines(hint)
+
+
 class _ResilientClient:
     """Own a native session with fork detection and safe read reconnects."""
 
@@ -2667,10 +2768,10 @@ class VfsiFileSystem(AbstractFileSystem):
                 stack.push(partial(_close_reader_on_exit, file))
                 stream = file
                 if codec is not None:
-                    stream = compr[codec](file, mode=binary_mode[0])
+                    stream = _OwnedStream(compr[codec](file, mode=binary_mode[0]), file)
                     stack.push(partial(_close_reader_on_exit, stream))
                 if text:
-                    stream = io.TextIOWrapper(stream, **text_kwargs)
+                    stream = _TextIOWrapper(stream, **text_kwargs)
                 stack.pop_all()
                 return stream
         except BaseException as primary:
