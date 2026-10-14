@@ -250,7 +250,19 @@ def _close_reader_on_exit(reader, exc_type, primary_error, traceback):
         reader.close()
     except BaseException as cleanup_error:
         if fd is not None:
-            raw.fs._client.defer_close_many([fd])
+            group = getattr(reader, "_buffer_group", None)
+            tokens = [fd]
+            if group is not None:
+                with group._lock:
+                    # A failed member exit is still a close request. Its token
+                    # can be deferred without abandoning healthy open siblings.
+                    for member in group.files:
+                        if member._raw is raw:
+                            group._close_requested.add(id(member))
+                            break
+                    if len(group._close_requested) == len(group.files):
+                        tokens = [member._raw._fd for member in group.files]
+            raw.fs._client.defer_close_many(tokens)
         if primary_error is not None:
             raise primary_error from cleanup_error
         raise
@@ -294,11 +306,14 @@ def _write_fully(file, data, callback=None):
             callback.relative_update(written)
 
 
-class _TextIOWrapper(io.TextIOWrapper):
+class _TextIOWrapper(PickleableTextIOWrapper):
     """Preserve application failures when text-stream cleanup also fails."""
 
     def __exit__(self, *args):
         _close_reader_on_exit(self, *args)
+
+    def __reduce__(self):
+        return type(self), self.args
 
 
 class _OwnedStream(io.IOBase):
@@ -1685,10 +1700,12 @@ class _WrappedFiles(list):
                 open_file.__exit__ = self.group._exit_wrapped
             open_file.fobjects = [file]
             if open_file.compression is not None:
-                file = compr[open_file.compression](file, mode=open_file.mode[0])
+                file = _OwnedStream(
+                    compr[open_file.compression](file, mode=open_file.mode[0]), file
+                )
                 open_file.fobjects.append(file)
             if "b" not in open_file.mode:
-                file = PickleableTextIOWrapper(
+                file = _TextIOWrapper(
                     file,
                     encoding=open_file.encoding,
                     errors=open_file.errors,
