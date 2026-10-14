@@ -4446,7 +4446,9 @@ class VfsiFileSystem(AbstractFileSystem):
             [(self._native_path(a), self._native_path(b)) for a, b in pairs]
         )
 
-    def _copy_recursive(self, src, dst, symlinks=False, callback=DEFAULT_CALLBACK):
+    def _copy_recursive(
+        self, src, dst, symlinks=False, callback=DEFAULT_CALLBACK, on_error="raise"
+    ):
         """Copy a directory tree with batched walk/mkdir/copy calls."""
         native_src = self._native_path(src)
         src = src.rstrip("/") or "/"
@@ -4476,18 +4478,12 @@ class VfsiFileSystem(AbstractFileSystem):
         self._ensure_dirs(list(dest_dirs), 0o755)
         self._copy_pairs(
             pairs,
-            "raise",
+            on_error,
             callback=callback,
             callback_is_parent=True,
             set_callback_size=False,
         )
-        for s, d in symlink_pairs:
-            target = self.readlink(s)
-            self._invalidate_namespace([d])
-            # readlink returns the stored target, already in the backend's
-            # namespace. Do not apply the application root prefix again.
-            self._client.symlink(target, self._native_path(d))
-            _complete_child(callback, s, d, 0)
+        self._copy_symlink_pairs(symlink_pairs, on_error, callback)
 
     def cp_file(self, path1, path2, callback=DEFAULT_CALLBACK, **kwargs):
         """Copy a single file (or create a directory) between two paths."""
@@ -4522,6 +4518,7 @@ class VfsiFileSystem(AbstractFileSystem):
         **kwargs,
     ):
         callback = Callback.as_callback(callback)
+        preserve_links = kwargs.get("symlinks", False)
         if on_error is None:
             on_error = "ignore" if recursive else "raise"
         if isinstance(path1, list) and isinstance(path2, list):
@@ -4531,9 +4528,12 @@ class VfsiFileSystem(AbstractFileSystem):
                 (self._checked_strip_protocol(a), self._checked_strip_protocol(b))
                 for a, b in zip(path1, path2)
             ]
-            self._copy_pairs(
-                pairs, on_error, callback=callback, callback_is_parent=True
-            )
+            if preserve_links:
+                self._copy_classified_pairs(pairs, on_error, callback, symlinks=True)
+            else:
+                self._copy_pairs(
+                    pairs, on_error, callback=callback, callback_is_parent=True
+                )
             return
         # Batched tree copy for the plain "directory -> new name" case.
         if (
@@ -4561,8 +4561,9 @@ class VfsiFileSystem(AbstractFileSystem):
                 self._copy_recursive(
                     src,
                     dst,
-                    kwargs.get("symlinks", False),
+                    preserve_links,
                     callback=callback,
+                    on_error=on_error,
                 )
                 return
         # Resolve globs and trailing-slash/maxdepth cases like fsspec's base
@@ -4576,7 +4577,21 @@ class VfsiFileSystem(AbstractFileSystem):
             path1, recursive=recursive, maxdepth=maxdepth, **kwargs
         )
         if source_is_str and (not recursive or maxdepth is not None):
-            paths1 = [p for p in paths1 if not (trailing_sep(p) or self.isdir(p))]
+            if preserve_links:
+                candidates = [p for p in paths1 if not trailing_sep(p)]
+                stats, _ = self._client.lstat_many(
+                    [
+                        self._native_path(self._checked_strip_protocol(p))
+                        for p in candidates
+                    ]
+                )
+                paths1 = [
+                    p
+                    for p, info in zip(candidates, stats)
+                    if info is None or info["type"] != "directory"
+                ]
+            else:
+                paths1 = [p for p in paths1 if not (trailing_sep(p) or self.isdir(p))]
             if not paths1:
                 callback.set_size(0)
                 return
@@ -4593,12 +4608,15 @@ class VfsiFileSystem(AbstractFileSystem):
             (self._checked_strip_protocol(a), self._checked_strip_protocol(b))
             for a, b in zip(paths1, paths2)
         ]
+        self._copy_classified_pairs(pairs, on_error, callback, symlinks=preserve_links)
+
+    def _copy_classified_pairs(self, pairs, on_error, callback, symlinks=False):
         callback.set_size(len(pairs))
-        stats, errors = self._client.stat_many(
-            [self._native_path(src) for src, _ in pairs]
-        )
+        metadata = self._client.lstat_many if symlinks else self._client.stat_many
+        stats, errors = metadata([self._native_path(src) for src, _ in pairs])
         file_pairs = []
         dir_pairs = []
+        symlink_pairs = []
         first_error = None
         for i, ((src, dst), stat) in enumerate(zip(pairs, stats)):
             if i in errors:
@@ -4609,6 +4627,8 @@ class VfsiFileSystem(AbstractFileSystem):
                 dir_pairs.append((src, dst))
             elif stat is not None and stat["type"] == "file":
                 file_pairs.append((src, dst))
+            elif symlinks and stat is not None and stat["type"] == "symlink":
+                symlink_pairs.append((src, dst))
             else:
                 callback.relative_update()
                 if first_error is None:
@@ -4624,8 +4644,30 @@ class VfsiFileSystem(AbstractFileSystem):
             callback_is_parent=True,
             set_callback_size=False,
         )
+        self._copy_symlink_pairs(symlink_pairs, on_error, callback)
         if first_error is not None:
             raise first_error
+
+    def _copy_symlink_pairs(self, pairs, on_error, callback):
+        """Copy stored targets without following links or adding the root twice."""
+        for src, dst in pairs:
+            try:
+                target = self.readlink(src)
+                parent = posixpath.dirname(dst)
+                if self.auto_mkdir and parent not in ("", "/"):
+                    self._ensure_dirs([parent], 0o755)
+                self._invalidate_namespace([dst])
+                self._client.symlink(target, self._native_path(dst))
+            except ConnectionError:
+                # Link creation may already have reached the server; never
+                # suppress an ambiguous transport failure or replay it.
+                raise
+            except (OSError, NotImplementedError):
+                callback.relative_update()
+                if on_error == "raise":
+                    raise
+            else:
+                _complete_child(callback, src, dst, 0)
 
     cp = copy
 
