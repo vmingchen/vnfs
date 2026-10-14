@@ -2579,8 +2579,9 @@ class VfsiFileSystem(AbstractFileSystem):
             # native sessions. If cleanup then raises, this object is still
             # unusable and must not remain available from fsspec's cache.
             token = getattr(self, "_fs_token_", None)
-            if token is not None:
-                type(self)._cache.pop(token, None)
+            cache = type(self)._cache
+            if token is not None and cache.get(token) is self:
+                cache.pop(token, None)
 
     def __enter__(self):
         if self.closed:
