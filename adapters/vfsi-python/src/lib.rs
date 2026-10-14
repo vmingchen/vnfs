@@ -1474,7 +1474,8 @@ impl NfsClient {
                 }
             }
 
-            // Batch reads with per-index error retry.
+            // Complete bounded ranges after legal short non-EOF reads.
+            let mut progress = vec![0usize; paths.len()];
             let mut remaining: Vec<usize> = (0..paths.len())
                 .filter(|&i| !stat_errors.contains_key(&i))
                 .collect();
@@ -1482,19 +1483,42 @@ impl NfsClient {
                 let ops: Vec<ReadOp> = remaining
                     .iter()
                     .map(|&i| {
-                        ReadOp::at(FileOperand::from_os_path(&paths[i]), starts[i], lengths[i])
+                        let offset = starts[i]
+                            .checked_add(progress[i] as u64)
+                            .ok_or_else(|| contract_error("read_many", "range offset overflow"))?;
+                        Ok(ReadOp::at(
+                            FileOperand::from_os_path(&paths[i]),
+                            offset,
+                            lengths[i] - progress[i],
+                        ))
                     })
-                    .collect();
+                    .collect::<PyResult<Vec<_>>>()?;
                 match fs.vread_impl(&ops) {
                     Ok(res) => {
                         let res = validate_read_results("read_many", &ops, res)?;
-                        for (&i, r) in remaining.iter().zip(res) {
-                            results[i] = Some(r.data);
+                        let batch = std::mem::take(&mut remaining);
+                        for (i, r) in batch.into_iter().zip(res) {
+                            let no_progress = r.data.is_empty();
+                            progress[i] += r.data.len();
+                            results[i].get_or_insert_with(Vec::new).extend(r.data);
+                            if progress[i] < lengths[i] && !r.eof {
+                                if no_progress {
+                                    results[i] = None;
+                                    errors.insert(i, libc::EIO as u32);
+                                } else {
+                                    remaining.push(i);
+                                }
+                            }
                         }
-                        break;
                     }
                     Err(e) => {
                         if e.is_transport() {
+                            let original =
+                                e.index().and_then(|index| remaining.get(index).copied());
+                            let e = match original {
+                                Some(index) => e.with_index(index),
+                                None => e,
+                            };
                             return Err(to_py_err(e, None));
                         }
                         let Some(bi) = e.index() else {
@@ -1505,6 +1529,7 @@ impl NfsClient {
                         }
                         let orig = remaining[bi];
                         errors.insert(orig, e.err_no());
+                        results[orig] = None;
                         remaining.remove(bi);
                     }
                 }
@@ -2576,3 +2601,6 @@ mod prr_test_support;
 
 #[cfg(all(test, feature = "dummy"))]
 mod prr_oct13_round14;
+
+#[cfg(all(test, feature = "dummy"))]
+mod prr_oct13_round16;

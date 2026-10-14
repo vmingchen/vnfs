@@ -33,6 +33,10 @@ impl Drop for TestRoot {
 pub(crate) struct FaultBackend {
     pub(crate) inner: LocalBackend,
     pub(crate) read_error: Option<VfError>,
+    pub(crate) read_error_on_call: usize,
+    pub(crate) read_limit: Option<usize>,
+    pub(crate) read_requests: Arc<Mutex<Vec<Vec<(u64, usize)>>>>,
+    pub(crate) grow_before_read: Option<(PathBuf, Vec<u8>)>,
     pub(crate) read_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
     pub(crate) write_counts: Option<Vec<usize>>,
     pub(crate) write_error: Option<VfError>,
@@ -43,6 +47,10 @@ impl FaultBackend {
         Self {
             inner: vfsi_posix::backend(root).unwrap(),
             read_error,
+            read_error_on_call: 0,
+            read_limit: None,
+            read_requests: Arc::default(),
+            grow_before_read: None,
             read_calls: Arc::default(),
             write_counts: None,
             write_error: None,
@@ -94,10 +102,41 @@ impl VectorBackend for FaultBackend {
                 .map(|op| op.file.path().unwrap().to_path_buf())
                 .collect(),
         );
-        if let Some(error) = self.read_error.take() {
-            return Err(error);
+        let call = self.read_calls.lock().unwrap().len() - 1;
+        self.read_requests.lock().unwrap().push(
+            ops.iter()
+                .map(|op| match op.offset {
+                    VfOffset::At(offset) => (offset, op.length),
+                    _ => panic!("range probe must use absolute offsets"),
+                })
+                .collect(),
+        );
+        if call == self.read_error_on_call {
+            if let Some(error) = self.read_error.take() {
+                return Err(error);
+            }
         }
-        self.inner.vread_impl(ops)
+        if let Some((path, data)) = self.grow_before_read.take() {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(path)
+                .unwrap()
+                .write_all(&data)
+                .unwrap();
+        }
+        let limited: Vec<ReadOp> = ops
+            .iter()
+            .map(|op| {
+                ReadOp::new(
+                    op.file.clone(),
+                    op.offset,
+                    self.read_limit
+                        .map_or(op.length, |limit| limit.min(op.length)),
+                )
+            })
+            .collect();
+        self.inner.vread_impl(&limited)
     }
     fn vwrite_impl(
         &mut self,
