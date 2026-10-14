@@ -25,7 +25,7 @@ from urllib.parse import unquote, urlsplit
 from fsspec.caching import caches
 from fsspec.callbacks import DEFAULT_CALLBACK, Callback
 from fsspec.compression import compr
-from fsspec.core import PickleableTextIOWrapper
+from fsspec.core import PickleableTextIOWrapper, get_compression
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 from fsspec.transaction import Transaction
 
@@ -2633,13 +2633,56 @@ class VfsiFileSystem(AbstractFileSystem):
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    def open(self, path, *args, **kwargs):
+    def open(
+        self,
+        path,
+        mode="rb",
+        block_size=None,
+        cache_options=None,
+        compression=None,
+        **kwargs,
+    ):
         # Validate before fsspec removes text flags, otherwise malformed modes
         # can become valid write modes and truncate files or create parents.
-        _normalize_mode(args[0] if args else kwargs.get("mode", "rb"))
-        # AbstractFileSystem.open strips the URL before calling _open.
+        _normalize_mode(mode)
         self._checked_strip_protocol(path)
-        return super().open(path, *args, **kwargs)
+        text = "b" not in mode
+        text_kwargs = {
+            key: kwargs.pop(key)
+            for key in ("encoding", "errors", "newline")
+            if text and key in kwargs
+        }
+        binary_mode = mode.replace("t", "") + "b" if text else mode
+        codec = get_compression(path, compression) if compression is not None else None
+        file = None
+        try:
+            with ExitStack() as stack:
+                file = super().open(
+                    path,
+                    binary_mode,
+                    block_size=block_size,
+                    cache_options=cache_options,
+                    **kwargs,
+                )
+                stack.push(partial(_close_reader_on_exit, file))
+                stream = file
+                if codec is not None:
+                    stream = compr[codec](file, mode=binary_mode[0])
+                    stack.push(partial(_close_reader_on_exit, stream))
+                if text:
+                    stream = io.TextIOWrapper(stream, **text_kwargs)
+                stack.pop_all()
+                return stream
+        except BaseException as primary:
+            if isinstance(file, _DeferredWriteFile):
+                transaction = self._transaction
+                if transaction is not None and file in transaction.files:
+                    transaction.files.remove(file)
+                try:
+                    file.discard()
+                except BaseException as cleanup:
+                    raise primary from cleanup
+            raise
 
     def glob(self, path, *args, **kwargs):
         # The base glob implementation strips the URL before calling find.
