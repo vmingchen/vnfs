@@ -158,6 +158,41 @@ def _record_backing_path(cache_fs, path, detail, filename):
     raise ValueError("unsafe path in fsspec block-cache metadata")
 
 
+def _publish_generations(cache_fs, records, previous):
+    """Allocate private backing files before publishing replacement metadata."""
+    created = []
+    try:
+        for record in records:
+            with open(record["filename"], "xb") as file:
+                created.append(record["filename"])
+                file.truncate(record["detail"]["size"])
+        _save_writable_metadata(cache_fs)
+    except BaseException as primary:
+        writable = cache_fs._metadata.cached_files[-1]
+        writable.clear()
+        writable.update(previous)
+        cleanup = None
+        for filename in created:
+            try:
+                os.remove(filename)
+            except FileNotFoundError:
+                pass
+            except BaseException as error:
+                cleanup = cleanup or error
+        if cleanup is not None:
+            raise primary from cleanup
+        raise
+    # Retiring published generations only unlinks their names. Existing mmap
+    # readers retain their own inode, which must never be truncated in place.
+    for record in records:
+        filename = record.get("old_filename")
+        if filename is not None and filename != record["filename"]:
+            try:
+                os.remove(filename)
+            except FileNotFoundError:
+                pass
+
+
 def _reset_stale_generation(cache_fs, path):
     raw = cache_fs._metadata.check_file(path, None)
     if not raw:
@@ -192,15 +227,19 @@ def _reset_stale_generation(cache_fs, path):
         }
     )
     replacement.pop("blocksize", None)
+    previous = cache_fs._metadata.cached_files[-1].copy()
     cache_fs._metadata.cached_files[-1][path] = replacement
-    _save_writable_metadata(cache_fs)
-    with open(_backing_path(cache_fs, replacement), "wb") as file:
-        file.truncate(info["size"])
-    # Unlinking is safe for existing descriptors/mappings; truncating is not.
-    try:
-        os.remove(backing_file)
-    except FileNotFoundError:
-        pass
+    _publish_generations(
+        cache_fs,
+        [
+            {
+                "filename": _backing_path(cache_fs, replacement),
+                "detail": replacement,
+                "old_filename": backing_file,
+            }
+        ],
+        previous,
+    )
 
 
 def _mark_compatible_cache(cache_fs, path, file):
@@ -484,6 +523,7 @@ def _prepare_cache_records(cache_fs, paths):
     replacements = []
     prepared = {}
     writable_cache = cache_fs._metadata.cached_files[-1]
+    previous = writable_cache.copy()
     now = time.time()
     for path, record in zip(paths, records):
         if path in prepared:
@@ -536,20 +576,7 @@ def _prepare_cache_records(cache_fs, paths):
         replacements.append(record)
 
     if replacements:
-        # Every generation owns a distinct inode. Persist its empty metadata
-        # before filling it, then unlink retired inodes without truncating mmap
-        # storage that may still be held by another reader or process.
-        _save_writable_metadata(cache_fs)
-        for record in replacements:
-            with open(record["filename"], "wb") as file:
-                file.truncate(record["detail"]["size"])
-        for path, record in zip(paths, records):
-            raw = record.get("old_filename")
-            if raw is not None and raw != record["filename"]:
-                try:
-                    os.remove(raw)
-                except FileNotFoundError:
-                    pass
+        _publish_generations(cache_fs, replacements, previous)
     return records
 
 
