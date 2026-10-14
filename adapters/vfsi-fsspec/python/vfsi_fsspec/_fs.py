@@ -1104,7 +1104,7 @@ class _RawVfsiFile(io.RawIOBase):
             raise io.UnsupportedOperation("not writable")
         if isinstance(data, str):
             raise TypeError("a bytes-like object is required, not 'str'")
-        self.fs._invalidate_persistent_caches([self.path])
+        self.fs._invalidate_persistent_caches([self.path], descriptors=[self._fd])
         self.fs._invalidate_parent_listing(self.path)
         fd = self._ensure_open()
         try:
@@ -1164,7 +1164,7 @@ class _RawVfsiFile(io.RawIOBase):
             size = self._pos
         if size < 0:
             raise OSError(errno.EINVAL, "Invalid argument")
-        self.fs._invalidate_persistent_caches([self.path])
+        self.fs._invalidate_persistent_caches([self.path], descriptors=[self._fd])
         self.fs._invalidate_parent_listing(self.path)
         fd = self._ensure_open()
         try:
@@ -2060,6 +2060,9 @@ class _BufferGroup:
                 break
             try:
                 fds = [file._raw._ensure_open() for file in wave]
+                self.fs._invalidate_persistent_caches(
+                    [file.path for file in wave], descriptors=fds
+                )
                 if wave[0]._base_mode == "a":
                     results = self.fs._client.append_many(fds, datas)
                     for file, data, (written, position) in zip(wave, datas, results):
@@ -2963,7 +2966,7 @@ class VfsiFileSystem(AbstractFileSystem):
             self.dircache[internal] = stored
             return True
 
-    def _evict_dircache(self, subtrees=(), exact=()):
+    def _evict_dircache(self, subtrees=(), exact=(), identities=(), uncertain=False):
         """Evict many cache keys atomically with one generation bump/scan."""
         subtrees = set(subtrees)
         exact = set(exact)
@@ -2972,11 +2975,18 @@ class VfsiFileSystem(AbstractFileSystem):
             if "/" in subtrees:
                 self.dircache.clear()
                 return
-            if not subtrees:
+            if not subtrees and not identities and not uncertain:
                 for key in exact:
                     self.dircache.pop(key, None)
                 return
             for key in list(self.dircache):
+                if identities or uncertain:
+                    infos = self.dircache.get(key, ())
+                    if any(
+                        uncertain or _handle_identity(info) in identities
+                        for info in infos
+                    ):
+                        exact.add(key)
                 candidate = key
                 in_subtree = False
                 while candidate != "/":
@@ -3003,23 +3013,63 @@ class VfsiFileSystem(AbstractFileSystem):
                 retained.append((weakref.ref(cache_fs), invalidator))
             self._persistent_cache_refs = retained
 
-    def _invalidate_persistent_caches(self, paths, subtrees=False):
-        """Make registered persistent data generations stale before mutation."""
+    def _invalidate_persistent_caches(
+        self, paths, subtrees=False, descriptors=None, evict_listings=True
+    ):
+        """Invalidate affected paths and every cached alias of their objects."""
         internals = {self._checked_strip_protocol(path) for path in paths}
         if not internals:
-            return
+            return set(), False
         with self._persistent_cache_lock:
             retained = []
-            caches = []
+            registered = []
             for cache_ref, invalidator in self._persistent_cache_refs:
                 cache = cache_ref()
                 if cache is None:
                     continue
                 retained.append((cache_ref, invalidator))
-                caches.append((cache, invalidator))
+                registered.append((cache, invalidator))
             self._persistent_cache_refs = retained
-        for cache, invalidator in caches:
-            invalidator(cache, internals, subtrees=subtrees)
+        with self._dircache_lock:
+            has_listings = bool(self.dircache)
+        if not registered and not has_listings:
+            return set(), False
+        uncertain = False
+        try:
+            if descriptors is not None:
+                attrs = self._client.fstat_many(descriptors)
+                errors = {}
+            else:
+                attrs, errors = self._client.stat_many(
+                    [self._native_path(path) for path in internals]
+                )
+            identities = {
+                identity
+                for attr in attrs
+                if attr is not None
+                if (identity := _handle_identity(attr)) is not None
+            }
+            uncertain = any(
+                attr is not None and _handle_identity(attr) is None for attr in attrs
+            ) or any(
+                code not in (errno.ENOENT, errno.ENOTDIR) for code in errors.values()
+            )
+        except (OSError, ConnectionError):
+            # Metadata permissions/availability must not prevent a permitted
+            # write. Conservatively discard cached generations in this case.
+            identities = set()
+            uncertain = True
+        if evict_listings and has_listings:
+            self._evict_dircache(identities=identities, uncertain=uncertain)
+        for cache, invalidator in registered:
+            invalidator(
+                cache,
+                internals,
+                subtrees=subtrees,
+                identities=identities,
+                uncertain=uncertain,
+            )
+        return identities, uncertain
 
     def invalidate_cache(self, path=None):
         """Discard a cached listing and all cached descendants.
@@ -3045,7 +3095,9 @@ class VfsiFileSystem(AbstractFileSystem):
         internals = {self._checked_strip_protocol(path) for path in paths}
         if not internals:
             return
-        self._invalidate_persistent_caches(internals, subtrees=True)
+        identities, uncertain = self._invalidate_persistent_caches(
+            internals, subtrees=True, evict_listings=False
+        )
         parents = {
             posixpath.dirname(internal.rstrip("/")) or "/" for internal in internals
         }
@@ -3055,7 +3107,12 @@ class VfsiFileSystem(AbstractFileSystem):
         parent_containers = {
             posixpath.dirname(parent.rstrip("/")) or "/" for parent in parents
         }
-        self._evict_dircache(subtrees=internals, exact=parents | parent_containers)
+        self._evict_dircache(
+            subtrees=internals,
+            exact=parents | parent_containers,
+            identities=identities,
+            uncertain=uncertain,
+        )
         for internal in internals | parents | parent_containers:
             super().invalidate_cache(internal)
 

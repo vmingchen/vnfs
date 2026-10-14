@@ -18,7 +18,12 @@ from fsspec.caching import MMapCache
 from fsspec.exceptions import BlocksizeMismatchError
 from fsspec.implementations.cached import CachingFileSystem
 
-from ._fs import _close_reader_on_exit, _enter_individually, _normalize_mode
+from ._fs import (
+    _close_reader_on_exit,
+    _enter_individually,
+    _handle_identity,
+    _normalize_mode,
+)
 
 _CACHE_FORMAT_KEY = "nfs4fs_blockcache_format"
 _CACHE_FORMAT = 1
@@ -223,6 +228,7 @@ def _reset_stale_generation(cache_fs, path):
             "size": info["size"],
             "time": time.time(),
             "uid": cache_fs.fs._ukey_from_info(info),
+            "identity": _handle_identity(info),
             _CACHE_FORMAT_KEY: _CACHE_FORMAT,
         }
     )
@@ -260,6 +266,10 @@ def _mark_compatible_cache(cache_fs, path, file):
     detail = cache_fs._metadata.cached_files[-1].get(path)
     if detail is not None:
         changed = False
+        identity = getattr(getattr(file, "_raw", None), "_identity", None)
+        if identity is not None and tuple(detail.get("identity") or ()) != identity:
+            detail["identity"] = identity
+            changed = True
         if detail.get(_CACHE_FORMAT_KEY) != _CACHE_FORMAT:
             detail[_CACHE_FORMAT_KEY] = _CACHE_FORMAT
             changed = True
@@ -386,7 +396,9 @@ def _cache_lock(cache_fs):
                 os.close(fd)
 
 
-def _invalidate_registered_paths(cache_fs, paths, subtrees=False):
+def _invalidate_registered_paths(
+    cache_fs, paths, subtrees=False, identities=(), uncertain=False
+):
     """Invalidate future opens without disrupting already-open mmap handles."""
     with _cache_lock(cache_fs):
         # Multiple CachingFileSystem wrappers may share one writable storage
@@ -395,7 +407,12 @@ def _invalidate_registered_paths(cache_fs, paths, subtrees=False):
         cache_fs.load_cache()
         writable = cache_fs._metadata.cached_files[-1]
 
-        def affected(candidate):
+        def affected(candidate, detail):
+            identity = detail.get("identity")
+            if uncertain or (
+                identities and (identity is None or tuple(identity) in identities)
+            ):
+                return True
             for path in paths:
                 if candidate == path:
                     return True
@@ -408,7 +425,7 @@ def _invalidate_registered_paths(cache_fs, paths, subtrees=False):
         changed = False
         for path, detail in writable.items():
             if (
-                affected(path)
+                affected(path, detail)
                 and detail.get(_CACHE_FORMAT_KEY) != _INVALID_CACHE_FORMAT
             ):
                 detail[_CACHE_FORMAT_KEY] = _INVALID_CACHE_FORMAT
@@ -566,6 +583,7 @@ def _prepare_cache_records(cache_fs, paths):
                 "size": info["size"],
                 "time": now,
                 "uid": cache_fs.fs._ukey_from_info(info),
+                "identity": _handle_identity(info),
                 _CACHE_FORMAT_KEY: _CACHE_FORMAT,
             }
         )
