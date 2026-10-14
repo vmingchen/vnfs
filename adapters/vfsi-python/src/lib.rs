@@ -56,6 +56,23 @@ type ReadManyResult = (Vec<Option<Vec<u8>>>, ErrnoMap);
 /// Per-index copied byte counts (None on failure) plus failures.
 type CopyManyResult = (Vec<Option<u64>>, ErrnoMap);
 const ERR_SAME_FILE: u32 = u32::MAX - 2;
+
+/// Map a vector-listing error back to the caller's original input positions.
+/// Transport failures without a trustworthy backend index remain unattributed.
+fn remap_aggregate_listdir_error(
+    error: VfError,
+    unique_to_original: &[usize],
+    paths: &[PathBuf],
+) -> (VfError, Option<usize>) {
+    let original_index = error
+        .index()
+        .and_then(|index| unique_to_original.get(index).copied())
+        .filter(|index| *index < paths.len());
+    match original_index {
+        Some(index) => (error.with_index(index), Some(index)),
+        None => (error, None),
+    }
+}
 /// Directory paths and their entries returned to Python by a tree walk.
 type WalkResult = Vec<(Py<PyString>, Vec<Py<PyDict>>)>;
 
@@ -1574,42 +1591,185 @@ impl NfsClient {
             .min(self.directory_max_path_bytes);
         let max_depth = self.walk_max_depth;
         let groups = self.with_fs(py, move |fs| {
-            let mut groups = Vec::with_capacity(paths.len());
-            for p in &paths {
-                let entries = if recursive {
-                    let mut no_sort = |_dir: &Path, _attrs: &mut Vec<VfAttrs>| {};
-                    fs.walk_with_options_impl(
-                        p,
-                        full_mask(),
-                        ListDirOptions::new()
-                            .recursive(true)
-                            .max_entries(max_entries)
-                            .max_path_bytes(max_path_bytes)
-                            .max_depth(max_depth),
-                        &mut no_sort,
-                    )
-                    .map_err(|e| to_py_err(e, Some(p.as_path())))?
-                    .into_iter()
-                    .flat_map(|entry| entry.entries)
-                    .collect()
-                } else {
-                    let entries = fs
-                        .listdir_impl(p, full_mask(), max_entries.saturating_add(1), false)
-                        .map_err(|e| to_py_err(e, Some(p.as_path())))?;
-                    validate_directory_results(&entries, max_entries, max_path_bytes)
-                        .map_err(|e| to_py_err(e, Some(p.as_path())))?;
-                    entries
-                };
-                if aggregate {
-                    max_entries -= entries.len();
-                    max_path_bytes -= entries
-                        .iter()
-                        .map(|entry| entry.file.path().map_or(0, |path| path.as_os_str().len()))
-                        .sum::<usize>();
+            if aggregate && !recursive {
+                // Walk prefetches sibling directories with a shared remaining
+                // budget. Route that batch through the backend's vector listing
+                // operation so NFS can resolve and READDIR siblings together.
+                let mut unique_paths = Vec::new();
+                let mut unique_to_original = Vec::new();
+                let mut unique_index_by_dir: HashMap<PathBuf, usize> = HashMap::new();
+                for (index, path) in paths.iter().enumerate() {
+                    if !unique_index_by_dir.contains_key(path) {
+                        let unique_index = unique_paths.len();
+                        unique_paths.push(path.clone());
+                        unique_to_original.push(index);
+                        unique_index_by_dir.insert(path.clone(), unique_index);
+                    }
                 }
-                groups.push(entries);
+                let dirs: Vec<&Path> = unique_paths.iter().map(PathBuf::as_path).collect();
+                let mut unique_entries = vec![Vec::new(); unique_paths.len()];
+                let mut invalid_directory = false;
+                let result = fs.vlistdirs_impl(
+                    &dirs,
+                    full_mask(),
+                    max_entries.saturating_add(1),
+                    false,
+                    &mut |entry, directory| {
+                        let Some(&unique_index) = unique_index_by_dir.get(directory) else {
+                            invalid_directory = true;
+                            return false;
+                        };
+                        unique_entries[unique_index].push(entry.clone());
+                        true
+                    },
+                );
+                if invalid_directory {
+                    return Err(to_py_err(
+                        VfError::transport(None, "invalid vlistdirs directory"),
+                        None,
+                    ));
+                }
+
+                // The backend returns each unique directory once. Apply shared
+                // budgets in original request order so non-adjacent duplicates
+                // cannot move the reported first over-budget input.
+                let apply_budgets = || {
+                    let mut grouped = vec![Vec::new(); paths.len()];
+                    let mut counted_entries = 0usize;
+                    let mut counted_path_bytes = 0usize;
+                    let mut overflow = None;
+                    for (index, path) in paths.iter().enumerate() {
+                        let Some(&unique_index) = unique_index_by_dir.get(path) else {
+                            overflow = Some(index);
+                            break;
+                        };
+                        for entry in &unique_entries[unique_index] {
+                            if counted_entries >= max_entries {
+                                overflow = Some(index);
+                                break;
+                            }
+                            counted_entries += 1;
+                            let path_bytes =
+                                entry.file.path().map_or(0, |path| path.as_os_str().len());
+                            let Some(next_bytes) = counted_path_bytes.checked_add(path_bytes)
+                            else {
+                                overflow = Some(index);
+                                break;
+                            };
+                            counted_path_bytes = next_bytes;
+                            if counted_path_bytes > max_path_bytes {
+                                overflow = Some(index);
+                                break;
+                            }
+                            grouped[index].push(entry.clone());
+                        }
+                        if overflow.is_some() {
+                            break;
+                        }
+                    }
+                    (grouped, overflow)
+                };
+
+                if let Err(error) = result {
+                    // A vector backend may fail while resolving all directories,
+                    // before it returns entries for earlier paths. Recheck the
+                    // successful request prefix sequentially so an earlier
+                    // budget overflow retains the scalar API's error precedence.
+                    let (error, index) =
+                        remap_aggregate_listdir_error(error, &unique_to_original, &paths);
+                    if let Some(failure_index) = index {
+                        let mut remaining_entries = max_entries;
+                        let mut remaining_path_bytes = max_path_bytes;
+                        for (prior_index, path) in paths.iter().enumerate().take(failure_index) {
+                            let entries = fs
+                                .listdir_impl(
+                                    path,
+                                    full_mask(),
+                                    remaining_entries.saturating_add(1),
+                                    false,
+                                )
+                                .map_err(|error| {
+                                    to_py_err(
+                                        error.map_index(|_| prior_index),
+                                        Some(path.as_path()),
+                                    )
+                                })?;
+                            if validate_directory_results(
+                                &entries,
+                                remaining_entries,
+                                remaining_path_bytes,
+                            )
+                            .is_err()
+                            {
+                                return Err(to_py_err(
+                                    VfError::failure(prior_index, libc::EFBIG as u32),
+                                    Some(path.as_path()),
+                                ));
+                            }
+                            remaining_entries -= entries.len();
+                            let path_bytes = entries
+                                .iter()
+                                .map(|entry| {
+                                    entry.file.path().map_or(0, |path| path.as_os_str().len())
+                                })
+                                .sum::<usize>();
+                            remaining_path_bytes -= path_bytes;
+                        }
+                    }
+                    return Err(to_py_err(
+                        error,
+                        index
+                            .and_then(|index| paths.get(index))
+                            .map(PathBuf::as_path),
+                    ));
+                }
+
+                let (grouped, overflow) = apply_budgets();
+                if let Some(index) = overflow {
+                    return Err(to_py_err(
+                        VfError::failure(index, libc::EFBIG as u32),
+                        paths.get(index).map(PathBuf::as_path),
+                    ));
+                }
+                Ok(grouped)
+            } else {
+                let mut groups = Vec::with_capacity(paths.len());
+                for p in &paths {
+                    let entries = if recursive {
+                        let mut no_sort = |_dir: &Path, _attrs: &mut Vec<VfAttrs>| {};
+                        fs.walk_with_options_impl(
+                            p,
+                            full_mask(),
+                            ListDirOptions::new()
+                                .recursive(true)
+                                .max_entries(max_entries)
+                                .max_path_bytes(max_path_bytes)
+                                .max_depth(max_depth),
+                            &mut no_sort,
+                        )
+                        .map_err(|e| to_py_err(e, Some(p.as_path())))?
+                        .into_iter()
+                        .flat_map(|entry| entry.entries)
+                        .collect()
+                    } else {
+                        let entries = fs
+                            .listdir_impl(p, full_mask(), max_entries.saturating_add(1), false)
+                            .map_err(|e| to_py_err(e, Some(p.as_path())))?;
+                        validate_directory_results(&entries, max_entries, max_path_bytes)
+                            .map_err(|e| to_py_err(e, Some(p.as_path())))?;
+                        entries
+                    };
+                    if aggregate {
+                        max_entries -= entries.len();
+                        max_path_bytes -= entries
+                            .iter()
+                            .map(|entry| entry.file.path().map_or(0, |path| path.as_os_str().len()))
+                            .sum::<usize>();
+                    }
+                    groups.push(entries);
+                }
+                Ok(groups)
             }
-            Ok(groups)
         })?;
         let mut out = Vec::with_capacity(groups.len());
         for entries in groups {
@@ -2211,5 +2371,21 @@ mod object_identity_tests {
                 None
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod aggregate_listdir_error_tests {
+    use super::*;
+
+    #[test]
+    fn unattributed_transport_error_does_not_name_first_input_path() {
+        let paths = vec![PathBuf::from("/first"), PathBuf::from("/second")];
+        let error = VfError::transport(None, "connection lost");
+
+        let (error, index) = remap_aggregate_listdir_error(error, &[0, 1], &paths);
+
+        assert_eq!(error.index(), None);
+        assert_eq!(index, None);
     }
 }
