@@ -2571,11 +2571,16 @@ class VfsiFileSystem(AbstractFileSystem):
         with self._dircache_lock:
             self._dircache_epoch += 1
             self.dircache.clear()
-        if not self._client.closed:
-            self._client.shutdown()
-        token = getattr(self, "_fs_token_", None)
-        if token is not None:
-            type(self)._cache.pop(token, None)
+        try:
+            if not self._client.closed:
+                self._client.shutdown()
+        finally:
+            # _ClientPool.shutdown() invalidates the pool before releasing
+            # native sessions. If cleanup then raises, this object is still
+            # unusable and must not remain available from fsspec's cache.
+            token = getattr(self, "_fs_token_", None)
+            if token is not None:
+                type(self)._cache.pop(token, None)
 
     def __enter__(self):
         if self.closed:
