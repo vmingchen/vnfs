@@ -4457,6 +4457,11 @@ class VfsiFileSystem(AbstractFileSystem):
         dst = self._checked_strip_protocol(path2)
         info = self.info(src)
         if info["type"] == "directory":
+            dst_stats, dst_errors = self._client.stat_many([self._native_path(dst)])
+            if 0 in dst_errors and dst_errors[0] != errno.ENOENT:
+                raise _oserror(dst_errors[0], dst) from None
+            if dst_stats[0] is not None and dst_stats[0]["type"] != "directory":
+                raise FileExistsError(errno.EEXIST, "File exists", dst)
             self._ensure_dirs([dst], 0o755)
             _complete_callback(callback, 0)
             return
@@ -4511,6 +4516,8 @@ class VfsiFileSystem(AbstractFileSystem):
                 i = min(errors)
                 if errors[i] != errno.ENOENT:
                     raise _oserror(errors[i], (src, dst)[i])
+            if src_is_dir and stats[1] is not None and not dst_is_dir:
+                raise FileExistsError(errno.EEXIST, "File exists", dst)
             if src_is_dir and not dst_is_dir:
                 self._copy_recursive(
                     src,
