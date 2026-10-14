@@ -1494,6 +1494,9 @@ impl NfsClient {
                         break;
                     }
                     Err(e) => {
+                        if e.is_transport() {
+                            return Err(to_py_err(e, None));
+                        }
                         let Some(bi) = e.index() else {
                             return Err(to_py_err(e, None));
                         };
@@ -2558,3 +2561,8 @@ mod aggregate_listdir_error_tests {
         assert_eq!(index, None);
     }
 }
+
+#[cfg(all(test, feature = "dummy"))]
+mod prr_oct13_round13;
+#[cfg(all(test, feature = "dummy"))]
+mod prr_test_support;
