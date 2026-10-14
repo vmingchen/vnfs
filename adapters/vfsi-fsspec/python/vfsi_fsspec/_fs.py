@@ -1226,60 +1226,72 @@ class VfsiFile(AbstractBufferedFile):
         defer_cache=False,
         identity=None,
     ):
-        self._raw = _RawVfsiFile(fs, path, mode, fd=fd, identity=identity)
-        self._base_mode = _normalize_mode(mode)
-        if fd is not None and self._base_mode in ("a", "a+") and size is not None:
-            self._raw._pos = size
-        self._buffered_read = self._base_mode == "r" and cache_type not in (
-            None,
-            "none",
-        )
-        self._buffered_write = self._base_mode in ("w", "a", "x") and bool(
-            write_buffering
-        )
-        self._using_buffer = self._buffered_read or self._buffered_write
+        # Validate options before a creating/truncating native OPEN.
+        self._closed = True
         self._buffer_group = None
-        self._write_spool = None
-        self._spool_read_offset = 0
-        self._write_failed = False
-        self._write_failure_errno = None
-        self._buffer_size = size
-        self._requested_read_end = None
-        self.cache_type = cache_type
         self._cache_options = dict(cache_options or {})
-        self._deferred_cache_type = (
-            cache_type if defer_cache and self._buffered_read else None
-        )
-        effective_block_size = block_size or self.DEFAULT_BLOCK_SIZE
-
-        if self._using_buffer:
-            super().__init__(
-                fs,
-                self._raw.path,
-                mode=self._raw._native_mode(),
-                block_size=effective_block_size,
-                cache_type=(
-                    "none" if self._deferred_cache_type is not None else cache_type
-                ),
-                cache_options=(
-                    {} if self._deferred_cache_type is not None else self._cache_options
-                ),
-                size=size,
-                identity=identity,
+        self._raw = _RawVfsiFile(fs, path, mode, fd=fd, identity=identity)
+        try:
+            self._base_mode = _normalize_mode(mode)
+            if fd is not None and self._base_mode in ("a", "a+") and size is not None:
+                self._raw._pos = size
+            self._buffered_read = self._base_mode == "r" and cache_type not in (
+                None,
+                "none",
             )
-            if self._buffered_write and self._base_mode == "a":
-                append_size = self._raw.tell() if size is None else size
-                self._raw._pos = append_size
-                self._buffer_size = append_size
-                self.loc = append_size
-        else:
-            io.IOBase.__init__(self)
-            self.fs = fs
-            self.path = self._raw.path
-            self.mode = mode
-            self.blocksize = effective_block_size
-            self.loc = self._raw.tell()
-            self._closed = False
+            self._buffered_write = self._base_mode in ("w", "a", "x") and bool(
+                write_buffering
+            )
+            self._using_buffer = self._buffered_read or self._buffered_write
+            self._buffer_group = None
+            self._write_spool = None
+            self._spool_read_offset = 0
+            self._write_failed = False
+            self._write_failure_errno = None
+            self._buffer_size = size
+            self._requested_read_end = None
+            self.cache_type = cache_type
+            self._deferred_cache_type = (
+                cache_type if defer_cache and self._buffered_read else None
+            )
+            effective_block_size = block_size or self.DEFAULT_BLOCK_SIZE
+
+            if self._using_buffer:
+                super().__init__(
+                    fs,
+                    self._raw.path,
+                    mode=self._raw._native_mode(),
+                    block_size=effective_block_size,
+                    cache_type=(
+                        "none" if self._deferred_cache_type is not None else cache_type
+                    ),
+                    cache_options=(
+                        {}
+                        if self._deferred_cache_type is not None
+                        else self._cache_options
+                    ),
+                    size=size,
+                    identity=identity,
+                )
+                if self._buffered_write and self._base_mode == "a":
+                    append_size = self._raw.tell() if size is None else size
+                    self._raw._pos = append_size
+                    self._buffer_size = append_size
+                    self.loc = append_size
+            else:
+                io.IOBase.__init__(self)
+                self.fs = fs
+                self.path = self._raw.path
+                self.mode = mode
+                self.blocksize = effective_block_size
+                self.loc = self._raw.tell()
+                self._closed = False
+        except BaseException as error:
+            # The facade may not yet have the fields required by flush/close.
+            # Its raw owner is independently closeable throughout setup.
+            self._closed = True
+            _close_reader_on_exit(self._raw, type(error), error, error.__traceback__)
+            raise
 
     @property
     def _fd(self):
@@ -4559,12 +4571,14 @@ class VfsiFileSystem(AbstractFileSystem):
             _BufferGroup(self, files)
         except BaseException as setup_error:
             cleanup_error = None
+            # A failing constructor can already have released its own token.
+            pending = [fd for fd in fds if self._client.descriptor_valid(fd)]
             try:
-                if fds and not self._client.closed:
-                    self._client.close_many(fds)
+                if pending and not self._client.closed:
+                    self._client.close_many(pending)
             except BaseException as error:
                 cleanup_error = error
-                self._client.defer_close_many(fds)
+                self._client.defer_close_many(pending)
             for file in files:
                 file._finish_group_close()
             if cleanup_error is not None:
