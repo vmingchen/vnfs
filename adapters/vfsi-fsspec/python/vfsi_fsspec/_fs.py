@@ -3239,7 +3239,6 @@ class VfsiFileSystem(AbstractFileSystem):
         valid = [index for index in range(len(paths)) if index not in failures]
         valid_sizes = [stats[index].get("size", 0) for index in valid]
         limit = self.read_all_max_total_bytes
-        self._check_read_allocation(sum(valid_sizes), paths[0] if paths else None)
         retained = 0
 
         def read_streamed(index, size, budget):
