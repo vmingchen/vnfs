@@ -4169,7 +4169,9 @@ class VfsiFileSystem(AbstractFileSystem):
             return files
         if self.auto_mkdir and any(any(c in m for c in "wax") for m in modes):
             parents = {
-                posixpath.dirname(p) for p in paths if posixpath.dirname(p) != "/"
+                posixpath.dirname(path)
+                for path, mode in zip(paths, modes)
+                if any(c in mode for c in "wax") and posixpath.dirname(path) != "/"
             }
             self._ensure_dirs(list(parents), 0o755)
         mutating_paths = [
