@@ -38,8 +38,19 @@ _ERR_UNSUPPORTED = 0xFFFF_FFFE
 
 def _normalize_mode(mode):
     """Collapse 'b'/'t' characters: 'rt'/'r'/'rb' -> 'r', 'wb+' -> 'w+', ..."""
+    if not isinstance(mode, str):
+        raise TypeError("mode must be a string")
     base = mode.replace("b", "").replace("t", "")
-    if base not in ("r", "r+", "w", "w+", "a", "a+", "x", "x+"):
+    if mode.count("b") + mode.count("t") > 1 or base not in (
+        "r",
+        "r+",
+        "w",
+        "w+",
+        "a",
+        "a+",
+        "x",
+        "x+",
+    ):
         raise ValueError(f"unsupported mode: {mode!r}")
     return base
 
@@ -2592,6 +2603,9 @@ class VfsiFileSystem(AbstractFileSystem):
         self.close()
 
     def open(self, path, *args, **kwargs):
+        # Validate before fsspec removes text flags, otherwise malformed modes
+        # can become valid write modes and truncate files or create parents.
+        _normalize_mode(args[0] if args else kwargs.get("mode", "rb"))
         # AbstractFileSystem.open strips the URL before calling _open.
         self._checked_strip_protocol(path)
         return super().open(path, *args, **kwargs)
@@ -4125,9 +4139,7 @@ class VfsiFileSystem(AbstractFileSystem):
     ):
         """Open a list of ``OpenFile`` objects in one openv batch."""
         paths = [self._checked_strip_protocol(f.path) for f in open_files]
-        modes = [f.mode.replace("t", "").replace("b", "") + "b" for f in open_files]
-        for mode in modes:
-            _normalize_mode(mode)
+        modes = [_normalize_mode(f.mode) + "b" for f in open_files]
         effective_block_size = self.block_size if block_size is None else block_size
         effective_cache_type = self.cache_type if cache_type is None else cache_type
         effective_cache_options = (

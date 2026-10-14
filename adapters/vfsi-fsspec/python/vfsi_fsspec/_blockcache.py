@@ -18,7 +18,7 @@ from fsspec.caching import MMapCache
 from fsspec.exceptions import BlocksizeMismatchError
 from fsspec.implementations.cached import CachingFileSystem
 
-from ._fs import _RawVfsiFile
+from ._fs import _RawVfsiFile, _normalize_mode
 
 _CACHE_FORMAT_KEY = "nfs4fs_blockcache_format"
 _CACHE_FORMAT = 1
@@ -580,6 +580,8 @@ def _is_compatible_backend(cache_fs):
 def _open_many_with_cache(cache_fs, open_files):
     if not _is_compatible_backend(cache_fs):
         return _delegate_open_many(cache_fs, open_files)
+    for open_file in open_files:
+        _normalize_mode(open_file.mode)
     _register_cache(cache_fs)
     if not all(_is_plain_read(open_file) for open_file in open_files):
         if all("r" in open_file.mode for open_file in open_files):
@@ -691,6 +693,7 @@ def install_fsspec_blockcache_compat(target_type):
 def _install_fsspec_blockcache_wrappers():
     original_init = CachingFileSystem.__init__
     original_open = CachingFileSystem._open
+    original_public_open = CachingFileSystem.open
     original_close_and_update = CachingFileSystem.close_and_update
     original_pop_from_cache = CachingFileSystem.pop_from_cache
 
@@ -705,6 +708,11 @@ def _install_fsspec_blockcache_wrappers():
 
             cache_fs._strip_protocol = strip_checked
             _register_cache(cache_fs)
+
+    def public_open_with_compat(cache_fs, path, *args, **kwargs):
+        if _is_compatible_backend(cache_fs):
+            _normalize_mode(args[0] if args else kwargs.get("mode", "rb"))
+        return original_public_open(cache_fs, path, *args, **kwargs)
 
     def open_with_compat(cache_fs, path, *args, **kwargs):
         if not _is_compatible_backend(cache_fs):
@@ -742,6 +750,7 @@ def _install_fsspec_blockcache_wrappers():
         return _pop_writable_cache_file(cache_fs, path)
 
     CachingFileSystem.__init__ = init_with_compat
+    CachingFileSystem.open = public_open_with_compat
     CachingFileSystem._open = open_with_compat
     CachingFileSystem.close_and_update = close_and_update_with_compat
     CachingFileSystem.open_many = open_many_with_compat
