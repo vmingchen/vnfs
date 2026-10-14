@@ -34,6 +34,9 @@ pub(crate) struct FaultBackend {
     pub(crate) inner: LocalBackend,
     pub(crate) read_error: Option<VfError>,
     pub(crate) read_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
+    pub(crate) write_counts: Option<Vec<usize>>,
+    pub(crate) write_error: Option<VfError>,
+    pub(crate) write_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
 }
 impl FaultBackend {
     pub(crate) fn new(root: &Path, read_error: Option<VfError>) -> Self {
@@ -41,6 +44,9 @@ impl FaultBackend {
             inner: vfsi_posix::backend(root).unwrap(),
             read_error,
             read_calls: Arc::default(),
+            write_counts: None,
+            write_error: None,
+            write_calls: Arc::default(),
         }
     }
 }
@@ -92,6 +98,42 @@ impl VectorBackend for FaultBackend {
             return Err(error);
         }
         self.inner.vread_impl(ops)
+    }
+    fn vwrite_impl(
+        &mut self,
+        ops: &[WriteOp<&FileOperand, &[u8]>],
+    ) -> vfsi_core::VfResult<Vec<WriteResult>> {
+        self.write_calls.lock().unwrap().push(
+            ops.iter()
+                .map(|op| op.file().path().unwrap().to_path_buf())
+                .collect(),
+        );
+        if let Some(error) = self.write_error.take() {
+            return Err(error);
+        }
+        if let Some(counts) = self.write_counts.take() {
+            assert_eq!(counts.len(), ops.len());
+            let partial: Vec<WriteOp> = ops
+                .iter()
+                .zip(counts)
+                .map(|(op, count)| {
+                    assert!(count <= op.data().len());
+                    let mut partial =
+                        WriteOp::new(op.file().clone(), op.offset(), op.data()[..count].to_vec());
+                    if op.creates() {
+                        partial = partial.with_creation();
+                    }
+                    if op.truncates() {
+                        partial = partial.with_truncate();
+                    }
+                    partial
+                })
+                .collect();
+            self.inner
+                .vwrite_impl(&partial.iter().map(WriteOp::borrowed).collect::<Vec<_>>())
+        } else {
+            self.inner.vwrite_impl(ops)
+        }
     }
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_core::VfRes {
         self.inner.vgetattrs_impl(attrs)

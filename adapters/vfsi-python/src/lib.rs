@@ -1975,8 +1975,15 @@ impl NfsClient {
                 ) {
                     Ok(results) => {
                         let results = validate_write_results("copy_many", &ops, results)?;
-                        for (&index, result) in write_remaining.iter().zip(results) {
-                            copied[index] = Some(result.written as u64);
+                        for ((&index, op), result) in write_remaining.iter().zip(&ops).zip(results)
+                        {
+                            if result.written != op.data().len() {
+                                // Copy promises complete contents, unlike a primitive
+                                // WRITE. Never replay a truncating write after partial progress.
+                                errors.insert(index, libc::EIO as u32);
+                            } else {
+                                copied[index] = Some(result.written as u64);
+                            }
                         }
                         break;
                     }
@@ -2566,3 +2573,6 @@ mod aggregate_listdir_error_tests {
 mod prr_oct13_round13;
 #[cfg(all(test, feature = "dummy"))]
 mod prr_test_support;
+
+#[cfg(all(test, feature = "dummy"))]
+mod prr_oct13_round14;
