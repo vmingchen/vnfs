@@ -17,8 +17,8 @@ import weakref
 from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
-from glob import has_magic
 from functools import partial
+from glob import has_magic
 from itertools import groupby
 from urllib.parse import unquote, urlsplit
 
@@ -919,7 +919,8 @@ class _RawVfsiFile(io.RawIOBase):
             if self._fd is None and self._pos == 0:
                 # Whole-file read: one batched read, no size stat, no OPEN.
                 data, errors = self.fs._client.read_all_many(
-                    [self.fs._native_path(self.path)]
+                    [self.fs._native_path(self.path)],
+                    self.fs.read_all_max_total_bytes,
                 )
                 if errors:
                     raise _oserror(errors[0], self.path)
@@ -1269,7 +1270,8 @@ class VfsiFile(AbstractBufferedFile):
                 data = self._raw.read(self.size)
             else:
                 data, errors = self.fs._client.read_all_many(
-                    [self.fs._native_path(self.path)]
+                    [self.fs._native_path(self.path)],
+                    self.fs.read_all_max_total_bytes,
                 )
                 if errors:
                     raise _oserror(errors[0], self.path)
@@ -2569,11 +2571,16 @@ class VfsiFileSystem(AbstractFileSystem):
         with self._dircache_lock:
             self._dircache_epoch += 1
             self.dircache.clear()
-        if not self._client.closed:
-            self._client.shutdown()
-        token = getattr(self, "_fs_token_", None)
-        if token is not None:
-            type(self)._cache.pop(token, None)
+        try:
+            if not self._client.closed:
+                self._client.shutdown()
+        finally:
+            # _ClientPool.shutdown() invalidates the pool before releasing
+            # native sessions. If cleanup then raises, this object is still
+            # unusable and must not remain available from fsspec's cache.
+            token = getattr(self, "_fs_token_", None)
+            if token is not None:
+                type(self)._cache.pop(token, None)
 
     def __enter__(self):
         if self.closed:
@@ -3013,7 +3020,35 @@ class VfsiFileSystem(AbstractFileSystem):
         ]
         self._invalidate_namespace(internal_missing)
         for depth in sorted(by_depth):
-            self._client.mkdir_many(by_depth[depth], mode)
+            pending = by_depth[depth]
+            while pending:
+                try:
+                    self._client.mkdir_many(pending, mode)
+                    break
+                except FileExistsError:
+                    # A concurrent mkdir-p may have won after exists_many.
+                    # Accept only paths that now resolve to directories and
+                    # retry siblings that remain absent.
+                    stats, errors = self._client.stat_many(pending)
+                    missing = []
+                    found_directory = False
+                    for index, native in enumerate(pending):
+                        if index in errors:
+                            if errors[index] == errno.ENOENT:
+                                missing.append(native)
+                                continue
+                            raise _oserror(
+                                errors[index], self._internalize(native)
+                            ) from None
+                        attrs = stats[index]
+                        if attrs is None or attrs["type"] != "directory":
+                            raise
+                        found_directory = True
+                    if not missing:
+                        break
+                    if not found_directory:
+                        raise
+                    pending = missing
 
     def _makedirs_batched(self, paths, exist_ok=False):
         """fsspec ``makedirs`` semantics for many paths, batched."""
@@ -3163,8 +3198,7 @@ class VfsiFileSystem(AbstractFileSystem):
         change = info.get("change")
         if change is not None:
             return (
-                f"fs_id:{info.get('fs_id')}:change:{change}:"
-                f"fileid:{info.get('fileid')}"
+                f"fs_id:{info.get('fs_id')}:change:{change}:fileid:{info.get('fileid')}"
             )
         return (
             f"fs_id:{info.get('fs_id')}:fileid:{info.get('fileid')}:"
@@ -3210,7 +3244,6 @@ class VfsiFileSystem(AbstractFileSystem):
         valid = [index for index in range(len(paths)) if index not in failures]
         valid_sizes = [stats[index].get("size", 0) for index in valid]
         limit = self.read_all_max_total_bytes
-        self._check_read_allocation(sum(valid_sizes), paths[0] if paths else None)
         retained = 0
 
         def read_streamed(index, size, budget):
@@ -3394,7 +3427,9 @@ class VfsiFileSystem(AbstractFileSystem):
             raise
         if start == 0 and end is None:
             # Whole file: read_allv skips the size stat entirely.
-            data, errors = self._client.read_all_many([self._native_path(internal)])
+            data, errors = self._client.read_all_many(
+                [self._native_path(internal)], self.read_all_max_total_bytes
+            )
             if errors:
                 raise _oserror(errors[0], internal)
             result = data[0] or b""
@@ -3671,7 +3706,12 @@ class VfsiFileSystem(AbstractFileSystem):
         with ExitStack() as stack:
             remote = self.open(path, "rb", cache_type="none")
             stack.push(partial(_close_reader_on_exit, remote))
-            if max_bytes == 0:
+            if max_bytes == 0 or (
+                max_bytes is None and self.read_all_max_total_bytes == 0
+            ):
+                # A zero-byte budget still permits an EOF probe. The pinned
+                # handle's size distinguishes empty files without requesting
+                # a one-byte buffer that would exceed the limit.
                 if remote.size:
                     limit = (
                         self.read_all_max_total_bytes
@@ -3852,7 +3892,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 self._native_path(self._checked_strip_protocol(remote_path))
                 for remote_path, _, _ in selected
             ]
-            data, errors = self._client.read_all_many(native)
+            data, errors = self._client.read_all_many(native, read_batch_bytes)
             for i, ((remote_path, local_path, _), buf) in enumerate(
                 zip(selected, data)
             ):
@@ -4085,6 +4125,8 @@ class VfsiFileSystem(AbstractFileSystem):
         """Open a list of ``OpenFile`` objects in one openv batch."""
         paths = [self._checked_strip_protocol(f.path) for f in open_files]
         modes = [f.mode.replace("t", "").replace("b", "") + "b" for f in open_files]
+        for mode in modes:
+            _normalize_mode(mode)
         effective_block_size = self.block_size if block_size is None else block_size
         effective_cache_type = self.cache_type if cache_type is None else cache_type
         effective_cache_options = (
@@ -4420,6 +4462,11 @@ class VfsiFileSystem(AbstractFileSystem):
         dst = self._checked_strip_protocol(path2)
         info = self.info(src)
         if info["type"] == "directory":
+            dst_stats, dst_errors = self._client.stat_many([self._native_path(dst)])
+            if 0 in dst_errors and dst_errors[0] != errno.ENOENT:
+                raise _oserror(dst_errors[0], dst) from None
+            if dst_stats[0] is not None and dst_stats[0]["type"] != "directory":
+                raise FileExistsError(errno.EEXIST, "File exists", dst)
             self._ensure_dirs([dst], 0o755)
             _complete_callback(callback, 0)
             return
@@ -4474,6 +4521,8 @@ class VfsiFileSystem(AbstractFileSystem):
                 i = min(errors)
                 if errors[i] != errno.ENOENT:
                     raise _oserror(errors[i], (src, dst)[i])
+            if src_is_dir and stats[1] is not None and not dst_is_dir:
+                raise FileExistsError(errno.EEXIST, "File exists", dst)
             if src_is_dir and not dst_is_dir:
                 self._copy_recursive(
                     src,
@@ -4561,25 +4610,54 @@ class VfsiFileSystem(AbstractFileSystem):
         self._invalidate_namespace([dst for _, dst in pairs])
         native_pairs = [(self._native_path(a), self._native_path(b)) for a, b in pairs]
         copied, errors = self._client.copy_many(native_pairs)
-        if errors and all(err == 2 for err in errors.values()):
-            if self.auto_mkdir:
-                # Successful pairs may have overwritten another source in
-                # this batch. Never replay them while recovering missing parents.
-                failed = sorted(errors)
-                retry_pairs = [native_pairs[index] for index in failed]
-                parents = {posixpath.dirname(b) for _, b in retry_pairs}
-                internal_parents = [
-                    self._internalize(parent)
-                    for parent in sorted(parents)
-                    if parent not in ("", "/")
-                ]
+        missing = sorted(
+            index for index, code in errors.items() if code == errno.ENOENT
+        )
+        if missing and self.auto_mkdir:
+            # Successful pairs may have overwritten another source in this
+            # batch. Retry only ENOENT pairs; retain unrelated per-item errors.
+            parents = {posixpath.dirname(native_pairs[index][1]) for index in missing}
+            internal_parents = [
+                self._internalize(parent)
+                for parent in sorted(parents)
+                if parent not in ("", "/")
+            ]
+            parent_errors = {}
+            try:
                 self._ensure_dirs(internal_parents, 0o755)
-                retried, retry_errors = self._client.copy_many(retry_pairs)
-                for position, index in enumerate(failed):
+            except OSError as error:
+                if isinstance(error, ConnectionError) or error.errno is None:
+                    raise
+                # Only a semantic failure needs parent-by-parent recovery.
+                # A bad parent must not block independent successful copies
+                # or bypass the original per-item error policy.
+                for parent in internal_parents:
+                    try:
+                        self._ensure_dirs([parent], 0o755)
+                    except OSError as failure:
+                        if (
+                            isinstance(failure, ConnectionError)
+                            or failure.errno is None
+                        ):
+                            raise
+                        parent_errors[parent] = failure.errno
+            ready = []
+            for index in missing:
+                parent = self._internalize(posixpath.dirname(native_pairs[index][1]))
+                if parent in parent_errors:
+                    errors[index] = parent_errors[parent]
+                else:
+                    ready.append(index)
+            if ready:
+                retried, retry_errors = self._client.copy_many(
+                    [native_pairs[index] for index in ready]
+                )
+                for position, index in enumerate(ready):
                     copied[index] = retried[position]
-                errors = {
-                    failed[position]: code for position, code in retry_errors.items()
-                }
+                    errors.pop(index, None)
+                errors.update(
+                    {ready[position]: code for position, code in retry_errors.items()}
+                )
         if callback is not None:
             for i, (src, dst) in enumerate(pairs):
                 if i in errors or copied[i] is None:
@@ -4780,14 +4858,36 @@ class VfsiFileSystem(AbstractFileSystem):
             except (FileNotFoundError, OSError) as error:
                 if getattr(error, "errno", None) == errno.EFBIG:
                     raise
-                if self.isfile(internal):
-                    info = self.info(internal)
-                    files = {"": info} if detail else [""]
-                    yield internal, [], files
-                    return
-                if on_error == "raise":
-                    raise
-                tree = self._best_effort_walk_tree(internal, maxdepth, on_error)
+                try:
+                    root_is_file = self.isfile(internal)
+                except (FileNotFoundError, OSError) as probe_error:
+                    if getattr(probe_error, "errno", None) == errno.EFBIG:
+                        raise
+                    if on_error == "raise":
+                        raise probe_error
+                    if callable(on_error):
+                        on_error(probe_error)
+                    tree = []
+                else:
+                    if root_is_file:
+                        try:
+                            info = self.info(internal)
+                        except (FileNotFoundError, OSError) as probe_error:
+                            if getattr(probe_error, "errno", None) == errno.EFBIG:
+                                raise
+                            if on_error == "raise":
+                                raise probe_error
+                            if callable(on_error):
+                                on_error(probe_error)
+                            tree = []
+                        else:
+                            files = {"": info} if detail else [""]
+                            yield internal, [], files
+                            return
+                    elif on_error == "raise":
+                        raise
+                    else:
+                        tree = self._best_effort_walk_tree(internal, maxdepth, on_error)
         by_dir = {}
         for directory, infos in tree:
             dirs = {}
