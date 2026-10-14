@@ -256,6 +256,32 @@ def _close_reader_on_exit(reader, exc_type, primary_error, traceback):
         raise
 
 
+def _enter_individually(open_files):
+    """Enter wrappers with primary-error and descriptor ownership preserved."""
+    entered = []
+    try:
+        for open_file in open_files:
+            entered.append(open_file.__enter__())
+    except BaseException as primary_error:
+        cleanup_error = None
+        # The failing entry may already own a handle before wrapper setup fails.
+        for open_file in reversed(open_files[: len(entered) + 1]):
+            try:
+                open_file.__exit__(
+                    type(primary_error), primary_error, primary_error.__traceback__
+                )
+            except BaseException as error:
+                cleanup_error = cleanup_error or error
+                for stream in open_file.fobjects:
+                    raw = getattr(stream, "_raw", stream)
+                    if isinstance(raw, _RawVfsiFile):
+                        raw.fs._client.defer_close_many([raw._fd])
+        if cleanup_error is not None:
+            raise primary_error from cleanup_error
+        raise
+    return entered
+
+
 def _write_fully(file, data, callback=None):
     """Finish a chunk without treating a valid short write as completion."""
     offset = 0
@@ -4159,14 +4185,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 raise NotImplementedError("transactional update modes are unsupported")
             # OpenFile already handles text/compression finalization and scalar
             # transaction enrollment. Reuse it instead of a second coordinator.
-            with ExitStack() as stack:
-                files = []
-                for entry in open_files:
-                    # __enter__ can open a handle before wrapper setup fails.
-                    stack.push(entry)
-                    files.append(entry.__enter__())
-                stack.pop_all()
-            return files
+            return _enter_individually(open_files)
         if self.auto_mkdir and any(any(c in m for c in "wax") for m in modes):
             parents = {
                 posixpath.dirname(path)
