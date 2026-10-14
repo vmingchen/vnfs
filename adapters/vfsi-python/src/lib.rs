@@ -195,6 +195,7 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> PyErr {
 /// Map a `VfError` onto the Python exception class that matches its errno.
 fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
     let index = e.index();
+    let filename = path.map(|path| path.as_os_str().to_os_string());
     let what = path
         .map(|p| format!(": '{}'", p.display()))
         .unwrap_or_default();
@@ -203,25 +204,18 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
             PyErr::new::<PyConnectionError, _>(format!("{}{}", message, what))
         }
         VfError::Op { err_no, .. } | VfError::OpUnattributed { err_no, .. } => match err_no {
-            ERR_NOENT => PyErr::new::<PyFileNotFoundError, _>((
-                2,
-                format!("No such file or directory{}", what),
-            )),
-            ERR_ACCES => {
-                PyErr::new::<PyPermissionError, _>((13, format!("Permission denied{}", what)))
+            ERR_NOENT => {
+                PyErr::new::<PyFileNotFoundError, _>((2, "No such file or directory", filename))
             }
-            ERR_EXIST => PyErr::new::<PyFileExistsError, _>((17, format!("File exists{}", what))),
-            ERR_NOTDIR => {
-                PyErr::new::<PyNotADirectoryError, _>((20, format!("Not a directory{}", what)))
-            }
-            ERR_ISDIR => {
-                PyErr::new::<PyIsADirectoryError, _>((21, format!("Is a directory{}", what)))
-            }
-            ERR_INVAL => PyErr::new::<PyValueError, _>(format!("Invalid argument{}", what)),
+            ERR_ACCES => PyErr::new::<PyPermissionError, _>((13, "Permission denied", filename)),
+            ERR_EXIST => PyErr::new::<PyFileExistsError, _>((17, "File exists", filename)),
+            ERR_NOTDIR => PyErr::new::<PyNotADirectoryError, _>((20, "Not a directory", filename)),
+            ERR_ISDIR => PyErr::new::<PyIsADirectoryError, _>((21, "Is a directory", filename)),
+            ERR_INVAL => PyErr::new::<PyOSError, _>((22, "Invalid argument", filename)),
             VF_ERR_UNSUPPORTED => {
                 PyErr::new::<PyNotImplementedError, _>(format!("operation is unsupported{}", what))
             }
-            other => PyErr::new::<PyOSError, _>((other, format!("op failed{}", what))),
+            other => PyErr::new::<PyOSError, _>((other, "op failed", filename)),
         },
         _ => PyErr::new::<PyOSError, _>("unknown vnfs error"),
     };
