@@ -4616,23 +4616,48 @@ class VfsiFileSystem(AbstractFileSystem):
         if missing and self.auto_mkdir:
             # Successful pairs may have overwritten another source in this
             # batch. Retry only ENOENT pairs; retain unrelated per-item errors.
-            retry_pairs = [native_pairs[index] for index in missing]
-            parents = {posixpath.dirname(dst) for _, dst in retry_pairs}
+            parents = {posixpath.dirname(native_pairs[index][1]) for index in missing}
             internal_parents = [
                 self._internalize(parent)
                 for parent in sorted(parents)
                 if parent not in ("", "/")
             ]
-            self._ensure_dirs(internal_parents, 0o755)
-            retried, retry_errors = self._client.copy_many(retry_pairs)
-            for position, index in enumerate(missing):
-                copied[index] = retried[position]
-            errors = {
-                index: code for index, code in errors.items() if index not in missing
-            }
-            errors.update(
-                {missing[position]: code for position, code in retry_errors.items()}
-            )
+            parent_errors = {}
+            try:
+                self._ensure_dirs(internal_parents, 0o755)
+            except OSError as error:
+                if isinstance(error, ConnectionError) or error.errno is None:
+                    raise
+                # Only a semantic failure needs parent-by-parent recovery.
+                # A bad parent must not block independent successful copies
+                # or bypass the original per-item error policy.
+                for parent in internal_parents:
+                    try:
+                        self._ensure_dirs([parent], 0o755)
+                    except OSError as failure:
+                        if (
+                            isinstance(failure, ConnectionError)
+                            or failure.errno is None
+                        ):
+                            raise
+                        parent_errors[parent] = failure.errno
+            ready = []
+            for index in missing:
+                parent = self._internalize(posixpath.dirname(native_pairs[index][1]))
+                if parent in parent_errors:
+                    errors[index] = parent_errors[parent]
+                else:
+                    ready.append(index)
+            if ready:
+                retried, retry_errors = self._client.copy_many(
+                    [native_pairs[index] for index in ready]
+                )
+                for position, index in enumerate(ready):
+                    copied[index] = retried[position]
+                    errors.pop(index, None)
+                errors.update(
+                    {ready[position]: code for position, code in retry_errors.items()}
+                )
         if callback is not None:
             for i, (src, dst) in enumerate(pairs):
                 if i in errors or copied[i] is None:

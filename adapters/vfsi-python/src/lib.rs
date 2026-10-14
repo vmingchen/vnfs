@@ -73,6 +73,114 @@ fn remap_aggregate_listdir_error(
         None => (error, None),
     }
 }
+
+/// Validate a request prefix in original order without retaining directory data.
+/// Used only after a semantic vector error or an early allocation-budget stop;
+/// interleaved pages do not establish which original directory overflows first.
+fn validate_aggregate_listdir_prefix(
+    fs: &mut dyn vfsi_sync::backend::VectorBackend,
+    paths: &[PathBuf],
+    max_entries: usize,
+    max_path_bytes: usize,
+) -> vfsi_core::VfResult<()> {
+    let mut budget = vfsi_core::internal::TraversalBudget::new(max_entries, max_path_bytes);
+    for (index, path) in paths.iter().enumerate() {
+        let mut overflow = false;
+        fs.visit_dir_impl(
+            path,
+            full_mask(),
+            budget.remaining_entries().saturating_add(1),
+            &mut |entry| {
+                overflow = budget.charge_paths(entry.file.path()).is_err();
+                !overflow
+            },
+        )
+        .map_err(|error| error.map_index(|_| index))?;
+        if overflow {
+            return Err(VfError::failure(index, libc::EFBIG as u32));
+        }
+    }
+    Ok(())
+}
+
+fn aggregate_listdirs(
+    fs: &mut dyn vfsi_sync::backend::VectorBackend,
+    paths: &[PathBuf],
+    max_entries: usize,
+    max_path_bytes: usize,
+) -> vfsi_core::VfResult<Vec<Vec<VfAttrs>>> {
+    let mut unique_paths = Vec::new();
+    let mut unique_to_original = Vec::new();
+    let mut unique_index_by_dir = HashMap::new();
+    for (index, path) in paths.iter().enumerate() {
+        if !unique_index_by_dir.contains_key(path) {
+            unique_index_by_dir.insert(path.clone(), unique_paths.len());
+            unique_paths.push(path.clone());
+            unique_to_original.push(index);
+        }
+    }
+    let dirs: Vec<&Path> = unique_paths.iter().map(PathBuf::as_path).collect();
+    let mut unique_entries = vec![Vec::new(); dirs.len()];
+    let mut budget = vfsi_core::internal::TraversalBudget::new(max_entries, max_path_bytes);
+    let mut overflow = None;
+    let mut invalid_directory = false;
+    let result = fs.vlistdirs_impl(
+        &dirs,
+        full_mask(),
+        max_entries.saturating_add(1),
+        false,
+        &mut |entry, directory| {
+            let Some(&index) = unique_index_by_dir.get(directory) else {
+                invalid_directory = true;
+                return false;
+            };
+            if budget.charge_paths(entry.file.path()).is_err() {
+                overflow = Some(unique_to_original[index]);
+                return false;
+            }
+            unique_entries[index].push(entry.clone());
+            true
+        },
+    );
+    if invalid_directory {
+        return Err(VfError::transport(None, "invalid vlistdirs directory"));
+    }
+    if let Err(error) = result {
+        let (error, index) = remap_aggregate_listdir_error(error, &unique_to_original, paths);
+        // Never replay an ambiguous transport failure, even if it is indexed.
+        if !error.is_transport()
+            && let Some(index) = index
+        {
+            validate_aggregate_listdir_prefix(fs, &paths[..index], max_entries, max_path_bytes)?;
+        }
+        return Err(error);
+    }
+    if let Some(index) = overflow {
+        validate_aggregate_listdir_prefix(fs, paths, max_entries, max_path_bytes)?;
+        // A concurrent shrink can make the second observation fit. The first
+        // vector was interrupted, so its partial groups still cannot be used.
+        return Err(VfError::failure(index, libc::EFBIG as u32));
+    }
+
+    // Complete unique listings are charged again in original request order,
+    // including duplicates, while constructing the caller-visible groups.
+    let mut budget = vfsi_core::internal::TraversalBudget::new(max_entries, max_path_bytes);
+    paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            unique_entries[unique_index_by_dir[path]]
+                .iter()
+                .map(|entry| {
+                    budget
+                        .charge_paths(entry.file.path())
+                        .map_err(|_| VfError::failure(index, libc::EFBIG as u32))?;
+                    Ok(entry.clone())
+                })
+                .collect()
+        })
+        .collect()
+}
 /// Directory paths and their entries returned to Python by a tree walk.
 type WalkResult = Vec<(Py<PyString>, Vec<Py<PyDict>>)>;
 
@@ -1595,143 +1703,10 @@ impl NfsClient {
                 // Walk prefetches sibling directories with a shared remaining
                 // budget. Route that batch through the backend's vector listing
                 // operation so NFS can resolve and READDIR siblings together.
-                let mut unique_paths = Vec::new();
-                let mut unique_to_original = Vec::new();
-                let mut unique_index_by_dir: HashMap<PathBuf, usize> = HashMap::new();
-                for (index, path) in paths.iter().enumerate() {
-                    if !unique_index_by_dir.contains_key(path) {
-                        let unique_index = unique_paths.len();
-                        unique_paths.push(path.clone());
-                        unique_to_original.push(index);
-                        unique_index_by_dir.insert(path.clone(), unique_index);
-                    }
-                }
-                let dirs: Vec<&Path> = unique_paths.iter().map(PathBuf::as_path).collect();
-                let mut unique_entries = vec![Vec::new(); unique_paths.len()];
-                let mut invalid_directory = false;
-                let result = fs.vlistdirs_impl(
-                    &dirs,
-                    full_mask(),
-                    max_entries.saturating_add(1),
-                    false,
-                    &mut |entry, directory| {
-                        let Some(&unique_index) = unique_index_by_dir.get(directory) else {
-                            invalid_directory = true;
-                            return false;
-                        };
-                        unique_entries[unique_index].push(entry.clone());
-                        true
-                    },
-                );
-                if invalid_directory {
-                    return Err(to_py_err(
-                        VfError::transport(None, "invalid vlistdirs directory"),
-                        None,
-                    ));
-                }
-
-                // The backend returns each unique directory once. Apply shared
-                // budgets in original request order so non-adjacent duplicates
-                // cannot move the reported first over-budget input.
-                let apply_budgets = || {
-                    let mut grouped = vec![Vec::new(); paths.len()];
-                    let mut counted_entries = 0usize;
-                    let mut counted_path_bytes = 0usize;
-                    let mut overflow = None;
-                    for (index, path) in paths.iter().enumerate() {
-                        let Some(&unique_index) = unique_index_by_dir.get(path) else {
-                            overflow = Some(index);
-                            break;
-                        };
-                        for entry in &unique_entries[unique_index] {
-                            if counted_entries >= max_entries {
-                                overflow = Some(index);
-                                break;
-                            }
-                            counted_entries += 1;
-                            let path_bytes =
-                                entry.file.path().map_or(0, |path| path.as_os_str().len());
-                            let Some(next_bytes) = counted_path_bytes.checked_add(path_bytes)
-                            else {
-                                overflow = Some(index);
-                                break;
-                            };
-                            counted_path_bytes = next_bytes;
-                            if counted_path_bytes > max_path_bytes {
-                                overflow = Some(index);
-                                break;
-                            }
-                            grouped[index].push(entry.clone());
-                        }
-                        if overflow.is_some() {
-                            break;
-                        }
-                    }
-                    (grouped, overflow)
-                };
-
-                if let Err(error) = result {
-                    // A vector backend may fail while resolving all directories,
-                    // before it returns entries for earlier paths. Recheck the
-                    // successful request prefix sequentially so an earlier
-                    // budget overflow retains the scalar API's error precedence.
-                    let (error, index) =
-                        remap_aggregate_listdir_error(error, &unique_to_original, &paths);
-                    if let Some(failure_index) = index {
-                        let mut remaining_entries = max_entries;
-                        let mut remaining_path_bytes = max_path_bytes;
-                        for (prior_index, path) in paths.iter().enumerate().take(failure_index) {
-                            let entries = fs
-                                .listdir_impl(
-                                    path,
-                                    full_mask(),
-                                    remaining_entries.saturating_add(1),
-                                    false,
-                                )
-                                .map_err(|error| {
-                                    to_py_err(
-                                        error.map_index(|_| prior_index),
-                                        Some(path.as_path()),
-                                    )
-                                })?;
-                            if validate_directory_results(
-                                &entries,
-                                remaining_entries,
-                                remaining_path_bytes,
-                            )
-                            .is_err()
-                            {
-                                return Err(to_py_err(
-                                    VfError::failure(prior_index, libc::EFBIG as u32),
-                                    Some(path.as_path()),
-                                ));
-                            }
-                            remaining_entries -= entries.len();
-                            let path_bytes = entries
-                                .iter()
-                                .map(|entry| {
-                                    entry.file.path().map_or(0, |path| path.as_os_str().len())
-                                })
-                                .sum::<usize>();
-                            remaining_path_bytes -= path_bytes;
-                        }
-                    }
-                    return Err(to_py_err(
-                        error,
-                        index
-                            .and_then(|index| paths.get(index))
-                            .map(PathBuf::as_path),
-                    ));
-                }
-
-                let (grouped, overflow) = apply_budgets();
-                if let Some(index) = overflow {
-                    return Err(to_py_err(
-                        VfError::failure(index, libc::EFBIG as u32),
-                        paths.get(index).map(PathBuf::as_path),
-                    ));
-                }
-                Ok(grouped)
+                aggregate_listdirs(fs, &paths, max_entries, max_path_bytes).map_err(|error| {
+                    let path = error.index().and_then(|index| paths.get(index));
+                    to_py_err(error, path.map(PathBuf::as_path))
+                })
             } else {
                 let mut groups = Vec::with_capacity(paths.len());
                 for p in &paths {
@@ -2377,6 +2352,206 @@ mod object_identity_tests {
 #[cfg(test)]
 mod aggregate_listdir_error_tests {
     use super::*;
+    use vfsi_sync::backend::{HandleBackend, VectorBackend};
+
+    #[derive(Default)]
+    struct ListingBackend {
+        pages: Vec<(PathBuf, VfAttrs)>,
+        error: Option<VfError>,
+        vector_entries: usize,
+        scalar_entries: usize,
+        visits: Vec<PathBuf>,
+        empty_visits: bool,
+    }
+
+    impl HandleBackend for ListingBackend {
+        fn sync_data(&mut self, _: &FileOperand) -> vfsi_core::VfResult<()> {
+            unreachable!()
+        }
+        fn open_impl(&mut self, _: &vfsi_core::OpenOp) -> vfsi_core::VfResult<FileOperand> {
+            unreachable!()
+        }
+        fn close_impl(&mut self, _: &FileOperand) -> vfsi_core::VfResult<()> {
+            unreachable!()
+        }
+        fn read_impl(&mut self, _: &ReadOp) -> vfsi_core::VfResult<ReadResult> {
+            unreachable!()
+        }
+        fn write_impl(
+            &mut self,
+            _: WriteOp<&FileOperand, &[u8]>,
+        ) -> vfsi_core::VfResult<WriteResult> {
+            unreachable!()
+        }
+        fn seek_impl(&mut self, _: &FileOperand, _: std::io::SeekFrom) -> vfsi_core::VfResult<u64> {
+            unreachable!()
+        }
+        fn metadata_impl(
+            &mut self,
+            _: vfsi_core::api::Target<'_, FileOperand>,
+            _: vfsi_core::api::AttrsOptions,
+        ) -> vfsi_core::VfResult<VfAttrs> {
+            unreachable!()
+        }
+        fn set_attributes_impl(
+            &mut self,
+            _: &vfsi_core::api::SetAttrsOp<vfsi_core::api::Target<'_, FileOperand>>,
+        ) -> vfsi_core::VfResult<()> {
+            unreachable!()
+        }
+    }
+
+    impl VectorBackend for ListingBackend {
+        fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_core::VfResult<Vec<ReadResult>> {
+            unreachable!()
+        }
+        fn vlistdirs_impl(
+            &mut self,
+            dirs: &[&Path],
+            _: AttrMask,
+            _: usize,
+            _: bool,
+            callback: &mut dyn FnMut(&VfAttrs, &Path) -> bool,
+        ) -> vfsi_core::VfResult<()> {
+            assert_eq!(
+                dirs.iter().copied().collect::<HashSet<_>>().len(),
+                dirs.len()
+            );
+            if let Some(error) = &self.error {
+                return Err(error.clone());
+            }
+            for (directory, entry) in &self.pages {
+                self.vector_entries += 1;
+                if !callback(entry, directory) {
+                    break;
+                }
+            }
+            Ok(())
+        }
+        fn visit_dir_impl(
+            &mut self,
+            dir: &Path,
+            _: AttrMask,
+            _: usize,
+            callback: &mut dyn FnMut(&VfAttrs) -> bool,
+        ) -> vfsi_core::VfResult<()> {
+            self.visits.push(dir.to_path_buf());
+            if !self.empty_visits {
+                for (_, entry) in self.pages.iter().filter(|(directory, _)| directory == dir) {
+                    self.scalar_entries += 1;
+                    if !callback(entry) {
+                        break;
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn pages(names: &[&str]) -> Vec<(PathBuf, VfAttrs)> {
+        names
+            .iter()
+            .map(|name| {
+                let path = Path::new(name);
+                (
+                    path.parent().unwrap().to_path_buf(),
+                    VfAttrs {
+                        file: FileOperand::from_os_path(path),
+                        ..VfAttrs::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn completed_interleaved_groups_preserve_duplicates_without_scalar_listing() {
+        let paths = vec!["/a".into(), "/b".into(), "/a".into()];
+        let mut backend = ListingBackend {
+            pages: pages(&["/a/1", "/b/1", "/a/2"]),
+            ..Default::default()
+        };
+        let groups = aggregate_listdirs(&mut backend, &paths, 5, 20).unwrap();
+        assert_eq!(groups.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1, 2]);
+        assert_eq!(
+            groups[0]
+                .iter()
+                .map(|entry| entry.file.path())
+                .collect::<Vec<_>>(),
+            groups[2]
+                .iter()
+                .map(|entry| entry.file.path())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(backend.vector_entries, 3);
+        assert!(backend.visits.is_empty());
+    }
+
+    #[test]
+    fn interleaved_entry_overflow_checks_the_original_prefix() {
+        let paths = vec!["/a".into(), "/b".into()];
+        let mut backend = ListingBackend {
+            pages: pages(&["/a/1", "/b/1", "/a/2", "/a/3", "/b/2"]),
+            ..Default::default()
+        };
+        let error = aggregate_listdirs(&mut backend, &paths, 2, 100).unwrap_err();
+        assert_eq!(
+            (error.err_no(), error.index()),
+            (libc::EFBIG as u32, Some(0))
+        );
+        assert_eq!(backend.vector_entries, 3);
+        assert_eq!(backend.scalar_entries, 3);
+        assert_eq!(backend.visits.as_slice(), &paths[..1]);
+    }
+
+    #[test]
+    fn byte_overflow_stops_both_vector_and_prefix_before_unrelated_entries() {
+        let paths = vec!["/a".into(), "/b".into()];
+        let mut backend = ListingBackend {
+            pages: pages(&["/a/too-long", "/b/1", "/b/2"]),
+            ..Default::default()
+        };
+        let error = aggregate_listdirs(&mut backend, &paths, 100, 1).unwrap_err();
+        assert_eq!(
+            (error.err_no(), error.index()),
+            (libc::EFBIG as u32, Some(0))
+        );
+        assert_eq!(backend.vector_entries, 1);
+        assert_eq!(backend.scalar_entries, 1);
+        assert_eq!(backend.visits.as_slice(), &paths[..1]);
+    }
+
+    #[test]
+    fn indexed_and_unattributed_transport_errors_never_replay_listings() {
+        let paths = vec!["/a".into(), "/b".into()];
+        for index in [None, Some(1)] {
+            let mut backend = ListingBackend {
+                error: Some(VfError::transport(index, "connection lost")),
+                ..Default::default()
+            };
+            let error = aggregate_listdirs(&mut backend, &paths, 100, 100).unwrap_err();
+            assert!(error.is_transport());
+            assert_eq!(error.index(), index);
+            assert!(backend.visits.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_concurrent_shrink_does_not_publish_interrupted_groups() {
+        let paths = vec!["/a".into()];
+        let mut backend = ListingBackend {
+            pages: pages(&["/a/1", "/a/2"]),
+            empty_visits: true,
+            ..Default::default()
+        };
+        let error = aggregate_listdirs(&mut backend, &paths, 1, 100).unwrap_err();
+        assert_eq!(
+            (error.err_no(), error.index()),
+            (libc::EFBIG as u32, Some(0))
+        );
+        assert_eq!(backend.vector_entries, 2);
+        assert_eq!(backend.visits, paths);
+    }
 
     #[test]
     fn unattributed_transport_error_does_not_name_first_input_path() {

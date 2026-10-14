@@ -146,3 +146,61 @@ def test_nfs_aggregate_budget_overflow_precedes_later_resolution_error(nfs_fs):
     assert error.value.errno == errno.EFBIG
     assert error.value.index == 0
     assert fs._native_path(directory) in str(error.value)
+
+
+def test_aggregate_byte_overflow_stops_before_sibling_continuations(nfs_fs):
+    fs = nfs_fs
+    root = f"/prr-byte-stop-{uuid.uuid4().hex}"
+    first, large = f"{root}/first", f"{root}/large"
+    for directory in (first, large):
+        fs.makedirs(directory, exist_ok=True)
+    fs.pipe_file(f"{first}/entry", b"")
+    fs.pipe({f"{large}/{index:04}-" + "x" * 220: b"" for index in range(1000)})
+
+    fs._client.compound_stats()
+    with pytest.raises(OSError) as scalar:
+        fs._client.listdir(fs._native_path(first), max_entries=2000, max_path_bytes=1)
+    scalar_compounds = fs._client.compound_stats()[0]
+    assert scalar.value.errno == errno.EFBIG
+
+    with pytest.raises(OSError) as aggregate:
+        fs._client.listdir_many(
+            [fs._native_path(first), fs._native_path(large)],
+            recursive=False,
+            max_entries=2000,
+            max_path_bytes=1,
+        )
+    compounds = fs._client.compound_stats()[0]
+    assert aggregate.value.errno == errno.EFBIG
+    assert aggregate.value.index == 0
+    # A bounded vector first wave and ordered overflow check are permitted,
+    # but not fetching the large sibling's remaining READDIR pages.
+    assert compounds <= scalar_compounds + 4, compounds
+
+
+def test_paginated_aggregate_overflow_names_first_original_directory(nfs_fs):
+    fs = nfs_fs
+    root = f"/prr-page-order-{uuid.uuid4().hex}"
+    directories = [f"{root}/d{index:02}" for index in range(15)]
+    for directory in directories:
+        fs.makedirs(directory, exist_ok=True)
+    values = {f"{directories[0]}/{index:04}-" + "x" * 220: b"" for index in range(300)}
+    values.update(
+        {
+            f"{directory}/{index:04}-" + "y" * 220: b""
+            for directory in directories[1:]
+            for index in range(12)
+        }
+    )
+    fs.pipe(values)
+
+    with pytest.raises(OSError) as error:
+        fs._client.listdir_many(
+            [fs._native_path(directory) for directory in directories],
+            recursive=False,
+            max_entries=250,
+            max_path_bytes=16 * 1024 * 1024,
+        )
+    assert error.value.errno == errno.EFBIG
+    assert error.value.index == 0
+    assert fs._native_path(directories[0]) in str(error.value)
