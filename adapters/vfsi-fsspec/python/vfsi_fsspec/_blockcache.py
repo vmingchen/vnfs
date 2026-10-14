@@ -406,6 +406,10 @@ def _invalidate_registered_paths(
         # reload, so refresh here before replacing shared generation metadata.
         cache_fs.load_cache()
         writable = cache_fs._metadata.cached_files[-1]
+        canonical = {}
+        if subtrees and writable:
+            canonical, unknown = cache_fs.fs._canonical_namespace_paths(writable)
+            uncertain = uncertain or unknown
 
         def affected(candidate, detail):
             identity = detail.get("identity")
@@ -414,12 +418,13 @@ def _invalidate_registered_paths(
             ):
                 return True
             for path in paths:
-                if candidate == path:
-                    return True
-                if subtrees and (
-                    path == "/" or candidate.startswith(path.rstrip("/") + "/")
-                ):
-                    return True
+                for name in {candidate, canonical.get(candidate, candidate)}:
+                    if name == path:
+                        return True
+                    if subtrees and (
+                        path == "/" or name.startswith(path.rstrip("/") + "/")
+                    ):
+                        return True
             return False
 
         changed = False

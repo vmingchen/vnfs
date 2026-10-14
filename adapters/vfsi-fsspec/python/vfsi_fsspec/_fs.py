@@ -2966,7 +2966,76 @@ class VfsiFileSystem(AbstractFileSystem):
             self.dircache[internal] = stored
             return True
 
-    def _evict_dircache(self, subtrees=(), exact=(), identities=(), uncertain=False):
+    def _canonical_namespace_paths(self, paths):
+        """Resolve containing directories, preserving each final namespace name."""
+        mapped = {}
+        known = {}
+        targets = {}
+        try:
+            for path in paths:
+                native = self._native_path(path)
+                parent = posixpath.dirname(native)
+                for _ in range(40):
+                    components = parent.strip("/").split("/") if parent != "/" else []
+                    prefixes = [
+                        "/" + "/".join(components[:i])
+                        for i in range(1, len(components) + 1)
+                    ]
+                    missing = [prefix for prefix in prefixes if prefix not in known]
+                    for batch in _bounded_batches(
+                        [len(os.fsencode(prefix)) for prefix in missing],
+                        self.batch_size,
+                        self.max_batch_bytes,
+                    ):
+                        selected = [missing[index] for index in batch]
+                        attrs, errors = self._client.lstat_many(selected)
+                        if any(
+                            code not in (errno.ENOENT, errno.ENOTDIR)
+                            for code in errors.values()
+                        ):
+                            return {}, True
+                        known.update(zip(selected, attrs))
+                    link = next(
+                        (
+                            prefix
+                            for prefix in prefixes
+                            if known[prefix] is not None
+                            and known[prefix]["type"] == "symlink"
+                        ),
+                        None,
+                    )
+                    if link is None:
+                        break
+                    if link not in targets:
+                        targets[link] = self._client.readlink(link)
+                    if ".." in targets[link].split("/"):
+                        # Resolving '..' before intermediate symlinks changes
+                        # server traversal semantics. Evict conservatively.
+                        return {}, True
+                    suffix = parent[len(link) :].lstrip("/")
+                    parent = posixpath.normpath(
+                        posixpath.join(posixpath.dirname(link), targets[link], suffix)
+                    )
+                else:
+                    return {}, True
+                canonical = posixpath.normpath(
+                    posixpath.join(parent, posixpath.basename(native))
+                )
+                if self._root:
+                    prefix = "/" + self._root
+                    if canonical != prefix and not canonical.startswith(prefix + "/"):
+                        # A server symlink can leave the configured view. Such
+                        # names cannot be represented safely as internal paths.
+                        return {}, True
+                mapped[path] = self._internalize(canonical)
+        except (OSError, NotImplementedError, ValueError):
+            # Cache maintenance must not hide the mutation's actual outcome.
+            return {}, True
+        return mapped, False
+
+    def _evict_dircache(
+        self, subtrees=(), exact=(), identities=(), uncertain=False, namespace=False
+    ):
         """Evict many cache keys atomically with one generation bump/scan."""
         subtrees = set(subtrees)
         exact = set(exact)
@@ -2979,7 +3048,19 @@ class VfsiFileSystem(AbstractFileSystem):
                 for key in exact:
                     self.dircache.pop(key, None)
                 return
-            for key in list(self.dircache):
+            keys = list(self.dircache)
+            canonical = {}
+            if namespace and keys:
+                probes = {key: posixpath.join(key, ".vfsi-cache-entry") for key in keys}
+                resolved, unknown = self._canonical_namespace_paths(probes.values())
+                if unknown:
+                    self.dircache.clear()
+                    return
+                canonical = {
+                    key: posixpath.dirname(resolved[probe])
+                    for key, probe in probes.items()
+                }
+            for key in keys:
                 if identities or uncertain:
                     infos = self.dircache.get(key, ())
                     if any(
@@ -2987,14 +3068,14 @@ class VfsiFileSystem(AbstractFileSystem):
                         for info in infos
                     ):
                         exact.add(key)
-                candidate = key
                 in_subtree = False
-                while candidate != "/":
-                    if candidate in subtrees:
-                        in_subtree = True
-                        break
-                    candidate = posixpath.dirname(candidate.rstrip("/")) or "/"
-                if key in exact or in_subtree:
+                for candidate in {key, canonical.get(key, key)}:
+                    while candidate != "/":
+                        if candidate in subtrees:
+                            in_subtree = True
+                            break
+                        candidate = posixpath.dirname(candidate.rstrip("/")) or "/"
+                if key in exact or canonical.get(key) in exact or in_subtree:
                     self.dircache.pop(key, None)
 
     def _register_persistent_cache(self, cache_fs, invalidator):
@@ -3095,6 +3176,15 @@ class VfsiFileSystem(AbstractFileSystem):
         internals = {self._checked_strip_protocol(path) for path in paths}
         if not internals:
             return
+        with self._persistent_cache_lock:
+            registered = any(
+                cache_ref() is not None for cache_ref, _ in self._persistent_cache_refs
+            )
+        if registered or self.dircache:
+            canonical, unknown = self._canonical_namespace_paths(internals)
+            internals.update(canonical.values())
+            if unknown:
+                internals.add("/")
         identities, uncertain = self._invalidate_persistent_caches(
             internals, subtrees=True, evict_listings=False
         )
@@ -3112,6 +3202,7 @@ class VfsiFileSystem(AbstractFileSystem):
             exact=parents | parent_containers,
             identities=identities,
             uncertain=uncertain,
+            namespace=True,
         )
         for internal in internals | parents | parent_containers:
             super().invalidate_cache(internal)
