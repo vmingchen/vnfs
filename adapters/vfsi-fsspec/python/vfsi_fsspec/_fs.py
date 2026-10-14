@@ -4828,14 +4828,36 @@ class VfsiFileSystem(AbstractFileSystem):
             except (FileNotFoundError, OSError) as error:
                 if getattr(error, "errno", None) == errno.EFBIG:
                     raise
-                if self.isfile(internal):
-                    info = self.info(internal)
-                    files = {"": info} if detail else [""]
-                    yield internal, [], files
-                    return
-                if on_error == "raise":
-                    raise
-                tree = self._best_effort_walk_tree(internal, maxdepth, on_error)
+                try:
+                    root_is_file = self.isfile(internal)
+                except (FileNotFoundError, OSError) as probe_error:
+                    if getattr(probe_error, "errno", None) == errno.EFBIG:
+                        raise
+                    if on_error == "raise":
+                        raise probe_error
+                    if callable(on_error):
+                        on_error(probe_error)
+                    tree = []
+                else:
+                    if root_is_file:
+                        try:
+                            info = self.info(internal)
+                        except (FileNotFoundError, OSError) as probe_error:
+                            if getattr(probe_error, "errno", None) == errno.EFBIG:
+                                raise
+                            if on_error == "raise":
+                                raise probe_error
+                            if callable(on_error):
+                                on_error(probe_error)
+                            tree = []
+                        else:
+                            files = {"": info} if detail else [""]
+                            yield internal, [], files
+                            return
+                    elif on_error == "raise":
+                        raise
+                    else:
+                        tree = self._best_effort_walk_tree(internal, maxdepth, on_error)
         by_dir = {}
         for directory, infos in tree:
             dirs = {}
