@@ -18,7 +18,7 @@ from fsspec.caching import MMapCache
 from fsspec.exceptions import BlocksizeMismatchError
 from fsspec.implementations.cached import CachingFileSystem
 
-from ._fs import _enter_individually, _normalize_mode
+from ._fs import _close_reader_on_exit, _enter_individually, _normalize_mode
 
 _CACHE_FORMAT_KEY = "nfs4fs_blockcache_format"
 _CACHE_FORMAT = 1
@@ -60,6 +60,11 @@ if hasattr(os, "register_at_fork"):
 
 class _Nfs4MMapCache(MMapCache):
     """MMapCache with correct exclusive-end block accounting."""
+
+    def close(self):
+        close = getattr(self.cache, "close", None)
+        if close is not None:
+            close()
 
     def _fetch(self, start, end):
         if start is None:
@@ -571,14 +576,14 @@ def _open_many_with_cache(cache_fs, open_files):
 
     results = [None] * len(paths)
     remote_indices = []
-    for index, record in enumerate(records):
-        if record["detail"]["blocks"] is True:
-            results[index] = open(record["filename"], "rb")
-        else:
-            remote_indices.append(index)
-
     remote_files = []
     try:
+        for index, record in enumerate(records):
+            if record["detail"]["blocks"] is True:
+                results[index] = open(record["filename"], "rb")
+            else:
+                remote_indices.append(index)
+
         if remote_indices:
             # VfsiFileSystem.open_many() has one block size per vector call.
             # Reuse each partial generation's established size and retain one
@@ -636,19 +641,24 @@ def _open_many_with_cache(cache_fs, open_files):
         for open_file, file in zip(open_files, results):
             open_file.fobjects = [file]
         return results
-    except BaseException:
-        for file in results:
+    except BaseException as primary:
+        for file in [*results, *(file for file in remote_files if file not in results)]:
             if file is not None:
                 try:
-                    file.close()
+                    _close_reader_on_exit(
+                        file, type(primary), primary, primary.__traceback__
+                    )
                 except BaseException:
                     pass
+        # A grouped CLOSE failure retains the entire cohort's raw tokens,
+        # including members whose facades have already marked themselves closed.
+        cache_fs.fs._client.defer_close_many(
+            [file._raw._fd for file in remote_files if file._raw._fd is not None]
+        )
         for file in remote_files:
-            if file not in results:
-                try:
-                    file.close()
-                except BaseException:
-                    pass
+            # No facade escapes failed setup; deferred tokens now belong to
+            # the client pool. Do not let destructors retry cache metadata.
+            file.closed = True
         raise
 
 
@@ -704,7 +714,13 @@ def _install_fsspec_blockcache_wrappers():
                 cache_fs, normalized, args, kwargs
             )
             file = original_open(cache_fs, path, *args, **kwargs)
-            _mark_compatible_cache(cache_fs, normalized, file)
+            try:
+                _mark_compatible_cache(cache_fs, normalized, file)
+            except BaseException as primary:
+                _close_reader_on_exit(
+                    file, type(primary), primary, primary.__traceback__
+                )
+                raise
             return file
 
     def close_and_update_with_compat(cache_fs, file, close):
