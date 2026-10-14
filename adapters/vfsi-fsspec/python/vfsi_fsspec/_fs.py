@@ -2118,18 +2118,23 @@ class _DeferredWriteFile:
         self._spool = tempfile.SpooledTemporaryFile(
             max_size=fs.transaction_spool_threshold, mode="w+b"
         )
-        self._closed = False
-        self._committed = False
-        self._prepared = False
-        self._stage_owned = False
-        self._published = False
-        parent = posixpath.dirname(path) or "/"
-        # Keep the staging component independent of the destination length;
-        # a valid NAME_MAX-sized basename must still be writable atomically.
-        self.temp_path = posixpath.join(parent, f".nfs4fs-txn-{uuid.uuid4().hex}")
-        if "a" in mode and fs.exists(path):
-            fs._copy_remote_to_fileobj(path, self._spool)
-            self._spool.seek(0, io.SEEK_END)
+        with ExitStack() as stack:
+            # Construction can fail before transaction enrollment. Own the
+            # local spool until append seeding and initialization both succeed.
+            stack.push(partial(_close_reader_on_exit, self._spool))
+            self._closed = False
+            self._committed = False
+            self._prepared = False
+            self._stage_owned = False
+            self._published = False
+            parent = posixpath.dirname(path) or "/"
+            # Keep the staging component independent of the destination length;
+            # a valid NAME_MAX-sized basename must still be writable atomically.
+            self.temp_path = posixpath.join(parent, f".nfs4fs-txn-{uuid.uuid4().hex}")
+            if "a" in mode and fs.exists(path):
+                fs._copy_remote_to_fileobj(path, self._spool)
+                self._spool.seek(0, io.SEEK_END)
+            stack.pop_all()
 
     def writable(self):
         return True
