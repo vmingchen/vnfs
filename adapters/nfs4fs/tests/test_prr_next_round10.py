@@ -28,3 +28,31 @@ def test_close_evicts_instance_cache_when_native_shutdown_raises(tmp_path, monke
         assert not replacement.closed
     finally:
         replacement.close()
+
+
+def test_stale_close_does_not_evict_replacement_from_instance_cache(
+    tmp_path, monkeypatch
+):
+    options = {
+        "backend": "dummy",
+        "dummy_root": str(tmp_path / "cache-retry"),
+        "skip_instance_cache": False,
+    }
+    stale = fsspec.filesystem("nfs4", **options)
+    original_shutdown = stale._client.shutdown
+
+    def shutdown_then_fail():
+        original_shutdown()
+        raise OSError("injected native cleanup failure")
+
+    monkeypatch.setattr(stale._client, "shutdown", shutdown_then_fail)
+    with pytest.raises(OSError, match="injected native cleanup failure"):
+        stale.close()
+
+    replacement = fsspec.filesystem("nfs4", **options)
+    try:
+        assert replacement is not stale
+        stale.close()
+        assert fsspec.filesystem("nfs4", **options) is replacement
+    finally:
+        replacement.close()
