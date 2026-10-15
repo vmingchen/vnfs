@@ -4914,7 +4914,7 @@ class VfsiFileSystem(AbstractFileSystem):
     def rm(self, path, recursive=False, maxdepth=None):
         if maxdepth is not None and maxdepth < 1:
             raise ValueError("maxdepth must be at least 1")
-        if isinstance(path, str):
+        if isinstance(path, (str, os.PathLike)):
             paths = [self._checked_strip_protocol(path)]
         else:
             paths = [self._checked_strip_protocol(p) for p in path]
@@ -5105,11 +5105,20 @@ class VfsiFileSystem(AbstractFileSystem):
     ):
         callback = Callback.as_callback(callback)
         preserve_links = kwargs.get("symlinks", False)
+        # Convert scalar paths before checking their shape, retaining separators
+        # used by fsspec to distinguish directory contents from the directory.
+        if isinstance(path1, os.PathLike):
+            path1 = os.fsdecode(path1)
+        if isinstance(path2, os.PathLike):
+            path2 = os.fsdecode(path2)
         if on_error is None:
             on_error = "ignore" if recursive else "raise"
-        if isinstance(path1, list) and isinstance(path2, list):
+        if not isinstance(path1, str) and not isinstance(path2, str):
+            # Paired inputs must stay paired: expand_path sorts and deduplicates
+            # source collections, which would change their destination mapping.
+            path1, path2 = list(path1), list(path2)
             if len(path1) != len(path2):
-                raise ValueError("path1 and path2 must be lists of equal length")
+                raise ValueError("path1 and path2 must be sequences of equal length")
             pairs = [
                 (self._checked_strip_protocol(a), self._checked_strip_protocol(b))
                 for a, b in zip(path1, path2)
@@ -5124,6 +5133,7 @@ class VfsiFileSystem(AbstractFileSystem):
         # Batched tree copy for the plain "directory -> new name" case.
         if (
             isinstance(path1, str)
+            and isinstance(path2, str)
             and not has_magic(path1)
             and recursive
             and maxdepth is None
@@ -5132,9 +5142,24 @@ class VfsiFileSystem(AbstractFileSystem):
         ):
             src = self._checked_strip_protocol(path1)
             dst = self._checked_strip_protocol(path2)
-            stats, errors = self._client.stat_many(
-                [self._native_path(src), self._native_path(dst)]
+            metadata = (
+                self._client.lstat_many if preserve_links else self._client.stat_many
             )
+            stats, errors = metadata([self._native_path(src), self._native_path(dst)])
+            if (
+                preserve_links
+                and stats[1] is not None
+                and stats[1]["type"] == "symlink"
+            ):
+                # Source links must remain links, while a destination link to a
+                # directory still has the ordinary copy-into-directory meaning.
+                followed, follow_errors = self._client.stat_many(
+                    [self._native_path(dst)]
+                )
+                stats[1] = followed[0]
+                errors.pop(1, None)
+                if 0 in follow_errors:
+                    errors[1] = follow_errors[0]
             src_is_dir = stats[0] is not None and stats[0]["type"] == "directory"
             dst_is_dir = stats[1] is not None and stats[1]["type"] == "directory"
             if errors:
@@ -5392,6 +5417,8 @@ class VfsiFileSystem(AbstractFileSystem):
                     self._client.touch(native)
 
     def symlink(self, target, path, **kwargs):
+        if isinstance(target, os.PathLike):
+            target = os.fsdecode(target)
         with self._cache_mutation([path], namespace=True):
             link = self._native_path(self._checked_strip_protocol(path))
             protocols = (
