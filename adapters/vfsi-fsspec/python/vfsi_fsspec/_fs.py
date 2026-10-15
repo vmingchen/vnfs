@@ -4447,6 +4447,53 @@ class VfsiFileSystem(AbstractFileSystem):
                         child.relative_update(len(buf))
                 callback.relative_update()
 
+    def _upload_file_streamed(
+        self,
+        local_path,
+        remote_path,
+        mode,
+        callback,
+        *,
+        size=None,
+        create_parents=False,
+        **open_kwargs,
+    ):
+        """Own upload endpoints and finish each chunk without unsafe replay."""
+        _validate_write_mode(mode)
+        internal = self._checked_strip_protocol(remote_path)
+        with ExitStack() as stack:
+            source = stack.enter_context(open(local_path, "rb"))
+            callback.set_size(
+                os.fstat(source.fileno()).st_size if size is None else size
+            )
+            if create_parents:
+                self._ensure_dirs([posixpath.dirname(internal) or "/"], 0o755)
+            remote = self.open(
+                internal, "xb" if mode == "create" else "wb", **open_kwargs
+            )
+            stack.push(partial(_close_reader_on_exit, remote))
+            while True:
+                chunk = source.read(min(self.transfer_chunk_size, self.max_batch_bytes))
+                if not chunk:
+                    break
+                _write_fully(remote, chunk, callback=callback)
+
+    def put_file(
+        self, lpath, rpath, callback=DEFAULT_CALLBACK, mode="overwrite", **kwargs
+    ):
+        """Upload one file with complete writes and atomic exclusive create."""
+        _validate_write_mode(mode)
+        internal = self._checked_strip_protocol(rpath)
+        callback = Callback.as_callback(callback)
+        if os.path.isdir(lpath):
+            if mode == "create" and self.exists(internal):
+                raise FileExistsError(errno.EEXIST, "File exists", internal)
+            self.makedirs(internal, exist_ok=True)
+            return
+        self._upload_file_streamed(
+            lpath, internal, mode, callback, create_parents=True, **kwargs
+        )
+
     def put(
         self,
         lpath,
@@ -4526,19 +4573,9 @@ class VfsiFileSystem(AbstractFileSystem):
 
         def upload_streamed(local_path, remote_path, size):
             with callback.branched(local_path, remote_path) as child:
-                child.set_size(size)
-                # Finish fallible local setup before creating/truncating remote.
-                with ExitStack() as stack:
-                    source = stack.enter_context(open(local_path, "rb"))
-                    remote = self.open(remote_path, "xb" if mode == "create" else "wb")
-                    stack.push(partial(_close_reader_on_exit, remote))
-                    while True:
-                        chunk = source.read(
-                            min(self.transfer_chunk_size, self.max_batch_bytes)
-                        )
-                        if not chunk:
-                            break
-                        _write_fully(remote, chunk, callback=child)
+                self._upload_file_streamed(
+                    local_path, remote_path, mode, child, size=size
+                )
             callback.relative_update()
 
         def upload_batched(items):

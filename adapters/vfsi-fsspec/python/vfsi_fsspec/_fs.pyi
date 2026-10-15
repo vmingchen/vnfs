@@ -183,6 +183,14 @@ class VfsiFileSystem(AbstractFileSystem):
         maxdepth: Optional[int] = None,
         **kwargs: Any,
     ) -> None: ...
+    def put_file(
+        self,
+        lpath: Path,
+        rpath: Path,
+        callback: Any = ...,
+        mode: str = "overwrite",
+        **kwargs: Any,
+    ) -> None: ...
     def put(
         self,
         lpath: Union[Path, Sequence[Path]],
