@@ -270,6 +270,17 @@ def _close_reader_on_exit(reader, exc_type, primary_error, traceback):
         raise
 
 
+def _finish_group_files(files):
+    """Release every member's local resources, retaining the first failure."""
+    first_error = None
+    for file in files:
+        try:
+            file._finish_group_close()
+        except BaseException as error:
+            first_error = first_error or error
+    return first_error
+
+
 def _enter_individually(open_files):
     """Enter wrappers with primary-error and descriptor ownership preserved."""
     entered = []
@@ -1787,9 +1798,14 @@ class VfsiFile(AbstractBufferedFile):
         self._raw._fd_generation = None
         self._raw._closed = True
         self._closed = True
-        if self._write_spool is not None:
-            self._write_spool.close()
-            self._write_spool = None
+        # Retain references if a local close fails so explicit cleanup can retry.
+        # ExitStack still attempts both resources and preserves the first error.
+        with ExitStack() as stack:
+            for resource in (self._write_spool, getattr(self, "cache", None)):
+                if callable(getattr(resource, "close", None)):
+                    stack.push(partial(_close_reader_on_exit, resource))
+        self._write_spool = None
+        self.cache = None
 
 
 class _WrappedFiles(list):
@@ -2315,18 +2331,18 @@ class _BufferGroup:
                             if isinstance(completed, int) and 0 <= completed <= len(
                                 batch
                             ):
-                                for member in batch[:completed]:
-                                    member._finish_group_close()
+                                _finish_group_files(batch[:completed])
                             first_error = first_error or error
                         else:
-                            for member in batch:
-                                member._finish_group_close()
+                            local_error = _finish_group_files(batch)
+                            first_error = first_error or local_error
             if first_error is not None:
                 raise first_error
 
+            local_error = _finish_group_files(self.files)
+            if local_error is not None:
+                raise local_error
             self._group_closed = True
-            for member in self.files:
-                member._finish_group_close()
             self._ranges.clear()
             self._whole_files.clear()
             self._speculative_order.clear()
@@ -4740,8 +4756,8 @@ class VfsiFileSystem(AbstractFileSystem):
             except BaseException as error:
                 cleanup_error = error
                 self._client.defer_close_many(pending)
-            for file in files:
-                file._finish_group_close()
+            local_error = _finish_group_files(files)
+            cleanup_error = cleanup_error or local_error
             if cleanup_error is not None:
                 raise setup_error from cleanup_error
             raise
