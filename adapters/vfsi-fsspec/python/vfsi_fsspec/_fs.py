@@ -538,7 +538,11 @@ class _ResilientClient:
         self._native = None
         self._generation += 1
         if old is not None:
-            old.shutdown()
+            if self._pid != os.getpid():
+                # A child must not CLOSE handles or destroy its parent's session.
+                old._abandon_after_fork()
+            else:
+                old.shutdown()
         del old
 
     def __getattr__(self, name):
