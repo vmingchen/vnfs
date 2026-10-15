@@ -1358,10 +1358,12 @@ fn pread_impl(
         .get(&fd)
         .cloned()
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-    let data = lock_or_io(&fs.fs)?.read_raw_impl(&file, offset, len)?;
-    // SAFETY: C caller must provide a buffer of at least `len` bytes.
-    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), buf as *mut u8, data.len()) };
-    Ok(data.len())
+    let request = ReadOp::at(file, offset, len);
+    // SAFETY: the C API requires `buf` to be writable for `len` bytes.
+    // Reading into caller storage avoids a temporary Vec and second copy.
+    let buffer = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), len) };
+    let result = lock_or_io(&fs.fs)?.read_into_impl(&request, buffer)?;
+    Ok(result.read)
 }
 
 /// Read up to `len` bytes at `offset` into `buf`; writes the actual count to
