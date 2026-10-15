@@ -2871,8 +2871,8 @@ class VfsiFileSystem(AbstractFileSystem):
         compression=None,
         **kwargs,
     ):
-        # Validate paths before any fallible wrapper or native setup.
-        self._checked_strip_protocol(path)
+        # Normalize before compression inference or native setup.
+        path = self._checked_strip_protocol(path)
         return _open_with_wrappers(
             self,
             super().open,
@@ -2886,13 +2886,13 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def glob(self, path, *args, **kwargs):
         # The base glob implementation strips the URL before calling find.
-        self._checked_strip_protocol(path)
+        path = self._checked_strip_protocol(path)
         return super().glob(path, *args, **kwargs)
 
     def expand_path(self, path, *args, **kwargs):
         # get(), copy(), and cat() may pass through this base method before
         # their own backend operations see the path.
-        self._checked_strip_protocol(path)
+        path = self._checked_strip_protocol(path)
         # The fsspec scalar branch does not forward assume_literal to its
         # recursive list call. Enter the list branch directly to retain it.
         paths = [path] if isinstance(path, (str, os.PathLike)) else path
@@ -2912,6 +2912,8 @@ class VfsiFileSystem(AbstractFileSystem):
         through logs, tracebacks, or copied URLs. A port is retained for SMB,
         whose native backend accepts ``host:port``.
         """
+        if isinstance(urlpath, os.PathLike):
+            urlpath = os.fsdecode(urlpath)
         if not isinstance(urlpath, str):
             return {}
         parsed = urlsplit(urlpath)
@@ -2924,7 +2926,7 @@ class VfsiFileSystem(AbstractFileSystem):
             raise ValueError("query strings and fragments are not supported")
         host = parsed.hostname
         if host is None:
-            return {}
+            raise ValueError("explicit URL authority must include a hostname")
         if ":" in host:
             host = f"[{host}]"
         if parsed.port is not None:
@@ -2935,7 +2937,9 @@ class VfsiFileSystem(AbstractFileSystem):
     def _strip_protocol(cls, path):
         if isinstance(path, list):
             return [cls._strip_protocol(p) for p in path]
-        if not isinstance(path, str):
+        if isinstance(path, os.PathLike):
+            path = os.fsdecode(path)
+        elif not isinstance(path, str):
             path = str(path)
         protos = (cls.protocol,) if isinstance(cls.protocol, str) else cls.protocol
         parsed = urlsplit(path)
@@ -2965,6 +2969,8 @@ class VfsiFileSystem(AbstractFileSystem):
         """Normalize an instance path without silently changing its server."""
         if isinstance(path, list):
             return [self._checked_strip_protocol(item) for item in path]
+        if isinstance(path, os.PathLike):
+            path = os.fsdecode(path)
         if isinstance(path, str):
             requested_host = type(self)._get_kwargs_from_urls(path).get("host")
             if (
