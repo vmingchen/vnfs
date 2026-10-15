@@ -1,6 +1,7 @@
 """PRR round 15: namespace mutations invalidate directory alias caches."""
 
 import errno
+import math
 
 import fsspec
 import pytest
@@ -220,3 +221,72 @@ def test_parent_component_alias_rename_invalidates_persistent_descendants(
     assert not dummy_fs.exists("/else/real/sub/deep/file")
     with pytest.raises(FileNotFoundError):
         cache.open("/else/real/sub/deep/file", "rb")
+
+
+@pytest.mark.parametrize("max_bytes", [1024, 21])
+def test_bulk_namespace_invalidation_batches_independent_directories(
+    dummy_fs, monkeypatch, max_bytes
+):
+    paths = [f"/dir{i:02}/file" for i in range(32)]
+    for path in paths:
+        dummy_fs.mkdir(path.rsplit("/", 1)[0])
+    dummy_fs.pipe(dict.fromkeys(paths, b"old"))
+    for path in paths:
+        dummy_fs.ls(path.rsplit("/", 1)[0])
+    dummy_fs.batch_size = 8
+    dummy_fs.max_batch_bytes = max_bytes
+    calls = []
+    original = dummy_fs._client.lstat_many
+
+    def record(paths):
+        calls.append(list(paths))
+        return original(paths)
+
+    monkeypatch.setattr(dummy_fs._client, "lstat_many", record)
+    dummy_fs.pipe(dict.fromkeys(paths, b"new"))
+    cohort = min(8, max_bytes // len(b"/dir00"))
+    # One bounded sweep for mutations and one for cached listing keys.
+    assert len(calls) == 2 * math.ceil(len(paths) / cohort)
+    assert all(len(batch) <= 8 for batch in calls)
+    assert all(
+        sum(len(path.encode()) for path in batch) <= max_bytes for batch in calls
+    )
+    assert not dummy_fs.dircache
+    assert dummy_fs.cat(paths) == dict.fromkeys(paths, b"new")
+
+
+def test_namespace_symlink_resolution_batches_each_wave(dummy_fs, monkeypatch):
+    expected = {
+        f"/alias{i:02}/{name}": f"/real{i:02}/{name}"
+        for i in range(16)
+        for name in ("first", "second")
+    }
+    for i in range(16):
+        dummy_fs.mkdir(f"/real{i:02}")
+        dummy_fs.symlink(f"real{i:02}", f"/link{i:02}")
+        dummy_fs.symlink(f"link{i:02}", f"/alias{i:02}")
+    dummy_fs.batch_size = 4
+    calls = []
+    original = dummy_fs._client.lstat_many
+
+    def record(paths):
+        calls.append(list(paths))
+        return original(paths)
+
+    monkeypatch.setattr(dummy_fs._client, "lstat_many", record)
+    mapped, uncertain = dummy_fs._canonical_namespace_paths(expected)
+    assert not uncertain
+    assert mapped == expected
+    assert len(calls) == 3 * 4  # alias, link, real: four compounds per wave
+    assert all(len(batch) == 4 for batch in calls)
+
+
+def test_namespace_resolution_cycle_discards_partial_results(dummy_fs):
+    dummy_fs.mkdir("/ordinary")
+    dummy_fs.symlink("cycle-b", "/cycle-a")
+    dummy_fs.symlink("cycle-a", "/cycle-b")
+    mapped, uncertain = dummy_fs._canonical_namespace_paths(
+        ["/ordinary/file", "/cycle-a/file"]
+    )
+    assert uncertain
+    assert mapped == {}

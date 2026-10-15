@@ -1,6 +1,7 @@
 """PRR round 4: every copy route honors explicit symlink preservation."""
 
 import errno
+import shutil
 
 import fsspec
 import pytest
@@ -168,3 +169,90 @@ def test_default_copy_dereferences_file_links(dummy_fs):
     assert not errors
     assert attrs[0]["type"] == "file"
     assert dummy_fs.cat_file("/destination/source/link") == b"payload"
+
+
+@pytest.mark.parametrize("destination", ["file", "link-file", "directory", "link-dir"])
+def test_paired_directory_copy_validates_destination_like_local(
+    dummy_fs, tmp_path, destination
+):
+    local = fsspec.filesystem("file", auto_mkdir=True)
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    for fs, prefix in ((local, str(oracle)), (dummy_fs, "")):
+        fs.mkdir(prefix + "/source")
+        fs.mkdir(prefix + "/directory")
+        fs.pipe_file(prefix + "/file", b"unchanged")
+        if destination.startswith("link-"):
+            target = "file" if destination == "link-file" else "directory"
+            if fs is local:
+                (oracle / destination).symlink_to(target)
+            else:
+                fs.symlink(target, "/" + destination)
+
+    def copy(fs, prefix):
+        fs.copy(
+            [prefix + "/source"],
+            [prefix + "/" + destination],
+            symlinks=True,
+            on_error="raise",
+        )
+
+    if destination in ("file", "link-file"):
+        for fs, prefix in ((local, str(oracle)), (dummy_fs, "")):
+            with pytest.raises(FileExistsError):
+                copy(fs, prefix)
+            assert fs.cat_file(prefix + "/file") == b"unchanged"
+    else:
+        copy(local, str(oracle))
+        callback = Callback()
+        dummy_fs.copy(
+            ["/source"], ["/" + destination], symlinks=True, callback=callback
+        )
+        assert dummy_fs.isdir("/" + destination)
+        assert callback.value == callback.size == 1
+
+
+@pytest.mark.parametrize("destination", ["link", "other-link", "alias/link"])
+def test_preserved_symlink_same_file_matches_local(
+    dummy_fs, tmp_path, monkeypatch, destination
+):
+    oracle = tmp_path / "oracle"
+    oracle.mkdir()
+    (oracle / "target").write_bytes(b"unchanged")
+    (oracle / "link").symlink_to("target")
+    (oracle / "other-link").symlink_to("target")
+    (oracle / "alias").symlink_to(".")
+    local = fsspec.filesystem("file")
+    with pytest.raises(shutil.SameFileError):
+        local.copy(
+            [str(oracle / "link")],
+            [str(oracle / destination)],
+            symlinks=True,
+            on_error="raise",
+        )
+    dummy_fs.pipe_file("/target", b"unchanged")
+    dummy_fs.symlink("target", "/link")
+    dummy_fs.symlink("target", "/other-link")
+    dummy_fs.symlink(".", "/alias")
+    attempts = []
+    original = dummy_fs._client.symlink
+
+    def record(*args):
+        attempts.append(args)
+        return original(*args)
+
+    monkeypatch.setattr(dummy_fs._client, "symlink", record)
+    with pytest.raises(shutil.SameFileError):
+        dummy_fs.copy(["/link"], ["/" + destination], symlinks=True, on_error="raise")
+    callback = Callback()
+    dummy_fs.copy(
+        ["/link"],
+        ["/" + destination],
+        symlinks=True,
+        on_error="ignore",
+        callback=callback,
+    )
+    assert callback.value == callback.size == 1
+    assert attempts == []
+    assert dummy_fs.readlink("/link") == "target"
+    assert dummy_fs.cat_file("/target") == b"unchanged"

@@ -3024,34 +3024,45 @@ class VfsiFileSystem(AbstractFileSystem):
             return True
 
     def _canonical_namespace_paths(self, paths):
-        """Resolve containing directories, preserving each final namespace name."""
+        """Resolve parents in bounded waves, preserving final namespace names."""
         mapped = {}
         known = {}
         targets = {}
         try:
-            for path in paths:
-                native = self._native_path(path)
-                parent = posixpath.dirname(native)
-                for _ in range(40):
+            pending = [
+                (path, native, posixpath.dirname(native))
+                for path in paths
+                for native in (self._native_path(path),)
+            ]
+            for _ in range(40):
+                prefixes_by_path = []
+                missing = {}
+                for _, _, parent in pending:
                     components = parent.strip("/").split("/") if parent != "/" else []
                     prefixes = [
                         "/" + "/".join(components[:i])
                         for i in range(1, len(components) + 1)
                     ]
-                    missing = [prefix for prefix in prefixes if prefix not in known]
-                    for batch in _bounded_batches(
-                        [len(os.fsencode(prefix)) for prefix in missing],
-                        self.batch_size,
-                        self.max_batch_bytes,
+                    prefixes_by_path.append(prefixes)
+                    missing.update(
+                        (prefix, None) for prefix in prefixes if prefix not in known
+                    )
+                missing = list(missing)
+                for batch in _bounded_batches(
+                    [len(os.fsencode(prefix)) for prefix in missing],
+                    self.batch_size,
+                    self.max_batch_bytes,
+                ):
+                    selected = [missing[index] for index in batch]
+                    attrs, errors = self._client.lstat_many(selected)
+                    if any(
+                        code not in (errno.ENOENT, errno.ENOTDIR)
+                        for code in errors.values()
                     ):
-                        selected = [missing[index] for index in batch]
-                        attrs, errors = self._client.lstat_many(selected)
-                        if any(
-                            code not in (errno.ENOENT, errno.ENOTDIR)
-                            for code in errors.values()
-                        ):
-                            return {}, True
-                        known.update(zip(selected, attrs))
+                        return {}, True
+                    known.update(zip(selected, attrs))
+                unresolved = []
+                for (path, native, parent), prefixes in zip(pending, prefixes_by_path):
                     link = next(
                         (
                             prefix
@@ -3061,34 +3072,40 @@ class VfsiFileSystem(AbstractFileSystem):
                         ),
                         None,
                     )
-                    if link is None:
-                        break
-                    if link not in targets:
-                        targets[link] = self._client.readlink(link)
-                    if ".." in targets[link].split("/"):
-                        # Resolving '..' before intermediate symlinks changes
-                        # server traversal semantics. Evict conservatively.
-                        return {}, True
-                    suffix = parent[len(link) :].lstrip("/")
-                    parent = posixpath.normpath(
-                        posixpath.join(posixpath.dirname(link), targets[link], suffix)
+                    if link is not None:
+                        if link not in targets:
+                            targets[link] = self._client.readlink(link)
+                        if ".." in targets[link].split("/"):
+                            # Resolving '..' before intermediate symlinks changes
+                            # server traversal semantics. Evict conservatively.
+                            return {}, True
+                        suffix = parent[len(link) :].lstrip("/")
+                        parent = posixpath.normpath(
+                            posixpath.join(
+                                posixpath.dirname(link), targets[link], suffix
+                            )
+                        )
+                        unresolved.append((path, native, parent))
+                        continue
+                    canonical = posixpath.normpath(
+                        posixpath.join(parent, posixpath.basename(native))
                     )
-                else:
-                    return {}, True
-                canonical = posixpath.normpath(
-                    posixpath.join(parent, posixpath.basename(native))
-                )
-                if self._root:
-                    prefix = "/" + self._root
-                    if canonical != prefix and not canonical.startswith(prefix + "/"):
-                        # A server symlink can leave the configured view. Such
-                        # names cannot be represented safely as internal paths.
-                        return {}, True
-                mapped[path] = self._internalize(canonical)
+                    if self._root:
+                        prefix = "/" + self._root
+                        if canonical != prefix and not canonical.startswith(
+                            prefix + "/"
+                        ):
+                            # A server symlink can leave the configured view. Such
+                            # names cannot be represented safely as internal paths.
+                            return {}, True
+                    mapped[path] = self._internalize(canonical)
+                pending = unresolved
+                if not pending:
+                    return mapped, False
         except (OSError, NotImplementedError, ValueError):
             # Cache maintenance must not hide the mutation's actual outcome.
             return {}, True
-        return mapped, False
+        return {}, True  # Too many symlinks, including cycles: evict conservatively.
 
     def _evict_dircache(
         self, subtrees=(), exact=(), identities=(), uncertain=False, namespace=False
@@ -5007,7 +5024,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 if first_error is None:
                     first_error = FileNotFoundError(src)
         if dir_pairs:
-            self._ensure_dirs([dst for _, dst in dir_pairs], 0o755)
+            self._makedirs_batched([dst for _, dst in dir_pairs], exist_ok=True)
             for src, dst in dir_pairs:
                 _complete_child(callback, src, dst, 0)
         self._copy_pairs(
@@ -5023,8 +5040,25 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def _copy_symlink_pairs(self, pairs, on_error, callback):
         """Copy stored targets without following links or adding the root twice."""
-        for src, dst in pairs:
+        if not pairs:
+            return
+        # Like shutil.copyfile, reject identical objects even when preserving
+        # the source link. Batch the followed identity probes across all pairs.
+        stats, _ = self._client.stat_many(
+            [self._native_path(path) for pair in pairs for path in pair]
+        )
+        for index, (src, dst) in enumerate(pairs):
             try:
+                source, destination = stats[2 * index : 2 * index + 2]
+                if source is not None and destination is not None:
+                    identity = _handle_identity(source)
+                    if src == dst or (
+                        identity is not None
+                        and identity == _handle_identity(destination)
+                    ):
+                        raise shutil.SameFileError(
+                            f"{src!r} and {dst!r} are the same file"
+                        )
                 target = self.readlink(src)
                 parent = posixpath.dirname(dst)
                 if self.auto_mkdir and parent not in ("", "/"):
@@ -5035,7 +5069,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 # Link creation may already have reached the server; never
                 # suppress an ambiguous transport failure or replay it.
                 raise
-            except (OSError, NotImplementedError):
+            except (OSError, NotImplementedError, shutil.SameFileError):
                 callback.relative_update()
                 if on_error == "raise":
                     raise
