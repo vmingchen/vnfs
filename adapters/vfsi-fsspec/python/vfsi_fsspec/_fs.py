@@ -428,6 +428,10 @@ class _OwnedStream(io.IOBase):
         method = getattr(self._stream, "read1", self._stream.read)
         return self._read_bounded(method, size)
 
+    def peek(self, size=0):
+        # Codecs treat size as a hint and may return more; check actual bytes.
+        return self._read_bounded(self._stream.peek, operator.index(size))
+
     def readline(self, size=-1):
         return self._read_bounded(self._stream.readline, size)
 
