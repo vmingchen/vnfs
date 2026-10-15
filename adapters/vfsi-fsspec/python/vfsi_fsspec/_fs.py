@@ -368,8 +368,10 @@ class _OwnedStream(io.IOBase):
         return self
 
     def __next__(self):
-        self._check_open()
-        return next(self._stream)
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
 
     def readable(self):
         self._check_open()
@@ -403,13 +405,33 @@ class _OwnedStream(io.IOBase):
         self._check_open()
         return self._stream.fileno()
 
-    def readline(self, size=-1):
+    def _read_bounded(self, method, size):
         self._check_open()
-        return self._stream.readline(size)
+        size = -1 if size is None else operator.index(size)
+        fs = getattr(self._raw, "fs", None)
+        if fs is None:
+            return method(size)
+        limit = fs.read_all_max_total_bytes
+        # A one-byte sentinel distinguishes EOF at the cap from an oversized
+        # decoded result. Never ask a codec to materialize unbounded output.
+        bounded = limit + 1 if size < 0 else min(size, limit + 1)
+        data = method(bounded)
+        fs._check_read_allocation(len(data), getattr(self._raw, "path", None))
+        return data
+
+    def read(self, size=-1):
+        return self._read_bounded(self._stream.read, size)
+
+    def read1(self, size=-1):
+        method = getattr(self._stream, "read1", self._stream.read)
+        return self._read_bounded(method, size)
+
+    def readline(self, size=-1):
+        return self._read_bounded(self._stream.readline, size)
 
     def readlines(self, hint=-1):
         self._check_open()
-        return self._stream.readlines(hint)
+        return io.IOBase.readlines(self, hint)
 
 
 class _ResilientClient:
