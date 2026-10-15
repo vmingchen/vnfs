@@ -29,6 +29,8 @@ from fsspec.core import PickleableTextIOWrapper, get_compression
 from fsspec.spec import AbstractBufferedFile, AbstractFileSystem
 from fsspec.transaction import Transaction
 
+from ._caching import _Nfs4MMapCache
+
 __all__ = ["VfsiFile", "VfsiFileSystem"]
 
 _MEMORY_PATH = "<memory>"
@@ -1263,16 +1265,25 @@ class VfsiFile(AbstractBufferedFile):
                     mode=self._raw._native_mode(),
                     block_size=effective_block_size,
                     cache_type=(
-                        "none" if self._deferred_cache_type is not None else cache_type
+                        "none"
+                        if self._deferred_cache_type is not None or cache_type == "mmap"
+                        else cache_type
                     ),
                     cache_options=(
                         {}
-                        if self._deferred_cache_type is not None
+                        if self._deferred_cache_type is not None or cache_type == "mmap"
                         else self._cache_options
                     ),
                     size=size,
                     identity=identity,
                 )
+                if self._buffered_read and cache_type == "mmap" and not defer_cache:
+                    self.cache = _Nfs4MMapCache(
+                        self.blocksize,
+                        self._fetch_range,
+                        self.size,
+                        **self._cache_options,
+                    )
                 if self._buffered_write and self._base_mode == "a":
                     append_size = self._raw.tell() if size is None else size
                     self._raw._pos = append_size
@@ -1324,7 +1335,8 @@ class VfsiFile(AbstractBufferedFile):
         if self._deferred_cache_type is not None:
             cache_type = self._deferred_cache_type
             self._deferred_cache_type = None
-            self.cache = caches[cache_type](
+            factory = _Nfs4MMapCache if cache_type == "mmap" else caches[cache_type]
+            self.cache = factory(
                 self.blocksize,
                 self._fetch_range,
                 self.size,
