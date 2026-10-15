@@ -4852,6 +4852,11 @@ class VfsiFileSystem(AbstractFileSystem):
                 # Like shutil.move / base copy+rm: moving onto an existing
                 # directory moves the source inside it.
                 dst = posixpath.join(dst, posixpath.basename(src))
+                entries, errors = self._client.lstat_many([self._native_path(dst)])
+                if entries[0] is not None:
+                    raise shutil.Error(f"Destination path {dst!r} already exists")
+                if 0 in errors and errors[0] != errno.ENOENT:
+                    raise _oserror(errors[0], dst)
             pairs = [(src, dst)]
         self._invalidate_namespace([path for pair in pairs for path in pair])
         self._client.rename_many(
