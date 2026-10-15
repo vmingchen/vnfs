@@ -13,6 +13,7 @@ import time
 import uuid
 import weakref
 from contextlib import contextmanager
+from functools import partial
 
 from fsspec.caching import MMapCache
 from fsspec.exceptions import BlocksizeMismatchError
@@ -24,6 +25,7 @@ from ._fs import (
     _enter_individually,
     _handle_identity,
     _normalize_mode,
+    _open_with_wrappers,
 )
 
 _CACHE_FORMAT_KEY = "nfs4fs_blockcache_format"
@@ -688,10 +690,36 @@ def _install_fsspec_blockcache_wrappers():
             cache_fs._strip_protocol = strip_checked
             _register_cache(cache_fs)
 
-    def public_open_with_compat(cache_fs, path, *args, **kwargs):
-        if _is_compatible_backend(cache_fs):
-            _normalize_mode(args[0] if args else kwargs.get("mode", "rb"))
-        return original_public_open(cache_fs, path, *args, **kwargs)
+    def public_open_with_compat(
+        cache_fs,
+        path,
+        mode="rb",
+        block_size=None,
+        cache_options=None,
+        compression=None,
+        **kwargs,
+    ):
+        if not _is_compatible_backend(cache_fs):
+            return original_public_open(
+                cache_fs,
+                path,
+                mode,
+                block_size=block_size,
+                cache_options=cache_options,
+                compression=compression,
+                **kwargs,
+            )
+        path = cache_fs._strip_protocol(path)
+        return _open_with_wrappers(
+            cache_fs,
+            partial(original_public_open, cache_fs),
+            path,
+            mode,
+            compression=compression,
+            block_size=block_size,
+            cache_options=cache_options,
+            **kwargs,
+        )
 
     def open_with_compat(cache_fs, path, *args, **kwargs):
         if not _is_compatible_backend(cache_fs):

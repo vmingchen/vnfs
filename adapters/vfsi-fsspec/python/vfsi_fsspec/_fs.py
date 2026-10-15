@@ -321,10 +321,12 @@ class _TextIOWrapper(PickleableTextIOWrapper):
 class _OwnedStream(io.IOBase):
     """A codec stream whose close also releases its explicitly owned file."""
 
-    def __init__(self, stream, owner):
+    def __init__(self, stream, owner, *, fs=None, path=None):
         self._stream = stream
         self._owner = owner
         self._raw = getattr(owner, "_raw", owner)
+        self._policy_fs = fs if fs is not None else getattr(self._raw, "fs", None)
+        self._read_path = getattr(self._raw, "path", path)
         self._closed = False
 
     def _check_open(self):
@@ -408,7 +410,7 @@ class _OwnedStream(io.IOBase):
     def _read_bounded(self, method, size):
         self._check_open()
         size = -1 if size is None else operator.index(size)
-        fs = getattr(self._raw, "fs", None)
+        fs = self._policy_fs
         if fs is None:
             return method(size)
         limit = fs.read_all_max_total_bytes
@@ -416,7 +418,7 @@ class _OwnedStream(io.IOBase):
         # decoded result. Never ask a codec to materialize unbounded output.
         bounded = limit + 1 if size < 0 else min(size, limit + 1)
         data = method(bounded)
-        fs._check_read_allocation(len(data), getattr(self._raw, "path", None))
+        fs._check_read_allocation(len(data), self._read_path)
         return data
 
     def read(self, size=-1):
@@ -432,6 +434,44 @@ class _OwnedStream(io.IOBase):
     def readlines(self, hint=-1):
         self._check_open()
         return io.IOBase.readlines(self, hint)
+
+
+def _open_with_wrappers(fs, opener, path, mode="rb", compression=None, **kwargs):
+    """Construct text/codecs with one owner and shared failure cleanup."""
+    _normalize_mode(mode)
+    text = "b" not in mode
+    text_kwargs = {
+        key: kwargs.pop(key)
+        for key in ("encoding", "errors", "newline")
+        if text and key in kwargs
+    }
+    binary_mode = mode.replace("t", "") + "b" if text else mode
+    codec = get_compression(path, compression) if compression is not None else None
+    file = None
+    try:
+        with ExitStack() as stack:
+            file = opener(path, binary_mode, **kwargs)
+            stack.push(partial(_close_reader_on_exit, file))
+            stream = file
+            if codec is not None:
+                stream = _OwnedStream(
+                    compr[codec](file, mode=binary_mode[0]), file, fs=fs, path=path
+                )
+                stack.push(partial(_close_reader_on_exit, stream))
+            if text:
+                stream = _TextIOWrapper(stream, **text_kwargs)
+            stack.pop_all()
+            return stream
+    except BaseException as primary:
+        if isinstance(file, _DeferredWriteFile):
+            transaction = fs._transaction
+            if transaction is not None and file in transaction.files:
+                transaction.files.remove(file)
+            try:
+                file.discard()
+            except BaseException as cleanup:
+                raise primary from cleanup
+        raise
 
 
 class _ResilientClient:
@@ -2809,47 +2849,18 @@ class VfsiFileSystem(AbstractFileSystem):
         compression=None,
         **kwargs,
     ):
-        # Validate before fsspec removes text flags, otherwise malformed modes
-        # can become valid write modes and truncate files or create parents.
-        _normalize_mode(mode)
+        # Validate paths before any fallible wrapper or native setup.
         self._checked_strip_protocol(path)
-        text = "b" not in mode
-        text_kwargs = {
-            key: kwargs.pop(key)
-            for key in ("encoding", "errors", "newline")
-            if text and key in kwargs
-        }
-        binary_mode = mode.replace("t", "") + "b" if text else mode
-        codec = get_compression(path, compression) if compression is not None else None
-        file = None
-        try:
-            with ExitStack() as stack:
-                file = super().open(
-                    path,
-                    binary_mode,
-                    block_size=block_size,
-                    cache_options=cache_options,
-                    **kwargs,
-                )
-                stack.push(partial(_close_reader_on_exit, file))
-                stream = file
-                if codec is not None:
-                    stream = _OwnedStream(compr[codec](file, mode=binary_mode[0]), file)
-                    stack.push(partial(_close_reader_on_exit, stream))
-                if text:
-                    stream = _TextIOWrapper(stream, **text_kwargs)
-                stack.pop_all()
-                return stream
-        except BaseException as primary:
-            if isinstance(file, _DeferredWriteFile):
-                transaction = self._transaction
-                if transaction is not None and file in transaction.files:
-                    transaction.files.remove(file)
-                try:
-                    file.discard()
-                except BaseException as cleanup:
-                    raise primary from cleanup
-            raise
+        return _open_with_wrappers(
+            self,
+            super().open,
+            path,
+            mode,
+            compression=compression,
+            block_size=block_size,
+            cache_options=cache_options,
+            **kwargs,
+        )
 
     def glob(self, path, *args, **kwargs):
         # The base glob implementation strips the URL before calling find.
