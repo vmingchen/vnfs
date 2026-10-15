@@ -307,11 +307,13 @@ def _enter_individually(open_files):
     return entered
 
 
-def _write_fully(file, data, callback=None):
+def _write_fully(file, data, callback=None, *, none_is_full=False):
     """Finish a chunk without treating a valid short write as completion."""
     offset = 0
     while offset < len(data):
         written = file.write(data[offset:])
+        if written is None and none_is_full:
+            written = len(data) - offset
         if written <= 0 or written > len(data) - offset:
             raise OSError(errno.EIO, "invalid progress during streamed write")
         offset += written
@@ -4247,19 +4249,26 @@ class VfsiFileSystem(AbstractFileSystem):
         max_bytes=None,
         allocation_base=0,
         allocation_limit=None,
+        *,
+        source=None,
     ):
         """Stream one remote file into a writable local file object."""
         streamed = 0
         with ExitStack() as stack:
-            remote = self.open(path, "rb", cache_type="none")
-            stack.push(partial(_close_reader_on_exit, remote))
+            remote = source
+            if remote is None:
+                remote = self.open(path, "rb", cache_type="none")
+                stack.push(partial(_close_reader_on_exit, remote))
             if max_bytes == 0 or (
                 max_bytes is None and self.read_all_max_total_bytes == 0
             ):
                 # A zero-byte budget still permits an EOF probe. The pinned
                 # handle's size distinguishes empty files without requesting
                 # a one-byte buffer that would exceed the limit.
-                if remote.size:
+                size = getattr(remote, "size", None)
+                if size is None:
+                    size = len(remote.read(1))
+                if size:
                     limit = (
                         self.read_all_max_total_bytes
                         if allocation_limit is None
@@ -4279,10 +4288,8 @@ class VfsiFileSystem(AbstractFileSystem):
                     raise _allocation_error(
                         path, allocation_base + streamed + len(chunk), limit
                     )
-                output.write(chunk)
+                _write_fully(output, chunk, callback=callback, none_is_full=True)
                 streamed += len(chunk)
-                if callback is not None:
-                    callback.relative_update(len(chunk))
 
     def pipe(self, path, value=None, callback=DEFAULT_CALLBACK, **kwargs):
         callback = Callback.as_callback(callback)
@@ -4317,6 +4324,33 @@ class VfsiFileSystem(AbstractFileSystem):
         )
 
     # -- batched local <-> remote transfer --------------------------------
+
+    def get_file(
+        self, rpath, lpath=None, callback=DEFAULT_CALLBACK, outfile=None, **kwargs
+    ):
+        """Download with bounded reads, complete writes, and owned cleanup."""
+        from fsspec.implementations.local import LocalFileSystem
+        from fsspec.utils import isfilelike
+
+        internal = self._checked_strip_protocol(rpath)
+        callback = Callback.as_callback(callback)
+        if outfile is None and isfilelike(lpath):
+            outfile = lpath
+        elif outfile is None and self.isdir(internal):
+            os.makedirs(lpath, exist_ok=True)
+            return
+        kwargs.setdefault("cache_type", "none")
+        with ExitStack() as stack:
+            remote = self.open(internal, "rb", **kwargs)
+            stack.push(partial(_close_reader_on_exit, remote))
+            callback.set_size(getattr(remote, "size", None))
+            if outfile is None:
+                local = LocalFileSystem(auto_mkdir=True)
+                local.makedirs(local._parent(lpath), exist_ok=True)
+                outfile = stack.enter_context(open(lpath, "wb"))
+            self._copy_remote_to_fileobj(
+                internal, outfile, callback=callback, source=remote
+            )
 
     def get(
         self,
@@ -4426,12 +4460,9 @@ class VfsiFileSystem(AbstractFileSystem):
                         remote = self.open(remote_path, "rb", cache_type="none")
                         stack.push(partial(_close_reader_on_exit, remote))
                         with open(local_path, "wb") as out:
-                            while True:
-                                chunk = remote.read(self._stream_read_size())
-                                if not chunk:
-                                    break
-                                out.write(chunk)
-                                child.relative_update(len(chunk))
+                            self._copy_remote_to_fileobj(
+                                remote_path, out, callback=child, source=remote
+                            )
                 callback.relative_update()
                 continue
             selected = [pairs[i] for i in batch]

@@ -174,6 +174,14 @@ class VfsiFileSystem(AbstractFileSystem):
         callback: Any = ...,
         **kwargs: Any,
     ) -> None: ...
+    def get_file(
+        self,
+        rpath: Path,
+        lpath: Any = ...,
+        callback: Any = ...,
+        outfile: Any = ...,
+        **kwargs: Any,
+    ) -> None: ...
     def get(
         self,
         rpath: Union[Path, Sequence[Path]],
