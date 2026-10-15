@@ -1534,6 +1534,11 @@ class VfsiFile(AbstractBufferedFile):
 
     def readuntil(self, char=b"\n", blocks=None):
         """Read through a delimiter without exceeding the returned-data budget."""
+        return self._read_until(char, blocks, -1)
+
+    def _read_until(self, char, blocks, size):
+        if size == 0:
+            return self.read(0)
         if not char:
             raise ValueError("delimiter must not be empty")
         block_size = self.blocksize if blocks is None else operator.index(blocks)
@@ -1555,7 +1560,10 @@ class VfsiFile(AbstractBufferedFile):
         while True:
             previous = len(data)
             start = self.tell()
-            part = self.read(min(block_size, limit - previous + 1, limit))
+            requested = min(block_size, limit - previous + 1, limit)
+            if size >= 0:
+                requested = min(requested, size - previous)
+            part = self.read(requested)
             if not part:
                 return bytes(data)
             data.extend(part)
@@ -1566,9 +1574,12 @@ class VfsiFile(AbstractBufferedFile):
                 self.seek(start + end - previous)
                 return bytes(data[:end])
             self.fs._check_read_allocation(len(data), self.path)
+            if size >= 0 and len(data) == size:
+                return bytes(data)
 
-    def readline(self):
-        return self.readuntil()
+    def readline(self, size=-1):
+        size = -1 if size is None else operator.index(size)
+        return self._read_until(b"\n", None, size)
 
     def readinto(self, b):
         if not self._has_read_cache():
