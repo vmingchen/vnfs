@@ -2915,17 +2915,23 @@ class VfsiFileSystem(AbstractFileSystem):
         )
 
     def glob(self, path, *args, **kwargs):
-        # The base glob implementation strips the URL before calling find.
+        # fsspec checks the trailing separator before stripping the protocol:
+        # it means directories only, and must survive path normalization.
+        if isinstance(path, os.PathLike):
+            path = os.fsdecode(path)
+        directories_only = isinstance(path, str) and path.endswith("/")
         path = self._checked_strip_protocol(path)
+        if directories_only and path != "/":
+            path += "/"
         return super().glob(path, *args, **kwargs)
 
     def expand_path(self, path, *args, **kwargs):
         # get(), copy(), and cat() may pass through this base method before
         # their own backend operations see the path.
-        path = self._checked_strip_protocol(path)
         # The fsspec scalar branch does not forward assume_literal to its
         # recursive list call. Enter the list branch directly to retain it.
         paths = [path] if isinstance(path, (str, os.PathLike)) else path
+        paths = [self._checked_strip_protocol(item) for item in paths]
         return super().expand_path(paths, *args, **kwargs)
 
     def smb_dialect(self):
