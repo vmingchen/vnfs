@@ -110,6 +110,26 @@ def _record_backing_path(cache_fs, path, detail, filename):
     raise ValueError("unsafe path in fsspec block-cache metadata")
 
 
+def _generation(detail):
+    return detail.get("fn"), detail.get("time"), detail.get("uid")
+
+
+def _filter_readonly_generations(cache_fs):
+    """Keep same-target invalidations across reloads without writing seed caches."""
+    invalidated = object.__getattribute__(cache_fs, "__dict__").get(
+        "_vfsi_readonly_invalidated", {}
+    )
+    for storage, records in zip(
+        cache_fs.storage[:-1], cache_fs._metadata.cached_files[:-1]
+    ):
+        rejected = invalidated.get(os.path.realpath(storage), {})
+        for path, detail in list(records.items()):
+            if detail.get(_CACHE_FORMAT_KEY) == _INVALID_CACHE_FORMAT or rejected.get(
+                path
+            ) == _generation(detail):
+                del records[path]
+
+
 def _publish_generations(cache_fs, records, previous):
     """Allocate private backing files before publishing replacement metadata."""
     created = []
@@ -232,11 +252,7 @@ def _mark_compatible_cache(cache_fs, path, file):
             changed = True
         if changed:
             _save_writable_metadata(cache_fs)
-        file._vfsi_cache_generation = (
-            detail.get("fn"),
-            detail.get("time"),
-            detail.get("uid"),
-        )
+        file._vfsi_cache_generation = _generation(detail)
 
 
 def _close_and_update_complete_blocks(cache_fs, file, close):
@@ -247,11 +263,7 @@ def _close_and_update_complete_blocks(cache_fs, file, close):
     cache_fs.load_cache()
     detail = cache_fs._metadata.cached_files[-1].get(path)
     generation = getattr(file, "_vfsi_cache_generation", None)
-    if detail is None or generation != (
-        detail.get("fn"),
-        detail.get("time"),
-        detail.get("uid"),
-    ):
+    if detail is None or generation != _generation(detail):
         # A different wrapper/process replaced this generation while the
         # handle was open. Never commit its old block set into the new record.
         close()
@@ -352,10 +364,11 @@ def _invalidate_registered_paths(
         # directory. cache_check=0 intentionally disables fsspec's automatic
         # reload, so refresh here before replacing shared generation metadata.
         cache_fs.load_cache()
-        writable = cache_fs._metadata.cached_files[-1]
+        locations = cache_fs._metadata.cached_files
         canonical = {}
-        if subtrees and writable:
-            canonical, unknown = cache_fs.fs._canonical_namespace_paths(writable)
+        candidates = {path for records in locations for path in records}
+        if subtrees and candidates:
+            canonical, unknown = cache_fs.fs._canonical_namespace_paths(candidates)
             uncertain = uncertain or unknown
 
         def affected(candidate, detail):
@@ -375,13 +388,24 @@ def _invalidate_registered_paths(
             return False
 
         changed = False
-        for path, detail in writable.items():
-            if (
-                affected(path, detail)
-                and detail.get(_CACHE_FORMAT_KEY) != _INVALID_CACHE_FORMAT
-            ):
-                detail[_CACHE_FORMAT_KEY] = _INVALID_CACHE_FORMAT
-                changed = True
+        invalidated = object.__getattribute__(cache_fs, "__dict__").setdefault(
+            "_vfsi_readonly_invalidated", {}
+        )
+        for index, (storage, records) in enumerate(zip(cache_fs.storage, locations)):
+            for path, detail in list(records.items()):
+                if not affected(path, detail):
+                    continue
+                if index < len(locations) - 1:
+                    # Earlier locations are read-only. Their records precede
+                    # writable replacements during lookup, so hide this exact
+                    # generation locally and after subsequent metadata reloads.
+                    invalidated.setdefault(os.path.realpath(storage), {})[path] = (
+                        _generation(detail)
+                    )
+                    del records[path]
+                elif detail.get(_CACHE_FORMAT_KEY) != _INVALID_CACHE_FORMAT:
+                    detail[_CACHE_FORMAT_KEY] = _INVALID_CACHE_FORMAT
+                    changed = True
         if changed:
             _save_writable_metadata(cache_fs)
 
@@ -619,11 +643,7 @@ def _open_many_with_cache(cache_fs, open_files):
                         f"original (old: {old_blocksize}, new {file.blocksize})"
                     )
                 detail["blocksize"] = file.blocksize
-                file._vfsi_cache_generation = (
-                    detail.get("fn"),
-                    detail.get("time"),
-                    detail.get("uid"),
-                )
+                file._vfsi_cache_generation = _generation(detail)
                 file.cache = _Nfs4MMapCache(
                     file.blocksize,
                     file._fetch_range,
@@ -685,6 +705,15 @@ def _install_fsspec_blockcache_wrappers():
     original_public_open = CachingFileSystem.open
     original_close_and_update = CachingFileSystem.close_and_update
     original_pop_from_cache = CachingFileSystem.pop_from_cache
+    original_load_cache = CachingFileSystem.load_cache
+
+    def load_cache_with_compat(cache_fs):
+        if not _is_compatible_backend(cache_fs):
+            return original_load_cache(cache_fs)
+        with _cache_lock(cache_fs):
+            result = original_load_cache(cache_fs)
+            _filter_readonly_generations(cache_fs)
+            return result
 
     def init_with_compat(cache_fs, *args, **kwargs):
         original_init(cache_fs, *args, **kwargs)
@@ -779,4 +808,5 @@ def _install_fsspec_blockcache_wrappers():
     CachingFileSystem.open_many = open_many_with_compat
     CachingFileSystem.commit_many = _delegate_commit_many
     CachingFileSystem.pop_from_cache = pop_from_cache_with_compat
+    CachingFileSystem.load_cache = load_cache_with_compat
     setattr(CachingFileSystem, _PATCH_MARKER, True)
