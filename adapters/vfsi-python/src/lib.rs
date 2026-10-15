@@ -465,6 +465,12 @@ fn attrs_to_dict(py: Python<'_>, a: &VfAttrs) -> PyResult<Py<PyDict>> {
 // per-operation failures)
 // ---------------------------------------------------------------------------
 
+/// Restore the caller's positions after a vector has been filtered or expanded.
+/// Missing or out-of-range backend indices cannot be remapped reliably.
+fn remap_subset_error(error: VfError, positions: &[usize]) -> VfError {
+    error.map_index(|index| positions.get(index).copied().unwrap_or(index))
+}
+
 /// Fetch attrs for `paths` in batches, returning per-path results. A failed
 /// operation is recorded in the errno map (keyed by the original index) and
 /// the remaining operations are retried in fresh batches. Transport failures
@@ -501,7 +507,7 @@ fn attrs_many_impl(
             }
             Err(e) => {
                 if e.is_transport() {
-                    return Err(e);
+                    return Err(remap_subset_error(e, &remaining));
                 }
                 let Some(bi) = e.index() else {
                     return Err(e);
@@ -543,10 +549,7 @@ fn read_allv_impl(
             }
             Err(e) => {
                 if e.is_transport() {
-                    return Err(match e.index().and_then(|index| remaining.get(index)) {
-                        Some(&index) => e.with_index(index),
-                        None => e,
-                    });
+                    return Err(remap_subset_error(e, &remaining));
                 }
                 let Some(bi) = e.index() else {
                     return Err(e);
@@ -1156,7 +1159,7 @@ impl NfsClient {
                     }
                     Err(error) => {
                         if error.is_transport() {
-                            return Err(to_py_err(error, None));
+                            return Err(to_py_err(remap_subset_error(error, &remaining), None));
                         }
                         let Some(batch_index) = error.index() else {
                             return Err(to_py_err(error, None));
@@ -1516,13 +1519,7 @@ impl NfsClient {
                     }
                     Err(e) => {
                         if e.is_transport() {
-                            let original =
-                                e.index().and_then(|index| remaining.get(index).copied());
-                            let e = match original {
-                                Some(index) => e.with_index(index),
-                                None => e,
-                            };
-                            return Err(to_py_err(e, None));
+                            return Err(to_py_err(remap_subset_error(e, &remaining), None));
                         }
                         let Some(bi) = e.index() else {
                             return Err(to_py_err(e, None));
@@ -1965,9 +1962,13 @@ impl NfsClient {
                     .iter()
                     .flat_map(|&index| [sources[index].clone(), dests[index].clone()])
                     .collect();
+                let identity_positions: Vec<usize> = existing_candidates
+                    .iter()
+                    .flat_map(|&index| [index, index])
+                    .collect();
                 let (attrs, _identity_errors) =
                     attrs_many_impl(fs, &identity_paths, AttrMask::stat(), true)
-                        .map_err(|e| to_py_err(e, None))?;
+                        .map_err(|e| to_py_err(remap_subset_error(e, &identity_positions), None))?;
                 for (pair_index, &index) in existing_candidates.iter().enumerate() {
                     let source = attrs[2 * pair_index].as_ref();
                     let destination = attrs[2 * pair_index + 1].as_ref();
@@ -2017,7 +2018,10 @@ impl NfsClient {
                     }
                     Err(error) => {
                         if error.is_transport() {
-                            return Err(to_py_err(error, None));
+                            return Err(to_py_err(
+                                remap_subset_error(error, &write_remaining),
+                                None,
+                            ));
                         }
                         let Some(batch_index) = error.index() else {
                             return Err(to_py_err(error, None));
@@ -2037,13 +2041,7 @@ impl NfsClient {
                             &prefix_paths,
                             copy_fast_path_budget(max_total_bytes),
                         )
-                        .map_err(|error| {
-                            let error = match error.index().and_then(|index| prefix.get(index)) {
-                                Some(&index) => error.with_index(index),
-                                None => error,
-                            };
-                            to_py_err(error, None)
-                        })?;
+                        .map_err(|error| to_py_err(remap_subset_error(error, prefix), None))?;
                         for (&index, actual) in prefix.iter().zip(verified) {
                             if actual.as_ref() == data[index].as_ref() {
                                 copied[index] =
@@ -2070,7 +2068,7 @@ impl NfsClient {
                 .collect();
             let identity_mask = AttrMask::SIZE | AttrMask::identity();
             let (attrs, stat_errors) = attrs_many_impl(fs, &oversized_sources, identity_mask, true)
-                .map_err(|e| to_py_err(e, None))?;
+                .map_err(|e| to_py_err(remap_subset_error(e, &oversized), None))?;
             for (subset_index, err_no) in stat_errors {
                 errors.insert(oversized[subset_index], err_no);
             }
@@ -2096,8 +2094,9 @@ impl NfsClient {
                     .map(|&index| dests[index].clone())
                     .collect();
                 let (dest_attrs, dest_errors) =
-                    attrs_many_impl(fs, &candidate_dests, AttrMask::identity(), true)
-                        .map_err(|e| to_py_err(e, None))?;
+                    attrs_many_impl(fs, &candidate_dests, AttrMask::identity(), true).map_err(
+                        |e| to_py_err(remap_subset_error(e, &identity_candidates), None),
+                    )?;
                 for (subset_index, err_no) in dest_errors {
                     if err_no != libc::ENOENT as u32 {
                         let index = identity_candidates[subset_index];
@@ -2157,7 +2156,7 @@ impl NfsClient {
                     }
                     Err(e) => {
                         if e.is_transport() {
-                            return Err(to_py_err(e, None));
+                            return Err(to_py_err(remap_subset_error(e, &remaining), None));
                         }
                         let Some(bi) = e.index() else {
                             return Err(to_py_err(e, None));
@@ -2638,3 +2637,6 @@ mod prr_oct13_round16;
 
 #[cfg(all(test, feature = "dummy"))]
 mod prr_oct14b_round10;
+
+#[cfg(all(test, feature = "dummy"))]
+mod prr_oct14c_round07;

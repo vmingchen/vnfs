@@ -30,9 +30,25 @@ impl Drop for TestRoot {
     }
 }
 
+fn operand_trace(file: &FileOperand) -> PathBuf {
+    if let Some(path) = file.path() {
+        path.to_path_buf()
+    } else if let Some(fd) = file.fd() {
+        PathBuf::from(format!("fd:{fd}"))
+    } else {
+        PathBuf::from(format!("{file:?}"))
+    }
+}
+
 pub(crate) struct FaultBackend {
     pub(crate) inner: LocalBackend,
     pub(crate) read_error: Option<VfError>,
+    pub(crate) read_errors: std::collections::VecDeque<VfError>,
+    pub(crate) attrs_errors: std::collections::VecDeque<Option<VfError>>,
+    pub(crate) attrs_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
+    pub(crate) extent_errors: std::collections::VecDeque<VfError>,
+    pub(crate) extent_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
+    pub(crate) write_errors: std::collections::VecDeque<VfError>,
     pub(crate) read_error_on_call: usize,
     pub(crate) read_limit: Option<usize>,
     pub(crate) read_requests: Arc<Mutex<Vec<Vec<(u64, usize)>>>>,
@@ -49,6 +65,12 @@ impl FaultBackend {
         Self {
             inner: vfsi_posix::backend(root).unwrap(),
             read_error,
+            read_errors: Default::default(),
+            attrs_errors: Default::default(),
+            attrs_calls: Default::default(),
+            extent_errors: Default::default(),
+            extent_calls: Default::default(),
+            write_errors: Default::default(),
             read_error_on_call: 0,
             read_limit: None,
             read_requests: Arc::default(),
@@ -59,6 +81,16 @@ impl FaultBackend {
             replace_after_write_error: None,
             read_all_errors_after_write: std::collections::VecDeque::new(),
             write_calls: Arc::default(),
+        }
+    }
+    fn record_attrs_call(&mut self, attrs: &[VfAttrs]) -> vfsi_core::VfRes {
+        self.attrs_calls
+            .lock()
+            .unwrap()
+            .push(attrs.iter().map(|attr| operand_trace(&attr.file)).collect());
+        match self.attrs_errors.pop_front().flatten() {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
     }
 }
@@ -101,11 +133,10 @@ impl HandleBackend for FaultBackend {
 }
 impl VectorBackend for FaultBackend {
     fn vread_impl(&mut self, ops: &[ReadOp]) -> vfsi_core::VfResult<Vec<ReadResult>> {
-        self.read_calls.lock().unwrap().push(
-            ops.iter()
-                .map(|op| op.file.path().unwrap().to_path_buf())
-                .collect(),
-        );
+        self.read_calls
+            .lock()
+            .unwrap()
+            .push(ops.iter().map(|op| operand_trace(&op.file)).collect());
         let call = self.read_calls.lock().unwrap().len() - 1;
         self.read_requests.lock().unwrap().push(
             ops.iter()
@@ -115,6 +146,9 @@ impl VectorBackend for FaultBackend {
                 })
                 .collect(),
         );
+        if let Some(error) = self.read_errors.pop_front() {
+            return Err(error);
+        }
         if call == self.read_error_on_call {
             if let Some(error) = self.read_error.take() {
                 return Err(error);
@@ -146,11 +180,13 @@ impl VectorBackend for FaultBackend {
         &mut self,
         ops: &[WriteOp<&FileOperand, &[u8]>],
     ) -> vfsi_core::VfResult<Vec<WriteResult>> {
-        self.write_calls.lock().unwrap().push(
-            ops.iter()
-                .map(|op| op.file().path().unwrap().to_path_buf())
-                .collect(),
-        );
+        self.write_calls
+            .lock()
+            .unwrap()
+            .push(ops.iter().map(|op| operand_trace(op.file())).collect());
+        if let Some(error) = self.write_errors.pop_front() {
+            return Err(error);
+        }
         if let Some(error) = self.write_error.take() {
             return Err(error);
         }
@@ -185,10 +221,26 @@ impl VectorBackend for FaultBackend {
         result
     }
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_core::VfRes {
+        self.record_attrs_call(attrs)?;
         self.inner.vgetattrs_impl(attrs)
     }
     fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_core::VfRes {
+        self.record_attrs_call(attrs)?;
         self.inner.vgetattrs_nofollow_impl(attrs)
+    }
+    fn vcopy_impl(
+        &mut self,
+        pairs: &[ExtentPair],
+        options: vfsi_core::CopyOption,
+    ) -> vfsi_core::VfRes {
+        self.extent_calls
+            .lock()
+            .unwrap()
+            .push(pairs.iter().map(|pair| pair.src_path.clone()).collect());
+        if let Some(error) = self.extent_errors.pop_front() {
+            return Err(error);
+        }
+        vfsi_sync::backend::helpers::vcopy_impl_default(self, pairs, options)
     }
     fn vread_all_with_options_impl(
         &mut self,
