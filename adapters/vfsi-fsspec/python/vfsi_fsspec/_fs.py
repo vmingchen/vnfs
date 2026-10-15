@@ -38,6 +38,11 @@ _ERR_SAME_FILE = 0xFFFF_FFFD
 _ERR_UNSUPPORTED = 0xFFFF_FFFE
 
 
+def _path_string(path):
+    """Coerce scalar paths without losing separators or changing collections."""
+    return os.fsdecode(path) if isinstance(path, os.PathLike) else path
+
+
 def _normalize_mode(mode):
     """Collapse 'b'/'t' characters: 'rt'/'r'/'rb' -> 'r', 'wb+' -> 'w+', ..."""
     if not isinstance(mode, str):
@@ -2919,8 +2924,7 @@ class VfsiFileSystem(AbstractFileSystem):
     def glob(self, path, *args, **kwargs):
         # fsspec checks the trailing separator before stripping the protocol:
         # it means directories only, and must survive path normalization.
-        if isinstance(path, os.PathLike):
-            path = os.fsdecode(path)
+        path = _path_string(path)
         directories_only = isinstance(path, str) and path.endswith("/")
         path = self._checked_strip_protocol(path)
         if directories_only and path != "/":
@@ -2950,8 +2954,7 @@ class VfsiFileSystem(AbstractFileSystem):
         through logs, tracebacks, or copied URLs. A port is retained for SMB,
         whose native backend accepts ``host:port``.
         """
-        if isinstance(urlpath, os.PathLike):
-            urlpath = os.fsdecode(urlpath)
+        urlpath = _path_string(urlpath)
         if not isinstance(urlpath, str):
             return {}
         parsed = urlsplit(urlpath)
@@ -2975,9 +2978,8 @@ class VfsiFileSystem(AbstractFileSystem):
     def _strip_protocol(cls, path):
         if isinstance(path, list):
             return [cls._strip_protocol(p) for p in path]
-        if isinstance(path, os.PathLike):
-            path = os.fsdecode(path)
-        elif not isinstance(path, str):
+        path = _path_string(path)
+        if not isinstance(path, str):
             path = str(path)
         protos = (cls.protocol,) if isinstance(cls.protocol, str) else cls.protocol
         parsed = urlsplit(path)
@@ -3007,8 +3009,7 @@ class VfsiFileSystem(AbstractFileSystem):
         """Normalize an instance path without silently changing its server."""
         if isinstance(path, list):
             return [self._checked_strip_protocol(item) for item in path]
-        if isinstance(path, os.PathLike):
-            path = os.fsdecode(path)
+        path = _path_string(path)
         if isinstance(path, str):
             requested_host = type(self)._get_kwargs_from_urls(path).get("host")
             if (
@@ -3907,6 +3908,7 @@ class VfsiFileSystem(AbstractFileSystem):
         callback=DEFAULT_CALLBACK,
         **kwargs,
     ):
+        path = _path_string(path)
         callback = Callback.as_callback(callback)
         if isinstance(path, str):
             paths = self.expand_path(path, recursive=recursive, **kwargs)
@@ -4292,6 +4294,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 streamed += len(chunk)
 
     def pipe(self, path, value=None, callback=DEFAULT_CALLBACK, **kwargs):
+        path = _path_string(path)
         callback = Callback.as_callback(callback)
         if isinstance(path, str):
             mode = kwargs.pop("mode", "overwrite")
@@ -4371,8 +4374,10 @@ class VfsiFileSystem(AbstractFileSystem):
         )
         from fsspec.utils import other_paths
 
+        lpath, rpath = _path_string(lpath), _path_string(rpath)
         pre_stats = None
-        if isinstance(lpath, list) and isinstance(rpath, list):
+        if not isinstance(lpath, str) and not isinstance(rpath, str):
+            lpath, rpath = list(lpath), list(rpath)
             if len(rpath) != len(lpath):
                 raise ValueError("rpath and lpath must have equal length")
             rpaths = rpath
@@ -4552,7 +4557,9 @@ class VfsiFileSystem(AbstractFileSystem):
         )
         from fsspec.utils import other_paths
 
-        if isinstance(lpath, list) and isinstance(rpath, list):
+        lpath, rpath = _path_string(lpath), _path_string(rpath)
+        if not isinstance(lpath, str) and not isinstance(rpath, str):
+            lpath, rpath = list(lpath), list(rpath)
             if len(lpath) != len(rpath):
                 raise ValueError("lpath and rpath must have equal length")
             rpaths = rpath
@@ -5107,10 +5114,8 @@ class VfsiFileSystem(AbstractFileSystem):
         preserve_links = kwargs.get("symlinks", False)
         # Convert scalar paths before checking their shape, retaining separators
         # used by fsspec to distinguish directory contents from the directory.
-        if isinstance(path1, os.PathLike):
-            path1 = os.fsdecode(path1)
-        if isinstance(path2, os.PathLike):
-            path2 = os.fsdecode(path2)
+        path1 = _path_string(path1)
+        path2 = _path_string(path2)
         if on_error is None:
             on_error = "ignore" if recursive else "raise"
         if not isinstance(path1, str) and not isinstance(path2, str):
@@ -5417,8 +5422,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     self._client.touch(native)
 
     def symlink(self, target, path, **kwargs):
-        if isinstance(target, os.PathLike):
-            target = os.fsdecode(target)
+        target = _path_string(target)
         with self._cache_mutation([path], namespace=True):
             link = self._native_path(self._checked_strip_protocol(path))
             protocols = (
