@@ -16,7 +16,7 @@ import uuid
 import weakref
 from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from functools import partial
 from glob import has_magic
 from itertools import groupby
@@ -270,6 +270,17 @@ def _close_reader_on_exit(reader, exc_type, primary_error, traceback):
         raise
 
 
+def _finish_group_files(files):
+    """Release every member's local resources, retaining the first failure."""
+    first_error = None
+    for file in files:
+        try:
+            file._finish_group_close()
+        except BaseException as error:
+            first_error = first_error or error
+    return first_error
+
+
 def _enter_individually(open_files):
     """Enter wrappers with primary-error and descriptor ownership preserved."""
     entered = []
@@ -428,6 +439,10 @@ class _OwnedStream(io.IOBase):
         method = getattr(self._stream, "read1", self._stream.read)
         return self._read_bounded(method, size)
 
+    def peek(self, size=0):
+        # Codecs treat size as a hint and may return more; check actual bytes.
+        return self._read_bounded(self._stream.peek, operator.index(size))
+
     def readline(self, size=-1):
         return self._read_bounded(self._stream.readline, size)
 
@@ -538,7 +553,11 @@ class _ResilientClient:
         self._native = None
         self._generation += 1
         if old is not None:
-            old.shutdown()
+            if self._pid != os.getpid():
+                # A child must not CLOSE handles or destroy its parent's session.
+                old._abandon_after_fork()
+            else:
+                old.shutdown()
         del old
 
     def __getattr__(self, name):
@@ -984,12 +1003,12 @@ class _RawVfsiFile(io.RawIOBase):
         self._readable = self._base_mode in ("r", "r+", "w+", "a+", "x+")
         self._writable = self._base_mode in ("r+", "w", "w+", "a", "a+", "x", "x+")
         if fd is None and self._base_mode in ("w", "w+", "a", "a+", "x", "x+"):
-            # These modes can create a directory entry, and ``w`` can also
-            # truncate it. Invalidate before the native mutation so ambiguous
-            # failures cannot leave stale contents or directory metadata.
-            self.fs._invalidate_namespace([self.path])
-        if fd is None and self._base_mode in ("w", "w+", "a", "a+", "x", "x+"):
-            self._ensure_open()
+            try:
+                with self.fs._cache_mutation([self.path], namespace=True):
+                    self._ensure_open()
+            except BaseException as error:
+                _close_reader_on_exit(self, type(error), error, error.__traceback__)
+                raise
 
     # -- internals ---------------------------------------------------------
 
@@ -1168,35 +1187,34 @@ class _RawVfsiFile(io.RawIOBase):
             raise io.UnsupportedOperation("not writable")
         if isinstance(data, str):
             raise TypeError("a bytes-like object is required, not 'str'")
-        self.fs._invalidate_persistent_caches([self.path], descriptors=[self._fd])
-        self.fs._invalidate_parent_listing(self.path)
         fd = self._ensure_open()
-        try:
-            if self._base_mode.startswith("a"):
-                # O_APPEND: the backend appends regardless of the requested offset.
-                n, new_pos = self.fs._client.write_positioned(fd, data)
-            else:
-                n = self.fs._client.pwrite(fd, data, self._pos)
-                new_pos = self._pos + n
-        except ConnectionError:
-            # A mutation may already have reached the server. Reconnect for
-            # future path operations, but never replay the write implicitly.
-            self._broken = True
+        with self.fs._cache_mutation([self.path], descriptors=[fd]):
             try:
-                if self.fs.auto_reconnect and self.fs._client.descriptor_valid(fd):
-                    self.fs._client.reconnect_descriptor(fd)
-            except BaseException:
-                # Preserve the ambiguous mutation error; reconnect is cleanup.
-                pass
-            finally:
-                # A disabled or failed reconnect can leave the original token
-                # live. Retain it for CLOSE; _broken prevents mutation replay.
-                if not self.fs._client.descriptor_valid(fd):
-                    self._fd = None
-                    self._fd_generation = None
-            raise
-        self._pos = new_pos
-        return n
+                if self._base_mode.startswith("a"):
+                    # O_APPEND: the backend appends regardless of the requested offset.
+                    n, new_pos = self.fs._client.write_positioned(fd, data)
+                else:
+                    n = self.fs._client.pwrite(fd, data, self._pos)
+                    new_pos = self._pos + n
+            except ConnectionError:
+                # A mutation may already have reached the server. Reconnect for
+                # future path operations, but never replay the write implicitly.
+                self._broken = True
+                try:
+                    if self.fs.auto_reconnect and self.fs._client.descriptor_valid(fd):
+                        self.fs._client.reconnect_descriptor(fd)
+                except BaseException:
+                    # Preserve the ambiguous mutation error; reconnect is cleanup.
+                    pass
+                finally:
+                    # A disabled or failed reconnect can leave the original token
+                    # live. Retain it for CLOSE; _broken prevents mutation replay.
+                    if not self.fs._client.descriptor_valid(fd):
+                        self._fd = None
+                        self._fd_generation = None
+                raise
+            self._pos = new_pos
+            return n
 
     def seek(self, offset, whence=0):
         if self.closed:
@@ -1228,17 +1246,16 @@ class _RawVfsiFile(io.RawIOBase):
             size = self._pos
         if size < 0:
             raise OSError(errno.EINVAL, "Invalid argument")
-        self.fs._invalidate_persistent_caches([self.path], descriptors=[self._fd])
-        self.fs._invalidate_parent_listing(self.path)
         fd = self._ensure_open()
-        try:
-            self.fs._client.ftruncate(fd, size)
-        except ConnectionError:
-            # The server may have applied the size change before the reply
-            # was lost. Never replay it on a potentially different handle.
-            self._broken = True
-            raise
-        return size
+        with self.fs._cache_mutation([self.path], descriptors=[fd]):
+            try:
+                self.fs._client.ftruncate(fd, size)
+            except ConnectionError:
+                # The server may have applied the size change before the reply
+                # was lost. Never replay it on a potentially different handle.
+                self._broken = True
+                raise
+            return size
 
     def flush(self):
         # NFS writes are FILE_SYNC (stable); nothing to flush.
@@ -1459,14 +1476,23 @@ class VfsiFile(AbstractBufferedFile):
             raise OSError(self._write_failure_errno, message, self.path)
         raise ConnectionError(message)
 
+    def _reconcile_append_position(self, previous, written, position):
+        # loc also counts bytes still buffered/spooled. Adjust only the gap
+        # between the predicted append end and the backend's actual end.
+        self.loc += position - (previous + written)
+        self._raw._pos = position
+
     def _upload_chunk(self, final=False):
         data = self.buffer.getvalue()
         offset = 0
         try:
             while offset < len(data):
+                previous = self._raw.tell()
                 written = self._raw.write(data[offset:])
                 if written <= 0:
                     raise OSError(errno.EIO, "short buffered write", self.path)
+                if self._base_mode == "a":
+                    self._reconcile_append_position(previous, written, self._raw.tell())
                 offset += written
         except BaseException as error:
             self._write_failed = True
@@ -1534,6 +1560,11 @@ class VfsiFile(AbstractBufferedFile):
 
     def readuntil(self, char=b"\n", blocks=None):
         """Read through a delimiter without exceeding the returned-data budget."""
+        return self._read_until(char, blocks, -1)
+
+    def _read_until(self, char, blocks, size):
+        if size == 0:
+            return self.read(0)
         if not char:
             raise ValueError("delimiter must not be empty")
         block_size = self.blocksize if blocks is None else operator.index(blocks)
@@ -1555,7 +1586,10 @@ class VfsiFile(AbstractBufferedFile):
         while True:
             previous = len(data)
             start = self.tell()
-            part = self.read(min(block_size, limit - previous + 1, limit))
+            requested = min(block_size, limit - previous + 1, limit)
+            if size >= 0:
+                requested = min(requested, size - previous)
+            part = self.read(requested)
             if not part:
                 return bytes(data)
             data.extend(part)
@@ -1566,9 +1600,12 @@ class VfsiFile(AbstractBufferedFile):
                 self.seek(start + end - previous)
                 return bytes(data[:end])
             self.fs._check_read_allocation(len(data), self.path)
+            if size >= 0 and len(data) == size:
+                return bytes(data)
 
-    def readline(self):
-        return self.readuntil()
+    def readline(self, size=-1):
+        size = -1 if size is None else operator.index(size)
+        return self._read_until(b"\n", None, size)
 
     def readinto(self, b):
         if not self._has_read_cache():
@@ -1761,9 +1798,14 @@ class VfsiFile(AbstractBufferedFile):
         self._raw._fd_generation = None
         self._raw._closed = True
         self._closed = True
-        if self._write_spool is not None:
-            self._write_spool.close()
-            self._write_spool = None
+        # Retain references if a local close fails so explicit cleanup can retry.
+        # ExitStack still attempts both resources and preserves the first error.
+        with ExitStack() as stack:
+            for resource in (self._write_spool, getattr(self, "cache", None)):
+                if callable(getattr(resource, "close", None)):
+                    stack.push(partial(_close_reader_on_exit, resource))
+        self._write_spool = None
+        self.cache = None
 
 
 class _WrappedFiles(list):
@@ -2146,26 +2188,32 @@ class _BufferGroup:
                 break
             try:
                 fds = [file._raw._ensure_open() for file in wave]
-                self.fs._invalidate_persistent_caches(
+                with self.fs._cache_mutation(
                     [file.path for file in wave], descriptors=fds
-                )
-                if wave[0]._base_mode == "a":
-                    results = self.fs._client.append_many(fds, datas)
-                    for file, data, (written, position) in zip(wave, datas, results):
-                        if written != len(data):
-                            raise OSError(errno.EIO, "short buffered append", file.path)
-                        file._raw._pos = position
-                        file._spool_read_offset += written
-                else:
-                    offsets = [file._raw._pos for file in wave]
-                    results = self.fs._client.pwrite_many(fds, offsets, datas)
-                    for file, data, written in zip(wave, datas, results):
-                        if written != len(data):
-                            raise OSError(errno.EIO, "short buffered write", file.path)
-                        file._raw._pos += written
-                        file._spool_read_offset += written
-                for file in wave:
-                    self.fs._invalidate_parent_listing(file.path)
+                ):
+                    if wave[0]._base_mode == "a":
+                        results = self.fs._client.append_many(fds, datas)
+                        for file, data, (written, position) in zip(
+                            wave, datas, results
+                        ):
+                            if written != len(data):
+                                raise OSError(
+                                    errno.EIO, "short buffered append", file.path
+                                )
+                            file._reconcile_append_position(
+                                file._raw._pos, written, position
+                            )
+                            file._spool_read_offset += written
+                    else:
+                        offsets = [file._raw._pos for file in wave]
+                        results = self.fs._client.pwrite_many(fds, offsets, datas)
+                        for file, data, written in zip(wave, datas, results):
+                            if written != len(data):
+                                raise OSError(
+                                    errno.EIO, "short buffered write", file.path
+                                )
+                            file._raw._pos += written
+                            file._spool_read_offset += written
             except BaseException as error:
                 index = getattr(error, "index", None)
                 if isinstance(index, int) and 0 <= index < len(wave):
@@ -2174,7 +2222,6 @@ class _BufferGroup:
                     except (AttributeError, TypeError):
                         pass
                 for file in wave:
-                    self.fs._invalidate_parent_listing(file.path)
                     file._write_failed = True
                     file._raw._broken = True
                 raise
@@ -2284,18 +2331,18 @@ class _BufferGroup:
                             if isinstance(completed, int) and 0 <= completed <= len(
                                 batch
                             ):
-                                for member in batch[:completed]:
-                                    member._finish_group_close()
+                                _finish_group_files(batch[:completed])
                             first_error = first_error or error
                         else:
-                            for member in batch:
-                                member._finish_group_close()
+                            local_error = _finish_group_files(batch)
+                            first_error = first_error or local_error
             if first_error is not None:
                 raise first_error
 
+            local_error = _finish_group_files(self.files)
+            if local_error is not None:
+                raise local_error
             self._group_closed = True
-            for member in self.files:
-                member._finish_group_close()
             self._ranges.clear()
             self._whole_files.clear()
             self._speculative_order.clear()
@@ -2450,31 +2497,35 @@ class _DeferredWriteFile:
         if not pending:
             return
         fs = pending[0].fs
-        fs._invalidate_namespace(file.path for file in pending)
-        # Preserve input order and vectorize contiguous overwriting renames.
-        # LINK publishes a staged exclusive create atomically without replacing
-        # an existing destination, including a dangling symlink.
-        for exclusive, run in groupby(pending, key=lambda file: "x" in file.mode):
-            batch = list(run)
-            if exclusive:
-                for file in batch:
-                    if not file._published:
-                        fs._client.hardlink(
-                            fs._native_path(file.temp_path), fs._native_path(file.path)
-                        )
-                        file._published = True
-                    file.discard()  # unlink only our staging name and close spool
-            else:
-                fs._client.rename_many(
-                    [
-                        (fs._native_path(file.temp_path), fs._native_path(file.path))
-                        for file in batch
-                    ]
-                )
-                for file in batch:
-                    file._prepared = False
-                    file._stage_owned = False
-                    file.discard()
+        with fs._cache_mutation((file.path for file in pending), namespace=True):
+            # Preserve input order and vectorize contiguous overwriting renames.
+            # LINK publishes a staged exclusive create atomically without replacing
+            # an existing destination, including a dangling symlink.
+            for exclusive, run in groupby(pending, key=lambda file: "x" in file.mode):
+                batch = list(run)
+                if exclusive:
+                    for file in batch:
+                        if not file._published:
+                            fs._client.hardlink(
+                                fs._native_path(file.temp_path),
+                                fs._native_path(file.path),
+                            )
+                            file._published = True
+                        file.discard()  # unlink only our staging name and close spool
+                else:
+                    fs._client.rename_many(
+                        [
+                            (
+                                fs._native_path(file.temp_path),
+                                fs._native_path(file.path),
+                            )
+                            for file in batch
+                        ]
+                    )
+                    for file in batch:
+                        file._prepared = False
+                        file._stage_owned = False
+                        file.discard()
 
     def commit(self):
         if self._committed:
@@ -2797,6 +2848,7 @@ class VfsiFileSystem(AbstractFileSystem):
         self._dircache_lock = threading.RLock()
         self._dircache_generation = self._client.generation
         self._dircache_epoch = 0
+        self._dircache_fill_generation = 0
         self._persistent_cache_lock = threading.RLock()
         self._persistent_cache_refs = []
 
@@ -2849,8 +2901,8 @@ class VfsiFileSystem(AbstractFileSystem):
         compression=None,
         **kwargs,
     ):
-        # Validate paths before any fallible wrapper or native setup.
-        self._checked_strip_protocol(path)
+        # Normalize before compression inference or native setup.
+        path = self._checked_strip_protocol(path)
         return _open_with_wrappers(
             self,
             super().open,
@@ -2863,17 +2915,23 @@ class VfsiFileSystem(AbstractFileSystem):
         )
 
     def glob(self, path, *args, **kwargs):
-        # The base glob implementation strips the URL before calling find.
-        self._checked_strip_protocol(path)
+        # fsspec checks the trailing separator before stripping the protocol:
+        # it means directories only, and must survive path normalization.
+        if isinstance(path, os.PathLike):
+            path = os.fsdecode(path)
+        directories_only = isinstance(path, str) and path.endswith("/")
+        path = self._checked_strip_protocol(path)
+        if directories_only and path != "/":
+            path += "/"
         return super().glob(path, *args, **kwargs)
 
     def expand_path(self, path, *args, **kwargs):
         # get(), copy(), and cat() may pass through this base method before
         # their own backend operations see the path.
-        self._checked_strip_protocol(path)
         # The fsspec scalar branch does not forward assume_literal to its
         # recursive list call. Enter the list branch directly to retain it.
         paths = [path] if isinstance(path, (str, os.PathLike)) else path
+        paths = [self._checked_strip_protocol(item) for item in paths]
         return super().expand_path(paths, *args, **kwargs)
 
     def smb_dialect(self):
@@ -2890,6 +2948,8 @@ class VfsiFileSystem(AbstractFileSystem):
         through logs, tracebacks, or copied URLs. A port is retained for SMB,
         whose native backend accepts ``host:port``.
         """
+        if isinstance(urlpath, os.PathLike):
+            urlpath = os.fsdecode(urlpath)
         if not isinstance(urlpath, str):
             return {}
         parsed = urlsplit(urlpath)
@@ -2902,7 +2962,7 @@ class VfsiFileSystem(AbstractFileSystem):
             raise ValueError("query strings and fragments are not supported")
         host = parsed.hostname
         if host is None:
-            return {}
+            raise ValueError("explicit URL authority must include a hostname")
         if ":" in host:
             host = f"[{host}]"
         if parsed.port is not None:
@@ -2913,7 +2973,9 @@ class VfsiFileSystem(AbstractFileSystem):
     def _strip_protocol(cls, path):
         if isinstance(path, list):
             return [cls._strip_protocol(p) for p in path]
-        if not isinstance(path, str):
+        if isinstance(path, os.PathLike):
+            path = os.fsdecode(path)
+        elif not isinstance(path, str):
             path = str(path)
         protos = (cls.protocol,) if isinstance(cls.protocol, str) else cls.protocol
         parsed = urlsplit(path)
@@ -2943,6 +3005,8 @@ class VfsiFileSystem(AbstractFileSystem):
         """Normalize an instance path without silently changing its server."""
         if isinstance(path, list):
             return [self._checked_strip_protocol(item) for item in path]
+        if isinstance(path, os.PathLike):
+            path = os.fsdecode(path)
         if isinstance(path, str):
             requested_host = type(self)._get_kwargs_from_urls(path).get("host")
             if (
@@ -3021,6 +3085,7 @@ class VfsiFileSystem(AbstractFileSystem):
             if fill_epoch != self._dircache_epoch:
                 return False
             self.dircache[internal] = stored
+            self._dircache_fill_generation += 1
             return True
 
     def _canonical_namespace_paths(self, paths):
@@ -3245,7 +3310,55 @@ class VfsiFileSystem(AbstractFileSystem):
         # public invalidation is broader when replayed, which is conservative.
         super().invalidate_cache(parent)
 
-    def _invalidate_namespace(self, paths):
+    @contextmanager
+    def _cache_mutation(self, paths, *, descriptors=None, namespace=False):
+        """Invalidate before mutation and retire any fills made during it."""
+        paths = list(paths)
+        if not paths:
+            yield
+            return
+        if namespace:
+            self._invalidate_namespace(paths)
+        else:
+            self._invalidate_persistent_caches(paths, descriptors=descriptors)
+            for path in paths:
+                self._invalidate_parent_listing(path)
+        with self._dircache_lock:
+            fill_generation = self._dircache_fill_generation
+        primary = None
+        try:
+            yield
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            try:
+                try:
+                    if namespace:
+                        self._invalidate_namespace(paths, evict_listings=False)
+                    else:
+                        with self._persistent_cache_lock:
+                            registered = any(
+                                ref() is not None
+                                for ref, _ in self._persistent_cache_refs
+                            )
+                        if registered:
+                            self._invalidate_persistent_caches(
+                                paths, descriptors=descriptors, evict_listings=False
+                            )
+                finally:
+                    with self._dircache_lock:
+                        # Reject pending stale listings too. If nothing refilled,
+                        # avoid a second scan of unrelated cached directories.
+                        self._dircache_epoch += 1
+                        if self._dircache_fill_generation != fill_generation:
+                            self.dircache.clear()
+            except BaseException as cleanup:
+                if primary is not None:
+                    raise primary from cleanup
+                raise
+
+    def _invalidate_namespace(self, paths, evict_listings=True):
         """Invalidate object subtrees, parents, and cached parent metadata."""
         internals = {self._checked_strip_protocol(path) for path in paths}
         if not internals:
@@ -3254,6 +3367,8 @@ class VfsiFileSystem(AbstractFileSystem):
             registered = any(
                 cache_ref() is not None for cache_ref, _ in self._persistent_cache_refs
             )
+        if not evict_listings and not registered:
+            return
         if registered or self.dircache:
             canonical, unknown = self._canonical_namespace_paths(internals)
             internals.update(canonical.values())
@@ -3271,15 +3386,16 @@ class VfsiFileSystem(AbstractFileSystem):
         parent_containers = {
             posixpath.dirname(parent.rstrip("/")) or "/" for parent in parents
         }
-        self._evict_dircache(
-            subtrees=internals,
-            exact=parents | parent_containers,
-            identities=identities,
-            uncertain=uncertain,
-            namespace=True,
-        )
-        for internal in internals | parents | parent_containers:
-            super().invalidate_cache(internal)
+        if evict_listings:
+            self._evict_dircache(
+                subtrees=internals,
+                exact=parents | parent_containers,
+                identities=identities,
+                uncertain=uncertain,
+                namespace=True,
+            )
+            for internal in internals | parents | parent_containers:
+                super().invalidate_cache(internal)
 
     def _infos_from_native_entries(self, entries):
         infos = [
@@ -3447,37 +3563,37 @@ class VfsiFileSystem(AbstractFileSystem):
             for native in missing
             if self._native_path(internal := self._internalize(native)) == native
         ]
-        self._invalidate_namespace(internal_missing)
-        for depth in sorted(by_depth):
-            pending = by_depth[depth]
-            while pending:
-                try:
-                    self._client.mkdir_many(pending, mode)
-                    break
-                except FileExistsError:
-                    # A concurrent mkdir-p may have won after exists_many.
-                    # Accept only paths that now resolve to directories and
-                    # retry siblings that remain absent.
-                    stats, errors = self._client.stat_many(pending)
-                    missing = []
-                    found_directory = False
-                    for index, native in enumerate(pending):
-                        if index in errors:
-                            if errors[index] == errno.ENOENT:
-                                missing.append(native)
-                                continue
-                            raise _oserror(
-                                errors[index], self._internalize(native)
-                            ) from None
-                        attrs = stats[index]
-                        if attrs is None or attrs["type"] != "directory":
-                            raise
-                        found_directory = True
-                    if not missing:
+        with self._cache_mutation(internal_missing, namespace=True):
+            for depth in sorted(by_depth):
+                pending = by_depth[depth]
+                while pending:
+                    try:
+                        self._client.mkdir_many(pending, mode)
                         break
-                    if not found_directory:
-                        raise
-                    pending = missing
+                    except FileExistsError:
+                        # A concurrent mkdir-p may have won after exists_many.
+                        # Accept only paths that now resolve to directories and
+                        # retry siblings that remain absent.
+                        stats, errors = self._client.stat_many(pending)
+                        missing = []
+                        found_directory = False
+                        for index, native in enumerate(pending):
+                            if index in errors:
+                                if errors[index] == errno.ENOENT:
+                                    missing.append(native)
+                                    continue
+                                raise _oserror(
+                                    errors[index], self._internalize(native)
+                                ) from None
+                            attrs = stats[index]
+                            if attrs is None or attrs["type"] != "directory":
+                                raise
+                            found_directory = True
+                        if not missing:
+                            break
+                        if not found_directory:
+                            raise
+                        pending = missing
 
     def _makedirs_batched(self, paths, exist_ok=False):
         """fsspec ``makedirs`` semantics for many paths, batched."""
@@ -3992,87 +4108,89 @@ class VfsiFileSystem(AbstractFileSystem):
         callback_pairs=None,
     ):
         _validate_write_mode(mode)
-        self._invalidate_namespace(paths)
-        native = [self._native_path(p) for p in paths]
-        datas = [v if isinstance(v, bytes) else bytes(v) for v in values]
-        is_bulk = callback_pairs is not None
-        if callback is not None:
-            callback.set_size(len(paths) if is_bulk else len(datas[0]))
+        with self._cache_mutation(paths, namespace=True):
+            native = [self._native_path(p) for p in paths]
+            datas = [v if isinstance(v, bytes) else bytes(v) for v in values]
+            is_bulk = callback_pairs is not None
+            if callback is not None:
+                callback.set_size(len(paths) if is_bulk else len(datas[0]))
 
-        def report(index, action=None):
-            size = len(datas[index])
-            if callback is None:
-                if action is not None:
-                    action(None)
-                return
-            if is_bulk:
-                with callback.branched(*callback_pairs[index]) as child:
-                    child.set_size(size)
-                    if action is None:
-                        child.relative_update(size)
-                    else:
-                        action(child)
-                callback.relative_update()
-            elif action is None:
-                callback.relative_update(size)
-            else:
-                action(callback)
+            def report(index, action=None):
+                size = len(datas[index])
+                if callback is None:
+                    if action is not None:
+                        action(None)
+                    return
+                if is_bulk:
+                    with callback.branched(*callback_pairs[index]) as child:
+                        child.set_size(size)
+                        if action is None:
+                            child.relative_update(size)
+                        else:
+                            action(child)
+                    callback.relative_update()
+                elif action is None:
+                    callback.relative_update(size)
+                else:
+                    action(callback)
 
-        if self._intrans:
-            for index, path in enumerate(paths):
-                report(
-                    index,
-                    lambda child, i=index, p=path: self._write_one_streamed(
-                        p,
-                        datas[i],
-                        callback=child,
-                        mode="xb" if mode == "create" else "wb",
-                    ),
-                )
-            return
-        if mode == "create":
-            for index, path in enumerate(paths):
-                report(
-                    index,
-                    lambda child, i=index, p=path: self._write_one_exclusive(
-                        p, datas[i], callback=child
-                    ),
-                )
-            return
-        for batch in _bounded_batches(
-            [len(data) for data in datas], self.batch_size, self.max_batch_bytes
-        ):
-            if len(batch) == 1 and len(datas[batch[0]]) > self.max_batch_bytes:
-                index = batch[0]
-                report(
-                    index,
-                    lambda child, i=index: self._write_one_streamed(
-                        paths[i], datas[i], callback=child
-                    ),
-                )
-                continue
-            batch_native = [native[i] for i in batch]
-            batch_datas = [datas[i] for i in batch]
-            if self.auto_mkdir:
-                parents = {
-                    posixpath.dirname(paths[i])
-                    for i in batch
-                    if posixpath.dirname(paths[i]) != "/"
-                }
-                self._ensure_dirs(list(parents), 0o755)
-            # A failed vector can have completed mutations. Prepare parents
-            # first and never replay writes, even for an indexed ENOENT.
-            written = self._client.write_many(batch_native, batch_datas, truncate=True)
-            for position, index in enumerate(batch):
-                expected = len(datas[index])
-                if written[position] != expected:
-                    raise OSError(
-                        errno.EIO,
-                        f"short write: wrote {written[position]} of {expected} bytes",
-                        paths[index],
+            if self._intrans:
+                for index, path in enumerate(paths):
+                    report(
+                        index,
+                        lambda child, i=index, p=path: self._write_one_streamed(
+                            p,
+                            datas[i],
+                            callback=child,
+                            mode="xb" if mode == "create" else "wb",
+                        ),
                     )
-            for index in batch:
-                report(index)
+                return
+            if mode == "create":
+                for index, path in enumerate(paths):
+                    report(
+                        index,
+                        lambda child, i=index, p=path: self._write_one_exclusive(
+                            p, datas[i], callback=child
+                        ),
+                    )
+                return
+            for batch in _bounded_batches(
+                [len(data) for data in datas], self.batch_size, self.max_batch_bytes
+            ):
+                if len(batch) == 1 and len(datas[batch[0]]) > self.max_batch_bytes:
+                    index = batch[0]
+                    report(
+                        index,
+                        lambda child, i=index: self._write_one_streamed(
+                            paths[i], datas[i], callback=child
+                        ),
+                    )
+                    continue
+                batch_native = [native[i] for i in batch]
+                batch_datas = [datas[i] for i in batch]
+                if self.auto_mkdir:
+                    parents = {
+                        posixpath.dirname(paths[i])
+                        for i in batch
+                        if posixpath.dirname(paths[i]) != "/"
+                    }
+                    self._ensure_dirs(list(parents), 0o755)
+                # A failed vector can have completed mutations. Prepare parents
+                # first and never replay writes, even for an indexed ENOENT.
+                written = self._client.write_many(
+                    batch_native, batch_datas, truncate=True
+                )
+                for position, index in enumerate(batch):
+                    expected = len(datas[index])
+                    if written[position] != expected:
+                        raise OSError(
+                            errno.EIO,
+                            f"short write: wrote {written[position]} of {expected} bytes",
+                            paths[index],
+                        )
+                for index in batch:
+                    report(index)
 
     def _write_one_streamed(self, path, value, callback=None, mode="wb"):
         """Write one in-memory value through the existing scalar/deferred path."""
@@ -4335,6 +4453,53 @@ class VfsiFileSystem(AbstractFileSystem):
                         child.relative_update(len(buf))
                 callback.relative_update()
 
+    def _upload_file_streamed(
+        self,
+        local_path,
+        remote_path,
+        mode,
+        callback,
+        *,
+        size=None,
+        create_parents=False,
+        **open_kwargs,
+    ):
+        """Own upload endpoints and finish each chunk without unsafe replay."""
+        _validate_write_mode(mode)
+        internal = self._checked_strip_protocol(remote_path)
+        with ExitStack() as stack:
+            source = stack.enter_context(open(local_path, "rb"))
+            callback.set_size(
+                os.fstat(source.fileno()).st_size if size is None else size
+            )
+            if create_parents:
+                self._ensure_dirs([posixpath.dirname(internal) or "/"], 0o755)
+            remote = self.open(
+                internal, "xb" if mode == "create" else "wb", **open_kwargs
+            )
+            stack.push(partial(_close_reader_on_exit, remote))
+            while True:
+                chunk = source.read(min(self.transfer_chunk_size, self.max_batch_bytes))
+                if not chunk:
+                    break
+                _write_fully(remote, chunk, callback=callback)
+
+    def put_file(
+        self, lpath, rpath, callback=DEFAULT_CALLBACK, mode="overwrite", **kwargs
+    ):
+        """Upload one file with complete writes and atomic exclusive create."""
+        _validate_write_mode(mode)
+        internal = self._checked_strip_protocol(rpath)
+        callback = Callback.as_callback(callback)
+        if os.path.isdir(lpath):
+            if mode == "create" and self.exists(internal):
+                raise FileExistsError(errno.EEXIST, "File exists", internal)
+            self.makedirs(internal, exist_ok=True)
+            return
+        self._upload_file_streamed(
+            lpath, internal, mode, callback, create_parents=True, **kwargs
+        )
+
     def put(
         self,
         lpath,
@@ -4414,19 +4579,9 @@ class VfsiFileSystem(AbstractFileSystem):
 
         def upload_streamed(local_path, remote_path, size):
             with callback.branched(local_path, remote_path) as child:
-                child.set_size(size)
-                # Finish fallible local setup before creating/truncating remote.
-                with ExitStack() as stack:
-                    source = stack.enter_context(open(local_path, "rb"))
-                    remote = self.open(remote_path, "xb" if mode == "create" else "wb")
-                    stack.push(partial(_close_reader_on_exit, remote))
-                    while True:
-                        chunk = source.read(
-                            min(self.transfer_chunk_size, self.max_batch_bytes)
-                        )
-                        if not chunk:
-                            break
-                        _write_fully(remote, chunk, callback=child)
+                self._upload_file_streamed(
+                    local_path, remote_path, mode, child, size=size
+                )
             callback.relative_update()
 
         def upload_batched(items):
@@ -4586,10 +4741,13 @@ class VfsiFileSystem(AbstractFileSystem):
             for path, mode in zip(paths, modes)
             if _normalize_mode(mode) in ("w", "w+", "a", "a+", "x", "x+")
         ]
-        self._invalidate_namespace(mutating_paths)
-        fds = self._client.open_many([self._native_path(p) for p in paths], modes)
+        fds = []
         files = []
         try:
+            with self._cache_mutation(mutating_paths, namespace=True):
+                fds = self._client.open_many(
+                    [self._native_path(p) for p in paths], modes
+                )
             identities = [None] * len(paths)
             metadata_indices = [
                 index
@@ -4641,8 +4799,8 @@ class VfsiFileSystem(AbstractFileSystem):
             except BaseException as error:
                 cleanup_error = error
                 self._client.defer_close_many(pending)
-            for file in files:
-                file._finish_group_close()
+            local_error = _finish_group_files(files)
+            cleanup_error = cleanup_error or local_error
             if cleanup_error is not None:
                 raise setup_error from cleanup_error
             raise
@@ -4699,8 +4857,8 @@ class VfsiFileSystem(AbstractFileSystem):
                 self._ensure_dirs([internal])
                 return
             self._ensure_dirs([posixpath.dirname(internal) or "/"])
-        self._invalidate_namespace([internal])
-        self._client.mkdir(self._native_path(internal), mode)
+        with self._cache_mutation([internal], namespace=True):
+            self._client.mkdir(self._native_path(internal), mode)
 
     def makedirs(self, path, exist_ok=False):
         self._makedirs_batched([path], exist_ok)
@@ -4715,8 +4873,8 @@ class VfsiFileSystem(AbstractFileSystem):
             raise _oserror(errors.get(0, errno.EIO), internal)
         if attrs["type"] != "directory":
             raise NotADirectoryError(errno.ENOTDIR, "Not a directory", internal)
-        self._invalidate_namespace([internal])
-        self._client.remove_many([self._native_path(internal)])
+        with self._cache_mutation([internal], namespace=True):
+            self._client.remove_many([self._native_path(internal)])
 
     def rm_file(self, path):
         """Remove one non-directory path using the native vector primitive."""
@@ -4729,20 +4887,20 @@ class VfsiFileSystem(AbstractFileSystem):
             paths = [self._checked_strip_protocol(path)]
         else:
             paths = [self._checked_strip_protocol(p) for p in path]
-        self._invalidate_namespace(paths)
-        if recursive:
-            self._rm_recursive(paths, maxdepth=maxdepth)
-        else:
-            # Like LocalFileSystem, non-recursive rm must not remove
-            # directories (lstat so symlinks-to-directories are removed as
-            # links, matching os.remove).
-            stats, errors = self._client.lstat_many(
-                [self._native_path(p) for p in paths]
-            )
-            for i, s in enumerate(stats):
-                if s is not None and s["type"] == "directory":
-                    raise ValueError("Cannot delete directory, set recursive=True")
-            self._client.remove_many([self._native_path(p) for p in paths])
+        with self._cache_mutation(paths, namespace=True):
+            if recursive:
+                self._rm_recursive(paths, maxdepth=maxdepth)
+            else:
+                # Like LocalFileSystem, non-recursive rm must not remove
+                # directories (lstat so symlinks-to-directories are removed as
+                # links, matching os.remove).
+                stats, errors = self._client.lstat_many(
+                    [self._native_path(p) for p in paths]
+                )
+                for i, s in enumerate(stats):
+                    if s is not None and s["type"] == "directory":
+                        raise ValueError("Cannot delete directory, set recursive=True")
+                self._client.remove_many([self._native_path(p) for p in paths])
 
     def _rm_recursive(self, paths, maxdepth=None):
         """Recursively remove ``paths`` with a batched walk + removev."""
@@ -4830,11 +4988,18 @@ class VfsiFileSystem(AbstractFileSystem):
                 # Like shutil.move / base copy+rm: moving onto an existing
                 # directory moves the source inside it.
                 dst = posixpath.join(dst, posixpath.basename(src))
+                entries, errors = self._client.lstat_many([self._native_path(dst)])
+                if entries[0] is not None:
+                    raise shutil.Error(f"Destination path {dst!r} already exists")
+                if 0 in errors and errors[0] != errno.ENOENT:
+                    raise _oserror(errors[0], dst)
             pairs = [(src, dst)]
-        self._invalidate_namespace([path for pair in pairs for path in pair])
-        self._client.rename_many(
-            [(self._native_path(a), self._native_path(b)) for a, b in pairs]
-        )
+        with self._cache_mutation(
+            [path for pair in pairs for path in pair], namespace=True
+        ):
+            self._client.rename_many(
+                [(self._native_path(a), self._native_path(b)) for a, b in pairs]
+            )
 
     def _copy_recursive(
         self, src, dst, symlinks=False, callback=DEFAULT_CALLBACK, on_error="raise"
@@ -5063,8 +5228,8 @@ class VfsiFileSystem(AbstractFileSystem):
                 parent = posixpath.dirname(dst)
                 if self.auto_mkdir and parent not in ("", "/"):
                     self._ensure_dirs([parent], 0o755)
-                self._invalidate_namespace([dst])
-                self._client.symlink(target, self._native_path(dst))
+                with self._cache_mutation([dst], namespace=True):
+                    self._client.symlink(target, self._native_path(dst))
             except ConnectionError:
                 # Link creation may already have reached the server; never
                 # suppress an ambiguous transport failure or replay it.
@@ -5090,118 +5255,129 @@ class VfsiFileSystem(AbstractFileSystem):
             callback.set_size(len(pairs))
         if not pairs:
             return
-        self._invalidate_namespace([dst for _, dst in pairs])
-        native_pairs = [(self._native_path(a), self._native_path(b)) for a, b in pairs]
-        copied, errors = self._client.copy_many(native_pairs)
-        missing = sorted(
-            index for index, code in errors.items() if code == errno.ENOENT
-        )
-        if missing and self.auto_mkdir:
-            # Successful pairs may have overwritten another source in this
-            # batch. Retry only ENOENT pairs; retain unrelated per-item errors.
-            parents = {posixpath.dirname(native_pairs[index][1]) for index in missing}
-            internal_parents = [
-                self._internalize(parent)
-                for parent in sorted(parents)
-                if parent not in ("", "/")
+        with self._cache_mutation([dst for _, dst in pairs], namespace=True):
+            native_pairs = [
+                (self._native_path(a), self._native_path(b)) for a, b in pairs
             ]
-            parent_errors = {}
-            try:
-                self._ensure_dirs(internal_parents, 0o755)
-            except OSError as error:
-                if isinstance(error, ConnectionError) or error.errno is None:
-                    raise
-                # Only a semantic failure needs parent-by-parent recovery.
-                # A bad parent must not block independent successful copies
-                # or bypass the original per-item error policy.
-                for parent in internal_parents:
-                    try:
-                        self._ensure_dirs([parent], 0o755)
-                    except OSError as failure:
-                        if (
-                            isinstance(failure, ConnectionError)
-                            or failure.errno is None
-                        ):
-                            raise
-                        parent_errors[parent] = failure.errno
-            ready = []
-            for index in missing:
-                parent = self._internalize(posixpath.dirname(native_pairs[index][1]))
-                if parent in parent_errors:
-                    errors[index] = parent_errors[parent]
-                else:
-                    ready.append(index)
-            if ready:
-                retried, retry_errors = self._client.copy_many(
-                    [native_pairs[index] for index in ready]
-                )
-                for position, index in enumerate(ready):
-                    copied[index] = retried[position]
-                    errors.pop(index, None)
-                errors.update(
-                    {ready[position]: code for position, code in retry_errors.items()}
-                )
-        if callback is not None:
-            for i, (src, dst) in enumerate(pairs):
-                if i in errors or copied[i] is None:
+            copied, errors = self._client.copy_many(native_pairs)
+            missing = sorted(
+                index for index, code in errors.items() if code == errno.ENOENT
+            )
+            if missing and self.auto_mkdir:
+                # Successful pairs may have overwritten another source in this
+                # batch. Retry only ENOENT pairs; retain unrelated per-item errors.
+                parents = {
+                    posixpath.dirname(native_pairs[index][1]) for index in missing
+                }
+                internal_parents = [
+                    self._internalize(parent)
+                    for parent in sorted(parents)
+                    if parent not in ("", "/")
+                ]
+                parent_errors = {}
+                try:
+                    self._ensure_dirs(internal_parents, 0o755)
+                except OSError as error:
+                    if isinstance(error, ConnectionError) or error.errno is None:
+                        raise
+                    # Only a semantic failure needs parent-by-parent recovery.
+                    # A bad parent must not block independent successful copies
+                    # or bypass the original per-item error policy.
+                    for parent in internal_parents:
+                        try:
+                            self._ensure_dirs([parent], 0o755)
+                        except OSError as failure:
+                            if (
+                                isinstance(failure, ConnectionError)
+                                or failure.errno is None
+                            ):
+                                raise
+                            parent_errors[parent] = failure.errno
+                ready = []
+                for index in missing:
+                    parent = self._internalize(
+                        posixpath.dirname(native_pairs[index][1])
+                    )
+                    if parent in parent_errors:
+                        errors[index] = parent_errors[parent]
+                    else:
+                        ready.append(index)
+                if ready:
+                    retried, retry_errors = self._client.copy_many(
+                        [native_pairs[index] for index in ready]
+                    )
+                    for position, index in enumerate(ready):
+                        copied[index] = retried[position]
+                        errors.pop(index, None)
+                    errors.update(
+                        {
+                            ready[position]: code
+                            for position, code in retry_errors.items()
+                        }
+                    )
+            if callback is not None:
+                for i, (src, dst) in enumerate(pairs):
+                    if i in errors or copied[i] is None:
+                        if callback_is_parent:
+                            callback.relative_update()
+                        continue
                     if callback_is_parent:
-                        callback.relative_update()
-                    continue
-                if callback_is_parent:
-                    _complete_child(callback, src, dst, copied[i])
+                        _complete_child(callback, src, dst, copied[i])
+                    else:
+                        _complete_callback(callback, copied[i])
+            if errors:
+                i = min(errors)
+                if errors[i] == _ERR_SAME_FILE:
+                    src, dst = pairs[i]
+                    exc = shutil.SameFileError(f"{src!r} and {dst!r} are the same file")
                 else:
-                    _complete_callback(callback, copied[i])
-        if errors:
-            i = min(errors)
-            if errors[i] == _ERR_SAME_FILE:
-                src, dst = pairs[i]
-                exc = shutil.SameFileError(f"{src!r} and {dst!r} are the same file")
-            else:
-                exc = _oserror(errors[i], pairs[i][0])
-            if on_error == "raise":
-                raise exc
+                    exc = _oserror(errors[i], pairs[i][0])
+                if on_error == "raise":
+                    raise exc
 
     def touch(self, path, truncate=True, **kwargs):
         internal = self._checked_strip_protocol(path)
         if truncate:
             self._write_batch([internal], [b""])
             return
-        self._invalidate_namespace([internal])
-        native = self._native_path(internal)
-        try:
-            self._client.touch(native)
-        except FileNotFoundError:
-            if self._intrans:
-                # Existing staged content already creates/touches this name.
-                # Otherwise publish exclusively to preserve concurrent creators.
-                if not any(file.path == internal for file in self.transaction.files):
-                    self._write_batch([internal], [b""], mode="create")
-            else:
-                if self.auto_mkdir:
-                    self._ensure_dirs([posixpath.dirname(internal)], 0o755)
-                # The name may now exist. Empty nontruncating writes also
-                # preserve the target of a symlink installed by another writer.
-                self._client.write_many([native], [b""], truncate=False)
+        with self._cache_mutation([internal], namespace=True):
+            native = self._native_path(internal)
+            try:
                 self._client.touch(native)
+            except FileNotFoundError:
+                if self._intrans:
+                    # Existing staged content already creates/touches this name.
+                    # Otherwise publish exclusively to preserve concurrent creators.
+                    if not any(
+                        file.path == internal for file in self.transaction.files
+                    ):
+                        self._write_batch([internal], [b""], mode="create")
+                else:
+                    if self.auto_mkdir:
+                        self._ensure_dirs([posixpath.dirname(internal)], 0o755)
+                    # The name may now exist. Empty nontruncating writes also
+                    # preserve the target of a symlink installed by another writer.
+                    self._client.write_many([native], [b""], truncate=False)
+                    self._client.touch(native)
 
     def symlink(self, target, path, **kwargs):
-        self._invalidate_namespace([path])
-        link = self._native_path(self._checked_strip_protocol(path))
-        protocols = (
-            (type(self).protocol,)
-            if isinstance(type(self).protocol, str)
-            else type(self).protocol
-        )
-        absolute_target = target.startswith("/") or any(
-            target.startswith((protocol + "://", protocol + "::"))
-            for protocol in protocols
-        )
-        if absolute_target:
-            # Map absolute targets through the configured path prefix.
-            # Relative targets are stored as-is and may resolve outside that
-            # prefix; the server export is the actual security boundary.
-            target = self._native_path(self._checked_strip_protocol(target))
-        self._client.symlink(target, link)
+        with self._cache_mutation([path], namespace=True):
+            link = self._native_path(self._checked_strip_protocol(path))
+            protocols = (
+                (type(self).protocol,)
+                if isinstance(type(self).protocol, str)
+                else type(self).protocol
+            )
+            absolute_target = target.startswith("/") or any(
+                target.startswith((protocol + "://", protocol + "::"))
+                for protocol in protocols
+            )
+            if absolute_target:
+                # Map absolute targets through the configured path prefix.
+                # Relative targets are stored as-is and may resolve outside that
+                # prefix; the server export is the actual security boundary.
+                target = self._native_path(self._checked_strip_protocol(target))
+            self._client.symlink(target, link)
 
     def readlink(self, path):
         return self._client.readlink(
@@ -5209,12 +5385,12 @@ class VfsiFileSystem(AbstractFileSystem):
         )
 
     def hardlink(self, src, dst):
-        self._invalidate_namespace([dst])
-        self._invalidate_parent_listing(src)
-        self._client.hardlink(
-            self._native_path(self._checked_strip_protocol(src)),
-            self._native_path(self._checked_strip_protocol(dst)),
-        )
+        with self._cache_mutation([dst], namespace=True):
+            self._invalidate_parent_listing(src)
+            self._client.hardlink(
+                self._native_path(self._checked_strip_protocol(src)),
+                self._native_path(self._checked_strip_protocol(dst)),
+            )
 
     # -- traversal ---------------------------------------------------------
 

@@ -40,6 +40,8 @@ pub(crate) struct FaultBackend {
     pub(crate) read_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
     pub(crate) write_counts: Option<Vec<usize>>,
     pub(crate) write_error: Option<VfError>,
+    pub(crate) replace_after_write_error: Option<(PathBuf, Vec<u8>)>,
+    pub(crate) read_all_errors_after_write: std::collections::VecDeque<VfError>,
     pub(crate) write_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
 }
 impl FaultBackend {
@@ -54,6 +56,8 @@ impl FaultBackend {
             read_calls: Arc::default(),
             write_counts: None,
             write_error: None,
+            replace_after_write_error: None,
+            read_all_errors_after_write: std::collections::VecDeque::new(),
             write_calls: Arc::default(),
         }
     }
@@ -150,7 +154,7 @@ impl VectorBackend for FaultBackend {
         if let Some(error) = self.write_error.take() {
             return Err(error);
         }
-        if let Some(counts) = self.write_counts.take() {
+        let result = if let Some(counts) = self.write_counts.take() {
             assert_eq!(counts.len(), ops.len());
             let partial: Vec<WriteOp> = ops
                 .iter()
@@ -172,7 +176,13 @@ impl VectorBackend for FaultBackend {
                 .vwrite_impl(&partial.iter().map(WriteOp::borrowed).collect::<Vec<_>>())
         } else {
             self.inner.vwrite_impl(ops)
+        };
+        if result.is_err() {
+            if let Some((path, data)) = self.replace_after_write_error.take() {
+                std::fs::write(path, data).unwrap();
+            }
         }
+        result
     }
     fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_core::VfRes {
         self.inner.vgetattrs_impl(attrs)
@@ -185,6 +195,11 @@ impl VectorBackend for FaultBackend {
         files: &[FileOperand],
         options: ReadAllOptions,
     ) -> vfsi_core::VfResult<Vec<Vec<u8>>> {
+        if !self.write_calls.lock().unwrap().is_empty() {
+            if let Some(error) = self.read_all_errors_after_write.pop_front() {
+                return Err(error);
+            }
+        }
         self.inner.vread_all_with_options_impl(files, options)
     }
 }

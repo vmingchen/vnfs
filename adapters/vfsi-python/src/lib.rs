@@ -543,7 +543,10 @@ fn read_allv_impl(
             }
             Err(e) => {
                 if e.is_transport() {
-                    return Err(e);
+                    return Err(match e.index().and_then(|index| remaining.get(index)) {
+                        Some(&index) => e.with_index(index),
+                        None => e,
+                    });
                 }
                 let Some(bi) = e.index() else {
                     return Err(e);
@@ -2022,10 +2025,38 @@ impl NfsClient {
                         if batch_index >= write_remaining.len() {
                             return Err(to_py_err(error, None));
                         }
+                        // Prefix writes may have completed, but the error omits
+                        // their counts. Verify the saved copy postcondition using
+                        // bounded reads; never replay a truncating mutation or
+                        // assume that successful primitive WRITEs were complete.
+                        let prefix = &write_remaining[..batch_index];
+                        let prefix_paths: Vec<PathBuf> =
+                            prefix.iter().map(|&index| dests[index].clone()).collect();
+                        let (verified, _) = read_allv_impl(
+                            fs,
+                            &prefix_paths,
+                            copy_fast_path_budget(max_total_bytes),
+                        )
+                        .map_err(|error| {
+                            let error = match error.index().and_then(|index| prefix.get(index)) {
+                                Some(&index) => error.with_index(index),
+                                None => error,
+                            };
+                            to_py_err(error, None)
+                        })?;
+                        for (&index, actual) in prefix.iter().zip(verified) {
+                            if actual.as_ref() == data[index].as_ref() {
+                                copied[index] =
+                                    data[index].as_ref().map(|bytes| bytes.len() as u64);
+                            } else {
+                                errors.insert(index, libc::EIO as u32);
+                            }
+                            data[index] = None;
+                        }
                         let original_index = write_remaining[batch_index];
                         errors.insert(original_index, error.err_no());
                         data[original_index] = None;
-                        write_remaining.remove(batch_index);
+                        write_remaining.drain(..=batch_index);
                     }
                 }
             }
@@ -2604,3 +2635,6 @@ mod prr_oct13_round14;
 
 #[cfg(all(test, feature = "dummy"))]
 mod prr_oct13_round16;
+
+#[cfg(all(test, feature = "dummy"))]
+mod prr_oct14b_round10;

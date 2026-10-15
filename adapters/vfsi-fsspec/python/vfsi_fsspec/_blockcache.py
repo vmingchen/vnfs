@@ -25,6 +25,7 @@ from ._fs import (
     _enter_individually,
     _handle_identity,
     _normalize_mode,
+    _OwnedStream,
     _open_with_wrappers,
 )
 
@@ -576,7 +577,14 @@ def _open_many_with_cache(cache_fs, open_files):
     try:
         for index, record in enumerate(records):
             if record["detail"]["blocks"] is True:
-                results[index] = open(record["filename"], "rb")
+                file = open(record["filename"], "rb")
+                try:
+                    results[index] = _OwnedStream(
+                        file, file, fs=cache_fs.fs, path=paths[index]
+                    )
+                except BaseException:
+                    file.close()
+                    raise
             else:
                 remote_indices.append(index)
 
@@ -738,6 +746,8 @@ def _install_fsspec_blockcache_wrappers():
             file = original_open(cache_fs, path, *args, **kwargs)
             try:
                 _mark_compatible_cache(cache_fs, normalized, file)
+                if getattr(file, "_raw", None) is None:
+                    return _OwnedStream(file, file, fs=cache_fs.fs, path=normalized)
             except BaseException as primary:
                 _close_reader_on_exit(
                     file, type(primary), primary, primary.__traceback__
