@@ -245,6 +245,38 @@ impl VectorBackend for NfsVecFs {
         if writes.iter().all(|w| w.file().is_fd()) {
             return self.vwrite_batch_nfs(writes);
         }
+        // Append descriptors require the same dependency/offset completion
+        // engine as descriptor-only vectors, including mixed path aliases.
+        if writes.iter().any(|request| {
+            request
+                .file()
+                .fd()
+                .and_then(|fd| self.open_files.get(&fd))
+                .is_some_and(|open| open.append)
+        }) {
+            // Opening a later truncating path must not change an earlier
+            // append's target before its write. Preserve these mutation
+            // boundaries; ordinary independent requests remain vectorized.
+            let mut output = Vec::with_capacity(writes.len());
+            let mut start = 0;
+            while start < writes.len() {
+                let truncates_path =
+                    |index: usize| !writes[index].file().is_fd() && writes[index].truncates();
+                let end = if truncates_path(start) {
+                    start + 1
+                } else {
+                    (start + 1..writes.len())
+                        .find(|&index| truncates_path(index))
+                        .unwrap_or(writes.len())
+                };
+                output.extend(
+                    self.vwrite_path_fallback_nfs(&writes[start..end])
+                        .map_err(|error| error.map_index(|index| start + index))?,
+                );
+                start = end;
+            }
+            return Ok(output);
+        }
         let mut path_ops = Vec::with_capacity(writes.len());
         let mut offsets = Vec::with_capacity(writes.len());
         for (i, w) in writes.iter().enumerate() {

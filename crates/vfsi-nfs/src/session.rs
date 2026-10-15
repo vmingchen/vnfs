@@ -25,6 +25,11 @@ pub struct Session {
     pub sessionid: sessionid4,
     pub minorversion: u32,
     slot_seqid: u32,
+    create_session_seqid: u32,
+    session_created: bool,
+    // A failed setup for an already confirmed identity must not destroy the
+    // client ID still owned by the connection being replaced.
+    owns_clientid: bool,
     /// Set after an RPC error where it is unknowable whether the server
     /// consumed the slot sequence. A fresh session is required before reuse.
     poisoned: bool,
@@ -125,6 +130,9 @@ impl Session {
             // check_slot_seqid() accepts seqid == slot_seqid + 1, so the
             // first SEQUENCE must carry seqid 1.
             slot_seqid: 1,
+            create_session_seqid: 1,
+            session_created: false,
+            owns_clientid: false,
             poisoned: false,
             max_requestsize: 4 * 1024 * 1024,
             max_responsesize: 4 * 1024 * 1024,
@@ -192,7 +200,10 @@ impl Session {
         if st != nfsstat4_NFS4_OK {
             return Err(RpcError::op(0, st));
         }
-        self.clientid = res.exchange_id(0).eir_clientid;
+        let exchanged = res.exchange_id(0);
+        self.clientid = exchanged.eir_clientid;
+        self.create_session_seqid = exchanged.eir_sequenceid;
+        self.owns_clientid = exchanged.eir_flags & EXCHGID4_FLAG_CONFIRMED_R == 0;
         Ok(())
     }
 
@@ -200,7 +211,10 @@ impl Session {
         let mut c = Compound::new();
         c.args.minorversion = self.minorversion;
         c.tag(b"create_session");
-        c.create_session(create_session_args(self.clientid));
+        c.create_session(create_session_args_with_sequence(
+            self.clientid,
+            self.create_session_seqid,
+        ));
         let res = c.call(&self.rpc)?;
         let st = res.try_op_status(0)?;
         if st != nfsstat4_NFS4_OK {
@@ -208,6 +222,7 @@ impl Session {
         }
         let ok = res.create_session(0);
         self.sessionid = ok.csr_sessionid;
+        self.session_created = true;
         // The server returns its confirmed channel attributes; compounds must
         // stay under these (the client's advertised values are only a
         // request). Zero is invalid and must not silently restore a larger
@@ -232,7 +247,7 @@ impl Session {
         // RECLAIM_COMPLETE requires a session: it must follow a SEQUENCE op.
         let res = self.compound(&mut c)?;
         let st = res.try_op_status(1)?;
-        if st != nfsstat4_NFS4_OK {
+        if st != nfsstat4_NFS4_OK && st != nfsstat4_NFS4ERR_COMPLETE_ALREADY {
             return Err(RpcError::op(1, st));
         }
         Ok(())
@@ -289,27 +304,65 @@ impl Session {
             return Ok(());
         }
         let mut first_error = None;
-        let mut c = Compound::new();
-        c.args.minorversion = self.minorversion;
-        c.tag(b"destroy_session");
-        c.destroy_session(&self.sessionid);
-        match c.call(&self.rpc) {
-            Ok(res) if res.status() == nfsstat4_NFS4_OK => {}
-            Ok(res) => first_error = Some(RpcError::op(0, res.status())),
-            Err(error) => first_error = Some(error),
+        if self.session_created
+            && let Err(error) = self.destroy_session(self.sessionid)
+        {
+            first_error = Some(error);
         }
-        let mut c = Compound::new();
-        c.args.minorversion = self.minorversion;
-        c.tag(b"destroy_clientid");
-        c.destroy_clientid(self.clientid);
-        match c.call(&self.rpc) {
-            Ok(res) if res.status() == nfsstat4_NFS4_OK => {}
-            Ok(res) if first_error.is_none() => first_error = Some(RpcError::op(0, res.status())),
-            Err(error) if first_error.is_none() => first_error = Some(error),
-            _ => {}
+        if self.owns_clientid {
+            let mut c = Compound::new();
+            c.args.minorversion = self.minorversion;
+            c.tag(b"destroy_clientid");
+            c.destroy_clientid(self.clientid);
+            match c.call(&self.rpc) {
+                Ok(res) if res.status() == nfsstat4_NFS4_OK => {}
+                Ok(res) if first_error.is_none() => {
+                    first_error = Some(RpcError::op(0, res.status()))
+                }
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                _ => {}
+            }
         }
         self.clientid = 0;
         first_error.map_or(Ok(()), Err)
+    }
+
+    pub(crate) fn shares_identity(&self, previous: &Self) -> bool {
+        self.clientid != 0 && self.clientid == previous.clientid
+    }
+
+    pub(crate) fn retire_previous_session(&mut self, previous: &Self) {
+        debug_assert!(self.shares_identity(previous));
+        // Use the new working transport, never the possibly dead old socket.
+        // Cleanup is best effort, just like ordinary session destruction.
+        let mut bind = Compound::new();
+        bind.args.minorversion = self.minorversion;
+        bind.tag(b"bind_retired_session");
+        bind.bind_fore_channel(previous.sessionid);
+        if bind
+            .call(&self.rpc)
+            .is_ok_and(|result| result.status() == nfsstat4_NFS4_OK)
+        {
+            let _ = self.destroy_session(previous.sessionid);
+        }
+        self.owns_clientid = previous.owns_clientid;
+    }
+
+    fn destroy_session(&self, sessionid: sessionid4) -> RpcResult<()> {
+        let mut c = Compound::new();
+        c.args.minorversion = self.minorversion;
+        c.tag(b"destroy_session");
+        c.destroy_session(&sessionid);
+        let result = c.call(&self.rpc)?;
+        let status = result.status();
+        if status == nfsstat4_NFS4_OK
+            || status == nfsstat4_NFS4ERR_BADSESSION
+            || status == nfsstat4_NFS4ERR_DEADSESSION
+        {
+            Ok(())
+        } else {
+            Err(RpcError::op(0, status))
+        }
     }
 
     /// Best-effort teardown used by `Drop`.
@@ -413,10 +466,15 @@ fn back_channel_attrs() -> channel_attrs4 {
     }
 }
 
+#[cfg(test)]
 fn create_session_args(clientid: clientid4) -> CREATE_SESSION4args {
+    create_session_args_with_sequence(clientid, 1)
+}
+
+fn create_session_args_with_sequence(clientid: clientid4, sequence: u32) -> CREATE_SESSION4args {
     CREATE_SESSION4args {
         csa_clientid: clientid,
-        csa_sequence: 1,
+        csa_sequence: sequence,
         csa_flags: 0,
         csa_fore_chan_attrs: fore_channel_attrs(),
         csa_back_chan_attrs: back_channel_attrs(),
@@ -512,3 +570,7 @@ mod tests {
         assert_eq!(args.csa_fore_chan_attrs.ca_maxoperations, 256);
     }
 }
+
+#[cfg(test)]
+#[path = "session_identity_tests.rs"]
+mod session_identity_tests;

@@ -116,7 +116,17 @@ impl NfsVecFs {
         } else {
             self.nfs.open(&dirfh, name, access, create_mode)
         };
-        result.map_err(|e| vfsi_core::error_from_rpc(e, 0))
+        result.map_err(|error| {
+            // NFS servers may reject OPEN on an existing symlink with
+            // NFS4ERR_SYMLINK even for exclusive creation. The parent was
+            // already followed above, so this status identifies the existing
+            // final entry and has POSIX exclusive-create semantics: EEXIST.
+            if create && excl && error.status == nfsstat4_NFS4ERR_SYMLINK {
+                VfError::nfs(0, nfsstat4_NFS4ERR_EXIST)
+            } else {
+                vfsi_core::error_from_rpc(error, 0)
+            }
+        })
     }
 
     /// The merged (single-compound) openv: resolve each parent once, then
@@ -440,13 +450,7 @@ impl NfsVecFs {
         if opens.is_empty() {
             return;
         }
-        let ops: Vec<crate::client::CloseOp> = opens
-            .iter()
-            .map(|(fh, sid)| crate::client::CloseOp {
-                fh: fh.clone(),
-                stateid: *sid,
-            })
-            .collect();
+        let ops = crate::client::latest_path_open_closes(opens);
         let _ = self.nfs.close_many_path(&ops);
     }
 }
@@ -525,3 +529,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "test-faults"))]
+#[path = "prr_temporary_open_tests.rs"]
+mod prr_temporary_open_tests;

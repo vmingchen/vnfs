@@ -238,6 +238,7 @@ impl NfsVecFs {
             .collect::<VfResult<_>>()?;
         let nfs = Self::connect_client(&self.connection)?;
         let mut replacement = Self::from_client(nfs, self.connection.clone());
+        replacement.nfs.prepare_reconnect(&self.nfs);
         replacement.read_only = self.read_only;
         #[cfg(target_os = "linux")]
         if let Some(mount) = &self.mount_source {
@@ -301,6 +302,22 @@ impl NfsVecFs {
         replacement.open_dirs = self.open_dirs.clone();
         replacement.dir_owner = self.dir_owner;
 
+        // Reusing a stable client ID retains the old server OPEN state.
+        // The replacement has acquired independent owners for its descriptors;
+        // retire the obsolete state and session through its live transport.
+        let obsolete = self
+            .open_files
+            .values()
+            .chain(self.deferred_descriptor_closes.iter())
+            .map(|open| crate::client::CloseOp {
+                fh: open.fh.clone(),
+                stateid: open.stateid,
+            })
+            .collect();
+        replacement
+            .nfs
+            .retire_replaced_connection(&self.nfs, obsolete);
+
         // Publish pending lifecycle events with the new session; a failed
         // reopen must leave them in the old backend for delivery on unlock.
         replacement.pending_events = std::mem::take(&mut self.pending_events);
@@ -309,6 +326,7 @@ impl NfsVecFs {
         // state. Do not turn successful recovery into several close/destroy
         // RPC timeouts while it is dropped.
         replacement.open_files.clear();
+        replacement.deferred_descriptor_closes.clear();
         replacement.nfs.abandon();
         Ok(())
     }

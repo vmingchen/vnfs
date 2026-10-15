@@ -478,6 +478,51 @@ fn copy_roots(
     progress: &mut Progress<'_>,
     skipped: &mut HashSet<usize>,
 ) -> Result<()> {
+    if options.layout != CopyLayout::Contents || roots.len() < 2 {
+        return copy_independent_roots(fs, roots, options, budget, summary, progress, skipped);
+    }
+    // Contents roots can map to the same destination, including descendants of
+    // a directory operand. Complete conflicting roots in input order. Distinct
+    // regular-file basenames remain independent and retain vector I/O.
+    let mut roots = roots.into_iter().peekable();
+    let mut first_cohort = true;
+    while let Some(root) = roots.next() {
+        let regular = root.metadata.is_file();
+        let mut destinations = HashSet::new();
+        destinations.insert(root.destination.clone());
+        let mut cohort = vec![root];
+        if regular {
+            while let Some(next) = roots.peek() {
+                if !next.metadata.is_file() || !destinations.insert(next.destination.clone()) {
+                    break;
+                }
+                cohort.push(roots.next().expect("peeked root"));
+            }
+        }
+        if !first_cohort {
+            // A freshly created container may now contain earlier output.
+            for task in &mut cohort {
+                task.fresh_destination = false;
+            }
+        }
+        copy_independent_roots(fs, cohort, options, budget, summary, progress, skipped)?;
+        if summary.stopped {
+            return Ok(());
+        }
+        first_cohort = false;
+    }
+    Ok(())
+}
+
+fn copy_independent_roots(
+    fs: &impl Vfsi,
+    roots: Vec<Task>,
+    options: CopyOptions,
+    budget: &mut TraversalBudget,
+    summary: &mut TransferSummary,
+    progress: &mut Progress<'_>,
+    skipped: &mut HashSet<usize>,
+) -> Result<()> {
     let limits = fs.limits();
     let mut pending = Vec::new();
     for batch in roots.chunks(options.batch_size) {

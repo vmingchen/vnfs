@@ -208,6 +208,44 @@ impl NfsVecFs {
             }
         };
 
+        // OPENs through the shared path owner can advance the stateid of any
+        // earlier OPEN of the same object, including read-only fanout. Filehandle
+        // identity also catches hardlink and symlink aliases without another RPC.
+        // Keep independent pairs batched; aliases must complete in caller order.
+        let aliases = (0..pairs.len()).any(|i| {
+            let source = &self.open_files[&src_tmp[i].expect("path source was opened")].fh;
+            let destination =
+                &self.open_files[&dst_tmp[i].expect("path destination was opened")].fh;
+            (i + 1..pairs.len()).any(|j| {
+                let other_source =
+                    &self.open_files[&src_tmp[j].expect("path source was opened")].fh;
+                let other_destination =
+                    &self.open_files[&dst_tmp[j].expect("path destination was opened")].fh;
+                source == other_source
+                    || source == other_destination
+                    || destination == other_source
+                    || destination == other_destination
+            })
+        });
+        if aliases {
+            // Obsolete stateids can fail CLOSE. Attempt every descriptor so
+            // one such error cannot skip cleanup of later independent objects.
+            for descriptor in src_tmp.iter().chain(&dst_tmp) {
+                self.close_tmp(std::slice::from_ref(descriptor));
+            }
+            for (index, pair) in pairs.iter().enumerate() {
+                self.copy_extents_server_side(std::slice::from_ref(pair))
+                    .map_err(|mut failure| {
+                        failure.error = failure.error.map_index(|_| index);
+                        // A previous pair may already have changed its destination.
+                        // Never ask the caller to replay that successful prefix.
+                        failure.fallback_safe &= index == 0;
+                        failure
+                    })?;
+            }
+            return Ok(());
+        }
+
         let result = (|| -> Result<(), CopyBatchFailure> {
             let explicit: Vec<usize> = pairs
                 .iter()

@@ -36,50 +36,7 @@ struct DescriptorReadPlan {
     offsets: Vec<u64>,
 }
 
-/// Same-object dependencies for one descriptor WRITE wave. The first range
-/// needs no tree allocation; additional independent ranges are indexed in
-/// O(log n), avoiding quadratic overlap checks for large scatter vectors.
-pub(super) struct WriteWaveAccess {
-    positional: bool,
-    first: std::ops::Range<u64>,
-    additional: std::collections::BTreeMap<u64, u64>,
-}
-
-impl WriteWaveAccess {
-    pub(super) fn new(range: std::ops::Range<u64>, positional: bool) -> Self {
-        Self {
-            positional,
-            first: range,
-            additional: std::collections::BTreeMap::new(),
-        }
-    }
-
-    pub(super) fn admit(&mut self, range: std::ops::Range<u64>, positional: bool) -> bool {
-        if !self.positional || !positional {
-            return false;
-        }
-        // Empty writes do not overlap, and must not replace a nonempty
-        // interval with the same start in the overlap index.
-        if range.is_empty() {
-            return true;
-        }
-        if !self.first.is_empty() && range.start < self.first.end && self.first.start < range.end {
-            return false;
-        }
-        // Already admitted intervals are disjoint: only the predecessor of
-        // this range's end can overlap it, even for nonmonotonic offsets.
-        if self
-            .additional
-            .range(..range.end)
-            .next_back()
-            .is_some_and(|(_, &end)| end > range.start)
-        {
-            return false;
-        }
-        self.additional.insert(range.start, range.end);
-        true
-    }
-}
+pub(super) use crate::client::WriteWaveAccess;
 
 pub(super) fn remap_descriptor_chunk_error(
     error: VfError,
@@ -955,8 +912,7 @@ impl NfsVecFs {
                 self.close_path_opens(&outcome.opened);
                 Ok(self.assemble_writes(writes, offsets, &outcome.counts, &outcome.committed))
             }
-            Err(error) if error.is_transport() => Err(vfsi_core::error_from_rpc(error, None)),
-            Err(_) => self.vwrite_path_fallback_nfs(writes),
+            Err(error) => Err(vfsi_core::error_from_rpc_indexed(error)),
         }
     }
 
@@ -993,8 +949,7 @@ impl NfsVecFs {
                 }
                 Ok(self.assemble_writes(writes, offsets, &outcome.counts, &outcome.committed))
             }
-            Err(error) if error.is_transport() => Err(vfsi_core::error_from_rpc(error, None)),
-            Err(_) => self.vwrite_path_fallback_nfs(writes),
+            Err(error) => Err(vfsi_core::error_from_rpc_indexed(error)),
         }
     }
 

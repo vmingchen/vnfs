@@ -395,21 +395,29 @@ impl NfsVecFs {
     /// The legacy phased removev (grouped per parent + remove_many).
     pub(super) fn removev_phased(&mut self, files: &[FileOperand]) -> VfRes {
         use std::collections::BTreeMap;
-        // Group by parent directory to batch REMOVEs.
-        let mut groups: BTreeMap<Box<[u8]>, Vec<Vec<u8>>> = BTreeMap::new();
+        // Group by parent directory to batch REMOVEs, retaining caller indices.
+        #[derive(Default)]
+        struct RemoveGroup {
+            indices: Vec<usize>,
+            names: Vec<Vec<u8>>,
+        }
+        let mut groups: BTreeMap<Box<[u8]>, RemoveGroup> = BTreeMap::new();
         for (i, f) in files.iter().enumerate() {
             let path = self.server_vf_path(f).map_err(|e| e.with_index(i))?;
             let (dir, name) =
                 split_path_bytes(path_bytes(&path)).map_err(|_| VfError::failure(i, ERR_NOENT))?;
-            groups.entry(dir.into_boxed_slice()).or_default().push(name);
+            let group = groups.entry(dir.into_boxed_slice()).or_default();
+            group.indices.push(i);
+            group.names.push(name);
         }
-        for (dir, names) in &groups {
+        for (dir, RemoveGroup { indices, names }) in groups {
             let dirfh = self
-                .resolve_path(&path_from_bytes(dir), true)
-                .map_err(|e| e.with_index(0))?;
-            self.nfs
-                .remove_many(&dirfh, names)
-                .map_err(vfsi_core::error_from_rpc_indexed)?;
+                .resolve_path(&path_from_bytes(&dir), true)
+                .map_err(|error| error.with_index(indices[0]))?;
+            self.nfs.remove_many(&dirfh, &names).map_err(|error| {
+                vfsi_core::error_from_rpc_indexed(error)
+                    .map_index(|relative| indices.get(relative).copied().unwrap_or(relative))
+            })?;
         }
         Ok(())
     }

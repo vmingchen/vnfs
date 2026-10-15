@@ -776,6 +776,17 @@ impl Compound {
         self.push(op);
     }
 
+    pub(crate) fn bind_fore_channel(&mut self, sessionid: sessionid4) {
+        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
+        op.argop = nfs_opnum4_NFS4_OP_BIND_CONN_TO_SESSION;
+        op.nfs_argop4_u.opbind_conn_to_session = BIND_CONN_TO_SESSION4args {
+            bctsa_sessid: sessionid,
+            bctsa_dir: channel_dir_from_client4_CDFC4_FORE,
+            bctsa_use_conn_in_rdma_mode: 0,
+        };
+        self.push(op);
+    }
+
     pub fn destroy_session(&mut self, sessionid: &sessionid4) {
         let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
         op.argop = nfs_opnum4_NFS4_OP_DESTROY_SESSION;
@@ -961,6 +972,9 @@ fn response_op_status(ro: &nfs_resop4) -> u32 {
             nfs_opnum4_NFS4_OP_CLOSE => ro.nfs_resop4_u.opclose.status,
             nfs_opnum4_NFS4_OP_EXCHANGE_ID => ro.nfs_resop4_u.opexchange_id.eir_status,
             nfs_opnum4_NFS4_OP_CREATE_SESSION => ro.nfs_resop4_u.opcreate_session.csr_status,
+            nfs_opnum4_NFS4_OP_BIND_CONN_TO_SESSION => {
+                ro.nfs_resop4_u.opbind_conn_to_session.bctsr_status
+            }
             nfs_opnum4_NFS4_OP_RECLAIM_COMPLETE => ro.nfs_resop4_u.opreclaim_complete.rcr_status,
             nfs_opnum4_NFS4_OP_CREATE => ro.nfs_resop4_u.opcreate.status,
             nfs_opnum4_NFS4_OP_READLINK => ro.nfs_resop4_u.opreadlink.status,

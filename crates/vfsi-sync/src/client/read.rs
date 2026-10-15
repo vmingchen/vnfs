@@ -136,7 +136,15 @@ impl<F: VectorBackend> FsClient<F> {
         for (index, request) in requests.iter().map(&project).enumerate() {
             self.validate_owner(request.file, index)?;
             reads.push(ReadOp::new(
-                request.file.raw()?.clone(),
+                request
+                    .file
+                    .raw()
+                    .map_err(|error| {
+                        error
+                            .with_index(index)
+                            .with_context("vread_native", request.file.path())
+                    })?
+                    .clone(),
                 request.offset,
                 request.length,
             ));
@@ -171,7 +179,15 @@ impl<F: VectorBackend> FsClient<F> {
                 return Err(VfError::client(index, libc::EFBIG as u32));
             }
             reads.push(ReadOp::new(
-                request.file.raw()?.clone(),
+                request
+                    .file
+                    .raw()
+                    .map_err(|error| {
+                        error
+                            .with_index(index)
+                            .with_context("vread_into_native", request.file.path())
+                    })?
+                    .clone(),
                 request.offset,
                 request.buffer.len(),
             ));

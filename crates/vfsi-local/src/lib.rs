@@ -1518,7 +1518,13 @@ impl HandleBackend for LocalBackend {
             opts.mode(mode & 0o7777);
             Self::protect_create_open(&p, &mut opts);
             match opts.open(&p) {
-                Ok(f) => f,
+                Ok(f) => {
+                    // The creation mode is now applied atomically by OPEN.
+                    // Retain the fault boundary before registering the handle.
+                    #[cfg(feature = "test-faults")]
+                    self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index: 0 })?;
+                    f
+                }
                 Err(e)
                     if flags & libc::O_EXCL == 0
                         && e.kind() == std::io::ErrorKind::AlreadyExists =>

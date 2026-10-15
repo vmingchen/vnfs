@@ -195,24 +195,29 @@ impl HandleBackend for NfsVecFs {
             VfPathBase::Cwd => self.server_path(pathname),
         };
         let full = path_from_bytes(&normalize_bytes(path_bytes(&full)));
-        // Follow a final symlink chain so O_CREAT creates the target
-        // (POSIX semantics); OPEN cannot target a symlink directly.
-        let full = self.follow_target_path(&full)?;
+        let create = flags & O_CREAT != 0;
+        let excl = flags & O_EXCL != 0;
+        // Exclusive creation tests the directory entry itself, including a
+        // dangling or looping symlink. Let the server's exclusive OPEN reject
+        // that existing leaf atomically; ordinary opens follow its target.
+        let full = if create && excl {
+            full
+        } else {
+            self.follow_target_path(&full)?
+        };
         let (dir, name) =
             split_path_bytes(path_bytes(&full)).map_err(|_| VfError::failure(0, ERR_NOENT))?;
         let access = Self::flags_to_access(flags);
-        let create = flags & O_CREAT != 0;
-        let excl = flags & O_EXCL != 0;
         // The mode only applies when O_CREAT actually creates the file
         // (POSIX ignores it for existing files).
         let created = if create {
             if excl {
                 true
             } else {
-                match self.nfs.resolve(path_bytes(&full)) {
+                match self.resolve_path(&full, false) {
                     Ok(_) => false,
-                    Err(e) if e.status == nfsstat4_NFS4ERR_NOENT => true,
-                    Err(e) => return Err(vfsi_core::error_from_rpc(e, 0)),
+                    Err(error) if error.err_no() == nfsstat4_NFS4ERR_NOENT => true,
+                    Err(error) => return Err(error),
                 }
             }
         } else {
