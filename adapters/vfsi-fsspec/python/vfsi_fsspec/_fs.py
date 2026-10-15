@@ -2650,6 +2650,7 @@ class VfsiFileSystem(AbstractFileSystem):
     transaction_type = _VfsiTransaction
     _native_module = None
     _supported_backends = frozenset({"nfs", "smb", "dummy"})
+    _default_dir_mode = 0o755
 
     def __init__(
         self,
@@ -3543,10 +3544,11 @@ class VfsiFileSystem(AbstractFileSystem):
 
     # -- batched directory creation ---------------------------------------
 
-    def _ensure_dirs(self, paths, mode=0o755):
+    def _ensure_dirs(self, paths, mode=None):
         """``mkdir -p`` a set of internal paths with as few compounds as
         possible: one batched existence probe, then one mkdirv batch per
         missing depth level."""
+        mode = self._default_dir_mode if mode is None else mode
         paths = list(dict.fromkeys(p for p in paths if p not in ("",)))
         if not paths:
             return
@@ -3628,7 +3630,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     raise _oserror(eerrs[j], p)
                 raise FileExistsError(errno.EEXIST, f"File exists: {p!r}")
         if missing:
-            self._ensure_dirs(missing, 0o755)
+            self._ensure_dirs(missing)
 
     # -- metadata ----------------------------------------------------------
 
@@ -4179,7 +4181,7 @@ class VfsiFileSystem(AbstractFileSystem):
                         for i in batch
                         if posixpath.dirname(paths[i]) != "/"
                     }
-                    self._ensure_dirs(list(parents), 0o755)
+                    self._ensure_dirs(list(parents))
                 # A failed vector can have completed mutations. Prepare parents
                 # first and never replay writes, even for an indexed ENOENT.
                 written = self._client.write_many(
@@ -4214,7 +4216,7 @@ class VfsiFileSystem(AbstractFileSystem):
         internal = self._checked_strip_protocol(path)
         parent = posixpath.dirname(internal)
         if self.auto_mkdir and parent not in ("", "/"):
-            self._ensure_dirs([parent], 0o755)
+            self._ensure_dirs([parent])
         fd = self._client.open(self._native_path(internal), "xb")
         write_error = None
         try:
@@ -4509,7 +4511,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 os.fstat(source.fileno()).st_size if size is None else size
             )
             if create_parents:
-                self._ensure_dirs([posixpath.dirname(internal) or "/"], 0o755)
+                self._ensure_dirs([posixpath.dirname(internal) or "/"])
             remote = self.open(
                 internal, "xb" if mode == "create" else "wb", **open_kwargs
             )
@@ -4690,7 +4692,7 @@ class VfsiFileSystem(AbstractFileSystem):
         if self.auto_mkdir and any(c in mode for c in "wax"):
             parent = self._parent(path)
             if parent not in ("", "/"):
-                self._ensure_dirs([parent], 0o755)
+                self._ensure_dirs([parent])
         fd = None
         identity = None
         try:
@@ -4773,7 +4775,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 for path, mode in zip(paths, modes)
                 if any(c in mode for c in "wax") and posixpath.dirname(path) != "/"
             }
-            self._ensure_dirs(list(parents), 0o755)
+            self._ensure_dirs(list(parents))
         mutating_paths = [
             path
             for path, mode in zip(paths, modes)
@@ -4886,12 +4888,12 @@ class VfsiFileSystem(AbstractFileSystem):
 
     def mkdir(self, path, create_parents=True, **kwargs):
         internal = self._checked_strip_protocol(path)
-        mode = kwargs.get("mode", 0o755)
-        mode = (0o755 if mode is None else mode) & 0o7777
+        mode = kwargs.get("mode")
+        mode = (self._default_dir_mode if mode is None else mode) & 0o7777
         if create_parents:
             if self.exists(internal):
                 raise FileExistsError(errno.EEXIST, "File exists", internal)
-            if mode == 0o755:
+            if mode == self._default_dir_mode:
                 self._ensure_dirs([internal])
                 return
             self._ensure_dirs([posixpath.dirname(internal) or "/"])
@@ -5068,7 +5070,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     pairs.append((child_int, dest))
 
         callback.set_size(len(pairs) + len(symlink_pairs))
-        self._ensure_dirs(list(dest_dirs), 0o755)
+        self._ensure_dirs(list(dest_dirs))
         self._copy_pairs(
             pairs,
             on_error,
@@ -5090,14 +5092,14 @@ class VfsiFileSystem(AbstractFileSystem):
                 raise _oserror(dst_errors[0], dst) from None
             if dst_stats[0] is not None and dst_stats[0]["type"] != "directory":
                 raise FileExistsError(errno.EEXIST, "File exists", dst)
-            self._ensure_dirs([dst], 0o755)
+            self._ensure_dirs([dst])
             _complete_callback(callback, 0)
             return
         if info["type"] != "file":
             raise FileNotFoundError(src)
         parent = self._parent(dst)
         if self.auto_mkdir and parent not in ("", "/"):
-            self._ensure_dirs([parent], 0o755)
+            self._ensure_dirs([parent])
         self._copy_pairs([(src, dst)], "raise", callback=callback)
 
     def copy(
@@ -5288,7 +5290,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 target = self.readlink(src)
                 parent = posixpath.dirname(dst)
                 if self.auto_mkdir and parent not in ("", "/"):
-                    self._ensure_dirs([parent], 0o755)
+                    self._ensure_dirs([parent])
                 with self._cache_mutation([dst], namespace=True):
                     self._client.symlink(target, self._native_path(dst))
             except ConnectionError:
@@ -5337,7 +5339,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 ]
                 parent_errors = {}
                 try:
-                    self._ensure_dirs(internal_parents, 0o755)
+                    self._ensure_dirs(internal_parents)
                 except OSError as error:
                     if isinstance(error, ConnectionError) or error.errno is None:
                         raise
@@ -5346,7 +5348,7 @@ class VfsiFileSystem(AbstractFileSystem):
                     # or bypass the original per-item error policy.
                     for parent in internal_parents:
                         try:
-                            self._ensure_dirs([parent], 0o755)
+                            self._ensure_dirs([parent])
                         except OSError as failure:
                             if (
                                 isinstance(failure, ConnectionError)
@@ -5415,7 +5417,7 @@ class VfsiFileSystem(AbstractFileSystem):
                         self._write_batch([internal], [b""], mode="create")
                 else:
                     if self.auto_mkdir:
-                        self._ensure_dirs([posixpath.dirname(internal)], 0o755)
+                        self._ensure_dirs([posixpath.dirname(internal)])
                     # The name may now exist. Empty nontruncating writes also
                     # preserve the target of a symlink installed by another writer.
                     self._client.write_many([native], [b""], truncate=False)

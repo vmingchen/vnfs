@@ -22,6 +22,182 @@ fn required() -> bool {
     std::env::var("VFSI_NFS_REQUIRED").as_deref() == Ok("1")
 }
 
+fn scalar_descriptor_lifetime(exclusive: bool) {
+    let Some(mut fs) = connect() else { return };
+    let root = format!("/vfsi-scalar-owner-{}-{exclusive}", std::process::id());
+    let path = std::path::PathBuf::from(format!("{root}/file"));
+    fs.ensure_dir_impl(Path::new(&root), 0o755).unwrap();
+    if !exclusive {
+        fs.vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::from_os_path(
+            &path,
+            VfOffset::At(0),
+            b"abc".to_vec(),
+        )
+        .with_creation()]))
+            .unwrap();
+    }
+    let flags = libc::O_RDWR
+        | libc::O_APPEND
+        | if exclusive {
+            libc::O_CREAT | libc::O_EXCL
+        } else {
+            0
+        };
+    let first = fs.open_raw_impl(&path, flags, 0o640).unwrap();
+    if exclusive {
+        fs.write_raw_impl(&first, 0, b"abc").unwrap();
+        assert_eq!(fs.fstat_impl(&first).unwrap().mode & 0o777, 0o640);
+    }
+    let second = fs.open_raw_impl(&path, libc::O_RDWR, 0).unwrap();
+    let by_path = FileOperand::from_os_path(&path);
+    assert_eq!(fs.read_raw_impl(&by_path, 0, 4).unwrap(), b"abc");
+    // The temporary pathname OPEN/CLOSE must not invalidate either descriptor.
+    let appended = fs
+        .vwrite_impl(&borrow_writes(&[vfsi_sync::WriteOp::new(
+            first.clone(),
+            VfOffset::Cur,
+            b"d".to_vec(),
+        )]))
+        .unwrap();
+    assert_eq!(appended[0].offset, 3);
+    assert_eq!(appended[0].written, 1);
+    assert_eq!(fs.read_raw_impl(&second, 0, 4).unwrap(), b"abcd");
+    // Closing one caller-owned OPEN must not close its independent sibling.
+    fs.close_impl(&first).unwrap();
+    fs.write_raw_impl(&second, 0, b"AB").unwrap();
+    assert_eq!(fs.read_raw_impl(&by_path, 0, 4).unwrap(), b"ABcd");
+    assert_eq!(fs.read_raw_impl(&second, 0, 4).unwrap(), b"ABcd");
+    fs.close_impl(&second).unwrap();
+    fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
+}
+
+#[test]
+fn scalar_opens_keep_independent_state_during_path_io() {
+    scalar_descriptor_lifetime(false);
+}
+
+#[test]
+fn exclusive_scalar_opens_keep_independent_state_during_path_io() {
+    scalar_descriptor_lifetime(true);
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn exclusive_open_cleanup_preserves_times_across_mixed_compound_chunks() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use vfsi_nfs::client::{CloseOp, OpenOp};
+
+    let server = match std::env::var("VFSI_NFS_SERVER") {
+        Ok(server) => server,
+        Err(_) => {
+            assert!(!required(), "VFSI_NFS_SERVER is required");
+            return;
+        }
+    };
+    let minor = std::env::var("VFSI_NFS_MINOR")
+        .unwrap_or_else(|_| "2".into())
+        .parse::<u32>()
+        .unwrap();
+    let mut client = NfsClient::connect_minor(&server, minor).unwrap();
+    let root = client.root().clone();
+    client.test_limit_compound_operations(8); // SEQUENCE + two three-op OPENs.
+    for mixed in [false, true] {
+        let name = format!("vfsi-exclusive-times-{}-{mixed}", std::process::id());
+        let dir = client.mkdir(&root, &name).unwrap();
+        let names: Vec<Vec<u8>> = (0..if mixed { 4 } else { 1 })
+            .map(|index| format!("file-{index}").into_bytes())
+            .collect();
+        let mut existing_times = Vec::new();
+        if mixed {
+            for name in &names[..2] {
+                let (fh, stateid) = client
+                    .open(
+                        &dir,
+                        name,
+                        nfsv41_sys::OPEN4_SHARE_ACCESS_BOTH,
+                        OpenCreate::Unchecked,
+                    )
+                    .unwrap();
+                // A known old timestamp also proves cleanup does not modify
+                // earlier nonexclusive requests when interpreting later replies.
+                client
+                    .setattr_values(&fh, None, None, Some((123, 456)), Some((123, 456)))
+                    .unwrap();
+                existing_times.push(
+                    client
+                        .getattr(
+                            &fh,
+                            &[
+                                nfsv41_sys::FATTR4_TIME_ACCESS,
+                                nfsv41_sys::FATTR4_TIME_MODIFY,
+                            ],
+                        )
+                        .unwrap(),
+                );
+                client.close(&fh, &stateid).unwrap();
+            }
+        }
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let ops: Vec<_> = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| OpenOp {
+                dir: dir.clone(),
+                name: name.clone(),
+                access: nfsv41_sys::OPEN4_SHARE_ACCESS_BOTH,
+                create: if mixed && index < 2 {
+                    OpenCreate::NoCreate
+                } else {
+                    OpenCreate::Exclusive
+                },
+            })
+            .collect();
+        let opened = client.open_many(&ops).unwrap();
+        let observed: Vec<_> = opened
+            .iter()
+            .map(|(fh, _)| {
+                client
+                    .getattr(
+                        fh,
+                        &[
+                            nfsv41_sys::FATTR4_TIME_ACCESS,
+                            nfsv41_sys::FATTR4_TIME_MODIFY,
+                        ],
+                    )
+                    .unwrap()
+            })
+            .collect();
+        let closes: Vec<_> = opened
+            .into_iter()
+            .map(|(fh, stateid)| CloseOp { fh, stateid })
+            .collect();
+        client.close_many(&closes).unwrap();
+        client.remove_many(&dir, &names).unwrap();
+        client.remove(&root, &name).unwrap();
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        for (index, attrs) in observed.iter().enumerate() {
+            if mixed && index < 2 {
+                assert_eq!(attrs, &existing_times[index]);
+            } else {
+                assert_eq!(attrs.len(), 24);
+                for offset in [0, 12] {
+                    let seconds = i64::from_be_bytes(attrs[offset..offset + 8].try_into().unwrap());
+                    assert!(
+                        (before..=after).contains(&seconds),
+                        "verifier timestamp was not restored: mixed={mixed}, file={index}, seconds={seconds}, expected {before}..={after}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn session_connect_uses_the_highest_supported_minor_and_initializes_limits() {
     let host = match std::env::var("VFSI_NFS_SERVER") {
@@ -904,6 +1080,52 @@ fn connect() -> Option<NfsVecFs> {
         Err(_) => NfsVecFs::connect(&server),
     };
     Some(client.expect("connect to configured NFS server"))
+}
+
+#[test]
+fn symlinked_directories_work_for_mkdir_and_batched_listdir() {
+    let Some(mut fs) = connect() else {
+        eprintln!("skipping NFS integration test: VFSI_NFS_SERVER not set");
+        return;
+    };
+    let root = format!("/vfsi-followed-directory-{}", std::process::id());
+    let target = format!("{root}/target");
+    let link = format!("{root}/link");
+    let child = format!("{link}/created");
+    let _ = fs.remove_paths_impl(&[Path::new(&root)], true);
+
+    let result: vfsi_core::VfResult<Vec<String>> = (|| {
+        fs.vmkdir_impl(&[VfAttrs {
+            file: FileOperand::from_path(&root),
+            mode: 0o755,
+            ..VfAttrs::default()
+        }])?;
+        fs.vmkdir_impl(&[VfAttrs {
+            file: FileOperand::from_path(&target),
+            mode: 0o755,
+            ..VfAttrs::default()
+        }])?;
+        fs.vsymlink_impl(&[Path::new("target")], &[Path::new(&link)])?;
+        fs.vmkdir_impl(&[VfAttrs {
+            file: FileOperand::from_path(&child),
+            mode: 0o755,
+            ..VfAttrs::default()
+        }])?;
+
+        let dirs = [Path::new(&link), Path::new(&target)];
+        let mut listed = Vec::new();
+        fs.vlistdirs_impl(&dirs, AttrMask::empty(), 0, false, &mut |entry, _dir| {
+            listed.push(entry.file.path().unwrap().to_string_lossy().into_owned());
+            true
+        })?;
+        Ok(listed)
+    })();
+    let cleanup = fs.remove_paths_impl(&[Path::new(&root)], true);
+
+    let listed = result.expect("operations through followed directory symlink");
+    cleanup.expect("remove symlink test fixture");
+    assert!(listed.contains(&child));
+    assert!(listed.contains(&format!("{target}/created")));
 }
 
 #[test]

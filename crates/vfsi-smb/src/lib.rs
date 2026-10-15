@@ -12,6 +12,13 @@
 //! SMB paths are Unicode. A `Path` containing non-UTF-8 bytes is rejected with
 //! `EILSEQ`; characters which are illegal in SMB names are reversibly mapped
 //! by the `smb2` crate.
+//!
+//! SMB creation uses the server/share security descriptor for the conventional
+//! POSIX creation modes (`0666` for files and `0777` for directories); the
+//! backend does not translate those modes into a Windows ACL. Other requested
+//! creation modes return `Unsupported`. The `MODE` attribute is likewise a
+//! conventional synthetic value (`0666` or `0777`), not a report of the
+//! server's effective ACL permissions.
 
 #[doc(hidden)]
 mod path {
@@ -27,7 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-faults")]
 use std::sync::Arc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
 use vfsi_sync::*;
 
@@ -383,17 +390,7 @@ impl SmbVecFs {
     fn wire_path(&self, path: &str) -> String {
         let encoded = smb2::name::encode_path(path);
         if self.tree.is_dfs {
-            let host = self
-                .tree
-                .server
-                .split(':')
-                .next()
-                .unwrap_or(&self.tree.server);
-            if encoded.is_empty() {
-                format!("{host}\\{}", self.tree.share_name)
-            } else {
-                format!("{host}\\{}\\{encoded}", self.tree.share_name)
-            }
+            format_dfs_wire_path(&self.tree.server, &self.tree.share_name, &encoded)
         } else {
             encoded
         }
@@ -476,6 +473,23 @@ impl SmbVecFs {
         require_status(&frame, Command::Close, 0)
     }
 
+    fn close_temporary_handle(&mut self, file_id: FileId) -> VfResult<()> {
+        let result = self.raw_close(file_id);
+        retain_failed_close(&mut self.deferred_closes, file_id, result)
+    }
+
+    fn close_compound_temporary_handle(
+        &mut self,
+        file_id: FileId,
+        compound_close_succeeded: bool,
+    ) -> VfResult<()> {
+        if compound_close_succeeded {
+            Ok(())
+        } else {
+            self.close_temporary_handle(file_id)
+        }
+    }
+
     fn raw_flush(&mut self, file_id: FileId) -> VfResult<()> {
         let request = FlushRequest { file_id };
         let tree_id = self.tree.tree_id;
@@ -534,8 +548,9 @@ impl SmbVecFs {
             require_status(&frame, Command::Read, 0)?;
             let response = ReadResponse::unpack(&mut ReadCursor::new(&frame.body))
                 .map_err(|e| smb_error(e, 0))?;
-            let got = response.data.len();
-            data.extend_from_slice(&response.data);
+            let response_data = checked_read_data(response.data, chunk as usize, 0)?;
+            let got = response_data.len();
+            data.extend_from_slice(&response_data);
             position = checked_offset(position, got as u64, 0)?;
             if got < chunk as usize {
                 break;
@@ -638,10 +653,13 @@ impl SmbVecFs {
         if length > max_read || length > u32::MAX as usize {
             let (file_id, _) = self.raw_open(path, libc::O_RDONLY)?;
             let result = self.raw_read(file_id, offset, length);
-            let close = self.raw_close(file_id);
+            let close = self.close_temporary_handle(file_id);
             return match result {
                 Ok(data) => close.map(|_| data),
-                Err(error) => Err(error),
+                Err(error) => {
+                    let _ = close;
+                    Err(error)
+                }
             };
         }
         let create = self.open_request(path, libc::O_RDONLY)?;
@@ -690,25 +708,29 @@ impl SmbVecFs {
         let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
             .map_err(|e| smb_error(e, 0))?
             .file_id;
-        if responses[1].header.status == NtStatus::END_OF_FILE {
-            if responses[2].header.status != NtStatus::SUCCESS {
-                let _ = self.raw_close(opened);
-            }
-            return Ok(Vec::new());
-        }
-        if let Err(error) = require_status(&responses[1], Command::Read, 0) {
-            let _ = self.raw_close(opened);
-            return Err(error);
-        }
-        let response = ReadResponse::unpack(&mut ReadCursor::new(&responses[1].body))
-            .map_err(|e| smb_error(e, 0))?;
-        if responses[2].header.status != NtStatus::SUCCESS {
-            let _ = self.raw_close(opened);
-        }
+        let data = if responses[1].header.status == NtStatus::END_OF_FILE {
+            Ok(Vec::new())
+        } else {
+            require_status(&responses[1], Command::Read, 0).and_then(|()| {
+                ReadResponse::unpack(&mut ReadCursor::new(&responses[1].body))
+                    .map_err(|error| smb_error(error, 0))
+                    .and_then(|response| checked_read_data(response.data, length, 0))
+            })
+        };
+        let close = self.close_compound_temporary_handle(
+            opened,
+            responses[2].header.status == NtStatus::SUCCESS,
+        );
         // Release the response buffers promptly; a large read can otherwise
         // remain duplicated until this stack frame returns.
         responses.clear();
-        Ok(response.data)
+        match data {
+            Ok(data) => close.map(|()| data),
+            Err(error) => {
+                let _ = close;
+                Err(error)
+            }
+        }
     }
 
     /// Write a range as CREATE + WRITE + FLUSH + CLOSE in one related
@@ -736,7 +758,7 @@ impl SmbVecFs {
         if data.is_empty() {
             let (file_id, _) = self.raw_open(path, flags)?;
             let result = self.raw_flush(file_id);
-            let close = self.raw_close(file_id);
+            let close = self.close_temporary_handle(file_id);
             return result.and(close).map(|()| 0);
         }
         if data.len() > max_write || data.len() > u32::MAX as usize {
@@ -744,10 +766,13 @@ impl SmbVecFs {
             let result = self
                 .raw_write(file_id, offset, data)
                 .and_then(|written| self.raw_flush(file_id).map(|_| written));
-            let close = self.raw_close(file_id);
+            let close = self.close_temporary_handle(file_id);
             return match result {
                 Ok(written) => close.map(|_| written),
-                Err(error) => Err(error),
+                Err(error) => {
+                    let _ = close;
+                    Err(error)
+                }
             };
         }
         let create = self.open_request(path, flags)?;
@@ -805,24 +830,33 @@ impl SmbVecFs {
         let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
             .map_err(|e| smb_error(e, 0))?
             .file_id;
-        for (position, command) in [Command::Write, Command::Flush].into_iter().enumerate() {
-            if let Err(error) = require_status(&responses[position + 1], command, 0) {
-                let _ = self.raw_close(opened);
-                return Err(error);
+        let write_result = require_status(&responses[1], Command::Write, 0).and_then(|()| {
+            WriteResponse::unpack(&mut ReadCursor::new(&responses[1].body))
+                .map(|response| response.count as usize)
+                .map_err(|error| smb_error(error, 0))
+                .and_then(|count| {
+                    if count > data.len() {
+                        Err(VfError::transport(
+                            None,
+                            "SMB server reported writing more bytes than requested",
+                        ))
+                    } else {
+                        Ok(count)
+                    }
+                })
+        });
+        let flush_result = require_status(&responses[2], Command::Flush, 0);
+        let close_result = self.close_compound_temporary_handle(
+            opened,
+            responses[3].header.status == NtStatus::SUCCESS,
+        );
+        match (write_result, flush_result) {
+            (Err(error), _) | (Ok(_), Err(error)) => {
+                let _ = close_result;
+                Err(error)
             }
+            (Ok(written), Ok(())) => close_result.map(|()| written),
         }
-        let response = WriteResponse::unpack(&mut ReadCursor::new(&responses[1].body))
-            .map_err(|e| smb_error(e, 0))?;
-        if response.count as usize > data.len() {
-            return Err(VfError::transport(
-                None,
-                "SMB server reported writing more bytes than requested",
-            ));
-        }
-        if responses[3].header.status != NtStatus::SUCCESS {
-            let _ = self.raw_close(opened);
-        }
-        Ok(response.count as usize)
     }
 
     fn query_size(&mut self, file_id: FileId) -> VfResult<u64> {
@@ -1002,7 +1036,7 @@ impl SmbVecFs {
             .map_err(|e| smb_error(e, index))?;
         let result = self.set_times_handle(response.file_id, atime, mtime, index);
         let close = self
-            .raw_close(response.file_id)
+            .close_temporary_handle(response.file_id)
             .map_err(|e| e.with_index(index));
         result.and(close)
     }
@@ -1011,7 +1045,7 @@ impl SmbVecFs {
         let path = self.local_path_string(path)?;
         let (file_id, _) = self.raw_open(&path, libc::O_WRONLY)?;
         let result = self.set_size_handle(file_id, size);
-        let close = self.raw_close(file_id);
+        let close = self.close_temporary_handle(file_id);
         result.and(close)
     }
 
@@ -1181,7 +1215,7 @@ impl SmbVecFs {
             let eof = !data.is_empty() && end >= size || op.length > 0 && data.len() < op.length;
             Ok((offset, data, eof, end))
         });
-        let close_result = temporary.then(|| self.raw_close(file_id));
+        let close_result = temporary.then(|| self.close_temporary_handle(file_id));
         let (offset, data, eof, end) = result?;
         if let Some(close) = close_result {
             close?;
@@ -1265,7 +1299,7 @@ impl SmbVecFs {
             self.raw_flush(file_id)?;
             Ok((offset, written))
         })();
-        let close_result = temporary.then(|| self.raw_close(file_id));
+        let close_result = temporary.then(|| self.close_temporary_handle(file_id));
         let (offset, written) = result?;
         if let Some(close) = close_result {
             close?;
@@ -1296,7 +1330,7 @@ impl SmbVecFs {
         let (dst_id, _) = match self.raw_open(&destination, libc::O_WRONLY | libc::O_CREAT) {
             Ok(value) => value,
             Err(error) => {
-                let _ = self.raw_close(src_id);
+                let _ = self.close_temporary_handle(src_id);
                 return Err(error);
             }
         };
@@ -1318,9 +1352,9 @@ impl SmbVecFs {
             self.set_size_handle(dst_id, checked_offset(pair.dst_offset, copied, 0)?)?;
             self.raw_flush(dst_id)
         })();
-        let _ = self.raw_close(dst_id);
-        let _ = self.raw_close(src_id);
-        result
+        let dst_close = self.close_temporary_handle(dst_id);
+        let src_close = self.close_temporary_handle(src_id);
+        result.and(dst_close).and(src_close)
     }
 }
 
@@ -1347,8 +1381,9 @@ impl HandleBackend for SmbVecFs {
         base: VfPathBase,
         pathname: &Path,
         flags: i32,
-        _mode: u32,
+        mode: u32,
     ) -> VfResult<FileOperand> {
+        validate_create_mode(flags, mode, 0)?;
         let path = match base {
             VfPathBase::Abs => path_from_bytes(&normalize_bytes(path_bytes(pathname))),
             VfPathBase::Cwd => self.abs_path(pathname),
@@ -1357,7 +1392,7 @@ impl HandleBackend for SmbVecFs {
         let (file_id, size) = self.raw_open(&path_string, flags)?;
         #[cfg(feature = "test-faults")]
         if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeRegister { index: 0 }) {
-            let _ = self.raw_close(file_id);
+            let _ = self.close_temporary_handle(file_id);
             return Err(error);
         }
         let access_mode = flags & libc::O_ACCMODE;
@@ -1372,7 +1407,7 @@ impl HandleBackend for SmbVecFs {
         match self.insert_open_file(open) {
             Ok(fd) => Ok(FileOperand::from_fd(fd)),
             Err(error) => {
-                let _ = self.raw_close(file_id);
+                let _ = self.close_temporary_handle(file_id);
                 Err(error)
             }
         }
@@ -1487,15 +1522,20 @@ impl HandleBackend for SmbVecFs {
 }
 
 impl VectorBackend for SmbVecFs {
+    fn vopen_preflight_impl(&mut self, paths: &[&Path], flags: &[i32], modes: &[u32]) -> VfRes {
+        if paths.len() != flags.len() || paths.len() != modes.len() {
+            return Err(VfError::failure(0, ERR_INVAL));
+        }
+        validate_open_modes(flags, modes)
+    }
+
     fn vopen_outcomes_impl(
         &mut self,
         paths: &[&Path],
         flags: &[i32],
         modes: &[u32],
     ) -> VfResult<ManyResults<FileOperand>> {
-        if paths.len() != flags.len() || paths.len() != modes.len() {
-            return Err(VfError::failure(0, ERR_INVAL));
-        }
+        self.vopen_preflight_impl(paths, flags, modes)?;
         self.drain_deferred_closes()?;
         let resolved: Vec<PathBuf> = paths.iter().map(|path| self.abs_path(path)).collect();
         if paths.len() <= 1 || self.tree.is_dfs || !paths_are_independent(&resolved) {
@@ -1546,10 +1586,18 @@ impl VectorBackend for SmbVecFs {
                 result.as_ref().ok().map(|(file_id, _)| {
                     let connection = connection.clone();
                     let file_id = *file_id;
-                    async move { close_on_connection(&connection, tree_id, file_id).await }
+                    async move {
+                        let result =
+                            close_on_connection_result(&connection, tree_id, file_id).await;
+                        (file_id, result)
+                    }
                 })
             });
-            self.runtime.block_on(join_all(closes));
+            for (file_id, result) in self.runtime.block_on(join_all(closes)) {
+                if result.is_err() {
+                    self.deferred_closes.push(file_id);
+                }
+            }
             return Err(error);
         }
         let mut output = Vec::with_capacity(paths.len());
@@ -1567,7 +1615,7 @@ impl VectorBackend for SmbVecFs {
             };
             #[cfg(feature = "test-faults")]
             if let Err(error) = self.inject_open_fault(OpenFaultPoint::BeforeRegister { index }) {
-                let _ = self.raw_close(file_id);
+                let _ = self.close_temporary_handle(file_id);
                 output.push(Err(error));
                 continue;
             }
@@ -1586,7 +1634,7 @@ impl VectorBackend for SmbVecFs {
             }) {
                 Ok(fd) => fd,
                 Err(error) => {
-                    let _ = self.raw_close(file_id);
+                    let _ = self.close_temporary_handle(file_id);
                     output.push(Err(error));
                     continue;
                 }
@@ -1698,7 +1746,10 @@ impl VectorBackend for SmbVecFs {
                 ));
             }
             let results = self.runtime.block_on(join_all(jobs));
-            if results.iter().any(Result::is_err) && self.client.is_disconnected() {
+            queue_deferred_closes(&results, &mut self.deferred_closes);
+            if results.iter().any(|outcome| outcome.result.is_err())
+                && self.client.is_disconnected()
+            {
                 let mut output = Vec::with_capacity(reads.len());
                 for (index, read) in reads.iter().enumerate() {
                     output.push(
@@ -1710,7 +1761,7 @@ impl VectorBackend for SmbVecFs {
             }
             let mut output = Vec::with_capacity(reads.len());
             for (index, (read, result)) in reads.iter().zip(results).enumerate() {
-                let data = result.map_err(|error| error.with_index(index))?;
+                let data = result.result.map_err(|error| error.with_index(index))?;
                 let VfOffset::At(offset) = read.offset else {
                     unreachable!("concurrent read eligibility checked")
                 };
@@ -1783,9 +1834,17 @@ impl VectorBackend for SmbVecFs {
             let identity_jobs = prepared.iter().map(|(_, create, _, _)| {
                 concurrent_file_identity(connection.clone(), tree_id, create.clone())
             });
-            let identities = self.runtime.block_on(join_all(identity_jobs));
-            let identities: Option<Vec<u64>> =
-                identities.into_iter().collect::<Result<_, _>>().ok();
+            let identity_outcomes = self.runtime.block_on(join_all(identity_jobs));
+            let mut identity_values = Vec::with_capacity(identity_outcomes.len());
+            let mut identity_failed = false;
+            queue_deferred_closes(&identity_outcomes, &mut self.deferred_closes);
+            for outcome in identity_outcomes {
+                match outcome.result {
+                    Ok(identity) => identity_values.push(identity),
+                    Err(_) => identity_failed = true,
+                }
+            }
+            let identities = (!identity_failed).then_some(identity_values);
             if identities
                 .as_deref()
                 .is_some_and(identities_are_independent)
@@ -1804,9 +1863,14 @@ impl VectorBackend for SmbVecFs {
                     )
                 });
                 let results = self.runtime.block_on(join_all(jobs));
+                for outcome in &results {
+                    if let Some(file_id) = &outcome.deferred_close {
+                        self.deferred_closes.push(*file_id);
+                    }
+                }
                 let mut output = Vec::with_capacity(writes.len());
                 for (index, (write, result)) in writes.iter().zip(results).enumerate() {
-                    let written = result.map_err(|error| error.with_index(index))?;
+                    let written = result.result.map_err(|error| error.with_index(index))?;
                     let VfOffset::At(offset) = write.offset() else {
                         unreachable!("concurrent write eligibility checked")
                     };
@@ -2104,6 +2168,7 @@ impl VectorBackend for SmbVecFs {
     }
 
     fn vmkdir_impl(&mut self, dirs: &[VfAttrs]) -> VfRes {
+        validate_mkdir_modes(dirs)?;
         let mut prepared = Vec::with_capacity(dirs.len());
         for (index, attrs) in dirs.iter().enumerate() {
             let path = self
@@ -2289,11 +2354,73 @@ impl Drop for SmbVecFs {
     }
 }
 
+struct CompoundOutcome<T> {
+    result: VfResult<T>,
+    deferred_close: Option<FileId>,
+}
+
+fn retain_failed_close_slot(
+    deferred_close: &mut Option<FileId>,
+    file_id: FileId,
+    result: VfResult<()>,
+) -> VfResult<()> {
+    if result.is_err() {
+        *deferred_close = Some(file_id);
+    }
+    result
+}
+
+fn queue_deferred_closes<T>(outcomes: &[CompoundOutcome<T>], deferred: &mut Vec<FileId>) {
+    deferred.extend(outcomes.iter().filter_map(|outcome| outcome.deferred_close));
+}
+
+fn retain_failed_close(
+    deferred: &mut Vec<FileId>,
+    file_id: FileId,
+    result: VfResult<()>,
+) -> VfResult<()> {
+    if result.is_err() {
+        deferred.push(file_id);
+    }
+    result
+}
+
+fn ascii_path_is_prefix(path: &Path, other: &Path) -> bool {
+    let mut path = path.components();
+    let mut other = other.components();
+    loop {
+        let Some(component) = path.next() else {
+            return true;
+        };
+        let Some(other_component) = other.next() else {
+            return false;
+        };
+        let Some(component) = component.as_os_str().to_str() else {
+            return false;
+        };
+        let Some(other_component) = other_component.as_os_str().to_str() else {
+            return false;
+        };
+        if !component.eq_ignore_ascii_case(other_component) {
+            return false;
+        }
+    }
+}
+
 fn paths_are_independent(paths: &[PathBuf]) -> bool {
+    // SMB normally resolves names case-insensitively. ASCII aliases can be
+    // compared without allocation; for non-ASCII paths, the server's Unicode
+    // upcase rules are not available here, so keep the batch ordered.
+    if paths
+        .iter()
+        .any(|path| !path.to_str().is_some_and(str::is_ascii))
+    {
+        return false;
+    }
     for (index, path) in paths.iter().enumerate() {
         if paths[index + 1..]
             .iter()
-            .any(|other| path == other || path.starts_with(other) || other.starts_with(path))
+            .any(|other| ascii_path_is_prefix(path, other) || ascii_path_is_prefix(other, path))
         {
             return false;
         }
@@ -2331,6 +2458,21 @@ async fn concurrent_file_identity(
     connection: Connection,
     tree_id: TreeId,
     create: CreateRequest,
+) -> CompoundOutcome<u64> {
+    let mut deferred_close = None;
+    let result =
+        concurrent_file_identity_inner(connection, tree_id, create, &mut deferred_close).await;
+    CompoundOutcome {
+        result,
+        deferred_close,
+    }
+}
+
+async fn concurrent_file_identity_inner(
+    connection: Connection,
+    tree_id: TreeId,
+    create: CreateRequest,
+    deferred_close: &mut Option<FileId>,
 ) -> VfResult<u64> {
     let query = QueryInfoRequest {
         info_type: InfoType::File,
@@ -2374,26 +2516,32 @@ async fn concurrent_file_identity(
     let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
         .map_err(|error| smb_error(error, 0))?
         .file_id;
-    if let Err(error) = require_status(&responses[1], Command::QueryInfo, 0) {
-        close_on_connection(&connection, tree_id, opened).await;
-        return Err(error);
+    let identity = require_status(&responses[1], Command::QueryInfo, 0).and_then(|()| {
+        let response = QueryInfoResponse::unpack(&mut ReadCursor::new(&responses[1].body))
+            .map_err(|error| smb_error(error, 0))?;
+        let bytes: [u8; 8] = response
+            .output_buffer
+            .get(..8)
+            .ok_or_else(|| VfError::transport(None, "short SMB FileInternalInformation response"))?
+            .try_into()
+            .expect("eight-byte slice");
+        Ok(u64::from_le_bytes(bytes))
+    });
+    let close = close_compound_on_connection(
+        &connection,
+        tree_id,
+        opened,
+        responses[2].header.status == NtStatus::SUCCESS,
+        deferred_close,
+    )
+    .await;
+    match identity {
+        Ok(identity) => close.map(|()| identity),
+        Err(error) => {
+            let _ = close;
+            Err(error)
+        }
     }
-    let response = QueryInfoResponse::unpack(&mut ReadCursor::new(&responses[1].body))
-        .map_err(|error| smb_error(error, 0))?;
-    if responses[2].header.status != NtStatus::SUCCESS {
-        close_on_connection(&connection, tree_id, opened).await;
-    }
-    let bytes: [u8; 8] = response
-        .output_buffer
-        .get(..8)
-        .ok_or_else(|| VfError::transport(None, "short SMB FileInternalInformation response"))?
-        .try_into()
-        .expect("eight-byte slice");
-    Ok(u64::from_le_bytes(bytes))
-}
-
-async fn close_on_connection(connection: &Connection, tree_id: TreeId, file_id: FileId) {
-    let _ = close_on_connection_result(connection, tree_id, file_id).await;
 }
 
 async fn close_on_connection_result(
@@ -2409,12 +2557,64 @@ async fn close_on_connection_result(
     require_status(&frame, Command::Close, 0)
 }
 
+async fn close_compound_on_connection(
+    connection: &Connection,
+    tree_id: TreeId,
+    file_id: FileId,
+    compound_close_succeeded: bool,
+    deferred_close: &mut Option<FileId>,
+) -> VfResult<()> {
+    let fallback = if compound_close_succeeded {
+        Ok(())
+    } else {
+        close_on_connection_result(connection, tree_id, file_id).await
+    };
+    finish_compound_close(deferred_close, file_id, compound_close_succeeded, fallback)
+}
+
+fn finish_compound_close(
+    deferred_close: &mut Option<FileId>,
+    file_id: FileId,
+    compound_close_succeeded: bool,
+    fallback: VfResult<()>,
+) -> VfResult<()> {
+    if compound_close_succeeded {
+        Ok(())
+    } else {
+        retain_failed_close_slot(deferred_close, file_id, fallback)
+    }
+}
+
 async fn concurrent_compound_read(
     connection: Connection,
     tree_id: TreeId,
     create: CreateRequest,
     offset: u64,
     length: usize,
+) -> CompoundOutcome<Vec<u8>> {
+    let mut deferred_close = None;
+    let result = concurrent_compound_read_inner(
+        connection,
+        tree_id,
+        create,
+        offset,
+        length,
+        &mut deferred_close,
+    )
+    .await;
+    CompoundOutcome {
+        result,
+        deferred_close,
+    }
+}
+
+async fn concurrent_compound_read_inner(
+    connection: Connection,
+    tree_id: TreeId,
+    create: CreateRequest,
+    offset: u64,
+    length: usize,
+    deferred_close: &mut Option<FileId>,
 ) -> VfResult<Vec<u8>> {
     let read = ReadRequest {
         padding: 0x50,
@@ -2460,22 +2660,30 @@ async fn concurrent_compound_read(
     let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
         .map_err(|error| smb_error(error, 0))?
         .file_id;
-    if responses[1].header.status == NtStatus::END_OF_FILE {
-        if responses[2].header.status != NtStatus::SUCCESS {
-            close_on_connection(&connection, tree_id, opened).await;
+    let data = if responses[1].header.status == NtStatus::END_OF_FILE {
+        Ok(Vec::new())
+    } else {
+        require_status(&responses[1], Command::Read, 0).and_then(|()| {
+            ReadResponse::unpack(&mut ReadCursor::new(&responses[1].body))
+                .map_err(|error| smb_error(error, 0))
+                .and_then(|response| checked_read_data(response.data, length, 0))
+        })
+    };
+    let close = close_compound_on_connection(
+        &connection,
+        tree_id,
+        opened,
+        responses[2].header.status == NtStatus::SUCCESS,
+        deferred_close,
+    )
+    .await;
+    match data {
+        Ok(data) => close.map(|()| data),
+        Err(error) => {
+            let _ = close;
+            Err(error)
         }
-        return Ok(Vec::new());
     }
-    if let Err(error) = require_status(&responses[1], Command::Read, 0) {
-        close_on_connection(&connection, tree_id, opened).await;
-        return Err(error);
-    }
-    let response = ReadResponse::unpack(&mut ReadCursor::new(&responses[1].body))
-        .map_err(|error| smb_error(error, 0))?;
-    if responses[2].header.status != NtStatus::SUCCESS {
-        close_on_connection(&connection, tree_id, opened).await;
-    }
-    Ok(response.data)
 }
 
 async fn concurrent_compound_write(
@@ -2484,6 +2692,30 @@ async fn concurrent_compound_write(
     create: CreateRequest,
     offset: u64,
     data: Vec<u8>,
+) -> CompoundOutcome<usize> {
+    let mut deferred_close = None;
+    let result = concurrent_compound_write_inner(
+        connection,
+        tree_id,
+        create,
+        offset,
+        data,
+        &mut deferred_close,
+    )
+    .await;
+    CompoundOutcome {
+        result,
+        deferred_close,
+    }
+}
+
+async fn concurrent_compound_write_inner(
+    connection: Connection,
+    tree_id: TreeId,
+    create: CreateRequest,
+    offset: u64,
+    data: Vec<u8>,
+    deferred_close: &mut Option<FileId>,
 ) -> VfResult<usize> {
     let write = WriteRequest {
         data_offset: 0x70,
@@ -2538,25 +2770,47 @@ async fn concurrent_compound_write(
     let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
         .map_err(|error| smb_error(error, 0))?
         .file_id;
-    for (position, command) in [Command::Write, Command::Flush].into_iter().enumerate() {
-        if let Err(error) = require_status(&responses[position + 1], command, 0) {
-            close_on_connection(&connection, tree_id, opened).await;
-            return Err(error);
+    let write_result = require_status(&responses[1], Command::Write, 0).and_then(|()| {
+        WriteResponse::unpack(&mut ReadCursor::new(&responses[1].body))
+            .map(|response| response.count as usize)
+            .map_err(|error| smb_error(error, 0))
+            .and_then(|count| {
+                if count > write.data.len() {
+                    Err(VfError::transport(
+                        None,
+                        "SMB server reported writing more bytes than requested",
+                    ))
+                } else {
+                    Ok(count)
+                }
+            })
+    });
+    let flush_result = require_status(&responses[2], Command::Flush, 0);
+    let close_result = close_compound_on_connection(
+        &connection,
+        tree_id,
+        opened,
+        responses[3].header.status == NtStatus::SUCCESS,
+        deferred_close,
+    )
+    .await;
+    match (write_result, flush_result) {
+        (Err(error), _) | (Ok(_), Err(error)) => {
+            let _ = close_result;
+            Err(error)
         }
+        (Ok(written), Ok(())) => close_result.map(|()| written),
     }
-    let response = WriteResponse::unpack(&mut ReadCursor::new(&responses[1].body))
-        .map_err(|error| smb_error(error, 0))?;
-    if response.count as usize > write.data.len() {
-        close_on_connection(&connection, tree_id, opened).await;
-        return Err(VfError::transport(
-            None,
-            "SMB server reported writing more bytes than requested",
-        ));
+}
+
+fn format_dfs_wire_path(server: &str, share: &str, encoded_path: &str) -> String {
+    // Tree.server is already a hostname/IP without a port. Keep IPv6 colons
+    // intact: the DFS server strips exactly the server and share components.
+    if encoded_path.is_empty() {
+        format!("{server}\\{share}")
+    } else {
+        format!("{server}\\{share}\\{encoded_path}")
     }
-    if responses[3].header.status != NtStatus::SUCCESS {
-        close_on_connection(&connection, tree_id, opened).await;
-    }
-    Ok(response.count as usize)
 }
 
 fn normalize_server(server: &str) -> String {
@@ -2574,6 +2828,20 @@ fn normalize_server(server: &str) -> String {
     } else {
         format!("{server}:445")
     }
+}
+
+fn checked_read_data(data: Vec<u8>, requested: usize, index: usize) -> VfResult<Vec<u8>> {
+    if data.len() > requested {
+        return Err(VfError::transport_with_kind(
+            Some(index),
+            vfsi_core::TransportKind::InvalidReply,
+            format!(
+                "SMB server returned {} READ bytes for a {requested}-byte request",
+                data.len()
+            ),
+        ));
+    }
+    Ok(data)
 }
 
 fn credit_charge(bytes: usize) -> u16 {
@@ -2651,20 +2919,48 @@ fn smb_error(error: SmbError, index: usize) -> VfError {
     }
 }
 
+fn validate_create_mode(flags: i32, mode: u32, index: usize) -> VfResult<()> {
+    if flags & libc::O_CREAT != 0 && mode & 0o7777 != 0o666 {
+        return Err(VfError::unsupported(index));
+    }
+    Ok(())
+}
+
+fn validate_open_modes(flags: &[i32], modes: &[u32]) -> VfRes {
+    for (index, (&flags, &mode)) in flags.iter().zip(modes).enumerate() {
+        validate_create_mode(flags, mode, index)?;
+    }
+    Ok(())
+}
+
+fn validate_mkdir_modes(dirs: &[VfAttrs]) -> VfRes {
+    for (index, dir) in dirs.iter().enumerate() {
+        if dir.masks.contains(AttrMask::MODE) && dir.mode & 0o7777 != 0o777 {
+            return Err(VfError::unsupported(index));
+        }
+    }
+    Ok(())
+}
+
 fn filetime_parts(time: FileTime) -> (i64, u32) {
-    let Some(system) = time.to_system_time() else {
-        return (0, 0);
-    };
-    match system.duration_since(UNIX_EPOCH) {
-        Ok(duration) => (
-            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
-            duration.subsec_nanos(),
-        ),
-        Err(error) => {
-            let duration = error.duration();
+    const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
+    const TICKS_PER_SECOND: u64 = 10_000_000;
+    if time.0 >= UNIX_EPOCH_FILETIME {
+        let ticks = time.0 - UNIX_EPOCH_FILETIME;
+        (
+            (ticks / TICKS_PER_SECOND) as i64,
+            ((ticks % TICKS_PER_SECOND) * 100) as u32,
+        )
+    } else {
+        let ticks_before_epoch = UNIX_EPOCH_FILETIME - time.0;
+        let whole_seconds = (ticks_before_epoch / TICKS_PER_SECOND) as i64;
+        let fractional_ticks = ticks_before_epoch % TICKS_PER_SECOND;
+        if fractional_ticks == 0 {
+            (whole_seconds.saturating_neg(), 0)
+        } else {
             (
-                -i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
-                duration.subsec_nanos(),
+                whole_seconds.saturating_neg().saturating_sub(1),
+                1_000_000_000 - (fractional_ticks * 100) as u32,
             )
         }
     }
@@ -2703,6 +2999,104 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_create_modes_are_rejected_before_io() {
+        let flags = [
+            libc::O_WRONLY | libc::O_CREAT,
+            libc::O_WRONLY | libc::O_CREAT,
+        ];
+        let modes = [0o666, 0o600];
+        let error = validate_open_modes(&flags, &modes).unwrap_err();
+        assert_eq!(error.index(), Some(1));
+        assert_eq!(error.err_no(), vfsi_core::VF_ERR_UNSUPPORTED);
+        assert!(validate_create_mode(libc::O_WRONLY, 0o600, 0).is_ok());
+
+        // Conventional defaults intentionally delegate permissions to the
+        // server/share security descriptor, as documented at the crate root.
+        assert!(validate_create_mode(libc::O_WRONLY | libc::O_CREAT, 0o666, 0).is_ok());
+        assert!(
+            validate_mkdir_modes(&[VfAttrs {
+                masks: AttrMask::MODE,
+                mode: 0o777,
+                ..VfAttrs::default()
+            }])
+            .is_ok()
+        );
+
+        let dirs = [
+            VfAttrs {
+                masks: AttrMask::MODE,
+                mode: 0o777,
+                ..VfAttrs::default()
+            },
+            VfAttrs {
+                masks: AttrMask::MODE,
+                mode: 0o700,
+                ..VfAttrs::default()
+            },
+        ];
+        let error = validate_mkdir_modes(&dirs).unwrap_err();
+        assert_eq!(error.index(), Some(1));
+        assert_eq!(error.err_no(), vfsi_core::VF_ERR_UNSUPPORTED);
+    }
+
+    #[test]
+    fn failed_temporary_close_is_retained_for_deferred_cleanup() {
+        let file_id = FileId::SENTINEL;
+        let mut deferred = Vec::new();
+        let result = retain_failed_close(
+            &mut deferred,
+            file_id,
+            Err(VfError::transport(None, "injected close failure")),
+        );
+        assert!(result.unwrap_err().is_transport());
+        assert_eq!(deferred, [file_id]);
+
+        retain_failed_close(&mut deferred, file_id, Ok(())).unwrap();
+        assert_eq!(deferred, [file_id]);
+    }
+
+    #[test]
+    fn vectorized_compound_close_failure_returns_handle_for_deferred_cleanup() {
+        let file_id = FileId::SENTINEL;
+        let mut deferred_close = None;
+        let result = finish_compound_close(
+            &mut deferred_close,
+            file_id,
+            false,
+            Err(VfError::transport(None, "injected fallback CLOSE failure")),
+        );
+        assert!(result.unwrap_err().is_transport());
+        assert_eq!(deferred_close, Some(file_id));
+
+        let outcome: CompoundOutcome<Vec<u8>> = CompoundOutcome {
+            result: Err(VfError::transport(None, "injected vector read failure")),
+            deferred_close,
+        };
+        let mut owner_queue = Vec::new();
+        queue_deferred_closes(&[outcome], &mut owner_queue);
+        assert_eq!(owner_queue, [file_id]);
+
+        let mut no_failed_close = None;
+        finish_compound_close(&mut no_failed_close, file_id, true, Ok(())).unwrap();
+        assert_eq!(no_failed_close, None);
+    }
+
+    #[test]
+    fn pre_epoch_fractional_filetimes_round_trip() {
+        let ticks = SmbVecFs::filetime_value(-1, 500_000_000, 0).unwrap();
+        assert_eq!(filetime_parts(FileTime(ticks)), (-1, 500_000_000));
+    }
+
+    #[test]
+    fn dfs_wire_path_preserves_ipv6_server_name() {
+        assert_eq!(
+            format_dfs_wire_path("::1", "share", "dir\\file"),
+            "::1\\share\\dir\\file"
+        );
+        assert_eq!(format_dfs_wire_path("server", "share", ""), "server\\share");
+    }
+
+    #[test]
     fn server_address_defaults_to_port_445() {
         assert_eq!(normalize_server("samba.example"), "samba.example:445");
         assert_eq!(normalize_server("samba.example:1445"), "samba.example:1445");
@@ -2735,6 +3129,33 @@ mod tests {
     }
 
     #[test]
+    fn oversized_read_responses_are_rejected_with_invalid_reply_classification() {
+        for (data, requested, index) in [(vec![1, 2, 3], 2, 0), (vec![4, 5, 6, 7], 3, 2)] {
+            let mut body = smb2::pack::WriteCursor::new();
+            smb2::pack::Pack::pack(
+                &ReadResponse {
+                    data_offset: 0x50,
+                    data_remaining: 0,
+                    flags: 0,
+                    data,
+                },
+                &mut body,
+            );
+            let response = ReadResponse::unpack(&mut ReadCursor::new(body.as_bytes())).unwrap();
+            let error = checked_read_data(response.data, requested, index).unwrap_err();
+            assert_eq!(error.index(), Some(index));
+            assert_eq!(
+                error.transport_kind(),
+                Some(vfsi_core::TransportKind::InvalidReply)
+            );
+            assert!(error.to_string().contains("READ bytes"));
+        }
+
+        assert_eq!(checked_read_data(vec![1, 2], 2, 0).unwrap(), [1, 2]);
+        assert!(checked_read_data(Vec::new(), 0, 0).unwrap().is_empty());
+    }
+
+    #[test]
     fn credit_charge_rounds_up_and_never_returns_zero() {
         assert_eq!(credit_charge(0), 1);
         assert_eq!(credit_charge(1), 1);
@@ -2753,6 +3174,30 @@ mod tests {
     fn concurrent_writes_require_distinct_server_file_identities() {
         assert!(identities_are_independent(&[10, 20, 30]));
         assert!(!identities_are_independent(&[10, 20, 10]));
+    }
+
+    #[test]
+    fn smb_path_dependencies_include_case_aliases_and_serialize_unicode_batches() {
+        assert!(!paths_are_independent(&[
+            PathBuf::from("/a"),
+            PathBuf::from("/A")
+        ]));
+        assert!(!paths_are_independent(&[
+            PathBuf::from("/Dir/file"),
+            PathBuf::from("/dir"),
+        ]));
+        assert!(!paths_are_independent(&[
+            PathBuf::from("/\u{e9}"),
+            PathBuf::from("/other"),
+        ]));
+        assert!(paths_are_independent(&[
+            PathBuf::from("/a"),
+            PathBuf::from("/b")
+        ]));
+        assert!(paths_are_independent(&[
+            PathBuf::from("/dir/a"),
+            PathBuf::from("/dir/b"),
+        ]));
     }
 
     #[test]

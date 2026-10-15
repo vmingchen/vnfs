@@ -820,6 +820,56 @@ mod tests {
         assert_eq!(std::fs::read(outside.0.join("victim")).unwrap(), b"outside");
     }
 
+    #[test]
+    fn portable_fallback_create_keeps_parent_directory_anchored() {
+        let (root, backend) = fs("sandbox-portable-parent-race");
+        let outside = TempRoot::new("sandbox-portable-race-outside");
+        std::fs::create_dir_all(root.0.join("inside")).unwrap();
+        std::fs::create_dir_all(&outside.0).unwrap();
+
+        let anchored = backend
+            .no_follow_path_fallback(&root.0.join("inside/new"))
+            .unwrap();
+        std::fs::rename(root.0.join("inside"), root.0.join("moved")).unwrap();
+        std::os::unix::fs::symlink(&outside.0, root.0.join("inside")).unwrap();
+
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        LocalBackend::protect_create_open(&anchored, &mut options);
+        options.open(&anchored).unwrap();
+
+        assert!(root.0.join("moved/new").exists());
+        assert!(!outside.0.join("new").exists());
+    }
+
+    #[test]
+    fn directory_listing_pins_final_directory_before_enumeration() {
+        let (root, backend) = fs("sandbox-directory-final-race");
+        let outside = TempRoot::new("sandbox-directory-final-outside");
+        std::fs::create_dir_all(root.0.join("inside")).unwrap();
+        std::fs::create_dir_all(&outside.0).unwrap();
+        std::fs::write(root.0.join("inside/internal-entry"), b"in").unwrap();
+        std::fs::write(outside.0.join("outside-entry"), b"out").unwrap();
+
+        let anchored = backend
+            .open_directory_no_follow_final(&root.0.join("inside"))
+            .unwrap();
+        std::fs::rename(root.0.join("inside"), root.0.join("moved")).unwrap();
+        std::os::unix::fs::symlink(&outside.0, root.0.join("inside")).unwrap();
+
+        let names: Vec<_> = std::fs::read_dir(&anchored)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from("internal-entry")]);
+        assert!(
+            backend
+                .open_directory_no_follow_final(&root.0.join("inside"))
+                .is_err(),
+            "a symlink in the final directory component must be rejected"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn following_chown_rejects_a_missing_leaf_replaced_by_an_escaping_symlink() {
@@ -1033,6 +1083,126 @@ mod tests {
             .unwrap();
         assert!(fs.exists_impl(Path::new("/z")).unwrap());
         assert!(!root.0.parent().unwrap().join("z").exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn to_eof_copy_between_hardlink_aliases_is_rejected_without_growth() {
+        const CHILD: &str = "VFSI_LOCAL_TO_EOF_SELF_COPY_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let (root, mut fs) = fs("self-copy-child");
+            write(&mut fs, "/source", b"bounded-source");
+            std::fs::hard_link(root.0.join("source"), root.0.join("alias")).unwrap();
+
+            // Keep a regression to the old unbounded loop from filling the
+            // test filesystem. The child exits on EFBIG/SIGXFSZ if it regresses.
+            let limit = libc::rlimit {
+                rlim_cur: 8 * 1024,
+                rlim_max: 8 * 1024,
+            };
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) }, 0);
+            let error = fs
+                .vcopy_impl(
+                    &[ExtentPair::new("/source", 0, "/alias", 1, None)],
+                    CopyOption::new(),
+                )
+                .unwrap_err();
+            assert_eq!(error.err_no(), ERR_INVAL);
+            assert_eq!(
+                std::fs::read(root.0.join("source")).unwrap(),
+                b"bounded-source"
+            );
+            assert_eq!(
+                std::fs::metadata(root.0.join("source")).unwrap().len(),
+                b"bounded-source".len() as u64
+            );
+            return;
+        }
+
+        let test_name = std::thread::current().name().unwrap().to_owned();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg(test_name)
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+            "child did not select exactly this test: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            output.status.success(),
+            "bounded self-copy child failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn open_create_new_rejects_dangling_final_symlink() {
+        let (root, mut fs) = fs("exclusive-dangling-symlink");
+        fs.symlink_raw_impl(Path::new("missing-target"), Path::new("/dangling"))
+            .unwrap();
+
+        let error = fs
+            .open_raw_impl(
+                Path::new("/dangling"),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                0o600,
+            )
+            .unwrap_err();
+
+        assert_eq!(error.err_no(), libc::EEXIST as u32);
+        assert!(std::fs::symlink_metadata(root.0.join("dangling")).is_ok());
+        assert!(!root.0.join("missing-target").exists());
+    }
+
+    #[test]
+    fn named_attr_syscalls_only_run_when_requested() {
+        let (_root, mut fs) = fs("xattr-query-mask");
+        write(&mut fs, "/f", b"x");
+
+        crate::XATTR_QUERY_COUNT.with(|count| count.set(0));
+        let mut attrs = VfAttrs {
+            file: FileOperand::from_path("/f"),
+            masks: AttrMask::MODE,
+            ..VfAttrs::default()
+        };
+        fs.vgetattrs_impl(std::slice::from_mut(&mut attrs)).unwrap();
+        assert_eq!(crate::XATTR_QUERY_COUNT.with(|count| count.get()), 0);
+        assert!(!attrs.returned.contains(AttrMask::NAMED_ATTR));
+
+        attrs.masks = AttrMask::NAMED_ATTR;
+        fs.vgetattrs_impl(std::slice::from_mut(&mut attrs)).unwrap();
+        assert_eq!(crate::XATTR_QUERY_COUNT.with(|count| count.get()), 1);
+        assert!(attrs.returned.contains(AttrMask::NAMED_ATTR));
+    }
+
+    #[test]
+    fn named_attr_query_errors_propagate_for_paths_and_handles() {
+        let (_root, mut fs) = fs("xattr-query-error");
+        write(&mut fs, "/f", b"x");
+        let handle = fs
+            .open_raw_impl(Path::new("/f"), libc::O_RDONLY, 0)
+            .unwrap();
+
+        for file in [FileOperand::from_path("/f"), handle.clone()] {
+            let mut attrs = VfAttrs {
+                file,
+                masks: AttrMask::NAMED_ATTR,
+                ..VfAttrs::default()
+            };
+            crate::XATTR_QUERY_ERROR.with(|error| error.set(Some(libc::EACCES)));
+            let error = fs
+                .vgetattrs_impl(std::slice::from_mut(&mut attrs))
+                .unwrap_err();
+            assert_eq!(error.err_no(), libc::EACCES as u32);
+            assert_eq!(error.index(), Some(0));
+            assert!(!attrs.returned.contains(AttrMask::NAMED_ATTR));
+        }
+
+        fs.close_impl(&handle).unwrap();
     }
 
     #[test]
@@ -1413,6 +1583,8 @@ mod tests {
 
     #[test]
     fn shared_tree_copy_preserves_symlinks_and_uses_the_copy_strategy() {
+        use std::os::unix::fs::PermissionsExt;
+
         let (root, mut backend) = fs("shared-tree-copy");
         std::fs::create_dir_all(root.0.join("source/sub")).unwrap();
         std::fs::write(root.0.join("source/file"), b"root").unwrap();
@@ -1432,6 +1604,17 @@ mod tests {
             std::convert::identity,
         )
         .unwrap();
+        for directory in ["copy", "copy/sub"] {
+            assert_eq!(
+                std::fs::metadata(root.0.join(directory))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o755,
+                "POSIX recursive-copy defaults must not change"
+            );
+        }
         assert_eq!(
             copied,
             [Path::new("/source/file"), Path::new("/source/sub/leaf")]
@@ -1516,5 +1699,296 @@ mod tests {
         assert_eq!(error.operation(), Some("attrs"));
         assert_eq!(error.path(), Some(Path::new("/missing")));
         assert_eq!(error.index(), Some(0));
+    }
+    #[cfg(feature = "test-faults")]
+    struct ReplaceLeafWithSymlink {
+        leaf: PathBuf,
+        target: PathBuf,
+    }
+
+    #[cfg(feature = "test-faults")]
+    impl vfsi_core::internal::faults::FaultInjector for ReplaceLeafWithSymlink {
+        fn check(&self, point: &vfsi_core::internal::faults::OpenFaultPoint) -> VfResult<()> {
+            if matches!(
+                point,
+                vfsi_core::internal::faults::OpenFaultPoint::BeforeSetPermissions { index: 0 }
+            ) {
+                if let Ok(metadata) = std::fs::symlink_metadata(&self.leaf) {
+                    if metadata.file_type().is_dir() {
+                        std::fs::remove_dir(&self.leaf).unwrap();
+                    } else {
+                        std::fs::remove_file(&self.leaf).unwrap();
+                    }
+                }
+                std::os::unix::fs::symlink(&self.target, &self.leaf).unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(all(feature = "test-faults", unix))]
+    #[test]
+    fn mkdir_mode_does_not_follow_a_leaf_symlink_swap() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, mut backend) = fs("mkdir-mode-symlink-swap");
+        let outside = TempRoot::new("mkdir-mode-symlink-target");
+        std::fs::create_dir_all(&outside.0).unwrap();
+        let target = outside.0.join("target-dir");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let leaf = root.0.join("new-dir");
+        backend.set_fault_injector(std::sync::Arc::new(ReplaceLeafWithSymlink {
+            leaf: leaf.clone(),
+            target: target.clone(),
+        }));
+
+        let attrs = VfAttrs {
+            file: FileOperand::from_path("/new-dir"),
+            masks: AttrMask::MODE,
+            mode: 0o700,
+            ..VfAttrs::default()
+        };
+        assert!(backend.vmkdir_impl(std::slice::from_ref(&attrs)).is_err());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
+            0o640
+        );
+        assert!(
+            std::fs::symlink_metadata(leaf)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(all(feature = "test-faults", unix))]
+    #[test]
+    fn setattr_mode_does_not_follow_a_leaf_symlink_swap() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, mut backend) = fs("setattr-mode-symlink-swap");
+        let outside = TempRoot::new("setattr-mode-symlink-target");
+        std::fs::create_dir_all(&outside.0).unwrap();
+        let target = outside.0.join("target");
+        std::fs::write(&target, b"outside").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let leaf = root.0.join("new-file");
+        backend.set_fault_injector(std::sync::Arc::new(ReplaceLeafWithSymlink {
+            leaf: leaf.clone(),
+            target: target.clone(),
+        }));
+
+        let attrs = VfAttrs {
+            file: FileOperand::from_path("/new-file"),
+            masks: AttrMask::MODE,
+            mode: 0o600,
+            ..VfAttrs::default()
+        };
+        assert!(
+            backend
+                .vsetattrs_raw_impl(std::slice::from_ref(&attrs))
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o7777,
+            0o640
+        );
+        assert!(
+            std::fs::symlink_metadata(leaf)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_create_honors_umask_and_does_not_chmod_existing_file() {
+        const CHILD: &str = "VFSI_LOCAL_OPEN_UMASK_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let test_name = std::thread::current().name().unwrap().to_owned();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg(test_name)
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("running 1 test"),
+                "child did not select exactly this test: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(
+                output.status.success(),
+                "open umask child failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, mut fs) = fs("open-create-umask");
+        std::fs::write(root.0.join("existing"), b"old").unwrap();
+        std::fs::set_permissions(
+            root.0.join("existing"),
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+
+        let previous = unsafe { libc::umask(0o077) };
+        let result = (|| {
+            let created =
+                fs.open_raw_impl(Path::new("/created"), libc::O_WRONLY | libc::O_CREAT, 0o666)?;
+            fs.close_impl(&created)?;
+            let existing =
+                fs.open_raw_impl(Path::new("/existing"), libc::O_RDWR | libc::O_CREAT, 0o777)?;
+            fs.close_impl(&existing)
+        })();
+        unsafe { libc::umask(previous) };
+        result.unwrap();
+
+        assert_eq!(
+            std::fs::metadata(root.0.join("created"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(root.0.join("existing"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o640
+        );
+    }
+
+    #[cfg(feature = "test-faults")]
+    fn run_filtered_test_child(test_name: &str, marker: &str) {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name])
+            .env(marker, "1")
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "isolated test child failed: {status}");
+                return;
+            }
+            if started.elapsed() >= Duration::from_secs(5) {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("isolated test child timed out: {test_name}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(all(feature = "test-faults", target_os = "linux"))]
+    #[test]
+    fn mkdir_mode_overrides_restrictive_umask() {
+        const CHILD: &str = "VFSI_LOCAL_UMASK_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            run_filtered_test_child(
+                "contract_tests::tests::mkdir_mode_overrides_restrictive_umask",
+                CHILD,
+            );
+            return;
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, mut backend) = fs("mkdir-restrictive-umask");
+        let previous = unsafe { libc::umask(0o700) };
+        let attrs = VfAttrs {
+            file: FileOperand::from_path("/restricted"),
+            masks: AttrMask::MODE,
+            mode: 0o700,
+            ..VfAttrs::default()
+        };
+        let result = backend.vmkdir_impl(std::slice::from_ref(&attrs));
+        unsafe { libc::umask(previous) };
+        result.unwrap();
+        assert_eq!(
+            std::fs::metadata(root.0.join("restricted"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+    }
+
+    #[cfg(feature = "test-faults")]
+    struct ReplaceLeafWithFifo {
+        leaf: PathBuf,
+    }
+
+    #[cfg(feature = "test-faults")]
+    impl vfsi_core::internal::faults::FaultInjector for ReplaceLeafWithFifo {
+        fn check(&self, point: &vfsi_core::internal::faults::OpenFaultPoint) -> VfResult<()> {
+            if matches!(
+                point,
+                vfsi_core::internal::faults::OpenFaultPoint::BeforeSetPermissions { index: 0 }
+            ) {
+                use std::ffi::CString;
+                use std::os::unix::ffi::OsStrExt;
+
+                let path = CString::new(self.leaf.as_os_str().as_bytes())
+                    .map_err(|_| VfError::failure(0, ERR_INVAL))?;
+                if unsafe { libc::mkfifo(path.as_ptr(), 0o600) } != 0 {
+                    return Err(VfError::client(
+                        0,
+                        LocalBackend::errno(&std::io::Error::last_os_error()),
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(all(feature = "test-faults", unix))]
+    #[test]
+    fn setattr_mode_does_not_block_on_a_raced_fifo() {
+        const CHILD: &str = "VFSI_LOCAL_FIFO_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            run_filtered_test_child(
+                "contract_tests::tests::setattr_mode_does_not_block_on_a_raced_fifo",
+                CHILD,
+            );
+            return;
+        }
+
+        use std::os::unix::fs::FileTypeExt;
+
+        let (root, mut backend) = fs("setattr-mode-fifo-swap");
+        let leaf = root.0.join("new-file");
+        backend.set_fault_injector(std::sync::Arc::new(ReplaceLeafWithFifo {
+            leaf: leaf.clone(),
+        }));
+        let attrs = VfAttrs {
+            file: FileOperand::from_path("/new-file"),
+            masks: AttrMask::MODE,
+            mode: 0o600,
+            ..VfAttrs::default()
+        };
+        backend
+            .vsetattrs_raw_impl(std::slice::from_ref(&attrs))
+            .unwrap();
+        assert!(
+            std::fs::symlink_metadata(leaf)
+                .unwrap()
+                .file_type()
+                .is_fifo()
+        );
     }
 }

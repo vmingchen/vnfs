@@ -377,6 +377,16 @@ impl NfsVecFs {
                 return Err(VfError::unsupported(i));
             }
         }
+        // The merged compound cannot condition SETATTR on GETATTR(TYPE).
+        // Resolve followed path timestamps first so a symlink's own timestamp
+        // is never changed before applying the update to its target.
+        if follow
+            && attrs
+                .iter()
+                .any(|a| !a.file.is_fd() && a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME))
+        {
+            return self.vsetattrs_phased_nfs(attrs, follow);
+        }
         if attrs
             .iter()
             .any(|a| a.masks.intersects(AttrMask::UID | AttrMask::GID))

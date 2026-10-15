@@ -807,9 +807,6 @@ pub trait VfsiExt: Vfsi {
         budget.charge(root)?;
         let mut pending = vec![(root.to_path_buf(), 0usize)];
         while let Some((path, depth)) = pending.pop() {
-            if depth >= options.depth_limit() && options.truncates_at_depth_limit() {
-                continue;
-            }
             let mut entries = self.read_dir_with_options(
                 &path,
                 budget.remaining_options(
@@ -822,10 +819,6 @@ pub trait VfsiExt: Vfsi {
                 budget
                     .charge(entry.path())
                     .map_err(|error| error.with_context("visit_dirs_ordered", entry.path()))?;
-                if depth >= options.depth_limit() {
-                    return Err(crate::api::Error::client(0, libc::EFBIG as u32)
-                        .with_context("visit_dirs_ordered", entry.path()));
-                }
             }
             entries.sort_by(&mut order);
             let listing = DirectoryListing { path, entries };
@@ -833,7 +826,7 @@ pub trait VfsiExt: Vfsi {
                 .entries
                 .iter()
                 .filter(|entry| entry.attrs().is_dir() && descend(entry))
-                .map(|entry| (entry.path().to_path_buf(), depth + 1))
+                .map(|entry| entry.path().to_path_buf())
                 .collect();
             match visitor(listing, depth)? {
                 crate::api::WalkControl::Stop => {
@@ -842,7 +835,14 @@ pub trait VfsiExt: Vfsi {
                 crate::api::WalkControl::SkipSubtree => continue,
                 crate::api::WalkControl::Continue => {}
             }
-            pending.extend(children.into_iter().rev());
+            if depth >= options.depth_limit() && !children.is_empty() {
+                if !options.truncates_at_depth_limit() {
+                    return Err(crate::api::Error::client(0, libc::EFBIG as u32)
+                        .with_context("visit_dirs_ordered", &children[0]));
+                }
+            } else {
+                pending.extend(children.into_iter().rev().map(|child| (child, depth + 1)));
+            }
         }
         Ok(crate::api::TraversalCompletion::Complete)
     }

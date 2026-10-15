@@ -8,6 +8,7 @@ use std::os::raw::c_char;
 #[cfg(feature = "test-faults")]
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use nfsv41_sys::*;
 
@@ -68,12 +69,16 @@ impl NfsFh {
     }
 
     fn from_nfs_fh(fh: &nfs_fh4) -> NfsFh {
-        let slice = unsafe {
-            std::slice::from_raw_parts(fh.nfs_fh4_val as *const u8, fh.nfs_fh4_len as usize)
+        let len = fh.nfs_fh4_len as usize;
+        let bytes: Box<[u8]> = if len == 0 {
+            // A zero-length XDR opaque value may have a null pointer, while
+            // from_raw_parts requires a non-null pointer even for length 0.
+            Vec::new().into_boxed_slice()
+        } else {
+            let slice = unsafe { std::slice::from_raw_parts(fh.nfs_fh4_val as *const u8, len) };
+            Box::from(slice)
         };
-        NfsFh {
-            bytes: Box::from(slice),
-        }
+        NfsFh { bytes }
     }
 
     pub fn len(&self) -> usize {
@@ -193,6 +198,54 @@ pub struct SetattrOp {
     pub mtime: Option<(i64, u32)>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct VerifierStorageAttrs {
+    mode: bool,
+    atime: bool,
+    mtime: bool,
+}
+
+fn verifier_storage_attrs(attrset: &bitmap4) -> VerifierStorageAttrs {
+    let has = |attribute: u32| {
+        let word = (attribute / 32) as usize;
+        word < attrset.bitmap4_len as usize
+            && word < attrset.map.len()
+            && attrset.map[word] & (1 << (attribute % 32)) != 0
+    };
+    VerifierStorageAttrs {
+        mode: has(FATTR4_MODE),
+        atime: has(FATTR4_TIME_ACCESS) || has(FATTR4_TIME_ACCESS_SET),
+        mtime: has(FATTR4_TIME_MODIFY) || has(FATTR4_TIME_MODIFY_SET),
+    }
+}
+
+fn current_timestamp() -> (i64, u32) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    (
+        now.as_secs().min(i64::MAX as u64) as i64,
+        now.subsec_nanos(),
+    )
+}
+
+fn verifier_cleanup_setattr(
+    fh: &NfsFh,
+    attrs: VerifierStorageAttrs,
+    mode: Option<u32>,
+    timestamp: (i64, u32),
+) -> SetattrOp {
+    SetattrOp {
+        fh: fh.clone(),
+        mode: mode.or(attrs.mode.then_some(0o600)),
+        uid: None,
+        gid: None,
+        size: None,
+        atime: attrs.atime.then_some(timestamp),
+        mtime: attrs.mtime.then_some(timestamp),
+    }
+}
+
 /// One READLINK of a batched compound, `[PUTFH, READLINK]`.
 pub struct ReadlinkOp {
     pub fh: NfsFh,
@@ -255,6 +308,19 @@ pub(crate) fn prepare_path_opens<C, T, E>(
         close(client, &closes);
     }
     result
+}
+
+fn read_error_with_cleanup<T, C>(
+    opened: &[(NfsFh, stateid4)],
+    close_in_compound: bool,
+    client: &mut C,
+    error: RpcError,
+    close: impl FnOnce(&mut C, &[CloseOp]),
+) -> RpcResult<T> {
+    if close_in_compound {
+        return Err(error);
+    }
+    prepare_path_opens(opened, client, |_| Err(error), close)
 }
 
 /// One NFSv4.2 COPY: `[PUTFH src, SAVEFH, PUTFH dst, COPY]`.
@@ -694,6 +760,14 @@ fn batch_resource_progress(
     } else {
         None
     }
+}
+
+fn remap_cleanup_error(error: RpcError, cleanup_indices: &[usize]) -> RpcError {
+    if error.is_transport() {
+        return error;
+    }
+    let op_index = error.op_index;
+    error.with_op_index(cleanup_indices.get(op_index).copied().unwrap_or(op_index))
 }
 
 fn path_components(path: &[u8]) -> impl Iterator<Item = &[u8]> + Clone {
@@ -1151,7 +1225,7 @@ impl NfsClient {
                         OPEN4_SHARE_DENY_NONE,
                         self.session.clientid,
                         &self.session.path_owner.name,
-                        make_open_how(open.create, self.session.path_owner.verifier),
+                        make_open_how(open.create),
                         &leaf,
                     );
                 }
@@ -1593,6 +1667,30 @@ impl NfsClient {
         })
     }
 
+    fn validate_read_length(actual: usize, requested: usize) -> RpcResult<()> {
+        if actual > requested {
+            Err(RpcError::transport(
+                "NFS READ reply exceeded requested count",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn record_expected_read_length(
+        expected: &mut [u32; MAX_COMPOUND_OPS],
+        count: &mut usize,
+        requested: usize,
+    ) -> RpcResult<()> {
+        let slot = expected
+            .get_mut(*count)
+            .ok_or_else(|| RpcError::transport("too many READ operations in compound"))?;
+        *slot = u32::try_from(requested)
+            .map_err(|_| RpcError::transport("READ count exceeds protocol limit"))?;
+        *count += 1;
+        Ok(())
+    }
+
     // One packing/validation engine; destinations are statically dispatched
     // while the reply storage is alive. Into reads never allocate owned data.
     fn readv_decode<R>(
@@ -1633,12 +1731,8 @@ impl NfsClient {
                         extracted += 1;
                         let ok = res.read(2 + 2 * i);
                         let len = ok.data.data_len as usize;
-                        if len > ops[wire_index].count as usize {
-                            return Err(RpcError::transport(
-                                "NFS READ reply exceeded requested count",
-                            )
-                            .with_op_index(local_index));
-                        }
+                        Self::validate_read_length(len, ops[wire_index].count as usize)
+                            .map_err(|error| error.with_op_index(local_index))?;
                         let data = if len == 0 {
                             &[][..]
                         } else {
@@ -1747,7 +1841,7 @@ impl NfsClient {
         access: u32,
         create: OpenCreate,
     ) -> RpcResult<(NfsFh, stateid4)> {
-        self.open_slot(dir, name, access, create, OwnerSlot::User)
+        self.open_slot(dir, name, access, create, OwnerSlot::User, None)
     }
 
     /// Like [`open`](Self::open) but uses the path-op open owner, whose
@@ -1759,7 +1853,27 @@ impl NfsClient {
         access: u32,
         create: OpenCreate,
     ) -> RpcResult<(NfsFh, stateid4)> {
-        self.open_slot(dir, name, access, create, OwnerSlot::Path)
+        self.open_slot(dir, name, access, create, OwnerSlot::Path, None)
+    }
+
+    /// Open a caller-owned descriptor and apply exclusive-create metadata
+    /// without borrowing the temporary pathname-I/O owner's state.
+    pub(crate) fn open_with_mode(
+        &mut self,
+        dir: &NfsFh,
+        name: &[u8],
+        access: u32,
+        create: OpenCreate,
+        mode: u32,
+    ) -> RpcResult<(NfsFh, stateid4)> {
+        self.open_slot(
+            dir,
+            name,
+            access,
+            create,
+            OwnerSlot::User,
+            Some(mode & 0o7777),
+        )
     }
 
     fn open_slot(
@@ -1769,22 +1883,19 @@ impl NfsClient {
         access: u32,
         create: OpenCreate,
         slot: OwnerSlot,
+        post_create_mode: Option<u32>,
     ) -> RpcResult<(NfsFh, stateid4)> {
-        let (seqid, verifier, owner_name) = match slot {
-            OwnerSlot::User => {
-                let verifier = self.session.open_owner.verifier;
-                (0, verifier, self.next_public_open_owner_name())
-            }
+        let (seqid, owner_name) = match slot {
+            OwnerSlot::User => (0, self.next_public_open_owner_name()),
             OwnerSlot::Path => (
                 self.session.path_owner.seqid,
-                self.session.path_owner.verifier,
                 Box::from(self.session.path_owner.name.as_slice()),
             ),
         };
         let mut c = Compound::new();
         c.tag(b"open");
         c.putfh(&dir.as_nfs_fh());
-        let openhow = make_open_how(create, verifier);
+        let openhow = make_open_how(create);
         c.open_claim_null(
             seqid,
             access,
@@ -1797,12 +1908,31 @@ impl NfsClient {
         c.getfh();
         let res = self.call_compound(&mut c)?;
         self.session.expect_all_ok(&res)?;
-        let stateid = res.open(2).stateid;
-        let fh = res.getfh(3);
+        let open_result = res.open(2);
+        let stateid = open_result.stateid;
+        let fh = NfsFh::from_nfs_fh(res.getfh(3));
         if matches!(slot, OwnerSlot::Path) {
             self.session.path_owner.seqid += 1;
         }
-        Ok((NfsFh::from_nfs_fh(fh), stateid))
+        if create == OpenCreate::Exclusive {
+            let attrs = verifier_storage_attrs(&open_result.attrset);
+            if post_create_mode.is_some() || attrs.mode || attrs.atime || attrs.mtime {
+                let timestamp = current_timestamp();
+                let update = verifier_cleanup_setattr(&fh, attrs, post_create_mode, timestamp);
+                if let Err(error) = self.setattr_many(&[update]) {
+                    let close = [CloseOp {
+                        fh: fh.clone(),
+                        stateid,
+                    }];
+                    let _ = match slot {
+                        OwnerSlot::User => self.close_many(&close),
+                        OwnerSlot::Path => self.close_many_path(&close),
+                    };
+                    return Err(error);
+                }
+            }
+        }
+        Ok((fh, stateid))
     }
 
     /// Run a batch of same-shaped operations across as few compounds as
@@ -1825,8 +1955,20 @@ impl NfsClient {
         tag: &[u8],
         per_op: usize,
         ops: &[T],
+        add: impl FnMut(&mut Compound, &T, usize),
+        extract: impl FnMut(&CompoundRes, usize) -> RpcResult<R>,
+    ) -> RpcResult<Vec<R>> {
+        self.batch_ops_fallible_with_failure(tag, per_op, ops, add, extract, |_, _| {})
+    }
+
+    fn batch_ops_fallible_with_failure<T, R>(
+        &mut self,
+        tag: &[u8],
+        per_op: usize,
+        ops: &[T],
         mut add: impl FnMut(&mut Compound, &T, usize),
         mut extract: impl FnMut(&CompoundRes, usize) -> RpcResult<R>,
+        mut on_failure: impl FnMut(&mut Self, &[R]),
     ) -> RpcResult<Vec<R>> {
         /// Translate a compound-internal resop index (0 = SEQUENCE) to the
         /// caller's request index: element `i` occupies resops
@@ -1848,7 +1990,13 @@ impl NfsClient {
         let mut global = 0usize;
         let mut max_items = usize::MAX;
         while global < ops.len() {
-            let chunk_size = self.op_budget_for(tag, 1 + per_op).batch_capacity(per_op)?;
+            let chunk_size = match self.op_budget_for(tag, 1 + per_op).batch_capacity(per_op) {
+                Ok(chunk_size) => chunk_size,
+                Err(error) => {
+                    on_failure(self, &out);
+                    return Err(error);
+                }
+            };
             let chunk = &ops[global..(global + chunk_size.min(max_items)).min(ops.len())];
             let chunk_start = global;
             let mut c = Compound::new();
@@ -1857,16 +2005,30 @@ impl NfsClient {
                 add(&mut c, op, global);
                 global += 1;
             }
-            if !self.compound_request_fits(&c)? && chunk.len() > 1 {
+            let fits = match self.compound_request_fits(&c) {
+                Ok(fits) => fits,
+                Err(error) => {
+                    on_failure(self, &out);
+                    return Err(error);
+                }
+            };
+            if !fits && chunk.len() > 1 {
                 max_items = chunk.len() / 2;
                 global = chunk_start;
                 continue;
             }
             max_items = usize::MAX;
-            let res = self.call_compound(&mut c).map_err(|e| {
-                let idx = caller_index(e.op_index, per_op, chunk_start, chunk.len());
-                e.with_op_index(idx)
-            })?;
+            let res = match self.call_compound(&mut c) {
+                Ok(res) => res,
+                Err(error) => {
+                    on_failure(self, &out);
+                    if error.is_transport() {
+                        return Err(error);
+                    }
+                    let idx = caller_index(error.op_index, per_op, chunk_start, chunk.len());
+                    return Err(error.with_op_index(idx));
+                }
+            };
             // Attribute a failing op to the right caller index. When the
             // server reports the failed op in the reply we find it by
             // scanning; when it aborts mid-compound and only sets the
@@ -1900,11 +2062,21 @@ impl NfsClient {
             }
             match bad {
                 Some(i) => {
+                    let completed = i.saturating_sub(1) / per_op;
+                    for local in 0..completed.min(chunk.len()) {
+                        out.push(extract(&res, local)?);
+                    }
+                    on_failure(self, &out);
                     let idx = caller_index(i, per_op, chunk_start, chunk.len());
                     return Err(RpcError::op(idx, res.op_status(i)));
                 }
                 None if res.status() != nfsstat4_NFS4_OK => {
                     let present = res.nops().saturating_sub(1);
+                    let completed = (present / per_op).min(chunk.len());
+                    for local in 0..completed {
+                        out.push(extract(&res, local)?);
+                    }
+                    on_failure(self, &out);
                     let local = present / per_op;
                     let idx = chunk_start + local.min(chunk.len() - 1);
                     return Err(RpcError::op(idx, res.status()));
@@ -1948,6 +2120,34 @@ impl NfsClient {
             |res, i| res.getattr_with_bitmap(2 + 2 * i),
         )
     }
+    fn cleanup_exclusive_path_opens(
+        &mut self,
+        opened: &[Option<(NfsFh, stateid4)>],
+        verifier_attrs: &[Option<VerifierStorageAttrs>],
+        ops: &[PathOpenOp],
+        indices: &[usize],
+    ) -> RpcResult<()> {
+        let timestamp = current_timestamp();
+        let mut cleanup_indices = Vec::new();
+        let mut cleanup = Vec::new();
+        for &index in indices {
+            if ops[index].create != OpenCreate::Exclusive {
+                continue;
+            }
+            let Some((fh, _)) = opened[index].as_ref() else {
+                continue;
+            };
+            let attrs = verifier_attrs[index].unwrap_or_default();
+            let mode = ops[index].mode.map(|mode| mode & 0o7777);
+            if mode.is_some() || attrs.mode || attrs.atime || attrs.mtime {
+                cleanup_indices.push(index);
+                cleanup.push(verifier_cleanup_setattr(fh, attrs, mode, timestamp));
+            }
+        }
+        self.setattr_many(&cleanup)
+            .map_err(|error| remap_cleanup_error(error, &cleanup_indices))
+    }
+
     /// SETATTR mode and/or size on several files in one compound.
     pub fn setattr_many(&mut self, ops: &[SetattrOp]) -> RpcResult<()> {
         let _ = self.batch_ops::<SetattrOp, ()>(
@@ -2057,11 +2257,10 @@ impl NfsClient {
         ops: &[OpenOp],
         slot: OwnerSlot,
     ) -> RpcResult<Vec<(NfsFh, stateid4)>> {
-        let (base, verifier, owner_name) = match slot {
-            OwnerSlot::User => (0, self.session.open_owner.verifier, Box::<[u8]>::default()),
+        let (base, owner_name) = match slot {
+            OwnerSlot::User => (0, Box::<[u8]>::default()),
             OwnerSlot::Path => (
                 self.session.path_owner.seqid,
-                self.session.path_owner.verifier,
                 Box::from(self.session.path_owner.name.as_slice()),
             ),
         };
@@ -2072,13 +2271,13 @@ impl NfsClient {
             Vec::new()
         };
         let clientid = self.session.clientid;
-        let out = self.batch_ops(
+        let out = self.batch_ops_fallible_with_failure(
             b"openv",
             3,
             ops,
             |c, op, gi| {
                 c.putfh(&op.dir.as_nfs_fh());
-                let openhow = make_open_how(op.create, verifier);
+                let openhow = make_open_how(op.create);
                 let (seqid, owner) = if matches!(slot, OwnerSlot::User) {
                     (0, &public_owner_names[gi])
                 } else {
@@ -2096,15 +2295,94 @@ impl NfsClient {
                 c.getfh();
             },
             |res, i| {
-                let stateid = res.open(2 + 3 * i).stateid;
+                let open_result = res.open(2 + 3 * i);
+                // i is compound-local. Decode independently of the original
+                // request; cleanup below checks its global creation mode.
+                let attrs = verifier_storage_attrs(&open_result.attrset);
                 let fh = res.getfh(3 + 3 * i);
-                (NfsFh::from_nfs_fh(fh), stateid)
+                Ok((NfsFh::from_nfs_fh(fh), open_result.stateid, attrs))
+            },
+            |client, opened: &[(NfsFh, stateid4, VerifierStorageAttrs)]| {
+                let timestamp = current_timestamp();
+                let cleanup_indices: Vec<usize> = opened
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, (_, _, attrs))| {
+                        (ops[index].create == OpenCreate::Exclusive
+                            && (attrs.mode || attrs.atime || attrs.mtime))
+                            .then_some(index)
+                    })
+                    .collect();
+                if !cleanup_indices.is_empty() {
+                    let cleanup: Vec<SetattrOp> = cleanup_indices
+                        .iter()
+                        .map(|&index| {
+                            verifier_cleanup_setattr(
+                                &opened[index].0,
+                                opened[index].2,
+                                None,
+                                timestamp,
+                            )
+                        })
+                        .collect();
+                    let _ = client.setattr_many(&cleanup);
+                }
+                if matches!(slot, OwnerSlot::Path) {
+                    client.session.path_owner.seqid = base + opened.len() as u32;
+                }
+                let closes: Vec<CloseOp> = opened
+                    .iter()
+                    .map(|(fh, stateid, _)| CloseOp {
+                        fh: fh.clone(),
+                        stateid: *stateid,
+                    })
+                    .collect();
+                let _ = match slot {
+                    OwnerSlot::User => client.close_many(&closes),
+                    OwnerSlot::Path => client.close_many_path(&closes),
+                };
             },
         )?;
         if matches!(slot, OwnerSlot::Path) {
             self.session.path_owner.seqid = base + n as u32;
         }
-        Ok(out)
+        let timestamp = current_timestamp();
+        let cleanup_indices: Vec<usize> = out
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (_, _, attrs))| {
+                (ops[index].create == OpenCreate::Exclusive
+                    && (attrs.mode || attrs.atime || attrs.mtime))
+                    .then_some(index)
+            })
+            .collect();
+        if !cleanup_indices.is_empty() {
+            let cleanup: Vec<SetattrOp> = cleanup_indices
+                .iter()
+                .map(|&index| {
+                    verifier_cleanup_setattr(&out[index].0, out[index].2, None, timestamp)
+                })
+                .collect();
+            if let Err(error) = self.setattr_many(&cleanup) {
+                let error = remap_cleanup_error(error, &cleanup_indices);
+                let closes: Vec<CloseOp> = out
+                    .iter()
+                    .map(|(fh, stateid, _)| CloseOp {
+                        fh: fh.clone(),
+                        stateid: *stateid,
+                    })
+                    .collect();
+                let _ = match slot {
+                    OwnerSlot::User => self.close_many(&closes),
+                    OwnerSlot::Path => self.close_many_path(&closes),
+                };
+                return Err(error);
+            }
+        }
+        Ok(out
+            .into_iter()
+            .map(|(fh, stateid, _)| (fh, stateid))
+            .collect())
     }
 
     /// CLOSE public descriptors in as few compounds as possible. Each has an
@@ -2351,25 +2629,21 @@ impl NfsClient {
                     committed[i] = None;
                 }
             }
-            // Extract results and opened stateids from the resarray.
+            if !close_in_compound {
+                res.for_each_open_result(map.executed_ranges(&report), |fh, stateid| {
+                    opened.push((NfsFh::from_nfs_fh(fh), stateid));
+                });
+            }
+            // Extract completed write results from the resarray.
             for (caller, s, e) in map.completed_ranges(&report) {
                 for j in *s..(*e).min(res.nops()) {
                     let ro = res.op(j);
-                    unsafe {
-                        match ro.resop {
-                            nfs_opnum4_NFS4_OP_WRITE => {
-                                let ok = ro.nfs_resop4_u.opwrite.WRITE4res_u.resok4;
-                                let c = counts[*caller].get_or_insert(0);
-                                *c = c.saturating_add(ok.count);
-                                committed[*caller] = Some(ok.committed);
-                            }
-                            nfs_opnum4_NFS4_OP_OPEN if !close_in_compound => {
-                                // Paired with the GETFH right after it.
-                                let stateid = res.open(j).stateid;
-                                let fh = res.getfh(j + 1);
-                                opened.push((NfsFh::from_nfs_fh(fh), stateid));
-                            }
-                            _ => {}
+                    if ro.resop == nfs_opnum4_NFS4_OP_WRITE {
+                        unsafe {
+                            let ok = ro.nfs_resop4_u.opwrite.WRITE4res_u.resok4;
+                            let c = counts[*caller].get_or_insert(0);
+                            *c = c.saturating_add(ok.count);
+                            committed[*caller] = Some(ok.committed);
                         }
                     }
                 }
@@ -2449,6 +2723,8 @@ impl NfsClient {
             let mut opens_in_chunk = 0usize;
             let base_seq = self.session.path_owner.seqid;
             let mut payload = 0usize;
+            let mut expected_read_lengths = [0; MAX_COMPOUND_OPS];
+            let mut expected_read_count = 0usize;
 
             while global < n && map.ranges.len() < max_items && map.next + per_file <= budget {
                 let op = &ops[global];
@@ -2508,6 +2784,11 @@ impl NfsClient {
                 if end > start {
                     let mut off = 0usize;
                     for chunk_len in chunk_lens(start, end, per_op) {
+                        Self::record_expected_read_length(
+                            &mut expected_read_lengths,
+                            &mut expected_read_count,
+                            chunk_len,
+                        )?;
                         c.read(
                             stateid,
                             checked_offset(op.offset, start + off, global)?,
@@ -2518,6 +2799,11 @@ impl NfsClient {
                     }
                 } else {
                     // Empty reads still emit a READ to preserve result order.
+                    Self::record_expected_read_length(
+                        &mut expected_read_lengths,
+                        &mut expected_read_count,
+                        0,
+                    )?;
                     c.read(stateid, checked_offset(op.offset, start, global)?, 0);
                     map.note_ops(1);
                 }
@@ -2589,32 +2875,80 @@ impl NfsClient {
                     eof[i] = None;
                 }
             }
+            if !close_in_compound {
+                res.for_each_open_result(map.executed_ranges(&report), |fh, stateid| {
+                    opened.push((NfsFh::from_nfs_fh(fh), stateid));
+                });
+            }
+            let mut read_index = 0usize;
             for (caller, s, e) in map.completed_ranges(&report) {
                 for j in *s..(*e).min(res.nops()) {
                     let ro = res.op(j);
-                    unsafe {
-                        match ro.resop {
-                            nfs_opnum4_NFS4_OP_READ => {
-                                let ok = ro.nfs_resop4_u.opread.READ4res_u.resok4;
-                                let len = ok.data.data_len as usize;
-                                // Borrow the XDR reply while it is alive and
-                                // copy once into the final growing result buffer.
-                                let bytes = if len == 0 {
-                                    &[]
-                                } else {
-                                    std::slice::from_raw_parts(ok.data.data_val as *const u8, len)
-                                };
-                                data[*caller]
-                                    .get_or_insert_with(Vec::new)
-                                    .extend_from_slice(bytes);
-                                eof[*caller] = Some(ok.eof != 0);
+                    if ro.resop == nfs_opnum4_NFS4_OP_READ {
+                        unsafe {
+                            let ok = ro.nfs_resop4_u.opread.READ4res_u.resok4;
+                            let len = ok.data.data_len as usize;
+                            let requested = match expected_read_lengths[..expected_read_count]
+                                .get(read_index)
+                                .copied()
+                            {
+                                Some(requested) => requested,
+                                None => {
+                                    let error = RpcError::transport(
+                                        "malformed readv COMPOUND reply: extra READ result",
+                                    )
+                                    .with_op_index(*caller);
+                                    return read_error_with_cleanup(
+                                        &opened,
+                                        close_in_compound,
+                                        self,
+                                        error,
+                                        |client, closes| {
+                                            client.close_path_or_defer(
+                                                closes
+                                                    .iter()
+                                                    .map(|op| CloseOp {
+                                                        fh: op.fh.clone(),
+                                                        stateid: op.stateid,
+                                                    })
+                                                    .collect(),
+                                            )
+                                        },
+                                    );
+                                }
+                            };
+                            read_index += 1;
+                            if let Err(error) = Self::validate_read_length(len, requested as usize)
+                            {
+                                return read_error_with_cleanup(
+                                    &opened,
+                                    close_in_compound,
+                                    self,
+                                    error.with_op_index(*caller),
+                                    |client, closes| {
+                                        client.close_path_or_defer(
+                                            closes
+                                                .iter()
+                                                .map(|op| CloseOp {
+                                                    fh: op.fh.clone(),
+                                                    stateid: op.stateid,
+                                                })
+                                                .collect(),
+                                        )
+                                    },
+                                );
                             }
-                            nfs_opnum4_NFS4_OP_OPEN if !close_in_compound => {
-                                let stateid = res.open(j).stateid;
-                                let fh = res.getfh(j + 1);
-                                opened.push((NfsFh::from_nfs_fh(fh), stateid));
-                            }
-                            _ => {}
+                            // Borrow the XDR reply while it is alive and
+                            // copy once into the final growing result buffer.
+                            let bytes = if len == 0 {
+                                &[]
+                            } else {
+                                std::slice::from_raw_parts(ok.data.data_val as *const u8, len)
+                            };
+                            data[*caller]
+                                .get_or_insert_with(Vec::new)
+                                .extend_from_slice(bytes);
+                            eof[*caller] = Some(ok.eof != 0);
                         }
                     }
                 }
@@ -2980,8 +3314,9 @@ impl NfsClient {
         let public_owner_names: Vec<Box<[u8]>> =
             (0..n).map(|_| self.next_public_open_owner_name()).collect();
         let mut opened: Vec<Option<(NfsFh, stateid4)>> = vec![None; n];
+        let mut verifier_attrs: Vec<Option<VerifierStorageAttrs>> = vec![None; n];
         let mut failed: Option<(usize, u32)> = None;
-        let per_file = 6; // RESTOREFH + OPEN + GETFH + [SETATTR x2] + margin
+        let per_file = 6; // RESTOREFH + OPEN + GETFH + margin
         let reserve = 16;
         let mut global = 0usize;
         let mut max_items = usize::MAX;
@@ -3036,18 +3371,13 @@ impl NfsClient {
                         OPEN4_SHARE_DENY_NONE,
                         self.session.clientid,
                         &public_owner_names[global],
-                        make_open_how(create, self.session.path_owner.verifier),
+                        make_open_how(create),
                         &leaf,
                     ),
                 }
                 map.note_ops(1);
                 c.getfh();
                 map.note_ops(1);
-                if op.create == OpenCreate::Exclusive {
-                    // EXCLUSIVE create always created the file; apply mode.
-                    c.setattr(Some(op.mode.unwrap_or(0o644) & 0o7777), None);
-                    map.note_ops(1);
-                }
                 map.end();
                 cursor.descend();
                 payload += est;
@@ -3111,22 +3441,61 @@ impl NfsClient {
                     }
                     for j in *s..*e {
                         if res.op(j).resop == nfs_opnum4_NFS4_OP_OPEN {
-                            let stateid = res.open(j).stateid;
+                            let open_result = res.open(j);
+                            let stateid = open_result.stateid;
                             let fh = res.getfh(j + 1);
                             opened[*c] = Some((NfsFh::from_nfs_fh(fh), stateid));
+                            if ops[*c].create == OpenCreate::Exclusive {
+                                verifier_attrs[*c] =
+                                    Some(verifier_storage_attrs(&open_result.attrset));
+                            }
                         }
                     }
                 }
+                let completed: Vec<usize> = map
+                    .ranges
+                    .iter()
+                    .filter_map(|(index, _, _)| (*index < caller).then_some(*index))
+                    .collect();
+                if let Err(error) =
+                    self.cleanup_exclusive_path_opens(&opened, &verifier_attrs, ops, &completed)
+                {
+                    let closes: Vec<CloseOp> = opened
+                        .iter_mut()
+                        .filter_map(Option::take)
+                        .map(|(fh, stateid)| CloseOp { fh, stateid })
+                        .collect();
+                    self.close_path_or_defer(closes);
+                    return Err(error);
+                }
                 break;
             }
+            let mut completed = Vec::new();
             for (caller, s, e) in &map.ranges {
                 for j in *s..*e {
                     if res.op(j).resop == nfs_opnum4_NFS4_OP_OPEN {
-                        let stateid = res.open(j).stateid;
+                        let open_result = res.open(j);
+                        let stateid = open_result.stateid;
                         let fh = res.getfh(j + 1);
                         opened[*caller] = Some((NfsFh::from_nfs_fh(fh), stateid));
+                        if ops[*caller].create == OpenCreate::Exclusive {
+                            verifier_attrs[*caller] =
+                                Some(verifier_storage_attrs(&open_result.attrset));
+                        }
+                        completed.push(*caller);
                     }
                 }
+            }
+            if let Err(error) =
+                self.cleanup_exclusive_path_opens(&opened, &verifier_attrs, ops, &completed)
+            {
+                let closes: Vec<CloseOp> = opened
+                    .iter_mut()
+                    .filter_map(Option::take)
+                    .map(|(fh, stateid)| CloseOp { fh, stateid })
+                    .collect();
+                self.close_path_or_defer(closes);
+                return Err(error);
             }
             if chunk_start == global {
                 failed.get_or_insert((chunk_start, nfsstat4_NFS4ERR_TOO_MANY_OPS));
@@ -3382,6 +3751,7 @@ impl NfsClient {
         self.session.expect_all_ok(&res)?;
         let ok = res.read(2);
         let len = ok.data.data_len as usize;
+        Self::validate_read_length(len, count as usize)?;
         let data = if len == 0 {
             Vec::new()
         } else {
@@ -3657,6 +4027,12 @@ impl NfsClient {
                 }
                 .to_vec()
             };
+            if name.is_empty() || name.contains(&b'/') || name.contains(&0) {
+                return Err(RpcError::transport_with_kind(
+                    vfsi_core::TransportKind::InvalidReply,
+                    "READDIR returned an invalid name component",
+                ));
+            }
             if name != b"." && name != b".." {
                 let attrs_len = ent.attrs.attr_vals.attrlist4_len as usize;
                 let attrs = if attrs_len == 0 {
@@ -3887,7 +4263,7 @@ fn session_mount_root(session: &mut Session) -> RpcResult<NfsFh> {
 }
 
 /// Build the `openflag4` for an OPEN based on the create mode.
-fn make_open_how(create: OpenCreate, verifier: verifier4) -> openflag4 {
+fn make_open_how(create: OpenCreate) -> openflag4 {
     match create {
         OpenCreate::NoCreate => openflag4 {
             opentype: opentype4_OPEN4_NOCREATE,
@@ -3901,7 +4277,7 @@ fn make_open_how(create: OpenCreate, verifier: verifier4) -> openflag4 {
                 how: createhow4 {
                     mode: createmode4_EXCLUSIVE4,
                     createhow4_u: createhow4__bindgen_ty_1 {
-                        createverf: verifier,
+                        createverf: crate::session::make_verifier(),
                     },
                 },
             },
@@ -3952,6 +4328,89 @@ fn make_open_how(create: OpenCreate, verifier: verifier4) -> openflag4 {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn cleanup_error_remapping_preserves_transport_errors_as_unattributed() {
+        let transport = super::remap_cleanup_error(
+            super::RpcError::transport("cleanup transport failure"),
+            &[2, 5],
+        );
+        assert!(transport.is_transport());
+        assert_eq!(transport.op_index, 0);
+
+        let nfs = super::remap_cleanup_error(super::RpcError::op(1, 10001), &[2, 5]);
+        assert!(!nfs.is_transport());
+        assert_eq!(nfs.op_index, 5);
+    }
+
+    #[test]
+    fn exclusive_open_attrset_selects_only_verifier_storage_timestamps() {
+        // OPEN reports the attributes used for the verifier, not necessarily
+        // the write-only *_SET attributes that a subsequent SETATTR uses.
+        for (access, modify) in [
+            (
+                nfsv41_sys::FATTR4_TIME_ACCESS,
+                nfsv41_sys::FATTR4_TIME_MODIFY,
+            ),
+            (
+                nfsv41_sys::FATTR4_TIME_ACCESS_SET,
+                nfsv41_sys::FATTR4_TIME_MODIFY_SET,
+            ),
+        ] {
+            let attrset = nfsv41_sys::bitmap4 {
+                bitmap4_len: 2,
+                map: [
+                    0,
+                    (1 << (access % 32))
+                        | (1 << (modify % 32))
+                        | (1 << (nfsv41_sys::FATTR4_MODE % 32)),
+                    0,
+                ],
+            };
+            assert_eq!(
+                super::verifier_storage_attrs(&attrset),
+                super::VerifierStorageAttrs {
+                    mode: true,
+                    atime: true,
+                    mtime: true,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn exclusive_cleanup_setattr_combines_creation_mode_and_reported_verifier_times() {
+        let fh = super::NfsFh::test_from_bytes(vec![1, 2, 3]);
+        let update = super::verifier_cleanup_setattr(
+            &fh,
+            super::VerifierStorageAttrs {
+                mode: false,
+                atime: true,
+                mtime: false,
+            },
+            Some(0o600),
+            (123, 456),
+        );
+        assert_eq!(update.fh, fh);
+        assert_eq!(update.mode, Some(0o600));
+        assert_eq!(update.atime, Some((123, 456)));
+        assert_eq!(update.mtime, None);
+        assert_eq!(update.uid, None);
+        assert_eq!(update.gid, None);
+        assert_eq!(update.size, None);
+
+        let fallback = super::verifier_cleanup_setattr(
+            &fh,
+            super::VerifierStorageAttrs {
+                mode: true,
+                atime: false,
+                mtime: false,
+            },
+            None,
+            (123, 456),
+        );
+        assert_eq!(fallback.mode, Some(0o600));
+    }
+
+    #[test]
     fn fixed_bytes_filehandle_layout_and_wire_ownership() {
         use std::collections::HashSet;
         use std::mem::size_of;
@@ -3995,6 +4454,13 @@ mod tests {
         });
         assert!(empty_handle.is_empty());
         assert_eq!(empty_handle.len(), 0);
+
+        let null_empty_handle = super::NfsFh::from_nfs_fh(&nfsv41_sys::nfs_fh4 {
+            nfs_fh4_len: 0,
+            nfs_fh4_val: std::ptr::null_mut(),
+        });
+        assert!(null_empty_handle.is_empty());
+        assert_eq!(null_empty_handle.len(), 0);
     }
 
     #[test]
@@ -4092,9 +4558,67 @@ mod tests {
     }
 
     #[test]
+    fn read_reply_data_never_exceeds_the_requested_count() {
+        assert!(super::NfsClient::validate_read_length(0, 0).is_ok());
+        assert!(super::NfsClient::validate_read_length(4, 5).is_ok());
+        assert!(super::NfsClient::validate_read_length(5, 5).is_ok());
+
+        let error = super::NfsClient::validate_read_length(6, 5).unwrap_err();
+        assert!(error.is_transport());
+        assert!(error.to_string().contains("exceeded requested count"));
+    }
+
+    #[test]
+    fn oversized_path_read_reply_closes_open_stateids_before_returning_error() {
+        let opened = vec![
+            (
+                super::NfsFh {
+                    bytes: Box::from([1u8, 2]),
+                },
+                nfsv41_sys::stateid4 {
+                    seqid: 3,
+                    other: [4; 12],
+                },
+            ),
+            (
+                super::NfsFh {
+                    bytes: Box::from([5u8]),
+                },
+                nfsv41_sys::stateid4 {
+                    seqid: 6,
+                    other: [7; 12],
+                },
+            ),
+        ];
+        let error = super::NfsClient::validate_read_length(6, 5).unwrap_err();
+        let mut closed = Vec::new();
+        let mut client = ();
+        let result: super::RpcResult<()> =
+            super::read_error_with_cleanup(&opened, false, &mut client, error, |_, ops| {
+                closed.extend(
+                    ops.iter()
+                        .map(|op| (op.fh.clone(), op.stateid.seqid, op.stateid.other)),
+                );
+            });
+
+        let error = result.unwrap_err();
+        assert!(error.is_transport());
+        assert_eq!(
+            closed,
+            vec![
+                (opened[0].0.clone(), 3, [4; 12]),
+                (opened[1].0.clone(), 6, [7; 12]),
+            ]
+        );
+    }
+
+    #[test]
     fn directory_page_eof_suppresses_continuation_without_rewriting_entry_cookies() {
+        let mut name = b"entry".to_vec();
         let mut entry: nfsv41_sys::entry4 = unsafe { std::mem::zeroed() };
         entry.cookie = 42;
+        entry.name.utf8string_len = name.len() as _;
+        entry.name.utf8string_val = name.as_mut_ptr().cast();
         let mut reply: nfsv41_sys::READDIR4resok = unsafe { std::mem::zeroed() };
         reply.reply.entries = &mut entry;
         reply.reply.eof = 1;
@@ -4110,6 +4634,43 @@ mod tests {
                 .unwrap_err()
                 .is_transport()
         );
+    }
+
+    #[test]
+    fn readdir_rejects_invalid_name_components_as_invalid_replies() {
+        for invalid in [&b""[..], b"/sibling", b"../sibling", b"file\0name"] {
+            let mut name = invalid.to_vec();
+            let mut entry: nfsv41_sys::entry4 = unsafe { std::mem::zeroed() };
+            entry.cookie = 1;
+            entry.name.utf8string_len = name.len() as _;
+            entry.name.utf8string_val = name.as_mut_ptr().cast();
+            let mut reply: nfsv41_sys::READDIR4resok = unsafe { std::mem::zeroed() };
+            reply.reply.entries = &mut entry;
+            reply.reply.eof = 1;
+
+            let error = super::NfsClient::collect_readdir(&reply).unwrap_err();
+            assert_eq!(
+                error.transport_kind,
+                Some(vfsi_core::TransportKind::InvalidReply),
+                "invalid name {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn readdir_preserves_non_utf8_name_components() {
+        let mut name = vec![0xff];
+        let mut entry: nfsv41_sys::entry4 = unsafe { std::mem::zeroed() };
+        entry.cookie = 1;
+        entry.name.utf8string_len = name.len() as _;
+        entry.name.utf8string_val = name.as_mut_ptr().cast();
+        let mut reply: nfsv41_sys::READDIR4resok = unsafe { std::mem::zeroed() };
+        reply.reply.entries = &mut entry;
+        reply.reply.eof = 1;
+
+        let (entries, next) = super::NfsClient::collect_readdir(&reply).unwrap();
+        assert_eq!(entries[0].name, name);
+        assert_eq!(next, 0);
     }
 
     use proptest::prelude::*;

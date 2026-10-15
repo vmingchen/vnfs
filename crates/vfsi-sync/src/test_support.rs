@@ -60,8 +60,13 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     let posix_metadata = capabilities.contains(Capabilities::POSIX_METADATA);
     let symlinks = capabilities.contains(Capabilities::SYMLINKS);
     let hardlinks = capabilities.contains(Capabilities::HARDLINKS);
+    // SMB reports synthetic modes and delegates conventional creation modes
+    // to the share ACL, so keep its shared conformance fixtures on defaults.
+    let directory_mode = if posix_metadata { 0o755 } else { 0o777 };
+    let file_mode = if posix_metadata { 0o644 } else { 0o666 };
+    let subdirectory_mode = if posix_metadata { 0o750 } else { 0o777 };
     let dir = format!("{}/suite", base);
-    fs.ensure_dir_impl(Path::new(&dir), 0o755)
+    fs.ensure_dir_impl(Path::new(&dir), directory_mode)
         .expect("ensure_dir");
     let f = format!("{}/f.txt", dir);
 
@@ -185,7 +190,8 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
 
     // mkdir.
     let sub = format!("{}/sub", dir);
-    fs.mkdir_raw_impl(Path::new(&sub), 0o750).expect("mkdir");
+    fs.mkdir_raw_impl(Path::new(&sub), subdirectory_mode)
+        .expect("mkdir");
     assert_eq!(
         fs.stat_impl(Path::new(&sub)).unwrap().ftype,
         VfType::Directory
@@ -272,7 +278,8 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
 
     // Strict vopen_raw_impl / vclose_impl.
     let more = format!("{}/more", dir);
-    fs.ensure_dir_impl(Path::new(&more), 0o755).unwrap();
+    fs.ensure_dir_impl(Path::new(&more), directory_mode)
+        .unwrap();
     let paths = [
         format!("{}/a", more),
         format!("{}/b", more),
@@ -280,7 +287,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     ];
     let refs: Vec<&Path> = paths.iter().map(Path::new).collect();
     let files = fs
-        .vopen_raw_impl(&refs, &[libc::O_CREAT | libc::O_RDWR; 3], &[0o644; 3])
+        .vopen_raw_impl(&refs, &[libc::O_CREAT | libc::O_RDWR; 3], &[file_mode; 3])
         .expect("openv");
     fs.vclose_impl(&files).expect("closev");
 
@@ -348,11 +355,15 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     // O_CREAT mode is ignored when the file already exists.
     let mode_f = format!("{}/mode.txt", dir);
     let mfd = fs
-        .open_raw_impl(Path::new(&mode_f), libc::O_CREAT | libc::O_RDWR, 0o600)
+        .open_raw_impl(
+            Path::new(&mode_f),
+            libc::O_CREAT | libc::O_RDWR,
+            if posix_metadata { 0o600 } else { 0o666 },
+        )
         .unwrap();
     fs.close_impl(&mfd).unwrap();
     let mfd = fs
-        .open_raw_impl(Path::new(&mode_f), libc::O_CREAT | libc::O_RDWR, 0o777)
+        .open_raw_impl(Path::new(&mode_f), libc::O_CREAT | libc::O_RDWR, file_mode)
         .unwrap();
     fs.close_impl(&mfd).unwrap();
     if posix_metadata {
@@ -368,7 +379,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         fs.open_raw_impl(
             Path::new(&mode_f),
             libc::O_CREAT | libc::O_EXCL | libc::O_RDWR,
-            0o644
+            file_mode
         )
         .unwrap_err()
         .err_no(),
@@ -440,12 +451,13 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     );
 
     // ensure_dir on an existing directory is a no-op.
-    fs.ensure_dir_impl(Path::new(&sub), 0o755)
+    fs.ensure_dir_impl(Path::new(&sub), directory_mode)
         .expect("ensure_dir existing");
 
     // Non-recursive rm of a non-empty directory fails.
     let nonempty = format!("{}/nonempty", dir);
-    fs.ensure_dir_impl(Path::new(&nonempty), 0o755).unwrap();
+    fs.ensure_dir_impl(Path::new(&nonempty), directory_mode)
+        .unwrap();
     fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
         FileOperand::from_os_path(Path::new(&format!("{}/x", nonempty))),
         0,
@@ -477,7 +489,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     // cp_recursive copies the tree.
     let cpsrc = format!("{}/cpsrc", dir);
     let cpdst = format!("{}/cpdst", dir);
-    fs.ensure_dir_impl(Path::new(&format!("{}/inner", cpsrc)), 0o755)
+    fs.ensure_dir_impl(Path::new(&format!("{}/inner", cpsrc)), directory_mode)
         .unwrap();
     let srcfile = format!("{}/inner/data.txt", cpsrc);
     let mut w = WriteOp::from_path(&srcfile, VfOffset::At(0), b"xyz".to_vec());
@@ -559,7 +571,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         .open_raw_impl(
             Path::new(&app),
             libc::O_CREAT | libc::O_RDWR | libc::O_APPEND,
-            0o644,
+            file_mode,
         )
         .expect("open append");
     fs.vwrite_impl(&borrow_writes(&[WriteOp::new(
@@ -655,7 +667,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
             VfPathBase::Abs,
             Path::new(&abs_rel),
             libc::O_CREAT | libc::O_RDWR,
-            0o644,
+            file_mode,
         )
         .expect("open_by_path Abs relative");
     fs.vwrite_impl(&borrow_writes(&[WriteOp::new(
@@ -692,10 +704,12 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     // walk returns pre-order with the sort callback applied to every
     // directory (subdirectories visited in the order the caller lists them).
     let wroot = format!("/{}/wroot", dir.trim_start_matches('/'));
-    fs.ensure_dir_impl(Path::new(&wroot), 0o755).unwrap();
+    fs.ensure_dir_impl(Path::new(&wroot), directory_mode)
+        .unwrap();
     for (sub, file) in [("b", "f1"), ("a", "f2"), ("a", "f3")] {
         let subp = format!("{}/{}", wroot, sub);
-        fs.ensure_dir_impl(Path::new(&subp), 0o755).unwrap();
+        fs.ensure_dir_impl(Path::new(&subp), directory_mode)
+            .unwrap();
         fs.vwrite_impl(&borrow_writes(&[WriteOp::at(
             FileOperand::from_os_path(Path::new(&format!("{}/{}", subp, file))),
             0,

@@ -339,3 +339,30 @@ fn ordinary_descriptor_metadata_delegates_without_faults() {
         );
     });
 }
+
+#[test]
+fn out_of_range_descriptor_does_not_close_a_valid_handle() {
+    Python::initialize();
+    let root = TestRoot::new();
+    std::fs::write(root.0.join("safe"), b"safe-data").unwrap();
+
+    use vfsi_sync::backend::HandleBackend;
+    let mut backend = FaultBackend::new(&root.0, None);
+    let fd = backend
+        .inner
+        .open_raw_impl(Path::new("/safe"), libc::O_RDONLY, 0)
+        .unwrap()
+        .fd()
+        .unwrap() as i64;
+    let client = client(backend);
+
+    Python::attach(|py| {
+        let invalid_fd = fd + (1_i64 << 32);
+        let error = client.close(py, invalid_fd).unwrap_err();
+        assert!(error.is_instance_of::<PyOSError>(py));
+
+        // The out-of-range value must not wrap around and close the valid fd.
+        assert_eq!(client.pread(py, fd, 9, 0).unwrap(), b"safe-data");
+        client.close(py, fd).unwrap();
+    });
+}

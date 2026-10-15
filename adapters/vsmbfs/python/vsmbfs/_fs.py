@@ -11,6 +11,9 @@ class VsmbFileSystem(_VfsiFileSystem):
     protocol = "vsmbfs"
     _native_module = _native
     _supported_backends = frozenset({"smb"})
+    # SMB delegates implicit directory permissions to the share's ACL.
+    # Explicit modes still reach native validation rather than being ignored.
+    _default_dir_mode = 0o777
 
     def __init__(self, host="127.0.0.1", root="", share=None, **kwargs):
         backend = kwargs.pop("backend", "smb")

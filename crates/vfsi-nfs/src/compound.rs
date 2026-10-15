@@ -1021,6 +1021,28 @@ impl CompoundRes {
         self.resop(i)
     }
 
+    /// Visit successful OPEN results in executed operation ranges. Path-I/O
+    /// callers collect these before returning errors so malformed replies or
+    /// a later failed operation cannot hide OPEN stateids from cleanup.
+    pub(crate) fn for_each_open_result(
+        &self,
+        ranges: impl IntoIterator<Item = (usize, usize)>,
+        mut visit: impl FnMut(&nfs_fh4, stateid4),
+    ) {
+        for (start, end) in ranges {
+            for index in start..end.min(self.nops()) {
+                if self.op(index).resop == nfs_opnum4_NFS4_OP_OPEN
+                    && index + 1 < end
+                    && index + 1 < self.nops()
+                    && self.op(index + 1).resop == nfs_opnum4_NFS4_OP_GETFH
+                {
+                    let stateid = self.open(index).stateid;
+                    visit(self.getfh(index + 1), stateid);
+                }
+            }
+        }
+    }
+
     /// Return the resop at `i`, asserting it is the expected op. Turns a
     /// wrong-op union access into a clear panic instead of reading garbage.
     fn expect_op(&self, i: usize, want: nfs_opnum4, what: &str) -> &nfs_resop4 {
@@ -1263,6 +1285,159 @@ mod response_validation_tests {
         let mut ops = [res(nfs_opnum4_NFS4_OP_PUTROOTFH)];
         ops[0].nfs_resop4_u.opputrootfh.status = nfsstat4_NFS4ERR_IO;
         assert!(validate_response_ops(&request, &reply(nfsstat4_NFS4ERR_IO, &mut ops)).is_ok());
+    }
+
+    #[test]
+    fn collects_open_results_after_an_earlier_read_in_the_same_range() {
+        let operations =
+            unsafe { libc::calloc(3, std::mem::size_of::<nfs_resop4>()).cast::<nfs_resop4>() };
+        assert!(!operations.is_null());
+        unsafe {
+            *operations.add(0) = res(nfs_opnum4_NFS4_OP_READ);
+            (*operations.add(0)).nfs_resop4_u.opread.status = nfsstat4_NFS4_OK;
+            *operations.add(1) = res(nfs_opnum4_NFS4_OP_OPEN);
+            (*operations.add(1)).nfs_resop4_u.opopen.status = nfsstat4_NFS4_OK;
+            (*operations.add(1))
+                .nfs_resop4_u
+                .opopen
+                .OPEN4res_u
+                .resok4
+                .stateid = stateid4 {
+                seqid: 7,
+                other: [8; 12],
+            };
+            *operations.add(2) = res(nfs_opnum4_NFS4_OP_GETFH);
+            (*operations.add(2)).nfs_resop4_u.opgetfh.status = nfsstat4_NFS4_OK;
+            let handle = libc::malloc(2).cast::<c_char>();
+            assert!(!handle.is_null());
+            *handle = 9;
+            *handle.add(1) = 10;
+            (*operations.add(2))
+                .nfs_resop4_u
+                .opgetfh
+                .GETFH4res_u
+                .resok4
+                .object = nfs_fh4 {
+                nfs_fh4_len: 2,
+                nfs_fh4_val: handle,
+            };
+        }
+        let response = CompoundRes {
+            res: reply(nfsstat4_NFS4_OK, unsafe {
+                std::slice::from_raw_parts_mut(operations, 3)
+            }),
+        };
+        let mut opened = Vec::new();
+        response.for_each_open_result([(0, 3)], |handle, stateid| {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    handle.nfs_fh4_val as *const u8,
+                    handle.nfs_fh4_len as usize,
+                )
+            };
+            opened.push((bytes.to_vec(), stateid.seqid, stateid.other));
+        });
+        assert_eq!(opened, vec![(vec![9, 10], 7, [8; 12])]);
+    }
+
+    #[test]
+    fn collects_open_stateid_from_successful_prefix_of_failed_read_item() {
+        let mut map = crate::planner::ExecutionMap::new();
+        map.begin(42);
+        map.note_ops(3);
+        map.end();
+
+        let operations =
+            unsafe { libc::calloc(4, std::mem::size_of::<nfs_resop4>()).cast::<nfs_resop4>() };
+        assert!(!operations.is_null());
+        unsafe {
+            *operations.add(0) = res(nfs_opnum4_NFS4_OP_SEQUENCE);
+            (*operations.add(0)).nfs_resop4_u.opsequence.sr_status = nfsstat4_NFS4_OK;
+            *operations.add(1) = res(nfs_opnum4_NFS4_OP_OPEN);
+            (*operations.add(1)).nfs_resop4_u.opopen.status = nfsstat4_NFS4_OK;
+            (*operations.add(1))
+                .nfs_resop4_u
+                .opopen
+                .OPEN4res_u
+                .resok4
+                .stateid = stateid4 {
+                seqid: 11,
+                other: [12; 12],
+            };
+            *operations.add(2) = res(nfs_opnum4_NFS4_OP_GETFH);
+            (*operations.add(2)).nfs_resop4_u.opgetfh.status = nfsstat4_NFS4_OK;
+            let handle = libc::malloc(1).cast::<c_char>();
+            assert!(!handle.is_null());
+            *handle = 13;
+            (*operations.add(2))
+                .nfs_resop4_u
+                .opgetfh
+                .GETFH4res_u
+                .resok4
+                .object = nfs_fh4 {
+                nfs_fh4_len: 1,
+                nfs_fh4_val: handle,
+            };
+            *operations.add(3) = res(nfs_opnum4_NFS4_OP_READ);
+            (*operations.add(3)).nfs_resop4_u.opread.status = nfsstat4_NFS4ERR_IO;
+        }
+        let response = CompoundRes {
+            res: reply(nfsstat4_NFS4ERR_IO, unsafe {
+                std::slice::from_raw_parts_mut(operations, 4)
+            }),
+        };
+        let report = map.analyze(&response).unwrap();
+        assert_eq!(report.failure.unwrap().op_index, 3);
+        let mut opened = Vec::new();
+        response.for_each_open_result(map.executed_ranges(&report), |handle, stateid| {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    handle.nfs_fh4_val as *const u8,
+                    handle.nfs_fh4_len as usize,
+                )
+            };
+            opened.push((bytes.to_vec(), stateid.seqid, stateid.other));
+        });
+        assert_eq!(opened, vec![(vec![13], 11, [12; 12])]);
+    }
+
+    #[test]
+    fn ignores_open_without_a_successful_getfh_in_the_executed_prefix() {
+        let mut map = crate::planner::ExecutionMap::new();
+        map.begin(42);
+        map.note_ops(2);
+        map.end();
+
+        let operations =
+            unsafe { libc::calloc(3, std::mem::size_of::<nfs_resop4>()).cast::<nfs_resop4>() };
+        assert!(!operations.is_null());
+        unsafe {
+            *operations.add(0) = res(nfs_opnum4_NFS4_OP_SEQUENCE);
+            (*operations.add(0)).nfs_resop4_u.opsequence.sr_status = nfsstat4_NFS4_OK;
+            *operations.add(1) = res(nfs_opnum4_NFS4_OP_OPEN);
+            (*operations.add(1)).nfs_resop4_u.opopen.status = nfsstat4_NFS4_OK;
+            (*operations.add(1))
+                .nfs_resop4_u
+                .opopen
+                .OPEN4res_u
+                .resok4
+                .stateid = stateid4 {
+                seqid: 11,
+                other: [12; 12],
+            };
+            *operations.add(2) = res(nfs_opnum4_NFS4_OP_GETFH);
+            (*operations.add(2)).nfs_resop4_u.opgetfh.status = nfsstat4_NFS4ERR_IO;
+        }
+        let response = CompoundRes {
+            res: reply(nfsstat4_NFS4ERR_IO, unsafe {
+                std::slice::from_raw_parts_mut(operations, 3)
+            }),
+        };
+        let report = map.analyze(&response).unwrap();
+        assert_eq!(report.failure.unwrap().op_index, 2);
+        let mut opened = 0;
+        response.for_each_open_result(map.executed_ranges(&report), |_, _| opened += 1);
+        assert_eq!(opened, 0);
     }
 
     #[test]

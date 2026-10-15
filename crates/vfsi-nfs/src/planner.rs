@@ -232,6 +232,26 @@ impl ExecutionMap {
         &self.ranges[..report.completed.len()]
     }
 
+    /// Operation ranges whose success is confirmed, including the successful
+    /// prefix of the first failed item. Cleanup uses this to capture resources
+    /// such as stateids created before a later operation in that item failed.
+    pub(crate) fn executed_ranges(
+        &self,
+        report: &ExecutionReport,
+    ) -> impl Iterator<Item = (usize, usize)> + '_ {
+        let completed = self
+            .completed_ranges(report)
+            .iter()
+            .map(|(_, start, end)| (*start, *end));
+        let failed_prefix = report.failure.and_then(|failure| {
+            self.ranges
+                .iter()
+                .find(|(caller, _, _)| *caller == failure.caller)
+                .map(|(_, start, _)| (*start, failure.op_index))
+        });
+        completed.chain(failed_prefix)
+    }
+
     pub(crate) fn analyze<R: ReplyView>(
         &self,
         reply: &R,
@@ -486,6 +506,31 @@ mod tests {
             map.end();
         }
         map
+    }
+
+    #[test]
+    fn executed_ranges_include_successful_prefix_of_failed_item() {
+        let mut map = ExecutionMap::new();
+        map.begin(71);
+        map.note_ops(2);
+        map.end();
+        map.begin(3);
+        map.note_ops(3);
+        map.end();
+
+        // SEQUENCE and the first two ops of caller 71 succeeded. Caller 3's
+        // first op succeeded and its second op failed.
+        let report = map
+            .analyze(&MockReply {
+                status: 5,
+                ops: vec![0, 0, 0, 0, 5],
+            })
+            .unwrap();
+        assert_eq!(report.failure.unwrap().caller, 3);
+        assert_eq!(
+            map.executed_ranges(&report).collect::<Vec<_>>(),
+            [(1, 3), (3, 4)]
+        );
     }
 
     #[test]

@@ -14,6 +14,25 @@ pub(super) fn object_ref_for_group<'a>(
     }
 }
 
+/// Retry a non-exclusive create as a plain open when another client wins the
+/// race between the caller's existence probe and the guarded OPEN.
+fn open_after_create_probe<T>(
+    excl: bool,
+    mut open: impl FnMut(bool, bool) -> VfResult<T>,
+) -> VfResult<(T, bool)> {
+    match open(true, excl) {
+        Ok(opened) => Ok((opened, true)),
+        Err(error)
+            if !excl
+                && error.domain() == vfsi_core::ErrorDomain::Nfs
+                && error.err_no() == nfsstat4_NFS4ERR_EXIST =>
+        {
+            open(false, false).map(|opened| (opened, false))
+        }
+        Err(error) => Err(error),
+    }
+}
+
 impl HandleBackend for NfsVecFs {
     fn prepare_object_refs(&mut self, files: &[&FileOperand]) -> VfResult<()> {
         self.open_object_ids
@@ -200,10 +219,29 @@ impl HandleBackend for NfsVecFs {
             false
         };
         // Open with NoCreate when the file already exists (kernel nfsd
-        // rejects CREATE_GUARDED on existing files with NFS4ERR_EXIST).
-        let (fh, stateid) = self.open_impl(&path_from_bytes(&dir), &name, access, created, excl)?;
+        // rejects CREATE_GUARDED on existing files with NFS4ERR_EXIST). If a
+        // non-exclusive create loses the probe/OPEN race, retry as NoCreate;
+        // that also keeps creation-only mode changes off the winning file.
+        let (opened, created) = if created {
+            open_after_create_probe(excl, |create, exclusive| {
+                self.open_impl(
+                    &path_from_bytes(&dir),
+                    &name,
+                    access,
+                    create,
+                    exclusive,
+                    mode,
+                )
+            })?
+        } else {
+            (
+                self.open_impl(&path_from_bytes(&dir), &name, access, false, false, mode)?,
+                false,
+            )
+        };
+        let (fh, stateid) = opened;
         let setup = (|| {
-            if created {
+            if created && !excl {
                 self.nfs
                     .setattr(&fh, Some(mode & 0o7777), None)
                     .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
@@ -368,5 +406,47 @@ impl HandleBackend for NfsVecFs {
     }
     fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, FileOperand>>]) -> VfResult<()> {
         vfsi_sync::backend::helpers::vsetattrs_typed_default(self, updates)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nonexclusive_create_race_opens_the_winning_file_without_creation_mode() {
+        let mut attempts = Vec::new();
+        let (opened, created) = open_after_create_probe(false, |create, excl| {
+            attempts.push((create, excl));
+            if create {
+                // A competing client created the file after the existence
+                // probe and before our guarded OPEN.
+                Err(VfError::nfs(0, nfsstat4_NFS4ERR_EXIST))
+            } else {
+                Ok("winner")
+            }
+        })
+        .unwrap();
+
+        assert_eq!(opened, "winner");
+        assert!(
+            !created,
+            "the raced-in file must be treated as pre-existing"
+        );
+        assert_eq!(attempts, [(true, false), (false, false)]);
+    }
+
+    #[test]
+    fn exclusive_create_race_does_not_retry_as_an_existing_open() {
+        let mut attempts = Vec::new();
+        let error = open_after_create_probe(true, |create, excl| {
+            attempts.push((create, excl));
+            Err::<(), _>(VfError::nfs(0, nfsstat4_NFS4ERR_EXIST))
+        })
+        .unwrap_err();
+
+        assert_eq!(error.domain(), vfsi_core::ErrorDomain::Nfs);
+        assert_eq!(error.err_no(), nfsstat4_NFS4ERR_EXIST);
+        assert_eq!(attempts, [(true, true)]);
     }
 }

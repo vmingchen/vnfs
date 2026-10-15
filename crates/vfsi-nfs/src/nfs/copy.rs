@@ -45,6 +45,23 @@ fn server_copy_failure_allows_fallback(status: u32, active_index: usize, totals:
         && totals.iter().all(|&total| total == 0)
 }
 
+fn open_destination_with_create_fallback<C, T>(
+    client: &mut C,
+    mut open: impl FnMut(&mut C, crate::client::OpenCreate) -> VfResult<T>,
+    close_source: impl FnOnce(&mut C),
+) -> VfResult<T> {
+    let destination = match open(client, crate::client::OpenCreate::NoCreate) {
+        Ok(destination) => return Ok(destination),
+        Err(error) if error.err_no() == ERR_NOENT => {
+            open(client, crate::client::OpenCreate::Guarded)
+        }
+        Err(error) => Err(error),
+    };
+    destination.inspect_err(|_error| {
+        close_source(client);
+    })
+}
+
 fn copy_extent_data<C>(
     client: &mut C,
     src_offset: u64,
@@ -121,31 +138,17 @@ impl NfsVecFs {
             .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
         // Kernel nfsd rejects CREATE_GUARDED on an existing file, so open the
         // destination without create and fall back to create only on NOENT.
-        let (dfh, dsid) = match self
-            .nfs
-            .open_path(
-                &ddirfh,
-                &dname,
-                OPEN4_SHARE_ACCESS_WRITE,
-                crate::client::OpenCreate::NoCreate,
-            )
-            .map_err(|e| vfsi_core::error_from_rpc(e, 0))
-        {
-            Ok(x) => x,
-            Err(e) if e.err_no() == ERR_NOENT => self
-                .nfs
-                .open_path(
-                    &ddirfh,
-                    &dname,
-                    OPEN4_SHARE_ACCESS_WRITE,
-                    crate::client::OpenCreate::Guarded,
-                )
-                .map_err(|e| vfsi_core::error_from_rpc(e, 0))?,
-            Err(e) => {
-                let _ = self.nfs.close_path(&sfh, &ssid);
-                return Err(e);
-            }
-        };
+        // Any failed destination open must release the already-open source.
+        let (dfh, dsid) = open_destination_with_create_fallback(
+            &mut self.nfs,
+            |nfs, create| {
+                nfs.open_path(&ddirfh, &dname, OPEN4_SHARE_ACCESS_WRITE, create)
+                    .map_err(|error| vfsi_core::error_from_rpc(error, 0))
+            },
+            |nfs| {
+                let _ = nfs.close_path(&sfh, &ssid);
+            },
+        )?;
 
         let result = copy_extent_data(
             &mut self.nfs,
@@ -377,6 +380,43 @@ impl NfsVecFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_guarded_destination_open_closes_the_source() {
+        #[derive(Default)]
+        struct Client {
+            attempts: Vec<crate::client::OpenCreate>,
+            source_closed: bool,
+        }
+
+        let mut client = Client::default();
+        let error = open_destination_with_create_fallback(
+            &mut client,
+            |client, create| {
+                client.attempts.push(create);
+                Err::<(), _>(VfError::nfs(
+                    0,
+                    match create {
+                        crate::client::OpenCreate::NoCreate => nfsstat4_NFS4ERR_NOENT,
+                        crate::client::OpenCreate::Guarded => nfsstat4_NFS4ERR_EXIST,
+                        _ => unreachable!(),
+                    },
+                ))
+            },
+            |client| client.source_closed = true,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.err_no(), nfsstat4_NFS4ERR_EXIST);
+        assert_eq!(
+            client.attempts,
+            [
+                crate::client::OpenCreate::NoCreate,
+                crate::client::OpenCreate::Guarded
+            ]
+        );
+        assert!(client.source_closed);
+    }
 
     #[test]
     fn server_copy_fallback_requires_no_completed_prefix() {

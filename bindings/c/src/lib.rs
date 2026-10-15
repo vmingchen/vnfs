@@ -461,6 +461,9 @@ pub unsafe extern "C" fn vfsi_listdirs(
         let Some(fields) = AttrMask::from_bits(options.attributes) else {
             return libc::EINVAL;
         };
+        if !mask().contains(fields | AttrMask::MODE) {
+            return libc::ENOTSUP;
+        }
         // Bound planning storage as well as returned entries; empty inputs can
         // otherwise bypass every payload quota.
         if count > vfsi_sync::DEFAULT_DIRECTORY_MAX_ENTRIES {
@@ -992,9 +995,20 @@ pub unsafe extern "C" fn vfsi_walk(
             return libc::EINVAL;
         };
         let fields = fields | AttrMask::MODE;
+        if !mask().contains(fields) {
+            return libc::ENOTSUP;
+        }
         let result = (|| -> Result<(), VfError> {
             let path = vpath_for(fs, &root)?;
-            let root_attrs = lock_or_io(&fs.fs)?.lstat_impl(&path)?;
+            let mut root_attrs = VfAttrs {
+                file: FileOperand::from_os_path(&path),
+                masks: fields,
+                ..VfAttrs::default()
+            };
+            lock_or_io(&fs.fs)?.vgetattrs_nofollow_impl(std::slice::from_mut(&mut root_attrs))?;
+            if !root_attrs.returned.contains(fields) {
+                return Err(VfError::failure(0, libc::ENOTSUP as u32));
+            }
             let metadata = vfsi_sync::metadata_from_attrs(root_attrs);
             let walk_options = vnfs::directory::ListDirOptions::new()
                 .recursive(true)
@@ -1015,7 +1029,11 @@ pub unsafe extern "C" fn vfsi_walk(
                     )?;
                     entries
                         .into_iter()
-                        .map(|attrs| {
+                        .enumerate()
+                        .map(|(index, attrs)| {
+                            if !attrs.returned.contains(fields) {
+                                return Err(VfError::failure(index, libc::ENOTSUP as u32));
+                            }
                             let path = attrs
                                 .file
                                 .path()
@@ -1271,7 +1289,16 @@ pub unsafe extern "C" fn vfsi_free(fs: *mut vfsi_fs) {
 
 fn stat_impl(fs: &vfsi_fs, path: &std::path::Path) -> Result<VfAttrs, VfError> {
     let vpath = vpath_for(fs, path)?;
-    lock_or_io(&fs.fs)?.stat_impl(&vpath)
+    let mut attrs = VfAttrs {
+        file: FileOperand::from_os_path(&vpath),
+        masks: mask(),
+        ..VfAttrs::default()
+    };
+    lock_or_io(&fs.fs)?.vgetattrs_impl(std::slice::from_mut(&mut attrs))?;
+    if !attrs.returned.contains(mask()) {
+        return Err(VfError::failure(0, libc::ENOTSUP as u32));
+    }
+    Ok(attrs)
 }
 
 /// Stat `path`, following a final symlink.
@@ -1605,9 +1632,18 @@ pub unsafe extern "C" fn vfsi_openv(
                 Ok(backend) => backend,
                 Err(error) => fail_batch!(results, vfsi_result::from_error(error), true),
             };
+            if let Err(error) = backend.vopen_preflight_impl(&refs, &flags, &modes) {
+                let failure = vfsi_result::from_error(error);
+                fail_results(results, failure, false);
+                return failure;
+            }
             match backend.vopen_raw_impl(&refs, &flags, &modes) {
                 Ok(opened) => opened,
-                Err(error) => return vfsi_result::from_error(error),
+                Err(error) => {
+                    let failure = vfsi_result::from_error(error);
+                    fail_results(results, failure, true);
+                    return failure;
+                }
             }
         };
         let mut registered = Vec::with_capacity(count);
@@ -1766,11 +1802,26 @@ pub unsafe extern "C" fn vfsi_statv(
         if let Err(error) = backend.vgetattrs_impl(&mut attrs) {
             fail_batch!(results, vfsi_result::from_error(error), true);
         }
-        for (op, attrs) in ops.iter_mut().zip(&attrs) {
-            op.attrs = vfsi_attrs::from_vf(attrs);
+        let mut first_failure = None;
+        for (index, (op, attrs)) in ops.iter_mut().zip(&attrs).enumerate() {
+            if attrs.returned.contains(mask()) {
+                op.attrs = vfsi_attrs::from_vf(attrs);
+                results[index] = vfsi_result::item_success(index);
+            } else {
+                // Clear stale caller data when this item cannot satisfy the C
+                // struct's all-fields contract.
+                op.attrs = vfsi_attrs::from_vf(&VfAttrs::default());
+                let failure = vfsi_result::base(
+                    index,
+                    VFSI_ERROR_UNSUPPORTED,
+                    libc::ENOTSUP as u32,
+                    "backend omitted requested stat attributes",
+                );
+                results[index] = failure;
+                first_failure.get_or_insert(failure);
+            }
         }
-        complete_results(results);
-        vfsi_result::success(count)
+        first_failure.unwrap_or_else(|| vfsi_result::success(count))
     })
 }
 
@@ -2382,6 +2433,9 @@ pub unsafe extern "C" fn vfsi_listdir_with_limits(
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let dir = vpath_for(fs, &dir)?;
             let entries = bounded_listdir(fs, &dir, mask(), max_entries, max_path_bytes)?;
+            if entries.iter().any(|attrs| !attrs.returned.contains(mask())) {
+                return Err(VfError::failure(0, libc::ENOTSUP as u32));
+            }
             for a in entries {
                 let name = a
                     .file
@@ -2447,6 +2501,7 @@ pub unsafe extern "C" fn vfsi_listdirv(
                 .map(|(i, p)| (p.clone(), i))
                 .collect();
             let mountpoint = fs.mountpoint.clone();
+            let backend_root = fs.backend_root.clone();
             let c_cb = cb;
             let mut rows = Vec::new();
             {
@@ -2462,11 +2517,19 @@ pub unsafe extern "C" fn vfsi_listdirv(
                     },
                 )?;
             }
+            if rows
+                .iter()
+                .any(|(attrs, _)| !attrs.returned.contains(mask()))
+            {
+                return Err(VfError::failure(0, libc::ENOTSUP as u32));
+            }
             for (attrs, dir) in rows {
                 let kernel_dir = match vpath_index.get(&dir) {
                     Some(&i) => original_paths[i].clone(),
                     None => {
-                        let rel = dir.strip_prefix("/").unwrap_or(&dir);
+                        let rel = dir
+                            .strip_prefix(&backend_root)
+                            .map_err(|_| VfError::client(0, libc::EINVAL as u32))?;
                         mountpoint.join(rel)
                     }
                 };
@@ -2622,6 +2685,7 @@ mod tests {
         missing_after: usize,
         fail_call: Option<usize>,
         write_calls: Option<WriteCalls>,
+        open_preflight_error: Option<usize>,
     }
 
     impl vfsi_sync::backend::HandleBackend for ListingBackend {
@@ -2662,6 +2726,83 @@ mod tests {
     }
 
     impl vfsi_sync::backend::VectorBackend for ListingBackend {
+        fn vgetattrs_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_sync::VfRes {
+            for (index, attrs) in attrs.iter_mut().enumerate() {
+                let missing = if index >= self.missing_after {
+                    self.missing
+                } else {
+                    AttrMask::empty()
+                };
+                attrs.returned = attrs.masks & !missing;
+                attrs.ftype = vfsi_sync::VfType::Regular;
+                attrs.mode = libc::S_IFREG | 0o644;
+                attrs.size = 7;
+                attrs.nlink = 1;
+                attrs.fileid = 2;
+                attrs.blocks = 1;
+                attrs.uid = 0;
+                attrs.gid = 0;
+                attrs.rdev = 0x1234;
+            }
+            Ok(())
+        }
+
+        fn vgetattrs_nofollow_impl(&mut self, attrs: &mut [VfAttrs]) -> vfsi_sync::VfRes {
+            let count = attrs.len();
+            self.vgetattrs_impl(attrs)?;
+            for attrs in attrs.iter_mut() {
+                attrs.ftype = vfsi_sync::VfType::Directory;
+                attrs.mode = libc::S_IFDIR | 0o755;
+            }
+            self.emitted += count;
+            Ok(())
+        }
+
+        fn listdir_impl(
+            &mut self,
+            dir: &Path,
+            masks: AttrMask,
+            max_count: usize,
+            recursive: bool,
+        ) -> vfsi_sync::VfResult<Vec<VfAttrs>> {
+            if recursive {
+                return Err(VfError::unsupported(0));
+            }
+            let count = if max_count == 0 {
+                self.entries_per_dir
+            } else {
+                self.entries_per_dir.min(max_count)
+            };
+            let mut entries = Vec::with_capacity(count);
+            for entry in 0..count {
+                let returned = if self.emitted >= self.missing_after {
+                    masks & !self.missing
+                } else {
+                    masks
+                };
+                entries.push(VfAttrs {
+                    file: FileOperand::from_os_path(&dir.join(format!("entry-{entry}"))),
+                    masks,
+                    returned,
+                    ftype: vfsi_sync::VfType::Regular,
+                    mode: libc::S_IFREG | 0o644,
+                    uid: 0,
+                    gid: 0,
+                    rdev: 0x1234,
+                    ..Default::default()
+                });
+                self.emitted += 1;
+            }
+            Ok(entries)
+        }
+
+        fn vopen_preflight_impl(&mut self, _: &[&Path], _: &[i32], _: &[u32]) -> vfsi_sync::VfRes {
+            match self.open_preflight_error {
+                Some(index) => Err(VfError::unsupported(index)),
+                None => Ok(()),
+            }
+        }
+
         fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VfResult<Vec<vfsi_sync::ReadResult>> {
             Err(VfError::unsupported(0))
         }
@@ -2733,6 +2874,7 @@ mod tests {
                         // Zero ownership is valid when explicitly returned.
                         uid: 0,
                         gid: 0,
+                        rdev: 0x1234,
                         ..Default::default()
                     };
                     self.emitted += 1;
@@ -2753,7 +2895,7 @@ mod tests {
     }
     impl ListingFixture {
         fn new(entries_per_dir: usize, missing: AttrMask, missing_after: usize) -> Self {
-            Self::with_failure(entries_per_dir, missing, missing_after, None)
+            Self::with_failure(entries_per_dir, missing, missing_after, None, None)
         }
 
         fn with_failure(
@@ -2761,6 +2903,7 @@ mod tests {
             missing: AttrMask,
             missing_after: usize,
             fail_call: Option<usize>,
+            open_preflight_error: Option<usize>,
         ) -> Self {
             let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
             Self {
@@ -2773,6 +2916,7 @@ mod tests {
                         missing_after,
                         fail_call,
                         write_calls: None,
+                        open_preflight_error,
                     }),
                     PathBuf::from("/"),
                     PathBuf::from("/"),
@@ -2823,6 +2967,37 @@ mod tests {
     }
 
     #[test]
+    fn openv_preflight_failure_preserves_not_attempted_items() {
+        let fixture = ListingFixture::with_failure(0, AttrMask::empty(), 0, None, Some(1));
+        let first = CString::new("/first").unwrap();
+        let second = CString::new("/second").unwrap();
+        let mut ops = [
+            vfsi_open_op {
+                path: first.as_ptr(),
+                flags: libc::O_CREAT | libc::O_RDWR,
+                mode: 0o666,
+                fd: -1,
+            },
+            vfsi_open_op {
+                path: second.as_ptr(),
+                flags: libc::O_CREAT | libc::O_RDWR,
+                mode: 0o600,
+                fd: -1,
+            },
+        ];
+        let mut items = [vfsi_result::panic(); 2];
+        let result =
+            unsafe { vfsi_openv(fixture.fs, ops.as_mut_ptr(), ops.len(), items.as_mut_ptr()) };
+
+        assert_eq!(result.index, 1);
+        assert_eq!(result.err_no, VF_ERR_UNSUPPORTED);
+        assert_eq!(items[0].category, VFSI_ERROR_NOT_ATTEMPTED);
+        assert_eq!(items[1].category, VFSI_ERROR_UNSUPPORTED);
+        assert_eq!(items[1].err_no, VF_ERR_UNSUPPORTED);
+        assert_eq!(items[1].index, 1);
+    }
+
+    #[test]
     fn c_vector_writes_borrow_payloads_and_preflight_the_entire_batch() {
         let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
         let fs = make_fs(
@@ -2834,6 +3009,7 @@ mod tests {
                 missing_after: 0,
                 fail_call: None,
                 write_calls: Some(calls.clone()),
+                open_preflight_error: None,
             }),
             PathBuf::from("/"),
             PathBuf::from("/"),
@@ -2901,6 +3077,236 @@ mod tests {
     }
 
     #[test]
+    fn c_metadata_apis_reject_missing_requested_fields_without_callbacks() {
+        unsafe extern "C" fn count_listdir(
+            _: *const c_char,
+            _: *const vfsi_attrs,
+            userdata: *mut c_void,
+        ) -> bool {
+            *(userdata as *mut usize) += 1;
+            true
+        }
+        unsafe extern "C" fn count_listdirv(
+            _: *const c_char,
+            _: *const c_char,
+            _: *const vfsi_attrs,
+            userdata: *mut c_void,
+        ) -> bool {
+            *(userdata as *mut usize) += 1;
+            true
+        }
+        let path = CString::new("/file").unwrap();
+        let dir = CString::new("/dir").unwrap();
+        let dirs = [dir.as_ptr()];
+
+        for bit in mask().iter() {
+            let fixture = ListingFixture::new(1, bit, 0);
+            let mut attrs = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { vfsi_stat(fixture.fs, path.as_ptr(), &mut attrs) },
+                libc::ENOTSUP,
+                "scalar stat accepted missing {bit:?}"
+            );
+
+            let mut stale_attrs: vfsi_attrs = unsafe { std::mem::zeroed() };
+            stale_attrs.size = 999;
+            let mut op = vfsi_stat_op {
+                path: path.as_ptr(),
+                attrs: stale_attrs,
+            };
+            let mut item = [vfsi_result::panic()];
+            let result = unsafe { vfsi_statv(fixture.fs, &mut op, 1, item.as_mut_ptr()) };
+            assert_eq!(result.category, VFSI_ERROR_UNSUPPORTED, "{bit:?}");
+            assert_eq!(result.err_no, libc::ENOTSUP as u32, "{bit:?}");
+            assert_eq!(item[0].category, VFSI_ERROR_UNSUPPORTED, "{bit:?}");
+            assert_eq!(
+                op.attrs.struct_size,
+                std::mem::size_of::<vfsi_attrs>() as u32
+            );
+            assert_eq!(op.attrs.size, 0, "failed statv must clear stale output");
+        }
+
+        for bit in mask().iter() {
+            let mut calls = 0usize;
+            let listdir_fixture = ListingFixture::new(2, bit, 1);
+            assert_eq!(
+                unsafe {
+                    vfsi_listdir_with_limits(
+                        listdir_fixture.fs,
+                        dir.as_ptr(),
+                        10,
+                        1024,
+                        Some(count_listdir),
+                        (&mut calls as *mut usize).cast(),
+                    )
+                },
+                libc::ENOTSUP,
+                "listdir accepted missing {bit:?}"
+            );
+            assert_eq!(calls, 0, "listdir callback ran with missing {bit:?}");
+
+            assert_eq!(
+                unsafe {
+                    vfsi_listdirv(
+                        ListingFixture::new(2, bit, 1).fs,
+                        dirs.as_ptr(),
+                        dirs.len(),
+                        10,
+                        false,
+                        Some(count_listdirv),
+                        (&mut calls as *mut usize).cast(),
+                    )
+                },
+                libc::ENOTSUP,
+                "listdirv accepted missing {bit:?}"
+            );
+            assert_eq!(calls, 0, "listdirv callback ran with missing {bit:?}");
+        }
+
+        let mixed = ListingFixture::new(0, AttrMask::SIZE, 1);
+        let mut ops = [
+            vfsi_stat_op {
+                path: path.as_ptr(),
+                attrs: unsafe { std::mem::zeroed() },
+            },
+            vfsi_stat_op {
+                path: path.as_ptr(),
+                attrs: unsafe { std::mem::zeroed() },
+            },
+        ];
+        let mut items = [vfsi_result::panic(); 2];
+        let result =
+            unsafe { vfsi_statv(mixed.fs, ops.as_mut_ptr(), ops.len(), items.as_mut_ptr()) };
+        assert_eq!(result.index, 1);
+        assert_eq!(result.category, VFSI_ERROR_UNSUPPORTED);
+        assert_eq!(items[0].category, VFSI_ERROR_NONE);
+        assert_eq!(items[1].category, VFSI_ERROR_UNSUPPORTED);
+        assert_eq!(ops[0].attrs.size, 7);
+        assert_eq!(ops[1].attrs.size, 0);
+
+        let fixture = ListingFixture::new(1, AttrMask::empty(), 0);
+        let mut attrs = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { vfsi_stat(fixture.fs, path.as_ptr(), &mut attrs) },
+            0
+        );
+        assert_eq!(attrs.uid, 0, "explicitly returned zero is valid");
+        assert_eq!(attrs.gid, 0, "explicitly returned zero is valid");
+    }
+
+    #[test]
+    fn c_attribute_options_reject_unrepresentable_rdev() {
+        let metadata = vfsi_sync::metadata_from_attrs(VfAttrs {
+            masks: AttrMask::RDEV,
+            returned: AttrMask::RDEV,
+            rdev: 0x1234,
+            ..VfAttrs::default()
+        });
+        assert_eq!(metadata.device_id(), Some(0x1234));
+
+        let dirs = [CString::new("/dir").unwrap()];
+        let fixture = ListingFixture::new(1, AttrMask::empty(), 0);
+        let options = vfsi_listing_options {
+            max_entries: 10,
+            max_path_bytes: 1024,
+            attributes: VFSI_ATTR_RDEV,
+        };
+        let (status, indices, results) = fixture.run(&dirs, &options);
+        assert_eq!(status, libc::ENOTSUP);
+        assert!(indices.is_empty());
+        assert!(results
+            .iter()
+            .all(|result| result.completion == 0 && result.delivered == 0));
+        assert!(fixture.calls.lock().unwrap().is_empty());
+
+        let root = CString::new("/").unwrap();
+        let walk_options = vfsi_walk_options {
+            max_entries: 10,
+            max_path_bytes: 1024,
+            max_depth: 10,
+            attributes: VFSI_ATTR_RDEV,
+            sort_by_name: false,
+        };
+        unsafe extern "C" fn stop_walk(
+            _: *const c_char,
+            _: u32,
+            _: usize,
+            _: *const vfsi_attrs,
+            _: *mut c_void,
+        ) -> u32 {
+            0
+        }
+        let mut calls = 0usize;
+        assert_eq!(
+            unsafe {
+                vfsi_walk(
+                    fixture.fs,
+                    root.as_ptr(),
+                    &walk_options,
+                    Some(stop_walk),
+                    (&mut calls as *mut usize).cast(),
+                )
+            },
+            libc::ENOTSUP
+        );
+        assert_eq!(calls, 0);
+    }
+
+    #[test]
+    fn c_walk_checks_requested_metadata_before_callbacks() {
+        unsafe extern "C" fn count_walk(
+            _: *const c_char,
+            kind: u32,
+            _: usize,
+            _: *const vfsi_attrs,
+            userdata: *mut c_void,
+        ) -> u32 {
+            if kind == 1 {
+                *(userdata as *mut usize) += 1;
+            }
+            0
+        }
+        let root = CString::new("/").unwrap();
+        let fixture = ListingFixture::new(1, AttrMask::MODE, 0);
+        let mut calls = 0usize;
+        let options = vfsi_walk_options {
+            max_entries: 10,
+            max_path_bytes: 1024,
+            max_depth: 10,
+            attributes: VFSI_ATTR_MODE,
+            sort_by_name: false,
+        };
+        assert_eq!(
+            unsafe {
+                vfsi_walk(
+                    fixture.fs,
+                    root.as_ptr(),
+                    &options,
+                    Some(count_walk),
+                    (&mut calls as *mut usize).cast(),
+                )
+            },
+            libc::ENOTSUP
+        );
+        assert_eq!(calls, 0, "walk callback ran with missing root mode");
+
+        let fixture = ListingFixture::new(1, AttrMask::MODE, 1);
+        assert_eq!(
+            unsafe {
+                vfsi_walk(
+                    fixture.fs,
+                    root.as_ptr(),
+                    &options,
+                    Some(count_walk),
+                    (&mut calls as *mut usize).cast(),
+                )
+            },
+            libc::ENOTSUP
+        );
+        assert_eq!(calls, 0, "walk delivered entries with missing mode");
+    }
+
+    #[test]
     fn indexed_listings_reject_missing_returned_fields_before_any_callback() {
         let options = vfsi_listing_options {
             max_entries: 10,
@@ -2909,7 +3315,6 @@ mod tests {
                 | VFSI_ATTR_NLINK
                 | VFSI_ATTR_FILEID
                 | VFSI_ATTR_BLOCKS
-                | VFSI_ATTR_RDEV
                 | VFSI_ATTR_UID
                 | VFSI_ATTR_GID
                 | VFSI_ATTR_ATIME
@@ -3053,7 +3458,7 @@ mod tests {
             (AttrMask::empty(), Some(3), libc::EIO),
             (AttrMask::UID | AttrMask::GID, None, libc::ENOTSUP),
         ] {
-            let fixture = ListingFixture::with_failure(1, missing, 32, fail_call);
+            let fixture = ListingFixture::with_failure(1, missing, 32, fail_call, None);
             let (status, indices, results) = fixture.run(&dirs, &options);
             assert_eq!(status, expected);
             assert_eq!(fixture.calls.lock().unwrap().len(), 3);
@@ -3495,6 +3900,65 @@ mod tests {
     }
 
     #[test]
+    fn recursive_listdirv_strips_backend_root_before_mount_mapping() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("exports/git/project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("file.bin"), b"data").unwrap();
+
+        let backend =
+            Box::new(vfsi_posix::backend(temp.path()).unwrap()) as Box<dyn BindingBackend>;
+        let raw = make_fs(
+            backend,
+            PathBuf::from("/mnt/repos"),
+            PathBuf::from("/exports/git"),
+        );
+        let dir = CString::new("/mnt/repos").unwrap();
+
+        #[derive(Default)]
+        struct Seen(Vec<(String, String)>);
+        unsafe extern "C" fn cb(
+            dir: *const c_char,
+            name: *const c_char,
+            _: *const vfsi_attrs,
+            user: *mut c_void,
+        ) -> bool {
+            let seen = &mut *(user as *mut Seen);
+            seen.0.push((
+                CStr::from_ptr(dir).to_string_lossy().into_owned(),
+                CStr::from_ptr(name).to_string_lossy().into_owned(),
+            ));
+            true
+        }
+
+        let dirs = [dir.as_ptr()];
+        let mut seen = Seen::default();
+        assert_eq!(
+            unsafe {
+                vfsi_listdirv(
+                    raw,
+                    dirs.as_ptr(),
+                    1,
+                    0,
+                    true,
+                    Some(cb),
+                    &mut seen as *mut _ as *mut c_void,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            seen.0,
+            vec![
+                ("/mnt/repos".into(), "project".into()),
+                ("/mnt/repos/project".into(), "file.bin".into()),
+            ]
+        );
+
+        unsafe { vfsi_free(raw) };
+    }
+
+    #[test]
     fn dummy_backend_listdirv_maps_dirs_to_entries() {
         let (_root, root) = temp_root();
         let mut fs: *mut vfsi_fs = std::ptr::null_mut();
@@ -3818,6 +4282,44 @@ mod tests {
         );
         assert_eq!(seen.rows[0].1, b"first");
         assert_eq!(seen.rows[1].1, b"second-longer");
+
+        unsafe { vfsi_free(fs) };
+    }
+
+    #[test]
+    fn openv_backend_failure_marks_submitted_items_indeterminate() {
+        let (root, root_path) = temp_root();
+        let existing = root.path().join("truncated-before-failure");
+        std::fs::write(&existing, b"old contents").unwrap();
+        let first = CString::new("/truncated-before-failure").unwrap();
+        let second = CString::new("/missing-parent/never-created").unwrap();
+        let mut fs: *mut vfsi_fs = std::ptr::null_mut();
+        assert_eq!(unsafe { vfsi_dummy_open(root_path.as_ptr(), &mut fs) }, 0);
+
+        let mut ops = [
+            vfsi_open_op {
+                path: first.as_ptr(),
+                flags: libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
+                mode: 0o644,
+                fd: -1,
+            },
+            vfsi_open_op {
+                path: second.as_ptr(),
+                flags: libc::O_CREAT | libc::O_RDWR | libc::O_TRUNC,
+                mode: 0o644,
+                fd: -1,
+            },
+        ];
+        let mut items = [vfsi_result::panic(); 2];
+        let result = unsafe { vfsi_openv(fs, ops.as_mut_ptr(), ops.len(), items.as_mut_ptr()) };
+
+        assert_eq!(result.index, 1);
+        assert_eq!(result.category, VFSI_ERROR_FILESYSTEM);
+        assert_eq!(result.err_no, libc::ENOENT as u32);
+        assert_eq!(items[0].category, VFSI_ERROR_INDETERMINATE);
+        assert_eq!(items[1].category, VFSI_ERROR_FILESYSTEM);
+        assert_eq!(items[1].index, 1);
+        assert_eq!(std::fs::read(existing).unwrap(), b"");
 
         unsafe { vfsi_free(fs) };
     }

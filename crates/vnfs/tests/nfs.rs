@@ -900,6 +900,58 @@ fn open_excl_fails_if_exists() {
 }
 
 #[test]
+fn open_excl_rejects_a_second_attempt_after_its_own_create() {
+    let dir = setup_dir("open_excl_repeat");
+    let f = format!("{}/created.txt", dir);
+    let mut c = client();
+    let first = c
+        .open_raw_impl(
+            Path::new(&f),
+            libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY,
+            0o600,
+        )
+        .expect("exclusive create");
+    c.close_impl(&first).expect("close created file");
+    assert_eq!(
+        c.stat_impl(Path::new(&f)).unwrap().mode & 0o777,
+        0o600,
+        "exclusive creation mode was applied"
+    );
+
+    let error = c
+        .open_raw_impl(
+            Path::new(&f),
+            libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY,
+            0o600,
+        )
+        .expect_err("a new O_EXCL request must reject the file created earlier");
+    assert_eq!(error.err_no(), nfsstat4_NFS4ERR_EXIST, "got {error:?}");
+    c.remove_paths_impl(&[Path::new(&dir)], true)
+        .expect("remove fixture");
+}
+
+#[test]
+fn openv_excl_rejects_a_second_entry_for_the_same_path() {
+    let dir = setup_dir("openv_excl_duplicate");
+    let f = format!("{}/created.txt", dir);
+    let paths = [Path::new(&f), Path::new(&f)];
+    let mut c = client();
+    let flags = libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY;
+    let error = VectorBackend::vopen_raw_impl(&mut c, &paths, &[flags; 2], &[0o600; 2])
+        .expect_err("the second exclusive create must fail");
+    assert_eq!(error.index(), Some(1), "got {error:?}");
+    assert_eq!(error.err_no(), nfsstat4_NFS4ERR_EXIST, "got {error:?}");
+    assert!(c.exists_impl(Path::new(&f)).expect("stat created prefix"));
+    assert_eq!(
+        c.stat_impl(Path::new(&f)).unwrap().mode & 0o777,
+        0o600,
+        "mode was applied after the OPEN compound"
+    );
+    c.remove_paths_impl(&[Path::new(&dir)], true)
+        .expect("remove fixture");
+}
+
+#[test]
 fn openv_closev() {
     let dir = setup_dir("openv");
     let paths = [
@@ -1097,6 +1149,53 @@ fn lsetattrsv() {
     }])
     .expect("lsetattrsv");
     assert_eq!(c.stat_impl(Path::new(&f)).unwrap().mode & 0o777, 0o640);
+}
+
+#[test]
+fn setattr_following_symlink_changes_target_timestamp_only() {
+    let dir = setup_dir("setattr-follow-symlink-mtime");
+    let target = format!("{dir}/target");
+    let link = format!("{dir}/link");
+    let mut c = client();
+    write_file(&mut c, Path::new(&target), b"target");
+    c.symlink_raw_impl(Path::new("target"), Path::new(&link))
+        .unwrap();
+
+    let read_mtime = |c: &mut NfsVecFs, path: &str, follow: bool| {
+        let mut attrs = [VfAttrs {
+            file: FileOperand::from_path(path),
+            masks: AttrMask::MTIME,
+            ..VfAttrs::default()
+        }];
+        if follow {
+            c.vgetattrs_impl(&mut attrs).unwrap();
+        } else {
+            c.vgetattrs_nofollow_impl(&mut attrs).unwrap();
+        }
+        assert!(attrs[0].returned.contains(AttrMask::MTIME));
+        attrs.into_iter().next().unwrap()
+    };
+    let link_before = read_mtime(&mut c, &link, false);
+    let requested_sec = link_before.mtime_sec + 10_000;
+    let requested_nsec = 123_456_789;
+    c.vsetattrs_raw_impl(&[VfAttrs {
+        file: FileOperand::from_path(&link),
+        masks: AttrMask::MTIME,
+        mtime_sec: requested_sec,
+        mtime_nsec: requested_nsec,
+        ..VfAttrs::default()
+    }])
+    .unwrap();
+
+    let target_after = read_mtime(&mut c, &target, true);
+    let link_after = read_mtime(&mut c, &link, false);
+    assert_eq!(target_after.mtime_sec, requested_sec);
+    assert_eq!(target_after.mtime_nsec, requested_nsec);
+    assert_eq!(
+        (link_after.mtime_sec, link_after.mtime_nsec),
+        (link_before.mtime_sec, link_before.mtime_nsec),
+        "following a symlink must not update the link object's timestamp"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2136,6 +2235,43 @@ fn openv_injected_post_reply_transport_failure_has_no_fabricated_index() {
     );
     assert_eq!(client.test_open_handle_count(), 0);
     client.remove_paths_impl(&[Path::new(&dir)], true).unwrap();
+}
+
+#[cfg(feature = "test-faults")]
+#[test]
+fn open_many_later_failure_closes_successful_prefix() {
+    let dir = setup_dir("open_many_prefix_cleanup");
+    let mut client = client();
+    client.set_merged_mode("off");
+    let file = format!("{dir}/created");
+    let directory = format!("{dir}/directory");
+    client
+        .vmkdir_impl(&[VfAttrs {
+            file: FileOperand::from_path(&directory),
+            masks: AttrMask::MODE,
+            mode: 0o700,
+            ..VfAttrs::default()
+        }])
+        .unwrap();
+
+    let before = client.test_confirmed_path_closes();
+    let error = client
+        .vwrite_impl(&borrow_writes(&[
+            WriteOp::at(FileOperand::from_path(&file), 0, b"x".to_vec()).with_creation(),
+            WriteOp::at(FileOperand::from_path(&directory), 0, b"y".to_vec()).with_creation(),
+        ]))
+        .unwrap_err();
+
+    assert_eq!(error.index(), Some(1), "the directory OPEN should fail");
+    assert!(
+        client.exists_impl(Path::new(&file)).unwrap(),
+        "the successful prefix still created the file"
+    );
+    assert_eq!(
+        client.test_confirmed_path_closes(),
+        before + 1,
+        "the successful prefix OPEN must be closed after the later failure"
+    );
 }
 
 #[cfg(feature = "test-faults")]

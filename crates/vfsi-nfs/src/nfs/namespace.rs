@@ -2,6 +2,18 @@
 
 use super::*;
 
+fn resolve_lookup_result<T>(
+    result: (T, u32),
+    follow: bool,
+    resolve_target: impl FnOnce() -> VfResult<(T, u32)>,
+) -> VfResult<(T, u32)> {
+    if follow && result.1 == nfs_ftype4_NF4LNK {
+        resolve_target()
+    } else {
+        Ok(result)
+    }
+}
+
 /// Root-relative application path for `path`, per the `HandleBackend::abs_path`
 /// contract: absolute inputs are taken relative to the application root and
 /// relative inputs resolve against `cwd`; neither includes the export prefix.
@@ -125,15 +137,13 @@ impl NfsVecFs {
             for ((i, _), r) in entries.iter().zip(results) {
                 match r {
                     Ok((fh, ftype)) => {
-                        if follow && ftype == nfs_ftype4_NF4LNK {
+                        out[*i] = match resolve_lookup_result((fh, ftype), follow, || {
                             let full = self.server_vf_path(files[*i])?;
-                            out[*i] = match self.resolve_follow(&full) {
-                                Ok(fh) => Ok((fh, ftype)),
-                                Err(e) => Err(e.err_no()),
-                            };
-                        } else {
-                            out[*i] = Ok((fh, ftype));
-                        }
+                            self.resolve_path_and_type(&full, true)
+                        }) {
+                            Ok(result) => Ok(result),
+                            Err(error) => Err(error.err_no()),
+                        };
                     }
                     Err(status) => out[*i] = Err(status),
                 }
@@ -169,6 +179,17 @@ impl NfsVecFs {
     /// component-wise walk that follows each symlink with READLINK, splicing
     /// its target into the remaining path (hop-capped at 40).
     pub(super) fn resolve_path(&mut self, root_rel: &Path, follow_final: bool) -> VfResult<NfsFh> {
+        self.resolve_path_and_type(root_rel, follow_final)
+            .map(|(fh, _)| fh)
+    }
+
+    /// Resolve a path like resolve_path, retaining the type observed on the
+    /// final handle so callers following a symlink can validate its target.
+    pub(super) fn resolve_path_and_type(
+        &mut self,
+        root_rel: &Path,
+        follow_final: bool,
+    ) -> VfResult<(NfsFh, u32)> {
         let mut path = normalize_bytes(path_bytes(root_rel));
         let mut hops = 0usize;
         loop {
@@ -178,14 +199,16 @@ impl NfsVecFs {
             match self.nfs.resolve(&path) {
                 Ok(fh) => {
                     if !follow_final {
-                        return Ok(fh);
+                        return Ok((fh, 0));
                     }
-                    let t = self
+                    let attrs = self
                         .nfs
                         .getattr(&fh, &[FATTR4_TYPE])
                         .map_err(|e| vfsi_core::error_from_rpc(e, 0))?;
-                    if !type_is_symlink(&t)? {
-                        return Ok(fh);
+                    let is_symlink = type_is_symlink(&attrs)?;
+                    let ftype = u32::from_be_bytes(attrs[0..4].try_into().unwrap());
+                    if !is_symlink {
+                        return Ok((fh, ftype));
                     }
                     let target = self
                         .nfs
@@ -234,7 +257,7 @@ impl NfsVecFs {
                         }
                         cur_fh = child;
                         if is_last {
-                            return Ok(cur_fh);
+                            return Ok((cur_fh, ftype));
                         }
                         consumed = full_comp;
                     }
@@ -453,5 +476,40 @@ impl NfsVecFs {
                 | nfsstat4_NFS4ERR_BAD_SEQID
                 | nfsstat4_NFS4ERR_NOTSUPP
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn following_lookup_symlink_returns_the_resolved_target_type() {
+        let result = resolve_lookup_result(("link", nfs_ftype4_NF4LNK), true, || {
+            Ok(("target", nfs_ftype4_NF4DIR))
+        })
+        .unwrap();
+
+        assert_eq!(result, ("target", nfs_ftype4_NF4DIR));
+    }
+
+    #[test]
+    fn lookup_without_following_keeps_the_link_and_skips_resolution() {
+        let result = resolve_lookup_result(("link", nfs_ftype4_NF4LNK), false, || {
+            panic!("nofollow must not resolve the target")
+        })
+        .unwrap();
+
+        assert_eq!(result, ("link", nfs_ftype4_NF4LNK));
+    }
+
+    #[test]
+    fn following_non_symlink_does_not_resolve_again() {
+        let result = resolve_lookup_result(("directory", nfs_ftype4_NF4DIR), true, || {
+            panic!("non-symlinks are already resolved")
+        })
+        .unwrap();
+
+        assert_eq!(result, ("directory", nfs_ftype4_NF4DIR));
     }
 }

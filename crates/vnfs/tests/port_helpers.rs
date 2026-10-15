@@ -227,3 +227,79 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
         libc::EFBIG as u32
     );
 }
+
+#[test]
+fn ordered_walk_depth_zero_delivers_root_and_limits_descent_only() {
+    let root = tempfile::tempdir().unwrap();
+    let fs = Posix::new(root.path()).unwrap();
+    fs.write("/file", b"x").unwrap();
+
+    for truncate in [false, true] {
+        let mut listings = Vec::new();
+        let completion = fs
+            .visit_dirs_ordered(
+                "/",
+                ListDirOptions::new()
+                    .recursive(true)
+                    .max_depth(0)
+                    .truncate_at_max_depth(truncate)
+                    .fields(Attributes::MODE),
+                |a, b| a.path().cmp(b.path()),
+                |_| true,
+                |listing, depth| {
+                    listings.push((listing.path, depth, listing.entries));
+                    Ok(WalkControl::Continue)
+                },
+            )
+            .unwrap();
+        assert_eq!(completion, TraversalCompletion::Complete);
+        assert_eq!(listings.len(), 1);
+        assert_eq!(listings[0].0, Path::new("/"));
+        assert_eq!(listings[0].1, 0);
+        assert_eq!(listings[0].2.len(), 1);
+        assert_eq!(listings[0].2[0].path(), Path::new("/file"));
+    }
+
+    fs.create_dir("/child").unwrap();
+    let mut strict_listings = Vec::new();
+    let error = fs
+        .visit_dirs_ordered(
+            "/",
+            ListDirOptions::new()
+                .recursive(true)
+                .max_depth(0)
+                .fields(Attributes::MODE),
+            |a, b| a.path().cmp(b.path()),
+            |_| true,
+            |listing, depth| {
+                strict_listings.push((listing.path, depth, listing.entries));
+                Ok(WalkControl::Continue)
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.err_no(), libc::EFBIG as u32);
+    assert_eq!(strict_listings.len(), 1);
+    assert_eq!(strict_listings[0].1, 0);
+
+    let mut truncated_listings = Vec::new();
+    let completion = fs
+        .visit_dirs_ordered(
+            "/",
+            ListDirOptions::new()
+                .recursive(true)
+                .max_depth(0)
+                .truncate_at_max_depth(true)
+                .fields(Attributes::MODE),
+            |a, b| a.path().cmp(b.path()),
+            |_| true,
+            |listing, depth| {
+                truncated_listings.push((listing.path, depth, listing.entries));
+                Ok(WalkControl::Continue)
+            },
+        )
+        .unwrap();
+    assert_eq!(completion, TraversalCompletion::Complete);
+    assert_eq!(truncated_listings.len(), 1);
+    assert_eq!(truncated_listings[0].1, 0);
+    assert_eq!(truncated_listings[0].2.len(), 2);
+}

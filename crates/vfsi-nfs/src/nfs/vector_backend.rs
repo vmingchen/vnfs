@@ -844,7 +844,9 @@ impl VectorBackend for NfsVecFs {
                 &mut budget,
                 &mut root_attrs,
             )?;
-            cookie = page.last().map(|entry| entry.cookie).unwrap_or(0);
+            let next_cookie = page.last().map(|entry| entry.cookie).unwrap_or(0);
+            validate_readdir_progress(cookie, next_cookie, None)?;
+            cookie = next_cookie;
             if cookie == 0 {
                 break;
             }
@@ -911,7 +913,9 @@ impl VectorBackend for NfsVecFs {
                     .readdir_pages(&operations, &ids)
                     .map_err(vfsi_core::error_from_rpc_indexed)?;
                 let mut next_pending = Vec::new();
-                for ((index, handle, _), (page, cookie)) in pending.iter().zip(pages) {
+                for ((index, handle, previous_cookie), (page, cookie)) in pending.iter().zip(pages)
+                {
+                    validate_readdir_progress(*previous_cookie, cookie, None)?;
                     append_bounded_walk_page(
                         root,
                         &frontier[*index].1,

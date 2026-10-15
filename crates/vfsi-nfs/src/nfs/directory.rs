@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// Reject an NFS server response that repeats the requested continuation
+/// cookie, which would otherwise make a READDIR loop request the same page
+/// forever. Cookie zero remains the normal end-of-directory marker.
+pub(super) fn validate_readdir_progress(
+    requested_cookie: u64,
+    next_cookie: u64,
+    index: Option<usize>,
+) -> VfRes {
+    if next_cookie != 0 && next_cookie == requested_cookie {
+        Err(VfError::transport(index, "READDIR cookie made no progress"))
+    } else {
+        Ok(())
+    }
+}
+
 /// READDIR continuation retained across unlocked application callbacks.
 pub(super) struct NfsDirectoryCursor {
     pub(super) fh: NfsFh,
@@ -201,7 +216,9 @@ impl NfsVecFs {
                     }
                     out.push(attrs);
                 }
-                cookie = entries.last().expect("non-empty READDIR page").cookie;
+                let next_cookie = entries.last().expect("non-empty READDIR page").cookie;
+                validate_readdir_progress(cookie, next_cookie, None)?;
+                cookie = next_cookie;
                 if cookie == 0 {
                     break;
                 }

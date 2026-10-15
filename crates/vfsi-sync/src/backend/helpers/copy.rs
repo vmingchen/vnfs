@@ -24,9 +24,19 @@ pub fn copy_tree_with<F: VectorBackend + ?Sized>(
     mut copy_file: impl FnMut(&mut F, &ExtentPair) -> VfRes,
     map_error: impl Fn(VfError) -> VfError,
 ) -> VfRes {
+    // Copy creates directories implicitly. POSIX backends retain the existing
+    // 0755 default; non-POSIX backends delegate permissions to the share ACL.
+    let directory_mode = if backend
+        .capabilities()
+        .contains(Capabilities::POSIX_METADATA)
+    {
+        0o755
+    } else {
+        0o777
+    };
     if !backend.exists_impl(destination)? {
         backend
-            .ensure_dir_impl(destination, 0o755)
+            .ensure_dir_impl(destination, directory_mode)
             .map_err(&map_error)?;
     }
     let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
@@ -43,7 +53,7 @@ pub fn copy_tree_with<F: VectorBackend + ?Sized>(
             let destination_child = destination.join(name);
             if entry.ftype == VfType::Directory {
                 backend
-                    .ensure_dir_impl(&destination_child, 0o755)
+                    .ensure_dir_impl(&destination_child, directory_mode)
                     .map_err(&map_error)?;
                 directories.push((source_child, destination_child));
             } else if entry.ftype == VfType::Symlink && symlinks {

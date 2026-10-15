@@ -581,3 +581,13 @@ fn distinct_nfs_filehandles_can_group_as_the_same_filesystem_object() {
     );
     assert_eq!(object_ref_for_group(&[1], None, false), None);
 }
+
+#[test]
+fn recursive_readdir_rejects_a_stalled_continuation_cookie() {
+    assert!(validate_readdir_progress(0, 7, None).is_ok());
+    assert!(validate_readdir_progress(7, 11, None).is_ok());
+    assert!(validate_readdir_progress(7, 0, None).is_ok());
+
+    let error = validate_readdir_progress(7, 7, None).unwrap_err();
+    assert!(error.is_transport());
+}

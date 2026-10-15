@@ -59,8 +59,12 @@ pub fn walk_events(
                 if decision == WalkControl::SkipSubtree {
                     continue;
                 }
-                if event.depth >= options.depth_limit() && options.truncates_at_depth_limit() {
-                    continue;
+                if event.depth > options.depth_limit() {
+                    if options.truncates_at_depth_limit() {
+                        continue;
+                    }
+                    return Err(VfError::client(0, libc::EFBIG as u32)
+                        .with_context("walk_events", event.entry.path()));
                 }
                 let remaining = budget.remaining_options(ListDirOptions::new());
                 let mut entries = read_dir(event.entry.path(), remaining)?;
@@ -68,10 +72,6 @@ pub fn walk_events(
                     budget
                         .charge(entry.path())
                         .map_err(|error| error.with_context("walk_events", entry.path()))?;
-                    if event.depth >= options.depth_limit() {
-                        return Err(VfError::client(0, libc::EFBIG as u32)
-                            .with_context("walk_events", entry.path()));
-                    }
                 }
                 if sort_by_name {
                     entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
@@ -97,6 +97,8 @@ pub fn walk_events(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
     use crate::{AttrMask, FileOperand, VfAttrs, VfType};
     fn entry(path: &str, dir: bool) -> DirEntry {
@@ -149,6 +151,79 @@ mod tests {
             ]
         );
     }
+    #[test]
+    fn depth_limit_allows_boundary_entries_and_only_blocks_directory_descent() {
+        let options = ListDirOptions::new().recursive(true).max_depth(0);
+        let mut events = Vec::new();
+        assert_eq!(
+            walk_events(
+                entry("/", true),
+                options,
+                false,
+                |path, _| {
+                    assert_eq!(path, Path::new("/"));
+                    Ok(vec![entry("/file", false)])
+                },
+                |event| {
+                    events.push((event.kind, event.entry.path().to_path_buf(), event.depth));
+                    Ok(WalkControl::Continue)
+                },
+            )
+            .unwrap(),
+            TraversalCompletion::Complete
+        );
+        assert_eq!(
+            events,
+            vec![
+                (WalkEventKind::Enter, PathBuf::from("/"), 0),
+                (WalkEventKind::Entry, PathBuf::from("/file"), 1),
+                (WalkEventKind::Leave, PathBuf::from("/"), 0),
+            ]
+        );
+
+        let mut strict_entries = Vec::new();
+        let error = walk_events(
+            entry("/", true),
+            options,
+            false,
+            |path, _| {
+                assert_eq!(path, Path::new("/"));
+                Ok(vec![entry("/file", false), entry("/child", true)])
+            },
+            |event| {
+                strict_entries.push(event.entry.path().to_path_buf());
+                Ok(WalkControl::Continue)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.err_no(), libc::EFBIG as u32);
+        assert!(strict_entries.contains(&PathBuf::from("/file")));
+
+        let mut truncated_events = Vec::new();
+        let mut listed = Vec::new();
+        assert_eq!(
+            walk_events(
+                entry("/", true),
+                options.truncate_at_max_depth(true),
+                false,
+                |path, _| {
+                    listed.push(path.to_path_buf());
+                    assert_eq!(path, Path::new("/"));
+                    Ok(vec![entry("/file", false), entry("/child", true)])
+                },
+                |event| {
+                    truncated_events.push((event.kind, event.entry.path().to_path_buf()));
+                    Ok(WalkControl::Continue)
+                },
+            )
+            .unwrap(),
+            TraversalCompletion::Complete
+        );
+        assert_eq!(listed, [PathBuf::from("/")]);
+        assert!(truncated_events.contains(&(WalkEventKind::Entry, PathBuf::from("/file"))));
+        assert!(truncated_events.contains(&(WalkEventKind::Enter, PathBuf::from("/child"))));
+    }
+
     #[test]
     fn stop_error_and_limits_do_not_read_descendants() {
         assert_eq!(

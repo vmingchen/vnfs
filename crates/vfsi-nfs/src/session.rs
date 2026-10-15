@@ -2,6 +2,8 @@
 //! and per-compound SEQUENCE/seqid management.
 
 use std::os::raw::c_char;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,7 +17,6 @@ use crate::rpc::{NfsAuthentication, RpcClient};
 pub struct OpenOwner {
     pub name: Vec<u8>,
     pub seqid: u32,
-    pub verifier: verifier4,
 }
 
 pub struct Session {
@@ -131,12 +132,10 @@ impl Session {
             open_owner: OpenOwner {
                 name: b"vnfs-open-owner".to_vec(),
                 seqid: 0,
-                verifier: make_verifier(),
             },
             path_owner: OpenOwner {
                 name: b"vnfs-path-open-owner".to_vec(),
                 seqid: 0,
-                verifier: make_verifier(),
             },
             client_owner: client_owner.map(Box::from),
         };
@@ -338,17 +337,19 @@ impl Drop for Session {
     }
 }
 
-/// 8-byte opaque verifier derived from the current time.
+/// 8-byte opaque verifier unique within this process and seeded from wall time.
 pub fn make_verifier() -> verifier4 {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64;
-    let mut v: verifier4 = [0; 8];
-    for (i, b) in v.iter_mut().enumerate() {
-        *b = ((now >> (8 * i)) & 0xff) as libc::c_char;
-    }
-    v
+    static NEXT: OnceLock<AtomicU64> = OnceLock::new();
+    let next = NEXT.get_or_init(|| {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        AtomicU64::new(now)
+    });
+    next.fetch_add(1, Ordering::Relaxed)
+        .to_le_bytes()
+        .map(|byte| byte as libc::c_char)
 }
 
 /// Highest NFSv4 minor version attempted before falling back.
@@ -433,6 +434,12 @@ mod tests {
 
     fn minor_mismatch() -> RpcError {
         RpcError::op(0, nfsstat4_NFS4ERR_MINOR_VERS_MISMATCH)
+    }
+
+    #[test]
+    fn generated_verifiers_are_unique_for_distinct_requests() {
+        let verifiers: std::collections::HashSet<_> = (0..1024).map(|_| make_verifier()).collect();
+        assert_eq!(verifiers.len(), 1024);
     }
 
     #[test]

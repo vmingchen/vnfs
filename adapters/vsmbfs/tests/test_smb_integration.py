@@ -17,6 +17,61 @@ def test_smb_identity_and_capabilities(smb_fs):
     assert smb_fs._client.capabilities() & _native.CAP_LSTAT == 0
 
 
+def test_native_recursive_copy_creates_nested_share_directories(smb_fs):
+    smb_fs.pipe_file("/source/nested/file", b"payload")
+    smb_fs.mkdir("/source/nested/empty")
+    smb_fs._client.cp_recursive(
+        smb_fs._native_path("/source"), smb_fs._native_path("/copy"), False
+    )
+    assert smb_fs.cat_file("/copy/nested/file") == b"payload"
+    assert smb_fs.isdir("/copy/nested/empty")
+
+
+@pytest.mark.parametrize(
+    "operation", ["mkdir", "makedirs", "open", "group", "pipe", "put"]
+)
+def test_default_directory_creation_uses_share_permissions(smb_fs, tmp_path, operation):
+    if operation == "mkdir":
+        smb_fs.mkdir("/parent/child")
+    elif operation == "makedirs":
+        smb_fs.makedirs("/parent/child")
+    elif operation == "open":
+        with smb_fs.open("/parent/child/file", "wb") as file:
+            file.write(b"payload")
+    elif operation == "group":
+        from fsspec.core import OpenFile, OpenFiles
+
+        entries = [
+            OpenFile(smb_fs, path, "wb")
+            for path in ("/parent/child/file", "/parent/child/sibling")
+        ]
+        with OpenFiles(entries, mode="wb", fs=smb_fs) as files:
+            for file in files:
+                file.write(b"payload")
+        assert smb_fs.cat_file("/parent/child/sibling") == b"payload"
+    elif operation == "pipe":
+        smb_fs.pipe({"/parent/child/file": b"payload"})
+    else:
+        source = tmp_path / "source"
+        source.write_bytes(b"payload")
+        smb_fs.put_file(str(source), "/parent/child/file")
+    assert smb_fs.isdir("/parent/child")
+    if operation not in {"mkdir", "makedirs"}:
+        assert smb_fs.cat_file("/parent/child/file") == b"payload"
+
+
+@pytest.mark.parametrize("mode", [0o700, 0o755])
+@pytest.mark.parametrize("create_parents", [False, True])
+def test_explicit_unsupported_directory_permissions_are_not_ignored(
+    smb_fs, mode, create_parents
+):
+    with pytest.raises(NotImplementedError):
+        smb_fs.mkdir("/private", mode=mode, create_parents=create_parents)
+    assert not smb_fs.exists("/private")
+    smb_fs.mkdir("/share-default", mode=0o777, create_parents=create_parents)
+    assert smb_fs.isdir("/share-default")
+
+
 @pytest.mark.parametrize("operation", ["scalar", "group", "pipe", "put"])
 @pytest.mark.parametrize("existing", [False, True])
 def test_smb_transactions_reject_unenforceable_private_staging(

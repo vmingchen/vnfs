@@ -226,6 +226,17 @@ pub trait VectorBackend: HandleBackend {
         Err(VfError::unsupported(0))
     }
 
+    /// Validate a strict-open request before dispatch. An error guarantees
+    /// that no operation in the batch has been attempted; FFI adapters use
+    /// this to preserve NOT_ATTEMPTED results for the remaining requests.
+    #[doc(hidden)]
+    fn vopen_preflight_impl(&mut self, paths: &[&Path], flags: &[i32], modes: &[u32]) -> VfRes {
+        if paths.len() != flags.len() || paths.len() != modes.len() {
+            return Err(VfError::failure(0, ERR_INVAL));
+        }
+        Ok(())
+    }
+
     /// Indexed partial outcomes for strict-open collection and cleanup.
     /// This internal ownership seam is distinct from the strict typed boundary.
     #[doc(hidden)]

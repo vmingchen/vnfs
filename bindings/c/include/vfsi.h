@@ -112,7 +112,11 @@ typedef struct vfsi_fs vfsi_fs;
 
 /**
  * Aggregate limits for complete shallow vector listings. Zero is a zero
- * budget; SIZE_MAX explicitly opts out. MODE is always requested.
+ * budget; SIZE_MAX explicitly opts out. MODE is always requested. Only
+ * requested attributes are guaranteed; the call returns ENOTSUP if the
+ * backend omits one.
+ * Requests for fields without a vfsi_attrs member (for example RDEV)
+ * return ENOTSUP.
  */
 typedef struct vfsi_listing_options {
   size_t max_entries;
@@ -122,6 +126,10 @@ typedef struct vfsi_listing_options {
 
 /**
  * Attributes returned by [`vfsi_stat`] and passed to listdir callbacks.
+ * This structure has no field-availability bitmap. vfsi_stat, vfsi_statv,
+ * vfsi_listdir, and vfsi_listdirv return ENOTSUP if the backend cannot provide
+ * every field. APIs with an attributes option guarantee only the requested
+ * fields plus MODE; other fields should be ignored.
  */
 typedef struct vfsi_attrs {
   /**
@@ -165,7 +173,11 @@ typedef struct vfsi_listing_result {
 
 /**
  * Resource policy for an incremental tree traversal. Zero is a zero limit,
- * not unlimited. Set SIZE_MAX explicitly to opt out of a limit.
+ * not unlimited. Set SIZE_MAX explicitly to opt out of a limit. MODE is always
+ * requested. Only requested attributes are guaranteed; ENOTSUP can follow
+ * earlier callbacks if a later directory omits one.
+ * Requests for fields without a vfsi_attrs member (for example RDEV)
+ * return ENOTSUP.
  */
 typedef struct vfsi_walk_options {
   size_t max_entries;
@@ -420,6 +432,7 @@ void vfsi_free(struct vfsi_fs *fs);
 
 /**
  * Stat `path`, following a final symlink.
+ * Returns ENOTSUP if the backend cannot provide every field in vfsi_attrs.
  */
 int vfsi_stat(struct vfsi_fs *fs, const char *path, struct vfsi_attrs *out);
 
@@ -496,7 +509,8 @@ struct vfsi_result vfsi_closev(struct vfsi_fs *fs,
                                struct vfsi_result *item_results);
 
 /**
- * Stat a path array in one backend vector call.
+ * Stat a path array in one backend vector call. An item is unsupported when
+ * the backend cannot provide every field in its vfsi_attrs.
  */
 struct vfsi_result vfsi_statv(struct vfsi_fs *fs,
                               struct vfsi_stat_op *ops,

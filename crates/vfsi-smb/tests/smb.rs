@@ -78,6 +78,86 @@ fn connect() -> Option<SmbVecFs> {
 }
 
 #[test]
+fn recursive_copy_uses_share_defaults_for_every_destination_directory() {
+    let Some(mut fs) = connect() else { return };
+    let root = PathBuf::from(format!("/vfsi-smb-copy-defaults-{}", std::process::id()));
+    let source = root.join("source");
+    fs.ensure_dir_impl(&source.join("nested/empty"), 0o777)
+        .unwrap();
+    fs.vwrite_impl(&borrow_writes(&[
+        WriteOp::from_os_path(&source.join("root-file"), VfOffset::At(0), b"root".to_vec())
+            .with_creation(),
+        WriteOp::from_os_path(
+            &source.join("nested/file"),
+            VfOffset::At(0),
+            b"child".to_vec(),
+        )
+        .with_creation(),
+    ]))
+    .unwrap();
+    for server_copy in [false, true] {
+        let destination = root.join(format!("copy-{server_copy}"));
+        fs.copy_tree_impl(&source, &destination, false, server_copy)
+            .unwrap();
+        for (path, contents) in [
+            ("root-file", b"root".as_slice()),
+            ("nested/file", b"child".as_slice()),
+        ] {
+            assert_eq!(
+                fs.read_raw_impl(&FileOperand::from_os_path(&destination.join(path)), 0, 16)
+                    .unwrap(),
+                contents
+            );
+        }
+        assert_eq!(
+            fs.stat_impl(&destination.join("nested/empty"))
+                .unwrap()
+                .ftype,
+            VfType::Directory
+        );
+        fs.remove_paths_impl(
+            &[
+                &destination.join("nested/file"),
+                &destination.join("root-file"),
+            ],
+            false,
+        )
+        .unwrap();
+        fs.remove_paths_impl(
+            &[
+                &destination.join("nested/empty"),
+                &destination.join("nested"),
+                &destination,
+            ],
+            false,
+        )
+        .unwrap();
+    }
+    // Only implicit defaults change: explicit unsupported Unix modes still fail.
+    let private = root.join("private");
+    assert_eq!(
+        fs.mkdir_raw_impl(&private, 0o700).unwrap_err().err_no(),
+        VF_ERR_UNSUPPORTED
+    );
+    assert!(!fs.exists_impl(&private).unwrap());
+    fs.remove_paths_impl(
+        &[&source.join("nested/file"), &source.join("root-file")],
+        false,
+    )
+    .unwrap();
+    fs.remove_paths_impl(
+        &[
+            &source.join("nested/empty"),
+            &source.join("nested"),
+            &source,
+            &root,
+        ],
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
 fn native_directory_visitor_reenters_client_across_snapshot_pages() {
     let Some(backend) = connect() else {
         return;
@@ -188,7 +268,7 @@ fn concurrent_write_preflight_keeps_distinct_files_vectorized() {
     };
     let root = PathBuf::from(format!("/vfsi-smb-identities-{}", std::process::id()));
     cleanup_test_tree(&root);
-    client.mkdir_raw_impl(&root, 0o755).unwrap();
+    client.mkdir_raw_impl(&root, 0o777).unwrap();
     let first = root.join("first");
     let second = root.join("second");
     client
@@ -216,7 +296,7 @@ fn recursive_remove_requires_no_follow_metadata() {
     };
     let root = PathBuf::from(format!("/vfsi-smb-no-lstat-{}", std::process::id()));
     cleanup_test_tree(&root);
-    fs.mkdir_raw_impl(&root, 0o755).unwrap();
+    fs.mkdir_raw_impl(&root, 0o777).unwrap();
     let child = root.join("keep");
     fs.vwrite_impl(&borrow_writes(&[WriteOp::from_os_path(
         &child,
@@ -279,11 +359,11 @@ fn descriptor_metadata_never_reopens_a_replaced_path() {
     };
     let root = PathBuf::from(format!("/vfsi-smb-retained-{}", std::process::id()));
     cleanup_test_tree(&root);
-    fs.create_dir_impl(&root, 0o755).unwrap();
+    fs.create_dir_impl(&root, 0o777).unwrap();
     let original = root.join("original");
     let renamed = root.join("renamed");
     let file = fs
-        .open_raw_impl(&original, libc::O_CREAT | libc::O_RDWR, 0o644)
+        .open_raw_impl(&original, libc::O_CREAT | libc::O_RDWR, 0o666)
         .unwrap();
     fs.write_raw_impl(&file, 0, b"original").unwrap();
     assert_eq!(fs.fstat_impl(&file).unwrap().size, 8);
@@ -315,7 +395,7 @@ fn smb_openv_injected_registration_failure_closes_all_successes() {
     };
     let root = PathBuf::from(format!("/vfsi-smb-openv-fault-{}", std::process::id()));
     cleanup_test_tree(&root);
-    fs.mkdir_raw_impl(root.as_path(), 0o755).unwrap();
+    fs.mkdir_raw_impl(root.as_path(), 0o777).unwrap();
     let paths = [root.join("f0"), root.join("f1"), root.join("f2")];
     let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
     let script = Arc::new(FaultScript::one(
@@ -327,7 +407,7 @@ fn smb_openv_injected_registration_failure_closes_all_successes() {
         &mut fs,
         &refs,
         &[libc::O_CREAT | libc::O_EXCL | libc::O_RDWR; 3],
-        &[0o644; 3],
+        &[0o666; 3],
     )
     .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -349,7 +429,7 @@ fn smb_failed_strict_open_quarantines_unconfirmed_cleanup() {
     };
     let root = PathBuf::from(format!("/vfsi-smb-cleanup-fault-{}", std::process::id()));
     cleanup_test_tree(&root);
-    fs.mkdir_raw_impl(root.as_path(), 0o755).unwrap();
+    fs.mkdir_raw_impl(root.as_path(), 0o777).unwrap();
     let paths = [root.join("one"), root.join("two")];
     let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
     let script = Arc::new(FaultScript::new([
@@ -364,7 +444,7 @@ fn smb_failed_strict_open_quarantines_unconfirmed_cleanup() {
     ]));
     fs.set_fault_injector(script.clone());
     assert!(
-        fs.vopen_raw_impl(&refs, &[libc::O_CREAT | libc::O_RDWR; 2], &[0o600; 2],)
+        fs.vopen_raw_impl(&refs, &[libc::O_CREAT | libc::O_RDWR; 2], &[0o666; 2],)
             .unwrap_err()
             .is_transport()
     );
@@ -376,7 +456,7 @@ fn smb_failed_strict_open_quarantines_unconfirmed_cleanup() {
         .vopen_raw_impl(
             &[next_path.as_path()],
             &[libc::O_CREAT | libc::O_RDWR],
-            &[0o600],
+            &[0o666],
         )
         .unwrap();
     assert_eq!(fs.test_deferred_close_count(), 0);
@@ -393,14 +473,14 @@ fn smb_closev_failure_keeps_handles_available_for_cleanup() {
     };
     let root = PathBuf::from(format!("/vfsi-smb-closev-fault-{}", std::process::id()));
     cleanup_test_tree(&root);
-    fs.mkdir_raw_impl(root.as_path(), 0o755).unwrap();
+    fs.mkdir_raw_impl(root.as_path(), 0o777).unwrap();
     let paths = [root.join("f0"), root.join("f1")];
     let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
     let files = VectorBackend::vopen_raw_impl(
         &mut fs,
         &refs,
         &[libc::O_CREAT | libc::O_RDWR; 2],
-        &[0o644; 2],
+        &[0o666; 2],
     )
     .unwrap();
     let script = Arc::new(FaultScript::one(
@@ -424,14 +504,14 @@ fn smb_closev_removes_successes_on_both_sides_of_a_failure() {
     };
     let root = PathBuf::from(format!("/vfsi-smb-close-results-{}", std::process::id()));
     cleanup_test_tree(&root);
-    fs.mkdir_raw_impl(root.as_path(), 0o755).unwrap();
+    fs.mkdir_raw_impl(root.as_path(), 0o777).unwrap();
     let paths = [root.join("f0"), root.join("f1"), root.join("f2")];
     let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
     let files = VectorBackend::vopen_raw_impl(
         &mut fs,
         &refs,
         &[libc::O_CREAT | libc::O_RDWR; 3],
-        &[0o644; 3],
+        &[0o666; 3],
     )
     .unwrap();
     let script = Arc::new(FaultScript::one(
@@ -460,7 +540,7 @@ fn smb_scalar_open_registration_failure_closes_remote_open() {
         std::process::id()
     ));
     cleanup_test_tree(&root);
-    fs.mkdir_raw_impl(root.as_path(), 0o755).unwrap();
+    fs.mkdir_raw_impl(root.as_path(), 0o777).unwrap();
     let path = root.join("file");
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::BeforeRegister { index: 0 },
@@ -468,7 +548,7 @@ fn smb_scalar_open_registration_failure_closes_remote_open() {
     ));
     fs.set_fault_injector(script.clone());
     assert!(
-        fs.open_raw_impl(path.as_path(), libc::O_CREAT | libc::O_RDWR, 0o600)
+        fs.open_raw_impl(path.as_path(), libc::O_CREAT | libc::O_RDWR, 0o666)
             .unwrap_err()
             .is_transport()
     );
@@ -486,10 +566,10 @@ fn smb_confirmed_write_advances_descriptor_when_flush_path_fails() {
     };
     let root = PathBuf::from(format!("/vfsi-smb-partial-write-{}", std::process::id()));
     cleanup_test_tree(&root);
-    fs.mkdir_raw_impl(root.as_path(), 0o755).unwrap();
+    fs.mkdir_raw_impl(root.as_path(), 0o777).unwrap();
     let path = root.join("file");
     let file = fs
-        .open_raw_impl(path.as_path(), libc::O_CREAT | libc::O_RDWR, 0o600)
+        .open_raw_impl(path.as_path(), libc::O_CREAT | libc::O_RDWR, 0o666)
         .unwrap();
     let script = Arc::new(FaultScript::one(
         OpenFaultPoint::AfterWriteChunk { chunk: 0 },
@@ -543,7 +623,7 @@ fn samba_round_trip_and_copy() {
 
     let root = PathBuf::from(format!("/vfsi-smb-test-{}", std::process::id()));
     cleanup_test_tree(&root);
-    fs.ensure_dir_impl(&root, 0o755)
+    fs.ensure_dir_impl(&root, 0o777)
         .expect("create test directory");
 
     let batch_dirs = [root.join("batch-a"), root.join("batch-b")];
@@ -552,7 +632,7 @@ fn samba_round_trip_and_copy() {
         .map(|path| VfAttrs {
             file: FileOperand::from_os_path(path),
             masks: AttrMask::MODE,
-            mode: 0o755,
+            mode: 0o777,
             ..VfAttrs::default()
         })
         .collect();
@@ -560,7 +640,7 @@ fn samba_round_trip_and_copy() {
     let batch_files = [batch_dirs[0].join("one"), batch_dirs[1].join("two")];
     let batch_refs: Vec<&Path> = batch_files.iter().map(PathBuf::as_path).collect();
     let opened = fs
-        .vopen_raw_simple_impl(&batch_refs, libc::O_CREAT | libc::O_RDWR, 0o644)
+        .vopen_raw_simple_impl(&batch_refs, libc::O_CREAT | libc::O_RDWR, 0o666)
         .expect("concurrent openv");
     fs.vclose_impl(&opened).expect("concurrent closev");
     let renamed_files = [batch_dirs[0].join("renamed"), batch_dirs[1].join("renamed")];
@@ -590,7 +670,7 @@ fn samba_round_trip_and_copy() {
     let renamed = root.join("renamed.bin");
     let copied = root.join("copied.bin");
     let file = fs
-        .open_raw_impl(&source, libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR, 0o644)
+        .open_raw_impl(&source, libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR, 0o666)
         .expect("open source");
     assert_eq!(fs.write_raw_impl(&file, 0, b"hello over smb").unwrap(), 14);
     assert_eq!(fs.read_raw_impl(&file, 6, 4).unwrap(), b"over");
@@ -690,7 +770,7 @@ fn path_reads_recover_after_server_restart() {
     let root = PathBuf::from(format!("/vfsi-smb-reconnect-{}", std::process::id()));
     let file = root.join("survives.bin");
     cleanup_test_tree(&root);
-    fs.ensure_dir_impl(&root, 0o755).unwrap();
+    fs.ensure_dir_impl(&root, 0o777).unwrap();
     fs.vwrite_impl(&borrow_writes(&[WriteOp::from_os_path(
         &file,
         VfOffset::At(0),

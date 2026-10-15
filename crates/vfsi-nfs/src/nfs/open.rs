@@ -102,16 +102,21 @@ impl NfsVecFs {
         access: u32,
         create: bool,
         excl: bool,
+        mode: u32,
     ) -> VfResult<(NfsFh, stateid4)> {
         let dirfh = self.resolve_path(dir, true).map_err(|e| e.with_index(0))?;
-        let mode = match (create, excl) {
+        let create_mode = match (create, excl) {
             (false, _) => OpenCreate::NoCreate,
             (true, true) => OpenCreate::Exclusive,
             (true, false) => OpenCreate::Guarded,
         };
-        self.nfs
-            .open(&dirfh, name, access, mode)
-            .map_err(|e| vfsi_core::error_from_rpc(e, 0))
+        let result = if create && excl {
+            self.nfs
+                .open_with_mode(&dirfh, name, access, create_mode, mode)
+        } else {
+            self.nfs.open(&dirfh, name, access, create_mode)
+        };
+        result.map_err(|e| vfsi_core::error_from_rpc(e, 0))
     }
 
     /// The merged (single-compound) openv: resolve each parent once, then

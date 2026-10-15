@@ -58,9 +58,19 @@ def test_live_vector_client_round_trip():
         password=os.environ.get("VFSI_SMB_PASSWORD", ""),
         domain=os.environ.get("VFSI_SMB_DOMAIN", ""),
     ) as client:
-        client.ensure_dir(root, 0o755)
+        client.ensure_dir(root, 0o777)
         paths = [f"{root}/a", f"{root}/b"]
         try:
+            # Implicit scalar/grouped opens use share permissions. Explicit
+            # restrictive permissions must still fail, never be ignored.
+            for path in paths:
+                with pytest.raises(NotImplementedError):
+                    client.open(path, "wb", permissions=0o644)
+                assert not client.exists(path)
+                fd = client.open(path, "wb")
+                client.close_many([fd])
+            fds = client.open_many(paths, ["wb", "wb"])
+            client.close_many(fds)
             assert client.write_many(paths, [b"alpha", b"beta"]) == [5, 4]
             values, errors = client.read_all_many(paths)
             assert errors == {}

@@ -16,7 +16,6 @@
 
 use std::collections::HashMap;
 use std::fs::{File, FileTimes, OpenOptions};
-#[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt, symlink};
@@ -30,6 +29,12 @@ use vfsi_core::internal::ManyResults;
 #[cfg(feature = "test-faults")]
 use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 use vfsi_core::path::{cstring_from_bytes, normalize_bytes, path_bytes, path_from_bytes};
+
+#[cfg(test)]
+std::thread_local! {
+    static XATTR_QUERY_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static XATTR_QUERY_ERROR: std::cell::Cell<Option<i32>> = const { std::cell::Cell::new(None) };
+}
 
 pub mod io;
 
@@ -160,9 +165,8 @@ pub struct LocalBackend {
     root: PathBuf,
     /// Canonical form of `root`, used for containment checks on platforms
     /// without Linux's dirfd-relative `openat2` resolution.
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(any(not(target_os = "linux"), test))]
     root_canon: PathBuf,
-    #[cfg(target_os = "linux")]
     root_dir: File,
     cwd: PathBuf,
     next_fd: i32,
@@ -259,12 +263,12 @@ impl LocalBackend {
                     .file
                     .metadata()
                     .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-                self.fill_attrs(a, None, &md);
+                self.fill_attrs(a, None, &md)
+                    .map_err(|error| error.with_index(i))?;
                 if a.masks.contains(AttrMask::NAMED_ATTR) {
                     use std::os::fd::AsRawFd;
-                    a.has_named_attr = unsafe {
-                        libc::flistxattr(open.file.as_raw_fd(), std::ptr::null_mut(), 0) > 0
-                    };
+                    a.has_named_attr = Self::has_xattr_fd(open.file.as_raw_fd())
+                        .map_err(|error| error.with_index(i))?;
                     a.returned.insert(AttrMask::NAMED_ATTR);
                 }
                 continue;
@@ -273,12 +277,14 @@ impl LocalBackend {
             if follow {
                 let p = self.real_path(&lexical).map_err(|e| e.with_index(i))?;
                 let md = std::fs::metadata(&p).map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-                self.fill_attrs(a, Some(&p), &md);
+                self.fill_attrs(a, Some(&p), &md)
+                    .map_err(|error| error.with_index(i))?;
             } else {
                 let p = self.no_follow_path(&lexical).map_err(|e| e.with_index(i))?;
                 let md = std::fs::symlink_metadata(&p)
                     .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-                self.fill_attrs(a, Some(&p), &md);
+                self.fill_attrs(a, Some(&p), &md)
+                    .map_err(|error| error.with_index(i))?;
             }
         }
         Ok(())
@@ -289,15 +295,13 @@ impl LocalBackend {
         std::fs::create_dir_all(&root).map_err(|error| VfError::failure(0, Self::errno(&error)))?;
         let root_canon = std::fs::canonicalize(&root)
             .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
-        #[cfg(target_os = "linux")]
         let root_dir =
             File::open(&root_canon).map_err(|error| VfError::failure(0, Self::errno(&error)))?;
         Ok(LocalBackend {
             io: Box::new(engine),
             root: root_canon.clone(),
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(any(not(target_os = "linux"), test))]
             root_canon,
-            #[cfg(target_os = "linux")]
             root_dir,
             cwd: PathBuf::new(),
             next_fd: 0,
@@ -362,25 +366,157 @@ impl LocalBackend {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            if p == self.root {
-                return Ok(AnchoredPath {
-                    path: self.root_canon.clone(),
-                    anchor: None,
-                    nofollow_on_open: false,
-                });
-            }
-            let parent = p.parent().unwrap_or(&self.root);
-            let canonical = std::fs::canonicalize(parent)
-                .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
-            if !canonical.starts_with(&self.root_canon) {
-                return Err(VfError::failure(0, ERR_ACCES));
-            }
-            Ok(AnchoredPath {
-                path: canonical.join(p.file_name().unwrap_or_default()),
-                anchor: None,
-                nofollow_on_open: true,
-            })
+            self.no_follow_path_fallback(p)
         }
+    }
+
+    #[cfg(any(not(target_os = "linux"), test))]
+    fn no_follow_path_fallback(&self, p: &Path) -> VfResult<AnchoredPath> {
+        let relative = p
+            .strip_prefix(&self.root)
+            .map_err(|_| VfError::failure(0, ERR_ACCES))?;
+        let parent = relative.parent().unwrap_or(Path::new(""));
+        let parent_path = if parent.as_os_str().is_empty() {
+            self.root.clone()
+        } else {
+            self.root.join(parent)
+        };
+        let canonical = std::fs::canonicalize(parent_path)
+            .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+        let canonical_relative = canonical
+            .strip_prefix(&self.root_canon)
+            .map_err(|_| VfError::failure(0, ERR_ACCES))?;
+
+        // Walk the canonical in-root parent from the held root descriptor.
+        // Each component is opened without following symlinks, so a later
+        // rename or symlink swap cannot redirect the final path.
+        let mut fd = unsafe { libc::fcntl(self.root_dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            return Err(VfError::failure(0, Self::errno(&error)));
+        }
+        for component in canonical_relative.components() {
+            let std::path::Component::Normal(name) = component else {
+                continue;
+            };
+            let name = cstring_from_bytes(name.as_bytes())
+                .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+            let next = unsafe {
+                libc::openat(
+                    fd,
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+            if next < 0 {
+                let error = std::io::Error::last_os_error();
+                unsafe { libc::close(fd) };
+                return Err(VfError::failure(0, Self::errno(&error)));
+            }
+            unsafe { libc::close(fd) };
+            fd = next;
+        }
+        let anchor = unsafe { File::from_raw_fd(fd) };
+        let mut path = PathBuf::from(format!("/dev/fd/{}", anchor.as_raw_fd()));
+        if let Some(name) = relative.file_name() {
+            path.push(name);
+        } else {
+            path.push(".");
+        }
+        Ok(AnchoredPath {
+            path,
+            anchor: Some(anchor),
+            nofollow_on_open: true,
+        })
+    }
+
+    /// Open a directory while following parent symlinks within the root, but
+    /// atomically reject a symlink in the final component.
+    fn open_directory_no_follow_final(&self, p: &Path) -> VfResult<AnchoredPath> {
+        #[cfg(target_os = "linux")]
+        let fd = {
+            #[repr(C)]
+            struct OpenHow {
+                flags: u64,
+                mode: u64,
+                resolve: u64,
+            }
+            let relative = p
+                .strip_prefix(&self.root)
+                .map_err(|_| VfError::failure(0, ERR_ACCES))?;
+            let relative = if relative.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                relative
+            };
+            let c_path = cstring_from_bytes(path_bytes(relative))
+                .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+            let how = OpenHow {
+                flags: (libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW)
+                    as u64,
+                mode: 0,
+                resolve: 0x10 | 0x02, // RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS
+            };
+            let fd = unsafe {
+                libc::syscall(
+                    libc::SYS_openat2,
+                    self.root_dir.as_raw_fd(),
+                    c_path.as_ptr(),
+                    &how as *const OpenHow,
+                    std::mem::size_of::<OpenHow>(),
+                ) as i32
+            };
+            if fd < 0 {
+                let error = std::io::Error::last_os_error();
+                let errno = if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
+                    && self.no_follow_path(p).ok().is_some_and(|path| {
+                        std::fs::symlink_metadata(path)
+                            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                    }) {
+                    ERR_ACCES
+                } else {
+                    Self::errno(&error)
+                };
+                return Err(VfError::failure(0, errno));
+            }
+            fd
+        };
+        #[cfg(not(target_os = "linux"))]
+        let fd = {
+            let parent_anchored = self.no_follow_path(p)?;
+            let path = cstring_from_bytes(path_bytes(parent_anchored.as_ref()))
+                .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+            let fd = unsafe {
+                libc::open(
+                    path.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+            if fd < 0 {
+                let error = std::io::Error::last_os_error();
+                let errno = if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
+                    && std::fs::symlink_metadata(&parent_anchored)
+                        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                {
+                    ERR_ACCES
+                } else {
+                    Self::errno(&error)
+                };
+                return Err(VfError::failure(0, errno));
+            }
+            fd
+        };
+        let anchor = unsafe { File::from_raw_fd(fd) };
+        let path = if cfg!(target_os = "linux") {
+            PathBuf::from(format!("/proc/self/fd/{}/.", anchor.as_raw_fd()))
+        } else {
+            PathBuf::from(format!("/dev/fd/{}/.", anchor.as_raw_fd()))
+        };
+        Ok(AnchoredPath {
+            path,
+            anchor: Some(anchor),
+            nofollow_on_open: false,
+        })
     }
 
     #[cfg(target_os = "linux")]
@@ -529,10 +665,10 @@ impl LocalBackend {
 
         #[cfg(not(target_os = "linux"))]
         {
-            if let Ok(c) = std::fs::canonicalize(p) {
-                if c.starts_with(&self.root_canon) {
+            if let Ok(canonical) = std::fs::canonicalize(p) {
+                if canonical.starts_with(&self.root_canon) {
                     return Ok(AnchoredPath {
-                        path: c,
+                        path: canonical,
                         anchor: None,
                         nofollow_on_open: false,
                     });
@@ -544,11 +680,113 @@ impl LocalBackend {
     }
 
     fn protect_create_open(path: &AnchoredPath, options: &mut OpenOptions) {
-        #[cfg(target_os = "linux")]
         if path.nofollow_on_open {
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NOFOLLOW);
         }
+    }
+
+    /// Change permissions through an opened object when the leaf must not be
+    /// followed. The descriptor pins the object between the no-follow open
+    /// and fchmod, closing the final-component symlink swap window.
+    fn set_permissions_no_follow(
+        path: &AnchoredPath,
+        mode: u32,
+        directory_only: bool,
+        index: usize,
+    ) -> VfResult<()> {
+        #[cfg(target_os = "linux")]
+        if directory_only {
+            // O_PATH pins a directory without requiring read/search permission
+            // on the directory itself, which may have been removed by umask.
+            let name = cstring_from_bytes(path_bytes(path))
+                .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+            let fd = unsafe {
+                libc::open(
+                    name.as_ptr(),
+                    libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(VfError::failure(
+                    index,
+                    Self::errno(&std::io::Error::last_os_error()),
+                ));
+            }
+            let file = unsafe { File::from_raw_fd(fd) };
+            let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
+            return std::fs::set_permissions(
+                descriptor_path,
+                std::fs::Permissions::from_mode(mode & 0o7777),
+            )
+            .map_err(|error| VfError::failure(index, Self::errno(&error)));
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        if directory_only {
+            // Use the held parent descriptor and reject symlink traversal.
+            // fchmodat changes the entry without opening a mode-restricted
+            // directory for reading.
+            let parent = path
+                .anchor
+                .as_ref()
+                .ok_or_else(|| VfError::unsupported(index))?;
+            let name = path
+                .file_name()
+                .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+            let name = cstring_from_bytes(path_bytes(Path::new(name)))
+                .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+            let result = unsafe {
+                libc::fchmodat(
+                    parent.as_raw_fd(),
+                    name.as_ptr(),
+                    (mode & 0o7777) as libc::mode_t,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if result != 0 {
+                return Err(VfError::failure(
+                    index,
+                    Self::errno(&std::io::Error::last_os_error()),
+                ));
+            }
+            // Some systems accept AT_SYMLINK_NOFOLLOW but treat chmod on a
+            // symlink as a successful no-op. Verify the anchored leaf itself
+            // is still a directory before reporting that mkdir's mode applied.
+            let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+            let result = unsafe {
+                libc::fstatat(
+                    parent.as_raw_fd(),
+                    name.as_ptr(),
+                    &mut metadata,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if result != 0 {
+                return Err(VfError::failure(
+                    index,
+                    Self::errno(&std::io::Error::last_os_error()),
+                ));
+            }
+            if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+                return Err(VfError::failure(index, ERR_ACCES));
+            }
+            return Ok(());
+        }
+
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        let mut flags = libc::O_NOFOLLOW | libc::O_NONBLOCK;
+        if directory_only {
+            flags |= libc::O_DIRECTORY;
+        }
+        options.custom_flags(flags);
+        let file = options
+            .open(path)
+            .map_err(|error| VfError::failure(index, Self::errno(&error)))?;
+        file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))
+            .map_err(|error| VfError::failure(index, Self::errno(&error)))
     }
 
     fn errno(e: &std::io::Error) -> u32 {
@@ -620,21 +858,48 @@ impl LocalBackend {
         }
     }
 
-    /// Whether the anchored object has at least one extended attribute.
-    fn has_xattr(path: &AnchoredPath) -> bool {
-        let Some(cpath) = cstring_from_bytes(path_bytes(path.as_ref())) else {
-            return false;
-        };
-        unsafe {
-            if path.nofollow_on_open {
-                libc::llistxattr(cpath.as_ptr(), std::ptr::null_mut(), 0) > 0
-            } else {
-                libc::listxattr(cpath.as_ptr(), std::ptr::null_mut(), 0) > 0
-            }
+    fn xattr_result(result: libc::ssize_t) -> VfResult<bool> {
+        #[cfg(test)]
+        if let Some(errno) = XATTR_QUERY_ERROR.with(std::cell::Cell::take) {
+            return Err(VfError::failure(0, errno as u32));
+        }
+        if result >= 0 {
+            Ok(result > 0)
+        } else {
+            Err(VfError::failure(
+                0,
+                Self::errno(&std::io::Error::last_os_error()),
+            ))
         }
     }
 
-    fn fill_attrs(&self, a: &mut VfAttrs, path: Option<&AnchoredPath>, md: &std::fs::Metadata) {
+    /// Whether the anchored object has at least one extended attribute.
+    fn has_xattr(path: &AnchoredPath) -> VfResult<bool> {
+        #[cfg(test)]
+        XATTR_QUERY_COUNT.with(|count| count.set(count.get() + 1));
+        let cpath = cstring_from_bytes(path_bytes(path.as_ref()))
+            .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        let result = unsafe {
+            if path.nofollow_on_open {
+                libc::llistxattr(cpath.as_ptr(), std::ptr::null_mut(), 0)
+            } else {
+                libc::listxattr(cpath.as_ptr(), std::ptr::null_mut(), 0)
+            }
+        };
+        Self::xattr_result(result)
+    }
+
+    fn has_xattr_fd(fd: std::os::fd::RawFd) -> VfResult<bool> {
+        let result = unsafe { libc::flistxattr(fd, std::ptr::null_mut(), 0) };
+        Self::xattr_result(result)
+    }
+
+    fn fill_attrs(
+        &self,
+        a: &mut VfAttrs,
+        path: Option<&AnchoredPath>,
+        md: &std::fs::Metadata,
+    ) -> VfResult<()> {
         let ft = md.file_type();
         a.ftype = if ft.is_dir() {
             VfType::Directory
@@ -651,7 +916,7 @@ impl LocalBackend {
         } else {
             VfType::Regular
         };
-        a.has_named_attr = path.is_some_and(Self::has_xattr);
+        a.has_named_attr = false;
         a.returned = AttrMask::empty();
         if a.masks.contains(AttrMask::MODE) {
             a.mode = md.mode();
@@ -707,9 +972,10 @@ impl LocalBackend {
         if a.masks.contains(AttrMask::NAMED_ATTR)
             && let Some(path) = path
         {
-            a.has_named_attr = Self::has_xattr(path);
+            a.has_named_attr = Self::has_xattr(path)?;
             a.returned.insert(AttrMask::NAMED_ATTR);
         }
+        Ok(())
     }
 
     fn ownership_ids(a: &VfAttrs, index: usize) -> VfResult<(libc::uid_t, libc::gid_t)> {
@@ -820,8 +1086,14 @@ impl LocalBackend {
         // Apply permissions last so a combined truncate+chmod cannot revoke
         // the write access needed by its own size update.
         if a.masks.contains(AttrMask::MODE) {
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(a.mode & 0o7777))
-                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            #[cfg(feature = "test-faults")]
+            self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index: i })?;
+            if p.nofollow_on_open {
+                Self::set_permissions_no_follow(&p, a.mode, false, i)?;
+            } else {
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(a.mode & 0o7777))
+                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            }
         }
         if a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
             let mut options = OpenOptions::new();
@@ -1026,12 +1298,7 @@ impl LocalBackend {
             if reached_limit(out) {
                 break;
             }
-            let p = self.no_follow_path(&self.resolve(&current))?;
-            let dir_metadata = std::fs::symlink_metadata(&p)
-                .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
-            if dir_metadata.file_type().is_symlink() {
-                return Err(VfError::failure(0, ERR_ACCES));
-            }
+            let p = self.open_directory_no_follow_final(&self.resolve(&current))?;
             let rd = std::fs::read_dir(&p).map_err(|e| VfError::failure(0, Self::errno(&e)))?;
             let mut children = Vec::new();
             for entry in rd {
@@ -1049,7 +1316,8 @@ impl LocalBackend {
                 let metadata = std::fs::symlink_metadata(entry.path())
                     .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
                 let real = self.no_follow_path(&self.resolve(&path))?;
-                self.fill_attrs(&mut attrs, Some(&real), &metadata);
+                self.fill_attrs(&mut attrs, Some(&real), &metadata)
+                    .map_err(|error| error.with_index(out.len()))?;
                 if recursive && attrs.ftype == VfType::Directory {
                     children.push(path);
                 }
@@ -1077,6 +1345,20 @@ impl LocalBackend {
         let dst = dst_options
             .open(&dp)
             .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
+        if p.length.is_none() && p.dst_offset > p.src_offset {
+            let src_metadata = src
+                .metadata()
+                .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
+            let dst_metadata = dst
+                .metadata()
+                .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
+            if src_metadata.dev() == dst_metadata.dev() && src_metadata.ino() == dst_metadata.ino()
+            {
+                // A forward to-EOF copy from the same inode keeps extending
+                // its own source. Reject it before the first write.
+                return Err(VfError::failure(0, ERR_INVAL));
+            }
+        }
         let mut so = p.src_offset;
         let mut doff = p.dst_offset;
         let mut copied: u64 = 0;
@@ -1218,25 +1500,32 @@ impl HandleBackend for LocalBackend {
                 .join(path_from_bytes(&normalize_bytes(path_bytes(pathname)))),
             VfPathBase::Cwd => self.resolve(pathname),
         };
-        let p = self.real_path(&resolved)?;
+        let p = if flags & O_CREAT != 0 && flags & libc::O_EXCL != 0 {
+            // Exclusive creation treats even a dangling final symlink as an
+            // existing directory entry. Keep the leaf unresolved so
+            // create_new sees it and the anchored open cannot follow it.
+            self.no_follow_path(&resolved)?
+        } else {
+            self.real_path(&resolved)?
+        };
         // The mode only applies when O_CREAT actually creates the file
         // (POSIX ignores it for existing files). Try create_new to detect
         // creation, then fall back to a plain open on EEXIST.
-        let mut created = false;
         let file = if flags & O_CREAT != 0 {
             let mut opts = Self::open_options(flags);
             opts.create_new(true);
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(mode & 0o7777);
             Self::protect_create_open(&p, &mut opts);
             match opts.open(&p) {
-                Ok(f) => {
-                    created = true;
-                    f
-                }
+                Ok(f) => f,
                 Err(e)
                     if flags & libc::O_EXCL == 0
                         && e.kind() == std::io::ErrorKind::AlreadyExists =>
                 {
                     let mut fallback = Self::open_options(flags);
+                    use std::os::unix::fs::OpenOptionsExt;
+                    fallback.mode(mode & 0o7777);
                     Self::protect_create_open(&p, &mut fallback);
                     fallback
                         .open(&p)
@@ -1251,12 +1540,6 @@ impl HandleBackend for LocalBackend {
                 .open(&p)
                 .map_err(|e| VfError::failure(0, Self::errno(&e)))?
         };
-        if created {
-            #[cfg(feature = "test-faults")]
-            self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index: 0 })?;
-            file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))
-                .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
-        }
         let fd = self.insert_open_file(LocalOpen {
             file: Arc::new(file),
             identity: std::cell::Cell::new(None),
@@ -1740,15 +2023,10 @@ impl VectorBackend for LocalBackend {
             Some(cursor) => cursor.into_state::<LocalDirectoryCursor>()?,
             None => {
                 let p = if follow_symlinks {
-                    self.no_follow_path(&self.resolve(dir))?
+                    self.open_directory_no_follow_final(&self.resolve(dir))?
                 } else {
                     self.strict_directory_path(dir)?
                 };
-                let metadata = std::fs::symlink_metadata(&p)
-                    .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
-                if metadata.file_type().is_symlink() {
-                    return Err(VfError::failure(0, ERR_ACCES));
-                }
                 let entries = std::fs::read_dir(&p)
                     .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
                 LocalDirectoryCursor {
@@ -1773,7 +2051,8 @@ impl VectorBackend for LocalBackend {
             let metadata = std::fs::symlink_metadata(entry.path())
                 .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
             let real = self.no_follow_path(&self.resolve(&path))?;
-            self.fill_attrs(&mut attrs, Some(&real), &metadata);
+            self.fill_attrs(&mut attrs, Some(&real), &metadata)
+                .map_err(|error| error.with_index(page.len()))?;
             page.push(attrs);
         }
         Ok((page, Some(DirPageCursor::new(state))))
@@ -1786,12 +2065,7 @@ impl VectorBackend for LocalBackend {
         max_entries: usize,
         cb: &mut dyn FnMut(&VfAttrs) -> bool,
     ) -> VfRes {
-        let p = self.no_follow_path(&self.resolve(dir))?;
-        let metadata = std::fs::symlink_metadata(&p)
-            .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
-        if metadata.file_type().is_symlink() {
-            return Err(VfError::failure(0, ERR_ACCES));
-        }
+        let p = self.open_directory_no_follow_final(&self.resolve(dir))?;
         let entries =
             std::fs::read_dir(&p).map_err(|error| VfError::failure(0, Self::errno(&error)))?;
         for (count, entry) in entries.enumerate() {
@@ -1808,7 +2082,8 @@ impl VectorBackend for LocalBackend {
             let metadata = std::fs::symlink_metadata(entry.path())
                 .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
             let real = self.no_follow_path(&self.resolve(&path))?;
-            self.fill_attrs(&mut attrs, Some(&real), &metadata);
+            self.fill_attrs(&mut attrs, Some(&real), &metadata)
+                .map_err(|error| error.with_index(count))?;
             if !cb(&attrs) {
                 return Ok(());
             }
@@ -1954,8 +2229,7 @@ impl VectorBackend for LocalBackend {
             if a.masks.contains(AttrMask::MODE) {
                 #[cfg(feature = "test-faults")]
                 self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index: i })?;
-                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(a.mode & 0o7777))
-                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+                Self::set_permissions_no_follow(&p, a.mode, true, i)?;
             }
         }
         Ok(())
