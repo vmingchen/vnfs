@@ -1459,14 +1459,23 @@ class VfsiFile(AbstractBufferedFile):
             raise OSError(self._write_failure_errno, message, self.path)
         raise ConnectionError(message)
 
+    def _reconcile_append_position(self, previous, written, position):
+        # loc also counts bytes still buffered/spooled. Adjust only the gap
+        # between the predicted append end and the backend's actual end.
+        self.loc += position - (previous + written)
+        self._raw._pos = position
+
     def _upload_chunk(self, final=False):
         data = self.buffer.getvalue()
         offset = 0
         try:
             while offset < len(data):
+                previous = self._raw.tell()
                 written = self._raw.write(data[offset:])
                 if written <= 0:
                     raise OSError(errno.EIO, "short buffered write", self.path)
+                if self._base_mode == "a":
+                    self._reconcile_append_position(previous, written, self._raw.tell())
                 offset += written
         except BaseException as error:
             self._write_failed = True
@@ -2165,7 +2174,9 @@ class _BufferGroup:
                     for file, data, (written, position) in zip(wave, datas, results):
                         if written != len(data):
                             raise OSError(errno.EIO, "short buffered append", file.path)
-                        file._raw._pos = position
+                        file._reconcile_append_position(
+                            file._raw._pos, written, position
+                        )
                         file._spool_read_offset += written
                 else:
                     offsets = [file._raw._pos for file in wave]
