@@ -281,10 +281,10 @@ impl Engine {
             // all CQEs drain. Vec header moves do not move allocations.
             let bytes = if let Some(buffer) = &mut op.owned {
                 debug_assert!(op.owned_start + length as usize <= buffer.len());
-                unsafe { buffer.as_mut_ptr().add(op.owned_start) }
+                buffer.as_mut_ptr().wrapping_add(op.owned_start)
             } else {
                 debug_assert!(end <= scratch_len);
-                unsafe { scratch_ptr.add(op.bytes.start) }
+                scratch_ptr.wrapping_add(op.bytes.start)
             };
             // Inject an actual short transfer, not a fabricated CQE after
             // the full payload has already reached the file.

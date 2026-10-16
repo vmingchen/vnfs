@@ -1,3 +1,7 @@
+#![cfg_attr(
+    test,
+    allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)
+)]
 //! Round-trip tests for individual NFSv4.1 operations: encode a COMPOUND4args
 //! / COMPOUND4res holding a single op with the nfsv41.h codecs, decode it
 //! back, and verify the fields match.
@@ -7,7 +11,6 @@
 //! symlink coverage is via LOOKUP / READDIR / REMOVE / RENAME / CREATE and
 //! READLINK instead.
 
-#![allow(unsafe_op_in_unsafe_fn)]
 use nfsv41_sys::*;
 use std::os::raw::c_char;
 

@@ -1,3 +1,7 @@
+#![cfg_attr(
+    test,
+    allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)
+)]
 //! Compile-time coverage for the application-facing NFS API and the explicit
 //! low-level backend namespace. No live server is needed.
 

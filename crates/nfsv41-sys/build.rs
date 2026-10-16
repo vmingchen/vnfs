@@ -2,17 +2,61 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Command;
 
+// Bindgen's raw bitfield/flexible-array accessors expose the C pointer
+// contract directly. Keep their audited obligations next to generated unsafe
+// blocks instead of exempting the entire generated module from the lint.
+fn document_raw_accessors(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut cursor = 0;
+    // Bindgen can emit either formatted or single-line Rust when rustfmt is
+    // unavailable. Locate each block and its enclosing generated function
+    // independently of physical lines.
+    for (offset, _) in source.match_indices("unsafe {") {
+        let function = source[..offset]
+            .rsplit_once("fn ")
+            .expect("unsafe helper must have a function")
+            .1
+            .split(['(', '<'])
+            .next()
+            .unwrap_or("")
+            .trim();
+        let reason = if function.starts_with("raw_") || function.ends_with("_raw") {
+            "the unsafe raw accessor requires live backing storage and an in-bounds bit range; writes require exclusive access."
+        } else if matches!(function, "_flags2" | "set__flags2" | "new_bitfield_1") {
+            "the generated conversion is between same-width C integers; every bit pattern is valid for both representations."
+        } else if matches!(function, "as_slice" | "as_mut_slice") {
+            "the unsafe flexible-array accessor requires len initialized elements in the backing allocation, exclusively borrowed for mutation."
+        } else {
+            panic!("review new bindgen unsafe helper: {function}");
+        };
+        let prefix = source[..offset].rsplit('\n').next().unwrap_or("");
+        let indent = &prefix[..prefix.len() - prefix.trim_start().len()];
+        output.push_str(&source[cursor..offset]);
+        if !prefix.trim().is_empty() {
+            output.push('\n');
+            output.push_str(indent);
+        }
+        output.push_str("// SAFETY: ");
+        output.push_str(reason);
+        output.push('\n');
+        output.push_str(indent);
+        output.push_str("unsafe {");
+        cursor = offset + "unsafe {".len();
+    }
+    output.push_str(&source[cursor..]);
+    output
+}
+
 fn main() {
     println!("cargo:rerun-if-env-changed=DOCS_RS");
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let src_dir = manifest_dir.join("src");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     if env::var_os("DOCS_RS").is_some() {
-        std::fs::copy(
-            src_dir.join("bindings-docs.rs"),
-            out_dir.join("bindings.rs"),
-        )
-        .expect("copy pregenerated docs.rs bindings");
+        let source = std::fs::read_to_string(src_dir.join("bindings-docs.rs"))
+            .expect("read pregenerated docs.rs bindings");
+        std::fs::write(out_dir.join("bindings.rs"), document_raw_accessors(&source))
+            .expect("write documented docs.rs bindings");
         println!("cargo:rerun-if-changed=src/bindings-docs.rs");
         return;
     }
@@ -73,6 +117,7 @@ fn main() {
         bindgen = bindgen.clang_arg(format!("-I{}", ntirpc_build_inc));
     }
     bindgen
+        .wrap_unsafe_ops(true)
         .blocklist_type("rpcblist")
         // Following are unsupported because of usage u128
         .blocklist_function("xdr_quadruple")
@@ -97,5 +142,5 @@ fn main() {
         .replace("unsafe extern \"C\" {", "\u{0}unsafe_extern\u{0}")
         .replace("extern \"C\" {", "unsafe extern \"C\" {")
         .replace("\u{0}unsafe_extern\u{0}", "unsafe extern \"C\" {");
-    std::fs::write(&bindings_path, rewritten).expect("rewrite bindings");
+    std::fs::write(&bindings_path, document_raw_accessors(&rewritten)).expect("rewrite bindings");
 }

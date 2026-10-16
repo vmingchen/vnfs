@@ -88,3 +88,6 @@ required-features = ["nfs"]
 [[example]]
 name = "write_schedule_benchmark"
 required-features = ["posix"]
+
+[lints]
+workspace = true

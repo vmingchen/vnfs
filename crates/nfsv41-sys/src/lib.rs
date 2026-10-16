@@ -6,7 +6,6 @@
 #![allow(unnecessary_transmutes)]
 #![allow(improper_ctypes)]
 #![allow(improper_ctypes_definitions)]
-#![allow(unsafe_op_in_unsafe_fn)]
 #![allow(clippy::ptr_offset_with_cast)]
 // bindgen 0.73 emits arithmetic div_ceil equivalents in generated bitfield helpers.
 #![allow(clippy::manual_div_ceil)]

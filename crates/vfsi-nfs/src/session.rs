@@ -187,7 +187,16 @@ impl Session {
             eia_state_protect: state_protect4_a {
                 spa_how: state_protect_how4_SP4_NONE,
                 state_protect4_a_u: state_protect4_a__bindgen_ty_1 {
-                    spa_mach_ops: unsafe { std::mem::zeroed() },
+                    spa_mach_ops: state_protect_ops4 {
+                        spo_must_enforce: bitmap4 {
+                            bitmap4_len: 0,
+                            map: [0; 3],
+                        },
+                        spo_must_allow: bitmap4 {
+                            bitmap4_len: 0,
+                            map: [0; 3],
+                        },
+                    },
                 },
             },
             eia_client_impl_id: EXCHANGE_ID4args__bindgen_ty_1 {
@@ -262,14 +271,17 @@ impl Session {
             ));
         }
         c.args.minorversion = self.minorversion;
-        let mut seq: nfs_argop4 = unsafe { std::mem::zeroed() };
-        seq.argop = nfs_opnum4_NFS4_OP_SEQUENCE;
-        seq.nfs_argop4_u.opsequence = SEQUENCE4args {
-            sa_sessionid: self.sessionid,
-            sa_sequenceid: self.slot_seqid,
-            sa_slotid: 0,
-            sa_highest_slotid: 0,
-            sa_cachethis: 0,
+        let seq = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_SEQUENCE,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opsequence: SEQUENCE4args {
+                    sa_sessionid: self.sessionid,
+                    sa_sequenceid: self.slot_seqid,
+                    sa_slotid: 0,
+                    sa_highest_slotid: 0,
+                    sa_cachethis: 0,
+                },
+            },
         };
         c.prepend_sequence(seq);
         let res = match c.call(&self.rpc) {

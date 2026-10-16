@@ -1,3 +1,7 @@
+#![cfg_attr(
+    test,
+    allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)
+)]
 //! Independent wire fixtures catch encoder/decoder bugs hidden by round trips.
 use nfsv41_sys::*;
 use std::os::raw::c_char;

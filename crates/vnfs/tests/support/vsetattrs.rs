@@ -1,3 +1,7 @@
+#![cfg_attr(
+    test,
+    allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)
+)]
 use vnfs::directory::{Attributes, AttrsOptions, Permissions};
 use vnfs::files::{Vfsi, VfsiExt};
 

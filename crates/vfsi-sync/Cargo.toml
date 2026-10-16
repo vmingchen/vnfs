@@ -16,3 +16,6 @@ test-faults = ["vfsi-core/test-faults"]
 [dependencies]
 libc = { workspace = true }
 vfsi-core = { workspace = true }
+
+[lints]
+workspace = true

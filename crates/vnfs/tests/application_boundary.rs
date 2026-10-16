@@ -1,3 +1,7 @@
+#![cfg_attr(
+    test,
+    allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)
+)]
 //! Compare facade adapters with the existing backend path, including allocations.
 #![cfg(target_os = "linux")]
 use std::alloc::{GlobalAlloc, Layout, System};

@@ -12,6 +12,44 @@ use nfsv41_sys::*;
 use crate::error::{RpcError, RpcResult};
 use crate::rpc::{NFSPROC4_COMPOUND, RpcClient};
 
+// These opcodes have no union payload on the wire. Initializing an unused
+// integer member is sufficient; the codec reads only the operation tag.
+fn no_arg_operation(argop: nfs_opnum4) -> nfs_argop4 {
+    nfs_argop4 {
+        argop,
+        nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+            opaccess: ACCESS4args { access: 0 },
+        },
+    }
+}
+
+/// NOCREATE has no union payload; initialize an unused verifier safely.
+pub(crate) fn no_create_how() -> openflag4 {
+    openflag4 {
+        opentype: opentype4_OPEN4_NOCREATE,
+        openflag4_u: openflag4__bindgen_ty_1 {
+            how: createhow4 {
+                mode: createmode4_EXCLUSIVE4,
+                createhow4_u: createhow4__bindgen_ty_1 { createverf: [0; 8] },
+            },
+        },
+    }
+}
+
+fn empty_response(status: nfsstat4) -> COMPOUND4res {
+    COMPOUND4res {
+        status,
+        tag: utf8string {
+            utf8string_len: 0,
+            utf8string_val: std::ptr::null_mut(),
+        },
+        resarray: COMPOUND4res__bindgen_ty_1 {
+            resarray_len: 0,
+            resarray_val: std::ptr::null_mut(),
+        },
+    }
+}
+
 thread_local! {
     // XDR requires word-aligned storage. Reuse it so the preflight does not
     // allocate a request-sized buffer for every compound.
@@ -50,10 +88,14 @@ fn compound_preflight_survives_late_thread_local_client_cleanup() {
 pub(crate) const SEQUENCE_XDR_BYTES: usize = 36;
 
 unsafe extern "C" fn wrap_compound4args(xdrs: *mut libntirpc_sys::XDR, objp: *mut c_void) -> bool {
+    // SAFETY: RpcClient invokes this wrapper only with live objects of the matching
+    // generated COMPOUND type and ABI-compatible XDR stream.
     unsafe { xdr_wrap_COMPOUND4args(xdrs as *mut nfsv41_sys::XDR, objp as *mut COMPOUND4args) }
 }
 
 unsafe extern "C" fn wrap_compound4res(xdrs: *mut libntirpc_sys::XDR, objp: *mut c_void) -> bool {
+    // SAFETY: RpcClient invokes this wrapper only with live objects of the matching
+    // generated COMPOUND type and ABI-compatible XDR stream.
     unsafe { xdr_wrap_COMPOUND4res(xdrs as *mut nfsv41_sys::XDR, objp as *mut COMPOUND4res) }
 }
 
@@ -156,7 +198,12 @@ impl Compound {
             let mut capacity = estimate.max(1024).min(limit);
             loop {
                 scratch.resize(capacity.div_ceil(4), 0);
+                // SAFETY: XDR is a C aggregate of integers, raw pointers and nullable
+                // callbacks, valid when zeroed before xdrmem_ncreate initializes it.
                 let mut xdr: XDR = unsafe { std::mem::zeroed() };
+                // SAFETY: the word-aligned scratch buffer stays allocated for the
+                // synchronous encoder; all argument payloads are owned by the live
+                // Compound builder.
                 let encoded = unsafe {
                     xdrmem_ncreate(
                         &mut xdr,
@@ -167,7 +214,9 @@ impl Compound {
                     xdr_wrap_COMPOUND4args(&mut xdr, &mut args)
                 };
                 if encoded {
-                    let size = unsafe { xdr.x_data.offset_from(xdr.x_v.vio_base) as usize };
+                    // The initialized memory XDR stream keeps both cursor pointers
+                    // within the same live scratch allocation.
+                    let size = xdr.x_data.addr() - xdr.x_v.vio_base.addr();
                     return Ok(Some(size));
                 }
                 if capacity >= limit {
@@ -230,32 +279,36 @@ impl Compound {
     }
 
     pub(crate) fn putfh(&mut self, fh: &nfs_fh4) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_PUTFH;
-        op.nfs_argop4_u.opputfh = PUTFH4args { object: *fh };
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_PUTFH,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opputfh: PUTFH4args { object: *fh },
+            },
+        };
         self.push(op);
     }
 
     pub fn putrootfh(&mut self) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_PUTROOTFH;
+        let op = no_arg_operation(nfs_opnum4_NFS4_OP_PUTROOTFH);
         self.push(op);
     }
 
     pub fn getfh(&mut self) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_GETFH;
+        let op = no_arg_operation(nfs_opnum4_NFS4_OP_GETFH);
         self.push(op);
     }
 
     pub fn lookup(&mut self, name: &[u8]) {
         let (ptr, len) = self.keep(name);
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_LOOKUP;
-        op.nfs_argop4_u.oplookup = LOOKUP4args {
-            objname: utf8string {
-                utf8string_len: len,
-                utf8string_val: ptr,
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_LOOKUP,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                oplookup: LOOKUP4args {
+                    objname: utf8string {
+                        utf8string_len: len,
+                        utf8string_val: ptr,
+                    },
+                },
             },
         };
         self.push(op);
@@ -268,22 +321,26 @@ impl Compound {
         slotid: u32,
         highest_slotid: u32,
     ) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_SEQUENCE;
-        op.nfs_argop4_u.opsequence = SEQUENCE4args {
-            sa_sessionid: *sessionid,
-            sa_sequenceid: seqid,
-            sa_slotid: slotid,
-            sa_highest_slotid: highest_slotid,
-            sa_cachethis: 0,
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_SEQUENCE,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opsequence: SEQUENCE4args {
+                    sa_sessionid: *sessionid,
+                    sa_sequenceid: seqid,
+                    sa_slotid: slotid,
+                    sa_highest_slotid: highest_slotid,
+                    sa_cachethis: 0,
+                },
+            },
         };
         self.push(op);
     }
 
     pub(crate) fn open(&mut self, args: OPEN4args) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_OPEN;
-        op.nfs_argop4_u.opopen = args;
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_OPEN,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 { opopen: args },
+        };
         self.push(op);
     }
 
@@ -340,13 +397,15 @@ impl Compound {
                     owner_val: own_ptr,
                 },
             },
-            openhow: openflag4 {
-                opentype: opentype4_OPEN4_NOCREATE,
-                openflag4_u: unsafe { std::mem::zeroed() },
-            },
+            openhow: no_create_how(),
             claim: open_claim4 {
                 claim: open_claim_type4_CLAIM_FH,
-                open_claim4_u: unsafe { std::mem::zeroed() },
+                open_claim4_u: open_claim4__bindgen_ty_1 {
+                    file: utf8string {
+                        utf8string_len: 0,
+                        utf8string_val: std::ptr::null_mut(),
+                    },
+                },
             },
         });
     }
@@ -423,27 +482,33 @@ impl Compound {
     }
 
     pub fn read(&mut self, stateid: &stateid4, offset: u64, count: u32) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_READ;
-        op.nfs_argop4_u.opread = READ4args {
-            stateid: *stateid,
-            offset,
-            count,
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_READ,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opread: READ4args {
+                    stateid: *stateid,
+                    offset,
+                    count,
+                },
+            },
         };
         self.push(op);
     }
 
     pub fn write(&mut self, stateid: &stateid4, offset: u64, stable: u32, data: &[u8]) {
         let (ptr, len) = self.keep(data);
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_WRITE;
-        op.nfs_argop4_u.opwrite = WRITE4args {
-            stateid: *stateid,
-            offset,
-            stable,
-            data: WRITE4args__bindgen_ty_1 {
-                data_len: len,
-                data_val: ptr,
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_WRITE,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opwrite: WRITE4args {
+                    stateid: *stateid,
+                    offset,
+                    stable,
+                    data: WRITE4args__bindgen_ty_1 {
+                        data_len: len,
+                        data_val: ptr,
+                    },
+                },
             },
         };
         self.push(op);
@@ -459,50 +524,65 @@ impl Compound {
         dst_offset: u64,
         count: u64,
     ) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_COPY;
-        op.nfs_argop4_u.opcopy = COPY4args {
-            ca_src_stateid: *src_stateid,
-            ca_dst_stateid: *dst_stateid,
-            ca_src_offset: src_offset,
-            ca_dst_offset: dst_offset,
-            ca_count: count,
-            ca_consecutive: 1,
-            ca_synchronous: 1,
-            ca_source_server_len: 0,
-            ca_source_server_val: std::ptr::null_mut(),
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_COPY,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opcopy: COPY4args {
+                    ca_src_stateid: *src_stateid,
+                    ca_dst_stateid: *dst_stateid,
+                    ca_src_offset: src_offset,
+                    ca_dst_offset: dst_offset,
+                    ca_count: count,
+                    ca_consecutive: 1,
+                    ca_synchronous: 1,
+                    ca_source_server_len: 0,
+                    ca_source_server_val: std::ptr::null_mut(),
+                },
+            },
         };
         self.push(op);
     }
 
     pub fn close(&mut self, seqid: u32, stateid: &stateid4) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_CLOSE;
-        op.nfs_argop4_u.opclose = CLOSE4args {
-            seqid,
-            open_stateid: *stateid,
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_CLOSE,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opclose: CLOSE4args {
+                    seqid,
+                    open_stateid: *stateid,
+                },
+            },
         };
         self.push(op);
     }
 
     pub(crate) fn exchange_id(&mut self, args: EXCHANGE_ID4args) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_EXCHANGE_ID;
-        op.nfs_argop4_u.opexchange_id = args;
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_EXCHANGE_ID,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opexchange_id: args,
+            },
+        };
         self.push(op);
     }
 
     pub(crate) fn create_session(&mut self, args: CREATE_SESSION4args) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_CREATE_SESSION;
-        op.nfs_argop4_u.opcreate_session = args;
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_CREATE_SESSION,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opcreate_session: args,
+            },
+        };
         self.push(op);
     }
 
     pub fn reclaim_complete(&mut self) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_RECLAIM_COMPLETE;
-        op.nfs_argop4_u.opreclaim_complete = RECLAIM_COMPLETE4args { rca_one_fs: 0 };
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_RECLAIM_COMPLETE,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opreclaim_complete: RECLAIM_COMPLETE4args { rca_one_fs: 0 },
+            },
+        };
         self.push(op);
     }
 
@@ -527,25 +607,42 @@ impl Compound {
             }
             None => createtype4 {
                 type_: ftype,
-                createtype4_u: unsafe { std::mem::zeroed() },
+                createtype4_u: if matches!(ftype, nfs_ftype4_NF4BLK | nfs_ftype4_NF4CHR) {
+                    createtype4__bindgen_ty_1 {
+                        devdata: specdata4 {
+                            specdata1: 0,
+                            specdata2: 0,
+                        },
+                    }
+                } else {
+                    createtype4__bindgen_ty_1 {
+                        linkdata: utf8string {
+                            utf8string_len: 0,
+                            utf8string_val: std::ptr::null_mut(),
+                        },
+                    }
+                },
             },
         };
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_CREATE;
-        op.nfs_argop4_u.opcreate = CREATE4args {
-            objtype,
-            objname: utf8string {
-                utf8string_len: nlen,
-                utf8string_val: nptr,
-            },
-            createattrs: fattr4 {
-                attrmask: bitmap4 {
-                    bitmap4_len: 0,
-                    map: [0; 3],
-                },
-                attr_vals: attrlist4 {
-                    attrlist4_len: 0,
-                    attrlist4_val: std::ptr::null_mut(),
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_CREATE,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opcreate: CREATE4args {
+                    objtype,
+                    objname: utf8string {
+                        utf8string_len: nlen,
+                        utf8string_val: nptr,
+                    },
+                    createattrs: fattr4 {
+                        attrmask: bitmap4 {
+                            bitmap4_len: 0,
+                            map: [0; 3],
+                        },
+                        attr_vals: attrlist4 {
+                            attrlist4_len: 0,
+                            attrlist4_val: std::ptr::null_mut(),
+                        },
+                    },
                 },
             },
         };
@@ -554,17 +651,19 @@ impl Compound {
 
     /// READLINK the current object (no arguments).
     pub fn readlink(&mut self) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_READLINK;
+        let op = no_arg_operation(nfs_opnum4_NFS4_OP_READLINK);
         self.push(op);
     }
 
     /// GETATTR the current object for the given FATTR4 attribute ids.
     pub fn getattr(&mut self, attrs: &[u32]) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_GETATTR;
-        op.nfs_argop4_u.opgetattr = GETATTR4args {
-            attr_request: Self::bitmap(attrs),
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_GETATTR,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opgetattr: GETATTR4args {
+                    attr_request: Self::bitmap(attrs),
+                },
+            },
         };
         self.push(op);
     }
@@ -665,18 +764,21 @@ impl Compound {
             }
         }
         let (vptr, vlen) = self.keep(&vals);
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_SETATTR;
-        op.nfs_argop4_u.opsetattr = SETATTR4args {
-            stateid: *stateid,
-            obj_attributes: fattr4 {
-                attrmask: bitmap4 {
-                    bitmap4_len: bitmap_len,
-                    map,
-                },
-                attr_vals: attrlist4 {
-                    attrlist4_len: vlen,
-                    attrlist4_val: vptr,
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_SETATTR,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opsetattr: SETATTR4args {
+                    stateid: *stateid,
+                    obj_attributes: fattr4 {
+                        attrmask: bitmap4 {
+                            bitmap4_len: bitmap_len,
+                            map,
+                        },
+                        attr_vals: attrlist4 {
+                            attrlist4_len: vlen,
+                            attrlist4_val: vptr,
+                        },
+                    },
                 },
             },
         };
@@ -693,14 +795,17 @@ impl Compound {
         maxcount: u32,
         attrs: &[u32],
     ) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_READDIR;
-        op.nfs_argop4_u.opreaddir = READDIR4args {
-            cookie,
-            cookieverf: *cookieverf,
-            dircount,
-            maxcount,
-            attr_request: Self::bitmap(attrs),
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_READDIR,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opreaddir: READDIR4args {
+                    cookie,
+                    cookieverf: *cookieverf,
+                    dircount,
+                    maxcount,
+                    attr_request: Self::bitmap(attrs),
+                },
+            },
         };
         self.push(op);
     }
@@ -708,12 +813,15 @@ impl Compound {
     /// REMOVE `name` from the current directory.
     pub fn remove(&mut self, name: &[u8]) {
         let (ptr, len) = self.keep(name);
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_REMOVE;
-        op.nfs_argop4_u.opremove = REMOVE4args {
-            target: utf8string {
-                utf8string_len: len,
-                utf8string_val: ptr,
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_REMOVE,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opremove: REMOVE4args {
+                    target: utf8string {
+                        utf8string_len: len,
+                        utf8string_val: ptr,
+                    },
+                },
             },
         };
         self.push(op);
@@ -723,16 +831,19 @@ impl Compound {
     pub fn rename(&mut self, oldname: &[u8], newname: &[u8]) {
         let (optr, olen) = self.keep(oldname);
         let (nptr, nlen) = self.keep(newname);
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_RENAME;
-        op.nfs_argop4_u.oprename = RENAME4args {
-            oldname: utf8string {
-                utf8string_len: olen,
-                utf8string_val: optr,
-            },
-            newname: utf8string {
-                utf8string_len: nlen,
-                utf8string_val: nptr,
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_RENAME,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                oprename: RENAME4args {
+                    oldname: utf8string {
+                        utf8string_len: olen,
+                        utf8string_val: optr,
+                    },
+                    newname: utf8string {
+                        utf8string_len: nlen,
+                        utf8string_val: nptr,
+                    },
+                },
             },
         };
         self.push(op);
@@ -740,8 +851,7 @@ impl Compound {
 
     /// SAVEFH the current filehandle.
     pub fn savefh(&mut self) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_SAVEFH;
+        let op = no_arg_operation(nfs_opnum4_NFS4_OP_SAVEFH);
         self.push(op);
     }
 
@@ -749,58 +859,68 @@ impl Compound {
     /// NFSv4.1 this is how a compound returns to a directory it previously
     /// SAVEFH'd, enabling many child operations in one compound.
     pub fn restorefh(&mut self) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_RESTOREFH;
+        let op = no_arg_operation(nfs_opnum4_NFS4_OP_RESTOREFH);
         self.push(op);
     }
 
     /// LOOKUPP: make the parent of the current filehandle the current
     /// filehandle.
     pub fn lookupp(&mut self) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_LOOKUPP;
+        let op = no_arg_operation(nfs_opnum4_NFS4_OP_LOOKUPP);
         self.push(op);
     }
 
     /// LINK the saved filehandle into the current directory under `newname`.
     pub fn link(&mut self, newname: &[u8]) {
         let (ptr, len) = self.keep(newname);
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_LINK;
-        op.nfs_argop4_u.oplink = LINK4args {
-            newname: utf8string {
-                utf8string_len: len,
-                utf8string_val: ptr,
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_LINK,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                oplink: LINK4args {
+                    newname: utf8string {
+                        utf8string_len: len,
+                        utf8string_val: ptr,
+                    },
+                },
             },
         };
         self.push(op);
     }
 
     pub(crate) fn bind_fore_channel(&mut self, sessionid: sessionid4) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_BIND_CONN_TO_SESSION;
-        op.nfs_argop4_u.opbind_conn_to_session = BIND_CONN_TO_SESSION4args {
-            bctsa_sessid: sessionid,
-            bctsa_dir: channel_dir_from_client4_CDFC4_FORE,
-            bctsa_use_conn_in_rdma_mode: 0,
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_BIND_CONN_TO_SESSION,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opbind_conn_to_session: BIND_CONN_TO_SESSION4args {
+                    bctsa_sessid: sessionid,
+                    bctsa_dir: channel_dir_from_client4_CDFC4_FORE,
+                    bctsa_use_conn_in_rdma_mode: 0,
+                },
+            },
         };
         self.push(op);
     }
 
     pub fn destroy_session(&mut self, sessionid: &sessionid4) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_DESTROY_SESSION;
-        op.nfs_argop4_u.opdestroy_session = DESTROY_SESSION4args {
-            dsa_sessionid: *sessionid,
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_DESTROY_SESSION,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opdestroy_session: DESTROY_SESSION4args {
+                    dsa_sessionid: *sessionid,
+                },
+            },
         };
         self.push(op);
     }
 
     pub fn destroy_clientid(&mut self, clientid: clientid4) {
-        let mut op: nfs_argop4 = unsafe { std::mem::zeroed() };
-        op.argop = nfs_opnum4_NFS4_OP_DESTROY_CLIENTID;
-        op.nfs_argop4_u.opdestroy_clientid = DESTROY_CLIENTID4args {
-            dca_clientid: clientid,
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_DESTROY_CLIENTID,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opdestroy_clientid: DESTROY_CLIENTID4args {
+                    dca_clientid: clientid,
+                },
+            },
         };
         self.push(op);
     }
@@ -809,7 +929,7 @@ impl Compound {
     pub(crate) fn call(&mut self, rpc: &RpcClient) -> RpcResult<CompoundRes> {
         self.args.argarray.argarray_len = self.ops.len() as u_int;
         self.args.argarray.argarray_val = self.ops.as_mut_ptr();
-        let mut res: COMPOUND4res = unsafe { std::mem::zeroed() };
+        let mut res = empty_response(nfsstat4_NFS4_OK);
         let t0 = std::time::Instant::now();
         // SAFETY: the matching generated XDR routines receive live COMPOUND
         // structures, and self owns every argument allocation during the call.
@@ -853,6 +973,9 @@ impl Drop for CompoundRes {
         let _guard = XDR_FREE_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        // SAFETY: this response exclusively owns its decoder-allocated pointer graph; the
+        // matching XDR_FREE routine runs exactly once while the global null stream is
+        // locked.
         unsafe { xdr_wrap_COMPOUND4res(&raw mut xdr_free_null_stream, &mut self.res) };
     }
 }
@@ -881,6 +1004,8 @@ pub(crate) fn validate_response_ops(request: &[nfs_argop4], res: &COMPOUND4res) 
         )));
     }
     for (index, expected) in request.iter().enumerate().take(count) {
+        // SAFETY: the decoder allocated count result operations, and count/null were
+        // checked above; index is strictly below count.
         let actual = unsafe { &*res.resarray.resarray_val.add(index) };
         if actual.resop != expected.argop {
             return Err(RpcError::transport(format!(
@@ -907,6 +1032,8 @@ pub(crate) fn validate_response_ops(request: &[nfs_argop4], res: &COMPOUND4res) 
                 res.status
             )));
         }
+        // SAFETY: the decoder initialized the union selected by resop; success payload
+        // fields are read only after their status is checked.
         let null_payload = unsafe {
             match actual.resop {
                 nfs_opnum4_NFS4_OP_GETFH => {
@@ -958,6 +1085,8 @@ pub(crate) fn validate_response_ops(request: &[nfs_argop4], res: &COMPOUND4res) 
 }
 
 fn response_op_status(ro: &nfs_resop4) -> u32 {
+    // SAFETY: each match arm selects the status field of the union member named by the
+    // decoded operation discriminator.
     unsafe {
         match ro.resop {
             nfs_opnum4_NFS4_OP_PUTFH => ro.nfs_resop4_u.opputfh.status,
@@ -998,8 +1127,7 @@ impl CompoundRes {
     /// Model a server rejecting a compound before executing SEQUENCE.
     #[cfg(feature = "test-faults")]
     pub(crate) fn injected_resource_rejection(status: u32) -> Self {
-        let mut res: COMPOUND4res = unsafe { std::mem::zeroed() };
-        res.status = status;
+        let res = empty_response(status);
         Self { res }
     }
 
@@ -1013,6 +1141,8 @@ impl CompoundRes {
 
     fn resop(&self, i: usize) -> &nfs_resop4 {
         assert!(i < self.nops(), "resop index out of range");
+        // SAFETY: i is bounds-checked and the validated decoded result array is owned by
+        // self for the returned borrow.
         unsafe { self.res.resarray.resarray_val.add(i).as_ref().unwrap() }
     }
 
@@ -1059,6 +1189,7 @@ impl CompoundRes {
 
     /// Return the resop at `i`, asserting it is the expected op. Turns a
     /// wrong-op union access into a clear panic instead of reading garbage.
+    #[inline]
     fn expect_op(&self, i: usize, want: nfs_opnum4, what: &str) -> &nfs_resop4 {
         let ro = self.resop(i);
         assert_eq!(
@@ -1066,18 +1197,27 @@ impl CompoundRes {
             "op {} is not {} (got {})",
             i, what, ro.resop
         );
+        assert_eq!(
+            response_op_status(ro),
+            nfsstat4_NFS4_OK,
+            "op {i} ({what}) did not return a success payload"
+        );
         ro
     }
 
     /// The `EXCHANGE_ID4resok` of resop `i`.
     pub(crate) fn exchange_id(&self, i: usize) -> &EXCHANGE_ID4resok {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_EXCHANGE_ID, "EXCHANGE_ID");
+        // SAFETY: expect_op checks the operation tag and success status, so the selected
+        // result union is initialized; its storage is owned by this reply.
         unsafe { &ro.nfs_resop4_u.opexchange_id.EXCHANGE_ID4res_u.eir_resok4 }
     }
 
     /// The `CREATE_SESSION4resok` of resop `i`.
     pub(crate) fn create_session(&self, i: usize) -> &CREATE_SESSION4resok {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_CREATE_SESSION, "CREATE_SESSION");
+        // SAFETY: expect_op checks the operation tag and success status, so the selected
+        // result union is initialized; its storage is owned by this reply.
         unsafe {
             &ro.nfs_resop4_u
                 .opcreate_session
@@ -1089,52 +1229,82 @@ impl CompoundRes {
     /// The file handle returned by the GETFH at resop `i`.
     pub fn getfh(&self, i: usize) -> &nfs_fh4 {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_GETFH, "GETFH");
+        // SAFETY: expect_op checks the operation tag and success status, so the selected
+        // result union is initialized; its storage is owned by this reply.
         unsafe { &ro.nfs_resop4_u.opgetfh.GETFH4res_u.resok4.object }
     }
 
     /// The `OPEN4resok` of resop `i`.
     pub(crate) fn open(&self, i: usize) -> &OPEN4resok {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_OPEN, "OPEN");
+        // SAFETY: expect_op checks the operation tag and success status, so the selected
+        // result union is initialized; its storage is owned by this reply.
         unsafe { &ro.nfs_resop4_u.opopen.OPEN4res_u.resok4 }
     }
 
     /// The `READ4resok` of resop `i`.
     pub fn read(&self, i: usize) -> &READ4resok {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_READ, "READ");
+        // SAFETY: expect_op checks the operation tag and success status, so the selected
+        // result union is initialized; its storage is owned by this reply.
         unsafe { &ro.nfs_resop4_u.opread.READ4res_u.resok4 }
+    }
+
+    /// Borrow successful READ bytes for the lifetime of this decoded reply.
+    pub(crate) fn read_data(&self, i: usize) -> &[u8] {
+        let data = &self.read(i).data;
+        if data.data_len == 0 {
+            return &[];
+        }
+        // SAFETY: response validation checked a non-null pointer for this
+        // nonempty successful READ; the decoder owns data_len initialized
+        // bytes until self drops, and this borrow cannot outlive self.
+        unsafe { std::slice::from_raw_parts(data.data_val.cast::<u8>(), data.data_len as usize) }
     }
 
     /// The `WRITE4resok` of resop `i`.
     pub fn write(&self, i: usize) -> &WRITE4resok {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_WRITE, "WRITE");
+        // SAFETY: expect_op checks the operation tag and success status, so the selected
+        // result union is initialized; its storage is owned by this reply.
         unsafe { &ro.nfs_resop4_u.opwrite.WRITE4res_u.resok4 }
     }
 
     /// The successful NFSv4.2 COPY result at resop `i`.
     pub fn copy(&self, i: usize) -> &COPY4resok {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_COPY, "COPY");
+        // SAFETY: expect_op checks the operation tag and success status, so the selected
+        // result union is initialized; its storage is owned by this reply.
         unsafe { &ro.nfs_resop4_u.opcopy.COPY4res_u.cr_resok4 }
     }
 
     /// The symlink target bytes of the READLINK at resop `i`.
     pub fn readlink(&self, i: usize) -> &[u8] {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_READLINK, "READLINK");
+        // SAFETY: expect_op checks the operation tag and success status, so the selected
+        // result union is initialized; its storage is owned by this reply.
         let link = unsafe { ro.nfs_resop4_u.opreadlink.READLINK4res_u.resok4.link };
         let len = link.utf8string_len as usize;
         if len == 0 {
             return &[];
         }
+        // SAFETY: the validated successful XDR field owns len initialized bytes; len is
+        // nonzero and the returned slice is borrowed from self.
         unsafe { std::slice::from_raw_parts(link.utf8string_val as *const u8, len) }
     }
 
     /// The raw attribute list returned by the GETATTR at resop `i`.
     pub fn getattr(&self, i: usize) -> &[u8] {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_GETATTR, "GETATTR");
+        // SAFETY: expect_op checks the operation tag and success status, so the selected
+        // result union is initialized; its storage is owned by this reply.
         let ok = unsafe { ro.nfs_resop4_u.opgetattr.GETATTR4res_u.resok4 };
         let len = ok.obj_attributes.attr_vals.attrlist4_len as usize;
         if len == 0 {
             return &[];
         }
+        // SAFETY: the validated successful XDR field owns len initialized bytes; len is
+        // nonzero and the returned slice is borrowed from self.
         unsafe {
             std::slice::from_raw_parts(ok.obj_attributes.attr_vals.attrlist4_val as *const u8, len)
         }
@@ -1143,12 +1313,16 @@ impl CompoundRes {
     /// The `READDIR4resok` of resop `i`.
     pub fn readdir(&self, i: usize) -> &READDIR4resok {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_READDIR, "READDIR");
+        // SAFETY: expect_op checks the operation tag and success status, so the selected
+        // result union is initialized; its storage is owned by this reply.
         unsafe { &ro.nfs_resop4_u.opreaddir.READDIR4res_u.resok4 }
     }
 
     /// Preserve the server's returned bitmap alongside the attribute payload.
     pub fn getattr_with_bitmap(&self, i: usize) -> (bitmap4, Vec<u8>) {
         let ro = self.expect_op(i, nfs_opnum4_NFS4_OP_GETATTR, "GETATTR");
+        // SAFETY: expect_op checks the operation tag and success status, so the selected
+        // result union is initialized; its storage is owned by this reply.
         let ok = unsafe { ro.nfs_resop4_u.opgetattr.GETATTR4res_u.resok4 };
         (ok.obj_attributes.attrmask, self.getattr_bytes(i))
     }
@@ -1178,8 +1352,28 @@ thread_local! {
 
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)]
+#[allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)]
 mod response_validation_tests {
     use super::*;
+
+    #[test]
+    fn typed_read_rejects_a_failed_operation_before_accessing_success_union() {
+        let mut operations = [res(nfs_opnum4_NFS4_OP_READ)];
+        operations[0].nfs_resop4_u.opread.status = nfsstat4_NFS4ERR_IO;
+        let response = std::mem::ManuallyDrop::new(CompoundRes {
+            res: reply(nfsstat4_NFS4ERR_IO, &mut operations),
+        });
+        assert!(std::panic::catch_unwind(|| response.read_data(0)).is_err());
+    }
+
+    #[test]
+    fn empty_read_data_accepts_the_decoders_null_empty_payload() {
+        let mut operations = [res(nfs_opnum4_NFS4_OP_READ)];
+        let response = std::mem::ManuallyDrop::new(CompoundRes {
+            res: reply(nfsstat4_NFS4_OK, &mut operations),
+        });
+        assert!(response.read_data(0).is_empty());
+    }
 
     fn arg(op: nfs_opnum4) -> nfs_argop4 {
         let mut value: nfs_argop4 = unsafe { std::mem::zeroed() };
@@ -1543,6 +1737,8 @@ fn compound_stats_record(args: &COMPOUND4args) {
         let n = args.argarray.argarray_val;
         for i in 0..args.argarray.argarray_len as usize {
             use std::fmt::Write;
+            // SAFETY: args comes from the live Compound builder and its operation vector
+            // owns argarray_len initialized elements for this diagnostic.
             let op = unsafe { (*n.add(i)).argop };
             if i > 0 {
                 buf.push(' ');
@@ -1567,7 +1763,11 @@ fn compound_stats_record(args: &COMPOUND4args) {
             buf.resize(4 * 1024 * 1024, 0);
         }
         loop {
+            // SAFETY: XDR is a C aggregate of integers, raw pointers and nullable
+            // callbacks, valid when zeroed before xdrmem_ncreate initializes it.
             let mut xdr: XDR = unsafe { std::mem::zeroed() };
+            // SAFETY: the word-aligned scratch buffer stays allocated for the synchronous
+            // encoder; all argument payloads are owned by the live Compound builder.
             let encoded = unsafe {
                 xdrmem_ncreate(
                     &mut xdr,
@@ -1578,7 +1778,9 @@ fn compound_stats_record(args: &COMPOUND4args) {
                 xdr_wrap_COMPOUND4args(&mut xdr, args as *const _ as *mut _)
             };
             if encoded {
-                let len = unsafe { xdr.x_data.offset_from(xdr.x_v.vio_base) as u64 };
+                // The initialized memory XDR stream keeps both cursor pointers
+                // within the same live scratch allocation.
+                let len = (xdr.x_data.addr() - xdr.x_v.vio_base.addr()) as u64;
                 COMPOUND_BYTES.fetch_add(len, Ordering::Relaxed);
                 THREAD_COMPOUND_STATS.with(|stats| {
                     let (count, ops, bytes, max_ops) = stats.get();
@@ -1624,8 +1826,23 @@ pub fn rpc_stats() -> (u64, u64) {
 }
 
 #[cfg(test)]
+#[allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)]
 mod request_size_tests {
     use super::*;
+
+    #[test]
+    fn safe_create_union_initializes_each_wire_payload() {
+        for (kind, expected) in [
+            (nfs_ftype4_NF4DIR, 36),
+            (nfs_ftype4_NF4LNK, 40),
+            (nfs_ftype4_NF4BLK, 44),
+            (nfs_ftype4_NF4CHR, 44),
+        ] {
+            let mut compound = Compound::new();
+            compound.create(b"x", kind, None);
+            assert_eq!(compound.encoded_len_up_to(1024).unwrap(), Some(expected));
+        }
+    }
 
     #[test]
     fn ownership_setattr_encodes_numeric_ids_in_attribute_order() {

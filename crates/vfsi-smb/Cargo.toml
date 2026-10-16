@@ -24,3 +24,6 @@ vfsi-sync = { workspace = true }
 [dev-dependencies]
 proptest = "1"
 vfsi-sync = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

@@ -74,6 +74,8 @@ fn initial_buffer_size(is_group: bool) -> usize {
     } else {
         libc::_SC_GETPW_R_SIZE_MAX
     };
+    // SAFETY: sysconf reads only the supplied valid _SC_* selector and does not borrow
+    // caller memory.
     let suggested = unsafe { libc::sysconf(selector) };
     if suggested > 0 {
         usize::try_from(suggested)
@@ -92,6 +94,8 @@ fn lookup(name: &str, is_group: bool) -> Option<u32> {
         let result = if is_group {
             let mut entry = std::mem::MaybeUninit::<libc::group>::uninit();
             let mut found = std::ptr::null_mut();
+            // SAFETY: the CString and writable entry, result pointer and scratch
+            // allocation remain live for the synchronous reentrant NSS call.
             let status = unsafe {
                 libc::getgrnam_r(
                     name.as_ptr(),
@@ -102,6 +106,8 @@ fn lookup(name: &str, is_group: bool) -> Option<u32> {
                 )
             };
             if status == 0 && !found.is_null() {
+                // SAFETY: NSS returned success and a non-null result, proving that the
+                // pointed-to entry was initialized in the still-live output storage.
                 Some(unsafe { (*found).gr_gid })
             } else if status == libc::ERANGE {
                 None
@@ -111,6 +117,8 @@ fn lookup(name: &str, is_group: bool) -> Option<u32> {
         } else {
             let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
             let mut found = std::ptr::null_mut();
+            // SAFETY: the CString and writable entry, result pointer and scratch
+            // allocation remain live for the synchronous reentrant NSS call.
             let status = unsafe {
                 libc::getpwnam_r(
                     name.as_ptr(),
@@ -121,6 +129,8 @@ fn lookup(name: &str, is_group: bool) -> Option<u32> {
                 )
             };
             if status == 0 && !found.is_null() {
+                // SAFETY: NSS returned success and a non-null result, proving that the
+                // pointed-to entry was initialized in the still-live output storage.
                 Some(unsafe { (*found).pw_uid })
             } else if status == libc::ERANGE {
                 None

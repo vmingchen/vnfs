@@ -78,6 +78,8 @@ impl NfsFh {
             // from_raw_parts requires a non-null pointer even for length 0.
             Vec::new().into_boxed_slice()
         } else {
+            // SAFETY: fh is borrowed from a live decoded XDR reply; its nonzero length
+            // describes initialized bytes, copied before that reply is freed.
             let slice = unsafe { std::slice::from_raw_parts(fh.nfs_fh4_val as *const u8, len) };
             Box::from(slice)
         };
@@ -1847,13 +1849,7 @@ impl NfsClient {
                         let len = ok.data.data_len as usize;
                         Self::validate_read_length(len, ops[wire_index].count as usize)
                             .map_err(|error| error.with_op_index(local_index))?;
-                        let data = if len == 0 {
-                            &[][..]
-                        } else {
-                            unsafe {
-                                std::slice::from_raw_parts(ok.data.data_val as *const u8, len)
-                            }
-                        };
+                        let data = res.read_data(2 + 2 * i);
                         decode(wire_index, data, ok.eof != 0)
                             .map_err(|error| error.with_op_index(local_index))
                     },
@@ -2915,7 +2911,7 @@ impl NfsClient {
                 for j in *s..(*e).min(res.nops()) {
                     let ro = res.op(j);
                     if ro.resop == nfs_opnum4_NFS4_OP_WRITE {
-                        let ok = unsafe { ro.nfs_resop4_u.opwrite.WRITE4res_u.resok4 };
+                        let ok = res.write(j);
                         #[cfg(feature = "test-faults")]
                         if injected_short_write {
                             self.short_merged_write_once = None;
@@ -3209,83 +3205,31 @@ impl NfsClient {
                 for j in *s..(*e).min(res.nops()) {
                     let ro = res.op(j);
                     if ro.resop == nfs_opnum4_NFS4_OP_READ {
-                        unsafe {
-                            let ok = ro.nfs_resop4_u.opread.READ4res_u.resok4;
-                            #[allow(unused_mut)]
-                            let mut len = ok.data.data_len as usize;
-                            #[allow(unused_mut)]
-                            let mut end_of_file = ok.eof != 0;
-                            #[cfg(feature = "test-faults")]
-                            if let Some(count) = self.short_merged_read_once.take()
-                                && count < len
-                            {
-                                len = count;
-                                end_of_file = false;
-                            }
-                            let requested = match expected_read_lengths[..expected_read_count]
-                                .get(read_index)
-                                .copied()
-                            {
-                                Some(requested) => requested,
-                                None => {
-                                    let error = RpcError::transport(
-                                        "malformed readv COMPOUND reply: extra READ result",
-                                    )
-                                    .with_op_index(*caller);
-                                    return read_error_with_cleanup(
-                                        &opened,
-                                        close_in_compound,
-                                        self,
-                                        error,
-                                        |client, closes| {
-                                            client.close_path_or_defer(
-                                                closes
-                                                    .iter()
-                                                    .map(|op| CloseOp {
-                                                        fh: op.fh.clone(),
-                                                        stateid: op.stateid,
-                                                    })
-                                                    .collect(),
-                                            )
-                                        },
-                                    );
-                                }
-                            };
-                            read_index += 1;
-                            if let Err(error) = Self::validate_read_length(len, requested as usize)
-                            {
-                                return read_error_with_cleanup(
-                                    &opened,
-                                    close_in_compound,
-                                    self,
-                                    error.with_op_index(*caller),
-                                    |client, closes| {
-                                        client.close_path_or_defer(
-                                            closes
-                                                .iter()
-                                                .map(|op| CloseOp {
-                                                    fh: op.fh.clone(),
-                                                    stateid: op.stateid,
-                                                })
-                                                .collect(),
-                                        )
-                                    },
-                                );
-                            }
-                            // Borrow the XDR reply while it is alive and
-                            // copy once into the final growing result buffer.
-                            let bytes = if len == 0 {
-                                &[]
-                            } else {
-                                std::slice::from_raw_parts(ok.data.data_val as *const u8, len)
-                            };
-                            if eof[*caller] == Some(true) {
-                                continue;
-                            }
-                            let output = data[*caller].get_or_insert_with(Vec::new);
-                            output.extend_from_slice(bytes);
-                            if len == 0 && requested != 0 && !end_of_file {
-                                let error = RpcError::op(*caller, nfsstat4_NFS4ERR_IO);
+                        // SAFETY: the successful READ owns data_len initialized bytes in
+                        // the live CompoundRes; requested lengths are checked before
+                        // copying or decoding.
+                        let ok = res.read(j);
+                        #[allow(unused_mut)]
+                        let mut len = ok.data.data_len as usize;
+                        #[allow(unused_mut)]
+                        let mut end_of_file = ok.eof != 0;
+                        #[cfg(feature = "test-faults")]
+                        if let Some(count) = self.short_merged_read_once.take()
+                            && count < len
+                        {
+                            len = count;
+                            end_of_file = false;
+                        }
+                        let requested = match expected_read_lengths[..expected_read_count]
+                            .get(read_index)
+                            .copied()
+                        {
+                            Some(requested) => requested,
+                            None => {
+                                let error = RpcError::transport(
+                                    "malformed readv COMPOUND reply: extra READ result",
+                                )
+                                .with_op_index(*caller);
                                 return read_error_with_cleanup(
                                     &opened,
                                     close_in_compound,
@@ -3304,40 +3248,88 @@ impl NfsClient {
                                     },
                                 );
                             }
-                            if len < requested as usize && !end_of_file {
-                                let offset =
-                                    checked_offset(ops[*caller].offset, output.len(), *caller)?;
-                                match self.repair_path_read(
-                                    &ops[*caller],
-                                    *caller,
-                                    offset,
-                                    requested as usize - len,
-                                    output,
-                                ) {
-                                    Ok(end) => end_of_file = end,
-                                    Err(error) => {
-                                        return read_error_with_cleanup(
-                                            &opened,
-                                            close_in_compound,
-                                            self,
-                                            error,
-                                            |client, closes| {
-                                                client.close_path_or_defer(
-                                                    closes
-                                                        .iter()
-                                                        .map(|op| CloseOp {
-                                                            fh: op.fh.clone(),
-                                                            stateid: op.stateid,
-                                                        })
-                                                        .collect(),
-                                                )
-                                            },
-                                        );
-                                    }
+                        };
+                        read_index += 1;
+                        if let Err(error) = Self::validate_read_length(len, requested as usize) {
+                            return read_error_with_cleanup(
+                                &opened,
+                                close_in_compound,
+                                self,
+                                error.with_op_index(*caller),
+                                |client, closes| {
+                                    client.close_path_or_defer(
+                                        closes
+                                            .iter()
+                                            .map(|op| CloseOp {
+                                                fh: op.fh.clone(),
+                                                stateid: op.stateid,
+                                            })
+                                            .collect(),
+                                    )
+                                },
+                            );
+                        }
+                        // Borrow the XDR reply while it is alive and
+                        // copy once into the final growing result buffer.
+                        let bytes = &res.read_data(j)[..len];
+                        if eof[*caller] == Some(true) {
+                            continue;
+                        }
+                        let output = data[*caller].get_or_insert_with(Vec::new);
+                        output.extend_from_slice(bytes);
+                        if len == 0 && requested != 0 && !end_of_file {
+                            let error = RpcError::op(*caller, nfsstat4_NFS4ERR_IO);
+                            return read_error_with_cleanup(
+                                &opened,
+                                close_in_compound,
+                                self,
+                                error,
+                                |client, closes| {
+                                    client.close_path_or_defer(
+                                        closes
+                                            .iter()
+                                            .map(|op| CloseOp {
+                                                fh: op.fh.clone(),
+                                                stateid: op.stateid,
+                                            })
+                                            .collect(),
+                                    )
+                                },
+                            );
+                        }
+                        if len < requested as usize && !end_of_file {
+                            let offset =
+                                checked_offset(ops[*caller].offset, output.len(), *caller)?;
+                            match self.repair_path_read(
+                                &ops[*caller],
+                                *caller,
+                                offset,
+                                requested as usize - len,
+                                output,
+                            ) {
+                                Ok(end) => end_of_file = end,
+                                Err(error) => {
+                                    return read_error_with_cleanup(
+                                        &opened,
+                                        close_in_compound,
+                                        self,
+                                        error,
+                                        |client, closes| {
+                                            client.close_path_or_defer(
+                                                closes
+                                                    .iter()
+                                                    .map(|op| CloseOp {
+                                                        fh: op.fh.clone(),
+                                                        stateid: op.stateid,
+                                                    })
+                                                    .collect(),
+                                            )
+                                        },
+                                    );
                                 }
                             }
-                            eof[*caller] = Some(end_of_file);
                         }
+                        eof[*caller] = Some(end_of_file);
                     }
                 }
             }
@@ -4140,12 +4132,7 @@ impl NfsClient {
         let ok = res.read(2);
         let len = ok.data.data_len as usize;
         Self::validate_read_length(len, count as usize)?;
-        let data = if len == 0 {
-            Vec::new()
-        } else {
-            let data = unsafe { std::slice::from_raw_parts(ok.data.data_val as *const u8, len) };
-            data.to_vec()
-        };
+        let data = res.read_data(2).to_vec();
         Ok((data, ok.eof != 0))
     }
 
@@ -4405,11 +4392,15 @@ impl NfsClient {
         let mut cookie = 0u64;
         let mut e = ok.reply.entries;
         while !e.is_null() {
+            // SAFETY: the generated XDR decoder owns this linked-list node; the reply
+            // remains alive for the entire traversal.
             let ent = unsafe { &*e };
             let name_len = ent.name.utf8string_len as usize;
             let name = if name_len == 0 {
                 Vec::new()
             } else {
+                // SAFETY: the live decoded entry owns name_len initialized name bytes; the
+                // zero-length case was handled separately.
                 unsafe {
                     std::slice::from_raw_parts(ent.name.utf8string_val as *const u8, name_len)
                 }
@@ -4426,6 +4417,8 @@ impl NfsClient {
                 let attrs = if attrs_len == 0 {
                     Vec::new()
                 } else {
+                    // SAFETY: the live decoded entry owns attrs_len initialized attribute
+                    // bytes; the zero-length case was handled separately.
                     unsafe {
                         std::slice::from_raw_parts(
                             ent.attrs.attr_vals.attrlist4_val as *const u8,
@@ -4653,12 +4646,7 @@ fn session_mount_root(session: &mut Session) -> RpcResult<NfsFh> {
 /// Build the `openflag4` for an OPEN based on the create mode.
 fn make_open_how(create: OpenCreate) -> openflag4 {
     match create {
-        OpenCreate::NoCreate => openflag4 {
-            opentype: opentype4_OPEN4_NOCREATE,
-            openflag4_u: openflag4__bindgen_ty_1 {
-                how: unsafe { std::mem::zeroed() },
-            },
-        },
+        OpenCreate::NoCreate => crate::compound::no_create_how(),
         OpenCreate::Exclusive => openflag4 {
             opentype: opentype4_OPEN4_CREATE,
             openflag4_u: openflag4__bindgen_ty_1 {
@@ -4714,6 +4702,7 @@ fn make_open_how(create: OpenCreate) -> openflag4 {
 }
 
 #[cfg(test)]
+#[allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)]
 mod tests {
     #[test]
     fn cleanup_error_remapping_preserves_transport_errors_as_unattributed() {

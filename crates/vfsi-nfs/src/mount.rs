@@ -344,7 +344,11 @@ pub fn decode_mount_field(field: &[u8]) -> Option<PathBuf> {
 #[doc(hidden)]
 pub fn path_mount_id(path: &Path) -> Option<u64> {
     let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: statx is a C integer aggregate and admits zero initialization before use as
+    // syscall output.
     let mut stat: libc::statx = unsafe { std::mem::zeroed() };
+    // SAFETY: the CString and writable statx output remain live until this synchronous
+    // syscall returns.
     let result = unsafe {
         libc::statx(
             libc::AT_FDCWD,
@@ -372,18 +376,30 @@ pub struct AuthSysIdentity {
 
 impl AuthSysIdentity {
     pub fn current() -> Option<Self> {
+        // SAFETY: the documented all-ones sentinel queries the current fsuid/fsgid without
+        // changing credentials and borrows no caller memory.
         let fsuid = unsafe { libc::setfsuid(!0) };
+        // SAFETY: the documented all-ones sentinel queries the current fsuid/fsgid without
+        // changing credentials and borrows no caller memory.
         let fsgid = unsafe { libc::setfsgid(!0) };
+        // SAFETY: this credential query takes no pointers and returns the process
+        // effective identity.
         let uid = unsafe { libc::geteuid() };
+        // SAFETY: this credential query takes no pointers and returns the process
+        // effective identity.
         let gid = unsafe { libc::getegid() };
         if fsuid as libc::uid_t != uid || fsgid as libc::gid_t != gid {
             return None;
         }
+        // SAFETY: the documented count-zero/null-buffer form queries the supplementary
+        // group count without writing memory.
         let count = unsafe { libc::getgroups(0, std::ptr::null_mut()) };
         if !(0..=16).contains(&count) {
             return None;
         }
         let mut groups = vec![0; count as usize];
+        // SAFETY: groups owns exactly count writable gid_t elements and stays allocated
+        // during this synchronous getgroups call.
         if unsafe { libc::getgroups(count, groups.as_mut_ptr()) } != count {
             return None;
         }

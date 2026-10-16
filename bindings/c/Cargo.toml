@@ -30,3 +30,6 @@ vfsi-sync = { workspace = true, features = ["test-support"] }
 
 [package.metadata.docs.rs]
 all-features = true
+
+[lints]
+workspace = true

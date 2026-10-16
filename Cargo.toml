@@ -28,3 +28,12 @@ vfsi-uring = { path = "crates/vfsi-uring", version = "0.1.0" }
 vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.1.9" }
 vfsi-smb = { path = "crates/vfsi-smb", version = "0.1.7" }
 vfsi-sync = { path = "crates/vfsi-sync", version = "0.1.10" }
+
+# Unsafe functions still require explicit blocks for their unsafe operations.
+# Production blocks/impls need SAFETY comments, including in unit-test builds.
+# Only cfg(test) items and integration-test targets may opt out.
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"

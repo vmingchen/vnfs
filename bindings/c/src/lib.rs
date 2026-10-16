@@ -3,9 +3,16 @@
 //! The C-facing symbols are intentionally thin: C code works with an opaque
 //! `vfsi_fs` handle and byte-oriented `const char *` paths, while all
 //! filesystem logic stays in the Rust `vnfs` implementation.
-#![allow(unsafe_op_in_unsafe_fn)]
+//!
+//! # C pointer contract
+//! Non-null handles must originate from this API and stay live for the whole
+//! call. Strings must be readable and NUL-terminated. Arrays and buffers must
+//! be aligned, valid for their stated lengths, and fit within one allocation.
+//! Writable arrays/buffers must be exclusively accessible and must not overlap
+//! other borrowed inputs. Optional null pointers are accepted only where the
+//! individual function documents them. Callbacks may use borrowed data only
+//! during their invocation and must not free the handle or invalidate inputs.
 #![allow(non_camel_case_types)]
-#![allow(clippy::missing_safety_doc)]
 
 use std::ffi::{CStr, CString, OsString};
 use std::os::raw::{c_char, c_int, c_void};
@@ -316,6 +323,29 @@ impl vfsi_result {
     }
 }
 
+/// Initialize output-only C storage before borrowing it as Rust values.
+///
+/// # Safety
+/// output must be non-null, aligned, and exclusively writable for count T
+/// slots in one allocation (whose size fits isize). The returned borrow must
+/// not outlive that storage. Old slot contents need not be initialized.
+#[inline]
+unsafe fn initialized_output_slice<'a, T: Copy>(
+    output: *mut T,
+    count: usize,
+    mut initialize: impl FnMut(usize) -> T,
+) -> &'a mut [T] {
+    // SAFETY: the caller grants count aligned writable slots. Raw writes do
+    // not read or drop old C output bytes. Every slot holds a valid T before
+    // we create references; the caller bounds the returned borrow's lifetime.
+    unsafe {
+        for index in 0..count {
+            output.add(index).write(initialize(index));
+        }
+        std::slice::from_raw_parts_mut(output, count)
+    }
+}
+
 // Keeping the error inline avoids allocating while crossing the C ABI; the
 // fixed-size result is copied directly into the caller's return value.
 #[allow(clippy::result_large_err)]
@@ -326,10 +356,13 @@ unsafe fn result_array<'a>(
     if results.is_null() {
         return Err(vfsi_result::invalid(0, "null result array"));
     }
-    let results = std::slice::from_raw_parts_mut(results, count);
-    for (index, result) in results.iter_mut().enumerate() {
-        *result = vfsi_result::base(index, VFSI_ERROR_NOT_ATTEMPTED, 0, "not attempted");
-    }
+    // SAFETY: the C contract grants count aligned writable output slots,
+    // exclusively borrowed for this call; initialization reads no old bytes.
+    let results = unsafe {
+        initialized_output_slice(results, count, |index| {
+            vfsi_result::base(index, VFSI_ERROR_NOT_ATTEMPTED, 0, "not attempted")
+        })
+    };
     Ok(results)
 }
 
@@ -446,7 +479,11 @@ pub unsafe extern "C" fn vfsi_listdirs(
     results: *mut vfsi_listing_result,
 ) -> c_int {
     ffi_guard!(libc::EIO, {
-        let (Some(fs), Some(options), Some(cb)) = (fs.as_ref(), options.as_ref(), cb) else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let (Some(fs), Some(options), Some(cb)) =
+            (unsafe { fs.as_ref() }, unsafe { options.as_ref() }, cb)
+        else {
             return libc::EINVAL;
         };
         if count == 0 {
@@ -456,8 +493,10 @@ pub unsafe extern "C" fn vfsi_listdirs(
             return libc::EINVAL;
         }
         // Caller owns count elements in both arrays.
-        let results = std::slice::from_raw_parts_mut(results, count);
-        results.fill(vfsi_listing_result::default());
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let results =
+            unsafe { initialized_output_slice(results, count, |_| vfsi_listing_result::default()) };
         let Some(fields) = AttrMask::from_bits(options.attributes) else {
             return libc::EINVAL;
         };
@@ -472,11 +511,15 @@ pub unsafe extern "C" fn vfsi_listdirs(
         let mut planning_bytes = 0usize;
         // Check borrowed input spellings before allocating their owned copies.
         for i in 0..count {
-            let pointer = *dirs.add(i);
+            // SAFETY: i is inside count and the caller supplies count live input pointers
+            // for this call.
+            let pointer = unsafe { *dirs.add(i) };
             if pointer.is_null() {
                 return libc::EINVAL;
             }
-            let length = CStr::from_ptr(pointer).to_bytes().len();
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            let length = unsafe { CStr::from_ptr(pointer) }.to_bytes().len();
             let Some(total) = planning_bytes.checked_add(length) else {
                 return libc::EFBIG;
             };
@@ -488,7 +531,9 @@ pub unsafe extern "C" fn vfsi_listdirs(
         let mut paths = Vec::with_capacity(count);
         let mut index = std::collections::HashMap::<PathBuf, Vec<usize>>::new();
         for i in 0..count {
-            let Some(path) = cstr_path(*dirs.add(i)) else {
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            let Some(path) = (unsafe { cstr_path(*dirs.add(i)) }) else {
                 return libc::EINVAL;
             };
             let vpath = match vpath_for(fs, &path) {
@@ -595,7 +640,9 @@ pub unsafe extern "C" fn vfsi_listdirs(
             for &i in &index[&dir] {
                 let path = paths[i].as_ref().expect("validated C paths");
                 results[i].delivered += 1;
-                if !cb(i, path.as_ptr(), name.as_ptr(), &attrs, userdata) {
+                // SAFETY: the caller provides this callback; borrowed strings, attributes
+                // and bytes remain live until it returns.
+                if !unsafe { cb(i, path.as_ptr(), name.as_ptr(), &attrs, userdata) } {
                     for result in results.iter_mut() {
                         result.completion = 2;
                     }
@@ -627,11 +674,17 @@ pub extern "C" fn vfsi_abi_version() -> u32 {
 
 /// Return the negotiated NFS minor version, or zero for a non-NFS/invalid
 /// handle.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[allow(deprecated)]
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_nfs_minorversion(fs: *const vfsi_fs) -> u32 {
     ffi_guard!(0, {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return 0;
         };
         fs.fs
@@ -644,11 +697,17 @@ pub unsafe extern "C" fn vfsi_nfs_minorversion(fs: *const vfsi_fs) -> u32 {
 
 /// Return the negotiated SMB dialect revision (`0x0202` through `0x0311`),
 /// or zero for a non-SMB/invalid handle.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[allow(deprecated)]
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_smb_dialect(fs: *const vfsi_fs) -> u16 {
     ffi_guard!(0, {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return 0;
         };
         fs.fs
@@ -660,10 +719,16 @@ pub unsafe extern "C" fn vfsi_smb_dialect(fs: *const vfsi_fs) -> u16 {
 }
 
 /// Return the current `VFSI_CAP_*` capability bitset.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_capabilities(fs: *const vfsi_fs) -> u64 {
     ffi_guard!(0, {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return 0;
         };
         fs.fs
@@ -741,7 +806,9 @@ fn lock_or_io<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, VfError> {
         .map_err(|_| VfError::failure(0, libc::EIO as u32))
 }
 
-fn cstr_path(path: *const c_char) -> Option<PathBuf> {
+/// # Safety
+/// A non-null path must point to a live NUL-terminated C string.
+unsafe fn cstr_path(path: *const c_char) -> Option<PathBuf> {
     if path.is_null() {
         return None;
     }
@@ -754,7 +821,9 @@ fn cstr_from_os(bytes: &[u8]) -> Option<CString> {
     CString::new(bytes).ok()
 }
 
-fn cstr_utf8(value: *const c_char) -> Option<String> {
+/// # Safety
+/// A non-null value must point to a live NUL-terminated C string.
+unsafe fn cstr_utf8(value: *const c_char) -> Option<String> {
     if value.is_null() {
         return None;
     }
@@ -823,20 +892,28 @@ fn vpath_for(fs: &vfsi_fs, path: &std::path::Path) -> Result<PathBuf, VfError> {
 }
 
 /// Create a local-directory vfsi backend rooted at `root`.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_dummy_open(root: *const c_char, out: *mut *mut vfsi_fs) -> c_int {
     ffi_guard!(libc::EIO, {
         if root.is_null() || out.is_null() {
             return libc::EINVAL;
         }
-        let Some(root) = cstr_path(root) else {
+        // SAFETY: non-null C strings are NUL-terminated and readable throughout this call,
+        // as required by the exported ABI.
+        let Some(root) = (unsafe { cstr_path(root) }) else {
             return libc::EINVAL;
         };
         let fs = match vfsi_posix::backend(root) {
             Ok(fs) => Box::new(fs) as Box<dyn BindingBackend>,
             Err(error) => return error.err_no() as c_int,
         };
-        *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
+        // SAFETY: out was checked for null; the caller provides writable storage for this
+        // returned handle.
+        unsafe { *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/")) };
         0
     })
 }
@@ -845,6 +922,10 @@ pub unsafe extern "C" fn vfsi_dummy_open(root: *const c_char, out: *mut *mut vfs
 /// `mountpoint` as the kernel-visible root of the same directory. Callers can
 /// pass ordinary kernel paths under `mountpoint`, which are mapped to `/`-rooted
 /// vfsi paths before they reach the backend.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_dummy_open_mount(
     root: *const c_char,
@@ -855,20 +936,30 @@ pub unsafe extern "C" fn vfsi_dummy_open_mount(
         if root.is_null() || mountpoint.is_null() || out.is_null() {
             return libc::EINVAL;
         }
-        let (Some(root), Some(mountpoint)) = (cstr_path(root), cstr_path(mountpoint)) else {
+        // SAFETY: non-null C strings are NUL-terminated and readable throughout this call,
+        // as required by the exported ABI.
+        let (Some(root), Some(mountpoint)) =
+            (unsafe { cstr_path(root) }, unsafe { cstr_path(mountpoint) })
+        else {
             return libc::EINVAL;
         };
         let fs = match vfsi_posix::backend(root) {
             Ok(fs) => Box::new(fs) as Box<dyn BindingBackend>,
             Err(error) => return error.err_no() as c_int,
         };
-        *out = make_fs(fs, mountpoint, PathBuf::from("/"));
+        // SAFETY: out was checked for null; the caller provides writable storage for this
+        // returned handle.
+        unsafe { *out = make_fs(fs, mountpoint, PathBuf::from("/")) };
         0
     })
 }
 
 /// Connect to an NFSv4 server at `host` and open the export root.
 /// Negotiate NFSv4.2, falling back to NFSv4.1.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_nfs_open(host: *const c_char, out: *mut *mut vfsi_fs) -> c_int {
     ffi_guard!(libc::EIO, {
@@ -876,6 +967,8 @@ pub unsafe extern "C" fn vfsi_nfs_open(host: *const c_char, out: *mut *mut vfsi_
             return libc::EINVAL;
         }
         // SAFETY: C callers must pass a NUL-terminated host string.
+        // SAFETY: host was checked non-null and the caller supplies a live
+        // NUL-terminated string for the full operation.
         let Ok(host) = unsafe { CStr::from_ptr(host) }.to_str() else {
             return libc::EINVAL;
         };
@@ -884,7 +977,9 @@ pub unsafe extern "C" fn vfsi_nfs_open(host: *const c_char, out: *mut *mut vfsi_
             .map_err(|e| vf_code(&e))
         {
             Ok(fs) => {
-                *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
+                // SAFETY: out was checked for null; the caller provides writable storage
+                // for this returned handle.
+                unsafe { *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/")) };
                 0
             }
             Err(code) => code,
@@ -893,6 +988,10 @@ pub unsafe extern "C" fn vfsi_nfs_open(host: *const c_char, out: *mut *mut vfsi_
 }
 
 /// Connect using an explicit supported NFS minor version (1 or 2).
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_nfs_open_minor(
     host: *const c_char,
@@ -903,6 +1002,8 @@ pub unsafe extern "C" fn vfsi_nfs_open_minor(
         if host.is_null() || out.is_null() || !matches!(minorversion, 1 | 2) {
             return libc::EINVAL;
         }
+        // SAFETY: host was checked non-null and the caller supplies a live
+        // NUL-terminated string for the full operation.
         let Ok(host) = unsafe { CStr::from_ptr(host) }.to_str() else {
             return libc::EINVAL;
         };
@@ -911,7 +1012,9 @@ pub unsafe extern "C" fn vfsi_nfs_open_minor(
             .map_err(|e| vf_code(&e))
         {
             Ok(fs) => {
-                *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/"));
+                // SAFETY: out was checked for null; the caller provides writable storage
+                // for this returned handle.
+                unsafe { *out = make_fs(fs, PathBuf::from("/"), PathBuf::from("/")) };
                 0
             }
             Err(code) => code,
@@ -921,6 +1024,10 @@ pub unsafe extern "C" fn vfsi_nfs_open_minor(
 
 /// Connect to an NFSv4.1/4.2 server and treat `mountpoint` (a local kernel mount
 /// path) as the vfsi root. Callers can then pass ordinary kernel paths.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_nfs_open_mount(
     host: *const c_char,
@@ -928,6 +1035,8 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount(
     out: *mut *mut vfsi_fs,
 ) -> c_int {
     ffi_guard!(libc::EIO, {
+        // SAFETY: this forwards the same caller-owned C pointers and lengths;
+        // the additional export root is a static NUL-terminated C string.
         unsafe { vfsi_nfs_open_mount_export(host, c"/".as_ptr(), mountpoint, out) }
     })
 }
@@ -936,21 +1045,31 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount(
 /// `path` must be an absolute directory. Ordinary paths beneath it are mapped
 /// to the corresponding remote directory. No AUTH_SYS downgrade or kernel
 /// fallback is performed; direct access does not share the kernel cache.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_nfs_from_mount(path: *const c_char, out: *mut *mut vfsi_fs) -> c_int {
     ffi_guard!(libc::EIO, {
         if out.is_null() {
             return libc::EINVAL;
         }
-        *out = std::ptr::null_mut();
-        let Some(path) = cstr_path(path) else {
+        // SAFETY: out was checked for null; the caller provides writable storage for this
+        // returned handle.
+        unsafe { *out = std::ptr::null_mut() };
+        // SAFETY: non-null C strings are NUL-terminated and readable throughout this call,
+        // as required by the exported ABI.
+        let Some(path) = (unsafe { cstr_path(path) }) else {
             return libc::EINVAL;
         };
         match vfsi_nfs::nfs::NfsClientBuilder::from_mount(&path)
             .and_then(|builder| builder.connect())
         {
             Ok(backend) => {
-                *out = make_fs(Box::new(backend), path, PathBuf::from("/"));
+                // SAFETY: out was checked for null; the caller provides writable storage
+                // for this returned handle.
+                unsafe { *out = make_fs(Box::new(backend), path, PathBuf::from("/")) };
                 0
             }
             Err(error) => vf_code(&error),
@@ -977,6 +1096,10 @@ pub type vfsi_walk_cb =
 /// Incremental no-follow traversal. Callbacks run outside the filesystem lock.
 /// Pruned directories are never listed. Errors can follow delivered events;
 /// callers must not replay side-effectful callbacks through another backend.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_walk(
     fs: *mut vfsi_fs,
@@ -987,7 +1110,11 @@ pub unsafe extern "C" fn vfsi_walk(
 ) -> c_int {
     ffi_guard!(libc::EIO, {
         let (Some(fs), Some(root), Some(options), Some(cb)) =
-            (fs.as_ref(), cstr_path(root), options.as_ref(), cb)
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+            // mutable outputs are exclusive.
+            (unsafe { fs.as_ref() }, unsafe { cstr_path(root) }, unsafe { options.as_ref() }, cb)
         else {
             return libc::EINVAL;
         };
@@ -1060,7 +1187,9 @@ pub unsafe extern "C" fn vfsi_walk(
                         vnfs::directory::WalkEventKind::Entry => 1,
                         vnfs::directory::WalkEventKind::Leave => 2,
                     };
-                    match cb(path.as_ptr(), kind, event.depth, &attrs, userdata) {
+                    // SAFETY: the caller provides this callback; borrowed strings,
+                    // attributes and bytes remain live until it returns.
+                    match unsafe { cb(path.as_ptr(), kind, event.depth, &attrs, userdata) } {
                         0 => Ok(vnfs::directory::WalkControl::Continue),
                         1 => Ok(vnfs::directory::WalkControl::SkipSubtree),
                         2 => Ok(vnfs::directory::WalkControl::Stop),
@@ -1121,6 +1250,10 @@ fn attrs_from_metadata(metadata: &vnfs::directory::Attrs) -> vfsi_attrs {
 
 /// Connect to an NFSv4.1/4.2 server, mapping a local kernel `mountpoint` to the
 /// server-side `export_root` beneath the NFSv4 pseudo-root.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_nfs_open_mount_export(
     host: *const c_char,
@@ -1132,11 +1265,16 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount_export(
         if host.is_null() || export_root.is_null() || mountpoint.is_null() || out.is_null() {
             return libc::EINVAL;
         }
+        // SAFETY: host was checked non-null and the caller supplies a live
+        // NUL-terminated string for the full operation.
         let Ok(host) = unsafe { CStr::from_ptr(host) }.to_str() else {
             return libc::EINVAL;
         };
-        let (Some(export_root), Some(mountpoint)) = (cstr_path(export_root), cstr_path(mountpoint))
-        else {
+        // SAFETY: non-null C strings are NUL-terminated and readable throughout this call,
+        // as required by the exported ABI.
+        let (Some(export_root), Some(mountpoint)) = (unsafe { cstr_path(export_root) }, unsafe {
+            cstr_path(mountpoint)
+        }) else {
             return libc::EINVAL;
         };
         if !export_root.is_absolute() || !mountpoint.is_absolute() {
@@ -1153,7 +1291,9 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount_export(
             .map_err(|e| vf_code(&e))
         {
             Ok(fs) => {
-                *out = make_fs(fs, mountpoint, export_root);
+                // SAFETY: out was checked for null; the caller provides writable storage
+                // for this returned handle.
+                unsafe { *out = make_fs(fs, mountpoint, export_root) };
                 0
             }
             Err(code) => code,
@@ -1163,6 +1303,10 @@ pub unsafe extern "C" fn vfsi_nfs_open_mount_export(
 
 /// Connect to an SMB2/3 share. `server` may omit port 445; empty username and
 /// password strings request guest access. Paths are rooted at the share root.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_smb_open(
     server: *const c_char,
@@ -1177,21 +1321,35 @@ pub unsafe extern "C" fn vfsi_smb_open(
             return libc::EINVAL;
         }
         let (Some(server), Some(share), Some(username), Some(password), Some(domain)) = (
-            cstr_utf8(server),
-            cstr_utf8(share),
-            cstr_utf8(username),
-            cstr_utf8(password),
-            cstr_utf8(domain),
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            unsafe { cstr_utf8(server) },
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            unsafe { cstr_utf8(share) },
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            unsafe { cstr_utf8(username) },
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            unsafe { cstr_utf8(password) },
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            unsafe { cstr_utf8(domain) },
         ) else {
             return libc::EINVAL;
         };
         match SmbVecFs::connect(&server, &share, &username, &password, &domain) {
             Ok(backend) => {
-                *out = make_fs(
-                    Box::new(backend) as Box<dyn BindingBackend>,
-                    PathBuf::from("/"),
-                    PathBuf::from("/"),
-                );
+                // SAFETY: out was checked for null; the caller provides writable storage
+                // for this returned handle.
+                unsafe {
+                    *out = make_fs(
+                        Box::new(backend) as Box<dyn BindingBackend>,
+                        PathBuf::from("/"),
+                        PathBuf::from("/"),
+                    )
+                };
                 0
             }
             Err(error) => vf_code(&error),
@@ -1202,6 +1360,10 @@ pub unsafe extern "C" fn vfsi_smb_open(
 /// Connect to an SMB2/3 share and map a kernel-visible `mountpoint` onto
 /// `share_root` within that share. Both paths must be absolute and may not
 /// contain parent-directory components.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_smb_open_mount(
     server: *const c_char,
@@ -1218,16 +1380,29 @@ pub unsafe extern "C" fn vfsi_smb_open_mount(
             return libc::EINVAL;
         }
         let (Some(server), Some(share), Some(username), Some(password), Some(domain)) = (
-            cstr_utf8(server),
-            cstr_utf8(share),
-            cstr_utf8(username),
-            cstr_utf8(password),
-            cstr_utf8(domain),
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            unsafe { cstr_utf8(server) },
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            unsafe { cstr_utf8(share) },
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            unsafe { cstr_utf8(username) },
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            unsafe { cstr_utf8(password) },
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            unsafe { cstr_utf8(domain) },
         ) else {
             return libc::EINVAL;
         };
-        let (Some(share_root), Some(mountpoint)) = (cstr_path(share_root), cstr_path(mountpoint))
-        else {
+        // SAFETY: non-null C strings are NUL-terminated and readable throughout this call,
+        // as required by the exported ABI.
+        let (Some(share_root), Some(mountpoint)) = (unsafe { cstr_path(share_root) }, unsafe {
+            cstr_path(mountpoint)
+        }) else {
             return libc::EINVAL;
         };
         if !share_root.is_absolute()
@@ -1241,11 +1416,15 @@ pub unsafe extern "C" fn vfsi_smb_open_mount(
         }
         match SmbVecFs::connect(&server, &share, &username, &password, &domain) {
             Ok(backend) => {
-                *out = make_fs(
-                    Box::new(backend) as Box<dyn BindingBackend>,
-                    mountpoint,
-                    share_root,
-                );
+                // SAFETY: out was checked for null; the caller provides writable storage
+                // for this returned handle.
+                unsafe {
+                    *out = make_fs(
+                        Box::new(backend) as Box<dyn BindingBackend>,
+                        mountpoint,
+                        share_root,
+                    )
+                };
                 0
             }
             Err(error) => vf_code(&error),
@@ -1255,6 +1434,10 @@ pub unsafe extern "C" fn vfsi_smb_open_mount(
 
 /// Destroy a filesystem handle returned by one of the `vfsi_*_open*`
 /// functions.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_free(fs: *mut vfsi_fs) {
     ffi_guard!((), {
@@ -1302,6 +1485,10 @@ fn stat_impl(fs: &vfsi_fs, path: &std::path::Path) -> Result<VfAttrs, VfError> {
 }
 
 /// Stat `path`, following a final symlink.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_stat(
     fs: *mut vfsi_fs,
@@ -1309,12 +1496,22 @@ pub unsafe extern "C" fn vfsi_stat(
     out: *mut vfsi_attrs,
 ) -> c_int {
     ffi_guard!(libc::EIO, {
-        let (Some(fs), Some(path), Some(out)) = (fs.as_ref(), cstr_path(path), out.as_mut()) else {
+        // SAFETY: non-null C strings are NUL-terminated and readable throughout this call,
+        // as required by the exported ABI.
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let (Some(fs), Some(path), false) = (
+            unsafe { fs.as_ref() },
+            unsafe { cstr_path(path) },
+            out.is_null(),
+        ) else {
             return libc::EINVAL;
         };
         match stat_impl(fs, &path) {
             Ok(a) => {
-                *out = vfsi_attrs::from_vf(&a);
+                // SAFETY: out is non-null, aligned and exclusively writable.
+                // Raw initialization permits uninitialized C output storage.
+                unsafe { out.write(vfsi_attrs::from_vf(&a)) };
                 0
             }
             Err(e) => vf_code(&e),
@@ -1335,6 +1532,10 @@ fn open_impl(
 }
 
 /// Open a file and return a vfsi descriptor (`>= 0`), or a negative errno.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_open(
     fs: *mut vfsi_fs,
@@ -1343,7 +1544,11 @@ pub unsafe extern "C" fn vfsi_open(
     mode: u32,
 ) -> c_int {
     ffi_guard!(-libc::EIO, {
-        let (Some(fs), Some(path)) = (fs.as_ref(), cstr_path(path)) else {
+        // SAFETY: non-null C strings are NUL-terminated and readable throughout this call,
+        // as required by the exported ABI.
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let (Some(fs), Some(path)) = (unsafe { fs.as_ref() }, unsafe { cstr_path(path) }) else {
             return -libc::EINVAL;
         };
         match open_impl(fs, &path, flags, mode) {
@@ -1361,10 +1566,16 @@ fn close_impl(fs: &vfsi_fs, fd: i32) -> Result<(), VfError> {
 }
 
 /// Close a descriptor opened by [`vfsi_open`].
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_close(fs: *mut vfsi_fs, fd: c_int) -> c_int {
     ffi_guard!(libc::EIO, {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return libc::EINVAL;
         };
         match close_impl(fs, fd) {
@@ -1374,27 +1585,24 @@ pub unsafe extern "C" fn vfsi_close(fs: *mut vfsi_fs, fd: c_int) -> c_int {
     })
 }
 
-fn pread_impl(
-    fs: &vfsi_fs,
-    fd: i32,
-    buf: *mut c_void,
-    len: usize,
-    offset: u64,
-) -> Result<usize, VfError> {
+fn pread_impl(fs: &vfsi_fs, fd: i32, buffer: &mut [u8], offset: u64) -> Result<usize, VfError> {
     let file = lock_or_io(&fs.files)?
         .get(&fd)
         .cloned()
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-    let request = ReadOp::at(file, offset, len);
-    // SAFETY: the C API requires `buf` to be writable for `len` bytes.
-    // Reading into caller storage avoids a temporary Vec and second copy.
-    let buffer = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), len) };
+    let request = ReadOp::at(file, offset, buffer.len());
     let result = lock_or_io(&fs.fs)?.read_into_impl(&request, buffer)?;
     Ok(result.read)
 }
 
 /// Read up to `len` bytes at `offset` into `buf`; writes the actual count to
 /// `*got` when non-NULL.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
+/// The scalar read buffer must contain initialized bytes before this call,
+/// because it is borrowed directly as a mutable Rust byte slice.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_pread(
     fs: *mut vfsi_fs,
@@ -1405,11 +1613,16 @@ pub unsafe extern "C" fn vfsi_pread(
     got: *mut usize,
 ) -> c_int {
     ffi_guard!(libc::EIO, {
-        let (Some(fs), false, Some(buf)) = (fs.as_ref(), buf.is_null(), buf.as_mut()) else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let (Some(fs), false) = (unsafe { fs.as_ref() }, buf.is_null()) else {
             return libc::EINVAL;
         };
-        let _ = buf;
-        match pread_impl(fs, fd, buf, len, offset) {
+        // SAFETY: the scalar C read contract grants len initialized, writable
+        // bytes, exclusively borrowed for this call. This keeps the existing
+        // direct-to-caller read without a temporary allocation or second copy.
+        let buffer = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), len) };
+        match pread_impl(fs, fd, buffer, offset) {
             Ok(n) => {
                 if !got.is_null() {
                     // SAFETY: C caller may pass NULL, otherwise a writable usize.
@@ -1422,23 +1635,19 @@ pub unsafe extern "C" fn vfsi_pread(
     })
 }
 
-fn pwrite_impl(
-    fs: &vfsi_fs,
-    fd: i32,
-    buf: *const c_void,
-    len: usize,
-    offset: u64,
-) -> Result<usize, VfError> {
+fn pwrite_impl(fs: &vfsi_fs, fd: i32, data: &[u8], offset: u64) -> Result<usize, VfError> {
     let file = lock_or_io(&fs.files)?
         .get(&fd)
         .cloned()
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-    // SAFETY: C caller must provide a valid buffer of `len` bytes.
-    let data = unsafe { std::slice::from_raw_parts(buf as *const u8, len) };
     lock_or_io(&fs.fs)?.write_raw_impl(&file, offset, data)
 }
 
 /// Write `len` bytes at `offset`; writes the actual count to `*wrote`.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_pwrite(
     fs: *mut vfsi_fs,
@@ -1449,11 +1658,15 @@ pub unsafe extern "C" fn vfsi_pwrite(
     wrote: *mut usize,
 ) -> c_int {
     ffi_guard!(libc::EIO, {
-        let (Some(fs), false, Some(buf)) = (fs.as_ref(), buf.is_null(), buf.as_ref()) else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let (Some(fs), false) = (unsafe { fs.as_ref() }, buf.is_null()) else {
             return libc::EINVAL;
         };
-        let _ = buf;
-        match pwrite_impl(fs, fd, buf, len, offset) {
+        // SAFETY: the non-null C input buffer is readable for len bytes and
+        // remains unchanged for this call. The Rust helper borrows it directly.
+        let data = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) };
+        match pwrite_impl(fs, fd, data, offset) {
             Ok(n) => {
                 if !wrote.is_null() {
                     // SAFETY: C caller may pass NULL, otherwise a writable usize.
@@ -1467,6 +1680,10 @@ pub unsafe extern "C" fn vfsi_pwrite(
 }
 
 /// Create a directory (`create_parents != 0` behaves like `mkdir -p`).
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_mkdir(
     fs: *mut vfsi_fs,
@@ -1475,7 +1692,11 @@ pub unsafe extern "C" fn vfsi_mkdir(
     create_parents: c_int,
 ) -> c_int {
     ffi_guard!(libc::EIO, {
-        let (Some(fs), Some(path)) = (fs.as_ref(), cstr_path(path)) else {
+        // SAFETY: non-null C strings are NUL-terminated and readable throughout this call,
+        // as required by the exported ABI.
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let (Some(fs), Some(path)) = (unsafe { fs.as_ref() }, unsafe { cstr_path(path) }) else {
             return libc::EINVAL;
         };
         let result: Result<(), VfError> = (|| {
@@ -1495,10 +1716,18 @@ pub unsafe extern "C" fn vfsi_mkdir(
 }
 
 /// Remove a path (directories must be empty).
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_remove(fs: *mut vfsi_fs, path: *const c_char) -> c_int {
     ffi_guard!(libc::EIO, {
-        let (Some(fs), Some(path)) = (fs.as_ref(), cstr_path(path)) else {
+        // SAFETY: non-null C strings are NUL-terminated and readable throughout this call,
+        // as required by the exported ABI.
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let (Some(fs), Some(path)) = (unsafe { fs.as_ref() }, unsafe { cstr_path(path) }) else {
             return libc::EINVAL;
         };
         let result: Result<(), VfError> = (|| {
@@ -1513,6 +1742,10 @@ pub unsafe extern "C" fn vfsi_remove(fs: *mut vfsi_fs, path: *const c_char) -> c
 }
 
 /// Rename `oldpath` to `newpath`.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_rename(
     fs: *mut vfsi_fs,
@@ -1521,7 +1754,11 @@ pub unsafe extern "C" fn vfsi_rename(
 ) -> c_int {
     ffi_guard!(libc::EIO, {
         let (Some(fs), Some(old), Some(new)) =
-            (fs.as_ref(), cstr_path(oldpath), cstr_path(newpath))
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+            // mutable outputs are exclusive.
+            (unsafe { fs.as_ref() }, unsafe { cstr_path(oldpath) }, unsafe { cstr_path(newpath) })
         else {
             return libc::EINVAL;
         };
@@ -1543,6 +1780,10 @@ pub unsafe extern "C" fn vfsi_rename(
 /// Copy one extent. When `to_eof` is true, `length` is ignored and copying
 /// continues to the source EOF. The backend uses NFSv4.2 COPY or SMB
 /// server-side copy when available and falls back to client-side I/O.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_copy(
     fs: *mut vfsi_fs,
@@ -1554,10 +1795,14 @@ pub unsafe extern "C" fn vfsi_copy(
     to_eof: bool,
 ) -> c_int {
     ffi_guard!(libc::EIO, {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return libc::EINVAL;
         };
-        let (Some(src), Some(dst)) = (cstr_path(src), cstr_path(dst)) else {
+        // SAFETY: non-null C strings are NUL-terminated and readable throughout this call,
+        // as required by the exported ABI.
+        let (Some(src), Some(dst)) = (unsafe { cstr_path(src) }, unsafe { cstr_path(dst) }) else {
             return libc::EINVAL;
         };
         let (Some(src), Some(dst)) = (path_for(fs, &src), path_for(fs, &dst)) else {
@@ -1582,6 +1827,10 @@ pub unsafe extern "C" fn vfsi_copy(
 /// Open `count` files in one backend vector call. ABI-v2 functions remain
 /// available; this and the other `*v` entry points use the uniform ABI-v3
 /// overall and per-element result contract.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_openv(
     fs: *mut vfsi_fs,
@@ -1590,29 +1839,39 @@ pub unsafe extern "C" fn vfsi_openv(
     item_results: *mut vfsi_result,
 ) -> vfsi_result {
     ffi_guard!(vfsi_result::panic(), {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return vfsi_result::invalid(0, "null filesystem");
         };
         if count == 0 {
             return vfsi_result::success(0);
         }
-        let results = match result_array(item_results, count) {
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let results = match unsafe { result_array(item_results, count) } {
             Ok(results) => results,
             Err(error) => return error,
         };
-        let Some(ops) = ops.as_mut() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(ops) = (unsafe { ops.as_mut() }) else {
             fail_batch!(
                 results,
                 vfsi_result::invalid(0, "null operation array"),
                 false
             );
         };
-        let ops = std::slice::from_raw_parts_mut(ops, count);
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let ops = unsafe { std::slice::from_raw_parts_mut(ops, count) };
         let mut paths = Vec::with_capacity(count);
         let mut flags = Vec::with_capacity(count);
         let mut modes = Vec::with_capacity(count);
         for (index, op) in ops.iter().enumerate() {
-            let Some(path) = cstr_path(op.path) else {
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            let Some(path) = (unsafe { cstr_path(op.path) }) else {
                 fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
             };
             match vpath_for(fs, &path) {
@@ -1674,6 +1933,10 @@ pub unsafe extern "C" fn vfsi_openv(
 }
 
 /// Close a descriptor array in one backend vector call.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_closev(
     fs: *mut vfsi_fs,
@@ -1682,13 +1945,17 @@ pub unsafe extern "C" fn vfsi_closev(
     item_results: *mut vfsi_result,
 ) -> vfsi_result {
     ffi_guard!(vfsi_result::panic(), {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return vfsi_result::invalid(0, "null filesystem");
         };
         if count == 0 {
             return vfsi_result::success(0);
         }
-        let results = match result_array(item_results, count) {
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let results = match unsafe { result_array(item_results, count) } {
             Ok(results) => results,
             Err(error) => return error,
         };
@@ -1699,7 +1966,9 @@ pub unsafe extern "C" fn vfsi_closev(
                 false
             );
         }
-        let fds = std::slice::from_raw_parts(fds, count);
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let fds = unsafe { std::slice::from_raw_parts(fds, count) };
         let files = {
             let table = match lock_or_io(&fs.files) {
                 Ok(table) => table,
@@ -1750,6 +2019,10 @@ pub unsafe extern "C" fn vfsi_closev(
 }
 
 /// Stat a path array in one backend vector call.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_statv(
     fs: *mut vfsi_fs,
@@ -1758,27 +2031,37 @@ pub unsafe extern "C" fn vfsi_statv(
     item_results: *mut vfsi_result,
 ) -> vfsi_result {
     ffi_guard!(vfsi_result::panic(), {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return vfsi_result::invalid(0, "null filesystem");
         };
         if count == 0 {
             return vfsi_result::success(0);
         }
-        let results = match result_array(item_results, count) {
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let results = match unsafe { result_array(item_results, count) } {
             Ok(results) => results,
             Err(error) => return error,
         };
-        let Some(ops) = ops.as_mut() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(ops) = (unsafe { ops.as_mut() }) else {
             fail_batch!(
                 results,
                 vfsi_result::invalid(0, "null operation array"),
                 false
             );
         };
-        let ops = std::slice::from_raw_parts_mut(ops, count);
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let ops = unsafe { std::slice::from_raw_parts_mut(ops, count) };
         let mut attrs = Vec::with_capacity(count);
         for (index, op) in ops.iter().enumerate() {
-            let Some(path) = cstr_path(op.path) else {
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            let Some(path) = (unsafe { cstr_path(op.path) }) else {
                 fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
             };
             let path = match vpath_for(fs, &path) {
@@ -1826,6 +2109,10 @@ pub unsafe extern "C" fn vfsi_statv(
 }
 
 /// Set selected attributes for a path array in one backend vector call.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_setattrv(
     fs: *mut vfsi_fs,
@@ -1834,13 +2121,17 @@ pub unsafe extern "C" fn vfsi_setattrv(
     item_results: *mut vfsi_result,
 ) -> vfsi_result {
     ffi_guard!(vfsi_result::panic(), {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return vfsi_result::invalid(0, "null filesystem");
         };
         if count == 0 {
             return vfsi_result::success(0);
         }
-        let results = match result_array(item_results, count) {
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let results = match unsafe { result_array(item_results, count) } {
             Ok(results) => results,
             Err(error) => return error,
         };
@@ -1851,10 +2142,14 @@ pub unsafe extern "C" fn vfsi_setattrv(
                 false
             );
         }
-        let ops = std::slice::from_raw_parts(ops, count);
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let ops = unsafe { std::slice::from_raw_parts(ops, count) };
         let mut attrs = Vec::with_capacity(count);
         for (index, op) in ops.iter().enumerate() {
-            let Some(path) = cstr_path(op.path) else {
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            let Some(path) = (unsafe { cstr_path(op.path) }) else {
                 fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
             };
             let path = match vpath_for(fs, &path) {
@@ -1903,6 +2198,10 @@ pub unsafe extern "C" fn vfsi_setattrv(
 }
 
 /// Positioned vector read using caller-owned buffers.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_preadv(
     fs: *mut vfsi_fs,
@@ -1911,24 +2210,32 @@ pub unsafe extern "C" fn vfsi_preadv(
     item_results: *mut vfsi_result,
 ) -> vfsi_result {
     ffi_guard!(vfsi_result::panic(), {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return vfsi_result::invalid(0, "null filesystem");
         };
         if count == 0 {
             return vfsi_result::success(0);
         }
-        let item_results = match result_array(item_results, count) {
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let item_results = match unsafe { result_array(item_results, count) } {
             Ok(results) => results,
             Err(error) => return error,
         };
-        let Some(ops) = ops.as_mut() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(ops) = (unsafe { ops.as_mut() }) else {
             fail_batch!(
                 item_results,
                 vfsi_result::invalid(0, "null operation array"),
                 false
             );
         };
-        let ops = std::slice::from_raw_parts_mut(ops, count);
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let ops = unsafe { std::slice::from_raw_parts_mut(ops, count) };
         let table = match lock_or_io(&fs.files) {
             Ok(table) => table,
             Err(error) => {
@@ -1968,11 +2275,27 @@ pub unsafe extern "C" fn vfsi_preadv(
         };
         for (op, result) in ops.iter_mut().zip(results) {
             if !result.data.is_empty() {
-                std::ptr::copy_nonoverlapping(
-                    result.data.as_ptr(),
-                    op.buf.cast::<u8>(),
-                    result.data.len(),
-                );
+                if result.data.len() > op.len {
+                    fail_batch!(
+                        item_results,
+                        vfsi_result::from_error(VfError::transport(
+                            None,
+                            "read result exceeded its output buffer"
+                        )),
+                        true
+                    );
+                }
+                // SAFETY: the caller grants op.len writable bytes and non-null
+                // was checked. The owned result is initialized and disjoint
+                // from caller storage. Raw copying also permits uninitialized
+                // C destination storage without creating a Rust slice over it.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        result.data.as_ptr(),
+                        op.buf.cast::<u8>(),
+                        result.data.len(),
+                    )
+                };
             }
             op.got = result.data.len();
         }
@@ -1982,6 +2305,10 @@ pub unsafe extern "C" fn vfsi_preadv(
 }
 
 /// Positioned vector write using caller-owned buffers.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_pwritev(
     fs: *mut vfsi_fs,
@@ -1990,24 +2317,32 @@ pub unsafe extern "C" fn vfsi_pwritev(
     item_results: *mut vfsi_result,
 ) -> vfsi_result {
     ffi_guard!(vfsi_result::panic(), {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return vfsi_result::invalid(0, "null filesystem");
         };
         if count == 0 {
             return vfsi_result::success(0);
         }
-        let item_results = match result_array(item_results, count) {
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let item_results = match unsafe { result_array(item_results, count) } {
             Ok(results) => results,
             Err(error) => return error,
         };
-        let Some(ops) = ops.as_mut() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(ops) = (unsafe { ops.as_mut() }) else {
             fail_batch!(
                 item_results,
                 vfsi_result::invalid(0, "null operation array"),
                 false
             );
         };
-        let ops = std::slice::from_raw_parts_mut(ops, count);
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let ops = unsafe { std::slice::from_raw_parts_mut(ops, count) };
         let table = match lock_or_io(&fs.files) {
             Ok(table) => table,
             Err(error) => {
@@ -2043,7 +2378,9 @@ pub unsafe extern "C" fn vfsi_pwritev(
                 let data = if op.len == 0 {
                     &[][..]
                 } else {
-                    std::slice::from_raw_parts(op.buf.cast::<u8>(), op.len)
+                    // SAFETY: the C contract supplies count aligned, live array elements;
+                    // mutable arrays are exclusively borrowed for this call.
+                    unsafe { std::slice::from_raw_parts(op.buf.cast::<u8>(), op.len) }
                 };
                 WriteOp::at(file, op.offset, data)
             })
@@ -2069,6 +2406,10 @@ pub unsafe extern "C" fn vfsi_pwritev(
 }
 
 /// Create a directory array in one backend vector call.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_mkdirv(
     fs: *mut vfsi_fs,
@@ -2077,13 +2418,17 @@ pub unsafe extern "C" fn vfsi_mkdirv(
     item_results: *mut vfsi_result,
 ) -> vfsi_result {
     ffi_guard!(vfsi_result::panic(), {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return vfsi_result::invalid(0, "null filesystem");
         };
         if count == 0 {
             return vfsi_result::success(0);
         }
-        let results = match result_array(item_results, count) {
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let results = match unsafe { result_array(item_results, count) } {
             Ok(results) => results,
             Err(error) => return error,
         };
@@ -2094,10 +2439,14 @@ pub unsafe extern "C" fn vfsi_mkdirv(
                 false
             );
         }
-        let ops = std::slice::from_raw_parts(ops, count);
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let ops = unsafe { std::slice::from_raw_parts(ops, count) };
         let mut dirs = Vec::with_capacity(count);
         for (index, op) in ops.iter().enumerate() {
-            let Some(path) = cstr_path(op.path) else {
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            let Some(path) = (unsafe { cstr_path(op.path) }) else {
                 fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
             };
             let path = match vpath_for(fs, &path) {
@@ -2134,6 +2483,10 @@ pub unsafe extern "C" fn vfsi_mkdirv(
 }
 
 /// Remove a path array in one backend vector call.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_removev(
     fs: *mut vfsi_fs,
@@ -2142,23 +2495,31 @@ pub unsafe extern "C" fn vfsi_removev(
     item_results: *mut vfsi_result,
 ) -> vfsi_result {
     ffi_guard!(vfsi_result::panic(), {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return vfsi_result::invalid(0, "null filesystem");
         };
         if count == 0 {
             return vfsi_result::success(0);
         }
-        let results = match result_array(item_results, count) {
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let results = match unsafe { result_array(item_results, count) } {
             Ok(results) => results,
             Err(error) => return error,
         };
         if paths.is_null() {
             fail_batch!(results, vfsi_result::invalid(0, "null path array"), false);
         }
-        let paths = std::slice::from_raw_parts(paths, count);
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let paths = unsafe { std::slice::from_raw_parts(paths, count) };
         let mut files = Vec::with_capacity(count);
         for (index, path) in paths.iter().enumerate() {
-            let Some(path) = cstr_path(*path) else {
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            let Some(path) = (unsafe { cstr_path(*path) }) else {
                 fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
             };
             let path = match vpath_for(fs, &path) {
@@ -2190,6 +2551,10 @@ pub unsafe extern "C" fn vfsi_removev(
 }
 
 /// Rename a path-pair array in one backend vector call.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_renamev(
     fs: *mut vfsi_fs,
@@ -2198,13 +2563,17 @@ pub unsafe extern "C" fn vfsi_renamev(
     item_results: *mut vfsi_result,
 ) -> vfsi_result {
     ffi_guard!(vfsi_result::panic(), {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return vfsi_result::invalid(0, "null filesystem");
         };
         if count == 0 {
             return vfsi_result::success(0);
         }
-        let results = match result_array(item_results, count) {
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let results = match unsafe { result_array(item_results, count) } {
             Ok(results) => results,
             Err(error) => return error,
         };
@@ -2215,11 +2584,16 @@ pub unsafe extern "C" fn vfsi_renamev(
                 false
             );
         }
-        let ops = std::slice::from_raw_parts(ops, count);
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let ops = unsafe { std::slice::from_raw_parts(ops, count) };
         let mut pairs = Vec::with_capacity(count);
         for (index, op) in ops.iter().enumerate() {
-            let (Some(oldpath), Some(newpath)) = (cstr_path(op.oldpath), cstr_path(op.newpath))
-            else {
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            let (Some(oldpath), Some(newpath)) = (unsafe { cstr_path(op.oldpath) }, unsafe {
+                cstr_path(op.newpath)
+            }) else {
                 fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
             };
             let (oldpath, newpath) = match (vpath_for(fs, &oldpath), vpath_for(fs, &newpath)) {
@@ -2256,6 +2630,10 @@ pub unsafe extern "C" fn vfsi_renamev(
 }
 
 /// Copy an extent-pair array in one backend vector call.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_copyv(
     fs: *mut vfsi_fs,
@@ -2264,13 +2642,17 @@ pub unsafe extern "C" fn vfsi_copyv(
     item_results: *mut vfsi_result,
 ) -> vfsi_result {
     ffi_guard!(vfsi_result::panic(), {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return vfsi_result::invalid(0, "null filesystem");
         };
         if count == 0 {
             return vfsi_result::success(0);
         }
-        let results = match result_array(item_results, count) {
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let results = match unsafe { result_array(item_results, count) } {
             Ok(results) => results,
             Err(error) => return error,
         };
@@ -2281,10 +2663,16 @@ pub unsafe extern "C" fn vfsi_copyv(
                 false
             );
         }
-        let ops = std::slice::from_raw_parts(ops, count);
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let ops = unsafe { std::slice::from_raw_parts(ops, count) };
         let mut pairs = Vec::with_capacity(count);
         for (index, op) in ops.iter().enumerate() {
-            let (Some(src), Some(dst)) = (cstr_path(op.src), cstr_path(op.dst)) else {
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            let (Some(src), Some(dst)) =
+                (unsafe { cstr_path(op.src) }, unsafe { cstr_path(op.dst) })
+            else {
                 fail_batch!(results, vfsi_result::invalid(index, "null path"), false);
             };
             let (Some(src), Some(dst)) = (path_for(fs, &src), path_for(fs, &dst)) else {
@@ -2323,6 +2711,10 @@ pub unsafe extern "C" fn vfsi_copyv(
 /// Stream several paths in bounded vectorized chunks. Returning `false` from
 /// `cb` cancels successfully. The callback provides backpressure and must not
 /// reenter the same filesystem handle.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_read_streamv(
     fs: *mut vfsi_fs,
@@ -2334,7 +2726,9 @@ pub unsafe extern "C" fn vfsi_read_streamv(
     userdata: *mut c_void,
 ) -> vfsi_result {
     ffi_guard!(vfsi_result::panic(), {
-        let Some(fs) = fs.as_ref() else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let Some(fs) = (unsafe { fs.as_ref() }) else {
             return vfsi_result::invalid(0, "null filesystem");
         };
         let Some(cb) = cb else {
@@ -2349,11 +2743,15 @@ pub unsafe extern "C" fn vfsi_read_streamv(
         if paths.is_null() {
             return vfsi_result::invalid(0, "null path array");
         }
-        let paths = std::slice::from_raw_parts(paths, count);
+        // SAFETY: the C contract supplies count aligned, live array elements; mutable
+        // arrays are exclusively borrowed for this call.
+        let paths = unsafe { std::slice::from_raw_parts(paths, count) };
         let mut cpaths = Vec::with_capacity(count);
         let mut files = Vec::with_capacity(count);
         for (index, path) in paths.iter().enumerate() {
-            let Some(kernel_path) = cstr_path(*path) else {
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            let Some(kernel_path) = (unsafe { cstr_path(*path) }) else {
                 return vfsi_result::invalid(index, "null path");
             };
             let Some(cpath) = cstr_from_os(kernel_path.as_os_str().as_bytes()) else {
@@ -2375,15 +2773,19 @@ pub unsafe extern "C" fn vfsi_read_streamv(
             chunk_size,
             memory_limit,
             &mut |index, offset, data, eof| {
-                cb(
-                    cpaths[index].as_ptr(),
-                    index,
-                    offset,
-                    data.as_ptr(),
-                    data.len(),
-                    eof,
-                    userdata,
-                )
+                // SAFETY: the caller provides this callback; borrowed strings, attributes
+                // and bytes remain live until it returns.
+                unsafe {
+                    cb(
+                        cpaths[index].as_ptr(),
+                        index,
+                        offset,
+                        data.as_ptr(),
+                        data.len(),
+                        eof,
+                        userdata,
+                    )
+                }
             },
         );
         match result {
@@ -2395,6 +2797,10 @@ pub unsafe extern "C" fn vfsi_read_streamv(
 
 /// List `dir` and call `cb` for each entry. Returning `false` from `cb`
 /// stops the listing.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_listdir(
     fs: *mut vfsi_fs,
@@ -2402,18 +2808,26 @@ pub unsafe extern "C" fn vfsi_listdir(
     cb: vfsi_listdir_cb,
     userdata: *mut c_void,
 ) -> c_int {
-    vfsi_listdir_with_limits(
-        fs,
-        dir,
-        vfsi_sync::DEFAULT_DIRECTORY_MAX_ENTRIES,
-        vfsi_sync::DEFAULT_DIRECTORY_MAX_PATH_BYTES,
-        cb,
-        userdata,
-    )
+    // SAFETY: this forwards the same live pointers, lengths and callback obligations
+    // required by the exported C ABI.
+    unsafe {
+        vfsi_listdir_with_limits(
+            fs,
+            dir,
+            vfsi_sync::DEFAULT_DIRECTORY_MAX_ENTRIES,
+            vfsi_sync::DEFAULT_DIRECTORY_MAX_PATH_BYTES,
+            cb,
+            userdata,
+        )
+    }
 }
 
 /// One bounded directory listing. Zero permits only an empty directory.
 /// Callbacks run outside the filesystem lock.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_listdir_with_limits(
     fs: *mut vfsi_fs,
@@ -2424,7 +2838,11 @@ pub unsafe extern "C" fn vfsi_listdir_with_limits(
     userdata: *mut c_void,
 ) -> c_int {
     ffi_guard!(libc::EIO, {
-        let (Some(fs), Some(dir)) = (fs.as_ref(), cstr_path(dir)) else {
+        // SAFETY: non-null C strings are NUL-terminated and readable throughout this call,
+        // as required by the exported ABI.
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let (Some(fs), Some(dir)) = (unsafe { fs.as_ref() }, unsafe { cstr_path(dir) }) else {
             return libc::EINVAL;
         };
         let Some(cb) = cb else {
@@ -2463,6 +2881,10 @@ pub unsafe extern "C" fn vfsi_listdir_with_limits(
 
 /// List several directories in one vectorized batch, calling `cb` for each
 /// entry with the directory the entry came from.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_listdirv(
     fs: *mut vfsi_fs,
@@ -2474,7 +2896,10 @@ pub unsafe extern "C" fn vfsi_listdirv(
     userdata: *mut c_void,
 ) -> c_int {
     ffi_guard!(libc::EIO, {
-        let (Some(fs), false, false) = (fs.as_ref(), dirs.is_null(), cb.is_none()) else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let (Some(fs), false, false) = (unsafe { fs.as_ref() }, dirs.is_null(), cb.is_none())
+        else {
             return libc::EINVAL;
         };
         let Some(cb) = cb else {
@@ -2484,7 +2909,9 @@ pub unsafe extern "C" fn vfsi_listdirv(
         for i in 0..count {
             // SAFETY: `dirs` points to `count` NUL-terminated strings.
             let p = unsafe { *dirs.add(i) };
-            let Some(path) = cstr_path(p) else {
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            let Some(path) = (unsafe { cstr_path(p) }) else {
                 return libc::EINVAL;
             };
             paths.push(path);
@@ -2563,6 +2990,10 @@ pub unsafe extern "C" fn vfsi_listdirv(
 
 /// Read the full contents of several files in one vectorized batch, calling
 /// `cb` for each file after its data has been fetched.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_read_paths(
     fs: *mut vfsi_fs,
@@ -2571,18 +3002,26 @@ pub unsafe extern "C" fn vfsi_read_paths(
     cb: vfsi_read_paths_cb,
     userdata: *mut c_void,
 ) -> c_int {
-    vfsi_read_paths_with_limit(
-        fs,
-        paths,
-        count,
-        vfsi_sync::DEFAULT_READ_ALLV_MAX_TOTAL_BYTES,
-        cb,
-        userdata,
-    )
+    // SAFETY: this forwards the same live pointers, lengths and callback obligations
+    // required by the exported C ABI.
+    unsafe {
+        vfsi_read_paths_with_limit(
+            fs,
+            paths,
+            count,
+            vfsi_sync::DEFAULT_READ_ALLV_MAX_TOTAL_BYTES,
+            cb,
+            userdata,
+        )
+    }
 }
 
 /// Whole-file vector with an explicit aggregate payload budget. Oversized
 /// results are an error, never successful truncation. Zero is a zero budget.
+///
+/// # Safety
+/// All pointers, buffers and callbacks must satisfy the module-level C
+/// pointer contract for their documented lengths and the full call duration.
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_read_paths_with_limit(
     fs: *mut vfsi_fs,
@@ -2593,7 +3032,10 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
     userdata: *mut c_void,
 ) -> c_int {
     ffi_guard!(libc::EIO, {
-        let (Some(fs), false, false) = (fs.as_ref(), paths.is_null(), cb.is_none()) else {
+        // SAFETY: non-null inputs point to live, aligned ABI objects for this call;
+        // mutable outputs are exclusive.
+        let (Some(fs), false, false) = (unsafe { fs.as_ref() }, paths.is_null(), cb.is_none())
+        else {
             return libc::EINVAL;
         };
         let Some(cb) = cb else {
@@ -2603,7 +3045,9 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
         for i in 0..count {
             // SAFETY: `paths` points to `count` NUL-terminated strings.
             let p = unsafe { *paths.add(i) };
-            let Some(path) = cstr_path(p) else {
+            // SAFETY: non-null C strings are NUL-terminated and readable throughout this
+            // call, as required by the exported ABI.
+            let Some(path) = (unsafe { cstr_path(p) }) else {
                 return libc::EINVAL;
             };
             kernel_paths.push(path);
@@ -2663,6 +3107,7 @@ impl BindingBackend for SmbVecFs {
 }
 
 #[cfg(test)]
+#[allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)]
 mod tests {
     use super::*;
     use std::ffi::CString;
@@ -2686,6 +3131,7 @@ mod tests {
         fail_call: Option<usize>,
         write_calls: Option<WriteCalls>,
         open_preflight_error: Option<usize>,
+        read_size: Option<usize>,
     }
 
     impl vfsi_sync::backend::HandleBackend for ListingBackend {
@@ -2803,8 +3249,22 @@ mod tests {
             }
         }
 
-        fn vread_impl(&mut self, _: &[ReadOp]) -> vfsi_sync::VfResult<Vec<vfsi_sync::ReadResult>> {
-            Err(VfError::unsupported(0))
+        fn vread_impl(
+            &mut self,
+            reads: &[ReadOp],
+        ) -> vfsi_sync::VfResult<Vec<vfsi_sync::ReadResult>> {
+            let Some(size) = self.read_size else {
+                return Err(VfError::unsupported(0));
+            };
+            Ok(reads
+                .iter()
+                .map(|read| vfsi_sync::ReadResult {
+                    file: read.file.clone(),
+                    offset: 0,
+                    data: vec![b'x'; size],
+                    eof: false,
+                })
+                .collect())
         }
 
         fn vwrite_impl(
@@ -2917,6 +3377,7 @@ mod tests {
                         fail_call,
                         write_calls: None,
                         open_preflight_error,
+                        read_size: None,
                     }),
                     PathBuf::from("/"),
                     PathBuf::from("/"),
@@ -2998,6 +3459,68 @@ mod tests {
     }
 
     #[test]
+    fn result_arrays_initialize_uninitialized_foreign_storage() {
+        let mut output = [std::mem::MaybeUninit::<vfsi_result>::uninit(); 2];
+        let results = unsafe { result_array(output.as_mut_ptr().cast(), output.len()) }
+            .unwrap_or_else(|_| panic!("valid writable output array"));
+        for (index, result) in results.iter().enumerate() {
+            assert_eq!(result.index, index);
+            assert_eq!(result.category, VFSI_ERROR_NOT_ATTEMPTED);
+        }
+    }
+
+    #[test]
+    fn c_vector_reads_never_copy_beyond_the_requested_output_length() {
+        for returned in [2, 3] {
+            let fixture = ListingFixture {
+                fs: make_fs(
+                    Box::new(ListingBackend {
+                        calls: Default::default(),
+                        entries_per_dir: 0,
+                        emitted: 0,
+                        missing: AttrMask::empty(),
+                        missing_after: 0,
+                        fail_call: None,
+                        write_calls: None,
+                        open_preflight_error: None,
+                        read_size: Some(returned),
+                    }),
+                    PathBuf::from("/"),
+                    PathBuf::from("/"),
+                ),
+                calls: Default::default(),
+            };
+            unsafe { &*fixture.fs }
+                .files
+                .lock()
+                .unwrap()
+                .insert(10, FileOperand::from_fd(100));
+            // Keep all canaries inside one real allocation, so even an old
+            // overlong copy can be detected without writing out of allocation.
+            let mut bytes = [0xa5u8; 8];
+            let mut operation = vfsi_pread_op {
+                fd: 10,
+                buf: bytes.as_mut_ptr().wrapping_add(2).cast(),
+                len: 2,
+                offset: 0,
+                got: 99,
+            };
+            let mut item = vfsi_result::panic();
+            let status = unsafe { vfsi_preadv(fixture.fs, &mut operation, 1, &mut item) };
+            if returned == 2 {
+                assert_eq!(status.category, VFSI_ERROR_NONE);
+                assert_eq!(operation.got, 2);
+                assert_eq!(bytes, [0xa5, 0xa5, b'x', b'x', 0xa5, 0xa5, 0xa5, 0xa5]);
+            } else {
+                assert_eq!(status.category, VFSI_ERROR_TRANSPORT);
+                assert_eq!(item.category, VFSI_ERROR_INDETERMINATE);
+                assert_eq!(operation.got, 99);
+                assert_eq!(bytes, [0xa5; 8]);
+            }
+        }
+    }
+
+    #[test]
     fn c_vector_writes_borrow_payloads_and_preflight_the_entire_batch() {
         let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
         let fs = make_fs(
@@ -3010,6 +3533,7 @@ mod tests {
                 fail_call: None,
                 write_calls: Some(calls.clone()),
                 open_preflight_error: None,
+                read_size: None,
             }),
             PathBuf::from("/"),
             PathBuf::from("/"),

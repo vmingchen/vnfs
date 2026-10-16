@@ -120,6 +120,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for file in source.iter().skip(usize::from(mixed)).filter(|_| cold) {
                 // Outside the timed region. Advisory eviction is not a
                 // guarantee of cold media or eviction of device/controller caches.
+                // SAFETY: file owns the descriptor; posix_fadvise takes no pointers
+                // and receives a valid whole-file range and advisory constant.
                 let result = unsafe {
                     libc::posix_fadvise(file.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED)
                 };

@@ -203,8 +203,8 @@ impl LocalBackend {
                 mode: 0,
                 resolve: 0x10 | 0x04, // RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS
             };
-            // OpenHow matches the kernel ABI; both borrowed pointers remain
-            // valid until this synchronous syscall returns.
+            // SAFETY: the CString and repr(C) OpenHow remain live for synchronous
+            // openat2; root_dir owns the borrowed descriptor.
             let fd = unsafe {
                 libc::syscall(
                     libc::SYS_openat2,
@@ -223,6 +223,8 @@ impl LocalBackend {
             }
             Ok(AnchoredPath {
                 path: PathBuf::from(format!("/proc/self/fd/{fd}/.")),
+                // SAFETY: the preceding open succeeded and returned a new descriptor,
+                // transferred exactly once to this owning File.
                 anchor: Some(unsafe { File::from_raw_fd(fd) }),
                 nofollow_on_open: false,
             })
@@ -390,33 +392,35 @@ impl LocalBackend {
         // Walk the canonical in-root parent from the held root descriptor.
         // Each component is opened without following symlinks, so a later
         // rename or symlink swap cannot redirect the final path.
-        let mut fd = unsafe { libc::fcntl(self.root_dir.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
-        if fd < 0 {
-            let error = std::io::Error::last_os_error();
-            return Err(VfError::failure(0, Self::errno(&error)));
-        }
+        let mut anchor = self
+            .root_dir
+            .try_clone()
+            .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
         for component in canonical_relative.components() {
             let std::path::Component::Normal(name) = component else {
                 continue;
             };
             let name = cstring_from_bytes(name.as_bytes())
                 .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+            // SAFETY: anchor owns the live directory descriptor and name is NUL-
+            // terminated for this synchronous openat.
             let next = unsafe {
                 libc::openat(
-                    fd,
+                    anchor.as_raw_fd(),
                     name.as_ptr(),
                     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                 )
             };
             if next < 0 {
-                let error = std::io::Error::last_os_error();
-                unsafe { libc::close(fd) };
-                return Err(VfError::failure(0, Self::errno(&error)));
+                return Err(VfError::failure(
+                    0,
+                    Self::errno(&std::io::Error::last_os_error()),
+                ));
             }
-            unsafe { libc::close(fd) };
-            fd = next;
+            // SAFETY: the preceding open succeeded and returned a new descriptor,
+            // transferred exactly once to this owning File.
+            anchor = unsafe { File::from_raw_fd(next) };
         }
-        let anchor = unsafe { File::from_raw_fd(fd) };
         let mut path = PathBuf::from(format!("/dev/fd/{}", anchor.as_raw_fd()));
         if let Some(name) = relative.file_name() {
             path.push(name);
@@ -457,6 +461,8 @@ impl LocalBackend {
                 mode: 0,
                 resolve: 0x10 | 0x02, // RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS
             };
+            // SAFETY: the CString, live root descriptor and initialized syscall
+            // arguments remain valid until this synchronous directory open returns.
             let fd = unsafe {
                 libc::syscall(
                     libc::SYS_openat2,
@@ -486,6 +492,8 @@ impl LocalBackend {
             let parent_anchored = self.no_follow_path(p)?;
             let path = cstring_from_bytes(path_bytes(parent_anchored.as_ref()))
                 .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+            // SAFETY: the CString, live root descriptor and initialized syscall
+            // arguments remain valid until this synchronous directory open returns.
             let fd = unsafe {
                 libc::open(
                     path.as_ptr(),
@@ -506,6 +514,8 @@ impl LocalBackend {
             }
             fd
         };
+        // SAFETY: the preceding open succeeded and returned a new descriptor,
+        // transferred exactly once to this owning File.
         let anchor = unsafe { File::from_raw_fd(fd) };
         let path = if cfg!(target_os = "linux") {
             PathBuf::from(format!("/proc/self/fd/{}/.", anchor.as_raw_fd()))
@@ -548,6 +558,8 @@ impl LocalBackend {
             mode: 0,
             resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
         };
+        // SAFETY: the CString and repr(C) OpenHow remain live for synchronous openat2;
+        // root_dir owns the borrowed descriptor.
         let fd = unsafe {
             libc::syscall(
                 libc::SYS_openat2,
@@ -565,6 +577,8 @@ impl LocalBackend {
             };
             return Err(VfError::failure(0, errno));
         }
+        // SAFETY: the preceding open succeeded and returned a new descriptor,
+        // transferred exactly once to this owning File.
         let anchor = unsafe { File::from_raw_fd(fd) };
         let mut path = PathBuf::from(format!("/proc/self/fd/{fd}"));
         if let Some(name) = name {
@@ -634,6 +648,8 @@ impl LocalBackend {
                 mode: 0,
                 resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS,
             };
+            // SAFETY: the CString and repr(C) OpenHow remain live for synchronous
+            // openat2; root_dir owns the borrowed descriptor.
             let fd = unsafe {
                 libc::syscall(
                     libc::SYS_openat2,
@@ -646,6 +662,8 @@ impl LocalBackend {
             if fd >= 0 {
                 return Ok(AnchoredPath {
                     path: PathBuf::from(format!("/proc/self/fd/{fd}")),
+                    // SAFETY: the preceding open succeeded and returned a new
+                    // descriptor, transferred exactly once to this owning File.
                     anchor: Some(unsafe { File::from_raw_fd(fd) }),
                     nofollow_on_open: false,
                 });
@@ -701,6 +719,8 @@ impl LocalBackend {
             // on the directory itself, which may have been removed by umask.
             let name = cstring_from_bytes(path_bytes(path))
                 .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+            // SAFETY: the owned parent/path and NUL-terminated name remain live for the
+            // synchronous syscall; metadata output storage is writable when used.
             let fd = unsafe {
                 libc::open(
                     name.as_ptr(),
@@ -713,6 +733,8 @@ impl LocalBackend {
                     Self::errno(&std::io::Error::last_os_error()),
                 ));
             }
+            // SAFETY: the preceding open succeeded and returned a new descriptor,
+            // transferred exactly once to this owning File.
             let file = unsafe { File::from_raw_fd(fd) };
             let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
             return std::fs::set_permissions(
@@ -736,6 +758,8 @@ impl LocalBackend {
                 .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
             let name = cstring_from_bytes(path_bytes(Path::new(name)))
                 .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+            // SAFETY: the owned parent/path and NUL-terminated name remain live for the
+            // synchronous syscall; metadata output storage is writable when used.
             let result = unsafe {
                 libc::fchmodat(
                     parent.as_raw_fd(),
@@ -753,7 +777,11 @@ impl LocalBackend {
             // Some systems accept AT_SYMLINK_NOFOLLOW but treat chmod on a
             // symlink as a successful no-op. Verify the anchored leaf itself
             // is still a directory before reporting that mkdir's mode applied.
+            // SAFETY: this libc output structure contains C integer fields and is valid
+            // when zero-initialized.
             let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+            // SAFETY: the owned parent/path and NUL-terminated name remain live for the
+            // synchronous syscall; metadata output storage is writable when used.
             let result = unsafe {
                 libc::fstatat(
                     parent.as_raw_fd(),
@@ -879,6 +907,8 @@ impl LocalBackend {
         XATTR_QUERY_COUNT.with(|count| count.set(count.get() + 1));
         let cpath = cstring_from_bytes(path_bytes(path.as_ref()))
             .ok_or_else(|| VfError::failure(0, ERR_INVAL))?;
+        // SAFETY: the path/descriptor is live; a null buffer with size zero requests
+        // the xattr list size without writing memory.
         let result = unsafe {
             if path.nofollow_on_open {
                 libc::llistxattr(cpath.as_ptr(), std::ptr::null_mut(), 0)
@@ -890,6 +920,8 @@ impl LocalBackend {
     }
 
     fn has_xattr_fd(fd: std::os::fd::RawFd) -> VfResult<bool> {
+        // SAFETY: the path/descriptor is live; a null buffer with size zero requests
+        // the xattr list size without writing memory.
         let result = unsafe { libc::flistxattr(fd, std::ptr::null_mut(), 0) };
         Self::xattr_result(result)
     }
@@ -978,34 +1010,24 @@ impl LocalBackend {
         Ok(())
     }
 
-    fn ownership_ids(a: &VfAttrs, index: usize) -> VfResult<(libc::uid_t, libc::gid_t)> {
-        let uid = if a.masks.contains(AttrMask::UID) {
-            a.uid
-        } else {
-            u32::MAX
-        };
-        let gid = if a.masks.contains(AttrMask::GID) {
-            a.gid
-        } else {
-            u32::MAX
-        };
-        if (a.masks.contains(AttrMask::UID) && uid == u32::MAX)
-            || (a.masks.contains(AttrMask::GID) && gid == u32::MAX)
-        {
+    fn ownership_ids(a: &VfAttrs, index: usize) -> VfResult<(Option<u32>, Option<u32>)> {
+        let uid = a.masks.contains(AttrMask::UID).then_some(a.uid);
+        let gid = a.masks.contains(AttrMask::GID).then_some(a.gid);
+        if uid == Some(u32::MAX) || gid == Some(u32::MAX) {
             return Err(VfError::failure(index, ERR_INVAL));
         }
         Ok((uid, gid))
     }
 
-    fn ownership_result(rc: libc::c_int, index: usize) -> VfResult<()> {
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(VfError::failure(
-                index,
-                Self::errno(&std::io::Error::last_os_error()),
-            ))
-        }
+    fn ownership_result(result: std::io::Result<()>, index: usize) -> VfResult<()> {
+        result.map_err(|error| {
+            let code = if error.kind() == std::io::ErrorKind::InvalidInput {
+                ERR_INVAL
+            } else {
+                Self::errno(&error)
+            };
+            VfError::failure(index, code)
+        })
     }
 
     fn chown_path(a: &VfAttrs, path: &AnchoredPath, follow: bool, index: usize) -> VfResult<()> {
@@ -1019,16 +1041,12 @@ impl LocalBackend {
             return Err(VfError::failure(index, ERR_NOENT));
         }
         let (uid, gid) = Self::ownership_ids(a, index)?;
-        let path = cstring_from_bytes(path_bytes(path.as_ref()))
-            .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
-        let rc = unsafe {
-            if follow {
-                libc::chown(path.as_ptr(), uid, gid)
-            } else {
-                libc::lchown(path.as_ptr(), uid, gid)
-            }
+        let result = if follow {
+            std::os::unix::fs::chown(path.as_ref(), uid, gid)
+        } else {
+            std::os::unix::fs::lchown(path.as_ref(), uid, gid)
         };
-        Self::ownership_result(rc, index)
+        Self::ownership_result(result, index)
     }
 
     fn setattr_one(&mut self, a: &VfAttrs, i: usize) -> VfResult<()> {
@@ -1043,10 +1061,8 @@ impl LocalBackend {
                     .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
             }
             if a.masks.intersects(AttrMask::UID | AttrMask::GID) {
-                use std::os::fd::AsRawFd;
                 let (uid, gid) = Self::ownership_ids(a, i)?;
-                let rc = unsafe { libc::fchown(open.file.as_raw_fd(), uid, gid) };
-                Self::ownership_result(rc, i)?;
+                Self::ownership_result(std::os::unix::fs::fchown(open.file.as_ref(), uid, gid), i)?;
             }
             if a.masks.contains(AttrMask::MODE) {
                 open.file
@@ -2148,6 +2164,8 @@ impl VectorBackend for LocalBackend {
                     vfsi_core::api::RenameOptions::Exchange => libc::RENAME_EXCHANGE,
                     vfsi_core::api::RenameOptions::Replace => unreachable!(),
                 };
+                // SAFETY: both NUL-terminated path buffers and their directory anchors
+                // stay live; flags are supported renameat2 constants.
                 let result = unsafe {
                     libc::syscall(
                         libc::SYS_renameat2,
@@ -2372,11 +2390,16 @@ impl VectorBackend for LocalBackend {
 }
 
 #[cfg(test)]
+#[allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)]
 mod contract_tests;
 
 #[cfg(target_os = "linux")]
 fn local_filesystem_stats(fd: std::os::fd::RawFd, index: usize) -> VfResult<FilesystemStats> {
+    // SAFETY: this libc output structure contains C integer fields and is valid when
+    // zero-initialized.
     let mut raw: libc::statvfs = unsafe { std::mem::zeroed() };
+    // SAFETY: fd is borrowed from a live File and raw provides writable statvfs output
+    // storage.
     if unsafe { libc::fstatvfs(fd, &mut raw) } != 0 {
         return Err(VfError::failure(
             index,
@@ -2390,13 +2413,19 @@ fn local_filesystem_stats(fd: std::os::fd::RawFd, index: usize) -> VfResult<File
             .ok_or_else(|| VfError::failure(index, libc::EOVERFLOW as u32))
     };
     let conf = |name| -> VfResult<Option<u64>> {
+        // SAFETY: libc supplies the calling thread's live errno cell; no reference
+        // escapes this operation.
         unsafe {
             *libc::__errno_location() = 0;
         }
+        // SAFETY: fd is borrowed from a live File and name is a supported _PC_*
+        // selector.
         let value = unsafe { libc::fpathconf(fd, name) };
         if value >= 0 {
             return Ok(Some(value as u64));
         }
+        // SAFETY: libc supplies the calling thread's live errno cell; no reference
+        // escapes this operation.
         let errno = unsafe { *libc::__errno_location() };
         if errno == 0 || errno == libc::EINVAL {
             Ok(None)

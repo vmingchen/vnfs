@@ -2,6 +2,9 @@ use nfsv41_sys::*;
 use std::os::raw::c_char;
 
 fn main() {
+    // SAFETY: the local C request points only into live buffers, memory-XDR streams are
+    // initialized before use, successful decoding initializes accessed fields, and decoded
+    // allocations are freed with their matching codec.
     unsafe {
         let fh: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
         let tag = b"roundtrip\0".to_vec();

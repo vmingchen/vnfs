@@ -1,4 +1,7 @@
-#![allow(unsafe_op_in_unsafe_fn)]
+#![cfg_attr(
+    test,
+    allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)
+)]
 use nfsv41_sys::*;
 use std::os::raw::c_char;
 

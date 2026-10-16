@@ -26,3 +26,9 @@ vfsi-posix = { path = "../../crates/vfsi-posix", version = "0.1.0", optional = t
 vfsi-nfs = { path = "../../crates/vfsi-nfs", version = "0.1.9", optional = true }
 vfsi-sync = { path = "../../crates/vfsi-sync", version = "0.1.10" }
 vfsi-smb = { path = "../../crates/vfsi-smb", version = "0.1.7", optional = true }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+undocumented_unsafe_blocks = "deny"

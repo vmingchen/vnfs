@@ -449,6 +449,9 @@ int vfsi_close(struct vfsi_fs *fs, int fd);
 /**
  * Read up to `len` bytes at `offset` into `buf`; writes the actual count to
  * `*got` when non-NULL.
+ * For this scalar zero-copy API, buf must contain len initialized writable
+ * bytes and be exclusively accessible for the call. Vector reads can write
+ * into uninitialized output buffers.
  */
 int vfsi_pread(struct vfsi_fs *fs, int fd, void *buf, size_t len, uint64_t offset, size_t *got);
 

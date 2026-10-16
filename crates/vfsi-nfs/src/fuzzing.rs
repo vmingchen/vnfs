@@ -66,9 +66,13 @@ fn operation(selector: u8) -> nfs_opnum4 {
 }
 
 fn argument(op: nfs_opnum4) -> nfs_argop4 {
-    let mut value: nfs_argop4 = unsafe { std::mem::zeroed() };
-    value.argop = op;
-    value
+    // This request sketch is used only for opcode validation, never encoding.
+    nfs_argop4 {
+        argop: op,
+        nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+            opaccess: ACCESS4args { access: 0 },
+        },
+    }
 }
 
 fn response(
@@ -77,6 +81,9 @@ fn response(
     payload_len: u32,
     payload: *mut c_char,
 ) -> nfs_resop4 {
+    // SAFETY: these C protocol aggregates contain integer, pointer and union fields
+    // admitting zero bits; all non-null fuzz payload pointers refer to owned buffers alive
+    // during validation.
     let mut value: nfs_resop4 = unsafe { std::mem::zeroed() };
     value.resop = op;
     match op {

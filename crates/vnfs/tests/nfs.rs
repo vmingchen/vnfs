@@ -1,3 +1,7 @@
+#![cfg_attr(
+    test,
+    allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)
+)]
 //! Native and high-level NFS integration tests. The server defaults to
 //! 127.0.0.1 with writable export `/`; override its address with VNFS_TEST_HOST.
 //! Select NFSv4.1 or v4.2 with VNFS_TEST_MINOR.

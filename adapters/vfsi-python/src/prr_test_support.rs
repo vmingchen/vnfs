@@ -40,6 +40,8 @@ fn operand_trace(file: &FileOperand) -> PathBuf {
     }
 }
 
+type ReadRequestTrace = Arc<Mutex<Vec<Vec<(u64, usize)>>>>;
+
 pub(crate) struct FaultBackend {
     pub(crate) inner: LocalBackend,
     pub(crate) read_error: Option<VfError>,
@@ -51,7 +53,7 @@ pub(crate) struct FaultBackend {
     pub(crate) write_errors: std::collections::VecDeque<VfError>,
     pub(crate) read_error_on_call: usize,
     pub(crate) read_limit: Option<usize>,
-    pub(crate) read_requests: Arc<Mutex<Vec<Vec<(u64, usize)>>>>,
+    pub(crate) read_requests: ReadRequestTrace,
     pub(crate) grow_before_read: Option<(PathBuf, Vec<u8>)>,
     pub(crate) read_calls: Arc<Mutex<Vec<Vec<PathBuf>>>>,
     pub(crate) write_counts: Option<Vec<usize>>,
@@ -149,10 +151,10 @@ impl VectorBackend for FaultBackend {
         if let Some(error) = self.read_errors.pop_front() {
             return Err(error);
         }
-        if call == self.read_error_on_call {
-            if let Some(error) = self.read_error.take() {
-                return Err(error);
-            }
+        if call == self.read_error_on_call
+            && let Some(error) = self.read_error.take()
+        {
+            return Err(error);
         }
         if let Some((path, data)) = self.grow_before_read.take() {
             use std::io::Write;
@@ -213,10 +215,10 @@ impl VectorBackend for FaultBackend {
         } else {
             self.inner.vwrite_impl(ops)
         };
-        if result.is_err() {
-            if let Some((path, data)) = self.replace_after_write_error.take() {
-                std::fs::write(path, data).unwrap();
-            }
+        if result.is_err()
+            && let Some((path, data)) = self.replace_after_write_error.take()
+        {
+            std::fs::write(path, data).unwrap();
         }
         result
     }
@@ -247,10 +249,10 @@ impl VectorBackend for FaultBackend {
         files: &[FileOperand],
         options: ReadAllOptions,
     ) -> vfsi_core::VfResult<Vec<Vec<u8>>> {
-        if !self.write_calls.lock().unwrap().is_empty() {
-            if let Some(error) = self.read_all_errors_after_write.pop_front() {
-                return Err(error);
-            }
+        if !self.write_calls.lock().unwrap().is_empty()
+            && let Some(error) = self.read_all_errors_after_write.pop_front()
+        {
+            return Err(error);
         }
         self.inner.vread_all_with_options_impl(files, options)
     }

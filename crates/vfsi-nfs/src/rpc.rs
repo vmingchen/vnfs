@@ -77,10 +77,14 @@ impl RpcsecGssProtection {
 }
 
 unsafe extern "C" fn svc_req_alloc(xprt: *mut SVCXPRT, xdrs: *mut XDR) -> *mut svc_req {
+    // SAFETY: calloc allocates suitably aligned zeroed C request storage; failure is
+    // checked before any dereference.
     let req = unsafe { libc::calloc(1, std::mem::size_of::<svc_req>()) } as *mut svc_req;
     if req.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: the allocation was checked non-null and is writable for svc_req; callback
+    // arguments are borrowed handles retained by libntirpc.
     unsafe {
         (*req).rq_xprt = xprt;
         (*req).rq_xdrs = xdrs;
@@ -89,6 +93,8 @@ unsafe extern "C" fn svc_req_alloc(xprt: *mut SVCXPRT, xdrs: *mut XDR) -> *mut s
 }
 
 unsafe extern "C" fn svc_req_free(req: *mut svc_req, _stat: xprt_stat) {
+    // SAFETY: libntirpc returns the allocation from svc_req_alloc exactly once to this
+    // matching free callback.
     unsafe { libc::free(req as *mut c_void) }
 }
 
@@ -96,6 +102,8 @@ unsafe extern "C" fn svc_req_free(req: *mut svc_req, _stat: xprt_stat) {
 /// by the same epoll/request machinery as server calls, so the request
 /// alloc/free callbacks are required on the client too.
 pub fn svc_init_once() -> RpcResult<()> {
+    // SAFETY: OnceLock serializes initialization; the zero-valid C configuration and
+    // static callback functions stay live for svc_init.
     let result = SVC_INIT.get_or_init(|| unsafe {
         let mut params: svc_init_params = std::mem::zeroed();
         params.flags = (SVC_INIT_EPOLL | SVC_INIT_NOREG_XPRTS) as u_long;
@@ -164,8 +172,12 @@ fn connect_explicit_endpoint(
             }
         };
         let fd = stream.as_raw_fd();
+        // SAFETY: sockaddr_storage consists of C scalar fields and padding and admits zero
+        // initialization.
         let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
         let mut storage_len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        // SAFETY: stream owns fd; storage and storage_len provide appropriately sized
+        // writable output for getpeername.
         if unsafe {
             libc::getpeername(
                 fd,
@@ -182,6 +194,8 @@ fn connect_explicit_endpoint(
             len: storage_len,
             buf: (&mut storage as *mut libc::sockaddr_storage).cast(),
         };
+        // SAFETY: the connected stream and stack netbuf/address stay live during client
+        // construction; ownership transfers only after CLSET_FD_CLOSE succeeds.
         let clnt = unsafe {
             clnt_vc_ncreatef(
                 fd,
@@ -197,12 +211,16 @@ fn connect_explicit_endpoint(
             last_error = Some(RpcError::transport("clnt_vc_ncreatef returned NULL"));
             continue;
         }
+        // SAFETY: clnt was checked non-null and its live ops table belongs to the
+        // successfully constructed libntirpc client.
         let closes_fd = unsafe {
             (*(*clnt).cl_ops)
                 .cl_control
                 .is_some_and(|control| control(clnt, CLSET_FD_CLOSE, std::ptr::null_mut()))
         };
         if !closes_fd {
+            // SAFETY: this branch still exclusively owns the successfully created client;
+            // destroy_client releases it once before returning the error.
             unsafe { destroy_client(clnt) };
             last_error = Some(RpcError::transport(
                 "failed to transfer TCP stream ownership to libntirpc",
@@ -231,6 +249,8 @@ pub struct RpcClient {
     request_timeout: timespec,
 }
 
+// SAFETY: the client owns its transport/authentication handles and can move between
+// threads; it is not Sync, so its synchronous request state is never shared concurrently.
 unsafe impl Send for RpcClient {}
 
 impl RpcClient {
@@ -277,6 +297,8 @@ impl RpcClient {
 
         let clnt = match connect_explicit_endpoint(host, connect_timeout) {
             Some(result) => result?,
+            // SAFETY: both CStrings and the initialized timeout remain live for this
+            // synchronous libntirpc constructor.
             None => unsafe {
                 clnt_ncreate_timed(
                     host_c.as_ptr(),
@@ -290,6 +312,8 @@ impl RpcClient {
         if clnt.is_null() {
             return Err(RpcError::transport("clnt_ncreate_timed returned NULL"));
         }
+        // SAFETY: the returned client is non-null and owns a valid C ops table; on failure
+        // it is destroyed exactly once.
         unsafe {
             if (*clnt).cl_error.re_status != clnt_stat_RPC_SUCCESS {
                 let e = format!(
@@ -305,6 +329,8 @@ impl RpcClient {
         }
 
         let auth = match authentication {
+            // SAFETY: AUTH_SYS construction takes no caller pointers; the returned handle
+            // is checked before use and released by RpcClient.
             NfsAuthentication::AuthSys => unsafe { authunix_ncreate_default() },
             #[cfg(feature = "rpcsec-gss")]
             NfsAuthentication::RpcsecGss {
@@ -317,6 +343,8 @@ impl RpcClient {
                     .clone()
                     .unwrap_or_else(|| default_service_principal(host));
                 let principal = std::ffi::CString::new(principal).map_err(|error| {
+                    // SAFETY: this branch still exclusively owns the successfully created
+                    // client; destroy_client releases it once before returning the error.
                     unsafe {
                         destroy_client(clnt);
                     }
@@ -329,6 +357,8 @@ impl RpcClient {
                     cred: std::ptr::null_mut(),
                     req_flags: protection.context_flags(),
                 };
+                // SAFETY: client, principal CString and initialized GSS configuration
+                // remain live throughout synchronous authentication setup.
                 unsafe {
                     vfsi_libntirpc_authgss_ncreate_default(
                         clnt,
@@ -339,6 +369,8 @@ impl RpcClient {
             }
         };
         if auth.is_null() {
+            // SAFETY: this branch still exclusively owns the successfully created client;
+            // destroy_client releases it once before returning the error.
             unsafe {
                 destroy_client(clnt);
             }
@@ -350,8 +382,14 @@ impl RpcClient {
                 }
             }));
         }
+        // SAFETY: auth was checked non-null and libntirpc initialized its error/status
+        // fields before returning it.
         if unsafe { (*auth).ah_error.re_status } != clnt_stat_RPC_SUCCESS {
+            // SAFETY: auth was checked non-null and libntirpc initialized its error/status
+            // fields before returning it.
             let status = unsafe { (*auth).ah_error.re_status };
+            // SAFETY: this error path exclusively owns auth and clnt and releases each
+            // once, in authentication-before-transport order.
             unsafe {
                 destroy_auth(auth);
                 destroy_client(clnt);
@@ -387,56 +425,65 @@ impl RpcClient {
         xres: xdrproc_t,
         res: *mut c_void,
     ) -> RpcResult<()> {
-        unsafe {
-            let mut req = Box::new(std::mem::zeroed::<clnt_req>());
-            let reqp: *mut clnt_req = &mut *req;
+        // SAFETY: clnt_req is a C aggregate of scalars, raw pointers and
+        // nullable callbacks. Zero is valid before pthread initialization.
+        let mut req = Box::new(unsafe { std::mem::zeroed::<clnt_req>() });
+        req.cc_clnt = self.clnt;
+        req.cc_auth = self.auth;
+        req.cc_proc = proc_;
+        req.cc_call = xdrpair {
+            proc_: xargs,
+            where_: args,
+        };
+        req.cc_reply = xdrpair {
+            proc_: xres,
+            where_: res,
+        };
+        // SAFETY: libntirpc initializes this immutable null-auth descriptor
+        // before calls; reading its scalar contents does not mutate it.
+        req.cc_verf = unsafe { _null_auth };
+        req.cc_free_cb = Some(req_free_cb);
+        req.cc_size = std::mem::size_of::<clnt_req>();
+        req.cc_refcnt = 1;
 
-            (*reqp).cc_clnt = self.clnt;
-            (*reqp).cc_auth = self.auth;
-            (*reqp).cc_proc = proc_;
-            (*reqp).cc_call = xdrpair {
-                proc_: xargs,
-                where_: args,
-            };
-            (*reqp).cc_reply = xdrpair {
-                proc_: xres,
-                where_: res,
-            };
-            (*reqp).cc_verf = _null_auth;
-            (*reqp).cc_free_cb = Some(req_free_cb);
-            (*reqp).cc_size = std::mem::size_of::<clnt_req>();
-            (*reqp).cc_refcnt = 1;
-
+        // Transfer ownership before the C callback can free the allocation.
+        let reqp = Box::into_raw(req);
+        // SAFETY: reqp owns live request storage; the caller guarantees that
+        // its argument/result graphs match their codecs. Our reference stays
+        // live until the explicit release following setup or wait_reply.
+        let stat = unsafe {
             waitq_init(reqp);
-
-            let timeout = self.request_timeout;
-            let stat = clnt_req_setup(reqp, timeout);
-            if stat != clnt_stat_RPC_SUCCESS {
-                clnt_req_release(reqp);
-                std::mem::forget(req);
-                return Err(RpcError::transport_with_kind(
-                    rpc_transport_kind(stat),
-                    format!("clnt_req_setup failed: {}", stat),
-                ));
-            }
+            clnt_req_setup(reqp, self.request_timeout)
+        };
+        if stat != clnt_stat_RPC_SUCCESS {
+            // SAFETY: our request reference remains live after failed setup.
+            // Final release tears down the wait queue and calls req_free_cb.
+            unsafe { clnt_req_release(reqp) };
+            return Err(RpcError::transport_with_kind(
+                rpc_transport_kind(stat),
+                format!("clnt_req_setup failed: {stat}"),
+            ));
+        }
+        // SAFETY: our request reference keeps reqp alive throughout the wait.
+        // Copy the error before releasing it; no pointer access follows the
+        // release, which may free the allocation through req_free_cb.
+        let (status, err) = unsafe {
             (*reqp).cc_refreshes = 1;
             let status = clnt_req_wait_reply(reqp);
             let err = (*reqp).cc_error;
             clnt_req_release(reqp);
-            // clnt_req_release runs our free callback, which frees the Box;
-            // prevent the compiler from dropping it a second time.
-            std::mem::forget(req);
-            if status != clnt_stat_RPC_SUCCESS {
-                return Err(RpcError::transport_with_kind(
-                    rpc_transport_kind(status),
-                    format!(
-                        "RPC call failed: stat={}, rpc_err.status={}",
-                        status, err.re_status
-                    ),
-                ));
-            }
-            Ok(())
+            (status, err)
+        };
+        if status != clnt_stat_RPC_SUCCESS {
+            return Err(RpcError::transport_with_kind(
+                rpc_transport_kind(status),
+                format!(
+                    "RPC call failed: stat={status}, rpc_err.status={}",
+                    err.re_status
+                ),
+            ));
         }
+        Ok(())
     }
 }
 
@@ -476,6 +523,8 @@ mod transport_kind_tests {
 }
 
 unsafe fn destroy_client(client: *mut CLIENT) {
+    // SAFETY: the caller transfers a live client or null for final destruction; its ops
+    // table is inspected only when non-null.
     unsafe {
         if !client.is_null()
             && !(*client).cl_ops.is_null()
@@ -487,6 +536,8 @@ unsafe fn destroy_client(client: *mut CLIENT) {
 }
 
 unsafe fn destroy_auth(auth: *mut AUTH) {
+    // SAFETY: the caller transfers a live authentication handle or null and no other owner
+    // destroys it.
     unsafe {
         if !auth.is_null() {
             vfsi_libntirpc_auth_destroy(auth);
@@ -502,6 +553,8 @@ unsafe fn destroy_auth(auth: *mut AUTH) {
 /// which destroys the condition variable and unlocks/destroys the mutex
 /// before invoking our free callback.
 unsafe fn waitq_init(reqp: *mut clnt_req) {
+    // SAFETY: reqp points to uniquely owned initialized request storage; its embedded
+    // mutex/condition storage matches the pthread ABI and is initialized once.
     unsafe {
         libc::pthread_mutex_init(
             &mut (*reqp).cc_we.mtx as *mut _ as *mut libc::pthread_mutex_t,
@@ -522,6 +575,7 @@ unsafe fn waitq_init(reqp: *mut clnt_req) {
 /// `clnt_req_release` performs the same teardown before invoking our free
 /// callback, so finalizing here as well would be a double destroy.
 #[cfg(test)]
+#[allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)]
 unsafe fn waitq_fini(reqp: *mut clnt_req) {
     unsafe {
         libc::pthread_cond_destroy(&mut (*reqp).cc_we.cv as *mut _ as *mut libc::pthread_cond_t);
@@ -537,6 +591,8 @@ unsafe extern "C" fn req_free_cb(
     _line: c_int,
     _func: *const c_char,
 ) {
+    // SAFETY: cc came from the Box allocated by RpcClient::call; libntirpc invokes this
+    // callback exactly once after its final reference and wait queue are released.
     unsafe {
         drop(Box::from_raw(cc));
     }
@@ -544,6 +600,8 @@ unsafe extern "C" fn req_free_cb(
 
 impl Drop for RpcClient {
     fn drop(&mut self) {
+        // SAFETY: Drop has exclusive ownership of both live C handles; authentication is
+        // destroyed before its transport and neither is used afterwards.
         unsafe {
             // RPCSEC_GSS destruction sends its context-destroy request over
             // the client transport, so authentication must be released first.
@@ -554,6 +612,7 @@ impl Drop for RpcClient {
 }
 
 #[cfg(test)]
+#[allow(clippy::undocumented_unsafe_blocks, unsafe_op_in_unsafe_fn)]
 mod tests {
     use super::*;
 
