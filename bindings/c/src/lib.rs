@@ -220,7 +220,7 @@ pub struct vfsi_copy_op {
     pub dst: *const c_char,
     pub dst_offset: u64,
     pub length: u64,
-    pub to_eof: bool,
+    pub to_eof: u8,
 }
 
 impl vfsi_attrs {
@@ -364,6 +364,14 @@ unsafe fn result_array<'a>(
         })
     };
     Ok(results)
+}
+
+fn parse_c_bool(value: u8) -> Option<bool> {
+    match value {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    }
 }
 
 fn complete_results(results: &mut [vfsi_result]) {
@@ -1086,7 +1094,7 @@ pub struct vfsi_walk_options {
     pub max_path_bytes: usize,
     pub max_depth: usize,
     pub attributes: u32,
-    pub sort_by_name: bool,
+    pub sort_by_name: u8,
 }
 /// Event kinds: 0=enter directory, 1=entry, 2=leave directory.
 /// Return 0=continue, 1=prune directory, 2=stop. Arguments are borrowed.
@@ -1118,6 +1126,9 @@ pub unsafe extern "C" fn vfsi_walk(
         else {
             return libc::EINVAL;
         };
+        let Some(sort_by_name) = parse_c_bool(options.sort_by_name) else {
+            return libc::EINVAL;
+        };
         let Some(fields) = AttrMask::from_bits(options.attributes) else {
             return libc::EINVAL;
         };
@@ -1145,7 +1156,7 @@ pub unsafe extern "C" fn vfsi_walk(
             vfsi_sync::walk_events(
                 vnfs::directory::DirEntry::new(path, metadata),
                 walk_options,
-                options.sort_by_name,
+                sort_by_name,
                 |path, limits| {
                     let entries = bounded_listdir(
                         fs,
@@ -2668,6 +2679,13 @@ pub unsafe extern "C" fn vfsi_copyv(
         let ops = unsafe { std::slice::from_raw_parts(ops, count) };
         let mut pairs = Vec::with_capacity(count);
         for (index, op) in ops.iter().enumerate() {
+            let Some(to_eof) = parse_c_bool(op.to_eof) else {
+                fail_batch!(
+                    results,
+                    vfsi_result::invalid(index, "to_eof must be 0 or 1"),
+                    false
+                );
+            };
             // SAFETY: non-null C strings are NUL-terminated and readable throughout this
             // call, as required by the exported ABI.
             let (Some(src), Some(dst)) =
@@ -2687,7 +2705,7 @@ pub unsafe extern "C" fn vfsi_copyv(
                 op.src_offset,
                 &dst,
                 op.dst_offset,
-                (!op.to_eof).then_some(op.length),
+                (!to_eof).then_some(op.length),
             ));
         }
         let mut backend = match lock_or_io(&fs.fs) {
@@ -3111,6 +3129,70 @@ impl BindingBackend for SmbVecFs {
 mod tests {
     use super::*;
     use std::ffi::CString;
+
+    #[test]
+    fn c_boolean_fields_accept_only_zero_and_one() {
+        assert_eq!(parse_c_bool(0), Some(false));
+        assert_eq!(parse_c_bool(1), Some(true));
+        for value in [2, u8::MAX] {
+            assert_eq!(parse_c_bool(value), None);
+        }
+        assert_eq!(std::mem::size_of::<bool>(), std::mem::size_of::<u8>());
+        assert_eq!(std::mem::align_of::<bool>(), std::mem::align_of::<u8>());
+    }
+
+    #[test]
+    fn c_apis_reject_invalid_boolean_bytes_before_backend_io() {
+        unsafe extern "C" fn stop_walk(
+            _: *const c_char,
+            _: u32,
+            _: usize,
+            _: *const vfsi_attrs,
+            _: *mut c_void,
+        ) -> u32 {
+            0
+        }
+        let fixture = ListingFixture::new(0, AttrMask::empty(), 0);
+        let root = CString::new("/").unwrap();
+        let walk_options = vfsi_walk_options {
+            max_entries: 1,
+            max_path_bytes: 1024,
+            max_depth: 1,
+            attributes: VFSI_ATTR_MODE,
+            sort_by_name: 2,
+        };
+        assert_eq!(
+            unsafe {
+                vfsi_walk(
+                    fixture.fs,
+                    root.as_ptr(),
+                    &walk_options,
+                    Some(stop_walk),
+                    std::ptr::null_mut(),
+                )
+            },
+            libc::EINVAL
+        );
+        assert!(fixture.calls.lock().unwrap().is_empty());
+
+        let src = CString::new("/src").unwrap();
+        let dst = CString::new("/dst").unwrap();
+        let copy = [vfsi_copy_op {
+            src: src.as_ptr(),
+            src_offset: 0,
+            dst: dst.as_ptr(),
+            dst_offset: 0,
+            length: 1,
+            to_eof: 2,
+        }];
+        let mut item = [vfsi_result::panic()];
+        let result = unsafe { vfsi_copyv(fixture.fs, copy.as_ptr(), 1, item.as_mut_ptr()) };
+        assert_eq!(result.category, VFSI_ERROR_INVALID_ARGUMENT);
+        assert_eq!(result.err_no, libc::EINVAL as u32);
+        assert_eq!(result.index, 0);
+        assert_eq!(item[0].category, VFSI_ERROR_INVALID_ARGUMENT);
+        assert!(fixture.calls.lock().unwrap().is_empty());
+    }
 
     #[derive(Default)]
     struct ListingCall {
@@ -3749,7 +3831,7 @@ mod tests {
             max_path_bytes: 1024,
             max_depth: 10,
             attributes: VFSI_ATTR_RDEV,
-            sort_by_name: false,
+            sort_by_name: 0,
         };
         unsafe extern "C" fn stop_walk(
             _: *const c_char,
@@ -3798,7 +3880,7 @@ mod tests {
             max_path_bytes: 1024,
             max_depth: 10,
             attributes: VFSI_ATTR_MODE,
-            sort_by_name: false,
+            sort_by_name: 0,
         };
         assert_eq!(
             unsafe {
@@ -4114,7 +4196,7 @@ mod tests {
                 max_path_bytes: 1024,
                 max_depth: 10,
                 attributes: VFSI_ATTR_MODE,
-                sort_by_name: true,
+                sort_by_name: 1,
             };
             assert_eq!(
                 vfsi_walk(

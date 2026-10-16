@@ -184,7 +184,7 @@ typedef struct vfsi_walk_options {
   size_t max_path_bytes;
   size_t max_depth;
   uint32_t attributes;
-  bool sort_by_name;
+  uint8_t sort_by_name; /* 0=false, 1=true */
 } vfsi_walk_options;
 
 /**
@@ -267,7 +267,7 @@ typedef struct vfsi_copy_op {
   const char *dst;
   uint64_t dst_offset;
   uint64_t length;
-  bool to_eof;
+  uint8_t to_eof; /* 0=false, 1=true */
 } vfsi_copy_op;
 
 typedef bool (*vfsi_read_stream_cb)(const char *path,
