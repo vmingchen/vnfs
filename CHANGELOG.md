@@ -5,6 +5,28 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## NFS and dependency patch release - 2026-10-17
+
+- Rust: vnfs 0.0.23, vfsi-core 0.1.11, vfsi-sync 0.1.12,
+  vfsi-local 0.1.10, vfsi-posix 0.1.2, vfsi-uring 0.1.2,
+  vfsi-nfs 0.1.11, vfsi-smb 0.1.9, and nfsv41-sys 0.1.12.
+  Dependency floors advance together. libntirpc-sys and C/Python SMB
+  distribution versions are unchanged by this release.
+- Python: nfs4fs 0.3.8 requires vfsi-fsspec 0.1.8; the private shared
+  native build crate advances to 0.1.3.
+- Hardened no-follow attribute updates, symlink-aware NFS traversal,
+  local self-copy overlap checks, C vector result validation, and deferred
+  descriptor cleanup. NFS symlink setattr continuation uses bounded stack space.
+- SMB traversal and deletion no longer follow final reparse points. DFS shares
+  are explicitly unsupported; NFSv4 referrals/migration and SMB path referrals
+  retain protocol statuses and report clear unsupported errors, including Python.
+- Renamed NFS authentication types to `Auth` and removed scalar retained-directory
+  extension helpers in favor of path-based workflows.
+- Refreshed Rust guides and object-reference documentation. Archive verification
+  refreshes normalized source timestamps to avoid reusing stale same-version APIs.
+- The separate Ganesha symlink-timestamp server fix is not bundled or deployed
+  by these client releases; unsupported server behavior remains a live-test risk.
+
 ## C adapter patch release - 2026-10-17
 
 - vfsi-c 0.3.7 uses vnfs 0.0.22 and the current published backend crates.

@@ -18,16 +18,16 @@ bitfields = "3.1.0"
 clap = { version = "4.5.17", features = ["derive"] }
 libc = "0.2"
 libntirpc-sys = "0.3.1"
-nfsv41-sys = { path = "crates/nfsv41-sys", version = "0.1.11" }
+nfsv41-sys = { path = "crates/nfsv41-sys", version = "0.1.12" }
 xdr-codec = "0.4.4"
 xdrgen = "0.4.4"
-vfsi-core = { path = "crates/vfsi-core", version = "0.1.10" }
-vfsi-local = { path = "crates/vfsi-local", version = "0.1.9" }
-vfsi-posix = { path = "crates/vfsi-posix", version = "0.1.1" }
-vfsi-uring = { path = "crates/vfsi-uring", version = "0.1.1" }
-vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.1.10" }
-vfsi-smb = { path = "crates/vfsi-smb", version = "0.1.8" }
-vfsi-sync = { path = "crates/vfsi-sync", version = "0.1.11" }
+vfsi-core = { path = "crates/vfsi-core", version = "0.1.11" }
+vfsi-local = { path = "crates/vfsi-local", version = "0.1.10" }
+vfsi-posix = { path = "crates/vfsi-posix", version = "0.1.2" }
+vfsi-uring = { path = "crates/vfsi-uring", version = "0.1.2" }
+vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.1.11" }
+vfsi-smb = { path = "crates/vfsi-smb", version = "0.1.9" }
+vfsi-sync = { path = "crates/vfsi-sync", version = "0.1.12" }
 
 # Unsafe functions still require explicit blocks for their unsafe operations.
 # Production blocks/impls need SAFETY comments, including in unit-test builds.
