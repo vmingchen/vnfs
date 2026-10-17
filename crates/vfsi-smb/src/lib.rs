@@ -19,6 +19,10 @@
 //! creation modes return `Unsupported`. The `MODE` attribute is likewise a
 //! conventional synthetic value (`0666` or `0777`), not a report of the
 //! server's effective ACL permissions.
+//!
+//! DFS namespaces/referrals are unsupported. Connection setup rejects DFS
+//! shares, and path referral responses return `Unsupported` without following
+//! them. Connect directly to the destination server/share instead.
 
 #[doc(hidden)]
 mod path {
@@ -84,9 +88,7 @@ struct SmbConnectFlags {
     auto_reconnect: bool,
     #[bits(default = true)]
     compression: bool,
-    #[bits(default = true)]
-    dfs_enabled: bool,
-    #[bits(5)]
+    #[bits(6)]
     _reserved: u8,
 }
 
@@ -119,20 +121,22 @@ impl SmbConnectOptions {
         self.flags.set_compression(value);
         self
     }
-    /// Enable SMB DFS support.
-    pub fn dfs_enabled(mut self, value: bool) -> Self {
-        self.flags.set_dfs_enabled(value);
-        self
-    }
     pub const fn reconnects_automatically(self) -> bool {
         self.flags.auto_reconnect()
     }
     pub const fn uses_compression(self) -> bool {
         self.flags.compression()
     }
-    pub const fn uses_dfs(self) -> bool {
-        self.flags.dfs_enabled()
+}
+
+fn check_share_routing(is_dfs: bool, share: &str) -> VfRes {
+    if is_dfs {
+        return Err(VfError::unsupported(0).with_context(
+            "SMB DFS referrals are unsupported; connect directly to the destination server/share",
+            share,
+        ));
     }
+    Ok(())
 }
 
 fn checked_offset(base: u64, delta: u64, index: usize) -> VfResult<u64> {
@@ -196,6 +200,8 @@ impl SmbVecFs {
     }
 
     /// Connect with explicit setup and per-request deadlines.
+    ///
+    /// DFS shares are rejected with `Unsupported`; referral following is disabled.
     pub fn connect_with_options(
         server: &str,
         share: &str,
@@ -222,7 +228,9 @@ impl SmbVecFs {
             domain: domain.to_owned(),
             auto_reconnect: options.reconnects_automatically(),
             compression: options.uses_compression(),
-            dfs_enabled: options.uses_dfs(),
+            // Custom compounds are bound to the primary connection. Never let
+            // the dependency redirect a tree to an untracked DFS connection.
+            dfs_enabled: false,
             dfs_target_overrides: HashMap::new(),
             connect_options: None,
         };
@@ -256,6 +264,7 @@ impl SmbVecFs {
             })
             .map_err(|_| VfError::transport(None, "SMB share connection timed out"))?
             .map_err(|e| smb_error(e, 0))?;
+        check_share_routing(tree.is_dfs || tree.dfs_origin.is_some(), share)?;
         Ok(Self {
             runtime,
             client,
@@ -3298,6 +3307,10 @@ fn collect_compound(
 }
 
 fn smb_error(error: SmbError, index: usize) -> VfError {
+    if let SmbError::DfsReferralRequired { path } = &error {
+        return VfError::smb(index, NtStatus::PATH_NOT_COVERED.0)
+            .with_context("SMB DFS referral", path);
+    }
     let status = error.status();
     let errno = match error.kind() {
         SmbErrorKind::NotFound => Some(ERR_NOENT),
@@ -3797,6 +3810,47 @@ mod tests {
     }
 
     #[test]
+    fn dfs_shares_are_rejected_but_ordinary_shares_remain_usable() {
+        check_share_routing(false, "ordinary").unwrap();
+        let error = check_share_routing(true, "namespace").unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(!error.is_transport());
+        assert_eq!(error.path(), Some(Path::new("namespace")));
+        assert!(
+            error
+                .to_string()
+                .contains("SMB DFS referrals are unsupported")
+        );
+    }
+
+    #[test]
+    fn referral_errors_are_unsupported_without_losing_the_request_index() {
+        for error in [
+            SmbError::Protocol {
+                status: NtStatus::PATH_NOT_COVERED,
+                command: Command::Create,
+            },
+            SmbError::DfsReferralRequired {
+                path: "projects/file".into(),
+            },
+        ] {
+            let error = smb_error(error, 7);
+            assert_eq!(error.index(), Some(7));
+            assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+            assert_eq!(
+                error.status(),
+                Some(StatusCode::Smb(NtStatus::PATH_NOT_COVERED.0))
+            );
+            assert!(!error.is_transport());
+            assert!(
+                error
+                    .to_string()
+                    .contains("SMB DFS referrals are unsupported")
+            );
+        }
+    }
+
+    #[test]
     fn unmapped_server_status_is_not_a_transport_failure() {
         let status = NtStatus(0xDEAD_BEEF);
         let error = smb_error(
@@ -3822,17 +3876,13 @@ mod option_layout_tests {
     fn packed_smb_options_keep_defaults_and_flags_independent() {
         assert_eq!(std::mem::size_of::<SmbConnectFlags>(), 1);
         let default = SmbConnectOptions::default();
-        assert!(
-            default.reconnects_automatically() && default.uses_compression() && default.uses_dfs()
-        );
-        for bits in 0..8 {
+        assert!(default.reconnects_automatically() && default.uses_compression());
+        for bits in 0..4 {
             let options = default
                 .auto_reconnect(bits & 1 != 0)
-                .compression(bits & 2 != 0)
-                .dfs_enabled(bits & 4 != 0);
+                .compression(bits & 2 != 0);
             assert_eq!(options.reconnects_automatically(), bits & 1 != 0);
             assert_eq!(options.uses_compression(), bits & 2 != 0);
-            assert_eq!(options.uses_dfs(), bits & 4 != 0);
             assert_eq!(options.connect_timeout, default.connect_timeout);
             assert_eq!(options.request_timeout, default.request_timeout);
         }

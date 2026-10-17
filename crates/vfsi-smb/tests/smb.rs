@@ -5,6 +5,8 @@
 //! empty strings for guest access.
 //! Set `VFSI_SMB_RESTART_COMMAND` to a command that restarts the configured
 //! server to enable recovery coverage.
+//! The ignored DFS rejection test additionally needs `VFSI_SMB_DFS_SHARE`
+//! naming a share configured with `msdfs root = yes` on that server.
 
 use std::{
     fs,
@@ -75,6 +77,29 @@ fn connect() -> Option<SmbVecFs> {
         SmbVecFs::connect(&server, &share, &username, &password, &domain)
             .expect("connect to configured SMB test share"),
     )
+}
+
+#[test]
+#[ignore = "requires VFSI_SMB_SERVER and a VFSI_SMB_DFS_SHARE advertising DFS"]
+fn dfs_share_is_rejected_at_connect_while_an_ordinary_share_works() {
+    let server = std::env::var("VFSI_SMB_SERVER").expect("VFSI_SMB_SERVER is required");
+    let share = std::env::var("VFSI_SMB_DFS_SHARE").expect("VFSI_SMB_DFS_SHARE is required");
+    let username = std::env::var("VFSI_SMB_USERNAME").unwrap_or_default();
+    let password = std::env::var("VFSI_SMB_PASSWORD").unwrap_or_default();
+    let domain = std::env::var("VFSI_SMB_DOMAIN").unwrap_or_default();
+    let ordinary = connect().expect("ordinary share fixture is required");
+    ordinary.shutdown().unwrap();
+    let error = SmbVecFs::connect(&server, &share, &username, &password, &domain)
+        .err()
+        .expect("DFS membership must be rejected before exposing a backend");
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(!error.is_transport());
+    assert_eq!(error.path(), Some(Path::new(&share)));
+    assert!(
+        error
+            .to_string()
+            .contains("SMB DFS referrals are unsupported")
+    );
 }
 
 #[test]

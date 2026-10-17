@@ -332,6 +332,9 @@ fn recovery_only_retries_transport_and_recoverable_session_statuses() {
         0,
         nfsstat4_NFS4ERR_NOENT,
     )));
+    let moved = VfError::nfs(3, nfsstat4_NFS4ERR_MOVED);
+    assert_eq!(moved.kind(), std::io::ErrorKind::Unsupported);
+    assert!(!NfsVecFs::needs_recovery(&moved));
 }
 
 #[test]

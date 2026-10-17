@@ -5,6 +5,24 @@ implementation contracts and the historical POSIX/C compatibility surface.
 
 ## Application boundary and migration
 
+### Referral support
+
+Direct NFS and SMB clients do not follow referrals. SMB connection setup rejects
+shares advertising DFS membership before file operations, and automatic DFS
+resolution is disabled (there is no `dfs_enabled` option). Connect directly to
+the destination server/share instead. A server merely advertising DFS capability
+does not prevent access to its ordinary, non-DFS shares.
+
+NFSv4 referrals are discovered lazily: `NFS4ERR_MOVED` (which can also indicate
+filesystem migration) returns `ErrorKind::Unsupported` with a descriptive
+message. SMB `STATUS_PATH_NOT_COVERED` errors receive the same classification.
+Both retain the original protocol status and available request index. These are
+semantic errors, not transport failures, and do not authorize automatic replay.
+Earlier operations or chunks may already have completed; a vector is not atomic.
+Connect directly to the destination NFS server/export to access a referred tree.
+
+### Application traits
+
 `vfsi-core::api` owns `Vfsi`, `VfsiExt`, `OpenFd`, and their portable
 requests, results, options, and traversal helpers. It depends on no backend,
 RPC library, or async runtime. `vnfs` re-exports these same types; its concrete

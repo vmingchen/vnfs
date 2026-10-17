@@ -401,6 +401,16 @@ impl std::fmt::Display for VfError {
                 }
                 write!(f, "transport error: {}", message)
             }
+        }?;
+        match self.status() {
+            Some(StatusCode::Nfs(10019)) => {
+                write!(f, "; {}", crate::error::NFS_REFERRAL_UNSUPPORTED)
+            }
+            Some(StatusCode::Smb(0xc000_0257)) => write!(
+                f,
+                "; SMB DFS referrals are unsupported; connect directly to the destination server/share"
+            ),
+            _ => Ok(()),
         }
     }
 }
@@ -505,7 +515,7 @@ impl VfError {
                 30 => K::ReadOnlyFilesystem,
                 63 => K::InvalidFilename,
                 66 => K::DirectoryNotEmpty,
-                10004 => K::Unsupported,
+                10004 | 10019 => K::Unsupported,
                 10008 => K::WouldBlock,
                 _ => K::Other,
             },
@@ -515,7 +525,7 @@ impl VfError {
                 0xc000_0035 => K::AlreadyExists,
                 0xc000_000d => K::InvalidInput,
                 0xc000_007f => K::StorageFull,
-                0xc000_00bb => K::Unsupported,
+                0xc000_00bb | 0xc000_0257 => K::Unsupported,
                 0xc000_0101 => K::DirectoryNotEmpty,
                 0xc000_0103 => K::NotADirectory,
                 0xc000_00ba => K::IsADirectory,
