@@ -1389,6 +1389,31 @@ impl LocalBackend {
                 return Err(VfError::failure(0, ERR_INVAL));
             }
         }
+        if let Some(requested) = p.length.filter(|&length| length > 0) {
+            // A chunked forward copy can overwrite bytes that a later chunk
+            // still needs when source and destination are aliases. Check only
+            // forward-shifted overlapping ranges so ordinary copies do not
+            // pay for extra metadata lookups.
+            let requested_forward_overlap =
+                p.dst_offset > p.src_offset && p.dst_offset - p.src_offset < requested;
+            if requested_forward_overlap {
+                let src_metadata = src
+                    .metadata()
+                    .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
+                let actual_length = requested.min(src_metadata.len().saturating_sub(p.src_offset));
+                let actual_forward_overlap = p.dst_offset - p.src_offset < actual_length;
+                if actual_forward_overlap {
+                    let dst_metadata = dst
+                        .metadata()
+                        .map_err(|e| VfError::failure(0, Self::errno(&e)))?;
+                    if src_metadata.dev() == dst_metadata.dev()
+                        && src_metadata.ino() == dst_metadata.ino()
+                    {
+                        return Err(VfError::failure(0, ERR_INVAL));
+                    }
+                }
+            }
+        }
         let mut so = p.src_offset;
         let mut doff = p.dst_offset;
         let mut copied: u64 = 0;

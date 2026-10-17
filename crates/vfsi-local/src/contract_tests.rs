@@ -1140,6 +1140,30 @@ mod tests {
     }
 
     #[test]
+    fn finite_overlapping_copy_between_hardlink_aliases_is_rejected_before_mutation() {
+        const CHUNK: usize = 1 << 20;
+        let (root, mut fs) = fs("finite-self-copy");
+        let original: Vec<u8> = (0..CHUNK * 2 + 16)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        std::fs::write(root.0.join("source"), &original).unwrap();
+        std::fs::hard_link(root.0.join("source"), root.0.join("alias")).unwrap();
+
+        let error = fs
+            .vcopy_data_impl(&[ExtentPair::new(
+                "/source",
+                0,
+                "/alias",
+                1,
+                Some((CHUNK + 16) as u64),
+            )])
+            .unwrap_err();
+        assert_eq!(error.index(), Some(0));
+        assert_eq!(error.err_no(), ERR_INVAL);
+        assert_eq!(std::fs::read(root.0.join("source")).unwrap(), original);
+    }
+
+    #[test]
     fn open_create_new_rejects_dangling_final_symlink() {
         let (root, mut fs) = fs("exclusive-dangling-symlink");
         fs.symlink_raw_impl(Path::new("missing-target"), Path::new("/dangling"))
