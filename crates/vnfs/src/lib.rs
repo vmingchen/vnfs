@@ -18,8 +18,7 @@ pub mod nfs {
     #[cfg(feature = "rpcsec-gss")]
     pub use vfsi_nfs::RpcsecGssProtection;
     pub use vfsi_nfs::{
-        NfsAuthentication, NfsEvent, NfsObserver, NfsReadPool, NfsReadPoolOptions,
-        NfsRecoveryPolicy,
+        NfsAuth, NfsEvent, NfsObserver, NfsReadPool, NfsReadPoolOptions, NfsRecoveryPolicy,
     };
 
     /// Linux mount discovery and local-to-remote path mapping for direct NFS access.

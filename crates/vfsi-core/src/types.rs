@@ -480,7 +480,7 @@ impl VfError {
         if self.transport_kind() == Some(TransportKind::InvalidReply) {
             return K::InvalidData;
         }
-        if self.transport_kind() == Some(TransportKind::Authentication) {
+        if self.transport_kind() == Some(TransportKind::Auth) {
             return K::PermissionDenied;
         }
         if matches!(

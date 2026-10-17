@@ -39,7 +39,7 @@ fn transport_categories_survive_attribution_context_and_io_conversion() {
         (TransportKind::Timeout, K::TimedOut),
         (TransportKind::Connection, K::Other),
         (TransportKind::InvalidReply, K::InvalidData),
-        (TransportKind::Authentication, K::PermissionDenied),
+        (TransportKind::Auth, K::PermissionDenied),
         (TransportKind::Other, K::Other),
     ] {
         let error = vfsi_core::error_from_rpc(

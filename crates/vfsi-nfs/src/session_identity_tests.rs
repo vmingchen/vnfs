@@ -19,7 +19,7 @@ fn rejected_reused_identity_setup_does_not_destroy_original_client() {
         .unwrap_or_else(|_| "2".into())
         .parse()
         .unwrap();
-    let authentication = NfsAuthentication::AuthSys;
+    let authentication = NfsAuth::AuthSys;
     let owner = format!(
         "prr-session-setup-failure-{}-{minorversion}",
         std::process::id()

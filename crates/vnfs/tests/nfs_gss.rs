@@ -8,14 +8,14 @@ use vfsi_nfs::NfsConnectOptions;
 use vfsi_nfs::NfsVecFs;
 use vfsi_sync::backend::VectorBackend;
 use vfsi_sync::{FileOperand, ReadOp, VfOffset, WriteOp};
-use vnfs::nfs::{NfsAuthentication, RpcsecGssProtection};
+use vnfs::nfs::{NfsAuth, RpcsecGssProtection};
 
 fn options(protection: RpcsecGssProtection) -> NfsConnectOptions {
     let mut options = NfsConnectOptions::default();
     options.minorversion = Some(1);
     options.connect_timeout = Duration::from_secs(5);
     options.request_timeout = Duration::from_secs(5);
-    options.authentication = NfsAuthentication::RpcsecGss {
+    options.authentication = NfsAuth::RpcsecGss {
         service_principal: Some(
             std::env::var("VNFS_GSS_SERVICE").unwrap_or_else(|_| "nfs@localhost".into()),
         ),
@@ -35,7 +35,7 @@ fn supported_rpcsec_gss_protection_levels_access_the_export() {
 
     let host = std::env::var("VNFS_GSS_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let protection_levels = [
-        ("krb5", RpcsecGssProtection::Authentication),
+        ("krb5", RpcsecGssProtection::Auth),
         ("krb5i", RpcsecGssProtection::Integrity),
     ];
 

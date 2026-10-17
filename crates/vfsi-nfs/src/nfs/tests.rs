@@ -357,7 +357,7 @@ fn connection_options_preserve_auth_sys_as_the_compatible_default() {
     assert_eq!(options.minorversion, None);
     assert_eq!(options.connect_timeout, Duration::from_secs(10));
     assert_eq!(options.request_timeout, Duration::from_secs(5));
-    assert_eq!(options.authentication, NfsAuthentication::AuthSys);
+    assert_eq!(options.authentication, NfsAuth::AuthSys);
     assert_eq!(options.root, Path::new("/"));
     assert!(options.reconnects_automatically());
     assert_eq!(options.max_compound_bytes, None);

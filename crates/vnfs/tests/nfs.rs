@@ -36,7 +36,7 @@ fn failed_gss_negotiation_does_not_fall_back_to_a_working_auth_sys_export() {
         )
         .connect_timeout(std::time::Duration::from_secs(2))
         .request_timeout(std::time::Duration::from_secs(2))
-        .authentication(vnfs::nfs::NfsAuthentication::RpcsecGss {
+        .authentication(vnfs::nfs::NfsAuth::RpcsecGss {
             service_principal: Some("nfs@vnfs-nonexistent-service.invalid".into()),
             protection: vnfs::nfs::RpcsecGssProtection::Integrity,
         })

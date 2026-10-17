@@ -11,7 +11,7 @@ use nfsv41_sys::*;
 
 use crate::compound::{Compound, CompoundRes};
 use crate::error::{RpcError, RpcResult};
-use crate::rpc::{NfsAuthentication, RpcClient};
+use crate::rpc::{NfsAuth, RpcClient};
 
 /// An OPEN owner. seqid is incremented by the server after each OPEN.
 pub struct OpenOwner {
@@ -83,7 +83,7 @@ impl Session {
             minorversion,
             connect_timeout,
             request_timeout,
-            &NfsAuthentication::AuthSys,
+            &NfsAuth::AuthSys,
         )
     }
 
@@ -93,7 +93,7 @@ impl Session {
         minorversion: u32,
         connect_timeout: Duration,
         request_timeout: Duration,
-        authentication: &NfsAuthentication,
+        authentication: &NfsAuth,
     ) -> RpcResult<Session> {
         Self::connect_minor_with_identity(
             host,
@@ -111,7 +111,7 @@ impl Session {
         minorversion: u32,
         connect_timeout: Duration,
         request_timeout: Duration,
-        authentication: &NfsAuthentication,
+        authentication: &NfsAuth,
         client_owner: Option<&[u8]>,
         client_verifier: Option<verifier4>,
     ) -> RpcResult<Session> {

@@ -31,7 +31,7 @@ use crate::session::make_verifier;
 mod read_pool;
 pub use read_pool::{NfsReadPool, NfsReadPoolOptions};
 // Re-export the shared types/trait so `use vnfs::legacy::nfs::*` works.
-pub use crate::rpc::NfsAuthentication;
+pub use crate::rpc::NfsAuth;
 #[cfg(feature = "rpcsec-gss")]
 pub use crate::rpc::RpcsecGssProtection;
 pub use crate::vecfs::*;
@@ -71,7 +71,7 @@ struct ConnectionConfig {
     minorversion: Option<u32>,
     connect_timeout: Duration,
     request_timeout: Duration,
-    authentication: NfsAuthentication,
+    authentication: NfsAuth,
     client_owner: Option<Box<[u8]>>,
     /// Stable for the lifetime of this client, including reconnects. A
     /// changed verifier tells an NFS server that the client rebooted.
@@ -91,7 +91,7 @@ struct ConnectFlags {
 ///
 /// The default uses automatic NFSv4.2-to-v4.1 negotiation, ten seconds for
 /// setup, five seconds per RPC, and AUTH_SYS. Enable the `rpcsec-gss` Cargo
-/// feature and select `NfsAuthentication::RpcsecGss` to opt into Kerberos.
+/// feature and select `NfsAuth::RpcsecGss` to opt into Kerberos.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NfsConnectOptions {
     /// Root of the application-visible namespace within the NFS pseudo-root.
@@ -99,7 +99,7 @@ pub struct NfsConnectOptions {
     pub minorversion: Option<u32>,
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
-    pub authentication: NfsAuthentication,
+    pub authentication: NfsAuth,
     /// Stable NFS client-owner identity. Must be unique among simultaneously
     /// active clients using the same server and credential.
     pub client_owner: Option<Vec<u8>>,
@@ -116,7 +116,7 @@ impl Default for NfsConnectOptions {
             minorversion: None,
             connect_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(5),
-            authentication: NfsAuthentication::AuthSys,
+            authentication: NfsAuth::AuthSys,
             client_owner: None,
             recovery_policy: NfsRecoveryPolicy::default(),
             flags: ConnectFlags::new(),
@@ -205,7 +205,7 @@ impl NfsClientBuilder {
         self
     }
 
-    pub fn authentication(mut self, authentication: NfsAuthentication) -> Self {
+    pub fn authentication(mut self, authentication: NfsAuth) -> Self {
         self.options.authentication = authentication;
         self
     }

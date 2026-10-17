@@ -10,7 +10,7 @@ use vfsi_sync::backend::VectorBackend;
 
 use vfsi_core::{AttrMask, FileOperand, VfAttrs, VfError, VfResult};
 
-use crate::{NfsAuthentication, NfsVecFs};
+use crate::{NfsAuth, NfsVecFs};
 
 /// Parsed supported NFS mount, shared with the mount-aware router.
 #[doc(hidden)]
@@ -161,7 +161,7 @@ impl NfsMount {
         if host != self.host()
             || options.root != self.root
             || options.minorversion != Some(self.minor_version())
-            || options.authentication != NfsAuthentication::AuthSys
+            || options.authentication != NfsAuth::AuthSys
         {
             return Err(VfError::client(0, libc::EINVAL as u32)
                 .with_context("conflicting mount connection options", &self.local_path));
@@ -517,7 +517,7 @@ mod tests {
         let mut matching = crate::NfsConnectOptions::default();
         matching.root = mount.root.clone();
         matching.minorversion = Some(mount.minor_version());
-        matching.authentication = NfsAuthentication::AuthSys;
+        matching.authentication = NfsAuth::AuthSys;
         // Matching options reach local identity validation; option conflicts
         // must instead fail with EINVAL before checking this stale mount.
         assert_eq!(
@@ -537,7 +537,7 @@ mod tests {
         #[cfg(feature = "rpcsec-gss")]
         {
             let mut wrong_auth = matching;
-            wrong_auth.authentication = NfsAuthentication::RpcsecGss {
+            wrong_auth.authentication = NfsAuth::RpcsecGss {
                 service_principal: None,
                 protection: crate::RpcsecGssProtection::Integrity,
             };
