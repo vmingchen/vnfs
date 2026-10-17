@@ -544,8 +544,23 @@ fn bypass_client(dir: &vnfs::nfs::NfsDir) { let _ = dir.remove_contents(); }
 ```
 
 ```compile_fail,E0599
-fn inherent_directory_open(client: &vnfs::nfs::NfsClient) {
-    let _ = client.open_dir_handle("/dir");
+use vnfs::{Vfsi, VfsiExt};
+fn removed_directory_open(fs: &impl Vfsi) {
+    let _ = fs.open_dir_handle("/dir");
+}
+```
+
+```compile_fail,E0599
+use vnfs::{Vfsi, VfsiExt};
+fn removed_contents_handle<C: Vfsi>(fs: &C, dir: &C::Dir) {
+    let _ = fs.remove_dir_contents_handle(dir);
+}
+```
+
+```compile_fail,E0599
+use vnfs::{directory::RemoveOptions, Vfsi, VfsiExt};
+fn removed_contents_handle_options<C: Vfsi>(fs: &C, dir: &C::Dir) {
+    let _ = fs.remove_dir_contents_handle_with_options(dir, RemoveOptions::new());
 }
 ```
 

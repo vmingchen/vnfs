@@ -33,6 +33,7 @@ struct PortableFs {
     page_calls: Cell<usize>,
     waves: RefCell<Vec<Vec<PathBuf>>>,
     directory_options: RefCell<Vec<ListDirOptions>>,
+    removals: RefCell<Vec<(Vec<PathBuf>, RemoveOptions)>>,
 }
 impl Vfsi for PortableFs {
     fn capabilities(&self) -> Result<vfsi_core::Capabilities> {
@@ -154,8 +155,22 @@ impl Vfsi for PortableFs {
     ) -> Result<()> {
         panic!("unexpected rename")
     }
-    fn vremove<P: AsRef<Path>>(&self, _: &[P], _: RemoveMode, _: RemoveOptions) -> Result<()> {
-        panic!("unexpected remove")
+    fn vremove<P: AsRef<Path>>(
+        &self,
+        paths: &[P],
+        mode: RemoveMode,
+        options: RemoveOptions,
+    ) -> Result<()> {
+        assert_eq!(mode, RemoveMode::Contents);
+        self.removals.borrow_mut().push((
+            paths.iter().map(|path| path.as_ref().to_owned()).collect(),
+            options,
+        ));
+        if self.shape.get() == 6 {
+            Err(Error::transport(None, "lost removal reply"))
+        } else {
+            Ok(())
+        }
     }
     fn vstream<P: AsRef<Path>>(
         &self,
@@ -279,6 +294,44 @@ fn tree_fs() -> PortableFs {
         tree: Cell::new(true),
         ..Default::default()
     }
+}
+
+#[test]
+fn path_contents_helpers_dispatch_once_without_handles_or_listing() {
+    let fs = tree_fs();
+    let path = Path::new("/empty");
+    let options = RemoveOptions::new()
+        .batch(2)
+        .continue_on_error(true)
+        .retries(1);
+    fs.remove_dir_contents(path).unwrap();
+    fs.remove_dir_contents_with_options(path, options).unwrap();
+    assert_eq!(
+        *fs.removals.borrow(),
+        [
+            (vec![path.to_owned()], RemoveOptions::default()),
+            (vec![path.to_owned()], options)
+        ]
+    );
+    assert_eq!(fs.metadata.get(), 2, "one no-follow validation per call");
+    assert_eq!(
+        fs.listings.get(),
+        0,
+        "do not collect entries in the extension"
+    );
+
+    fs.shape.set(6);
+    let error = fs
+        .remove_dir_contents_with_options(path, options)
+        .unwrap_err();
+    assert!(error.is_transport());
+    assert_eq!(error.index(), None);
+    assert_eq!(
+        fs.removals.borrow().len(),
+        3,
+        "never replay a lost mutation reply"
+    );
+    assert_eq!(fs.metadata.get(), 3);
 }
 
 #[test]

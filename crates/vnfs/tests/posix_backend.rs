@@ -706,7 +706,7 @@ fn owned_directory_handle_refuses_path_only_backend() {
     let client = FsClient::new(backend);
     client.create_dir("/d").unwrap();
     client.write("/d/keep", b"x").unwrap();
-    let error = client.open_dir_handle("/d").unwrap_err();
+    let error = client.vopen_dirs(&["/d"]).unwrap_err();
     assert_eq!(error.err_no(), vfsi_sync::VF_ERR_UNSUPPORTED);
     assert_eq!(client.read("/d/keep").unwrap(), b"x");
 

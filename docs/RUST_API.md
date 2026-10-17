@@ -428,10 +428,18 @@ errors propagate. This replaces the previous boolean directory callbacks.
 For recursive removal, `VfsiExt::remove_dir_all` is fail-fast and
 `remove_dir_all_with_options`, `remove_dir_contents_with_options`, and
 `Vfsi::vremove(paths, mode, options)` expose `RemoveOptions` at the application layer.
-`VfsiExt::open_dir_handle` returns an owned directory handle (`NfsDir` on NFS) only when the backend has
-a genuine directory descriptor; its `remove_contents` methods stay rooted at
-that handle and `Drop` queues its cleanup. Backends that only offer path tokens return
-`Unsupported` instead of implying handle safety. The NFS remover processes
+Scalar contents removal uses `remove_dir_contents(path)` or
+`remove_dir_contents_with_options(path, options)`; multiple roots use `vremove`
+with `RemoveMode::Contents`. These calls resolve the current pathname and do not
+retain a directory's identity across separate calls or renames. Use trusted
+ancestor paths, not a diagnostic name from an old handle.
+
+The core `Vfsi::vopen_dirs` and `vremove_dir_contents` operations remain for
+explicit retained-directory vectors. They require genuine directory descriptors;
+path-only tokens return `Unsupported` rather than imply handle safety. The NFS
+path remover uses a retained handle internally and closes it after the call;
+the scalar extension does not open or collect directory contents itself.
+The NFS remover processes
 one bounded READDIR reply at a time (32 KiB by default), advances through the
 current pass, and verifies from the beginning after a mutating pass. If a server
 invalidates a continuation cookie, it restarts the scan.

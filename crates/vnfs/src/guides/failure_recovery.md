@@ -66,20 +66,34 @@ The NFS remover traverses retained directory filehandles, but resolving the
 initial directory remains a caller-side race. Path-only backend tokens are
 not secure directory handles.
 
-Obtain a genuine handle from a trusted namespace for security-sensitive removal:
+Use the path convenience API for directories whose removal you intentionally
+own, with trusted ancestors:
 
 ```rust,no_run
 use vnfs::files::VfsiExt;
+use vnfs::directory::RemoveOptions;
 # fn example(fs: &vnfs::nfs::NfsClient) -> vnfs::Result<()> {
-let mut dir = fs.open_dir_handle("/resolved-directory")?;
-fs.remove_dir_contents_handle(&dir)?;
-dir.try_close()?;
+fs.remove_dir_contents_with_options(
+    "/owned-scratch-directory",
+    RemoveOptions::new().batch(32),
+)?;
 # Ok(())
 # }
 ```
 
-`open_dir_handle` rejects backends without genuine handles and does not follow
-the final symlink; it does not secure attacker-controlled ancestors.
+The root must be a directory, not a symlink; child symlinks are removed without
+following their targets. Each path call resolves the name anew. If a directory
+was renamed, pass its intended current path; a saved pathname can now identify
+a replacement object. A preflight attribute check does not eliminate namespace
+races. The NFS path remover retains a directory filehandle internally for the
+duration of removal, not across separate application calls.
+
+Workflows that explicitly require a retained directory identity use the core
+`Vfsi::vopen_dirs`/`vremove_dir_contents` operations on a supported backend.
+Path-only tokens must be rejected by those operations, and opening a genuine
+handle still does not secure attacker-controlled ancestors. The scalar
+extension API uses paths rather than exposing another handle workflow.
+
 `RemoveOptions` selects fail-fast/best-effort behavior, batch caps, and
 transient-entry retries on supported backends. Generic removers reject
 non-default tuning rather than ignore it.

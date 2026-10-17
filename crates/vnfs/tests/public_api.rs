@@ -338,7 +338,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
             .is_err()
     );
     assert_eq!(
-        client.open_dir_handle("/sub").unwrap_err().kind(),
+        client.vopen_dirs(&["/sub"]).unwrap_err().kind(),
         vnfs::error::ErrorKind::Unsupported
     );
     client

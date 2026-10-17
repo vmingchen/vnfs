@@ -2914,7 +2914,7 @@ impl VectorBackend for DirectoryProbe {
 }
 
 #[test]
-fn directory_vectors_preflight_all_handles_and_singular_helpers_use_retained_descriptors() {
+fn directory_vectors_preflight_all_handles_and_use_retained_descriptors() {
     use vfsi_sync::RemoveOptions;
     let backend = DirectoryProbe::default();
     let removed = Arc::clone(&backend.removed);
@@ -2925,7 +2925,7 @@ fn directory_vectors_preflight_all_handles_and_singular_helpers_use_retained_des
         .unwrap();
     let mut dirs = fs.vopen_dirs(&["/0", "/1"]).unwrap();
     let other = FsClient::new(DirectoryProbe::default());
-    let foreign = other.open_dir_handle("/1").unwrap();
+    let foreign = other.vopen_dirs(&["/1"]).unwrap().remove(0);
     let error = fs
         .vremove_dir_contents(&[&dirs[0], &foreign], RemoveOptions::default())
         .unwrap_err();
@@ -2940,11 +2940,11 @@ fn directory_vectors_preflight_all_handles_and_singular_helpers_use_retained_des
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert!(removed.lock().unwrap().is_empty());
-    let second = fs.open_dir_handle("/2").unwrap();
+    let second = fs.vopen_dirs(&["/2"]).unwrap().remove(0);
     fs.clone()
         .vremove_dir_contents(&[&dirs[0], &second], RemoveOptions::default())
         .unwrap();
-    fs.remove_dir_contents_handle_with_options(&second, RemoveOptions::new().batch(1))
+    fs.vremove_dir_contents(&[&second], RemoveOptions::new().batch(1))
         .unwrap();
     assert_eq!(*removed.lock().unwrap(), [0, 2, 2]);
     for dir in dirs {

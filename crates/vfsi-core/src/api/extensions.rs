@@ -35,22 +35,6 @@ use super::{OpenFd, Vfsi};
 /// bounded paging, or recovery semantics. Singular convenience is not a promise
 /// of one RPC, and vector execution is not a promise of atomicity.
 pub trait VfsiExt: Vfsi {
-    /// Open one genuine, retained directory through the portable vector engine.
-    fn open_dir_handle(&self, path: impl AsRef<Path>) -> Result<Self::Dir> {
-        single_completion(self.vopen_dirs(&[path])?, "vopen_dirs")
-    }
-    /// Remove a retained directory's contents without resolving its old name.
-    fn remove_dir_contents_handle(&self, dir: &Self::Dir) -> Result<()> {
-        self.remove_dir_contents_handle_with_options(dir, crate::RemoveOptions::default())
-    }
-    fn remove_dir_contents_handle_with_options(
-        &self,
-        dir: &Self::Dir,
-        options: crate::RemoveOptions,
-    ) -> Result<()> {
-        self.vremove_dir_contents(&[dir], options)
-    }
-
     /// Build reusable open options for this client.
     fn open_options(&self) -> super::OpenOptions<'_, Self> {
         super::OpenOptions::new(self)
@@ -1130,6 +1114,8 @@ pub trait VfsiExt: Vfsi {
     /// The root must be a directory, not a symlink. Child symlinks are removed
     /// without following their targets. Errors can leave partially removed
     /// contents; retaining the root does not make the operation transactional.
+    /// The path is resolved for this call, not pinned across calls or renames.
+    /// Use trusted ancestors; this is not a path-confinement guarantee.
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
@@ -1146,6 +1132,8 @@ pub trait VfsiExt: Vfsi {
     /// Recursively empty one directory while retaining its root, using
     /// explicit batching and failure policy. The root is validated without
     /// following a symlink. Prefer [`Vfsi::vremove`] for several roots.
+    /// Like [`Self::remove_dir_contents`], this resolves the current pathname;
+    /// it does not retain a previously opened directory's identity.
     fn remove_dir_contents_with_options(
         &self,
         path: impl AsRef<Path>,

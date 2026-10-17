@@ -990,13 +990,13 @@ fn live_directory_open_errors_report_application_operands() {
     assert_eq!(error.kind(), crate::ErrorKind::NotFound);
     fs.drain_cleanup().unwrap();
 
-    let error = fs.open_dir_handle(&file).unwrap_err();
+    let error = fs.vopen_dirs(&[&file]).unwrap_err();
     assert_eq!(error.index(), Some(0));
     assert_eq!(error.path(), Some(file.as_path()));
     assert_eq!(error.operation(), Some("vopen_dirs"));
     assert_eq!(error.kind(), crate::ErrorKind::NotADirectory);
     assert_eq!(std::fs::read(&file).unwrap(), b"keep");
-    fs.open_dir_handle(&first).unwrap().close().unwrap();
+    fs.vopen_dirs(&[&first]).unwrap().remove(0).close().unwrap();
 }
 
 #[test]

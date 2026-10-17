@@ -668,9 +668,6 @@ fn whole_file_readv_honors_the_client_budget() {
             .kind(),
         vnfs::error::ErrorKind::FileTooLarge
     );
-    let mut dir_handle = client.open_dir_handle(&dir).unwrap();
-    dir_handle.try_close().unwrap();
-    dir_handle.try_close().unwrap();
     client.remove_dir_all(&dir).unwrap();
 }
 
@@ -3174,7 +3171,7 @@ fn open_dir_accepts_namespace_root() {
 }
 
 #[test]
-fn owned_directory_handle_survives_rename_and_exposes_options() {
+fn retained_directory_vector_survives_rename_and_exposes_options() {
     use vfsi_sync::FsClient;
     use vnfs::directory::RemoveOptions;
 
@@ -3186,9 +3183,9 @@ fn owned_directory_handle_survives_rename_and_exposes_options() {
     c.create_dir(&original).unwrap();
     c.write(format!("{original}/file"), b"data").unwrap();
 
-    let handle = c.open_dir_handle(&original).unwrap();
+    let handle = c.vopen_dirs(&[&original]).unwrap().remove(0);
     c.rename(&original, &moved).unwrap();
-    c.remove_dir_contents_handle_with_options(&handle, RemoveOptions::new().batch(2))
+    c.vremove_dir_contents(&[&handle], RemoveOptions::new().batch(2))
         .unwrap();
     assert_eq!(handle.path(), Path::new(&original));
     assert!(c.read_dir(&moved).unwrap().is_empty());
@@ -4668,11 +4665,18 @@ mod portable_directory_handles;
 #[test]
 fn portable_directory_vectors_preflight_and_retain_identity() {
     let root = setup_dir("portable_directory_vectors");
+    let version = match std::env::var("VNFS_TEST_MINOR").as_deref() {
+        Ok("1") => vnfs::nfs::NfsVersion::V4_1,
+        Ok("2") => vnfs::nfs::NfsVersion::V4_2,
+        _ => vnfs::nfs::NfsVersion::Auto,
+    };
     let fs = Nfs::builder(test_host())
+        .version(version)
         .root(root.as_str())
         .connect()
         .unwrap();
     let other = Nfs::builder(test_host())
+        .version(version)
         .root(root.as_str())
         .connect()
         .unwrap();

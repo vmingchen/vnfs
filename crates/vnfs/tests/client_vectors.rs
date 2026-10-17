@@ -287,21 +287,49 @@ fn custom_targets_are_prepared_once_on_mounted_and_auto() {
 }
 
 #[test]
-fn portable_directory_open_preserves_path_only_backend_rejection() {
+fn path_contents_removal_works_without_retained_directory_handles() {
     fn check(fs: &impl Vfsi) {
+        use vnfs::directory::RemoveOptions;
         fs.create_dir("/dir").unwrap();
         fs.write("/dir/keep", b"keep").unwrap();
         assert!(fs.vopen_dirs::<&str>(&[]).unwrap().is_empty());
-        assert_eq!(
-            fs.open_dir_handle("/dir").err().unwrap().kind(),
-            vnfs::error::ErrorKind::Unsupported
-        );
         assert_eq!(
             fs.vopen_dirs(&["/dir"]).err().unwrap().kind(),
             vnfs::error::ErrorKind::Unsupported
         );
         fs.vremove_dir_contents(&[], Default::default()).unwrap();
         assert_eq!(fs.read("/dir/keep").unwrap(), b"keep");
+
+        fs.create_dir_all("/dir/sub").unwrap();
+        fs.write("/dir/sub/file", b"nested").unwrap();
+        fs.create_dir("/outside").unwrap();
+        fs.write("/outside/keep", b"outside").unwrap();
+        fs.symlink("../outside", "/dir/link").unwrap();
+        fs.symlink("dir", "/dir-link").unwrap();
+        for path in ["/dir-link", "/dir/keep"] {
+            assert_eq!(
+                fs.remove_dir_contents(path).unwrap_err().kind(),
+                vnfs::error::ErrorKind::NotADirectory
+            );
+            assert_eq!(fs.read("/dir/keep").unwrap(), b"keep");
+        }
+        fs.remove_dir_contents("/dir").unwrap();
+        assert!(fs.attrs("/dir").unwrap().is_dir());
+        assert!(fs.read_dir("/dir").unwrap().is_empty());
+        assert_eq!(fs.read("/outside/keep").unwrap(), b"outside");
+
+        fs.write("/dir/file", b"original").unwrap();
+        fs.rename("/dir", "/moved").unwrap();
+        fs.create_dir("/dir").unwrap();
+        fs.write("/dir/file", b"replacement").unwrap();
+        fs.remove_dir_contents("/dir").unwrap();
+        assert!(fs.read_dir("/dir").unwrap().is_empty());
+        assert_eq!(fs.read("/moved/file").unwrap(), b"original");
+        fs.remove_dir_contents_with_options("/moved", RemoveOptions::default())
+            .unwrap();
+        assert!(fs.attrs("/moved").unwrap().is_dir());
+        assert!(fs.read_dir("/moved").unwrap().is_empty());
+        assert_eq!(fs.read("/outside/keep").unwrap(), b"outside");
     }
     for auto in [false, true] {
         let root = tempfile::tempdir().unwrap();
