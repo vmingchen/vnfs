@@ -26,7 +26,7 @@ vfsi-local = { path = "crates/vfsi-local", version = "0.1.9" }
 vfsi-posix = { path = "crates/vfsi-posix", version = "0.1.1" }
 vfsi-uring = { path = "crates/vfsi-uring", version = "0.1.1" }
 vfsi-nfs = { path = "crates/vfsi-nfs", version = "0.1.10" }
-vfsi-smb = { path = "crates/vfsi-smb", version = "0.1.7" }
+vfsi-smb = { path = "crates/vfsi-smb", version = "0.1.8" }
 vfsi-sync = { path = "crates/vfsi-sync", version = "0.1.11" }
 
 # Unsafe functions still require explicit blocks for their unsafe operations.

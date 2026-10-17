@@ -5,6 +5,13 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## C adapter patch release - 2026-10-17
+
+- vfsi-c 0.3.7 uses vnfs 0.0.22 and the current published backend crates.
+  Local filesystem access uses the POSIX backend; the C ABI remains version 3.
+- vfsi-smb 0.1.8 updates the backend to the current core request types so
+  registry-only C adapter builds resolve compatible implementations.
+
 ## NFS patch release - 2026-10-16
 
 - Rust: vnfs 0.0.22, vfsi-core 0.1.10, vfsi-sync 0.1.11,

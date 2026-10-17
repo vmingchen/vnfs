@@ -860,7 +860,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-smb"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "bitfields",
  "futures-util",
