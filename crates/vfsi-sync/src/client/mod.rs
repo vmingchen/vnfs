@@ -100,17 +100,13 @@ impl<F: HandleBackend> FsClient<F> {
         if self.drain_cleanup().is_err() {
             return Err(self);
         }
+        let limits = self.limits;
         match Arc::try_unwrap(self.inner) {
-            Ok(mut shared) => Ok(shared
-                .backend
-                .get_mut()
-                .unwrap_or_else(|e| e.into_inner())
-                .take()
-                .expect("owned backend")),
-            Err(inner) => Err(Self {
-                inner,
-                limits: self.limits,
+            Ok(shared) => shared.into_backend().map_err(|shared| Self {
+                inner: Arc::new(shared),
+                limits,
             }),
+            Err(inner) => Err(Self { inner, limits }),
         }
     }
 

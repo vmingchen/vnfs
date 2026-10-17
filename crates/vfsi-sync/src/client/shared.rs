@@ -56,6 +56,50 @@ impl<F: HandleBackend> SharedBackend<F> {
         let _ = guard.drain_cleanup();
         Ok(guard)
     }
+
+    /// Consume the uniquely owned backend after draining cleanup once more.
+    /// A handle can enqueue its deferred close after an earlier shared drain
+    /// and before the last `Arc` is released, so exclusive extraction is the
+    /// final point at which those requests can still be reported and retried.
+    pub(super) fn into_backend(mut self) -> Result<F, Self> {
+        let (error, callbacks) = {
+            let backend = self
+                .backend
+                .get_mut()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .as_mut()
+                .expect("live backend");
+            let pending = self
+                .pending
+                .get_mut()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let mut failed = Vec::new();
+            let mut first = None;
+            for close in std::mem::take(pending) {
+                if let Err(error) = (close.close)(backend, &close.target) {
+                    first.get_or_insert(error);
+                    failed.push(close);
+                }
+            }
+            pending.extend(failed);
+            self.has_pending
+                .store(!pending.is_empty(), Ordering::Release);
+            (first, backend.take_notifications())
+        };
+
+        for callback in callbacks {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+        }
+        if error.is_some() {
+            return Err(self);
+        }
+        Ok(self
+            .backend
+            .get_mut()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+            .expect("owned backend"))
+    }
 }
 impl<F: HandleBackend> Drop for SharedBackend<F> {
     fn drop(&mut self) {
