@@ -53,12 +53,23 @@ def main() -> int:
         if package.get("publish") is False:
             errors.append(f"{relative_path}: public Rust package must be publishable")
 
+    native_artifacts: dict[str, str] = {}
     for relative_path in PRIVATE_RUST_PACKAGES:
-        package = load(relative_path)["package"]
+        manifest = load(relative_path)
+        package = manifest["package"]
         if package.get("publish") is not False:
             errors.append(
                 f"{relative_path}: native build crate must set publish = false"
             )
+        artifact = manifest.get("lib", {}).get(
+            "name", package["name"].replace("-", "_")
+        )
+        if artifact in native_artifacts:
+            errors.append(
+                f"{relative_path}: native artifact {artifact!r} collides with "
+                f"{native_artifacts[artifact]} in a shared Cargo target directory"
+            )
+        native_artifacts[artifact] = relative_path
 
     for relative_path in PYTHON_PACKAGES:
         project = load(relative_path)["project"]

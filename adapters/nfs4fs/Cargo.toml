@@ -10,7 +10,7 @@ repository = "https://github.com/vmingchen/vnfs"
 keywords = ["python", "nfs", "fsspec", "vfsi"]
 
 [lib]
-name = "_native"
+name = "nfs4fs_native"
 crate-type = ["cdylib"]
 
 # Detached workspace: `cargo build --workspace` at the repo root must not see

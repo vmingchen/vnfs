@@ -10,7 +10,7 @@ repository = "https://github.com/vmingchen/vnfs"
 keywords = ["python", "smb", "filesystem", "vfsi"]
 
 [lib]
-name = "_native"
+name = "vsmb_native"
 crate-type = ["cdylib"]
 
 [workspace]

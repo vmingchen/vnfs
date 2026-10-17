@@ -23,6 +23,8 @@ This project follows [Semantic Versioning](https://semver.org/) for the
   backends reject them before allocating staging resources.
 - Repaired crate README guide links and documented the request-byte cap
   separately from response limits and Python allocation budgets.
+- Gave detached Python native builds distinct artifact names so NFS and SMB
+  builds can safely reuse a Cargo target directory; Python imports are unchanged.
 
 ## Python release - 2026-10-10
 
