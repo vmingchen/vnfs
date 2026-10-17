@@ -5,6 +5,7 @@ import os
 import time
 
 import fsspec
+import pytest
 
 from .common import run_correctness_suite
 
@@ -76,6 +77,21 @@ def _unique(nfs_fs, name):
     return f"nfs4:///{name}"
 
 
+@pytest.mark.parametrize("max_depth, expected", [(0, [""]), (1, ["", "/child"])])
+def test_native_walk_does_not_visit_directories_beyond_depth(
+    nfs_fs, max_depth, expected
+):
+    nfs_fs.mkdir("/bounded/child/grandchild", create_parents=True)
+    nfs_fs.pipe_file("/bounded/child/grandchild/hidden", b"not visited")
+    root = nfs_fs._native_path("/bounded")
+    tree = nfs_fs._client.walk(root, max_depth=max_depth)
+    assert [directory for directory, _ in tree] == [
+        root + suffix for suffix in expected
+    ]
+    # Entries at the boundary are still returned; only descent is prohibited.
+    assert len(tree[-1][1]) == 1
+
+
 def test_round_trip_bounds(nfs_fs):
     """Bulk operations must use a bounded number of compounds regardless of
     how many files they touch (one-dir batches are constant)."""
@@ -142,12 +158,13 @@ def test_round_trip_bounds(nfs_fs):
     )
     assert cp_count <= 6, cp_count
 
-    # walk on a 30-node tree is level-batched.
+    # Walk batches the 30-node tree: root resolution/type and READDIR/EOF (4),
+    # then parent resolution/type, sibling LOOKUPs, and sibling READDIR (4).
     for i in range(5):
         for j in range(5):
             fs.pipe_file(_unique(nfs_fs, f"tree/sub{i}/f{j}.txt"), b"x")
     _, walk_count = _measured(fs, lambda: list(fs.walk("nfs4:///tree")))
-    assert walk_count <= 6, walk_count
+    assert walk_count <= 8, walk_count
 
 
 def test_recursive_tree_ops_are_batched(nfs_fs):

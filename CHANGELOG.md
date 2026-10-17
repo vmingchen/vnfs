@@ -15,6 +15,8 @@ This project follows [Semantic Versioning](https://semver.org/) for the
   the C binding version, and libntirpc-sys are unchanged by this release.
 - Hardened NFS open ownership, short-I/O progress, ordered copies, symlink
   handling, directory replies, and stable client-identity recovery.
+- Depth-limited NFS walks no longer fetch children below depth zero or emit
+  empty directory records for unvisited descendants.
 - Hardened rooted local access and creation permissions; narrowed unsafe
   blocks and enforced safety documentation across Rust backends.
 - Fixed Python read budgets, short reads, cache invalidation and cleanup,
