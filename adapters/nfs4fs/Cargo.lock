@@ -175,9 +175,9 @@ dependencies = [
 
 [[package]]
 name = "libntirpc-sys"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "daa179db6c4b507a5774291578f5863c26827efbf6c214e406e1dfbdcd8b1a6f"
+checksum = "73dcebf725cfc5496e2c200c7aaba14f8c40ecc3c49b68f9339270b75ef49c92"
 dependencies = [
  "bindgen",
  "cc",
