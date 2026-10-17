@@ -380,6 +380,138 @@ fn complete_results(results: &mut [vfsi_result]) {
     }
 }
 
+fn invalid_backend_reply(message: impl Into<String>) -> VfError {
+    VfError::transport_with_kind(None, vfsi_sync::TransportKind::InvalidReply, message)
+}
+
+fn invalid_backend_result_count(operation: &str, expected: usize, actual: usize) -> VfError {
+    invalid_backend_reply(format!(
+        "{operation} returned {actual} results for {expected} requests",
+    ))
+}
+
+fn validate_c_open_results(opened: &[FileOperand], expected: usize) -> Result<(), VfError> {
+    if opened.len() != expected {
+        return Err(invalid_backend_result_count(
+            "vopen_raw_impl",
+            expected,
+            opened.len(),
+        ));
+    }
+    for (index, file) in opened.iter().enumerate() {
+        let Some(fd) = file.fd() else {
+            return Err(invalid_backend_reply(format!(
+                "vopen_raw_impl result {index} is not an open file handle",
+            )));
+        };
+        if fd < 0 {
+            return Err(invalid_backend_reply(format!(
+                "vopen_raw_impl result {index} has a negative file handle",
+            )));
+        }
+    }
+    if opened.len() > 1 {
+        let mut seen = std::collections::HashSet::with_capacity(opened.len());
+        for (index, file) in opened.iter().enumerate() {
+            let fd = file
+                .fd()
+                .expect("open results were checked to be file handles");
+            if !seen.insert(fd) {
+                return Err(invalid_backend_reply(format!(
+                    "vopen_raw_impl returned the same open handle more than once (result {index})",
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unique_open_handles_for_cleanup(opened: &[FileOperand]) -> Vec<FileOperand> {
+    let mut seen = std::collections::HashSet::with_capacity(opened.len());
+    opened
+        .iter()
+        .filter(|file| file.fd().is_some_and(|fd| fd >= 0 && seen.insert(fd)))
+        .cloned()
+        .collect()
+}
+
+fn validate_c_read_results(
+    reads: &[ReadOp],
+    results: &[vfsi_sync::ReadResult],
+) -> Result<(), VfError> {
+    if results.len() != reads.len() {
+        return Err(invalid_backend_result_count(
+            "vread_impl",
+            reads.len(),
+            results.len(),
+        ));
+    }
+    for (index, (read, result)) in reads.iter().zip(results).enumerate() {
+        if result.file != read.file {
+            return Err(invalid_backend_reply(format!(
+                "vread_impl result {index} has a different file handle",
+            )));
+        }
+        if result.data.len() > read.length {
+            return Err(invalid_backend_reply(format!(
+                "vread_impl result {index} returned {} bytes for a {}-byte read",
+                result.data.len(),
+                read.length,
+            )));
+        }
+        if let vfsi_sync::VfOffset::At(expected) = read.offset {
+            if result.offset != expected {
+                return Err(invalid_backend_reply(format!(
+                    "vread_impl result {index} started at offset {}, expected {expected}",
+                    result.offset,
+                )));
+            }
+        }
+        if read.length != 0 && result.data.is_empty() && !result.eof {
+            return Err(invalid_backend_reply(format!(
+                "vread_impl result {index} made no progress without EOF",
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_c_write_results(
+    writes: &[WriteOp<&FileOperand, &[u8]>],
+    results: &[vfsi_sync::WriteResult],
+) -> Result<(), VfError> {
+    if results.len() != writes.len() {
+        return Err(invalid_backend_result_count(
+            "vwrite_impl",
+            writes.len(),
+            results.len(),
+        ));
+    }
+    for (index, (write, result)) in writes.iter().zip(results).enumerate() {
+        if result.file != *write.file() {
+            return Err(invalid_backend_reply(format!(
+                "vwrite_impl result {index} has a different file handle",
+            )));
+        }
+        if result.written > write.data().len() {
+            return Err(invalid_backend_reply(format!(
+                "vwrite_impl result {index} reported {} bytes written for a {}-byte write",
+                result.written,
+                write.data().len(),
+            )));
+        }
+        if let vfsi_sync::VfOffset::At(expected) = write.offset() {
+            if result.offset != expected {
+                return Err(invalid_backend_reply(format!(
+                    "vwrite_impl result {index} started at offset {}, expected {expected}",
+                    result.offset,
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn fail_results(results: &mut [vfsi_result], failure: vfsi_result, submitted: bool) {
     if submitted {
         for (index, result) in results.iter_mut().enumerate() {
@@ -1457,13 +1589,13 @@ pub unsafe extern "C" fn vfsi_free(fs: *mut vfsi_fs) {
                 let (n, ops, bytes, max) = vfsi_nfs::compound::compound_stats();
                 if n > 0 {
                     eprintln!(
-                    "[vfsi] compounds={} avg_ops={:.2} max_ops={} avg_bytes={:.0} total_bytes={}",
-                    n,
-                    ops as f64 / n as f64,
-                    max,
-                    bytes as f64 / n as f64,
-                    bytes
-                );
+                        "[vfsi] compounds={} avg_ops={:.2} max_ops={} avg_bytes={:.0} total_bytes={}",
+                        n,
+                        ops as f64 / n as f64,
+                        max,
+                        bytes as f64 / n as f64,
+                        bytes
+                    );
                 }
                 let (calls, us) = vfsi_nfs::compound::rpc_stats();
                 if calls > 0 {
@@ -1916,6 +2048,19 @@ pub unsafe extern "C" fn vfsi_openv(
                 }
             }
         };
+        if let Err(error) = validate_c_open_results(&opened, count) {
+            // Do not register ambiguous or non-handle results. Close each
+            // distinct handle at most once during best-effort cleanup.
+            let cleanup = unique_open_handles_for_cleanup(&opened);
+            if !cleanup.is_empty() {
+                if let Ok(mut backend) = fs.fs.lock() {
+                    for file in &cleanup {
+                        let _ = backend.close_impl(file);
+                    }
+                }
+            }
+            fail_batch!(results, vfsi_result::from_error(error), true);
+        }
         let mut registered = Vec::with_capacity(count);
         let registration = (|| -> Result<(), VfError> {
             let mut files = lock_or_io(&fs.files)?;
@@ -2284,6 +2429,9 @@ pub unsafe extern "C" fn vfsi_preadv(
                 fail_batch!(item_results, vfsi_result::from_error(error), true)
             }
         };
+        if let Err(error) = validate_c_read_results(&reads, &results) {
+            fail_batch!(item_results, vfsi_result::from_error(error), true);
+        }
         for (op, result) in ops.iter_mut().zip(results) {
             if !result.data.is_empty() {
                 if result.data.len() > op.len {
@@ -2408,6 +2556,9 @@ pub unsafe extern "C" fn vfsi_pwritev(
                 fail_batch!(item_results, vfsi_result::from_error(error), true)
             }
         };
+        if let Err(error) = validate_c_write_results(&writes, &results) {
+            fail_batch!(item_results, vfsi_result::from_error(error), true);
+        }
         for (op, result) in ops.iter_mut().zip(results) {
             op.wrote = result.written;
         }
@@ -3201,6 +3352,20 @@ mod tests {
     }
 
     type WriteCalls = std::sync::Arc<Mutex<Vec<Vec<(usize, usize)>>>>;
+    type CloseAttempts = std::sync::Arc<Mutex<Vec<i32>>>;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum MalformedReply {
+        OpenDuplicate,
+        OpenPath,
+        OpenNegativeFd,
+        ReadWrongFile,
+        ReadWrongOffset,
+        ReadNoProgress,
+        WriteWrongFile,
+        WriteWrongOffset,
+        WriteTooManyBytes,
+    }
 
     // Exercise the actual C entry point. Like NFS, this backend fetches all
     // roots' first pages before its first quota callback, and records that work.
@@ -3214,6 +3379,12 @@ mod tests {
         write_calls: Option<WriteCalls>,
         open_preflight_error: Option<usize>,
         read_size: Option<usize>,
+        open_result_count: Option<usize>,
+        read_result_count: Option<usize>,
+        write_result_count: Option<usize>,
+        close_attempts: Option<CloseAttempts>,
+        close_failure_fd: Option<i32>,
+        malformed_reply: Option<MalformedReply>,
     }
 
     impl vfsi_sync::backend::HandleBackend for ListingBackend {
@@ -3223,8 +3394,18 @@ mod tests {
         fn open_impl(&mut self, _: &vfsi_sync::OpenOp) -> vfsi_sync::VfResult<FileOperand> {
             Err(VfError::unsupported(0))
         }
-        fn close_impl(&mut self, _: &FileOperand) -> vfsi_sync::VfResult<()> {
-            Err(VfError::unsupported(0))
+        fn close_impl(&mut self, file: &FileOperand) -> vfsi_sync::VfResult<()> {
+            if let Some(attempts) = &self.close_attempts {
+                attempts.lock().unwrap().push(file.fd().unwrap_or(-1));
+            }
+            if self
+                .close_failure_fd
+                .is_some_and(|fd| file.fd() == Some(fd))
+            {
+                Err(VfError::failure(0, libc::EIO as u32))
+            } else {
+                Ok(())
+            }
         }
         fn read_impl(&mut self, _: &ReadOp) -> vfsi_sync::VfResult<vfsi_sync::ReadResult> {
             Err(VfError::unsupported(0))
@@ -3324,6 +3505,35 @@ mod tests {
             Ok(entries)
         }
 
+        fn vopen_raw_impl(
+            &mut self,
+            _: &[&Path],
+            _: &[i32],
+            _: &[u32],
+        ) -> vfsi_sync::VfResult<Vec<FileOperand>> {
+            let count = self
+                .open_result_count
+                .ok_or_else(|| VfError::unsupported(0))?;
+            match self.malformed_reply {
+                Some(MalformedReply::OpenDuplicate) => {
+                    Ok(vec![FileOperand::from_fd(10_000); count])
+                }
+                Some(MalformedReply::OpenPath) => Ok((0..count)
+                    .map(|index| {
+                        if index + 1 == count {
+                            FileOperand::from_path("/not-an-open-handle")
+                        } else {
+                            FileOperand::from_fd(10_000 + index as i32)
+                        }
+                    })
+                    .collect()),
+                Some(MalformedReply::OpenNegativeFd) => Ok(vec![FileOperand::from_fd(-1); count]),
+                _ => Ok((0..count)
+                    .map(|index| FileOperand::from_fd(10_000 + index as i32))
+                    .collect()),
+            }
+        }
+
         fn vopen_preflight_impl(&mut self, _: &[&Path], _: &[i32], _: &[u32]) -> vfsi_sync::VfRes {
             match self.open_preflight_error {
                 Some(index) => Err(VfError::unsupported(index)),
@@ -3338,12 +3548,30 @@ mod tests {
             let Some(size) = self.read_size else {
                 return Err(VfError::unsupported(0));
             };
+            let result_count = self.read_result_count.unwrap_or(reads.len());
             Ok(reads
                 .iter()
+                .cycle()
+                .take(result_count)
                 .map(|read| vfsi_sync::ReadResult {
-                    file: read.file.clone(),
-                    offset: 0,
-                    data: vec![b'x'; size],
+                    file: if self.malformed_reply == Some(MalformedReply::ReadWrongFile) {
+                        FileOperand::from_fd(999)
+                    } else {
+                        read.file.clone()
+                    },
+                    offset: if self.malformed_reply == Some(MalformedReply::ReadWrongOffset) {
+                        1
+                    } else {
+                        match read.offset {
+                            vfsi_sync::VfOffset::At(offset) => offset,
+                            _ => 0,
+                        }
+                    },
+                    data: if self.malformed_reply == Some(MalformedReply::ReadNoProgress) {
+                        Vec::new()
+                    } else {
+                        vec![b'x'; size]
+                    },
                     eof: false,
                 })
                 .collect())
@@ -3363,15 +3591,31 @@ mod tests {
                     .map(|op| (op.data().as_ptr() as usize, op.data().len()))
                     .collect(),
             );
+            let result_count = self.write_result_count.unwrap_or(writes.len());
             Ok(writes
                 .iter()
+                .cycle()
+                .take(result_count)
                 .map(|op| vfsi_sync::WriteResult {
-                    file: op.file().clone(),
+                    file: if self.malformed_reply == Some(MalformedReply::WriteWrongFile) {
+                        FileOperand::from_fd(999)
+                    } else {
+                        op.file().clone()
+                    },
                     offset: match op.offset() {
+                        vfsi_sync::VfOffset::At(offset)
+                            if self.malformed_reply == Some(MalformedReply::WriteWrongOffset) =>
+                        {
+                            offset + 1
+                        }
                         vfsi_sync::VfOffset::At(offset) => offset,
                         _ => unreachable!(),
                     },
-                    written: op.data().len(),
+                    written: if self.malformed_reply == Some(MalformedReply::WriteTooManyBytes) {
+                        op.data().len() + 1
+                    } else {
+                        op.data().len()
+                    },
                     stable: true,
                 })
                 .collect())
@@ -3460,6 +3704,12 @@ mod tests {
                         write_calls: None,
                         open_preflight_error,
                         read_size: None,
+                        open_result_count: None,
+                        read_result_count: None,
+                        write_result_count: None,
+                        close_attempts: None,
+                        close_failure_fd: None,
+                        malformed_reply: None,
                     }),
                     PathBuf::from("/"),
                     PathBuf::from("/"),
@@ -3541,6 +3791,227 @@ mod tests {
     }
 
     #[test]
+    fn c_openv_rejects_backend_result_cardinality_mismatch_and_cleans_handles() {
+        for returned in [1, 3] {
+            let close_attempts = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let fs = make_fs(
+                Box::new(ListingBackend {
+                    calls: Default::default(),
+                    entries_per_dir: 0,
+                    emitted: 0,
+                    missing: AttrMask::empty(),
+                    missing_after: 0,
+                    fail_call: None,
+                    write_calls: None,
+                    open_preflight_error: None,
+                    read_size: None,
+                    open_result_count: Some(returned),
+                    read_result_count: None,
+                    write_result_count: None,
+                    close_attempts: Some(close_attempts.clone()),
+                    close_failure_fd: if returned > 1 { Some(10_000) } else { None },
+                    malformed_reply: None,
+                }),
+                PathBuf::from("/"),
+                PathBuf::from("/"),
+            );
+            let first = CString::new("/first").unwrap();
+            let second = CString::new("/second").unwrap();
+            let mut ops = [
+                vfsi_open_op {
+                    path: first.as_ptr(),
+                    flags: libc::O_RDONLY,
+                    mode: 0,
+                    fd: -1,
+                },
+                vfsi_open_op {
+                    path: second.as_ptr(),
+                    flags: libc::O_RDONLY,
+                    mode: 0,
+                    fd: -1,
+                },
+            ];
+            let mut items = [vfsi_result::success(0); 2];
+
+            let result = unsafe { vfsi_openv(fs, ops.as_mut_ptr(), ops.len(), items.as_mut_ptr()) };
+
+            assert_eq!(result.category, VFSI_ERROR_TRANSPORT);
+            assert_eq!(result.err_no, vfsi_sync::VF_ERR_RPC);
+            assert!(items
+                .iter()
+                .all(|item| item.category == VFSI_ERROR_INDETERMINATE));
+            assert_eq!(ops.map(|op| op.fd), [-1, -1]);
+            assert!(unsafe { &*fs }.files.lock().unwrap().is_empty());
+            assert_eq!(
+                *close_attempts.lock().unwrap(),
+                (0..returned)
+                    .map(|index| 10_000 + index as i32)
+                    .collect::<Vec<_>>()
+            );
+            unsafe { vfsi_free(fs) };
+        }
+    }
+
+    #[test]
+    fn c_openv_rejects_duplicate_and_non_handle_results() {
+        for (malformed_reply, expected_closes) in [
+            (MalformedReply::OpenDuplicate, vec![10_000]),
+            (MalformedReply::OpenPath, vec![10_000]),
+            (MalformedReply::OpenNegativeFd, vec![]),
+        ] {
+            let close_attempts = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let fs = make_fs(
+                Box::new(ListingBackend {
+                    calls: Default::default(),
+                    entries_per_dir: 0,
+                    emitted: 0,
+                    missing: AttrMask::empty(),
+                    missing_after: 0,
+                    fail_call: None,
+                    write_calls: None,
+                    open_preflight_error: None,
+                    read_size: None,
+                    open_result_count: Some(2),
+                    read_result_count: None,
+                    write_result_count: None,
+                    close_attempts: Some(close_attempts.clone()),
+                    close_failure_fd: None,
+                    malformed_reply: Some(malformed_reply),
+                }),
+                PathBuf::from("/"),
+                PathBuf::from("/"),
+            );
+            let first = CString::new("/first").unwrap();
+            let second = CString::new("/second").unwrap();
+            let mut ops = [
+                vfsi_open_op {
+                    path: first.as_ptr(),
+                    flags: libc::O_RDONLY,
+                    mode: 0,
+                    fd: -1,
+                },
+                vfsi_open_op {
+                    path: second.as_ptr(),
+                    flags: libc::O_RDONLY,
+                    mode: 0,
+                    fd: -1,
+                },
+            ];
+            let mut items = [vfsi_result::success(0); 2];
+
+            let result = unsafe { vfsi_openv(fs, ops.as_mut_ptr(), ops.len(), items.as_mut_ptr()) };
+
+            assert_eq!(result.category, VFSI_ERROR_TRANSPORT);
+            assert!(items
+                .iter()
+                .all(|item| item.category == VFSI_ERROR_INDETERMINATE));
+            assert_eq!(ops.map(|op| op.fd), [-1, -1]);
+            assert!(unsafe { &*fs }.files.lock().unwrap().is_empty());
+            assert_eq!(*close_attempts.lock().unwrap(), expected_closes);
+            unsafe { vfsi_free(fs) };
+        }
+    }
+
+    #[test]
+    fn c_vector_reads_reject_backend_result_cardinality_mismatch_before_copying() {
+        for returned in [0, 2] {
+            let fs = make_fs(
+                Box::new(ListingBackend {
+                    calls: Default::default(),
+                    entries_per_dir: 0,
+                    emitted: 0,
+                    missing: AttrMask::empty(),
+                    missing_after: 0,
+                    fail_call: None,
+                    write_calls: None,
+                    open_preflight_error: None,
+                    read_size: Some(1),
+                    open_result_count: None,
+                    read_result_count: Some(returned),
+                    write_result_count: None,
+                    close_attempts: None,
+                    close_failure_fd: None,
+                    malformed_reply: None,
+                }),
+                PathBuf::from("/"),
+                PathBuf::from("/"),
+            );
+            unsafe { &*fs }
+                .files
+                .lock()
+                .unwrap()
+                .insert(10, FileOperand::from_fd(100));
+            let mut bytes = [0xa5u8; 4];
+            let mut op = vfsi_pread_op {
+                fd: 10,
+                buf: bytes.as_mut_ptr().cast(),
+                len: bytes.len(),
+                offset: 0,
+                got: 99,
+            };
+            let mut item = vfsi_result::success(0);
+
+            let result = unsafe { vfsi_preadv(fs, &mut op, 1, &mut item) };
+
+            assert_eq!(result.category, VFSI_ERROR_TRANSPORT);
+            assert_eq!(item.category, VFSI_ERROR_INDETERMINATE);
+            assert_eq!(op.got, 99);
+            assert_eq!(bytes, [0xa5; 4]);
+            unsafe { vfsi_free(fs) };
+        }
+    }
+
+    #[test]
+    fn c_vector_writes_reject_backend_result_cardinality_mismatch() {
+        for returned in [0, 2] {
+            let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let fs = make_fs(
+                Box::new(ListingBackend {
+                    calls: Default::default(),
+                    entries_per_dir: 0,
+                    emitted: 0,
+                    missing: AttrMask::empty(),
+                    missing_after: 0,
+                    fail_call: None,
+                    write_calls: Some(calls.clone()),
+                    open_preflight_error: None,
+                    read_size: None,
+                    open_result_count: None,
+                    read_result_count: None,
+                    write_result_count: Some(returned),
+                    close_attempts: None,
+                    close_failure_fd: None,
+                    malformed_reply: None,
+                }),
+                PathBuf::from("/"),
+                PathBuf::from("/"),
+            );
+            unsafe { &*fs }
+                .files
+                .lock()
+                .unwrap()
+                .insert(10, FileOperand::from_fd(100));
+            let data = b"payload";
+            let mut op = vfsi_pwrite_op {
+                fd: 10,
+                buf: data.as_ptr().cast(),
+                len: data.len(),
+                offset: 0,
+                wrote: 99,
+            };
+            let mut item = vfsi_result::success(0);
+
+            let result = unsafe { vfsi_pwritev(fs, &mut op, 1, &mut item) };
+
+            assert_eq!(result.category, VFSI_ERROR_TRANSPORT);
+            assert_eq!(item.category, VFSI_ERROR_INDETERMINATE);
+            assert_eq!(op.wrote, 99);
+            assert_eq!(calls.lock().unwrap().len(), 1);
+            unsafe { vfsi_free(fs) };
+        }
+    }
+
+    #[test]
     fn result_arrays_initialize_uninitialized_foreign_storage() {
         let mut output = [std::mem::MaybeUninit::<vfsi_result>::uninit(); 2];
         let results = unsafe { result_array(output.as_mut_ptr().cast(), output.len()) }
@@ -3566,6 +4037,12 @@ mod tests {
                         write_calls: None,
                         open_preflight_error: None,
                         read_size: Some(returned),
+                        open_result_count: None,
+                        read_result_count: None,
+                        write_result_count: None,
+                        close_attempts: None,
+                        close_failure_fd: None,
+                        malformed_reply: None,
                     }),
                     PathBuf::from("/"),
                     PathBuf::from("/"),
@@ -3603,6 +4080,113 @@ mod tests {
     }
 
     #[test]
+    fn c_vector_reads_reject_malformed_backend_results_before_copying() {
+        for malformed_reply in [
+            MalformedReply::ReadWrongFile,
+            MalformedReply::ReadWrongOffset,
+            MalformedReply::ReadNoProgress,
+        ] {
+            let fs = make_fs(
+                Box::new(ListingBackend {
+                    calls: Default::default(),
+                    entries_per_dir: 0,
+                    emitted: 0,
+                    missing: AttrMask::empty(),
+                    missing_after: 0,
+                    fail_call: None,
+                    write_calls: None,
+                    open_preflight_error: None,
+                    read_size: Some(1),
+                    open_result_count: None,
+                    read_result_count: None,
+                    write_result_count: None,
+                    close_attempts: None,
+                    close_failure_fd: None,
+                    malformed_reply: Some(malformed_reply),
+                }),
+                PathBuf::from("/"),
+                PathBuf::from("/"),
+            );
+            unsafe { &*fs }
+                .files
+                .lock()
+                .unwrap()
+                .insert(10, FileOperand::from_fd(100));
+            let mut bytes = [0xa5u8; 4];
+            let mut op = vfsi_pread_op {
+                fd: 10,
+                buf: bytes.as_mut_ptr().cast(),
+                len: bytes.len(),
+                offset: 7,
+                got: 99,
+            };
+            let mut item = vfsi_result::success(0);
+
+            let result = unsafe { vfsi_preadv(fs, &mut op, 1, &mut item) };
+
+            assert_eq!(result.category, VFSI_ERROR_TRANSPORT);
+            assert_eq!(item.category, VFSI_ERROR_INDETERMINATE);
+            assert_eq!(op.got, 99);
+            assert_eq!(bytes, [0xa5; 4]);
+            unsafe { vfsi_free(fs) };
+        }
+    }
+
+    #[test]
+    fn c_vector_writes_reject_malformed_backend_results() {
+        for malformed_reply in [
+            MalformedReply::WriteWrongFile,
+            MalformedReply::WriteWrongOffset,
+            MalformedReply::WriteTooManyBytes,
+        ] {
+            let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let fs = make_fs(
+                Box::new(ListingBackend {
+                    calls: Default::default(),
+                    entries_per_dir: 0,
+                    emitted: 0,
+                    missing: AttrMask::empty(),
+                    missing_after: 0,
+                    fail_call: None,
+                    write_calls: Some(calls.clone()),
+                    open_preflight_error: None,
+                    read_size: None,
+                    open_result_count: None,
+                    read_result_count: None,
+                    write_result_count: None,
+                    close_attempts: None,
+                    close_failure_fd: None,
+                    malformed_reply: Some(malformed_reply),
+                }),
+                PathBuf::from("/"),
+                PathBuf::from("/"),
+            );
+            unsafe { &*fs }
+                .files
+                .lock()
+                .unwrap()
+                .insert(10, FileOperand::from_fd(100));
+            let data = b"payload";
+            let mut op = vfsi_pwrite_op {
+                fd: 10,
+                buf: data.as_ptr().cast(),
+                len: data.len(),
+                offset: 7,
+                wrote: 99,
+            };
+            let mut item = vfsi_result::success(0);
+
+            let result = unsafe { vfsi_pwritev(fs, &mut op, 1, &mut item) };
+
+            assert_eq!(result.category, VFSI_ERROR_TRANSPORT);
+            assert_eq!(item.category, VFSI_ERROR_INDETERMINATE);
+            assert_eq!(op.wrote, 99);
+            assert_eq!(calls.lock().unwrap().len(), 1);
+            unsafe { vfsi_free(fs) };
+        }
+    }
+
+    #[test]
     fn c_vector_writes_borrow_payloads_and_preflight_the_entire_batch() {
         let calls = std::sync::Arc::new(Mutex::new(Vec::new()));
         let fs = make_fs(
@@ -3616,6 +4200,12 @@ mod tests {
                 write_calls: Some(calls.clone()),
                 open_preflight_error: None,
                 read_size: None,
+                open_result_count: None,
+                read_result_count: None,
+                write_result_count: None,
+                close_attempts: None,
+                close_failure_fd: None,
+                malformed_reply: None,
             }),
             PathBuf::from("/"),
             PathBuf::from("/"),
