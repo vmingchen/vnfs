@@ -61,11 +61,12 @@ def test_cached_codec_budget_applies_to_remote_and_complete_hits(
 ):
     payload = b"x" * (CAP + 20)
     dummy_fs.read_all_max_total_bytes = CAP
-    dummy_fs.pipe_file("/data", CODECS[codec](payload))
+    encoded_payload = CODECS[codec](payload)
+    dummy_fs.pipe_file("/data", encoded_payload)
     cached = cached_fs(dummy_fs, tmp_path)
     if complete:
         with cached.open("/data", "rb") as encoded:
-            assert encoded.read() == CODECS[codec](payload)
+            assert encoded.read() == encoded_payload
     with cached.open("/data", "rb", compression=codec) as file:
         with pytest.raises(OSError) as error:
             next(file) if method == "next" else getattr(file, method)()
