@@ -707,27 +707,44 @@ impl SmbVecFs {
             .runtime
             .block_on(self.client.connection_mut().execute_compound(&operations))
             .map_err(|e| smb_error(e, 0))?;
-        let mut responses = collect_compound(responses, operations.len())?;
-        require_status(&responses[0], Command::Create, 0)?;
-        let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
-            .map_err(|e| smb_error(e, 0))?
-            .file_id;
-        let data = if responses[1].header.status == NtStatus::END_OF_FILE {
-            Ok(Vec::new())
-        } else {
-            require_status(&responses[1], Command::Read, 0).and_then(|()| {
-                ReadResponse::unpack(&mut ReadCursor::new(&responses[1].body))
+        let OpenCompoundResponseState {
+            file_id,
+            create_response,
+            operation_responses,
+            close_succeeded,
+            cardinality_error,
+        } = decode_open_compound_responses(
+            responses,
+            operations.len(),
+            |response| {
+                require_status(response, Command::Create, 0)?;
+                CreateResponse::unpack(&mut ReadCursor::new(&response.body))
+                    .map(|opened| opened.file_id)
                     .map_err(|error| smb_error(error, 0))
-                    .and_then(|response| checked_read_data(response.data, length, 0))
-            })
+            },
+            |response| response.header.status == NtStatus::SUCCESS,
+            |error| smb_error(error, 0),
+        )?;
+        let data = if let Some(error) = cardinality_error {
+            Err(error)
+        } else {
+            match operation_responses.into_iter().next() {
+                Some(Ok(response)) if response.header.status == NtStatus::END_OF_FILE => {
+                    Ok(Vec::new())
+                }
+                Some(Ok(response)) => require_status(&response, Command::Read, 0).and_then(|()| {
+                    ReadResponse::unpack(&mut ReadCursor::new(&response.body))
+                        .map_err(|error| smb_error(error, 0))
+                        .and_then(|response| checked_read_data(response.data, length, 0))
+                }),
+                Some(Err(error)) => Err(smb_error(error, 0)),
+                None => Err(compound_cardinality_error(1, operations.len())),
+            }
         };
-        let close = self.close_compound_temporary_handle(
-            opened,
-            responses[2].header.status == NtStatus::SUCCESS,
-        );
+        let close = self.close_compound_temporary_handle(file_id, close_succeeded);
         // Release the response buffers promptly; a large read can otherwise
         // remain duplicated until this stack frame returns.
-        responses.clear();
+        drop(create_response);
         match data {
             Ok(data) => close.map(|()| data),
             Err(error) => {
@@ -829,37 +846,64 @@ impl SmbVecFs {
             .runtime
             .block_on(self.client.connection_mut().execute_compound(&operations))
             .map_err(|e| smb_error(e, 0))?;
-        let responses = collect_compound(responses, operations.len())?;
-        require_status(&responses[0], Command::Create, 0)?;
-        let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
-            .map_err(|e| smb_error(e, 0))?
-            .file_id;
-        let write_result = require_status(&responses[1], Command::Write, 0).and_then(|()| {
-            WriteResponse::unpack(&mut ReadCursor::new(&responses[1].body))
-                .map(|response| response.count as usize)
-                .map_err(|error| smb_error(error, 0))
-                .and_then(|count| {
-                    if count > data.len() {
-                        Err(VfError::transport(
-                            None,
-                            "SMB server reported writing more bytes than requested",
-                        ))
-                    } else {
-                        Ok(count)
-                    }
-                })
-        });
-        let flush_result = require_status(&responses[2], Command::Flush, 0);
-        let close_result = self.close_compound_temporary_handle(
-            opened,
-            responses[3].header.status == NtStatus::SUCCESS,
-        );
-        match (write_result, flush_result) {
-            (Err(error), _) | (Ok(_), Err(error)) => {
+        let OpenCompoundResponseState {
+            file_id,
+            create_response,
+            operation_responses,
+            close_succeeded,
+            cardinality_error,
+        } = decode_open_compound_responses(
+            responses,
+            operations.len(),
+            |response| {
+                require_status(response, Command::Create, 0)?;
+                CreateResponse::unpack(&mut ReadCursor::new(&response.body))
+                    .map(|opened| opened.file_id)
+                    .map_err(|error| smb_error(error, 0))
+            },
+            |response| response.header.status == NtStatus::SUCCESS,
+            |error| smb_error(error, 0),
+        )?;
+        let write_result = if let Some(error) = cardinality_error {
+            Err(error)
+        } else {
+            (|| {
+                let mut responses = operation_responses.into_iter();
+                let write = responses
+                    .next()
+                    .expect("complete compound contains WRITE response")
+                    .map_err(|error| smb_error(error, 0))?;
+                let flush = responses
+                    .next()
+                    .expect("complete compound contains FLUSH response")
+                    .map_err(|error| smb_error(error, 0))?;
+                let written = require_status(&write, Command::Write, 0).and_then(|()| {
+                    WriteResponse::unpack(&mut ReadCursor::new(&write.body))
+                        .map(|response| response.count as usize)
+                        .map_err(|error| smb_error(error, 0))
+                        .and_then(|count| {
+                            if count > data.len() {
+                                Err(VfError::transport(
+                                    None,
+                                    "SMB server reported writing more bytes than requested",
+                                ))
+                            } else {
+                                Ok(count)
+                            }
+                        })
+                })?;
+                require_status(&flush, Command::Flush, 0)?;
+                Ok(written)
+            })()
+        };
+        let close_result = self.close_compound_temporary_handle(file_id, close_succeeded);
+        drop(create_response);
+        match write_result {
+            Ok(written) => close_result.map(|()| written),
+            Err(error) => {
                 let _ = close_result;
                 Err(error)
             }
-            (Ok(written), Ok(())) => close_result.map(|()| written),
         }
     }
 
@@ -2570,25 +2614,24 @@ async fn delete_entry_on_connection(
             .execute_compound(&operations)
             .await
             .map_err(|error| smb_error(error, 0))?;
-        let response_state = decode_delete_entry_responses(
+        let OpenCompoundResponseState {
+            file_id,
+            operation_responses,
+            close_succeeded,
+            cardinality_error,
+            ..
+        } = decode_open_compound_responses(
             responses,
             operations.len(),
             |response| {
-                require_status(&response, Command::Create, 0)?;
+                require_status(response, Command::Create, 0)?;
                 CreateResponse::unpack(&mut ReadCursor::new(&response.body))
                     .map(|opened| opened.file_id)
                     .map_err(|error| smb_error(error, 0))
             },
-            |response| require_status(&response, Command::SetInfo, 0),
             |response| response.header.status == NtStatus::SUCCESS,
             |error| smb_error(error, 0),
         )?;
-        let DeleteEntryResponseState {
-            file_id,
-            delete_result,
-            close_succeeded,
-            cardinality_error,
-        } = response_state;
         let close_result = close_compound_on_connection(
             &connection,
             tree_id,
@@ -2601,7 +2644,12 @@ async fn delete_entry_on_connection(
         if let Some(error) = cardinality_error {
             return Err(error);
         }
-        delete_result?;
+        let delete_response = operation_responses
+            .into_iter()
+            .next()
+            .expect("complete compound contains SET_INFO response")
+            .map_err(|error| smb_error(error, 0))?;
+        require_status(&delete_response, Command::SetInfo, 0)?;
         close_result
     }
     .await;
@@ -2640,20 +2688,40 @@ async fn probe_reparse_point(
             .execute_compound(&operations)
             .await
             .map_err(|error| smb_error(error, 0))?;
-        let responses = collect_compound(responses, operations.len())?;
-        require_status(&responses[0], Command::Create, 0)?;
-        let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
-            .map_err(|error| smb_error(error, 0))?;
-        let is_reparse_point = opened.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
-        close_compound_on_connection(
+        let OpenCompoundResponseState {
+            file_id,
+            create_response,
+            close_succeeded,
+            cardinality_error,
+            ..
+        } = decode_open_compound_responses(
+            responses,
+            operations.len(),
+            |response| {
+                require_status(response, Command::Create, 0)?;
+                CreateResponse::unpack(&mut ReadCursor::new(&response.body))
+                    .map(|opened| opened.file_id)
+                    .map_err(|error| smb_error(error, 0))
+            },
+            |response| response.header.status == NtStatus::SUCCESS,
+            |error| smb_error(error, 0),
+        )?;
+        let is_reparse_point = CreateResponse::unpack(&mut ReadCursor::new(&create_response.body))
+            .map(|opened| opened.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+            .map_err(|error| smb_error(error, 0));
+        let close_result = close_compound_on_connection(
             &connection,
             tree_id,
-            opened.file_id,
-            responses[1].header.status == NtStatus::SUCCESS,
+            file_id,
+            close_succeeded,
             &mut deferred_close,
         )
-        .await?;
-        Ok(is_reparse_point)
+        .await;
+        if let Some(error) = cardinality_error {
+            return Err(error);
+        }
+        close_result?;
+        is_reparse_point
     }
     .await;
     CompoundOutcome {
@@ -2722,27 +2790,52 @@ async fn concurrent_file_identity_inner(
         .execute_compound(&operations)
         .await
         .map_err(|error| smb_error(error, 0))?;
-    let responses = collect_compound(responses, operations.len())?;
-    require_status(&responses[0], Command::Create, 0)?;
-    let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
-        .map_err(|error| smb_error(error, 0))?
-        .file_id;
-    let identity = require_status(&responses[1], Command::QueryInfo, 0).and_then(|()| {
-        let response = QueryInfoResponse::unpack(&mut ReadCursor::new(&responses[1].body))
-            .map_err(|error| smb_error(error, 0))?;
-        let bytes: [u8; 8] = response
-            .output_buffer
-            .get(..8)
-            .ok_or_else(|| VfError::transport(None, "short SMB FileInternalInformation response"))?
-            .try_into()
-            .expect("eight-byte slice");
-        Ok(u64::from_le_bytes(bytes))
-    });
+    let OpenCompoundResponseState {
+        file_id,
+        operation_responses,
+        close_succeeded,
+        cardinality_error,
+        ..
+    } = decode_open_compound_responses(
+        responses,
+        operations.len(),
+        |response| {
+            require_status(response, Command::Create, 0)?;
+            CreateResponse::unpack(&mut ReadCursor::new(&response.body))
+                .map(|opened| opened.file_id)
+                .map_err(|error| smb_error(error, 0))
+        },
+        |response| response.header.status == NtStatus::SUCCESS,
+        |error| smb_error(error, 0),
+    )?;
+    let identity = if let Some(error) = cardinality_error {
+        Err(error)
+    } else {
+        (|| {
+            let response = operation_responses
+                .into_iter()
+                .next()
+                .expect("complete compound contains QUERY_INFO response")
+                .map_err(|error| smb_error(error, 0))?;
+            require_status(&response, Command::QueryInfo, 0)?;
+            let response = QueryInfoResponse::unpack(&mut ReadCursor::new(&response.body))
+                .map_err(|error| smb_error(error, 0))?;
+            let bytes: [u8; 8] = response
+                .output_buffer
+                .get(..8)
+                .ok_or_else(|| {
+                    VfError::transport(None, "short SMB FileInternalInformation response")
+                })?
+                .try_into()
+                .expect("eight-byte slice");
+            Ok(u64::from_le_bytes(bytes))
+        })()
+    };
     let close = close_compound_on_connection(
         &connection,
         tree_id,
-        opened,
-        responses[2].header.status == NtStatus::SUCCESS,
+        file_id,
+        close_succeeded,
         deferred_close,
     )
     .await;
@@ -2866,25 +2959,43 @@ async fn concurrent_compound_read_inner(
         .execute_compound(&operations)
         .await
         .map_err(|error| smb_error(error, 0))?;
-    let responses = collect_compound(responses, operations.len())?;
-    require_status(&responses[0], Command::Create, 0)?;
-    let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
-        .map_err(|error| smb_error(error, 0))?
-        .file_id;
-    let data = if responses[1].header.status == NtStatus::END_OF_FILE {
-        Ok(Vec::new())
-    } else {
-        require_status(&responses[1], Command::Read, 0).and_then(|()| {
-            ReadResponse::unpack(&mut ReadCursor::new(&responses[1].body))
+    let OpenCompoundResponseState {
+        file_id,
+        operation_responses,
+        close_succeeded,
+        cardinality_error,
+        ..
+    } = decode_open_compound_responses(
+        responses,
+        operations.len(),
+        |response| {
+            require_status(response, Command::Create, 0)?;
+            CreateResponse::unpack(&mut ReadCursor::new(&response.body))
+                .map(|opened| opened.file_id)
                 .map_err(|error| smb_error(error, 0))
-                .and_then(|response| checked_read_data(response.data, length, 0))
-        })
+        },
+        |response| response.header.status == NtStatus::SUCCESS,
+        |error| smb_error(error, 0),
+    )?;
+    let data = if let Some(error) = cardinality_error {
+        Err(error)
+    } else {
+        match operation_responses.into_iter().next() {
+            Some(Ok(response)) if response.header.status == NtStatus::END_OF_FILE => Ok(Vec::new()),
+            Some(Ok(response)) => require_status(&response, Command::Read, 0).and_then(|()| {
+                ReadResponse::unpack(&mut ReadCursor::new(&response.body))
+                    .map_err(|error| smb_error(error, 0))
+                    .and_then(|response| checked_read_data(response.data, length, 0))
+            }),
+            Some(Err(error)) => Err(smb_error(error, 0)),
+            None => Err(compound_cardinality_error(1, operations.len())),
+        }
     };
     let close = close_compound_on_connection(
         &connection,
         tree_id,
-        opened,
-        responses[2].header.status == NtStatus::SUCCESS,
+        file_id,
+        close_succeeded,
         deferred_close,
     )
     .await;
@@ -2976,41 +3087,71 @@ async fn concurrent_compound_write_inner(
         .execute_compound(&operations)
         .await
         .map_err(|error| smb_error(error, 0))?;
-    let responses = collect_compound(responses, operations.len())?;
-    require_status(&responses[0], Command::Create, 0)?;
-    let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
-        .map_err(|error| smb_error(error, 0))?
-        .file_id;
-    let write_result = require_status(&responses[1], Command::Write, 0).and_then(|()| {
-        WriteResponse::unpack(&mut ReadCursor::new(&responses[1].body))
-            .map(|response| response.count as usize)
-            .map_err(|error| smb_error(error, 0))
-            .and_then(|count| {
-                if count > write.data.len() {
-                    Err(VfError::transport(
-                        None,
-                        "SMB server reported writing more bytes than requested",
-                    ))
-                } else {
-                    Ok(count)
-                }
-            })
-    });
-    let flush_result = require_status(&responses[2], Command::Flush, 0);
+    let OpenCompoundResponseState {
+        file_id,
+        operation_responses,
+        close_succeeded,
+        cardinality_error,
+        ..
+    } = decode_open_compound_responses(
+        responses,
+        operations.len(),
+        |response| {
+            require_status(response, Command::Create, 0)?;
+            CreateResponse::unpack(&mut ReadCursor::new(&response.body))
+                .map(|opened| opened.file_id)
+                .map_err(|error| smb_error(error, 0))
+        },
+        |response| response.header.status == NtStatus::SUCCESS,
+        |error| smb_error(error, 0),
+    )?;
+    let requested_length = write.data.len();
+    let write_result = if let Some(error) = cardinality_error {
+        Err(error)
+    } else {
+        (|| {
+            let mut responses = operation_responses.into_iter();
+            let write = responses
+                .next()
+                .expect("complete compound contains WRITE response")
+                .map_err(|error| smb_error(error, 0))?;
+            let flush = responses
+                .next()
+                .expect("complete compound contains FLUSH response")
+                .map_err(|error| smb_error(error, 0))?;
+            let written = require_status(&write, Command::Write, 0).and_then(|()| {
+                WriteResponse::unpack(&mut ReadCursor::new(&write.body))
+                    .map(|response| response.count as usize)
+                    .map_err(|error| smb_error(error, 0))
+                    .and_then(|count| {
+                        if count > requested_length {
+                            Err(VfError::transport(
+                                None,
+                                "SMB server reported writing more bytes than requested",
+                            ))
+                        } else {
+                            Ok(count)
+                        }
+                    })
+            })?;
+            require_status(&flush, Command::Flush, 0)?;
+            Ok(written)
+        })()
+    };
     let close_result = close_compound_on_connection(
         &connection,
         tree_id,
-        opened,
-        responses[3].header.status == NtStatus::SUCCESS,
+        file_id,
+        close_succeeded,
         deferred_close,
     )
     .await;
-    match (write_result, flush_result) {
-        (Err(error), _) | (Ok(_), Err(error)) => {
+    match write_result {
+        Ok(written) => close_result.map(|()| written),
+        Err(error) => {
             let _ = close_result;
             Err(error)
         }
-        (Ok(written), Ok(())) => close_result.map(|()| written),
     }
 }
 
@@ -3074,40 +3215,56 @@ fn require_status(frame: &smb2::client::Frame, command: Command, index: usize) -
     }
 }
 
-struct DeleteEntryResponseState {
+struct OpenCompoundResponseState<T, E> {
     file_id: FileId,
-    delete_result: VfResult<()>,
+    create_response: T,
+    operation_responses: Vec<Result<T, E>>,
     close_succeeded: bool,
     cardinality_error: Option<VfError>,
 }
 
-fn decode_delete_entry_responses<T, E>(
+/// Keep a successful CREATE response and its FileId even when a later waiter
+/// fails or the compound response vector is truncated. Callers can then issue
+/// a fallback CLOSE instead of leaking the temporary handle.
+fn decode_open_compound_responses<T, E>(
     responses: Vec<Result<T, E>>,
     expected: usize,
-    parse_create: impl FnOnce(T) -> VfResult<FileId>,
-    parse_delete: impl FnOnce(T) -> VfResult<()>,
+    parse_create: impl FnOnce(&T) -> VfResult<FileId>,
     close_succeeded: impl Fn(&T) -> bool,
     mut map_error: impl FnMut(E) -> VfError,
-) -> VfResult<DeleteEntryResponseState> {
+) -> VfResult<OpenCompoundResponseState<T, E>> {
     let response_count = responses.len();
-    let mut responses = responses.into_iter();
-    let Some(create_response) = responses.next() else {
+    let mut responses = responses;
+    if expected < 2 {
+        return Err(VfError::transport(
+            None,
+            "SMB temporary-handle compound must include CREATE and CLOSE",
+        ));
+    }
+    if responses.is_empty() {
         return Err(compound_cardinality_error(response_count, expected));
+    }
+    let create_response = responses.remove(0).map_err(&mut map_error)?;
+    let file_id = parse_create(&create_response)?;
+
+    let operation_count = expected - 2;
+    // A short response vector is a prefix, so its final response cannot be
+    // assumed to be CLOSE. Only trust the expected CLOSE slot when present.
+    let close_succeeded = if response_count >= expected {
+        response_succeeded(responses.get(operation_count), close_succeeded)
+    } else {
+        false
     };
-    let file_id = parse_create(create_response.map_err(&mut map_error)?)?;
-    let delete_result = match responses.next() {
-        Some(Ok(response)) => parse_delete(response),
-        Some(Err(error)) => Err(map_error(error)),
-        None => Err(compound_cardinality_error(response_count, expected)),
-    };
-    let close_response = responses.next();
-    let close_succeeded = response_succeeded(close_response.as_ref(), close_succeeded);
+    // Reuse the response vector's allocation rather than allocating another
+    // Vec for the middle operations. Extra responses are rejected below.
+    responses.truncate(operation_count);
     let cardinality_error =
         (response_count != expected).then(|| compound_cardinality_error(response_count, expected));
 
-    Ok(DeleteEntryResponseState {
+    Ok(OpenCompoundResponseState {
         file_id,
-        delete_result,
+        create_response,
+        operation_responses: responses,
         close_succeeded,
         cardinality_error,
     })
@@ -3238,17 +3395,13 @@ mod tests {
             Close(bool),
         }
 
-        let parse_create = |response| match response {
-            Response::Create(file_id) => Ok(file_id),
+        let parse_create = |response: &Response| match response {
+            Response::Create(file_id) => Ok(*file_id),
             _ => panic!("expected CREATE response"),
-        };
-        let parse_set_info = |response| match response {
-            Response::SetInfo => Ok(()),
-            _ => panic!("expected SET_INFO response"),
         };
         let map_error = |error| VfError::transport(None, error);
 
-        let set_info_failed = decode_delete_entry_responses(
+        let set_info_failed = decode_open_compound_responses(
             vec![
                 Ok(Response::Create(FileId::SENTINEL)),
                 Err("SET_INFO waiter failed"),
@@ -3256,17 +3409,19 @@ mod tests {
             ],
             3,
             parse_create,
-            parse_set_info,
             |response| matches!(response, Response::Close(true)),
             map_error,
         )
         .unwrap();
         assert_eq!(set_info_failed.file_id, FileId::SENTINEL);
-        assert!(set_info_failed.delete_result.unwrap_err().is_transport());
+        assert!(matches!(
+            set_info_failed.operation_responses.as_slice(),
+            [Err("SET_INFO waiter failed")]
+        ));
         assert!(set_info_failed.close_succeeded);
         assert!(set_info_failed.cardinality_error.is_none());
 
-        let close_failed = decode_delete_entry_responses(
+        let close_failed = decode_open_compound_responses(
             vec![
                 Ok(Response::Create(FileId::SENTINEL)),
                 Ok(Response::SetInfo),
@@ -3274,13 +3429,15 @@ mod tests {
             ],
             3,
             parse_create,
-            parse_set_info,
             |response| matches!(response, Response::Close(true)),
             map_error,
         )
         .unwrap();
         assert_eq!(close_failed.file_id, FileId::SENTINEL);
-        close_failed.delete_result.unwrap();
+        assert!(matches!(
+            close_failed.operation_responses.as_slice(),
+            [Ok(Response::SetInfo)]
+        ));
         assert!(!close_failed.close_succeeded);
         assert!(close_failed.cardinality_error.is_none());
 
@@ -3289,6 +3446,42 @@ mod tests {
             &mut deferred_close,
             close_failed.file_id,
             close_failed.close_succeeded,
+            Err(VfError::transport(None, "injected fallback CLOSE failure")),
+        );
+        assert!(close_result.unwrap_err().is_transport());
+        assert_eq!(deferred_close, Some(FileId::SENTINEL));
+    }
+
+    #[test]
+    fn create_handle_survives_truncated_compound_response() {
+        enum Response {
+            Create(FileId),
+        }
+
+        let truncated = decode_open_compound_responses(
+            vec![
+                Ok(Response::Create(FileId::SENTINEL)),
+                Err("READ waiter failed"),
+            ],
+            3,
+            |Response::Create(file_id)| Ok(*file_id),
+            |_| false,
+            |error| VfError::transport(None, error),
+        )
+        .unwrap();
+        assert_eq!(truncated.file_id, FileId::SENTINEL);
+        assert!(matches!(
+            truncated.operation_responses.as_slice(),
+            [Err("READ waiter failed")]
+        ));
+        assert!(!truncated.close_succeeded);
+        assert!(truncated.cardinality_error.is_some());
+
+        let mut deferred_close = None;
+        let close_result = finish_compound_close(
+            &mut deferred_close,
+            truncated.file_id,
+            truncated.close_succeeded,
             Err(VfError::transport(None, "injected fallback CLOSE failure")),
         );
         assert!(close_result.unwrap_err().is_transport());
