@@ -68,22 +68,11 @@ pub fn vstream_impl_default<F: VectorBackend + ?Sized>(
             batch_indices.push(index);
             budget -= length;
         }
-        let results = backend.vread_impl(&reads).map_err(|error| {
-            error.index().map_or(error.clone(), |local_index| {
-                batch_indices
-                    .get(local_index)
-                    .copied()
-                    .map_or(error.clone(), |index| error.with_index(index))
-            })
-        })?;
-        validate_read_results("vstream_impl", &reads, &results).map_err(|error| {
-            error.index().map_or(error.clone(), |local_index| {
-                batch_indices
-                    .get(local_index)
-                    .copied()
-                    .map_or(error.clone(), |index| error.with_index(index))
-            })
-        })?;
+        let remap_error = |error: VfError| {
+            error.map_index(|index| batch_indices.get(index).copied().unwrap_or(index))
+        };
+        let results = backend.vread_impl(&reads).map_err(&remap_error)?;
+        validate_read_results("vstream_impl", &reads, &results).map_err(&remap_error)?;
         for (batch_index, result) in results.into_iter().enumerate() {
             let index = batch_indices[batch_index];
             let offset = offsets[index];
