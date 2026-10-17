@@ -1,7 +1,7 @@
 """Whole-walk limits and one-fetch-per-directory regressions."""
 
-from collections import Counter
 import errno
+from collections import Counter
 
 import fsspec
 import pytest

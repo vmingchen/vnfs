@@ -40,6 +40,7 @@ def test_streamed_download_failed_close_preserves_primary_and_defers_cleanup(
     dummy_fs, tmp_path, monkeypatch, paired_paths, close_error_type, failure_at
 ):
     import builtins
+
     from fsspec.callbacks import Callback
 
     payload = b"remote payload"

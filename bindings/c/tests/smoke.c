@@ -19,6 +19,13 @@ static bool list_one(const char *name, const struct vfsi_attrs *attrs, void *use
     return true;
 }
 
+static bool list_one_indexed(size_t index, const char *dir, const char *name,
+                             const struct vfsi_attrs *attrs, void *userdata)
+{
+    (void)dir;
+    return index == 0 && list_one(name, attrs, userdata);
+}
+
 int main(int argc, char **argv)
 {
     vfsi_dynamic_api dynamic_api;
@@ -89,7 +96,8 @@ int main(int argc, char **argv)
     snprintf(source, sizeof(source), "%s/f.bin", dir);
     snprintf(copied, sizeof(copied), "%s/copied.bin", dir);
 
-    struct vfsi_mkdir_op mkdir_op = {.path = dir, .mode = 0755};
+    /* SMB creation inherits server ACLs; POSIX mode overrides are unsupported. */
+    struct vfsi_mkdir_op mkdir_op = {.path = dir, .mode = smb ? 0777 : 0755};
     struct vfsi_result item_result;
     struct vfsi_result batch = vfsi_mkdirv(fs, &mkdir_op, 1, &item_result);
     if (batch.category != VFSI_ERROR_NONE || batch.index != 1) {
@@ -98,7 +106,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    int fd = vfsi_open(fs, source, O_CREAT | O_RDWR | O_TRUNC, 0644);
+    int fd = vfsi_open(fs, source, O_CREAT | O_RDWR | O_TRUNC, smb ? 0666 : 0644);
     if (fd < 0) {
         fprintf(stderr, "open failed: %d\n", fd);
         return 1;
@@ -141,7 +149,18 @@ int main(int argc, char **argv)
         return 1;
 
     char *seen = NULL;
-    rc = vfsi_listdir(fs, dir, list_one, &seen);
+    if (smb) {
+        /* Legacy listdir promises Unix ownership fields SMB cannot provide. */
+        const char *dirs[] = {dir};
+        struct vfsi_listing_options options = {
+            .max_entries = 2, .max_path_bytes = 4096, .attributes = VFSI_ATTR_SIZE};
+        struct vfsi_listing_result result;
+        rc = vfsi_listdirs(fs, dirs, 1, &options, list_one_indexed, &seen, &result);
+        if (rc == 0 && (result.completion != 1 || result.delivered != 1))
+            return 1;
+    } else {
+        rc = vfsi_listdir(fs, dir, list_one, &seen);
+    }
     if (rc != 0 || seen == NULL || strcmp(seen, "f.bin") != 0) {
         fprintf(stderr, "listdir failed: rc=%d seen=%s\n", rc, seen ? seen : "(null)");
         return 1;

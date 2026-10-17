@@ -9,7 +9,9 @@ import fsspec
 import pytest
 from fsspec.core import OpenFile
 
-CAP = 1 << 16
+# Keep the cap below codec peek buffers on all supported Python versions.
+# peek's hint is not a minimum; older codecs legitimately return only 8 KiB.
+CAP = 1 << 10
 CODECS = {"gzip": gzip.compress, "bz2": bz2.compress, "xz": lzma.compress}
 
 

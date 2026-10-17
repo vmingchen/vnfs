@@ -92,8 +92,9 @@ def test_decoding_observes_cap_changed_after_open(dummy_fs, codec):
 
 
 def test_codec_receives_bounded_requests_before_output_allocation(dummy_fs):
-    from vfsi_fsspec._fs import _OwnedStream
     import io
+
+    from vfsi_fsspec._fs import _OwnedStream
 
     dummy_fs.read_all_max_total_bytes = 16
     calls = []

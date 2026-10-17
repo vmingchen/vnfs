@@ -71,8 +71,8 @@ pub fn vstream_impl_default<F: VectorBackend + ?Sized>(
         let remap_error = |error: VfError| {
             error.map_index(|index| batch_indices.get(index).copied().unwrap_or(index))
         };
-        let results = backend.vread_impl(&reads).map_err(&remap_error)?;
-        validate_read_results("vstream_impl", &reads, &results).map_err(&remap_error)?;
+        let results = backend.vread_impl(&reads).map_err(remap_error)?;
+        validate_read_results("vstream_impl", &reads, &results).map_err(remap_error)?;
         for (batch_index, result) in results.into_iter().enumerate() {
             let index = batch_indices[batch_index];
             let offset = offsets[index];

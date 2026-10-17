@@ -5,7 +5,6 @@ by registered VFSI adapters. They can be removed after the supported fsspec
 floor contains equivalent generation and mmap-boundary fixes.
 """
 
-import errno
 import fcntl
 import os
 import threading
@@ -25,8 +24,8 @@ from ._fs import (
     _enter_individually,
     _handle_identity,
     _normalize_mode,
-    _OwnedStream,
     _open_with_wrappers,
+    _OwnedStream,
 )
 
 _CACHE_FORMAT_KEY = "nfs4fs_blockcache_format"

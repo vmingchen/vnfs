@@ -2794,7 +2794,7 @@ impl NfsClient {
                         #[cfg(feature = "test-faults")]
                         let invalid_stateid = stateid4 {
                             seqid: 0,
-                            other: [0xff; 12],
+                            other: [!0; 12],
                         };
                         #[cfg(feature = "test-faults")]
                         let stateid = if self.fail_merged_write_once

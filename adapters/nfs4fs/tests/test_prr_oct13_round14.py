@@ -3,6 +3,7 @@
 import errno
 
 import pytest
+
 from .test_callbacks import RecordingCallback
 
 

@@ -464,7 +464,7 @@ mod tests {
 
     struct FailingTruncateClient {
         setattr_calls: Cell<usize>,
-        closed: Vec<(Vec<u8>, u32, [u8; 12])>,
+        closed: Vec<(Vec<u8>, u32, [std::ffi::c_char; 12])>,
     }
 
     impl PathBatchTruncateClient for FailingTruncateClient {
