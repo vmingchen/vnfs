@@ -2932,14 +2932,44 @@ class VfsiFileSystem(AbstractFileSystem):
             path += "/"
         return super().glob(path, *args, **kwargs)
 
-    def expand_path(self, path, *args, **kwargs):
-        # get(), copy(), and cat() may pass through this base method before
-        # their own backend operations see the path.
-        # The fsspec scalar branch does not forward assume_literal to its
-        # recursive list call. Enter the list branch directly to retain it.
+    def expand_path(
+        self, path, recursive=False, maxdepth=None, assume_literal=False, **kwargs
+    ):
+        # Older supported fsspec versions lack assume_literal and re-expand
+        # matched names containing glob characters, potentially forever.
+        if maxdepth is not None and maxdepth < 1:
+            raise ValueError("maxdepth must be at least 1")
         paths = [path] if isinstance(path, (str, os.PathLike)) else path
         paths = [self._checked_strip_protocol(item) for item in paths]
-        return super().expand_path(paths, *args, **kwargs)
+        expanded = set()
+        for item in paths:
+            if not assume_literal and has_magic(item):
+                matches = set(self.glob(item, maxdepth=maxdepth, **kwargs))
+                expanded.update(matches)
+                if not recursive or (maxdepth is not None and maxdepth <= 1):
+                    continue
+                remaining_depth = None if maxdepth is None else maxdepth - 1
+            else:
+                matches = [item]
+                remaining_depth = maxdepth
+            # Glob results are literal paths, even if their names contain
+            # brackets, question marks or stars. Reuse bounded find/walk.
+            for match in matches:
+                if recursive:
+                    expanded.update(
+                        self.find(
+                            match,
+                            maxdepth=remaining_depth,
+                            withdirs=True,
+                            detail=False,
+                            **kwargs,
+                        )
+                    )
+                if match not in expanded and (not recursive or self.exists(match)):
+                    expanded.add(match)
+        if not expanded:
+            raise FileNotFoundError(paths)
+        return sorted(expanded)
 
     def smb_dialect(self):
         """Return the negotiated SMB dialect revision, or ``None``."""

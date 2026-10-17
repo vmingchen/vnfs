@@ -553,7 +553,7 @@ jobs:
       - name: Create a Python SBOM for the nfs4fs runtime
         run: |
           python -m venv .runtime-venv
-          .runtime-venv/bin/pip install 'fsspec>=2024.12.0'
+          .runtime-venv/bin/pip install adapters/vfsi-fsspec
           .security-venv/bin/cyclonedx-py environment .runtime-venv \
             --pyproject adapters/nfs4fs/pyproject.toml \
             --mc-type library \

@@ -23,6 +23,8 @@ This project follows [Semantic Versioning](https://semver.org/) for the
   path/error mappings, streamed transfers, and transactional staging.
   Transactional writes require native private-create support; current SMB
   backends reject them before allocating staging resources.
+- Path expansion preserves literal glob characters on the minimum supported
+  fsspec version as well as current releases, without recursive re-expansion.
 - Repaired crate README guide links and documented the request-byte cap
   separately from response limits and Python allocation budgets.
 - Gave detached Python native builds distinct artifact names so NFS and SMB
