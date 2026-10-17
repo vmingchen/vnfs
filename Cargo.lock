@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "nfsv41-sys"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "bindgen",
  "libntirpc-sys",
@@ -1344,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-core"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "bitfields",
  "bitflags",
@@ -1354,7 +1354,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-local"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "libc",
  "proptest",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-nfs"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "bitfields",
  "libc",
@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-posix"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tempfile",
  "vfsi-core",
@@ -1401,7 +1401,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-sync"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "libc",
  "vfsi-core",
@@ -1409,7 +1409,7 @@ dependencies = [
 
 [[package]]
 name = "vfsi-uring"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bitfields",
  "io-uring",
@@ -1423,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "vnfs"
-version = "0.0.21"
+version = "0.0.22"
 dependencies = [
  "bitfields",
  "libc",

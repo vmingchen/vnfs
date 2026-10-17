@@ -63,7 +63,7 @@ def test_copy_parent_transport_failure_is_not_replayed_or_ignored(
         copies.append(list(pairs))
         return [None, None], {0: errno.EACCES, 1: errno.ENOENT}
 
-    def disconnected(paths, mode):
+    def disconnected(paths, mode=None):
         parents.append(list(paths))
         raise ConnectionError("parent transport failure")
 

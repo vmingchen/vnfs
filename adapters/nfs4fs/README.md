@@ -136,8 +136,11 @@ symlink inside it can resolve elsewhere in the same NFS export. Configure a
 server export rooted at the intended directory when callers must be confined
 to that directory.
 
-`compound_size_limit` caps the payload merged into one compound. The default is
-1 MiB; lower it when a server has a smaller request limit:
+`compound_size_limit` caps the request-byte budget for each compound, including
+reserved RPC/authentication overhead, rather than just file data. It defaults to
+1 MiB and cannot exceed the server's negotiated request maximum. Response bytes
+and operation counts have separate negotiated limits; lowering this setting
+does not lower the read-response budget:
 
 ```python
 fs = fsspec.filesystem(
@@ -460,8 +463,9 @@ sudo apt-get install build-essential cmake clang libclang-dev pkg-config \
   libkrb5-dev liburcu-dev
 python -m venv .venv
 .venv/bin/pip install hypothesis maturin fsspec pytest
+.venv/bin/pip install -e adapters/vfsi-fsspec
 cd adapters/nfs4fs
-../../.venv/bin/maturin develop
+../../.venv/bin/maturin develop --locked
 ../../.venv/bin/python -m pytest tests
 ```
 

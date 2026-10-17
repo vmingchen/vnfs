@@ -172,7 +172,7 @@ jobs:
           python -m venv .sbom-venv
           .sbom-venv/bin/pip install cyclonedx-bom==7.3.1
           python -m venv .sbom-runtime
-          .sbom-runtime/bin/pip install 'fsspec>=2024.12.0'
+          .sbom-runtime/bin/pip install adapters/vfsi-fsspec
           mkdir -p sbom
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) cargo cyclonedx \
             --manifest-path adapters/nfs4fs/Cargo.toml \

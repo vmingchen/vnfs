@@ -17,7 +17,7 @@ Connect directly to a server—no kernel mount required.
 
 ```toml
 [dependencies]
-vnfs = "0.0.21"
+vnfs = "0.0.22"
 ```
 
 On Ubuntu 24.04 or newer, install the Linux native build prerequisites:
@@ -122,10 +122,10 @@ The vector API builds on the FAST'17 paper
 MIT OR Apache-2.0, at your option.
 
 [api]: https://docs.rs/vnfs/latest/vnfs/
-[examples]: https://docs.rs/vnfs/latest/vnfs/examples/
-[scalar]: https://docs.rs/vnfs/latest/vnfs/guides/standard_io/
-[failure]: https://docs.rs/vnfs/latest/vnfs/guides/failure_recovery/
-[auth]: https://docs.rs/vnfs/latest/vnfs/guides/authentication/
-[operations]: https://docs.rs/vnfs/latest/vnfs/guides/operations/
+[examples]: https://github.com/vmingchen/vnfs/tree/main/crates/vnfs/examples
+[scalar]: https://docs.rs/vnfs/latest/vnfs/nfs/#standard-rust-io-and-handle-lifecycle
+[failure]: https://docs.rs/vnfs/latest/vnfs/nfs/#failure-partial-progress-and-recovery
+[auth]: https://docs.rs/vnfs/latest/vnfs/nfs/#optional-kerberos-authentication
+[operations]: https://docs.rs/vnfs/latest/vnfs/nfs/#streaming-resource-limits-and-mount-routing
 [benchmark]: https://github.com/vmingchen/vnfs/blob/main/crates/vnfs/examples/small_files_benchmark.rs
 [fast]: https://www.usenix.org/conference/fast17/technical-sessions/presentation/chen

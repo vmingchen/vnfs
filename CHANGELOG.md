@@ -5,6 +5,25 @@ This project follows [Semantic Versioning](https://semver.org/) for the
 
 ## Unreleased
 
+## NFS patch release - 2026-10-16
+
+- Rust: vnfs 0.0.22, vfsi-core 0.1.10, vfsi-sync 0.1.11,
+  vfsi-local 0.1.9, vfsi-posix 0.1.1, vfsi-uring 0.1.1,
+  vfsi-nfs 0.1.10, and nfsv41-sys 0.1.11. Dependency floors advance
+  together so registry installs include the current implementations.
+- Python: nfs4fs 0.3.7 requires vfsi-fsspec 0.1.7. SMB package versions,
+  the C binding version, and libntirpc-sys are unchanged by this release.
+- Hardened NFS open ownership, short-I/O progress, ordered copies, symlink
+  handling, directory replies, and stable client-identity recovery.
+- Hardened rooted local access and creation permissions; narrowed unsafe
+  blocks and enforced safety documentation across Rust backends.
+- Fixed Python read budgets, short reads, cache invalidation and cleanup,
+  path/error mappings, streamed transfers, and transactional staging.
+  Transactional writes require native private-create support; current SMB
+  backends reject them before allocating staging resources.
+- Repaired crate README guide links and documented the request-byte cap
+  separately from response limits and Python allocation budgets.
+
 ## Python release - 2026-10-10
 
 - nfs4fs 0.3.6, vsmb 0.1.3, vsmbfs 0.1.3, and vfsi-fsspec 0.1.6.
