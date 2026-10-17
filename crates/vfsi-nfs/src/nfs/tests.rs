@@ -583,11 +583,174 @@ fn distinct_nfs_filehandles_can_group_as_the_same_filesystem_object() {
 }
 
 #[test]
-fn recursive_readdir_rejects_a_stalled_continuation_cookie() {
-    assert!(validate_readdir_progress(0, 7, None).is_ok());
-    assert!(validate_readdir_progress(7, 11, None).is_ok());
-    assert!(validate_readdir_progress(7, 0, None).is_ok());
+fn path_setattrs_resolve_symlink_policy_before_mutation() {
+    assert!(nofollow_symlink_setattr_is_unsupported(
+        false,
+        nfs_ftype4_NF4LNK,
+        AttrMask::MODE
+    ));
+    assert!(nofollow_symlink_setattr_is_unsupported(
+        false,
+        nfs_ftype4_NF4LNK,
+        AttrMask::SIZE | AttrMask::MTIME
+    ));
+    assert!(!nofollow_symlink_setattr_is_unsupported(
+        false,
+        nfs_ftype4_NF4LNK,
+        AttrMask::ATIME | AttrMask::MTIME
+    ));
+    assert!(!nofollow_symlink_setattr_is_unsupported(
+        true,
+        nfs_ftype4_NF4LNK,
+        AttrMask::MODE
+    ));
+    assert!(!nofollow_symlink_setattr_is_unsupported(
+        false,
+        nfs_ftype4_NF4REG,
+        AttrMask::MODE
+    ));
 
-    let error = validate_readdir_progress(7, 7, None).unwrap_err();
+    let path_mode = [VfAttrs {
+        file: FileOperand::from_path("/link"),
+        masks: AttrMask::MODE,
+        ..VfAttrs::default()
+    }];
+    assert!(path_setattrs_require_type_resolution(&path_mode, false));
+    assert!(path_setattrs_require_type_resolution(&path_mode, true));
+
+    let path_mtime = [VfAttrs {
+        file: FileOperand::from_path("/link"),
+        masks: AttrMask::MTIME,
+        ..VfAttrs::default()
+    }];
+    assert!(!path_setattrs_require_type_resolution(&path_mtime, false));
+    assert!(path_setattrs_require_type_resolution(&path_mtime, true));
+
+    let handle = [VfAttrs {
+        file: FileOperand::from_fd(7),
+        masks: AttrMask::MODE,
+        ..VfAttrs::default()
+    }];
+    assert!(!path_setattrs_require_type_resolution(&handle, false));
+
+    let no_updates = [VfAttrs {
+        file: FileOperand::from_path("/empty"),
+        ..VfAttrs::default()
+    }];
+    assert!(!path_setattrs_require_type_resolution(&no_updates, false));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires VFSI_NFS_TEST_MOUNT pointing to a writable direct NFS mount"]
+fn live_nofollow_setattr_respects_symlink_semantics() {
+    use std::os::unix::fs::symlink;
+
+    let mount = std::env::var("VFSI_NFS_TEST_MOUNT").expect("mount fixture is required");
+    let name = format!(".vfsi-nofollow-setattr-{}", std::process::id());
+    let fixture = Path::new(&mount).join(&name);
+    std::fs::create_dir(&fixture).unwrap();
+    std::fs::write(fixture.join("target"), b"target").unwrap();
+    symlink("target", fixture.join("link")).unwrap();
+    let mut backend = NfsClientBuilder::from_mount(&fixture)
+        .unwrap()
+        .connect()
+        .unwrap();
+    let before_link = backend.lstat_impl(Path::new("/link")).unwrap();
+    let before_target = backend.stat_impl(Path::new("/target")).unwrap();
+    let mode_update = VfAttrs {
+        file: FileOperand::from_path("/link"),
+        masks: AttrMask::MODE,
+        mode: 0o600,
+        ..VfAttrs::default()
+    };
+    let error = backend
+        .vsetattrs_raw_nofollow_impl(std::slice::from_ref(&mode_update))
+        .unwrap_err();
+    assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
+    let after_mode_link = backend.lstat_impl(Path::new("/link")).unwrap();
+    let after_mode_target = backend.stat_impl(Path::new("/target")).unwrap();
+    assert_eq!(after_mode_link.mode, before_link.mode);
+    assert_eq!(after_mode_target.mode, before_target.mode);
+
+    // NFS can set symlink timestamps directly, so no-follow updates apply to
+    // the link and leave the target untouched.
+    let time_update = VfAttrs {
+        file: FileOperand::from_path("/link"),
+        masks: AttrMask::MTIME,
+        mtime_sec: 1_700_000_003,
+        mtime_nsec: 123_456_789,
+        ..VfAttrs::default()
+    };
+    backend
+        .vsetattrs_raw_nofollow_impl(std::slice::from_ref(&time_update))
+        .unwrap();
+    let after_link = backend.lstat_impl(Path::new("/link")).unwrap();
+    let after_target = backend.stat_impl(Path::new("/target")).unwrap();
+    assert_eq!(
+        (after_link.mtime_sec, after_link.mtime_nsec),
+        (time_update.mtime_sec, time_update.mtime_nsec)
+    );
+    assert_eq!(
+        (after_target.mtime_sec, after_target.mtime_nsec),
+        (before_target.mtime_sec, before_target.mtime_nsec)
+    );
+
+    // A path MODE update sends the whole vector through the phased path. It
+    // must not make an independent no-follow timestamp update to a symlink
+    // fail just because the sibling operation needs type resolution.
+    let target_mode_update = VfAttrs {
+        file: FileOperand::from_path("/target"),
+        masks: AttrMask::MODE,
+        mode: 0o640,
+        ..VfAttrs::default()
+    };
+    let link_time_update = VfAttrs {
+        file: FileOperand::from_path("/link"),
+        masks: AttrMask::MTIME,
+        mtime_sec: 1_700_000_007,
+        mtime_nsec: 987_654_321,
+        ..VfAttrs::default()
+    };
+    backend
+        .vsetattrs_raw_nofollow_impl(&[target_mode_update.clone(), link_time_update.clone()])
+        .unwrap();
+    let after_mixed_link = backend.lstat_impl(Path::new("/link")).unwrap();
+    let after_mixed_target = backend.stat_impl(Path::new("/target")).unwrap();
+    assert_eq!(after_mixed_target.mode & 0o777, target_mode_update.mode);
+    assert_eq!(
+        (after_mixed_link.mtime_sec, after_mixed_link.mtime_nsec),
+        (link_time_update.mtime_sec, link_time_update.mtime_nsec)
+    );
+    assert_eq!(
+        (after_mixed_target.mtime_sec, after_mixed_target.mtime_nsec),
+        (before_target.mtime_sec, before_target.mtime_nsec)
+    );
+    drop(backend);
+    std::fs::remove_file(fixture.join("link")).unwrap();
+    std::fs::remove_file(fixture.join("target")).unwrap();
+    std::fs::remove_dir(fixture).unwrap();
+}
+
+#[test]
+fn recursive_readdir_rejects_a_stalled_continuation_cookie() {
+    let mut seen = std::collections::HashSet::new();
+    assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
+    assert!(validate_readdir_progress(7, 11, &mut seen, None).is_ok());
+    assert!(validate_readdir_progress(11, 0, &mut seen, None).is_ok());
+
+    let mut seen = std::collections::HashSet::new();
+    assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
+    let error = validate_readdir_progress(7, 7, &mut seen, None).unwrap_err();
     assert!(error.is_transport());
+}
+
+#[test]
+fn recursive_readdir_rejects_nonadjacent_cookie_cycles() {
+    let mut seen = std::collections::HashSet::new();
+    assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
+    assert!(validate_readdir_progress(7, 11, &mut seen, None).is_ok());
+    let error = validate_readdir_progress(11, 7, &mut seen, Some(3)).unwrap_err();
+    assert!(error.is_transport());
+    assert_eq!(error.index(), Some(3));
 }

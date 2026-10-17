@@ -1,17 +1,22 @@
 //! Retained directory cursors and recursive removal state.
 
 use super::*;
+use std::collections::HashSet;
 
-/// Reject an NFS server response that repeats the requested continuation
-/// cookie, which would otherwise make a READDIR loop request the same page
-/// forever. Cookie zero remains the normal end-of-directory marker.
+/// Reject an NFS server response that repeats any continuation cookie, which
+/// would otherwise let a multi-page cycle make READDIR loop forever. Cookie
+/// zero remains the normal end-of-directory marker.
 pub(super) fn validate_readdir_progress(
     requested_cookie: u64,
     next_cookie: u64,
+    seen_cookies: &mut HashSet<u64>,
     index: Option<usize>,
 ) -> VfRes {
-    if next_cookie != 0 && next_cookie == requested_cookie {
-        Err(VfError::transport(index, "READDIR cookie made no progress"))
+    if next_cookie != 0 && (next_cookie == requested_cookie || !seen_cookies.insert(next_cookie)) {
+        Err(VfError::transport(
+            index,
+            "READDIR continuation cookie repeated",
+        ))
     } else {
         Ok(())
     }
@@ -21,6 +26,7 @@ pub(super) fn validate_readdir_progress(
 pub(super) struct NfsDirectoryCursor {
     pub(super) fh: NfsFh,
     pub(super) cookie: u64,
+    pub(super) seen_cookies: HashSet<u64>,
     pub(super) buffered: VecDeque<crate::client::DirEntry>,
 }
 
@@ -59,12 +65,14 @@ pub(super) enum RmTask {
     Enter {
         dir: RemoveDir,
         cookie: u64,
+        seen_cookies: HashSet<u64>,
         pass_changed: bool,
     },
     /// Flush child-directory removals before resuming the parent's scan.
     Continue {
         dir: RemoveDir,
         cookie: u64,
+        seen_cookies: HashSet<u64>,
         files_removed: bool,
         pass_changed: bool,
     },
@@ -191,6 +199,7 @@ impl NfsVecFs {
             let dirfh = self.resolve_path(&self.server_path(&current), true)?;
             let mut children = Vec::new();
             let mut cookie = 0u64;
+            let mut seen_cookies = HashSet::new();
             loop {
                 let entries = self
                     .nfs
@@ -217,7 +226,7 @@ impl NfsVecFs {
                     out.push(attrs);
                 }
                 let next_cookie = entries.last().expect("non-empty READDIR page").cookie;
-                validate_readdir_progress(cookie, next_cookie, None)?;
+                validate_readdir_progress(cookie, next_cookie, &mut seen_cookies, None)?;
                 cookie = next_cookie;
                 if cookie == 0 {
                     break;
@@ -270,10 +279,12 @@ impl NfsVecFs {
                 RmTask::Enter {
                     dir,
                     cookie,
+                    seen_cookies,
                     pass_changed,
                 } => self.enter_directory(
                     dir,
                     cookie,
+                    seen_cookies,
                     pass_changed,
                     &mut stack,
                     &mut changed_parents,
@@ -283,6 +294,7 @@ impl NfsVecFs {
                 RmTask::Continue {
                     dir,
                     cookie,
+                    seen_cookies,
                     files_removed,
                     pass_changed,
                 } => {
@@ -299,6 +311,11 @@ impl NfsVecFs {
                         Some((cookie, pass_changed)) => stack.push(RmTask::Enter {
                             dir,
                             cookie,
+                            seen_cookies: if cookie == 0 && !pass_changed {
+                                HashSet::new()
+                            } else {
+                                seen_cookies
+                            },
                             pass_changed,
                         }),
                         None => stack.push(RmTask::Finish(dir)),
@@ -359,6 +376,7 @@ impl NfsVecFs {
                                     root,
                                 },
                                 cookie: 0,
+                                seen_cookies: HashSet::new(),
                                 pass_changed: false,
                             }),
                             Err(lookup) if lookup.is_transport() => {
@@ -423,6 +441,7 @@ impl NfsVecFs {
         &mut self,
         dir: RemoveDir,
         cookie: u64,
+        mut seen_cookies: HashSet<u64>,
         pass_changed: bool,
         stack: &mut Vec<RmTask>,
         changed_parents: &mut std::collections::HashSet<NfsFh>,
@@ -442,6 +461,7 @@ impl NfsVecFs {
                 stack.push(RmTask::Enter {
                     dir,
                     cookie: 0,
+                    seen_cookies: HashSet::new(),
                     pass_changed: false,
                 });
                 return Ok(());
@@ -469,6 +489,7 @@ impl NfsVecFs {
                 Some((cookie, pass_changed)) => stack.push(RmTask::Enter {
                     dir,
                     cookie,
+                    seen_cookies: HashSet::new(),
                     pass_changed,
                 }),
                 None => stack.push(RmTask::Finish(dir)),
@@ -476,9 +497,7 @@ impl NfsVecFs {
             return Ok(());
         }
         let next_cookie = entries.last().map(|entry| entry.cookie).unwrap_or(0);
-        if next_cookie != 0 && next_cookie == cookie {
-            return Err(VfError::transport(None, "READDIR cookie made no progress"));
-        }
+        validate_readdir_progress(cookie, next_cookie, &mut seen_cookies, Some(dir.root))?;
 
         let mut file_names = Vec::new();
         let mut dir_names = Vec::new();
@@ -503,6 +522,7 @@ impl NfsVecFs {
         stack.push(RmTask::Continue {
             dir,
             cookie: next_cookie,
+            seen_cookies,
             files_removed,
             pass_changed,
         });
@@ -515,6 +535,7 @@ impl NfsVecFs {
                     root,
                 },
                 cookie: 0,
+                seen_cookies: HashSet::new(),
                 pass_changed: false,
             });
         }

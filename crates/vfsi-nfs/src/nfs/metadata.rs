@@ -356,6 +356,22 @@ pub(super) fn decode_filesystem_stats(bitmap: bitmap4, bytes: &[u8]) -> VfResult
     Ok(stats)
 }
 
+pub(super) fn path_setattrs_require_type_resolution(attrs: &[VfAttrs], follow: bool) -> bool {
+    attrs.iter().any(|attrs| {
+        !attrs.file.is_fd()
+            && (attrs.masks.intersects(AttrMask::MODE | AttrMask::SIZE)
+                || (follow && attrs.masks.intersects(AttrMask::ATIME | AttrMask::MTIME)))
+    })
+}
+
+pub(super) fn nofollow_symlink_setattr_is_unsupported(
+    follow: bool,
+    ftype: u32,
+    masks: AttrMask,
+) -> bool {
+    !follow && ftype == nfs_ftype4_NF4LNK && masks.intersects(AttrMask::MODE | AttrMask::SIZE)
+}
+
 impl NfsVecFs {
     /// The merged (single-compound) setattrsv: resolve each parent once,
     /// then LOOKUP + GETATTR type + SETATTR per file. Symlinks (either to
@@ -377,19 +393,15 @@ impl NfsVecFs {
                 return Err(VfError::unsupported(i));
             }
         }
-        // The merged compound cannot condition SETATTR on GETATTR(TYPE).
-        // Resolve followed path timestamps first so a symlink's own timestamp
-        // is never changed before applying the update to its target.
-        if follow
-            && attrs
+        // NFS compounds cannot condition SETATTR on GETATTR(TYPE). Resolve
+        // paths first when mode/size must be refused on a no-follow symlink,
+        // or when following timestamps must be applied to the target only.
+        // Handle operands already identify the opened object and can stay in
+        // the merged path.
+        if path_setattrs_require_type_resolution(attrs, follow)
+            || attrs
                 .iter()
-                .any(|a| !a.file.is_fd() && a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME))
-        {
-            return self.vsetattrs_phased_nfs(attrs, follow);
-        }
-        if attrs
-            .iter()
-            .any(|a| a.masks.intersects(AttrMask::UID | AttrMask::GID))
+                .any(|a| a.masks.intersects(AttrMask::UID | AttrMask::GID))
         {
             return self.vsetattrs_phased_nfs(attrs, follow);
         }
@@ -446,11 +458,12 @@ impl NfsVecFs {
                     // path, re-attributing its error to the original index.
                     for (k, a) in attrs.iter().enumerate().take(i) {
                         let own_type = outcome.types[k];
-                        if own_type == Some(nfs_ftype4_NF4LNK) {
-                            if !follow {
+                        if own_type == Some(nfs_ftype4_NF4LNK) && !a.file.is_fd() {
+                            if follow {
+                                self.setattr_one_following(k, a)?;
+                            } else if a.masks.intersects(AttrMask::MODE | AttrMask::SIZE) {
                                 return Err(VfError::unsupported(k));
                             }
-                            self.setattr_one_following(k, a)?;
                         }
                     }
                     if let Err(e) = self.vsetattrs_phased_nfs(&attrs[i..], follow) {
@@ -460,12 +473,15 @@ impl NfsVecFs {
                 }
                 for (i, a) in attrs.iter().enumerate() {
                     let own_type = outcome.types[i];
-                    if own_type == Some(nfs_ftype4_NF4LNK) {
-                        if !follow {
-                            // No non-following mode/size setter for symlinks.
+                    if own_type == Some(nfs_ftype4_NF4LNK) && !a.file.is_fd() {
+                        if follow {
+                            self.setattr_one_following(i, a)?;
+                        } else if a.masks.intersects(AttrMask::MODE | AttrMask::SIZE) {
+                            // NFS has no portable non-following mode/size
+                            // setter for symlinks; these paths were phased
+                            // before any SETATTR could touch the link.
                             return Err(VfError::unsupported(i));
                         }
-                        self.setattr_one_following(i, a)?;
                     }
                 }
                 Ok(())
@@ -497,10 +513,7 @@ impl NfsVecFs {
                 Ok(x) => x.clone(),
                 Err(status) => return Err(VfError::nfs(i, *status)),
             };
-            if !follow
-                && ftype == nfs_ftype4_NF4LNK
-                && !a.masks.difference(AttrMask::UID | AttrMask::GID).is_empty()
-            {
+            if nofollow_symlink_setattr_is_unsupported(follow, ftype, a.masks) {
                 // NFSv4 has no non-following mode/size setter for symlinks;
                 // refuse like the `std::fs` backend instead of pretending the
                 // SETATTR applied to the link.
