@@ -13,8 +13,8 @@ for every combination of API, protocol, and language.
 
 ## Project identity and source of truth
 
-The project uses **VFSI** as its public umbrella name. Existing package names
-remain stable:
+The project uses **VFSI** as its public umbrella name. Package names identify
+their roles; they do not imply a stable pre-1.0 Rust source API:
 
 - `vnfs` is the published NFS-focused Rust application crate;
 - `vfsi-smb` is the standalone Rust SMB backend;
@@ -98,9 +98,11 @@ ci/                     integration servers and ecosystem tests
 
 ### Private implementation modules
 
-Keep public contracts and re-exports stable while grouping implementation by
-resource ownership. In `vfsi-core/src/api`, `handles` defines retained-resource
-contracts, `vfsi` defines vectors, and `extensions` composes conveniences.
+Do not expand public contracts or re-exports merely to organize implementation
+modules. Intentional pre-1.0 API changes are allowed; migrate callers and docs
+together. Group implementation by resource ownership. In `vfsi-core/src/api`,
+`handles` defines retained-resource contracts, `vfsi` defines vectors, and
+`extensions` composes conveniences.
 `vfsi-sync/src/client` separates shared connection locking/cleanup, owned
 handles, and read, write, directory, metadata, and namespace dispatch.
 
@@ -132,7 +134,9 @@ copy of the resolved dependency, retaining native ABI and fuzzing unit coverage
 without modifying the registry cache. Release libntirpc-sys changes from its own
 repository before updating VFSI's dependency version and lockfiles.
 
-The dependency direction is deliberately one-way:
+The layering is deliberately one-way. Arrows below run from a provider to its
+consumer, not from a package to its dependencies; they show major relationships,
+not every manifest dependency:
 
 ```text
 vfsi-core -> vfsi-sync -> vfsi-nfs -> vnfs
@@ -141,14 +145,17 @@ vfsi-core -> vfsi-sync -> vfsi-nfs -> vnfs
                                      -> vfsi-uring
 
 vnfs + vfsi-smb -------------------> vfsi-c
-vfsi-python + vfsi-fsspec ---------> nfs4fs / vsmb / vsmbfs
+vfsi-python ----------------------> nfs4fs / vsmb (native bindings)
+vfsi-fsspec ----------------------> nfs4fs / vsmbfs (fsspec adapters)
 vsmb + vfsi-fsspec ----------------> vsmbfs
 ```
 
 Shared crates must not depend on a backend. Backends may implement optimized
 vector operations and report optional capabilities. The `vnfs` facade is
-NFS-focused and preserves historical NFS imports; Rust SMB consumers depend on
-`vfsi-smb` directly. Cross-protocol bindings such as `vfsi-c` compose backend
+NFS-focused and also offers feature-gated local/mounted executors. Its public
+module paths follow the current API rather than preserving historical root
+imports. Rust SMB consumers depend on `vfsi-smb` directly. Cross-protocol
+bindings such as `vfsi-c` compose backend
 crates directly instead of routing them through `vnfs`.
 Shared backend contract assertions live behind `vfsi-sync`'s non-default
 `test-support` feature so published backends can reuse them without depending
@@ -169,9 +176,11 @@ other. Shared syscall helpers let the ring backend preserve append/dependency
 ordering without depending on the POSIX executor crate. Application operations
 and traits remain in `vfsi-core`, not in the executor interface.
 
-Applications use `vnfs::Posix` with the `posix` feature or `vnfs::Uring` with
-`uring`; `Auto` uses `Posix` for kernel routing. Python's `dummy` backend and
-the C dummy constructors retain their test-fixture names and select POSIX.
+Applications use `vnfs::posix::Posix` with the `posix` feature or
+`vnfs::uring::Uring` with `uring` on Linux. `vnfs::mounted::Auto` uses `Posix`
+for kernel routing and is available with `auto` on Linux. Python's `dummy`
+backend and the C dummy constructors retain their test-fixture names and select
+POSIX.
 
 io_uring is an execution mechanism, not a network filesystem protocol.
 Cloud object-store support belongs in
@@ -187,6 +196,8 @@ requires it.
 | `vfsi/.github` | organization | Project catalog and contribution routing |
 | `vfsi/vfsi-port-git` | application port | Git loose-object traversal using VFSI |
 | `vfsi/vfsi-port-rsync` | application port | rsync sender-side scans using VFSI |
+| `vfsi/vfsi-port-coreutils` | application port | Rust coreutils commands using the application API |
+| `vfsi/vfsi-port-findutils` | application port | Rust findutils commands using the application API |
 | `vfsi/vfsi-infra-nfs-ganesha` | infrastructure | Pinned server used by integration tests |
 
 Application-port repository names use the `vfsi-port-` prefix. Infrastructure
@@ -208,29 +219,43 @@ platform mirror.
 
 ## Registration and compatibility
 
-`ecosystem/ports.toml` records each canonical repository name. An entry may
-temporarily include a planned repository or branch name during an active
+`ecosystem/ports.toml` records pinned components, not a complete catalog of the
+organization. An entry may temporarily include a planned repository or branch
+name during an active
 migration. Every entry pins a full revision, upstream base, integration branch,
 maturity, required ABI, and compatibility-test entry point. Platform CI must
 never build an unpinned external branch.
 
-Fast platform CI validates the registry and public API compatibility. Scheduled
-and manually dispatched ecosystem CI reconstructs each registered revision and
-builds it against the current `vfsi-c` ABI. ABI changes are not releasable until
-the registered ports pass or explicitly move to a new declared ABI.
+Fast platform CI validates the registry and public API compatibility. The
+scheduled/manually dispatched [Port compatibility workflow](../.github/workflows/ports.yml)
+currently reconstructs only its Git and rsync matrix entries and builds them
+against `vfsi-c`. The registry also pins Ganesha test infrastructure. Coreutils
+and findutils are not registered or included in that scheduled matrix; do not
+describe them as covered by it. Their checkout-based local runner and coverage
+limits are documented in [scripts/README.md](../scripts/README.md).
+
+ABI changes require the registered C ports to pass or explicitly move to a new
+declared ABI. Extending the registry and workflow matrix is an implementation
+task, not something a documentation claim can supply.
 
 ## Releases and mirror promotion
 
-Rust crates, the C ABI, and Python distributions are built and published only
-from the canonical repository. Package tags are namespace-qualified, such as
-`vnfs-v0.0.10` and `nfs4fs-v0.3.2`.
+Platform Rust crates, the C ABI, and Python distributions are built and published only
+from the canonical repository. Package tags are namespace-qualified, using
+`PACKAGE-vVERSION`, such as `nfs4fs-v0.3.7`; published tags are immutable.
 
-Workspace crates are released in dependency order: `vfsi-core`, `vfsi-sync`,
-the selected `vfsi-*` backends, `vnfs`, and then `vfsi-c`. Python packages are
-released in dependency order: `vfsi-fsspec`, `nfs4fs` and `vsmb`, then
+Release Rust packages in manifest dependency order, including `nfsv41-sys`
+before its NFS consumers and the separately maintained `libntirpc-sys` before
+updating its VFSI consumers. The main layering is `vfsi-core`, `vfsi-sync`,
+selected backends, `vnfs`, then `vfsi-c`; manifests, not this summary, determine
+the exact graph. Python packages are released in dependency order:
+`vfsi-fsspec`, `nfs4fs` and `vsmb`, then
 `vsmbfs`. The `nfs4fs-python`, `vsmb-python`, and `vfsi-python-native` Cargo
 packages are private build crates source-linked into native Python
 distributions; they are not published independently on crates.io.
+Rust publication uses Cargo from the canonical checkout. Python publication
+uses the package-specific release workflows in [`.github/workflows`](../.github/workflows)
+with trusted publishing; see those files for tag triggers and approval gates.
 CI packages and tests every public Rust crate from its generated crate archive.
 It builds every Python distribution, installs each one in an isolated virtual
 environment with only its declared dependency closure, and runs package-level
@@ -242,6 +267,10 @@ docs.rs uses checked-in FFI declarations and skips native compilation. Normal
 builds compile the pinned source packaged in the independently maintained
 `libntirpc-sys` crate without downloading native source or selecting a system
 libntirpc.
+
+[Release build times](RELEASE_BUILD_TIMES.md) records observed publication and
+build costs; it is historical telemetry, not a release procedure or a speed
+guarantee.
 
 The `Promote VFSI mirror` workflow requires an explicit canonical commit, a
 successful CI run for that commit, and approval through the `vfsi-publish`

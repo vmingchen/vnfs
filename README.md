@@ -110,20 +110,29 @@ All writes use the borrowed `vwrite_impl` boundary. Owned preparation storage
 uses `WriteOp::borrowed()` without copying payloads.
 Typed attribute updates use `vsetattrs_impl`; raw attribute masks use
 `vsetattrs_raw_impl`. C/Python operation names are unchanged. See the
-[migration ledger](docs/backend-migration.md) for the complete mapping.
+[backend guide](docs/BACKENDS.md) for current execution contracts and the
+remaining compatibility aliases.
 
 ## Filesystem capacity and limits
 
 `Vfsi::vstatfs` queries paths and open handles in input order. The singular
 `VfsiExt::statfs` helper delegates to that vector operation:
 
-```rust,ignore
-use vnfs::{Target, Vfsi, VfsiExt};
+```rust,no_run
+use vnfs::{files::Target, Result, Vfsi, VfsiExt};
 
-let capacities = fs.vstatfs(&["/data", "/archive"])?;
-let file = fs.open("/data/example")?;
-let capacity = fs.statfs(Target::File(&file))?;
-println!("available bytes: {:?}", capacity.available_bytes);
+fn show_capacity(fs: &impl Vfsi) -> Result<()> {
+    let capacities = fs.vstatfs(&["/data", "/archive"])?;
+    let file = fs.open("/data/example")?;
+    let capacity = fs.statfs(Target::File(&file))?;
+    println!(
+        "{} namespaces; available bytes: {:?}",
+        capacities.len(),
+        capacity.available_bytes
+    );
+    fs.close_files(vec![file])?;
+    Ok(())
+}
 ```
 
 `FilesystemStats` reports total, free, and caller-available byte and file
@@ -166,6 +175,8 @@ submodules.
 See [VFSI project organization](docs/PROJECT_ORGANIZATION.md) for the source
 tree, repository ownership, API facets, port naming, maturity, compatibility,
 and mirror-promotion policies.
+The [documentation index](docs/README.md) separates current guides from dated
+benchmark and release records.
 
 ## Rust
 

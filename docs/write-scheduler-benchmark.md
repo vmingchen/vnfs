@@ -6,10 +6,15 @@ four allowed CPUs, Linux 7.0.0-28-generic, ext4 on `/dev/sda1`, Rust 1.93.1
 No tests, builds or profiler ran concurrently with timed samples.
 
 The comparison uses the original scheduler in commit
-`4b9ff879b621cdb056f0cd20f2377e3d7fefc308` and the final uncommitted scheduler.
-Its `crates/vfsi-sync/src/client/write.rs` SHA-256 is
+`4b9ff879b621cdb056f0cd20f2377e3d7fefc308` and the scheduler later committed in
+[`2acffaa`](https://github.com/vmingchen/vnfs/commit/2acffaa0d0badb248787da39e817a007e9d616ea).
+The measured `crates/vfsi-sync/src/client/write.rs` SHA-256, also present in that commit, is
 `fcf8cefa51f5ecaef67148c6c755dba627918d89d2cc55709f63e0f95ca35936`.
 The earlier allocation/layout changes are present in both versions.
+
+This is a dated report, not a new benchmark of HEAD. Measurements and checked-in
+raw samples are preserved; the reproduction commands below run the selected
+checkout and must not be used to relabel these results as current measurements.
 
 ## Results
 
@@ -122,7 +127,10 @@ does not account for every source of VM or deployment variation.
 
 ## Reproduction and records
 
-Run from the repository on Linux with the recorded baseline commit available:
+Run from the repository on Linux with the recorded baseline commit available.
+The runner compares that baseline with the current working tree; use the landed
+commit above in a separate checkout to study the historical implementation.
+Offline dependencies must already be cached:
 
 ```sh
 python3 scripts/benchmark-write-scheduler.py --samples 9 --target-ms 200
@@ -171,12 +179,14 @@ Raw metadata, calibrated iteration counts, executable/source hashes, all paired
 samples and dispatch counts are retained in
 [main results](benchmarks/write-scheduler-2026-10-11.json) and
 [confirmation results](benchmarks/write-scheduler-confirmation-2026-10-11.json).
-The comparison binaries and optimized build logs remain on the VM under
+The comparison binaries and optimized build logs were originally written on the VM under
 `target/write-scheduler-benchmark/20261011T164231168028Z/` and
 `target/write-scheduler-benchmark/20261011T164431108037Z/`. The archived baseline
-source, original baseline executable and its build log are under
+source, original baseline executable and its build log were under
 `target/write-scheduler-benchmark/20261011T163037327297Z/`; the final runs record
-and verify reuse of that baseline.
+and verify reuse of that baseline. These three build-cache directories were
+absent when checked on October 17. The checked-in JSON retains samples,
+hashes, and configuration evidence, not executable files or a complete build cache.
 The full matrix runner preceded the compiler-reuse guard/runner-hash metadata
 addition; the confirmation used the current runner. Calibration, sampling and
 statistics were unchanged.
@@ -190,7 +200,7 @@ No public API or dispatch ordering change is required by this optimization.
 
 ## Baseline reuse fix and release verification
 
-The review's P2 was fixed by recording and comparing build settings, rejecting
+Baseline reuse was hardened by recording and comparing build settings, rejecting
 unknown legacy metadata, and checking Cargo's per-target profiles. These guards
 use explicit errors and also execute with `python3 -O`.
 
@@ -226,7 +236,8 @@ sink/POSIX cases with five pairs and a 100 ms target. These focused checks do no
 replace the original 35-case matrix.
 
 `python3 scripts/test-ci-scripts.py BenchmarkBuildTests` passed 14 new tests;
-`python3 scripts/test-ci-scripts.py` passed all 30 in 0.72 s reported test time.
+`python3 scripts/test-ci-scripts.py` passed all 30 in 0.72 s reported test time
+at the recorded revision; these are historical validation counts.
 Coverage includes flags/profile changes, wrappers, configuration hierarchy and
 includes, missing metadata, credential exclusion, Cargo artifact paths/profiles,
 and checks under Python optimization. Real CLI verification completed:
@@ -247,5 +258,6 @@ code was unchanged for this P2 fix, so the earlier live NFS coverage was retaine
 full CI and broader live/backend suites were not rerun.
 
 [Release settings, executable hashes, raw comparison samples and validation records](benchmarks/write-scheduler-release-verification-2026-10-11.json)
-are retained with the report. Normal release logs are at
-`/tmp/vnfs-release-verify.log`; CLI checks use `/tmp/vnfs-benchmark-build-*.log`.
+are retained with the report. Normal release logs were written to
+`/tmp/vnfs-release-verify.log`; CLI checks used `/tmp/vnfs-benchmark-build-*.log`.
+Those temporary paths are not a durable archive.

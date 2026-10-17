@@ -4,6 +4,69 @@ These are observed GitHub Actions timings, retained for a separate release-speed
 investigation. Durations are wall-clock job or step times from the GitHub Actions
 API, not estimates of CPU time. Jobs run concurrently.
 
+For future records, include the source revision, package versions, workflow
+links, timestamps/timezone, and whether each duration is a workflow, job, build
+step, or complete publish command. Record cache/verification conditions when
+known. Do not compare warm, cold, emulated, and verification-skipping runs as
+though they measured the same work. Preserve older records unchanged.
+
+## 2026-10-16 coordinated releases
+
+Source: `b5c4ae36127865b76e536bab66a2d024ba59c19e`. Runs occurred on
+October 17 UTC (October 16 in America/New_York). The source
+[18-job CI run](https://github.com/vmingchen/vnfs/actions/runs/38992170670)
+and both Python release workflows succeeded. These are saved observations,
+not a new CI run or a controlled comparison with October 10.
+
+Published Python packages were
+[nfs4fs 0.3.7](https://github.com/vmingchen/vnfs/actions/runs/38993069447) and
+[vfsi-fsspec 0.1.7](https://github.com/vmingchen/vnfs/actions/runs/38992923669).
+
+| Run | Job or step | Duration |
+|---|---|---:|
+| Main CI | Rust job | 10m 03s |
+| vfsi-fsspec | Build/test job | 34s |
+| vfsi-fsspec | Publish job | 25s |
+| nfs4fs | x86_64 abi3 wheel job | 2m 29s |
+| nfs4fs | x86_64 free-threaded wheel job | 2m 30s |
+| nfs4fs | aarch64 abi3 wheel job under QEMU | 22m 48s |
+| nfs4fs | Portable aarch64 wheel build step, within that job | **22m 08s** |
+| nfs4fs | Installed wheel against live NFS RPCSEC_GSS job | 33s |
+| nfs4fs | Publish job | 28s |
+
+The nfs4fs workflow took 23m 57s from creation to completion, including queueing;
+job durations exclude runner wait time. The x86_64 portable build steps took
+2m 20s (abi3) and 2m 21s (free-threaded). The emulated ARM build dominated
+the critical path. These observations do not establish a cause or a speedup.
+
+Rust publication ran sequentially with the VM's existing cache after CI archive
+verification. The commands used `--locked --no-verify` to avoid exhausting the
+VM disk. The following measured wall times include packaging/upload/index wait
+but **exclude local Cargo verification builds**; they are not comparable to the
+default `cargo publish` timings in the October 10 table.
+
+| Crate | Publish command wall time (`--no-verify`) |
+|---|---:|
+| vfsi-core 0.1.10 | 3.416s |
+| vfsi-sync 0.1.11 | 2.962s |
+| nfsv41-sys 0.1.11 | 3.126s |
+| vfsi-local 0.1.9 | 2.701s |
+| vfsi-posix 0.1.1 | 2.473s |
+| vfsi-uring 0.1.1 | 2.495s |
+| vfsi-nfs 0.1.10 | 3.376s |
+| vnfs 0.0.22 | 3.616s |
+
+A separate registry-only Rust 1.88 consumer then compiled and linked the
+published dependency graph with io_uring/RPCSEC_GSS enabled and passed live NFS
+read/write. Its recorded check/build commands took 14.27s and 12.29s respectively;
+these consumer checks are not release-build or publish durations.
+
+Job/step timestamps and upload logs were saved on the VM in
+`/home/ubuntu/vnfs-release-2026-10-16/`. Main-job timestamps are also retained in
+`release-telemetry-compact.tar.gz` there. That external archive is not checked
+into this repository; the workflow links above identify the public runs.
+This entry covers the coordinated batch above, not subsequent SMB/C releases.
+
 ## 2026-10-10 Python publications
 
 All four releases used `50ec71ee12c95d36a2b401f59041af28dfd83405`.

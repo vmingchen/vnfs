@@ -1,5 +1,42 @@
 # io_uring versus the POSIX VFSI backend
 
+This is a historical experiment report from October 10–11, 2026, not a new
+benchmark of the current checkout. Measurements below are preserved unchanged.
+For application setup, use the [io_uring guide](../crates/vnfs/src/guides/uring.md).
+
+## Summary and provenance
+
+The current executor defaults to ring I/O, a 256-entry queue, and a 2 MiB byte
+window. `cached_reads(true)` and `syscall_writes(true)` remain explicit opt-ins;
+the adaptive measurements must not be advertised as ring-only results. Verify
+defaults in [`vfsi-uring::Options`](../crates/vfsi-uring/src/lib.rs) when tuning.
+
+- The initial tables use caller-provided read buffers. The later
+  [owned small-read experiment](#bounded-owned-small-read-fast-path) includes
+  allocation and removes the extra userspace scratch-to-result copy only for
+  bounded owned cohorts. These are different workloads, not contradictory results.
+- Neither path is a zero-copy API: ordinary kernel/filesystem copies remain.
+- Pure ring buffered writes and warm borrowed small reads did not universally
+  beat POSIX. The [adaptive policy](#all-workload-follow-up-opt-in-adaptive-execution)
+  is an alternative measured separately, not a default change.
+- Directory enumeration uses shared syscall machinery; it is a control, not
+  evidence of io_uring directory acceleration. Buffered writes exclude fsync
+  and are not durable-storage throughput measurements.
+
+| Record | Landed implementation |
+|---|---|
+| Initial scratch arena, completion waiting, and 2 MiB window; October 10 | [`c0ac238`](https://github.com/vmingchen/vnfs/commit/c0ac238916fb5fc97c75e2f23ad26c9d199a5b50) |
+| Large-write/adaptive experiments, rejected tuning, and bounded owned reads; October 11 | [`ac23e37`](https://github.com/vmingchen/vnfs/commit/ac23e37e8f7827827ddde100b32c517efb215652) |
+
+These commits locate the landed changes and reports. The original comparisons
+used intermediate working-tree binaries, not necessarily those complete commit
+trees; exact binary provenance cannot be reconstructed from a commit label alone.
+The raw `target/uring-write-profile` artifacts cited by the original report were
+absent when checked on October 17. The tables and methodology remain, but the
+old binaries/profiles are not a retained reproducibility archive.
+
+## Setup and current reproduction
+
 Measured on the development VM: ARM64, four vCPUs, Linux `7.0.0-28-generic`,
 ext4 on `/dev/sda1`, optimized Cargo release profile. No artificial latency,
 direct I/O, SQPOLL, or privileged cache drops. Both clients use the same
@@ -7,11 +44,19 @@ direct I/O, SQPOLL, or privileged cache drops. Both clients use the same
 The benchmark's `local/` labels select `vfsi-posix`.
 
 ```sh
-cargo run --release -p vnfs --no-default-features --features uring,posix \
+cargo run --release --locked -p vnfs --no-default-features --features uring,posix \
   --example uring_bench -- 200
 ```
 
+Commands below exercise the checked-out harness; they do not reproduce an old
+number merely by running on HEAD. Keep CPU, backend order, allocation mode,
+cache procedure, and execution policy matched. Capture new results outside
+build caches and identify the measured source before comparing them with history.
+
 ## Validated before/after comparison
+
+This initial comparison belongs to the October 10 scratch-arena experiment;
+the owned-read results later in this report supersede it only for that workload.
 
 Warm results are medians of 200 calls after five warmups. Advisory-cold reads
 use 20 measured calls after five warmups. Opens/closes, pattern preparation,
@@ -34,9 +79,9 @@ optimized run; its large-file times vary with the VM's CPU/cache state.
 | Advisory-cold read: 256 × 4 KiB files | 45,509.4 µs | 781.3 µs | 757.0 µs | 1.03× |
 | Advisory-cold read: large-file ranges | 5,117.5 µs | 5,845.2 µs | 3,197.1 µs | 1.83× |
 
-The optimized ring is 1.31× faster than POSIX on warm large reads, 1.60× on
+In this initial experiment, the optimized ring was 1.31× faster than POSIX on warm large reads, 1.60× on
 advisory-cold large reads, and about 60× on advisory-cold small-file reads.
-POSIX still wins warm small-file reads and buffered writes. The 2% small-write
+POSIX won warm small-file reads and buffered writes. The 2% small-write
 change is effectively flat given VM variability, not a robust speedup claim.
 
 Directory enumeration (16 directories × 16 files) averaged 853.2 µs POSIX
@@ -93,7 +138,9 @@ promises. Repeat on deployment storage and tune `Options::max_batch_bytes` and
 the 2 MiB window limits in-flight scratch, not total request size.
 
 Open/close, namespaces, directories, append, and dependent writes remain ordinary
-syscalls. Kernel-facing storage is still owned and copied, not a zero-copy API.
+syscalls. This initial borrowed-buffer path used owned scratch storage and
+copies. The later bounded owned-read path avoids one userspace copy, but does
+not eliminate kernel copies or provide a zero-copy API.
 Future work should measure registered buffers or an owned-buffer API without
 weakening submission-failure ownership. The following write-specific follow-up
 addresses worker scheduling without adding concurrency. Earlier results are
@@ -169,7 +216,7 @@ and fsync. This measures buffered overwrites, not durable disk throughput.
 
 ## All-workload follow-up: opt-in adaptive execution
 
-The current prototype keeps the ring-only default, with two explicit switches:
+The adaptive implementation landed with the ring-only default and two explicit switches:
 `cached_reads(true)` requires two full probe hits per cohort of 16 small reads
 before using ordinary positional syscalls; the first miss sends the
 remaining reads through bounded ring waves. Large reads always use the ring.
@@ -396,9 +443,10 @@ The `owned-*` phases include output allocation inside the timed call; ordinary
 read phases reuse caller buffers. Never compare those phases as if they had
 identical allocation costs. Results use independently prepared distinguishable
 file/range contents and retain the same validation, OPEN/CLOSE exclusion and
-advisory eviction procedure. Raw final logs are under
-`target/uring-write-profile/owned-selected-*.log`; earlier unrestricted and
-page-touch experiment binaries/profiles remain there for diagnosis.
+advisory eviction procedure. Raw final logs were written under
+`target/uring-write-profile/owned-selected-*.log`, alongside earlier unrestricted
+and page-touch experiment binaries/profiles. That directory is no longer present
+on the VM; do not treat these paths as available evidence.
 
 ```sh
 target/release/examples/uring_bench 3000 target both owned-read 256 2097152 ring
@@ -407,13 +455,13 @@ target/release/examples/uring_bench 200 target both owned-large-read 256 2097152
 target/release/examples/uring_bench 20 target both owned-cold-large-read 256 2097152 ring
 ```
 
-Regression coverage asserts unchanged final allocation addresses, zero copy
+At the recorded implementation, regression coverage asserted unchanged final allocation addresses, zero copy
 bytes on the direct path, exactly one wave for 256 small owned reads, bounded
 fallback waves, short/EOF results, mixed owned/borrowed public reads, original
 failure indices and retention/poisoning after injected publication failure.
 `./scripts/test-ci-local.sh uring smoke check` passed: 35 ring/public/example/doc
 checks, 159 smoke tests, 16 script tests, workspace and detached adapter lint
-checks. The latest jobs took 4 / 3 / 2 seconds respectively on a warm build cache.
+checks. Those jobs took 4 / 3 / 2 seconds respectively on a warm build cache.
 The 48 shared-local unit tests also passed separately. Live NFS/SMB suites were
 not rerun for this local-executor-only change; 11 live fixture tests in smoke
 remain ignored and are not counted as coverage.

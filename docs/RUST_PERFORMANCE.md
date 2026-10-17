@@ -1,4 +1,94 @@
-# Rust allocation and layout audit
+# Rust performance notes and audits
+
+Current implementation notes are separate from the dated audit and benchmark
+records below. Layout observations are target-specific, not ABI guarantees;
+historical test counts do not describe the current checkout. No new benchmark
+was run for this documentation update.
+
+## Current implementation notes
+
+`NfsFh` privately owns `Box<[u8]>`: its length is fixed and callers cannot
+modify its opaque bytes. `Clone` still copies the bytes and does not perform
+NFS OPEN or CLOSE. On a 64-bit target the stored slice uses 16 bytes, versus
+24 bytes for a `Vec<u8>` header, saving 8 bytes per handle. This is a storage
+layout observation, not a public ABI guarantee or a reduction in the payload
+length. A boxed slice permits mutation in Rust; immutability here comes from
+the type's private field and its API.
+
+Private fixed byte storage also uses boxed slices for compound backing
+payloads, adaptive compound tag keys, saved/opened path snapshots, generated
+OPEN-owner tokens, established client-owner IDs, namespace cache/group keys,
+retained directory cursor/removal names, and `TreeBuilder` file contents.
+Compound payload allocations remain stable as the outer operation/buffer
+lists grow. Vectors remain for growing or reusable I/O/XDR/path buffers and
+for public byte-vector interfaces (including connect options and protocol
+request/result fields). Those public types retain their ownership and mutation
+behavior; bytes are boxed when they enter private fixed storage. Path
+normalization borrows immutable components from its input for the duration of the call,
+avoiding a separate allocation for every component.
+
+Fixed private UTF-8 text uses `Box<str>` for NFS builder/reconnection endpoints,
+Auto's retained mount-spec endpoint, and owner/group identity-cache keys and
+their eviction queue. The stored string occupies 16 bytes on a 64-bit target,
+versus 24 bytes for `String`; the text allocation remains separate. These
+fields retain their contents and value-based equality, and cloning still
+copies their text. The fixed RPC initialization diagnostic uses `&'static str`
+and requires no retained heap allocation. Public `Into<String>` endpoint
+inputs, `AutoRoute`/`MountInfo` server fields, error messages, authentication
+options, and text-I/O results/buffers retain their existing `String` types.
+Growing string builders and strings transferred into those public types also
+keep `String`.
+
+Private Auto routes share one `Arc` connection snapshot rather than cloning
+its mount paths, endpoint, credentials, and client policy for every operand,
+file, or directory cursor. Changing Auto's limits replaces the cached client
+view using copy-on-write and preserves its separate route identity; already-open
+handles retain their connection and cleanup ownership. The shared allocation
+adds reference-count bookkeeping once per connection. Object sizes are Rust
+implementation details, not public ABI guarantees.
+
+NFS path planning borrows component slices while constructing compounds; the
+compound owns the wire payloads it needs. It restores a saved handle only for
+a relative walk, avoiding a redundant RESTOREFH before a root walk and keeping
+the reported operation count equal to the compound built. Byte-path splitting allocates only
+the returned parent/name buffers, and joining reserves the final length once.
+Attribute decoding borrows padded owner/group fields from the reply, and
+identity-cache hits borrow names without creating owned keys. The owner and
+group namespaces remain distinct under one shared FIFO capacity of 1024 entries.
+
+Merged NFS reads copy wire bytes directly into the growing result buffer and
+transfer that buffer into the owned result. Completed compound items form a
+prefix in execution order, so result extraction scans that prefix once instead
+of searching for each caller. Failure attribution, fallback, retry policy,
+ordering, and public request/result types remain unchanged. These reduce local
+allocation/copying and quadratic extraction work; they do not establish an
+end-to-end throughput improvement without workload measurements.
+
+Complete positional writes keep successor lists and outstanding dependency
+counts for conflicting requests on the same underlying object. Local clients
+use cached device/inode pairs. NFS uses retained handle equality when every
+request shares one handle; otherwise it batches FSID/FILEID queries once per
+live descriptor and caches only complete object identity. Unequal NFS handles
+may still denote one object (RFC 8881 section 9.11). Separate opens and
+hard-link/renamed aliases therefore participate in the same ordering. Cached
+identities are invalidated on descriptor reuse and reconnect.
+Backends without object references conservatively order potentially conflicting
+requests across the whole batch; paths never establish independence. A request
+releases its successors only after every byte is acknowledged; short writes
+remain in subsequent ready waves. Ready waves retain input order, and their
+index buffers are reused. Empty requests still undergo whole-batch validation
+and are complete without dispatch. Append ordering, error indices, and failure
+replay rules remain unchanged. Pairwise conflict construction can still be
+quadratic, but blocked requests are no longer rescanned on every wave. The
+first successor is stored inline to avoid a single-edge allocation; graph arrays
+are prepared before conflict comparisons for batches of two or more requests.
+Scalar writes need no graph arrays. The [scheduler benchmark](write-scheduler-benchmark.md)
+records release comparisons, sparse-case tradeoffs and measurement limits.
+
+The [allocation and layout audit below](#allocation-and-layout-audit--2026-10-11) records measured
+layouts, implementation evidence, tradeoffs, and remaining optimization candidates.
+
+## Allocation and layout audit — 2026-10-11
 
 This focused audit starts from commit `d21a87a` and examines representative
 Rust hot paths: core byte paths and operation types; sync read/write dispatch,
@@ -7,7 +97,7 @@ resolution, path I/O and worker state; Auto routing/handles; local/Posix and
 io_uring I/O; SMB vector dispatch; and allocation boundaries in the C binding.
 It is not a workload profile or an exhaustive line-by-line review.
 
-## Implemented changes
+### Implemented changes
 
 | Area | Previous cost | Change and evidence |
 |---|---|---|
@@ -29,7 +119,7 @@ representation is introduced.
 The allocation and layout changes above have no end-to-end measurements in
 this audit. The write scheduler follow-up below was benchmarked separately.
 
-## Write dependency scheduling follow-up
+## Write dependency scheduling follow-up — 2026-10-11
 
 This follow-up starts from commit `4b9ff87`. In
 `crates/vfsi-sync/src/client/write.rs`, complete positional writes previously
@@ -142,14 +232,18 @@ invocation also checked its 16 script regressions. The benchmark runner complete
 matrix and baseline-reuse confirmation; its Python syntax and `git diff --check`
 were checked separately.
 
-Logs and command/result/timing records are on the VM under
+At the recorded validation, logs and command/result/timing records were on the VM under
 `/tmp/vnfs-write-scheduler-*.log` and
 `/tmp/vnfs-write-scheduler-{focused,live,checks}-results.json`.
-The configured NFS fixture was reused without service changes. No access
+These `/tmp` paths are ephemeral, not checked-in evidence; the benchmark JSON
+records linked above are retained. The configured NFS fixture was reused without service changes. No access
 limitation occurred. Full CI, remaining live suites, live SMB and real io_uring
 were not run for this follow-up. Benchmarks and correctness tests ran separately.
 
 ## Follow-up candidates
+
+Reviewed against the implementation on 2026-10-17. These are profiling/code
+inspection leads, not promises of a speedup or measured regressions.
 
 | Priority | Location | Evidence and next step |
 |---|---|---|
@@ -166,7 +260,7 @@ asynchronous protocol messages; shrinking their headers alone would not remove
 the ownership copy. Public `Vec`, `String` and native path APIs are not general
 replacement targets merely because their values are often read-only.
 
-## Allocation and layout validation scope
+## Allocation and layout validation scope — 2026-10-11
 
 Seven new deterministic regressions cover layout, borrowed storage, ownership
 transfer, byte-path rules, identity-cache bounds and completed-prefix extraction.
@@ -197,8 +291,9 @@ Validation completed:
 The first NFS 4.2 backend run had one STALE_CLIENTID connection-setup failure
 before file I/O (25 tests passed). The same case passed alone and the complete
 26-test target passed on rerun; the transient was not reproduced or fixed.
-Logs for the final smoke/check runs are at
-`/tmp/vnfs-rust-optimization-{smoke,check}.log` on the VM.
+Logs for those smoke/check runs were written to
+`/tmp/vnfs-rust-optimization-{smoke,check}.log` on the VM; these ephemeral paths
+are not a durable validation archive.
 
 No access limitation occurred. The existing fixture and mount configuration
 were reused. Full CI, other mount-specific fixture cases, live SMB and real
