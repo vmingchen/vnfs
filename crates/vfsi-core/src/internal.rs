@@ -206,6 +206,7 @@ pub mod faults {
         AfterWriteChunk { chunk: usize },
         BeforeReadRepair { index: usize },
         BeforeSetPermissions { index: usize },
+        AfterNoFollowSetattrTypeCheck { index: usize },
         BeforeRemoveType { index: usize },
         BeforeRemoveChunk { first_name: Vec<u8> },
         BeforeRemovePage { cookie: u64 },

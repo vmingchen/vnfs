@@ -1726,6 +1726,89 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "test-faults")]
+    struct ReplaceLeafWithSymlinkAfterNoFollowCheck {
+        leaf: PathBuf,
+        target: PathBuf,
+    }
+
+    #[cfg(feature = "test-faults")]
+    impl vfsi_core::internal::faults::FaultInjector for ReplaceLeafWithSymlinkAfterNoFollowCheck {
+        fn check(&self, point: &vfsi_core::internal::faults::OpenFaultPoint) -> VfResult<()> {
+            if matches!(
+                point,
+                vfsi_core::internal::faults::OpenFaultPoint::AfterNoFollowSetattrTypeCheck {
+                    index: 0
+                }
+            ) {
+                std::fs::remove_file(&self.leaf).unwrap();
+                std::os::unix::fs::symlink(&self.target, &self.leaf).unwrap();
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(all(feature = "test-faults", unix))]
+    #[test]
+    fn nofollow_setattrs_do_not_mutate_a_leaf_symlink_swap_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (root, mut backend) = fs("nofollow-setattr-symlink-swap");
+        write(&mut backend, "/target", b"protected");
+        std::fs::set_permissions(
+            root.0.join("target"),
+            std::fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        let target = root.0.join("target");
+        let original_mtime = std::fs::metadata(&target).unwrap().modified().unwrap();
+
+        for (index, (mask, mode, size, mtime_sec)) in [
+            (AttrMask::MODE, 0o600, 0, 0),
+            (AttrMask::SIZE, 0, 1, 0),
+            (AttrMask::MTIME, 0, 0, 1_700_000_000),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let leaf_name = format!("leaf-{index}");
+            write(&mut backend, &format!("/{leaf_name}"), b"original");
+            let leaf = root.0.join(&leaf_name);
+            backend.set_fault_injector(std::sync::Arc::new(
+                ReplaceLeafWithSymlinkAfterNoFollowCheck {
+                    leaf: leaf.clone(),
+                    target: PathBuf::from("target"),
+                },
+            ));
+
+            let virtual_path = format!("/{leaf_name}");
+            let attrs = VfAttrs {
+                file: FileOperand::from_path(&virtual_path),
+                masks: mask,
+                mode,
+                size,
+                mtime_sec,
+                ..VfAttrs::default()
+            };
+            assert!(
+                backend
+                    .vsetattrs_raw_nofollow_impl(std::slice::from_ref(&attrs))
+                    .is_err(),
+                "nofollow update {mask:?} should reject the replaced symlink"
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), b"protected");
+            let metadata = std::fs::metadata(&target).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o7777, 0o640);
+            assert_eq!(metadata.modified().unwrap(), original_mtime);
+            assert!(
+                std::fs::symlink_metadata(leaf)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+        }
+    }
+
     #[cfg(all(feature = "test-faults", unix))]
     #[test]
     fn mkdir_mode_does_not_follow_a_leaf_symlink_swap() {

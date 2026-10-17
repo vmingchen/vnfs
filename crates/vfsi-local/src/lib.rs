@@ -704,9 +704,7 @@ impl LocalBackend {
         }
     }
 
-    /// Change permissions through an opened object when the leaf must not be
-    /// followed. The descriptor pins the object between the no-follow open
-    /// and fchmod, closing the final-component symlink swap window.
+    /// Change permissions through a pinned object without following the leaf.
     fn set_permissions_no_follow(
         path: &AnchoredPath,
         mode: u32,
@@ -714,107 +712,113 @@ impl LocalBackend {
         index: usize,
     ) -> VfResult<()> {
         #[cfg(target_os = "linux")]
-        if directory_only {
-            // O_PATH pins a directory without requiring read/search permission
-            // on the directory itself, which may have been removed by umask.
+        {
+            // O_PATH allows chmod of files that grant no read access. With
+            // O_NOFOLLOW it pins the leaf itself, including a concurrently
+            // inserted symlink, which is rejected below.
             let name = cstring_from_bytes(path_bytes(path))
                 .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
-            // SAFETY: the owned parent/path and NUL-terminated name remain live for the
-            // synchronous syscall; metadata output storage is writable when used.
-            let fd = unsafe {
-                libc::open(
-                    name.as_ptr(),
-                    libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )
-            };
+            let mut flags = libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+            if directory_only {
+                flags |= libc::O_DIRECTORY;
+            }
+            // SAFETY: the owned path and NUL-terminated name remain live for this syscall.
+            let fd = unsafe { libc::open(name.as_ptr(), flags) };
             if fd < 0 {
                 return Err(VfError::failure(
                     index,
                     Self::errno(&std::io::Error::last_os_error()),
                 ));
             }
-            // SAFETY: the preceding open succeeded and returned a new descriptor,
-            // transferred exactly once to this owning File.
+            // SAFETY: open succeeded and transferred a new descriptor exactly once.
             let file = unsafe { File::from_raw_fd(fd) };
+            let metadata = file
+                .metadata()
+                .map_err(|error| VfError::failure(index, Self::errno(&error)))?;
+            if metadata.file_type().is_symlink() {
+                return Err(VfError::unsupported(index));
+            }
             let descriptor_path = PathBuf::from(format!("/proc/self/fd/{}", file.as_raw_fd()));
-            return std::fs::set_permissions(
+            std::fs::set_permissions(
                 descriptor_path,
                 std::fs::Permissions::from_mode(mode & 0o7777),
             )
-            .map_err(|error| VfError::failure(index, Self::errno(&error)));
+            .map_err(|error| VfError::failure(index, Self::errno(&error)))
         }
 
         #[cfg(not(target_os = "linux"))]
-        if directory_only {
-            // Use the held parent descriptor and reject symlink traversal.
-            // fchmodat changes the entry without opening a mode-restricted
-            // directory for reading.
-            let parent = path
-                .anchor
-                .as_ref()
-                .ok_or_else(|| VfError::unsupported(index))?;
-            let name = path
-                .file_name()
-                .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
-            let name = cstring_from_bytes(path_bytes(Path::new(name)))
-                .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
-            // SAFETY: the owned parent/path and NUL-terminated name remain live for the
-            // synchronous syscall; metadata output storage is writable when used.
-            let result = unsafe {
-                libc::fchmodat(
-                    parent.as_raw_fd(),
-                    name.as_ptr(),
-                    (mode & 0o7777) as libc::mode_t,
-                    libc::AT_SYMLINK_NOFOLLOW,
-                )
-            };
-            if result != 0 {
-                return Err(VfError::failure(
-                    index,
-                    Self::errno(&std::io::Error::last_os_error()),
-                ));
+        {
+            if directory_only {
+                // Use the held parent descriptor and reject symlink traversal.
+                // fchmodat changes the entry without opening a mode-restricted
+                // directory for reading.
+                let parent = path
+                    .anchor
+                    .as_ref()
+                    .ok_or_else(|| VfError::unsupported(index))?;
+                let name = path
+                    .file_name()
+                    .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+                let name = cstring_from_bytes(path_bytes(Path::new(name)))
+                    .ok_or_else(|| VfError::failure(index, ERR_INVAL))?;
+                // SAFETY: the owned parent/path and NUL-terminated name remain live for the
+                // synchronous syscall; metadata output storage is writable when used.
+                let result = unsafe {
+                    libc::fchmodat(
+                        parent.as_raw_fd(),
+                        name.as_ptr(),
+                        (mode & 0o7777) as libc::mode_t,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                };
+                if result != 0 {
+                    return Err(VfError::failure(
+                        index,
+                        Self::errno(&std::io::Error::last_os_error()),
+                    ));
+                }
+                // Some systems accept AT_SYMLINK_NOFOLLOW but treat chmod on a
+                // symlink as a successful no-op. Verify the anchored leaf itself
+                // is still a directory before reporting that mkdir's mode applied.
+                // SAFETY: this libc output structure contains C integer fields and is valid
+                // when zero-initialized.
+                let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+                // SAFETY: the owned parent/path and NUL-terminated name remain live for the
+                // synchronous syscall; metadata output storage is writable when used.
+                let result = unsafe {
+                    libc::fstatat(
+                        parent.as_raw_fd(),
+                        name.as_ptr(),
+                        &mut metadata,
+                        libc::AT_SYMLINK_NOFOLLOW,
+                    )
+                };
+                if result != 0 {
+                    return Err(VfError::failure(
+                        index,
+                        Self::errno(&std::io::Error::last_os_error()),
+                    ));
+                }
+                if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+                    return Err(VfError::failure(index, ERR_ACCES));
+                }
+                return Ok(());
             }
-            // Some systems accept AT_SYMLINK_NOFOLLOW but treat chmod on a
-            // symlink as a successful no-op. Verify the anchored leaf itself
-            // is still a directory before reporting that mkdir's mode applied.
-            // SAFETY: this libc output structure contains C integer fields and is valid
-            // when zero-initialized.
-            let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
-            // SAFETY: the owned parent/path and NUL-terminated name remain live for the
-            // synchronous syscall; metadata output storage is writable when used.
-            let result = unsafe {
-                libc::fstatat(
-                    parent.as_raw_fd(),
-                    name.as_ptr(),
-                    &mut metadata,
-                    libc::AT_SYMLINK_NOFOLLOW,
-                )
-            };
-            if result != 0 {
-                return Err(VfError::failure(
-                    index,
-                    Self::errno(&std::io::Error::last_os_error()),
-                ));
-            }
-            if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
-                return Err(VfError::failure(index, ERR_ACCES));
-            }
-            return Ok(());
-        }
 
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut options = OpenOptions::new();
-        options.read(true);
-        let mut flags = libc::O_NOFOLLOW | libc::O_NONBLOCK;
-        if directory_only {
-            flags |= libc::O_DIRECTORY;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut options = OpenOptions::new();
+            options.read(true);
+            let mut flags = libc::O_NOFOLLOW | libc::O_NONBLOCK;
+            if directory_only {
+                flags |= libc::O_DIRECTORY;
+            }
+            options.custom_flags(flags);
+            let file = options
+                .open(path)
+                .map_err(|error| VfError::failure(index, Self::errno(&error)))?;
+            file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))
+                .map_err(|error| VfError::failure(index, Self::errno(&error)))
         }
-        options.custom_flags(flags);
-        let file = options
-            .open(path)
-            .map_err(|error| VfError::failure(index, Self::errno(&error)))?;
-        file.set_permissions(std::fs::Permissions::from_mode(mode & 0o7777))
-            .map_err(|error| VfError::failure(index, Self::errno(&error)))
     }
 
     fn errno(e: &std::io::Error) -> u32 {
@@ -1086,38 +1090,48 @@ impl LocalBackend {
         let p = self
             .real_path(&self.tcfile_path(&a.file).map_err(|e| e.with_index(i))?)
             .map_err(|e| e.with_index(i))?;
+        self.setattr_path(a, i, &p, true)
+    }
+
+    fn setattr_path(
+        &mut self,
+        a: &VfAttrs,
+        i: usize,
+        path: &AnchoredPath,
+        follow: bool,
+    ) -> VfResult<()> {
         if a.masks.contains(AttrMask::SIZE) {
             let mut options = OpenOptions::new();
             options.write(true);
-            Self::protect_create_open(&p, &mut options);
-            let f = options
-                .open(&p)
-                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
-            f.set_len(a.size)
-                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+            Self::protect_create_open(path, &mut options);
+            let file = options
+                .open(path)
+                .map_err(|error| VfError::failure(i, Self::errno(&error)))?;
+            file.set_len(a.size)
+                .map_err(|error| VfError::failure(i, Self::errno(&error)))?;
         }
         if a.masks.intersects(AttrMask::UID | AttrMask::GID) {
-            Self::chown_path(a, &p, true, i)?;
+            Self::chown_path(a, path, follow, i)?;
         }
         // Apply permissions last so a combined truncate+chmod cannot revoke
         // the write access needed by its own size update.
         if a.masks.contains(AttrMask::MODE) {
             #[cfg(feature = "test-faults")]
             self.inject_open_fault(OpenFaultPoint::BeforeSetPermissions { index: i })?;
-            if p.nofollow_on_open {
-                Self::set_permissions_no_follow(&p, a.mode, false, i)?;
+            if !follow || path.nofollow_on_open {
+                Self::set_permissions_no_follow(path, a.mode, false, i)?;
             } else {
-                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(a.mode & 0o7777))
-                    .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(a.mode & 0o7777))
+                    .map_err(|error| VfError::failure(i, Self::errno(&error)))?;
             }
         }
         if a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
             let mut options = OpenOptions::new();
             options.read(true);
-            Self::protect_create_open(&p, &mut options);
+            Self::protect_create_open(path, &mut options);
             let file = options
-                .open(&p)
-                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+                .open(path)
+                .map_err(|error| VfError::failure(i, Self::errno(&error)))?;
             let mut times = FileTimes::new();
             if a.masks.contains(AttrMask::ATIME) {
                 times = times.set_accessed(Self::system_time(a.atime_sec, a.atime_nsec, i)?);
@@ -1126,7 +1140,7 @@ impl LocalBackend {
                 times = times.set_modified(Self::system_time(a.mtime_sec, a.mtime_nsec, i)?);
             }
             file.set_times(times)
-                .map_err(|e| VfError::failure(i, Self::errno(&e)))?;
+                .map_err(|error| VfError::failure(i, Self::errno(&error)))?;
         }
         Ok(())
     }
@@ -2012,7 +2026,9 @@ impl VectorBackend for LocalBackend {
                 // No portable lchmod/ltruncate: refuse rather than follow.
                 return Err(VfError::unsupported(i));
             }
-            self.setattr_one(a, i)?;
+            #[cfg(feature = "test-faults")]
+            self.inject_open_fault(OpenFaultPoint::AfterNoFollowSetattrTypeCheck { index: i })?;
+            self.setattr_path(a, i, &p, false)?;
         }
         Ok(())
     }
