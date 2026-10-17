@@ -1,12 +1,40 @@
 #!/usr/bin/env python3
 """Server-independent regression tests for the local CI runner plumbing."""
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
+
+
+class ArchiveVerificationTests(unittest.TestCase):
+    def test_reextracted_crates_refresh_source_mtimes_for_cargos_cache(self):
+        workflow = Path(__file__).resolve().parents[1] / ".github/workflows/ci.yml"
+        command = next(line.strip() for line in workflow.read_text().splitlines()
+                       if 'tar -' in line and '$package-$version.crate' in line)
+        timestamp = 1153704088  # Cargo normalizes archive mtimes, even after edits.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            packages = root / "target/package"
+            packages.mkdir(parents=True)
+            archive = packages / "vfsi-core-0.1.0.crate"
+            relative = "vfsi-core-0.1.0/src/error.rs"
+            for contents in (b"old API", b"new API"):
+                with tarfile.open(archive, "w:gz") as output:
+                    entry = tarfile.TarInfo(relative)
+                    entry.size = len(contents)
+                    entry.mtime = timestamp
+                    output.addfile(entry, io.BytesIO(contents))
+                subprocess.run(["bash", "-ec", command], cwd=root, check=True,
+                               env=dict(os.environ, package="vfsi-core", version="0.1.0"))
+                source = packages / relative
+                self.assertEqual(source.read_bytes(), contents)
+                self.assertGreater(source.stat().st_mtime, timestamp,
+                                   "normalized mtimes can reuse stale same-version Rust artifacts")
 
 
 class NativeFixtureTests(unittest.TestCase):
