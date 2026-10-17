@@ -8,6 +8,8 @@
 //! The ignored DFS rejection test additionally needs `VFSI_SMB_DFS_SHARE`
 //! naming a share configured with `msdfs root = yes` on that server.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -830,12 +832,13 @@ fn listing_walk_and_tree_copy_do_not_follow_directory_reparse_points() {
     };
     let root = PathBuf::from(format!("/vfsi-smb-reparse-{}", std::process::id()));
     let source = root.join("source");
-    let local_root = Path::new(&local_root);
-    let share_root = root.strip_prefix("/").unwrap();
-    let local_source = local_root.join(share_root).join("source");
-    let local_outside = local_root.join(share_root).join("outside");
+    let local_root = Path::new(&local_root).join(root.strip_prefix("/").unwrap());
+    let local_source = local_root.join("source");
+    let local_outside = local_root.join("outside");
     fs::create_dir_all(&local_source).unwrap();
     fs::create_dir_all(&local_outside).unwrap();
+    // Samba may force a different Unix user than the process creating fixtures.
+    fs::set_permissions(&local_root, fs::Permissions::from_mode(0o777)).unwrap();
     fs::write(local_outside.join("secret"), b"outside source tree").unwrap();
     std::os::unix::fs::symlink("../outside", local_source.join("alias")).unwrap();
 
@@ -895,7 +898,7 @@ fn listing_walk_and_tree_copy_do_not_follow_directory_reparse_points() {
     // Isolate a regular-file link: ignoring `symlinks=true` would silently
     // create a regular destination file containing the link target's bytes.
     let file_source = root.join("file-source");
-    let local_file_source = local_root.join(share_root).join("file-source");
+    let local_file_source = local_root.join("file-source");
     fs::create_dir_all(&local_file_source).unwrap();
     std::os::unix::fs::symlink("../outside/secret", local_file_source.join("alias")).unwrap();
     let file_destination = root.join("file-copy-preserving-links");
@@ -917,6 +920,8 @@ fn remove_reparse_entries_without_deleting_their_targets() {
     cleanup_test_tree(&root);
     let local_root = Path::new(&local_root).join(root.strip_prefix("/").unwrap());
     fs::create_dir_all(&local_root).unwrap();
+    // Allow the server's forced Unix user to unlink entries in this owned fixture.
+    fs::set_permissions(&local_root, fs::Permissions::from_mode(0o777)).unwrap();
 
     let target_file = local_root.join("target-file");
     let file_link = local_root.join("file-link");
@@ -994,6 +999,3 @@ fn copy_options_reject_unsupported_symlink_preservation_before_lookup() {
     assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
     assert_eq!(error.index(), Some(0));
 }
-
-#[cfg(feature = "test-faults")]
-use std::os::unix::fs::PermissionsExt;
