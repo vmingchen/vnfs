@@ -21,6 +21,30 @@ pub fn copy_tree_with<F: VectorBackend + ?Sized>(
     destination: &Path,
     symlinks: bool,
     masks: AttrMask,
+    copy_file: impl FnMut(&mut F, &ExtentPair) -> VfRes,
+    map_error: impl Fn(VfError) -> VfError,
+) -> VfRes {
+    copy_tree_with_listdir(
+        backend,
+        source,
+        destination,
+        symlinks,
+        masks,
+        |backend, path, masks| backend.listdir_impl(path, masks, 0, false),
+        copy_file,
+        map_error,
+    )
+}
+
+/// Shared iterative traversal with a backend-specific shallow-listing policy.
+#[allow(clippy::too_many_arguments)] // Mirrors `copy_tree_with` plus the listing policy.
+pub fn copy_tree_with_listdir<F: VectorBackend + ?Sized>(
+    backend: &mut F,
+    source: &Path,
+    destination: &Path,
+    symlinks: bool,
+    masks: AttrMask,
+    mut list_directory: impl FnMut(&mut F, &Path, AttrMask) -> VfResult<Vec<VfAttrs>>,
     mut copy_file: impl FnMut(&mut F, &ExtentPair) -> VfRes,
     map_error: impl Fn(VfError) -> VfError,
 ) -> VfRes {
@@ -41,7 +65,7 @@ pub fn copy_tree_with<F: VectorBackend + ?Sized>(
     }
     let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
     while let Some((source, destination)) = pending.pop() {
-        let entries = backend.listdir_impl(&source, masks, 0, false)?;
+        let entries = list_directory(backend, &source, masks)?;
         let mut directories = Vec::new();
         for entry in entries {
             let name = entry

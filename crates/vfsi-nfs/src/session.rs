@@ -515,15 +515,16 @@ mod tests {
     #[test]
     fn compound_failure_preserves_executed_prefix_position() {
         let ok = nfsstat4_NFS4_OK;
-        let resource = nfsstat4_NFS4ERR_RESOURCE;
-        assert_eq!(
-            first_compound_failure(resource, [ok, ok, ok, resource].into_iter()),
-            Some((3, resource))
-        );
-        assert_eq!(
-            first_compound_failure(resource, std::iter::empty()),
-            Some((0, resource))
-        );
+        for status in [nfsstat4_NFS4ERR_RESOURCE, nfsstat4_NFS4ERR_MOVED] {
+            assert_eq!(
+                first_compound_failure(status, [ok, ok, ok, status].into_iter()),
+                Some((3, status))
+            );
+            assert_eq!(
+                first_compound_failure(status, std::iter::empty()),
+                Some((0, status))
+            );
+        }
         assert_eq!(first_compound_failure(ok, [ok, ok].into_iter()), None);
     }
 
@@ -545,14 +546,16 @@ mod tests {
 
     #[test]
     fn negotiate_minor_does_not_retry_on_other_errors() {
-        let mut attempts = Vec::new();
-        let error = negotiate_minor(|minor| -> RpcResult<u32> {
-            attempts.push(minor);
-            Err(RpcError::op(0, nfsstat4_NFS4ERR_IO))
-        })
-        .unwrap_err();
-        assert_eq!(attempts, vec![2]);
-        assert_eq!(error.status, nfsstat4_NFS4ERR_IO);
+        for status in [nfsstat4_NFS4ERR_IO, nfsstat4_NFS4ERR_MOVED] {
+            let mut attempts = Vec::new();
+            let error = negotiate_minor(|minor| -> RpcResult<u32> {
+                attempts.push(minor);
+                Err(RpcError::op(0, status))
+            })
+            .unwrap_err();
+            assert_eq!(attempts, vec![2]);
+            assert_eq!(error.status, status);
+        }
     }
 
     #[test]

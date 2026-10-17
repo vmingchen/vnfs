@@ -124,6 +124,63 @@ fn rpc_transport_placeholder_is_not_exposed_as_request_zero() {
 }
 
 #[test]
+fn unsupported_referrals_preserve_protocol_status_indices_and_context() {
+    let moved = 10019; // NFS4ERR_MOVED also covers filesystem migration.
+    let path_not_covered = 0xc000_0257;
+    let rpc = RpcError::op(4, moved);
+    assert!(
+        rpc.to_string()
+            .contains("referrals and filesystem migration are unsupported")
+    );
+    for (error, status, detail) in [
+        (VfError::nfs(3, moved), StatusCode::Nfs(moved), "NFSv4"),
+        (
+            vfsi_core::error_from_rpc(rpc.clone(), Some(3)),
+            StatusCode::Nfs(moved),
+            "NFSv4",
+        ),
+        (
+            vfsi_core::error_from_rpc(rpc, None),
+            StatusCode::Nfs(moved),
+            "NFSv4",
+        ),
+        (
+            VfError::smb(3, path_not_covered),
+            StatusCode::Smb(path_not_covered),
+            "SMB DFS",
+        ),
+    ] {
+        let expected_index = error.index().map(|i| i + 2);
+        let error = error
+            .map_index(|i| i + 2)
+            .with_context("vremove", "/projects/file");
+        assert_eq!(error.index(), expected_index);
+        assert_eq!(error.status(), Some(status));
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(!error.is_transport());
+        let message = error.to_string();
+        for text in [
+            detail,
+            "unsupported",
+            "connect directly",
+            "vremove",
+            "/projects/file",
+        ] {
+            assert!(message.contains(text), "missing {text:?}: {message}");
+        }
+        let io: std::io::Error = error.clone().into();
+        assert_eq!(io.kind(), std::io::ErrorKind::Unsupported);
+        assert_eq!(
+            io.get_ref().unwrap().downcast_ref::<VfError>(),
+            Some(&error)
+        );
+    }
+    // Numeric collisions in unrelated status domains must not become referrals.
+    assert!(!VfError::failure(0, moved).to_string().contains("referrals"));
+    assert!(!VfError::smb(0, moved).to_string().contains("referrals"));
+}
+
+#[test]
 fn index_mapping_preserves_unknown_transport_location() {
     let unknown = VfError::transport(None, "connection reset").map_index(|index| index + 10);
     assert_eq!(unknown.index(), None);

@@ -5,6 +5,8 @@ use std::fmt;
 /// NFS4 status used for transport-level failures (there is no NFS status).
 pub const STATUS_TRANSPORT: u32 = u32::MAX;
 
+pub(crate) const NFS_REFERRAL_UNSUPPORTED: &str = "NFSv4 referrals and filesystem migration are unsupported; connect directly to the destination server/export";
+
 /// Transport provenance, not a guarantee that an operation is safe to retry.
 /// Unknown failures remain `Other`; messages are never parsed to classify them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,7 +103,11 @@ impl fmt::Display for RpcError {
         if self.is_transport() {
             write!(f, "transport error: {}", self.message)
         } else {
-            write!(f, "op {} failed: status {}", self.op_index, self.status)
+            write!(f, "op {} failed: status {}", self.op_index, self.status)?;
+            if self.status == 10019 {
+                write!(f, "; {NFS_REFERRAL_UNSUPPORTED}")?;
+            }
+            Ok(())
         }
     }
 }

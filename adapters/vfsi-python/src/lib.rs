@@ -192,7 +192,8 @@ fn lock_err<T>(_: std::sync::PoisonError<T>) -> PyErr {
     PyErr::new::<PyOSError, _>("vnfs client lock poisoned")
 }
 
-/// Map a `VfError` onto the Python exception class that matches its errno.
+/// Preserve unsupported diagnostics; retain errno-compatible Python exceptions
+/// for other filesystem errors.
 fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
     let index = e.index();
     let filename = path.map(|path| path.as_os_str().to_os_string());
@@ -200,6 +201,10 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
         .map(|p| format!(": '{}'", p.display()))
         .unwrap_or_default();
     let error = match e {
+        error if error.kind() == std::io::ErrorKind::Unsupported => {
+            let context = if error.path() == path { "" } else { &what };
+            PyErr::new::<PyNotImplementedError, _>(format!("{error}{context}"))
+        }
         VfError::Transport { message, .. } => {
             PyErr::new::<PyConnectionError, _>(format!("{}{}", message, what))
         }
@@ -212,9 +217,6 @@ fn to_py_err(e: VfError, path: Option<&Path>) -> PyErr {
             ERR_NOTDIR => PyErr::new::<PyNotADirectoryError, _>((20, "Not a directory", filename)),
             ERR_ISDIR => PyErr::new::<PyIsADirectoryError, _>((21, "Is a directory", filename)),
             ERR_INVAL => PyErr::new::<PyOSError, _>((22, "Invalid argument", filename)),
-            VF_ERR_UNSUPPORTED => {
-                PyErr::new::<PyNotImplementedError, _>(format!("operation is unsupported{}", what))
-            }
             other => PyErr::new::<PyOSError, _>((other, "op failed", filename)),
         },
         _ => PyErr::new::<PyOSError, _>("unknown vnfs error"),
@@ -2316,6 +2318,86 @@ impl BindingBackend for SmbVecFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn referral_exceptions_preserve_diagnostics_paths_and_optional_indices() {
+        Python::initialize();
+        Python::attach(|py| {
+            for source in [
+                VfError::nfs(7, 10019).with_context("vread", "/referred/file"),
+                VfError::smb(7, 0xc000_0257).with_context("vremove", "/referred/file"),
+                VfError::unsupported(0).with_context(
+                    "SMB DFS referrals are unsupported; connect directly to the destination server/share",
+                    "namespace",
+                ),
+                vfsi_core::error_from_rpc(vfsi_core::RpcError::op(0, 10019), None),
+            ] {
+                let index = source.index();
+                let diagnostic = source.to_string();
+                let error = to_py_err(source, Some(Path::new("/caller-path")));
+                assert!(error.is_instance_of::<PyNotImplementedError>(py));
+                let message = error.value(py).str().unwrap().to_string();
+                for text in [diagnostic.as_str(), "unsupported", "connect directly", "/caller-path"] {
+                    assert!(message.contains(text), "missing {text:?}: {message}");
+                }
+                if let Some(index) = index {
+                    assert_eq!(error.value(py).getattr("index").unwrap().extract::<usize>().unwrap(), index);
+                } else {
+                    assert!(!error.value(py).hasattr("index").unwrap());
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn unsupported_mapping_preserves_context_without_changing_other_exception_classes() {
+        Python::initialize();
+        Python::attach(|py| {
+            let path = Path::new("/file");
+            let source = VfError::unsupported(2).with_context("vsetattrs", path);
+            let error = to_py_err(source, Some(path));
+            assert!(error.is_instance_of::<PyNotImplementedError>(py));
+            let message = error.value(py).str().unwrap().to_string();
+            assert!(message.contains("vsetattrs"));
+            assert_eq!(message.matches("/file").count(), 1);
+
+            let missing = to_py_err(VfError::nfs(2, ERR_NOENT), Some(path));
+            assert!(missing.is_instance_of::<PyFileNotFoundError>(py));
+            assert_eq!(
+                missing
+                    .value(py)
+                    .getattr("errno")
+                    .unwrap()
+                    .extract::<u32>()
+                    .unwrap(),
+                ERR_NOENT
+            );
+            assert_eq!(
+                missing
+                    .value(py)
+                    .getattr("filename")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "/file"
+            );
+
+            // A coincident raw errno is not an NFS referral.
+            let ordinary = to_py_err(VfError::failure(2, 10019), Some(path));
+            assert!(ordinary.is_instance_of::<PyOSError>(py));
+            assert!(!ordinary.is_instance_of::<PyNotImplementedError>(py));
+            let transport = to_py_err(VfError::transport(None, "connection lost"), Some(path));
+            assert!(transport.is_instance_of::<PyConnectionError>(py));
+            assert!(
+                transport
+                    .value(py)
+                    .str()
+                    .unwrap()
+                    .to_string()
+                    .contains("connection lost")
+            );
+        });
+    }
 
     #[test]
     fn copy_fast_path_is_capped_at_extent_size() {

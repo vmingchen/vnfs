@@ -5,6 +5,8 @@
 //! empty strings for guest access.
 //! Set `VFSI_SMB_RESTART_COMMAND` to a command that restarts the configured
 //! server to enable recovery coverage.
+//! The ignored DFS rejection test additionally needs `VFSI_SMB_DFS_SHARE`
+//! naming a share configured with `msdfs root = yes` on that server.
 
 use std::{
     fs,
@@ -75,6 +77,29 @@ fn connect() -> Option<SmbVecFs> {
         SmbVecFs::connect(&server, &share, &username, &password, &domain)
             .expect("connect to configured SMB test share"),
     )
+}
+
+#[test]
+#[ignore = "requires VFSI_SMB_SERVER and a VFSI_SMB_DFS_SHARE advertising DFS"]
+fn dfs_share_is_rejected_at_connect_while_an_ordinary_share_works() {
+    let server = std::env::var("VFSI_SMB_SERVER").expect("VFSI_SMB_SERVER is required");
+    let share = std::env::var("VFSI_SMB_DFS_SHARE").expect("VFSI_SMB_DFS_SHARE is required");
+    let username = std::env::var("VFSI_SMB_USERNAME").unwrap_or_default();
+    let password = std::env::var("VFSI_SMB_PASSWORD").unwrap_or_default();
+    let domain = std::env::var("VFSI_SMB_DOMAIN").unwrap_or_default();
+    let ordinary = connect().expect("ordinary share fixture is required");
+    ordinary.shutdown().unwrap();
+    let error = SmbVecFs::connect(&server, &share, &username, &password, &domain)
+        .err()
+        .expect("DFS membership must be rejected before exposing a backend");
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert!(!error.is_transport());
+    assert_eq!(error.path(), Some(Path::new(&share)));
+    assert!(
+        error
+            .to_string()
+            .contains("SMB DFS referrals are unsupported")
+    );
 }
 
 #[test]
@@ -793,6 +818,157 @@ fn path_reads_recover_after_server_restart() {
         .expect("path read should reconnect and re-establish the share");
     assert_eq!(result[0].data, b"after restart");
     assert_eq!(fs.stat_impl(&file).unwrap().size, 13);
+    cleanup_test_tree(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn listing_walk_and_tree_copy_do_not_follow_directory_reparse_points() {
+    let Some(mut fs) = connect() else { return };
+    let Ok(local_root) = std::env::var("VFSI_SMB_LOCAL_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-reparse-{}", std::process::id()));
+    let source = root.join("source");
+    let local_root = Path::new(&local_root);
+    let share_root = root.strip_prefix("/").unwrap();
+    let local_source = local_root.join(share_root).join("source");
+    let local_outside = local_root.join(share_root).join("outside");
+    fs::create_dir_all(&local_source).unwrap();
+    fs::create_dir_all(&local_outside).unwrap();
+    fs::write(local_outside.join("secret"), b"outside source tree").unwrap();
+    std::os::unix::fs::symlink("../outside", local_source.join("alias")).unwrap();
+
+    let shallow = fs
+        .listdir_impl(&source, AttrMask::MODE, 0, false)
+        .expect("shallow listing should identify the directory reparse point");
+    assert!(shallow.iter().any(|entry| {
+        entry
+            .file
+            .path()
+            .is_some_and(|path| path.ends_with("alias"))
+            && entry.ftype == VfType::Symlink
+    }));
+
+    let walked = fs
+        .walk_impl(&source, AttrMask::MODE, &mut |_, _| {})
+        .expect("walk should stop at the directory reparse point");
+    assert!(!walked.iter().flat_map(|dir| &dir.entries).any(|entry| {
+        entry
+            .file
+            .path()
+            .is_some_and(|path| path.ends_with("alias/secret"))
+    }));
+
+    let entries = fs
+        .listdir_impl(&source, AttrMask::MODE, 0, true)
+        .expect("recursive listing should identify the directory reparse point");
+    assert!(entries.iter().any(|entry| {
+        entry
+            .file
+            .path()
+            .is_some_and(|path| path.ends_with("alias"))
+            && entry.ftype == VfType::Symlink
+    }));
+    assert!(!entries.iter().any(|entry| {
+        entry
+            .file
+            .path()
+            .is_some_and(|path| path.ends_with("alias/secret"))
+    }));
+
+    let destination = root.join("copy");
+    assert!(
+        fs.copy_tree_impl(&source, &destination, false, false)
+            .is_err()
+    );
+    assert!(!fs.exists_impl(&destination.join("alias/secret")).unwrap());
+
+    // SMB cannot create symlinks, so requesting preservation must report the
+    // unsupported operation instead of silently copying through the link.
+    let preserve_destination = root.join("copy-preserving-links");
+    let error = fs
+        .copy_tree_impl(&source, &preserve_destination, true, false)
+        .expect_err("requested symlink preservation must not be ignored");
+    assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
+
+    // Isolate a regular-file link: ignoring `symlinks=true` would silently
+    // create a regular destination file containing the link target's bytes.
+    let file_source = root.join("file-source");
+    let local_file_source = local_root.join(share_root).join("file-source");
+    fs::create_dir_all(&local_file_source).unwrap();
+    std::os::unix::fs::symlink("../outside/secret", local_file_source.join("alias")).unwrap();
+    let file_destination = root.join("file-copy-preserving-links");
+    let error = fs
+        .copy_tree_impl(&file_source, &file_destination, true, false)
+        .expect_err("file-symlink preservation must not copy through silently");
+    assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
+    assert!(!fs.exists_impl(&file_destination.join("alias")).unwrap());
+    cleanup_test_tree(&root);
+}
+
+#[test]
+fn remove_reparse_entries_without_deleting_their_targets() {
+    let Some(mut fs) = connect() else { return };
+    let Ok(local_root) = std::env::var("VFSI_SMB_LOCAL_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-remove-reparse-{}", std::process::id()));
+    cleanup_test_tree(&root);
+    let local_root = Path::new(&local_root).join(root.strip_prefix("/").unwrap());
+    fs::create_dir_all(&local_root).unwrap();
+
+    let target_file = local_root.join("target-file");
+    let file_link = local_root.join("file-link");
+    let ordinary_file = local_root.join("ordinary-file");
+    let ordinary_directory = local_root.join("ordinary-directory");
+    fs::write(&target_file, b"keep target").unwrap();
+    fs::write(&ordinary_file, b"remove file").unwrap();
+    fs::create_dir(&ordinary_directory).unwrap();
+    std::os::unix::fs::symlink("target-file", &file_link).unwrap();
+
+    let target_directory = local_root.join("target-directory");
+    let directory_link = local_root.join("directory-link");
+    fs::create_dir(&target_directory).unwrap();
+    fs::write(target_directory.join("keep"), b"keep target directory").unwrap();
+    std::os::unix::fs::symlink("target-directory", &directory_link).unwrap();
+
+    let dangling_link = local_root.join("dangling-link");
+    std::os::unix::fs::symlink("missing-target", &dangling_link).unwrap();
+    let paths = [
+        PathBuf::from(format!("{}/file-link", root.display())),
+        PathBuf::from(format!("{}/directory-link", root.display())),
+        PathBuf::from(format!("{}/dangling-link", root.display())),
+        PathBuf::from(format!("{}/ordinary-file", root.display())),
+        PathBuf::from(format!("{}/ordinary-directory", root.display())),
+    ];
+    fs.vremove_impl(
+        &paths
+            .iter()
+            .map(|path| FileOperand::from_os_path(path.as_path()))
+            .collect::<Vec<_>>(),
+    )
+    .expect("remove only the final reparse entries");
+
+    assert_eq!(fs::read(target_file).unwrap(), b"keep target");
+    assert_eq!(
+        fs::read(target_directory.join("keep")).unwrap(),
+        b"keep target directory"
+    );
+    assert_eq!(
+        fs::symlink_metadata(ordinary_file).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        fs::symlink_metadata(ordinary_directory).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    for link in [file_link, directory_link, dangling_link] {
+        assert_eq!(
+            fs::symlink_metadata(link).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
     cleanup_test_tree(&root);
 }
 

@@ -110,6 +110,32 @@ fn scalar_read_uses_bounded_whole_file_api_without_opening_a_handle() {
     }
 }
 
+#[test]
+fn into_inner_drains_cleanup_queued_while_an_earlier_close_is_running() {
+    let close_entered = Arc::new(std::sync::Barrier::new(2));
+    let close_release = Arc::new(std::sync::Barrier::new(2));
+    let client = FsClient::new(ScalarOnly {
+        blocked_close: Some((close_entered.clone(), close_release.clone())),
+        ..ScalarOnly::default()
+    });
+    let first = client.open("/first").unwrap();
+    let concurrent = client.open("/concurrent").unwrap();
+    drop(first);
+
+    let dropper = std::thread::spawn(move || {
+        close_entered.wait();
+        drop(concurrent);
+        close_release.wait();
+    });
+    let backend = client
+        .into_inner()
+        .expect("exclusive extraction must close every queued handle");
+    dropper.join().unwrap();
+
+    assert_eq!(backend.close_calls, 2);
+    assert!(!backend.open);
+}
+
 type Notifications = Arc<Mutex<Vec<Box<dyn FnOnce() + Send>>>>;
 type MetadataCalls = Arc<Mutex<Vec<(bool, Vec<FileOperand>)>>>;
 type SyncCalls = Arc<Mutex<Vec<(vfsi_core::api::SyncMode, Vec<FileOperand>)>>>;
@@ -132,6 +158,7 @@ struct ScalarOnly {
     stats_error_index: Option<usize>,
     notifications: Notifications,
     blocked_read: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
+    blocked_close: Option<(Arc<std::sync::Barrier>, Arc<std::sync::Barrier>)>,
     close_observed: Arc<AtomicUsize>,
     data: Vec<u8>,
     cursor: u64,
@@ -1283,6 +1310,10 @@ impl HandleBackend for ScalarOnly {
     fn close_impl(&mut self, _: &FileOperand) -> VfResult<()> {
         self.close_calls += 1;
         self.close_observed.fetch_add(1, Ordering::SeqCst);
+        if let Some((entered, release)) = self.blocked_close.take() {
+            entered.wait();
+            release.wait();
+        }
         if self.close_failures_remaining != 0 {
             self.close_failures_remaining -= 1;
             return Err(VfError::transport(None, "injected close failure"));

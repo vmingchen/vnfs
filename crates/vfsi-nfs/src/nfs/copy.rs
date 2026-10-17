@@ -473,11 +473,10 @@ mod tests {
             0,
             &[8, 0, 0],
         ));
-        assert!(!server_copy_failure_allows_fallback(
-            nfsstat4_NFS4ERR_ACCESS,
-            0,
-            &[0, 0, 0],
-        ));
+        for status in [nfsstat4_NFS4ERR_ACCESS, nfsstat4_NFS4ERR_MOVED] {
+            assert!(!server_copy_failure_allows_fallback(status, 0, &[0, 0, 0]));
+            assert!(!CopyBatchFailure::from(VfError::nfs(0, status)).fallback_safe);
+        }
     }
 
     #[test]

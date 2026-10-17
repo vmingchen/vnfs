@@ -715,17 +715,21 @@ fn worker_main(
                     if active.is_some() {
                         return Err(VfError::client(0, libc::EBUSY as u32));
                     }
-                    let size = if worker == 0 {
-                        Some(
-                            client
-                                .attrs(&path)?
-                                .len()
-                                .ok_or_else(|| VfError::unsupported(0))?,
-                        )
-                    } else {
-                        None
-                    };
-                    let file = client.open(&path)?;
+                    let (file, size) = open_stream_file(
+                        || client.open(&path),
+                        |file| {
+                            if worker == 0 {
+                                client
+                                    .attrs(vfsi_core::Target::file(file))?
+                                    .len()
+                                    .map(Some)
+                                    .ok_or_else(|| VfError::unsupported(0))
+                            } else {
+                                Ok(None)
+                            }
+                        },
+                        |file| file.close(),
+                    )?;
                     active = Some((stream_id, file));
                     Ok(size)
                 })();
@@ -785,6 +789,21 @@ fn worker_main(
     }
     if let Some((_, file)) = active.take() {
         let _ = file.close();
+    }
+}
+
+fn open_stream_file<T>(
+    open: impl FnOnce() -> VfResult<T>,
+    size: impl FnOnce(&T) -> VfResult<Option<u64>>,
+    close: impl FnOnce(T) -> VfResult<()>,
+) -> VfResult<(T, Option<u64>)> {
+    let file = open()?;
+    match size(&file) {
+        Ok(size) => Ok((file, size)),
+        Err(error) => {
+            let _ = close(file);
+            Err(error)
+        }
     }
 }
 
@@ -853,6 +872,48 @@ mod tests {
                 .unwrap(),
             (3, 3)
         );
+    }
+
+    #[test]
+    fn stream_start_measures_the_open_handle_and_closes_it_on_metadata_error() {
+        use super::open_stream_file;
+        use std::cell::{Cell, RefCell};
+
+        let steps = RefCell::new(Vec::new());
+        let (file, size) = open_stream_file(
+            || {
+                steps.borrow_mut().push("open");
+                Ok::<_, vfsi_core::VfError>(41)
+            },
+            |file| {
+                steps.borrow_mut().push("attrs");
+                assert_eq!(*file, 41);
+                Ok(Some(123))
+            },
+            |file| {
+                steps.borrow_mut().push("close");
+                assert_eq!(file, 41);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(file, 41);
+        assert_eq!(size, Some(123));
+        assert_eq!(*steps.borrow(), ["open", "attrs"]);
+
+        let closed = Cell::new(false);
+        let error = open_stream_file(
+            || Ok::<_, vfsi_core::VfError>(42),
+            |_| Err(vfsi_core::VfError::failure(0, libc::EIO as u32)),
+            |file| {
+                assert_eq!(file, 42);
+                closed.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.err_no(), libc::EIO as u32);
+        assert!(closed.get());
     }
 
     #[test]

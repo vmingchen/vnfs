@@ -332,6 +332,9 @@ fn recovery_only_retries_transport_and_recoverable_session_statuses() {
         0,
         nfsstat4_NFS4ERR_NOENT,
     )));
+    let moved = VfError::nfs(3, nfsstat4_NFS4ERR_MOVED);
+    assert_eq!(moved.kind(), std::io::ErrorKind::Unsupported);
+    assert!(!NfsVecFs::needs_recovery(&moved));
 }
 
 #[test]
@@ -583,11 +586,278 @@ fn distinct_nfs_filehandles_can_group_as_the_same_filesystem_object() {
 }
 
 #[test]
-fn recursive_readdir_rejects_a_stalled_continuation_cookie() {
-    assert!(validate_readdir_progress(0, 7, None).is_ok());
-    assert!(validate_readdir_progress(7, 11, None).is_ok());
-    assert!(validate_readdir_progress(7, 0, None).is_ok());
+fn path_setattrs_resolve_symlink_policy_before_mutation() {
+    assert!(nofollow_symlink_setattr_is_unsupported(
+        false,
+        nfs_ftype4_NF4LNK,
+        AttrMask::MODE
+    ));
+    assert!(nofollow_symlink_setattr_is_unsupported(
+        false,
+        nfs_ftype4_NF4LNK,
+        AttrMask::SIZE | AttrMask::MTIME
+    ));
+    assert!(!nofollow_symlink_setattr_is_unsupported(
+        false,
+        nfs_ftype4_NF4LNK,
+        AttrMask::ATIME | AttrMask::MTIME
+    ));
+    assert!(!nofollow_symlink_setattr_is_unsupported(
+        true,
+        nfs_ftype4_NF4LNK,
+        AttrMask::MODE
+    ));
+    assert!(!nofollow_symlink_setattr_is_unsupported(
+        false,
+        nfs_ftype4_NF4REG,
+        AttrMask::MODE
+    ));
 
-    let error = validate_readdir_progress(7, 7, None).unwrap_err();
+    let path_mode = [VfAttrs {
+        file: FileOperand::from_path("/link"),
+        masks: AttrMask::MODE,
+        ..VfAttrs::default()
+    }];
+    assert!(path_setattrs_require_type_resolution(&path_mode, false));
+    assert!(path_setattrs_require_type_resolution(&path_mode, true));
+
+    let path_mtime = [VfAttrs {
+        file: FileOperand::from_path("/link"),
+        masks: AttrMask::MTIME,
+        ..VfAttrs::default()
+    }];
+    assert!(!path_setattrs_require_type_resolution(&path_mtime, false));
+    assert!(path_setattrs_require_type_resolution(&path_mtime, true));
+
+    let handle = [VfAttrs {
+        file: FileOperand::from_fd(7),
+        masks: AttrMask::MODE,
+        ..VfAttrs::default()
+    }];
+    assert!(!path_setattrs_require_type_resolution(&handle, false));
+
+    let no_updates = [VfAttrs {
+        file: FileOperand::from_path("/empty"),
+        ..VfAttrs::default()
+    }];
+    assert!(!path_setattrs_require_type_resolution(&no_updates, false));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires VFSI_NFS_TEST_MOUNT pointing to a writable direct NFS mount"]
+fn live_nofollow_setattr_respects_symlink_semantics() {
+    use std::os::unix::fs::symlink;
+
+    fn snapshot(backend: &mut NfsVecFs, path: &str, follow: bool) -> VfAttrs {
+        let mut attrs = VfAttrs {
+            file: FileOperand::from_path(path),
+            masks: AttrMask::MODE | AttrMask::MTIME,
+            ..VfAttrs::default()
+        };
+        if follow {
+            backend.vgetattrs_impl(std::slice::from_mut(&mut attrs))
+        } else {
+            backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs))
+        }
+        .unwrap();
+        assert!(attrs.returned.contains(attrs.masks));
+        attrs
+    }
+
+    let mount = std::env::var("VFSI_NFS_TEST_MOUNT").expect("mount fixture is required");
+    let name = format!(".vfsi-nofollow-setattr-{}", std::process::id());
+    let fixture = Path::new(&mount).join(&name);
+    std::fs::create_dir(&fixture).unwrap();
+    std::fs::write(fixture.join("target"), b"target").unwrap();
+    symlink("target", fixture.join("link")).unwrap();
+    let mut backend = NfsClientBuilder::from_mount(&fixture)
+        .unwrap()
+        .connect()
+        .unwrap();
+    let before_link = snapshot(&mut backend, "/link", false);
+    let before_target = snapshot(&mut backend, "/target", true);
+    let mode_update = VfAttrs {
+        file: FileOperand::from_path("/link"),
+        masks: AttrMask::MODE,
+        mode: 0o600,
+        ..VfAttrs::default()
+    };
+    let error = backend
+        .vsetattrs_raw_nofollow_impl(std::slice::from_ref(&mode_update))
+        .unwrap_err();
+    assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
+    let after_mode_link = snapshot(&mut backend, "/link", false);
+    let after_mode_target = snapshot(&mut backend, "/target", true);
+    assert_eq!(after_mode_link.mode, before_link.mode);
+    assert_eq!(after_mode_target.mode, before_target.mode);
+
+    // NFS can set symlink timestamps directly, so no-follow updates apply to
+    // the link and leave the target untouched.
+    let time_update = VfAttrs {
+        file: FileOperand::from_path("/link"),
+        masks: AttrMask::MTIME,
+        mtime_sec: 1_700_000_003,
+        mtime_nsec: 123_456_789,
+        ..VfAttrs::default()
+    };
+    backend
+        .vsetattrs_raw_nofollow_impl(std::slice::from_ref(&time_update))
+        .unwrap();
+    let after_link = snapshot(&mut backend, "/link", false);
+    let after_target = snapshot(&mut backend, "/target", true);
+    assert_eq!(
+        (after_link.mtime_sec, after_link.mtime_nsec),
+        (time_update.mtime_sec, time_update.mtime_nsec)
+    );
+    assert_eq!(
+        (after_target.mtime_sec, after_target.mtime_nsec),
+        (before_target.mtime_sec, before_target.mtime_nsec)
+    );
+
+    // The MODE update uses an in-compound NVERIFY guard, so it can stay in
+    // the vector without forcing the independent no-follow timestamp update
+    // onto a phased path.
+    let target_mode_update = VfAttrs {
+        file: FileOperand::from_path("/target"),
+        masks: AttrMask::MODE,
+        mode: 0o640,
+        ..VfAttrs::default()
+    };
+    let link_time_update = VfAttrs {
+        file: FileOperand::from_path("/link"),
+        masks: AttrMask::MTIME,
+        mtime_sec: 1_700_000_007,
+        mtime_nsec: 987_654_321,
+        ..VfAttrs::default()
+    };
+    backend
+        .vsetattrs_raw_nofollow_impl(&[target_mode_update.clone(), link_time_update.clone()])
+        .unwrap();
+    let after_mixed_link = snapshot(&mut backend, "/link", false);
+    let after_mixed_target = snapshot(&mut backend, "/target", true);
+    assert_eq!(after_mixed_target.mode & 0o777, target_mode_update.mode);
+    assert_eq!(
+        (after_mixed_link.mtime_sec, after_mixed_link.mtime_nsec),
+        (link_time_update.mtime_sec, link_time_update.mtime_nsec)
+    );
+    assert_eq!(
+        (after_mixed_target.mtime_sec, after_mixed_target.mtime_nsec),
+        (before_target.mtime_sec, before_target.mtime_nsec)
+    );
+    drop(backend);
+    std::fs::remove_file(fixture.join("link")).unwrap();
+    std::fs::remove_file(fixture.join("target")).unwrap();
+    std::fs::remove_dir(fixture).unwrap();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires VFSI_NFS_TEST_MOUNT pointing to a writable direct NFS mount"]
+fn live_guarded_setattr_handles_symlink_cohorts_on_a_bounded_stack() {
+    use std::os::unix::fs::symlink;
+
+    let mount = std::env::var("VFSI_NFS_TEST_MOUNT").expect("mount fixture is required");
+    let fixture = Path::new(&mount).join(format!(".vfsi-setattr-cohort-{}", std::process::id()));
+    std::fs::create_dir(&fixture).unwrap();
+    // Own just this test's newly created directory, including on assertion failure.
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let cleanup = Cleanup(fixture.clone());
+    for name in ["target", "tail"] {
+        std::fs::write(fixture.join(name), b"keep").unwrap();
+    }
+    for index in 0..512 {
+        symlink("target", fixture.join(format!("link-{index}"))).unwrap();
+    }
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let mut backend = NfsClientBuilder::from_mount(&fixture)
+                .unwrap()
+                .connect()
+                .unwrap();
+            let update = |path: String, mode| VfAttrs {
+                file: FileOperand::from_path(&path),
+                masks: AttrMask::MODE,
+                mode,
+                ..VfAttrs::default()
+            };
+            let mut updates = vec![update("/target".into(), 0o640)];
+            updates.extend((0..512).map(|index| update(format!("/link-{index}"), 0o600)));
+            updates.push(update("/tail".into(), 0o640));
+            backend.vsetattrs_raw_impl(&updates).unwrap();
+            assert_eq!(
+                backend.stat_impl(Path::new("/target")).unwrap().mode & 0o777,
+                0o600
+            );
+            assert_eq!(
+                backend.stat_impl(Path::new("/tail")).unwrap().mode & 0o777,
+                0o640
+            );
+
+            let missing_index = updates.len();
+            updates.push(update("/missing".into(), 0o600));
+            updates.push(update("/tail".into(), 0o666));
+            let error = backend.vsetattrs_raw_impl(&updates).unwrap_err();
+            assert_eq!(error.index(), Some(missing_index));
+            assert_eq!(error.err_no(), ERR_NOENT);
+            assert_eq!(
+                backend.stat_impl(Path::new("/tail")).unwrap().mode & 0o777,
+                0o640,
+                "do not execute the suffix after a later failure"
+            );
+
+            // The optimized guard path must not allocate a suffix-sized type vector
+            // that its caller never consumes.
+            let operation = crate::client::PathSetattrOp {
+                file: crate::client::FileRef::Path(
+                    crate::path::path_bytes(&backend.server_path(Path::new("/tail"))).to_vec(),
+                ),
+                mode: Some(0o640),
+                uid: None,
+                gid: None,
+                size: None,
+                atime: None,
+                mtime: None,
+                check_type: false,
+            };
+            let outcome = backend
+                .nfs
+                .setattr_path_compound_guarded(&[operation], &[false])
+                .unwrap();
+            assert!(outcome.failed.is_none());
+            assert!(outcome.types.is_empty());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    drop(cleanup);
+}
+
+#[test]
+fn recursive_readdir_rejects_a_stalled_continuation_cookie() {
+    let mut seen = std::collections::HashSet::new();
+    assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
+    assert!(validate_readdir_progress(7, 11, &mut seen, None).is_ok());
+    assert!(validate_readdir_progress(11, 0, &mut seen, None).is_ok());
+
+    let mut seen = std::collections::HashSet::new();
+    assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
+    let error = validate_readdir_progress(7, 7, &mut seen, None).unwrap_err();
     assert!(error.is_transport());
+}
+
+#[test]
+fn recursive_readdir_rejects_nonadjacent_cookie_cycles() {
+    let mut seen = std::collections::HashSet::new();
+    assert!(validate_readdir_progress(0, 7, &mut seen, None).is_ok());
+    assert!(validate_readdir_progress(7, 11, &mut seen, None).is_ok());
+    let error = validate_readdir_progress(11, 7, &mut seen, Some(3)).unwrap_err();
+    assert!(error.is_transport());
+    assert_eq!(error.index(), Some(3));
 }

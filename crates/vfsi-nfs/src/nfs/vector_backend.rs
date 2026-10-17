@@ -412,6 +412,7 @@ impl VectorBackend for NfsVecFs {
             None => NfsDirectoryCursor {
                 fh: self.resolve_directory_path(dir, follow_symlinks)?,
                 cookie: 0,
+                seen_cookies: std::collections::HashSet::new(),
                 buffered: VecDeque::new(),
             },
         };
@@ -425,9 +426,7 @@ impl VectorBackend for NfsVecFs {
                 return Ok((Vec::new(), None));
             }
             let next_cookie = page.last().map(|entry| entry.cookie).unwrap_or(0);
-            if next_cookie != 0 && next_cookie == state.cookie {
-                return Err(VfError::transport(None, "READDIR cookie made no progress"));
-            }
+            validate_readdir_progress(state.cookie, next_cookie, &mut state.seen_cookies, None)?;
             state.cookie = next_cookie;
             state.buffered = page.into();
         }
@@ -536,6 +535,7 @@ impl VectorBackend for NfsVecFs {
                     NfsDirectoryCursor {
                         fh: child.parent,
                         cookie: 0,
+                        seen_cookies: std::collections::HashSet::new(),
                         buffered: VecDeque::new(),
                     }
                 }
@@ -545,6 +545,7 @@ impl VectorBackend for NfsVecFs {
                 None => NfsDirectoryCursor {
                     fh: handles.remove(&index).expect("resolved fresh directory"),
                     cookie: 0,
+                    seen_cookies: std::collections::HashSet::new(),
                     buffered: VecDeque::new(),
                 },
             });
@@ -562,9 +563,12 @@ impl VectorBackend for NfsVecFs {
             ));
         }
         for (&index, page) in child_indices.iter().zip(child_pages) {
+            let mut seen_cookies = std::collections::HashSet::new();
+            validate_readdir_progress(0, page.cookie, &mut seen_cookies, Some(index))?;
             states[index] = NfsDirectoryCursor {
                 fh: page.fh,
                 cookie: page.cookie,
+                seen_cookies,
                 buffered: page.entries.into(),
             };
         }
@@ -590,12 +594,7 @@ impl VectorBackend for NfsVecFs {
         }
         for (&index, (entries, cookie)) in active.iter().zip(pages) {
             let state = &mut states[index];
-            if cookie != 0 && cookie == state.cookie {
-                return Err(VfError::transport(
-                    Some(index),
-                    "READDIR cookie made no progress",
-                ));
-            }
+            validate_readdir_progress(state.cookie, cookie, &mut state.seen_cookies, Some(index))?;
             state.cookie = cookie;
             state.buffered = entries.into();
         }
@@ -663,6 +662,7 @@ impl VectorBackend for NfsVecFs {
         let fh = self.resolve_path(&self.server_path(dir), true)?;
         let ids = request_mask_to_attr_list(&masks);
         let mut cookie = 0u64;
+        let mut seen_cookies = std::collections::HashSet::new();
         let mut count = 0usize;
         loop {
             let page = self
@@ -690,9 +690,7 @@ impl VectorBackend for NfsVecFs {
             if next == 0 {
                 return Ok(());
             }
-            if next == cookie {
-                return Err(VfError::transport(None, "READDIR cookie made no progress"));
-            }
+            validate_readdir_progress(cookie, next, &mut seen_cookies, None)?;
             cookie = next;
         }
     }
@@ -792,17 +790,19 @@ impl VectorBackend for NfsVecFs {
                 if !emit_page(idx, entries)? {
                     return Ok(());
                 }
+                let mut seen_cookies = std::collections::HashSet::new();
+                validate_readdir_progress(0, cookie, &mut seen_cookies, Some(level[idx].2))?;
                 if cookie != 0 {
-                    pending.push((idx, level[idx].0.clone(), cookie));
+                    pending.push((idx, level[idx].0.clone(), cookie, seen_cookies));
                 }
             }
             while !pending.is_empty() {
                 let cont_ops: Vec<(NfsFh, u64)> = pending
                     .iter()
-                    .map(|(_, fh, cookie)| (fh.clone(), *cookie))
+                    .map(|(_, fh, cookie, _)| (fh.clone(), *cookie))
                     .collect();
                 let pending_owners: Vec<usize> =
-                    pending.iter().map(|(idx, _, _)| level[*idx].2).collect();
+                    pending.iter().map(|(idx, _, _, _)| level[*idx].2).collect();
                 let cont = self.nfs.readdir_pages(&cont_ops, &ids).map_err(|error| {
                     remap_active_error(vfsi_core::error_from_rpc_indexed(error), &pending_owners)
                 })?;
@@ -813,19 +813,20 @@ impl VectorBackend for NfsVecFs {
                     ));
                 }
                 let mut next_pending = Vec::new();
-                for ((idx, fh, previous_cookie), (entries, cookie)) in pending.into_iter().zip(cont)
+                for ((idx, fh, previous_cookie, mut seen_cookies), (entries, cookie)) in
+                    pending.into_iter().zip(cont)
                 {
+                    validate_readdir_progress(
+                        previous_cookie,
+                        cookie,
+                        &mut seen_cookies,
+                        Some(level[idx].2),
+                    )?;
                     if !emit_page(idx, entries)? {
                         return Ok(());
                     }
-                    if cookie == previous_cookie {
-                        return Err(VfError::transport(
-                            Some(level[idx].2),
-                            "READDIR continuation cookie made no progress",
-                        ));
-                    }
                     if cookie != 0 {
-                        next_pending.push((idx, fh, cookie));
+                        next_pending.push((idx, fh, cookie, seen_cookies));
                     }
                 }
                 pending = next_pending;
@@ -860,6 +861,7 @@ impl VectorBackend for NfsVecFs {
         // pages are never retained after they are decoded.
         let mut root_attrs = Vec::new();
         let mut cookie = 0u64;
+        let mut seen_cookies = std::collections::HashSet::new();
         loop {
             let page = self
                 .nfs
@@ -877,7 +879,7 @@ impl VectorBackend for NfsVecFs {
                 &mut root_attrs,
             )?;
             let next_cookie = page.last().map(|entry| entry.cookie).unwrap_or(0);
-            validate_readdir_progress(cookie, next_cookie, None)?;
+            validate_readdir_progress(cookie, next_cookie, &mut seen_cookies, None)?;
             cookie = next_cookie;
             if cookie == 0 {
                 break;
@@ -930,37 +932,40 @@ impl VectorBackend for NfsVecFs {
                     &mut budget,
                     &mut level_attrs[index],
                 )?;
+                let mut seen_cookies = std::collections::HashSet::new();
+                validate_readdir_progress(0, result.cookie, &mut seen_cookies, None)?;
                 if result.cookie != 0 {
-                    pending.push((index, result.fh.clone(), result.cookie));
+                    pending.push((index, result.fh.clone(), result.cookie, seen_cookies));
                 }
             }
 
             while !pending.is_empty() {
                 let operations: Vec<(NfsFh, u64)> = pending
                     .iter()
-                    .map(|(_, handle, cookie)| (handle.clone(), *cookie))
+                    .map(|(_, handle, cookie, _)| (handle.clone(), *cookie))
                     .collect();
                 let pages = self
                     .nfs
                     .readdir_pages(&operations, &ids)
                     .map_err(vfsi_core::error_from_rpc_indexed)?;
                 let mut next_pending = Vec::new();
-                for ((index, handle, previous_cookie), (page, cookie)) in pending.iter().zip(pages)
+                for ((index, handle, previous_cookie, mut seen_cookies), (page, cookie)) in
+                    pending.into_iter().zip(pages)
                 {
-                    validate_readdir_progress(*previous_cookie, cookie, None)?;
+                    validate_readdir_progress(previous_cookie, cookie, &mut seen_cookies, None)?;
                     append_bounded_walk_page(
                         root,
-                        &frontier[*index].1,
+                        &frontier[index].1,
                         masks,
                         &ids,
                         &page,
                         options,
                         &mut entry_count,
                         &mut budget,
-                        &mut level_attrs[*index],
+                        &mut level_attrs[index],
                     )?;
                     if cookie != 0 {
-                        next_pending.push((*index, handle.clone(), cookie));
+                        next_pending.push((index, handle, cookie, seen_cookies));
                     }
                 }
                 pending = next_pending;
@@ -1490,6 +1495,7 @@ impl VectorBackend for NfsVecFs {
                 root: 0,
             },
             cookie: 0,
+            seen_cookies: std::collections::HashSet::new(),
             pass_changed: false,
         }];
         self.run_rm_tasks(stack, &mut first_error, options)?;

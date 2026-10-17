@@ -356,6 +356,24 @@ pub(super) fn decode_filesystem_stats(bitmap: bitmap4, bytes: &[u8]) -> VfResult
     Ok(stats)
 }
 
+/// Whether a path SETATTR must guard against its final component being a
+/// symlink before mutation. NVERIFY can enforce this within the same compound.
+pub(super) fn path_setattrs_require_type_resolution(attrs: &[VfAttrs], follow: bool) -> bool {
+    attrs.iter().any(|attrs| {
+        !attrs.file.is_fd()
+            && (attrs.masks.intersects(AttrMask::MODE | AttrMask::SIZE)
+                || (follow && attrs.masks.intersects(AttrMask::ATIME | AttrMask::MTIME)))
+    })
+}
+
+pub(super) fn nofollow_symlink_setattr_is_unsupported(
+    follow: bool,
+    ftype: u32,
+    masks: AttrMask,
+) -> bool {
+    !follow && ftype == nfs_ftype4_NF4LNK && masks.intersects(AttrMask::MODE | AttrMask::SIZE)
+}
+
 impl NfsVecFs {
     /// The merged (single-compound) setattrsv: resolve each parent once,
     /// then LOOKUP + GETATTR type + SETATTR per file. Symlinks (either to
@@ -377,16 +395,9 @@ impl NfsVecFs {
                 return Err(VfError::unsupported(i));
             }
         }
-        // The merged compound cannot condition SETATTR on GETATTR(TYPE).
-        // Resolve followed path timestamps first so a symlink's own timestamp
-        // is never changed before applying the update to its target.
-        if follow
-            && attrs
-                .iter()
-                .any(|a| !a.file.is_fd() && a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME))
-        {
-            return self.vsetattrs_phased_nfs(attrs, follow);
-        }
+        // Ownership updates still require name-to-id resolution before the
+        // SETATTR compound. Other path updates use an in-compound NVERIFY guard
+        // so a symlink stops before mutation, then follow it only when requested.
         if attrs
             .iter()
             .any(|a| a.masks.intersects(AttrMask::UID | AttrMask::GID))
@@ -394,7 +405,12 @@ impl NfsVecFs {
             return self.vsetattrs_phased_nfs(attrs, follow);
         }
         let mut ops = Vec::with_capacity(attrs.len());
+        let mut symlink_guards = Vec::with_capacity(attrs.len());
         for (i, a) in attrs.iter().enumerate() {
+            symlink_guards.push(path_setattrs_require_type_resolution(
+                std::slice::from_ref(a),
+                follow,
+            ));
             let file = if a.file.is_fd() {
                 let fd = a.file.fd().unwrap();
                 let open = self
@@ -436,43 +452,54 @@ impl NfsVecFs {
                 size,
                 atime,
                 mtime,
-                check_type: true,
+                check_type: false,
             });
         }
-        match self.nfs.setattr_path_compound(&ops) {
-            Ok(outcome) => {
-                if let Some((i, _st)) = outcome.failed {
-                    // Prefix [0..i) succeeded; resume [i..] via the phased
-                    // path, re-attributing its error to the original index.
-                    for (k, a) in attrs.iter().enumerate().take(i) {
-                        let own_type = outcome.types[k];
-                        if own_type == Some(nfs_ftype4_NF4LNK) {
-                            if !follow {
-                                return Err(VfError::unsupported(k));
+        let mut start = 0;
+        while start < attrs.len() {
+            match self
+                .nfs
+                .setattr_path_compound_guarded(&ops[start..], &symlink_guards[start..])
+            {
+                Ok(outcome) => {
+                    if let Some((i, status)) = outcome.failed {
+                        let i = start + i;
+                        if symlink_guards[i] && status == nfsstat4_NFS4ERR_SAME {
+                            if nofollow_symlink_setattr_is_unsupported(
+                                follow,
+                                nfs_ftype4_NF4LNK,
+                                attrs[i].masks,
+                            ) {
+                                return Err(VfError::unsupported(i));
                             }
-                            self.setattr_one_following(k, a)?;
+                            if follow {
+                                // NVERIFY failed before this path's SETATTR; follow
+                                // the final symlink and mutate only its target.
+                                self.setattr_one_following(i, &attrs[i])?;
+                                start = i + 1;
+                                continue;
+                            }
                         }
-                    }
-                    if let Err(e) = self.vsetattrs_phased_nfs(&attrs[i..], follow) {
-                        return Err(e.map_index(|rel| i + rel));
+                        // The successful prefix is already applied. Resume at the
+                        // first failed path, preserving its index and symlink policy.
+                        if let Err(error) = self.vsetattrs_phased_nfs(&attrs[i..], follow) {
+                            return Err(error.map_index(|relative| i + relative));
+                        }
+                        return Ok(());
                     }
                     return Ok(());
                 }
-                for (i, a) in attrs.iter().enumerate() {
-                    let own_type = outcome.types[i];
-                    if own_type == Some(nfs_ftype4_NF4LNK) {
-                        if !follow {
-                            // No non-following mode/size setter for symlinks.
-                            return Err(VfError::unsupported(i));
-                        }
-                        self.setattr_one_following(i, a)?;
-                    }
+                Err(error) if error.is_transport() => {
+                    return Err(vfsi_core::error_from_rpc(error, None));
                 }
-                Ok(())
+                Err(_) => {
+                    return self
+                        .vsetattrs_phased_nfs(&attrs[start..], follow)
+                        .map_err(|error| error.map_index(|relative| start + relative));
+                }
             }
-            Err(error) if error.is_transport() => Err(vfsi_core::error_from_rpc(error, None)),
-            Err(_) => self.vsetattrs_phased_nfs(attrs, follow),
         }
+        Ok(())
     }
 
     /// The legacy phased setattrsv (resolve_many_tcfile + setattr_many).
@@ -497,10 +524,7 @@ impl NfsVecFs {
                 Ok(x) => x.clone(),
                 Err(status) => return Err(VfError::nfs(i, *status)),
             };
-            if !follow
-                && ftype == nfs_ftype4_NF4LNK
-                && !a.masks.difference(AttrMask::UID | AttrMask::GID).is_empty()
-            {
+            if nofollow_symlink_setattr_is_unsupported(follow, ftype, a.masks) {
                 // NFSv4 has no non-following mode/size setter for symlinks;
                 // refuse like the `std::fs` backend instead of pretending the
                 // SETATTR applied to the link.
