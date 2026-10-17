@@ -3495,6 +3495,7 @@ impl NfsClient {
     /// Internal variant that inserts an NVERIFY symlink guard before SETATTR
     /// for selected operations. A matching symlink stops that operation before
     /// mutation, allowing the caller to resolve and update the target safely.
+    /// Guarded execution does not collect types; `check_type` is ignored.
     pub(crate) fn setattr_path_compound_guarded(
         &mut self,
         ops: &[PathSetattrOp],
@@ -3512,7 +3513,11 @@ impl NfsClient {
         symlink_guards: Option<&[bool]>,
     ) -> RpcResult<PathSetattrOutcome> {
         let n = ops.len();
-        let mut types: Vec<Option<u32>> = vec![None; n];
+        let mut types: Vec<Option<u32>> = if symlink_guards.is_some() {
+            Vec::new()
+        } else {
+            vec![None; n]
+        };
         let mut failed: Option<(usize, u32)> = None;
         let per_file = 5; // RESTOREFH + LOOKUP + [GETATTR or NVERIFY] + SETATTR + margin
         let reserve = 16;
@@ -3560,7 +3565,7 @@ impl NfsClient {
                 if symlink_guards.is_some_and(|guards| guards[global]) {
                     c.nverify_type(nfs_ftype4_NF4LNK);
                     map.note_ops(1);
-                } else if op.check_type {
+                } else if symlink_guards.is_none() && op.check_type {
                     c.getattr(&[FATTR4_TYPE]);
                     map.note_ops(1);
                 }

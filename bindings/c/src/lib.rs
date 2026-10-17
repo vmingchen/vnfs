@@ -98,12 +98,27 @@ macro_rules! fail_batch {
 /// Opaque filesystem handle owned by C.
 pub struct vfsi_fs {
     fs: Mutex<Box<dyn BindingBackend>>,
-    files: Mutex<std::collections::HashMap<i32, FileOperand>>,
+    files: Mutex<std::collections::HashMap<i32, CFile>>,
     next_fd: AtomicI32,
     /// Kernel mountpoint used by application-visible paths.
     mountpoint: PathBuf,
     /// Backend path corresponding to `mountpoint`.
     backend_root: PathBuf,
+}
+
+#[derive(Clone)]
+struct CFile {
+    file: FileOperand,
+    append: bool,
+}
+
+impl From<FileOperand> for CFile {
+    fn from(file: FileOperand) -> Self {
+        Self {
+            file,
+            append: false,
+        }
+    }
 }
 
 /// Attributes returned by [`vfsi_stat`] and passed to listdir callbacks.
@@ -1004,8 +1019,8 @@ fn make_fs(
 
 fn insert_c_file(
     fs: &vfsi_fs,
-    files: &mut std::collections::HashMap<i32, FileOperand>,
-    file: FileOperand,
+    files: &mut std::collections::HashMap<i32, CFile>,
+    file: CFile,
 ) -> Result<i32, VfError> {
     for _ in 0..i32::MAX {
         let fd = loop {
@@ -1671,7 +1686,14 @@ fn open_impl(
     let vpath = vpath_for(fs, path)?;
     let file = lock_or_io(&fs.fs)?.open_raw_impl(&vpath, flags, mode)?;
     let mut files = lock_or_io(&fs.files)?;
-    insert_c_file(fs, &mut files, file)
+    insert_c_file(
+        fs,
+        &mut files,
+        CFile {
+            file,
+            append: flags & libc::O_APPEND != 0,
+        },
+    )
 }
 
 /// Open a file and return a vfsi descriptor (`>= 0`), or a negative errno.
@@ -1705,7 +1727,7 @@ fn close_impl(fs: &vfsi_fs, fd: i32) -> Result<(), VfError> {
     let file = lock_or_io(&fs.files)?
         .remove(&fd)
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
-    lock_or_io(&fs.fs)?.close_impl(&file)
+    lock_or_io(&fs.fs)?.close_impl(&file.file)
 }
 
 /// Close a descriptor opened by [`vfsi_open`].
@@ -1731,7 +1753,7 @@ pub unsafe extern "C" fn vfsi_close(fs: *mut vfsi_fs, fd: c_int) -> c_int {
 fn pread_impl(fs: &vfsi_fs, fd: i32, buffer: &mut [u8], offset: u64) -> Result<usize, VfError> {
     let file = lock_or_io(&fs.files)?
         .get(&fd)
-        .cloned()
+        .map(|file| file.file.clone())
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
     let request = ReadOp::at(file, offset, buffer.len());
     let result = lock_or_io(&fs.fs)?.read_into_impl(&request, buffer)?;
@@ -1781,7 +1803,7 @@ pub unsafe extern "C" fn vfsi_pread(
 fn pwrite_impl(fs: &vfsi_fs, fd: i32, data: &[u8], offset: u64) -> Result<usize, VfError> {
     let file = lock_or_io(&fs.files)?
         .get(&fd)
-        .cloned()
+        .map(|file| file.file.clone())
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
     lock_or_io(&fs.fs)?.write_raw_impl(&file, offset, data)
 }
@@ -2065,8 +2087,15 @@ pub unsafe extern "C" fn vfsi_openv(
         let registration = (|| -> Result<(), VfError> {
             let mut files = lock_or_io(&fs.files)?;
             for (index, (op, file)) in ops.iter_mut().zip(&opened).enumerate() {
-                let fd = insert_c_file(fs, &mut files, file.clone())
-                    .map_err(|error| error.with_index(index))?;
+                let fd = insert_c_file(
+                    fs,
+                    &mut files,
+                    CFile {
+                        file: file.clone(),
+                        append: op.flags & libc::O_APPEND != 0,
+                    },
+                )
+                .map_err(|error| error.with_index(index))?;
                 op.fd = fd;
                 registered.push(fd);
             }
@@ -2139,7 +2168,7 @@ pub unsafe extern "C" fn vfsi_closev(
                         false
                     );
                 };
-                files.push(file);
+                files.push(file.file);
             }
             files
         };
@@ -2414,7 +2443,7 @@ pub unsafe extern "C" fn vfsi_preadv(
                     false
                 );
             };
-            reads.push(ReadOp::at(file, op.offset, op.len));
+            reads.push(ReadOp::at(file.file, op.offset, op.len));
         }
         drop(table);
         let mut backend = match lock_or_io(&fs.fs) {
@@ -2541,7 +2570,15 @@ pub unsafe extern "C" fn vfsi_pwritev(
                     // mutable arrays are exclusively borrowed for this call.
                     unsafe { std::slice::from_raw_parts(op.buf.cast::<u8>(), op.len) }
                 };
-                WriteOp::at(file, op.offset, data)
+                // Backends honor O_APPEND even for positioned writes. Express
+                // that policy in the request so validation accepts its actual
+                // EOF position without relaxing ordinary offset checks.
+                let offset = if file.append {
+                    vfsi_sync::VfOffset::End
+                } else {
+                    vfsi_sync::VfOffset::At(op.offset)
+                };
+                WriteOp::new(&file.file, offset, data)
             })
             .collect();
         let mut backend = match lock_or_io(&fs.fs) {
@@ -3940,7 +3977,7 @@ mod tests {
                 .files
                 .lock()
                 .unwrap()
-                .insert(10, FileOperand::from_fd(100));
+                .insert(10, FileOperand::from_fd(100).into());
             let mut bytes = [0xa5u8; 4];
             let mut op = vfsi_pread_op {
                 fd: 10,
@@ -3990,7 +4027,7 @@ mod tests {
                 .files
                 .lock()
                 .unwrap()
-                .insert(10, FileOperand::from_fd(100));
+                .insert(10, FileOperand::from_fd(100).into());
             let data = b"payload";
             let mut op = vfsi_pwrite_op {
                 fd: 10,
@@ -4008,6 +4045,67 @@ mod tests {
             assert_eq!(op.wrote, 99);
             assert_eq!(calls.lock().unwrap().len(), 1);
             unsafe { vfsi_free(fs) };
+        }
+    }
+
+    #[test]
+    fn c_vector_writes_preserve_append_and_positional_handles() {
+        for vector_open in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let raw = make_fs(
+                Box::new(vfsi_posix::backend(root.path()).unwrap()),
+                PathBuf::from("/"),
+                PathBuf::from("/"),
+            );
+            let append = CString::new("/append").unwrap();
+            let positional = CString::new("/positional").unwrap();
+            let mut opens = [
+                vfsi_open_op {
+                    path: append.as_ptr(),
+                    flags: libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+                    mode: 0o644,
+                    fd: -1,
+                },
+                vfsi_open_op {
+                    path: positional.as_ptr(),
+                    flags: libc::O_WRONLY | libc::O_CREAT,
+                    mode: 0o644,
+                    fd: -1,
+                },
+            ];
+            if vector_open {
+                let mut items = [vfsi_result::panic(); 2];
+                assert_eq!(
+                    unsafe { vfsi_openv(raw, opens.as_mut_ptr(), 2, items.as_mut_ptr()) }.category,
+                    VFSI_ERROR_NONE
+                );
+            } else {
+                for op in &mut opens {
+                    op.fd = unsafe { vfsi_open(raw, op.path, op.flags, op.mode) };
+                    assert!(op.fd >= 0);
+                }
+            }
+            for (payload, offset) in [(b"abc".as_slice(), 0), (b"XY".as_slice(), 1)] {
+                let mut writes = opens.map(|op| vfsi_pwrite_op {
+                    fd: op.fd,
+                    buf: payload.as_ptr().cast(),
+                    len: payload.len(),
+                    offset,
+                    wrote: 99,
+                });
+                let mut items = [vfsi_result::panic(); 2];
+                let result =
+                    unsafe { vfsi_pwritev(raw, writes.as_mut_ptr(), 2, items.as_mut_ptr()) };
+                assert_eq!(result.category, VFSI_ERROR_NONE, "{}", result.err_no);
+                assert!(items.iter().all(|item| item.category == VFSI_ERROR_NONE));
+                assert!(writes.iter().all(|op| op.wrote == payload.len()));
+            }
+            unsafe { vfsi_free(raw) };
+            assert_eq!(std::fs::read(root.path().join("append")).unwrap(), b"abcXY");
+            assert_eq!(
+                std::fs::read(root.path().join("positional")).unwrap(),
+                b"aXY"
+            );
         }
     }
 
@@ -4053,7 +4151,7 @@ mod tests {
                 .files
                 .lock()
                 .unwrap()
-                .insert(10, FileOperand::from_fd(100));
+                .insert(10, FileOperand::from_fd(100).into());
             // Keep all canaries inside one real allocation, so even an old
             // overlong copy can be detected without writing out of allocation.
             let mut bytes = [0xa5u8; 8];
@@ -4111,7 +4209,7 @@ mod tests {
                 .files
                 .lock()
                 .unwrap()
-                .insert(10, FileOperand::from_fd(100));
+                .insert(10, FileOperand::from_fd(100).into());
             let mut bytes = [0xa5u8; 4];
             let mut op = vfsi_pread_op {
                 fd: 10,
@@ -4165,7 +4263,7 @@ mod tests {
                 .files
                 .lock()
                 .unwrap()
-                .insert(10, FileOperand::from_fd(100));
+                .insert(10, FileOperand::from_fd(100).into());
             let data = b"payload";
             let mut op = vfsi_pwrite_op {
                 fd: 10,
@@ -4215,12 +4313,12 @@ mod tests {
             .files
             .lock()
             .unwrap()
-            .insert(10, FileOperand::from_fd(100));
+            .insert(10, FileOperand::from_fd(100).into());
         fs_ref
             .files
             .lock()
             .unwrap()
-            .insert(11, FileOperand::from_fd(101));
+            .insert(11, FileOperand::from_fd(101).into());
         let data = b"payload owned by C caller";
         let mut ops = [
             vfsi_pwrite_op {

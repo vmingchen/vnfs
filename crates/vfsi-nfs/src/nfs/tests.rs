@@ -646,6 +646,22 @@ fn path_setattrs_resolve_symlink_policy_before_mutation() {
 fn live_nofollow_setattr_respects_symlink_semantics() {
     use std::os::unix::fs::symlink;
 
+    fn snapshot(backend: &mut NfsVecFs, path: &str, follow: bool) -> VfAttrs {
+        let mut attrs = VfAttrs {
+            file: FileOperand::from_path(path),
+            masks: AttrMask::MODE | AttrMask::MTIME,
+            ..VfAttrs::default()
+        };
+        if follow {
+            backend.vgetattrs_impl(std::slice::from_mut(&mut attrs))
+        } else {
+            backend.vgetattrs_nofollow_impl(std::slice::from_mut(&mut attrs))
+        }
+        .unwrap();
+        assert!(attrs.returned.contains(attrs.masks));
+        attrs
+    }
+
     let mount = std::env::var("VFSI_NFS_TEST_MOUNT").expect("mount fixture is required");
     let name = format!(".vfsi-nofollow-setattr-{}", std::process::id());
     let fixture = Path::new(&mount).join(&name);
@@ -656,8 +672,8 @@ fn live_nofollow_setattr_respects_symlink_semantics() {
         .unwrap()
         .connect()
         .unwrap();
-    let before_link = backend.lstat_impl(Path::new("/link")).unwrap();
-    let before_target = backend.stat_impl(Path::new("/target")).unwrap();
+    let before_link = snapshot(&mut backend, "/link", false);
+    let before_target = snapshot(&mut backend, "/target", true);
     let mode_update = VfAttrs {
         file: FileOperand::from_path("/link"),
         masks: AttrMask::MODE,
@@ -668,8 +684,8 @@ fn live_nofollow_setattr_respects_symlink_semantics() {
         .vsetattrs_raw_nofollow_impl(std::slice::from_ref(&mode_update))
         .unwrap_err();
     assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
-    let after_mode_link = backend.lstat_impl(Path::new("/link")).unwrap();
-    let after_mode_target = backend.stat_impl(Path::new("/target")).unwrap();
+    let after_mode_link = snapshot(&mut backend, "/link", false);
+    let after_mode_target = snapshot(&mut backend, "/target", true);
     assert_eq!(after_mode_link.mode, before_link.mode);
     assert_eq!(after_mode_target.mode, before_target.mode);
 
@@ -685,8 +701,8 @@ fn live_nofollow_setattr_respects_symlink_semantics() {
     backend
         .vsetattrs_raw_nofollow_impl(std::slice::from_ref(&time_update))
         .unwrap();
-    let after_link = backend.lstat_impl(Path::new("/link")).unwrap();
-    let after_target = backend.stat_impl(Path::new("/target")).unwrap();
+    let after_link = snapshot(&mut backend, "/link", false);
+    let after_target = snapshot(&mut backend, "/target", true);
     assert_eq!(
         (after_link.mtime_sec, after_link.mtime_nsec),
         (time_update.mtime_sec, time_update.mtime_nsec)
@@ -715,8 +731,8 @@ fn live_nofollow_setattr_respects_symlink_semantics() {
     backend
         .vsetattrs_raw_nofollow_impl(&[target_mode_update.clone(), link_time_update.clone()])
         .unwrap();
-    let after_mixed_link = backend.lstat_impl(Path::new("/link")).unwrap();
-    let after_mixed_target = backend.stat_impl(Path::new("/target")).unwrap();
+    let after_mixed_link = snapshot(&mut backend, "/link", false);
+    let after_mixed_target = snapshot(&mut backend, "/target", true);
     assert_eq!(after_mixed_target.mode & 0o777, target_mode_update.mode);
     assert_eq!(
         (after_mixed_link.mtime_sec, after_mixed_link.mtime_nsec),
@@ -730,6 +746,94 @@ fn live_nofollow_setattr_respects_symlink_semantics() {
     std::fs::remove_file(fixture.join("link")).unwrap();
     std::fs::remove_file(fixture.join("target")).unwrap();
     std::fs::remove_dir(fixture).unwrap();
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires VFSI_NFS_TEST_MOUNT pointing to a writable direct NFS mount"]
+fn live_guarded_setattr_handles_symlink_cohorts_on_a_bounded_stack() {
+    use std::os::unix::fs::symlink;
+
+    let mount = std::env::var("VFSI_NFS_TEST_MOUNT").expect("mount fixture is required");
+    let fixture = Path::new(&mount).join(format!(".vfsi-setattr-cohort-{}", std::process::id()));
+    std::fs::create_dir(&fixture).unwrap();
+    // Own just this test's newly created directory, including on assertion failure.
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let cleanup = Cleanup(fixture.clone());
+    for name in ["target", "tail"] {
+        std::fs::write(fixture.join(name), b"keep").unwrap();
+    }
+    for index in 0..512 {
+        symlink("target", fixture.join(format!("link-{index}"))).unwrap();
+    }
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            let mut backend = NfsClientBuilder::from_mount(&fixture)
+                .unwrap()
+                .connect()
+                .unwrap();
+            let update = |path: String, mode| VfAttrs {
+                file: FileOperand::from_path(&path),
+                masks: AttrMask::MODE,
+                mode,
+                ..VfAttrs::default()
+            };
+            let mut updates = vec![update("/target".into(), 0o640)];
+            updates.extend((0..512).map(|index| update(format!("/link-{index}"), 0o600)));
+            updates.push(update("/tail".into(), 0o640));
+            backend.vsetattrs_raw_impl(&updates).unwrap();
+            assert_eq!(
+                backend.stat_impl(Path::new("/target")).unwrap().mode & 0o777,
+                0o600
+            );
+            assert_eq!(
+                backend.stat_impl(Path::new("/tail")).unwrap().mode & 0o777,
+                0o640
+            );
+
+            let missing_index = updates.len();
+            updates.push(update("/missing".into(), 0o600));
+            updates.push(update("/tail".into(), 0o666));
+            let error = backend.vsetattrs_raw_impl(&updates).unwrap_err();
+            assert_eq!(error.index(), Some(missing_index));
+            assert_eq!(error.err_no(), ERR_NOENT);
+            assert_eq!(
+                backend.stat_impl(Path::new("/tail")).unwrap().mode & 0o777,
+                0o640,
+                "do not execute the suffix after a later failure"
+            );
+
+            // The optimized guard path must not allocate a suffix-sized type vector
+            // that its caller never consumes.
+            let operation = crate::client::PathSetattrOp {
+                file: crate::client::FileRef::Path(
+                    crate::path::path_bytes(&backend.server_path(Path::new("/tail"))).to_vec(),
+                ),
+                mode: Some(0o640),
+                uid: None,
+                gid: None,
+                size: None,
+                atime: None,
+                mtime: None,
+                check_type: false,
+            };
+            let outcome = backend
+                .nfs
+                .setattr_path_compound_guarded(&[operation], &[false])
+                .unwrap();
+            assert!(outcome.failed.is_none());
+            assert!(outcome.types.is_empty());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    drop(cleanup);
 }
 
 #[test]

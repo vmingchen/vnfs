@@ -455,44 +455,51 @@ impl NfsVecFs {
                 check_type: false,
             });
         }
-        match self
-            .nfs
-            .setattr_path_compound_guarded(&ops, &symlink_guards)
-        {
-            Ok(outcome) => {
-                if let Some((i, status)) = outcome.failed {
-                    if symlink_guards[i] && status == nfsstat4_NFS4ERR_SAME {
-                        if nofollow_symlink_setattr_is_unsupported(
-                            follow,
-                            nfs_ftype4_NF4LNK,
-                            attrs[i].masks,
-                        ) {
-                            return Err(VfError::unsupported(i));
-                        }
-                        if follow {
-                            // NVERIFY failed before this path's SETATTR; follow
-                            // the final symlink and mutate only its target.
-                            self.setattr_one_following(i, &attrs[i])?;
-                            if i + 1 < attrs.len()
-                                && let Err(error) = self.vsetattrs_nfs(&attrs[i + 1..], follow)
-                            {
-                                return Err(error.map_index(|relative| i + 1 + relative));
+        let mut start = 0;
+        while start < attrs.len() {
+            match self
+                .nfs
+                .setattr_path_compound_guarded(&ops[start..], &symlink_guards[start..])
+            {
+                Ok(outcome) => {
+                    if let Some((i, status)) = outcome.failed {
+                        let i = start + i;
+                        if symlink_guards[i] && status == nfsstat4_NFS4ERR_SAME {
+                            if nofollow_symlink_setattr_is_unsupported(
+                                follow,
+                                nfs_ftype4_NF4LNK,
+                                attrs[i].masks,
+                            ) {
+                                return Err(VfError::unsupported(i));
                             }
-                            return Ok(());
+                            if follow {
+                                // NVERIFY failed before this path's SETATTR; follow
+                                // the final symlink and mutate only its target.
+                                self.setattr_one_following(i, &attrs[i])?;
+                                start = i + 1;
+                                continue;
+                            }
                         }
-                    }
-                    // The successful prefix is already applied. Resume at the
-                    // first failed path, preserving its index and symlink policy.
-                    if let Err(error) = self.vsetattrs_phased_nfs(&attrs[i..], follow) {
-                        return Err(error.map_index(|relative| i + relative));
+                        // The successful prefix is already applied. Resume at the
+                        // first failed path, preserving its index and symlink policy.
+                        if let Err(error) = self.vsetattrs_phased_nfs(&attrs[i..], follow) {
+                            return Err(error.map_index(|relative| i + relative));
+                        }
+                        return Ok(());
                     }
                     return Ok(());
                 }
-                Ok(())
+                Err(error) if error.is_transport() => {
+                    return Err(vfsi_core::error_from_rpc(error, None));
+                }
+                Err(_) => {
+                    return self
+                        .vsetattrs_phased_nfs(&attrs[start..], follow)
+                        .map_err(|error| error.map_index(|relative| start + relative));
+                }
             }
-            Err(error) if error.is_transport() => Err(vfsi_core::error_from_rpc(error, None)),
-            Err(_) => self.vsetattrs_phased_nfs(attrs, follow),
         }
+        Ok(())
     }
 
     /// The legacy phased setattrsv (resolve_many_tcfile + setattr_many).
