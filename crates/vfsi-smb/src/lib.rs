@@ -1118,6 +1118,7 @@ impl SmbVecFs {
         masks: AttrMask,
         max_count: usize,
         recursive: bool,
+        probe_file_reparse_points: bool,
         output: &mut Vec<VfAttrs>,
     ) -> VfResult<()> {
         let mut pending = vec![self.abs_path(dir)];
@@ -1145,7 +1146,7 @@ impl SmbVecFs {
                     break;
                 }
                 remaining -= 1;
-                if !entry.is_directory {
+                if !entry.is_directory && !probe_file_reparse_points {
                     continue;
                 }
                 let child = current.join(&entry.name);
@@ -1221,6 +1222,26 @@ impl SmbVecFs {
             }
         }
         Ok(())
+    }
+
+    fn listdir_with_reparse_policy(
+        &mut self,
+        dir: &Path,
+        masks: AttrMask,
+        max_count: usize,
+        recursive: bool,
+        probe_file_reparse_points: bool,
+    ) -> VfResult<Vec<VfAttrs>> {
+        let mut output = Vec::new();
+        self.listdir_rec(
+            dir,
+            masks,
+            max_count,
+            recursive,
+            probe_file_reparse_points,
+            &mut output,
+        )?;
+        Ok(output)
     }
 
     fn read_one(&mut self, op: &ReadOp) -> VfResult<ReadResult> {
@@ -2124,9 +2145,7 @@ impl VectorBackend for SmbVecFs {
         max_count: usize,
         recursive: bool,
     ) -> VfResult<Vec<VfAttrs>> {
-        let mut output = Vec::new();
-        self.listdir_rec(dir, masks, max_count, recursive, &mut output)?;
-        Ok(output)
+        self.listdir_with_reparse_policy(dir, masks, max_count, recursive, false)
     }
 
     fn vrename_impl(&mut self, pairs: &[(FileOperand, FileOperand)]) -> VfRes {
@@ -2344,15 +2363,18 @@ impl VectorBackend for SmbVecFs {
         &mut self,
         source: &Path,
         destination: &Path,
-        _symlinks: bool,
+        symlinks: bool,
         use_server_side_copy: bool,
     ) -> VfRes {
-        vfsi_sync::backend::helpers::copy_tree_with(
+        vfsi_sync::backend::helpers::copy_tree_with_listdir(
             self,
             source,
             destination,
-            false,
+            symlinks,
             AttrMask::MODE | AttrMask::SIZE,
+            |backend, path, masks| {
+                backend.listdir_with_reparse_policy(path, masks, 0, false, symlinks)
+            },
             |backend, pair| {
                 let pairs = std::slice::from_ref(pair);
                 if use_server_side_copy {

@@ -858,6 +858,27 @@ fn listing_walk_and_tree_copy_do_not_follow_directory_reparse_points() {
             .is_err()
     );
     assert!(!fs.exists_impl(&destination.join("alias/secret")).unwrap());
+
+    // SMB cannot create symlinks, so requesting preservation must report the
+    // unsupported operation instead of silently copying through the link.
+    let preserve_destination = root.join("copy-preserving-links");
+    let error = fs
+        .copy_tree_impl(&source, &preserve_destination, true, false)
+        .expect_err("requested symlink preservation must not be ignored");
+    assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
+
+    // Isolate a regular-file link: ignoring `symlinks=true` would silently
+    // create a regular destination file containing the link target's bytes.
+    let file_source = root.join("file-source");
+    let local_file_source = local_root.join(share_root).join("file-source");
+    fs::create_dir_all(&local_file_source).unwrap();
+    std::os::unix::fs::symlink("../outside/secret", local_file_source.join("alias")).unwrap();
+    let file_destination = root.join("file-copy-preserving-links");
+    let error = fs
+        .copy_tree_impl(&file_source, &file_destination, true, false)
+        .expect_err("file-symlink preservation must not copy through silently");
+    assert_eq!(error.err_no(), VF_ERR_UNSUPPORTED);
+    assert!(!fs.exists_impl(&file_destination.join("alias")).unwrap());
     cleanup_test_tree(&root);
 }
 
