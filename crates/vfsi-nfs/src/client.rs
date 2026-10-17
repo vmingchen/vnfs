@@ -1038,7 +1038,7 @@ impl NfsClient {
             host,
             connect_timeout,
             request_timeout,
-            &crate::rpc::NfsAuthentication::AuthSys,
+            &crate::rpc::NfsAuth::AuthSys,
         )
     }
 
@@ -1047,7 +1047,7 @@ impl NfsClient {
         host: &str,
         connect_timeout: Duration,
         request_timeout: Duration,
-        authentication: &crate::rpc::NfsAuthentication,
+        authentication: &crate::rpc::NfsAuth,
     ) -> RpcResult<NfsClient> {
         Self::connect_with_identity(
             host,
@@ -1063,7 +1063,7 @@ impl NfsClient {
         host: &str,
         connect_timeout: Duration,
         request_timeout: Duration,
-        authentication: &crate::rpc::NfsAuthentication,
+        authentication: &crate::rpc::NfsAuth,
         client_owner: Option<&[u8]>,
         client_verifier: Option<verifier4>,
     ) -> RpcResult<NfsClient> {
@@ -1091,7 +1091,7 @@ impl NfsClient {
             minorversion,
             connect_timeout,
             request_timeout,
-            &crate::rpc::NfsAuthentication::AuthSys,
+            &crate::rpc::NfsAuth::AuthSys,
         )
     }
 
@@ -1101,7 +1101,7 @@ impl NfsClient {
         minorversion: u32,
         connect_timeout: Duration,
         request_timeout: Duration,
-        authentication: &crate::rpc::NfsAuthentication,
+        authentication: &crate::rpc::NfsAuth,
     ) -> RpcResult<NfsClient> {
         Self::connect_minor_with_identity(
             host,
@@ -1119,7 +1119,7 @@ impl NfsClient {
         minorversion: u32,
         connect_timeout: Duration,
         request_timeout: Duration,
-        authentication: &crate::rpc::NfsAuthentication,
+        authentication: &crate::rpc::NfsAuth,
         client_owner: Option<&[u8]>,
         client_verifier: Option<verifier4>,
     ) -> RpcResult<NfsClient> {
@@ -1140,9 +1140,9 @@ impl NfsClient {
         let max_ops = session.max_operations.min(MAX_COMPOUND_OPS);
         let server_max_request_bytes = session.max_requestsize;
         let rpc_envelope_reserve = match authentication {
-            crate::rpc::NfsAuthentication::AuthSys => 1024,
+            crate::rpc::NfsAuth::AuthSys => 1024,
             #[cfg(feature = "rpcsec-gss")]
-            crate::rpc::NfsAuthentication::RpcsecGss { .. } => 8192,
+            crate::rpc::NfsAuth::RpcsecGss { .. } => 8192,
         };
         if max_compound_bytes <= rpc_envelope_reserve + 128 {
             return Err(RpcError::transport(format!(

@@ -18,11 +18,11 @@ process's default GSS credential cache, not a supplied password.
 ```rust,no_run
 # #[cfg(feature = "rpcsec-gss")]
 # fn main() -> vnfs::Result<()> {
-use vnfs::nfs::{Nfs, NfsAuthentication, RpcsecGssProtection};
+use vnfs::nfs::{Nfs, NfsAuth, RpcsecGssProtection};
 
 let fs = Nfs::builder("nfs.example.com")
     .root("/export/application")
-    .auth(NfsAuthentication::RpcsecGss {
+    .auth(NfsAuth::RpcsecGss {
         // Default host-based service name: nfs@nfs.example.com.
         service_principal: None,
         protection: RpcsecGssProtection::Integrity,
@@ -35,7 +35,7 @@ drop(fs);
 # fn main() {}
 ```
 
-`Authentication` corresponds to `sec=krb5`; `Integrity` corresponds to
+`Auth` corresponds to `sec=krb5`; `Integrity` corresponds to
 `sec=krb5i` and is the recommended baseline. Supply an explicit host-based
 service name if the server's identity differs from `nfs@<host>`.
 

@@ -18,7 +18,7 @@ pub const NFSPROC4_COMPOUND: rpcproc_t = 1;
 
 static SVC_INIT: OnceLock<Result<(), &'static str>> = OnceLock::new();
 
-/// Authentication used for the NFS RPC connection.
+/// Auth used for the NFS RPC connection.
 ///
 /// AUTH_SYS remains the default for compatibility. RPCSEC_GSS is available
 /// only when the `rpcsec-gss` Cargo feature is enabled and obtains Kerberos
@@ -26,7 +26,7 @@ static SVC_INIT: OnceLock<Result<(), &'static str>> = OnceLock::new();
 /// and other secrets are never accepted by this API.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum NfsAuthentication {
+pub enum NfsAuth {
     /// Traditional host-trusted AUTH_SYS credentials for the current process.
     #[default]
     AuthSys,
@@ -46,7 +46,7 @@ pub enum NfsAuthentication {
 #[non_exhaustive]
 pub enum RpcsecGssProtection {
     /// Authenticate requests (`sec=krb5`) without protecting RPC payloads.
-    Authentication,
+    Auth,
     /// Authenticate requests and integrity-protect payloads (`sec=krb5i`).
     #[default]
     Integrity,
@@ -57,7 +57,7 @@ impl RpcsecGssProtection {
     fn service_code(self) -> std::os::raw::c_int {
         use libntirpc_sys::rpcsec_gss::{RPCSEC_GSS_SVC_INTEGRITY, RPCSEC_GSS_SVC_NONE};
         match self {
-            Self::Authentication => RPCSEC_GSS_SVC_NONE,
+            Self::Auth => RPCSEC_GSS_SVC_NONE,
             Self::Integrity => RPCSEC_GSS_SVC_INTEGRITY,
         }
     }
@@ -70,7 +70,7 @@ impl RpcsecGssProtection {
         const GSS_C_MUTUAL_FLAG: std::os::raw::c_uint = 2;
         const GSS_C_INTEG_FLAG: std::os::raw::c_uint = 32;
         match self {
-            Self::Authentication => 0,
+            Self::Auth => 0,
             Self::Integrity => GSS_C_MUTUAL_FLAG | GSS_C_INTEG_FLAG,
         }
     }
@@ -265,12 +265,7 @@ impl RpcClient {
         connect_timeout: Duration,
         request_timeout: Duration,
     ) -> RpcResult<RpcClient> {
-        Self::connect_with_authentication(
-            host,
-            connect_timeout,
-            request_timeout,
-            &NfsAuthentication::AuthSys,
-        )
+        Self::connect_with_authentication(host, connect_timeout, request_timeout, &NfsAuth::AuthSys)
     }
 
     /// Connect with explicit timeouts and authentication.
@@ -278,7 +273,7 @@ impl RpcClient {
         host: &str,
         connect_timeout: Duration,
         request_timeout: Duration,
-        authentication: &NfsAuthentication,
+        authentication: &NfsAuth,
     ) -> RpcResult<RpcClient> {
         svc_init_once()?;
 
@@ -331,9 +326,9 @@ impl RpcClient {
         let auth = match authentication {
             // SAFETY: AUTH_SYS construction takes no caller pointers; the returned handle
             // is checked before use and released by RpcClient.
-            NfsAuthentication::AuthSys => unsafe { authunix_ncreate_default() },
+            NfsAuth::AuthSys => unsafe { authunix_ncreate_default() },
             #[cfg(feature = "rpcsec-gss")]
-            NfsAuthentication::RpcsecGss {
+            NfsAuth::RpcsecGss {
                 service_principal,
                 protection,
             } => {
@@ -375,9 +370,9 @@ impl RpcClient {
                 destroy_client(clnt);
             }
             return Err(RpcError::transport(match authentication {
-                NfsAuthentication::AuthSys => "failed to create AUTH_SYS credentials",
+                NfsAuth::AuthSys => "failed to create AUTH_SYS credentials",
                 #[cfg(feature = "rpcsec-gss")]
-                NfsAuthentication::RpcsecGss { .. } => {
+                NfsAuth::RpcsecGss { .. } => {
                     "RPCSEC_GSS negotiation failed; obtain a valid Kerberos ticket and verify the NFS service principal"
                 }
             }));
@@ -495,7 +490,7 @@ fn rpc_transport_kind(status: clnt_stat) -> vfsi_core::TransportKind {
             K::Connection
         }
         value if value == clnt_stat_RPC_CANTDECODERES => K::InvalidReply,
-        value if value == clnt_stat_RPC_AUTHERROR => K::Authentication,
+        value if value == clnt_stat_RPC_AUTHERROR => K::Auth,
         _ => K::Other,
     }
 }
@@ -513,10 +508,7 @@ mod transport_kind_tests {
         );
         assert_eq!(rpc_transport_kind(clnt_stat_RPC_CANTSEND), K::Connection);
         assert_eq!(rpc_transport_kind(clnt_stat_RPC_CANTRECV), K::Connection);
-        assert_eq!(
-            rpc_transport_kind(clnt_stat_RPC_AUTHERROR),
-            K::Authentication
-        );
+        assert_eq!(rpc_transport_kind(clnt_stat_RPC_AUTHERROR), K::Auth);
         assert_eq!(rpc_transport_kind(clnt_stat_RPC_CANTENCODEARGS), K::Other);
         assert_eq!(rpc_transport_kind(clnt_stat_RPC_PROGVERSMISMATCH), K::Other);
     }
@@ -618,7 +610,7 @@ mod tests {
 
     #[test]
     fn authentication_defaults_to_auth_sys() {
-        assert_eq!(NfsAuthentication::default(), NfsAuthentication::AuthSys);
+        assert_eq!(NfsAuth::default(), NfsAuth::AuthSys);
     }
 
     #[test]
@@ -651,7 +643,7 @@ mod tests {
     fn rpcsec_gss_levels_map_to_wire_services_and_required_context_flags() {
         use libntirpc_sys::rpcsec_gss::{RPCSEC_GSS_SVC_INTEGRITY, RPCSEC_GSS_SVC_NONE};
 
-        let auth = RpcsecGssProtection::Authentication;
+        let auth = RpcsecGssProtection::Auth;
         let integrity = RpcsecGssProtection::Integrity;
         assert_eq!(auth.service_code(), RPCSEC_GSS_SVC_NONE);
         assert_eq!(integrity.service_code(), RPCSEC_GSS_SVC_INTEGRITY);

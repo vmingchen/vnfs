@@ -7,13 +7,13 @@
 
 use std::io::Read;
 use vnfs::files::{OpenFlags, OpenOp, ReadOptions, Vfsi, VfsiExt};
-use vnfs::nfs::{Nfs, NfsAuthentication, NfsBuilder};
+use vnfs::nfs::{Nfs, NfsAuth, NfsBuilder};
 
 #[test]
 fn application_surface_is_small_and_typed() {
     let _: NfsBuilder = Nfs::builder("server.example.com")
         .root("/export")
-        .auth(NfsAuthentication::AuthSys);
+        .auth(NfsAuth::AuthSys);
     let _ = OpenOp::new("/file", OpenFlags::READ);
     assert_eq!(ReadOptions::new().total_byte_limit(), None);
     assert_eq!(

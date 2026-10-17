@@ -13,7 +13,7 @@ pub enum TransportKind {
     Timeout,
     Connection,
     InvalidReply,
-    Authentication,
+    Auth,
     Other,
 }
 

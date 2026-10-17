@@ -7,8 +7,7 @@ use std::time::Duration;
 
 use crate::{NfsClient, ResourceLimits, Result as VfResult};
 use vfsi_nfs::{
-    NfsAuthentication, NfsClientBuilder, NfsObserver, NfsReadPool, NfsReadPoolOptions,
-    NfsRecoveryPolicy,
+    NfsAuth, NfsClientBuilder, NfsObserver, NfsReadPool, NfsReadPoolOptions, NfsRecoveryPolicy,
 };
 use vfsi_sync::FsClient;
 
@@ -228,7 +227,7 @@ impl NfsBuilder {
     /// Select RPC authentication explicitly. Default AUTH_SYS conveys Unix
     /// identity but provides no cryptographic peer authentication or encryption.
     /// An explicitly requested secure mode must succeed or fail; no downgrade.
-    pub fn auth(mut self, auth: NfsAuthentication) -> Self {
+    pub fn auth(mut self, auth: NfsAuth) -> Self {
         self.inner = self.inner.authentication(auth);
         self
     }

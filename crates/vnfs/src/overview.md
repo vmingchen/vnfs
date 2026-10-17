@@ -105,7 +105,7 @@ helpers, not core execution methods. Import the traits with `vnfs::prelude::*` a
   [`nfs::NfsClientPool`] distributes workloads across independent sessions;
   [`nfs::NfsReadPool`] provides bounded pipelined large-file reads.
 - Default AUTH_SYS conveys Unix identity without cryptographic peer authentication
-  or encryption. Enable `rpcsec-gss` and select [`nfs::NfsAuthentication`] explicitly
+  or encryption. Enable `rpcsec-gss` and select [`nfs::NfsAuth`] explicitly
   for Kerberos. Requested secure authentication fails rather than downgrades.
 - Direct NFS access, including mount discovery, does not share or invalidate
   the Linux kernel client's caches. Mixing the two requires an explicit coherence

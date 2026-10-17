@@ -44,6 +44,6 @@ pub mod vecfs {
 pub use nfs::RpcsecGssProtection;
 #[cfg(feature = "ffi")]
 pub use nfs::{
-    NfsAuthentication, NfsClientBuilder, NfsConnectOptions, NfsEvent, NfsObserver, NfsReadPool,
+    NfsAuth, NfsClientBuilder, NfsConnectOptions, NfsEvent, NfsObserver, NfsReadPool,
     NfsReadPoolOptions, NfsRecoveryPolicy, NfsServerCopyStats, NfsVecFs,
 };

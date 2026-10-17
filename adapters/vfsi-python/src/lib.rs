@@ -30,7 +30,7 @@ use vfsi_nfs::RpcsecGssProtection;
 #[cfg(feature = "nfs")]
 use vfsi_nfs::compound::{compound_stats, rpc_stats};
 #[cfg(feature = "nfs")]
-use vfsi_nfs::{NfsAuthentication, NfsClientBuilder};
+use vfsi_nfs::{NfsAuth, NfsClientBuilder};
 #[cfg(feature = "smb")]
 use vfsi_smb::SmbVecFs;
 use vfsi_sync::{ListDirOptions, ReadAllOptions};
@@ -788,14 +788,14 @@ impl NfsClient {
                         return Err(PyValueError::new_err("minor_version must be 1, 2, or None"));
                     }
                     let nfs_authentication = match auth {
-                        "auth_sys" => NfsAuthentication::AuthSys,
+                        "auth_sys" => NfsAuth::AuthSys,
                         #[cfg(feature = "nfs-rpcsec-gss")]
-                        "krb5" => NfsAuthentication::RpcsecGss {
+                        "krb5" => NfsAuth::RpcsecGss {
                             service_principal: service_principal.clone(),
-                            protection: RpcsecGssProtection::Authentication,
+                            protection: RpcsecGssProtection::Auth,
                         },
                         #[cfg(feature = "nfs-rpcsec-gss")]
-                        "krb5i" => NfsAuthentication::RpcsecGss {
+                        "krb5i" => NfsAuth::RpcsecGss {
                             service_principal: service_principal.clone(),
                             protection: RpcsecGssProtection::Integrity,
                         },
