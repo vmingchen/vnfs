@@ -796,6 +796,71 @@ fn path_reads_recover_after_server_restart() {
     cleanup_test_tree(&root);
 }
 
+#[cfg(unix)]
+#[test]
+fn listing_walk_and_tree_copy_do_not_follow_directory_reparse_points() {
+    let Some(mut fs) = connect() else { return };
+    let Ok(local_root) = std::env::var("VFSI_SMB_LOCAL_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-reparse-{}", std::process::id()));
+    let source = root.join("source");
+    let local_root = Path::new(&local_root);
+    let share_root = root.strip_prefix("/").unwrap();
+    let local_source = local_root.join(share_root).join("source");
+    let local_outside = local_root.join(share_root).join("outside");
+    fs::create_dir_all(&local_source).unwrap();
+    fs::create_dir_all(&local_outside).unwrap();
+    fs::write(local_outside.join("secret"), b"outside source tree").unwrap();
+    std::os::unix::fs::symlink("../outside", local_source.join("alias")).unwrap();
+
+    let shallow = fs
+        .listdir_impl(&source, AttrMask::MODE, 0, false)
+        .expect("shallow listing should identify the directory reparse point");
+    assert!(shallow.iter().any(|entry| {
+        entry
+            .file
+            .path()
+            .is_some_and(|path| path.ends_with("alias"))
+            && entry.ftype == VfType::Symlink
+    }));
+
+    let walked = fs
+        .walk_impl(&source, AttrMask::MODE, &mut |_, _| {})
+        .expect("walk should stop at the directory reparse point");
+    assert!(!walked.iter().flat_map(|dir| &dir.entries).any(|entry| {
+        entry
+            .file
+            .path()
+            .is_some_and(|path| path.ends_with("alias/secret"))
+    }));
+
+    let entries = fs
+        .listdir_impl(&source, AttrMask::MODE, 0, true)
+        .expect("recursive listing should identify the directory reparse point");
+    assert!(entries.iter().any(|entry| {
+        entry
+            .file
+            .path()
+            .is_some_and(|path| path.ends_with("alias"))
+            && entry.ftype == VfType::Symlink
+    }));
+    assert!(!entries.iter().any(|entry| {
+        entry
+            .file
+            .path()
+            .is_some_and(|path| path.ends_with("alias/secret"))
+    }));
+
+    let destination = root.join("copy");
+    assert!(
+        fs.copy_tree_impl(&source, &destination, false, false)
+            .is_err()
+    );
+    assert!(!fs.exists_impl(&destination.join("alias/secret")).unwrap());
+    cleanup_test_tree(&root);
+}
+
 #[test]
 fn copy_options_reject_unsupported_symlink_preservation_before_lookup() {
     let Some(mut fs) = connect() else {

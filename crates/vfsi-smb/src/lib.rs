@@ -72,6 +72,9 @@ const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
 const FILE_BASIC_INFORMATION: u8 = 4;
 const FILE_INTERNAL_INFORMATION: u8 = 6;
 const FILE_END_OF_FILE_INFORMATION: u8 = 20;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const SMB_REPARSE_PROBE_CONCURRENCY: usize = 32;
 
 #[bitfields::bitfield(u8)]
 #[derive(PartialEq, Eq)]
@@ -1087,6 +1090,27 @@ impl SmbVecFs {
         // bits deliberately remain clear instead of inventing values.
     }
 
+    fn probe_reparse_point_batch(
+        &mut self,
+        requests: &[(usize, CreateRequest)],
+        reparse_points: &mut [bool],
+    ) -> VfRes {
+        if requests.is_empty() {
+            return Ok(());
+        }
+        let connection = self.client.connection_mut().clone();
+        let tree_id = self.tree.tree_id;
+        let jobs = requests
+            .iter()
+            .map(|(_, create)| probe_reparse_point(connection.clone(), tree_id, create.clone()));
+        let outcomes = self.runtime.block_on(join_all(jobs));
+        queue_deferred_closes(&outcomes, &mut self.deferred_closes);
+        for ((index, _), outcome) in requests.iter().zip(outcomes) {
+            reparse_points[*index] = outcome.result?;
+        }
+        Ok(())
+    }
+
     fn listdir_rec(
         &mut self,
         dir: &Path,
@@ -1105,8 +1129,43 @@ impl SmbVecFs {
                 .runtime
                 .block_on(self.client.list_directory(&mut self.tree, &path))
                 .map_err(|error| smb_error(error, 0))?;
+            let mut reparse_points = vec![false; entries.len()];
+            let mut requests = Vec::with_capacity(SMB_REPARSE_PROBE_CONCURRENCY);
+            let mut remaining = if max_count == 0 {
+                usize::MAX
+            } else {
+                max_count.saturating_sub(output.len())
+            };
+            for (index, entry) in entries.iter().enumerate() {
+                if matches!(entry.name.as_str(), "." | "..") {
+                    continue;
+                }
+                if remaining == 0 {
+                    break;
+                }
+                remaining -= 1;
+                if !entry.is_directory {
+                    continue;
+                }
+                let child = current.join(&entry.name);
+                let child_path = self.path_string(&child)?;
+                let mut create = self.open_request(&child_path, libc::O_RDONLY)?;
+                // Leave the object type unconstrained: some SMB servers
+                // expose a directory symlink as a reparse object that is
+                // not itself a directory.
+                create.create_options = FILE_OPEN_REPARSE_POINT;
+                create.desired_access = FileAccessMask::new(
+                    FileAccessMask::FILE_READ_ATTRIBUTES | FileAccessMask::SYNCHRONIZE,
+                );
+                requests.push((index, create));
+                if requests.len() == SMB_REPARSE_PROBE_CONCURRENCY {
+                    self.probe_reparse_point_batch(&requests, &mut reparse_points)?;
+                    requests.clear();
+                }
+            }
+            self.probe_reparse_point_batch(&requests, &mut reparse_points)?;
             let mut children = Vec::new();
-            for entry in entries {
+            for (index, entry) in entries.into_iter().enumerate() {
                 if matches!(entry.name.as_str(), "." | "..") {
                     continue;
                 }
@@ -1114,13 +1173,18 @@ impl SmbVecFs {
                     break;
                 }
                 let child = current.join(&entry.name);
+                // SMB directory entries discard FILE_ATTRIBUTE_REPARSE_POINT;
+                // the bounded probes above open candidate children without following them.
+                let is_reparse_point = reparse_points[index];
                 let mut attrs = VfAttrs {
                     file: FileOperand::Path {
                         base: VfPathBase::Abs,
                         path: Path::new("/").join(&child),
                     },
                     masks,
-                    ftype: if entry.is_directory {
+                    ftype: if is_reparse_point {
+                        VfType::Symlink
+                    } else if entry.is_directory {
                         VfType::Directory
                     } else {
                         VfType::Regular
@@ -1129,7 +1193,9 @@ impl SmbVecFs {
                 };
                 attrs.returned = AttrMask::empty();
                 if masks.contains(AttrMask::MODE) {
-                    attrs.mode = if entry.is_directory {
+                    attrs.mode = if is_reparse_point {
+                        libc::S_IFLNK | 0o777
+                    } else if entry.is_directory {
                         libc::S_IFDIR | 0o777
                     } else {
                         libc::S_IFREG | 0o666
@@ -1144,7 +1210,7 @@ impl SmbVecFs {
                     (attrs.mtime_sec, attrs.mtime_nsec) = filetime_parts(entry.modified);
                     attrs.returned.insert(AttrMask::MTIME);
                 }
-                if recursive && entry.is_directory {
+                if recursive && entry.is_directory && !is_reparse_point {
                     children.push(child);
                 }
                 output.push(attrs);
@@ -2449,6 +2515,57 @@ fn handle_info(basic: &[u8], standard: &[u8]) -> VfResult<smb2::client::FileInfo
 fn identities_are_independent(identities: &[u64]) -> bool {
     let mut unique = HashSet::with_capacity(identities.len());
     identities.iter().all(|identity| unique.insert(*identity))
+}
+
+async fn probe_reparse_point(
+    connection: Connection,
+    tree_id: TreeId,
+    create: CreateRequest,
+) -> CompoundOutcome<bool> {
+    let mut deferred_close = None;
+    let close = CloseRequest {
+        flags: 0,
+        file_id: FileId::SENTINEL,
+    };
+    let operations = [
+        CompoundOp {
+            command: Command::Create,
+            body: &create,
+            tree_id: Some(tree_id),
+            credit_charge: CreditCharge(1),
+        },
+        CompoundOp {
+            command: Command::Close,
+            body: &close,
+            tree_id: Some(tree_id),
+            credit_charge: CreditCharge(1),
+        },
+    ];
+    let result = async {
+        let responses = connection
+            .execute_compound(&operations)
+            .await
+            .map_err(|error| smb_error(error, 0))?;
+        let responses = collect_compound(responses, operations.len())?;
+        require_status(&responses[0], Command::Create, 0)?;
+        let opened = CreateResponse::unpack(&mut ReadCursor::new(&responses[0].body))
+            .map_err(|error| smb_error(error, 0))?;
+        let is_reparse_point = opened.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        close_compound_on_connection(
+            &connection,
+            tree_id,
+            opened.file_id,
+            responses[1].header.status == NtStatus::SUCCESS,
+            &mut deferred_close,
+        )
+        .await?;
+        Ok(is_reparse_point)
+    }
+    .await;
+    CompoundOutcome {
+        result,
+        deferred_close,
+    }
 }
 
 /// Return the server's stable file index for an existing path without
