@@ -3489,10 +3489,32 @@ impl NfsClient {
         &mut self,
         ops: &[PathSetattrOp],
     ) -> RpcResult<PathSetattrOutcome> {
+        self.setattr_path_compound_inner(ops, None)
+    }
+
+    /// Internal variant that inserts an NVERIFY symlink guard before SETATTR
+    /// for selected operations. A matching symlink stops that operation before
+    /// mutation, allowing the caller to resolve and update the target safely.
+    pub(crate) fn setattr_path_compound_guarded(
+        &mut self,
+        ops: &[PathSetattrOp],
+        symlink_guards: &[bool],
+    ) -> RpcResult<PathSetattrOutcome> {
+        if ops.len() != symlink_guards.len() {
+            return Err(RpcError::transport("invalid SETATTR symlink-guard count"));
+        }
+        self.setattr_path_compound_inner(ops, Some(symlink_guards))
+    }
+
+    fn setattr_path_compound_inner(
+        &mut self,
+        ops: &[PathSetattrOp],
+        symlink_guards: Option<&[bool]>,
+    ) -> RpcResult<PathSetattrOutcome> {
         let n = ops.len();
         let mut types: Vec<Option<u32>> = vec![None; n];
         let mut failed: Option<(usize, u32)> = None;
-        let per_file = 5; // RESTOREFH + LOOKUP + [GETATTR] + SETATTR + margin
+        let per_file = 5; // RESTOREFH + LOOKUP + [GETATTR or NVERIFY] + SETATTR + margin
         let reserve = 16;
         let mut global = 0usize;
         let mut max_items = usize::MAX;
@@ -3535,7 +3557,10 @@ impl NfsClient {
                         map.note_ops(1);
                     }
                 }
-                if op.check_type {
+                if symlink_guards.is_some_and(|guards| guards[global]) {
+                    c.nverify_type(nfs_ftype4_NF4LNK);
+                    map.note_ops(1);
+                } else if op.check_type {
                     c.getattr(&[FATTR4_TYPE]);
                     map.note_ops(1);
                 }

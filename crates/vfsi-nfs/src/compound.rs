@@ -668,6 +668,28 @@ impl Compound {
         self.push(op);
     }
 
+    /// Stop a compound when the current object's selected attributes match.
+    /// Used internally to guard a following SETATTR without a separate round trip.
+    pub(crate) fn nverify_type(&mut self, expected: nfs_ftype4) {
+        let values = expected.to_be_bytes();
+        let (value_ptr, value_len) = self.keep(&values);
+        let op = nfs_argop4 {
+            argop: nfs_opnum4_NFS4_OP_NVERIFY,
+            nfs_argop4_u: nfs_argop4__bindgen_ty_1 {
+                opnverify: NVERIFY4args {
+                    obj_attributes: fattr4 {
+                        attrmask: Self::bitmap(&[FATTR4_TYPE]),
+                        attr_vals: attrlist4 {
+                            attrlist4_len: value_len,
+                            attrlist4_val: value_ptr,
+                        },
+                    },
+                },
+            },
+        };
+        self.push(op);
+    }
+
     /// SETATTR mode and/or size on the current object. A None value leaves the
     /// corresponding attribute unchanged. Uses the zero stateid (current
     /// state).
@@ -1094,6 +1116,7 @@ fn response_op_status(ro: &nfs_resop4) -> u32 {
             nfs_opnum4_NFS4_OP_GETFH => ro.nfs_resop4_u.opgetfh.status,
             nfs_opnum4_NFS4_OP_LOOKUP => ro.nfs_resop4_u.oplookup.status,
             nfs_opnum4_NFS4_OP_SEQUENCE => ro.nfs_resop4_u.opsequence.sr_status,
+            nfs_opnum4_NFS4_OP_NVERIFY => ro.nfs_resop4_u.opnverify.status,
             nfs_opnum4_NFS4_OP_OPEN => ro.nfs_resop4_u.opopen.status,
             nfs_opnum4_NFS4_OP_READ => ro.nfs_resop4_u.opread.status,
             nfs_opnum4_NFS4_OP_WRITE => ro.nfs_resop4_u.opwrite.status,
@@ -1842,6 +1865,27 @@ mod request_size_tests {
             compound.create(b"x", kind, None);
             assert_eq!(compound.encoded_len_up_to(1024).unwrap(), Some(expected));
         }
+    }
+
+    #[test]
+    fn symlink_nverify_encodes_type_before_guarded_setattr() {
+        let mut compound = Compound::new();
+        compound.nverify_type(nfs_ftype4_NF4LNK);
+        compound.setattr(Some(0o640), None);
+        assert_eq!(compound.ops.len(), 2);
+        assert_eq!(compound.ops[0].argop, nfs_opnum4_NFS4_OP_NVERIFY);
+        assert_eq!(compound.ops[1].argop, nfs_opnum4_NFS4_OP_SETATTR);
+        let op = &compound.ops[0];
+        let args = unsafe { op.nfs_argop4_u.opnverify };
+        assert_eq!(args.obj_attributes.attrmask.bitmap4_len, 1);
+        assert_eq!(args.obj_attributes.attrmask.map[0], 1 << FATTR4_TYPE);
+        let values = unsafe {
+            std::slice::from_raw_parts(
+                args.obj_attributes.attr_vals.attrlist4_val.cast::<u8>(),
+                args.obj_attributes.attr_vals.attrlist4_len as usize,
+            )
+        };
+        assert_eq!(values, &nfs_ftype4_NF4LNK.to_be_bytes());
     }
 
     #[test]

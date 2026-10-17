@@ -696,9 +696,9 @@ fn live_nofollow_setattr_respects_symlink_semantics() {
         (before_target.mtime_sec, before_target.mtime_nsec)
     );
 
-    // A path MODE update sends the whole vector through the phased path. It
-    // must not make an independent no-follow timestamp update to a symlink
-    // fail just because the sibling operation needs type resolution.
+    // The MODE update uses an in-compound NVERIFY guard, so it can stay in
+    // the vector without forcing the independent no-follow timestamp update
+    // onto a phased path.
     let target_mode_update = VfAttrs {
         file: FileOperand::from_path("/target"),
         masks: AttrMask::MODE,
