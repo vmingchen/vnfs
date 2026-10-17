@@ -71,6 +71,7 @@ const FILE_DIRECTORY_FILE: u32 = 0x0000_0001;
 const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
 const FILE_BASIC_INFORMATION: u8 = 4;
 const FILE_INTERNAL_INFORMATION: u8 = 6;
+const FILE_DISPOSITION_INFORMATION: u8 = 13;
 const FILE_END_OF_FILE_INFORMATION: u8 = 20;
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
@@ -2176,58 +2177,35 @@ impl VectorBackend for SmbVecFs {
         let mut prepared = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
             let path = self.file_path(file).map_err(|e| e.with_index(index))?;
-            let wire = self.path_string(&path).map_err(|e| e.with_index(index))?;
-            prepared.push((path, wire));
+            let path_string = self.path_string(&path).map_err(|e| e.with_index(index))?;
+            let create = self
+                .open_request(&path_string, libc::O_RDONLY)
+                .map_err(|e| e.with_index(index))?;
+            prepared.push((path, delete_entry_create_request(create)));
         }
         let path_list: Vec<PathBuf> = prepared.iter().map(|(path, _)| path.clone()).collect();
+        let connection = self.client.connection_mut().clone();
+        let tree_id = self.tree.tree_id;
         if prepared.len() > 1 && !self.tree.is_dfs && paths_are_independent(&path_list) {
-            let connection = self.client.connection_mut().clone();
-            let tree = self.tree.clone();
-            let stat_jobs = prepared.iter().map(|(_, path)| {
-                let tree = tree.clone();
-                let mut connection = connection.clone();
-                let path = path.clone();
-                async move { tree.stat(&mut connection, &path).await }
-            });
-            let infos = self.runtime.block_on(join_all(stat_jobs));
-            let mut kinds = Vec::with_capacity(infos.len());
-            for (index, result) in infos.into_iter().enumerate() {
-                kinds.push(
-                    result
-                        .map_err(|error| smb_error(error, index))?
-                        .is_directory,
-                );
-            }
-            let delete_jobs = prepared.into_iter().zip(kinds).map(|((_, path), is_dir)| {
-                let tree = tree.clone();
-                let mut connection = connection.clone();
-                async move {
-                    if is_dir {
-                        tree.delete_directory(&mut connection, &path).await
-                    } else {
-                        tree.delete_file(&mut connection, &path).await
-                    }
-                }
-            });
-            for (index, result) in self
-                .runtime
-                .block_on(join_all(delete_jobs))
+            let jobs = prepared
                 .into_iter()
-                .enumerate()
-            {
-                result.map_err(|error| smb_error(error, index))?;
+                .map(|(_, create)| delete_entry_on_connection(connection.clone(), tree_id, create));
+            let outcomes = self.runtime.block_on(join_all(jobs));
+            queue_deferred_closes(&outcomes, &mut self.deferred_closes);
+            for (index, outcome) in outcomes.into_iter().enumerate() {
+                outcome.result.map_err(|error| error.with_index(index))?;
             }
         } else {
-            for (index, (_, path)) in prepared.into_iter().enumerate() {
-                let info = self.client_stat(&path).map_err(|e| e.with_index(index))?;
-                let result = if info.is_directory {
-                    self.runtime
-                        .block_on(self.client.delete_directory(&self.tree, &path))
-                } else {
-                    self.runtime
-                        .block_on(self.client.delete_file(&self.tree, &path))
-                };
-                result.map_err(|e| smb_error(e, index))?;
+            for (index, (_, create)) in prepared.into_iter().enumerate() {
+                let outcome = self.runtime.block_on(delete_entry_on_connection(
+                    connection.clone(),
+                    tree_id,
+                    create,
+                ));
+                if let Some(file_id) = outcome.deferred_close {
+                    self.deferred_closes.push(file_id);
+                }
+                outcome.result.map_err(|error| error.with_index(index))?;
             }
         }
         Ok(())
@@ -2512,9 +2490,103 @@ fn handle_info(basic: &[u8], standard: &[u8]) -> VfResult<smb2::client::FileInfo
     })
 }
 
+fn delete_entry_create_request(mut create: CreateRequest) -> CreateRequest {
+    create.desired_access = FileAccessMask::new(
+        FileAccessMask::DELETE | FileAccessMask::FILE_READ_ATTRIBUTES | FileAccessMask::SYNCHRONIZE,
+    );
+    // Open the final reparse point itself so deleting a symlink cannot delete
+    // its target. Leave file/directory type unconstrained to cover dangling and
+    // directory symlinks as well as ordinary files and directories.
+    create.create_options = FILE_OPEN_REPARSE_POINT;
+    create
+}
+
 fn identities_are_independent(identities: &[u64]) -> bool {
     let mut unique = HashSet::with_capacity(identities.len());
     identities.iter().all(|identity| unique.insert(*identity))
+}
+
+async fn delete_entry_on_connection(
+    connection: Connection,
+    tree_id: TreeId,
+    create: CreateRequest,
+) -> CompoundOutcome<()> {
+    let mut deferred_close = None;
+    let result = async {
+        let disposition = SetInfoRequest {
+            info_type: InfoType::File,
+            file_info_class: FILE_DISPOSITION_INFORMATION,
+            additional_information: 0,
+            file_id: FileId::SENTINEL,
+            buffer: vec![1], // DeletePending = true (MS-FSCC 2.4.11).
+        };
+        let close = CloseRequest {
+            flags: 0,
+            file_id: FileId::SENTINEL,
+        };
+        let operations = [
+            CompoundOp {
+                command: Command::Create,
+                body: &create,
+                tree_id: Some(tree_id),
+                credit_charge: CreditCharge(1),
+            },
+            CompoundOp {
+                command: Command::SetInfo,
+                body: &disposition,
+                tree_id: Some(tree_id),
+                credit_charge: CreditCharge(1),
+            },
+            CompoundOp {
+                command: Command::Close,
+                body: &close,
+                tree_id: Some(tree_id),
+                credit_charge: CreditCharge(1),
+            },
+        ];
+        let responses = connection
+            .execute_compound(&operations)
+            .await
+            .map_err(|error| smb_error(error, 0))?;
+        let response_state = decode_delete_entry_responses(
+            responses,
+            operations.len(),
+            |response| {
+                require_status(&response, Command::Create, 0)?;
+                CreateResponse::unpack(&mut ReadCursor::new(&response.body))
+                    .map(|opened| opened.file_id)
+                    .map_err(|error| smb_error(error, 0))
+            },
+            |response| require_status(&response, Command::SetInfo, 0),
+            |response| response.header.status == NtStatus::SUCCESS,
+            |error| smb_error(error, 0),
+        )?;
+        let DeleteEntryResponseState {
+            file_id,
+            delete_result,
+            close_succeeded,
+            cardinality_error,
+        } = response_state;
+        let close_result = close_compound_on_connection(
+            &connection,
+            tree_id,
+            file_id,
+            close_succeeded,
+            &mut deferred_close,
+        )
+        .await;
+
+        if let Some(error) = cardinality_error {
+            return Err(error);
+        }
+        delete_result?;
+        close_result
+    }
+    .await;
+    CompoundOutcome {
+        result,
+        deferred_close,
+    }
 }
 
 async fn probe_reparse_point(
@@ -2980,18 +3052,65 @@ fn require_status(frame: &smb2::client::Frame, command: Command, index: usize) -
     }
 }
 
+struct DeleteEntryResponseState {
+    file_id: FileId,
+    delete_result: VfResult<()>,
+    close_succeeded: bool,
+    cardinality_error: Option<VfError>,
+}
+
+fn decode_delete_entry_responses<T, E>(
+    responses: Vec<Result<T, E>>,
+    expected: usize,
+    parse_create: impl FnOnce(T) -> VfResult<FileId>,
+    parse_delete: impl FnOnce(T) -> VfResult<()>,
+    close_succeeded: impl Fn(&T) -> bool,
+    mut map_error: impl FnMut(E) -> VfError,
+) -> VfResult<DeleteEntryResponseState> {
+    let response_count = responses.len();
+    let mut responses = responses.into_iter();
+    let Some(create_response) = responses.next() else {
+        return Err(compound_cardinality_error(response_count, expected));
+    };
+    let file_id = parse_create(create_response.map_err(&mut map_error)?)?;
+    let delete_result = match responses.next() {
+        Some(Ok(response)) => parse_delete(response),
+        Some(Err(error)) => Err(map_error(error)),
+        None => Err(compound_cardinality_error(response_count, expected)),
+    };
+    let close_response = responses.next();
+    let close_succeeded = response_succeeded(close_response.as_ref(), close_succeeded);
+    let cardinality_error =
+        (response_count != expected).then(|| compound_cardinality_error(response_count, expected));
+
+    Ok(DeleteEntryResponseState {
+        file_id,
+        delete_result,
+        close_succeeded,
+        cardinality_error,
+    })
+}
+
+fn compound_cardinality_error(actual: usize, expected: usize) -> VfError {
+    VfError::transport(
+        None,
+        format!("SMB compound returned {actual} responses, expected {expected}"),
+    )
+}
+
+fn response_succeeded<T, E>(
+    response: Option<&Result<T, E>>,
+    is_success: impl FnOnce(&T) -> bool,
+) -> bool {
+    response.is_some_and(|response| response.as_ref().is_ok_and(is_success))
+}
+
 fn collect_compound(
     responses: Vec<Result<smb2::client::Frame, SmbError>>,
     expected: usize,
 ) -> VfResult<Vec<smb2::client::Frame>> {
     if responses.len() != expected {
-        return Err(VfError::transport(
-            None,
-            format!(
-                "SMB compound returned {} responses, expected {expected}",
-                responses.len()
-            ),
-        ));
+        return Err(compound_cardinality_error(responses.len(), expected));
     }
     responses
         .into_iter()
@@ -3088,6 +3207,107 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn create_handle_survives_later_compound_waiter_errors() {
+        enum Response {
+            Create(FileId),
+            SetInfo,
+            Close(bool),
+        }
+
+        let parse_create = |response| match response {
+            Response::Create(file_id) => Ok(file_id),
+            _ => panic!("expected CREATE response"),
+        };
+        let parse_set_info = |response| match response {
+            Response::SetInfo => Ok(()),
+            _ => panic!("expected SET_INFO response"),
+        };
+        let map_error = |error| VfError::transport(None, error);
+
+        let set_info_failed = decode_delete_entry_responses(
+            vec![
+                Ok(Response::Create(FileId::SENTINEL)),
+                Err("SET_INFO waiter failed"),
+                Ok(Response::Close(true)),
+            ],
+            3,
+            parse_create,
+            parse_set_info,
+            |response| matches!(response, Response::Close(true)),
+            map_error,
+        )
+        .unwrap();
+        assert_eq!(set_info_failed.file_id, FileId::SENTINEL);
+        assert!(set_info_failed.delete_result.unwrap_err().is_transport());
+        assert!(set_info_failed.close_succeeded);
+        assert!(set_info_failed.cardinality_error.is_none());
+
+        let close_failed = decode_delete_entry_responses(
+            vec![
+                Ok(Response::Create(FileId::SENTINEL)),
+                Ok(Response::SetInfo),
+                Err("CLOSE waiter failed"),
+            ],
+            3,
+            parse_create,
+            parse_set_info,
+            |response| matches!(response, Response::Close(true)),
+            map_error,
+        )
+        .unwrap();
+        assert_eq!(close_failed.file_id, FileId::SENTINEL);
+        close_failed.delete_result.unwrap();
+        assert!(!close_failed.close_succeeded);
+        assert!(close_failed.cardinality_error.is_none());
+
+        let mut deferred_close = None;
+        let close_result = finish_compound_close(
+            &mut deferred_close,
+            close_failed.file_id,
+            close_failed.close_succeeded,
+            Err(VfError::transport(None, "injected fallback CLOSE failure")),
+        );
+        assert!(close_result.unwrap_err().is_transport());
+        assert_eq!(deferred_close, Some(FileId::SENTINEL));
+    }
+
+    #[test]
+    fn missing_or_failed_compound_close_response_requires_fallback_close() {
+        let waiter_error: Result<(), ()> = Err(());
+        assert!(!response_succeeded(None::<&Result<(), ()>>, |_| true));
+        assert!(!response_succeeded(Some(&waiter_error), |_| true));
+
+        let status_failure: Result<(), ()> = Ok(());
+        assert!(!response_succeeded(Some(&status_failure), |_| false));
+        assert!(response_succeeded(Some(&status_failure), |_| true));
+    }
+
+    #[test]
+    fn delete_entry_request_opens_the_reparse_point_without_type_constraint() {
+        let create = CreateRequest {
+            requested_oplock_level: OplockLevel::None,
+            impersonation_level: ImpersonationLevel::Impersonation,
+            desired_access: FileAccessMask::new(FileAccessMask::FILE_READ_DATA),
+            file_attributes: 0,
+            share_access: ShareAccess(ShareAccess::FILE_SHARE_READ),
+            create_disposition: CreateDisposition::FileOpen,
+            create_options: FILE_NON_DIRECTORY_FILE,
+            name: "entry".to_owned(),
+            create_contexts: Vec::new(),
+        };
+        let request = delete_entry_create_request(create);
+        assert_eq!(
+            request.desired_access,
+            FileAccessMask::new(
+                FileAccessMask::DELETE
+                    | FileAccessMask::FILE_READ_ATTRIBUTES
+                    | FileAccessMask::SYNCHRONIZE,
+            )
+        );
+        assert_eq!(request.create_options, FILE_OPEN_REPARSE_POINT);
+    }
 
     fn offset_boundary() -> impl Strategy<Value = u64> {
         prop_oneof![

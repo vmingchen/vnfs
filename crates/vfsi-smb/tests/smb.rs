@@ -862,6 +862,71 @@ fn listing_walk_and_tree_copy_do_not_follow_directory_reparse_points() {
 }
 
 #[test]
+fn remove_reparse_entries_without_deleting_their_targets() {
+    let Some(mut fs) = connect() else { return };
+    let Ok(local_root) = std::env::var("VFSI_SMB_LOCAL_ROOT") else {
+        return;
+    };
+    let root = PathBuf::from(format!("/vfsi-smb-remove-reparse-{}", std::process::id()));
+    cleanup_test_tree(&root);
+    let local_root = Path::new(&local_root).join(root.strip_prefix("/").unwrap());
+    fs::create_dir_all(&local_root).unwrap();
+
+    let target_file = local_root.join("target-file");
+    let file_link = local_root.join("file-link");
+    let ordinary_file = local_root.join("ordinary-file");
+    let ordinary_directory = local_root.join("ordinary-directory");
+    fs::write(&target_file, b"keep target").unwrap();
+    fs::write(&ordinary_file, b"remove file").unwrap();
+    fs::create_dir(&ordinary_directory).unwrap();
+    std::os::unix::fs::symlink("target-file", &file_link).unwrap();
+
+    let target_directory = local_root.join("target-directory");
+    let directory_link = local_root.join("directory-link");
+    fs::create_dir(&target_directory).unwrap();
+    fs::write(target_directory.join("keep"), b"keep target directory").unwrap();
+    std::os::unix::fs::symlink("target-directory", &directory_link).unwrap();
+
+    let dangling_link = local_root.join("dangling-link");
+    std::os::unix::fs::symlink("missing-target", &dangling_link).unwrap();
+    let paths = [
+        PathBuf::from(format!("{}/file-link", root.display())),
+        PathBuf::from(format!("{}/directory-link", root.display())),
+        PathBuf::from(format!("{}/dangling-link", root.display())),
+        PathBuf::from(format!("{}/ordinary-file", root.display())),
+        PathBuf::from(format!("{}/ordinary-directory", root.display())),
+    ];
+    fs.vremove_impl(
+        &paths
+            .iter()
+            .map(|path| FileOperand::from_os_path(path.as_path()))
+            .collect::<Vec<_>>(),
+    )
+    .expect("remove only the final reparse entries");
+
+    assert_eq!(fs::read(target_file).unwrap(), b"keep target");
+    assert_eq!(
+        fs::read(target_directory.join("keep")).unwrap(),
+        b"keep target directory"
+    );
+    assert_eq!(
+        fs::symlink_metadata(ordinary_file).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        fs::symlink_metadata(ordinary_directory).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    for link in [file_link, directory_link, dangling_link] {
+        assert_eq!(
+            fs::symlink_metadata(link).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
+    cleanup_test_tree(&root);
+}
+
+#[test]
 fn copy_options_reject_unsupported_symlink_preservation_before_lookup() {
     let Some(mut fs) = connect() else {
         return;
