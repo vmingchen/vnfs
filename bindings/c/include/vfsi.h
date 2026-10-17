@@ -112,11 +112,7 @@ typedef struct vfsi_fs vfsi_fs;
 
 /**
  * Aggregate limits for complete shallow vector listings. Zero is a zero
- * budget; SIZE_MAX explicitly opts out. MODE is always requested. Only
- * requested attributes are guaranteed; the call returns ENOTSUP if the
- * backend omits one.
- * Requests for fields without a vfsi_attrs member (for example RDEV)
- * return ENOTSUP.
+ * budget; SIZE_MAX explicitly opts out. MODE is always requested.
  */
 typedef struct vfsi_listing_options {
   size_t max_entries;
@@ -126,10 +122,6 @@ typedef struct vfsi_listing_options {
 
 /**
  * Attributes returned by [`vfsi_stat`] and passed to listdir callbacks.
- * This structure has no field-availability bitmap. vfsi_stat, vfsi_statv,
- * vfsi_listdir, and vfsi_listdirv return ENOTSUP if the backend cannot provide
- * every field. APIs with an attributes option guarantee only the requested
- * fields plus MODE; other fields should be ignored.
  */
 typedef struct vfsi_attrs {
   /**
@@ -173,18 +165,14 @@ typedef struct vfsi_listing_result {
 
 /**
  * Resource policy for an incremental tree traversal. Zero is a zero limit,
- * not unlimited. Set SIZE_MAX explicitly to opt out of a limit. MODE is always
- * requested. Only requested attributes are guaranteed; ENOTSUP can follow
- * earlier callbacks if a later directory omits one.
- * Requests for fields without a vfsi_attrs member (for example RDEV)
- * return ENOTSUP.
+ * not unlimited. Set SIZE_MAX explicitly to opt out of a limit.
  */
 typedef struct vfsi_walk_options {
   size_t max_entries;
   size_t max_path_bytes;
   size_t max_depth;
   uint32_t attributes;
-  uint8_t sort_by_name; /* 0=false, 1=true */
+  uint8_t sort_by_name;
 } vfsi_walk_options;
 
 /**
@@ -267,7 +255,7 @@ typedef struct vfsi_copy_op {
   const char *dst;
   uint64_t dst_offset;
   uint64_t length;
-  uint8_t to_eof; /* 0=false, 1=true */
+  uint8_t to_eof;
 } vfsi_copy_op;
 
 typedef bool (*vfsi_read_stream_cb)(const char *path,
@@ -327,22 +315,38 @@ uint32_t vfsi_abi_version(void);
 /**
  * Return the negotiated NFS minor version, or zero for a non-NFS/invalid
  * handle.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 uint32_t vfsi_nfs_minorversion(const struct vfsi_fs *fs);
 
 /**
  * Return the negotiated SMB dialect revision (`0x0202` through `0x0311`),
  * or zero for a non-SMB/invalid handle.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 uint16_t vfsi_smb_dialect(const struct vfsi_fs *fs);
 
 /**
  * Return the current `VFSI_CAP_*` capability bitset.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 uint64_t vfsi_capabilities(const struct vfsi_fs *fs);
 
 /**
  * Create a local-directory vfsi backend rooted at `root`.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_dummy_open(const char *root, struct vfsi_fs **out);
 
@@ -351,23 +355,39 @@ int vfsi_dummy_open(const char *root, struct vfsi_fs **out);
  * `mountpoint` as the kernel-visible root of the same directory. Callers can
  * pass ordinary kernel paths under `mountpoint`, which are mapped to `/`-rooted
  * vfsi paths before they reach the backend.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_dummy_open_mount(const char *root, const char *mountpoint, struct vfsi_fs **out);
 
 /**
  * Connect to an NFSv4 server at `host` and open the export root.
  * Negotiate NFSv4.2, falling back to NFSv4.1.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_nfs_open(const char *host, struct vfsi_fs **out);
 
 /**
  * Connect using an explicit supported NFS minor version (1 or 2).
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_nfs_open_minor(const char *host, uint32_t minorversion, struct vfsi_fs **out);
 
 /**
  * Connect to an NFSv4.1/4.2 server and treat `mountpoint` (a local kernel mount
  * path) as the vfsi root. Callers can then pass ordinary kernel paths.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_nfs_open_mount(const char *host, const char *mountpoint, struct vfsi_fs **out);
 
@@ -376,6 +396,10 @@ int vfsi_nfs_open_mount(const char *host, const char *mountpoint, struct vfsi_fs
  * `path` must be an absolute directory. Ordinary paths beneath it are mapped
  * to the corresponding remote directory. No AUTH_SYS downgrade or kernel
  * fallback is performed; direct access does not share the kernel cache.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_nfs_from_mount(const char *path, struct vfsi_fs **out);
 
@@ -383,6 +407,10 @@ int vfsi_nfs_from_mount(const char *path, struct vfsi_fs **out);
  * Incremental no-follow traversal. Callbacks run outside the filesystem lock.
  * Pruned directories are never listed. Errors can follow delivered events;
  * callers must not replay side-effectful callbacks through another backend.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_walk(struct vfsi_fs *fs,
               const char *root,
@@ -393,6 +421,10 @@ int vfsi_walk(struct vfsi_fs *fs,
 /**
  * Connect to an NFSv4.1/4.2 server, mapping a local kernel `mountpoint` to the
  * server-side `export_root` beneath the NFSv4 pseudo-root.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_nfs_open_mount_export(const char *host,
                                const char *export_root,
@@ -402,6 +434,10 @@ int vfsi_nfs_open_mount_export(const char *host,
 /**
  * Connect to an SMB2/3 share. `server` may omit port 445; empty username and
  * password strings request guest access. Paths are rooted at the share root.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_smb_open(const char *server,
                   const char *share,
@@ -414,6 +450,10 @@ int vfsi_smb_open(const char *server,
  * Connect to an SMB2/3 share and map a kernel-visible `mountpoint` onto
  * `share_root` within that share. Both paths must be absolute and may not
  * contain parent-directory components.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_smb_open_mount(const char *server,
                         const char *share,
@@ -427,36 +467,58 @@ int vfsi_smb_open_mount(const char *server,
 /**
  * Destroy a filesystem handle returned by one of the `vfsi_*_open*`
  * functions.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 void vfsi_free(struct vfsi_fs *fs);
 
 /**
  * Stat `path`, following a final symlink.
- * Returns ENOTSUP if the backend cannot provide every field in vfsi_attrs.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_stat(struct vfsi_fs *fs, const char *path, struct vfsi_attrs *out);
 
 /**
  * Open a file and return a vfsi descriptor (`>= 0`), or a negative errno.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_open(struct vfsi_fs *fs, const char *path, int flags, uint32_t mode);
 
 /**
  * Close a descriptor opened by [`vfsi_open`].
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_close(struct vfsi_fs *fs, int fd);
 
 /**
  * Read up to `len` bytes at `offset` into `buf`; writes the actual count to
  * `*got` when non-NULL.
- * For this scalar zero-copy API, buf must contain len initialized writable
- * bytes and be exclusively accessible for the call. Vector reads can write
- * into uninitialized output buffers.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
+ * The scalar read buffer must contain initialized bytes before this call,
+ * because it is borrowed directly as a mutable Rust byte slice.
  */
 int vfsi_pread(struct vfsi_fs *fs, int fd, void *buf, size_t len, uint64_t offset, size_t *got);
 
 /**
  * Write `len` bytes at `offset`; writes the actual count to `*wrote`.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_pwrite(struct vfsi_fs *fs,
                 int fd,
@@ -467,16 +529,28 @@ int vfsi_pwrite(struct vfsi_fs *fs,
 
 /**
  * Create a directory (`create_parents != 0` behaves like `mkdir -p`).
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_mkdir(struct vfsi_fs *fs, const char *path, uint32_t mode, int create_parents);
 
 /**
  * Remove a path (directories must be empty).
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_remove(struct vfsi_fs *fs, const char *path);
 
 /**
  * Rename `oldpath` to `newpath`.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_rename(struct vfsi_fs *fs, const char *oldpath, const char *newpath);
 
@@ -484,6 +558,10 @@ int vfsi_rename(struct vfsi_fs *fs, const char *oldpath, const char *newpath);
  * Copy one extent. When `to_eof` is true, `length` is ignored and copying
  * continues to the source EOF. The backend uses NFSv4.2 COPY or SMB
  * server-side copy when available and falls back to client-side I/O.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_copy(struct vfsi_fs *fs,
               const char *src,
@@ -497,6 +575,10 @@ int vfsi_copy(struct vfsi_fs *fs,
  * Open `count` files in one backend vector call. ABI-v2 functions remain
  * available; this and the other `*v` entry points use the uniform ABI-v3
  * overall and per-element result contract.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 struct vfsi_result vfsi_openv(struct vfsi_fs *fs,
                               struct vfsi_open_op *ops,
@@ -505,6 +587,10 @@ struct vfsi_result vfsi_openv(struct vfsi_fs *fs,
 
 /**
  * Close a descriptor array in one backend vector call.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 struct vfsi_result vfsi_closev(struct vfsi_fs *fs,
                                const int *fds,
@@ -512,8 +598,11 @@ struct vfsi_result vfsi_closev(struct vfsi_fs *fs,
                                struct vfsi_result *item_results);
 
 /**
- * Stat a path array in one backend vector call. An item is unsupported when
- * the backend cannot provide every field in its vfsi_attrs.
+ * Stat a path array in one backend vector call.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 struct vfsi_result vfsi_statv(struct vfsi_fs *fs,
                               struct vfsi_stat_op *ops,
@@ -522,6 +611,10 @@ struct vfsi_result vfsi_statv(struct vfsi_fs *fs,
 
 /**
  * Set selected attributes for a path array in one backend vector call.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 struct vfsi_result vfsi_setattrv(struct vfsi_fs *fs,
                                  const struct vfsi_setattr_op *ops,
@@ -530,6 +623,10 @@ struct vfsi_result vfsi_setattrv(struct vfsi_fs *fs,
 
 /**
  * Positioned vector read using caller-owned buffers.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 struct vfsi_result vfsi_preadv(struct vfsi_fs *fs,
                                struct vfsi_pread_op *ops,
@@ -538,6 +635,10 @@ struct vfsi_result vfsi_preadv(struct vfsi_fs *fs,
 
 /**
  * Positioned vector write using caller-owned buffers.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 struct vfsi_result vfsi_pwritev(struct vfsi_fs *fs,
                                 struct vfsi_pwrite_op *ops,
@@ -546,6 +647,10 @@ struct vfsi_result vfsi_pwritev(struct vfsi_fs *fs,
 
 /**
  * Create a directory array in one backend vector call.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 struct vfsi_result vfsi_mkdirv(struct vfsi_fs *fs,
                                const struct vfsi_mkdir_op *ops,
@@ -554,6 +659,10 @@ struct vfsi_result vfsi_mkdirv(struct vfsi_fs *fs,
 
 /**
  * Remove a path array in one backend vector call.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 struct vfsi_result vfsi_removev(struct vfsi_fs *fs,
                                 const char *const *paths,
@@ -562,6 +671,10 @@ struct vfsi_result vfsi_removev(struct vfsi_fs *fs,
 
 /**
  * Rename a path-pair array in one backend vector call.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 struct vfsi_result vfsi_renamev(struct vfsi_fs *fs,
                                 const struct vfsi_rename_op *ops,
@@ -570,6 +683,10 @@ struct vfsi_result vfsi_renamev(struct vfsi_fs *fs,
 
 /**
  * Copy an extent-pair array in one backend vector call.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 struct vfsi_result vfsi_copyv(struct vfsi_fs *fs,
                               const struct vfsi_copy_op *ops,
@@ -580,6 +697,10 @@ struct vfsi_result vfsi_copyv(struct vfsi_fs *fs,
  * Stream several paths in bounded vectorized chunks. Returning `false` from
  * `cb` cancels successfully. The callback provides backpressure and must not
  * reenter the same filesystem handle.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 struct vfsi_result vfsi_read_streamv(struct vfsi_fs *fs,
                                      const char *const *paths,
@@ -592,12 +713,20 @@ struct vfsi_result vfsi_read_streamv(struct vfsi_fs *fs,
 /**
  * List `dir` and call `cb` for each entry. Returning `false` from `cb`
  * stops the listing.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_listdir(struct vfsi_fs *fs, const char *dir, vfsi_listdir_cb cb, void *userdata);
 
 /**
  * One bounded directory listing. Zero permits only an empty directory.
  * Callbacks run outside the filesystem lock.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_listdir_with_limits(struct vfsi_fs *fs,
                              const char *dir,
@@ -609,6 +738,10 @@ int vfsi_listdir_with_limits(struct vfsi_fs *fs,
 /**
  * List several directories in one vectorized batch, calling `cb` for each
  * entry with the directory the entry came from.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_listdirv(struct vfsi_fs *fs,
                   const char *const *dirs,
@@ -621,6 +754,10 @@ int vfsi_listdirv(struct vfsi_fs *fs,
 /**
  * Read the full contents of several files in one vectorized batch, calling
  * `cb` for each file after its data has been fetched.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_read_paths(struct vfsi_fs *fs,
                     const char *const *paths,
@@ -631,6 +768,10 @@ int vfsi_read_paths(struct vfsi_fs *fs,
 /**
  * Whole-file vector with an explicit aggregate payload budget. Oversized
  * results are an error, never successful truncation. Zero is a zero budget.
+ *
+ * # Safety
+ * All pointers, buffers and callbacks must satisfy the module-level C
+ * pointer contract for their documented lengths and the full call duration.
  */
 int vfsi_read_paths_with_limit(struct vfsi_fs *fs,
                                const char *const *paths,
