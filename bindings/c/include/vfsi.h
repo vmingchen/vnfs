@@ -535,6 +535,7 @@ int vfsi_pread(struct vfsi_fs *fs, int fd, void *buf, size_t len, uint64_t offse
 
 /**
  * Write `len` bytes at `offset`; writes the actual count to `*wrote`.
+ * Handles opened with `O_APPEND` write at EOF regardless of `offset`.
  *
  * # Safety
  * All pointers, buffers and callbacks must satisfy the module-level C
