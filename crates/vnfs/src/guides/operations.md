@@ -92,7 +92,7 @@ values are scoped to a backend identity namespace, not globally unique across
 unrelated servers or clients, and can be reused after deletion. A backend that cannot report both parts returns
 no `FsObjId`.
 
-`FileHandle` is the owned File Descriptor handle to one open instance. The
+`FileHandle` is the trait for an owned handle to one open instance. The
 generic concrete type is `vfsi_sync::OpenFile<F>`; `Fd` is a numeric backend
 slot, and `FileOperand::Fd` references that slot without owning cleanup. Opening the same
 object twice produces the same `FsObjId` and separate handles; closing one does
@@ -129,7 +129,8 @@ opens remain on the kernel route; supported exclusive creates may go direct.
 `route_for` is a candidate; the opened file's `route()` is definitive. Handles
 remain pinned, and ambiguous writes are never replayed through another
 backend. Direct credentials are captured per connection; direct handle use
-after a filesystem identity change is rejected.
+and retained directory-cursor reuse after a filesystem credential change are
+rejected.
 
 **Direct NFS clients do not share or invalidate kernel caches.** Aliases can
 reach the same objects. Prefer `Posix` for exact kernel semantics or warm

@@ -104,6 +104,14 @@ Python adapters. It reuses Cargo artifacts; the first build can still be slow.
 Use `./scripts/test-rust.sh` and the applicable live jobs before pushing.
 Changes to protocols, FFI, adapters or features need their targeted suites too.
 
-For a very narrow change, use Cargo's test filter directly, for example:
-`cargo test -p vnfs --lib option_layout_tests`.
-Timing records remain in `target/test-timings.tsv` (or `VFSI_TEST_TIMINGS`).
+For a narrow change, select the package, target and optional name filter through
+the focused runner, which retains the package's normal fault-test features:
+
+```sh
+./scripts/test-rust.sh --package vnfs --test directory_pages
+./scripts/test-rust.sh --package vnfs --lib --filter read::tests
+```
+
+The runner records timings in `target/test-timings.tsv` (or `VFSI_TEST_TIMINGS`)
+and rejects selections that execute no tests or report missing-fixture skips.
+Direct `cargo test` commands do not update this timing report.
