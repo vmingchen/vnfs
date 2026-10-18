@@ -83,7 +83,8 @@ expose; chmod and link operations therefore report `ENOTSUP`.
 Use `vfsi_capabilities()` and the granular `VFSI_CAP_*` bits to distinguish
 these optional semantics from portable file, directory, and I/O operations.
 
-Example C smoke test:
+Example C smoke test (creates its local test root if missing; the backend
+itself requires an existing directory):
 
 ```sh
 cc -I bindings/c/include bindings/c/tests/smoke.c \

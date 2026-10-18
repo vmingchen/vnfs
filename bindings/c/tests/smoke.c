@@ -1,10 +1,12 @@
 #include "vfsi.h"
 #include "vfsi_dynamic.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static bool list_one(const char *name, const struct vfsi_attrs *attrs, void *userdata)
@@ -62,6 +64,11 @@ int main(int argc, char **argv)
         rc = vfsi_nfs_open_minor(argv[2], (uint32_t)nfs_minor, &fs);
     } else {
         backend = "dummy";
+        /* Backends require an existing root; create this test's fixture explicitly. */
+        if (mkdir(argv[1], 0700) != 0 && errno != EEXIST) {
+            perror("create smoke-test root");
+            return 1;
+        }
         rc = vfsi_dummy_open(argv[1], &fs);
     }
     if (rc != 0 || fs == NULL) {

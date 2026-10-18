@@ -1527,32 +1527,97 @@ impl FilesystemStats {
             .set_present(bits | if present { mask } else { 0 });
     }
 
-    filesystem_stat_field!(/// Total capacity in bytes.
-        total_bytes, with_total_bytes, u64, 0);
-    filesystem_stat_field!(/// Free capacity in bytes, including reserved space.
-        free_bytes, with_free_bytes, u64, 1);
-    filesystem_stat_field!(/// Space available to an unprivileged caller (may exclude reserved blocks).
-        available_bytes, with_available_bytes, u64, 2);
-    filesystem_stat_field!(/// Total file count.
-        total_files, with_total_files, u64, 3);
-    filesystem_stat_field!(/// Free file count.
-        free_files, with_free_files, u64, 4);
-    filesystem_stat_field!(/// File count available to an unprivileged caller.
-        available_files, with_available_files, u64, 5);
-    filesystem_stat_field!(/// Preferred I/O block size in bytes.
-        block_size, with_block_size, u64, 6);
-    filesystem_stat_field!(/// Allocation unit used by capacity counts, in bytes.
-        fragment_size, with_fragment_size, u64, 7);
-    filesystem_stat_field!(/// Maximum filename length in bytes.
-        max_name_len, with_max_name_len, u64, 8);
-    filesystem_stat_field!(/// Maximum path length in bytes.
-        max_path_len, with_max_path_len, u64, 9);
-    filesystem_stat_field!(/// Maximum number of hard links.
-        max_links, with_max_links, u64, 10);
-    filesystem_stat_field!(/// Maximum file size in bytes.
-        max_file_size, with_max_file_size, u64, 11);
-    filesystem_stat_field!(/// POSIX FILESIZEBITS; not necessarily the filesystem's file-size limit.
-        file_size_bits, with_file_size_bits, u32, 12);
+    filesystem_stat_field!(
+        /// Total capacity in bytes.
+        total_bytes,
+        with_total_bytes,
+        u64,
+        0
+    );
+    filesystem_stat_field!(
+        /// Free capacity in bytes, including reserved space.
+        free_bytes,
+        with_free_bytes,
+        u64,
+        1
+    );
+    filesystem_stat_field!(
+        /// Space available to an unprivileged caller (may exclude reserved blocks).
+        available_bytes,
+        with_available_bytes,
+        u64,
+        2
+    );
+    filesystem_stat_field!(
+        /// Total file count.
+        total_files,
+        with_total_files,
+        u64,
+        3
+    );
+    filesystem_stat_field!(
+        /// Free file count.
+        free_files,
+        with_free_files,
+        u64,
+        4
+    );
+    filesystem_stat_field!(
+        /// File count available to an unprivileged caller.
+        available_files,
+        with_available_files,
+        u64,
+        5
+    );
+    filesystem_stat_field!(
+        /// Preferred I/O block size in bytes.
+        block_size,
+        with_block_size,
+        u64,
+        6
+    );
+    filesystem_stat_field!(
+        /// Allocation unit used by capacity counts, in bytes.
+        fragment_size,
+        with_fragment_size,
+        u64,
+        7
+    );
+    filesystem_stat_field!(
+        /// Maximum filename length in bytes.
+        max_name_len,
+        with_max_name_len,
+        u64,
+        8
+    );
+    filesystem_stat_field!(
+        /// Maximum path length in bytes.
+        max_path_len,
+        with_max_path_len,
+        u64,
+        9
+    );
+    filesystem_stat_field!(
+        /// Maximum number of hard links.
+        max_links,
+        with_max_links,
+        u64,
+        10
+    );
+    filesystem_stat_field!(
+        /// Maximum file size in bytes.
+        max_file_size,
+        with_max_file_size,
+        u64,
+        11
+    );
+    filesystem_stat_field!(
+        /// POSIX FILESIZEBITS; not necessarily the filesystem's file-size limit.
+        file_size_bits,
+        with_file_size_bits,
+        u32,
+        12
+    );
 
     /// Whether the filesystem is read-only, when known.
     pub const fn read_only(&self) -> Option<bool> {
