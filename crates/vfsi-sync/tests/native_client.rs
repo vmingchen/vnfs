@@ -3220,3 +3220,36 @@ fn projected_metadata_vectors_convert_each_target_once_and_preflight_all_mutatio
     assert_eq!(calls.get(), 2);
     assert!(updates.lock().unwrap().is_empty());
 }
+
+#[test]
+fn projected_io_errors_allow_client_reentry() {
+    #[cfg(feature = "test-support")]
+    if vfsi_sync::test_support::supervise_with_deadline("projected_io_errors_allow_client_reentry")
+    {
+        return;
+    }
+    let fs = FsClient::new(WriteBoundaryProbe {
+        failure: Some(VfError::client(0, libc::ENOSPC as u32)),
+        ..Default::default()
+    });
+    let file = fs.open("/file").unwrap();
+    let reads = [file.read_request_at(0, 1)];
+    let error = fs
+        .vread_with_limit_projected_native(&reads, 1, |request| {
+            fs.capabilities().unwrap();
+            request
+        })
+        .unwrap_err();
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(error.path(), Some(std::path::Path::new("/file")));
+    let writes = [file.write_request_at(0, b"x")];
+    let error = fs
+        .vwrite_mapped_native(&writes, |request| {
+            fs.capabilities().unwrap();
+            *request
+        })
+        .unwrap_err();
+    assert_eq!(error.raw_code(), libc::ENOSPC as u32);
+    assert_eq!(error.index(), Some(0));
+    assert_eq!(error.path(), Some(std::path::Path::new("/file")));
+}

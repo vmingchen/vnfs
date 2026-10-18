@@ -75,7 +75,9 @@ impl<F: VectorBackend> FsClient<F> {
         F: 'b,
     {
         let writes = self.write_ops(requests, &project)?;
-        let results = self.lock()?.vwrite_impl(&writes).map_err(|error| {
+        // Drop the backend guard before invoking caller projection code.
+        let result = self.lock()?.vwrite_impl(&writes);
+        let results = result.map_err(|error| {
             error
                 .index()
                 .and_then(|index| requests.get(index).map(&project))

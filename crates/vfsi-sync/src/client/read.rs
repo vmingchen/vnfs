@@ -98,7 +98,9 @@ impl<F: VectorBackend> FsClient<F> {
             }
         }
         let reads = self.read_ops(requests, &project)?;
-        let results = self.lock()?.vread_impl(&reads).map_err(|error| {
+        // Drop the backend guard before invoking caller projection code.
+        let result = self.lock()?.vread_impl(&reads);
+        let results = result.map_err(|error| {
             error
                 .index()
                 .and_then(|index| requests.get(index).map(&project))
