@@ -233,6 +233,7 @@ prepare_python() {
   python_bin="$venv/bin/python"
   maturin_bin="$venv/bin/maturin"
   [[ -x "$maturin_bin" ]] || { echo "Install maturin in $venv" >&2; return 1; }
+  export VIRTUAL_ENV="$venv"
   "$python_bin" -m pip install --no-deps -e adapters/vfsi-fsspec -q
   "$maturin_bin" develop --manifest-path adapters/nfs4fs/Cargo.toml --locked
   "$python_bin" -m pip install --no-deps -e adapters/vfsi-fsspec -q
