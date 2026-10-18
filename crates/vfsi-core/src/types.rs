@@ -1196,25 +1196,27 @@ impl FsObjId {
 }
 
 /// Idiomatic metadata returned by the Rust-native path API.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Attrs {
     file_type: VfType,
     len: u64,
     permissions: Permissions,
     returned: AttrMask,
-    mode: Option<u32>,
-    blocks: Option<u64>,
-    device_id: Option<u64>,
+    // Integer presence is already encoded by `returned`. Keep niche-optimized
+    // timestamp/bool Options: a returned timestamp can still fail conversion.
+    mode: u32,
+    blocks: u64,
+    device_id: u64,
     has_named_attributes: Option<bool>,
     modified: Option<std::time::SystemTime>,
     accessed: Option<std::time::SystemTime>,
     changed: Option<std::time::SystemTime>,
-    nlink: Option<u32>,
-    fs_id: Option<u128>,
-    file_id: Option<u64>,
-    change_id: Option<u64>,
-    uid: Option<u32>,
-    gid: Option<u32>,
+    nlink: u32,
+    fs_id: u128,
+    file_id: u64,
+    change_id: u64,
+    uid: u32,
+    gid: u32,
 }
 
 impl Attrs {
@@ -1239,17 +1241,21 @@ impl Attrs {
 
     /// Full POSIX mode, including the file type bits, when returned.
     pub fn mode(&self) -> Option<u32> {
-        self.mode
+        self.returned.contains(AttrMask::MODE).then_some(self.mode)
     }
 
     /// Number of allocated 512-byte blocks, when returned.
     pub fn blocks(&self) -> Option<u64> {
-        self.blocks
+        self.returned
+            .contains(AttrMask::BLOCKS)
+            .then_some(self.blocks)
     }
 
     /// Device identifier for a special file, when returned.
     pub fn device_id(&self) -> Option<u64> {
-        self.device_id
+        self.returned
+            .contains(AttrMask::RDEV)
+            .then_some(self.device_id)
     }
 
     /// Whether named attributes exist, when the backend supplied this field.
@@ -1303,20 +1309,26 @@ impl Attrs {
     }
 
     pub fn nlink(&self) -> Option<u32> {
-        self.nlink
+        self.returned
+            .contains(AttrMask::NLINK)
+            .then_some(self.nlink)
     }
 
     /// Backend file number, when returned; combine with [`Self::fs_id`]
     /// rather than comparing this number across filesystems.
     pub fn file_id(&self) -> Option<u64> {
-        self.file_id
+        self.returned
+            .contains(AttrMask::FILEID)
+            .then_some(self.file_id)
     }
 
     /// Backend filesystem ID, when returned. Pair it with file_id; it is
     /// not globally unique across servers or unrelated backend clients. NFS
     /// packs the FSID major part in the high 64 bits and minor part in the low.
     pub fn fs_id(&self) -> Option<u128> {
-        self.fs_id
+        self.returned
+            .contains(AttrMask::FS_ID)
+            .then_some(self.fs_id)
     }
 
     /// Compatibility accessor. Prefer [`Self::fs_id`].
@@ -1328,8 +1340,8 @@ impl Attrs {
     /// The underlying filesystem object ID when both components were returned.
     pub fn fs_obj_id(&self) -> Option<FsObjId> {
         Some(FsObjId {
-            fs_id: self.fs_id?,
-            file_id: self.file_id?,
+            fs_id: self.fs_id()?,
+            file_id: self.file_id()?,
         })
     }
 
@@ -1339,15 +1351,41 @@ impl Attrs {
     }
 
     pub fn change_id(&self) -> Option<u64> {
-        self.change_id
+        self.returned
+            .contains(AttrMask::CHANGE)
+            .then_some(self.change_id)
     }
 
     pub fn uid(&self) -> Option<u32> {
-        self.uid
+        self.returned.contains(AttrMask::UID).then_some(self.uid)
     }
 
     pub fn gid(&self) -> Option<u32> {
-        self.gid
+        self.returned.contains(AttrMask::GID).then_some(self.gid)
+    }
+}
+
+impl std::fmt::Debug for Attrs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Attrs")
+            .field("file_type", &self.file_type)
+            .field("len", &self.len)
+            .field("permissions", &self.permissions)
+            .field("returned", &self.returned)
+            .field("mode", &self.mode())
+            .field("blocks", &self.blocks())
+            .field("device_id", &self.device_id())
+            .field("has_named_attributes", &self.has_named_attributes())
+            .field("modified", &self.modified())
+            .field("accessed", &self.accessed())
+            .field("changed", &self.changed())
+            .field("nlink", &self.nlink())
+            .field("fs_id", &self.fs_id())
+            .field("file_id", &self.file_id())
+            .field("change_id", &self.change_id())
+            .field("uid", &self.uid())
+            .field("gid", &self.gid())
+            .finish()
     }
 }
 
@@ -1364,16 +1402,25 @@ fn system_time(seconds: i64, nanos: u32) -> Option<std::time::SystemTime> {
 /// Backend attribute conversion; absent fields remain absent.
 pub fn metadata_from_attrs(attributes: VfAttrs) -> Attrs {
     let returned = attributes.returned;
+    // Keep absent integer payloads canonical so derived equality preserves
+    // the old Option semantics, independent of unreturned backend values.
+    macro_rules! integer {
+        ($mask:ident, $field:ident) => {
+            if returned.contains(AttrMask::$mask) {
+                attributes.$field
+            } else {
+                0
+            }
+        };
+    }
     Attrs {
         file_type: attributes.ftype,
         len: attributes.size,
         permissions: Permissions::from_mode(attributes.mode),
         returned,
-        mode: returned.contains(AttrMask::MODE).then_some(attributes.mode),
-        blocks: returned
-            .contains(AttrMask::BLOCKS)
-            .then_some(attributes.blocks),
-        device_id: returned.contains(AttrMask::RDEV).then_some(attributes.rdev),
+        mode: integer!(MODE, mode),
+        blocks: integer!(BLOCKS, blocks),
+        device_id: integer!(RDEV, rdev),
         has_named_attributes: returned
             .contains(AttrMask::NAMED_ATTR)
             .then_some(attributes.has_named_attr),
@@ -1389,20 +1436,12 @@ pub fn metadata_from_attrs(attributes: VfAttrs) -> Attrs {
             .contains(AttrMask::CTIME)
             .then(|| system_time(attributes.ctime_sec, attributes.ctime_nsec))
             .flatten(),
-        nlink: returned
-            .contains(AttrMask::NLINK)
-            .then_some(attributes.nlink),
-        fs_id: returned
-            .contains(AttrMask::FS_ID)
-            .then_some(attributes.fs_id),
-        file_id: returned
-            .contains(AttrMask::FILEID)
-            .then_some(attributes.fileid),
-        change_id: returned
-            .contains(AttrMask::CHANGE)
-            .then_some(attributes.change),
-        uid: returned.contains(AttrMask::UID).then_some(attributes.uid),
-        gid: returned.contains(AttrMask::GID).then_some(attributes.gid),
+        nlink: integer!(NLINK, nlink),
+        fs_id: integer!(FS_ID, fs_id),
+        file_id: integer!(FILEID, fileid),
+        change_id: integer!(CHANGE, change),
+        uid: integer!(UID, uid),
+        gid: integer!(GID, gid),
     }
 }
 
@@ -1881,6 +1920,146 @@ mod copy_option_tests {
 #[cfg(test)]
 mod sparse_metadata_tests {
     use super::*;
+    #[test]
+    fn compact_attrs_preserve_each_presence_bit_zero_and_maximum_values() {
+        assert!(std::mem::size_of::<Attrs>() <= 144);
+        let fields = [
+            AttrMask::MODE,
+            AttrMask::SIZE,
+            AttrMask::NLINK,
+            AttrMask::FILEID,
+            AttrMask::BLOCKS,
+            AttrMask::UID,
+            AttrMask::GID,
+            AttrMask::RDEV,
+            AttrMask::ATIME,
+            AttrMask::MTIME,
+            AttrMask::CTIME,
+            AttrMask::NAMED_ATTR,
+            AttrMask::CHANGE,
+            AttrMask::FS_ID,
+        ];
+        for value in [0, u64::MAX] {
+            for returned in [AttrMask::empty(), AttrMask::all()]
+                .into_iter()
+                .chain(fields)
+            {
+                let attrs = metadata_from_attrs(VfAttrs {
+                    returned,
+                    ftype: VfType::Symlink,
+                    size: value,
+                    mode: value as u32,
+                    nlink: value as u32,
+                    fileid: value,
+                    fs_id: if value == 0 { 0 } else { u128::MAX },
+                    change: value,
+                    uid: value as u32,
+                    gid: value as u32,
+                    rdev: value,
+                    blocks: value,
+                    atime_sec: -1,
+                    atime_nsec: 500_000_000,
+                    mtime_sec: 1,
+                    mtime_nsec: 250_000_000,
+                    ctime_sec: 0,
+                    ctime_nsec: 0,
+                    has_named_attr: value != 0,
+                    ..VfAttrs::default()
+                });
+                macro_rules! check {
+                    ($getter:ident, $mask:ident, $expected:expr) => {
+                        assert_eq!(
+                            attrs.$getter(),
+                            returned.contains(AttrMask::$mask).then_some($expected),
+                            "{} {returned:?}",
+                            stringify!($getter)
+                        );
+                    };
+                }
+                assert_eq!(attrs.returned_attributes(), returned);
+                assert!(attrs.is_symlink());
+                check!(len, SIZE, value);
+                check!(is_empty, SIZE, value == 0);
+                check!(mode, MODE, value as u32);
+                check!(permissions, MODE, Permissions::from_mode(value as u32));
+                check!(nlink, NLINK, value as u32);
+                check!(file_id, FILEID, value);
+                check!(fs_id, FS_ID, if value == 0 { 0 } else { u128::MAX });
+                check!(change_id, CHANGE, value);
+                check!(blocks, BLOCKS, value);
+                check!(device_id, RDEV, value);
+                check!(uid, UID, value as u32);
+                check!(gid, GID, value as u32);
+                check!(has_named_attributes, NAMED_ATTR, value != 0);
+                check!(
+                    accessed,
+                    ATIME,
+                    std::time::UNIX_EPOCH - std::time::Duration::from_millis(500)
+                );
+                check!(
+                    modified,
+                    MTIME,
+                    std::time::UNIX_EPOCH + std::time::Duration::from_millis(1250)
+                );
+                check!(changed, CTIME, std::time::UNIX_EPOCH);
+                assert_eq!(
+                    attrs.fs_obj_id().map(|id| (id.fs_id(), id.file_id())),
+                    returned
+                        .contains(AttrMask::identity())
+                        .then_some((if value == 0 { 0 } else { u128::MAX }, value))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn absent_integer_payloads_do_not_change_equality_or_debug_output() {
+        let empty = metadata_from_attrs(VfAttrs::default());
+        // These unreturned fields previously became None regardless of payload.
+        let dirty = metadata_from_attrs(VfAttrs {
+            blocks: u64::MAX,
+            rdev: u64::MAX,
+            nlink: u32::MAX,
+            fs_id: u128::MAX,
+            fileid: u64::MAX,
+            change: u64::MAX,
+            uid: u32::MAX,
+            gid: u32::MAX,
+            has_named_attr: true,
+            atime_sec: 1,
+            mtime_sec: 2,
+            ctime_sec: 3,
+            ..VfAttrs::default()
+        });
+        assert_eq!(dirty, empty);
+        assert_eq!(format!("{dirty:?}"), format!("{empty:?}"));
+        assert!(format!("{dirty:?}").contains("fs_id: None"));
+    }
+
+    #[test]
+    fn timestamp_conversion_failure_does_not_erase_the_returned_mask() {
+        let returned = AttrMask::ATIME | AttrMask::MTIME | AttrMask::CTIME;
+        let attrs = metadata_from_attrs(VfAttrs {
+            returned,
+            atime_sec: i64::MAX,
+            atime_nsec: u32::MAX,
+            mtime_sec: i64::MAX,
+            mtime_nsec: u32::MAX,
+            ctime_sec: i64::MAX,
+            ctime_nsec: u32::MAX,
+            ..VfAttrs::default()
+        });
+        let expected =
+            std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(i64::MAX as u64, u32::MAX));
+        assert_eq!(attrs.accessed(), expected);
+        assert_eq!(attrs.modified(), expected);
+        assert_eq!(attrs.changed(), expected);
+        assert_eq!(attrs.returned_attributes(), returned);
+        assert!(attrs.has_attributes(returned));
+        #[cfg(target_os = "linux")]
+        assert_eq!(expected, None);
+    }
+
     #[test]
     fn omitted_fields_are_distinct_from_real_zero_values() {
         let missing = metadata_from_attrs(VfAttrs {

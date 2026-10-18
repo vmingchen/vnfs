@@ -10,20 +10,27 @@ use super::*;
 #[derive(Debug, Clone, Default)]
 pub(super) struct AttrValues {
     pub(super) ftype: Option<u32>,
-    pub(super) change: Option<u64>,
-    pub(super) mode: Option<u32>,
-    pub(super) size: Option<u64>,
-    pub(super) nlink: Option<u32>,
-    pub(super) fs_id: Option<u128>,
-    pub(super) fileid: Option<u64>,
-    pub(super) uid: Option<u32>,
-    pub(super) gid: Option<u32>,
-    pub(super) rdev: Option<u64>,
-    pub(super) blocks: Option<u64>,
-    pub(super) mtime: Option<(i64, u32)>,
-    pub(super) atime: Option<(i64, u32)>,
-    pub(super) ctime: Option<(i64, u32)>,
-    pub(super) has_named_attr: Option<bool>,
+    // Only successfully decoded/mapped attributes are present. TYPE is kept
+    // separately because it has no AttrMask bit and is fetched independently.
+    present: AttrMask,
+    change: u64,
+    mode: u32,
+    size: u64,
+    nlink: u32,
+    fs_id: u128,
+    fileid: u64,
+    uid: u32,
+    gid: u32,
+    rdev: u64,
+    blocks: u64,
+    // Separate components avoid the padding of three (i64, u32) tuples.
+    mtime_sec: i64,
+    mtime_nsec: u32,
+    atime_sec: i64,
+    atime_nsec: u32,
+    ctime_sec: i64,
+    ctime_nsec: u32,
+    has_named_attr: bool,
 }
 
 /// The full set of supported FATTR4 ids, in wire (increasing) order. Must
@@ -79,58 +86,78 @@ pub(super) fn parse_attr_list(ids: &[u32], list: &[u8]) -> VfResult<AttrValues> 
     let mut v = AttrValues::default();
     let mut off = 0usize;
     for id in ids {
-        match *id {
+        let field = match *id {
             FATTR4_TYPE => {
                 v.ftype = Some(read_u32(list, &mut off)?);
+                continue;
             }
             FATTR4_CHANGE => {
-                v.change = Some(read_u64(list, &mut off)?);
+                v.change = read_u64(list, &mut off)?;
+                AttrMask::CHANGE
             }
             FATTR4_SIZE => {
-                v.size = Some(read_u64(list, &mut off)?);
+                v.size = read_u64(list, &mut off)?;
+                AttrMask::SIZE
             }
             FATTR4_FSID => {
                 let major = read_u64(list, &mut off)?;
                 let minor = read_u64(list, &mut off)?;
-                v.fs_id = Some((u128::from(major) << 64) | u128::from(minor));
+                v.fs_id = (u128::from(major) << 64) | u128::from(minor);
+                AttrMask::FS_ID
             }
             FATTR4_NAMED_ATTR => {
-                v.has_named_attr = Some(read_u32(list, &mut off)? != 0);
+                v.has_named_attr = read_u32(list, &mut off)? != 0;
+                AttrMask::NAMED_ATTR
             }
             FATTR4_FILEID => {
-                v.fileid = Some(read_u64(list, &mut off)?);
+                v.fileid = read_u64(list, &mut off)?;
+                AttrMask::FILEID
             }
             FATTR4_MODE => {
-                v.mode = Some(read_u32(list, &mut off)?);
+                v.mode = read_u32(list, &mut off)?;
+                AttrMask::MODE
             }
             FATTR4_NUMLINKS => {
-                v.nlink = Some(read_u32(list, &mut off)?);
+                v.nlink = read_u32(list, &mut off)?;
+                AttrMask::NLINK
             }
             FATTR4_OWNER => {
-                v.uid = crate::identity::name_to_id(read_str(list, &mut off)?, false);
+                let uid = crate::identity::name_to_id(read_str(list, &mut off)?, false);
+                v.uid = uid.unwrap_or_default();
+                v.present.set(AttrMask::UID, uid.is_some());
+                continue;
             }
             FATTR4_OWNER_GROUP => {
-                v.gid = crate::identity::name_to_id(read_str(list, &mut off)?, true);
+                let gid = crate::identity::name_to_id(read_str(list, &mut off)?, true);
+                v.gid = gid.unwrap_or_default();
+                v.present.set(AttrMask::GID, gid.is_some());
+                continue;
             }
             FATTR4_RAWDEV => {
                 let major = read_u32(list, &mut off)?;
                 let minor = read_u32(list, &mut off)?;
-                v.rdev = Some(libc::makedev(major, minor));
+                v.rdev = libc::makedev(major, minor);
+                AttrMask::RDEV
             }
             FATTR4_SPACE_USED => {
-                v.blocks = Some(read_u64(list, &mut off)? / 512);
+                v.blocks = read_u64(list, &mut off)? / 512;
+                AttrMask::BLOCKS
             }
             FATTR4_TIME_ACCESS => {
-                v.atime = Some(read_nfstime(list, &mut off)?);
+                (v.atime_sec, v.atime_nsec) = read_nfstime(list, &mut off)?;
+                AttrMask::ATIME
             }
             FATTR4_TIME_MODIFY => {
-                v.mtime = Some(read_nfstime(list, &mut off)?);
+                (v.mtime_sec, v.mtime_nsec) = read_nfstime(list, &mut off)?;
+                AttrMask::MTIME
             }
             FATTR4_TIME_METADATA => {
-                v.ctime = Some(read_nfstime(list, &mut off)?);
+                (v.ctime_sec, v.ctime_nsec) = read_nfstime(list, &mut off)?;
+                AttrMask::CTIME
             }
             _ => unreachable!(),
-        }
+        };
+        v.present.insert(field);
     }
     if off != list.len() {
         return Err(attr_decode_error());
@@ -164,96 +191,32 @@ pub(super) fn apply_attrs(a: &mut VfAttrs, v: &AttrValues) {
         .ftype
         .map(vfsi_core::file_type_from_nfs)
         .unwrap_or(VfType::Regular);
-    a.returned = AttrMask::empty();
-    if a.masks.contains(AttrMask::MODE)
-        && let Some(mode) = v.mode
-    {
-        a.mode = mode | s_ifmt(vfsi_core::file_type_to_nfs(&a.ftype));
-        a.returned.insert(AttrMask::MODE);
+    a.returned = a.masks & v.present;
+    if a.returned.contains(AttrMask::MODE) {
+        a.mode = v.mode | s_ifmt(vfsi_core::file_type_to_nfs(&a.ftype));
     }
-    if a.masks.contains(AttrMask::SIZE)
-        && let Some(size) = v.size
-    {
-        a.size = size;
-        a.returned.insert(AttrMask::SIZE);
+    // Copy only requested, actually present fields; leave absent payloads alone.
+    macro_rules! copy {
+        ($mask:ident, $($field:ident),+) => {
+            if a.returned.contains(AttrMask::$mask) {
+                $(a.$field = v.$field;)+
+            }
+        };
     }
-    if a.masks.contains(AttrMask::NLINK)
-        && let Some(nlink) = v.nlink
-    {
-        a.nlink = nlink;
-        a.returned.insert(AttrMask::NLINK);
-    }
-    if a.masks.contains(AttrMask::FILEID)
-        && let Some(fileid) = v.fileid
-    {
-        a.fileid = fileid;
-        a.returned.insert(AttrMask::FILEID);
-    }
-    if a.masks.contains(AttrMask::FS_ID)
-        && let Some(fs_id) = v.fs_id
-    {
-        a.fs_id = fs_id;
-        a.returned.insert(AttrMask::FS_ID);
-    }
-    if a.masks.contains(AttrMask::CHANGE)
-        && let Some(change) = v.change
-    {
-        a.change = change;
-        a.returned.insert(AttrMask::CHANGE);
-    }
-    if a.masks.contains(AttrMask::UID)
-        && let Some(uid) = v.uid
-    {
-        a.uid = uid;
-        a.returned.insert(AttrMask::UID);
-    }
-    if a.masks.contains(AttrMask::GID)
-        && let Some(gid) = v.gid
-    {
-        a.gid = gid;
-        a.returned.insert(AttrMask::GID);
-    }
-    if a.masks.contains(AttrMask::RDEV)
-        && let Some(rdev) = v.rdev
-    {
-        a.rdev = rdev;
-        a.returned.insert(AttrMask::RDEV);
-    }
-    if a.masks.contains(AttrMask::BLOCKS)
-        && let Some(blocks) = v.blocks
-    {
-        // `v.blocks` is already FATTR4_SPACE_USED converted to 512-byte
-        // units in `parse_attr_list` (matching the dummy's `st_blocks`).
-        a.blocks = blocks;
-        a.returned.insert(AttrMask::BLOCKS);
-    }
-    if a.masks.contains(AttrMask::MTIME)
-        && let Some((s, n)) = v.mtime
-    {
-        a.mtime_sec = s;
-        a.mtime_nsec = n;
-        a.returned.insert(AttrMask::MTIME);
-    }
-    if a.masks.contains(AttrMask::ATIME)
-        && let Some((s, n)) = v.atime
-    {
-        a.atime_sec = s;
-        a.atime_nsec = n;
-        a.returned.insert(AttrMask::ATIME);
-    }
-    if a.masks.contains(AttrMask::CTIME)
-        && let Some((s, n)) = v.ctime
-    {
-        a.ctime_sec = s;
-        a.ctime_nsec = n;
-        a.returned.insert(AttrMask::CTIME);
-    }
-    if a.masks.contains(AttrMask::NAMED_ATTR)
-        && let Some(has) = v.has_named_attr
-    {
-        a.has_named_attr = has;
-        a.returned.insert(AttrMask::NAMED_ATTR);
-    }
+    copy!(SIZE, size);
+    copy!(NLINK, nlink);
+    copy!(FILEID, fileid);
+    copy!(FS_ID, fs_id);
+    copy!(CHANGE, change);
+    copy!(UID, uid);
+    copy!(GID, gid);
+    copy!(RDEV, rdev);
+    // Already converted from SPACE_USED to 512-byte units during parsing.
+    copy!(BLOCKS, blocks);
+    copy!(MTIME, mtime_sec, mtime_nsec);
+    copy!(ATIME, atime_sec, atime_nsec);
+    copy!(CTIME, ctime_sec, ctime_nsec);
+    copy!(NAMED_ATTR, has_named_attr);
 }
 
 /// Whether a single `FATTR4_TYPE` attribute payload names a symlink. A
@@ -762,6 +725,186 @@ impl NfsVecFs {
 mod tests {
     use super::*;
 
+    fn xdr_string(value: &[u8]) -> Vec<u8> {
+        let mut wire = (value.len() as u32).to_be_bytes().to_vec();
+        wire.extend_from_slice(value);
+        wire.resize(4 + value.len().div_ceil(4) * 4, 0);
+        wire
+    }
+
+    #[test]
+    fn compact_decoder_preserves_sparse_values_and_requested_masks() {
+        assert!(std::mem::size_of::<AttrValues>() <= 128);
+        for value in [0, u64::MAX] {
+            let id = (value as u32).to_string();
+            let time = |seconds: i64, nanos: u32| {
+                let mut bytes = seconds.to_be_bytes().to_vec();
+                bytes.extend_from_slice(&nanos.to_be_bytes());
+                bytes
+            };
+            let mut fs_id = value.to_be_bytes().to_vec();
+            fs_id.extend_from_slice(&value.to_be_bytes());
+            let mut device = (value as u32).to_be_bytes().to_vec();
+            device.extend_from_slice(&(value as u32).to_be_bytes());
+            let fields = [
+                (
+                    FATTR4_TYPE,
+                    AttrMask::empty(),
+                    nfs_ftype4_NF4LNK.to_be_bytes().to_vec(),
+                ),
+                (
+                    FATTR4_CHANGE,
+                    AttrMask::CHANGE,
+                    value.to_be_bytes().to_vec(),
+                ),
+                (FATTR4_SIZE, AttrMask::SIZE, value.to_be_bytes().to_vec()),
+                (
+                    FATTR4_NAMED_ATTR,
+                    AttrMask::NAMED_ATTR,
+                    u32::from(value != 0).to_be_bytes().to_vec(),
+                ),
+                (FATTR4_FSID, AttrMask::FS_ID, fs_id),
+                (
+                    FATTR4_FILEID,
+                    AttrMask::FILEID,
+                    value.to_be_bytes().to_vec(),
+                ),
+                (
+                    FATTR4_MODE,
+                    AttrMask::MODE,
+                    (value as u32).to_be_bytes().to_vec(),
+                ),
+                (
+                    FATTR4_NUMLINKS,
+                    AttrMask::NLINK,
+                    (value as u32).to_be_bytes().to_vec(),
+                ),
+                (FATTR4_OWNER, AttrMask::UID, xdr_string(id.as_bytes())),
+                (FATTR4_OWNER_GROUP, AttrMask::GID, xdr_string(id.as_bytes())),
+                (FATTR4_RAWDEV, AttrMask::RDEV, device),
+                (
+                    FATTR4_SPACE_USED,
+                    AttrMask::BLOCKS,
+                    value.to_be_bytes().to_vec(),
+                ),
+                (FATTR4_TIME_ACCESS, AttrMask::ATIME, time(-1, 500_000_000)),
+                (FATTR4_TIME_METADATA, AttrMask::CTIME, time(0, 0)),
+                (FATTR4_TIME_MODIFY, AttrMask::MTIME, time(1, 250_000_000)),
+            ];
+            for (id, _, bytes) in &fields {
+                for cut in 0..bytes.len() {
+                    assert!(parse_attr_list(&[*id], &bytes[..cut]).is_err());
+                }
+            }
+            let full = VfAttrs {
+                size: value,
+                mode: value as u32,
+                nlink: value as u32,
+                fileid: value,
+                fs_id: if value == 0 { 0 } else { u128::MAX },
+                change: value,
+                uid: value as u32,
+                gid: value as u32,
+                rdev: libc::makedev(value as u32, value as u32),
+                blocks: value / 512,
+                atime_sec: -1,
+                atime_nsec: 500_000_000,
+                mtime_sec: 1,
+                mtime_nsec: 250_000_000,
+                ctime_sec: 0,
+                ctime_nsec: 0,
+                has_named_attr: value != 0,
+                ..VfAttrs::default()
+            };
+            // Empty, all fields, and every singleton detect accidental sharing
+            // of presence bits and TYPE's independence from the MODE field.
+            for selected in [0, (1u16 << fields.len()) - 1]
+                .into_iter()
+                .chain((0..fields.len()).map(|i| 1u16 << i))
+            {
+                let mut ids = Vec::new();
+                let mut wire = Vec::new();
+                let mut present = AttrMask::empty();
+                for (index, (id, mask, bytes)) in fields.iter().enumerate() {
+                    if selected & (1 << index) != 0 {
+                        ids.push(*id);
+                        wire.extend_from_slice(bytes);
+                        present |= *mask;
+                    }
+                }
+                let decoded = parse_attr_list(&ids, &wire).unwrap();
+                for requested in [AttrMask::empty(), AttrMask::all()] {
+                    let mut actual = VfAttrs {
+                        masks: requested,
+                        ..VfAttrs::default()
+                    };
+                    apply_attrs(&mut actual, &decoded);
+                    let mut expected = full.clone();
+                    expected.returned = present & requested;
+                    expected.ftype = if selected & 1 != 0 {
+                        VfType::Symlink
+                    } else {
+                        VfType::Regular
+                    };
+                    expected.size = if expected.returned.contains(AttrMask::SIZE) {
+                        value
+                    } else {
+                        0
+                    };
+                    expected.mode = if expected.returned.contains(AttrMask::MODE) {
+                        value as u32 | s_ifmt(vfsi_core::file_type_to_nfs(&expected.ftype))
+                    } else {
+                        0
+                    };
+                    assert_eq!(actual.returned, expected.returned);
+                    assert_eq!(
+                        vfsi_core::metadata_from_attrs(actual),
+                        vfsi_core::metadata_from_attrs(expected),
+                        "{ids:?} {requested:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unmapped_owner_clears_presence_without_changing_other_payloads() {
+        for (id, mask) in [
+            (FATTR4_OWNER, AttrMask::UID),
+            (FATTR4_OWNER_GROUP, AttrMask::GID),
+        ] {
+            let known = xdr_string(b"0");
+            let values = parse_attr_list(&[id], &known).unwrap();
+            assert!(values.present.contains(mask)); // uid/gid zero is known.
+            let mut wire = known;
+            wire.extend_from_slice(&xdr_string(&[0xff])); // No NSS lookup.
+            let values = parse_attr_list(&[id, id], &wire).unwrap();
+            assert!(!values.present.contains(mask));
+            let mut attrs = VfAttrs {
+                masks: AttrMask::all(),
+                returned: AttrMask::all(),
+                uid: 42,
+                gid: 43,
+                size: 123,
+                atime_sec: -7,
+                atime_nsec: 99,
+                ..VfAttrs::default()
+            };
+            apply_attrs(&mut attrs, &values);
+            assert_eq!(attrs.returned, AttrMask::empty());
+            assert_eq!(
+                (
+                    attrs.uid,
+                    attrs.gid,
+                    attrs.size,
+                    attrs.atime_sec,
+                    attrs.atime_nsec
+                ),
+                (42, 43, 123, -7, 99)
+            );
+        }
+    }
+
     #[test]
     fn allocation_attribute_strings_borrow_wire_and_check_padding() {
         for length in 0..10u32 {
@@ -785,7 +928,13 @@ mod tests {
             0, 0, 0, 4, b' ', b'4', b'2', b' ', 0, 0, 0, 2, b'9', b'9', 0, 0,
         ];
         let values = parse_attr_list(&[FATTR4_OWNER, FATTR4_OWNER_GROUP], &wire).unwrap();
-        assert_eq!(values.uid, Some(42));
-        assert_eq!(values.gid, Some(99));
+        let mut attrs = VfAttrs {
+            masks: AttrMask::UID | AttrMask::GID,
+            ..VfAttrs::default()
+        };
+        apply_attrs(&mut attrs, &values);
+        assert_eq!(attrs.returned, AttrMask::UID | AttrMask::GID);
+        assert_eq!(attrs.uid, 42);
+        assert_eq!(attrs.gid, 99);
     }
 }
