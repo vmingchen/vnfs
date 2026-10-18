@@ -139,7 +139,9 @@ fn contents_replace_colliding_regular_roots_in_input_order() {
                     TransferOptions::new()
                         .with_layout(CopyLayout::Contents)
                         .with_existing(Existing::Replace)
-                        .with_batch_size(batch)
+                        .with_batch_size(
+                            std::num::NonZeroUsize::new(batch).expect("nonzero tuning value"),
+                        )
                         .with_preserve_permissions(preserve),
                 )
                 .unwrap();
@@ -169,7 +171,9 @@ fn contents_conflicts_error_or_skip_after_first_completed_root() {
                 TransferOptions::new()
                     .with_layout(CopyLayout::Contents)
                     .with_existing(policy)
-                    .with_batch_size(batch),
+                    .with_batch_size(
+                        std::num::NonZeroUsize::new(batch).expect("nonzero tuning value"),
+                    ),
             );
             if policy == Existing::Error {
                 assert_eq!(result.unwrap_err().index(), Some(1));
@@ -203,7 +207,9 @@ fn contents_directory_roots_complete_before_later_regular_roots() {
                 TransferOptions::new()
                     .with_layout(CopyLayout::Contents)
                     .with_existing(Existing::Replace)
-                    .with_batch_size(batch),
+                    .with_batch_size(
+                        std::num::NonZeroUsize::new(batch).expect("nonzero tuning value"),
+                    ),
             )
             .unwrap();
             assert_eq!(
@@ -234,7 +240,7 @@ fn contents_directory_collisions_follow_root_order_at_every_depth() {
             TransferOptions::new()
                 .with_layout(CopyLayout::Contents)
                 .with_existing(Existing::Replace)
-                .with_batch_size(batch),
+                .with_batch_size(std::num::NonZeroUsize::new(batch).expect("nonzero tuning value")),
         )
         .unwrap();
         assert_eq!(

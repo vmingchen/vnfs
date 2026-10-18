@@ -78,7 +78,7 @@ pub mod directory {
     pub use vfsi_core::api::{
         AttrsOptions, DepthLimit, DirHandle, DirectoryListing, ListDirOptions, MkDirOp, RemoveMode,
         RemoveOptions, RenameMode, SetAttrsOp, TraversalCompletion, WalkControl, WalkEvent,
-        WalkEventKind,
+        WalkEventKind, WalkOptions,
     };
     pub use vfsi_core::{
         AttrMask as Attributes, Attrs, DirEntry, FsObjId, Permissions, VfType as FileType,

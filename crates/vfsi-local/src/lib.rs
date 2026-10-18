@@ -1533,7 +1533,10 @@ impl HandleBackend for LocalBackend {
     }
 
     fn capabilities(&self) -> Capabilities {
-        Capabilities::UNIX_SEMANTICS
+        let caps = Capabilities::UNIX_SEMANTICS;
+        #[cfg(target_os = "linux")]
+        let caps = caps | Capabilities::RENAME_NOREPLACE | Capabilities::RENAME_EXCHANGE;
+        caps
     }
 
     fn abs_path(&self, path: &Path) -> PathBuf {

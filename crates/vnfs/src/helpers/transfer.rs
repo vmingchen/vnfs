@@ -41,6 +41,14 @@ struct CopyFlags {
 /// reject links/special files, 64-file batches and 1 MiB chunks. Aggregate read
 /// storage and traversal limits inherit the client's limits. Options never
 /// disable negotiated backend limits. Failure/cancellation leaves partial output.
+/// ```compile_fail
+/// use vnfs::helpers::TransferOptions;
+/// TransferOptions::new().with_batch_size(0);
+/// ```
+/// ```compile_fail
+/// use vnfs::helpers::TransferOptions;
+/// TransferOptions::new().with_chunk_size(0);
+/// ```
 #[derive(Clone, Copy, Debug)]
 #[must_use = "configuration and requests have no effect until used"]
 pub struct TransferOptions {
@@ -90,12 +98,12 @@ impl TransferOptions {
         self.flags.set_preserve_permissions(value);
         self
     }
-    pub fn with_batch_size(mut self, value: usize) -> Self {
-        self.batch_size = value;
+    pub fn with_batch_size(mut self, value: std::num::NonZeroUsize) -> Self {
+        self.batch_size = value.get();
         self
     }
-    pub fn with_chunk_size(mut self, value: usize) -> Self {
-        self.chunk_bytes = value;
+    pub fn with_chunk_size(mut self, value: std::num::NonZeroUsize) -> Self {
+        self.chunk_bytes = value.get();
         self
     }
     pub fn with_max_entries(mut self, value: usize) -> Self {
@@ -273,7 +281,7 @@ fn roots<P: AsRef<Path>>(
     budget: &mut TraversalBudget,
     max_path_bytes: usize,
 ) -> Result<Vec<Task>> {
-    if options.batch_size == 0 || options.chunk_bytes == 0 || fs.limits().max_read_bytes() == 0 {
+    if fs.limits().max_read_bytes() == 0 {
         return Err(invalid(0, destination));
     }
     if sources.len() > budget.remaining_entries() {
@@ -586,10 +594,11 @@ fn copy_independent_roots(
                             }
                             return Err(limit(parent.root, entry.path()));
                         }
+                        let (source, metadata) = entry.into_parts();
                         children.push(Task {
-                            source: entry.path().to_path_buf(),
+                            source,
                             destination: dest,
-                            metadata: entry.attrs().clone(),
+                            metadata,
                             size: 0,
                             root: parent.root,
                             depth,

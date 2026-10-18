@@ -8,10 +8,8 @@ struct VisitFlags {
     truncate: bool,
     entries_unlimited: bool,
     bytes_unlimited: bool,
-    enter_leave: bool,
-    sort_by_name: bool,
     no_follow: bool,
-    #[bits(1)]
+    #[bits(3)]
     _reserved: u8,
 }
 
@@ -65,21 +63,6 @@ impl ListDirOptions {
         self.flags.set_recursive(value);
         self
     }
-    /// Emit directory Enter/Leave events, including the root, in
-    /// [`super::VfsiExt::listdir`]. Otherwise only child Entry events are emitted.
-    /// Lifecycle traversal uses bounded directory buffers for depth-first order.
-    /// Other directory methods reject this setting, including [`super::Vfsi::vlistdirs`].
-    pub const fn with_enter_leave(mut self, value: bool) -> Self {
-        self.flags.set_enter_leave(value);
-        self
-    }
-    /// Sort siblings by filename in [`super::VfsiExt::listdir`]. Sorting
-    /// requires a complete, bounded directory listing before delivering entries.
-    /// Other directory methods reject this setting; page order remains backend-defined.
-    pub const fn with_sort_by_name(mut self, value: bool) -> Self {
-        self.flags.set_sort_by_name(value);
-        self
-    }
     /// Whether resolving an input directory path may follow symlinks (default:
     /// true). False requires no-follow resolution, including parent components;
     /// backends unable to guarantee it return Unsupported. Recursive entry
@@ -131,56 +114,49 @@ impl ListDirOptions {
     pub const fn recursive(self) -> bool {
         self.flags.recursive()
     }
-    pub const fn enter_leave(self) -> bool {
-        self.flags.enter_leave()
-    }
-    pub const fn sort_by_name(self) -> bool {
-        self.flags.sort_by_name()
-    }
     pub const fn allow_symlink_components(self) -> bool {
         !self.flags.no_follow()
     }
     pub fn fields(self) -> Attributes {
         self.fields.unwrap_or_else(Attributes::stat) | Attributes::MODE
     }
-    /// Configured entry budget, or the built-in default before client resolution.
-    pub fn max_entries(self) -> usize {
+    /// Configured override; `None` inherits the client's entry budget.
+    pub fn max_entries(self) -> Option<usize> {
         if self.flags.entries_unlimited() {
-            usize::MAX
+            Some(usize::MAX)
         } else {
-            self.entries
-                .map_or(super::DEFAULT_DIRECTORY_MAX_ENTRIES, |v| v.get() - 1)
+            self.entries.map(|v| v.get() - 1)
         }
     }
-    /// Configured path-byte budget, or the built-in default before client resolution.
-    pub fn max_path_bytes(self) -> usize {
+    /// Configured override; `None` inherits the client's path-byte budget.
+    pub fn max_path_bytes(self) -> Option<usize> {
         if self.flags.bytes_unlimited() {
-            usize::MAX
+            Some(usize::MAX)
         } else {
-            self.bytes
-                .map_or(super::DEFAULT_DIRECTORY_MAX_PATH_BYTES, |v| v.get() - 1)
+            self.bytes.map(|v| v.get() - 1)
         }
     }
-    pub fn max_depth(self) -> DepthLimit {
+    /// Configured override; `None` inherits the client's descent limit.
+    pub const fn max_depth(self) -> Option<DepthLimit> {
         self.depth
-            .unwrap_or_else(|| DepthLimit::new(super::DEFAULT_WALK_MAX_DEPTH).unwrap())
+    }
+    pub fn max_entries_or(self, default: usize) -> usize {
+        self.max_entries().unwrap_or(default)
+    }
+    pub fn max_path_bytes_or(self, default: usize) -> usize {
+        self.max_path_bytes().unwrap_or(default)
+    }
+    pub fn max_depth_or(self, default: DepthLimit) -> DepthLimit {
+        self.max_depth().unwrap_or(default)
     }
     pub const fn truncate_at_max_depth(self) -> bool {
         self.flags.truncate()
     }
     /// Apply client defaults while preserving explicit zero and unlimited budgets.
     pub fn resolve(mut self, limits: ResourceLimits) -> Self {
-        let entries = if self.entries.is_some() || self.flags.entries_unlimited() {
-            self.max_entries()
-        } else {
-            limits.max_directory_entries()
-        };
-        let bytes = if self.bytes.is_some() || self.flags.bytes_unlimited() {
-            self.max_path_bytes()
-        } else {
-            limits.max_directory_path_bytes()
-        };
-        self.depth = Some(self.depth.unwrap_or_else(|| limits.max_walk_depth()));
+        let entries = self.max_entries_or(limits.max_directory_entries());
+        let bytes = self.max_path_bytes_or(limits.max_directory_path_bytes());
+        self.depth = Some(self.max_depth_or(limits.max_walk_depth()));
         self.with_max_entries(entries).with_max_path_bytes(bytes)
     }
     /// Resolve a recursive traversal against the client's defaults.
@@ -190,6 +166,67 @@ impl ListDirOptions {
     /// Resolve a shallow listing against the client's defaults.
     pub fn directory_options(self, limits: ResourceLimits) -> Self {
         self.with_recursive(false).resolve(limits)
+    }
+}
+
+/// Event-walk presentation policy, separate from native directory-page options.
+/// Sorting and lifecycle events buffer complete bounded directory listings.
+///
+/// ```compile_fail
+/// use vfsi_core::api::ListDirOptions;
+/// ListDirOptions::new().with_sort_by_name(true);
+/// ```
+/// ```compile_fail
+/// use vfsi_core::api::{Vfsi, WalkOptions, ListDirOptions};
+/// fn invalid(fs: &impl Vfsi) {
+///     fs.vlistdirs(&["/"], WalkOptions::new(ListDirOptions::new()), |_, _| {
+///         Ok(std::ops::ControlFlow::Continue(()))
+///     }).unwrap();
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
+pub struct WalkOptions {
+    listing: ListDirOptions,
+    enter_leave: bool,
+    sort_by_name: bool,
+}
+impl WalkOptions {
+    pub const fn new(listing: ListDirOptions) -> Self {
+        Self {
+            listing,
+            enter_leave: false,
+            sort_by_name: false,
+        }
+    }
+    /// Replace shared listing policy without changing presentation settings.
+    pub const fn with_listing_options(mut self, listing: ListDirOptions) -> Self {
+        self.listing = listing;
+        self
+    }
+    pub const fn listing_options(self) -> ListDirOptions {
+        self.listing
+    }
+    /// Include directory Enter/Leave events, including the root.
+    pub const fn with_enter_leave(mut self, value: bool) -> Self {
+        self.enter_leave = value;
+        self
+    }
+    /// Buffer and sort each directory by filename before emitting its events.
+    pub const fn with_sort_by_name(mut self, value: bool) -> Self {
+        self.sort_by_name = value;
+        self
+    }
+    pub const fn enter_leave(self) -> bool {
+        self.enter_leave
+    }
+    pub const fn sort_by_name(self) -> bool {
+        self.sort_by_name
+    }
+}
+impl From<ListDirOptions> for WalkOptions {
+    fn from(listing: ListDirOptions) -> Self {
+        Self::new(listing)
     }
 }
 
@@ -214,15 +251,21 @@ mod option_layout_tests {
             .with_max_directory_path_bytes(13)
             .with_max_walk_depth(crate::api::DepthLimit::new(3).expect("finite depth"));
         let inherited = ListDirOptions::new().walk_options(limits);
-        assert!(!ListDirOptions::new().enter_leave());
-        assert!(!ListDirOptions::new().sort_by_name());
         assert!(ListDirOptions::new().allow_symlink_components());
-        assert_eq!(inherited.max_entries(), limits.walk_options().max_entries());
         assert_eq!(
-            inherited.max_depth().get(),
-            limits.walk_options().max_depth().get()
+            inherited.max_entries_or(crate::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+            limits
+                .walk_options()
+                .max_entries_or(crate::api::DEFAULT_DIRECTORY_MAX_ENTRIES)
         );
-        assert_eq!(inherited.max_path_bytes(), 13);
+        assert_eq!(
+            inherited.max_depth_or(Default::default()).get(),
+            limits.walk_options().max_depth_or(Default::default()).get()
+        );
+        assert_eq!(
+            inherited.max_path_bytes_or(crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
+            13
+        );
         for value in [0, 1, 200, usize::MAX] {
             let options = ListDirOptions::new()
                 .with_max_entries(value)
@@ -233,47 +276,63 @@ mod option_layout_tests {
                     crate::api::DepthLimit::new(value).expect("finite depth")
                 })
                 .with_recursive(true)
-                .with_enter_leave(true)
-                .with_sort_by_name(true)
                 .with_allow_symlink_components(false)
                 .with_truncate_at_max_depth(true)
                 .with_fields(Attributes::SIZE);
             let walk = options.walk_options(limits);
-            assert_eq!(walk.max_entries(), value);
+            assert_eq!(
+                walk.max_entries_or(crate::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+                value
+            );
             assert_eq!(walk.fields(), options.fields());
             assert!(!walk.allow_symlink_components());
-            assert_eq!(walk.max_path_bytes(), value);
-            assert_eq!(walk.max_depth().get(), value);
+            assert_eq!(
+                walk.max_path_bytes_or(crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
+                value
+            );
+            assert_eq!(walk.max_depth_or(Default::default()).get(), value);
             assert!(walk.truncate_at_max_depth());
             assert!(options.recursive());
-            assert!(options.enter_leave());
-            assert!(options.sort_by_name());
             assert!(!options.allow_symlink_components());
             assert_eq!(options.fields(), Attributes::SIZE | Attributes::MODE);
             let changed = options
                 .with_recursive(false)
-                .with_truncate_at_max_depth(false)
-                .with_enter_leave(false)
-                .with_sort_by_name(false);
+                .with_truncate_at_max_depth(false);
             let changed = changed.with_allow_symlink_components(true);
             assert!(!changed.recursive());
-            assert!(!changed.enter_leave());
-            assert!(!changed.sort_by_name());
             assert!(changed.allow_symlink_components());
             assert!(!changed.walk_options(limits).truncate_at_max_depth());
-            assert_eq!(changed.directory_options(limits).max_entries(), value);
+            assert_eq!(
+                changed
+                    .directory_options(limits)
+                    .max_entries_or(crate::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+                value
+            );
             let zero = changed
                 .with_max_entries(0)
                 .with_max_path_bytes(0)
                 .with_max_depth(crate::api::DepthLimit::new(0).expect("finite depth"));
-            assert_eq!(zero.walk_options(limits).max_entries(), 0);
-            assert_eq!(zero.walk_options(limits).max_path_bytes(), 0);
-            assert_eq!(zero.walk_options(limits).max_depth().get(), 0);
+            assert_eq!(
+                zero.walk_options(limits)
+                    .max_entries_or(crate::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+                0
+            );
+            assert_eq!(
+                zero.walk_options(limits)
+                    .max_path_bytes_or(crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
+                0
+            );
+            assert_eq!(
+                zero.walk_options(limits)
+                    .max_depth_or(Default::default())
+                    .get(),
+                0
+            );
         }
         assert_eq!(
             ListDirOptions::unlimited()
                 .walk_options(limits)
-                .max_depth()
+                .max_depth_or(Default::default())
                 .get(),
             usize::MAX
         );

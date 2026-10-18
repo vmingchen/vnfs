@@ -364,9 +364,9 @@ impl NfsRecoveryPolicy {
     pub fn new() -> Self {
         Self::default()
     }
-    /// Set the attempt cap, including the first attempt. Zero also makes one attempt.
-    pub fn with_reconnect_attempts(mut self, value: usize) -> Self {
-        self.reconnect_attempts = value.max(1);
+    /// Set the nonzero attempt cap, including the first attempt.
+    pub fn with_reconnect_attempts(mut self, value: std::num::NonZeroUsize) -> Self {
+        self.reconnect_attempts = value.get();
         self
     }
     pub const fn reconnect_attempts(self) -> usize {

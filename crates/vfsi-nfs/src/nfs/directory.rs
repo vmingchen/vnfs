@@ -167,7 +167,9 @@ pub(super) fn append_bounded_walk_page(
                 .strip_prefix(root)
                 .map(|relative| relative.components().count())
                 .unwrap_or(usize::MAX);
-            if depth > options.max_depth().get() && !options.truncate_at_max_depth() {
+            if depth > options.max_depth_or(Default::default()).get()
+                && !options.truncate_at_max_depth()
+            {
                 return Err(
                     VfError::failure(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
                 );
@@ -559,7 +561,7 @@ impl NfsVecFs {
             let take = removal_batch_take(
                 names.len() - start,
                 self.nfs.remove_batch_capacity(),
-                options.batch_size(),
+                options.batch_size().map_or(0, std::num::NonZeroUsize::get),
             );
             match self.nfs.remove_many(dir, &names[start..start + take]) {
                 Ok(()) => {
@@ -614,7 +616,7 @@ impl NfsVecFs {
             let take = removal_batch_take(
                 entries.len() - start,
                 self.nfs.remove_batch_capacity(),
-                options.batch_size(),
+                options.batch_size().map_or(0, std::num::NonZeroUsize::get),
             );
             let chunk = &entries[start..start + take];
             let names: Vec<Vec<u8>> = chunk.iter().map(|(name, _)| name.to_vec()).collect();
@@ -676,7 +678,7 @@ impl NfsVecFs {
             let take = removal_batch_take(
                 names.len() - start,
                 self.nfs.lookup_batch_capacity(),
-                options.batch_size(),
+                options.batch_size().map_or(0, std::num::NonZeroUsize::get),
             );
             let chunk = &names[start..start + take];
             let ops: Vec<(NfsFh, Vec<u8>)> = chunk

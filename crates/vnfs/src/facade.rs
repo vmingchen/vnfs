@@ -15,50 +15,41 @@ macro_rules! owned_client {
                 targets: &[P],
                 options: AttrsOptions,
             ) -> Result<Vec<Attrs>> {
-                let targets: Vec<_> = targets
-                    .iter()
-                    .map(|target| match target.as_target() {
+                self.inner.vgetattrs_projected_native(
+                    targets,
+                    options.fields(),
+                    options.follow_final_symlink(),
+                    |target| match target.as_target() {
                         Target::Path(path) => Target::Path(path),
                         Target::File(file) => Target::File(&file.inner),
-                    })
-                    .collect();
-                self.inner.vgetattrs(&targets, options)
+                    },
+                )
             }
             pub(crate) fn vfsync_impl(&self, files: &[&$file], mode: SyncMode) -> Result<()> {
-                let files: Vec<_> = files.iter().map(|file| &file.inner).collect();
-                self.inner.vfsync(&files, mode)
+                self.inner
+                    .vfsync_projected_native(files, mode, |file| &file.inner)
             }
-            /// Query filesystem statistics for paths and this client's open handles.
             pub(crate) fn vstatfs_impl<P: vfsi_core::AsTarget<$file>>(
                 &self,
                 targets: &[P],
             ) -> Result<Vec<FilesystemStats>> {
-                let targets: Vec<_> = targets
-                    .iter()
-                    .map(|target| match target.as_target() {
-                        vfsi_core::Target::Path(path) => vfsi_core::Target::Path(path),
-                        vfsi_core::Target::File(file) => vfsi_core::Target::File(&file.inner),
+                self.inner
+                    .vstatfs_projected_native(targets, |target| match target.as_target() {
+                        Target::Path(path) => Target::Path(path),
+                        Target::File(file) => Target::File(&file.inner),
                     })
-                    .collect();
-                self.inner.vstatfs(&targets)
             }
-            /// Update selected metadata fields for many paths in one backend vector.
             pub(crate) fn vsetattrs_impl<P: vfsi_core::AsTarget<$file>>(
                 &self,
                 updates: &[SetAttrsOp<P>],
             ) -> Result<()> {
-                let updates: Vec<_> = updates
-                    .iter()
-                    .map(|op| {
-                        let target = match op.target().as_target() {
-                            vfsi_core::Target::Path(path) => vfsi_core::Target::Path(path),
-                            vfsi_core::Target::File(file) => vfsi_core::Target::File(&file.inner),
-                        };
-                        op.with_target(target)
+                self.inner
+                    .vsetattrs_projected_native(updates, |target| match target.as_target() {
+                        Target::Path(path) => Target::Path(path),
+                        Target::File(file) => Target::File(&file.inner),
                     })
-                    .collect();
-                self.inner.vsetattrs(&updates)
             }
+
             /// Create symbolic links, retaining each target's original text.
             pub(crate) fn vsymlink_impl<P: AsRef<Path>, Q: AsRef<Path>>(
                 &self,

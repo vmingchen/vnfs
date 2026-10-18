@@ -1308,6 +1308,11 @@ impl DirEntry {
         &self.path
     }
 
+    /// Consume the entry, transferring its owned path and metadata without cloning.
+    pub fn into_parts(self) -> (PathBuf, Attrs) {
+        (self.path, self.metadata)
+    }
+
     pub fn file_name(&self) -> Option<&std::ffi::OsStr> {
         self.path.file_name()
     }
@@ -1360,6 +1365,14 @@ bitflags::bitflags! {
         const NON_UTF8_PATHS = VF_CAP_NON_UTF8_PATHS;
         const LSTAT = VF_CAP_LSTAT;
         const UNIX_SEMANTICS = VF_CAP_UNIX_SEMANTICS;
+        /// Will attempt native atomic no-replace rename; a filesystem may reject it.
+        const RENAME_NOREPLACE = 1 << 6;
+        /// Will attempt native atomic name exchange; a filesystem may reject it.
+        const RENAME_EXCHANGE = 1 << 7;
+        /// Can retain genuine directory handles through vopen_dirs.
+        const DIRECTORY_HANDLES = 1 << 8;
+        /// Can remove directory contents anchored to retained directory identity.
+        const ANCHORED_REMOVAL = 1 << 9;
     }
 }
 
@@ -1383,9 +1396,9 @@ pub struct RemoveOptions {
     /// Keep removing after a per-entry failure and report the first error at
     /// the end. When `false`, the first failure aborts.
     flags: RemoveFlags,
-    /// Maximum batch size for vectorized removals; `0` lets the backend learn
+    /// Maximum batch size for vectorized removals; `None` lets the backend learn
     /// a safe size from useful work, starting at a conservative default.
-    batch: usize,
+    batch: Option<std::num::NonZeroUsize>,
     /// Bounded retries for retryable per-entry statuses.
     retries: u32,
 }
@@ -1394,15 +1407,15 @@ impl Default for RemoveOptions {
     fn default() -> Self {
         Self {
             flags: RemoveFlags::new(),
-            batch: 0,
+            batch: None,
             retries: 4,
         }
     }
 }
 
 impl RemoveOptions {
-    /// Configured batch size; zero allows backend adaptation.
-    pub const fn batch_size(self) -> usize {
+    /// Configured batch size; `None` allows backend adaptation.
+    pub const fn batch_size(self) -> Option<std::num::NonZeroUsize> {
         self.batch
     }
     /// Retry cap; zero disables retries.
@@ -1424,7 +1437,7 @@ impl RemoveOptions {
         self.flags.continue_on_error()
     }
 
-    pub fn with_batch_size(mut self, value: usize) -> Self {
+    pub fn with_batch_size(mut self, value: Option<std::num::NonZeroUsize>) -> Self {
         self.batch = value;
         self
     }

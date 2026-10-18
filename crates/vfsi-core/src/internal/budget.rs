@@ -65,7 +65,7 @@ mod tests {
         assert_eq!(
             budget
                 .remaining_options(ListDirOptions::new())
-                .max_path_bytes(),
+                .max_path_bytes_or(crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
             3
         );
         budget.charge(Path::new("/é")).unwrap();
@@ -73,7 +73,7 @@ mod tests {
         assert_eq!(
             budget
                 .remaining_options(ListDirOptions::new())
-                .max_path_bytes(),
+                .max_path_bytes_or(crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
             0
         );
         assert!(budget.charge(Path::new("")).is_err());
@@ -89,10 +89,16 @@ mod tests {
                 .with_allow_symlink_components(true)
                 .with_max_depth(crate::api::DepthLimit::new(7).expect("finite depth")),
         );
-        assert_eq!(options.max_entries(), usize::MAX - 1);
-        assert_eq!(options.max_path_bytes(), usize::MAX - 5);
+        assert_eq!(
+            options.max_entries_or(crate::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+            usize::MAX - 1
+        );
+        assert_eq!(
+            options.max_path_bytes_or(crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
+            usize::MAX - 5
+        );
         assert!(options.recursive());
         assert!(options.allow_symlink_components());
-        assert_eq!(options.max_depth().get(), 7);
+        assert_eq!(options.max_depth_or(Default::default()).get(), 7);
     }
 }

@@ -700,6 +700,8 @@ fn rust_native_client_pool_uses_independent_sessions() {
     assert_eq!(pool.len(), 2);
     assert!(!pool.is_empty());
     assert!(pool.client(2).is_none());
+    assert!(std::ptr::eq(pool.client(0).unwrap(), pool.next_client()));
+    assert!(std::ptr::eq(pool.client(1).unwrap(), pool.next_client()));
     let first = pool.client(0).unwrap();
     let paths: Vec<_> = (0..2).map(|index| format!("{dir}/file-{index}")).collect();
     for path in &paths {
@@ -716,7 +718,7 @@ fn rust_native_client_pool_uses_independent_sessions() {
     let threads: Vec<_> = paths
         .into_iter()
         .map(|path| {
-            let client = pool.next_client();
+            let client = pool.next_client().clone();
             std::thread::spawn(move || {
                 let file = client.open(&path).unwrap();
                 let mut bytes = [0; 4];
@@ -817,9 +819,9 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
     client.write(&path, &expected).expect("write fixture");
 
     let options = NfsReadPoolOptions::new()
-        .with_worker_count(3)
-        .with_chunk_size(64 * 1024)
-        .with_max_in_flight(5)
+        .with_worker_count(std::num::NonZeroUsize::new(3).expect("nonzero tuning value"))
+        .with_chunk_size(std::num::NonZeroUsize::new(64 * 1024).expect("nonzero tuning value"))
+        .with_max_in_flight(std::num::NonZeroUsize::new(5).expect("nonzero tuning value"))
         .with_max_buffered_bytes(5 * 64 * 1024);
     let mut pool = Nfs::builder(test_host())
         .connect_read_pool(options)
@@ -2562,9 +2564,11 @@ fn pipelined_read_recovers_after_a_lost_read_reply() {
     let mut pool = Nfs::builder(proxy.endpoint())
         .connect_read_pool(
             NfsReadPoolOptions::new()
-                .with_worker_count(3)
-                .with_chunk_size(32 * 1024)
-                .with_max_in_flight(6)
+                .with_worker_count(std::num::NonZeroUsize::new(3).expect("nonzero tuning value"))
+                .with_chunk_size(
+                    std::num::NonZeroUsize::new(32 * 1024).expect("nonzero tuning value"),
+                )
+                .with_max_in_flight(std::num::NonZeroUsize::new(6).expect("nonzero tuning value"))
                 .with_max_buffered_bytes(6 * 32 * 1024),
         )
         .expect("connect read pool through NFS reply-loss proxy");
@@ -3206,19 +3210,29 @@ fn retained_directory_vector_survives_rename_and_exposes_options() {
 
     let handle = c.vopen_dirs(&[&original]).unwrap().remove(0);
     c.rename(&original, &moved).unwrap();
-    c.vremove_dir_contents(&[&handle], RemoveOptions::new().with_batch_size(2))
-        .unwrap();
+    c.vremove_dir_contents(
+        &[&handle],
+        RemoveOptions::new().with_batch_size(std::num::NonZeroUsize::new(2)),
+    )
+    .unwrap();
     assert_eq!(handle.path(), Path::new(&original));
     assert!(c.read_dir(&moved).unwrap().is_empty());
     assert!(c.attrs(&file).is_err());
     handle.close().unwrap();
     let extra = format!("{moved}/extra");
     c.write(&extra, b"data").unwrap();
-    c.vremove_impl(&[&extra], false, RemoveOptions::new().with_batch_size(2))
-        .unwrap();
+    c.vremove_impl(
+        &[&extra],
+        false,
+        RemoveOptions::new().with_batch_size(std::num::NonZeroUsize::new(2)),
+    )
+    .unwrap();
     assert!(c.attrs(&extra).is_err());
-    c.remove_dir_all_with_options(&moved, RemoveOptions::new().with_batch_size(2))
-        .unwrap();
+    c.remove_dir_all_with_options(
+        &moved,
+        RemoveOptions::new().with_batch_size(std::num::NonZeroUsize::new(2)),
+    )
+    .unwrap();
     assert!(c.attrs(&moved).is_err());
 }
 
@@ -3237,8 +3251,11 @@ fn recursive_removal_drains_large_directory_and_nested_children() {
         c.create_dir(&child).unwrap();
         c.write(format!("{child}/file"), b"x").unwrap();
     }
-    c.remove_dir_contents_with_options(&root, RemoveOptions::new().with_batch_size(32))
-        .unwrap();
+    c.remove_dir_contents_with_options(
+        &root,
+        RemoveOptions::new().with_batch_size(std::num::NonZeroUsize::new(32)),
+    )
+    .unwrap();
     assert!(c.read_dir(&root).unwrap().is_empty());
     c.remove_dir_all(&root).unwrap();
 }
@@ -3280,7 +3297,7 @@ fn rm_with_options_honors_batch_size() {
         c.remove_paths_with_options_impl(
             &[Path::new(&root)],
             true,
-            vfsi_sync::RemoveOptions::new().with_batch_size(batch),
+            vfsi_sync::RemoveOptions::new().with_batch_size(std::num::NonZeroUsize::new(batch)),
         )
         .unwrap();
         let (compounds, _, _, max_ops) = vfsi_nfs::compound::thread_compound_stats();
@@ -3317,7 +3334,7 @@ fn recursive_rm_learns_larger_batches_from_useful_compounds() {
     c.remove_paths_with_options_impl(
         &[Path::new(&fixed)],
         true,
-        vfsi_sync::RemoveOptions::new().with_batch_size(24),
+        vfsi_sync::RemoveOptions::new().with_batch_size(std::num::NonZeroUsize::new(24)),
     )
     .unwrap();
     let fixed_compounds = vfsi_nfs::compound::thread_compound_stats().0;
@@ -4171,10 +4188,14 @@ fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
     let options = vnfs::directory::ListDirOptions::new().with_recursive(true);
     for mode in [
         DirectoryVisit::Pages,
-        DirectoryVisit::Events(options),
-        DirectoryVisit::Events(options.with_sort_by_name(true)),
-        DirectoryVisit::Events(options.with_enter_leave(true)),
-        DirectoryVisit::Events(options.with_sort_by_name(true).with_enter_leave(true)),
+        DirectoryVisit::Events(options.into()),
+        DirectoryVisit::Events(vfsi_core::api::WalkOptions::new(options).with_sort_by_name(true)),
+        DirectoryVisit::Events(vfsi_core::api::WalkOptions::new(options).with_enter_leave(true)),
+        DirectoryVisit::Events(
+            vfsi_core::api::WalkOptions::new(options)
+                .with_sort_by_name(true)
+                .with_enter_leave(true),
+        ),
     ] {
         directory_replacement_is_not_followed(mode, ReplacedDirectory::Child);
     }
@@ -4184,9 +4205,11 @@ fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
 fn buffered_directory_walk_rejects_an_ancestor_replaced_by_a_symlink() {
     let options = vnfs::directory::ListDirOptions::new().with_recursive(true);
     for options in [
-        options.with_sort_by_name(true),
-        options.with_enter_leave(true),
-        options.with_sort_by_name(true).with_enter_leave(true),
+        vfsi_core::api::WalkOptions::new(options).with_sort_by_name(true),
+        vfsi_core::api::WalkOptions::new(options).with_enter_leave(true),
+        vfsi_core::api::WalkOptions::new(options)
+            .with_sort_by_name(true)
+            .with_enter_leave(true),
     ] {
         directory_replacement_is_not_followed(
             DirectoryVisit::Events(options),
@@ -4198,7 +4221,7 @@ fn buffered_directory_walk_rejects_an_ancestor_replaced_by_a_symlink() {
 #[derive(Clone, Copy, Debug)]
 enum DirectoryVisit {
     Pages,
-    Events(vnfs::directory::ListDirOptions),
+    Events(vnfs::directory::WalkOptions),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4548,6 +4571,13 @@ fn vector_links_modes_and_capabilities_work_generically_on_nfs() {
         })
         .connect()
         .unwrap();
+    let caps = fs.capabilities().unwrap();
+    assert!(caps.contains(
+        vnfs::files::Capabilities::DIRECTORY_HANDLES | vnfs::files::Capabilities::ANCHORED_REMOVAL
+    ));
+    assert!(!caps.intersects(
+        vnfs::files::Capabilities::RENAME_NOREPLACE | vnfs::files::Capabilities::RENAME_EXCHANGE
+    ));
     links_support::check_links_and_modes(&fs, &directory);
     fs.remove_dir_all(&directory).unwrap();
 }

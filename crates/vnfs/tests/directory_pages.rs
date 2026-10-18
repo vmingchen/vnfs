@@ -143,13 +143,15 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
         ("recursive lifecycle", true, true, false),
         ("recursive sorted lifecycle", true, true, true),
     ] {
-        let options = ListDirOptions::new()
-            .with_recursive(recursive)
-            .with_enter_leave(lifecycle)
-            .with_sort_by_name(sort)
-            .with_max_depth(
-                vfsi_core::api::DepthLimit::new(usize::from(recursive)).expect("finite depth"),
-            );
+        let options = vfsi_core::api::WalkOptions::new(
+            ListDirOptions::new()
+                .with_recursive(recursive)
+                .with_max_depth(
+                    vfsi_core::api::DepthLimit::new(usize::from(recursive)).expect("finite depth"),
+                ),
+        )
+        .with_enter_leave(lifecycle)
+        .with_sort_by_name(sort);
         let mut expected: Vec<_> = ["/tree/empty", "/tree/link", "/tree/sub", "/tree/top"]
             .map(std::path::PathBuf::from)
             .into();
@@ -160,45 +162,54 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
             expected.push("/tree".into());
         }
         expected.sort();
-        let collect = |options| -> vnfs::Result<Vec<std::path::PathBuf>> {
-            let mut paths = Vec::new();
-            let completion = fs.listdir("/tree", options, |event| {
-                assert_eq!(
-                    event.depth,
-                    event
-                        .entry
-                        .path()
-                        .strip_prefix("/tree")
-                        .unwrap()
-                        .components()
-                        .count(),
-                    "{name}"
-                );
-                if !lifecycle || (!recursive && event.depth > 0) {
-                    assert_eq!(event.kind, WalkEventKind::Entry, "{name}");
-                }
-                if event.kind != WalkEventKind::Leave {
-                    paths.push(event.entry.path().to_owned());
-                }
-                Ok(WalkControl::Continue)
-            })?;
-            assert_eq!(completion, TraversalCompletion::Complete, "{name}");
-            paths.sort();
-            Ok(paths)
-        };
+        let collect =
+            |options: vnfs::directory::WalkOptions| -> vnfs::Result<Vec<std::path::PathBuf>> {
+                let mut paths = Vec::new();
+                let completion = fs.listdir("/tree", options, |event| {
+                    assert_eq!(
+                        event.depth,
+                        event
+                            .entry
+                            .path()
+                            .strip_prefix("/tree")
+                            .unwrap()
+                            .components()
+                            .count(),
+                        "{name}"
+                    );
+                    if !lifecycle || (!recursive && event.depth > 0) {
+                        assert_eq!(event.kind, WalkEventKind::Entry, "{name}");
+                    }
+                    if event.kind != WalkEventKind::Leave {
+                        paths.push(event.entry.path().to_owned());
+                    }
+                    Ok(WalkControl::Continue)
+                })?;
+                assert_eq!(completion, TraversalCompletion::Complete, "{name}");
+                paths.sort();
+                Ok(paths)
+            };
         assert_eq!(collect(options).unwrap(), expected, "{name}");
         assert_eq!(
             collect(
-                options
-                    .with_max_entries(usize::MAX)
-                    .with_max_path_bytes(usize::MAX)
+                options.with_listing_options(
+                    options
+                        .listing_options()
+                        .with_max_entries(usize::MAX)
+                        .with_max_path_bytes(usize::MAX)
+                )
             )
             .unwrap(),
             expected,
             "{name}: unlimited budgets"
         );
         assert_eq!(
-            collect(options.with_max_entries(expected.len())).unwrap(),
+            collect(
+                options.with_listing_options(
+                    options.listing_options().with_max_entries(expected.len())
+                )
+            )
+            .unwrap(),
             expected,
             "{name}: exact entry budget"
         );
@@ -210,23 +221,32 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
                 0
             };
         assert_eq!(
-            collect(options.with_max_path_bytes(bytes)).unwrap(),
+            collect(
+                options.with_listing_options(options.listing_options().with_max_path_bytes(bytes))
+            )
+            .unwrap(),
             expected,
             "{name}"
         );
         for limited_options in [
-            options.with_max_entries(expected.len() - 1),
-            options.with_max_path_bytes(bytes - 1),
-            options.with_max_path_bytes(1),
+            options.with_listing_options(
+                options
+                    .listing_options()
+                    .with_max_entries(expected.len() - 1),
+            ),
+            options.with_listing_options(options.listing_options().with_max_path_bytes(bytes - 1)),
+            options.with_listing_options(options.listing_options().with_max_path_bytes(1)),
         ] {
             let error = collect(limited_options).unwrap_err();
             assert_eq!(error.kind(), vnfs::error::ErrorKind::FileTooLarge, "{name}");
             assert_eq!(error.index(), Some(0), "{name}");
         }
         assert_eq!(
-            fs.listdir("/tree", options.with_max_entries(0), |_| panic!(
-                "zero budget"
-            ))
+            fs.listdir(
+                "/tree",
+                options.with_listing_options(options.listing_options().with_max_entries(0)),
+                |_| panic!("zero budget")
+            )
             .unwrap_err()
             .kind(),
             vnfs::error::ErrorKind::FileTooLarge,
@@ -270,8 +290,11 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
         if recursive {
             assert_eq!(
                 collect(
-                    options
-                        .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
+                    options.with_listing_options(
+                        options.listing_options().with_max_depth(
+                            vfsi_core::api::DepthLimit::new(0).expect("finite depth")
+                        )
+                    )
                 )
                 .unwrap_err()
                 .kind(),
@@ -279,9 +302,12 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
                 "{name}"
             );
             let truncated = collect(
-                options
-                    .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
-                    .with_truncate_at_max_depth(true),
+                options.with_listing_options(
+                    options
+                        .listing_options()
+                        .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
+                        .with_truncate_at_max_depth(true),
+                ),
             )
             .unwrap();
             let shallow: Vec<_> = expected
@@ -293,8 +319,11 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
             if lifecycle {
                 fs.listdir(
                     "/tree",
-                    options
-                        .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth")),
+                    options.with_listing_options(
+                        options.listing_options().with_max_depth(
+                            vfsi_core::api::DepthLimit::new(0).expect("finite depth"),
+                        ),
+                    ),
                     |event| {
                         assert_ne!(event.entry.path(), Path::new("/tree/sub/leaf"));
                         Ok(if event.depth > 0 && event.kind == WalkEventKind::Enter {
@@ -314,9 +343,9 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
 #[test]
 fn buffered_local_walk_never_follows_replaced_children_or_ancestors() {
     for options in [
-        ListDirOptions::new().with_sort_by_name(true),
-        ListDirOptions::new().with_enter_leave(true),
-        ListDirOptions::new()
+        vfsi_core::api::WalkOptions::new(ListDirOptions::new()).with_sort_by_name(true),
+        vfsi_core::api::WalkOptions::new(ListDirOptions::new()).with_enter_leave(true),
+        vfsi_core::api::WalkOptions::new(ListDirOptions::new())
             .with_sort_by_name(true)
             .with_enter_leave(true),
     ] {
@@ -332,15 +361,19 @@ fn buffered_local_walk_never_follows_replaced_children_or_ancestors() {
                 .unwrap();
             let mut changed = false;
             let mut escaped = false;
-            let result = fs.listdir("/tree", options.with_recursive(true), |event| {
-                if event.entry.path() == Path::new("/tree/child") && !changed {
-                    fs.vrename(&[(victim, "/saved")], Default::default())?;
-                    fs.symlink(target, victim)?;
-                    changed = true;
-                }
-                escaped |= event.entry.path().ends_with("secret");
-                Ok(vnfs::directory::WalkControl::Continue)
-            });
+            let result = fs.listdir(
+                "/tree",
+                options.with_listing_options(options.listing_options().with_recursive(true)),
+                |event| {
+                    if event.entry.path() == Path::new("/tree/child") && !changed {
+                        fs.vrename(&[(victim, "/saved")], Default::default())?;
+                        fs.symlink(target, victim)?;
+                        changed = true;
+                    }
+                    escaped |= event.entry.path().ends_with("secret");
+                    Ok(vnfs::directory::WalkControl::Continue)
+                },
+            );
             assert!(changed);
             assert!(!escaped, "{options:?}, {name}");
             let error = result.unwrap_err();
@@ -411,21 +444,14 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
 }
 
 #[test]
-fn vector_pages_reject_presentation_flags_before_resolving_any_root() {
-    let root = tempfile::tempdir().unwrap();
-    let fs = Posix::new(root.path()).unwrap();
-    for options in [
-        ListDirOptions::new().with_enter_leave(true),
-        ListDirOptions::new().with_sort_by_name(true),
-        ListDirOptions::new()
-            .with_enter_leave(true)
-            .with_sort_by_name(true),
-    ] {
-        let error = fs
-            .vlistdirs(&["/missing"], options, |_, _| {
-                panic!("callback must not run")
-            })
-            .unwrap_err();
-        assert_eq!(error.kind(), vnfs::error::ErrorKind::InvalidInput);
-    }
+fn presentation_policy_preserves_its_independent_listing_configuration() {
+    let listing = ListDirOptions::new()
+        .with_recursive(true)
+        .with_max_entries(17);
+    let walk = vnfs::directory::WalkOptions::new(listing)
+        .with_enter_leave(true)
+        .with_sort_by_name(true);
+    assert_eq!(walk.listing_options(), listing);
+    assert!(walk.enter_leave());
+    assert!(walk.sort_by_name());
 }

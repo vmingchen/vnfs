@@ -1,18 +1,19 @@
 //! Execution policies for the scalar directory visitor; all I/O uses Vfsi vectors.
 use super::{
-    AttrsOptions, ControlFlow, DirEntry, Error, ListDirOptions, Result, TraversalCompletion, Vfsi,
-    VfsiExt, WalkControl, WalkEvent, WalkEventKind,
+    AttrsOptions, ControlFlow, DirEntry, Error, Result, TraversalCompletion, Vfsi, VfsiExt,
+    WalkControl, WalkEvent, WalkEventKind,
 };
 use std::path::Path;
 
 pub(super) fn listdir<F: Vfsi + ?Sized>(
     fs: &F,
     root: &Path,
-    options: ListDirOptions,
+    presentation: super::WalkOptions,
     mut visitor: impl FnMut(&WalkEvent) -> Result<WalkControl>,
 ) -> Result<TraversalCompletion> {
-    if options.enter_leave() || options.sort_by_name() {
-        return buffered(fs, root, options, visitor);
+    let options = presentation.listing_options();
+    if presentation.enter_leave() || presentation.sort_by_name() {
+        return buffered(fs, root, presentation, visitor);
     }
 
     // Keep the native paging engine, including anchored child cursors, linear
@@ -86,11 +87,12 @@ fn limit_error(path: &Path) -> Error {
 fn buffered<F: Vfsi + ?Sized>(
     fs: &F,
     root: &Path,
-    options: ListDirOptions,
+    presentation: super::WalkOptions,
     mut visitor: impl FnMut(&WalkEvent) -> Result<WalkControl>,
 ) -> Result<TraversalCompletion> {
+    let options = presentation.listing_options();
     let fields = options.fields();
-    let lifecycle = options.enter_leave();
+    let lifecycle = presentation.enter_leave();
     let attrs = if lifecycle || options.recursive() {
         fs.attrs_with_options(
             root,
@@ -116,10 +118,15 @@ fn buffered<F: Vfsi + ?Sized>(
     // from the entry budget; shallow listing also excludes its retained path.
     let mut budget = walk;
     if !lifecycle {
-        budget = budget.with_max_entries(walk.max_entries().saturating_add(1));
+        budget = budget.with_max_entries(
+            walk.max_entries_or(crate::api::DEFAULT_DIRECTORY_MAX_ENTRIES)
+                .saturating_add(1),
+        );
         if !options.recursive() {
-            budget = budget
-                .with_max_path_bytes(walk.max_path_bytes().saturating_add(root.as_os_str().len()));
+            budget = budget.with_max_path_bytes(
+                walk.max_path_bytes_or(crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES)
+                    .saturating_add(root.as_os_str().len()),
+            );
         }
     }
     // ListDirOptions depth limits concern descent, not files in a root listing.
@@ -131,7 +138,7 @@ fn buffered<F: Vfsi + ?Sized>(
     super::traversal::walk_events(
         DirEntry::new(root.to_path_buf(), attrs),
         budget,
-        options.sort_by_name(),
+        presentation.sort_by_name(),
         |path, remaining| {
             // Match native recursive entry-mode accounting: child paths are
             // charged once as entries and again when retained for descent.
@@ -141,15 +148,13 @@ fn buffered<F: Vfsi + ?Sized>(
                     .ok_or_else(|| limit_error(path))?;
             }
             let bytes = remaining
-                .max_path_bytes()
+                .max_path_bytes_or(crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES)
                 .checked_sub(retained_bytes)
                 .ok_or_else(|| limit_error(path))?;
             fs.read_dir_with_options(
                 path,
                 remaining
                     .with_recursive(false)
-                    .with_enter_leave(false)
-                    .with_sort_by_name(false)
                     .with_max_path_bytes(bytes)
                     .with_fields(fields)
                     // Reopening a path is not anchored to the original page.
@@ -193,7 +198,7 @@ fn buffered<F: Vfsi + ?Sized>(
                 if !options.recursive() || decision == WalkControl::SkipSubtree {
                     return Ok(WalkControl::SkipSubtree);
                 }
-                if event.depth > walk.max_depth().get() {
+                if event.depth > walk.max_depth_or(Default::default()).get() {
                     if !walk.truncate_at_max_depth() {
                         return Err(limit_error(event.entry.path()));
                     }

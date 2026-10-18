@@ -54,15 +54,15 @@ impl NfsClientPool {
         self.inner.clients.is_empty()
     }
 
-    /// Return a specific member; cloned handles share that member's session.
-    pub fn client(&self, index: usize) -> Option<NfsClient> {
-        self.inner.clients.get(index).cloned()
+    /// Borrow a specific member. Clone explicitly to retain an owned client view.
+    pub fn client(&self, index: usize) -> Option<&NfsClient> {
+        self.inner.clients.get(index)
     }
 
     /// Choose the next independent session in round-robin order.
-    pub fn next_client(&self) -> NfsClient {
+    pub fn next_client(&self) -> &NfsClient {
         let index = self.inner.next.fetch_add(1, Ordering::Relaxed) % self.len();
-        self.inner.clients[index].clone()
+        &self.inner.clients[index]
     }
 }
 
@@ -98,7 +98,7 @@ impl Nfs {
             inner: NfsClientBuilder::new(host),
             limits: ResourceLimits::default(),
             #[cfg(target_os = "linux")]
-            mount_binding: None,
+            mount: None,
         }
     }
 
@@ -143,10 +143,10 @@ impl NfsMount {
 pub struct NfsBuilder {
     inner: NfsClientBuilder,
     limits: ResourceLimits,
-    // A customization callback may clone the supplied builder, but must not
-    // replace it with one whose backend lacks the original mount safeguards.
+    // Pinned discovery information for connect_session; backend validation
+    // independently checks mount root, authentication and version at connect.
     #[cfg(target_os = "linux")]
-    mount_binding: Option<Arc<()>>,
+    mount: Option<Arc<NfsMount>>,
 }
 
 impl NfsBuilder {
@@ -172,29 +172,8 @@ impl NfsBuilder {
         Ok(Self {
             inner: NfsClientBuilder::from_mount_config(mount.inner.clone())?,
             limits: ResourceLimits::default(),
-            mount_binding: Some(Arc::new(())),
+            mount: Some(Arc::new(mount.clone())),
         })
-    }
-
-    #[cfg(target_os = "linux")]
-    pub(crate) fn configure_for_mount(
-        self,
-        local_path: &Path,
-        configure: impl FnOnce(Self) -> Self,
-    ) -> VfResult<Self> {
-        let binding = self.mount_binding.clone();
-        let configured = configure(self);
-        if !binding
-            .as_ref()
-            .zip(configured.mount_binding.as_ref())
-            .is_some_and(|(expected, actual)| Arc::ptr_eq(expected, actual))
-        {
-            return Err(crate::Error::client(0, libc::EINVAL as u32).with_context(
-                "mount session customization must retain the supplied builder",
-                local_path,
-            ));
-        }
-        Ok(configured)
     }
 
     /// Select an NFS-visible namespace directory, not a host-local directory.
@@ -264,6 +243,22 @@ impl NfsBuilder {
         })
     }
 
+    /// Connect a discovered mount together with its local-path mapping.
+    /// Configure through `NfsBuilder::from_mount` or `NfsMount::builder`.
+    /// A direct-host builder has no mapping and fails before network I/O.
+    #[cfg(target_os = "linux")]
+    pub fn connect_session(mut self) -> VfResult<crate::nfs::mount::NfsMountSession> {
+        let mount = self.mount.take().ok_or_else(|| {
+            crate::Error::client(0, libc::EINVAL as u32)
+                .with_context("connect_session requires a discovered mount", Path::new(""))
+        })?;
+        let fs = self.connect()?;
+        Ok(crate::nfs::mount::NfsMountSession::from_connected(
+            Arc::unwrap_or_clone(mount),
+            fs,
+        ))
+    }
+
     /// Defaults for connected clients. Read pools instead use their supplied
     /// `NfsReadPoolOptions`, which bound concurrency and outstanding buffers.
     pub fn limits(mut self, limits: ResourceLimits) -> Self {
@@ -302,72 +297,64 @@ mod mount_tests {
     use crate::Vfsi;
 
     #[test]
-    fn mount_customization_rejects_unbound_and_differently_bound_builders() {
-        let path = Path::new("/mnt/nfs/project");
-        for separately_bound in [false, true] {
-            let mut supplied = Nfs::builder("127.0.0.1:2049");
-            supplied.mount_binding = Some(Arc::new(()));
-            let mut replacement = Nfs::builder("127.0.0.1:2049");
-            if separately_bound {
-                replacement.mount_binding = Some(Arc::new(()));
-            }
-            let error = supplied
-                .configure_for_mount(path, |_| replacement)
-                .unwrap_err();
-            assert_eq!(error.raw_code(), libc::EINVAL as u32);
-            assert_eq!(error.path(), Some(path));
-            assert!(error.to_string().contains("supplied builder"));
-        }
-    }
-
-    #[test]
-    fn mount_customization_accepts_cloning_and_tuning_the_supplied_builder() {
-        let binding = Arc::new(());
-        let mut supplied = Nfs::builder("127.0.0.1:2049");
-        supplied.mount_binding = Some(binding.clone());
-        let limits = ResourceLimits::new().with_max_read_bytes(1024);
-        let configured = supplied
-            .configure_for_mount(Path::new("/mnt/nfs/project"), |builder| {
-                builder
-                    .clone()
-                    .request_timeout(Duration::from_secs(2))
-                    .limits(limits)
-            })
-            .unwrap();
-        assert!(Arc::ptr_eq(
-            configured.mount_binding.as_ref().unwrap(),
-            &binding
-        ));
-        assert_eq!(configured.limits, limits);
+    fn direct_builders_cannot_create_mapped_mount_sessions() {
+        let error = Nfs::builder("invalid host before network I/O")
+            .request_timeout(Duration::from_secs(2))
+            .connect_session()
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("requires a discovered mount"));
     }
 
     #[test]
     #[ignore = "requires configured NFS mount fixtures"]
-    fn live_mount_session_rejects_replacement_builders() {
-        let directory = std::env::var("VFSI_NFS_TEST_MOUNT")
-            .expect("VFSI_NFS_TEST_MOUNT is required for this ignored integration test");
-        // Other live tests install nested bind mounts under the export root;
-        // mount discovery correctly rejects roots containing those mounts.
+    fn live_mount_builder_preserves_tuning_and_rejects_root_auth_or_version_changes() {
+        let directory = std::env::var("VFSI_NFS_TEST_MOUNT").expect("mount fixture required");
         let directory = tempfile::tempdir_in(directory).unwrap();
         let mount = Nfs::discover_mount(directory.path()).unwrap();
-        let host = mount.host().to_owned();
-        let replacement = |_| {
-            Nfs::builder(&host)
-                .root("/")
-                .version(NfsVersion::V4_2)
-                .connect_timeout(Duration::from_secs(2))
-                .request_timeout(Duration::from_secs(2))
-        };
-        let error = crate::nfs::mount::NfsMountSession::from_discovered_with(mount, replacement)
-            .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EINVAL as u32);
-        assert!(error.to_string().contains("supplied builder"));
-
-        let error =
-            crate::nfs::mount::NfsMountSession::from_mount_with(directory.path(), replacement)
-                .unwrap_err();
-        assert_eq!(error.raw_code(), libc::EINVAL as u32);
-        assert!(error.to_string().contains("supplied builder"));
+        let limits = ResourceLimits::new().with_max_read_bytes(1024);
+        let tuned = mount
+            .builder()
+            .unwrap()
+            .clone()
+            .request_timeout(Duration::from_secs(2))
+            .limits(limits);
+        let session = tuned.connect_session().unwrap();
+        assert_eq!(session.fs().limits(), limits);
+        assert_eq!(
+            session.local_root(),
+            directory.path().canonicalize().unwrap()
+        );
+        for builder in [
+            mount
+                .builder()
+                .unwrap()
+                .root(mount.inner.root().join("different-root")),
+            mount
+                .builder()
+                .unwrap()
+                .version(if mount.inner.minor_version() == 1 {
+                    NfsVersion::V4_2
+                } else {
+                    NfsVersion::V4_1
+                }),
+        ] {
+            assert_eq!(
+                builder.connect_session().unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
+        #[cfg(feature = "rpcsec-gss")]
+        {
+            let changed = mount.builder().unwrap().auth(NfsAuth::RpcsecGss {
+                service_principal: None,
+                protection: crate::nfs::RpcsecGssProtection::Integrity,
+            });
+            assert_eq!(
+                changed.connect_session().unwrap_err().kind(),
+                std::io::ErrorKind::InvalidInput
+            );
+        }
     }
 
     #[test]
@@ -377,10 +364,11 @@ mod mount_tests {
             .expect("VFSI_NFS_TEST_MOUNT is required for this ignored integration test");
         let directory = Path::new(&mount).join(format!(".vnfs-from-mount-{}", std::process::id()));
         std::fs::create_dir(&directory).unwrap();
-        let session = crate::nfs::mount::NfsMountSession::from_mount_with(&directory, |builder| {
-            builder.request_timeout(Duration::from_secs(2))
-        })
-        .unwrap();
+        let session = NfsBuilder::from_mount(&directory)
+            .unwrap()
+            .request_timeout(Duration::from_secs(2))
+            .connect_session()
+            .unwrap();
         assert_eq!(session.local_root(), directory.canonicalize().unwrap());
         assert_eq!(
             session

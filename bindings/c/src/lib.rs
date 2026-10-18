@@ -71,6 +71,21 @@ pub const VFSI_CAP_HARDLINKS: u64 = 1 << 3;
 pub const VFSI_CAP_NON_UTF8_PATHS: u64 = 1 << 4;
 /// The backend implements no-follow metadata operations.
 pub const VFSI_CAP_LSTAT: u64 = 1 << 5;
+/// Native atomic no-replace rename is implemented (filesystem support may vary).
+pub const VFSI_CAP_RENAME_NOREPLACE: u64 = 1 << 6;
+const _: () =
+    assert!(VFSI_CAP_RENAME_NOREPLACE == vfsi_sync::Capabilities::RENAME_NOREPLACE.bits());
+/// Native atomic name exchange is implemented (filesystem support may vary).
+pub const VFSI_CAP_RENAME_EXCHANGE: u64 = 1 << 7;
+const _: () = assert!(VFSI_CAP_RENAME_EXCHANGE == vfsi_sync::Capabilities::RENAME_EXCHANGE.bits());
+/// Genuine retained directory handles are implemented.
+pub const VFSI_CAP_DIRECTORY_HANDLES: u64 = 1 << 8;
+const _: () =
+    assert!(VFSI_CAP_DIRECTORY_HANDLES == vfsi_sync::Capabilities::DIRECTORY_HANDLES.bits());
+/// Contents removal can be anchored to a retained directory handle.
+pub const VFSI_CAP_ANCHORED_REMOVAL: u64 = 1 << 9;
+const _: () =
+    assert!(VFSI_CAP_ANCHORED_REMOVAL == vfsi_sync::Capabilities::ANCHORED_REMOVAL.bits());
 
 const _: () = assert!(VFSI_CAP_POSIX_METADATA == vfsi_sync::VF_CAP_POSIX_METADATA);
 const _: () = assert!(VFSI_CAP_SYMLINKS == vfsi_sync::VF_CAP_SYMLINKS);
@@ -1298,8 +1313,8 @@ pub unsafe extern "C" fn vfsi_walk(
                         fs,
                         path,
                         fields,
-                        limits.max_entries(),
-                        limits.max_path_bytes(),
+                        limits.max_entries_or(vfsi_sync::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+                        limits.max_path_bytes_or(vfsi_sync::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
                     )?;
                     entries
                         .into_iter()
