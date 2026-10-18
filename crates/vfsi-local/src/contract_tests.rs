@@ -2147,4 +2147,66 @@ mod tests {
                 .is_fifo()
         );
     }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn directory_cursor_metadata_stays_with_renamed_directory() {
+        use std::os::unix::fs::MetadataExt;
+        for replace in [true, false] {
+            let (root, mut backend) = fs("cursor-metadata-identity");
+            std::fs::create_dir(root.0.join("tree")).unwrap();
+            let mut expected = std::collections::HashMap::new();
+            for name in ["a", "b", "c"] {
+                let path = root.0.join("tree").join(name);
+                std::fs::write(&path, b"original").unwrap();
+                expected.insert(name.to_owned(), std::fs::metadata(&path).unwrap().ino());
+                let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+                // SAFETY: the path/name and one-byte value remain valid during
+                // this synchronous syscall and contain the required terminators.
+                let result = unsafe {
+                    libc::setxattr(
+                        path.as_ptr(),
+                        c"user.prr_cursor".as_ptr(),
+                        b"x".as_ptr().cast(),
+                        1,
+                        0,
+                    )
+                };
+                assert_eq!(result, 0);
+            }
+            let fields = AttrMask::FILEID | AttrMask::NAMED_ATTR;
+            let (first, cursor) = backend
+                .listdir_page_impl(Path::new("/tree"), fields, None, 1, 10, true)
+                .unwrap();
+            assert_eq!(first.len(), 1);
+            assert!(first[0].has_named_attr);
+            let cursor = cursor.expect("more entries remain");
+            std::fs::rename(root.0.join("tree"), root.0.join("moved")).unwrap();
+            if replace {
+                std::fs::create_dir(root.0.join("tree")).unwrap();
+                for name in ["a", "b", "c"] {
+                    std::fs::write(root.0.join("tree").join(name), b"replacement").unwrap();
+                }
+            }
+            let (rest, _) = backend
+                .listdir_page_impl(Path::new("/tree"), fields, Some(cursor), 128, 10, true)
+                .unwrap();
+            assert_eq!(rest.len(), 2);
+            for entry in rest {
+                let name = entry
+                    .file
+                    .path()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
+                assert_eq!(entry.fileid, expected[name]);
+                assert!(
+                    entry.has_named_attr,
+                    "xattrs must describe the retained original entry"
+                );
+                assert!(entry.returned.contains(AttrMask::NAMED_ATTR));
+            }
+        }
+    }
 }
