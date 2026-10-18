@@ -106,6 +106,26 @@
 #define VFSI_CAP_LSTAT (1 << 5)
 
 /**
+ * Native atomic no-replace rename is implemented (filesystem support may vary).
+ */
+#define VFSI_CAP_RENAME_NOREPLACE (1 << 6)
+
+/**
+ * Native atomic name exchange is implemented (filesystem support may vary).
+ */
+#define VFSI_CAP_RENAME_EXCHANGE (1 << 7)
+
+/**
+ * Genuine retained directory handles are implemented.
+ */
+#define VFSI_CAP_DIRECTORY_HANDLES (1 << 8)
+
+/**
+ * Contents removal can be anchored to a retained directory handle.
+ */
+#define VFSI_CAP_ANCHORED_REMOVAL (1 << 9)
+
+/**
  * Opaque filesystem handle owned by C.
  */
 typedef struct vfsi_fs vfsi_fs;

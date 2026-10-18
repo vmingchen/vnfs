@@ -66,6 +66,12 @@ pub const DEFAULT_WALK_MAX_DEPTH: usize = 128;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DepthLimit(std::num::NonZeroU16);
 
+impl Default for DepthLimit {
+    fn default() -> Self {
+        Self::new(DEFAULT_WALK_MAX_DEPTH).unwrap()
+    }
+}
+
 impl DepthLimit {
     /// Construct a finite limit. Out-of-range input never disables the limit.
     pub const fn new(depth: usize) -> Option<Self> {
@@ -248,7 +254,12 @@ mod depth_limit_tests {
             let limit = DepthLimit::new(depth).unwrap();
             assert!(!limit.is_unlimited());
             let limits = ResourceLimits::new().with_max_walk_depth(limit);
-            assert_eq!(ListDirOptions::new().resolve(limits).max_depth(), limit);
+            assert_eq!(
+                ListDirOptions::new()
+                    .resolve(limits)
+                    .max_depth_or(Default::default()),
+                limit
+            );
         }
         for invalid in [65534, 65535, usize::MAX] {
             assert!(DepthLimit::new(invalid).is_none());
@@ -256,7 +267,7 @@ mod depth_limit_tests {
         assert!(
             ListDirOptions::new()
                 .resolve(ResourceLimits::new().with_max_walk_depth(DepthLimit::unlimited()))
-                .max_depth()
+                .max_depth_or(Default::default())
                 .is_unlimited()
         );
     }

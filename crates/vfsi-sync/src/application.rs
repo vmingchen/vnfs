@@ -24,12 +24,12 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
     ) -> Result<Vec<crate::DirectoryPage>>,
     mut callback: impl FnMut(usize, DirectoryListing) -> Result<std::ops::ControlFlow<()>>,
 ) -> Result<Vec<crate::TraversalCompletion>> {
-    if policy.enter_leave() || policy.sort_by_name() {
-        return Err(vfsi_core::api::Error::client(0, libc::EINVAL as u32));
-    }
     let directory = policy.directory_options(limits);
     let walk = policy.walk_options(limits);
-    let mut budget = TraversalBudget::new(directory.max_entries(), directory.max_path_bytes());
+    let mut budget = TraversalBudget::new(
+        directory.max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+        directory.max_path_bytes_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
+    );
     let mut completed = Vec::new();
     let mut pending = std::collections::VecDeque::new();
     for (index, root) in roots.iter().enumerate() {
@@ -131,7 +131,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                     }
                     accepted += 1;
                     if policy.recursive() && entry.attrs().is_dir() {
-                        if depth >= walk.max_depth().get() {
+                        if depth >= walk.max_depth_or(Default::default()).get() {
                             if !walk.truncate_at_max_depth() {
                                 page_error = Some(
                                     vfsi_core::api::Error::client(index, libc::EFBIG as u32)

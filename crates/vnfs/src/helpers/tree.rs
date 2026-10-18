@@ -54,6 +54,10 @@ struct Entry {
 /// # Ok(())
 /// # }
 /// ```
+/// ```compile_fail
+/// use vnfs::helpers::TreeBuilder;
+/// TreeBuilder::new().batch_size(0);
+/// ```
 #[derive(Debug)]
 #[must_use = "configuration and requests have no effect until used"]
 pub struct TreeBuilder {
@@ -101,8 +105,8 @@ impl TreeBuilder {
     }
 
     /// Maximum files or sibling directories per vector call. Must be nonzero.
-    pub fn batch_size(mut self, size: usize) -> Self {
-        self.batch_size = size;
+    pub fn batch_size(mut self, size: std::num::NonZeroUsize) -> Self {
+        self.batch_size = size.get();
         self
     }
 
@@ -183,8 +187,7 @@ impl TreeBuilder {
         if root.as_os_str().len() > self.max_total_bytes {
             return Err(Error::client(0, libc::EFBIG as u32));
         }
-        if self.batch_size == 0
-            || root.as_os_str().is_empty()
+        if root.as_os_str().is_empty()
             || root.as_os_str().as_encoded_bytes().contains(&0)
             || root
                 .components()
@@ -370,7 +373,7 @@ mod tests {
         // Planning sorts names: a is first and b is second, but b was declared
         // at index two, including the suppressed duplicate directory.
         let error = TreeBuilder::new()
-            .batch_size(2)
+            .batch_size(std::num::NonZeroUsize::new(2).expect("nonzero tuning value"))
             .add_directory("unused")
             .add_directory("./unused")
             .add_file("b", "b")

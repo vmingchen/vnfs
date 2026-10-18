@@ -14,12 +14,15 @@ fn stable_owner_reconnect_preserves_independent_opens_and_shutdown() {
         .unwrap_or_else(|_| "2".into())
         .parse()
         .unwrap();
-    let mut fs = NfsVecFs::builder(&server)
-        .minor_version(Some(minor))
-        .client_owner(format!("prr-stable-owner-{}-{minor}", std::process::id()))
-        .recovery_policy(NfsRecoveryPolicy::new().with_reconnect_attempts(1))
-        .connect()
-        .unwrap();
+    let mut fs =
+        NfsVecFs::builder(&server)
+            .minor_version(Some(minor))
+            .client_owner(format!("prr-stable-owner-{}-{minor}", std::process::id()))
+            .recovery_policy(NfsRecoveryPolicy::new().with_reconnect_attempts(
+                std::num::NonZeroUsize::new(1).expect("nonzero tuning value"),
+            ))
+            .connect()
+            .unwrap();
     let path = format!("/prr-stable-owner-{}-{minor}", std::process::id());
     let setup = fs
         .open_raw_impl(
@@ -74,12 +77,15 @@ fn failed_stable_owner_reconnect_keeps_original_descriptors_usable() {
         .unwrap_or_else(|_| "2".into())
         .parse()
         .unwrap();
-    let mut fs = NfsVecFs::builder(&server)
-        .minor_version(Some(minor))
-        .client_owner(format!("prr-owner-failure-{}-{minor}", std::process::id()))
-        .recovery_policy(NfsRecoveryPolicy::new().with_reconnect_attempts(1))
-        .connect()
-        .unwrap();
+    let mut fs =
+        NfsVecFs::builder(&server)
+            .minor_version(Some(minor))
+            .client_owner(format!("prr-owner-failure-{}-{minor}", std::process::id()))
+            .recovery_policy(NfsRecoveryPolicy::new().with_reconnect_attempts(
+                std::num::NonZeroUsize::new(1).expect("nonzero tuning value"),
+            ))
+            .connect()
+            .unwrap();
     let path = format!("/prr-owner-failure-{}-{minor}", std::process::id());
     let file = fs
         .open_raw_impl(
@@ -119,12 +125,15 @@ fn reconnect_cleanup_failure_is_retained_and_retried_at_shutdown() {
         .unwrap_or_else(|_| "2".into())
         .parse()
         .unwrap();
-    let mut fs = NfsVecFs::builder(&server)
-        .minor_version(Some(minor))
-        .client_owner(format!("prr-owner-cleanup-{}-{minor}", std::process::id()))
-        .recovery_policy(NfsRecoveryPolicy::new().with_reconnect_attempts(1))
-        .connect()
-        .unwrap();
+    let mut fs =
+        NfsVecFs::builder(&server)
+            .minor_version(Some(minor))
+            .client_owner(format!("prr-owner-cleanup-{}-{minor}", std::process::id()))
+            .recovery_policy(NfsRecoveryPolicy::new().with_reconnect_attempts(
+                std::num::NonZeroUsize::new(1).expect("nonzero tuning value"),
+            ))
+            .connect()
+            .unwrap();
     let path = format!("/prr-owner-cleanup-{}-{minor}", std::process::id());
     let file = fs
         .open_raw_impl(

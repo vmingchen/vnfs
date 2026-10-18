@@ -75,7 +75,7 @@ use vnfs::directory::RemoveOptions;
 # fn example(fs: &vnfs::nfs::NfsClient) -> vnfs::Result<()> {
 fs.remove_dir_contents_with_options(
     "/owned-scratch-directory",
-    RemoveOptions::new().with_batch_size(32),
+    RemoveOptions::new().with_batch_size(std::num::NonZeroUsize::new(32)),
 )?;
 # Ok(())
 # }

@@ -72,7 +72,8 @@ compares single-session and pooled reads and reports setup separately.
 ## Directory callbacks
 
 `vlistdirs` delivers bounded pages; `read_dirs_with_options` collects them.
-`listdir` visits entries; enable `with_recursive(true).with_enter_leave(true)` for
+`listdir` visits entries. Pass
+`WalkOptions::new(ListDirOptions::new().with_recursive(true)).with_enter_leave(true)` for
 depth-first Enter/Entry/Leave events and prune with `SkipSubtree` on Enter.
 `Stop` ends the entire traversal. Sorting and lifecycle ordering require
 bounded directory buffers; plain entry traversal retains native paging and

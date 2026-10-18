@@ -257,8 +257,10 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
     let options = ListDirOptions::new()
         .with_recursive(true)
         .with_max_entries(1);
-    let mut budget =
-        vfsi_core::internal::TraversalBudget::new(options.max_entries(), options.max_path_bytes());
+    let mut budget = vfsi_core::internal::TraversalBudget::new(
+        options.max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+        options.max_path_bytes_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
+    );
     let mut output = Vec::new();
     let error = append_bounded_walk_page(
         Path::new("/root"),
@@ -280,8 +282,10 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
     let options = ListDirOptions::new()
         .with_recursive(true)
         .with_max_path_bytes(1);
-    budget =
-        vfsi_core::internal::TraversalBudget::new(options.max_entries(), options.max_path_bytes());
+    budget = vfsi_core::internal::TraversalBudget::new(
+        options.max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+        options.max_path_bytes_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
+    );
     output.clear();
     let error = append_bounded_walk_page(
         Path::new("/root"),
@@ -407,7 +411,8 @@ fn fixed_text_builder_owns_compact_endpoints_and_preserves_input_compatibility()
 
 #[test]
 fn builder_collects_connection_and_runtime_configuration() {
-    let policy = NfsRecoveryPolicy::new().with_reconnect_attempts(3);
+    let policy = NfsRecoveryPolicy::new()
+        .with_reconnect_attempts(std::num::NonZeroUsize::new(3).expect("nonzero tuning value"));
     let builder = NfsClientBuilder::new("server:2049")
         .root("/export/app")
         .minor_version(Some(1))

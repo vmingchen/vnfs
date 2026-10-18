@@ -93,7 +93,7 @@ fn builds_nested_binary_empty_and_directory_entries_without_implicit_cleanup() {
     let temp = tempfile::tempdir().unwrap();
     let client = Posix::new(temp.path()).unwrap();
     let tree = TreeBuilder::new()
-        .batch_size(2)
+        .batch_size(std::num::NonZeroUsize::new(2).expect("nonzero tuning value"))
         .add_file("config/./app.conf", "host = localhost")
         .add_file("data/blob", [0, 255, 10])
         .add_empty_file("logs/app.log")
@@ -187,7 +187,6 @@ fn budgets_include_implicit_directories_payloads_and_planned_path_bytes() {
         TreeBuilder::new().max_entries(2).add_file("a/b/c", ""),
         TreeBuilder::new().max_total_bytes(5).add_file("f", "12345"),
         TreeBuilder::new().max_total_bytes(10).add_file("a/b", ""),
-        TreeBuilder::new().batch_size(0).add_file("f", ""),
         TreeBuilder::new()
             .add_directory(std::iter::repeat_n("x", 129).collect::<Vec<_>>().join("/")),
     ];

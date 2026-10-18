@@ -207,7 +207,8 @@ fn native_directory_visitor_reenters_client_across_snapshot_pages() {
         client
             .listdir(
                 &remote_dir,
-                vfsi_core::api::ListDirOptions::new().with_sort_by_name(sort),
+                vfsi_core::api::WalkOptions::new(vfsi_core::api::ListDirOptions::new())
+                    .with_sort_by_name(sort),
                 |entry| {
                     assert_eq!(client.attrs(entry.entry.path())?.len(), Some(1));
                     seen.push(entry.entry.path().to_path_buf());

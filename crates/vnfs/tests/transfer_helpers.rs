@@ -260,8 +260,8 @@ fn recursive_copy_is_bounded_and_short_reads_have_no_gaps() {
         "/src",
         "/dst",
         TransferOptions::new()
-            .with_chunk_size(16)
-            .with_batch_size(2),
+            .with_chunk_size(std::num::NonZeroUsize::new(16).expect("nonzero tuning value"))
+            .with_batch_size(std::num::NonZeroUsize::new(2).expect("nonzero tuning value")),
     )
     .unwrap();
     assert_eq!(s.files_copied, 3);
@@ -371,8 +371,6 @@ fn overlap_depth_and_budgets_are_explicit() {
     for options in [
         TransferOptions::new().with_max_entries(0),
         TransferOptions::new().with_max_path_bytes(1),
-        TransferOptions::new().with_batch_size(0),
-        TransferOptions::new().with_chunk_size(0),
     ] {
         assert!(copy_tree(&fs, "/src", "/dst", options).is_err());
         assert!(!t.path().join("dst").exists());
@@ -401,7 +399,7 @@ fn cancellation_reports_completed_wave_and_retains_sources() {
         &["/src/a", "/src/c"],
         "/dst",
         TransferOptions::new()
-            .with_chunk_size(16)
+            .with_chunk_size(std::num::NonZeroUsize::new(16).expect("nonzero tuning value"))
             .with_preserve_permissions(true),
         |p| {
             assert_eq!(p.file_bytes_copied, 16);
@@ -421,7 +419,8 @@ fn cancellation_reports_completed_wave_and_retains_sources() {
         &fs,
         &["/src/a", "/src/c"],
         "/wave",
-        TransferOptions::new().with_chunk_size(16),
+        TransferOptions::new()
+            .with_chunk_size(std::num::NonZeroUsize::new(16).expect("nonzero tuning value")),
         |p| {
             assert_eq!(p.summary.bytes_copied, Some(32));
             Ok(ControlFlow::Break(()))
@@ -448,7 +447,9 @@ fn malformed_reads_lost_write_and_close_failure_never_delete_or_replay() {
                 &fs,
                 &["/src/a"],
                 "/dst",
-                TransferOptions::new().with_chunk_size(16)
+                TransferOptions::new().with_chunk_size(
+                    std::num::NonZeroUsize::new(16).expect("nonzero tuning value")
+                )
             )
             .is_err()
         );
@@ -534,7 +535,7 @@ fn vector_counts_and_storage_follow_cohort_limits() {
         &sources,
         "/batch",
         TransferOptions::new()
-            .with_chunk_size(16)
+            .with_chunk_size(std::num::NonZeroUsize::new(16).expect("nonzero tuning value"))
             .with_preserve_permissions(true),
     )
     .unwrap();
@@ -552,8 +553,8 @@ fn vector_counts_and_storage_follow_cohort_limits() {
         &sources,
         "/serial",
         TransferOptions::new()
-            .with_batch_size(1)
-            .with_chunk_size(16),
+            .with_batch_size(std::num::NonZeroUsize::new(1).expect("nonzero tuning value"))
+            .with_chunk_size(std::num::NonZeroUsize::new(16).expect("nonzero tuning value")),
     )
     .unwrap();
     assert_eq!(fs.calls.borrow().reads, 12);
@@ -568,7 +569,8 @@ fn vector_errors_map_to_original_mixed_root_index() {
         &fs,
         &["/src/nested", "/src/a", "/other"],
         "/dst",
-        TransferOptions::new().with_chunk_size(16),
+        TransferOptions::new()
+            .with_chunk_size(std::num::NonZeroUsize::new(16).expect("nonzero tuning value")),
     )
     .unwrap_err();
     assert_eq!(e.index(), Some(2));

@@ -852,8 +852,8 @@ impl VectorBackend for NfsVecFs {
             std::collections::HashMap::new();
         let mut entry_count = 0usize;
         let mut budget = vfsi_core::internal::TraversalBudget::new(
-            options.max_entries(),
-            options.max_path_bytes(),
+            options.max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+            options.max_path_bytes_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
         );
 
         // Resolve the root once, then decode each bounded READDIR response
@@ -891,7 +891,10 @@ impl VectorBackend for NfsVecFs {
         // directory can share one compound instead of re-walking full paths.
         let mut frontier: Vec<(NfsFh, PathBuf)> = root_attrs
             .iter()
-            .filter(|entry| entry.ftype == VfType::Directory && options.max_depth().get() > 0)
+            .filter(|entry| {
+                entry.ftype == VfType::Directory
+                    && options.max_depth_or(Default::default()).get() > 0
+            })
             .filter_map(|entry| {
                 entry
                     .file
@@ -982,7 +985,7 @@ impl VectorBackend for NfsVecFs {
                             .strip_prefix(root)
                             .map(|relative| relative.components().count())
                             .unwrap_or(usize::MAX)
-                            <= options.max_depth().get()
+                            <= options.max_depth_or(Default::default()).get()
                     {
                         next_frontier.push((results[index].fh.clone(), path.to_path_buf()));
                     }

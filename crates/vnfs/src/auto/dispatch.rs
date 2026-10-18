@@ -131,7 +131,9 @@ impl Auto {
     /// Common routed capabilities. Server-copy acceleration is route-specific
     /// and is not advertised as a guarantee for the whole namespace.
     pub(crate) fn capabilities_impl(&self) -> VfResult<crate::Capabilities> {
-        self.mounted.capabilities()
+        self.mounted.capabilities().map(|caps| {
+            caps & !(crate::Capabilities::RENAME_NOREPLACE | crate::Capabilities::RENAME_EXCHANGE)
+        })
     }
 
     /// Keep target text unchanged and let the kernel interpret it in the

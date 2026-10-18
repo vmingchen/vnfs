@@ -449,7 +449,7 @@ mod walk_depth_tests {
         const UNLIMITED: ListDirOptions = ListDirOptions::new()
             .with_recursive(true)
             .with_max_depth(DepthLimit::unlimited());
-        assert_eq!(UNLIMITED.max_depth().get(), usize::MAX);
+        assert_eq!(UNLIMITED.max_depth_or(Default::default()).get(), usize::MAX);
         for depth in 0..=200 {
             let options = ListDirOptions::new()
                 .with_recursive(true)
@@ -461,9 +461,15 @@ mod walk_depth_tests {
                 .with_max_entries(7)
                 .with_max_path_bytes(11)
                 .with_truncate_at_max_depth(true);
-            assert_eq!(options.max_depth().get(), depth);
-            assert_eq!(options.max_entries(), 7);
-            assert_eq!(options.max_path_bytes(), 11);
+            assert_eq!(options.max_depth_or(Default::default()).get(), depth);
+            assert_eq!(
+                options.max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+                7
+            );
+            assert_eq!(
+                options.max_path_bytes_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
+                11
+            );
             assert!(options.truncate_at_max_depth());
         }
         for depth in [201, 254, 255, 256, 500, 65533, usize::MAX] {
@@ -475,18 +481,18 @@ mod walk_depth_tests {
                     } else {
                         vfsi_core::api::DepthLimit::new(depth).expect("finite depth")
                     });
-            assert_eq!(options.max_depth().get(), depth);
+            assert_eq!(options.max_depth_or(Default::default()).get(), depth);
             assert_eq!(
                 options
                     .with_max_depth(vfsi_core::api::DepthLimit::new(0).expect("finite depth"))
-                    .max_depth()
+                    .max_depth_or(Default::default())
                     .get(),
                 0
             );
             assert_eq!(
                 options
                     .with_max_depth(vfsi_core::api::DepthLimit::new(200).expect("finite depth"))
-                    .max_depth()
+                    .max_depth_or(Default::default())
                     .get(),
                 200
             );
@@ -494,7 +500,7 @@ mod walk_depth_tests {
         assert_eq!(
             ListDirOptions::unlimited()
                 .with_recursive(true)
-                .max_depth()
+                .max_depth_or(Default::default())
                 .get(),
             usize::MAX
         );

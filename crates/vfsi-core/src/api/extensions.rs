@@ -638,7 +638,6 @@ pub trait VfsiExt: Vfsi {
         paths: &[P],
         options: crate::api::ListDirOptions,
     ) -> Result<Vec<Vec<DirectoryListing>>> {
-        require_page_options(options)?;
         let mut trees: Vec<Vec<DirectoryListing>> = (0..paths.len()).map(|_| Vec::new()).collect();
         let mut positions: Vec<std::collections::HashMap<std::path::PathBuf, usize>> = (0..paths
             .len())
@@ -715,7 +714,8 @@ pub trait VfsiExt: Vfsi {
     /// use vfsi_core::api::{ListDirOptions, Vfsi, VfsiExt, WalkControl, WalkEventKind};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.listdir("/project",
-    ///     ListDirOptions::new().with_recursive(true).with_enter_leave(true).with_sort_by_name(true),
+    ///     vfsi_core::api::WalkOptions::new(ListDirOptions::new().with_recursive(true))
+    ///         .with_enter_leave(true).with_sort_by_name(true),
     ///     |event| {
     ///         if event.kind == WalkEventKind::Enter
     ///             && event.entry.file_name() == Some(std::ffi::OsStr::new(".git")) {
@@ -730,10 +730,10 @@ pub trait VfsiExt: Vfsi {
     fn listdir(
         &self,
         root: impl AsRef<Path>,
-        options: crate::api::ListDirOptions,
+        options: impl Into<crate::api::WalkOptions>,
         visitor: impl FnMut(&crate::api::WalkEvent) -> Result<crate::api::WalkControl>,
     ) -> Result<crate::api::TraversalCompletion> {
-        super::listdir::listdir(self, root.as_ref(), options, visitor)
+        super::listdir::listdir(self, root.as_ref(), options.into(), visitor)
     }
 
     /// Visit individual entries using the directory-page primitive.
@@ -744,7 +744,6 @@ pub trait VfsiExt: Vfsi {
         options: crate::api::ListDirOptions,
         mut callback: impl FnMut(usize, &crate::api::DirEntry) -> Result<std::ops::ControlFlow<()>>,
     ) -> Result<Vec<crate::api::TraversalCompletion>> {
-        require_page_options(options)?;
         self.vlistdirs(paths, options, |index, page| {
             for entry in &page.entries {
                 if callback(index, entry)?.is_break() {
@@ -793,11 +792,12 @@ pub trait VfsiExt: Vfsi {
         mut descend: impl FnMut(&crate::api::DirEntry) -> bool,
         mut visitor: impl FnMut(DirectoryListing, usize) -> Result<crate::api::WalkControl>,
     ) -> Result<crate::api::TraversalCompletion> {
-        require_page_options(options)?;
         let options = options.walk_options(self.limits());
         let root = root.as_ref();
-        let mut budget =
-            crate::internal::TraversalBudget::new(options.max_entries(), options.max_path_bytes());
+        let mut budget = crate::internal::TraversalBudget::new(
+            options.max_entries_or(crate::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+            options.max_path_bytes_or(crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
+        );
         budget.charge(root)?;
         let mut pending = vec![(root.to_path_buf(), 0usize)];
         while let Some((path, depth)) = pending.pop() {
@@ -829,7 +829,7 @@ pub trait VfsiExt: Vfsi {
                 crate::api::WalkControl::SkipSubtree => continue,
                 crate::api::WalkControl::Continue => {}
             }
-            if depth >= options.max_depth().get() && !children.is_empty() {
+            if depth >= options.max_depth_or(Default::default()).get() && !children.is_empty() {
                 if !options.truncate_at_max_depth() {
                     return Err(crate::api::Error::client(0, libc::EFBIG as u32)
                         .with_context("visit_dirs_ordered", &children[0]));
@@ -1197,12 +1197,4 @@ fn single_tree(trees: &mut Vec<Vec<DirectoryListing>>) -> Result<Vec<DirectoryLi
         ));
     }
     Ok(trees.remove(0))
-}
-
-fn require_page_options(options: crate::api::ListDirOptions) -> Result<()> {
-    if options.enter_leave() || options.sort_by_name() {
-        Err(crate::api::Error::client(0, libc::EINVAL as u32))
-    } else {
-        Ok(())
-    }
 }

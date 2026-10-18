@@ -24,7 +24,7 @@ coherent with concurrent kernel-mounted access.
 listings with entry/path/depth budgets and admission before child-directory I/O.
 Its comparator borrows immutable entries, so sorting cannot rewrite validated
 paths or metadata. It lets tools such as `ls` retain their sort and display policy without owning a
-second traversal engine. Use `listdir` with `with_enter_leave(true)` for pre/post-order entry
+second traversal engine. Use `listdir` with `WalkOptions::new(listing_options).with_enter_leave(true)` for pre/post-order entry
 events and `vlistdirs` to batch independent, already-approved directories.
 
 `helpers::copy_to_writer` streams a source to a caller-owned `std::io::Write`
@@ -131,7 +131,7 @@ use vnfs::helpers::TransferOptions;
 
 let fs = Nfs::connect("server.example.com")?;
 let result = copy_items(&fs, &["/input/images", "/input/config"], "/output",
-    TransferOptions::new().with_batch_size(64).with_chunk_size(1024 * 1024))?;
+    TransferOptions::new().with_batch_size(std::num::NonZeroUsize::new(64).expect("nonzero tuning value")).with_chunk_size(std::num::NonZeroUsize::new(1024 * 1024).expect("nonzero tuning value")))?;
 println!("copied {} files", result.files_copied);
 let stats = tree_stats(&fs, "/output", ListDirOptions::new())?;
 println!("{} files, {} logical bytes", stats.files, stats.file_bytes);

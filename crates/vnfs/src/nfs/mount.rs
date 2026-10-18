@@ -26,45 +26,18 @@ impl NfsMountSession {
     /// mount. Unsupported, ambiguous, stale, or insecurely configured mounts
     /// are errors; there is no AUTH_SYS downgrade or kernel fallback.
     pub fn from_mount(directory: impl AsRef<Path>) -> Result<Self> {
-        Self::from_mount_with(directory, |builder| builder)
+        super::NfsBuilder::from_mount(directory)?.connect_session()
     }
 
-    /// Discover a mount and customize its builder before connecting.
-    ///
-    /// Adjust or clone the supplied builder; returning an independently
-    /// constructed builder is an error. The mount root, authentication and
-    /// protocol version must remain unchanged.
-    pub fn from_mount_with(
-        directory: impl AsRef<Path>,
-        configure: impl FnOnce(super::NfsBuilder) -> super::NfsBuilder,
-    ) -> Result<Self> {
-        Self::from_discovered_with(super::Nfs::discover_mount(directory)?, configure)
-    }
-
-    /// Connect using mount information already returned by
-    /// [`super::Nfs::discover_mount`]. This avoids repeating system mount-table
-    /// discovery when an application first classifies or groups an operand.
+    /// Connect from pinned discovery information with default tuning.
+    /// To customize, use `mount.builder()?.request_timeout(timeout).connect_session()`.
     pub fn from_discovered(mount: NfsMount) -> Result<Self> {
-        Self::from_discovered_with(mount, |builder| builder)
+        mount.builder()?.connect_session()
     }
 
-    /// Connect from existing mount information after customizing the builder.
-    ///
-    /// The callback must retain the supplied builder's mount binding, as in
-    /// [`Self::from_mount_with`]. Replacement builders are rejected before any
-    /// connection is attempted.
-    pub fn from_discovered_with(
-        mount: NfsMount,
-        configure: impl FnOnce(super::NfsBuilder) -> super::NfsBuilder,
-    ) -> Result<Self> {
-        let fs = mount
-            .builder()?
-            .configure_for_mount(mount.local_path(), configure)?
-            .connect()?;
-        // Discovery already canonicalized and validated this path, so avoid a
-        // second host filesystem lookup while creating the mapping.
+    pub(crate) fn from_connected(mount: NfsMount, fs: super::NfsClient) -> Self {
         let paths = PathMapper::from_validated_root(mount.local_path().to_path_buf());
-        Ok(Self { mount, fs, paths })
+        Self { mount, fs, paths }
     }
 
     /// The validated direct NFS client.

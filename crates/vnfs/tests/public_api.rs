@@ -482,7 +482,7 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
                 } else {
                     vfsi_core::api::DepthLimit::new(depth).expect("finite depth")
                 });
-        assert_eq!(walk.max_depth().get(), depth);
+        assert_eq!(walk.max_depth_or(Default::default()).get(), depth);
         let converted = walk;
         assert!(converted.recursive());
         let explicit = fs
@@ -569,7 +569,7 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
         ListDirOptions::new()
             .with_recursive(true)
             .with_max_depth(vfsi_core::api::DepthLimit::new(200).expect("finite depth"))
-            .max_depth()
+            .max_depth_or(Default::default())
             .get(),
         200
     );
@@ -661,6 +661,8 @@ fn vector_links_modes_and_capabilities_work_generically_on_local_and_auto() {
     assert_eq!(
         vnfs::files::Vfsi::capabilities(&auto).unwrap(),
         vnfs::files::Vfsi::capabilities(&mounted).unwrap()
+            & !(vnfs::files::Capabilities::RENAME_NOREPLACE
+                | vnfs::files::Capabilities::RENAME_EXCHANGE)
     );
 }
 
@@ -875,17 +877,25 @@ fn policy_builders_preserve_zero_budgets_and_bound_recovery() {
     assert_eq!(limits.max_directory_entries(), 0);
     assert_eq!(limits.max_directory_path_bytes(), 0);
     assert_eq!(limits.max_walk_depth().get(), 0);
-    assert_eq!(limits.directory_options().max_entries(), 0);
-    assert_eq!(limits.walk_options().max_depth().get(), 0);
+    assert_eq!(
+        limits
+            .directory_options()
+            .max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+        0
+    );
+    assert_eq!(
+        limits.walk_options().max_depth_or(Default::default()).get(),
+        0
+    );
     let remove = vnfs::directory::RemoveOptions::new()
-        .with_batch_size(0)
+        .with_batch_size(std::num::NonZeroUsize::new(0))
         .with_retries(0)
         .with_continue_on_error(true);
-    assert_eq!(remove.batch_size(), 0);
+    assert_eq!(remove.batch_size(), None);
     assert_eq!(remove.retries(), 0);
     assert!(remove.continue_on_error());
     let recovery = vnfs::nfs::NfsRecoveryPolicy::new()
-        .with_reconnect_attempts(0)
+        .with_reconnect_attempts(std::num::NonZeroUsize::new(1).expect("nonzero tuning value"))
         .with_initial_backoff(std::time::Duration::MAX)
         .with_max_backoff(std::time::Duration::ZERO)
         .with_max_elapsed(std::time::Duration::ZERO);

@@ -2733,6 +2733,12 @@ fn portable_handle_queries_and_sync_batch_and_preflight_every_handle() {
 }
 #[test]
 fn sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices() {
+    #[cfg(feature = "test-support")]
+    if vfsi_sync::test_support::supervise_with_deadline(
+        "sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices",
+    ) {
+        return;
+    }
     use vfsi_core::api::SyncMode;
     for index in [None, Some(1), Some(2)] {
         let error = index.map_or_else(
@@ -2749,12 +2755,25 @@ fn sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices() {
         let a = fs.open("/a").unwrap();
         let b = fs.open("/b").unwrap();
         let error = fs.vfsync(&[&a, &b], SyncMode::Data).unwrap_err();
-        if index == Some(1) {
-            assert_eq!(error.index(), Some(1));
-            assert_eq!(error.path(), Some(std::path::Path::new("/b")));
-        } else {
-            assert!(error.is_transport());
-            assert_eq!(error.index(), None);
+        let calls = std::cell::Cell::new(0);
+        let projected_error = fs
+            .vfsync_projected_native(&[&a, &b], SyncMode::Data, |file| {
+                calls.set(calls.get() + 1);
+                // Projection is caller code: reentry must remain outside the
+                // backend lock, including when attributing an indexed error.
+                fs.capabilities().unwrap();
+                *file
+            })
+            .unwrap_err();
+        assert_eq!(calls.get(), 2, "project each input exactly once");
+        for error in [error, projected_error] {
+            if index == Some(1) {
+                assert_eq!(error.index(), Some(1));
+                assert_eq!(error.path(), Some(std::path::Path::new("/b")));
+            } else {
+                assert!(error.is_transport());
+                assert_eq!(error.index(), None);
+            }
         }
     }
 }
@@ -3000,8 +3019,11 @@ fn directory_vectors_preflight_all_handles_and_use_retained_descriptors() {
     fs.clone()
         .vremove_dir_contents(&[&dirs[0], &second], RemoveOptions::default())
         .unwrap();
-    fs.vremove_dir_contents(&[&second], RemoveOptions::new().with_batch_size(1))
-        .unwrap();
+    fs.vremove_dir_contents(
+        &[&second],
+        RemoveOptions::new().with_batch_size(std::num::NonZeroUsize::new(1)),
+    )
+    .unwrap();
     assert_eq!(*removed.lock().unwrap(), [0, 2, 2]);
     for dir in dirs {
         dir.close().unwrap();
@@ -3147,4 +3169,54 @@ fn write_allv_orders_aliases_and_unknown_objects_across_short_writes() {
         assert_eq!(waves[2][0].offset, VfOffset::At(2));
         assert_eq!(waves[3][0].offset, VfOffset::At(4));
     }
+}
+
+#[test]
+fn projected_metadata_vectors_convert_each_target_once_and_preflight_all_mutations() {
+    use std::cell::Cell;
+    let backend = AttrsBackend::default();
+    let queries = backend.metadata_calls.clone();
+    let updates = backend.scalar.attrs_calls.clone();
+    let fs = FsClient::new(backend);
+    let calls = Cell::new(0);
+    let targets = [std::path::Path::new("/a"), std::path::Path::new("/b")];
+    fs.vgetattrs_projected_native(&targets, vfsi_core::AttrMask::MODE, false, |path| {
+        calls.set(calls.get() + 1);
+        Target::Path(path)
+    })
+    .unwrap();
+    assert_eq!(calls.get(), 2);
+    assert_eq!(queries.lock().unwrap().len(), 1);
+    assert_eq!(queries.lock().unwrap()[0].1.len(), 2);
+    calls.set(0);
+    let stats_backend = ScalarOnly::default();
+    let stats = stats_backend.stats_calls.clone();
+    let stats_fs = FsClient::new(stats_backend);
+    stats_fs
+        .vstatfs_projected_native(&targets, |path| {
+            calls.set(calls.get() + 1);
+            Target::Path(path)
+        })
+        .unwrap();
+    assert_eq!(calls.get(), 2);
+    assert_eq!(stats.load(Ordering::SeqCst), 1);
+    let local = fs.open("/local").unwrap();
+    let foreign_fs = FsClient::new(AttrsBackend::default());
+    let foreign = foreign_fs.open("/foreign").unwrap();
+    let ops = [
+        SetAttrsOp::file(&local).len(1),
+        SetAttrsOp::file(&foreign).len(2),
+    ];
+    calls.set(0);
+    assert_eq!(
+        fs.vsetattrs_projected_native(&ops, |target| {
+            calls.set(calls.get() + 1);
+            *target
+        })
+        .unwrap_err()
+        .index(),
+        Some(1)
+    );
+    assert_eq!(calls.get(), 2);
+    assert!(updates.lock().unwrap().is_empty());
 }

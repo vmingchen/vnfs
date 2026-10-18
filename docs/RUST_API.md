@@ -436,12 +436,13 @@ with `ListDirOptions`; set `with_recursive(true)` to visit a recursive root. The
 options-aware helper respects the supplied traversal scope, metadata, and budgets.
 `listdir` replaces the former shallow, recursive, options-aware, and event-walk
 entry points. Its callback receives `WalkEvent` and returns `WalkControl`.
-Use `with_enter_leave(true)` for lifecycle events and `with_sort_by_name(true)` for sorted
+Use `WalkOptions::new(listing_options).with_enter_leave(true)` for lifecycle events
+and `WalkOptions::with_sort_by_name(true)` for sorted
 siblings; those modes retain bounded directory buffers. The default entry-only
 mode stays paged and retains native anchored child cursors and batching. With
 lifecycle events enabled, `SkipSubtree` on Enter prevents descent.
-`visit_dirs_ordered` still supplies custom ordering and complete listings. Sorting and enter/leave options
-belong to listdir; page primitives and collecting helpers reject them before I/O.
+`visit_dirs_ordered` still supplies custom ordering and complete listings. Sorting and enter/leave controls belong to `WalkOptions`, accepted by `listdir`;
+page primitives and collecting helpers accept only `ListDirOptions`.
 The shallow read_dir_with_options helper also rejects recursive options; use
 read_dirs_with_options for recursive collection.
 `vgetattrs` accepts paths and retained handles through `AsTarget`, including
@@ -531,3 +532,24 @@ fields explicitly. Page visitors reject sorting and enter/leave flags, and
 Metadata policies use `with_follow_final_symlink`; directory policies use
 `with_allow_symlink_components`. Local Rust clients require an existing directory
 root and preserve lookup failures. Create directories explicitly before connecting.
+
+### API migration notes
+
+- `ListDirOptions::max_entries`, `max_path_bytes`, and `max_depth` return optional
+  overrides. `None` inherits client policy. Use `resolve(client.limits())` or the
+  explicit `*_or(default)` accessors when an effective value is needed.
+- For lifecycle or sorted entry walks, pass
+  `WalkOptions::new(listing_options).with_enter_leave(true).with_sort_by_name(true)`
+  to `listdir`. Plain `ListDirOptions` still selects paged entry visiting.
+- Positive worker, chunk, batch, and recovery-attempt settings take
+  `NonZeroUsize`. Removal batch policy uses `None` for adaptive sizing and
+  `Some(nonzero)` for a fixed size. Entry and byte budgets still permit zero.
+- Configure mapped mount sessions with
+  `NfsBuilder::from_mount(path)?.request_timeout(timeout).connect_session()` or
+  `mount.builder()?.connect_session()`. The former customization callbacks are
+  removed; discovered root, authentication, and protocol safeguards remain.
+- Pool `client` and `next_client` borrow a member; call `.clone()` explicitly when
+  an owned client must outlive that borrow.
+- Capability bits distinguish optional native rename modes, retained directory
+  handles, and handle-anchored contents removal. They describe implementation
+  support, not path authorization or universal filesystem support.

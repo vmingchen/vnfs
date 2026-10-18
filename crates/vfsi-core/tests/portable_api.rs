@@ -297,7 +297,7 @@ fn path_contents_helpers_dispatch_once_without_handles_or_listing() {
     let fs = tree_fs();
     let path = Path::new("/empty");
     let options = RemoveOptions::new()
-        .with_batch_size(2)
+        .with_batch_size(std::num::NonZeroUsize::new(2))
         .with_continue_on_error(true)
         .with_retries(1);
     fs.remove_dir_contents(path).unwrap();
@@ -380,8 +380,7 @@ fn listdir_recursive_entry_pruning_requires_lifecycle_configuration() {
         let error = fs
             .listdir(
                 "/tree",
-                ListDirOptions::new()
-                    .with_recursive(true)
+                vfsi_core::api::WalkOptions::new(ListDirOptions::new().with_recursive(true))
                     .with_sort_by_name(sort),
                 |event| {
                     assert_eq!(event.kind, WalkEventKind::Entry);
@@ -405,8 +404,7 @@ fn listdir_lifecycle_sorts_prunes_and_balances_directory_events() {
     let mut seen = Vec::new();
     fs.listdir(
         "/tree",
-        ListDirOptions::new()
-            .with_recursive(true)
+        vfsi_core::api::WalkOptions::new(ListDirOptions::new().with_recursive(true))
             .with_enter_leave(true)
             .with_sort_by_name(true),
         |event| {
@@ -460,8 +458,7 @@ fn listdir_lifecycle_root_pruning_stop_and_empty_directory_need_no_child_reads()
         let completion = fs
             .listdir(
                 "/tree",
-                ListDirOptions::new()
-                    .with_recursive(true)
+                vfsi_core::api::WalkOptions::new(ListDirOptions::new().with_recursive(true))
                     .with_enter_leave(true),
                 |event| {
                     kinds.push(event.kind);
@@ -486,7 +483,7 @@ fn listdir_lifecycle_root_pruning_stop_and_empty_directory_need_no_child_reads()
     let mut kinds = Vec::new();
     fs.listdir(
         "/empty",
-        ListDirOptions::new().with_enter_leave(true),
+        vfsi_core::api::WalkOptions::new(ListDirOptions::new()).with_enter_leave(true),
         |event| {
             kinds.push(event.kind);
             Ok(WalkControl::Continue)
@@ -509,21 +506,26 @@ fn buffered_listdir_forwards_remaining_budgets_fields_and_resolution_policy() {
         let fs = tree_fs();
         fs.listdir(
             "/tree",
-            ListDirOptions::new()
-                .with_recursive(recursive)
-                .with_enter_leave(lifecycle)
-                .with_sort_by_name(sort)
-                .with_fields(Attributes::MODE)
-                .with_max_entries(20)
-                .with_max_path_bytes(1024),
+            vfsi_core::api::WalkOptions::new(
+                ListDirOptions::new()
+                    .with_recursive(recursive)
+                    .with_fields(Attributes::MODE)
+                    .with_max_entries(20)
+                    .with_max_path_bytes(1024),
+            )
+            .with_enter_leave(lifecycle)
+            .with_sort_by_name(sort),
             |_| Ok(WalkControl::Continue),
         )
         .unwrap();
         let calls = fs.directory_options.borrow();
         let first = calls[0].directory_options(fs.limits());
-        assert_eq!(first.max_entries(), 20 - usize::from(lifecycle));
         assert_eq!(
-            first.max_path_bytes(),
+            first.max_entries_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+            20 - usize::from(lifecycle)
+        );
+        assert_eq!(
+            first.max_path_bytes_or(vfsi_core::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
             1024 - if recursive || lifecycle {
                 "/tree".len()
             } else {
@@ -533,8 +535,6 @@ fn buffered_listdir_forwards_remaining_budgets_fields_and_resolution_policy() {
         for options in calls.iter() {
             assert_eq!(options.fields(), Attributes::MODE);
             assert!(!options.recursive());
-            assert!(!options.enter_leave());
-            assert!(!options.sort_by_name());
             assert_eq!(options.allow_symlink_components(), !recursive && !lifecycle);
         }
     }
@@ -641,43 +641,6 @@ fn directory_defaults_match_with_or_without_explicit_options() {
 #[test]
 fn collecting_and_page_adapters_reject_unhandled_policies_before_io() {
     let fs = PortableFs::default();
-    for options in [
-        ListDirOptions::new().with_enter_leave(true),
-        ListDirOptions::new().with_sort_by_name(true),
-    ] {
-        assert_eq!(
-            fs.read_dir_with_options("/missing", options)
-                .unwrap_err()
-                .kind(),
-            ErrorKind::InvalidInput
-        );
-        assert_eq!(
-            fs.read_dirs_with_options(&["/missing"], options)
-                .unwrap_err()
-                .kind(),
-            ErrorKind::InvalidInput
-        );
-        assert_eq!(
-            fs.visit_entries_with_options(&["/missing"], options, |_, _| panic!(
-                "callback must not run"
-            ))
-            .unwrap_err()
-            .kind(),
-            ErrorKind::InvalidInput
-        );
-        assert_eq!(
-            fs.visit_dirs_ordered(
-                "/missing",
-                options,
-                |_, _| std::cmp::Ordering::Equal,
-                |_| true,
-                |_, _| panic!("callback must not run")
-            )
-            .unwrap_err()
-            .kind(),
-            ErrorKind::InvalidInput
-        );
-    }
     assert_eq!(
         fs.read_dir_with_options("/missing", ListDirOptions::new().with_recursive(true))
             .unwrap_err()
@@ -686,4 +649,49 @@ fn collecting_and_page_adapters_reject_unhandled_policies_before_io() {
     );
     assert_eq!(fs.listings.get(), 0);
     assert_eq!(fs.metadata.get(), 0);
+}
+
+#[test]
+fn consuming_directory_entries_reuses_the_owned_path_allocation() {
+    let path = PathBuf::from("/a/long-owned-directory-entry");
+    let pointer = path.as_os_str().as_encoded_bytes().as_ptr();
+    let attrs = vfsi_core::metadata_from_attrs(vfsi_core::VfAttrs {
+        size: 27,
+        returned: Attributes::SIZE,
+        ..Default::default()
+    });
+    let (path, attrs) = DirEntry::new(path, attrs).into_parts();
+    assert_eq!(path.as_os_str().as_encoded_bytes().as_ptr(), pointer);
+    assert_eq!(attrs.len(), Some(27));
+}
+
+#[test]
+fn directory_budget_overrides_remain_distinct_from_client_defaults() {
+    let defaults = ResourceLimits::new()
+        .with_max_directory_entries(7)
+        .with_max_directory_path_bytes(11)
+        .with_max_walk_depth(DepthLimit::new(3).unwrap());
+    let inherited = ListDirOptions::new();
+    assert_eq!(inherited.max_entries(), None);
+    assert_eq!(inherited.max_path_bytes(), None);
+    assert_eq!(inherited.max_depth(), None);
+    let resolved = inherited.resolve(defaults);
+    assert_eq!(resolved.max_entries(), Some(7));
+    assert_eq!(resolved.max_path_bytes(), Some(11));
+    assert_eq!(resolved.max_depth(), Some(DepthLimit::new(3).unwrap()));
+    for budget in [0, 1, usize::MAX] {
+        let options = inherited
+            .with_max_entries(budget)
+            .with_max_path_bytes(budget);
+        assert_eq!(options.max_entries(), Some(budget));
+        assert_eq!(options.max_path_bytes(), Some(budget));
+        assert_eq!(options.resolve(defaults).max_entries(), Some(budget));
+        assert_eq!(options.resolve(defaults).max_path_bytes(), Some(budget));
+    }
+    let walk = WalkOptions::new(inherited)
+        .with_enter_leave(true)
+        .with_sort_by_name(true)
+        .with_listing_options(resolved);
+    assert_eq!(walk.listing_options(), resolved);
+    assert!(walk.enter_leave() && walk.sort_by_name());
 }

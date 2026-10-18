@@ -9,11 +9,28 @@ impl<F: HandleBackend> FsClient<F> {
         files: &[&OpenFile<F>],
         mode: vfsi_core::api::SyncMode,
     ) -> VfResult<()> {
+        self.vfsync_projected_native(files, mode, |file| *file)
+    }
+
+    /// Adapter projection fused with full-vector ownership preflight.
+    /// Each input is projected once before acquiring the backend lock.
+    #[doc(hidden)]
+    pub fn vfsync_projected_native<'a, P>(
+        &self,
+        files: &'a [P],
+        mode: vfsi_core::api::SyncMode,
+        project: impl Fn(&'a P) -> &'a OpenFile<F>,
+    ) -> VfResult<()>
+    where
+        F: 'a,
+    {
         if files.is_empty() {
             return Ok(());
         }
         let mut raw = Vec::with_capacity(files.len());
+        let mut projected = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
+            let file = project(file);
             if !Arc::ptr_eq(&self.inner, &file.inner) {
                 return Err(
                     VfError::client(index, crate::ERR_INVAL).with_context("vfsync", &file.path)
@@ -24,18 +41,18 @@ impl<F: HandleBackend> FsClient<F> {
                     .map_err(|e| e.with_index(index).with_context("vfsync", &file.path))?
                     .clone(),
             );
+            // Retain only a borrowed handle for error context, not a cloned
+            // path or another call to potentially reentrant projection code.
+            projected.push(file);
         }
-        self.lock()?
-            .vfsync_impl(&raw, mode)
-            .map_err(|error| match error.index() {
-                Some(index) if index < files.len() => {
-                    error.with_context("vfsync", &files[index].path)
-                }
-                Some(_) => {
-                    VfError::transport(None, "fsync backend returned an invalid error index")
-                }
-                None => error,
-            })
+        let result = self.lock()?.vfsync_impl(&raw, mode);
+        result.map_err(|error| match error.index() {
+            Some(index) if index < projected.len() => {
+                error.with_context("vfsync", &projected[index].path)
+            }
+            Some(_) => VfError::transport(None, "fsync backend returned an invalid error index"),
+            None => error,
+        })
     }
 
     /// Query filesystems using one native vector of paths and retained handles.
@@ -43,6 +60,19 @@ impl<F: HandleBackend> FsClient<F> {
         &self,
         targets: &[P],
     ) -> VfResult<Vec<crate::FilesystemStats>> {
+        self.vstatfs_projected_native(targets, |target| target.as_target())
+    }
+
+    /// Adapter projection fused with full-vector ownership preflight.
+    #[doc(hidden)]
+    pub fn vstatfs_projected_native<'a, P>(
+        &self,
+        targets: &'a [P],
+        project: impl Fn(&'a P) -> vfsi_core::Target<'a, OpenFile<F>>,
+    ) -> VfResult<Vec<crate::FilesystemStats>>
+    where
+        F: 'a,
+    {
         use vfsi_core::Target;
         if targets.is_empty() {
             return Ok(Vec::new());
@@ -50,7 +80,7 @@ impl<F: HandleBackend> FsClient<F> {
         let mut files = Vec::with_capacity(targets.len());
         let mut paths = Vec::with_capacity(targets.len());
         for (index, target) in targets.iter().enumerate() {
-            let (raw, path) = match target.as_target() {
+            let (raw, path) = match project(target) {
                 Target::Path(path) => (FileOperand::from_os_path(path), path),
                 Target::File(file) => {
                     if !Arc::ptr_eq(&self.inner, &file.inner) {
@@ -92,6 +122,19 @@ impl<F: HandleBackend> FsClient<F> {
         &self,
         updates: &[vfsi_core::SetAttrsOp<P>],
     ) -> VfResult<()> {
+        self.vsetattrs_projected_native(updates, |target| target.as_target())
+    }
+
+    /// Adapter projection fused with full-vector validation before mutation.
+    #[doc(hidden)]
+    pub fn vsetattrs_projected_native<'a, P>(
+        &self,
+        updates: &'a [vfsi_core::SetAttrsOp<P>],
+        project: impl Fn(&'a P) -> vfsi_core::Target<'a, OpenFile<F>>,
+    ) -> VfResult<()>
+    where
+        F: 'a,
+    {
         use vfsi_core::Target;
         if updates.is_empty() {
             return Ok(());
@@ -100,7 +143,7 @@ impl<F: HandleBackend> FsClient<F> {
         let mut attrs = Vec::with_capacity(updates.len());
         for (index, op) in updates.iter().enumerate() {
             let target = op.target();
-            let (raw, path) = match target.as_target() {
+            let (raw, path) = match project(target) {
                 Target::Path(path) => (Target::Path(path), path),
                 Target::File(file) => {
                     if !Arc::ptr_eq(&self.inner, &file.inner) {
@@ -160,6 +203,21 @@ impl<F: VectorBackend> FsClient<F> {
         fields: AttrMask,
         follow: bool,
     ) -> VfResult<Vec<Attrs>> {
+        self.vgetattrs_projected_native(targets, fields, follow, |target| target.as_target())
+    }
+
+    /// Adapter projection fused with ownership preflight and metadata dispatch.
+    #[doc(hidden)]
+    pub fn vgetattrs_projected_native<'a, P>(
+        &self,
+        targets: &'a [P],
+        fields: AttrMask,
+        follow: bool,
+        project: impl Fn(&'a P) -> vfsi_core::Target<'a, OpenFile<F>>,
+    ) -> VfResult<Vec<Attrs>>
+    where
+        F: 'a,
+    {
         use vfsi_core::Target;
         if targets.is_empty() {
             return Ok(Vec::new());
@@ -168,7 +226,7 @@ impl<F: VectorBackend> FsClient<F> {
         let mut attrs = Vec::with_capacity(targets.len());
         let mut policies = Vec::with_capacity(targets.len());
         for (index, target) in targets.iter().enumerate() {
-            let (raw, path, follows) = match target.as_target() {
+            let (raw, path, follows) = match project(target) {
                 Target::Path(path) => (FileOperand::from_os_path(path), path, follow),
                 Target::File(file) => {
                     self.validate_owner(file, index)

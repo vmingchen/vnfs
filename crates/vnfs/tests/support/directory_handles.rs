@@ -45,7 +45,7 @@ pub fn check<C: Vfsi>(fs: &C, other: &C, namespace: &impl Vfsi, verify: &impl Vf
     let second = fs.vopen_dirs(&["/b"]).unwrap().remove(0);
     fs.vremove_dir_contents(
         &[&dirs[0], &second],
-        RemoveOptions::new().with_batch_size(1),
+        RemoveOptions::new().with_batch_size(std::num::NonZeroUsize::new(1)),
     )
     .unwrap();
     assert!(verify.read_dir("/moved").unwrap().is_empty());

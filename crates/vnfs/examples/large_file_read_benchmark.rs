@@ -189,9 +189,17 @@ fn main() -> Result<()> {
                 .version(vnfs::nfs::NfsVersion::try_from(args.minor_version)?)
                 .connect_read_pool(
                     NfsReadPoolOptions::new()
-                        .with_worker_count(worker_count)
-                        .with_chunk_size(chunk_size)
-                        .with_max_in_flight(worker_count * 2)
+                        .with_worker_count(
+                            std::num::NonZeroUsize::new(worker_count)
+                                .expect("nonzero tuning value"),
+                        )
+                        .with_chunk_size(
+                            std::num::NonZeroUsize::new(chunk_size).expect("nonzero tuning value"),
+                        )
+                        .with_max_in_flight(
+                            std::num::NonZeroUsize::new(worker_count * 2)
+                                .expect("nonzero tuning value"),
+                        )
                         .with_max_buffered_bytes(16 * 1024 * 1024),
                 )?;
             let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;

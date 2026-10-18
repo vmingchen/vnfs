@@ -61,7 +61,8 @@ fn tree_creation_batches_compounds_on_nfsv41_and_nfsv42() {
         );
         cleanup.unwrap();
         let serial_root = format!("{root}-serial");
-        let mut serial = TreeBuilder::new().batch_size(1);
+        let mut serial = TreeBuilder::new()
+            .batch_size(std::num::NonZeroUsize::new(1).expect("nonzero tuning value"));
         for index in 0..16 {
             serial = serial.add_file(format!("dir-{index}/file"), format!("payload-{index}"));
         }

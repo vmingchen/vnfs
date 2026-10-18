@@ -165,6 +165,8 @@ impl HandleBackend for NfsVecFs {
 
     fn capabilities(&self) -> Capabilities {
         Capabilities::UNIX_SEMANTICS
+            | Capabilities::DIRECTORY_HANDLES
+            | Capabilities::ANCHORED_REMOVAL
             | if self.server_copy_enabled() {
                 Capabilities::SERVER_COPY
             } else {

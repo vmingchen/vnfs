@@ -46,7 +46,9 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 &fs,
                 &src,
                 format!("{root}/descriptor"),
-                TransferOptions::new().with_chunk_size(16),
+                TransferOptions::new().with_chunk_size(
+                    std::num::NonZeroUsize::new(16).expect("nonzero tuning value"),
+                ),
             )?;
             assert_eq!(s.files_copied, 2);
             assert_eq!(s.bytes_copied, Some(103));
@@ -103,7 +105,8 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 &fs,
                 &batchsrc,
                 format!("{root}/serial-copy"),
-                TransferOptions::new().with_batch_size(1),
+                TransferOptions::new()
+                    .with_batch_size(std::num::NonZeroUsize::new(1).expect("nonzero tuning value")),
             )?;
             let serial = vnfs::diagnostics::take_and_reset();
             eprintln!(

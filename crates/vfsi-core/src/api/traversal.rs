@@ -36,7 +36,10 @@ pub fn walk_events(
     mut read_dir: impl FnMut(&Path, ListDirOptions) -> VfResult<Vec<DirEntry>>,
     mut callback: impl FnMut(&WalkEvent) -> VfResult<WalkControl>,
 ) -> VfResult<TraversalCompletion> {
-    let mut budget = TraversalBudget::new(options.max_entries(), options.max_path_bytes());
+    let mut budget = TraversalBudget::new(
+        options.max_entries_or(crate::api::DEFAULT_DIRECTORY_MAX_ENTRIES),
+        options.max_path_bytes_or(crate::api::DEFAULT_DIRECTORY_MAX_PATH_BYTES),
+    );
     budget.charge(root.path())?;
     let kind = if root.attrs().is_dir() {
         WalkEventKind::Enter
@@ -48,19 +51,18 @@ pub fn walk_events(
         entry: root,
         depth: 0,
     }];
-    while let Some(event) = pending.pop() {
+    while let Some(mut event) = pending.pop() {
         match callback(&event)? {
             WalkControl::Stop => return Ok(TraversalCompletion::Stopped),
             decision if event.kind == WalkEventKind::Enter => {
-                pending.push(WalkEvent {
-                    kind: WalkEventKind::Leave,
-                    ..event.clone()
-                });
+                event.kind = WalkEventKind::Leave;
                 if decision == WalkControl::SkipSubtree {
+                    pending.push(event);
                     continue;
                 }
-                if event.depth > options.max_depth().get() {
+                if event.depth > options.max_depth_or(Default::default()).get() {
                     if options.truncate_at_max_depth() {
+                        pending.push(event);
                         continue;
                     }
                     return Err(VfError::client(0, libc::EFBIG as u32)
@@ -76,6 +78,8 @@ pub fn walk_events(
                 if sort_by_name {
                     entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
                 }
+                let child_depth = event.depth + 1;
+                pending.push(event);
                 for entry in entries.into_iter().rev() {
                     let kind = if entry.attrs().is_dir() {
                         WalkEventKind::Enter
@@ -85,7 +89,7 @@ pub fn walk_events(
                     pending.push(WalkEvent {
                         kind,
                         entry,
-                        depth: event.depth + 1,
+                        depth: child_depth,
                     });
                 }
             }

@@ -28,11 +28,13 @@ fn application_walk_prunes_before_io_selects_metadata_and_allows_reentry() {
     client
         .listdir(
             "/",
-            vfsi_core::api::ListDirOptions::default()
-                .with_recursive(true)
-                .with_fields(vnfs::directory::Attributes::MODE)
-                .with_enter_leave(true)
-                .with_sort_by_name(true),
+            vfsi_core::api::WalkOptions::new(
+                vfsi_core::api::ListDirOptions::default()
+                    .with_recursive(true)
+                    .with_fields(vnfs::directory::Attributes::MODE),
+            )
+            .with_enter_leave(true)
+            .with_sort_by_name(true),
             |event| {
                 visited.push(event.entry.path().to_path_buf());
                 assert!(event.entry.attrs().uid().is_none());
@@ -745,7 +747,7 @@ fn generic_remover_rejects_options_it_cannot_honor() {
     let handle = fs.open_dir_impl(Path::new("/d")).unwrap();
     for options in [
         vfsi_sync::RemoveOptions::new().with_continue_on_error(true),
-        vfsi_sync::RemoveOptions::new().with_batch_size(2),
+        vfsi_sync::RemoveOptions::new().with_batch_size(std::num::NonZeroUsize::new(2)),
         vfsi_sync::RemoveOptions::new().with_retries(0),
     ] {
         assert!(
@@ -1401,4 +1403,24 @@ fn directory_visitor_callback_can_reenter_client_and_drop_a_file() {
     result.unwrap();
     assert_eq!(seen, 130);
     worker.join().unwrap();
+}
+
+#[test]
+fn optional_operation_capabilities_match_local_and_routed_dispatch() {
+    let root = tempfile::tempdir().unwrap();
+    let local = vnfs::posix::Posix::new(root.path()).unwrap();
+    let caps = local.capabilities().unwrap();
+    assert!(!caps.contains(Capabilities::DIRECTORY_HANDLES));
+    assert!(!caps.contains(Capabilities::ANCHORED_REMOVAL));
+    #[cfg(target_os = "linux")]
+    {
+        assert!(caps.contains(Capabilities::RENAME_NOREPLACE | Capabilities::RENAME_EXCHANGE));
+        let routed = vnfs::mounted::Auto::new(root.path()).unwrap();
+        assert!(
+            !routed
+                .capabilities()
+                .unwrap()
+                .intersects(Capabilities::RENAME_NOREPLACE | Capabilities::RENAME_EXCHANGE)
+        );
+    }
 }
