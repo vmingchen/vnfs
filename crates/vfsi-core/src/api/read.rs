@@ -224,13 +224,77 @@ pub fn consume_ops<'a, H: crate::api::OpenFd + 'a, R, B>(
     owned: impl FnOnce(&[ReadRequest<'a, R>], usize) -> Result<Vec<OwnedReadResult>>,
     buffers: impl FnOnce(&mut [B], usize) -> Result<Vec<crate::api::ReadIntoResult>>,
 ) -> Result<Vec<ReadResult>> {
+    let mut ops = ops.into_iter();
+    let Some(first) = ops.next() else {
+        return Ok(Vec::new());
+    };
+    let second = ops.next();
+    if second.is_none() {
+        let length = match &first.source {
+            OpSource::Whole(_) => 0,
+            OpSource::Range(_, _, length) => *length,
+            OpSource::Into(_, _, buffer) => buffer.len(),
+        };
+        if length > budget {
+            return Err(Error::client(0, libc::EFBIG as u32));
+        }
+        let remap = |error: Error| match error.index() {
+            Some(0) | None => error,
+            Some(_) => Error::transport(None, "invalid vread_native backend error index"),
+        };
+        let request = match first.source {
+            OpSource::Whole(path) => ReadRequest::whole_file(path),
+            OpSource::Range(file, offset, length) => {
+                ReadRequest::range(range(file, offset, length))
+            }
+            OpSource::Into(file, offset, buffer) => {
+                let values = buffers(&mut [into(file, offset, buffer)], budget).map_err(remap)?;
+                if values.len() != 1 {
+                    return Err(Error::transport(
+                        None,
+                        "invalid vread_native buffer result count",
+                    ));
+                }
+                if values[0].bytes_read > budget {
+                    return Err(Error::transport(
+                        None,
+                        "vread_native backend exceeded byte budget",
+                    ));
+                }
+                return Ok(values
+                    .into_iter()
+                    .map(|result| {
+                        ReadResult::buffered(result.offset, result.bytes_read, result.eof)
+                    })
+                    .collect());
+            }
+        };
+        let values = owned(&[request], budget).map_err(remap)?;
+        if values.len() != 1 {
+            return Err(Error::transport(
+                None,
+                "invalid vread_native owned result count",
+            ));
+        }
+        if values[0].data.len() > budget {
+            return Err(Error::transport(
+                None,
+                "vread_native backend exceeded byte budget",
+            ));
+        }
+        return Ok(values
+            .into_iter()
+            .map(|result| ReadResult::owned(result.offset, result.data, result.eof))
+            .collect());
+    }
+    let ops = std::iter::once(first).chain(second).chain(ops);
     let mut owned_ops = Vec::new();
     let mut owned_indices = Vec::new();
     let mut buffer_ops = Vec::new();
     let mut buffer_indices = Vec::new();
     let mut requested = 0usize;
     let mut count = 0usize;
-    for (index, op) in ops.into_iter().enumerate() {
+    for (index, op) in ops.enumerate() {
         count += 1;
         let length = match &op.source {
             OpSource::Whole(_) => 0,
@@ -290,6 +354,23 @@ pub fn consume_ops<'a, H: crate::api::OpenFd + 'a, R, B>(
             "invalid vread_native owned result count",
         ));
     }
+    for result in &allocated {
+        remaining = remaining
+            .checked_sub(result.data.len())
+            .ok_or_else(|| Error::transport(None, "vread_native backend exceeded byte budget"))?;
+    }
+    if buffer_indices.is_empty() {
+        return Ok(allocated
+            .into_iter()
+            .map(|result| ReadResult::owned(result.offset, result.data, result.eof))
+            .collect());
+    }
+    if owned_indices.is_empty() {
+        return Ok(buffered
+            .into_iter()
+            .map(|result| ReadResult::buffered(result.offset, result.bytes_read, result.eof))
+            .collect());
+    }
     let mut output: Vec<Option<ReadResult>> = (0..count).map(|_| None).collect();
     for (index, result) in buffer_indices.into_iter().zip(buffered) {
         output[index] = Some(ReadResult::buffered(
@@ -299,9 +380,6 @@ pub fn consume_ops<'a, H: crate::api::OpenFd + 'a, R, B>(
         ));
     }
     for (index, result) in owned_indices.into_iter().zip(allocated) {
-        remaining = remaining
-            .checked_sub(result.data.len())
-            .ok_or_else(|| Error::transport(None, "vread_native backend exceeded byte budget"))?;
         output[index] = Some(ReadResult::owned(result.offset, result.data, result.eof));
     }
     output
