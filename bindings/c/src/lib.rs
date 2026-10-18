@@ -833,7 +833,6 @@ pub extern "C" fn vfsi_abi_version() -> u32 {
 /// # Safety
 /// All pointers, buffers and callbacks must satisfy the module-level C
 /// pointer contract for their documented lengths and the full call duration.
-#[allow(deprecated)]
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_nfs_minorversion(fs: *const vfsi_fs) -> u32 {
     ffi_guard!(0, {
@@ -856,7 +855,6 @@ pub unsafe extern "C" fn vfsi_nfs_minorversion(fs: *const vfsi_fs) -> u32 {
 /// # Safety
 /// All pointers, buffers and callbacks must satisfy the module-level C
 /// pointer contract for their documented lengths and the full call duration.
-#[allow(deprecated)]
 #[no_mangle]
 pub unsafe extern "C" fn vfsi_smb_dialect(fs: *const vfsi_fs) -> u16 {
     ffi_guard!(0, {

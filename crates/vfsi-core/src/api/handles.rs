@@ -31,10 +31,6 @@ pub trait OpenFd {
         Self: Sized;
 }
 
-/// Compatibility name for the same [`OpenFd`] trait.
-#[deprecated(note = "Use OpenFd instead")]
-pub use OpenFd as FileHandle;
-
 /// Owned directory retaining the opened object's identity after rename or path
 /// replacement. Paths are diagnostic only; clients validate ownership and live
 /// state before handle-rooted operations. Failed `try_close` retains cleanup ownership.

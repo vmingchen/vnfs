@@ -149,22 +149,24 @@ the current checkout has been tested.
 ## Identity and open descriptor names
 
 The [object-reference tables](RUST_API.md#object-ids-open-instances-and-mount-routes)
-define current semantics and Linux/GCS/NFS analogies. This appendix records only
-remaining compatibility spellings and source changes needed around them:
+define current semantics and Linux/GCS/NFS analogies. The following old names
+are removed; update imports, calls, constructors, and matches to their replacements.
+There are no forwarding aliases for these names.
 
-| Previous spelling | Current spelling | Compatibility / migration |
-|---|---|---|
-| Core `FileHandle` trait | `OpenFd` | Deprecated re-export at existing core/API/prelude and `vnfs::files` paths; the same trait. |
-| `vfsi_sync::FsFile<F>` | `vfsi_sync::OpenFile<F>` | Deprecated re-export of the same owned type. |
-| NFS `client::FileHandle` | `client::NfsFh` | Deprecated module-scoped re-export of the same opaque reference. |
-| `VfFile` | `FileOperand` | Deprecated re-export; unchanged constructors/path variants remain usable. |
-| `VfFile::Descriptor(fd)` | `FileOperand::Fd(fd)` | Variants have no alias; update expressions and matches. |
-| `is_descriptor()` | `is_fd()` | Deprecated forwarding method; `from_fd()` and `fd()` remain. |
-| `Attrs::filesystem_id()` / `FsObjId::filesystem_id()` | `fs_id()` | Deprecated forwarding accessors. |
-| `AttrMask::FILESYSTEM_ID` | `AttrMask::FS_ID` | Deprecated associated constant with the same bit value. |
-| `VfAttrs.filesystem_id` | `VfAttrs.fs_id` | Fields have no alias; update accesses and literals. |
-| `FileIdentity` / `file_identity()` | `FsObjId` / `fs_obj_id()` | Compatibility names remain; prefer the canonical spellings. |
+| Removed spelling | Replacement |
+|---|---|
+| Core/API/prelude and `vnfs::files::FileHandle` trait | `OpenFd` at the corresponding import path |
+| `vfsi_sync::FsFile<F>` | `vfsi_sync::OpenFile<F>` |
+| NFS `client::FileHandle` | `client::NfsFh` |
+| `VfFile` | `FileOperand` |
+| `VfFile::Descriptor(fd)` | `FileOperand::Fd(fd)` |
+| `is_descriptor()` | `is_fd()`; `from_fd()` and `fd()` remain |
+| `Attrs::filesystem_id()` | `Attrs::fs_id()` |
+| `FsObjId::filesystem_id()` | `FsObjId::fs_id()` |
+| `AttrMask::FILESYSTEM_ID` | `AttrMask::FS_ID` |
+| `VfAttrs.filesystem_id` | `VfAttrs.fs_id` |
+| `FileIdentity` / `file_identity()` | `FsObjId` / `fs_obj_id()` |
 
-These aliases do not imply a source-stability promise. Removed trait families,
-intermediate metadata request types, and the exhaustive historical rename ledger
-are available in Git history rather than maintained as another API inventory.
+The pre-1.0 API is not source-stable. Other removed trait families, intermediate
+metadata request types, and the exhaustive historical rename ledger are available
+in Git history rather than maintained as another API inventory.

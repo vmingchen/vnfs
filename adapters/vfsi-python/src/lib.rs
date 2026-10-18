@@ -935,14 +935,12 @@ impl NfsClient {
 
     /// Negotiated NFS minor version, or None for the dummy backend.
     // The erased multi-protocol VectorBackend object cannot use a concrete backend's
-    // extension trait; this compatibility query is intentional at this seam.
-    #[allow(deprecated)]
+    // extension trait; this protocol query is intentional at this seam.
     fn minor_version(&self, py: Python<'_>) -> PyResult<Option<u32>> {
         self.with_fs(py, |fs| Ok(fs.nfs_minorversion()))
     }
 
     /// Negotiated SMB dialect revision, or None for non-SMB backends.
-    #[allow(deprecated)]
     fn smb_dialect(&self, py: Python<'_>) -> PyResult<Option<u16>> {
         self.with_fs(py, |fs| Ok(fs.smb_dialect()))
     }

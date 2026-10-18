@@ -700,10 +700,6 @@ pub enum FileOperand {
     Saved,
 }
 
-/// Compatibility name for [`FileOperand`]. Use `FileOperand::Fd` for descriptors.
-#[deprecated(note = "Use FileOperand instead; Descriptor is now Fd")]
-pub use FileOperand as VfFile;
-
 impl FileOperand {
     pub fn from_path(path: &str) -> FileOperand {
         Self::from_path_bytes(path.as_bytes())
@@ -749,12 +745,6 @@ impl FileOperand {
     /// Whether this references an open File Descriptor.
     pub fn is_fd(&self) -> bool {
         matches!(self, FileOperand::Fd(_))
-    }
-
-    /// Compatibility predicate. Prefer [`Self::is_fd`].
-    #[deprecated(note = "Use is_fd() instead")]
-    pub fn is_descriptor(&self) -> bool {
-        self.is_fd()
     }
 
     /// The File Descriptor, if this operand is [`Self::Fd`].
@@ -1051,10 +1041,6 @@ bitflags::bitflags! {
 }
 
 impl AttrMask {
-    /// Compatibility spelling of [`Self::FS_ID`]; it has the same bit value.
-    #[deprecated(note = "Use AttrMask::FS_ID instead")]
-    pub const FILESYSTEM_ID: Self = Self::FS_ID;
-
     /// The attributes a scalar stat operation needs, including a filesystem-
     /// scoped object identity when the backend provides one.
     pub fn stat() -> AttrMask {
@@ -1166,9 +1152,6 @@ pub struct FsObjId {
     file_id: u64,
 }
 
-/// Compatibility name for [`FsObjId`]. Prefer `FsObjId` in new code.
-pub type FileIdentity = FsObjId;
-
 impl FsObjId {
     /// Construct a pair obtained from one backend/server identity namespace.
     /// This does not make numeric IDs globally unique across unrelated servers.
@@ -1180,12 +1163,6 @@ impl FsObjId {
     /// This is independent of the mount used to reach the object.
     pub const fn fs_id(self) -> u128 {
         self.fs_id
-    }
-
-    /// Compatibility accessor. Prefer [`Self::fs_id`].
-    #[deprecated(note = "Use fs_id() instead")]
-    pub const fn filesystem_id(self) -> u128 {
-        self.fs_id()
     }
 
     /// File-number component, meaningful within [`Self::fs_id`] and its
@@ -1331,23 +1308,12 @@ impl Attrs {
             .then_some(self.fs_id)
     }
 
-    /// Compatibility accessor. Prefer [`Self::fs_id`].
-    #[deprecated(note = "Use fs_id() instead")]
-    pub fn filesystem_id(&self) -> Option<u128> {
-        self.fs_id()
-    }
-
     /// The underlying filesystem object ID when both components were returned.
     pub fn fs_obj_id(&self) -> Option<FsObjId> {
         Some(FsObjId {
             fs_id: self.fs_id()?,
             file_id: self.file_id()?,
         })
-    }
-
-    /// Compatibility accessor. Prefer [`Self::fs_obj_id`].
-    pub fn file_identity(&self) -> Option<FsObjId> {
-        self.fs_obj_id()
     }
 
     pub fn change_id(&self) -> Option<u64> {

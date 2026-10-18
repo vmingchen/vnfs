@@ -645,3 +645,70 @@ fn native_builder<F: vfsi_sync::backend::VectorBackend + 'static>(client: &vfsi_
     let _ = client.open_options();
 }
 ```
+
+Metadata exposes one filesystem-ID accessor, `Attrs::fs_id`:
+
+```compile_fail,E0599
+fn old_filesystem_id(attrs: &vnfs::Attrs) {
+    let _ = attrs.filesystem_id();
+}
+```
+
+Object identity uses `FsObjId` and `Attrs::fs_obj_id`, with no legacy aliases:
+
+```compile_fail,E0432
+use vfsi_core::FileIdentity;
+```
+
+```compile_fail,E0599
+fn old_identity(attrs: &vnfs::Attrs) {
+    let _ = attrs.file_identity();
+}
+```
+
+```compile_fail,E0599
+fn old_object_filesystem_id(id: vfsi_core::FsObjId) {
+    let _ = id.filesystem_id();
+}
+```
+
+```compile_fail,E0599
+let _ = vfsi_core::AttrMask::FILESYSTEM_ID;
+```
+
+Descriptor operands and owned open instances expose only their canonical names:
+
+```compile_fail,E0432
+use vfsi_core::VfFile;
+```
+
+```compile_fail,E0599
+let _ = vfsi_core::FileOperand::Fd(7).is_descriptor();
+```
+
+```compile_fail,E0432
+use vfsi_sync::FsFile;
+```
+
+The `OpenFd` contract and opaque `NfsFh` reference are distinct; neither retains
+the ambiguous `FileHandle` spelling at any former public import path:
+
+```compile_fail,E0432
+use vfsi_core::FileHandle;
+```
+
+```compile_fail,E0432
+use vfsi_core::api::FileHandle;
+```
+
+```compile_fail,E0432
+use vfsi_core::api::prelude::FileHandle;
+```
+
+```compile_fail,E0432
+use vnfs::files::FileHandle;
+```
+
+```compile_fail,E0432
+use vfsi_nfs::client::FileHandle;
+```

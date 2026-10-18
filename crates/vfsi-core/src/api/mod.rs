@@ -17,7 +17,7 @@
 pub type Result<T> = crate::VfResult<T>;
 pub type Error = crate::VfError;
 pub use crate::{
-    AttrMask as Attributes, Attrs, Capabilities, CopyOption, DirEntry, ErrorDomain, FileIdentity,
+    AttrMask as Attributes, Attrs, Capabilities, CopyOption, DirEntry, ErrorDomain,
     FilesystemStats, FsObjId, OpenFlags, OpenOp, Permissions, RemoveOptions, StatusCode,
     TransportKind, VfType as FileType,
 };
@@ -41,8 +41,6 @@ pub use io::SyncMode;
 mod builders;
 pub use builders::OpenOptions;
 mod handles;
-#[allow(deprecated)]
-pub use handles::FileHandle;
 pub use handles::{DirHandle, OpenFd};
 mod vfsi;
 pub use vfsi::Vfsi;
@@ -93,8 +91,6 @@ pub mod internal {
 
 /// Common imports for backend-independent application code.
 pub mod prelude {
-    #[allow(deprecated)]
-    pub use super::FileHandle;
     pub use super::{
         AsTarget, Attributes, AttrsOptions, ControlFlow, CopyOption, DirHandle, ListDirOptions,
         MkDirOp, OpenFd, OpenFlags, OpenOp, ReadOp, ReadOptions, ReadResult, RemoveMode,

@@ -31,6 +31,4 @@ pub use types::*;
 
 /// Portable application contracts, operations, options, and extension workflows.
 pub mod api;
-#[allow(deprecated)]
-pub use api::FileHandle;
 pub use api::{AsTarget, DirHandle, MkDirOp, OpenFd, SetAttrsOp, Target, Vfsi, VfsiExt};

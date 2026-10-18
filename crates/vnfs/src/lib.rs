@@ -57,8 +57,6 @@ pub mod posix {
 )]
 #[cfg_attr(feature = "nfs", doc = concat!("\n```no_run\n", include_str!("../examples/stream_file.rs"), "\n```\n"))]
 pub mod files {
-    #[allow(deprecated)]
-    pub use vfsi_core::FileHandle;
     pub use vfsi_core::api::{
         OpenOptions, ReadOp, ReadOptions, ReadResult, ResourceLimits, StreamCompletion,
         StreamOptions, SyncMode, WriteOp, WriteOptions, WriteResult,

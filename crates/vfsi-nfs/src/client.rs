@@ -39,10 +39,6 @@ pub struct NfsFh {
     bytes: Box<[u8]>,
 }
 
-/// Compatibility name for the same opaque [`NfsFh`] object reference.
-#[deprecated(note = "Use NfsFh instead")]
-pub use NfsFh as FileHandle;
-
 /// Which open owner a client operation uses: the user-visible descriptor
 /// owner, or the internal path-op owner whose stateids never collide with
 /// caller-held descriptors.

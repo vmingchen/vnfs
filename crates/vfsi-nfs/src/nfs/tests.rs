@@ -501,10 +501,6 @@ fn fs_id_and_fileid_decode_as_one_fs_obj_id() {
     let id = attrs.fs_obj_id().unwrap();
     assert_eq!(id.fs_id(), (u128::from(major) << 64) | u128::from(minor));
     assert_eq!(id.file_id(), fileid);
-
-    // Preserve the previous type and accessor for callers migrating gradually.
-    let legacy: Option<vfsi_core::FileIdentity> = attrs.file_identity();
-    assert_eq!(legacy, Some(id));
 }
 
 #[test]

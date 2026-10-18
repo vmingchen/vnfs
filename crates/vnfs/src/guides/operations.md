@@ -89,8 +89,7 @@ filesystem component; it is independent of the mount used to reach the object. T
 reports (`st_dev`, `st_ino`); NFS reports its filesystem ID and file ID. These
 values are scoped to a backend identity namespace, not globally unique across
 unrelated servers or clients, and can be reused after deletion. A backend that cannot report both parts returns
-no `FsObjId`. The previous `file_identity()` accessor and `FileIdentity` type
-remain as compatibility aliases.
+no `FsObjId`.
 
 `OpenFd` is the owned File Descriptor handle to one open instance. The
 generic concrete type is `vfsi_sync::OpenFile<F>`; `Fd` is a numeric backend

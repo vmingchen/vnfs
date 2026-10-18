@@ -16,9 +16,6 @@ pub use traits::{BackendDirectoryPage, DirPageCursor, DirectoryPage, ReadAllOpti
 mod application_macros;
 mod client;
 mod traversal;
-/// Compatibility name for the same owned [`OpenFile`] type.
-#[deprecated(note = "Use OpenFile instead")]
-pub use client::OpenFile as FsFile;
 pub use client::{FsClient, FsDir, FsRead, FsReadInto, FsWrite, OpenFile};
 pub use traversal::walk_events;
 /// Native execution contracts for backend implementers and language bindings.
