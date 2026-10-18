@@ -50,7 +50,7 @@ impl Harness {
         Self {
             fs: Posix::new(path)
                 .unwrap()
-                .with_limits(ResourceLimits::new().max_read_bytes(64)),
+                .with_limits(ResourceLimits::new().with_max_read_bytes(64)),
             read_failure: Cell::new(None),
             calls: RefCell::new(Calls::default()),
             fault: Cell::new(Fault::None),
@@ -257,7 +257,7 @@ fn recursive_copy_is_bounded_and_short_reads_have_no_gaps() {
         &fs,
         "/src",
         "/dst",
-        CopyOptions::new().chunk_bytes(16).batch_size(2),
+        CopyOptions::new().with_chunk_size(16).with_batch_size(2),
     )
     .unwrap();
     assert_eq!(s.files_copied, 3);
@@ -284,7 +284,7 @@ fn conflict_policies_preserve_hard_links_and_reject_self_copy() {
         &fs,
         &["/src/a"],
         "/dst",
-        CopyOptions::new().existing(Existing::Skip),
+        CopyOptions::new().with_existing(Existing::Skip),
     )
     .unwrap();
     assert_eq!(skipped.entries_skipped, 1);
@@ -293,7 +293,7 @@ fn conflict_policies_preserve_hard_links_and_reject_self_copy() {
         &fs,
         &["/src/a"],
         "/dst",
-        CopyOptions::new().existing(Existing::Replace),
+        CopyOptions::new().with_existing(Existing::Replace),
     )
     .unwrap();
     assert_eq!(replaced.bytes_copied, None);
@@ -307,7 +307,7 @@ fn conflict_policies_preserve_hard_links_and_reject_self_copy() {
             &fs,
             &["/src/a"],
             "/dst",
-            CopyOptions::new().existing(Existing::Replace)
+            CopyOptions::new().with_existing(Existing::Replace)
         )
         .is_err()
     );
@@ -329,8 +329,8 @@ fn layouts_permissions_and_stats() {
         &["/src"],
         "/contents",
         CopyOptions::new()
-            .layout(CopyLayout::Contents)
-            .preserve_permissions(true),
+            .with_layout(CopyLayout::Contents)
+            .with_preserve_permissions(true),
     )
     .unwrap();
     assert!(t.path().join("contents/nested/b").exists());
@@ -354,7 +354,7 @@ fn layouts_permissions_and_stats() {
         &fs,
         "/src",
         "/skip",
-        CopyOptions::new().unsupported_entries(UnsupportedEntry::Skip),
+        CopyOptions::new().with_unsupported_entries(UnsupportedEntry::Skip),
     )
     .unwrap();
     assert_eq!(s.entries_skipped, 1);
@@ -365,10 +365,10 @@ fn layouts_permissions_and_stats() {
 fn overlap_depth_and_budgets_are_explicit() {
     let (t, fs) = fixture();
     for options in [
-        CopyOptions::new().max_entries(0),
-        CopyOptions::new().max_path_bytes(1),
-        CopyOptions::new().batch_size(0),
-        CopyOptions::new().chunk_bytes(0),
+        CopyOptions::new().with_max_entries(0),
+        CopyOptions::new().with_max_path_bytes(1),
+        CopyOptions::new().with_batch_size(0),
+        CopyOptions::new().with_chunk_size(0),
     ] {
         assert!(copy_tree(&fs, "/src", "/dst", options).is_err());
         assert!(!t.path().join("dst").exists());
@@ -380,7 +380,7 @@ fn overlap_depth_and_budgets_are_explicit() {
         &fs,
         &["/src"],
         "/dst",
-        CopyOptions::new().depth(DepthLimit::new(0)),
+        CopyOptions::new().with_max_depth(DepthLimit::new(0)),
     )
     .unwrap();
     assert_eq!(s.entries_skipped, 1);
@@ -397,8 +397,8 @@ fn cancellation_reports_completed_wave_and_retains_sources() {
         &["/src/a", "/src/c"],
         "/dst",
         CopyOptions::new()
-            .chunk_bytes(16)
-            .preserve_permissions(true),
+            .with_chunk_size(16)
+            .with_preserve_permissions(true),
         |p| {
             assert_eq!(p.file_bytes_copied, 16);
             Ok(ControlFlow::Break(()))
@@ -417,7 +417,7 @@ fn cancellation_reports_completed_wave_and_retains_sources() {
         &fs,
         &["/src/a", "/src/c"],
         "/wave",
-        CopyOptions::new().chunk_bytes(16),
+        CopyOptions::new().with_chunk_size(16),
         |p| {
             assert_eq!(p.summary.bytes_copied, Some(32));
             Ok(ControlFlow::Break(()))
@@ -439,7 +439,15 @@ fn malformed_reads_lost_write_and_close_failure_never_delete_or_replay() {
     ] {
         let (t, fs) = fixture();
         fs.fault.set(fault);
-        assert!(move_items(&fs, &["/src/a"], "/dst", CopyOptions::new().chunk_bytes(16)).is_err());
+        assert!(
+            move_items(
+                &fs,
+                &["/src/a"],
+                "/dst",
+                CopyOptions::new().with_chunk_size(16)
+            )
+            .is_err()
+        );
         assert!(t.path().join("src/a").exists());
         let c = fs.calls.borrow();
         assert_eq!(c.removes, 0);
@@ -466,7 +474,7 @@ fn move_rename_and_cross_device_fallback_are_not_general_retry() {
             &fs,
             &["/src"],
             "/dst",
-            CopyOptions::new().existing(Existing::Replace),
+            CopyOptions::new().with_existing(Existing::Replace),
         );
         if fault == Fault::Rename {
             assert!(result.is_err());
@@ -494,7 +502,7 @@ fn skipped_move_and_callback_error_keep_source() {
         &fs,
         &["/src/a"],
         "/dst",
-        CopyOptions::new().existing(Existing::Skip),
+        CopyOptions::new().with_existing(Existing::Skip),
     )
     .unwrap();
     assert_eq!(s.roots_removed, 0);
@@ -522,8 +530,8 @@ fn vector_counts_and_storage_follow_cohort_limits() {
         &sources,
         "/batch",
         CopyOptions::new()
-            .chunk_bytes(16)
-            .preserve_permissions(true),
+            .with_chunk_size(16)
+            .with_preserve_permissions(true),
     )
     .unwrap();
     {
@@ -539,7 +547,7 @@ fn vector_counts_and_storage_follow_cohort_limits() {
         &fs,
         &sources,
         "/serial",
-        CopyOptions::new().batch_size(1).chunk_bytes(16),
+        CopyOptions::new().with_batch_size(1).with_chunk_size(16),
     )
     .unwrap();
     assert_eq!(fs.calls.borrow().reads, 12);
@@ -554,7 +562,7 @@ fn vector_errors_map_to_original_mixed_root_index() {
         &fs,
         &["/src/nested", "/src/a", "/other"],
         "/dst",
-        CopyOptions::new().chunk_bytes(16),
+        CopyOptions::new().with_chunk_size(16),
     )
     .unwrap_err();
     assert_eq!(e.index(), Some(2));
@@ -589,7 +597,7 @@ fn aggregate_move_budget_and_progress_span_all_roots() {
             &fs,
             &["/src/nested", "/second"],
             "/out",
-            CopyOptions::new().max_entries(3)
+            CopyOptions::new().with_max_entries(3)
         )
         .is_err()
     );
@@ -608,7 +616,7 @@ fn replacement_refuses_destination_symlinks() {
             &fs,
             &["/src/a"],
             "/dst",
-            CopyOptions::new().existing(Existing::Replace)
+            CopyOptions::new().with_existing(Existing::Replace)
         )
         .is_err()
     );
@@ -681,7 +689,7 @@ fn bulk_move_renames_independent_roots_in_one_vector() {
         &fs,
         &paths,
         "/out",
-        CopyOptions::new().existing(Existing::Replace),
+        CopyOptions::new().with_existing(Existing::Replace),
     )
     .unwrap();
     assert_eq!(result.roots_renamed, 12);
@@ -770,7 +778,7 @@ fn partial_cross_device_rename_reconciles_without_replaying_prefix() {
         &fs,
         &["/src/a", "/src/empty", "/src/nested"],
         "/out",
-        CopyOptions::new().existing(Existing::Replace),
+        CopyOptions::new().with_existing(Existing::Replace),
     )
     .unwrap();
     assert_eq!(result.roots_renamed, 1);
@@ -795,7 +803,7 @@ fn lost_batch_rename_reply_never_falls_back_or_replays() {
         &fs,
         &["/src/a", "/src/empty"],
         "/out",
-        CopyOptions::new().existing(Existing::Replace),
+        CopyOptions::new().with_existing(Existing::Replace),
     );
     assert!(result.unwrap_err().is_transport());
     let calls = fs.calls.borrow();
@@ -815,7 +823,7 @@ fn move_wave_keeps_skipped_roots_but_deletes_complete_siblings() {
         &fs,
         &["/src/a", "/src/empty", "/src/nested"],
         "/out",
-        CopyOptions::new().existing(Existing::Skip),
+        CopyOptions::new().with_existing(Existing::Skip),
     )
     .unwrap();
     assert_eq!(result.roots_removed, 2);
@@ -923,7 +931,9 @@ fn collecting_adapter_retries_interrupted_reads_and_exact_budget_probes() {
         for interrupted_at in [1, 2] {
             let root = tempfile::tempdir().unwrap();
             let mut fs = Harness::new(root.path());
-            fs.fs = fs.fs.with_limits(ResourceLimits::new().max_read_bytes(3));
+            fs.fs = fs
+                .fs
+                .with_limits(ResourceLimits::new().with_max_read_bytes(3));
             fs.fs.write("/file", b"abc").unwrap();
             fs.read_failure
                 .set(Some((interrupted_at, libc::EINTR as u32)));
@@ -946,7 +956,9 @@ fn collecting_adapter_retries_interrupted_reads_and_exact_budget_probes() {
     for failed_at in [1, 2] {
         let root = tempfile::tempdir().unwrap();
         let mut fs = Harness::new(root.path());
-        fs.fs = fs.fs.with_limits(ResourceLimits::new().max_read_bytes(3));
+        fs.fs = fs
+            .fs
+            .with_limits(ResourceLimits::new().with_max_read_bytes(3));
         fs.fs.write("/file", b"abcdef").unwrap();
         fs.read_failure.set(Some((failed_at, libc::EIO as u32)));
         let file = fs.open("/file").unwrap();

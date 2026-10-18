@@ -341,7 +341,7 @@ impl NfsVecFs {
             mount.check_credentials()?;
         }
         self.notify(NfsEvent::ReconnectStarted);
-        let attempts = self.recovery_policy.attempt_limit();
+        let attempts = self.recovery_policy.reconnect_attempts();
         let mut backoff = self.recovery_policy.initial_backoff;
         let started = std::time::Instant::now();
         let mut last = None;

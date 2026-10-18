@@ -130,7 +130,7 @@ impl<T, D, O: From<u64>, P: Default> WriteRequest<T, D, O, P> {
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp, WriteOptions};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let file = fs.create("/output")?;
-    /// let result = fs.vwrite(&[WriteOp::at(&file, 0, b"hello")], WriteOptions::new().write_all(true));
+    /// let result = fs.vwrite(&[WriteOp::at(&file, 0, b"hello")], WriteOptions::new().with_write_all(true));
     /// let close = fs.close_files(vec![file]);
     /// result?;
     /// close?;

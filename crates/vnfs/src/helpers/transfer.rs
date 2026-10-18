@@ -72,44 +72,44 @@ impl CopyOptions {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn existing(mut self, value: Existing) -> Self {
+    pub fn with_existing(mut self, value: Existing) -> Self {
         self.existing = value;
         self
     }
-    pub fn layout(mut self, value: CopyLayout) -> Self {
+    pub fn with_layout(mut self, value: CopyLayout) -> Self {
         self.layout = value;
         self
     }
-    pub fn unsupported_entries(mut self, value: UnsupportedEntry) -> Self {
+    pub fn with_unsupported_entries(mut self, value: UnsupportedEntry) -> Self {
         self.unsupported = value;
         self
     }
     /// Preserve file permission bits, not directory modes, ownership, times or ACLs.
-    pub fn preserve_permissions(mut self, value: bool) -> Self {
+    pub fn with_preserve_permissions(mut self, value: bool) -> Self {
         self.flags.set_preserve_permissions(value);
         self
     }
-    pub fn batch_size(mut self, value: usize) -> Self {
+    pub fn with_batch_size(mut self, value: usize) -> Self {
         self.batch_size = value;
         self
     }
-    pub fn chunk_bytes(mut self, value: usize) -> Self {
+    pub fn with_chunk_size(mut self, value: usize) -> Self {
         self.chunk_bytes = value;
         self
     }
-    pub fn max_entries(mut self, value: usize) -> Self {
+    pub fn with_max_entries(mut self, value: usize) -> Self {
         self.max_entries = Some(value);
         self
     }
     /// Aggregate source+destination logical path bytes over the whole transfer.
-    pub fn max_path_bytes(mut self, value: usize) -> Self {
+    pub fn with_max_path_bytes(mut self, value: usize) -> Self {
         self.max_path_bytes = Some(value);
         self
     }
     /// Deliberately omit deeper directories. Omitted subtrees count as skipped;
     /// move helpers then retain the source. Without this override, exceeding the
     /// client's depth limit is an error rather than successful truncation.
-    pub fn depth(mut self, value: DepthLimit) -> Self {
+    pub fn with_max_depth(mut self, value: DepthLimit) -> Self {
         self.depth = Some(value);
         self
     }
@@ -272,7 +272,7 @@ fn roots<P: AsRef<Path>>(
     budget: &mut TraversalBudget,
     max_path_bytes: usize,
 ) -> Result<Vec<Task>> {
-    if options.batch_size == 0 || options.chunk_bytes == 0 || fs.limits().read_byte_limit() == 0 {
+    if options.batch_size == 0 || options.chunk_bytes == 0 || fs.limits().max_read_bytes() == 0 {
         return Err(invalid(0, destination));
     }
     if sources.len() > budget.remaining_entries() {
@@ -324,7 +324,9 @@ fn roots<P: AsRef<Path>>(
         let metadata = fs
             .vgetattrs(
                 &paths,
-                AttrsOptions::new().fields(fields()).follow_symlinks(false),
+                AttrsOptions::new()
+                    .with_fields(fields())
+                    .with_follow_symlinks(false),
             )
             .map_err(|e| mapped(e, batch))?;
         if metadata.len() != batch.len() {
@@ -423,10 +425,10 @@ fn run<P: AsRef<Path>>(
     let limits = fs.limits();
     let max_entries = options
         .max_entries
-        .unwrap_or(limits.directory_entry_limit());
+        .unwrap_or(limits.max_directory_entries());
     let max_path_bytes = options
         .max_path_bytes
-        .unwrap_or(limits.directory_path_byte_limit());
+        .unwrap_or(limits.max_directory_path_bytes());
     let mut budget = TraversalBudget::new(max_entries, max_path_bytes);
     let mut roots = roots(
         fs,
@@ -543,7 +545,7 @@ fn copy_independent_roots(
         let wave_size = pending.len().min(options.batch_size);
         let wave: Vec<_> = pending.drain(pending.len() - wave_size..).collect();
         let paths: Vec<_> = wave.iter().map(|t| &t.source).collect();
-        let options_visit = budget.remaining_options(ListDirOptions::new().fields(fields()));
+        let options_visit = budget.remaining_options(ListDirOptions::new().with_fields(fields()));
         let mut callback_error = None;
         let completed = fs
             .vlistdirs(&paths, options_visit, |index, page| {
@@ -571,7 +573,7 @@ fn copy_independent_roots(
                             .checked_add(1)
                             .ok_or_else(|| limit(parent.root, entry.path()))?;
                         if entry.attrs().is_dir()
-                            && depth > options.depth.map_or(limits.walk_depth_limit(), |d| d.get())
+                            && depth > options.depth.map_or(limits.max_walk_depth(), |d| d.get())
                         {
                             if options.depth.is_some() {
                                 summary.entries_skipped += 1;
@@ -683,7 +685,7 @@ fn dispatch(
         }
     }
     pending.extend(dirs);
-    let chunk = options.chunk_bytes.min(fs.limits().read_byte_limit());
+    let chunk = options.chunk_bytes.min(fs.limits().max_read_bytes());
     let native_copy = progress.is_none()
         && options.existing == Existing::Replace
         && !options.flags.preserve_permissions();
@@ -693,7 +695,7 @@ fn dispatch(
         let mut bytes = 0;
         while end < files.len() && end - start < options.batch_size {
             let required = chunk.min(usize::try_from(files[end].size).unwrap_or(usize::MAX));
-            if !native_copy && required > fs.limits().read_byte_limit() - bytes {
+            if !native_copy && required > fs.limits().max_read_bytes() - bytes {
                 break;
             }
             if !native_copy {
@@ -858,7 +860,7 @@ fn copy_batch(
                 .map(|(r, i)| WriteOp::at(&destinations[*i], offsets[*i], &buffers[*i][..r.read()]))
                 .collect();
             let written = fs
-                .vwrite(&writes, WriteOptions::new().write_all(true))
+                .vwrite(&writes, WriteOptions::new().with_write_all(true))
                 .map_err(|e| active_error(e, &active, &selected, tasks))?;
             if written.len() != read.len() {
                 return Err(contract("transfer: invalid WRITE cardinality"));
@@ -1035,10 +1037,10 @@ fn move_run<P: AsRef<Path>>(
     let limits = fs.limits();
     let max_entries = options
         .max_entries
-        .unwrap_or(limits.directory_entry_limit());
+        .unwrap_or(limits.max_directory_entries());
     let max_path_bytes = options
         .max_path_bytes
-        .unwrap_or(limits.directory_path_byte_limit());
+        .unwrap_or(limits.max_directory_path_bytes());
     let mut budget = TraversalBudget::new(max_entries, max_path_bytes);
     // Validate all roots/overlaps before the first mutation.
     let mut tasks = roots(

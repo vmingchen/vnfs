@@ -1296,10 +1296,10 @@ pub unsafe extern "C" fn vfsi_walk(
             }
             let metadata = vfsi_sync::metadata_from_attrs(root_attrs);
             let walk_options = vnfs::directory::ListDirOptions::new()
-                .recursive(true)
-                .max_entries(options.max_entries)
-                .max_path_bytes(options.max_path_bytes)
-                .max_depth(options.max_depth);
+                .with_recursive(true)
+                .with_max_entries(options.max_entries)
+                .with_max_path_bytes(options.max_path_bytes)
+                .with_max_depth(options.max_depth);
             vfsi_sync::walk_events(
                 vnfs::directory::DirEntry::new(path, metadata),
                 walk_options,
@@ -1309,8 +1309,8 @@ pub unsafe extern "C" fn vfsi_walk(
                         fs,
                         path,
                         fields,
-                        limits.entry_limit(),
-                        limits.path_byte_limit(),
+                        limits.max_entries(),
+                        limits.max_path_bytes(),
                     )?;
                     entries
                         .into_iter()
@@ -3268,7 +3268,7 @@ pub unsafe extern "C" fn vfsi_read_paths_with_limit(
                 .collect();
             let datas = lock_or_io(&fs.fs)?.vread_all_with_options_impl(
                 &files,
-                vfsi_sync::ReadAllOptions::new().max_total_bytes(max_bytes),
+                vfsi_sync::ReadAllOptions::new().with_max_total_bytes(max_bytes),
             )?;
             let c_cb = cb;
             for (i, data) in datas.iter().enumerate() {

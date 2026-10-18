@@ -207,7 +207,7 @@ fn native_directory_visitor_reenters_client_across_snapshot_pages() {
         client
             .listdir(
                 &remote_dir,
-                vfsi_core::api::ListDirOptions::new().sort_by_name(sort),
+                vfsi_core::api::ListDirOptions::new().with_sort_by_name(sort),
                 |entry| {
                     assert_eq!(client.attrs(entry.entry.path())?.len(), Some(1));
                     seen.push(entry.entry.path().to_path_buf());
@@ -982,7 +982,7 @@ fn copy_options_reject_unsupported_symlink_preservation_before_lookup() {
     let Some(mut fs) = connect() else {
         return;
     };
-    let options = vfsi_sync::CopyOption::new().follow_source_symlinks(false);
+    let options = vfsi_sync::CopyOption::new().with_follow_source_symlinks(false);
     fs.vcopy_impl(&[], options).unwrap();
     let error = fs
         .vcopy_impl(

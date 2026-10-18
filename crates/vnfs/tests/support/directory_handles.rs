@@ -26,7 +26,7 @@ pub fn check<C: Vfsi>(fs: &C, other: &C, namespace: &impl Vfsi, verify: &impl Vf
     let foreign = other.vopen_dirs(&["/b"]).unwrap().remove(0);
     for options in [
         RemoveOptions::default(),
-        RemoveOptions::new().continue_on_error(true),
+        RemoveOptions::new().with_continue_on_error(true),
     ] {
         let error = fs
             .vremove_dir_contents(&[&dirs[0], &foreign], options)
@@ -43,8 +43,11 @@ pub fn check<C: Vfsi>(fs: &C, other: &C, namespace: &impl Vfsi, verify: &impl Vf
     assert_eq!(error.err_no(), libc::EBADF as u32);
     assert_eq!(verify.read("/moved/file").unwrap(), b"original");
     let second = fs.vopen_dirs(&["/b"]).unwrap().remove(0);
-    fs.vremove_dir_contents(&[&dirs[0], &second], RemoveOptions::new().batch(1))
-        .unwrap();
+    fs.vremove_dir_contents(
+        &[&dirs[0], &second],
+        RemoveOptions::new().with_batch_size(1),
+    )
+    .unwrap();
     assert!(verify.read_dir("/moved").unwrap().is_empty());
     assert!(verify.read_dir("/b").unwrap().is_empty());
     assert_eq!(verify.read("/a/keep").unwrap(), b"replacement");

@@ -149,13 +149,16 @@ fn opaque_adapters_preserve_batch_allocations_and_borrowed_storage() {
         .collect();
     let (results, cost) = measured(|| {
         mounted
-            .vwrite(&writes, vnfs::files::WriteOptions::new().write_all(true))
+            .vwrite(
+                &writes,
+                vnfs::files::WriteOptions::new().with_write_all(true),
+            )
             .unwrap()
     });
     let (expected, raw_cost) = measured(|| {
         raw.vwrite(
             &raw_writes,
-            vnfs::files::WriteOptions::new().write_all(true),
+            vnfs::files::WriteOptions::new().with_write_all(true),
         )
         .unwrap()
     });

@@ -272,7 +272,7 @@ impl TreeBuilder {
                 })
                 .collect();
             let write = fs
-                .vwrite(&writes, crate::WriteOptions::new().write_all(true))
+                .vwrite(&writes, crate::WriteOptions::new().with_write_all(true))
                 .map(|_| ())
                 .map_err(|e| entry_error(e, batch, &self.entries));
             drop(writes);

@@ -11,7 +11,7 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
     options: ListDirOptions,
     mut visitor: impl FnMut(&WalkEvent) -> Result<WalkControl>,
 ) -> Result<TraversalCompletion> {
-    if options.emits_enter_leave() || options.sorts_by_name() {
+    if options.enter_leave() || options.sort_by_name() {
         return buffered(fs, root, options, visitor);
     }
 
@@ -27,7 +27,7 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
                 .path
                 .strip_prefix(root)
                 .map_err(|_| Error::transport(None, "invalid listdir page parent"))?;
-            if (!options.is_recursive() && page.path != root)
+            if (!options.recursive() && page.path != root)
                 || relative
                     .components()
                     .any(|component| !matches!(component, std::path::Component::Normal(_)))
@@ -47,7 +47,7 @@ pub(super) fn listdir<F: Vfsi + ?Sized>(
                         return Ok(ControlFlow::Break(()));
                     }
                     WalkControl::SkipSubtree
-                        if options.is_recursive() && event.entry.attrs().is_dir() =>
+                        if options.recursive() && event.entry.attrs().is_dir() =>
                     {
                         return Err(pruning_error(event.entry.path()));
                     }
@@ -89,12 +89,14 @@ fn buffered<F: Vfsi + ?Sized>(
     options: ListDirOptions,
     mut visitor: impl FnMut(&WalkEvent) -> Result<WalkControl>,
 ) -> Result<TraversalCompletion> {
-    let fields = options.attributes();
-    let lifecycle = options.emits_enter_leave();
-    let attrs = if lifecycle || options.is_recursive() {
+    let fields = options.fields();
+    let lifecycle = options.enter_leave();
+    let attrs = if lifecycle || options.recursive() {
         fs.attrs_with_options(
             root,
-            AttrsOptions::new().fields(fields).follow_symlinks(false),
+            AttrsOptions::new()
+                .with_fields(fields)
+                .with_follow_symlinks(false),
         )?
     } else {
         // The entry-only root is never exposed. READDIR validates its type;
@@ -114,49 +116,49 @@ fn buffered<F: Vfsi + ?Sized>(
     // from the entry budget; shallow listing also excludes its retained path.
     let mut budget = walk;
     if !lifecycle {
-        budget = budget.max_entries(walk.entry_limit().saturating_add(1));
-        if !options.is_recursive() {
-            budget = budget.max_path_bytes(
-                walk.path_byte_limit()
-                    .saturating_add(root.as_os_str().len()),
-            );
+        budget = budget.with_max_entries(walk.max_entries().saturating_add(1));
+        if !options.recursive() {
+            budget = budget
+                .with_max_path_bytes(walk.max_path_bytes().saturating_add(root.as_os_str().len()));
         }
     }
     // ListDirOptions depth limits concern descent, not files in a root listing.
     // Admission below enforces them after allowing a directory to be pruned.
-    budget = budget.max_depth(usize::MAX).truncate_at_max_depth(false);
+    budget = budget
+        .with_max_depth(usize::MAX)
+        .with_truncate_at_max_depth(false);
     let mut retained_bytes = 0usize;
     super::traversal::walk_events(
         DirEntry::new(root.to_path_buf(), attrs),
         budget,
-        options.sorts_by_name(),
+        options.sort_by_name(),
         |path, remaining| {
             // Match native recursive entry-mode accounting: child paths are
             // charged once as entries and again when retained for descent.
-            if !lifecycle && options.is_recursive() && path != root {
+            if !lifecycle && options.recursive() && path != root {
                 retained_bytes = retained_bytes
                     .checked_add(path.as_os_str().len())
                     .ok_or_else(|| limit_error(path))?;
             }
             let bytes = remaining
-                .path_byte_limit()
+                .max_path_bytes()
                 .checked_sub(retained_bytes)
                 .ok_or_else(|| limit_error(path))?;
             fs.read_dir_with_options(
                 path,
                 remaining
-                    .max_path_bytes(bytes)
-                    .fields(fields)
+                    .with_max_path_bytes(bytes)
+                    .with_fields(fields)
                     // Reopening a path is not anchored to the original page.
                     // Require atomic no-follow resolution, including ancestors.
-                    .follow_symlinks(
-                        options.follows_symlinks() && !options.is_recursive() && !lifecycle,
+                    .with_follow_symlinks(
+                        options.follow_symlinks() && !options.recursive() && !lifecycle,
                     ),
             )
         },
         |event| {
             if event.kind == WalkEventKind::Leave {
-                return if lifecycle && (options.is_recursive() || event.depth == 0) {
+                return if lifecycle && (options.recursive() || event.depth == 0) {
                     visitor(event)
                 } else {
                     Ok(WalkControl::Continue)
@@ -170,7 +172,7 @@ fn buffered<F: Vfsi + ?Sized>(
                 };
             }
             let decision =
-                if (lifecycle && options.is_recursive()) || event.kind == WalkEventKind::Entry {
+                if (lifecycle && options.recursive()) || event.kind == WalkEventKind::Entry {
                     visitor(event)?
                 } else {
                     visitor(&WalkEvent {
@@ -182,14 +184,14 @@ fn buffered<F: Vfsi + ?Sized>(
                 return Ok(decision);
             }
             if event.kind == WalkEventKind::Enter {
-                if options.is_recursive() && !lifecycle && decision == WalkControl::SkipSubtree {
+                if options.recursive() && !lifecycle && decision == WalkControl::SkipSubtree {
                     return Err(pruning_error(event.entry.path()));
                 }
-                if !options.is_recursive() || decision == WalkControl::SkipSubtree {
+                if !options.recursive() || decision == WalkControl::SkipSubtree {
                     return Ok(WalkControl::SkipSubtree);
                 }
-                if event.depth > walk.depth_limit() {
-                    if !walk.truncates_at_depth_limit() {
+                if event.depth > walk.max_depth() {
+                    if !walk.truncate_at_max_depth() {
                         return Err(limit_error(event.entry.path()));
                     }
                     return Ok(WalkControl::SkipSubtree);

@@ -30,21 +30,21 @@ impl AttrsOptions {
         Self::default()
     }
     /// Select requested attributes. Object type may additionally be fetched.
-    pub fn fields(mut self, fields: crate::api::Attributes) -> Self {
+    pub fn with_fields(mut self, fields: crate::api::Attributes) -> Self {
         self.fields = fields;
         self
     }
     /// Follow the final symlink when true; otherwise describe the link itself.
-    pub fn follow_symlinks(mut self, follow: bool) -> Self {
+    pub fn with_follow_symlinks(mut self, follow: bool) -> Self {
         self.flags.set_follow(follow);
         self
     }
     /// Requested attributes; unavailable optional attributes remain absent.
-    pub fn requested_attributes(self) -> crate::api::Attributes {
+    pub fn fields(self) -> crate::api::Attributes {
         self.fields
     }
     /// Whether to follow the final component if it is a symlink.
-    pub fn follows_symlinks(self) -> bool {
+    pub fn follow_symlinks(self) -> bool {
         self.flags.follow()
     }
 }
@@ -83,7 +83,7 @@ impl<T> SetAttrsOp<T> {
 
     /// Follow the final path symlink when true, or modify the link itself when
     /// false. Opened objects retain their identity regardless of this setting.
-    pub fn follow_symlinks(mut self, follow: bool) -> Self {
+    pub fn with_follow_symlinks(mut self, follow: bool) -> Self {
         self.flags.set_follow(follow);
         self
     }
@@ -170,7 +170,7 @@ impl<T> SetAttrsOp<T> {
     }
 
     /// Whether the final path symlink is followed.
-    pub fn follows_symlinks(&self) -> bool {
+    pub fn follow_symlinks(&self) -> bool {
         self.flags.follow()
     }
 }
@@ -201,7 +201,7 @@ mod option_layout_tests {
         let accessed = std::time::UNIX_EPOCH + std::time::Duration::from_secs(123);
         let modified = std::time::UNIX_EPOCH - std::time::Duration::from_secs(456);
         let empty = SetAttrsOp::new(NonClone);
-        assert!(empty.follows_symlinks());
+        assert!(empty.follow_symlinks());
         assert_eq!(empty.requested_permissions(), None);
         assert_eq!(empty.requested_len(), None);
         assert_eq!(empty.requested_uid(), None);
@@ -215,7 +215,7 @@ mod option_layout_tests {
             .gid(43)
             .accessed(accessed)
             .modified(modified)
-            .follow_symlinks(false);
+            .with_follow_symlinks(false);
         for path in ["/first", "/second"] {
             let rebound = op.with_target(path);
             assert_eq!(*rebound.target(), path);
@@ -225,38 +225,38 @@ mod option_layout_tests {
             assert_eq!(rebound.requested_gid(), Some(43));
             assert_eq!(rebound.requested_accessed(), Some(accessed));
             assert_eq!(rebound.requested_modified(), Some(modified));
-            assert!(!rebound.follows_symlinks());
+            assert!(!rebound.follow_symlinks());
         }
         let replaced = op
             .with_target("/third")
             .len(10)
             .uid(44)
-            .follow_symlinks(true);
+            .with_follow_symlinks(true);
         assert_eq!(replaced.requested_len(), Some(10));
         assert_eq!(replaced.requested_uid(), Some(44));
-        assert!(replaced.follows_symlinks());
+        assert!(replaced.follow_symlinks());
         assert_eq!(op.requested_len(), Some(0));
         assert_eq!(op.requested_uid(), Some(42));
-        assert!(!op.follows_symlinks());
+        assert!(!op.follow_symlinks());
     }
     #[test]
     fn packed_follow_flag_preserves_selected_fields() {
         assert_eq!(std::mem::size_of::<AttrsFlags>(), 1);
-        assert!(AttrsOptions::default().follows_symlinks());
+        assert!(AttrsOptions::default().follow_symlinks());
         let op = SetAttrsOp::new("/file").len(0).uid(42);
         assert_eq!(*op.target(), "/file");
-        assert!(op.follows_symlinks());
-        let op = op.follow_symlinks(false);
-        assert!(!op.follows_symlinks());
+        assert!(op.follow_symlinks());
+        let op = op.with_follow_symlinks(false);
+        assert!(!op.follow_symlinks());
         assert_eq!(op.requested_len(), Some(0));
         assert_eq!(op.requested_uid(), Some(42));
         let fields = crate::api::Attributes::SIZE | crate::api::Attributes::CHANGE;
-        let options = AttrsOptions::new().fields(fields);
+        let options = AttrsOptions::new().with_fields(fields);
         for follow in [false, true, false] {
-            let changed = options.follow_symlinks(follow);
-            assert_eq!(changed.follows_symlinks(), follow);
-            assert_eq!(changed.requested_attributes(), fields);
-            assert!(options.follows_symlinks());
+            let changed = options.with_follow_symlinks(follow);
+            assert_eq!(changed.follow_symlinks(), follow);
+            assert_eq!(changed.fields(), fields);
+            assert!(options.follow_symlinks());
         }
     }
 }

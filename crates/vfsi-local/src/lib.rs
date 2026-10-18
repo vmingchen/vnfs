@@ -2350,7 +2350,7 @@ impl VectorBackend for LocalBackend {
     }
 
     fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOption) -> VfRes {
-        if options.follows_source_symlinks() {
+        if options.follow_source_symlinks() {
             return self.vcopy_data_impl(pairs);
         }
         for (i, p) in pairs.iter().enumerate() {

@@ -24,12 +24,12 @@ impl WriteOptions {
     /// Complete successful short writes at their remaining offsets when true.
     /// Stop on any error, including ambiguous transport failures; never replay it.
     /// This does not flush data to stable storage or make the batch atomic.
-    pub const fn write_all(mut self, complete: bool) -> Self {
+    pub const fn with_write_all(mut self, complete: bool) -> Self {
         self.flags.set_write_all(complete);
         self
     }
     /// Whether successful short writes should be completed.
-    pub const fn writes_all(self) -> bool {
+    pub const fn write_all(self) -> bool {
         self.flags.write_all()
     }
 }
@@ -76,11 +76,16 @@ mod option_layout_tests {
     use super::*;
     #[test]
     fn packed_completion_flag_keeps_const_defaults_and_toggles() {
-        const COMPLETE: WriteOptions = WriteOptions::new().write_all(true);
+        const COMPLETE: WriteOptions = WriteOptions::new().with_write_all(true);
         assert_eq!(std::mem::size_of::<WriteOptions>(), 1);
-        assert!(!WriteOptions::default().writes_all());
-        assert!(COMPLETE.writes_all());
-        assert!(!COMPLETE.write_all(false).writes_all());
-        assert!(COMPLETE.write_all(false).write_all(true).writes_all());
+        assert!(!WriteOptions::default().write_all());
+        assert!(COMPLETE.write_all());
+        assert!(!COMPLETE.with_write_all(false).write_all());
+        assert!(
+            COMPLETE
+                .with_write_all(false)
+                .with_write_all(true)
+                .write_all()
+        );
     }
 }

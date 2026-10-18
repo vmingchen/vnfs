@@ -21,8 +21,8 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
     let read_calls = Arc::clone(&backend.read_calls);
     let client = FsClient::new(backend).with_limits(
         vfsi_sync::ResourceLimits::new()
-            .max_read_bytes(3)
-            .stream_chunk_bytes(std::num::NonZeroUsize::new(2).unwrap()),
+            .with_max_read_bytes(3)
+            .with_stream_chunk_size(std::num::NonZeroUsize::new(2).unwrap()),
     );
     assert_eq!(client.clone().limits(), client.limits());
     assert_eq!(client.capabilities().unwrap(), Capabilities::empty());
@@ -34,7 +34,7 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
         client
             .read_with_options(
                 "/file",
-                ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(6))
+                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(6))
             )
             .unwrap(),
         b"abcdef"
@@ -191,7 +191,7 @@ fn std_io_collection_obeys_client_limits_and_retains_cursor() {
             data: b"abcdef".to_vec(),
             ..Default::default()
         })
-        .with_limits(vfsi_sync::ResourceLimits::new().max_read_bytes(limit));
+        .with_limits(vfsi_sync::ResourceLimits::new().with_max_read_bytes(limit));
         let mut file = client.open("/file").unwrap();
         let mut io = client.std_io(&file);
         let mut output = Vec::new();
@@ -747,7 +747,7 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
         .gid(43)
         .accessed(std::time::UNIX_EPOCH + std::time::Duration::new(123, 456))
         .modified(std::time::UNIX_EPOCH - std::time::Duration::new(1, 25))
-        .follow_symlinks(false);
+        .with_follow_symlinks(false);
     vsetattrs_typed_default(backend, std::slice::from_ref(&op)).unwrap();
     // Borrowing the operation leaves it reusable; changing options performs no I/O.
     vsetattrs_typed_default(backend, std::slice::from_ref(&op)).unwrap();
@@ -761,8 +761,8 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
         backend,
         Target::File(&file),
         vfsi_core::api::AttrsOptions::new()
-            .fields(fields)
-            .follow_symlinks(false),
+            .with_fields(fields)
+            .with_follow_symlinks(false),
     )
     .unwrap();
     assert_eq!(attrs.file, file);
@@ -770,7 +770,7 @@ fn shared_attribute_ops_preserve_all_fields_at_the_raw_backend_boundary() {
     native_metadata_impl_default(
         backend,
         Target::Path(std::path::Path::new("/link")),
-        vfsi_core::api::AttrsOptions::new().fields(AttrMask::SIZE),
+        vfsi_core::api::AttrsOptions::new().with_fields(AttrMask::SIZE),
     )
     .unwrap();
     assert_eq!(concrete.calls.len(), 2);
@@ -824,10 +824,10 @@ fn shared_native_attribute_batches_preflight_and_remap_policy_run_errors() {
         SetAttrsOp::new(Target::Path(std::path::Path::new("/a"))).len(1),
         SetAttrsOp::new(Target::Path(std::path::Path::new("/b")))
             .len(2)
-            .follow_symlinks(false),
+            .with_follow_symlinks(false),
         SetAttrsOp::new(Target::Path(std::path::Path::new("/c")))
             .len(3)
-            .follow_symlinks(false),
+            .with_follow_symlinks(false),
         SetAttrsOp::new(Target::Path(std::path::Path::new("/a"))).len(4),
     ];
     let mut backend = AttrsBackend::default();
@@ -984,8 +984,8 @@ fn default_directory_visitor_uses_native_pages_without_materializing_a_listing()
         .listdir(
             "/tree",
             vfsi_sync::ListDirOptions::new()
-                .fields(vfsi_sync::AttrMask::SIZE)
-                .max_entries(3),
+                .with_fields(vfsi_sync::AttrMask::SIZE)
+                .with_max_entries(3),
             |entry| {
                 paths.push(entry.entry.path().to_path_buf());
                 Ok(vfsi_core::api::WalkControl::Continue)
@@ -1162,14 +1162,17 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
         .vopen_impl(&[OpenOp::new("/file", OpenFlags::READ)])
         .unwrap();
     let data = backend
-        .vread_all_with_options_impl(&files, vfsi_sync::ReadAllOptions::new().max_total_bytes(6))
+        .vread_all_with_options_impl(
+            &files,
+            vfsi_sync::ReadAllOptions::new().with_max_total_bytes(6),
+        )
         .unwrap();
     assert_eq!(data, [b"abcdef".to_vec()]);
     assert_eq!(
         backend
             .vread_all_with_options_impl(
                 &files,
-                vfsi_sync::ReadAllOptions::new().max_total_bytes(3),
+                vfsi_sync::ReadAllOptions::new().with_max_total_bytes(3),
             )
             .unwrap_err()
             .kind(),
@@ -1266,7 +1269,7 @@ impl HandleBackend for ScalarOnly {
     fn vsetattrs_impl(&mut self, updates: &[SetAttrsOp<Target<'_, FileOperand>>]) -> VfResult<()> {
         let mut calls = self.attrs_calls.lock().unwrap();
         calls.push((
-            updates[0].follows_symlinks(),
+            updates[0].follow_symlinks(),
             updates.iter().map(|op| op.requested_len()).collect(),
         ));
         if let Some((call, error)) = &self.attrs_failure
@@ -1473,8 +1476,8 @@ fn setattrs_ops_batch_policy_runs_in_order_and_preflight_before_dispatch() {
     fs.vsetattrs(&[
         SetAttrsOp::new("/a").len(1),
         SetAttrsOp::new("/b").len(2),
-        SetAttrsOp::new("/c").len(3).follow_symlinks(false),
-        SetAttrsOp::new("/d").len(4).follow_symlinks(false),
+        SetAttrsOp::new("/c").len(3).with_follow_symlinks(false),
+        SetAttrsOp::new("/d").len(4).with_follow_symlinks(false),
         SetAttrsOp::new("/a").len(5),
     ])
     .unwrap();
@@ -1490,7 +1493,9 @@ fn setattrs_ops_batch_policy_runs_in_order_and_preflight_before_dispatch() {
     let error = fs
         .vsetattrs(&[
             SetAttrsOp::new("/a").len(6),
-            SetAttrsOp::new("/b").uid(u32::MAX).follow_symlinks(false),
+            SetAttrsOp::new("/b")
+                .uid(u32::MAX)
+                .with_follow_symlinks(false),
         ])
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -1515,8 +1520,8 @@ fn setattrs_ops_remap_later_run_failures_without_replaying_or_dispatching_suffix
         let error = fs
             .vsetattrs(&[
                 SetAttrsOp::new("/a").len(1),
-                SetAttrsOp::new("/b").len(2).follow_symlinks(false),
-                SetAttrsOp::new("/c").len(3).follow_symlinks(false),
+                SetAttrsOp::new("/b").len(2).with_follow_symlinks(false),
+                SetAttrsOp::new("/c").len(3).with_follow_symlinks(false),
                 SetAttrsOp::new("/d").len(4),
             ])
             .unwrap_err();
@@ -1619,7 +1624,7 @@ fn allocating_whole_file_reads_enforce_a_configurable_limit() {
     let error = client
         .read_with_options(
             "/file",
-            ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(3)),
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(3)),
         )
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
@@ -1634,7 +1639,7 @@ fn allocating_whole_file_reads_enforce_a_configurable_limit() {
         client
             .read_with_options(
                 "/file",
-                ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(4))
+                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(4))
             )
             .unwrap(),
         b"four"
@@ -1648,7 +1653,7 @@ fn allocating_whole_file_reads_enforce_a_configurable_limit() {
         client
             .read_to_string_with_options(
                 "/file",
-                ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(4))
+                ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(4))
             )
             .unwrap(),
         "utf8"
@@ -2279,7 +2284,8 @@ fn stream_callback_can_reenter_client_and_drop_another_file() {
     client
         .read_stream_with_options(
             "/file",
-            vfsi_sync::StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(2).unwrap()),
+            vfsi_sync::StreamOptions::new()
+                .with_chunk_size(std::num::NonZeroUsize::new(2).unwrap()),
             |_, data| {
                 drop(other.take());
                 let file = client.open("/nested")?;
@@ -2315,7 +2321,7 @@ fn directory_visit_starts_with_one_entry_and_respects_tight_limits() {
     let error = client
         .listdir(
             "/tree",
-            vfsi_sync::ListDirOptions::new().max_entries(3),
+            vfsi_sync::ListDirOptions::new().with_max_entries(3),
             |_| {
                 seen += 1;
                 Ok(vfsi_core::api::WalkControl::Continue)
@@ -2377,7 +2383,7 @@ fn visitor_field_selection_is_forwarded_to_each_page() {
     client
         .listdir(
             "/tree",
-            vfsi_sync::ListDirOptions::new().fields(vfsi_sync::AttrMask::SIZE),
+            vfsi_sync::ListDirOptions::new().with_fields(vfsi_sync::AttrMask::SIZE),
             |_| {
                 seen += 1;
                 Ok(vfsi_core::api::WalkControl::Continue)
@@ -2655,7 +2661,7 @@ fn portable_handle_queries_and_sync_batch_and_preflight_every_handle() {
             Target::Path(std::path::Path::new("/link")),
             Target::file(&b),
         ],
-        AttrsOptions::new().follow_symlinks(false),
+        AttrsOptions::new().with_follow_symlinks(false),
     )
     .unwrap();
     assert_eq!(
@@ -2854,7 +2860,7 @@ fn complete_append_vectors_order_short_writes_and_never_replay_failures() {
                 vfsi_core::api::WriteOp::at(&file, 0, b"AAAA"),
                 vfsi_core::api::WriteOp::at(&file, 100, b"BBBB"),
             ],
-            vfsi_core::api::WriteOptions::new().write_all(true),
+            vfsi_core::api::WriteOptions::new().with_write_all(true),
         )
         .unwrap();
     assert_eq!(
@@ -2966,7 +2972,7 @@ fn directory_vectors_preflight_all_handles_and_use_retained_descriptors() {
     let error = fs
         .vremove_dir_contents(
             &[&dirs[0], &dirs[1]],
-            RemoveOptions::new().continue_on_error(true),
+            RemoveOptions::new().with_continue_on_error(true),
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -2975,7 +2981,7 @@ fn directory_vectors_preflight_all_handles_and_use_retained_descriptors() {
     fs.clone()
         .vremove_dir_contents(&[&dirs[0], &second], RemoveOptions::default())
         .unwrap();
-    fs.vremove_dir_contents(&[&second], RemoveOptions::new().batch(1))
+    fs.vremove_dir_contents(&[&second], RemoveOptions::new().with_batch_size(1))
         .unwrap();
     assert_eq!(*removed.lock().unwrap(), [0, 2, 2]);
     for dir in dirs {
@@ -3009,7 +3015,7 @@ fn directory_vector_errors_preserve_index_and_do_not_replay_transport_failures()
         let error = fs
             .vremove_dir_contents(
                 &dirs.iter().collect::<Vec<_>>(),
-                vfsi_sync::RemoveOptions::new().continue_on_error(keep_going),
+                vfsi_sync::RemoveOptions::new().with_continue_on_error(keep_going),
             )
             .unwrap_err();
         assert_eq!(error.index(), Some(1));

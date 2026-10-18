@@ -177,7 +177,7 @@ impl<F: VectorBackend> FsClient<F> {
             ) {
                 let error = crate::application::vector_index(error, index)
                     .with_context("vremove_dir_contents", &dir.path);
-                if error.is_transport() || !options.continues_on_error() {
+                if error.is_transport() || !options.continue_on_error() {
                     return Err(error);
                 }
                 first_error.get_or_insert(error);

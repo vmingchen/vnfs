@@ -6,6 +6,13 @@
 //!
 //! Application read/write operations live here rather than sharing the legacy
 //! backend operation types at the crate root.
+//!
+//! Value-style options use `with_<property>(value)` to configure a copy and
+//! `<property>()` to inspect it. Neither performs I/O. Read-budget overrides
+//! remain optional: `None` inherits the client's policy. Resolve inherited
+//! limits before interpreting them as effective execution budgets. Dedicated
+//! builders such as [`OpenOptions`](crate::api::OpenOptions) retain their
+//! standard builder-style verbs.
 
 pub type Result<T> = crate::VfResult<T>;
 pub type Error = crate::VfError;
@@ -154,10 +161,10 @@ mod target_tests {
         for target in [first, second.as_target()] {
             assert!(matches!(target, Target::File(actual) if std::ptr::eq(actual, &file)));
         }
-        let (first, second) = copy(SetAttrsOp::file(&file).len(0).follow_symlinks(false));
+        let (first, second) = copy(SetAttrsOp::file(&file).len(0).with_follow_symlinks(false));
         for op in [first, second] {
             assert_eq!(op.requested_len(), Some(0));
-            assert!(!op.follows_symlinks());
+            assert!(!op.follow_symlinks());
             assert!(matches!(op.target(), Target::File(actual) if std::ptr::eq(*actual, &file)));
         }
         let path = std::path::Path::new("/file");

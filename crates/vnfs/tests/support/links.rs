@@ -19,7 +19,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     fs.vmkdir(&directories).unwrap();
     let paths: Vec<_> = directories.iter().map(|op| op.path()).collect();
     let attrs = fs
-        .vgetattrs(&paths, AttrsOptions::new().fields(Attributes::MODE))
+        .vgetattrs(&paths, AttrsOptions::new().with_fields(Attributes::MODE))
         .unwrap();
     assert_eq!(attrs.len(), directories.len());
     for (attrs, op) in attrs.iter().zip(&directories) {
@@ -53,7 +53,7 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     let read = fs.vreadlink(&links).unwrap();
     assert_eq!(read, targets.iter().map(PathBuf::from).collect::<Vec<_>>());
     for attrs in fs
-        .vgetattrs(&links, AttrsOptions::new().follow_symlinks(false))
+        .vgetattrs(&links, AttrsOptions::new().with_follow_symlinks(false))
         .unwrap()
     {
         assert!(attrs.is_symlink());
@@ -65,13 +65,13 @@ pub fn check_links_and_modes(fs: &impl Vfsi, directory: &str) {
     let attrs = fs
         .vgetattrs(
             &files,
-            AttrsOptions::new().fields(Attributes::FILEID | Attributes::NLINK),
+            AttrsOptions::new().with_fields(Attributes::FILEID | Attributes::NLINK),
         )
         .unwrap();
     let linked = fs
         .vgetattrs(
             &hardlinks,
-            AttrsOptions::new().fields(Attributes::FILEID | Attributes::NLINK),
+            AttrsOptions::new().with_fields(Attributes::FILEID | Attributes::NLINK),
         )
         .unwrap();
     for (source, target) in attrs.iter().zip(&linked) {

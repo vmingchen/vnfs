@@ -28,7 +28,7 @@ and concrete-client helper entry points are not retained:
 ```compile_fail,E0599
 use vnfs::files::{Vfsi, VfsiExt};
 fn old_collect(fs: &impl Vfsi) {
-    let _ = fs.walks_with_options(&["/tree"], vnfs::directory::Attributes::MODE, vnfs::directory::ListDirOptions::new().recursive(true));
+    let _ = fs.walks_with_options(&["/tree"], vnfs::directory::Attributes::MODE, vnfs::directory::ListDirOptions::new().with_recursive(true));
 }
 ```
 
@@ -50,7 +50,7 @@ Shallow and recursive visits share one primitive, with borrowed entries:
 ```compile_fail,E0599
 use vnfs::files::Vfsi;
 fn old_walk(fs: &impl Vfsi) {
-    let _ = fs.visit_walks_with_options(&["/tree"], vnfs::directory::ListDirOptions::new().recursive(true),
+    let _ = fs.visit_walks_with_options(&["/tree"], vnfs::directory::ListDirOptions::new().with_recursive(true),
         |_, _| Ok(vnfs::directory::ControlFlow::Continue(())));
 }
 ```
@@ -347,7 +347,7 @@ fn rename(fs: &impl Vfsi) {
 ```compile_fail,E0599
 use vnfs::files::Vfsi;
 fn walk_with_options(fs: &impl Vfsi) {
-    let _ = fs.walk_with_options("/", vnfs::directory::ListDirOptions::new().recursive(true).fields(vnfs::directory::Attributes::MODE));
+    let _ = fs.walk_with_options("/", vnfs::directory::ListDirOptions::new().with_recursive(true).with_fields(vnfs::directory::Attributes::MODE));
 }
 ```
 
@@ -511,7 +511,7 @@ limits.max_read_bytes = 0;
 ```
 
 ```compile_fail,E0308
-let _ = vnfs::files::ResourceLimits::new().stream_chunk_bytes(0);
+let _ = vnfs::files::ResourceLimits::new().with_stream_chunk_size(0);
 ```
 
 ```compile_fail,E0616

@@ -26,7 +26,7 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
         .collect();
     fs.vsetattrs(&updates).unwrap();
     let options =
-        AttrsOptions::new().fields(Attributes::MODE | Attributes::SIZE | Attributes::MTIME);
+        AttrsOptions::new().with_fields(Attributes::MODE | Attributes::SIZE | Attributes::MTIME);
     let metadata = fs.vgetattrs(&paths, options).unwrap();
     assert_eq!(metadata.len(), paths.len());
     for (i, item) in metadata.iter().enumerate() {
@@ -47,7 +47,7 @@ pub fn check_many(fs: &impl Vfsi, directory: &str) {
         .map(|(i, path)| {
             vnfs::directory::SetAttrsOp::new(path)
                 .len(i as u64)
-                .follow_symlinks(false)
+                .with_follow_symlinks(false)
         })
         .collect();
     fs.vsetattrs(&sizes).unwrap();
@@ -84,7 +84,7 @@ fn check_mixed_policies(fs: &impl Vfsi, directory: &str) {
     let error = fs
         .vsetattrs(&[
             SetAttrsOp::new(&first).len(2),
-            SetAttrsOp::new(&link).len(4).follow_symlinks(false),
+            SetAttrsOp::new(&link).len(4).with_follow_symlinks(false),
             SetAttrsOp::new(&last).len(1),
         ])
         .unwrap_err();
@@ -94,7 +94,7 @@ fn check_mixed_policies(fs: &impl Vfsi, directory: &str) {
     // Do not regroup nonadjacent equal policies: these updates alias one object.
     fs.vsetattrs(&[
         SetAttrsOp::new(&link).len(5),
-        SetAttrsOp::new(&first).len(6).follow_symlinks(false),
+        SetAttrsOp::new(&first).len(6).with_follow_symlinks(false),
         SetAttrsOp::new(&link).len(7),
     ])
     .unwrap();
@@ -103,7 +103,7 @@ fn check_mixed_policies(fs: &impl Vfsi, directory: &str) {
     // Validation spans policy boundaries and must precede the first mutation.
     let error = fs
         .vsetattrs(&[
-            SetAttrsOp::new(&first).len(1).follow_symlinks(false),
+            SetAttrsOp::new(&first).len(1).with_follow_symlinks(false),
             SetAttrsOp::new(&last).uid(u32::MAX),
         ])
         .unwrap_err();
@@ -148,7 +148,7 @@ pub fn check_handles(fs: &impl Vfsi, directory: &str) {
             vnfs::directory::SetAttrsOp::new(Target::File(file))
                 .len(i as u64)
                 .permissions(Permissions::from_mode(0o640))
-                .follow_symlinks(false)
+                .with_follow_symlinks(false)
         })
         .collect();
     // no-follow must still address the opened objects.
@@ -241,9 +241,9 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
     )
     .unwrap();
     let options =
-        AttrsOptions::new().fields(Attributes::stat() | Attributes::UID | Attributes::GID);
+        AttrsOptions::new().with_fields(Attributes::stat() | Attributes::UID | Attributes::GID);
     let attrs = |path: &str, follow: bool| {
-        fs.attrs_with_options(path, options.follow_symlinks(follow))
+        fs.attrs_with_options(path, options.with_follow_symlinks(follow))
             .unwrap()
     };
     let original = attrs(&paths[0], true);
@@ -295,7 +295,7 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
                 .uid(uid)
                 .gid(gid)
                 .permissions(Permissions::from_mode(0o640))
-                .follow_symlinks(false)
+                .with_follow_symlinks(false)
         })
         .collect();
     fs.vsetattrs(&updates).unwrap();
@@ -327,7 +327,7 @@ pub fn check_ownership(fs: &impl Vfsi, directory: &str) {
     fs.vsetattrs(&[vnfs::directory::SetAttrsOp::new(&link)
         .uid(new_uid)
         .gid(new_gid)
-        .follow_symlinks(false)])
+        .with_follow_symlinks(false)])
         .unwrap();
     assert_eq!(attrs(&link, false).uid(), Some(new_uid));
     assert_eq!(attrs(&paths[1], true).uid(), Some(uid));

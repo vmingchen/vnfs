@@ -132,11 +132,11 @@ impl Default for NfsConnectOptions {
 
 impl NfsConnectOptions {
     /// Configure automatic read-only recovery.
-    pub fn auto_reconnect(mut self, enabled: bool) -> Self {
+    pub fn with_auto_reconnect(mut self, enabled: bool) -> Self {
         self.flags.set_auto_reconnect(enabled);
         self
     }
-    pub const fn reconnects_automatically(&self) -> bool {
+    pub const fn auto_reconnect(&self) -> bool {
         self.flags.auto_reconnect()
     }
 }
@@ -365,35 +365,35 @@ impl NfsRecoveryPolicy {
         Self::default()
     }
     /// Set the attempt cap, including the first attempt. Zero also makes one attempt.
-    pub fn reconnect_attempts(mut self, value: usize) -> Self {
+    pub fn with_reconnect_attempts(mut self, value: usize) -> Self {
         self.reconnect_attempts = value.max(1);
         self
     }
-    pub const fn attempt_limit(self) -> usize {
+    pub const fn reconnect_attempts(self) -> usize {
         self.reconnect_attempts
     }
     /// Set the initial delay; execution clamps it to the maximum delay and remaining window.
-    pub fn initial_backoff(mut self, value: Duration) -> Self {
+    pub fn with_initial_backoff(mut self, value: Duration) -> Self {
         self.initial_backoff = value;
         self
     }
-    pub const fn initial_delay(self) -> Duration {
+    pub const fn initial_backoff(self) -> Duration {
         self.initial_backoff
     }
     /// Set the maximum delay; zero disables sleeping between attempts.
-    pub fn max_backoff(mut self, value: Duration) -> Self {
+    pub fn with_max_backoff(mut self, value: Duration) -> Self {
         self.max_backoff = value;
         self
     }
-    pub const fn maximum_delay(self) -> Duration {
+    pub const fn max_backoff(self) -> Duration {
         self.max_backoff
     }
     /// Set the retry window; zero still permits the first attempt.
-    pub fn max_elapsed(mut self, value: Duration) -> Self {
+    pub fn with_max_elapsed(mut self, value: Duration) -> Self {
         self.max_elapsed = value;
         self
     }
-    pub const fn retry_window(self) -> Duration {
+    pub const fn max_elapsed(self) -> Duration {
         self.max_elapsed
     }
 }

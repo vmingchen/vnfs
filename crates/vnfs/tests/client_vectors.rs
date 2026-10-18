@@ -33,13 +33,13 @@ fn writes<C: Vfsi>(fs: &C) {
             WriteOp::at(&files[1], 0, b"first"),
             WriteOp::at(&files[1], 2, b"XX"),
         ],
-        vnfs::files::WriteOptions::new().write_all(true),
+        vnfs::files::WriteOptions::new().with_write_all(true),
     )
     .unwrap();
     assert_eq!(fs.read_files(&["/b"]).unwrap(), [b"fiXXt".to_vec()]);
     fs.vwrite(
         &[WriteOp::at(&files[0], 0, b"")],
-        vnfs::files::WriteOptions::new().write_all(true),
+        vnfs::files::WriteOptions::new().with_write_all(true),
     )
     .unwrap();
     fs.close_files(files).unwrap();
@@ -65,7 +65,7 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
     let file = fs.create("/a").unwrap();
     fs.vwrite(
         &[WriteOp::at(&file, 0, b"keep")],
-        vnfs::files::WriteOptions::new().write_all(true),
+        vnfs::files::WriteOptions::new().with_write_all(true),
     )
     .unwrap();
     let foreign = other.create("/b").unwrap();
@@ -75,7 +75,7 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
                 WriteOp::at(&file, 0, b"bad!"),
                 WriteOp::at(&foreign, 0, b""),
             ],
-            vnfs::files::WriteOptions::new().write_all(true),
+            vnfs::files::WriteOptions::new().with_write_all(true),
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -85,7 +85,7 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
                 WriteOp::at(&file, 0, b"bad!"),
                 WriteOp::at(&file, u64::MAX, b"xx"),
             ],
-            vnfs::files::WriteOptions::new().write_all(true),
+            vnfs::files::WriteOptions::new().with_write_all(true),
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -98,7 +98,7 @@ fn complete_writes_reject_the_entire_invalid_batch_before_mutation() {
     assert_eq!(
         fs.vwrite(
             &[WriteOp::at(&file, 0, b"bad!"), WriteOp::at(&closed, 0, b"")],
-            vnfs::files::WriteOptions::new().write_all(true)
+            vnfs::files::WriteOptions::new().with_write_all(true)
         )
         .unwrap_err()
         .index(),
@@ -114,12 +114,12 @@ fn attrs_query<C: Vfsi>(fs: &C) {
             .is_file()
     );
     assert!(
-        fs.attrs_with_options("/link", AttrsOptions::new().follow_symlinks(false))
+        fs.attrs_with_options("/link", AttrsOptions::new().with_follow_symlinks(false))
             .unwrap()
             .is_symlink()
     );
     let scalar = fs
-        .attrs_with_options("/a", AttrsOptions::new().fields(Attributes::FILEID))
+        .attrs_with_options("/a", AttrsOptions::new().with_fields(Attributes::FILEID))
         .unwrap();
     assert!(scalar.file_id().is_some());
     assert_eq!(scalar.len(), None);
@@ -130,7 +130,7 @@ fn attrs_query<C: Vfsi>(fs: &C) {
     let links = fs
         .vgetattrs(
             &["/a", "/link", "/dangling"],
-            AttrsOptions::new().follow_symlinks(false),
+            AttrsOptions::new().with_follow_symlinks(false),
         )
         .unwrap();
     assert!(links[0].is_file());
@@ -140,7 +140,7 @@ fn attrs_query<C: Vfsi>(fs: &C) {
     assert!(fs.symlink_attrs("/link").unwrap().is_symlink());
     assert!(fs.attrs("/dangling").is_err());
     let partial = fs
-        .vgetattrs(&["/a"], AttrsOptions::new().fields(Attributes::FILEID))
+        .vgetattrs(&["/a"], AttrsOptions::new().with_fields(Attributes::FILEID))
         .unwrap();
     assert!(partial[0].file_id().is_some());
     assert_eq!(
@@ -169,8 +169,8 @@ fn attrs_query<C: Vfsi>(fs: &C) {
         fs.attrs_with_options(
             "/link",
             vnfs::directory::AttrsOptions::new()
-                .fields(Attributes::MODE)
-                .follow_symlinks(false)
+                .with_fields(Attributes::MODE)
+                .with_follow_symlinks(false)
         )
         .unwrap()
         .is_symlink()

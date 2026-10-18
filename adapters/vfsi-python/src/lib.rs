@@ -547,7 +547,7 @@ fn read_allv_impl(
         let subset: Vec<FileOperand> = remaining.iter().map(|&i| files[i].clone()).collect();
         match fs.vread_all_with_options_impl(
             &subset,
-            ReadAllOptions::new().max_total_bytes(max_total_bytes),
+            ReadAllOptions::new().with_max_total_bytes(max_total_bytes),
         ) {
             Ok(bufs) => {
                 for (&i, buf) in remaining.iter().zip(bufs) {
@@ -1771,10 +1771,10 @@ impl NfsClient {
                             p,
                             full_mask(),
                             ListDirOptions::new()
-                                .recursive(true)
-                                .max_entries(max_entries)
-                                .max_path_bytes(max_path_bytes)
-                                .max_depth(max_depth),
+                                .with_recursive(true)
+                                .with_max_entries(max_entries)
+                                .with_max_path_bytes(max_path_bytes)
+                                .with_max_depth(max_depth),
                             &mut no_sort,
                         )
                         .map_err(|e| to_py_err(e, Some(p.as_path())))?
@@ -1824,15 +1824,17 @@ impl NfsClient {
         max_depth: Option<usize>,
     ) -> PyResult<WalkResult> {
         let options = ListDirOptions::new()
-            .recursive(true)
-            .max_entries(self.directory_max_entries)
-            .max_path_bytes(self.directory_max_path_bytes)
-            .max_depth(
+            .with_recursive(true)
+            .with_max_entries(self.directory_max_entries)
+            .with_max_path_bytes(self.directory_max_path_bytes)
+            .with_max_depth(
                 max_depth
                     .unwrap_or(self.walk_max_depth)
                     .min(self.walk_max_depth),
             )
-            .truncate_at_max_depth(max_depth.is_some_and(|depth| depth <= self.walk_max_depth));
+            .with_truncate_at_max_depth(
+                max_depth.is_some_and(|depth| depth <= self.walk_max_depth),
+            );
         let tree = self.with_fs(py, move |fs| {
             let mut sort_fn = |_dir: &Path, attrs: &mut Vec<VfAttrs>| {
                 if sort {

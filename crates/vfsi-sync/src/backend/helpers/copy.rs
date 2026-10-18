@@ -8,7 +8,7 @@ pub fn vcopy_impl_default<F: VectorBackend + ?Sized>(
     if pairs.is_empty() {
         return Ok(());
     }
-    if !options.follows_source_symlinks() {
+    if !options.follow_source_symlinks() {
         return Err(VfError::unsupported(0));
     }
     backend.vcopy_data_impl(pairs)

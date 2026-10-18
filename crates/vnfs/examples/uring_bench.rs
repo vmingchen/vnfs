@@ -73,7 +73,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .collect::<Vec<_>>(),
         )?;
         let mut buffers = vec![vec![0u8; size]; offsets.len()];
-        let budget = ReadOptions::new().max_total_bytes(NonZeroUsize::new(size * offsets.len()));
+        let budget =
+            ReadOptions::new().with_max_total_bytes(NonZeroUsize::new(size * offsets.len()));
         let mut samples = Vec::new();
         let source: Vec<_> = paths
             .iter()
@@ -137,7 +138,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .enumerate()
                     .map(|(i, (offset, data))| WriteOp::at(&files[i % files.len()], *offset, data))
                     .collect();
-                let results = fs.vwrite(&ops, WriteOptions::new().write_all(true))?;
+                let results = fs.vwrite(&ops, WriteOptions::new().with_write_all(true))?;
                 assert_eq!(results.len(), offsets.len());
                 assert!(results.iter().all(|result| result.written == size));
             } else if owned {
@@ -246,10 +247,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("execution mode must be ring, cached or adaptive".into());
     }
     let options = vfsi_uring::Options::default()
-        .cached_reads(read_mode != "ring")
-        .syscall_writes(read_mode == "adaptive")
-        .queue_depth(std::num::NonZeroU32::new(depth).ok_or("queue_depth must be nonzero")?)
-        .max_batch_bytes(NonZeroUsize::new(bytes).ok_or("max_batch_bytes must be nonzero")?);
+        .with_cached_reads(read_mode != "ring")
+        .with_syscall_writes(read_mode == "adaptive")
+        .with_queue_depth(std::num::NonZeroU32::new(depth).ok_or("queue_depth must be nonzero")?)
+        .with_max_batch_bytes(NonZeroUsize::new(bytes).ok_or("max_batch_bytes must be nonzero")?);
     let temp = tempfile::Builder::new()
         .prefix("vfsi-uring-bench-")
         .tempdir_in(parent)?;

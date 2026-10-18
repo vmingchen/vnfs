@@ -852,8 +852,8 @@ impl VectorBackend for NfsVecFs {
             std::collections::HashMap::new();
         let mut entry_count = 0usize;
         let mut budget = vfsi_core::internal::TraversalBudget::new(
-            options.entry_limit(),
-            options.path_byte_limit(),
+            options.max_entries(),
+            options.max_path_bytes(),
         );
 
         // Resolve the root once, then decode each bounded READDIR response
@@ -891,7 +891,7 @@ impl VectorBackend for NfsVecFs {
         // directory can share one compound instead of re-walking full paths.
         let mut frontier: Vec<(NfsFh, PathBuf)> = root_attrs
             .iter()
-            .filter(|entry| entry.ftype == VfType::Directory && options.depth_limit() > 0)
+            .filter(|entry| entry.ftype == VfType::Directory && options.max_depth() > 0)
             .filter_map(|entry| {
                 entry
                     .file
@@ -982,7 +982,7 @@ impl VectorBackend for NfsVecFs {
                             .strip_prefix(root)
                             .map(|relative| relative.components().count())
                             .unwrap_or(usize::MAX)
-                            <= options.depth_limit()
+                            <= options.max_depth()
                     {
                         next_frontier.push((results[index].fh.clone(), path.to_path_buf()));
                     }
@@ -1264,7 +1264,7 @@ impl VectorBackend for NfsVecFs {
         if pairs.is_empty() {
             return Ok(());
         }
-        if options.follows_source_symlinks() {
+        if options.follow_source_symlinks() {
             return self.vcopy_data_nfs(pairs);
         }
         let mut attrs: Vec<_> = pairs
@@ -1370,7 +1370,7 @@ impl VectorBackend for NfsVecFs {
         let mut total = 0usize;
         let mut active: Vec<usize> = (0..files.len()).collect();
         while !active.is_empty() {
-            let remaining = options.total_byte_limit().saturating_sub(total);
+            let remaining = options.max_total_bytes().saturating_sub(total);
             let (batch_active, window) =
                 bounded_read_allv_batch(&active, remaining, compound_budget, max_window);
             let reads: Vec<ReadOp> = batch_active
@@ -1386,7 +1386,7 @@ impl VectorBackend for NfsVecFs {
                 &mut out,
                 &mut offsets,
                 &mut total,
-                options.total_byte_limit(),
+                options.max_total_bytes(),
             )?;
             let mut untouched = active.split_off(batch_active.len());
             untouched.append(&mut next);

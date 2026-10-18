@@ -36,7 +36,7 @@ pub fn walk_events(
     mut read_dir: impl FnMut(&Path, ListDirOptions) -> VfResult<Vec<DirEntry>>,
     mut callback: impl FnMut(&WalkEvent) -> VfResult<WalkControl>,
 ) -> VfResult<TraversalCompletion> {
-    let mut budget = TraversalBudget::new(options.entry_limit(), options.path_byte_limit());
+    let mut budget = TraversalBudget::new(options.max_entries(), options.max_path_bytes());
     budget.charge(root.path())?;
     let kind = if root.attrs().is_dir() {
         WalkEventKind::Enter
@@ -59,8 +59,8 @@ pub fn walk_events(
                 if decision == WalkControl::SkipSubtree {
                     continue;
                 }
-                if event.depth > options.depth_limit() {
-                    if options.truncates_at_depth_limit() {
+                if event.depth > options.max_depth() {
+                    if options.truncate_at_max_depth() {
                         continue;
                     }
                     return Err(VfError::client(0, libc::EFBIG as u32)
@@ -121,7 +121,7 @@ mod tests {
         let mut events = Vec::new();
         walk_events(
             entry("/", true),
-            ListDirOptions::default().recursive(true),
+            ListDirOptions::default().with_recursive(true),
             true,
             |path, _| {
                 assert_eq!(path, Path::new("/"), "pruned directory must not be read");
@@ -153,7 +153,7 @@ mod tests {
     }
     #[test]
     fn depth_limit_allows_boundary_entries_and_only_blocks_directory_descent() {
-        let options = ListDirOptions::new().recursive(true).max_depth(0);
+        let options = ListDirOptions::new().with_recursive(true).with_max_depth(0);
         let mut events = Vec::new();
         assert_eq!(
             walk_events(
@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(
             walk_events(
                 entry("/", true),
-                options.truncate_at_max_depth(true),
+                options.with_truncate_at_max_depth(true),
                 false,
                 |path, _| {
                     listed.push(path.to_path_buf());
@@ -229,7 +229,7 @@ mod tests {
         assert_eq!(
             walk_events(
                 entry("/", true),
-                ListDirOptions::default().recursive(true),
+                ListDirOptions::default().with_recursive(true),
                 false,
                 |_, _| panic!("stopped"),
                 |_| Ok(WalkControl::Stop)
@@ -240,7 +240,7 @@ mod tests {
         assert!(
             walk_events(
                 entry("/", true),
-                ListDirOptions::default().recursive(true),
+                ListDirOptions::default().with_recursive(true),
                 false,
                 |_, _| panic!("callback failed"),
                 |_| Err(VfError::client(0, libc::EIO as u32))
@@ -248,9 +248,13 @@ mod tests {
             .is_err()
         );
         for options in [
-            ListDirOptions::new().recursive(true).max_entries(1),
-            ListDirOptions::new().recursive(true).max_path_bytes(1),
-            ListDirOptions::new().recursive(true).max_depth(0),
+            ListDirOptions::new()
+                .with_recursive(true)
+                .with_max_entries(1),
+            ListDirOptions::new()
+                .with_recursive(true)
+                .with_max_path_bytes(1),
+            ListDirOptions::new().with_recursive(true).with_max_depth(0),
         ] {
             assert_eq!(
                 walk_events(

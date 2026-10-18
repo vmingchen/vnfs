@@ -16,7 +16,7 @@ use std::num::NonZeroUsize;
 # fn example(fs: &vnfs::nfs::NfsClient) -> vnfs::Result<()> {
 let results = fs.vread(
     [ReadOp::whole("/file-1"), ReadOp::whole("/file-2")],
-    ReadOptions::new().max_total_bytes(NonZeroUsize::new(32 * 1024 * 1024)),
+    ReadOptions::new().with_max_total_bytes(NonZeroUsize::new(32 * 1024 * 1024)),
 )?;
 # let _ = results;
 # Ok(())
@@ -44,7 +44,7 @@ use std::num::NonZeroUsize;
 let mut bytes_seen = 0u64;
 fs.vstream(
     &["/dataset/large.bin"],
-    StreamOptions::new().chunk_size(NonZeroUsize::new(4 * 1024 * 1024).unwrap()),
+    StreamOptions::new().with_chunk_size(NonZeroUsize::new(4 * 1024 * 1024).unwrap()),
     |index, offset, chunk| {
         assert_eq!(index, 0);
         assert_eq!(offset, bytes_seen);
@@ -72,7 +72,7 @@ compares single-session and pooled reads and reports setup separately.
 ## Directory callbacks
 
 `vlistdirs` delivers bounded pages; `read_dirs_with_options` collects them.
-`listdir` visits entries; enable `recursive(true).enter_leave(true)` for
+`listdir` visits entries; enable `with_recursive(true).with_enter_leave(true)` for
 depth-first Enter/Entry/Leave events and prune with `SkipSubtree` on Enter.
 `Stop` ends the entire traversal. Sorting and lifecycle ordering require
 bounded directory buffers; plain entry traversal retains native paging and

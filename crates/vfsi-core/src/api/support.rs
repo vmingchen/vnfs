@@ -27,17 +27,17 @@ impl StreamOptions {
     ///
     /// ```compile_fail
     /// use vfsi_core::api::StreamOptions;
-    /// let options = StreamOptions::new().chunk_size(0);
+    /// let options = StreamOptions::new().with_chunk_size(0);
     /// ```
     ///
     /// NFS and other backends may return smaller chunks due to negotiated
     /// protocol limits. A larger setting does not bypass those limits.
-    pub const fn chunk_size(mut self, bytes: std::num::NonZeroUsize) -> Self {
+    pub const fn with_chunk_size(mut self, bytes: std::num::NonZeroUsize) -> Self {
         self.chunk_size = bytes;
         self
     }
 
-    pub const fn chunk_size_bytes(self) -> usize {
+    pub const fn chunk_size(self) -> usize {
         self.chunk_size.get()
     }
 }
@@ -167,16 +167,16 @@ impl ResourceLimits {
         Self::default()
     }
     /// Set the collected read budget; zero permits only empty payloads.
-    pub const fn max_read_bytes(mut self, value: usize) -> Self {
+    pub const fn with_max_read_bytes(mut self, value: usize) -> Self {
         self.max_read_bytes = value;
         self
     }
     /// Read the configured policy value.
-    pub const fn read_byte_limit(self) -> usize {
+    pub const fn max_read_bytes(self) -> usize {
         self.max_read_bytes
     }
     /// Set the default streaming chunk size. Nonzero chunks guarantee progress.
-    pub const fn stream_chunk_bytes(mut self, value: std::num::NonZeroUsize) -> Self {
+    pub const fn with_stream_chunk_size(mut self, value: std::num::NonZeroUsize) -> Self {
         self.stream_chunk_bytes = value;
         self
     }
@@ -185,45 +185,45 @@ impl ResourceLimits {
         self.stream_chunk_bytes.get()
     }
     /// Set the aggregate directory entry budget; zero is a valid budget.
-    pub const fn max_directory_entries(mut self, value: usize) -> Self {
+    pub const fn with_max_directory_entries(mut self, value: usize) -> Self {
         self.max_directory_entries = value;
         self
     }
     /// Read the configured policy value.
-    pub const fn directory_entry_limit(self) -> usize {
+    pub const fn max_directory_entries(self) -> usize {
         self.max_directory_entries
     }
     /// Set the aggregate path byte budget; zero is a valid budget.
-    pub const fn max_directory_path_bytes(mut self, value: usize) -> Self {
+    pub const fn with_max_directory_path_bytes(mut self, value: usize) -> Self {
         self.max_directory_path_bytes = value;
         self
     }
     /// Read the configured policy value.
-    pub const fn directory_path_byte_limit(self) -> usize {
+    pub const fn max_directory_path_bytes(self) -> usize {
         self.max_directory_path_bytes
     }
     /// Set maximum descent depth; zero includes only the starting directory.
-    pub const fn max_walk_depth(mut self, value: usize) -> Self {
+    pub const fn with_max_walk_depth(mut self, value: usize) -> Self {
         self.max_walk_depth = value;
         self
     }
     /// Read the configured policy value.
-    pub const fn walk_depth_limit(self) -> usize {
+    pub const fn max_walk_depth(self) -> usize {
         self.max_walk_depth
     }
 
     pub fn directory_options(self) -> ListDirOptions {
         ListDirOptions::new()
-            .max_entries(self.max_directory_entries)
-            .max_path_bytes(self.max_directory_path_bytes)
+            .with_max_entries(self.max_directory_entries)
+            .with_max_path_bytes(self.max_directory_path_bytes)
     }
 
     pub fn walk_options(self) -> crate::api::ListDirOptions {
         crate::api::ListDirOptions::new()
-            .recursive(true)
-            .max_entries(self.max_directory_entries)
-            .max_path_bytes(self.max_directory_path_bytes)
-            .max_depth(self.max_walk_depth)
+            .with_recursive(true)
+            .with_max_entries(self.max_directory_entries)
+            .with_max_path_bytes(self.max_directory_path_bytes)
+            .with_max_depth(self.max_walk_depth)
     }
 }
 

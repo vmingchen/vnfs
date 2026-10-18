@@ -68,7 +68,12 @@ pub fn walk_impl_default<F: VectorBackend + ?Sized>(
     masks: AttrMask,
     sort: &mut dyn FnMut(&Path, &mut Vec<VfAttrs>),
 ) -> VfResult<Vec<WalkEntry>> {
-    backend.walk_with_options_impl(root, masks, ListDirOptions::default().recursive(true), sort)
+    backend.walk_with_options_impl(
+        root,
+        masks,
+        ListDirOptions::default().with_recursive(true),
+        sort,
+    )
 }
 
 pub fn walk_with_options_impl_default<F: VectorBackend + ?Sized>(
@@ -86,7 +91,7 @@ pub fn walk_with_options_impl_default<F: VectorBackend + ?Sized>(
     let mut entry_count = 0usize;
     let mut path_bytes = 0usize;
     while let Some((dir, depth)) = stack.pop() {
-        let remaining = options.entry_limit().saturating_sub(entry_count);
+        let remaining = options.max_entries().saturating_sub(entry_count);
         let request_count = remaining.saturating_add(1);
         let mut entries = backend.listdir_impl(&dir, masks, request_count, false)?;
         if entries.len() > remaining {
@@ -99,7 +104,7 @@ pub fn walk_with_options_impl_default<F: VectorBackend + ?Sized>(
             path_bytes = path_bytes.checked_add(bytes).ok_or_else(|| {
                 VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
             })?;
-            if path_bytes > options.path_byte_limit() {
+            if path_bytes > options.max_path_bytes() {
                 return Err(
                     VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
                 );
@@ -112,15 +117,12 @@ pub fn walk_with_options_impl_default<F: VectorBackend + ?Sized>(
             .filter(|e| e.ftype == VfType::Directory)
             .filter_map(|e| e.file.path().map(|p| p.to_path_buf()))
             .collect();
-        if !subdirs.is_empty()
-            && depth >= options.depth_limit()
-            && !options.truncates_at_depth_limit()
-        {
+        if !subdirs.is_empty() && depth >= options.max_depth() && !options.truncate_at_max_depth() {
             return Err(
                 VfError::failure(entry_count, libc::EFBIG as u32).with_context("walk", &dir)
             );
         }
-        if depth < options.depth_limit() {
+        if depth < options.max_depth() {
             for s in subdirs.into_iter().rev() {
                 stack.push((s, depth + 1));
             }
@@ -207,12 +209,12 @@ pub fn native_read_dir_impl_default<F: VectorBackend + ?Sized>(
     path: &std::path::Path,
     options: ListDirOptions,
 ) -> VfResult<Vec<DirEntry>> {
-    let requested = options.entry_limit().saturating_add(1);
+    let requested = options.max_entries().saturating_add(1);
     let entries = backend
         .listdir_impl(path, metadata_mask(), requested, false)
         .map_err(|error| error.with_context("read_dir", path))?;
-    if entries.len() > options.entry_limit() {
-        return Err(VfError::failure(options.entry_limit(), libc::EFBIG as u32)
+    if entries.len() > options.max_entries() {
+        return Err(VfError::failure(options.max_entries(), libc::EFBIG as u32)
             .with_context("read_dir", path));
     }
     let mut path_bytes = 0usize;
@@ -230,7 +232,7 @@ pub fn native_read_dir_impl_default<F: VectorBackend + ?Sized>(
                 .ok_or_else(|| {
                     VfError::failure(index, libc::EFBIG as u32).with_context("read_dir", path)
                 })?;
-            if path_bytes > options.path_byte_limit() {
+            if path_bytes > options.max_path_bytes() {
                 return Err(
                     VfError::failure(index, libc::EFBIG as u32).with_context("read_dir", path)
                 );

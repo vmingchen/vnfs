@@ -324,7 +324,7 @@ mod mount_tests {
         let binding = Arc::new(());
         let mut supplied = Nfs::builder("127.0.0.1:2049");
         supplied.mount_binding = Some(binding.clone());
-        let limits = ResourceLimits::new().max_read_bytes(1024);
+        let limits = ResourceLimits::new().with_max_read_bytes(1024);
         let configured = supplied
             .configure_for_mount(Path::new("/mnt/nfs/project"), |builder| {
                 builder

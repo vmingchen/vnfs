@@ -118,7 +118,7 @@ impl Auto {
                 }
             });
             if let Err(error) = result {
-                if error.is_transport() || !options.continues_on_error() {
+                if error.is_transport() || !options.continue_on_error() {
                     return Err(error);
                 }
                 first_error.get_or_insert(error);
@@ -761,7 +761,7 @@ impl Auto {
             .map(|path| self.resolve(path.as_ref(), &mounts))
             .collect();
         let mut output = Vec::with_capacity(paths.len());
-        let mut remaining = options.total_byte_limit();
+        let mut remaining = options.max_total_bytes();
         let mut start = 0;
         while start < paths.len() {
             let mut end = start + 1;
@@ -772,7 +772,7 @@ impl Auto {
                 .iter()
                 .map(|item| item.path.as_path())
                 .collect();
-            let options = crate::ReadAllOptions::new().max_total_bytes(remaining);
+            let options = crate::ReadAllOptions::new().with_max_total_bytes(remaining);
             let buffers = match &resolved[start].route {
                 Route::Posix => self.mounted.read_files_native(&batch, options),
                 Route::Nfs(connection) => connection.client.read_files_native(&batch, options),
@@ -904,7 +904,7 @@ impl Auto {
     ) -> VfResult<Vec<crate::ReadResult>> {
         crate::read::consume_ops(
             ops,
-            options.limit_or(self.limits.read_byte_limit()),
+            options.max_total_bytes_or(self.limits.max_read_bytes()),
             |file, offset, length| AutoRead {
                 file,
                 offset,
@@ -936,7 +936,10 @@ impl Auto {
                 self.vread_with_limit_projected_native(ranges, bytes, |request| request)
             },
             |paths, bytes| {
-                self.read_files_native(paths, crate::ReadAllOptions::new().max_total_bytes(bytes))
+                self.read_files_native(
+                    paths,
+                    crate::ReadAllOptions::new().with_max_total_bytes(bytes),
+                )
             },
         )
     }

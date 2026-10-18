@@ -128,18 +128,18 @@ impl<F: HandleBackend> FsClient<F> {
             None => error,
         };
         let mut backend = self.lock()?;
-        let follow = updates[0].follows_symlinks();
-        if updates.iter().all(|op| op.follows_symlinks() == follow) {
+        let follow = updates[0].follow_symlinks();
+        if updates.iter().all(|op| op.follow_symlinks() == follow) {
             return backend
                 .vsetattrs_impl(&attrs)
                 .map_err(|error| map_error(error, 0, updates.len()));
         }
         let mut start = 0;
         while start < updates.len() {
-            let follow = updates[start].follows_symlinks();
+            let follow = updates[start].follow_symlinks();
             let count = updates[start..]
                 .iter()
-                .take_while(|op| op.follows_symlinks() == follow)
+                .take_while(|op| op.follow_symlinks() == follow)
                 .count();
             backend
                 .vsetattrs_impl(&attrs[start..start + count])

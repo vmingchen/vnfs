@@ -29,10 +29,10 @@ fn application_walk_prunes_before_io_selects_metadata_and_allows_reentry() {
         .listdir(
             "/",
             vfsi_core::api::ListDirOptions::default()
-                .recursive(true)
-                .fields(vnfs::directory::Attributes::MODE)
-                .enter_leave(true)
-                .sort_by_name(true),
+                .with_recursive(true)
+                .with_fields(vnfs::directory::Attributes::MODE)
+                .with_enter_leave(true)
+                .with_sort_by_name(true),
             |event| {
                 visited.push(event.entry.path().to_path_buf());
                 assert!(event.entry.attrs().uid().is_none());
@@ -60,7 +60,7 @@ fn bounded_open_file_collection_keeps_identity_across_rename_and_replacement() {
     use std::io::Read;
     let (_root, backend) = dummy();
     let client =
-        vfsi_sync::FsClient::new(backend).with_limits(ResourceLimits::new().max_read_bytes(6));
+        vfsi_sync::FsClient::new(backend).with_limits(ResourceLimits::new().with_max_read_bytes(6));
     client.write("/original", b"opened").unwrap();
     let file = client.open("/original").unwrap();
     client.rename("/original", "/moved").unwrap();
@@ -72,7 +72,7 @@ fn bounded_open_file_collection_keeps_identity_across_rename_and_replacement() {
     assert_eq!(io.read_to_end(&mut output).unwrap(), 0);
     let limited = client
         .clone()
-        .with_limits(ResourceLimits::new().max_read_bytes(5));
+        .with_limits(ResourceLimits::new().with_max_read_bytes(5));
     assert_eq!(
         limited
             .std_io(&file)
@@ -100,7 +100,8 @@ fn native_paged_tree_honors_budget_overrides_and_allows_reentry() {
     use vnfs::directory::{ListDirOptions, TraversalCompletion};
     use vnfs::files::ResourceLimits;
     let (_root, backend) = dummy();
-    let client = FsClient::new(backend).with_limits(ResourceLimits::new().max_directory_entries(3));
+    let client =
+        FsClient::new(backend).with_limits(ResourceLimits::new().with_max_directory_entries(3));
     client.create_dir_all("/tree/sub").unwrap();
     client.write("/tree/a", b"a").unwrap();
     client.write("/tree/sub/b", b"b").unwrap();
@@ -110,7 +111,7 @@ fn native_paged_tree_honors_budget_overrides_and_allows_reentry() {
     let error = client
         .listdir(
             "/tree",
-            vfsi_core::api::ListDirOptions::new().recursive(true),
+            vfsi_core::api::ListDirOptions::new().with_recursive(true),
             |entry| {
                 clone.symlink_attrs(entry.entry.path()).unwrap();
                 seen.push(entry.entry.path().to_path_buf());
@@ -121,7 +122,9 @@ fn native_paged_tree_honors_budget_overrides_and_allows_reentry() {
     assert_eq!(error.kind(), vnfs::error::ErrorKind::FileTooLarge);
     assert_eq!(seen.len(), 3);
     seen.clear();
-    let options = ListDirOptions::new().recursive(true).max_entries(10);
+    let options = ListDirOptions::new()
+        .with_recursive(true)
+        .with_max_entries(10);
     assert_eq!(
         client
             .listdir("/tree", options, |entry| {
@@ -172,7 +175,7 @@ fn one_shot_file_vectors_roundtrip_and_bound_returned_bytes() {
     let error = client
         .read_files_with_options(
             &["/file-1", "/file-2"],
-            ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(9)),
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(9)),
         )
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
@@ -223,7 +226,7 @@ fn application_directory_vectors_preserve_fields_and_limits() {
 
     let fields = Attributes::MODE | Attributes::SIZE | Attributes::BLOCKS;
     let listed = client
-        .read_dirs_with_options(&["/a", "/b"], ListDirOptions::new().fields(fields))
+        .read_dirs_with_options(&["/a", "/b"], ListDirOptions::new().with_fields(fields))
         .unwrap();
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0][0].path, Path::new("/a"));
@@ -236,25 +239,34 @@ fn application_directory_vectors_preserve_fields_and_limits() {
     let error = client
         .read_dirs_with_options(
             &["/a", "/b"],
-            ListDirOptions::new().fields(fields).max_entries(1),
+            ListDirOptions::new()
+                .with_fields(fields)
+                .with_max_entries(1),
         )
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
     let repeated = client
-        .read_dirs_with_options(&["/a", "/a"], ListDirOptions::new().fields(fields))
+        .read_dirs_with_options(&["/a", "/a"], ListDirOptions::new().with_fields(fields))
         .unwrap();
     assert_eq!(repeated.len(), 2);
     assert_eq!(repeated[0], repeated[1]);
     let error = client
         .read_dirs_with_options(
             &["/a", "/a"],
-            ListDirOptions::new().fields(fields).max_entries(1),
+            ListDirOptions::new()
+                .with_fields(fields)
+                .with_max_entries(1),
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
 
     let tree = client
-        .read_dirs_with_options(&["/"], ListDirOptions::new().fields(fields).recursive(true))
+        .read_dirs_with_options(
+            &["/"],
+            ListDirOptions::new()
+                .with_fields(fields)
+                .with_recursive(true),
+        )
         .map(|mut trees| trees.remove(0))
         .unwrap();
     assert!(
@@ -269,9 +281,9 @@ fn application_directory_vectors_preserve_fields_and_limits() {
         .read_dirs_with_options(
             &["/"],
             ListDirOptions::new()
-                .max_entries(1)
-                .fields(fields)
-                .recursive(true),
+                .with_max_entries(1)
+                .with_fields(fields)
+                .with_recursive(true),
         )
         .map(|mut trees| trees.remove(0))
         .unwrap_err();
@@ -292,8 +304,8 @@ fn application_metadata_and_batch_mutations() {
         .attrs_with_options(
             "/link",
             vnfs::directory::AttrsOptions::new()
-                .fields(Attributes::MODE | Attributes::BLOCKS)
-                .follow_symlinks(false),
+                .with_fields(Attributes::MODE | Attributes::BLOCKS)
+                .with_follow_symlinks(false),
         )
         .unwrap();
     assert!(metadata.is_symlink());
@@ -312,7 +324,7 @@ fn application_metadata_and_batch_mutations() {
         .copy_with_options(
             "/link",
             "/link-copy",
-            vnfs::files::CopyOption::new().follow_source_symlinks(false),
+            vnfs::files::CopyOption::new().with_follow_source_symlinks(false),
         )
         .unwrap();
     assert_eq!(
@@ -345,12 +357,12 @@ fn application_directory_cohorts_preserve_global_error_index() {
     }
     paths.push(paths[0].clone());
     let listings = client
-        .read_dirs_with_options(&paths, ListDirOptions::new().fields(Attributes::MODE))
+        .read_dirs_with_options(&paths, ListDirOptions::new().with_fields(Attributes::MODE))
         .unwrap();
     assert_eq!(listings[0], listings[32]);
     paths.push("/missing".to_string());
     let error = client
-        .read_dirs_with_options(&paths, ListDirOptions::new().fields(Attributes::MODE))
+        .read_dirs_with_options(&paths, ListDirOptions::new().with_fields(Attributes::MODE))
         .unwrap_err();
     assert_eq!(error.index(), Some(33));
 }
@@ -388,7 +400,7 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     client
         .read_stream_with_options(
             "/stream",
-            StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(64 * 1024).unwrap()),
+            StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(64 * 1024).unwrap()),
             |offset, chunk| {
                 assert_eq!(offset, next_offset);
                 assert!(!chunk.is_empty());
@@ -416,7 +428,7 @@ fn single_file_stream_is_bounded_ordered_and_cancellable() {
     client
         .read_stream_with_options(
             "/stream",
-            StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(1234).unwrap()),
+            StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(1234).unwrap()),
             |_, chunk| {
                 seen += chunk.len();
                 Ok(std::ops::ControlFlow::Break(()))
@@ -710,7 +722,7 @@ fn owned_directory_handle_refuses_path_only_backend() {
     assert_eq!(error.err_no(), vfsi_sync::VF_ERR_UNSUPPORTED);
     assert_eq!(client.read("/d/keep").unwrap(), b"x");
 
-    let options = RemoveOptions::new().continue_on_error(true);
+    let options = RemoveOptions::new().with_continue_on_error(true);
     assert!(VfsiExt::remove_dir_contents_with_options(&client, "/d", options).is_err());
     assert!(VfsiExt::remove_dir_all_with_options(&client, "/d", options).is_err());
     assert!(client.vremove_impl(&["/d/keep"], false, options).is_err());
@@ -731,9 +743,9 @@ fn generic_remover_rejects_options_it_cannot_honor() {
         .unwrap();
     let handle = fs.open_dir_impl(Path::new("/d")).unwrap();
     for options in [
-        vfsi_sync::RemoveOptions::new().continue_on_error(true),
-        vfsi_sync::RemoveOptions::new().batch(2),
-        vfsi_sync::RemoveOptions::new().retries(0),
+        vfsi_sync::RemoveOptions::new().with_continue_on_error(true),
+        vfsi_sync::RemoveOptions::new().with_batch_size(2),
+        vfsi_sync::RemoveOptions::new().with_retries(0),
     ] {
         assert!(
             fs.remove_paths_with_options_impl(&[Path::new("/d/keep")], false, options)
@@ -1276,7 +1288,7 @@ fn native_scalar_contract_separates_metadata_query_from_update() {
     let attrs = HandleBackend::metadata_impl(
         &mut fs,
         Target::Path(Path::new("/metadata")),
-        AttrsOptions::new().fields(AttrMask::MODE | AttrMask::SIZE),
+        AttrsOptions::new().with_fields(AttrMask::MODE | AttrMask::SIZE),
     )
     .unwrap();
     assert!(attrs.returned.contains(AttrMask::MODE | AttrMask::SIZE));
@@ -1308,7 +1320,9 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
         .walk_with_options_impl(
             Path::new("/tree"),
             AttrMask::stat(),
-            ListDirOptions::new().recursive(true).max_entries(2),
+            ListDirOptions::new()
+                .with_recursive(true)
+                .with_max_entries(2),
             &mut |_, _| {},
         )
         .unwrap_err();
@@ -1318,7 +1332,7 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
         .walk_with_options_impl(
             Path::new("/tree"),
             AttrMask::stat(),
-            ListDirOptions::new().recursive(true).max_depth(0),
+            ListDirOptions::new().with_recursive(true).with_max_depth(0),
             &mut |_, _| {},
         )
         .unwrap_err();
@@ -1326,12 +1340,12 @@ fn allocating_directory_apis_enforce_entry_path_and_depth_limits() {
 
     let client = FsClient::new(fs);
     let error = client
-        .read_dir_with_options("/tree", ListDirOptions::new().max_entries(1))
+        .read_dir_with_options("/tree", ListDirOptions::new().with_max_entries(1))
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
 
     let error = client
-        .read_dir_with_options("/tree", ListDirOptions::new().max_path_bytes(1))
+        .read_dir_with_options("/tree", ListDirOptions::new().with_max_path_bytes(1))
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
 

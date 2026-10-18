@@ -202,7 +202,7 @@ macro_rules! owned_client {
             ) -> Result<Vec<ReadResult>> {
                 crate::read::consume_ops(
                     ops,
-                    options.limit_or(self.limits().read_byte_limit()),
+                    options.max_total_bytes_or(self.limits().max_read_bytes()),
                     |file, offset, length| file.inner.read_request_at(offset, length),
                     |file, offset, buffer| file.inner.read_request_at_into(offset, buffer),
                     |requests, budget| {

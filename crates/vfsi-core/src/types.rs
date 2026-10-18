@@ -1155,7 +1155,7 @@ impl Permissions {
 /// fn object_id<C: Vfsi>(fs: &C) -> VfResult<Option<FsObjId>> {
 ///     let attrs = fs.attrs_with_options(
 ///         "/file",
-///         AttrsOptions::new().fields(AttrMask::identity()),
+///         AttrsOptions::new().with_fields(AttrMask::identity()),
 ///     )?;
 ///     Ok(attrs.fs_obj_id())
 /// }
@@ -1519,7 +1519,7 @@ impl RemoveOptions {
         self.batch
     }
     /// Retry cap; zero disables retries.
-    pub const fn retry_limit(self) -> u32 {
+    pub const fn retries(self) -> u32 {
         self.retries
     }
 
@@ -1527,22 +1527,22 @@ impl RemoveOptions {
         Self::default()
     }
 
-    pub fn continue_on_error(mut self, value: bool) -> Self {
+    pub fn with_continue_on_error(mut self, value: bool) -> Self {
         self.flags.set_continue_on_error(value);
         self
     }
 
     /// Whether removal continues after semantic per-entry failures.
-    pub const fn continues_on_error(self) -> bool {
+    pub const fn continue_on_error(self) -> bool {
         self.flags.continue_on_error()
     }
 
-    pub fn batch(mut self, value: usize) -> Self {
+    pub fn with_batch_size(mut self, value: usize) -> Self {
         self.batch = value;
         self
     }
 
-    pub fn retries(mut self, value: u32) -> Self {
+    pub fn with_retries(mut self, value: u32) -> Self {
         self.retries = value;
         self
     }
@@ -1616,11 +1616,11 @@ impl CopyOption {
         Self::default()
     }
     /// Follow final source symlinks when true; otherwise recreate the links.
-    pub fn follow_source_symlinks(mut self, follow: bool) -> Self {
+    pub fn with_follow_source_symlinks(mut self, follow: bool) -> Self {
         self.flags.set_follow_source_symlinks(follow);
         self
     }
-    pub fn follows_source_symlinks(self) -> bool {
+    pub fn follow_source_symlinks(self) -> bool {
         self.flags.follow_source_symlinks()
     }
 }
@@ -1630,13 +1630,13 @@ mod copy_option_tests {
     use super::CopyOption;
     #[test]
     fn follows_source_symlinks_by_default_and_builder_can_disable_it() {
-        assert!(CopyOption::default().follows_source_symlinks());
-        let preserve = CopyOption::new().follow_source_symlinks(false);
-        assert!(!preserve.follows_source_symlinks());
+        assert!(CopyOption::default().follow_source_symlinks());
+        let preserve = CopyOption::new().with_follow_source_symlinks(false);
+        assert!(!preserve.follow_source_symlinks());
         assert!(
             preserve
-                .follow_source_symlinks(true)
-                .follows_source_symlinks()
+                .with_follow_source_symlinks(true)
+                .follow_source_symlinks()
         );
     }
 }

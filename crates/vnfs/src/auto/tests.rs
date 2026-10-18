@@ -144,14 +144,14 @@ fn routed_pages_enforce_public_budgets_and_pin_cursor_ownership() {
     client.write("/dir/b", b"x").unwrap();
     assert_eq!(
         client
-            .read_dirs_with_options(&["/dir"], ListDirOptions::new().max_path_bytes(12))
+            .read_dirs_with_options(&["/dir"], ListDirOptions::new().with_max_path_bytes(12))
             .unwrap()[0][0]
             .entries
             .len(),
         2
     );
     let error = client
-        .read_dirs_with_options(&["/dir"], ListDirOptions::new().max_path_bytes(11))
+        .read_dirs_with_options(&["/dir"], ListDirOptions::new().with_max_path_bytes(11))
         .unwrap_err();
     assert_eq!(error.kind(), crate::ErrorKind::FileTooLarge);
     assert_eq!(error.index(), Some(0));
@@ -409,7 +409,7 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
         .mounted
         .vgetattrs(
             &[Path::new("/one"), Path::new("/link")],
-            crate::AttrsOptions::new().follow_symlinks(false),
+            crate::AttrsOptions::new().with_follow_symlinks(false),
         )
         .unwrap();
     assert_eq!(metadata[0].file_type(), crate::FileType::Regular);
@@ -418,13 +418,13 @@ fn local_paths_stay_mounted_and_open_file_roundtrips() {
         .mounted
         .vgetattrs(
             &[Path::new("/one"), Path::new("/missing")],
-            crate::AttrsOptions::new().follow_symlinks(false),
+            crate::AttrsOptions::new().with_follow_symlinks(false),
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     let tiny = Auto::new(&root)
         .unwrap()
-        .with_limits(ResourceLimits::new().max_read_bytes(5));
+        .with_limits(ResourceLimits::new().with_max_read_bytes(5));
     let tiny_file = tiny.open("/one").unwrap();
     let error = tiny
         .vread(
@@ -490,7 +490,7 @@ fn write_allv_preflights_closed_empty_and_overflowing_requests_locally() {
                         if closed { b"" } else { b"XX" },
                     ),
                 ],
-                crate::WriteOptions::new().write_all(true),
+                crate::WriteOptions::new().with_write_all(true),
             )
             .unwrap_err();
         let first = client.read("/first").unwrap();
@@ -599,7 +599,7 @@ fn live_nfs_mount_uses_direct_connection() {
                 crate::WriteOp::at(&files[1], 0, b"SECOND"),
                 crate::WriteOp::at(&files[2], 0, b"LOCAL"),
             ],
-            crate::WriteOptions::new().write_all(true),
+            crate::WriteOptions::new().with_write_all(true),
         )
         .unwrap();
     let mut files = files;
@@ -615,7 +615,7 @@ fn live_nfs_mount_uses_direct_connection() {
         client
             .read_files_with_options(
                 &paths,
-                crate::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(15))
+                crate::ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(15))
             )
             .is_err()
     );
@@ -674,7 +674,7 @@ fn live_changed_auto_limits_apply_to_cached_connections_and_open_handles() {
     for reopen in [false, true] {
         let client = Auto::new("/")
             .unwrap()
-            .with_limits(ResourceLimits::new().max_read_bytes(4));
+            .with_limits(ResourceLimits::new().with_max_read_bytes(4));
         let file = client.open(&path).unwrap();
         assert!(matches!(file.route(), AutoRoute::DirectNfs { .. }));
         let Route::Nfs(pinned) = &file.route else {
@@ -690,7 +690,7 @@ fn live_changed_auto_limits_apply_to_cached_connections_and_open_handles() {
             .clone();
         assert!(Arc::ptr_eq(pinned, &cached));
         assert_eq!(pinned.spec.server.as_ptr(), cached.spec.server.as_ptr());
-        let client = client.with_limits(ResourceLimits::new().max_read_bytes(8));
+        let client = client.with_limits(ResourceLimits::new().with_max_read_bytes(8));
         let updated = client
             .connections
             .lock()
@@ -701,8 +701,8 @@ fn live_changed_auto_limits_apply_to_cached_connections_and_open_handles() {
             .clone();
         assert!(!Arc::ptr_eq(&cached, &updated));
         assert!(Route::Nfs(cached.clone()).same_backend(&Route::Nfs(updated.clone())));
-        assert_eq!(cached.client.limits().read_byte_limit(), 4);
-        assert_eq!(updated.client.limits().read_byte_limit(), 8);
+        assert_eq!(cached.client.limits().max_read_bytes(), 4);
+        assert_eq!(updated.client.limits().max_read_bytes(), 8);
         assert_eq!(cached.spec, updated.spec);
         assert_eq!(cached.credentials, updated.credentials);
         let file = if reopen {
@@ -723,7 +723,7 @@ fn live_changed_auto_limits_apply_to_cached_connections_and_open_handles() {
                     assert_eq!(&buffer, b"abcdef");
                 }),
         );
-        let client = client.with_limits(ResourceLimits::new().max_read_bytes(3));
+        let client = client.with_limits(ResourceLimits::new().with_max_read_bytes(3));
         buffer.fill(0xff);
         assert_eq!(
             client
@@ -799,7 +799,7 @@ fn live_write_allv_preflights_invalid_later_requests_across_routes() {
                             payload,
                         ),
                     ],
-                    crate::WriteOptions::new().write_all(true),
+                    crate::WriteOptions::new().with_write_all(true),
                 )
                 .unwrap_err();
             let mut first = [0; 8];
@@ -865,8 +865,8 @@ fn live_auto_traversal_charges_public_path_bytes() {
         .read_dirs_with_options(
             &[&route.path],
             crate::ListDirOptions::unlimited()
-                .fields(crate::Attributes::stat())
-                .recursive(true),
+                .with_fields(crate::Attributes::stat())
+                .with_recursive(true),
         )
         .map(|mut trees| trees.remove(0))
         .unwrap();
@@ -897,15 +897,15 @@ fn live_auto_traversal_charges_public_path_bytes() {
         .read_dirs_with_options(
             &[&root],
             crate::ListDirOptions::new()
-                .max_path_bytes(backend_total)
-                .fields(crate::Attributes::stat())
-                .recursive(true),
+                .with_max_path_bytes(backend_total)
+                .with_fields(crate::Attributes::stat())
+                .with_recursive(true),
         )
         .map(|mut trees| trees.remove(0));
     let mut dir_bytes = 0;
     let dir = client.listdir(
         &root,
-        ListDirOptions::new().max_path_bytes(backend_entries),
+        ListDirOptions::new().with_max_path_bytes(backend_entries),
         |entry| {
             dir_bytes += entry.entry.path().as_os_str().len();
             Ok(vfsi_core::api::WalkControl::Continue)
@@ -915,8 +915,8 @@ fn live_auto_traversal_charges_public_path_bytes() {
     let tree = client.listdir(
         &root,
         crate::ListDirOptions::new()
-            .recursive(true)
-            .max_path_bytes(backend_total),
+            .with_recursive(true)
+            .with_max_path_bytes(backend_total),
         |entry| {
             tree_bytes += entry.entry.path().as_os_str().len();
             Ok(vfsi_core::api::WalkControl::Continue)
@@ -928,9 +928,9 @@ fn live_auto_traversal_charges_public_path_bytes() {
             .read_dirs_with_options(
                 &[&root],
                 crate::ListDirOptions::new()
-                    .max_path_bytes(public_total)
-                    .fields(crate::Attributes::stat())
-                    .recursive(true)
+                    .with_max_path_bytes(public_total)
+                    .with_fields(crate::Attributes::stat())
+                    .with_recursive(true)
             )
             .map(|mut trees| trees.remove(0))
             .is_ok()
@@ -939,7 +939,7 @@ fn live_auto_traversal_charges_public_path_bytes() {
         client
             .listdir(
                 &root,
-                ListDirOptions::new().max_path_bytes(public_entries),
+                ListDirOptions::new().with_max_path_bytes(public_entries),
                 |_| Ok(vfsi_core::api::WalkControl::Continue)
             )
             .is_ok()
@@ -949,8 +949,8 @@ fn live_auto_traversal_charges_public_path_bytes() {
             .listdir(
                 &root,
                 crate::ListDirOptions::new()
-                    .recursive(true)
-                    .max_path_bytes(public_total),
+                    .with_recursive(true)
+                    .with_max_path_bytes(public_total),
                 |_| Ok(vfsi_core::api::WalkControl::Continue)
             )
             .unwrap(),

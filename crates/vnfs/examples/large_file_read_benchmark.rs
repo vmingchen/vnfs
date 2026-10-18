@@ -125,7 +125,7 @@ fn read_once(
     let started = Instant::now();
     client.read_stream_with_options(
         path,
-        StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(chunk_size).unwrap()),
+        StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(chunk_size).unwrap()),
         |_, data| {
             bytes += data.len() as u64;
             chunks += 1;
@@ -189,10 +189,10 @@ fn main() -> Result<()> {
                 .version(vnfs::nfs::NfsVersion::try_from(args.minor_version)?)
                 .connect_read_pool(
                     NfsReadPoolOptions::new()
-                        .worker_count(worker_count)
-                        .chunk_size(chunk_size)
-                        .max_in_flight(worker_count * 2)
-                        .max_buffered_bytes(16 * 1024 * 1024),
+                        .with_worker_count(worker_count)
+                        .with_chunk_size(chunk_size)
+                        .with_max_in_flight(worker_count * 2)
+                        .with_max_buffered_bytes(16 * 1024 * 1024),
                 )?;
             let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
             for _ in 0..args.warmups {

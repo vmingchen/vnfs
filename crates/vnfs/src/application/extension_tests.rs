@@ -147,14 +147,14 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
     fs.create_dir("/b").unwrap();
     fs.write("/a/sub/f", b"payload").unwrap();
     fs.write("/b/f", b"x").unwrap();
-    let shallow = ListDirOptions::new().fields(Attributes::SIZE);
+    let shallow = ListDirOptions::new().with_fields(Attributes::SIZE);
     let listed = fs.read_dirs_with_options(&["/a", "/b"], shallow).unwrap();
     assert_eq!(listed.len(), 2);
     assert!(listed.iter().all(|tree| tree.len() == 1));
     assert_eq!(listed[0][0].path, Path::new("/a"));
     assert_eq!(listed[1][0].entries[0].attrs().len().unwrap(), 1);
     let trees = fs
-        .read_dirs_with_options(&["/a", "/b"], shallow.recursive(true))
+        .read_dirs_with_options(&["/a", "/b"], shallow.with_recursive(true))
         .unwrap();
     assert_eq!(trees[0].len(), 2);
     assert_eq!(trees[1].len(), 1);
@@ -166,7 +166,7 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
                 && entry.attrs().len().unwrap() == 7)
     );
     assert_eq!(
-        fs.read_dirs_with_options(&["/a", "/a"], shallow.max_entries(1))
+        fs.read_dirs_with_options(&["/a", "/a"], shallow.with_max_entries(1))
             .unwrap_err()
             .index(),
         Some(1)
@@ -186,23 +186,26 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
         .read_dirs_with_options(
             &["/a"],
             shallow
-                .recursive(true)
-                .max_depth(0)
-                .truncate_at_max_depth(true),
+                .with_recursive(true)
+                .with_max_depth(0)
+                .with_truncate_at_max_depth(true),
         )
         .unwrap();
     assert_eq!(truncated[0].len(), 1);
     std::os::unix::fs::symlink(root.path().join("a"), root.path().join("link")).unwrap();
     let paths = vec![String::from("/link"), String::from("/b")];
     let metadata = fs
-        .vgetattrs(&paths, crate::AttrsOptions::new().follow_symlinks(false))
+        .vgetattrs(
+            &paths,
+            crate::AttrsOptions::new().with_follow_symlinks(false),
+        )
         .unwrap();
     assert!(metadata[0].is_symlink());
     assert!(metadata[1].is_dir());
     assert!(
         fs.vgetattrs(
             &[std::path::PathBuf::from("/link")],
-            crate::AttrsOptions::new().follow_symlinks(false)
+            crate::AttrsOptions::new().with_follow_symlinks(false)
         )
         .unwrap()[0]
             .is_symlink()
@@ -210,13 +213,13 @@ fn unified_collection_keeps_grouping_limits_and_generic_metadata_paths() {
     assert!(
         fs.vgetattrs(
             &["/link"],
-            crate::AttrsOptions::new().follow_symlinks(false)
+            crate::AttrsOptions::new().with_follow_symlinks(false)
         )
         .unwrap()[0]
             .is_symlink()
     );
     assert!(
-        fs.vgetattrs::<String>(&[], crate::AttrsOptions::new().follow_symlinks(false))
+        fs.vgetattrs::<String>(&[], crate::AttrsOptions::new().with_follow_symlinks(false))
             .unwrap()
             .is_empty()
     );
@@ -229,7 +232,7 @@ fn unified_visiting_preserves_depth_defaults_fields_and_failures() {
     let fs = Probe {
         mounted: crate::Posix::new(root.path())
             .unwrap()
-            .with_limits(ResourceLimits::new().max_directory_entries(1)),
+            .with_limits(ResourceLimits::new().with_max_directory_entries(1)),
         calls: Cell::new(0),
         shape: Cell::new(0),
     };
@@ -250,14 +253,16 @@ fn unified_visiting_preserves_depth_defaults_fields_and_failures() {
     assert!(
         fs.visit_entries_with_options(
             &["/tree"],
-            ListDirOptions::new().recursive(true),
+            ListDirOptions::new().with_recursive(true),
             |_, _| Ok(ControlFlow::Continue(()))
         )
         .is_err()
     ); // inherits client budget
-    let recursive = ListDirOptions::new().recursive(true).max_entries(10);
+    let recursive = ListDirOptions::new()
+        .with_recursive(true)
+        .with_max_entries(10);
     assert!(
-        fs.visit_entries_with_options(&["/tree"], recursive.max_depth(0), |_, _| Ok(
+        fs.visit_entries_with_options(&["/tree"], recursive.with_max_depth(0), |_, _| Ok(
             ControlFlow::Continue(())
         ))
         .is_err()
@@ -267,9 +272,9 @@ fn unified_visiting_preserves_depth_defaults_fields_and_failures() {
         fs.visit_entries_with_options(
             &["/tree"],
             recursive
-                .max_depth(depth)
-                .truncate_at_max_depth(true)
-                .fields(Attributes::SIZE),
+                .with_max_depth(depth)
+                .with_truncate_at_max_depth(true)
+                .with_fields(Attributes::SIZE),
             |_, entry| {
                 if entry.path().ends_with("file") {
                     assert_eq!(entry.attrs().len().unwrap(), 7);
@@ -374,7 +379,7 @@ fn removal_modes_preserve_roots_symlinks_and_vector_indices() {
         fs.vremove(
             &["/policy"],
             RemoveMode::Contents,
-            RemoveOptions::new().retries(0)
+            RemoveOptions::new().with_retries(0)
         )
         .is_err()
     );
@@ -443,7 +448,7 @@ fn blanket_helpers_preserve_order_empty_files_limits_and_error_indices() {
     let fs = Probe {
         mounted: crate::Posix::new(root.path())
             .unwrap()
-            .with_limits(ResourceLimits::new().max_read_bytes(5)),
+            .with_limits(ResourceLimits::new().with_max_read_bytes(5)),
         calls: Cell::new(0),
         shape: Cell::new(0),
     };
@@ -466,7 +471,7 @@ fn blanket_helpers_preserve_order_empty_files_limits_and_error_indices() {
     assert_eq!(
         fs.read_files_with_options(
             &["/a", "/b", "/a"],
-            crate::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(8))
+            crate::ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(8))
         )
         .unwrap()
         .len(),
@@ -534,7 +539,7 @@ impl WritePolicyProbe {
             return Err(crate::Error::transport(None, "injected lost write reply"));
         }
         self.mounted
-            .vwrite(ops, crate::WriteOptions::new().write_all(true))
+            .vwrite(ops, crate::WriteOptions::new().with_write_all(true))
     }
 }
 impl Vfsi for WritePolicyProbe {
@@ -563,18 +568,20 @@ fn write_options_select_completion_without_replaying_ambiguous_errors() {
     };
     let file = fs.create("/file").unwrap();
     let ops = [crate::WriteOp::at(&file, 0, b"abcdef")];
-    assert!(!crate::WriteOptions::default().writes_all());
+    assert!(!crate::WriteOptions::default().write_all());
     assert_eq!(fs.vwrite(&ops, Default::default()).unwrap()[0].written, 2);
     for options in [
         crate::WriteOptions::new(),
-        crate::WriteOptions::new().write_all(true).write_all(false),
+        crate::WriteOptions::new()
+            .with_write_all(true)
+            .with_write_all(false),
     ] {
         assert_eq!(fs.vwrite(&ops, options).unwrap()[0].written, 2);
     }
     assert_eq!(fs.partial_calls.get(), 3);
     assert_eq!(fs.complete_calls.get(), 0);
     assert_eq!(fs.read_files(&["/file"]).unwrap(), [b"ab".to_vec()]);
-    let complete = crate::WriteOptions::new().write_all(true);
+    let complete = crate::WriteOptions::new().with_write_all(true);
     assert_eq!(fs.vwrite(&ops, complete).unwrap()[0].written, 6);
     assert_eq!(fs.partial_calls.get(), 3);
     assert_eq!(fs.complete_calls.get(), 1);
@@ -624,8 +631,8 @@ fn default_listing_and_stream_helpers_respect_client_limits_and_reentry() {
     let fs = Probe {
         mounted: crate::Posix::new(root.path()).unwrap().with_limits(
             ResourceLimits::new()
-                .max_directory_entries(1)
-                .stream_chunk_bytes(std::num::NonZeroUsize::new(2).unwrap()),
+                .with_max_directory_entries(1)
+                .with_stream_chunk_size(std::num::NonZeroUsize::new(2).unwrap()),
         ),
         calls: Cell::new(0),
         shape: Cell::new(0),
@@ -638,8 +645,8 @@ fn default_listing_and_stream_helpers_respect_client_limits_and_reentry() {
         fs.read_dirs_with_options(
             &["/dir"],
             crate::ListDirOptions::new()
-                .fields(crate::Attributes::stat())
-                .recursive(true)
+                .with_fields(crate::Attributes::stat())
+                .with_recursive(true)
         )
         .map(|mut trees| trees.remove(0))
         .is_err()
@@ -675,9 +682,11 @@ fn vector_walk_budgets_count_entries_not_listing_containers() {
     ])
     .unwrap();
     fs.write_files(&[("/a/f", b"x"), ("/b/f", b"y")]).unwrap();
-    let options = crate::ListDirOptions::new().recursive(true).max_entries(2);
+    let options = crate::ListDirOptions::new()
+        .with_recursive(true)
+        .with_max_entries(2);
     let trees = fs
-        .read_dirs_with_options(&["/a", "/b"], options.fields(crate::Attributes::MODE))
+        .read_dirs_with_options(&["/a", "/b"], options.with_fields(crate::Attributes::MODE))
         .unwrap();
     assert_eq!(
         trees
@@ -690,7 +699,9 @@ fn vector_walk_budgets_count_entries_not_listing_containers() {
     assert_eq!(
         fs.read_dirs_with_options(
             &["/a", "/b"],
-            options.max_entries(1).fields(crate::Attributes::MODE)
+            options
+                .with_max_entries(1)
+                .with_fields(crate::Attributes::MODE)
         )
         .unwrap_err()
         .index(),
@@ -701,14 +712,18 @@ fn vector_walk_budgets_count_entries_not_listing_containers() {
     assert!(
         fs.read_dirs_with_options(
             &["/a", "/b"],
-            options.max_entries(0).fields(crate::Attributes::MODE)
+            options
+                .with_max_entries(0)
+                .with_fields(crate::Attributes::MODE)
         )
         .is_ok()
     );
     assert_eq!(
         fs.read_dirs_with_options(
             &["/a", "/b"],
-            options.max_path_bytes(3).fields(crate::Attributes::MODE)
+            options
+                .with_max_path_bytes(3)
+                .with_fields(crate::Attributes::MODE)
         )
         .unwrap_err()
         .index(),
@@ -730,24 +745,26 @@ fn vector_walk_visitors_charge_root_paths_once_and_honor_cancellation() {
     ])
     .unwrap();
     let options = crate::ListDirOptions::new()
-        .recursive(true)
-        .max_entries(0)
-        .max_path_bytes(4);
+        .with_recursive(true)
+        .with_max_entries(0)
+        .with_max_path_bytes(4);
     assert_eq!(
         fs.visit_entries_with_options(&["/a", "/b"], options, |_, _| panic!("empty roots"))
             .unwrap(),
         [crate::TraversalCompletion::Complete; 2]
     );
     assert_eq!(
-        fs.visit_entries_with_options(&["/a", "/b"], options.max_path_bytes(2), |_, _| panic!(
-            "empty roots"
-        ))
+        fs.visit_entries_with_options(
+            &["/a", "/b"],
+            options.with_max_path_bytes(2),
+            |_, _| panic!("empty roots")
+        )
         .unwrap_err()
         .index(),
         Some(1)
     );
     fs.write_files(&[("/a/f", b"x"), ("/b/f", b"y")]).unwrap();
-    let options = options.max_entries(2).max_path_bytes(12);
+    let options = options.with_max_entries(2).with_max_path_bytes(12);
     let mut seen = Vec::new();
     fs.visit_entries_with_options(&["/a", "/b"], options, |index, entry| {
         seen.push((index, entry.path().to_path_buf()));
@@ -762,7 +779,7 @@ fn vector_walk_visitors_charge_root_paths_once_and_honor_cancellation() {
         ]
     );
     assert_eq!(
-        fs.visit_entries_with_options(&["/a", "/b"], options.max_path_bytes(11), |_, _| Ok(
+        fs.visit_entries_with_options(&["/a", "/b"], options.with_max_path_bytes(11), |_, _| Ok(
             std::ops::ControlFlow::Continue(())
         ))
         .unwrap_err()
@@ -770,9 +787,11 @@ fn vector_walk_visitors_charge_root_paths_once_and_honor_cancellation() {
         Some(1)
     );
     assert_eq!(
-        fs.visit_entries_with_options(&["/a", "/missing"], options.max_path_bytes(6), |_, _| Ok(
-            std::ops::ControlFlow::Break(())
-        ))
+        fs.visit_entries_with_options(
+            &["/a", "/missing"],
+            options.with_max_path_bytes(6),
+            |_, _| Ok(std::ops::ControlFlow::Break(()))
+        )
         .unwrap(),
         [crate::TraversalCompletion::Stopped]
     );
@@ -788,14 +807,18 @@ fn singleton_walk_reports_the_root_index_not_an_entry_index() {
     };
     fs.create_dir_all("/a/sub").unwrap();
     fs.write("/a/f", b"x").unwrap();
-    let options = crate::ListDirOptions::new().recursive(true).max_depth(0);
+    let options = crate::ListDirOptions::new()
+        .with_recursive(true)
+        .with_max_depth(0);
     // Concrete method syntax must use the same extension as generic code,
     // not leak the backend's per-entry index.
     assert_eq!(
         fs.mounted
             .read_dirs_with_options(
                 &["/a"],
-                options.fields(crate::Attributes::MODE).recursive(true)
+                options
+                    .with_fields(crate::Attributes::MODE)
+                    .with_recursive(true)
             )
             .map(|mut trees| trees.remove(0))
             .unwrap_err()
@@ -803,7 +826,7 @@ fn singleton_walk_reports_the_root_index_not_an_entry_index() {
         Some(0)
     );
     assert_eq!(
-        fs.read_dirs_with_options(&["/a"], options.fields(crate::Attributes::MODE))
+        fs.read_dirs_with_options(&["/a"], options.with_fields(crate::Attributes::MODE))
             .unwrap_err()
             .index(),
         Some(0)
@@ -846,27 +869,31 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
         .read_dirs_with_options(
             &roots,
             crate::ListDirOptions::new()
-                .recursive(true)
-                .fields(crate::Attributes::MODE),
+                .with_recursive(true)
+                .with_fields(crate::Attributes::MODE),
         )
         .unwrap();
     assert_eq!(trees.len(), 2);
     assert!(trees.iter().all(|tree| !tree.is_empty()));
     for limit in 0..=4 {
         let options = crate::ListDirOptions::new()
-            .recursive(true)
-            .max_entries(limit);
+            .with_recursive(true)
+            .with_max_entries(limit);
         assert_eq!(
             fs.read_dirs_with_options(
                 &["/two"],
-                options.fields(crate::Attributes::MODE).recursive(true)
+                options
+                    .with_fields(crate::Attributes::MODE)
+                    .with_recursive(true)
             )
             .map(|mut trees| trees.remove(0))
             .is_ok(),
             fs.mounted
                 .read_dirs_with_options(
                     &["/two"],
-                    options.fields(crate::Attributes::MODE).recursive(true)
+                    options
+                        .with_fields(crate::Attributes::MODE)
+                        .with_recursive(true)
                 )
                 .map(|mut trees| trees.remove(0))
                 .is_ok()
@@ -887,7 +914,7 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
     let completion = fs
         .visit_entries_with_options(
             &roots,
-            crate::ListDirOptions::new().recursive(true),
+            crate::ListDirOptions::new().with_recursive(true),
             |index, _| {
                 seen.push(index);
                 Ok(std::ops::ControlFlow::Break(()))
@@ -900,7 +927,7 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
     let error = fs
         .visit_entries_with_options(
             &["/two", "/two"],
-            crate::ListDirOptions::new().max_entries(1),
+            crate::ListDirOptions::new().with_max_entries(1),
             |_, _| Ok(std::ops::ControlFlow::Continue(())),
         )
         .unwrap_err();
@@ -908,7 +935,7 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
     let error = fs
         .visit_entries_with_options(
             &["/two", "/two"],
-            crate::ListDirOptions::new().max_path_bytes("/two/c".len()),
+            crate::ListDirOptions::new().with_max_path_bytes("/two/c".len()),
             |_, _| Ok(std::ops::ControlFlow::Continue(())),
         )
         .unwrap_err();
@@ -917,9 +944,9 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
         fs.read_dirs_with_options(
             &["/two", "/two"],
             crate::ListDirOptions::new()
-                .recursive(true)
-                .max_entries(1)
-                .fields(crate::Attributes::MODE)
+                .with_recursive(true)
+                .with_max_entries(1)
+                .with_fields(crate::Attributes::MODE)
         )
         .is_err()
     );
@@ -928,7 +955,7 @@ fn blanket_scalar_helpers_and_new_vectors_preserve_limits_stop_and_indices() {
     let completion = fs
         .vstream(
             &["/one/moved", "/absent"],
-            crate::StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(2).unwrap()),
+            crate::StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(2).unwrap()),
             |index, offset, data| {
                 assert_eq!((index, offset), (0, 0));
                 assert_eq!(data, b"ab");

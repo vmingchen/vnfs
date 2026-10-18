@@ -18,7 +18,9 @@ impl TraversalBudget {
         self.bytes
     }
     pub fn remaining_options(&self, options: ListDirOptions) -> ListDirOptions {
-        options.max_entries(self.entries).max_path_bytes(self.bytes)
+        options
+            .with_max_entries(self.entries)
+            .with_max_path_bytes(self.bytes)
     }
     pub fn charge(&mut self, path: &Path) -> VfResult<()> {
         self.charge_paths([path])
@@ -63,7 +65,7 @@ mod tests {
         assert_eq!(
             budget
                 .remaining_options(ListDirOptions::new())
-                .path_byte_limit(),
+                .max_path_bytes(),
             3
         );
         budget.charge(Path::new("/é")).unwrap();
@@ -71,7 +73,7 @@ mod tests {
         assert_eq!(
             budget
                 .remaining_options(ListDirOptions::new())
-                .path_byte_limit(),
+                .max_path_bytes(),
             0
         );
         assert!(budget.charge(Path::new("")).is_err());
@@ -83,14 +85,14 @@ mod tests {
         budget.charge(Path::new("/file")).unwrap();
         let options = budget.remaining_options(
             ListDirOptions::new()
-                .recursive(true)
-                .follow_symlinks(true)
-                .max_depth(7),
+                .with_recursive(true)
+                .with_follow_symlinks(true)
+                .with_max_depth(7),
         );
-        assert_eq!(options.entry_limit(), usize::MAX - 1);
-        assert_eq!(options.path_byte_limit(), usize::MAX - 5);
-        assert!(options.is_recursive());
-        assert!(options.follows_symlinks());
-        assert_eq!(options.depth_limit(), 7);
+        assert_eq!(options.max_entries(), usize::MAX - 1);
+        assert_eq!(options.max_path_bytes(), usize::MAX - 5);
+        assert!(options.recursive());
+        assert!(options.follow_symlinks());
+        assert_eq!(options.max_depth(), 7);
     }
 }

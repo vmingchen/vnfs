@@ -808,8 +808,8 @@ mod tests {
         for short in [None, Some(2), Some(0)] {
             let (mut engine, telemetry) = Engine::new(
                 Options::default()
-                    .queue_depth(std::num::NonZeroU32::new(3).unwrap())
-                    .max_batch_bytes(std::num::NonZeroUsize::new(16).unwrap()),
+                    .with_queue_depth(std::num::NonZeroU32::new(3).unwrap())
+                    .with_max_batch_bytes(std::num::NonZeroUsize::new(16).unwrap()),
             )
             .unwrap();
             engine.short_completion = short;
@@ -900,7 +900,7 @@ mod tests {
         std::fs::write(&path, b"abcdefgh").unwrap();
         let file = Arc::new(File::open(path).unwrap());
         let (mut engine, telemetry) = Engine::new(
-            Options::default().max_batch_bytes(std::num::NonZeroUsize::new(3).unwrap()),
+            Options::default().with_max_batch_bytes(std::num::NonZeroUsize::new(3).unwrap()),
         )
         .unwrap();
         let results = engine.read_owned(vec![OwnedRead {
@@ -932,7 +932,7 @@ mod tests {
         let file = Arc::new(File::open(&path).unwrap());
         let writeonly = Arc::new(File::options().write(true).open(path).unwrap());
         let (mut engine, telemetry) =
-            Engine::new(Options::default().queue_depth(std::num::NonZeroU32::new(2).unwrap()))
+            Engine::new(Options::default().with_queue_depth(std::num::NonZeroU32::new(2).unwrap()))
                 .unwrap();
         let results = engine.read_owned(vec![
             OwnedRead {
@@ -1020,7 +1020,8 @@ mod tests {
         std::fs::write(&path, b"old").unwrap();
         let write = Arc::new(File::options().write(true).open(&path).unwrap());
         let read = Arc::new(File::open(&path).unwrap());
-        let (mut engine, telemetry) = Engine::new(Options::default().syscall_writes(true)).unwrap();
+        let (mut engine, telemetry) =
+            Engine::new(Options::default().with_syscall_writes(true)).unwrap();
         assert!(engine.ordered());
         let operations = [
             Write {
@@ -1072,7 +1073,7 @@ mod tests {
             std::fs::write(&path, b"abcdefgh").unwrap();
             let file = Arc::new(File::open(path).unwrap());
             let (mut engine, telemetry) =
-                Engine::new(Options::default().cached_reads(true)).unwrap();
+                Engine::new(Options::default().with_cached_reads(true)).unwrap();
             engine.cache_read_limit = Some(limit);
             engine.cache_read_error = error.map(|errno| (0, errno));
             let mut first = [99; 4];
@@ -1113,7 +1114,8 @@ mod tests {
         let expected: Vec<u8> = (0..128).collect();
         std::fs::write(&path, &expected).unwrap();
         let file = Arc::new(File::open(path).unwrap());
-        let (mut engine, telemetry) = Engine::new(Options::default().cached_reads(true)).unwrap();
+        let (mut engine, telemetry) =
+            Engine::new(Options::default().with_cached_reads(true)).unwrap();
         engine.cache_read_limit = Some(usize::MAX);
         engine.cache_read_error = Some((2, libc::EAGAIN));
         let mut buffers = [[99; 4]; 32];
@@ -1153,7 +1155,8 @@ mod tests {
         std::fs::write(&path, b"abc").unwrap();
         let file = Arc::new(File::open(&path).unwrap());
         let writeonly = Arc::new(File::options().write(true).open(path).unwrap());
-        let (mut engine, telemetry) = Engine::new(Options::default().cached_reads(true)).unwrap();
+        let (mut engine, telemetry) =
+            Engine::new(Options::default().with_cached_reads(true)).unwrap();
         engine.cache_read_limit = Some(usize::MAX);
         let mut bytes = [99; 5];
         let results = engine.read(&mut [Read {
@@ -1412,7 +1415,7 @@ mod tests {
         std::fs::write(&path, b"0123456789").unwrap();
         let file = Arc::new(File::options().read(true).write(true).open(&path).unwrap());
         let (mut engine, telemetry) = Engine::new(
-            Options::default().max_batch_bytes(std::num::NonZeroUsize::new(7).unwrap()),
+            Options::default().with_max_batch_bytes(std::num::NonZeroUsize::new(7).unwrap()),
         )
         .unwrap();
         for value in *b"abc" {

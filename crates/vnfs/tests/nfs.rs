@@ -420,8 +420,10 @@ fn rust_native_client_workflow_on_nfs() {
             .vgetattrs(
                 &paths,
                 vnfs::directory::AttrsOptions::new()
-                    .fields(vnfs::directory::Attributes::MODE | vnfs::directory::Attributes::SIZE)
-                    .follow_symlinks(follow),
+                    .with_fields(
+                        vnfs::directory::Attributes::MODE | vnfs::directory::Attributes::SIZE,
+                    )
+                    .with_follow_symlinks(follow),
             )
             .unwrap();
         assert_eq!(
@@ -507,7 +509,7 @@ fn native_removal_modes_forward_policy_across_roots() {
         .vremove(
             &roots,
             RemoveMode::Contents,
-            RemoveOptions::new().continue_on_error(true),
+            RemoveOptions::new().with_continue_on_error(true),
         )
         .unwrap_err();
     assert_eq!(error.index(), Some(0));
@@ -535,20 +537,24 @@ fn unified_directory_visits_on_nfs() {
     client.create_dir_all(&sub).unwrap();
     client.write(&file, b"payload").unwrap();
     let options = ListDirOptions::new()
-        .fields(Attributes::SIZE)
-        .max_entries(2);
+        .with_fields(Attributes::SIZE)
+        .with_max_entries(2);
     for (recursive, count) in [(false, 1), (true, 2)] {
         let mut seen = 0;
         client
-            .visit_entries_with_options(&[&dir], options.recursive(recursive), |index, entry| {
-                assert_eq!(index, 0);
-                if entry.path() == Path::new(&file) {
-                    assert_eq!(entry.attrs().len().unwrap(), 7);
-                }
-                seen += 1;
-                assert!(client.attrs(entry.path()).is_ok());
-                Ok(ControlFlow::Continue(()))
-            })
+            .visit_entries_with_options(
+                &[&dir],
+                options.with_recursive(recursive),
+                |index, entry| {
+                    assert_eq!(index, 0);
+                    if entry.path() == Path::new(&file) {
+                        assert_eq!(entry.attrs().len().unwrap(), 7);
+                    }
+                    seen += 1;
+                    assert!(client.attrs(entry.path()).is_ok());
+                    Ok(ControlFlow::Continue(()))
+                },
+            )
             .unwrap();
         assert_eq!(seen, count);
     }
@@ -556,7 +562,7 @@ fn unified_directory_visits_on_nfs() {
         client
             .visit_entries_with_options(
                 &[dir.as_str(), "/absent-visitor-root"],
-                options.recursive(true),
+                options.with_recursive(true),
                 |_, _| Ok(ControlFlow::Break(()))
             )
             .unwrap(),
@@ -594,7 +600,7 @@ fn application_collection_preserves_native_batching_and_root_groups() {
     let fields = Attributes::MODE | Attributes::SIZE;
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let listings = client
-        .read_dirs_with_options(&roots, ListDirOptions::new().fields(fields))
+        .read_dirs_with_options(&roots, ListDirOptions::new().with_fields(fields))
         .unwrap();
     let count = vfsi_nfs::compound::thread_compound_stats().0;
     assert!(
@@ -608,14 +614,21 @@ fn application_collection_preserves_native_batching_and_root_groups() {
         assert_eq!(tree[0].entries[0].attrs().len().unwrap(), 4);
     }
     let error = client
-        .read_dirs_with_options(&roots, ListDirOptions::new().fields(fields).max_entries(5))
+        .read_dirs_with_options(
+            &roots,
+            ListDirOptions::new()
+                .with_fields(fields)
+                .with_max_entries(5),
+        )
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let trees = client
         .read_dirs_with_options(
             &[&dir],
-            ListDirOptions::new().recursive(true).fields(fields),
+            ListDirOptions::new()
+                .with_recursive(true)
+                .with_fields(fields),
         )
         .unwrap();
     let count = vfsi_nfs::compound::thread_compound_stats().0;
@@ -640,7 +653,7 @@ fn whole_file_readv_honors_the_client_budget() {
     const BYTES: usize = 1024 * 1024 + 17;
     let client = Nfs::builder(host)
         .version(version)
-        .limits(vnfs::files::ResourceLimits::new().max_read_bytes(BYTES))
+        .limits(vnfs::files::ResourceLimits::new().with_max_read_bytes(BYTES))
         .connect()
         .unwrap();
     let path = format!("{dir}/file");
@@ -662,7 +675,7 @@ fn whole_file_readv_honors_the_client_budget() {
             .vread(
                 [vnfs::files::ReadOp::whole(&path)],
                 vnfs::files::ReadOptions::new()
-                    .max_total_bytes(std::num::NonZeroUsize::new(BYTES - 1))
+                    .with_max_total_bytes(std::num::NonZeroUsize::new(BYTES - 1))
             )
             .unwrap_err()
             .kind(),
@@ -804,10 +817,10 @@ fn read_pool_streams_ordered_ranges_and_recovers_after_cancellation() {
     client.write(&path, &expected).expect("write fixture");
 
     let options = NfsReadPoolOptions::new()
-        .worker_count(3)
-        .chunk_size(64 * 1024)
-        .max_in_flight(5)
-        .max_buffered_bytes(5 * 64 * 1024);
+        .with_worker_count(3)
+        .with_chunk_size(64 * 1024)
+        .with_max_in_flight(5)
+        .with_max_buffered_bytes(5 * 64 * 1024);
     let mut pool = Nfs::builder(test_host())
         .connect_read_pool(options)
         .expect("connect read pool");
@@ -1254,7 +1267,9 @@ fn bounded_walk_limits_nfs_accumulation() {
         .walk_with_options_impl(
             Path::new(&dir),
             AttrMask::stat(),
-            ListDirOptions::new().recursive(true).max_entries(1),
+            ListDirOptions::new()
+                .with_recursive(true)
+                .with_max_entries(1),
             &mut |_, _| {},
         )
         .unwrap_err();
@@ -1264,7 +1279,7 @@ fn bounded_walk_limits_nfs_accumulation() {
         .walk_with_options_impl(
             Path::new(&dir),
             AttrMask::stat(),
-            ListDirOptions::new().recursive(true).max_depth(0),
+            ListDirOptions::new().with_recursive(true).with_max_depth(0),
             &mut |_, _| {},
         )
         .unwrap_err();
@@ -1275,10 +1290,10 @@ fn bounded_walk_limits_nfs_accumulation() {
             Path::new(&dir),
             AttrMask::stat(),
             ListDirOptions::new()
-                .recursive(true)
-                .max_entries(16)
-                .max_path_bytes(4096)
-                .max_depth(4),
+                .with_recursive(true)
+                .with_max_entries(16)
+                .with_max_path_bytes(4096)
+                .with_max_depth(4),
             &mut |_, entries| entries.sort_by(|a, b| a.file.path().cmp(&b.file.path())),
         )
         .unwrap();
@@ -2359,7 +2374,7 @@ fn openv_does_not_replay_exclusive_create_after_real_reply_loss() {
     let proxy = DropReplyProxy::start(reply_loss_target());
     let endpoint = proxy.endpoint();
     let mut proxied = NfsVecFs::connect_with_options(&endpoint, {
-        let mut options = NfsConnectOptions::default().auto_reconnect(false);
+        let mut options = NfsConnectOptions::default().with_auto_reconnect(false);
         options.minorversion = match std::env::var("VNFS_TEST_MINOR").as_deref() {
             Ok("1") => Some(1),
             Ok("2") => Some(2),
@@ -2545,10 +2560,10 @@ fn pipelined_read_recovers_after_a_lost_read_reply() {
     let mut pool = Nfs::builder(proxy.endpoint())
         .connect_read_pool(
             NfsReadPoolOptions::new()
-                .worker_count(3)
-                .chunk_size(32 * 1024)
-                .max_in_flight(6)
-                .max_buffered_bytes(6 * 32 * 1024),
+                .with_worker_count(3)
+                .with_chunk_size(32 * 1024)
+                .with_max_in_flight(6)
+                .with_max_buffered_bytes(6 * 32 * 1024),
         )
         .expect("connect read pool through NFS reply-loss proxy");
 
@@ -2647,7 +2662,8 @@ fn native_read_dirs_batches_and_reports_bounded_errors() {
     let listings = client
         .read_dirs_with_options(
             &directories,
-            ListDirOptions::new().fields(Attributes::MODE | Attributes::SIZE | Attributes::BLOCKS),
+            ListDirOptions::new()
+                .with_fields(Attributes::MODE | Attributes::SIZE | Attributes::BLOCKS),
         )
         .unwrap();
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
@@ -2671,15 +2687,18 @@ fn native_read_dirs_batches_and_reports_bounded_errors() {
         .read_dirs_with_options(
             &directories,
             ListDirOptions::new()
-                .fields(Attributes::MODE)
-                .max_entries(5),
+                .with_fields(Attributes::MODE)
+                .with_max_entries(5),
         )
         .unwrap_err();
     assert_eq!(error.err_no(), libc::EFBIG as u32);
 
     let missing = [directories[0].clone(), format!("{dir}/missing")];
     let error = client
-        .read_dirs_with_options(&missing, ListDirOptions::new().fields(Attributes::MODE))
+        .read_dirs_with_options(
+            &missing,
+            ListDirOptions::new().with_fields(Attributes::MODE),
+        )
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
 }
@@ -3185,7 +3204,7 @@ fn retained_directory_vector_survives_rename_and_exposes_options() {
 
     let handle = c.vopen_dirs(&[&original]).unwrap().remove(0);
     c.rename(&original, &moved).unwrap();
-    c.vremove_dir_contents(&[&handle], RemoveOptions::new().batch(2))
+    c.vremove_dir_contents(&[&handle], RemoveOptions::new().with_batch_size(2))
         .unwrap();
     assert_eq!(handle.path(), Path::new(&original));
     assert!(c.read_dir(&moved).unwrap().is_empty());
@@ -3193,10 +3212,10 @@ fn retained_directory_vector_survives_rename_and_exposes_options() {
     handle.close().unwrap();
     let extra = format!("{moved}/extra");
     c.write(&extra, b"data").unwrap();
-    c.vremove_impl(&[&extra], false, RemoveOptions::new().batch(2))
+    c.vremove_impl(&[&extra], false, RemoveOptions::new().with_batch_size(2))
         .unwrap();
     assert!(c.attrs(&extra).is_err());
-    c.remove_dir_all_with_options(&moved, RemoveOptions::new().batch(2))
+    c.remove_dir_all_with_options(&moved, RemoveOptions::new().with_batch_size(2))
         .unwrap();
     assert!(c.attrs(&moved).is_err());
 }
@@ -3216,7 +3235,7 @@ fn recursive_removal_drains_large_directory_and_nested_children() {
         c.create_dir(&child).unwrap();
         c.write(format!("{child}/file"), b"x").unwrap();
     }
-    c.remove_dir_contents_with_options(&root, RemoveOptions::new().batch(32))
+    c.remove_dir_contents_with_options(&root, RemoveOptions::new().with_batch_size(32))
         .unwrap();
     assert!(c.read_dir(&root).unwrap().is_empty());
     c.remove_dir_all(&root).unwrap();
@@ -3238,7 +3257,7 @@ fn rm_is_fail_fast_but_explicit_best_effort_continues() {
         c.remove_paths_with_options_impl(
             &[Path::new(&missing), Path::new(&victim)],
             true,
-            vfsi_sync::RemoveOptions::new().continue_on_error(true),
+            vfsi_sync::RemoveOptions::new().with_continue_on_error(true),
         )
         .is_err()
     );
@@ -3259,7 +3278,7 @@ fn rm_with_options_honors_batch_size() {
         c.remove_paths_with_options_impl(
             &[Path::new(&root)],
             true,
-            vfsi_sync::RemoveOptions::new().batch(batch),
+            vfsi_sync::RemoveOptions::new().with_batch_size(batch),
         )
         .unwrap();
         let (compounds, _, _, max_ops) = vfsi_nfs::compound::thread_compound_stats();
@@ -3296,7 +3315,7 @@ fn recursive_rm_learns_larger_batches_from_useful_compounds() {
     c.remove_paths_with_options_impl(
         &[Path::new(&fixed)],
         true,
-        vfsi_sync::RemoveOptions::new().batch(24),
+        vfsi_sync::RemoveOptions::new().with_batch_size(24),
     )
     .unwrap();
     let fixed_compounds = vfsi_nfs::compound::thread_compound_stats().0;
@@ -3699,7 +3718,7 @@ fn extent_copy_options_regular_files() {
         .unwrap();
     c.vcopy_impl(
         &[ExtentPair::new(&src, 5, &d2, 0, Some(5))],
-        vfsi_core::CopyOption::new().follow_source_symlinks(false),
+        vfsi_core::CopyOption::new().with_follow_source_symlinks(false),
     )
     .unwrap();
     assert_eq!(read_all(&mut c, Path::new(&d1)), b"01234");
@@ -4147,13 +4166,13 @@ fn directory_page_collection_preserves_batching_empty_roots_and_ordered_cancella
 
 #[test]
 fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
-    let options = vnfs::directory::ListDirOptions::new().recursive(true);
+    let options = vnfs::directory::ListDirOptions::new().with_recursive(true);
     for mode in [
         DirectoryVisit::Pages,
         DirectoryVisit::Events(options),
-        DirectoryVisit::Events(options.sort_by_name(true)),
-        DirectoryVisit::Events(options.enter_leave(true)),
-        DirectoryVisit::Events(options.sort_by_name(true).enter_leave(true)),
+        DirectoryVisit::Events(options.with_sort_by_name(true)),
+        DirectoryVisit::Events(options.with_enter_leave(true)),
+        DirectoryVisit::Events(options.with_sort_by_name(true).with_enter_leave(true)),
     ] {
         directory_replacement_is_not_followed(mode, ReplacedDirectory::Child);
     }
@@ -4161,11 +4180,11 @@ fn recursive_directory_pages_reject_a_child_replaced_by_a_symlink() {
 
 #[test]
 fn buffered_directory_walk_rejects_an_ancestor_replaced_by_a_symlink() {
-    let options = vnfs::directory::ListDirOptions::new().recursive(true);
+    let options = vnfs::directory::ListDirOptions::new().with_recursive(true);
     for options in [
-        options.sort_by_name(true),
-        options.enter_leave(true),
-        options.sort_by_name(true).enter_leave(true),
+        options.with_sort_by_name(true),
+        options.with_enter_leave(true),
+        options.with_sort_by_name(true).with_enter_leave(true),
     ] {
         directory_replacement_is_not_followed(
             DirectoryVisit::Events(options),
@@ -4244,7 +4263,7 @@ fn directory_replacement_is_not_followed(mode: DirectoryVisit, replacement: Repl
         DirectoryVisit::Pages => fs
             .vlistdirs(
                 &[&tree],
-                ListDirOptions::new().recursive(true),
+                ListDirOptions::new().with_recursive(true),
                 |_, page| {
                     for entry in &page.entries {
                         on_entry(entry)?;
@@ -4298,7 +4317,7 @@ fn directory_path_resolution_preserves_shallow_symlinks_and_rejects_strict_alias
             1
         );
         assert!(
-            fs.read_dir_with_options(path, ListDirOptions::new().follow_symlinks(false))
+            fs.read_dir_with_options(path, ListDirOptions::new().with_follow_symlinks(false))
                 .is_err()
         );
     }
@@ -4332,12 +4351,12 @@ fn recursive_directory_pages_keep_linear_deep_tree_compound_counts() {
     fs.write(format!("{path}/leaf"), b"x").unwrap();
     let _ = vfsi_nfs::compound::thread_compound_stats();
     let trees = fs
-        .read_dirs_with_options(&[&dir], ListDirOptions::new().recursive(true))
+        .read_dirs_with_options(&[&dir], ListDirOptions::new().with_recursive(true))
         .unwrap();
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     let mut entries = 0;
     let mut maximum_depth = 0;
-    fs.listdir(&dir, ListDirOptions::new().recursive(true), |event| {
+    fs.listdir(&dir, ListDirOptions::new().with_recursive(true), |event| {
         assert_eq!(event.kind, vnfs::directory::WalkEventKind::Entry);
         entries += 1;
         maximum_depth = maximum_depth.max(event.depth);
@@ -4396,7 +4415,7 @@ fn recursive_directory_pages_retain_the_parent_handle_after_rename() {
     let mut data = 0;
     let result = fs.vlistdirs(
         &[&tree],
-        ListDirOptions::new().recursive(true),
+        ListDirOptions::new().with_recursive(true),
         |_, page| {
             if page.path == Path::new(&tree) && !renamed {
                 fs.vrename(&[(&tree, &moved)], vnfs::directory::RenameOptions::Replace)?;
@@ -4443,16 +4462,20 @@ fn recursive_directory_pages_do_not_retry_an_ambiguous_child_reply() {
         .connect()
         .unwrap();
     let mut delivered = 0;
-    let result = visitor.vlistdirs(&[&dir], ListDirOptions::new().recursive(true), |_, page| {
-        assert_eq!(
-            page.path,
-            Path::new(&dir),
-            "a child page must not be replayed after the lost reply"
-        );
-        delivered += 1;
-        proxy.arm();
-        Ok(ControlFlow::Continue(()))
-    });
+    let result = visitor.vlistdirs(
+        &[&dir],
+        ListDirOptions::new().with_recursive(true),
+        |_, page| {
+            assert_eq!(
+                page.path,
+                Path::new(&dir),
+                "a child page must not be replayed after the lost reply"
+            );
+            delivered += 1;
+            proxy.arm();
+            Ok(ControlFlow::Continue(()))
+        },
+    );
     proxy.wait_for_drop();
     admin.remove_paths_impl(&[Path::new(&dir)], true).unwrap();
     assert!(result.unwrap_err().is_transport());
@@ -4580,7 +4603,7 @@ fn copy_options_nfs_mixed_source_symlinks_and_extents() {
         .unwrap();
     fs.symlink_raw_impl(Path::new("missing-target"), Path::new(&dangling))
         .unwrap();
-    let options = CopyOption::new().follow_source_symlinks(false);
+    let options = CopyOption::new().with_follow_source_symlinks(false);
     let mut pairs: Vec<_> = (0..17)
         .map(|i| ExtentPair::new(&source, 2, &format!("{directory}/copy-{i}"), 0, Some(4)))
         .collect();

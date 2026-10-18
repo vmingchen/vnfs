@@ -129,7 +129,7 @@ pub(super) fn note_error(
     error: VfError,
     options: RemoveOptions,
 ) -> VfResult<()> {
-    if options.continues_on_error() {
+    if options.continue_on_error() {
         record_error(slot, error);
         Ok(())
     } else {
@@ -167,7 +167,7 @@ pub(super) fn append_bounded_walk_page(
                 .strip_prefix(root)
                 .map(|relative| relative.components().count())
                 .unwrap_or(usize::MAX);
-            if depth > options.depth_limit() && !options.truncates_at_depth_limit() {
+            if depth > options.max_depth() && !options.truncate_at_max_depth() {
                 return Err(
                     VfError::failure(*entry_count, libc::EFBIG as u32).with_context("walk", dir)
                 );
@@ -396,8 +396,7 @@ impl NfsVecFs {
                     return Ok(());
                 }
                 Err(error)
-                    if remove_status_is_retryable(error.status)
-                        && attempts < options.retry_limit() =>
+                    if remove_status_is_retryable(error.status) && attempts < options.retries() =>
                 {
                     attempts += 1;
                     std::thread::sleep(remove_backoff(attempts));
@@ -734,7 +733,7 @@ impl NfsVecFs {
         // The caller already made the initial attempt. `retries` counts
         // additional attempts, not an unconditional extra call plus retries.
         let mut last_error = initial_error;
-        for attempt in 0..options.retry_limit() {
+        for attempt in 0..options.retries() {
             std::thread::sleep(remove_backoff(attempt.saturating_add(1)));
             match self.nfs.remove_many(dir, std::slice::from_ref(&owned)) {
                 Ok(()) => return Ok(true),

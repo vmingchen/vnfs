@@ -154,7 +154,7 @@ operation return an unsupported error for nonempty requests.
 
 The shared extent-copy backend entry point is `vcopy_impl(pairs, CopyOption)`.
 `CopyOption::new()` follows final source symlinks and allows server-side copy
-with a client-copy fallback. Use `.follow_source_symlinks(false)` to recreate
+with a client-copy fallback. Use `.with_follow_source_symlinks(false)` to recreate
 source links with their original text; offsets and length do not apply to links.
 Data-copy destination symlinks keep their existing following behavior. Local
 and NFS support preserving source links; SMB returns an unsupported error for

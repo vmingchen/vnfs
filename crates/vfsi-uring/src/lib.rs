@@ -55,7 +55,7 @@ impl Options {
     /// Execute buffered positional writes with ordered syscalls, avoiding
     /// worker scheduling and the kernel-facing scratch copy. Disabled by
     /// default; reads and fsyncs still use the ring unless separately configured.
-    pub fn syscall_writes(mut self, enabled: bool) -> Self {
+    pub fn with_syscall_writes(mut self, enabled: bool) -> Self {
         self.flags.set_syscall_writes(enabled);
         self
     }
@@ -65,13 +65,13 @@ impl Options {
     /// block for at most 14 unprobed reads before checking again. Large reads
     /// always use the ring; partial or zero probe replies never imply EOF.
     /// Disabled by default; unsupported filesystems retain ordinary ring reads.
-    pub fn cached_reads(mut self, enabled: bool) -> Self {
+    pub fn with_cached_reads(mut self, enabled: bool) -> Self {
         self.flags.set_cached_reads(enabled);
         self
     }
     /// Maximum submissions in a wave (1..=4096). Oversized values fail at
     /// connection rather than allocating an arbitrarily large kernel ring.
-    pub fn queue_depth(mut self, depth: NonZeroU32) -> Self {
+    pub fn with_queue_depth(mut self, depth: NonZeroU32) -> Self {
         self.queue_depth = depth;
         self
     }
@@ -80,7 +80,7 @@ impl Options {
     /// read allocation limits. Shared read limits still default to 16 MiB.
     /// Defaults to 2 MiB to limit copy working sets while preserving many-file
     /// concurrency; tune upward for storage that benefits from larger windows.
-    pub fn max_batch_bytes(mut self, bytes: NonZeroUsize) -> Self {
+    pub fn with_max_batch_bytes(mut self, bytes: NonZeroUsize) -> Self {
         self.max_batch_bytes = bytes;
         self
     }

@@ -138,12 +138,12 @@ mod tests {
                 .len(3)
                 .permissions(Permissions::from_mode(0o640))
                 .modified(modified)
-                .follow_symlinks(false)])
+                .with_follow_symlinks(false)])
             .unwrap();
         let attrs = client
             .attrs_with_options(
                 vfsi_core::Target::file(&file),
-                vfsi_core::api::AttrsOptions::new().fields(
+                vfsi_core::api::AttrsOptions::new().with_fields(
                     vfsi_core::AttrMask::MODE
                         | vfsi_core::AttrMask::SIZE
                         | vfsi_core::AttrMask::MTIME,
@@ -1535,7 +1535,7 @@ mod tests {
         let pair = ExtentPair::new("/link", 0, "/link-copy", 0, None);
         fs.vcopy_impl(
             std::slice::from_ref(&pair),
-            vfsi_core::CopyOption::new().follow_source_symlinks(false),
+            vfsi_core::CopyOption::new().with_follow_source_symlinks(false),
         )
         .unwrap();
         assert_eq!(
@@ -1568,7 +1568,7 @@ mod tests {
         write(&mut fs, "/source", b"0123456789");
         fs.symlink_raw_impl(Path::new("missing-target"), Path::new("/dangling"))
             .unwrap();
-        let options = CopyOption::new().follow_source_symlinks(false);
+        let options = CopyOption::new().with_follow_source_symlinks(false);
         let pairs = [
             ExtentPair::new("/source", 2, "/data-copy", 0, Some(4)),
             ExtentPair::new("/dangling", 99, "/dangling-copy", 100, Some(0)),

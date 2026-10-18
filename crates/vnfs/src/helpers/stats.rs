@@ -45,7 +45,9 @@ pub fn tree_stats(
     let fields = Attributes::MODE | Attributes::SIZE;
     let mut metadata = fs.vgetattrs(
         &[root],
-        AttrsOptions::new().fields(fields).follow_symlinks(false),
+        AttrsOptions::new()
+            .with_fields(fields)
+            .with_follow_symlinks(false),
     )?;
     if metadata.len() != 1 {
         return Err(crate::Error::transport_with_kind(
@@ -60,7 +62,7 @@ pub fn tree_stats(
     if metadata.is_dir() {
         let completion = fs.vlistdirs(
             &[root],
-            options.recursive(true).fields(fields),
+            options.with_recursive(true).with_fields(fields),
             |index, page| {
                 if index != 0 {
                     return Err(crate::Error::transport_with_kind(

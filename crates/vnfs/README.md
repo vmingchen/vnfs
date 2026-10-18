@@ -84,7 +84,7 @@ universal speedup. See the [benchmark driver][benchmark] to reproduce them.
 - **Repeated I/O:** `vopen`, `ReadOp::range`/`ReadOp::into`, and `vwrite` use owned
   handles and optional caller-provided buffers.
 - **Directories:** `vlistdirs` pages listings with selected `Attributes`, avoiding
-  a separate stat per entry. `ListDirOptions::recursive(true)` visits trees.
+  a separate stat per entry. `ListDirOptions::with_recursive(true)` visits trees.
 - **Large files:** `vstream` bounds memory; read pools hide RTT with independent
   sessions. See [streaming and resource limits][operations].
 

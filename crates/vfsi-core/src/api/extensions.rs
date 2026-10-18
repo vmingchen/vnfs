@@ -82,7 +82,7 @@ pub trait VfsiExt: Vfsi {
     /// use vfsi_core::api::{Vfsi, VfsiExt, OpenFd, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let file = fs.create("/output")?;
-    /// let result = fs.vwrite(&[WriteOp::at(&file, 0, b"complete contents")], vfsi_core::api::WriteOptions::new().write_all(true));
+    /// let result = fs.vwrite(&[WriteOp::at(&file, 0, b"complete contents")], vfsi_core::api::WriteOptions::new().with_write_all(true));
     /// let close = file.close();
     /// result?;
     /// close?;
@@ -162,7 +162,7 @@ pub trait VfsiExt: Vfsi {
     }
     /// Read complete files in input order using vectorized whole-file reads.
     ///
-    /// The aggregate payload is bounded by `limits().read_byte_limit()`.
+    /// The aggregate payload is bounded by `limits().max_read_bytes()`.
     /// Use [`Self::read_files_with_options`] to override it, or stream large files.
     /// A failure returns an error, not a successful partial collection.
     ///
@@ -184,7 +184,7 @@ pub trait VfsiExt: Vfsi {
     /// use vfsi_core::api::{Vfsi, VfsiExt, ReadOptions, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let files = fs.read_files_with_options(&["/config"],
-    ///     ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024)))?;
+    ///     ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024)))?;
     /// # let _ = files;
     /// # Ok(())
     /// # }
@@ -254,7 +254,7 @@ pub trait VfsiExt: Vfsi {
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let text = fs.read_to_string_with_options("/config", vfsi_core::api::ReadOptions::new()
-    ///     .max_total_bytes(std::num::NonZeroUsize::new(4096)))?;
+    ///     .with_max_total_bytes(std::num::NonZeroUsize::new(4096)))?;
     /// println!("{text}");
     /// # Ok(())
     /// # }
@@ -293,7 +293,7 @@ pub trait VfsiExt: Vfsi {
     ) -> Result<crate::api::StreamCompletion> {
         self.read_stream_with_options(
             path,
-            crate::api::StreamOptions::new().chunk_size(
+            crate::api::StreamOptions::new().with_chunk_size(
                 std::num::NonZeroUsize::new(self.limits().stream_chunk_size()).unwrap(),
             ),
             callback,
@@ -318,7 +318,7 @@ pub trait VfsiExt: Vfsi {
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let mut processed = 0_u64;
     /// let completion = fs.read_stream_with_options(
-    ///     "/large.bin", StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()),
+    ///     "/large.bin", StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()),
     ///     |_offset, chunk| {
     ///         processed += chunk.len() as u64; // Process the borrowed bytes here.
     ///         Ok(if processed < 8 * 1024 * 1024 {
@@ -370,7 +370,7 @@ pub trait VfsiExt: Vfsi {
         let file = self.create(path)?;
         let result = self.vwrite(
             &[crate::api::WriteOp::at(&file, 0, data)],
-            crate::api::WriteOptions::new().write_all(true),
+            crate::api::WriteOptions::new().with_write_all(true),
         );
         let close_result = file.close();
         result?;
@@ -425,7 +425,10 @@ pub trait VfsiExt: Vfsi {
             .zip(entries)
             .map(|(file, (_, data))| crate::api::WriteOp::at(file, 0, data.as_ref()))
             .collect();
-        let result = self.vwrite(&writes, crate::api::WriteOptions::new().write_all(true));
+        let result = self.vwrite(
+            &writes,
+            crate::api::WriteOptions::new().with_write_all(true),
+        );
         drop(writes);
         let close_result = self.close_files(files);
         result?;
@@ -485,7 +488,7 @@ pub trait VfsiExt: Vfsi {
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let attrs = fs.attrs_with_options(
     ///     "/file-1", vfsi_core::api::AttrsOptions::new()
-    ///         .fields(Attributes::MODE | Attributes::BLOCKS).follow_symlinks(false),
+    ///         .with_fields(Attributes::MODE | Attributes::BLOCKS).with_follow_symlinks(false),
     /// )?;
     /// if let Some(blocks) = attrs.blocks() {
     ///     println!("allocated blocks: {blocks}");
@@ -520,7 +523,7 @@ pub trait VfsiExt: Vfsi {
         attrs_query(
             self,
             path,
-            crate::api::AttrsOptions::new().follow_symlinks(false),
+            crate::api::AttrsOptions::new().with_follow_symlinks(false),
             "symlink_attrs",
         )
     }
@@ -542,20 +545,21 @@ pub trait VfsiExt: Vfsi {
     fn read_dir(&self, path: impl AsRef<Path>) -> Result<Vec<crate::api::DirEntry>> {
         self.read_dir_with_options(
             path,
-            crate::api::ListDirOptions::new().fields(crate::api::Attributes::stat()),
+            crate::api::ListDirOptions::new().with_fields(crate::api::Attributes::stat()),
         )
     }
 
     /// Single-target convenience. For multiple directories, prefer [`VfsiExt::read_dirs_with_options`] with one aggregate budget.
     ///
     /// Collect one shallow directory with selected metadata and entry/path-byte limits.
-    /// This helper forces `recursive(false)`; use `walk_with_options` for a tree.
+    /// This helper forces shallow mode; use `read_dirs_with_options` with
+    /// `ListDirOptions::with_recursive(true)` to collect a tree.
     ///
     /// ```no_run
     /// use vfsi_core::api::{Vfsi, VfsiExt, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let entries = fs.read_dir_with_options("/input",
-    ///     vfsi_core::api::ListDirOptions::new().max_entries(100))?;
+    ///     vfsi_core::api::ListDirOptions::new().with_max_entries(100))?;
     /// println!("{} entries", entries.len());
     /// # Ok(())
     /// # }
@@ -565,7 +569,7 @@ pub trait VfsiExt: Vfsi {
         path: impl AsRef<Path>,
         options: crate::api::ListDirOptions,
     ) -> Result<Vec<crate::api::DirEntry>> {
-        let mut trees = self.read_dirs_with_options(&[path], options.recursive(false))?;
+        let mut trees = self.read_dirs_with_options(&[path], options.with_recursive(false))?;
         Ok(single_completion(single_tree(&mut trees)?, "read_dirs")?.entries)
     }
 
@@ -591,7 +595,7 @@ pub trait VfsiExt: Vfsi {
     fn read_dirs<P: AsRef<Path>>(&self, paths: &[P]) -> Result<Vec<DirectoryListing>> {
         let trees = self.read_dirs_with_options(
             paths,
-            crate::api::ListDirOptions::new().fields(crate::api::Attributes::stat()),
+            crate::api::ListDirOptions::new().with_fields(crate::api::Attributes::stat()),
         )?;
         if trees.len() != paths.len() || trees.iter().any(|tree| tree.len() != 1) {
             return Err(crate::api::Error::transport(
@@ -616,8 +620,8 @@ pub trait VfsiExt: Vfsi {
     /// use vfsi_core::api::{Vfsi, VfsiExt, Attributes, ListDirOptions};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let trees = fs.read_dirs_with_options(&["/input", "/output"],
-    ///     ListDirOptions::new().recursive(true).fields(Attributes::MODE)
-    ///         .max_entries(10_000).max_path_bytes(1024 * 1024))?;
+    ///     ListDirOptions::new().with_recursive(true).with_fields(Attributes::MODE)
+    ///         .with_max_entries(10_000).with_max_path_bytes(1024 * 1024))?;
     /// for tree in trees {
     ///     for listing in tree {
     ///         println!("{}: {} entries", listing.path.display(), listing.entries.len());
@@ -707,7 +711,7 @@ pub trait VfsiExt: Vfsi {
     /// use vfsi_core::api::{ListDirOptions, Vfsi, VfsiExt, WalkControl, WalkEventKind};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.listdir("/project",
-    ///     ListDirOptions::new().recursive(true).enter_leave(true).sort_by_name(true),
+    ///     ListDirOptions::new().with_recursive(true).with_enter_leave(true).with_sort_by_name(true),
     ///     |event| {
     ///         if event.kind == WalkEventKind::Enter
     ///             && event.entry.file_name() == Some(std::ffi::OsStr::new(".git")) {
@@ -766,7 +770,7 @@ pub trait VfsiExt: Vfsi {
     /// use vfsi_core::api::{Attributes, Result, Vfsi, VfsiExt, WalkControl};
     /// # fn example(fs: &impl Vfsi) -> Result<()> {
     /// fs.visit_dirs_ordered("/input",
-    ///     fs.limits().walk_options().fields(Attributes::MODE | Attributes::SIZE),
+    ///     fs.limits().walk_options().with_fields(Attributes::MODE | Attributes::SIZE),
     ///     |a, b| a.path().cmp(b.path()),
     ///     |entry| entry.file_name() != Some(std::ffi::OsStr::new(".git")),
     ///     |listing, depth| {
@@ -787,7 +791,7 @@ pub trait VfsiExt: Vfsi {
         let options = options.walk_options(self.limits());
         let root = root.as_ref();
         let mut budget =
-            crate::internal::TraversalBudget::new(options.entry_limit(), options.path_byte_limit());
+            crate::internal::TraversalBudget::new(options.max_entries(), options.max_path_bytes());
         budget.charge(root)?;
         let mut pending = vec![(root.to_path_buf(), 0usize)];
         while let Some((path, depth)) = pending.pop() {
@@ -795,8 +799,8 @@ pub trait VfsiExt: Vfsi {
                 &path,
                 budget.remaining_options(
                     crate::api::ListDirOptions::new()
-                        .fields(options.attributes())
-                        .follow_symlinks(options.follows_symlinks()),
+                        .with_fields(options.fields())
+                        .with_follow_symlinks(options.follow_symlinks()),
                 ),
             )?;
             for entry in &entries {
@@ -819,8 +823,8 @@ pub trait VfsiExt: Vfsi {
                 crate::api::WalkControl::SkipSubtree => continue,
                 crate::api::WalkControl::Continue => {}
             }
-            if depth >= options.depth_limit() && !children.is_empty() {
-                if !options.truncates_at_depth_limit() {
+            if depth >= options.max_depth() && !children.is_empty() {
+                if !options.truncate_at_max_depth() {
                     return Err(crate::api::Error::client(0, libc::EFBIG as u32)
                         .with_context("visit_dirs_ordered", &children[0]));
                 }
@@ -867,7 +871,7 @@ pub trait VfsiExt: Vfsi {
 
     /// Change ownership of one path or opened object through [`Vfsi::vsetattrs`].
     /// `None` leaves the corresponding owner/group unchanged. Use the vector
-    /// with [`SetAttrsOp::follow_symlinks(false)`](SetAttrsOp::follow_symlinks)
+    /// with [`SetAttrsOp::with_follow_symlinks(false)`](SetAttrsOp::with_follow_symlinks)
     /// to change a symlink itself.
     fn chown<T: crate::api::AsTarget<Self::File>>(
         &self,

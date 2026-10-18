@@ -114,19 +114,19 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
         assert_eq!(&result.data, data);
     }
     assert_eq!(
-        fs.vread_all_with_options_impl(&whole_files, ReadAllOptions::new().max_total_bytes(6))
+        fs.vread_all_with_options_impl(&whole_files, ReadAllOptions::new().with_max_total_bytes(6))
             .unwrap(),
         [b"abc".to_vec(), b"def".to_vec()]
     );
     let error = fs
-        .vread_all_with_options_impl(&whole_files, ReadAllOptions::new().max_total_bytes(5))
+        .vread_all_with_options_impl(&whole_files, ReadAllOptions::new().with_max_total_bytes(5))
         .unwrap_err();
     assert_eq!(
         (error.index(), error.err_no()),
         (Some(1), libc::EFBIG as u32)
     );
     assert_eq!(
-        ReadAllOptions::default().total_byte_limit(),
+        ReadAllOptions::default().max_total_bytes(),
         DEFAULT_READ_ALLV_MAX_TOTAL_BYTES
     );
     assert_eq!(DEFAULT_READ_ALLV_MAX_TOTAL_BYTES, 16 * 1024 * 1024);

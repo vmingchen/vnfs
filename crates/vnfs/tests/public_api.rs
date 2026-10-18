@@ -15,11 +15,11 @@ fn application_surface_is_small_and_typed() {
         .root("/export")
         .auth(NfsAuth::AuthSys);
     let _ = OpenOp::new("/file", OpenFlags::READ);
-    assert_eq!(ReadOptions::new().total_byte_limit(), None);
+    assert_eq!(ReadOptions::new().max_total_bytes(), None);
     assert_eq!(
         ReadOptions::new()
-            .max_total_bytes(std::num::NonZeroUsize::new(42))
-            .total_byte_limit(),
+            .with_max_total_bytes(std::num::NonZeroUsize::new(42))
+            .max_total_bytes(),
         std::num::NonZeroUsize::new(42)
     );
     let _: Option<vnfs::nfs::NfsClient> = None;
@@ -53,7 +53,8 @@ fn concrete_and_extension_directory_visitors_borrow_entries_consistently() {
         concrete
             .read_files_with_options(
                 &["/file"],
-                vnfs::files::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(4))
+                vnfs::files::ReadOptions::new()
+                    .with_max_total_bytes(std::num::NonZeroUsize::new(4))
             )
             .unwrap(),
         [b"data".to_vec()]
@@ -119,7 +120,7 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
             | vnfs::directory::Attributes::NLINK;
         let listings = client.read_dirs_with_options(
             &["/a", "/b"],
-            vnfs::directory::ListDirOptions::new().fields(fields),
+            vnfs::directory::ListDirOptions::new().with_fields(fields),
         )?;
         for directory in listings.into_iter().flatten() {
             for entry in directory.entries {
@@ -129,15 +130,15 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
         let _ = client.attrs_with_options(
             "/a/link",
             vnfs::directory::AttrsOptions::new()
-                .fields(fields)
-                .follow_symlinks(false),
+                .with_fields(fields)
+                .with_follow_symlinks(false),
         )?;
         let _ = client
             .read_dirs_with_options(
                 &["/a"],
                 vnfs::directory::ListDirOptions::new()
-                    .fields(fields)
-                    .recursive(true),
+                    .with_fields(fields)
+                    .with_recursive(true),
             )
             .map(|mut trees| trees.remove(0))?;
         client.vcopy(
@@ -169,8 +170,8 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     let root = tempfile_root();
     let client = vnfs::mounted::Auto::new(&root).unwrap().with_limits(
         vnfs::files::ResourceLimits::new()
-            .max_read_bytes(6)
-            .stream_chunk_bytes(std::num::NonZeroUsize::new(2).unwrap()),
+            .with_max_read_bytes(6)
+            .with_stream_chunk_size(std::num::NonZeroUsize::new(2).unwrap()),
     );
     client.create_dir_all("/sub").unwrap();
     client
@@ -198,7 +199,8 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
                     vnfs::files::ReadOp::whole("/sub/a"),
                     vnfs::files::ReadOp::whole("/sub/b")
                 ],
-                vnfs::files::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(5))
+                vnfs::files::ReadOptions::new()
+                    .with_max_total_bytes(std::num::NonZeroUsize::new(5))
             )
             .is_err()
     );
@@ -229,7 +231,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
                 vnfs::files::WriteOp::at(&files[0], 1, b"XY"),
                 vnfs::files::WriteOp::at(&files[1], 0, b"UV"),
             ],
-            vnfs::files::WriteOptions::new().write_all(true),
+            vnfs::files::WriteOptions::new().with_write_all(true),
         )
         .unwrap();
     assert_eq!(
@@ -253,7 +255,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         client
             .listdir(
                 "/sub",
-                vfsi_core::api::ListDirOptions::new().recursive(true),
+                vfsi_core::api::ListDirOptions::new().with_recursive(true),
                 |_| Ok(vfsi_core::api::WalkControl::Continue)
             )
             .unwrap(),
@@ -264,8 +266,8 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
             .read_dirs_with_options(
                 &["/sub"],
                 vnfs::directory::ListDirOptions::new()
-                    .fields(vnfs::directory::Attributes::stat())
-                    .recursive(true)
+                    .with_fields(vnfs::directory::Attributes::stat())
+                    .with_recursive(true)
             )
             .map(|mut trees| trees.remove(0))
             .unwrap()[0]
@@ -283,7 +285,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
         foreign
             .vwrite(
                 &[vnfs::files::WriteOp::at(&file, 0, b"wrong")],
-                vnfs::files::WriteOptions::new().write_all(true)
+                vnfs::files::WriteOptions::new().with_write_all(true)
             )
             .is_err()
     );
@@ -314,7 +316,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
                 std::path::Path::new("/sub/a"),
                 std::path::Path::new("/sub/link"),
             ],
-            vnfs::directory::AttrsOptions::new().follow_symlinks(false),
+            vnfs::directory::AttrsOptions::new().with_follow_symlinks(false),
         )
         .unwrap();
     assert!(metadata[0].is_file());
@@ -332,8 +334,8 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
             .read_dirs_with_options(
                 &["/sub", "/copies"],
                 vnfs::directory::ListDirOptions::new()
-                    .max_entries(5)
-                    .fields(vnfs::directory::Attributes::stat())
+                    .with_max_entries(5)
+                    .with_fields(vnfs::directory::Attributes::stat())
             )
             .is_err()
     );
@@ -392,7 +394,10 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
             .collect();
         assert!(
             client
-                .vwrite(&writes, vnfs::files::WriteOptions::new().write_all(true))?
+                .vwrite(
+                    &writes,
+                    vnfs::files::WriteOptions::new().with_write_all(true)
+                )?
                 .iter()
                 .all(|result| result.written == 3)
         );
@@ -474,32 +479,39 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
     fs.create_dir_all("/tree/child").unwrap();
     fs.write("/tree/child/file", b"x").unwrap();
     for depth in [201, 254, 255, 256, 500, usize::MAX - 1, usize::MAX] {
-        let walk = ListDirOptions::new().recursive(true).max_depth(depth);
-        assert_eq!(walk.depth_limit(), usize::MAX);
+        let walk = ListDirOptions::new()
+            .with_recursive(true)
+            .with_max_depth(depth);
+        assert_eq!(walk.max_depth(), usize::MAX);
         let converted = walk;
-        assert!(converted.is_recursive());
+        assert!(converted.recursive());
         let explicit = fs
-            .read_dirs_with_options(&["/tree"], walk.fields(Attributes::MODE).recursive(true))
+            .read_dirs_with_options(
+                &["/tree"],
+                walk.with_fields(Attributes::MODE).with_recursive(true),
+            )
             .map(|mut trees| trees.remove(0))
             .unwrap();
         let direct = fs
             .read_dirs_with_options(
                 &["/tree"],
-                ListDirOptions::new().recursive(true).max_depth(depth),
+                ListDirOptions::new()
+                    .with_recursive(true)
+                    .with_max_depth(depth),
             )
             .unwrap();
         assert_eq!(explicit.len(), 2);
         assert_eq!(direct[0].len(), 2);
         let inherited = vnfs::posix::Posix::new(root.path())
             .unwrap()
-            .with_limits(ResourceLimits::new().max_walk_depth(depth));
+            .with_limits(ResourceLimits::new().with_max_walk_depth(depth));
         assert_eq!(
             inherited
                 .read_dirs_with_options(
                     &["/tree"],
                     vnfs::directory::ListDirOptions::new()
-                        .fields(vnfs::directory::Attributes::stat())
-                        .recursive(true)
+                        .with_fields(vnfs::directory::Attributes::stat())
+                        .with_recursive(true)
                 )
                 .map(|mut trees| trees.remove(0))
                 .unwrap()
@@ -511,9 +523,9 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
         fs.read_dirs_with_options(
             &["/tree"],
             vnfs::directory::ListDirOptions::new()
-                .max_depth(0)
-                .fields(Attributes::MODE)
-                .recursive(true)
+                .with_max_depth(0)
+                .with_fields(Attributes::MODE)
+                .with_recursive(true)
         )
         .map(|mut trees| trees.remove(0))
         .is_err()
@@ -522,10 +534,10 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
         fs.read_dirs_with_options(
             &["/tree"],
             vnfs::directory::ListDirOptions::new()
-                .max_depth(0)
-                .truncate_at_max_depth(true)
-                .fields(Attributes::MODE)
-                .recursive(true)
+                .with_max_depth(0)
+                .with_truncate_at_max_depth(true)
+                .with_fields(Attributes::MODE)
+                .with_recursive(true)
         )
         .map(|mut trees| trees.remove(0))
         .unwrap()
@@ -536,9 +548,9 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
         fs.read_dirs_with_options(
             &["/tree"],
             vnfs::directory::ListDirOptions::new()
-                .max_depth(1)
-                .fields(Attributes::MODE)
-                .recursive(true)
+                .with_max_depth(1)
+                .with_fields(Attributes::MODE)
+                .with_recursive(true)
         )
         .map(|mut trees| trees.remove(0))
         .unwrap()
@@ -547,9 +559,9 @@ fn traversal_depths_share_finite_and_unlimited_semantics_without_panics() {
     );
     assert_eq!(
         ListDirOptions::new()
-            .recursive(true)
-            .max_depth(200)
-            .depth_limit(),
+            .with_recursive(true)
+            .with_max_depth(200)
+            .max_depth(),
         200
     );
 }
@@ -605,7 +617,7 @@ fn vsetattrs_many_local_and_routed_files() {
     let updates = [vnfs::directory::SetAttrsOp::new("/link").len(11)];
     assert!(
         mounted
-            .vsetattrs(&[updates[0].follow_symlinks(false)])
+            .vsetattrs(&[updates[0].with_follow_symlinks(false)])
             .is_err()
     );
     assert_eq!(
@@ -719,7 +731,7 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
         let sparse = fs
             .attrs_with_options(
                 vnfs::files::Target::file(&file),
-                vnfs::directory::AttrsOptions::new().fields(vnfs::directory::Attributes::MODE),
+                vnfs::directory::AttrsOptions::new().with_fields(vnfs::directory::Attributes::MODE),
             )
             .unwrap();
         assert_eq!(sparse.len(), None);
@@ -804,7 +816,7 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
     }
     for auto in [false, true] {
         let root = tempfile::tempdir().unwrap();
-        let limits = vnfs::files::ResourceLimits::new().max_read_bytes(3);
+        let limits = vnfs::files::ResourceLimits::new().with_max_read_bytes(3);
         if auto {
             check(
                 &vnfs::mounted::Auto::new(root.path())
@@ -822,7 +834,7 @@ fn explicit_io_adapter_bounds_collecting_reads_and_preserves_retained_identity()
     let root = tempfile::tempdir().unwrap();
     let fs = vnfs::posix::Posix::new(root.path())
         .unwrap()
-        .with_limits(vnfs::files::ResourceLimits::new().max_read_bytes(0));
+        .with_limits(vnfs::files::ResourceLimits::new().with_max_read_bytes(0));
     fs.write("/empty", b"").unwrap();
     let file = fs.open("/empty").unwrap();
     assert_eq!(fs.std_io(&file).read_to_end(&mut Vec::new()).unwrap(), 0);
@@ -844,34 +856,34 @@ fn policy_builders_preserve_zero_budgets_and_bound_recovery() {
     assert_eq!(op.flags(), OpenFlags::WRITE | OpenFlags::CREATE);
     assert_eq!(op.creation_mode(), 0o600);
     let limits = vnfs::files::ResourceLimits::new()
-        .max_read_bytes(0)
-        .stream_chunk_bytes(std::num::NonZeroUsize::new(2).unwrap())
-        .max_directory_entries(0)
-        .max_directory_path_bytes(0)
-        .max_walk_depth(0);
-    assert_eq!(limits.read_byte_limit(), 0);
+        .with_max_read_bytes(0)
+        .with_stream_chunk_size(std::num::NonZeroUsize::new(2).unwrap())
+        .with_max_directory_entries(0)
+        .with_max_directory_path_bytes(0)
+        .with_max_walk_depth(0);
+    assert_eq!(limits.max_read_bytes(), 0);
     assert_eq!(limits.stream_chunk_size(), 2);
-    assert_eq!(limits.directory_entry_limit(), 0);
-    assert_eq!(limits.directory_path_byte_limit(), 0);
-    assert_eq!(limits.walk_depth_limit(), 0);
-    assert_eq!(limits.directory_options().entry_limit(), 0);
-    assert_eq!(limits.walk_options().depth_limit(), 0);
+    assert_eq!(limits.max_directory_entries(), 0);
+    assert_eq!(limits.max_directory_path_bytes(), 0);
+    assert_eq!(limits.max_walk_depth(), 0);
+    assert_eq!(limits.directory_options().max_entries(), 0);
+    assert_eq!(limits.walk_options().max_depth(), 0);
     let remove = vnfs::directory::RemoveOptions::new()
-        .batch(0)
-        .retries(0)
-        .continue_on_error(true);
+        .with_batch_size(0)
+        .with_retries(0)
+        .with_continue_on_error(true);
     assert_eq!(remove.batch_size(), 0);
-    assert_eq!(remove.retry_limit(), 0);
-    assert!(remove.continues_on_error());
+    assert_eq!(remove.retries(), 0);
+    assert!(remove.continue_on_error());
     let recovery = vnfs::nfs::NfsRecoveryPolicy::new()
-        .reconnect_attempts(0)
-        .initial_backoff(std::time::Duration::MAX)
-        .max_backoff(std::time::Duration::ZERO)
-        .max_elapsed(std::time::Duration::ZERO);
-    assert_eq!(recovery.attempt_limit(), 1);
-    assert_eq!(recovery.initial_delay(), std::time::Duration::MAX);
-    assert_eq!(recovery.maximum_delay(), std::time::Duration::ZERO);
-    assert_eq!(recovery.retry_window(), std::time::Duration::ZERO);
+        .with_reconnect_attempts(0)
+        .with_initial_backoff(std::time::Duration::MAX)
+        .with_max_backoff(std::time::Duration::ZERO)
+        .with_max_elapsed(std::time::Duration::ZERO);
+    assert_eq!(recovery.reconnect_attempts(), 1);
+    assert_eq!(recovery.initial_backoff(), std::time::Duration::MAX);
+    assert_eq!(recovery.max_backoff(), std::time::Duration::ZERO);
+    assert_eq!(recovery.max_elapsed(), std::time::Duration::ZERO);
 }
 
 #[cfg(all(feature = "auto", target_os = "linux"))]
@@ -923,7 +935,7 @@ fn object_identity_and_open_instances_are_distinct_concepts() {
         fs.write("/other", b"separate").unwrap();
 
         let fields = Attributes::identity();
-        let query = || AttrsOptions::new().fields(fields);
+        let query = || AttrsOptions::new().with_fields(fields);
         let object = fs.attrs_with_options("/object", query()).unwrap();
         let alias = fs.attrs_with_options("/alias", query()).unwrap();
         let other = fs.attrs_with_options("/other", query()).unwrap();
@@ -1000,7 +1012,7 @@ fn renamed_open_descriptors_and_operands_preserve_compatible_imports() {
     let attrs = fs
         .attrs_with_options(
             Target::file(&file),
-            AttrsOptions::new().fields(AttrMask::FILESYSTEM_ID | AttrMask::FILEID),
+            AttrsOptions::new().with_fields(AttrMask::FILESYSTEM_ID | AttrMask::FILEID),
         )
         .unwrap();
     let object_id = attrs.fs_obj_id().unwrap();

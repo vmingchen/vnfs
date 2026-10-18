@@ -13,10 +13,10 @@ fn read_write_sync_vectors_are_bounded_and_match_local() {
             std::fs::write(root.path().join(&path[1..]), vec![i as u8; 100 + i]).unwrap();
         }
         let options = Options::default()
-            .cached_reads(adaptive)
-            .syscall_writes(adaptive)
-            .queue_depth(NonZeroU32::new(3).unwrap())
-            .max_batch_bytes(NonZeroUsize::new(80).unwrap());
+            .with_cached_reads(adaptive)
+            .with_syscall_writes(adaptive)
+            .with_queue_depth(NonZeroU32::new(3).unwrap())
+            .with_max_batch_bytes(NonZeroUsize::new(80).unwrap());
         let (fs, telemetry) = connect_with_telemetry(root.path(), options).unwrap();
         let local = vfsi_posix::connect(root.path()).unwrap();
         let opens: Vec<_> = paths
@@ -45,7 +45,7 @@ fn read_write_sync_vectors_are_bounded_and_match_local() {
             .map(|(f, b)| WriteOp::at(f, 0, b))
             .collect();
         assert!(
-            fs.vwrite(&writes, WriteOptions::new().write_all(true))
+            fs.vwrite(&writes, WriteOptions::new().with_write_all(true))
                 .unwrap()
                 .iter()
                 .all(|r| r.written == 133)
@@ -161,7 +161,7 @@ fn indexed_cqe_failure_drains_other_requests_and_ring_remains_usable() {
         .map(|file| WriteOp::at(file, 0, b"new"))
         .collect();
     let error = fs
-        .vwrite(&writes, WriteOptions::new().write_all(true))
+        .vwrite(&writes, WriteOptions::new().with_write_all(true))
         .unwrap_err();
     assert_eq!(error.index(), Some(1));
     let stats = telemetry.snapshot();
@@ -187,8 +187,8 @@ fn known_failure_stops_unsent_waves_for_queue_and_byte_limits() {
         let (fs, telemetry) = connect_with_telemetry(
             root.path(),
             Options::default()
-                .queue_depth(NonZeroU32::new(depth).unwrap())
-                .max_batch_bytes(NonZeroUsize::new(budget).unwrap()),
+                .with_queue_depth(NonZeroU32::new(depth).unwrap())
+                .with_max_batch_bytes(NonZeroUsize::new(budget).unwrap()),
         )
         .unwrap();
         let files = fs
@@ -203,7 +203,7 @@ fn known_failure_stops_unsent_waves_for_queue_and_byte_limits() {
             .map(|file| WriteOp::at(file, 0, b"new"))
             .collect();
         let error = fs
-            .vwrite(&writes, WriteOptions::new().write_all(true))
+            .vwrite(&writes, WriteOptions::new().with_write_all(true))
             .unwrap_err();
         assert_eq!(error.index(), Some(1));
         assert_eq!(std::fs::read(root.path().join("a")).unwrap(), b"new");
@@ -266,7 +266,7 @@ fn namespace_fallback_and_whole_file_limits_preserve_contracts() {
         .unwrap();
     assert_eq!(results[0].data(), Some(b"hello".as_slice()));
     assert_eq!(results[1].data(), Some(b"world".as_slice()));
-    let budget = ReadOptions::new().max_total_bytes(NonZeroUsize::new(4));
+    let budget = ReadOptions::new().with_max_total_bytes(NonZeroUsize::new(4));
     assert!(fs.vread([ReadOp::whole("/a")], budget).is_err());
     assert_eq!(fs.read_dir("/").unwrap().len(), 2);
     fs.vrename(&[("/a", "/renamed")], Default::default())
@@ -281,7 +281,7 @@ fn invalid_queue_depth_is_rejected_before_creating_root() {
     assert!(
         connect(
             &path,
-            Options::default().queue_depth(NonZeroU32::new(4097).unwrap())
+            Options::default().with_queue_depth(NonZeroU32::new(4097).unwrap())
         )
         .is_err()
     );
@@ -297,7 +297,7 @@ fn queue_depth_partitions_vectors_into_exact_submission_waves() {
     }
     let (fs, telemetry) = connect_with_telemetry(
         root.path(),
-        Options::default().queue_depth(NonZeroU32::new(3).unwrap()),
+        Options::default().with_queue_depth(NonZeroU32::new(3).unwrap()),
     )
     .unwrap();
     let files = fs
@@ -376,8 +376,8 @@ fn write_coalescing_respects_gaps_order_descriptors_and_wave_limits() {
         let (fs, telemetry) = connect_with_telemetry(
             root.path(),
             Options::default()
-                .queue_depth(NonZeroU32::new(depth).unwrap())
-                .max_batch_bytes(NonZeroUsize::new(budget).unwrap()),
+                .with_queue_depth(NonZeroU32::new(depth).unwrap())
+                .with_max_batch_bytes(NonZeroUsize::new(budget).unwrap()),
         )
         .unwrap();
         // Two opens of the same inode must not be merged across descriptors.

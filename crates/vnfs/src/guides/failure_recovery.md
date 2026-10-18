@@ -23,7 +23,7 @@ preserve the original error as an `io::Error` source.
 
 Range reads and default writes can return short progress. A short read without
 EOF does not imply completion. Whole-file reads complete or fail rather than
-truncate. `WriteOptions::new().write_all(true)` completes successful short
+truncate. `WriteOptions::new().with_write_all(true)` completes successful short
 writes; it does not replay failed or ambiguous writes or guarantee durability.
 Positional I/O preserves the handle cursor.
 
@@ -75,7 +75,7 @@ use vnfs::directory::RemoveOptions;
 # fn example(fs: &vnfs::nfs::NfsClient) -> vnfs::Result<()> {
 fs.remove_dir_contents_with_options(
     "/owned-scratch-directory",
-    RemoveOptions::new().batch(32),
+    RemoveOptions::new().with_batch_size(32),
 )?;
 # Ok(())
 # }

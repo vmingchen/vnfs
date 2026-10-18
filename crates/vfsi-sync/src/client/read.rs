@@ -15,7 +15,7 @@ impl<F: HandleBackend> FsClient<F> {
         options: StreamOptions,
         mut callback: impl FnMut(u64, &[u8]) -> VfResult<std::ops::ControlFlow<()>>,
     ) -> VfResult<StreamCompletion> {
-        let chunk_size = options.chunk_size_bytes();
+        let chunk_size = options.chunk_size();
         let file = self.open(path)?;
         let raw_file = file.raw()?.clone();
         let operation = (|| -> VfResult<StreamCompletion> {
@@ -62,7 +62,7 @@ impl<F: VectorBackend> FsClient<F> {
     /// [`vread_into_native`](Self::vread_into_native) to provide bounded caller-owned buffers.
     #[doc(hidden)]
     pub fn vread_native(&self, requests: &[FsRead<'_, F>]) -> VfResult<Vec<FsReadResult>> {
-        self.vread_with_limit_native(requests, self.limits.read_byte_limit())
+        self.vread_with_limit_native(requests, self.limits.max_read_bytes())
     }
 
     /// Read an ordered vector with an explicit aggregate request limit.
@@ -157,7 +157,7 @@ impl<F: VectorBackend> FsClient<F> {
         &self,
         requests: &mut [FsReadInto<'_, F>],
     ) -> VfResult<Vec<FsReadIntoResult>> {
-        self.vread_into_with_limit_native(requests, self.limits.read_byte_limit())
+        self.vread_into_with_limit_native(requests, self.limits.max_read_bytes())
     }
 
     /// Read into caller storage with an explicit aggregate buffer budget.

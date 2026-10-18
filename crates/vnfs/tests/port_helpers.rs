@@ -80,7 +80,7 @@ fn writer_bridge_handles_short_writes_and_never_replays_failed_output() {
             &fs,
             "/source",
             &mut ok,
-            StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(3).unwrap())
+            StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(3).unwrap())
         )
         .unwrap(),
         10
@@ -95,7 +95,7 @@ fn writer_bridge_handles_short_writes_and_never_replays_failed_output() {
         &fs,
         "/source",
         &mut bad,
-        StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(3).unwrap()),
+        StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(3).unwrap()),
     )
     .unwrap_err();
     assert_eq!(err.err_no(), libc::ENOSPC as u32);
@@ -117,8 +117,8 @@ fn ordered_walk_preserves_sorting_prunes_before_io_and_callbacks_are_unlocked() 
         .visit_dirs_ordered(
             "/",
             ListDirOptions::new()
-                .recursive(true)
-                .fields(Attributes::MODE),
+                .with_recursive(true)
+                .with_fields(Attributes::MODE),
             |a, b| b.path().cmp(a.path()),
             |entry| {
                 if entry.path() == Path::new("/prune") {
@@ -152,8 +152,8 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
         fs.visit_dirs_ordered(
             "/link",
             ListDirOptions::new()
-                .recursive(true)
-                .fields(Attributes::MODE),
+                .with_recursive(true)
+                .with_fields(Attributes::MODE),
             |a, b| a.path().cmp(b.path()),
             |_| true,
             |_, _| panic!("symlink root must not be followed")
@@ -167,8 +167,8 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
             .visit_dirs_ordered(
                 "/",
                 ListDirOptions::new()
-                    .recursive(true)
-                    .fields(Attributes::MODE),
+                    .with_recursive(true)
+                    .with_fields(Attributes::MODE),
                 |a, b| a.path().cmp(b.path()),
                 |_| true,
                 |listing, _| {
@@ -196,9 +196,9 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
         fs.visit_dirs_ordered(
             "/",
             ListDirOptions::new()
-                .recursive(true)
-                .max_entries(1)
-                .fields(Attributes::MODE),
+                .with_recursive(true)
+                .with_max_entries(1)
+                .with_fields(Attributes::MODE),
             |a, b| a.path().cmp(b.path()),
             |_| false,
             |_, _| {
@@ -215,9 +215,9 @@ fn ordered_walk_stop_skip_and_limits_are_not_silent_truncation() {
         fs.visit_dirs_ordered(
             "/",
             ListDirOptions::new()
-                .recursive(true)
-                .max_path_bytes(1)
-                .fields(Attributes::MODE),
+                .with_recursive(true)
+                .with_max_path_bytes(1)
+                .with_fields(Attributes::MODE),
             |a, b| a.path().cmp(b.path()),
             |_| false,
             |_, _| panic!("over-budget snapshot must not be delivered")
@@ -240,10 +240,10 @@ fn ordered_walk_depth_zero_delivers_root_and_limits_descent_only() {
             .visit_dirs_ordered(
                 "/",
                 ListDirOptions::new()
-                    .recursive(true)
-                    .max_depth(0)
-                    .truncate_at_max_depth(truncate)
-                    .fields(Attributes::MODE),
+                    .with_recursive(true)
+                    .with_max_depth(0)
+                    .with_truncate_at_max_depth(truncate)
+                    .with_fields(Attributes::MODE),
                 |a, b| a.path().cmp(b.path()),
                 |_| true,
                 |listing, depth| {
@@ -266,9 +266,9 @@ fn ordered_walk_depth_zero_delivers_root_and_limits_descent_only() {
         .visit_dirs_ordered(
             "/",
             ListDirOptions::new()
-                .recursive(true)
-                .max_depth(0)
-                .fields(Attributes::MODE),
+                .with_recursive(true)
+                .with_max_depth(0)
+                .with_fields(Attributes::MODE),
             |a, b| a.path().cmp(b.path()),
             |_| true,
             |listing, depth| {
@@ -286,10 +286,10 @@ fn ordered_walk_depth_zero_delivers_root_and_limits_descent_only() {
         .visit_dirs_ordered(
             "/",
             ListDirOptions::new()
-                .recursive(true)
-                .max_depth(0)
-                .truncate_at_max_depth(true)
-                .fields(Attributes::MODE),
+                .with_recursive(true)
+                .with_max_depth(0)
+                .with_truncate_at_max_depth(true)
+                .with_fields(Attributes::MODE),
             |a, b| a.path().cmp(b.path()),
             |_| true,
             |listing, depth| {

@@ -141,10 +141,10 @@ fn contents_replace_colliding_regular_roots_in_input_order() {
                     &["/left/same", "/right/same"],
                     "/out",
                     CopyOptions::new()
-                        .layout(CopyLayout::Contents)
-                        .existing(Existing::Replace)
-                        .batch_size(batch)
-                        .preserve_permissions(preserve),
+                        .with_layout(CopyLayout::Contents)
+                        .with_existing(Existing::Replace)
+                        .with_batch_size(batch)
+                        .with_preserve_permissions(preserve),
                 )
                 .unwrap();
                 assert_eq!(
@@ -171,9 +171,9 @@ fn contents_conflicts_error_or_skip_after_first_completed_root() {
                 &["/left/same", "/right/same"],
                 "/out",
                 CopyOptions::new()
-                    .layout(CopyLayout::Contents)
-                    .existing(policy)
-                    .batch_size(batch),
+                    .with_layout(CopyLayout::Contents)
+                    .with_existing(policy)
+                    .with_batch_size(batch),
             );
             if policy == Existing::Error {
                 assert_eq!(result.unwrap_err().index(), Some(1));
@@ -205,9 +205,9 @@ fn contents_directory_roots_complete_before_later_regular_roots() {
                 &sources,
                 "/out",
                 CopyOptions::new()
-                    .layout(CopyLayout::Contents)
-                    .existing(Existing::Replace)
-                    .batch_size(batch),
+                    .with_layout(CopyLayout::Contents)
+                    .with_existing(Existing::Replace)
+                    .with_batch_size(batch),
             )
             .unwrap();
             assert_eq!(
@@ -236,9 +236,9 @@ fn contents_directory_collisions_follow_root_order_at_every_depth() {
             &["/left", "/right"],
             "/out",
             CopyOptions::new()
-                .layout(CopyLayout::Contents)
-                .existing(Existing::Replace)
-                .batch_size(batch),
+                .with_layout(CopyLayout::Contents)
+                .with_existing(Existing::Replace)
+                .with_batch_size(batch),
         )
         .unwrap();
         assert_eq!(
@@ -262,11 +262,13 @@ fn disjoint_regular_roots_keep_vector_io_in_both_layouts() {
                 &fs,
                 &["/left/same", "/right/nested/item"],
                 "/out",
-                CopyOptions::new().layout(layout).existing(if native {
-                    Existing::Replace
-                } else {
-                    Existing::Error
-                }),
+                CopyOptions::new()
+                    .with_layout(layout)
+                    .with_existing(if native {
+                        Existing::Replace
+                    } else {
+                        Existing::Error
+                    }),
             )
             .unwrap();
             assert_eq!(summary.files_copied, 2);
@@ -299,9 +301,9 @@ fn contents_cohorts_share_traversal_budget() {
         &["/left", "/right"],
         "/out",
         CopyOptions::new()
-            .layout(CopyLayout::Contents)
-            .existing(Existing::Replace)
-            .max_entries(5),
+            .with_layout(CopyLayout::Contents)
+            .with_existing(Existing::Replace)
+            .with_max_entries(5),
     )
     .unwrap_err();
     assert_eq!(error.index(), Some(1));
@@ -324,8 +326,8 @@ fn contents_cancellation_keeps_later_conflicting_root_unstarted() {
         &["/left/same", "/right/same"],
         "/out",
         CopyOptions::new()
-            .layout(CopyLayout::Contents)
-            .existing(Existing::Replace),
+            .with_layout(CopyLayout::Contents)
+            .with_existing(Existing::Replace),
         |_| Ok(ControlFlow::Break(())),
     )
     .unwrap();
@@ -346,8 +348,8 @@ fn contents_collision_splits_only_the_necessary_file_cohort() {
         &["/left/same", "/right/nested/item", "/right/same"],
         "/out",
         CopyOptions::new()
-            .layout(CopyLayout::Contents)
-            .existing(Existing::Replace),
+            .with_layout(CopyLayout::Contents)
+            .with_existing(Existing::Replace),
     )
     .unwrap();
     assert_eq!(summary.files_copied, 3);

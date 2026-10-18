@@ -26,7 +26,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
 ) -> Result<Vec<crate::TraversalCompletion>> {
     let directory = policy.directory_options(limits);
     let walk = policy.walk_options(limits);
-    let mut budget = TraversalBudget::new(directory.entry_limit(), directory.path_byte_limit());
+    let mut budget = TraversalBudget::new(directory.max_entries(), directory.max_path_bytes());
     let mut completed = Vec::new();
     let mut pending = std::collections::VecDeque::new();
     for (index, root) in roots.iter().enumerate() {
@@ -34,19 +34,19 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
     }
     while !pending.is_empty() {
         let owner = pending.front().unwrap().0;
-        if policy.is_recursive() && pending.front().unwrap().2 == 0 {
+        if policy.recursive() && pending.front().unwrap().2 == 0 {
             validate_root(&pending.front().unwrap().1)
                 .map_err(|error| vector_index(error, owner))?;
         }
         // Recursive traversal completes one input root before starting another.
         let candidate_paths: Vec<_> = pending
             .iter()
-            .take_while(|state| !policy.is_recursive() || state.0 == owner)
+            .take_while(|state| !policy.recursive() || state.0 == owner)
             .take(32)
             .map(|state| state.1.as_path())
             .collect();
         let capacity = capacity(&candidate_paths)?.clamp(1, 32);
-        let cohort_size = if policy.is_recursive() {
+        let cohort_size = if policy.recursive() {
             pending
                 .iter()
                 .take(capacity)
@@ -68,7 +68,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
         let pages = match fetch(&paths, cursors, 1, requested) {
             Ok(pages) => pages,
             Err(error)
-                if !policy.is_recursive()
+                if !policy.recursive()
                     && !error.is_transport()
                     && error.index().is_some_and(|i| i > 0 && i < cohort.len()) =>
             {
@@ -104,7 +104,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
         while !wave.is_empty() {
             let mut continuations = Vec::new();
             for ((index, path, depth, first), (mut page, next, seeds)) in wave {
-                if first && policy.is_recursive() {
+                if first && policy.recursive() {
                     budget.charge_path(&path).map_err(|error| {
                         vector_index(error.with_context("vector traversal", &path), index)
                     })?;
@@ -127,9 +127,9 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                         break;
                     }
                     accepted += 1;
-                    if policy.is_recursive() && entry.attrs().is_dir() {
-                        if depth >= walk.depth_limit() {
-                            if !walk.truncates_at_depth_limit() {
+                    if policy.recursive() && entry.attrs().is_dir() {
+                        if depth >= walk.max_depth() {
+                            if !walk.truncate_at_max_depth() {
                                 page_error = Some(
                                     vfsi_core::api::Error::client(index, libc::EFBIG as u32)
                                         .with_context("visit_dirs", entry.path()),
@@ -152,14 +152,14 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                     }
                     page.entries.truncate(accepted);
                 }
-                if !policy.is_recursive() && completed.len() <= index {
+                if !policy.recursive() && completed.len() <= index {
                     completed.resize(index + 1, crate::TraversalCompletion::Stopped);
                 }
                 if callback(index, page)
                     .map_err(|error| vector_index(error, index))?
                     .is_break()
                 {
-                    if policy.is_recursive() {
+                    if policy.recursive() {
                         completed.truncate(index);
                         completed.push(crate::TraversalCompletion::Stopped);
                     } else {
@@ -172,7 +172,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
                 }
                 match next {
                     Some(cursor) => continuations.push(((index, path, depth, false), Some(cursor))),
-                    None if !policy.is_recursive() => {
+                    None if !policy.recursive() => {
                         completed[index] = crate::TraversalCompletion::Complete
                     }
                     None => {}
@@ -213,7 +213,7 @@ pub fn visit_directory_pages<P: AsRef<Path>>(
         for child in children.into_iter().rev() {
             pending.push_front(child);
         }
-        if policy.is_recursive() && pending.front().is_none_or(|state| state.0 != owner) {
+        if policy.recursive() && pending.front().is_none_or(|state| state.0 != owner) {
             completed.push(crate::TraversalCompletion::Complete);
         }
     }
@@ -263,7 +263,10 @@ pub fn read_backend_owned<F: crate::backend::VectorBackend + 'static>(
         budget,
         |ranges, bytes| client.vread_with_limit_projected_native(ranges, bytes, |request| request),
         |paths, bytes| {
-            client.read_files_native(paths, crate::ReadAllOptions::new().max_total_bytes(bytes))
+            client.read_files_native(
+                paths,
+                crate::ReadAllOptions::new().with_max_total_bytes(bytes),
+            )
         },
     )
 }
@@ -274,7 +277,7 @@ pub(crate) fn read_backend<'a, F: crate::backend::VectorBackend + 'static>(
 ) -> Result<Vec<ReadResult>> {
     consume_ops(
         ops,
-        options.limit_or(client.limits().read_byte_limit()),
+        options.max_total_bytes_or(client.limits().max_read_bytes()),
         crate::OpenFile::read_request_at,
         crate::OpenFile::read_request_at_into,
         |requests, options| read_backend_owned(client, requests, options),
@@ -323,11 +326,7 @@ pub(crate) fn metadata_backend<F, P: vfsi_core::AsTarget<crate::OpenFile<F>>>(
 where
     F: crate::backend::VectorBackend + 'static,
 {
-    client.vgetattrs_native(
-        paths,
-        options.requested_attributes(),
-        options.follows_symlinks(),
-    )
+    client.vgetattrs_native(paths, options.fields(), options.follow_symlinks())
 }
 
 use vfsi_core::api::internal::{OwnedReadResult, ReadRequest, consume_ops, read_batch};
@@ -439,9 +438,9 @@ mod traversal_tests {
             Arc::clone(&live),
             Arc::clone(&peak),
             ListDirOptions::new()
-                .recursive(true)
-                .max_entries(1000)
-                .max_path_bytes(1_000_000),
+                .with_recursive(true)
+                .with_max_entries(1000)
+                .with_max_path_bytes(1_000_000),
             |_, page| {
                 seen += page.entries.len();
                 Ok(std::ops::ControlFlow::Continue(()))
@@ -461,10 +460,10 @@ mod traversal_tests {
             let live = Arc::new(AtomicUsize::new(0));
             let peak = Arc::new(AtomicUsize::new(0));
             let options = ListDirOptions::new()
-                .recursive(true)
-                .max_entries(if outcome == 2 { 2 } else { 1000 })
+                .with_recursive(true)
+                .with_max_entries(if outcome == 2 { 2 } else { 1000 })
                 // Root (5 bytes) and two entry paths (13 bytes each) fit.
-                .max_path_bytes(if outcome == 3 { 31 } else { 1_000_000 });
+                .with_max_path_bytes(if outcome == 3 { 31 } else { 1_000_000 });
             let mut fetch = snapshot_pages(Arc::clone(&live), peak);
             let mut callbacks = 0;
             let mut live_budget_page = false;

@@ -136,6 +136,17 @@ impl ReadResult {
 /// Aggregate logical byte budget, defaulting to the client's policy (16 MiB).
 /// Range request lengths must fit even if EOF returns fewer bytes. Complete
 /// files share the remaining returned-data budget and fail rather than truncate.
+///
+/// ```
+/// use std::num::NonZeroUsize;
+/// use vfsi_core::api::ReadOptions;
+/// let inherited = ReadOptions::new();
+/// let limited = inherited.with_max_total_bytes(NonZeroUsize::new(4096));
+/// assert_eq!(limited.max_total_bytes(), NonZeroUsize::new(4096));
+/// assert_eq!(limited.max_total_bytes_or(8192), 4096);
+/// assert_eq!(inherited.max_total_bytes(), None);
+/// assert_eq!(inherited.max_total_bytes_or(8192), 8192);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadOptions {
     max_total_bytes: Option<std::num::NonZeroUsize>,
@@ -150,16 +161,17 @@ impl ReadOptions {
     /// Override the aggregate budget for this call; `None` restores inheritance.
     /// Only nonzero overrides are representable. Stream larger files instead
     /// of raising this when bounded memory is required.
-    pub const fn max_total_bytes(mut self, bytes: Option<std::num::NonZeroUsize>) -> Self {
+    pub const fn with_max_total_bytes(mut self, bytes: Option<std::num::NonZeroUsize>) -> Self {
         self.max_total_bytes = bytes;
         self
     }
-    /// None inherits the client's configured read budget.
-    pub const fn total_byte_limit(self) -> Option<std::num::NonZeroUsize> {
+    /// Return the configured override, not the effective client budget.
+    /// `None` inherits the client's budget; it does not mean unlimited.
+    pub const fn max_total_bytes(self) -> Option<std::num::NonZeroUsize> {
         self.max_total_bytes
     }
     /// Resolve an inherited aggregate budget against the client's default.
-    pub fn limit_or(self, default: usize) -> usize {
+    pub fn max_total_bytes_or(self, default: usize) -> usize {
         self.max_total_bytes
             .map_or(default, std::num::NonZeroUsize::get)
     }
@@ -395,18 +407,18 @@ mod option_layout_tests {
             std::mem::size_of::<usize>()
         );
         let mut options = ReadOptions::new();
-        assert_eq!(options.limit_or(7), 7);
+        assert_eq!(options.max_total_bytes_or(7), 7);
         for bytes in [1, 42, usize::MAX] {
             let limit = NonZeroUsize::new(bytes);
-            options = options.max_total_bytes(limit);
-            assert_eq!(options.total_byte_limit(), limit);
-            assert_eq!(options.limit_or(7), bytes);
+            options = options.with_max_total_bytes(limit);
+            assert_eq!(options.max_total_bytes(), limit);
+            assert_eq!(options.max_total_bytes_or(7), bytes);
         }
-        options = options.max_total_bytes(None);
-        assert_eq!(options.total_byte_limit(), None);
-        assert_eq!(options.limit_or(7), 7);
+        options = options.with_max_total_bytes(None);
+        assert_eq!(options.max_total_bytes(), None);
+        assert_eq!(options.max_total_bytes_or(7), 7);
         assert_eq!(
-            options.limit_or(0),
+            options.max_total_bytes_or(0),
             0,
             "an inherited zero policy must not become unlimited"
         );

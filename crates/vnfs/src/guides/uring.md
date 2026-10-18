@@ -40,7 +40,7 @@ the adaptive prototype explicitly:
 ```no_run
 use vnfs::uring::{Options, Uring};
 # fn main() -> vnfs::Result<()> {
-let options = Options::default().cached_reads(true).syscall_writes(true);
+let options = Options::default().with_cached_reads(true).with_syscall_writes(true);
 let (fs, telemetry) = Uring::with_telemetry("/data", options)?;
 # let _ = (fs, telemetry);
 # Ok(())

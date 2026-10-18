@@ -254,9 +254,11 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
         },
     ];
     let mut count = 0;
-    let options = ListDirOptions::new().recursive(true).max_entries(1);
+    let options = ListDirOptions::new()
+        .with_recursive(true)
+        .with_max_entries(1);
     let mut budget =
-        vfsi_core::internal::TraversalBudget::new(options.entry_limit(), options.path_byte_limit());
+        vfsi_core::internal::TraversalBudget::new(options.max_entries(), options.max_path_bytes());
     let mut output = Vec::new();
     let error = append_bounded_walk_page(
         Path::new("/root"),
@@ -275,9 +277,11 @@ fn walk_page_decoder_stops_at_entry_and_path_budgets() {
     assert_eq!(output.len(), 1);
 
     count = 0;
-    let options = ListDirOptions::new().recursive(true).max_path_bytes(1);
+    let options = ListDirOptions::new()
+        .with_recursive(true)
+        .with_max_path_bytes(1);
     budget =
-        vfsi_core::internal::TraversalBudget::new(options.entry_limit(), options.path_byte_limit());
+        vfsi_core::internal::TraversalBudget::new(options.max_entries(), options.max_path_bytes());
     output.clear();
     let error = append_bounded_walk_page(
         Path::new("/root"),
@@ -362,7 +366,7 @@ fn connection_options_preserve_auth_sys_as_the_compatible_default() {
     assert_eq!(options.request_timeout, Duration::from_secs(5));
     assert_eq!(options.authentication, NfsAuth::AuthSys);
     assert_eq!(options.root, Path::new("/"));
-    assert!(options.reconnects_automatically());
+    assert!(options.auto_reconnect());
     assert_eq!(options.max_compound_bytes, None);
 }
 
@@ -403,7 +407,7 @@ fn fixed_text_builder_owns_compact_endpoints_and_preserves_input_compatibility()
 
 #[test]
 fn builder_collects_connection_and_runtime_configuration() {
-    let policy = NfsRecoveryPolicy::new().reconnect_attempts(3);
+    let policy = NfsRecoveryPolicy::new().with_reconnect_attempts(3);
     let builder = NfsClientBuilder::new("server:2049")
         .root("/export/app")
         .minor_version(Some(1))
@@ -421,7 +425,7 @@ fn builder_collects_connection_and_runtime_configuration() {
     );
     assert_eq!(builder.options.request_timeout, Duration::from_secs(7));
     assert_eq!(builder.options.recovery_policy, policy);
-    assert!(!builder.options.reconnects_automatically());
+    assert!(!builder.options.auto_reconnect());
     assert_eq!(
         builder.options.max_compound_bytes,
         std::num::NonZeroUsize::new(64 * 1024)

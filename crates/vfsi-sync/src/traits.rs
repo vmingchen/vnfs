@@ -55,12 +55,12 @@ impl ReadAllOptions {
     }
 
     /// Set the maximum combined size of all returned buffers.
-    pub const fn max_total_bytes(mut self, bytes: usize) -> Self {
+    pub const fn with_max_total_bytes(mut self, bytes: usize) -> Self {
         self.max_total_bytes = bytes;
         self
     }
 
-    pub const fn total_byte_limit(self) -> usize {
+    pub const fn max_total_bytes(self) -> usize {
         self.max_total_bytes
     }
 }
@@ -446,28 +446,32 @@ mod walk_depth_tests {
     }
     #[test]
     fn depth_limits_normalize_without_wrapping_and_keep_other_options() {
-        const UNLIMITED: ListDirOptions = ListDirOptions::new().recursive(true).max_depth(201);
-        assert_eq!(UNLIMITED.depth_limit(), usize::MAX);
+        const UNLIMITED: ListDirOptions = ListDirOptions::new()
+            .with_recursive(true)
+            .with_max_depth(201);
+        assert_eq!(UNLIMITED.max_depth(), usize::MAX);
         for depth in 0..=200 {
             let options = ListDirOptions::new()
-                .recursive(true)
-                .max_depth(depth)
-                .max_entries(7)
-                .max_path_bytes(11)
-                .truncate_at_max_depth(true);
-            assert_eq!(options.depth_limit(), depth);
-            assert_eq!(options.entry_limit(), 7);
-            assert_eq!(options.path_byte_limit(), 11);
-            assert!(options.truncates_at_depth_limit());
+                .with_recursive(true)
+                .with_max_depth(depth)
+                .with_max_entries(7)
+                .with_max_path_bytes(11)
+                .with_truncate_at_max_depth(true);
+            assert_eq!(options.max_depth(), depth);
+            assert_eq!(options.max_entries(), 7);
+            assert_eq!(options.max_path_bytes(), 11);
+            assert!(options.truncate_at_max_depth());
         }
         for depth in [201, 254, 255, 256, 500, usize::MAX - 1, usize::MAX] {
-            let options = ListDirOptions::new().recursive(true).max_depth(depth);
-            assert_eq!(options.depth_limit(), usize::MAX);
-            assert_eq!(options.max_depth(0).depth_limit(), 0);
-            assert_eq!(options.max_depth(200).depth_limit(), 200);
+            let options = ListDirOptions::new()
+                .with_recursive(true)
+                .with_max_depth(depth);
+            assert_eq!(options.max_depth(), usize::MAX);
+            assert_eq!(options.with_max_depth(0).max_depth(), 0);
+            assert_eq!(options.with_max_depth(200).max_depth(), 200);
         }
         assert_eq!(
-            ListDirOptions::unlimited().recursive(true).depth_limit(),
+            ListDirOptions::unlimited().with_recursive(true).max_depth(),
             usize::MAX
         );
     }

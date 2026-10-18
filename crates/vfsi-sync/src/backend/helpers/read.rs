@@ -16,7 +16,7 @@ pub fn vread_all_with_options_impl_default<F: VectorBackend + ?Sized>(
     let mut total = 0usize;
     let mut limit_error = None;
     let stream_budget = options
-        .total_byte_limit()
+        .max_total_bytes()
         .clamp(1, DEFAULT_READ_ALLV_MAX_TOTAL_BYTES);
     let chunk_size = stream_budget.min(1024 * 1024);
     backend.vstream_impl(
@@ -28,7 +28,7 @@ pub fn vread_all_with_options_impl_default<F: VectorBackend + ?Sized>(
                 limit_error = Some(index);
                 return false;
             };
-            if next_total > options.total_byte_limit() {
+            if next_total > options.max_total_bytes() {
                 limit_error = Some(index);
                 return false;
             }
@@ -99,7 +99,7 @@ pub fn native_read_file_impl_default<F: VectorBackend + ?Sized>(
     backend
         .vread_all_with_options_impl(
             std::slice::from_ref(file),
-            ReadAllOptions::new().max_total_bytes(max_bytes),
+            ReadAllOptions::new().with_max_total_bytes(max_bytes),
         )
         .and_then(|mut results| {
             if results.len() != 1 {

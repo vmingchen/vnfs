@@ -281,8 +281,8 @@ fn recursive_remove_does_not_restart_each_page_after_a_persistent_entry_failure(
             &[Path::new(&root)],
             true,
             vfsi_sync::RemoveOptions::new()
-                .batch(1)
-                .continue_on_error(true),
+                .with_batch_size(1)
+                .with_continue_on_error(true),
         )
         .unwrap_err();
     let attempts = failure.attempts.load(Ordering::Relaxed);
@@ -348,7 +348,9 @@ fn recursive_remove_retries_a_transient_entry_only_when_configured() {
         let result = fs.remove_paths_with_options_impl(
             &[Path::new(&root)],
             true,
-            vfsi_sync::RemoveOptions::new().batch(1).retries(retries),
+            vfsi_sync::RemoveOptions::new()
+                .with_batch_size(1)
+                .with_retries(retries),
         );
         let exists = fs.exists_impl(Path::new(&path)).unwrap();
         fs.set_fault_injector(Arc::new(FaultScript::new([])));

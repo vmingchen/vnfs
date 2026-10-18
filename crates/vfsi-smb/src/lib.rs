@@ -112,19 +112,19 @@ impl Default for SmbConnectOptions {
 
 impl SmbConnectOptions {
     /// Enable read-only recovery after transport failures.
-    pub fn auto_reconnect(mut self, value: bool) -> Self {
+    pub fn with_auto_reconnect(mut self, value: bool) -> Self {
         self.flags.set_auto_reconnect(value);
         self
     }
     /// Enable negotiated SMB compression.
-    pub fn compression(mut self, value: bool) -> Self {
+    pub fn with_compression(mut self, value: bool) -> Self {
         self.flags.set_compression(value);
         self
     }
-    pub const fn reconnects_automatically(self) -> bool {
+    pub const fn auto_reconnect(self) -> bool {
         self.flags.auto_reconnect()
     }
-    pub const fn uses_compression(self) -> bool {
+    pub const fn compression(self) -> bool {
         self.flags.compression()
     }
 }
@@ -226,8 +226,8 @@ impl SmbVecFs {
             username: username.to_owned(),
             password: password.to_owned(),
             domain: domain.to_owned(),
-            auto_reconnect: options.reconnects_automatically(),
-            compression: options.uses_compression(),
+            auto_reconnect: options.auto_reconnect(),
+            compression: options.compression(),
             // Custom compounds are bound to the primary connection. Never let
             // the dependency redirect a tree to an untracked DFS connection.
             dfs_enabled: false,
@@ -2362,7 +2362,7 @@ impl VectorBackend for SmbVecFs {
         if pairs.is_empty() {
             return Ok(());
         }
-        if !options.follows_source_symlinks() {
+        if !options.follow_source_symlinks() {
             return Err(VfError::unsupported(0));
         }
         if !self.server_copy_enabled {
@@ -3876,13 +3876,13 @@ mod option_layout_tests {
     fn packed_smb_options_keep_defaults_and_flags_independent() {
         assert_eq!(std::mem::size_of::<SmbConnectFlags>(), 1);
         let default = SmbConnectOptions::default();
-        assert!(default.reconnects_automatically() && default.uses_compression());
+        assert!(default.auto_reconnect() && default.compression());
         for bits in 0..4 {
             let options = default
-                .auto_reconnect(bits & 1 != 0)
-                .compression(bits & 2 != 0);
-            assert_eq!(options.reconnects_automatically(), bits & 1 != 0);
-            assert_eq!(options.uses_compression(), bits & 2 != 0);
+                .with_auto_reconnect(bits & 1 != 0)
+                .with_compression(bits & 2 != 0);
+            assert_eq!(options.auto_reconnect(), bits & 1 != 0);
+            assert_eq!(options.compression(), bits & 2 != 0);
             assert_eq!(options.connect_timeout, default.connect_timeout);
             assert_eq!(options.request_timeout, default.request_timeout);
         }

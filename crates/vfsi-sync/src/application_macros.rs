@@ -61,8 +61,8 @@ macro_rules! __vfsi_client_methods {
                     let metadata = self.vgetattrs(
                         &[path],
                         vfsi_core::api::AttrsOptions::new()
-                            .fields(vfsi_core::api::Attributes::MODE)
-                            .follow_symlinks(false),
+                            .with_fields(vfsi_core::api::Attributes::MODE)
+                            .with_follow_symlinks(false),
                     )?;
                     if metadata.len() != 1 {
                         return Err(vfsi_core::api::Error::transport(
@@ -80,11 +80,11 @@ macro_rules! __vfsi_client_methods {
                     <$client>::read_dir_pages_with_fields(
                         $receiver(self),
                         paths,
-                        options.attributes(),
+                        options.fields(),
                         cursors,
                         page_size,
                         max_entries,
-                        options.follows_symlinks(),
+                        options.follow_symlinks(),
                     )
                 },
                 callback,
@@ -173,7 +173,7 @@ macro_rules! __vfsi_client_methods {
             requests: &[vfsi_core::api::WriteOp<'a, Self::File>],
             options: vfsi_core::api::WriteOptions,
         ) -> Result<Vec<WriteResult>> {
-            let result = if options.writes_all() {
+            let result = if options.write_all() {
                 ($vwrite_all_native)($write_receiver(self), requests)
             } else {
                 ($vwrite_native)($write_receiver(self), requests)
@@ -218,7 +218,7 @@ macro_rules! __vfsi_client_methods {
                             options,
                         ) {
                             let error = $crate::application::vector_index(error, index);
-                            if error.is_transport() || !options.continues_on_error() {
+                            if error.is_transport() || !options.continue_on_error() {
                                 return Err(error);
                             }
                             first_error.get_or_insert(error);

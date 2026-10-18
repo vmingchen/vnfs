@@ -133,8 +133,8 @@ benchmark preparation/validation and are not library-only CPU budgets.
 
 Advisory eviction does not guarantee cold physical media; hypervisor/device
 caches remain warm. These are indicative results from one VM, not performance
-promises. Repeat on deployment storage and tune `Options::max_batch_bytes` and
-`queue_depth` separately. Caller-facing read limits remain 16 MiB by default;
+promises. Repeat on deployment storage and tune `Options::with_max_batch_bytes` and
+`Options::with_queue_depth` separately. Caller-facing read limits remain 16 MiB by default;
 the 2 MiB window limits in-flight scratch, not total request size.
 
 Open/close, namespaces, directories, append, and dependent writes remain ordinary

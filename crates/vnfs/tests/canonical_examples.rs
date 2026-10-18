@@ -50,7 +50,7 @@ fn bulk_roundtrip_cleanup_and_existing_directory_protection() -> Result<()> {
     );
     let bounded = fs
         .clone()
-        .with_limits(vnfs::files::ResourceLimits::new().max_read_bytes(3));
+        .with_limits(vnfs::files::ResourceLimits::new().with_max_read_bytes(3));
     // Fail after creating/writing the owned directory, then still clean it up.
     assert!(bulk_files::run(&bounded, "/failed-read").is_err());
     assert!(!root.path().join("failed-read").exists());
@@ -157,7 +157,8 @@ fn canonical_workflows_on_nfsv41_and_nfsv42() -> Result<()> {
                     vnfs::files::ReadOp::whole(&paths[1]),
                     vnfs::files::ReadOp::into(&file, 20, &mut buffer),
                 ],
-                vnfs::files::ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(12)),
+                vnfs::files::ReadOptions::new()
+                    .with_max_total_bytes(std::num::NonZeroUsize::new(12)),
             )?;
             assert_eq!(mixed[0].data().unwrap(), b"hello");
             assert_eq!(mixed[1].offset(), 10);

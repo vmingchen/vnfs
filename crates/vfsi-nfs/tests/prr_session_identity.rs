@@ -17,7 +17,7 @@ fn stable_owner_reconnect_preserves_independent_opens_and_shutdown() {
     let mut fs = NfsVecFs::builder(&server)
         .minor_version(Some(minor))
         .client_owner(format!("prr-stable-owner-{}-{minor}", std::process::id()))
-        .recovery_policy(NfsRecoveryPolicy::new().reconnect_attempts(1))
+        .recovery_policy(NfsRecoveryPolicy::new().with_reconnect_attempts(1))
         .connect()
         .unwrap();
     let path = format!("/prr-stable-owner-{}-{minor}", std::process::id());
@@ -77,7 +77,7 @@ fn failed_stable_owner_reconnect_keeps_original_descriptors_usable() {
     let mut fs = NfsVecFs::builder(&server)
         .minor_version(Some(minor))
         .client_owner(format!("prr-owner-failure-{}-{minor}", std::process::id()))
-        .recovery_policy(NfsRecoveryPolicy::new().reconnect_attempts(1))
+        .recovery_policy(NfsRecoveryPolicy::new().with_reconnect_attempts(1))
         .connect()
         .unwrap();
     let path = format!("/prr-owner-failure-{}-{minor}", std::process::id());
@@ -122,7 +122,7 @@ fn reconnect_cleanup_failure_is_retained_and_retried_at_shutdown() {
     let mut fs = NfsVecFs::builder(&server)
         .minor_version(Some(minor))
         .client_owner(format!("prr-owner-cleanup-{}-{minor}", std::process::id()))
-        .recovery_policy(NfsRecoveryPolicy::new().reconnect_attempts(1))
+        .recovery_policy(NfsRecoveryPolicy::new().with_reconnect_attempts(1))
         .connect()
         .unwrap();
     let path = format!("/prr-owner-cleanup-{}-{minor}", std::process::id());

@@ -31,41 +31,41 @@ impl NfsReadPoolOptions {
         }
     }
 
-    pub const fn worker_count(mut self, count: usize) -> Self {
+    pub const fn with_worker_count(mut self, count: usize) -> Self {
         self.worker_count = count;
         self
     }
 
-    pub const fn chunk_size(mut self, bytes: usize) -> Self {
+    pub const fn with_chunk_size(mut self, bytes: usize) -> Self {
         self.chunk_size = bytes;
         self
     }
 
     /// Maximum scheduled ranges not yet delivered to the callback.
-    pub const fn max_in_flight(mut self, count: usize) -> Self {
+    pub const fn with_max_in_flight(mut self, count: usize) -> Self {
         self.max_in_flight = count;
         self
     }
 
     /// Hard budget for completed and in-progress range buffers.
-    pub const fn max_buffered_bytes(mut self, bytes: usize) -> Self {
+    pub const fn with_max_buffered_bytes(mut self, bytes: usize) -> Self {
         self.max_buffered_bytes = bytes;
         self
     }
 
-    pub const fn configured_worker_count(self) -> usize {
+    pub const fn worker_count(self) -> usize {
         self.worker_count
     }
 
-    pub const fn configured_chunk_size(self) -> usize {
+    pub const fn chunk_size(self) -> usize {
         self.chunk_size
     }
 
-    pub const fn configured_max_in_flight(self) -> usize {
+    pub const fn max_in_flight(self) -> usize {
         self.max_in_flight
     }
 
-    pub const fn configured_max_buffered_bytes(self) -> usize {
+    pub const fn max_buffered_bytes(self) -> usize {
         self.max_buffered_bytes
     }
 
@@ -826,7 +826,7 @@ fn read_range(
                 &mut data[filled..],
             )],
             vfsi_core::api::ReadOptions::new()
-                .max_total_bytes(std::num::NonZeroUsize::new(length - filled)),
+                .with_max_total_bytes(std::num::NonZeroUsize::new(length - filled)),
         )?;
         let count = results[0].read();
         if count == 0 {
@@ -848,30 +848,36 @@ mod tests {
     fn options_enforce_minimums_and_cap_concurrency_by_memory_budget() {
         assert!(
             NfsReadPoolOptions::new()
-                .worker_count(0)
+                .with_worker_count(0)
                 .effective()
                 .is_err()
         );
-        assert!(NfsReadPoolOptions::new().chunk_size(0).effective().is_err());
         assert!(
             NfsReadPoolOptions::new()
-                .max_buffered_bytes(1024)
+                .with_chunk_size(0)
+                .effective()
+                .is_err()
+        );
+        assert!(
+            NfsReadPoolOptions::new()
+                .with_max_buffered_bytes(1024)
                 .effective()
                 .is_err()
         );
 
         // A 3-block budget prevents an 8-request window from allocating more
         // than 3 chunks, regardless of the worker count.
-        assert_eq!(
-            NfsReadPoolOptions::new()
-                .worker_count(8)
-                .chunk_size(4096)
-                .max_in_flight(8)
-                .max_buffered_bytes(12 * 1024)
-                .effective()
-                .unwrap(),
-            (3, 3)
-        );
+        let options = NfsReadPoolOptions::new()
+            .with_worker_count(8)
+            .with_chunk_size(4096)
+            .with_max_in_flight(8)
+            .with_max_buffered_bytes(12 * 1024);
+        // Getters expose configuration, not concurrency after memory clamping.
+        assert_eq!(options.worker_count(), 8);
+        assert_eq!(options.chunk_size(), 4096);
+        assert_eq!(options.max_in_flight(), 8);
+        assert_eq!(options.max_buffered_bytes(), 12 * 1024);
+        assert_eq!(options.effective().unwrap(), (3, 3));
     }
 
     #[test]

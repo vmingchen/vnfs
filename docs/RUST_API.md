@@ -8,6 +8,19 @@ migration log. For runnable application examples, start with the
 
 ## Application execution
 
+### Option naming
+
+Value-style options and resource/recovery policies use
+`with_<property>(value)` for fluent setters and `<property>()` for existing
+getters. For example, `ReadOptions::new().with_max_total_bytes(limit)` sets the
+override, while `options.max_total_bytes()` returns it. `None` means inherit
+the client's budget, not unlimited; `max_total_bytes_or(default)` resolves it.
+This is a naming convention, not a change to defaults, zero-value rules,
+resource limits, or packed layouts. Existing getters keep their return types.
+Dedicated builders such as `OpenOptions` and `NfsBuilder` retain builder-style
+names such as `.read(true)` and `.root("/export")`. Python keyword names are
+unchanged.
+
 ### Referral support
 
 Direct NFS and SMB clients do not follow referrals. SMB connection setup rejects
@@ -51,7 +64,7 @@ listing per root; recursive mode includes descendants. The allocating helper con
 `VfsiExt::read_dirs` supplies the ordinary flat shallow result for convenience.
 
 `Vfsi::vlistdirs` handles both shallow and recursive visits through
-`ListDirOptions`. Shallow is the default; `.recursive(true)` enables descent.
+`ListDirOptions`. Shallow is the default; `.with_recursive(true)` enables descent.
 Depth 0 lists root children, and depth 1 also lists immediate subdirectories.
 Recursive depth limits fail on deeper directories unless intentional truncation
 is enabled. Callbacks receive owned `DirectoryListing` pages, including pages for empty
@@ -161,9 +174,9 @@ operations without constructing `VfAttrs` or calling backend traits directly.
 fields such as size, permissions, allocated blocks, device ID, full mode,
 and named-attribute presence as `Option`, so missing values are not confused
 with zero. Use `attrs_with_options` with
-`AttrsOptions::follow_symlinks(false)` for a no-follow query, and `vlistdirs`
+`AttrsOptions::with_follow_symlinks(false)` for a no-follow query, and `vlistdirs`
 to visit pages for several directory operands, with
-`ListDirOptions::recursive(true)` for bounded recursive trees. Use the
+`ListDirOptions::with_recursive(true)` for bounded recursive trees. Use the
 `VfsiExt::read_dirs_with_options` collector only when retained listings are
 needed. `DirectoryListing` carries paths and already-fetched entry metadata.
 `vcopy` and `vremove` perform ordered batches without promising transactionality.
@@ -378,7 +391,7 @@ must impose a finite default allocation limit and expose an explicit override.
 and `VfsiExt::read_to_string` therefore inherit a 16 MiB client budget.
 Callers may select another bound with `ReadOptions` on `vread`,
 `read_files_with_options`, or `read_to_string_with_options`. A
-`ReadOptions::max_total_bytes(Some(NonZeroUsize))` override must be nonzero;
+`ReadOptions::with_max_total_bytes(Some(NonZeroUsize))` override must be nonzero;
 `None` inherits the client default. Native backend whole-file collection uses
 the separate `ReadAllOptions` type on `VectorBackend::vread_all_with_options_impl`.
 `ResourceLimits` sets client defaults through `NfsBuilder::limits`,
@@ -408,17 +421,17 @@ Allocating directory APIs are bounded for the same reason. `VfsiExt::read_dir`
 uses finite entry and combined-path-byte defaults; `read_dir_with_options` and
 `ListDirOptions` select tighter limits or explicitly opt into unlimited
 collection. `read_dirs_with_options` applies these limits across the entire
-returned vector. Use `read_dirs_with_options(&[root], ListDirOptions::new().recursive(true))`
+returned vector. Use `read_dirs_with_options(&[root], ListDirOptions::new().with_recursive(true))`
 for recursive collection with the default depth limit. The result contains
 one tree per input root. NFS multi-directory listing
 delivers each bounded READDIR page before requesting continuation pages, so
 early-stop callbacks no longer retain the whole remote listing. Applications
 needing to consume one directory incrementally can use `listdir`
-with `ListDirOptions`; set `recursive(true)` to visit a recursive root. The
+with `ListDirOptions`; set `with_recursive(true)` to visit a recursive root. The
 options-aware helper respects the supplied traversal scope, metadata, and budgets.
 `listdir` replaces the former shallow, recursive, options-aware, and event-walk
 entry points. Its callback receives `WalkEvent` and returns `WalkControl`.
-Use `enter_leave(true)` for lifecycle events and `sort_by_name(true)` for sorted
+Use `with_enter_leave(true)` for lifecycle events and `with_sort_by_name(true)` for sorted
 siblings; those modes retain bounded directory buffers. The default entry-only
 mode stays paged and retains native anchored child cursors and batching. With
 lifecycle events enabled, `SkipSubtree` on Enter prevents descent.

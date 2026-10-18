@@ -10,7 +10,7 @@ fn collect(
     roots: &[&str],
     recursive: bool,
 ) -> vnfs::Result<Vec<Vec<vnfs::directory::DirectoryListing>>> {
-    fs.read_dirs_with_options(roots, ListDirOptions::new().recursive(recursive))
+    fs.read_dirs_with_options(roots, ListDirOptions::new().with_recursive(recursive))
 }
 
 #[test]
@@ -96,13 +96,13 @@ fn collection_limits_and_errors_keep_the_input_root_index() {
     fs.write("/a/f", b"x").unwrap();
     fs.write("/b/f", b"x").unwrap();
     assert_eq!(
-        fs.read_dirs_with_options(&["/a", "/b"], ListDirOptions::new().max_entries(1))
+        fs.read_dirs_with_options(&["/a", "/b"], ListDirOptions::new().with_max_entries(1))
             .unwrap_err()
             .index(),
         Some(1)
     );
     assert_eq!(
-        fs.read_dirs_with_options(&["/a", "/a"], ListDirOptions::new().max_path_bytes(7))
+        fs.read_dirs_with_options(&["/a", "/a"], ListDirOptions::new().with_max_path_bytes(7))
             .unwrap_err()
             .index(),
         Some(1)
@@ -132,7 +132,7 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
     fs.symlink("sub", "/tree/link").unwrap();
     let limited = Posix::new(root.path())
         .unwrap()
-        .with_limits(vnfs::files::ResourceLimits::new().max_directory_entries(1));
+        .with_limits(vnfs::files::ResourceLimits::new().with_max_directory_entries(1));
     for (name, recursive, lifecycle, sort) in [
         ("paged", false, false, false),
         ("sorted", false, false, true),
@@ -144,10 +144,10 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
         ("recursive sorted lifecycle", true, true, true),
     ] {
         let options = ListDirOptions::new()
-            .recursive(recursive)
-            .enter_leave(lifecycle)
-            .sort_by_name(sort)
-            .max_depth(usize::from(recursive));
+            .with_recursive(recursive)
+            .with_enter_leave(lifecycle)
+            .with_sort_by_name(sort)
+            .with_max_depth(usize::from(recursive));
         let mut expected: Vec<_> = ["/tree/empty", "/tree/link", "/tree/sub", "/tree/top"]
             .map(std::path::PathBuf::from)
             .into();
@@ -186,12 +186,17 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
         };
         assert_eq!(collect(options).unwrap(), expected, "{name}");
         assert_eq!(
-            collect(options.max_entries(usize::MAX).max_path_bytes(usize::MAX)).unwrap(),
+            collect(
+                options
+                    .with_max_entries(usize::MAX)
+                    .with_max_path_bytes(usize::MAX)
+            )
+            .unwrap(),
             expected,
             "{name}: unlimited budgets"
         );
         assert_eq!(
-            collect(options.max_entries(expected.len())).unwrap(),
+            collect(options.with_max_entries(expected.len())).unwrap(),
             expected,
             "{name}: exact entry budget"
         );
@@ -203,23 +208,25 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
                 0
             };
         assert_eq!(
-            collect(options.max_path_bytes(bytes)).unwrap(),
+            collect(options.with_max_path_bytes(bytes)).unwrap(),
             expected,
             "{name}"
         );
         for limited_options in [
-            options.max_entries(expected.len() - 1),
-            options.max_path_bytes(bytes - 1),
-            options.max_path_bytes(1),
+            options.with_max_entries(expected.len() - 1),
+            options.with_max_path_bytes(bytes - 1),
+            options.with_max_path_bytes(1),
         ] {
             let error = collect(limited_options).unwrap_err();
             assert_eq!(error.kind(), vnfs::error::ErrorKind::FileTooLarge, "{name}");
             assert_eq!(error.index(), Some(0), "{name}");
         }
         assert_eq!(
-            fs.listdir("/tree", options.max_entries(0), |_| panic!("zero budget"))
-                .unwrap_err()
-                .kind(),
+            fs.listdir("/tree", options.with_max_entries(0), |_| panic!(
+                "zero budget"
+            ))
+            .unwrap_err()
+            .kind(),
             vnfs::error::ErrorKind::FileTooLarge,
             "{name}"
         );
@@ -260,11 +267,12 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
         }
         if recursive {
             assert_eq!(
-                collect(options.max_depth(0)).unwrap_err().kind(),
+                collect(options.with_max_depth(0)).unwrap_err().kind(),
                 vnfs::error::ErrorKind::FileTooLarge,
                 "{name}"
             );
-            let truncated = collect(options.max_depth(0).truncate_at_max_depth(true)).unwrap();
+            let truncated =
+                collect(options.with_max_depth(0).with_truncate_at_max_depth(true)).unwrap();
             let shallow: Vec<_> = expected
                 .iter()
                 .filter(|p| p.as_path() != Path::new("/tree/sub/leaf"))
@@ -272,7 +280,7 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
                 .collect();
             assert_eq!(truncated, shallow, "{name}");
             if lifecycle {
-                fs.listdir("/tree", options.max_depth(0), |event| {
+                fs.listdir("/tree", options.with_max_depth(0), |event| {
                     assert_ne!(event.entry.path(), Path::new("/tree/sub/leaf"));
                     Ok(if event.depth > 0 && event.kind == WalkEventKind::Enter {
                         WalkControl::SkipSubtree
@@ -290,9 +298,11 @@ fn listdir_modes_preserve_scope_limits_depth_and_callback_contracts() {
 #[test]
 fn buffered_local_walk_never_follows_replaced_children_or_ancestors() {
     for options in [
-        ListDirOptions::new().sort_by_name(true),
-        ListDirOptions::new().enter_leave(true),
-        ListDirOptions::new().sort_by_name(true).enter_leave(true),
+        ListDirOptions::new().with_sort_by_name(true),
+        ListDirOptions::new().with_enter_leave(true),
+        ListDirOptions::new()
+            .with_sort_by_name(true)
+            .with_enter_leave(true),
     ] {
         for (name, victim, target, outside) in [
             ("child", "/tree/child", "../outside", "/outside"),
@@ -306,7 +316,7 @@ fn buffered_local_walk_never_follows_replaced_children_or_ancestors() {
                 .unwrap();
             let mut changed = false;
             let mut escaped = false;
-            let result = fs.listdir("/tree", options.recursive(true), |event| {
+            let result = fs.listdir("/tree", options.with_recursive(true), |event| {
                 if event.entry.path() == Path::new("/tree/child") && !changed {
                     fs.vrename(&[(victim, "/saved")], Default::default())?;
                     fs.symlink(target, victim)?;
@@ -328,7 +338,7 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
     let root = tempfile::tempdir().unwrap();
     let fs = Posix::new(root.path())
         .unwrap()
-        .with_limits(vnfs::files::ResourceLimits::new().max_directory_entries(1));
+        .with_limits(vnfs::files::ResourceLimits::new().with_max_directory_entries(1));
     fs.create_dir_all("/tree/sub").unwrap();
     fs.write("/tree/top", b"a").unwrap();
     fs.write("/tree/sub/leaf", b"b").unwrap();
@@ -339,17 +349,17 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
         vnfs::error::ErrorKind::FileTooLarge
     );
     assert_eq!(
-        fs.read_dirs_with_options(&["/tree"], ListDirOptions::new().recursive(true))
+        fs.read_dirs_with_options(&["/tree"], ListDirOptions::new().with_recursive(true))
             .map(|mut trees| trees.remove(0))
             .unwrap_err()
             .kind(),
         vnfs::error::ErrorKind::FileTooLarge
     );
     let options = ListDirOptions::new()
-        .max_entries(3)
-        .fields(vnfs::directory::Attributes::MODE);
+        .with_max_entries(3)
+        .with_fields(vnfs::directory::Attributes::MODE);
     let shallow = fs
-        .read_dir_with_options("/tree", options.recursive(true))
+        .read_dir_with_options("/tree", options.with_recursive(true))
         .unwrap();
     assert_eq!(shallow.len(), 2);
     assert!(
@@ -358,7 +368,7 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
             .any(|entry| entry.path() == Path::new("/tree/sub/leaf"))
     );
     let tree = fs
-        .read_dirs_with_options(&["/tree"], options.recursive(true))
+        .read_dirs_with_options(&["/tree"], options.with_recursive(true))
         .map(|mut trees| trees.remove(0))
         .unwrap();
     assert_eq!(tree.len(), 2);
@@ -367,7 +377,7 @@ fn scalar_collectors_select_named_scope_and_respect_visit_budgets() {
             .any(|listing| listing.path == Path::new("/tree/sub"))
     );
     assert_eq!(
-        fs.read_dirs_with_options(&["/tree"], options.max_depth(0).recursive(true))
+        fs.read_dirs_with_options(&["/tree"], options.with_max_depth(0).with_recursive(true))
             .map(|mut trees| trees.remove(0))
             .unwrap_err()
             .kind(),

@@ -53,7 +53,7 @@ are in the [package README](https://github.com/vmingchen/vnfs/tree/main/crates/v
 | Repeated or positional I/O | [`Vfsi::vopen`], [`Vfsi::vread`], [`Vfsi::vwrite`] | [Open handles](files/index.html#open-handles) |
 | One large file | [`Vfsi::vstream`] | [Bounded streaming](files/index.html#bounded-streaming) |
 | Many directory listings with attributes | [`Vfsi::vlistdirs`] | [Directories](directory/index.html#runnable-example) |
-| Large trees without collecting everything | [`Vfsi::vlistdirs`] with [`ListDirOptions::recursive`] | [Directories](directory/index.html#runnable-example) |
+| Large trees without collecting everything | [`Vfsi::vlistdirs`] with [`ListDirOptions::with_recursive`] | [Directories](directory/index.html#runnable-example) |
 | Declarative fresh directory tree | `helpers::TreeBuilder` | [Builder example](helpers::TreeBuilder) |
 | Existing Linux NFS mount | `nfs::mount::NfsMountSession::from_mount` for a connection plus local-path mapping; `nfs::Nfs::from_mount` for a connection only | [Mount discovery](nfs::Nfs::from_mount) |
 | Backend-independent application code | `Vfsi`, `VfsiExt`, `OpenFd` | [Generic workflows](files/index.html) |
@@ -95,7 +95,7 @@ helpers, not core execution methods. Import the traits with `vnfs::prelude::*` a
   does not inherit an allocation limit.
 - `vread` range requests and `vwrite` may return short progress. Whole-file
   requests complete or fail; they never silently truncate. Use `vwrite`
-  with `WriteOptions::new().write_all(true)` to complete
+  with `WriteOptions::new().with_write_all(true)` to complete
   successful short writes; do not mistake a short read without EOF for completion.
   Positional requests preserve the file cursor.
 - Files close best-effort on drop. Use explicit `VfsiExt::close_files` to surface cleanup

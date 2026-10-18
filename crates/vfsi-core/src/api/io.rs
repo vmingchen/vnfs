@@ -50,7 +50,7 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
                 self.position,
                 &mut buffer[..length],
             )],
-            ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(budget)),
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(budget)),
         )?;
         let [value] = values.as_slice() else {
             return Err(invalid("invalid read count"));
@@ -103,12 +103,12 @@ impl<C: Vfsi + ?Sized> Read for StdIo<'_, C> {
         if buffer.is_empty() {
             return Ok(0);
         }
-        self.read_at(buffer, self.client.limits().read_byte_limit())
+        self.read_at(buffer, self.client.limits().max_read_bytes())
             .map(|(count, _)| count)
             .map_err(Into::into)
     }
     fn read_to_end(&mut self, output: &mut Vec<u8>) -> io::Result<usize> {
-        let budget = self.client.limits().read_byte_limit();
+        let budget = self.client.limits().max_read_bytes();
         let mut added = 0;
         loop {
             let remaining = budget - added;
@@ -169,7 +169,7 @@ impl<C: Vfsi + ?Sized> Seek for StdIo<'_, C> {
             SeekFrom::End(offset) => {
                 let values = self.client.vgetattrs(
                     &[Target::file(self.file)],
-                    AttrsOptions::new().fields(Attributes::SIZE),
+                    AttrsOptions::new().with_fields(Attributes::SIZE),
                 )?;
                 let [value] = values.as_slice() else {
                     return Err(invalid("invalid metadata count").into());

@@ -21,7 +21,7 @@ use super::{DirHandle, OpenFd};
 /// | Repeated/range I/O on owned handles | [`vopen`](Self::vopen), [`vread`](Self::vread), [`vwrite`](Self::vwrite) |
 /// | Large files without collecting them | [`vstream`](Self::vstream) |
 /// | Directory pages with entry metadata | [`vlistdirs`](Self::vlistdirs) |
-/// | Recursive directory pages | [`vlistdirs`](Self::vlistdirs) with [`ListDirOptions::recursive`](crate::api::ListDirOptions::recursive) |
+/// | Recursive directory pages | [`vlistdirs`](Self::vlistdirs) with [`ListDirOptions::with_recursive`](crate::api::ListDirOptions::with_recursive) |
 ///
 /// Generic application code needs a `Vfsi` bound. Import [`VfsiExt`](super::VfsiExt) for
 /// convenience operations such as `read_files`, `write_files`, and scalar open.
@@ -84,8 +84,8 @@ pub trait Vfsi {
     /// use vfsi_core::api::{Vfsi, VfsiExt, AttrsOptions, Attributes, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let entries = fs.vgetattrs(&["/file-1", "/link"],
-    ///     AttrsOptions::new().fields(Attributes::MODE | Attributes::SIZE)
-    ///         .follow_symlinks(false))?;
+    ///     AttrsOptions::new().with_fields(Attributes::MODE | Attributes::SIZE)
+    ///         .with_follow_symlinks(false))?;
     /// # let _ = entries;
     /// # Ok(())
     /// # }
@@ -131,7 +131,7 @@ pub trait Vfsi {
     /// fs.vsetattrs(&[
     ///     SetAttrsOp::file(file).len(1024),
     ///     SetAttrsOp::new(Target::Path(std::path::Path::new("/other"))).len(0)
-    ///         .follow_symlinks(false),
+    ///         .with_follow_symlinks(false),
     /// ])?;
     /// # Ok(())
     /// # }
@@ -203,8 +203,8 @@ pub trait Vfsi {
     /// use vfsi_core::api::Vfsi;
     /// # fn example(fs: &impl Vfsi) {
     /// let limits = fs.limits();
-    /// println!("owned-read budget: {} bytes", limits.read_byte_limit());
-    /// println!("walk depth: {}", limits.walk_depth_limit());
+    /// println!("owned-read budget: {} bytes", limits.max_read_bytes());
+    /// println!("walk depth: {}", limits.max_walk_depth());
     /// # }
     /// ```
     fn limits(&self) -> ResourceLimits;
@@ -238,7 +238,7 @@ pub trait Vfsi {
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// let results = fs.vread(
     ///     [ReadOp::whole("/config")],
-    ///     ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024)),
+    ///     ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024)),
     /// )?;
     /// println!("{} bytes", results[0].read());
     /// # Ok(())
@@ -250,7 +250,7 @@ pub trait Vfsi {
     /// Construction does no I/O. Results retain input order and never borrow
     /// caller storage. Whole files complete or fail; ranges may return short
     /// progress. Only `buffer[..result.read]` is valid after a buffered read.
-    /// The default aggregate budget comes from `limits().read_byte_limit()`.
+    /// The default aggregate budget comes from `limits().max_read_bytes()`.
     /// All range and buffer lengths must fit before dispatch. Buffer reads run
     /// first, then allocating ranges, then whole paths, in batched phases.
     /// Errors retain original indices; buffers may already contain partial
@@ -300,7 +300,7 @@ pub trait Vfsi {
     /// let result = fs.vwrite(&[
     ///     WriteOp::at(&files[0], 0, b"hello"),
     ///     WriteOp::at(&files[1], 4096, b"world"),
-    /// ], vfsi_core::api::WriteOptions::new().write_all(true));
+    /// ], vfsi_core::api::WriteOptions::new().with_write_all(true));
     /// let close = fs.close_files(files);
     /// result?;
     /// close?;
@@ -434,7 +434,7 @@ pub trait Vfsi {
     /// use vfsi_core::api::{Vfsi, ListDirOptions, ControlFlow};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.vlistdirs(&["/tree-1", "/tree-2"],
-    ///     ListDirOptions::new().recursive(true).max_depth(8),
+    ///     ListDirOptions::new().with_recursive(true).with_max_depth(8),
     ///     |index, page| {
     ///         println!("{index}: {} ({} entries)", page.path.display(), page.entries.len());
     ///         Ok(ControlFlow::Continue(()))
@@ -458,7 +458,7 @@ pub trait Vfsi {
     /// use vfsi_core::api::{Vfsi, StreamOptions};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.vstream(&["/large-1", "/large-2"],
-    ///     StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()), |index, offset, data| {
+    ///     StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()), |index, offset, data| {
     ///         println!("{index}: {} bytes at {offset}", data.len());
     ///         Ok(std::ops::ControlFlow::Continue(()))
     ///     })?;

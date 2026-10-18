@@ -20,7 +20,7 @@ fn mixed<C: Vfsi>(fs: &C) {
                 ReadOp::into(&file, 5, &mut buffer),
                 ReadOp::whole("/empty"),
             ],
-            ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(9)),
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(9)),
         )
         .unwrap();
     assert_eq!(results[0].data(), Some(b"xyz".as_slice()));
@@ -52,7 +52,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
     let temp = tempfile::tempdir().unwrap();
     let fs = Posix::new(temp.path())
         .unwrap()
-        .with_limits(ResourceLimits::new().max_read_bytes(4));
+        .with_limits(ResourceLimits::new().with_max_read_bytes(4));
     fs.write_files(&[("/a", b"abc"), ("/b", b"xyz")]).unwrap();
     assert_eq!(
         fs.vread(
@@ -66,7 +66,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
     assert_eq!(
         fs.vread(
             [ReadOp::whole("/a"), ReadOp::whole("/b")],
-            ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(6))
+            ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(6))
         )
         .unwrap()
         .len(),
@@ -94,7 +94,7 @@ fn budgets_are_shared_and_preflight_buffer_lengths() {
     assert_eq!(error.index(), Some(0));
     assert_eq!(&buffer, b"abc"); // Reads are not atomic; earlier buffers may be filled.
     assert!(
-        fs.vread([], ReadOptions::new().max_total_bytes(None))
+        fs.vread([], ReadOptions::new().with_max_total_bytes(None))
             .unwrap()
             .is_empty()
     );
@@ -221,7 +221,7 @@ fn an_exhausted_internal_budget_never_restores_the_default() {
     let root = tempfile::tempdir().unwrap();
     let fs = Posix::new(root.path())
         .unwrap()
-        .with_limits(vnfs::files::ResourceLimits::new().max_read_bytes(3));
+        .with_limits(vnfs::files::ResourceLimits::new().with_max_read_bytes(3));
     fs.write("/a", b"abc").unwrap();
     fs.write("/empty", b"").unwrap();
     fs.write("/extra", b"x").unwrap();
@@ -244,7 +244,7 @@ fn an_exhausted_internal_budget_never_restores_the_default() {
     assert_eq!(error.kind(), vnfs::error::ErrorKind::FileTooLarge);
     assert_eq!(error.index(), Some(1));
     assert_eq!(&buffer, b"abc");
-    let fs = fs.with_limits(vnfs::files::ResourceLimits::new().max_read_bytes(0));
+    let fs = fs.with_limits(vnfs::files::ResourceLimits::new().with_max_read_bytes(0));
     assert_eq!(fs.read_files(&["/empty"]).unwrap(), vec![Vec::<u8>::new()]);
     assert_eq!(
         fs.read_files(&["/extra"]).unwrap_err().kind(),
@@ -267,7 +267,7 @@ fn text_options_inherit_or_override_budgets_and_preserve_utf8_errors() {
     let root = tempfile::tempdir().unwrap();
     let fs = vnfs::posix::Posix::new(root.path())
         .unwrap()
-        .with_limits(vnfs::files::ResourceLimits::new().max_read_bytes(2));
+        .with_limits(vnfs::files::ResourceLimits::new().with_max_read_bytes(2));
     fs.write("/text", b"hello").unwrap();
     fs.write("/invalid", &[0xff]).unwrap();
     assert_eq!(
@@ -276,7 +276,7 @@ fn text_options_inherit_or_override_budgets_and_preserve_utf8_errors() {
             .kind(),
         vnfs::error::ErrorKind::FileTooLarge
     );
-    let options = ReadOptions::new().max_total_bytes(std::num::NonZeroUsize::new(5));
+    let options = ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(5));
     assert_eq!(
         fs.read_to_string_with_options("/text", options).unwrap(),
         "hello"

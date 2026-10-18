@@ -8,7 +8,7 @@ pub fn run(fs: &impl Vfsi, paths: &[String], tree: &str) -> vnfs::Result<usize> 
     for cohort in paths.chunks(64) {
         fs.vlistdirs(
             cohort,
-            ListDirOptions::new().fields(Attributes::MODE | Attributes::SIZE),
+            ListDirOptions::new().with_fields(Attributes::MODE | Attributes::SIZE),
             |_, listing| {
                 for entry in listing.entries {
                     println!("{:?}: {:?} bytes", entry.path(), entry.attrs().len());
@@ -20,10 +20,14 @@ pub fn run(fs: &impl Vfsi, paths: &[String], tree: &str) -> vnfs::Result<usize> 
     // Visit bounded pages instead of collecting a large tree.
     // Symlinks are not followed; iteration order is backend-defined.
     let mut entries = 0;
-    fs.vlistdirs(&[tree], ListDirOptions::new().recursive(true), |_, page| {
-        entries += page.entries.len();
-        Ok(ControlFlow::Continue(()))
-    })?;
+    fs.vlistdirs(
+        &[tree],
+        ListDirOptions::new().with_recursive(true),
+        |_, page| {
+            entries += page.entries.len();
+            Ok(ControlFlow::Continue(()))
+        },
+    )?;
     Ok(entries)
 }
 

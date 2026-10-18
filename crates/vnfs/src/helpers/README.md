@@ -24,7 +24,7 @@ coherent with concurrent kernel-mounted access.
 listings with entry/path/depth budgets and admission before child-directory I/O.
 Its comparator borrows immutable entries, so sorting cannot rewrite validated
 paths or metadata. It lets tools such as `ls` retain their sort and display policy without owning a
-second traversal engine. Use `listdir` with `enter_leave(true)` for pre/post-order entry
+second traversal engine. Use `listdir` with `with_enter_leave(true)` for pre/post-order entry
 events and `vlistdirs` to batch independent, already-approved directories.
 
 `helpers::copy_to_writer` streams a source to a caller-owned `std::io::Write`
@@ -43,7 +43,7 @@ let session = NfsMountSession::from_mount("/mnt/data")?;
 let source = session.map("/mnt/data/input", ResolvePath::Follow)?;
 let mut output = std::fs::File::create("output")?;
 copy_to_writer(session.fs(), source, &mut output,
-    StreamOptions::new().chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()))?;
+    StreamOptions::new().with_chunk_size(std::num::NonZeroUsize::new(1024 * 1024).unwrap()))?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -59,7 +59,7 @@ use vnfs::nfs::mount::NfsMountSession;
 let session = NfsMountSession::from_mount("/mnt/nfs/project")?;
 let path = session.map("/mnt/nfs/project/README", ResolvePath::Follow)?;
 let attrs = session.fs().vgetattrs(&[path], AttrsOptions::new()
-    .fields(Attributes::MODE | Attributes::SIZE))?;
+    .with_fields(Attributes::MODE | Attributes::SIZE))?;
 assert!(attrs[0].has_attributes(Attributes::MODE | Attributes::SIZE));
 println!("NFS server: {}", session.mount().host());
 # Ok::<(), Box<dyn std::error::Error>>(())
@@ -131,7 +131,7 @@ use vnfs::helpers::CopyOptions;
 
 let fs = Nfs::connect("server.example.com")?;
 let result = copy_items(&fs, &["/input/images", "/input/config"], "/output",
-    CopyOptions::new().batch_size(64).chunk_bytes(1024 * 1024))?;
+    CopyOptions::new().with_batch_size(64).with_chunk_size(1024 * 1024))?;
 println!("copied {} files", result.files_copied);
 let stats = tree_stats(&fs, "/output", ListDirOptions::new())?;
 println!("{} files, {} logical bytes", stats.files, stats.file_bytes);

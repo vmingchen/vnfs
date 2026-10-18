@@ -46,7 +46,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 &fs,
                 &src,
                 format!("{root}/descriptor"),
-                CopyOptions::new().chunk_bytes(16),
+                CopyOptions::new().with_chunk_size(16),
             )?;
             assert_eq!(s.files_copied, 2);
             assert_eq!(s.bytes_copied, Some(103));
@@ -60,7 +60,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 &fs,
                 &src,
                 format!("{root}/native"),
-                CopyOptions::new().existing(Existing::Replace),
+                CopyOptions::new().with_existing(Existing::Replace),
             )?;
             assert_eq!(s.files_copied, 2);
             assert_eq!(s.bytes_copied, None);
@@ -69,7 +69,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 &fs,
                 &src,
                 format!("{root}/native"),
-                CopyOptions::new().existing(Existing::Replace),
+                CopyOptions::new().with_existing(Existing::Replace),
             )?;
             let path = format!("{root}/native/nested/files/b");
             let data = fs.vread([ReadOp::whole(&path)], ReadOptions::new())?;
@@ -103,7 +103,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 &fs,
                 &batchsrc,
                 format!("{root}/serial-copy"),
-                CopyOptions::new().batch_size(1),
+                CopyOptions::new().with_batch_size(1),
             )?;
             let serial = vnfs::diagnostics::take_and_reset();
             eprintln!(
