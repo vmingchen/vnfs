@@ -223,6 +223,7 @@ impl SmbVecFs {
         let config = ClientConfig {
             addr: normalize_server(server),
             timeout: options.connect_timeout,
+            response_timeout: Some(options.request_timeout),
             username: username.to_owned(),
             password: password.to_owned(),
             domain: domain.to_owned(),
@@ -1139,9 +1140,8 @@ impl SmbVecFs {
             (a.mtime_sec, a.mtime_nsec) = filetime_parts(info.modified);
             a.returned.insert(AttrMask::MTIME);
         }
-        // The high-level SMB FileInfo does not expose change time, link count,
-        // file ID, Unix ownership, blocks, or named attributes. Their returned
-        // bits deliberately remain clear instead of inventing values.
+        // Only the portable fields projected above are reported here. Other
+        // returned bits remain clear instead of inventing values.
     }
 
     fn probe_reparse_point_batch(
@@ -2555,14 +2555,20 @@ fn handle_info(basic: &[u8], standard: &[u8]) -> VfResult<smb2::client::FileInfo
         ));
     }
     let value = |bytes: &[u8]| u64::from_le_bytes(bytes.try_into().expect("length checked"));
-    Ok(smb2::client::FileInfo {
-        created: FileTime(value(&basic[0..8])),
-        accessed: FileTime(value(&basic[8..16])),
-        modified: FileTime(value(&basic[16..24])),
-        size: value(&standard[8..16]),
-        is_directory: standard[21] != 0
-            || u32::from_le_bytes(basic[32..36].try_into().expect("length checked")) & 0x10 != 0,
-    })
+    // FileInfo is non-exhaustive; initialize only the fields available in
+    // FILE_BASIC_INFORMATION and FILE_STANDARD_INFORMATION.
+    let mut info = smb2::client::FileInfo::default();
+    info.created = FileTime(value(&basic[0..8]));
+    info.accessed = FileTime(value(&basic[8..16]));
+    info.modified = FileTime(value(&basic[16..24]));
+    info.changed = FileTime(value(&basic[24..32]));
+    info.attributes = smb2::types::flags::FileAttributes(u32::from_le_bytes(
+        basic[32..36].try_into().expect("length checked"),
+    ));
+    info.size = value(&standard[8..16]);
+    info.is_directory =
+        standard[21] != 0 || info.attributes.0 & smb2::types::flags::FileAttributes::DIRECTORY != 0;
+    Ok(info)
 }
 
 fn delete_entry_create_request(mut create: CreateRequest) -> CreateRequest {
@@ -3694,6 +3700,58 @@ mod tests {
     }
 
     #[test]
+    fn request_deadline_applies_to_the_initial_negotiate() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        listener.set_nonblocking(true).unwrap();
+        let (stop, stopped) = std::sync::mpsc::channel();
+        let peer = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            loop {
+                match listener.accept() {
+                    Ok((_stream, _)) => {
+                        // Accept TCP but never reply to NEGOTIATE.
+                        let _ = stopped.recv_timeout(Duration::from_secs(3));
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= deadline {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("accept silent SMB peer: {error}"),
+                }
+            }
+        });
+        let start = std::time::Instant::now();
+        let result = SmbVecFs::connect_with_options(
+            &address,
+            "share",
+            "",
+            "",
+            "",
+            SmbConnectOptions {
+                connect_timeout: Duration::from_secs(5),
+                request_timeout: Duration::from_millis(50),
+                ..SmbConnectOptions::default()
+            },
+        );
+        let elapsed = start.elapsed();
+        let _ = stop.send(());
+        peer.join().unwrap();
+        let error = result
+            .err()
+            .expect("a silent server cannot negotiate successfully");
+        assert!(error.is_transport());
+        assert!(error.to_string().contains("timed out"), "{error}");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "NEGOTIATE ignored request timeout: {elapsed:?}"
+        );
+    }
+
+    #[test]
     fn oversized_read_responses_are_rejected_with_invalid_reply_classification() {
         for (data, requested, index) in [(vec![1, 2, 3], 2, 0), (vec![4, 5, 6, 7], 3, 2)] {
             let mut body = smb2::pack::WriteCursor::new();
@@ -3769,10 +3827,11 @@ mod tests {
     fn handle_metadata_checks_lengths_and_decodes_only_reported_fields() {
         let mut basic = [0; 40];
         let mut standard = [0; 24];
-        for (offset, ticks) in [(0, 1u64), (8, 2), (16, 3)] {
+        for (offset, ticks) in [(0, 1u64), (8, 2), (16, 3), (24, 4)] {
             basic[offset..offset + 8].copy_from_slice(&ticks.to_le_bytes());
         }
         standard[8..16].copy_from_slice(&123u64.to_le_bytes());
+        basic[32..36].copy_from_slice(&0x21u32.to_le_bytes());
         for length in 0..basic.len() {
             assert!(
                 handle_info(&basic[..length], &standard)
@@ -3793,6 +3852,8 @@ mod tests {
             (1, 2, 3)
         );
         assert_eq!(info.size, 123);
+        assert_eq!(info.changed.0, 4);
+        assert_eq!(info.attributes.0, 0x21);
         assert!(!info.is_directory);
         basic[32] = 0x10;
         assert!(handle_info(&basic, &standard).unwrap().is_directory);

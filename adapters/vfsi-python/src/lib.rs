@@ -625,7 +625,7 @@ fn mode_to_flags(mode: &str) -> PyResult<i32> {
 // ---------------------------------------------------------------------------
 
 /// Mount discovery recipe and shared resolved filesystem configuration.
-#[pyclass(frozen, skip_from_py_object)]
+#[pyclass(frozen)]
 #[derive(Clone)]
 struct MountConfiguration {
     #[cfg(all(feature = "nfs", target_os = "linux"))]
@@ -1232,7 +1232,10 @@ impl NfsClient {
                 )
                 .map_err(|e| to_py_err(e, None))?;
             let writes = validate_write_results("pwrite_many", &ops, writes)?;
-            Ok(writes.into_iter().map(|write| write.bytes_written).collect())
+            Ok(writes
+                .into_iter()
+                .map(|write| write.bytes_written)
+                .collect())
         })
     }
 
