@@ -595,6 +595,7 @@ pub fn open_flags_to_libc(flags: OpenFlags) -> VfResult<i32> {
 /// One complete open request. This replaces three error-prone parallel
 /// slices of paths, flags, and modes.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct OpenOp {
     path: PathBuf,
     flags: OpenFlags,
@@ -1499,6 +1500,7 @@ struct RemoveFlags {
 /// as much as possible, report the first error) or fail fast. Backends using
 /// the generic remover support only the default options and reject others.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct RemoveOptions {
     /// Keep removing after a per-entry failure and report the first error at
     /// the end. When `false`, the first failure aborts.
@@ -1852,6 +1854,7 @@ struct CopyFlags {
 /// symlink, its link text is copied and an existing destination is not replaced.
 /// Destination symlinks for data copies retain normal following behavior.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct CopyOptions {
     flags: CopyFlags,
 }

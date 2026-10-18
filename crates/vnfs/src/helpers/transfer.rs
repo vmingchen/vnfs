@@ -42,6 +42,7 @@ struct CopyFlags {
 /// storage and traversal limits inherit the client's limits. Options never
 /// disable negotiated backend limits. Failure/cancellation leaves partial output.
 #[derive(Clone, Copy, Debug)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct TransferOptions {
     existing: Existing,
     layout: CopyLayout,

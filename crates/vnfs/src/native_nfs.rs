@@ -139,6 +139,7 @@ impl NfsMount {
 
 /// NFS configuration builder whose `connect` returns an owned native client.
 #[derive(Debug, Clone)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct NfsBuilder {
     inner: NfsClientBuilder,
     limits: ResourceLimits,

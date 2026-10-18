@@ -35,6 +35,7 @@ struct Flags {
 /// Bounds both in-flight SQEs and the reusable owned scratch arena. No SQPOLL
 /// thread is started. A large operation is split into bounded contiguous chunks.
 #[derive(Clone, Copy, Debug)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct Options {
     pub(crate) queue_depth: NonZeroU32,
     pub(crate) max_batch_bytes: NonZeroUsize,

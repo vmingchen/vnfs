@@ -20,6 +20,7 @@ struct VisitFlags {
 /// visiting delivers owned directory pages incrementally through callbacks.
 /// Unspecified budgets inherit the client's resource limits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct ListDirOptions {
     flags: VisitFlags,
     entries: Option<NonZeroUsize>,

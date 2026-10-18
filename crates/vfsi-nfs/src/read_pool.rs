@@ -14,6 +14,7 @@ use super::{NfsClientBuilder, NfsVecFs};
 
 /// Controls concurrency and memory use for [`NfsReadPool`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct NfsReadPoolOptions {
     worker_count: usize,
     chunk_size: usize,

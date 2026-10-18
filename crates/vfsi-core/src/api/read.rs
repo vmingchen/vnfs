@@ -4,6 +4,7 @@ use std::path::Path;
 
 /// One consuming read operation. Construction performs no I/O or allocation.
 /// Caller buffers are borrowed only until `Vfsi::vread` returns, including on errors.
+#[must_use = "configuration and requests have no effect until used"]
 pub struct ReadOp<'a, H: crate::api::OpenFd + 'a> {
     source: OpSource<'a, H>,
 }
@@ -134,6 +135,15 @@ impl ReadResult {
     }
 }
 
+/// Fluent configuration must be retained; discarding a changed copy is diagnosed.
+///
+/// ```compile_fail
+/// #![deny(unused_must_use)]
+/// use vfsi_core::api::ReadOptions;
+/// let options = ReadOptions::new();
+/// options.with_max_total_bytes(std::num::NonZeroUsize::new(4096));
+/// ```
+///
 /// Aggregate logical byte budget, defaulting to the client's policy (16 MiB).
 /// Range request lengths must fit even if EOF returns fewer bytes. Complete
 /// files share the remaining returned-data budget and fail rather than truncate.
@@ -149,6 +159,7 @@ impl ReadResult {
 /// assert_eq!(inherited.max_total_bytes_or(8192), 8192);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct ReadOptions {
     max_total_bytes: Option<std::num::NonZeroUsize>,
 }

@@ -12,6 +12,7 @@ pub const DEFAULT_READ_ALLV_MAX_TOTAL_BYTES: usize = DEFAULT_READ_MAX_BYTES;
 
 /// Tuning options for bounded single-file streaming reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct StreamOptions {
     chunk_size: std::num::NonZeroUsize,
 }
@@ -134,6 +135,7 @@ pub enum TraversalCompletion {
 /// Default resource policy for a client. Per-call options override it.
 /// Byte limits bound logical payload, not allocator capacity or RPC overhead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct ResourceLimits {
     /// Maximum collected scalar payload or aggregate vector read buffers.
     /// Not a process-memory cap; standard `Read::read_to_end` and explicit

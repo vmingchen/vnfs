@@ -12,6 +12,7 @@ struct AttrsFlags {
 /// Select metadata fields and whether to follow the final symlink.
 /// Ancestor symlinks use ordinary backend path-resolution semantics.
 #[derive(Clone, Copy, Debug)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct AttrsOptions {
     fields: crate::api::Attributes,
     flags: AttrsFlags,
@@ -55,6 +56,7 @@ impl AttrsOptions {
 /// or mixed path/handle batches. Unspecified fields are unchanged; construction
 /// performs no I/O. Final symlinks are followed by default.
 #[derive(Clone, Copy, Debug)]
+#[must_use = "configuration and requests have no effect until used"]
 pub struct SetAttrsOp<T> {
     target: T,
     permissions: Option<crate::Permissions>,
