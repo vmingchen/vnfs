@@ -344,6 +344,48 @@ fn recursive_remove_requires_no_follow_metadata() {
 }
 
 #[test]
+fn timestamp_updates_reject_control_values_without_changing_the_file() {
+    let Some(mut fs) = connect() else { return };
+    let root = PathBuf::from(format!("/vfsi-smb-time-controls-{}", std::process::id()));
+    fs.create_dir_impl(&root, 0o777).unwrap();
+    let path = root.join("file");
+    let file = fs
+        .open_raw_impl(&path, libc::O_CREAT | libc::O_RDWR, 0o666)
+        .unwrap();
+    let baseline = VfAttrs {
+        file: file.clone(),
+        masks: AttrMask::ATIME | AttrMask::MTIME,
+        atime_sec: 1_700_000_000,
+        mtime_sec: 1_700_000_001,
+        ..VfAttrs::default()
+    };
+    fs.vsetattrs_raw_impl(std::slice::from_ref(&baseline))
+        .unwrap();
+    for target in [file.clone(), FileOperand::from_os_path(&path)] {
+        let update = VfAttrs {
+            file: target,
+            masks: AttrMask::ATIME | AttrMask::MTIME,
+            atime_sec: -11_644_473_600,
+            mtime_sec: -11_644_473_600,
+            ..VfAttrs::default()
+        };
+        let error = fs.vsetattrs_raw_impl(&[update]).unwrap_err();
+        assert_eq!(error.raw_code(), libc::EINVAL as u32);
+        assert_eq!(error.index(), Some(0));
+        let mut attrs = [VfAttrs {
+            file: file.clone(),
+            masks: AttrMask::ATIME | AttrMask::MTIME,
+            ..VfAttrs::default()
+        }];
+        fs.vgetattrs_impl(&mut attrs).unwrap();
+        assert_eq!(attrs[0].atime_sec, baseline.atime_sec);
+        assert_eq!(attrs[0].mtime_sec, baseline.mtime_sec);
+    }
+    fs.close_impl(&file).unwrap();
+    cleanup_test_tree(&root);
+}
+
+#[test]
 fn rust_native_file_workflow_on_smb() {
     let Some(fs) = connect() else {
         eprintln!("skipping SMB integration test: VFSI_SMB_SERVER/SHARE not set");
