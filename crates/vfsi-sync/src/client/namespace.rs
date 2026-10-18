@@ -23,17 +23,14 @@ impl<F: VectorBackend> FsClient<F> {
                 )
             })
             .collect();
-        self.lock()?
-            .vrename_with_options_impl(&requests, options)
-            .map_err(|error| match error.index() {
-                Some(index) if index < pairs.len() => {
-                    error.with_context("vrename", pairs[index].0.as_ref())
-                }
-                Some(_) => {
-                    VfError::transport(None, "rename backend returned an invalid error index")
-                }
-                None => error,
-            })
+        let result = self.lock()?.vrename_with_options_impl(&requests, options);
+        result.map_err(|error| match error.index() {
+            Some(index) if index < pairs.len() => {
+                error.with_context("vrename", pairs[index].0.as_ref())
+            }
+            Some(_) => VfError::transport(None, "rename backend returned an invalid error index"),
+            None => error,
+        })
     }
 
     /// Create directories with per-request Unix permission bits.
@@ -61,17 +58,14 @@ impl<F: VectorBackend> FsClient<F> {
                 ..Default::default()
             })
             .collect();
-        self.lock()?
-            .vmkdir_impl(&dirs)
-            .map_err(|error| match error.index() {
-                Some(index) if index < directories.len() => {
-                    error.with_context("vmkdir", directories[index].path())
-                }
-                Some(_) => {
-                    VfError::transport(None, "mkdir backend returned an invalid error index")
-                }
-                None => error,
-            })
+        let result = self.lock()?.vmkdir_impl(&dirs);
+        result.map_err(|error| match error.index() {
+            Some(index) if index < directories.len() => {
+                error.with_context("vmkdir", directories[index].path())
+            }
+            Some(_) => VfError::transport(None, "mkdir backend returned an invalid error index"),
+            None => error,
+        })
     }
 
     /// Create symbolic links in one native backend vector.
@@ -141,7 +135,8 @@ impl<F: VectorBackend> FsClient<F> {
                 crate::ExtentPair::from_os_paths(from.as_ref(), 0, to.as_ref(), 0, None)
             })
             .collect();
-        self.lock()?.vcopy_impl(&extents, options).map_err(|error| {
+        let result = self.lock()?.vcopy_impl(&extents, options);
+        result.map_err(|error| {
             error
                 .index()
                 .and_then(|index| pairs.get(index))

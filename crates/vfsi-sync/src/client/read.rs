@@ -242,17 +242,15 @@ impl<F: VectorBackend> FsClient<F> {
             .iter()
             .map(|path| FileOperand::from_os_path(path.as_ref()))
             .collect();
-        let result = self
-            .lock()?
-            .vread_all_with_options_impl(&files, options)
-            .map_err(|error| {
-                error
-                    .index()
-                    .and_then(|index| paths.get(index))
-                    .map_or(error.clone(), |path| {
-                        error.with_context("read_files", path.as_ref())
-                    })
-            });
+        let result = self.lock()?.vread_all_with_options_impl(&files, options);
+        let result = result.map_err(|error| {
+            error
+                .index()
+                .and_then(|index| paths.get(index))
+                .map_or(error.clone(), |path| {
+                    error.with_context("read_files", path.as_ref())
+                })
+        });
         result.and_then(|buffers| {
             if buffers.len() != paths.len() {
                 Err(wrong_result_count("read_files", paths.len(), buffers.len()))

@@ -3329,3 +3329,57 @@ fn malformed_open_results_retain_failed_cleanup_for_retry() {
         assert_eq!(backend.close_calls, failures + 1);
     }
 }
+
+#[test]
+fn generic_path_conversion_can_reenter_namespace_operations() {
+    #[cfg(feature = "test-support")]
+    if vfsi_sync::test_support::supervise_with_deadline(
+        "generic_path_conversion_can_reenter_namespace_operations",
+    ) {
+        return;
+    }
+    struct ReentrantPath<'a, F: VectorBackend>(&'a FsClient<F>, &'static std::path::Path);
+    impl<F: VectorBackend + 'static> AsRef<std::path::Path> for ReentrantPath<'_, F> {
+        fn as_ref(&self) -> &std::path::Path {
+            self.0.capabilities().unwrap();
+            self.1
+        }
+    }
+    let fs = FsClient::new(DefaultBackend {
+        scalar: ScalarOnly {
+            read_failure: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let path = |name: &'static str| ReentrantPath(&fs, std::path::Path::new(name));
+    assert!(
+        fs.vrename(&[(path("/from"), path("/to"))], Default::default())
+            .is_err()
+    );
+    assert!(
+        fs.vmkdir(&[vfsi_core::api::MkDirOp::new(path("/dir"), 0o777)])
+            .is_err()
+    );
+    assert!(
+        fs.vcopy(&[(path("/from"), path("/to"))], Default::default())
+            .is_err()
+    );
+    assert!(
+        fs.read_files_native(&[path("/file")], Default::default())
+            .is_err()
+    );
+    assert!(fs.ensure_empty_dir(path("/dir")).is_err());
+
+    let fs = FsClient::new(DirectoryProbe::default());
+    let closed = fs
+        .vopen_dirs(&[
+            ReentrantPath(&fs, std::path::Path::new("/0")),
+            ReentrantPath(&fs, std::path::Path::new("/1")),
+        ])
+        .unwrap();
+    assert_eq!(closed.len(), 2);
+    for dir in closed {
+        dir.close().unwrap();
+    }
+}
