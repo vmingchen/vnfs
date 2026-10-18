@@ -462,5 +462,91 @@ raise SystemExit(1)
             self.benchmark.compiler_profiles('{"reason":"build-finished","success":true}\n')
 
 
+class PairedBenchmarkTests(unittest.TestCase):
+    def setUp(self):
+        import importlib.util
+        import sys
+        self.script = Path(__file__).with_name('benchmark-paired.py')
+        spec = importlib.util.spec_from_file_location('paired', self.script)
+        self.paired = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.paired)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.fixture = self.root / 'fixture with spaces'
+        self.fixture.mkdir()
+        (self.fixture / 'input').write_bytes(b'unchanged')
+        self.output = self.root / 'results'
+        self.base = [sys.executable, str(self.script), '--fixture', str(self.fixture),
+                     '--output', str(self.output), '--pairs', '3', '--cache-state', 'warm']
+
+    def run_cli(self, before, after, *extra):
+        return subprocess.run([*self.base, '--baseline', before, '--candidate', after, *extra],
+                              capture_output=True, text=True, timeout=10)
+
+    def test_timing_uses_blocking_wait_without_timeout_polling(self):
+        from unittest.mock import patch
+        original = self.paired.subprocess.Popen.wait
+        calls = []
+        def wait(process, timeout=None):
+            calls.append(timeout)
+            return original(process, timeout=timeout)
+        with patch.object(self.paired.subprocess.Popen, 'wait', wait):
+            result = self.paired.run_command(['true'], self.root / 'timing', 1)
+        self.assertTrue(calls)
+        self.assertEqual(calls, [None])
+        self.assertGreater(result['elapsed_ns'], 0)
+
+    def test_abba_pairs_preserve_fixture_outputs_and_refuse_overwrite(self):
+        command = 'printf identical'
+        result = self.run_cli(command, command, '--check-output')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads((self.output / 'comparison.json').read_text())
+        self.assertEqual([s['label'] for s in report['samples']],
+                         ['baseline', 'candidate', 'candidate', 'baseline', 'baseline', 'candidate'])
+        self.assertEqual((self.fixture / 'input').read_bytes(), b'unchanged')
+        self.assertTrue(report['fixture_objects'])
+        original = (self.output / 'comparison.json').read_bytes()
+        self.assertNotEqual(self.run_cli(command, command).returncode, 0)
+        self.assertEqual((self.output / 'comparison.json').read_bytes(), original)
+
+    def test_rejects_output_mismatch_failed_commands_and_timeout(self):
+        for candidate, extra in [('printf different', ['--check-output']),
+                                 ('false', []), ('sleep 30', ['--timeout', '0.05'])]:
+            with self.subTest(candidate=candidate):
+                self.output = self.root / ('results-' + str(len(list(self.root.iterdir()))))
+                self.base[self.base.index('--output') + 1] = str(self.output)
+                result = self.run_cli('printf identical', candidate, *extra)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse((self.output / 'comparison.json').exists())
+
+    def test_paths_are_expanded_as_arguments_and_inode_changes_are_detected(self):
+        tokens = self.paired.command('printf "%s" {fixture}', {'fixture': str(self.fixture)})
+        self.assertEqual(tokens[-1], str(self.fixture))
+        before = self.paired.fixture_objects(self.fixture)
+        (self.fixture / 'input').rename(self.fixture / 'old')
+        (self.fixture / 'input').write_bytes(b'unchanged')
+        self.assertNotEqual(before, self.paired.fixture_objects(self.fixture))
+
+    def test_structured_comparisons_require_matching_objects_and_geometry(self):
+        case = {'backend': 'uring', 'case': 'read', 'rounds': 20, 'bytes_per_call': 8,
+                'requests_per_call': 2, 'request_bytes': 4, 'files': 2, 'cache': 'warm',
+                'allocation': 'owned', 'p50_ns': 100}
+        before = {'environment': {'fixture_objects': [1]}, 'cases': [case]}
+        after = json.loads(json.dumps(before))
+        after['cases'][0]['p50_ns'] = 50
+        self.assertEqual(self.paired.metrics(before, after), {'uring/read': 2})
+        after['cases'][0]['rounds'] = 19
+        with self.assertRaisesRegex(RuntimeError, 'geometry'):
+            self.paired.metrics(before, after)
+        after = json.loads(json.dumps(before))
+        after['environment']['fixture_objects'] = [2]
+        with self.assertRaisesRegex(RuntimeError, 'objects differ'):
+            self.paired.metrics(before, after)
+        with self.assertRaisesRegex(RuntimeError, 'only one'):
+            self.paired.metrics(before, None)
+        self.assertEqual(self.paired.comparison([2, 2, 2])['bootstrap_95_percent_interval'], [2, 2])
+
+
 if __name__ == "__main__":
     unittest.main()

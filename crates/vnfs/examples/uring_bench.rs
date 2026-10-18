@@ -112,10 +112,19 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
             .collect::<std::io::Result<_>>()?;
         // Reset both backends to identical, distinguishable contents. Source
         // preparation and validation never use the executor being measured.
+        report.preparation_bytes = 0;
+        let mut current = vec![0; size];
         for (i, (buffer, offset)) in buffers.iter_mut().zip(offsets).enumerate() {
             fill_pattern(buffer, i % files.len(), *offset, 0);
-            source[i % files.len()].write_all_at(buffer, *offset)?;
+            let source = &source[i % files.len()];
+            // Reused read fixtures must not be rewritten: that can change
+            // physical extents on copy-on-write filesystems between binaries.
+            if source.read_at(&mut current, *offset)? != size || current != *buffer {
+                source.write_all_at(buffer, *offset)?;
+                report.preparation_bytes += size as u64;
+            }
         }
+        drop(current);
         if cold {
             for file in &source {
                 file.sync_all()?;
@@ -223,24 +232,10 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
 
     let cases = config.cases()?;
     support::check_fd_limit(&cases)?;
-    let temp = tempfile::Builder::new()
-        .prefix("vfsi-uring-bench-")
-        .tempdir_in(&config.parent)?;
-    let root = temp.path();
+    let fixture = support::Fixture::open(&config)?;
+    let root = fixture.root.as_path();
     let mut report = support::Report::new(&config, root)?;
-    // Fixtures start empty: each case initializes its own ranges in bounded
-    // buffers, rather than allocating a second large-file preparation buffer.
-    for i in 0..config.files {
-        std::fs::File::create(root.join(format!("file-{i}")))?;
-    }
-    std::fs::File::create(root.join("large"))?;
-    for i in 0..16 {
-        let dir = root.join(format!("dir-{i}"));
-        std::fs::create_dir(&dir)?;
-        for j in 0..16 {
-            std::fs::write(dir.join(format!("file-{j}")), b"directory")?;
-        }
-    }
+    report.fixture(&fixture);
     println!("{config:?}\nBuffered I/O, no fsync; eviction is advisory; five warmups per case.");
     for case in cases {
         for backend in config.backends() {
@@ -259,15 +254,9 @@ fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
                 report.telemetry = Some(telemetry);
                 fs
             };
-            let rounds = if matches!(
-                case.mode,
-                Mode::ColdRead | Mode::MixedRead | Mode::OwnedRead(true)
-            ) {
-                config.rounds.min(20)
-            } else {
-                config.rounds
-            };
+            let rounds = config.rounds_for(&case);
             if case.name == "directories" {
+                report.preparation_bytes = 0;
                 let mut samples = Vec::with_capacity(rounds);
                 let mut cpu = 0.0;
                 let mut before = report.snapshot();
@@ -352,6 +341,55 @@ mod tests {
         };
         assert_ne!(pattern(0, 0), pattern(256, 0));
         assert_ne!(pattern(0, 0), pattern(0, 251));
+    }
+
+    #[test]
+    fn paired_read_runs_reuse_inodes_without_rewriting_and_honor_cold_rounds() {
+        let parent = tempfile::tempdir().unwrap();
+        let fixture = parent.path().join("fixture");
+        let mut identity = None;
+        for index in 0..2 {
+            let output = parent.path().join(format!("run-{index}.json"));
+            let config = support::Config::parse(
+                [
+                    "1",
+                    parent.path().to_str().unwrap(),
+                    "both",
+                    "cold-small-read",
+                    "2",
+                    "8192",
+                    "ring",
+                    "--files",
+                    "4",
+                    "--fixture",
+                    fixture.to_str().unwrap(),
+                    "--cold-rounds",
+                    "21",
+                    "--json",
+                    output.to_str().unwrap(),
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            )
+            .unwrap();
+            run(config).unwrap();
+            let report: serde_json::Value =
+                serde_json::from_reader(std::fs::File::open(output).unwrap()).unwrap();
+            if let Some(prior) = &identity {
+                assert_eq!(&report["environment"]["fixture_objects"], prior);
+            }
+            identity = Some(report["environment"]["fixture_objects"].clone());
+            for case in report["cases"].as_array().unwrap() {
+                assert_eq!(case["rounds"], 21);
+                if index == 1 {
+                    assert_eq!(case["preparation_written_bytes"], 0);
+                }
+            }
+            let stats = &report["cases"][1]["telemetry"];
+            assert_eq!(stats["submissions"], 84);
+            assert_eq!(stats["completions"], 84);
+            assert_eq!(stats["waves"], 42);
+        }
     }
 
     #[test]

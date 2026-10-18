@@ -11,7 +11,7 @@ use std::{
 use vfsi_uring::{Stats, Telemetry};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
-pub const USAGE: &str = "uring_bench [rounds] [parent] [both|both-reverse|posix|uring] [all|warm|cold|write-shapes|CASE] [queue_depth] [max_batch_bytes] [ring|cached|adaptive] [--files N] [--small-bytes N] [--large-bytes N] [--chunk-bytes N] [--order sequential|random] [--seed N] [--max-case-bytes N] [--json NEW_PATH]";
+pub const USAGE: &str = "uring_bench [rounds] [parent] [both|both-reverse|posix|uring] [all|warm|cold|write-shapes|CASE] [queue_depth] [max_batch_bytes] [ring|cached|adaptive] [--files N] [--small-bytes N] [--large-bytes N] [--chunk-bytes N] [--order sequential|random] [--seed N] [--max-case-bytes N] [--fixture MANAGED_DIRECTORY] [--cold-rounds N] [--json NEW_PATH]";
 const WARM: &[&str] = &[
     "small-read",
     "small-write",
@@ -45,6 +45,8 @@ pub struct Config {
     seed: u64,
     max_case_bytes: usize,
     output: Option<PathBuf>,
+    pub fixture: Option<PathBuf>,
+    cold_rounds: Option<usize>,
 }
 
 impl Config {
@@ -81,6 +83,8 @@ impl Config {
             seed: 1,
             max_case_bytes: 64 * 1024 * 1024,
             output: None,
+            fixture: None,
+            cold_rounds: None,
         };
         let mut seen = std::collections::HashSet::new();
         let mut extra = args[split..].iter();
@@ -99,6 +103,8 @@ impl Config {
                 "--seed" => c.seed = value.parse()?,
                 "--max-case-bytes" => c.max_case_bytes = value.parse()?,
                 "--json" => c.output = Some(value.into()),
+                "--fixture" => c.fixture = Some(value.into()),
+                "--cold-rounds" => c.cold_rounds = Some(value.parse()?),
                 "--order" => {
                     c.random = match value.as_str() {
                         "sequential" => false,
@@ -118,6 +124,7 @@ impl Config {
             || c.large == 0
             || c.chunk == 0
             || !c.large.is_multiple_of(c.chunk)
+            || c.cold_rounds.is_some_and(|n| !(1..=1_000_000).contains(&n))
         {
             return Err("invalid geometry: nonzero sizes, divisible large/chunk bytes, files <= 65536, rounds <= 1000000, depth <= 4096 required".into());
         }
@@ -138,6 +145,17 @@ impl Config {
             "posix" => vec!["posix"],
             "uring" => vec!["uring"],
             _ => vec!["posix", "uring"],
+        }
+    }
+
+    pub fn rounds_for(&self, case: &Case) -> usize {
+        if matches!(
+            case.mode,
+            Mode::ColdRead | Mode::MixedRead | Mode::OwnedRead(true)
+        ) {
+            self.cold_rounds.unwrap_or(self.rounds.min(20))
+        } else {
+            self.rounds
         }
     }
 
@@ -189,6 +207,133 @@ impl Config {
             Ok(Case { name, paths, offsets, size, mode })
         }).collect()
     }
+}
+
+/// Private benchmark fixtures only: never adopt an arbitrary existing directory.
+/// The persistent lock and inode manifest keep paired processes on one fixture.
+pub struct Fixture {
+    pub root: PathBuf,
+    identity: Value,
+    _lock: File,
+    _temporary: Option<tempfile::TempDir>,
+}
+
+impl Fixture {
+    pub fn open(config: &Config) -> Result<Self> {
+        use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+        let temporary = if config.fixture.is_none() {
+            Some(
+                tempfile::Builder::new()
+                    .prefix("vfsi-uring-bench-")
+                    .tempdir_in(&config.parent)?,
+            )
+        } else {
+            None
+        };
+        let root = config
+            .fixture
+            .as_deref()
+            .unwrap_or_else(|| temporary.as_ref().unwrap().path());
+        let fresh = if temporary.is_some() {
+            true
+        } else {
+            match std::fs::create_dir(root) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+                Err(error) => return Err(error.into()),
+            }
+        };
+        if !std::fs::symlink_metadata(root)?.is_dir() {
+            return Err("fixture must be a real managed directory, not a symlink".into());
+        }
+        let lock = File::options()
+            .read(true)
+            .write(true)
+            .create_new(fresh)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(root.join(".vfsi-bench.lock"))?;
+        if !lock.metadata()?.is_file() {
+            return Err("invalid fixture lock file".into());
+        }
+        // SAFETY: lock owns a live file descriptor. Never wait behind another run.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err("fixture is in use by another benchmark".into());
+        }
+        let marker = root.join(".vfsi-bench.json");
+        let geometry = json!({"schema": 1, "files": config.files, "small": config.small,
+            "large": config.large, "chunk": config.chunk, "phase": config.phase,
+            "random": config.random, "seed": config.seed});
+        if fresh {
+            for i in 0..config.files {
+                File::options()
+                    .write(true)
+                    .create_new(true)
+                    .open(root.join(format!("file-{i}")))?;
+            }
+            File::options()
+                .write(true)
+                .create_new(true)
+                .open(root.join("large"))?;
+            for i in 0..16 {
+                let dir = root.join(format!("dir-{i}"));
+                std::fs::create_dir(&dir)?;
+                for j in 0..16 {
+                    File::options()
+                        .write(true)
+                        .create_new(true)
+                        .open(dir.join(format!("file-{j}")))?
+                        .write_all(b"directory")?;
+                }
+            }
+        }
+        let identity = fixture_identity(root, config.files)?;
+        let expected = json!({"geometry": geometry, "objects": identity});
+        if fresh {
+            let file = File::options().write(true).create_new(true).open(marker)?;
+            serde_json::to_writer(file, &expected)?;
+        } else {
+            let file = File::options()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(marker)?;
+            if !file.metadata()?.is_file() || file.metadata()?.len() > 32 * 1024 * 1024 {
+                return Err("invalid benchmark fixture manifest".into());
+            }
+            let prior: Value = serde_json::from_reader(file)?;
+            if prior != expected {
+                return Err(
+                    "fixture geometry or object identities changed; choose a new fixture directory"
+                        .into(),
+                );
+            }
+        }
+        Ok(Self {
+            root: root.canonicalize()?,
+            identity,
+            _lock: lock,
+            _temporary: temporary,
+        })
+    }
+}
+
+fn fixture_identity(root: &Path, files: usize) -> Result<Value> {
+    use std::os::unix::fs::MetadataExt;
+    let paths = (0..files)
+        .map(|i| format!("file-{i}"))
+        .chain(std::iter::once("large".into()))
+        .chain((0..16).flat_map(|i| {
+            std::iter::once(format!("dir-{i}"))
+                .chain((0..16).map(move |j| format!("dir-{i}/file-{j}")))
+        }));
+    let mut identities = Vec::new();
+    for path in paths {
+        let metadata = std::fs::symlink_metadata(root.join(&path))?;
+        if !(metadata.is_file() || metadata.is_dir()) {
+            return Err("fixture contains a replaced or nonregular object".into());
+        }
+        identities.push(json!({"path": path, "device": metadata.dev(), "inode": metadata.ino()}));
+    }
+    Ok(json!(identities))
 }
 
 fn shuffle(values: &mut [u64], seed: u64) {
@@ -279,6 +424,7 @@ fn counters(before: Stats, after: Stats) -> Value {
 
 pub struct Report {
     pub telemetry: Option<Telemetry>,
+    pub preparation_bytes: u64,
     records: Vec<Value>,
     environment: Value,
     file: Option<File>,
@@ -317,10 +463,16 @@ impl Report {
         });
         Ok(Self {
             telemetry: None,
+            preparation_bytes: 0,
             records: Vec::new(),
             environment,
             file,
         })
+    }
+
+    pub fn fixture(&mut self, fixture: &Fixture) {
+        self.environment["fixture_root"] = json!(fixture.root);
+        self.environment["fixture_objects"] = fixture.identity.clone();
     }
 
     pub fn snapshot(&self) -> Stats {
@@ -368,6 +520,7 @@ impl Report {
             "mib_per_second_at_p50": throughput, "operations_per_second_at_p50": operations as f64 * 1e9 / p50.max(1) as f64,
             "process_cpu_seconds": cpu, "bytes_per_call": bytes, "requests_per_call": case.offsets.len(),
             "request_bytes": case.size, "files": case.paths.len(),
+            "preparation_written_bytes": self.preparation_bytes,
             "directory_entries_per_call": if case.name == "directories" { Some(256) } else { None },
             "allocation": if case.name == "directories" { "listing" } else if matches!(case.mode, Mode::OwnedRead(_)) { "owned" } else { "reused-caller-buffers" },
             "cache": match case.mode { Mode::MixedRead => "first-file-warm-rest-advisory-evicted", Mode::ColdRead | Mode::OwnedRead(true) => "advisory-evicted", _ => "warm" },
@@ -400,6 +553,59 @@ mod tests {
     use super::*;
     fn config(args: &[&str]) -> Result<Config> {
         Config::parse(args.iter().map(|s| (*s).to_owned()))
+    }
+
+    #[test]
+    fn persistent_fixtures_lock_validate_geometry_and_reject_replaced_objects() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("fixture");
+        let args = [
+            "2",
+            parent.path().to_str().unwrap(),
+            "posix",
+            "cold-small-read",
+            "--files",
+            "2",
+            "--fixture",
+            path.to_str().unwrap(),
+            "--cold-rounds",
+            "31",
+        ];
+        let c = config(&args).unwrap();
+        assert_eq!(c.rounds_for(&c.cases().unwrap()[0]), 31);
+        let first = Fixture::open(&c).unwrap();
+        let ids = first.identity.clone();
+        assert!(Fixture::open(&c).is_err(), "must not race another process");
+        drop(first);
+        assert_eq!(Fixture::open(&c).unwrap().identity, ids);
+        let mut changed = config(&args).unwrap();
+        changed.small += 1;
+        assert!(Fixture::open(&changed).is_err());
+        std::fs::rename(path.join("file-0"), path.join("old-file")).unwrap();
+        File::create(path.join("file-0")).unwrap();
+        assert!(
+            Fixture::open(&c).is_err(),
+            "replacement inode must not be adopted"
+        );
+        for value in ["0", "1000001"] {
+            assert!(config(&["--cold-rounds", value]).is_err());
+        }
+    }
+
+    #[test]
+    fn fixtures_never_adopt_existing_user_directories_or_symlinks() {
+        use std::os::unix::fs::symlink;
+        let parent = tempfile::tempdir().unwrap();
+        let data = parent.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(data.join("file-0"), b"keep").unwrap();
+        let link = parent.path().join("link");
+        symlink(&data, &link).unwrap();
+        for path in [&data, &link] {
+            let c = config(&["--fixture", path.to_str().unwrap()]).unwrap();
+            assert!(Fixture::open(&c).is_err());
+        }
+        assert_eq!(std::fs::read(data.join("file-0")).unwrap(), b"keep");
     }
 
     #[test]

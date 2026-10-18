@@ -1,5 +1,45 @@
 # Local CI and build reuse
 
+## Paired benchmarks
+
+`benchmark-paired.py` compares immutable commands in alternating AB/BA pairs on
+one fixture, recording executable/input hashes, device/inode identities, raw
+output and paired speedup estimates. Build both executables using the same
+harness/compiler settings and retain build provenance. Initialize outside timing:
+
+```sh
+python3 scripts/benchmark-paired.py --pairs 9 --cache-state advisory-evicted \
+  --fixture /tmp/uring-shared --output /tmp/uring-comparison \
+  --prepare '/path/baseline 1 target uring cold-small-read --fixture {fixture} --json {report}' \
+  --baseline '/path/baseline 100 target uring cold-small-read --cold-rounds 100 --fixture {fixture} --json {report}' \
+  --candidate '/path/candidate 100 target uring cold-small-read --cold-rounds 100 --fixture {fixture} --json {report}'
+```
+
+Structured comparisons use inner-operation p50 and check equal geometry and
+fixture identities; process startup/setup is reported separately. Queue/window
+settings may differ for tuning. Read-only preparation should report zero writes
+after initialization. A fixture lock excludes overlapping comparisons. Process
+groups have deadlines; failures retain logs.
+
+Application ports use the same runner. For read-only deterministic commands,
+`--check-output` verifies identical stdout, for example on an existing NFS tree:
+
+```sh
+python3 scripts/benchmark-paired.py --cache-state warm --check-output \
+  --fixture /mnt/nfs/benchmark-tree --output /tmp/ls-comparison \
+  --baseline '/path/upstream/ls -R {fixture}' \
+  --candidate 'env VNFS_IMPL=nfs /path/vfsi-port-coreutils/ls -R {fixture}'
+```
+
+Explicit `--before-each` setup runs outside timing. The runner never changes
+shared mounts/network configuration. `--rtt-ms` only labels externally established
+RTT: use a dedicated namespace for latency experiments. Cache labels likewise
+describe caller setup, not guaranteed cold storage. Keep credentials out of
+recorded arguments. Optional `--max-regression-percent 10` gates only when the
+estimated speedup interval lies wholly beyond that slowdown; use controlled
+hosts. Bootstrap intervals are not proof of equivalence. Keep deterministic
+batching tests in CI and timing campaigns separate.
+
 ### Development application ports
 
 After temporarily pointing the Rust ports' `vnfs` dependency at this checkout:

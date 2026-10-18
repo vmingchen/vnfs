@@ -165,6 +165,8 @@ These are the defaults; trailing named options customize the geometry:
 | `--seed` | 1 | Seed for the range permutation |
 | `--max-case-bytes` | 67108864 | Maximum payload per vector call; increase explicitly for larger cases |
 | `--json` | none | New report path; existing files are never overwritten |
+| `--fixture` | temporary | Reuse a managed directory with matching geometry and file identities |
+| `--cold-rounds` | min(rounds, 20) | Sample count for advisory-evicted and mixed-cache cases |
 
 Payload limits are validated before fixture creation. Validation/alternate
 buffers can require approximately three times the payload, plus request/result
@@ -176,6 +178,21 @@ file needs a backend handle and an independent validation handle, plus a small
 reserve. For large cohorts, raise only the benchmark shell's soft limit within
 its existing hard limit (for example `ulimit -Sn 16384` for 4,096 files), or reduce
 `--files`. No process or system limits are changed automatically.
+
+`--fixture` creates a managed directory when absent; it never adopts an arbitrary
+existing directory. Later runs verify geometry and device/inode identities,
+and an exclusive lock prevents concurrent measurements. Persistent fixtures
+require manual cleanup; the default temporary fixture is removed on exit.
+Read-only runs check existing bytes without rewriting correct data, avoiding
+extent-layout changes between executables. JSON records fixture identities and
+`preparation_written_bytes` (zero after initialization for repeated read cases).
+Advisory eviction does not guarantee cold physical storage.
+
+Use `scripts/benchmark-paired.py` to compare immutable executables on these same
+objects in alternating AB/BA order, or to compare application-port commands.
+It preserves raw reports, executable hashes, output checks, and cache/RTT labels.
+See `scripts/README.md` for the workflow. Profile separately from timing runs;
+ordinary CI checks deterministic batching, not noisy throughput thresholds.
 
 For a small complete run, including actual ring I/O and both backends:
 
