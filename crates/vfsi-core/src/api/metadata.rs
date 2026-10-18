@@ -55,17 +55,18 @@ impl AttrsOptions {
 /// Paths can be supplied directly. Use [`super::Target`] for handles
 /// or mixed path/handle batches. Unspecified fields are unchanged; construction
 /// performs no I/O. Final symlinks are followed by default.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 #[must_use = "configuration and requests have no effect until used"]
 pub struct SetAttrsOp<T> {
     target: T,
-    permissions: Option<crate::Permissions>,
-    uid: Option<u32>,
-    gid: Option<u32>,
-    len: Option<u64>,
+    permissions: crate::Permissions,
+    uid: u32,
+    gid: u32,
+    len: u64,
     accessed: Option<std::time::SystemTime>,
     modified: Option<std::time::SystemTime>,
     flags: AttrsFlags,
+    present: u8,
 }
 
 impl<T> SetAttrsOp<T> {
@@ -73,13 +74,14 @@ impl<T> SetAttrsOp<T> {
     pub fn new(target: T) -> Self {
         Self {
             target,
-            permissions: None,
-            uid: None,
-            gid: None,
-            len: None,
+            permissions: crate::Permissions::from_mode(0),
+            uid: 0,
+            gid: 0,
+            len: 0,
             accessed: None,
             modified: None,
             flags: AttrsFlags::new(),
+            present: 0,
         }
     }
 
@@ -97,25 +99,29 @@ impl<T> SetAttrsOp<T> {
 
     /// Change permissions, leaving other unspecified attributes unchanged.
     pub fn permissions(mut self, permissions: crate::Permissions) -> Self {
-        self.permissions = Some(permissions);
+        self.permissions = permissions;
+        self.present |= 1 << 0;
         self
     }
 
     /// Change the owner. `u32::MAX` is reserved and rejected before dispatch.
     pub fn uid(mut self, uid: u32) -> Self {
-        self.uid = Some(uid);
+        self.uid = uid;
+        self.present |= 1 << 1;
         self
     }
 
     /// Change the group. `u32::MAX` is reserved and rejected before dispatch.
     pub fn gid(mut self, gid: u32) -> Self {
-        self.gid = Some(gid);
+        self.gid = gid;
+        self.present |= 1 << 2;
         self
     }
 
     /// Truncate or extend the file. Zero explicitly truncates it to an empty file.
     pub fn len(mut self, len: u64) -> Self {
-        self.len = Some(len);
+        self.len = len;
+        self.present |= 1 << 3;
         self
     }
 
@@ -143,24 +149,25 @@ impl<T> SetAttrsOp<T> {
             accessed: self.accessed,
             modified: self.modified,
             flags: self.flags,
+            present: self.present,
         }
     }
 
     /// Requested permission change, or `None` to leave permissions unchanged.
     pub fn requested_permissions(&self) -> Option<crate::Permissions> {
-        self.permissions
+        (self.present & (1 << 0) != 0).then_some(self.permissions)
     }
     /// Requested owner change, or `None` to leave the owner unchanged.
     pub fn requested_uid(&self) -> Option<u32> {
-        self.uid
+        (self.present & (1 << 1) != 0).then_some(self.uid)
     }
     /// Requested group change, or `None` to leave the group unchanged.
     pub fn requested_gid(&self) -> Option<u32> {
-        self.gid
+        (self.present & (1 << 2) != 0).then_some(self.gid)
     }
     /// Requested length, including zero, or `None` to leave the length unchanged.
     pub fn requested_len(&self) -> Option<u64> {
-        self.len
+        (self.present & (1 << 3) != 0).then_some(self.len)
     }
     /// Requested access timestamp, or `None` to leave it unchanged.
     pub fn requested_accessed(&self) -> Option<std::time::SystemTime> {
@@ -177,6 +184,20 @@ impl<T> SetAttrsOp<T> {
     }
 }
 
+impl<T: std::fmt::Debug> std::fmt::Debug for SetAttrsOp<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SetAttrsOp")
+            .field("target", self.target())
+            .field("permissions", &self.requested_permissions())
+            .field("uid", &self.requested_uid())
+            .field("gid", &self.requested_gid())
+            .field("len", &self.requested_len())
+            .field("accessed", &self.requested_accessed())
+            .field("modified", &self.requested_modified())
+            .field("flags", &self.flags)
+            .finish()
+    }
+}
 impl<'a, F> SetAttrsOp<super::Target<'a, F>> {
     /// Prepare an update for an opened object without borrowing its pathname.
     /// The handle remains owned by the caller and is checked at dispatch.
@@ -259,6 +280,48 @@ mod option_layout_tests {
             assert_eq!(changed.follow_symlinks(), follow);
             assert_eq!(changed.fields(), fields);
             assert!(options.follow_symlinks());
+        }
+    }
+}
+
+#[cfg(test)]
+mod compact_update_tests {
+    use super::*;
+    #[test]
+    fn integer_presence_is_independent_and_keeps_zero_and_maximum_values() {
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(std::mem::size_of::<SetAttrsOp<&std::path::Path>>(), 72);
+        }
+        for bits in 0u8..16 {
+            for maximum in [false, true] {
+                let integer = if maximum { u32::MAX } else { 0 };
+                let length = if maximum { u64::MAX } else { 0 };
+                let permissions = crate::Permissions::from_mode(integer);
+                let mut op = SetAttrsOp::new("/file");
+                if bits & 1 != 0 {
+                    op = op.permissions(permissions);
+                }
+                if bits & 2 != 0 {
+                    op = op.uid(integer);
+                }
+                if bits & 4 != 0 {
+                    op = op.gid(integer);
+                }
+                if bits & 8 != 0 {
+                    op = op.len(length);
+                }
+                for op in [op, op.with_target("/other").with_follow_symlinks(false)] {
+                    assert_eq!(
+                        op.requested_permissions(),
+                        (bits & 1 != 0).then_some(permissions)
+                    );
+                    assert_eq!(op.requested_uid(), (bits & 2 != 0).then_some(integer));
+                    assert_eq!(op.requested_gid(), (bits & 4 != 0).then_some(integer));
+                    assert_eq!(op.requested_len(), (bits & 8 != 0).then_some(length));
+                    assert_eq!(op.requested_accessed(), None);
+                    assert_eq!(op.requested_modified(), None);
+                }
+            }
         }
     }
 }

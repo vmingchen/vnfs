@@ -82,56 +82,72 @@ impl<'a, H: crate::api::OpenFd + 'a> ReadOp<'a, H> {
 }
 
 /// Progress for one operation, with no borrowed references to caller storage.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReadResult {
-    /// Resolved absolute offset; zero for a complete-file operation.
-    pub(crate) offset: u64,
-    /// Number of valid bytes in owned data or the caller's buffer.
-    pub(crate) bytes_read: usize,
-    /// True when the backend observed end of file.
-    pub(crate) eof: bool,
-    /// Owned contents for `whole`/`range`; `None` for `into`, including empty reads.
-    pub(crate) data: Option<Vec<u8>>,
+    offset: u64,
+    eof: bool,
+    payload: ReadPayload,
 }
-
+#[derive(Clone, PartialEq, Eq)]
+enum ReadPayload {
+    Owned(Vec<u8>),
+    Buffered(usize),
+}
+impl std::fmt::Debug for ReadResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReadResult")
+            .field("offset", &self.offset())
+            .field("bytes_read", &self.bytes_read())
+            .field("eof", &self.eof())
+            .field("data", &self.data())
+            .finish()
+    }
+}
 impl ReadResult {
     /// Owned contents. The byte count is derived, never independently supplied.
     pub fn owned(offset: u64, data: Vec<u8>, eof: bool) -> Self {
         Self {
             offset,
-            bytes_read: data.len(),
             eof,
-            data: Some(data),
+            payload: ReadPayload::Owned(data),
         }
     }
-    /// Progress in caller storage, for implementing `Vfsi`. The implementation
-    /// must ensure `bytes_read` does not exceed the corresponding destination length.
+    /// Progress in caller storage, for implementing Vfsi. The implementation
+    /// must keep bytes_read within the corresponding destination length.
     pub const fn buffered(offset: u64, bytes_read: usize, eof: bool) -> Self {
         Self {
             offset,
-            bytes_read,
             eof,
-            data: None,
+            payload: ReadPayload::Buffered(bytes_read),
         }
     }
     pub const fn offset(&self) -> u64 {
         self.offset
     }
-    /// Number of valid bytes in the owned data or caller-provided buffer.
+    /// Number of valid bytes in owned data or caller-provided storage.
     pub const fn bytes_read(&self) -> usize {
-        self.bytes_read
+        match &self.payload {
+            ReadPayload::Owned(data) => data.len(),
+            ReadPayload::Buffered(count) => *count,
+        }
     }
     pub const fn eof(&self) -> bool {
         self.eof
     }
     pub fn data(&self) -> Option<&[u8]> {
-        self.data.as_deref()
+        match &self.payload {
+            ReadPayload::Owned(data) => Some(data.as_slice()),
+            ReadPayload::Buffered(_) => None,
+        }
     }
     pub fn into_data(self) -> Option<Vec<u8>> {
-        self.data
+        match self.payload {
+            ReadPayload::Owned(data) => Some(data),
+            ReadPayload::Buffered(_) => None,
+        }
     }
     pub const fn is_buffered(&self) -> bool {
-        self.data.is_none()
+        matches!(&self.payload, ReadPayload::Buffered(_))
     }
 }
 
@@ -276,23 +292,17 @@ pub fn consume_ops<'a, H: crate::api::OpenFd + 'a, R, B>(
     }
     let mut output: Vec<Option<ReadResult>> = (0..count).map(|_| None).collect();
     for (index, result) in buffer_indices.into_iter().zip(buffered) {
-        output[index] = Some(ReadResult {
-            offset: result.offset,
-            bytes_read: result.bytes_read,
-            eof: result.eof,
-            data: None,
-        });
+        output[index] = Some(ReadResult::buffered(
+            result.offset,
+            result.bytes_read,
+            result.eof,
+        ));
     }
     for (index, result) in owned_indices.into_iter().zip(allocated) {
         remaining = remaining
             .checked_sub(result.data.len())
             .ok_or_else(|| Error::transport(None, "vread_native backend exceeded byte budget"))?;
-        output[index] = Some(ReadResult {
-            offset: result.offset,
-            bytes_read: result.data.len(),
-            eof: result.eof,
-            data: Some(result.data),
-        });
+        output[index] = Some(ReadResult::owned(result.offset, result.data, result.eof));
     }
     output
         .into_iter()
@@ -439,6 +449,39 @@ mod option_layout_tests {
             options.max_total_bytes_or(0),
             0,
             "an inherited zero policy must not become unlimited"
+        );
+    }
+}
+
+#[cfg(test)]
+mod compact_read_tests {
+    use super::*;
+    #[test]
+    fn compact_read_results_preserve_owned_and_buffered_empty_progress() {
+        if cfg!(target_pointer_width = "64") {
+            assert_eq!(std::mem::size_of::<ReadResult>(), 40);
+        }
+        let owned = ReadResult::owned(7, Vec::new(), true);
+        const BUFFERED: ReadResult = ReadResult::buffered(7, 0, true);
+        assert_eq!(owned.bytes_read(), 0);
+        assert_eq!(owned.offset(), BUFFERED.offset());
+        assert_eq!(owned.eof(), BUFFERED.eof());
+        assert_eq!(owned.data(), Some(b"".as_slice()));
+        assert_eq!(BUFFERED.data(), None);
+        assert_ne!(owned, BUFFERED);
+        assert!(!owned.is_buffered());
+        assert!(BUFFERED.is_buffered());
+        assert_eq!(owned.clone().into_data(), Some(Vec::new()));
+        assert_eq!(BUFFERED.clone().into_data(), None);
+        let data = vec![1, 2, 3];
+        let pointer = data.as_ptr();
+        let result = ReadResult::owned(9, data, false);
+        assert_eq!(result.bytes_read(), 3);
+        let extracted = result.into_data().unwrap();
+        assert_eq!(extracted.as_ptr(), pointer);
+        assert_eq!(
+            ReadResult::buffered(0, usize::MAX, false).bytes_read(),
+            usize::MAX
         );
     }
 }

@@ -210,13 +210,14 @@ pub trait VfsiExt: Vfsi {
             .into_iter()
             .enumerate()
             .map(|(index, result)| {
-                let data = result.data.ok_or_else(|| {
+                let complete = result.offset() == 0 && result.eof();
+                let data = result.into_data().ok_or_else(|| {
                     crate::api::Error::transport(
                         Some(index),
                         "whole-file vread_native omitted owned data",
                     )
                 })?;
-                if data.len() != result.bytes_read || result.offset != 0 || !result.eof {
+                if !complete {
                     return Err(crate::api::Error::transport(
                         Some(index),
                         "whole-file vread_native returned incomplete or invalid data",
