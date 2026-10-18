@@ -1,7 +1,8 @@
 # io_uring versus the POSIX VFSI backend
 
-This is a historical experiment report from October 10–11, 2026, not a new
-benchmark of the current checkout. Measurements below are preserved unchanged.
+The October 10–11, 2026 sections are historical experiments; their measurements
+are preserved unchanged. The [October 18 follow-up](#october-18-2026-bounded-wave-planning)
+records a new profiling-driven scheduler optimization against commit `7dc2654`.
 For application setup, use the [io_uring guide](../crates/vnfs/src/guides/uring.md).
 
 ## Summary and provenance
@@ -465,3 +466,111 @@ checks. Those jobs took 4 / 3 / 2 seconds respectively on a warm build cache.
 The 48 shared-local unit tests also passed separately. Live NFS/SMB suites were
 not rerun for this local-executor-only change; 11 live fixture tests in smoke
 remain ignored and are not counted as coverage.
+
+## October 18, 2026: bounded-wave planning
+
+Baseline: `7dc2654`, built with the release profile and `uring,posix` features.
+The candidate changes only the executor's scheduling scans; queue/byte defaults,
+buffer ownership, syscall-selection policy and write-coalescing behavior remain
+unchanged. This experiment used the ARM64 four-vCPU development VM, Linux
+`7.0.0-28-generic`, and the existing disk-backed `target` scratch parent.
+
+### Profile and implementation
+
+A 16 MiB file read as 4,096 independent 4 KiB ranges, with queue depth 16 and a
+64 KiB window, exposed repeated scanning of completed jobs and the complete
+error array for every wave. At 499 Hz, process CPU-clock sampling attributed
+12.35% of samples to `Engine::execute`; annotated assembly put its hottest
+instructions in these scans. The candidate keeps a monotonic first-pending
+cursor and a failure flag, retaining per-request progress/error storage.
+It neither reorders work nor changes submission or failure ownership.
+The executor's sample share fell to 2.62% in the follow-up profile.
+
+These profiles include preparation, buffer poisoning and validation outside
+the timed region. In particular, `memcmp` and `memset` samples are not all
+library costs. Do not use sampled shares as wall-time fractions or read
+speedups from profiled run times. Unprofiled timings follow below.
+
+The deterministic regression initially failed with **16,766 planning visits for
+128 reads**. It now bounds planning visits linearly for reads and writes using
+a one-entry queue and three-byte window, verifies distinct per-request data and
+changed write payloads, and requires exactly 512 submissions/completions/waves
+for the combined work. Test-only counting adds no release instrumentation.
+
+### Matched measurements
+
+Run the immutable baseline/candidate binaries in ABBA order, reversing backend
+order for balanced controls. Figures below are means of per-run p50 latencies,
+not aggregate request percentiles or confidence intervals. The initial ABBA
+sequence used two runs per binary: 300 samples for range/large-cohort cases and
+3,000 for ordinary small reads/writes, each following five warmups.
+
+| Ring-only workload | Baseline | Candidate | Interpretation |
+|---|---:|---:|---|
+| 4,096 × 4 KiB ranges; depth 16, window 64 KiB | 4,553.0 µs | 4,044.7 µs | 11.2% lower latency, 1.13× throughput |
+| Same ranges; default depth/window | 4,061.2 µs | 4,030.7 µs | Essentially flat |
+| 4,096 × 4 KiB files; default depth/window | 5,321.5 µs | 5,248.5 µs | Small difference; not a robust speedup claim |
+
+The depth-16 POSIX control changed from 4,876.8 to 5,010.0 µs; the ring gain is
+not explained by a faster control. Every matched scenario retained identical
+submission/completion/wave counts, read-copy bytes and peak transfer budgets.
+The 300-sample depth-16 ring case still performs 1,228,800 SQEs/CQEs in 76,800
+waves, with 65,536 peak transfer bytes and 5,033,164,800 read-copy bytes.
+
+An initial owned-read difference did not reproduce in a longer eight-run
+confirmation (four runs per binary). Owned 4 KiB ranges averaged 5,107.7 versus
+5,048.5 µs, about 0.5% faster after normalizing against POSIX controls: flat in
+practical terms. An eight-run, 5,000-sample warm-small-read confirmation averaged
+113.1 versus 113.7 µs; POSIX-normalized throughput was 0.999×. No warm-small-read
+speedup or robust regression is established.
+
+Cold-I/O results need more caution. A separate full-matrix comparison initially
+showed substantially slower cold small/mixed reads, despite identical I/O work.
+After an eight-run matched check, a further ring-only ABBA sequence with 16 runs
+per binary measured cold-small means of 774.5 versus 818.2 µs and mixed-read
+means of 769.9 versus 812.6 µs. Individual medians ranged from 667–926 versus
+719–1,007 µs for cold reads, and 726–847 versus 726–1,070 µs for mixed reads.
+Cold-small caller CPU time was essentially unchanged (511.3 versus 510.4 µs
+per call). The roughly 5–6% slower candidate wall-time means and broad spread
+are retained as a residual performance concern, not dismissed as a proven
+non-regression. These measurements do not establish all-workload parity.
+An eight-run small-write confirmation was approximately flat against POSIX
+controls (0.990× normalized throughput). No default tuning change follows from
+these inconclusive cases.
+
+### Remaining costs and reproduction
+
+Warm borrowed small-read profiling still shows kernel copy-to-user, userspace
+copying and request setup. Borrowed destinations retain their kernel-facing
+scratch for catastrophic-failure safety; removing that copy was not part of this
+change. System-wide small-write profiling found worker wakeups and kernel/user
+copies; idle and unrelated work were also sampled. This does not justify a
+worker-policy or default execution-mode change. Hybrid/syscall-write results
+must remain separate from ring-only performance.
+
+Raw JSON, logs, perf data, annotated assembly, and immutable binaries are retained
+outside Cargo caches on the development VM at
+`/home/ubuntu/uring-profile-2026-10-18.Bt2ZLt`. Source revision/status recorded by
+the driver are runtime metadata: distinguish the `7dc2654` baseline from the
+candidate scheduler patch, and use each report's executable SHA-256 to identify
+the measured binary. These are single-VM observations, not deployment guarantees.
+
+```sh
+export CARGO_TARGET_DIR=target/merge-vnfs01
+cargo build --release --locked -p vnfs --no-default-features \
+  --features uring,posix --example uring_bench
+target/merge-vnfs01/release/examples/uring_bench 300 target both large-read 16 65536 ring \
+  --large-bytes 16777216 --chunk-bytes 4096 --json /tmp/uring-ranges-q16.json
+# Repeat with both-reverse and alternate saved baseline/candidate binaries.
+# Profile separately; do not compare perf-instrumented timings with untraced ones.
+sudo perf record -e cpu-clock -F 499 -g -- \
+  target/merge-vnfs01/release/examples/uring_bench 300 target uring large-read 16 65536 ring \
+  --large-bytes 16777216 --chunk-bytes 4096
+sudo perf report --stdio --no-children --call-graph none
+```
+
+Validation: the complete real-ring unit/fault, backend, public facade,
+benchmark and guide selections passed, as did the repository smoke selection,
+strict selected-target Clippy, formatting, and Rust 1.88 compatibility checks.
+The new planning regression was observed failing before the optimization.
+Live NFS/SMB tests are outside this executor-only change and were not rerun.

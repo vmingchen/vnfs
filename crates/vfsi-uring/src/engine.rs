@@ -98,6 +98,8 @@ pub(crate) struct Engine {
     short_completion: Option<usize>,
     #[cfg(test)]
     fail_after_submit: bool,
+    #[cfg(test)]
+    planning_visits: usize,
 }
 
 enum Buffer<'a> {
@@ -181,6 +183,8 @@ impl Engine {
                 short_completion: None,
                 #[cfg(test)]
                 fail_after_submit: false,
+                #[cfg(test)]
+                planning_visits: 0,
             },
             telemetry,
         ))
@@ -396,6 +400,10 @@ impl Engine {
     }
 
     fn execute(&mut self, jobs: &mut [Job<'_>]) -> Vec<io::Result<usize>> {
+        #[cfg(test)]
+        {
+            self.planning_visits = 0;
+        }
         if self.ring.is_none() {
             return jobs
                 .iter()
@@ -413,10 +421,25 @@ impl Engine {
         done.resize(jobs.len(), false);
         errors.clear();
         errors.resize(jobs.len(), None);
-        while done.iter().any(|finished| !finished) {
+        // Completed prefixes never become pending again. Keep a monotonic
+        // cursor instead of rescanning all earlier jobs for every bounded wave.
+        let mut first_pending = 0;
+        // Aggregate errors as they are recorded, not with another cohort scan.
+        let mut failed = false;
+        while first_pending < jobs.len() {
+            while first_pending < jobs.len() && done[first_pending] {
+                first_pending += 1;
+            }
+            if first_pending == jobs.len() {
+                break;
+            }
             pending.clear();
             let mut budget = self.options.max_batch_bytes.get();
-            for (index, job) in jobs.iter_mut().enumerate() {
+            for (index, job) in jobs.iter_mut().enumerate().skip(first_pending) {
+                #[cfg(test)]
+                {
+                    self.planning_visits += 1;
+                }
                 if done[index] {
                     continue;
                 }
@@ -441,6 +464,7 @@ impl Engine {
                     .min(u32::MAX as usize);
                 let Some(offset) = job.offset.checked_add(progress[index] as u64) else {
                     errors[index] = Some(libc::EOVERFLOW);
+                    failed = true;
                     done[index] = true;
                     continue;
                 };
@@ -499,12 +523,14 @@ impl Engine {
                         }
                         if result < 0 {
                             errors[index] = Some(-result);
+                            failed = true;
                             done[index] = true;
                             continue;
                         }
                         let count = result as usize;
                         if count > op.bytes.len() {
                             errors[index] = Some(libc::EIO);
+                            failed = true;
                             done[index] = true;
                             continue;
                         }
@@ -539,6 +565,7 @@ impl Engine {
                     pending = completed;
                 }
                 Err(error) => {
+                    failed = true;
                     let errno = error.raw_os_error().unwrap_or(libc::EIO);
                     for index in 0..jobs.len() {
                         if !done[index] {
@@ -552,7 +579,7 @@ impl Engine {
             // not dispatch untouched jobs or retry another job's suffix.
             // Keep their acknowledged progress; the indexed error remains
             // attached to the request that actually failed.
-            if errors.iter().any(Option::is_some) {
+            if failed {
                 break;
             }
         }
@@ -1406,6 +1433,73 @@ mod tests {
                 (1, 1, 1)
             );
         }
+    }
+
+    #[test]
+    fn many_bounded_waves_do_not_rescan_the_completed_prefix() {
+        const COUNT: usize = 128;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file");
+        let initial: Vec<_> = (0..COUNT).flat_map(|i| [i as u8; 4]).collect();
+        std::fs::write(&path, &initial).unwrap();
+        let file = Arc::new(File::options().read(true).write(true).open(path).unwrap());
+        let (mut engine, telemetry) = Engine::new(
+            Options::default()
+                .with_queue_depth(std::num::NonZeroU32::new(1).unwrap())
+                .with_max_batch_bytes(std::num::NonZeroUsize::new(3).unwrap()),
+        )
+        .unwrap();
+        let mut buffers = vec![[0; 4]; COUNT];
+        let mut reads: Vec<_> = buffers
+            .iter_mut()
+            .enumerate()
+            .map(|(i, buffer)| Read {
+                file: &file,
+                offset: (i * 4) as u64,
+                buffer,
+            })
+            .collect();
+        let results = engine.read(&mut reads);
+        assert!(results.iter().all(|r| *r.as_ref().unwrap() == 4));
+        assert!(buffers.iter().enumerate().all(|(i, b)| *b == [i as u8; 4]));
+        assert!(
+            engine.planning_visits <= COUNT * 8,
+            "{} planning visits for {COUNT} reads",
+            engine.planning_visits
+        );
+        for buffer in &mut buffers {
+            for byte in buffer {
+                *byte ^= 0xa5;
+            }
+        }
+        let writes: Vec<_> = buffers
+            .iter()
+            .enumerate()
+            .map(|(i, buffer)| Write {
+                file: &file,
+                offset: (i * 4) as u64,
+                data: buffer,
+            })
+            .collect();
+        let results = engine.write(&writes);
+        assert!(results.iter().all(|r| *r.as_ref().unwrap() == 4));
+        assert!(
+            engine.planning_visits <= COUNT * 8,
+            "{} planning visits for {COUNT} writes",
+            engine.planning_visits
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("file")).unwrap(),
+            initial.iter().map(|byte| byte ^ 0xa5).collect::<Vec<_>>()
+        );
+        let stats = telemetry.snapshot();
+        // Two bounded chunks per logical operation; no missing work or altered
+        // batching may explain a reduction in planning work.
+        assert_eq!(
+            (stats.submissions, stats.completions, stats.waves),
+            (512, 512, 512)
+        );
+        assert_eq!(stats.peak_bytes, 3);
     }
 
     #[test]
