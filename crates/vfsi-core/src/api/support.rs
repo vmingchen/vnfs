@@ -61,7 +61,7 @@ pub const DEFAULT_WALK_MAX_DEPTH: usize = 128;
 /// A checked finite traversal depth or an explicitly unlimited traversal.
 /// The root has depth zero. Unlimited depth retains entry and byte budgets.
 /// Finite depths 0 through 65,533 are representable; larger values are rejected.
-/// Both this type and Option<DepthLimit> occupy two bytes.
+/// Both this type and `Option<DepthLimit>` occupy two bytes.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DepthLimit(std::num::NonZeroU16);
