@@ -19,7 +19,7 @@ dummy = ["dep:vfsi-local", "dep:vfsi-posix"]
 
 [dependencies]
 libc = "0.2"
-pyo3 = { version = "0.29", features = ["abi3-py39", "abi3t"] }
+pyo3 = { version = "0.30", features = ["abi3-py39", "abi3t"] }
 vfsi-core = { path = "../../crates/vfsi-core", version = "0.1.11" }
 vfsi-local = { path = "../../crates/vfsi-local", version = "0.1.10", optional = true }
 vfsi-posix = { path = "../../crates/vfsi-posix", version = "0.1.2", optional = true }
