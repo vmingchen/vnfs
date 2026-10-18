@@ -1137,3 +1137,30 @@ fn symlink_policy_names_distinguish_final_metadata_from_directory_components() {
         2
     );
 }
+
+#[cfg(all(feature = "posix", unix))]
+#[test]
+fn local_constructors_preserve_missing_and_non_directory_root_errors() {
+    let root = tempfile_root();
+    let missing = root.join("missing/child");
+    let error = vnfs::posix::Posix::new(&missing).err().unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(error.path(), Some(missing.as_path()));
+    assert!(!root.join("missing").exists());
+    let regular = root.join("file");
+    std::fs::write(&regular, b"data").unwrap();
+    let error = vnfs::posix::Posix::new(&regular).err().unwrap();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+    assert_eq!(error.path(), Some(regular.as_path()));
+
+    #[cfg(all(feature = "auto", target_os = "linux"))]
+    {
+        let error = vnfs::mounted::Auto::new(&missing).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(error.path(), Some(missing.as_path()));
+        assert!(!root.join("missing").exists());
+        let error = vnfs::mounted::Auto::new(&regular).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

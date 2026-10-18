@@ -32,13 +32,13 @@ impl DescriptorIo for PosixIo {
     }
 }
 
-/// Construct the rooted native backend, creating a missing root.
+/// Construct the native backend rooted at an existing directory.
 /// Applications normally use [`connect`] or `vnfs::Posix` instead.
 pub fn backend(root: impl AsRef<Path>) -> VfResult<LocalBackend> {
     LocalBackend::new(root.as_ref().to_path_buf(), PosixIo)
 }
 
-/// Connect to a root (created if missing), using ordered syscalls.
+/// Connect to an existing directory, using ordered syscalls.
 pub fn connect(root: impl AsRef<Path>) -> VfResult<vfsi_sync::FsClient<LocalBackend>> {
     backend(root).map(vfsi_sync::FsClient::new)
 }

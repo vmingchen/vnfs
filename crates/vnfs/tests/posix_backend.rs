@@ -503,6 +503,7 @@ fn dummy_stays_under_root() {
     let name = format!("vnfs_root_{}", std::process::id());
     let root = std::env::temp_dir().join(&name);
     let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir(&root).unwrap();
     let mut fs = vfsi_posix::backend(root.clone()).unwrap();
 
     fs.ensure_dir_impl(Path::new(&format!("/{}", name)), 0o755)

@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::fs::{File, FileTimes, OpenOptions};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt, symlink};
+use std::os::unix::fs::{
+    FileExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt, symlink,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -292,13 +294,17 @@ impl LocalBackend {
         Ok(())
     }
 
-    /// Prepare a root (created if missing) with an explicit synchronous executor.
+    /// Open an existing directory with an explicit synchronous executor.
     pub fn new(root: PathBuf, engine: impl io::DescriptorIo + 'static) -> VfResult<Self> {
-        std::fs::create_dir_all(&root).map_err(|error| VfError::failure(0, Self::errno(&error)))?;
-        let root_canon = std::fs::canonicalize(&root)
-            .map_err(|error| VfError::failure(0, Self::errno(&error)))?;
-        let root_dir =
-            File::open(&root_canon).map_err(|error| VfError::failure(0, Self::errno(&error)))?;
+        let root_error = |error: std::io::Error| {
+            VfError::failure(0, Self::errno(&error)).with_context("connect", &root)
+        };
+        let root_canon = std::fs::canonicalize(&root).map_err(root_error)?;
+        let root_dir = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY)
+            .open(&root_canon)
+            .map_err(root_error)?;
         Ok(LocalBackend {
             io: Box::new(engine),
             root: root_canon.clone(),

@@ -89,8 +89,8 @@ impl Options {
 
 pub use engine::{Stats, Telemetry};
 
-/// Construct a rooted VFSI client. Roots follow the local backend's semantics
-/// (including creating a missing root); configure [`vfsi_core::api::ResourceLimits`]
+/// Construct a VFSI client rooted at an existing directory.
+/// Configure [`vfsi_core::api::ResourceLimits`]
 /// on the returned client to change application allocation/traversal budgets.
 pub fn connect(
     root: impl AsRef<Path>,

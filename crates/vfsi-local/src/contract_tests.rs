@@ -67,6 +67,7 @@ mod tests {
     /// A fresh dummy backend rooted at a unique temp directory.
     fn fs(tag: &str) -> (TempRoot, LocalBackend) {
         let root = TempRoot::new(tag);
+        std::fs::create_dir(&root.0).unwrap();
         let fs = LocalBackend::new(root.0.clone(), ()).unwrap();
         (root, fs)
     }
@@ -188,11 +189,59 @@ mod tests {
         std::fs::create_dir(&root.0).unwrap();
         let not_a_directory = root.0.join("file");
         std::fs::write(&not_a_directory, b"not a directory").unwrap();
-        let error = LocalBackend::new(not_a_directory, ()).err().unwrap();
-        assert!(matches!(
-            error.err_no(),
-            value if value == libc::EEXIST as u32 || value == libc::ENOTDIR as u32
-        ));
+        let error = LocalBackend::new(not_a_directory.clone(), ())
+            .err()
+            .unwrap();
+        assert_eq!(error.err_no(), libc::ENOTDIR as u32);
+        assert_eq!(error.path(), Some(not_a_directory.as_path()));
+    }
+
+    #[test]
+    fn constructor_requires_an_existing_root_and_preserves_lookup_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = TempRoot::new("root-errors");
+        std::fs::create_dir(&root.0).unwrap();
+        let missing = root.0.join("missing/child");
+        let error = LocalBackend::new(missing.clone(), ()).err().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(error.path(), Some(missing.as_path()));
+        assert!(!root.0.join("missing").exists());
+
+        let blocked = root.0.join("blocked");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::set_permissions(&root.0, std::fs::Permissions::from_mode(0o0)).unwrap();
+        let result = LocalBackend::new(blocked.clone(), ());
+        std::fs::set_permissions(&root.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Root bypasses directory permissions; unprivileged runs exercise EACCES.
+        // SAFETY: geteuid has no arguments or preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            let error = result.err().unwrap();
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(error.path(), Some(blocked.as_path()));
+        }
+    }
+
+    #[test]
+    fn constructor_rejects_fifo_roots_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = TempRoot::new("fifo-root");
+        std::fs::create_dir(&root.0).unwrap();
+        let fifo = root.0.join("fifo");
+        let path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: path is a valid NUL-terminated filename in our temporary directory.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let (send, receive) = std::sync::mpsc::channel();
+        let thread_path = fifo.clone();
+        let worker = std::thread::spawn(move || {
+            send.send(LocalBackend::new(thread_path, ()).err().unwrap())
+                .unwrap();
+        });
+        let error = receive
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("opening a non-directory root must not block");
+        worker.join().unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotADirectory);
+        assert_eq!(error.path(), Some(fifo.as_path()));
     }
 
     fn write(fs: &mut LocalBackend, path: &str, data: &[u8]) {

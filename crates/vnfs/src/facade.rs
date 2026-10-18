@@ -311,13 +311,9 @@ mod posix {
     use std::path::Path;
     owned_client!(Posix, PosixFile, PosixDir, vfsi_local::LocalBackend);
     impl Posix {
-        /// Access this host directory through kernel filesystem operations.
+        /// Access this existing host directory through kernel filesystem operations.
         /// Namespace rooting is not a security sandbox.
         pub fn new(root: impl AsRef<Path>) -> Result<Self> {
-            let root = root.as_ref();
-            if !root.is_dir() {
-                return Err(Error::client(0, libc::ENOTDIR as u32).with_context("posix", root));
-            }
             vfsi_posix::connect(root).map(|inner| Self { inner })
         }
     }
