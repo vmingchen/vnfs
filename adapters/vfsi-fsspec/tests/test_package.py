@@ -212,3 +212,57 @@ def test_bulk_read_queue_consumes_each_path_once_in_bounded_batches(monkeypatch)
         assert [len(batch) for batch in batches] == [64] * 16 + [1]
         assert [path for batch in batches for path in batch] == list(native.files)
     assert consumed == 1025
+
+
+@pytest.mark.parametrize("kind", ["fifo", "socket", "char", "block", "other"])
+@pytest.mark.parametrize("on_error", ["raise", "ignore"])
+@pytest.mark.parametrize("symlinks", [False, True])
+def test_copy_special_sources_respects_error_policy(kind, on_error, symlinks):
+    from fsspec.callbacks import Callback
+
+    class CopyClient(_MemoryClient):
+        def stat_many(self, paths):
+            attrs, errors = super().stat_many(paths)
+            for path, attr in zip(paths, attrs):
+                if path == "/special" and attr is not None:
+                    attr["type"] = kind
+            return attrs, errors
+
+        lstat_many = stat_many
+
+        def copy_many(self, pairs):
+            self.calls.append(("copy_many", list(pairs)))
+            for source, destination in pairs:
+                self.files[destination] = self.files[source]
+            return [len(self.files[source]) for source, _ in pairs], {}
+
+    class CopyFs(_MemoryFileSystem):
+        _native_module = SimpleNamespace(NfsClient=CopyClient)
+
+    with CopyFs(backend="memory", skip_instance_cache=True) as fs:
+        client = _MemoryClient.instances[-1]
+        client.files["/special"] = b""
+        callback = Callback()
+        if on_error == "raise":
+            with pytest.raises(FileNotFoundError):
+                fs.copy(
+                    ["/special", "/alpha"],
+                    "/out/",
+                    on_error=on_error,
+                    symlinks=symlinks,
+                    callback=callback,
+                )
+        else:
+            fs.copy(
+                ["/special", "/alpha"],
+                "/out/",
+                on_error=on_error,
+                symlinks=symlinks,
+                callback=callback,
+            )
+        assert client.files["/out/alpha"] == b"alpha"
+        assert "/out/special" not in client.files
+        assert [call for call in client.calls if call[0] == "copy_many"] == [
+            ("copy_many", [("/alpha", "/out/alpha")])
+        ]
+        assert callback.size == callback.value == 2

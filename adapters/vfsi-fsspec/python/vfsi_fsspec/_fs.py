@@ -5279,7 +5279,7 @@ class VfsiFileSystem(AbstractFileSystem):
                 symlink_pairs.append((src, dst))
             else:
                 callback.relative_update()
-                if first_error is None:
+                if on_error == "raise" and first_error is None:
                     first_error = FileNotFoundError(src)
         if dir_pairs:
             self._makedirs_batched([dst for _, dst in dir_pairs], exist_ok=True)
