@@ -2,8 +2,8 @@
 
 Current implementation notes are separate from the dated audit and benchmark
 records below. Layout observations are target-specific, not ABI guarantees;
-historical test counts do not describe the current checkout. No new benchmark
-was run for this documentation update.
+historical test counts do not describe the current checkout. Benchmark results
+describe their recorded host and workloads, not universal performance guarantees.
 
 ## Current implementation notes
 
@@ -78,12 +78,34 @@ releases its successors only after every byte is acknowledged; short writes
 remain in subsequent ready waves. Ready waves retain input order, and their
 index buffers are reused. Empty requests still undergo whole-batch validation
 and are complete without dispatch. Append ordering, error indices, and failure
-replay rules remain unchanged. Pairwise conflict construction can still be
-quadratic, but blocked requests are no longer rescanned on every wave. The
+replay rules remain unchanged. Small object cohorts use direct conflict
+comparisons: dense ones switch after 16 requests, sparse ones after 256. Larger
+cohorts index disjoint byte intervals by their
+latest writer, retaining transitive ordering without redundant edges. Append
+is an object-wide barrier; unknown identities still rebuild one conservative
+group. Interval updates and graph construction take O(n log n) time and O(n)
+space per object, rather than constructing every pairwise conflict. The
 first successor is stored inline to avoid a single-edge allocation; graph arrays
 are prepared before conflict comparisons for batches of two or more requests.
 Scalar writes need no graph arrays. The [scheduler benchmark](write-scheduler-benchmark.md)
 records release comparisons, sparse-case tradeoffs and measurement limits.
+
+### Write-frontier comparison — 2026-10-18
+
+Compared with `9ae4df0` on the ARM64 Linux VM, using matched release builds,
+nine alternating CPU-pinned pairs per case and 100 ms target samples. All 35
+cases retained identical backend dispatch counts. Fourteen were classified as
+improved, 21 within noise/small-change bounds, and none regressed under the
+runner's bootstrap/5% criteria. Dense 1,024-request sink scheduling improved
+14.7x; 1,024-request scatter improved 2.0x; buffered POSIX overlap at 512
+requests improved 2.7x. Sparse 64-request chains remained flat. These are batch
+latency comparisons, not NFS-throughput claims.
+
+An initial universal 16-request cutoff regressed sparse chains and mixed
+workloads. Retaining linear comparison longer for sparse groups removed those
+regressions in the full rerun. Raw reports/build provenance are retained under
+`target/write-scheduler-frontier-tuned`; reproduce with
+`scripts/benchmark-write-scheduler.py --baseline 9ae4df0 --samples 9 --target-ms 100`.
 
 The [allocation and layout audit below](#allocation-and-layout-audit--2026-10-11) records measured
 layouts, implementation evidence, tradeoffs, and remaining optimization candidates.

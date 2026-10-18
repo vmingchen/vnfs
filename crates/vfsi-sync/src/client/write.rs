@@ -37,21 +37,136 @@ impl WriteSuccessors {
 
 type WriteRange = (usize, u64, u64, bool);
 
+#[cfg(test)]
+#[test]
+fn large_write_graphs_have_linear_edges_and_preserve_initial_readiness() {
+    for shape in ["overlap", "scatter", "append"] {
+        let count = 4096;
+        let mut prior = WriteDependencies::default();
+        let mut successors: Vec<_> = (0..count).map(|_| WriteSuccessors::default()).collect();
+        let mut remaining = vec![0; count];
+        let mut ready = Vec::new();
+        for index in 0..count {
+            let start = if shape == "scatter" {
+                index as u64 * 4
+            } else {
+                0
+            };
+            add_write_dependencies(
+                (index, start, start + 4, shape == "append"),
+                &mut prior,
+                &mut successors,
+                &mut remaining,
+                &mut ready,
+            );
+        }
+        let edges: usize = remaining.iter().sum();
+        if shape == "scatter" {
+            assert_eq!(edges, 0);
+            assert_eq!(ready, (0..count).collect::<Vec<_>>());
+        } else {
+            assert!(edges <= count + 120, "{shape}: {edges} edges");
+            assert_eq!(ready, [0]);
+        }
+        assert!(prior.prior.is_empty());
+        assert!(prior.frontier.is_some());
+    }
+}
+
+// Small/sparse object cohorts retain the cheap linear path. Larger ones remember
+// only the latest writer of each disjoint byte interval. An overwritten writer
+// remains ordered through its successors, so redundant transitive edges vanish.
+#[derive(Default)]
+struct WriteDependencies {
+    prior: Vec<WriteRange>,
+    frontier: Option<Box<WriteFrontier>>,
+}
+
+#[derive(Default)]
+struct WriteFrontier {
+    ranges: std::collections::BTreeMap<u64, (u64, usize)>,
+    append: Option<usize>,
+    dependencies: Vec<usize>,
+}
+
+impl WriteFrontier {
+    fn insert(&mut self, (index, start, end, append): WriteRange, mut depend: impl FnMut(usize)) {
+        self.dependencies.clear();
+        self.dependencies.extend(self.append);
+        if append {
+            self.dependencies
+                .extend(self.ranges.values().map(|&(_, writer)| writer));
+            self.ranges.clear();
+            self.append = Some(index);
+        } else {
+            // Preserve uncovered tails when replacing the most recent writer.
+            if let Some((&left, &(right, writer))) = self.ranges.range(..=start).next_back()
+                && right > start
+            {
+                self.ranges.remove(&left);
+                self.dependencies.push(writer);
+                if left < start {
+                    self.ranges.insert(left, (start, writer));
+                }
+                if end < right {
+                    self.ranges.insert(end, (right, writer));
+                }
+            }
+            while let Some((&left, &(right, writer))) = self.ranges.range(start..end).next() {
+                self.ranges.remove(&left);
+                self.dependencies.push(writer);
+                if end < right {
+                    self.ranges.insert(end, (right, writer));
+                }
+            }
+            self.ranges.insert(start, (end, index));
+        }
+        // One writer can own several fragments. Emit its edge only once.
+        self.dependencies.sort_unstable();
+        self.dependencies.dedup();
+        for &writer in &self.dependencies {
+            depend(writer);
+        }
+    }
+}
+
 fn add_write_dependencies(
     range: WriteRange,
-    prior: &mut Vec<WriteRange>,
+    prior: &mut WriteDependencies,
     successors: &mut [WriteSuccessors],
     remaining_dependencies: &mut [usize],
     wave_indices: &mut Vec<usize>,
 ) {
     let (index, offset, end, append) = range;
-    for &(earlier, start, earlier_end, earlier_append) in prior.iter() {
-        if earlier_append || append || (offset < earlier_end && start < end) {
-            successors[earlier].push(index);
-            remaining_dependencies[index] += 1;
+    let count = prior.prior.len();
+    let dense = prior
+        .prior
+        .last()
+        .is_some_and(|&(last, _, _, _)| remaining_dependencies[last] > count / 4);
+    // Dense graphs benefit early; a BTreeMap costs more than a few cheap
+    // comparisons in a sparse chain. Both thresholds bound the quadratic prefix.
+    if prior.frontier.is_none() && count >= 16 && (count >= 256 || dense) {
+        let mut frontier = Box::<WriteFrontier>::default();
+        for previous in prior.prior.drain(..) {
+            frontier.insert(previous, |_| {});
         }
+        prior.prior = Vec::new();
+        prior.frontier = Some(frontier);
     }
-    prior.push(range);
+    let mut depend = |earlier: usize| {
+        successors[earlier].push(index);
+        remaining_dependencies[index] += 1;
+    };
+    if let Some(frontier) = &mut prior.frontier {
+        frontier.insert(range, depend);
+    } else {
+        for &(earlier, start, earlier_end, earlier_append) in &prior.prior {
+            if earlier_append || append || (offset < earlier_end && start < end) {
+                depend(earlier);
+            }
+        }
+        prior.prior.push(range);
+    }
     if remaining_dependencies[index] == 0 {
         wave_indices.push(index);
     }
@@ -192,7 +307,7 @@ impl<F: VectorBackend> FsClient<F> {
                 .map_err(map_identity_error)?;
             let mut unknown = false;
             let mut prior_by_object = HashMap::new();
-            let mut prior_unknown = Vec::new();
+            let mut prior_unknown = WriteDependencies::default();
             for (index, request) in requests.iter().map(&project).enumerate() {
                 if request.data().is_empty() {
                     continue;

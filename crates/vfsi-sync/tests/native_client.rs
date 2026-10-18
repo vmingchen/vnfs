@@ -1921,8 +1921,14 @@ fn write_allv_dependency_schedule_treats_validated_empty_requests_as_complete() 
 fn write_allv_dependency_schedule_matches_reference_waves() {
     let mut state = 0x4d59_5df4_d0f3_3173u64;
     for case in 0..64 {
-        let specifications: Vec<_> = (0..8)
-            .map(|_| {
+        let count = [8, 17, 64, 320][case % 4];
+        let specifications: Vec<_> = (0..count)
+            .map(|index| {
+                if case == 63 {
+                    // One sparse overlapping object crosses the 256 cutoff
+                    // while every request still needs two short-write waves.
+                    return (0, false, index as u64 * 3, 4);
+                }
                 state ^= state << 13;
                 state ^= state >> 7;
                 state ^= state << 17;
@@ -1939,9 +1945,9 @@ fn write_allv_dependency_schedule_matches_reference_waves() {
             .map(|&(_, _, _, length)| vec![case as u8; length])
             .collect();
         // Reference the previous readiness rule, including completed empty
-        // requests. Small deterministic batches cover mixed paths, intervals,
+        // requests. Batches across the indexing threshold cover paths, intervals,
         // append handles, empty payloads, and multiple short-write waves.
-        let mut totals = [0usize; 8];
+        let mut totals = vec![0usize; count];
         let mut expected = Vec::new();
         while specifications
             .iter()
@@ -3155,19 +3161,71 @@ fn write_allv_orders_aliases_and_unknown_objects_across_short_writes() {
         let client = FsClient::new(backend);
         let first = client.open("/original").unwrap();
         let alias = client.open("/renamed-or-hardlink").unwrap();
-        client
-            .vwrite_all_native(&[
-                first.write_request_at(0, b"AAAA"),
-                alias.write_request_at(2, b"BBBB"),
-            ])
-            .unwrap();
+        let payloads: Vec<_> = (0..64).map(|index| [index as u8; 4]).collect();
+        let requests: Vec<_> = payloads
+            .iter()
+            .enumerate()
+            .map(|(index, data)| {
+                // Discover an unknown alias only after the prefix was indexed.
+                if index < 32 {
+                    first.write_request_at(0, data)
+                } else {
+                    alias.write_request_at(2, data)
+                }
+            })
+            .collect();
+        client.vwrite_all_native(&requests).unwrap();
         let waves = calls.lock().unwrap();
-        assert_eq!(waves.len(), 4);
+        assert_eq!(waves.len(), 128);
         assert!(waves.iter().all(|wave| wave.len() == 1));
-        assert_eq!(waves[0][0].offset, VfOffset::At(0));
-        assert_eq!(waves[1][0].offset, VfOffset::At(2));
-        assert_eq!(waves[2][0].offset, VfOffset::At(2));
-        assert_eq!(waves[3][0].offset, VfOffset::At(4));
+        for (index, _) in payloads.iter().enumerate() {
+            for part in 0..2 {
+                let op = &waves[2 * index + part][0];
+                assert_eq!(
+                    op.offset,
+                    VfOffset::At(if index < 32 { 0 } else { 2 } + 2 * part as u64)
+                );
+                assert_eq!(op.pointer, payloads[index][2 * part..].as_ptr() as usize);
+                assert_eq!(op.length, 4 - 2 * part);
+            }
+        }
+    }
+}
+
+#[test]
+fn indexed_write_frontier_stops_at_late_short_write_failure_without_replay() {
+    for error in [
+        VfError::client(0, libc::ENOSPC as u32),
+        VfError::transport(None, "lost indexed write reply"),
+    ] {
+        let backend = WriteBoundaryProbe {
+            failure: Some(error.clone()),
+            failure_after: 53,
+            ..Default::default()
+        };
+        let calls = backend.calls.clone();
+        let fs = FsClient::new(backend);
+        let file = fs.open("/indexed").unwrap();
+        let payloads: Vec<_> = (0..64).map(|i| [i as u8; 4]).collect();
+        let requests: Vec<_> = payloads
+            .iter()
+            .map(|data| file.write_request_at(0, data))
+            .collect();
+        let actual = fs.vwrite_all_native(&requests).unwrap_err();
+        assert_eq!(actual.is_transport(), error.is_transport());
+        assert_eq!(actual.index(), error.index().map(|_| 26));
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 54, "failed suffix must not be replayed");
+        for (index, wave) in calls.iter().enumerate() {
+            assert_eq!(wave.len(), 1);
+            let part = index % 2;
+            assert_eq!(
+                wave[0].pointer,
+                payloads[index / 2][2 * part..].as_ptr() as usize
+            );
+            assert_eq!(wave[0].offset, VfOffset::At(2 * part as u64));
+            assert_eq!(wave[0].length, 4 - 2 * part);
+        }
     }
 }
 
