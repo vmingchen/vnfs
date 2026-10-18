@@ -281,9 +281,6 @@ fn roots<P: AsRef<Path>>(
     budget: &mut TraversalBudget,
     max_path_bytes: usize,
 ) -> Result<Vec<Task>> {
-    if fs.limits().max_read_bytes() == 0 {
-        return Err(invalid(0, destination));
-    }
     if sources.len() > budget.remaining_entries() {
         return Err(limit(0, destination));
     }
@@ -775,6 +772,14 @@ fn copy_batch(
         summary.files_copied += tasks.len() as u64;
         summary.bytes_copied = None;
         return Ok(());
+    }
+    // Empty files need no payload storage. A zero read budget also permits
+    // native COPY and rename-only moves, but cannot make descriptor progress
+    // on a nonempty file. Reject before opening or replacing any file.
+    if chunk == 0
+        && let Some(task) = tasks.iter().find(|task| task.size != 0)
+    {
+        return Err(limit(task.root, &task.source));
     }
     let requests: Vec<_> = tasks
         .iter()
