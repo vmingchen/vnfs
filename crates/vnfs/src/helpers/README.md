@@ -127,11 +127,11 @@ use vnfs::nfs::{Nfs};
 use vnfs::directory::{ListDirOptions};
 use vnfs::helpers::copy_items;
 use vnfs::helpers::tree_stats;
-use vnfs::helpers::CopyOptions;
+use vnfs::helpers::TransferOptions;
 
 let fs = Nfs::connect("server.example.com")?;
 let result = copy_items(&fs, &["/input/images", "/input/config"], "/output",
-    CopyOptions::new().with_batch_size(64).with_chunk_size(1024 * 1024))?;
+    TransferOptions::new().with_batch_size(64).with_chunk_size(1024 * 1024))?;
 println!("copied {} files", result.files_copied);
 let stats = tree_stats(&fs, "/output", ListDirOptions::new())?;
 println!("{} files, {} logical bytes", stats.files, stats.file_bytes);

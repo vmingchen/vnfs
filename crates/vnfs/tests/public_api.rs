@@ -138,7 +138,7 @@ fn application_traversal_and_mutation_do_not_require_backend_imports() {
             .map(|mut trees| trees.remove(0))?;
         client.vcopy(
             &[("/a/source", "/a/copy")],
-            vnfs::files::CopyOption::default(),
+            vnfs::files::CopyOptions::default(),
         )?;
         client.vremove(
             &["/a/copy"],
@@ -217,7 +217,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
             Default::default(),
         )
         .unwrap();
-    assert_eq!(result[0].read(), 3);
+    assert_eq!(result[0].bytes_read(), 3);
     assert!(result[0].eof());
     assert_eq!(&b, b"ef");
     client
@@ -295,7 +295,7 @@ fn auto_supports_the_core_native_bulk_and_streaming_surface() {
     client
         .vcopy(
             &[("/sub/a", "/copies/a"), ("/sub/b", "/copies/b")],
-            vnfs::files::CopyOption::default(),
+            vnfs::files::CopyOptions::default(),
         )
         .unwrap();
     client.hard_link("/sub/a", "/copies/hard").unwrap();
@@ -394,7 +394,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
                     vnfs::files::WriteOptions::new().with_write_all(true)
                 )?
                 .iter()
-                .all(|result| result.written == 3)
+                .all(|result| result.bytes_written == 3)
         );
         drop(writes);
         let reads: Vec<_> = files
@@ -420,7 +420,7 @@ fn one_generic_application_uses_mounted_auto_or_direct_nfs_without_backend_types
         assert!(
             result
                 .iter()
-                .all(|result| result.read() == 3 && result.eof())
+                .all(|result| result.bytes_read() == 3 && result.eof())
         );
         let mut contents = Vec::new();
         client.std_io(&files[0]).read_to_end(&mut contents).unwrap();

@@ -30,7 +30,7 @@ fn read_result(result: ReadResult) -> FsReadResult {
 fn write_result(result: WriteResult) -> FsWriteResult {
     FsWriteResult {
         offset: result.offset,
-        written: result.written,
+        bytes_written: result.bytes_written,
         stable: result.stable,
     }
 }

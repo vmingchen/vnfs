@@ -432,7 +432,7 @@ impl NfsVecFs {
             results.push(ReadIntoResult {
                 file: read.file.clone(),
                 offset,
-                read: length,
+                bytes_read: length,
                 eof,
             });
         }
@@ -440,7 +440,7 @@ impl NfsVecFs {
         // cursors, even if a later short-read repair failed after decoding.
         for (read, result) in reads.iter().zip(&results) {
             if read.offset == VfOffset::Cur {
-                self.advance_offset(&read.file, result.offset + result.read as u64);
+                self.advance_offset(&read.file, result.offset + result.bytes_read as u64);
             }
         }
         Ok(results)
@@ -673,7 +673,7 @@ impl NfsVecFs {
             .map(|(index, request)| WriteResult {
                 file: request.file().clone(),
                 offset: offsets[index],
-                written: request.data().len(),
+                bytes_written: request.data().len(),
                 stable: stable[index],
             })
             .collect())
@@ -966,7 +966,7 @@ impl NfsVecFs {
             .map(|(i, w)| WriteResult {
                 file: w.file().clone(),
                 offset: offsets[i],
-                written: counts[i].unwrap_or(0) as usize,
+                bytes_written: counts[i].unwrap_or(0) as usize,
                 stable: committed[i].unwrap_or(0) == stable_how4_FILE_SYNC4,
             })
             .collect()

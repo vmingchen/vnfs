@@ -65,7 +65,7 @@ use vfsi_core::internal::faults::{FaultInjector, OpenFaultPoint};
 
 use crate::path::{normalize_bytes, path_bytes, path_from_bytes};
 use crate::vecfs::{
-    Adb, AttrMask, CopyOption, ERR_ACCES, ERR_EBADF, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT,
+    Adb, AttrMask, CopyOptions, ERR_ACCES, ERR_EBADF, ERR_EXIST, ERR_INVAL, ERR_ISDIR, ERR_NOENT,
     ERR_NOTDIR, ExtentPair, Fd, FileOperand, ReadOp, ReadResult, SeekFrom, SetAttrsOp, Target,
     VfAttrs, VfError, VfOffset, VfPathBase, VfRes, VfResult, VfType, WriteOp, WriteResult,
 };
@@ -1391,7 +1391,7 @@ impl SmbVecFs {
             return Ok(WriteResult {
                 file: op.file().clone(),
                 offset,
-                written,
+                bytes_written: written,
                 stable: true,
             });
         }
@@ -1448,7 +1448,7 @@ impl SmbVecFs {
         Ok(WriteResult {
             file: op.file().clone(),
             offset,
-            written,
+            bytes_written: written,
             stable: true,
         })
     }
@@ -2018,7 +2018,7 @@ impl VectorBackend for SmbVecFs {
                     output.push(WriteResult {
                         file: write.file().clone(),
                         offset,
-                        written,
+                        bytes_written: written,
                         stable: true,
                     });
                 }
@@ -2358,7 +2358,7 @@ impl VectorBackend for SmbVecFs {
         Ok(())
     }
 
-    fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOption) -> VfRes {
+    fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOptions) -> VfRes {
         if pairs.is_empty() {
             return Ok(());
         }
@@ -2431,7 +2431,7 @@ impl VectorBackend for SmbVecFs {
             |backend, pair| {
                 let pairs = std::slice::from_ref(pair);
                 if use_server_side_copy {
-                    backend.vcopy_impl(pairs, vfsi_core::CopyOption::new())
+                    backend.vcopy_impl(pairs, vfsi_core::CopyOptions::new())
                 } else {
                     backend.vcopy_data_impl(pairs)
                 }

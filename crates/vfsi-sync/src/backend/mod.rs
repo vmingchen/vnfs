@@ -592,7 +592,7 @@ pub trait VectorBackend: HandleBackend {
         Err(VfError::unsupported(0))
     }
 
-    fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOption) -> VfRes {
+    fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOptions) -> VfRes {
         crate::backend::helpers::vcopy_impl_default(self, pairs, options)
     }
 

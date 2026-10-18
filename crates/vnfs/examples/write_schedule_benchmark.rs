@@ -91,7 +91,7 @@ impl VectorBackend for Sink {
                 WriteResult {
                     file: request.file().clone(),
                     offset,
-                    written,
+                    bytes_written: written,
                     stable: true,
                 }
             })
@@ -204,7 +204,7 @@ fn measure<F: VectorBackend + 'static>(
         .expect("verify write results");
     assert_eq!(before.len(), plan.items.len());
     for (result, item) in before.iter().zip(&plan.items) {
-        assert_eq!(result.written, item.length);
+        assert_eq!(result.bytes_written, item.length);
         if !plan.append {
             assert_eq!(result.offset, item.offset);
         }
@@ -233,7 +233,7 @@ fn measure<F: VectorBackend + 'static>(
         after
             .iter()
             .zip(&plan.items)
-            .all(|(result, item)| result.written == item.length)
+            .all(|(result, item)| result.bytes_written == item.length)
     );
     if let Some(root) = real_root {
         assert!(!plan.append, "real append benchmark would grow the fixture");

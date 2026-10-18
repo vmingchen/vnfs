@@ -358,7 +358,7 @@ fn rust_native_client_workflow_on_nfs() {
     assert_eq!(
         lengths
             .iter()
-            .map(|result| result.read())
+            .map(|result| result.bytes_read())
             .collect::<Vec<_>>(),
         [3, 3]
     );
@@ -2722,7 +2722,7 @@ fn large_writev_readv_roundtrip() {
         )
         .with_creation()]))
         .unwrap();
-    assert_eq!(w[0].written, data.len());
+    assert_eq!(w[0].bytes_written, data.len());
     assert_eq!(
         vfsi_nfs::compound::thread_compound_stats().0,
         1,
@@ -3459,7 +3459,7 @@ fn dupv_copies_extent() {
     let mut c42 = NfsVecFs::connect_minor(&test_host(), 2).expect("connect with NFSv4.2");
     c42.vcopy_impl(
         &[ExtentPair::new(&src, 2, &whole, 0, None)],
-        vfsi_core::CopyOption::new(),
+        vfsi_core::CopyOptions::new(),
     )
     .expect("copyv whole file");
     assert_eq!(read_all(&mut c42, Path::new(&whole)), b"cdefghij");
@@ -3480,7 +3480,7 @@ fn copyv_batches_nfs42_server_copies_or_falls_back() {
     }
     let before = c.server_copy_stats();
     let _ = vfsi_nfs::compound::thread_compound_stats();
-    c.vcopy_impl(&pairs, vfsi_core::CopyOption::new())
+    c.vcopy_impl(&pairs, vfsi_core::CopyOptions::new())
         .expect("batched NFSv4.2 COPY");
     let compounds = vfsi_nfs::compound::thread_compound_stats().0;
     let server_copy_enabled = c.server_copy_enabled();
@@ -3559,7 +3559,7 @@ fn copyv_extent_semantics_and_server_telemetry() {
     ];
     let before = c.server_copy_stats();
     for (i, pair) in pairs.iter().enumerate() {
-        c.vcopy_impl(std::slice::from_ref(pair), vfsi_core::CopyOption::new())
+        c.vcopy_impl(std::slice::from_ref(pair), vfsi_core::CopyOptions::new())
             .unwrap_or_else(|error| panic!("copy extent variant {i}: {error:?}"));
         if std::env::var_os("VNFS_TEST_REQUIRE_SERVER_COPY").is_some() {
             assert!(
@@ -3601,7 +3601,7 @@ fn copyv_extent_semantics_and_server_telemetry() {
                         dst_offset,
                         Some(length),
                     )],
-                    vfsi_core::CopyOption::new(),
+                    vfsi_core::CopyOptions::new(),
                 )
                 .expect_err("same-file server COPY must be rejected");
             assert!(matches!(error.err_no(), ERR_EXIST | ERR_INVAL));
@@ -3629,7 +3629,7 @@ fn copyv_reports_mid_batch_failure_index() {
                 ExtentPair::new(&missing, 0, &dst1, 0, None),
                 ExtentPair::new(&src2, 0, &dst2, 0, None),
             ],
-            vfsi_core::CopyOption::new(),
+            vfsi_core::CopyOptions::new(),
         )
         .expect_err("missing middle source must fail");
     assert_eq!(error.index(), Some(1));
@@ -3648,7 +3648,7 @@ fn copyv_falls_back_on_nfs41() {
     write_file(&mut c, Path::new(&src), b"client-side-fallback");
     c.vcopy_impl(
         &[ExtentPair::new(&src, 0, &dst, 0, None)],
-        vfsi_core::CopyOption::new(),
+        vfsi_core::CopyOptions::new(),
     )
     .expect("v4.1 copyv fallback");
     assert_eq!(read_all(&mut c, Path::new(&dst)), b"client-side-fallback");
@@ -3668,7 +3668,7 @@ fn client_side_copy_closes_source_when_destination_open_fails() {
     let error = client
         .vcopy_impl(
             &[ExtentPair::new(&src, 0, &dst, 0, None)],
-            vfsi_core::CopyOption::new(),
+            vfsi_core::CopyOptions::new(),
         )
         .unwrap_err();
     assert!(!error.is_transport());
@@ -3693,7 +3693,7 @@ fn client_side_copy_surfaces_close_failure_and_continues_cleanup() {
     let error = client
         .vcopy_impl(
             &[ExtentPair::new(&src, 0, &dst, 0, None)],
-            vfsi_core::CopyOption::new(),
+            vfsi_core::CopyOptions::new(),
         )
         .unwrap_err();
     assert!(error.is_transport());
@@ -3718,7 +3718,7 @@ fn extent_copy_options_regular_files() {
         .unwrap();
     c.vcopy_impl(
         &[ExtentPair::new(&src, 5, &d2, 0, Some(5))],
-        vfsi_core::CopyOption::new().with_follow_source_symlinks(false),
+        vfsi_core::CopyOptions::new().with_follow_source_symlinks(false),
     )
     .unwrap();
     assert_eq!(read_all(&mut c, Path::new(&d1)), b"01234");
@@ -3880,7 +3880,7 @@ fn batched_readv_writev_many_files() {
         .vwrite_impl(&borrow_writes(&writes))
         .expect("batched writev");
     for (i, w) in wres.iter().enumerate() {
-        assert_eq!(w.written, 3, "write {} wrote 3 bytes", i);
+        assert_eq!(w.bytes_written, 3, "write {} wrote 3 bytes", i);
     }
 
     let reads: Vec<ReadOp> = tfs
@@ -4603,7 +4603,7 @@ fn copy_options_nfs_mixed_source_symlinks_and_extents() {
         .unwrap();
     fs.symlink_raw_impl(Path::new("missing-target"), Path::new(&dangling))
         .unwrap();
-    let options = CopyOption::new().with_follow_source_symlinks(false);
+    let options = CopyOptions::new().with_follow_source_symlinks(false);
     let mut pairs: Vec<_> = (0..17)
         .map(|i| ExtentPair::new(&source, 2, &format!("{directory}/copy-{i}"), 0, Some(4)))
         .collect();
@@ -4644,7 +4644,7 @@ fn copy_options_nfs_mixed_source_symlinks_and_extents() {
     let followed = format!("{directory}/followed");
     fs.vcopy_impl(
         &[ExtentPair::new(&link, 0, &followed, 0, None)],
-        CopyOption::new(),
+        CopyOptions::new(),
     )
     .unwrap();
     assert_eq!(read_all(&mut fs, Path::new(&followed)), b"0123456789");

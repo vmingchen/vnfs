@@ -20,7 +20,7 @@ fn writes<C: Vfsi>(fs: &C) {
     assert_eq!(
         results
             .iter()
-            .map(|r| (r.offset, r.written))
+            .map(|r| (r.offset, r.bytes_written))
             .collect::<Vec<_>>(),
         [(3, 7), (0, 3)]
     );

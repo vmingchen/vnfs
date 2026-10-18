@@ -133,7 +133,7 @@ impl<F: VectorBackend> FsClient<F> {
     pub(crate) fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         pairs: &[(P, Q)],
-        options: vfsi_core::api::CopyOption,
+        options: vfsi_core::api::CopyOptions,
     ) -> VfResult<()> {
         let extents: Vec<_> = pairs
             .iter()

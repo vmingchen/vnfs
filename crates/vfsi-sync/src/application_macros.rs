@@ -190,7 +190,7 @@ macro_rules! __vfsi_client_methods {
         fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
             &self,
             pairs: &[(P, Q)],
-            options: vfsi_core::api::CopyOption,
+            options: vfsi_core::api::CopyOptions,
         ) -> Result<()> {
             <$client>::$copy($receiver(self), pairs, options)
         }

@@ -23,7 +23,7 @@ pub fn vread_into_impl_default<F: VectorBackend + ?Sized>(
             ReadIntoResult {
                 file: result.file,
                 offset: result.offset,
-                read: result.data.len(),
+                bytes_read: result.data.len(),
                 eof: result.eof,
             }
         })

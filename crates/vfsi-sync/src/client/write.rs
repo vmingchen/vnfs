@@ -288,18 +288,18 @@ impl<F: VectorBackend> FsClient<F> {
             })?;
             for (&index, result) in wave_indices.iter().zip(results) {
                 let request = project(&requests[index]);
-                if result.written == 0 {
+                if result.bytes_written == 0 {
                     return Err(VfError::client(index, crate::ERR_IO)
                         .with_context("vwrite_all_native", request.file().path()));
                 }
-                totals[index] += result.written;
+                totals[index] += result.bytes_written;
                 if request.file().append {
                     // Preserve the last reported end even when outside writers
                     // append between short-write waves. This is an aggregate
                     // completion offset, not a guarantee of a contiguous extent.
                     offsets[index] = result
                         .offset
-                        .checked_add(result.written as u64)
+                        .checked_add(result.bytes_written as u64)
                         .and_then(|end| end.checked_sub(totals[index] as u64))
                         .ok_or_else(|| {
                             VfError::transport_with_kind(
@@ -337,7 +337,7 @@ impl<F: VectorBackend> FsClient<F> {
             .enumerate()
             .map(|(index, offset)| FsWriteResult {
                 offset,
-                written: totals[index],
+                bytes_written: totals[index],
                 stable: stable[index],
             })
             .collect())

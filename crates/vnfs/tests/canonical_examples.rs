@@ -165,7 +165,7 @@ fn canonical_workflows_on_nfsv41_and_nfsv42() -> Result<()> {
             assert_eq!(mixed[1].data().unwrap(), [37; 3]);
             assert!(mixed[2].data().as_ref().unwrap().is_empty() && mixed[2].eof());
             assert_eq!(mixed[3].data(), None);
-            assert_eq!(mixed[3].read(), 4);
+            assert_eq!(mixed[3].bytes_read(), 4);
             assert_eq!(buffer, [37; 4]);
             file.close()?;
             assert_eq!(

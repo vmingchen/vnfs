@@ -508,10 +508,10 @@ fn validate_c_write_results(
                 "vwrite_impl result {index} has a different file handle",
             )));
         }
-        if result.written > write.data().len() {
+        if result.bytes_written > write.data().len() {
             return Err(invalid_backend_reply(format!(
                 "vwrite_impl result {index} reported {} bytes written for a {}-byte write",
-                result.written,
+                result.bytes_written,
                 write.data().len(),
             )));
         }
@@ -1755,7 +1755,7 @@ fn pread_impl(fs: &vfsi_fs, fd: i32, buffer: &mut [u8], offset: u64) -> Result<u
         .ok_or_else(|| VfError::failure(0, ERR_EBADF))?;
     let request = ReadOp::at(file, offset, buffer.len());
     let result = lock_or_io(&fs.fs)?.read_into_impl(&request, buffer)?;
-    Ok(result.read)
+    Ok(result.bytes_read)
 }
 
 /// Read up to `len` bytes at `offset` into `buf`; writes the actual count to
@@ -1979,7 +1979,7 @@ pub unsafe extern "C" fn vfsi_copy(
             (!to_eof).then_some(length),
         );
         match lock_or_io(&fs.fs)
-            .and_then(|mut backend| backend.vcopy_impl(&[pair], vfsi_sync::CopyOption::new()))
+            .and_then(|mut backend| backend.vcopy_impl(&[pair], vfsi_sync::CopyOptions::new()))
         {
             Ok(()) => 0,
             Err(error) => vf_code(&error),
@@ -2595,7 +2595,7 @@ pub unsafe extern "C" fn vfsi_pwritev(
             fail_batch!(item_results, vfsi_result::from_error(error), true);
         }
         for (op, result) in ops.iter_mut().zip(results) {
-            op.wrote = result.written;
+            op.wrote = result.bytes_written;
         }
         complete_results(item_results);
         vfsi_result::success(count)
@@ -2898,7 +2898,7 @@ pub unsafe extern "C" fn vfsi_copyv(
             Ok(backend) => backend,
             Err(error) => fail_batch!(results, vfsi_result::from_error(error), false),
         };
-        match backend.vcopy_impl(&pairs, vfsi_sync::CopyOption::new()) {
+        match backend.vcopy_impl(&pairs, vfsi_sync::CopyOptions::new()) {
             Ok(()) => {
                 complete_results(results);
                 vfsi_result::success(count)
@@ -3646,7 +3646,9 @@ mod tests {
                         vfsi_sync::VfOffset::At(offset) => offset,
                         _ => unreachable!(),
                     },
-                    written: if self.malformed_reply == Some(MalformedReply::WriteTooManyBytes) {
+                    bytes_written: if self.malformed_reply
+                        == Some(MalformedReply::WriteTooManyBytes)
+                    {
                         op.data().len() + 1
                     } else {
                         op.data().len()

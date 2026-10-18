@@ -1,5 +1,5 @@
 use crate::api::{
-    Attrs, CopyOption, DirectoryListing, MkDirOp, OpenOp, ResourceLimits, Result, SetAttrsOp,
+    Attrs, CopyOptions, DirectoryListing, MkDirOp, OpenOp, ResourceLimits, Result, SetAttrsOp,
     WriteResult,
 };
 use std::path::Path;
@@ -240,7 +240,7 @@ pub trait Vfsi {
     ///     [ReadOp::whole("/config")],
     ///     ReadOptions::new().with_max_total_bytes(std::num::NonZeroUsize::new(1024 * 1024)),
     /// )?;
-    /// println!("{} bytes", results[0].read());
+    /// println!("{} bytes", results[0].bytes_read());
     /// # Ok(())
     /// # }
     /// ```
@@ -249,7 +249,7 @@ pub trait Vfsi {
     ///
     /// Construction does no I/O. Results retain input order and never borrow
     /// caller storage. Whole files complete or fail; ranges may return short
-    /// progress. Only `buffer[..result.read]` is valid after a buffered read.
+    /// progress. Only `buffer[..result.bytes_read()]` is valid after a buffered read.
     /// The default aggregate budget comes from `limits().max_read_bytes()`.
     /// All range and buffer lengths must fit before dispatch. Buffer reads run
     /// first, then allocating ranges, then whole paths, in batched phases.
@@ -270,7 +270,7 @@ pub trait Vfsi {
     /// let results = result?;
     /// close?;
     /// println!("config: {:?}", results[0].data().unwrap());
-    /// println!("buffer: {:?}", &buffer[..results[2].read()]);
+    /// println!("buffer: {:?}", &buffer[..results[2].bytes_read()]);
     /// # Ok(())
     /// # }
     /// ```
@@ -361,19 +361,19 @@ pub trait Vfsi {
     /// copies transactional or safe to replay after ambiguous failure.
     ///
     /// ```no_run
-    /// use vfsi_core::api::{CopyOption, Vfsi, VfsiExt, WriteOp};
+    /// use vfsi_core::api::{CopyOptions, Vfsi, VfsiExt, WriteOp};
     /// # fn example(fs: &impl Vfsi) -> vfsi_core::api::Result<()> {
     /// fs.vcopy(&[
     ///     ("/input/file-1", "/output/file-1"),
     ///     ("/input/file-2", "/output/file-2"),
-    /// ], CopyOption::default())?;
+    /// ], CopyOptions::default())?;
     /// # Ok(())
     /// # }
     /// ```
     fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         pairs: &[(P, Q)],
-        options: CopyOption,
+        options: CopyOptions,
     ) -> Result<()>;
     /// Remove entries, recursive trees, or directory contents with explicit policy.
     ///

@@ -413,7 +413,7 @@ impl Probe {
                 results.pop();
             }
             2 => {
-                results[0] = crate::ReadResult::buffered(0, results[0].read(), true);
+                results[0] = crate::ReadResult::buffered(0, results[0].bytes_read(), true);
             }
             4 => {
                 results[0] =
@@ -569,20 +569,23 @@ fn write_options_select_completion_without_replaying_ambiguous_errors() {
     let file = fs.create("/file").unwrap();
     let ops = [crate::WriteOp::at(&file, 0, b"abcdef")];
     assert!(!crate::WriteOptions::default().write_all());
-    assert_eq!(fs.vwrite(&ops, Default::default()).unwrap()[0].written, 2);
+    assert_eq!(
+        fs.vwrite(&ops, Default::default()).unwrap()[0].bytes_written,
+        2
+    );
     for options in [
         crate::WriteOptions::new(),
         crate::WriteOptions::new()
             .with_write_all(true)
             .with_write_all(false),
     ] {
-        assert_eq!(fs.vwrite(&ops, options).unwrap()[0].written, 2);
+        assert_eq!(fs.vwrite(&ops, options).unwrap()[0].bytes_written, 2);
     }
     assert_eq!(fs.partial_calls.get(), 3);
     assert_eq!(fs.complete_calls.get(), 0);
     assert_eq!(fs.read_files(&["/file"]).unwrap(), [b"ab".to_vec()]);
     let complete = crate::WriteOptions::new().with_write_all(true);
-    assert_eq!(fs.vwrite(&ops, complete).unwrap()[0].written, 6);
+    assert_eq!(fs.vwrite(&ops, complete).unwrap()[0].bytes_written, 6);
     assert_eq!(fs.partial_calls.get(), 3);
     assert_eq!(fs.complete_calls.get(), 1);
     assert_eq!(fs.read_files(&["/file"]).unwrap(), [b"abcdef".to_vec()]);

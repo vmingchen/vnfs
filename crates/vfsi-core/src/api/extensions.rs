@@ -1,4 +1,4 @@
-use crate::api::{Attrs, CopyOption, DirectoryListing, MkDirOp, OpenOp, Result, SetAttrsOp};
+use crate::api::{Attrs, CopyOptions, DirectoryListing, MkDirOp, OpenOp, Result, SetAttrsOp};
 use std::path::Path;
 
 use super::{OpenFd, Vfsi};
@@ -61,7 +61,7 @@ pub trait VfsiExt: Vfsi {
     /// let mut header = [0_u8; 128];
     /// let result = fs.vread([vfsi_core::api::ReadOp::into(&file, 0, &mut header)], Default::default());
     /// let close = file.close();
-    /// let bytes = result?[0].read();
+    /// let bytes = result?[0].bytes_read();
     /// close?;
     /// println!("read {bytes} bytes");
     /// # Ok(())
@@ -216,7 +216,7 @@ pub trait VfsiExt: Vfsi {
                         "whole-file vread_native omitted owned data",
                     )
                 })?;
-                if data.len() != result.read || result.offset != 0 || !result.eof {
+                if data.len() != result.bytes_read || result.offset != 0 || !result.eof {
                     return Err(crate::api::Error::transport(
                         Some(index),
                         "whole-file vread_native returned incomplete or invalid data",
@@ -999,7 +999,7 @@ pub trait VfsiExt: Vfsi {
     /// # }
     /// ```
     fn copy(&self, source: impl AsRef<Path>, destination: impl AsRef<Path>) -> Result<()> {
-        self.copy_with_options(source, destination, CopyOption::default())
+        self.copy_with_options(source, destination, CopyOptions::default())
     }
 
     /// Single-target copy with explicit operation semantics; prefer [`Vfsi::vcopy`]
@@ -1008,7 +1008,7 @@ pub trait VfsiExt: Vfsi {
         &self,
         source: impl AsRef<Path>,
         destination: impl AsRef<Path>,
-        options: CopyOption,
+        options: CopyOptions,
     ) -> Result<()> {
         self.vcopy(&[(source, destination)], options)
     }

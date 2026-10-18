@@ -26,7 +26,7 @@ fn mixed<C: Vfsi>(fs: &C) {
     assert_eq!(results[0].data(), Some(b"xyz".as_slice()));
     assert_eq!(results[1].data(), Some(b"cd".as_slice()));
     assert_eq!(results[2].data(), None);
-    assert_eq!(results[2].read(), 1);
+    assert_eq!(results[2].bytes_read(), 1);
     assert!(results[2].eof());
     assert_eq!(results[3].data(), Some(b"".as_slice()));
     assert_eq!(
@@ -35,7 +35,7 @@ fn mixed<C: Vfsi>(fs: &C) {
     );
     assert_eq!(buffer, [b'f', 0xcc, 0xcc, 0xcc]);
     buffer.fill(0); // No result retains the borrow, even while results remain live.
-    assert_eq!(results[2].read(), 1);
+    assert_eq!(results[2].bytes_read(), 1);
     let mut first = [0];
     std::io::Read::read_exact(&mut fs.std_io(&file), &mut first).unwrap();
     assert_eq!(&first, b"a");
@@ -147,7 +147,10 @@ fn zero_length_buffers_and_owned_reads_keep_distinct_data_ownership() {
         .unwrap();
     assert_eq!(results[0].data(), Some([].as_slice()));
     assert_eq!(results[1].data(), None);
-    assert_eq!(results.iter().map(|r| r.read()).collect::<Vec<_>>(), [0, 0]);
+    assert_eq!(
+        results.iter().map(|r| r.bytes_read()).collect::<Vec<_>>(),
+        [0, 0]
+    );
 }
 
 #[test]
@@ -161,7 +164,10 @@ fn path_conversions_and_iterators_construct_whole_file_operations() {
             Default::default(),
         )
         .unwrap();
-    assert_eq!(results.iter().map(|r| r.read()).collect::<Vec<_>>(), [3, 3]);
+    assert_eq!(
+        results.iter().map(|r| r.bytes_read()).collect::<Vec<_>>(),
+        [3, 3]
+    );
     let results = fs
         .vread(
             ["/a", "/b"].into_iter().map(ReadOp::whole),
@@ -199,19 +205,19 @@ fn external_clients_can_inspect_sources_without_private_fields() {
 fn result_constructors_preserve_storage_invariants_without_retaining_borrows() {
     let owned = vnfs::files::ReadResult::owned(17, vec![1, 2, 3], true);
     assert_eq!(owned.offset(), 17);
-    assert_eq!(owned.read(), 3);
+    assert_eq!(owned.bytes_read(), 3);
     assert!(owned.eof());
     assert!(!owned.is_buffered());
     assert_eq!(owned.data(), Some([1, 2, 3].as_slice()));
     assert_eq!(owned.into_data(), Some(vec![1, 2, 3]));
     let borrowed = vnfs::files::ReadResult::buffered(5, 2, false);
     assert!(borrowed.is_buffered());
-    assert_eq!(borrowed.read(), 2);
+    assert_eq!(borrowed.bytes_read(), 2);
     assert!(!borrowed.eof());
     assert_eq!(borrowed.data(), None);
     assert_eq!(borrowed.into_data(), None);
     assert_eq!(
-        vnfs::files::ReadResult::owned(0, Vec::new(), true).read(),
+        vnfs::files::ReadResult::owned(0, Vec::new(), true).bytes_read(),
         0
     );
 }

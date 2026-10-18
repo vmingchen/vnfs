@@ -904,7 +904,7 @@ pub struct ReadResult {
 pub struct ReadIntoResult {
     pub file: FileOperand,
     pub offset: u64,
-    pub read: usize,
+    pub bytes_read: usize,
     pub eof: bool,
 }
 
@@ -915,7 +915,7 @@ pub struct WriteResult {
     /// The resolved offset the write actually started at (never `Cur`/`End`
     /// sentinels).
     pub offset: u64,
-    pub written: usize,
+    pub bytes_written: usize,
     /// Whether the server committed the write to stable storage.
     pub stable: bool,
 }
@@ -1852,10 +1852,10 @@ struct CopyFlags {
 /// symlink, its link text is copied and an existing destination is not replaced.
 /// Destination symlinks for data copies retain normal following behavior.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct CopyOption {
+pub struct CopyOptions {
     flags: CopyFlags,
 }
-impl CopyOption {
+impl CopyOptions {
     pub fn new() -> Self {
         Self::default()
     }
@@ -1871,11 +1871,11 @@ impl CopyOption {
 
 #[cfg(test)]
 mod copy_option_tests {
-    use super::CopyOption;
+    use super::CopyOptions;
     #[test]
     fn follows_source_symlinks_by_default_and_builder_can_disable_it() {
-        assert!(CopyOption::default().follow_source_symlinks());
-        let preserve = CopyOption::new().with_follow_source_symlinks(false);
+        assert!(CopyOptions::default().follow_source_symlinks());
+        let preserve = CopyOptions::new().with_follow_source_symlinks(false);
         assert!(!preserve.follow_source_symlinks());
         assert!(
             preserve

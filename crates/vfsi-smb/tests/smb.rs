@@ -715,7 +715,7 @@ fn samba_round_trip_and_copy() {
     .unwrap();
     fs.vcopy_impl(
         &[ExtentPair::from_os_paths(&renamed, 0, &copied, 0, None)],
-        vfsi_core::CopyOption::new(),
+        vfsi_core::CopyOptions::new(),
     )
     .unwrap();
     assert_eq!(
@@ -982,7 +982,7 @@ fn copy_options_reject_unsupported_symlink_preservation_before_lookup() {
     let Some(mut fs) = connect() else {
         return;
     };
-    let options = vfsi_sync::CopyOption::new().with_follow_source_symlinks(false);
+    let options = vfsi_sync::CopyOptions::new().with_follow_source_symlinks(false);
     fs.vcopy_impl(&[], options).unwrap();
     let error = fs
         .vcopy_impl(

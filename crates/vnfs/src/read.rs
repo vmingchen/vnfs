@@ -49,7 +49,7 @@ mod tests {
                     Ok(vec![
                         crate::ReadIntoResult {
                             offset: 0,
-                            read,
+                            bytes_read: read,
                             eof: false
                         };
                         count

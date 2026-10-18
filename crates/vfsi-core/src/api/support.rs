@@ -103,17 +103,17 @@ pub struct FsReadResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadIntoResult {
     pub offset: u64,
-    pub read: usize,
+    pub bytes_read: usize,
     pub eof: bool,
 }
 
 /// Application result for one vector write, in request order.
-/// For completed append writes, `offset + written` is the last reported end;
+/// For completed append writes, `offset + bytes_written` is the last reported end;
 /// concurrent writers can interleave between short-write waves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteResult {
     pub offset: u64,
-    pub written: usize,
+    pub bytes_written: usize,
     pub stable: bool,
 }
 

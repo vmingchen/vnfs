@@ -548,7 +548,7 @@ impl Auto {
     pub(crate) fn vcopy_impl<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         pairs: &[(P, Q)],
-        options: vfsi_core::api::CopyOption,
+        options: vfsi_core::api::CopyOptions,
     ) -> VfResult<()> {
         let mounts = read_mounts(false);
         let pairs: Vec<_> = pairs

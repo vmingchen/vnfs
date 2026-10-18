@@ -140,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .collect();
                 let results = fs.vwrite(&ops, WriteOptions::new().with_write_all(true))?;
                 assert_eq!(results.len(), offsets.len());
-                assert!(results.iter().all(|result| result.written == size));
+                assert!(results.iter().all(|result| result.bytes_written == size));
             } else if owned {
                 let results = fs.vread(
                     offsets
@@ -150,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     budget,
                 )?;
                 assert_eq!(results.len(), offsets.len());
-                assert!(results.iter().all(|result| result.read() == size));
+                assert!(results.iter().all(|result| result.bytes_read() == size));
                 buffers = results
                     .into_iter()
                     .map(|result| result.into_data().unwrap())
@@ -166,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .collect();
                 let results = fs.vread(ops, budget)?;
                 assert_eq!(results.len(), offsets.len());
-                assert!(results.iter().all(|result| result.read() == size));
+                assert!(results.iter().all(|result| result.bytes_read() == size));
             }
             let elapsed = start.elapsed().as_secs_f64();
             if !write && buffers != expected {

@@ -75,7 +75,7 @@ pub fn run_suite(fs: &mut impl VectorBackend, base: &str) {
     let mut w = WriteOp::from_path(&f, VfOffset::At(0), payload.clone());
     w = w.with_creation();
     let wr = &fs.vwrite_impl(&borrow_writes(&[w])).expect("writev")[0];
-    assert_eq!(wr.written, payload.len());
+    assert_eq!(wr.bytes_written, payload.len());
 
     let r = &fs
         .vread_impl(&[ReadOp::from_path(&f, VfOffset::At(0), payload.len())])

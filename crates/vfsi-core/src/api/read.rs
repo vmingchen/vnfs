@@ -86,7 +86,7 @@ pub struct ReadResult {
     /// Resolved absolute offset; zero for a complete-file operation.
     pub(crate) offset: u64,
     /// Number of valid bytes in owned data or the caller's buffer.
-    pub(crate) read: usize,
+    pub(crate) bytes_read: usize,
     /// True when the backend observed end of file.
     pub(crate) eof: bool,
     /// Owned contents for `whole`/`range`; `None` for `into`, including empty reads.
@@ -98,17 +98,17 @@ impl ReadResult {
     pub fn owned(offset: u64, data: Vec<u8>, eof: bool) -> Self {
         Self {
             offset,
-            read: data.len(),
+            bytes_read: data.len(),
             eof,
             data: Some(data),
         }
     }
     /// Progress in caller storage, for implementing `Vfsi`. The implementation
-    /// must ensure `read` does not exceed the corresponding destination length.
-    pub const fn buffered(offset: u64, read: usize, eof: bool) -> Self {
+    /// must ensure `bytes_read` does not exceed the corresponding destination length.
+    pub const fn buffered(offset: u64, bytes_read: usize, eof: bool) -> Self {
         Self {
             offset,
-            read,
+            bytes_read,
             eof,
             data: None,
         }
@@ -116,8 +116,9 @@ impl ReadResult {
     pub const fn offset(&self) -> u64 {
         self.offset
     }
-    pub const fn read(&self) -> usize {
-        self.read
+    /// Number of valid bytes in the owned data or caller-provided buffer.
+    pub const fn bytes_read(&self) -> usize {
+        self.bytes_read
     }
     pub const fn eof(&self) -> bool {
         self.eof
@@ -242,7 +243,7 @@ pub fn consume_ops<'a, H: crate::api::OpenFd + 'a, R, B>(
     let mut remaining = budget;
     for result in &buffered {
         remaining = remaining
-            .checked_sub(result.read)
+            .checked_sub(result.bytes_read)
             .ok_or_else(|| Error::transport(None, "vread_native backend exceeded byte budget"))?;
     }
     let allocated = if owned_ops.is_empty() {
@@ -260,7 +261,7 @@ pub fn consume_ops<'a, H: crate::api::OpenFd + 'a, R, B>(
     for (index, result) in buffer_indices.into_iter().zip(buffered) {
         output[index] = Some(ReadResult {
             offset: result.offset,
-            read: result.read,
+            bytes_read: result.bytes_read,
             eof: result.eof,
             data: None,
         });
@@ -271,7 +272,7 @@ pub fn consume_ops<'a, H: crate::api::OpenFd + 'a, R, B>(
             .ok_or_else(|| Error::transport(None, "vread_native backend exceeded byte budget"))?;
         output[index] = Some(ReadResult {
             offset: result.offset,
-            read: result.data.len(),
+            bytes_read: result.data.len(),
             eof: result.eof,
             data: Some(result.data),
         });

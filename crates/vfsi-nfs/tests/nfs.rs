@@ -60,7 +60,7 @@ fn scalar_descriptor_lifetime(exclusive: bool) {
         )]))
         .unwrap();
     assert_eq!(appended[0].offset, 3);
-    assert_eq!(appended[0].written, 1);
+    assert_eq!(appended[0].bytes_written, 1);
     assert_eq!(fs.read_raw_impl(&second, 0, 4).unwrap(), b"abcd");
     // Closing one caller-owned OPEN must not close its independent sibling.
     fs.close_impl(&first).unwrap();
@@ -431,7 +431,7 @@ fn assert_same_file_scatter_is_batched(write_all: bool, short: bool) {
         "write_all={write_all}, short={short}"
     );
     assert_eq!(cursor, 0, "positional scatter writes changed the cursor");
-    assert!(results.iter().all(|result| result.written == 32));
+    assert!(results.iter().all(|result| result.bytes_written == 32));
     assert_eq!(observed, expected);
 }
 
@@ -732,7 +732,7 @@ fn ordered_write_waves_still_batch_independent_small_files() {
         compounds, 1,
         "small independent writes must use one real compound"
     );
-    assert!(results.iter().all(|result| result.written == 7));
+    assert!(results.iter().all(|result| result.bytes_written == 7));
     assert!(contents.iter().all(|result| result.data == b"batched"));
 }
 
@@ -760,7 +760,7 @@ fn descriptor_short_reads_preserve_contiguous_contents() {
         let observed = if into {
             let mut buffer = vec![0; size];
             let result = fs.vread_into_impl(&[request], &mut [&mut buffer]).unwrap();
-            buffer.truncate(result[0].read);
+            buffer.truncate(result[0].bytes_read);
             buffer
         } else {
             fs.vread_impl(&[request]).unwrap().remove(0).data
@@ -793,7 +793,7 @@ fn descriptor_short_writes_preserve_contiguous_contents() {
     let results = fs
         .vwrite_all_native(&[file.write_request_at(0, &payload)])
         .unwrap();
-    assert_eq!(results[0].written, size);
+    assert_eq!(results[0].bytes_written, size);
     file.close().unwrap();
     let observed = fs.read(&path).unwrap();
     fs.remove_file(&path).unwrap();
@@ -935,8 +935,8 @@ fn short_writes_do_not_reorder_overlapping_or_cursor_requests() {
                 vfsi_sync::WriteOp::new(files[0].clone(), offset, second.clone()),
             ]))
             .unwrap();
-        assert_eq!(results[0].written, first.len());
-        assert_eq!(results[1].written, second.len());
+        assert_eq!(results[0].bytes_written, first.len());
+        assert_eq!(results[1].bytes_written, second.len());
         assert_eq!(results[1].offset, if cursor { length as u64 } else { 0 });
         let position = fs
             .seek_raw_impl(&files[0], 0, vfsi_sync::SeekFrom::Cur)
@@ -1050,7 +1050,7 @@ fn short_reads_handle_eof_and_requests_beyond_the_file() {
         let (observed, eof) = if into {
             let mut buffer = vec![0; size * 2];
             let result = fs.vread_into_impl(&[request], &mut [&mut buffer]).unwrap();
-            buffer.truncate(result[0].read);
+            buffer.truncate(result[0].bytes_read);
             (buffer, result[0].eof)
         } else {
             let result = fs.vread_impl(&[request]).unwrap().remove(0);

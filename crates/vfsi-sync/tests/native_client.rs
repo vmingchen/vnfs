@@ -52,7 +52,7 @@ fn client_policy_applies_to_scalar_vector_and_into_reads_before_dispatch() {
     let result = client
         .vread_into_with_limit_native(&mut [file.read_request_at_into(0, &mut buffer)], 4)
         .unwrap();
-    assert_eq!(result[0].read, 4);
+    assert_eq!(result[0].bytes_read, 4);
     assert_eq!(&buffer, b"abcd");
     buffer.fill(0xff);
     let before = read_calls.load(Ordering::SeqCst);
@@ -587,7 +587,7 @@ impl VectorBackend for WriteBoundaryProbe {
                     VfOffset::At(offset) => offset,
                     _ => 0,
                 },
-                written: op.data().len().min(2),
+                bytes_written: op.data().len().min(2),
                 stable: true,
             })
             .collect())
@@ -668,7 +668,12 @@ fn consolidated_write_dispatch_retries_only_successful_short_writes_without_copy
                 "indexed and ambiguous failures must never replay"
             );
         } else {
-            assert!(result.unwrap().iter().all(|r| r.written == data.len()));
+            assert!(
+                result
+                    .unwrap()
+                    .iter()
+                    .all(|r| r.bytes_written == data.len())
+            );
             assert_eq!(calls.len(), 3);
             for (wave, requests) in calls.iter().enumerate() {
                 assert_eq!(requests.len(), 2, "independent requests stay vectorized");
@@ -1070,7 +1075,7 @@ impl VectorBackend for WorkflowOverride {
     fn vcopy_impl(
         &mut self,
         _: &[vfsi_sync::ExtentPair],
-        _: vfsi_sync::CopyOption,
+        _: vfsi_sync::CopyOptions,
     ) -> vfsi_sync::VfRes {
         self.calls.push("copy");
         Ok(())
@@ -1108,7 +1113,7 @@ fn shared_workflows_keep_dynamic_backend_overrides_reachable() {
                 0,
                 None,
             )],
-            vfsi_sync::CopyOption::default(),
+            vfsi_sync::CopyOptions::default(),
         )
         .unwrap();
     let (entries, next) = backend
@@ -1195,7 +1200,7 @@ fn minimal_backend_defaults_are_object_safe_bounded_and_terminate() {
         .vread_into_impl(&[ReadOp::at(files[0].clone(), 2, 3)], &mut [&mut buffer])
         .unwrap();
     assert_eq!(buffer, *b"cde");
-    assert_eq!(result[0].read, 3);
+    assert_eq!(result[0].bytes_read, 3);
     let paths = [(
         FileOperand::from_path("/source"),
         FileOperand::from_path("/target"),
@@ -1377,7 +1382,7 @@ impl HandleBackend for ScalarOnly {
             return Ok(ReadIntoResult {
                 file: result.file,
                 offset: result.offset,
-                read: result.data.len(),
+                bytes_read: result.data.len(),
                 eof: result.eof,
             });
         }
@@ -1399,7 +1404,7 @@ impl HandleBackend for ScalarOnly {
         Ok(ReadIntoResult {
             file: request.file.clone(),
             offset,
-            read: data.len(),
+            bytes_read: data.len(),
             eof: end == self.data.len(),
         })
     }
@@ -1413,7 +1418,7 @@ impl HandleBackend for ScalarOnly {
             return Ok(WriteResult {
                 file: request.file().clone(),
                 offset: 0,
-                written: request.data().len() + 1,
+                bytes_written: request.data().len() + 1,
                 stable: true,
             });
         }
@@ -1434,7 +1439,7 @@ impl HandleBackend for ScalarOnly {
         Ok(WriteResult {
             file: request.file().clone(),
             offset,
-            written: length,
+            bytes_written: length,
             stable: true,
         })
     }
@@ -1776,7 +1781,7 @@ fn write_allv_dependency_schedule_visits_requests_only_when_ready() {
             *request
         })
         .unwrap();
-    assert!(results.iter().all(|result| result.written == 1));
+    assert!(results.iter().all(|result| result.bytes_written == 1));
     let calls = calls.lock().unwrap();
     assert_eq!(calls.len(), requests.len());
     for (index, wave) in calls.iter().enumerate() {
@@ -1817,7 +1822,7 @@ fn write_allv_dependency_schedule_orders_newly_ready_and_partial_requests() {
     assert_eq!(
         results
             .iter()
-            .map(|result| result.written)
+            .map(|result| result.bytes_written)
             .collect::<Vec<_>>(),
         [2, 4, 6, 6]
     );
@@ -1866,7 +1871,7 @@ fn write_allv_dependency_schedule_treats_validated_empty_requests_as_complete() 
     assert_eq!(
         results
             .iter()
-            .map(|result| (result.offset, result.written))
+            .map(|result| (result.offset, result.bytes_written))
             .collect::<Vec<_>>(),
         [(u64::MAX, 0), (0, 4), (2, 0), (0, 2), (10, 0), (20, 2)]
     );
@@ -1890,7 +1895,7 @@ fn write_allv_dependency_schedule_treats_validated_empty_requests_as_complete() 
     assert_eq!(
         results
             .iter()
-            .map(|result| result.written)
+            .map(|result| result.bytes_written)
             .collect::<Vec<_>>(),
         [0, 0]
     );
@@ -1988,7 +1993,7 @@ fn write_allv_dependency_schedule_matches_reference_waves() {
             .collect();
         let results = client.vwrite_all_native(&requests).unwrap();
         for (result, &(_, append, offset, length)) in results.iter().zip(&specifications) {
-            assert_eq!(result.written, length);
+            assert_eq!(result.bytes_written, length);
             if !append || length == 0 {
                 assert_eq!(result.offset, offset);
             }
@@ -2066,7 +2071,7 @@ fn write_allv_retries_short_writes_in_vector_waves() {
     assert_eq!(
         results
             .iter()
-            .map(|result| result.written)
+            .map(|result| result.bytes_written)
             .collect::<Vec<_>>(),
         [5, 5]
     );
@@ -2096,7 +2101,7 @@ fn write_allv_preserves_order_for_overlapping_short_writes() {
     assert_eq!(
         results
             .iter()
-            .map(|result| result.written)
+            .map(|result| result.bytes_written)
             .collect::<Vec<_>>(),
         [4, 4]
     );
@@ -2417,7 +2422,10 @@ fn native_read_into_dispatches_without_owned_read_results() {
         ])
         .unwrap();
     assert_eq!(
-        lengths.iter().map(|result| result.read).collect::<Vec<_>>(),
+        lengths
+            .iter()
+            .map(|result| result.bytes_read)
+            .collect::<Vec<_>>(),
         [3, 3]
     );
     assert_eq!(
@@ -2449,7 +2457,7 @@ fn native_read_into_dispatches_without_owned_read_results() {
     assert!(
         results
             .iter()
-            .all(|result| result.is_buffered() && result.read() == 3)
+            .all(|result| result.is_buffered() && result.bytes_read() == 3)
     );
     assert_eq!((&first, &second), (b"abc", b"def"));
     assert_eq!(calls.load(Ordering::SeqCst), 5);
@@ -2866,7 +2874,7 @@ fn complete_append_vectors_order_short_writes_and_never_replay_failures() {
     assert_eq!(
         results
             .iter()
-            .map(|r| (r.offset, r.written))
+            .map(|r| (r.offset, r.bytes_written))
             .collect::<Vec<_>>(),
         [(3, 4), (7, 4)]
     );

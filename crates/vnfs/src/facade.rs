@@ -148,7 +148,7 @@ macro_rules! owned_client {
             pub(crate) fn vcopy_impl<P: AsRef<Path>, Q: AsRef<Path>>(
                 &self,
                 pairs: &[(P, Q)],
-                options: crate::CopyOption,
+                options: crate::CopyOptions,
             ) -> Result<()> {
                 self.inner.vcopy(pairs, options)
             }

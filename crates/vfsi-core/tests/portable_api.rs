@@ -144,7 +144,7 @@ impl Vfsi for PortableFs {
     fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         _: &[(P, Q)],
-        _: vfsi_core::api::CopyOption,
+        _: vfsi_core::api::CopyOptions,
     ) -> Result<()> {
         panic!("unexpected copy")
     }
@@ -583,11 +583,11 @@ fn consuming_reads_release_caller_buffers_and_owned_counts_are_derived() {
         .vread([ReadOp::into(&file, 7, &mut buffer)], ReadOptions::new())
         .unwrap();
     assert_eq!(buffer, [0; 3]);
-    assert_eq!((result[0].offset(), result[0].read()), (7, 3));
+    assert_eq!((result[0].offset(), result[0].bytes_read()), (7, 3));
     assert!(result[0].is_buffered());
     buffer.fill(42); // Results retain no borrow of caller storage.
     let owned = ReadResult::owned(2, vec![1, 2, 3], true);
-    assert_eq!(owned.read(), owned.data().unwrap().len());
+    assert_eq!(owned.bytes_read(), owned.data().unwrap().len());
 }
 
 impl DirHandle for TestFile {

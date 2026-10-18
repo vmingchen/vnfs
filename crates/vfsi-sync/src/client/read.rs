@@ -219,7 +219,7 @@ impl<F: VectorBackend> FsClient<F> {
             .into_iter()
             .map(|result| FsReadIntoResult {
                 offset: result.offset,
-                read: result.read,
+                bytes_read: result.bytes_read,
                 eof: result.eof,
             })
             .collect())

@@ -332,12 +332,12 @@ fn validate_write_results(
                 ),
             ));
         }
-        if result.written > op.data().len() {
+        if result.bytes_written > op.data().len() {
             return Err(contract_error(
                 operation,
                 format!(
                     "result {index} reported {} bytes for a {}-byte request",
-                    result.written,
+                    result.bytes_written,
                     op.data().len()
                 ),
             ));
@@ -1043,7 +1043,7 @@ impl NfsClient {
             let w = fs
                 .vwrite_impl(std::slice::from_ref(&op.borrowed()))
                 .map_err(|e| to_py_err(e, None))?;
-            Ok(one_write_result("write", &op, w)?.written)
+            Ok(one_write_result("write", &op, w)?.bytes_written)
         })
     }
 
@@ -1060,9 +1060,9 @@ impl NfsClient {
             let w = one_write_result("write_positioned", &op, w)?;
             let position = w
                 .offset
-                .checked_add(w.written as u64)
+                .checked_add(w.bytes_written as u64)
                 .ok_or_else(|| PyOSError::new_err("file position overflow"))?;
-            Ok((w.written, position))
+            Ok((w.bytes_written, position))
         })
     }
 
@@ -1084,7 +1084,7 @@ impl NfsClient {
             let w = fs
                 .vwrite_impl(std::slice::from_ref(&op.borrowed()))
                 .map_err(|e| to_py_err(e, None))?;
-            Ok(one_write_result("pwrite", &op, w)?.written)
+            Ok(one_write_result("pwrite", &op, w)?.bytes_written)
         })
     }
 
@@ -1232,7 +1232,7 @@ impl NfsClient {
                 )
                 .map_err(|e| to_py_err(e, None))?;
             let writes = validate_write_results("pwrite_many", &ops, writes)?;
-            Ok(writes.into_iter().map(|write| write.written).collect())
+            Ok(writes.into_iter().map(|write| write.bytes_written).collect())
         })
     }
 
@@ -1270,9 +1270,9 @@ impl NfsClient {
                 .map(|write| {
                     let position = write
                         .offset
-                        .checked_add(write.written as u64)
+                        .checked_add(write.bytes_written as u64)
                         .ok_or_else(|| PyOSError::new_err("file position overflow"))?;
-                    Ok((write.written, position))
+                    Ok((write.bytes_written, position))
                 })
                 .collect()
         })
@@ -1614,7 +1614,7 @@ impl NfsClient {
                 )
                 .map_err(|e| map_err_with_path(e, &paths))?;
             let res = validate_write_results("write_many", &ops, res)?;
-            Ok(res.into_iter().map(|r| r.written).collect())
+            Ok(res.into_iter().map(|r| r.bytes_written).collect())
         })
     }
 
@@ -2039,12 +2039,12 @@ impl NfsClient {
                         let results = validate_write_results("copy_many", &ops, results)?;
                         for ((&index, op), result) in write_remaining.iter().zip(&ops).zip(results)
                         {
-                            if result.written != op.data().len() {
+                            if result.bytes_written != op.data().len() {
                                 // Copy promises complete contents, unlike a primitive
                                 // WRITE. Never replay a truncating write after partial progress.
                                 errors.insert(index, libc::EIO as u32);
                             } else {
-                                copied[index] = Some(result.written as u64);
+                                copied[index] = Some(result.bytes_written as u64);
                             }
                         }
                         break;
@@ -2174,7 +2174,7 @@ impl NfsClient {
                         )
                     })
                     .collect();
-                match fs.vcopy_impl(&ops, vfsi_core::CopyOption::new()) {
+                match fs.vcopy_impl(&ops, vfsi_core::CopyOptions::new()) {
                     Ok(()) => {
                         let mut next = Vec::new();
                         for (&index, &length) in remaining.iter().zip(&chunks) {
@@ -2478,7 +2478,7 @@ mod tests {
                 vec![WriteResult {
                     file: FileOperand::from_fd(7),
                     offset: 11,
-                    written: 4,
+                    bytes_written: 4,
                     stable: true,
                 }],
             )

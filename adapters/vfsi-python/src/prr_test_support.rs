@@ -233,7 +233,7 @@ impl VectorBackend for FaultBackend {
     fn vcopy_impl(
         &mut self,
         pairs: &[ExtentPair],
-        options: vfsi_core::CopyOption,
+        options: vfsi_core::CopyOptions,
     ) -> vfsi_core::VfRes {
         self.extent_calls
             .lock()

@@ -828,7 +828,7 @@ fn read_range(
             vfsi_core::api::ReadOptions::new()
                 .with_max_total_bytes(std::num::NonZeroUsize::new(length - filled)),
         )?;
-        let count = results[0].read();
+        let count = results[0].bytes_read();
         if count == 0 {
             return Err(
                 VfError::client(0, libc::EIO as u32).with_context("read_pipeline", file.path())

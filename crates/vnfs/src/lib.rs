@@ -62,7 +62,7 @@ pub mod files {
         StreamOptions, SyncMode, WriteOp, WriteOptions, WriteResult,
     };
     pub use vfsi_core::{
-        AsTarget, Capabilities, CopyOption, FilesystemStats, OpenFd, OpenFlags, OpenOp, Target,
+        AsTarget, Capabilities, CopyOptions, FilesystemStats, OpenFd, OpenFlags, OpenOp, Target,
         Vfsi, VfsiExt,
     };
 }
@@ -228,7 +228,7 @@ pub(crate) use vfsi_core::api::{
     StreamCompletion, StreamOptions, TraversalCompletion, WriteResult,
 };
 pub(crate) use vfsi_core::{
-    Attrs, Capabilities, CopyOption, FilesystemStats, OpenFlags, OpenOp, TransportKind,
+    Attrs, Capabilities, CopyOptions, FilesystemStats, OpenFlags, OpenOp, TransportKind,
 };
 #[cfg(all(feature = "auto", target_os = "linux"))]
 pub(crate) use vfsi_sync::ReadAllOptions;

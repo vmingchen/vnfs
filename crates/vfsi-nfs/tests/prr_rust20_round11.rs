@@ -550,7 +550,10 @@ fn ordinary_mixed_vectors_keep_one_merged_compound() {
     fs.remove_paths_impl(&[Path::new(&root)], true).unwrap();
     assert_eq!(compounds, 1);
     assert_eq!(actual, b"first");
-    assert_eq!(result.iter().map(|r| r.written).collect::<Vec<_>>(), [5, 6]);
+    assert_eq!(
+        result.iter().map(|r| r.bytes_written).collect::<Vec<_>>(),
+        [5, 6]
+    );
 }
 
 #[cfg(feature = "test-faults")]

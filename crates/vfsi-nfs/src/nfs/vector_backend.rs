@@ -227,7 +227,7 @@ impl VectorBackend for NfsVecFs {
             output.push(ReadIntoResult {
                 file: result.file,
                 offset: result.offset,
-                read: result.data.len(),
+                bytes_read: result.data.len(),
                 eof: result.eof,
             });
         }
@@ -339,7 +339,7 @@ impl VectorBackend for NfsVecFs {
             if w.offset() == VfOffset::Cur && w.file().is_fd() {
                 let new = out[i]
                     .offset
-                    .checked_add(out[i].written as u64)
+                    .checked_add(out[i].bytes_written as u64)
                     .ok_or_else(|| VfError::failure(i, libc::EOVERFLOW as u32))?;
                 self.advance_offset(w.file(), new);
             }
@@ -1259,7 +1259,7 @@ impl VectorBackend for NfsVecFs {
         Ok(())
     }
 
-    fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOption) -> VfRes {
+    fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOptions) -> VfRes {
         self.ensure_writable(pairs.len())?;
         if pairs.is_empty() {
             return Ok(());

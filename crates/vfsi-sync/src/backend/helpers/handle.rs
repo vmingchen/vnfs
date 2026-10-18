@@ -58,7 +58,7 @@ pub fn write_raw_impl_default<F: HandleBackend + ?Sized>(
         std::slice::from_ref(&request),
         std::slice::from_ref(&result),
     )?;
-    Ok(result.written)
+    Ok(result.bytes_written)
 }
 
 pub fn native_open_impl_default<F: HandleBackend + ?Sized>(
@@ -159,7 +159,7 @@ pub fn read_into_impl_default<F: HandleBackend + ?Sized>(
     Ok(ReadIntoResult {
         file: result.file,
         offset: result.offset,
-        read: result.data.len(),
+        bytes_read: result.data.len(),
         eof: result.eof,
     })
 }

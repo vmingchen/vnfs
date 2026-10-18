@@ -153,8 +153,8 @@ operation return an unsupported error for nonempty requests.
 
 ## Copy options
 
-The shared extent-copy backend entry point is `vcopy_impl(pairs, CopyOption)`.
-`CopyOption::new()` follows final source symlinks and allows server-side copy
+The shared extent-copy backend entry point is `vcopy_impl(pairs, CopyOptions)`.
+`CopyOptions::new()` follows final source symlinks and allows server-side copy
 with a client-copy fallback. Use `.with_follow_source_symlinks(false)` to recreate
 source links with their original text; offsets and length do not apply to links.
 Data-copy destination symlinks keep their existing following behavior. Local

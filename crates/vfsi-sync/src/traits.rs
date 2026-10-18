@@ -172,13 +172,13 @@ pub(crate) fn validate_read_into_results(
                 "result file does not match request",
             ));
         }
-        if result.read > request.length {
+        if result.bytes_read > request.length {
             return Err(contract_error(
                 operation,
                 Some(index),
                 format!(
                     "returned {} bytes for a {}-byte read",
-                    result.read, request.length
+                    result.bytes_read, request.length
                 ),
             ));
         }
@@ -191,7 +191,7 @@ pub(crate) fn validate_read_into_results(
                 format!("result offset {} does not match {expected}", result.offset),
             ));
         }
-        if request.length != 0 && result.read == 0 && !result.eof {
+        if request.length != 0 && result.bytes_read == 0 && !result.eof {
             return Err(contract_error(
                 operation,
                 Some(index),
@@ -226,13 +226,13 @@ pub(crate) fn validate_write_results(
                 "result file does not match request",
             ));
         }
-        if result.written > request.data().len() {
+        if result.bytes_written > request.data().len() {
             return Err(contract_error(
                 operation,
                 Some(index),
                 format!(
                     "reported {} bytes written for a {}-byte write",
-                    result.written,
+                    result.bytes_written,
                     request.data().len()
                 ),
             ));
@@ -358,7 +358,7 @@ mod contract_tests {
         let valid = WriteResult {
             file: file.clone(),
             offset: 0,
-            written: 1,
+            bytes_written: 1,
             stable: true,
         };
         validate_write_results("test", &[request], std::slice::from_ref(&valid)).unwrap();
@@ -368,7 +368,7 @@ mod contract_tests {
             "test",
             &[request],
             &[WriteResult {
-                written: 0,
+                bytes_written: 0,
                 ..valid.clone()
             }],
         )
@@ -395,7 +395,7 @@ mod contract_tests {
                 ..valid.clone()
             },
             WriteResult {
-                written: 2,
+                bytes_written: 2,
                 ..valid.clone()
             },
         ] {

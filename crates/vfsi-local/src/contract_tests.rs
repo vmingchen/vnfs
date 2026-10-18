@@ -271,7 +271,7 @@ mod tests {
         let write: WriteOp<&FileOperand, &[u8]> =
             WriteOp::new(&file, VfOffset::At(0), &b"hello"[..]).with_creation();
         let written = fs.vwrite_impl(&[write]).unwrap();
-        assert_eq!(written[0].written, 5);
+        assert_eq!(written[0].bytes_written, 5);
 
         let reads = [ReadOp::at(file.clone(), 0, 3), ReadOp::at(file, 3, 5)];
         let mut first = [0u8; 3];
@@ -280,11 +280,11 @@ mod tests {
             .vread_into_impl(&reads, &mut [&mut first, &mut second])
             .unwrap();
         assert_eq!(
-            (results[0].offset, results[0].read, results[0].eof),
+            (results[0].offset, results[0].bytes_read, results[0].eof),
             (0, 3, false)
         );
         assert_eq!(
-            (results[1].offset, results[1].read, results[1].eof),
+            (results[1].offset, results[1].bytes_read, results[1].eof),
             (3, 2, true)
         );
         assert_eq!(&first, b"hel");
@@ -1104,7 +1104,7 @@ mod tests {
             let error = fs
                 .vcopy_impl(
                     &[ExtentPair::new("/source", 0, "/alias", 1, None)],
-                    CopyOption::new(),
+                    CopyOptions::new(),
                 )
                 .unwrap_err();
             assert_eq!(error.err_no(), ERR_INVAL);
@@ -1535,7 +1535,7 @@ mod tests {
         let pair = ExtentPair::new("/link", 0, "/link-copy", 0, None);
         fs.vcopy_impl(
             std::slice::from_ref(&pair),
-            vfsi_core::CopyOption::new().with_follow_source_symlinks(false),
+            vfsi_core::CopyOptions::new().with_follow_source_symlinks(false),
         )
         .unwrap();
         assert_eq!(
@@ -1549,7 +1549,7 @@ mod tests {
 
         // The default option on the same entry point copies the target's data.
         let pair = ExtentPair::new("/link", 0, "/link-dup", 0, None);
-        fs.vcopy_impl(std::slice::from_ref(&pair), CopyOption::new())
+        fs.vcopy_impl(std::slice::from_ref(&pair), CopyOptions::new())
             .unwrap();
         assert_eq!(
             fs.file_type_impl(Path::new("/link-dup")).unwrap(),
@@ -1568,7 +1568,7 @@ mod tests {
         write(&mut fs, "/source", b"0123456789");
         fs.symlink_raw_impl(Path::new("missing-target"), Path::new("/dangling"))
             .unwrap();
-        let options = CopyOption::new().with_follow_source_symlinks(false);
+        let options = CopyOptions::new().with_follow_source_symlinks(false);
         let pairs = [
             ExtentPair::new("/source", 2, "/data-copy", 0, Some(4)),
             ExtentPair::new("/dangling", 99, "/dangling-copy", 100, Some(0)),
@@ -1598,7 +1598,7 @@ mod tests {
         let error = fs
             .vcopy_impl(
                 &[ExtentPair::new("/dangling", 0, "/followed", 0, None)],
-                CopyOption::new(),
+                CopyOptions::new(),
             )
             .unwrap_err();
         assert_eq!(error.err_no(), libc::ENOENT as u32);

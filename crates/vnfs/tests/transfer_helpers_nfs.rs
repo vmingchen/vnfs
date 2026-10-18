@@ -46,7 +46,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 &fs,
                 &src,
                 format!("{root}/descriptor"),
-                CopyOptions::new().with_chunk_size(16),
+                TransferOptions::new().with_chunk_size(16),
             )?;
             assert_eq!(s.files_copied, 2);
             assert_eq!(s.bytes_copied, Some(103));
@@ -60,7 +60,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 &fs,
                 &src,
                 format!("{root}/native"),
-                CopyOptions::new().with_existing(Existing::Replace),
+                TransferOptions::new().with_existing(Existing::Replace),
             )?;
             assert_eq!(s.files_copied, 2);
             assert_eq!(s.bytes_copied, None);
@@ -69,7 +69,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 &fs,
                 &src,
                 format!("{root}/native"),
-                CopyOptions::new().with_existing(Existing::Replace),
+                TransferOptions::new().with_existing(Existing::Replace),
             )?;
             let path = format!("{root}/native/nested/files/b");
             let data = fs.vread([ReadOp::whole(&path)], ReadOptions::new())?;
@@ -78,7 +78,7 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 &fs,
                 &[format!("{root}/descriptor")],
                 format!("{root}/moved"),
-                CopyOptions::new(),
+                TransferOptions::new(),
             )?;
             assert_eq!(s.roots_removed, 1);
             assert_eq!(
@@ -96,14 +96,14 @@ fn transfers_and_statistics_on_nfsv41_and_nfsv42() {
                 &fs,
                 &batchsrc,
                 format!("{root}/batch-copy"),
-                CopyOptions::new(),
+                TransferOptions::new(),
             )?;
             let batched = vnfs::diagnostics::take_and_reset();
             copy_tree(
                 &fs,
                 &batchsrc,
                 format!("{root}/serial-copy"),
-                CopyOptions::new().with_batch_size(1),
+                TransferOptions::new().with_batch_size(1),
             )?;
             let serial = vnfs::diagnostics::take_and_reset();
             eprintln!(

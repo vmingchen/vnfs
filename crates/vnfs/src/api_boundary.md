@@ -394,7 +394,7 @@ Read-result fields cannot be independently mutated:
 
 ```compile_fail
 let mut result = vnfs::files::ReadResult::owned(0, vec![1], true);
-result.read = 100;
+result.bytes_read = 100;
 ```
 
 Filesystem operations require the portable traits; internal dispatch is private.

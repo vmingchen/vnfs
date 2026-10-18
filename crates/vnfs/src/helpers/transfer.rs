@@ -1,5 +1,5 @@
 use crate::{
-    Attributes, Attrs, AttrsOptions, ControlFlow, CopyOption, DepthLimit, Error, ListDirOptions,
+    Attributes, Attrs, AttrsOptions, ControlFlow, CopyOptions, DepthLimit, Error, ListDirOptions,
     OpenFlags, OpenOp, ReadOp, ReadOptions, Result, SetAttrsOp, TransportKind, Vfsi, VfsiExt,
     WriteOp, WriteOptions,
 };
@@ -42,7 +42,7 @@ struct CopyFlags {
 /// storage and traversal limits inherit the client's limits. Options never
 /// disable negotiated backend limits. Failure/cancellation leaves partial output.
 #[derive(Clone, Copy, Debug)]
-pub struct CopyOptions {
+pub struct TransferOptions {
     existing: Existing,
     layout: CopyLayout,
     unsupported: UnsupportedEntry,
@@ -53,7 +53,7 @@ pub struct CopyOptions {
     max_path_bytes: Option<usize>,
     depth: Option<DepthLimit>,
 }
-impl Default for CopyOptions {
+impl Default for TransferOptions {
     fn default() -> Self {
         Self {
             existing: Existing::Error,
@@ -68,7 +68,7 @@ impl Default for CopyOptions {
         }
     }
 }
-impl CopyOptions {
+impl TransferOptions {
     pub fn new() -> Self {
         Self::default()
     }
@@ -164,7 +164,7 @@ pub fn copy_items<P: AsRef<Path>>(
     fs: &impl Vfsi,
     sources: &[P],
     destination: impl AsRef<Path>,
-    options: CopyOptions,
+    options: TransferOptions,
 ) -> Result<TransferSummary> {
     run(fs, sources, destination.as_ref(), options, false, None)
 }
@@ -172,7 +172,7 @@ pub fn copy_items_with_progress<P: AsRef<Path>>(
     fs: &impl Vfsi,
     sources: &[P],
     destination: impl AsRef<Path>,
-    options: CopyOptions,
+    options: TransferOptions,
     mut progress: impl FnMut(TransferProgress<'_>) -> Result<ControlFlow<()>>,
 ) -> Result<TransferSummary> {
     run(
@@ -190,7 +190,7 @@ pub fn copy_tree(
     fs: &impl Vfsi,
     source: impl AsRef<Path>,
     destination: impl AsRef<Path>,
-    options: CopyOptions,
+    options: TransferOptions,
 ) -> Result<TransferSummary> {
     run(fs, &[source], destination.as_ref(), options, true, None)
 }
@@ -198,7 +198,7 @@ pub fn copy_tree_with_progress(
     fs: &impl Vfsi,
     source: impl AsRef<Path>,
     destination: impl AsRef<Path>,
-    options: CopyOptions,
+    options: TransferOptions,
     mut progress: impl FnMut(TransferProgress<'_>) -> Result<ControlFlow<()>>,
 ) -> Result<TransferSummary> {
     run(
@@ -267,7 +267,7 @@ fn roots<P: AsRef<Path>>(
     fs: &impl Vfsi,
     sources: &[P],
     destination: &Path,
-    options: CopyOptions,
+    options: TransferOptions,
     exact: bool,
     budget: &mut TraversalBudget,
     max_path_bytes: usize,
@@ -418,7 +418,7 @@ fn run<P: AsRef<Path>>(
     fs: &impl Vfsi,
     sources: &[P],
     destination: &Path,
-    options: CopyOptions,
+    options: TransferOptions,
     exact: bool,
     mut progress: Progress<'_>,
 ) -> Result<TransferSummary> {
@@ -474,7 +474,7 @@ fn run<P: AsRef<Path>>(
 fn copy_roots(
     fs: &impl Vfsi,
     roots: Vec<Task>,
-    options: CopyOptions,
+    options: TransferOptions,
     budget: &mut TraversalBudget,
     summary: &mut TransferSummary,
     progress: &mut Progress<'_>,
@@ -519,7 +519,7 @@ fn copy_roots(
 fn copy_independent_roots(
     fs: &impl Vfsi,
     roots: Vec<Task>,
-    options: CopyOptions,
+    options: TransferOptions,
     budget: &mut TraversalBudget,
     summary: &mut TransferSummary,
     progress: &mut Progress<'_>,
@@ -643,7 +643,7 @@ fn dispatch(
     fs: &impl Vfsi,
     tasks: Vec<Task>,
     pending: &mut Vec<Task>,
-    options: CopyOptions,
+    options: TransferOptions,
     summary: &mut TransferSummary,
     progress: &mut Progress<'_>,
     skipped: &mut HashSet<usize>,
@@ -722,7 +722,7 @@ fn dispatch(
 fn copy_batch(
     fs: &impl Vfsi,
     tasks: &[Task],
-    options: CopyOptions,
+    options: TransferOptions,
     chunk: usize,
     summary: &mut TransferSummary,
     progress: &mut Progress<'_>,
@@ -757,7 +757,7 @@ fn copy_batch(
         }
         close?;
         let pairs: Vec<_> = tasks.iter().map(|t| (&t.source, &t.destination)).collect();
-        fs.vcopy(&pairs, CopyOption::default())
+        fs.vcopy(&pairs, CopyOptions::default())
             .map_err(|e| mapped(e, tasks))?;
         summary.files_copied += tasks.len() as u64;
         summary.bytes_copied = None;
@@ -843,21 +843,27 @@ fn copy_batch(
                 let remaining = tasks[selected[*i]].size.saturating_sub(offsets[*i]);
                 if result.offset() != offsets[*i]
                     || result.data().is_some()
-                    || result.read()
+                    || result.bytes_read()
                         > buffers[*i]
                             .len()
                             .min(usize::try_from(remaining).unwrap_or(usize::MAX))
                 {
                     return Err(contract("transfer: misassociated READ result"));
                 }
-                if result.read() == 0 && !result.eof() && remaining != 0 {
+                if result.bytes_read() == 0 && !result.eof() && remaining != 0 {
                     return Err(contract("transfer: READ made no progress"));
                 }
             }
             let writes: Vec<_> = read
                 .iter()
                 .zip(&active)
-                .map(|(r, i)| WriteOp::at(&destinations[*i], offsets[*i], &buffers[*i][..r.read()]))
+                .map(|(r, i)| {
+                    WriteOp::at(
+                        &destinations[*i],
+                        offsets[*i],
+                        &buffers[*i][..r.bytes_read()],
+                    )
+                })
                 .collect();
             let written = fs
                 .vwrite(&writes, WriteOptions::new().with_write_all(true))
@@ -866,14 +872,14 @@ fn copy_batch(
                 return Err(contract("transfer: invalid WRITE cardinality"));
             }
             for ((written, read), i) in written.iter().zip(&read).zip(&active) {
-                if written.offset != offsets[*i] || written.written != read.read() {
+                if written.offset != offsets[*i] || written.bytes_written != read.bytes_read() {
                     return Err(contract("transfer: invalid complete WRITE progress"));
                 }
                 offsets[*i] = offsets[*i]
-                    .checked_add(read.read() as u64)
+                    .checked_add(read.bytes_read() as u64)
                     .ok_or_else(|| limit(tasks[selected[*i]].root, &tasks[selected[*i]].source))?;
                 if let Some(bytes) = &mut summary.bytes_copied {
-                    *bytes = bytes.checked_add(read.read() as u64).ok_or_else(|| {
+                    *bytes = bytes.checked_add(read.bytes_read() as u64).ok_or_else(|| {
                         limit(tasks[selected[*i]].root, &tasks[selected[*i]].source)
                     })?;
                 }
@@ -1008,7 +1014,7 @@ pub fn move_items<P: AsRef<Path>>(
     fs: &impl Vfsi,
     sources: &[P],
     destination: impl AsRef<Path>,
-    options: CopyOptions,
+    options: TransferOptions,
 ) -> Result<TransferSummary> {
     move_run(fs, sources, destination.as_ref(), options, None)
 }
@@ -1016,7 +1022,7 @@ pub fn move_items_with_progress<P: AsRef<Path>>(
     fs: &impl Vfsi,
     sources: &[P],
     destination: impl AsRef<Path>,
-    options: CopyOptions,
+    options: TransferOptions,
     mut progress: impl FnMut(TransferProgress<'_>) -> Result<ControlFlow<()>>,
 ) -> Result<TransferSummary> {
     move_run(
@@ -1031,7 +1037,7 @@ fn move_run<P: AsRef<Path>>(
     fs: &impl Vfsi,
     sources: &[P],
     destination: &Path,
-    options: CopyOptions,
+    options: TransferOptions,
     mut progress: Progress<'_>,
 ) -> Result<TransferSummary> {
     let limits = fs.limits();

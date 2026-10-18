@@ -57,13 +57,13 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
         };
         if value.offset() != self.position
             || value.data().is_some()
-            || value.read() > length
-            || (length != 0 && value.read() == 0 && !value.eof())
+            || value.bytes_read() > length
+            || (length != 0 && value.bytes_read() == 0 && !value.eof())
         {
             return Err(invalid("invalid read progress"));
         }
-        self.position += value.read() as u64;
-        Ok((value.read(), value.eof()))
+        self.position += value.bytes_read() as u64;
+        Ok((value.bytes_read(), value.eof()))
     }
     fn read_uninterrupted(&mut self, buffer: &mut [u8], budget: usize) -> Result<(usize, bool)> {
         loop {
@@ -84,15 +84,15 @@ impl<'a, C: Vfsi + ?Sized> StdIo<'a, C> {
         let [value] = values.as_slice() else {
             return Err(invalid("invalid write count"));
         };
-        if value.written > buffer.len() {
+        if value.bytes_written > buffer.len() {
             return Err(invalid("invalid write progress"));
         }
         // Append descriptors report the actual position selected by the backend.
         self.position = value
             .offset
-            .checked_add(value.written as u64)
+            .checked_add(value.bytes_written as u64)
             .ok_or_else(|| invalid("write offset overflow"))?;
-        Ok(value.written)
+        Ok(value.bytes_written)
     }
 }
 fn invalid(message: &'static str) -> Error {

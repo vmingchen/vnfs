@@ -24,7 +24,7 @@ let result = fs.vread(files.iter().map(|file| ReadOp::range(file, 0, 4096)),
 let close = fs.close_files(files);
 let results = result?;
 close?;
-for result in results { println!("{} bytes", result.read()); }
+for result in results { println!("{} bytes", result.bytes_read()); }
 # Ok(())
 # }
 ```

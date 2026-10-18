@@ -69,7 +69,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            written.iter().map(|r| r.written).collect::<Vec<_>>(),
+            written.iter().map(|r| r.bytes_written).collect::<Vec<_>>(),
             [5, 4]
         );
         let mut a = [0; 5];
@@ -109,7 +109,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            results.iter().map(|r| r.written).collect::<Vec<_>>(),
+            results.iter().map(|r| r.bytes_written).collect::<Vec<_>>(),
             [4, 2]
         );
         assert_eq!(std::fs::read(root.path().join("a")).unwrap(), b"12XYa");

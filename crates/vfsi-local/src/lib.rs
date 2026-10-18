@@ -1148,7 +1148,7 @@ impl LocalBackend {
     fn readv_one(&mut self, op: &ReadOp) -> VfResult<ReadResult> {
         let mut data = vec![0u8; op.length];
         let result = self.readv_one_into(op, &mut data)?;
-        data.truncate(result.read);
+        data.truncate(result.bytes_read);
         Ok(ReadResult {
             file: result.file,
             offset: result.offset,
@@ -1242,7 +1242,7 @@ impl LocalBackend {
         Ok(ReadIntoResult {
             file: op.file.clone(),
             offset: off,
-            read: n,
+            bytes_read: n,
             eof: n < op.length,
         })
     }
@@ -1309,7 +1309,7 @@ impl LocalBackend {
         Ok(WriteResult {
             file: op.file().clone(),
             offset: off,
-            written: op.data().len(),
+            bytes_written: op.data().len(),
             stable: true,
         })
     }
@@ -1842,7 +1842,7 @@ impl VectorBackend for LocalBackend {
                 .into_iter()
                 .zip(storage)
                 .map(|(result, mut data)| {
-                    data.truncate(result.read);
+                    data.truncate(result.bytes_read);
                     ReadResult {
                         file: result.file,
                         offset: result.offset,
@@ -1901,7 +1901,7 @@ impl VectorBackend for LocalBackend {
                         out.push(ReadIntoResult {
                             file: op.file.clone(),
                             offset,
-                            read,
+                            bytes_read: read,
                             eof: read < op.length,
                         });
                     }
@@ -1983,7 +1983,7 @@ impl VectorBackend for LocalBackend {
                         Ok(WriteResult {
                             file: op.file().clone(),
                             offset: request.offset,
-                            written,
+                            bytes_written: written,
                             stable: true,
                         })
                     })
@@ -2349,7 +2349,7 @@ impl VectorBackend for LocalBackend {
         Ok(())
     }
 
-    fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOption) -> VfRes {
+    fn vcopy_impl(&mut self, pairs: &[ExtentPair], options: CopyOptions) -> VfRes {
         if options.follow_source_symlinks() {
             return self.vcopy_data_impl(pairs);
         }

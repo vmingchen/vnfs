@@ -48,7 +48,7 @@ fn read_write_sync_vectors_are_bounded_and_match_local() {
             fs.vwrite(&writes, WriteOptions::new().with_write_all(true))
                 .unwrap()
                 .iter()
-                .all(|r| r.written == 133)
+                .all(|r| r.bytes_written == 133)
         );
         fs.vfsync(&files.iter().collect::<Vec<_>>(), SyncMode::Data)
             .unwrap();
@@ -92,7 +92,7 @@ fn single_file_ranges_and_caller_buffers_are_batched_without_gaps() {
     assert!(
         results
             .iter()
-            .all(|r| r.read() == 256 && r.data().is_none())
+            .all(|r| r.bytes_read() == 256 && r.data().is_none())
     );
     assert_eq!(buffers.concat(), bytes);
     assert_eq!(telemetry.snapshot().waves, 1);
@@ -117,8 +117,8 @@ fn single_file_ranges_and_caller_buffers_are_batched_without_gaps() {
         )
         .unwrap();
     assert!(results[0].eof());
-    assert_eq!(results[0].read(), 0);
-    assert_eq!(results[1].read(), 0);
+    assert_eq!(results[0].bytes_read(), 0);
+    assert_eq!(results[1].bytes_read(), 0);
     let mut caller = [99; 4];
     let mixed = fs
         .vread(
@@ -171,7 +171,7 @@ fn indexed_cqe_failure_drains_other_requests_and_ring_remains_usable() {
     assert_eq!(std::fs::read(root.path().join("b")).unwrap(), b"old");
     assert_eq!(std::fs::read(root.path().join("c")).unwrap(), b"new");
     assert_eq!(
-        fs.vwrite(&[writes[0]], Default::default()).unwrap()[0].written,
+        fs.vwrite(&[writes[0]], Default::default()).unwrap()[0].bytes_written,
         3
     );
     fs.close_files(files).unwrap();
@@ -216,7 +216,7 @@ fn known_failure_stops_unsent_waves_for_queue_and_byte_limits() {
         let stats = telemetry.snapshot();
         assert_eq!((stats.submissions, stats.completions), (2, 2));
         assert_eq!(
-            fs.vwrite(&[writes[0]], Default::default()).unwrap()[0].written,
+            fs.vwrite(&[writes[0]], Default::default()).unwrap()[0].bytes_written,
             3
         );
         fs.close_files(files).unwrap();
@@ -344,7 +344,7 @@ fn disjoint_writes_to_one_file_are_batched_at_their_actual_offsets() {
         results
             .iter()
             .enumerate()
-            .all(|(i, result)| result.offset == (i * 64) as u64 && result.written == 64)
+            .all(|(i, result)| result.offset == (i * 64) as u64 && result.bytes_written == 64)
     );
     assert_eq!(
         std::fs::read(root.path().join("file")).unwrap(),
@@ -394,7 +394,10 @@ fn write_coalescing_respects_gaps_order_descriptors_and_wave_limits() {
         let results = fs.vwrite(&writes, Default::default()).unwrap();
         let mut expected = [0; 16];
         for i in 0..3 {
-            assert_eq!((results[i].offset, results[i].written), (offsets[i], 3));
+            assert_eq!(
+                (results[i].offset, results[i].bytes_written),
+                (offsets[i], 3)
+            );
             let start = offsets[i] as usize;
             expected[start..start + 3].copy_from_slice(&blocks[i]);
         }

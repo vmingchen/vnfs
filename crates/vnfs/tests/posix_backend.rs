@@ -315,7 +315,7 @@ fn application_metadata_and_batch_mutations() {
     client
         .vcopy(
             &[("/source-1", "/copy-1"), ("/source-2", "/copy-2")],
-            vnfs::files::CopyOption::default(),
+            vnfs::files::CopyOptions::default(),
         )
         .unwrap();
     assert_eq!(client.read("/copy-1").unwrap(), b"abc");
@@ -324,7 +324,7 @@ fn application_metadata_and_batch_mutations() {
         .copy_with_options(
             "/link",
             "/link-copy",
-            vnfs::files::CopyOption::new().with_follow_source_symlinks(false),
+            vnfs::files::CopyOptions::new().with_follow_source_symlinks(false),
         )
         .unwrap();
     assert_eq!(
@@ -888,7 +888,10 @@ fn owned_client_supports_multiple_live_files_and_typed_requests() {
         ])
         .unwrap();
     assert_eq!(
-        lengths.iter().map(|result| result.read).collect::<Vec<_>>(),
+        lengths
+            .iter()
+            .map(|result| result.bytes_read)
+            .collect::<Vec<_>>(),
         [3, 3]
     );
     assert_eq!(&one_buffer, b"one");
@@ -957,7 +960,7 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
                 Default::default()
             )
             .unwrap()[0]
-            .written,
+            .bytes_written,
         1
     );
     let mut bytes = [0; 5];
@@ -968,7 +971,7 @@ fn native_client_covers_idiomatic_file_and_namespace_workflows() {
                 Default::default()
             )
             .unwrap()[0]
-            .read(),
+            .bytes_read(),
         5
     );
     assert_eq!(&bytes, b"hallo");

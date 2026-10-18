@@ -213,7 +213,7 @@ fn successful_range_and_buffer_batches_keep_one_dispatch_each() {
     assert!(
         results
             .iter()
-            .all(|result| result.is_buffered() && result.read() == 2)
+            .all(|result| result.is_buffered() && result.bytes_read() == 2)
     );
     assert_eq!(dispatches.load(Ordering::SeqCst), 2);
 }

@@ -4,7 +4,7 @@
 use std::path::Path;
 use vfsi_nfs::NfsVecFs;
 use vfsi_sync::backend::{HandleBackend, VectorBackend};
-use vfsi_sync::{CopyOption, ExtentPair, FileOperand};
+use vfsi_sync::{CopyOptions, ExtentPair, FileOperand};
 
 fn connect(name: &str) -> Option<(NfsVecFs, String)> {
     let Ok(server) = std::env::var("VFSI_NFS_SERVER") else {
@@ -57,7 +57,7 @@ fn chained(hardlink: bool) {
             ExtentPair::new(&a, 0, &b, 0, None),
             ExtentPair::new(source, 0, &c, 0, None),
         ],
-        CopyOption::default(),
+        CopyOptions::default(),
     );
     let actual_b = get(&mut fs, &b);
     let actual_c = get(&mut fs, &c);
@@ -97,7 +97,7 @@ fn later_destination_does_not_invalidate_an_earlier_source() {
             ExtentPair::new(&a, 0, &b, 0, None),
             ExtentPair::new(&c, 0, &a, 0, None),
         ],
-        CopyOption::default(),
+        CopyOptions::default(),
     );
     let actual_b = get(&mut fs, &b);
     let actual_a = get(&mut fs, &a);
@@ -126,7 +126,7 @@ fn repeated_destination_preserves_final_size_without_disabling_server_copy() {
             ExtentPair::new(&a, 0, &c, 0, None),
             ExtentPair::new(&b, 0, &c, 0, None),
         ],
-        CopyOption::default(),
+        CopyOptions::default(),
     );
     let actual = get(&mut fs, &c);
     let enabled = fs.server_copy_enabled();
@@ -154,7 +154,7 @@ fn independent_pairs_keep_one_server_copy_cohort() {
             ExtentPair::new(&a, 0, &c, 0, None),
             ExtentPair::new(&b, 0, &d, 0, None),
         ],
-        CopyOption::default(),
+        CopyOptions::default(),
     );
     let after = fs.server_copy_stats();
     let actual_c = get(&mut fs, &c);
@@ -189,7 +189,7 @@ fn fanout(hardlink: bool) {
             ExtentPair::new(&a, 0, &b, 0, None),
             ExtentPair::new(source, 0, &c, 0, None),
         ],
-        CopyOption::default(),
+        CopyOptions::default(),
     );
     let actual_b = get(&mut fs, &b);
     let actual_c = get(&mut fs, &c);
@@ -228,7 +228,7 @@ fn failed_dependent_suffix_keeps_original_index_and_does_not_replay_prefix() {
             ExtentPair::new(&b, 0, &c, 0, None),
             ExtentPair::new(&c, 0, &c, 0, None),
         ],
-        CopyOption::default(),
+        CopyOptions::default(),
     );
     let actual_b = get(&mut fs, &b);
     let actual_c = get(&mut fs, &c);

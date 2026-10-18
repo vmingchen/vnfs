@@ -75,7 +75,7 @@ impl Vfsi for Counted {
     fn vmkdir<P: AsRef<Path>>(&self, p: &[MkDirOp<P>]) -> Result<()> {
         self.fs.vmkdir(p)
     }
-    fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)], o: CopyOption) -> Result<()> {
+    fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(&self, p: &[(P, Q)], o: CopyOptions) -> Result<()> {
         self.calls.borrow_mut().copies.push(p.len());
         self.fs.vcopy(p, o)
     }
@@ -140,7 +140,7 @@ fn contents_replace_colliding_regular_roots_in_input_order() {
                     &fs,
                     &["/left/same", "/right/same"],
                     "/out",
-                    CopyOptions::new()
+                    TransferOptions::new()
                         .with_layout(CopyLayout::Contents)
                         .with_existing(Existing::Replace)
                         .with_batch_size(batch)
@@ -170,7 +170,7 @@ fn contents_conflicts_error_or_skip_after_first_completed_root() {
                 &fs,
                 &["/left/same", "/right/same"],
                 "/out",
-                CopyOptions::new()
+                TransferOptions::new()
                     .with_layout(CopyLayout::Contents)
                     .with_existing(policy)
                     .with_batch_size(batch),
@@ -204,7 +204,7 @@ fn contents_directory_roots_complete_before_later_regular_roots() {
                 &fs,
                 &sources,
                 "/out",
-                CopyOptions::new()
+                TransferOptions::new()
                     .with_layout(CopyLayout::Contents)
                     .with_existing(Existing::Replace)
                     .with_batch_size(batch),
@@ -235,7 +235,7 @@ fn contents_directory_collisions_follow_root_order_at_every_depth() {
             &fs,
             &["/left", "/right"],
             "/out",
-            CopyOptions::new()
+            TransferOptions::new()
                 .with_layout(CopyLayout::Contents)
                 .with_existing(Existing::Replace)
                 .with_batch_size(batch),
@@ -262,7 +262,7 @@ fn disjoint_regular_roots_keep_vector_io_in_both_layouts() {
                 &fs,
                 &["/left/same", "/right/nested/item"],
                 "/out",
-                CopyOptions::new()
+                TransferOptions::new()
                     .with_layout(layout)
                     .with_existing(if native {
                         Existing::Replace
@@ -300,7 +300,7 @@ fn contents_cohorts_share_traversal_budget() {
         &fs,
         &["/left", "/right"],
         "/out",
-        CopyOptions::new()
+        TransferOptions::new()
             .with_layout(CopyLayout::Contents)
             .with_existing(Existing::Replace)
             .with_max_entries(5),
@@ -325,7 +325,7 @@ fn contents_cancellation_keeps_later_conflicting_root_unstarted() {
         &fs,
         &["/left/same", "/right/same"],
         "/out",
-        CopyOptions::new()
+        TransferOptions::new()
             .with_layout(CopyLayout::Contents)
             .with_existing(Existing::Replace),
         |_| Ok(ControlFlow::Break(())),
@@ -347,7 +347,7 @@ fn contents_collision_splits_only_the_necessary_file_cohort() {
         &fs,
         &["/left/same", "/right/nested/item", "/right/same"],
         "/out",
-        CopyOptions::new()
+        TransferOptions::new()
             .with_layout(CopyLayout::Contents)
             .with_existing(Existing::Replace),
     )

@@ -3,7 +3,7 @@ use super::*;
 pub fn vcopy_impl_default<F: VectorBackend + ?Sized>(
     backend: &mut F,
     pairs: &[ExtentPair],
-    options: CopyOption,
+    options: CopyOptions,
 ) -> VfRes {
     if pairs.is_empty() {
         return Ok(());

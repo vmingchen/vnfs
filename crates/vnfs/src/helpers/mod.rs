@@ -10,7 +10,7 @@ pub use tree::{Tree, TreeBuilder};
 
 mod transfer;
 pub use transfer::{
-    CopyLayout, CopyOptions, Existing, TransferProgress, TransferSummary, UnsupportedEntry,
+    CopyLayout, Existing, TransferOptions, TransferProgress, TransferSummary, UnsupportedEntry,
     copy_items, copy_items_with_progress, copy_tree, copy_tree_with_progress, move_items,
     move_items_with_progress,
 };

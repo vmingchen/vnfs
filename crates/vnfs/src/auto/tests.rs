@@ -585,7 +585,10 @@ fn live_nfs_mount_uses_direct_connection() {
         )
         .unwrap();
     assert_eq!(
-        reads.iter().map(|read| read.read()).collect::<Vec<_>>(),
+        reads
+            .iter()
+            .map(|read| read.bytes_read())
+            .collect::<Vec<_>>(),
         [5, 6, 5]
     );
     assert!(reads.iter().all(|read| read.eof()));
@@ -719,7 +722,7 @@ fn live_changed_auto_limits_apply_to_cached_connections_and_open_handles() {
                     Default::default(),
                 )
                 .map(|results| {
-                    assert_eq!(results[0].read(), 6);
+                    assert_eq!(results[0].bytes_read(), 6);
                     assert_eq!(&buffer, b"abcdef");
                 }),
         );
@@ -1059,7 +1062,7 @@ fn live_mount_alias_clients_share_identity_and_cross_routes_never_use_kernel_cop
     client.write(&source, b"original").unwrap();
     assert!(
         client
-            .vcopy(&[(&source, &destination)], crate::CopyOption::default())
+            .vcopy(&[(&source, &destination)], crate::CopyOptions::default())
             .unwrap_err()
             .kind()
             == std::io::ErrorKind::Unsupported

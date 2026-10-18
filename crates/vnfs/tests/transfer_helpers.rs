@@ -136,10 +136,12 @@ impl Vfsi for Harness {
         let mut c = self.calls.borrow_mut();
         c.reads += 1;
         c.max_files = c.max_files.max(out.len());
-        c.max_bytes = c.max_bytes.max(out.iter().map(ReadResult::read).sum());
+        c.max_bytes = c
+            .max_bytes
+            .max(out.iter().map(ReadResult::bytes_read).sum());
         if self.fault.get() == Fault::ShortRead {
             for result in &mut out {
-                if result.read() > 3 {
+                if result.bytes_read() > 3 {
                     *result = ReadResult::buffered(result.offset(), 3, false);
                 }
             }
@@ -148,7 +150,7 @@ impl Vfsi for Harness {
             out.pop();
         }
         if self.fault.get() == Fault::WrongOffset {
-            out[0] = ReadResult::buffered(1, out[0].read(), out[0].eof());
+            out[0] = ReadResult::buffered(1, out[0].bytes_read(), out[0].eof());
         }
         Ok(out)
     }
@@ -167,7 +169,7 @@ impl Vfsi for Harness {
             ));
         }
         if self.fault.get() == Fault::BadWrite {
-            out[0].written += 1;
+            out[0].bytes_written += 1;
         }
         Ok(out)
     }
@@ -185,7 +187,7 @@ impl Vfsi for Harness {
     fn vcopy<P: AsRef<Path>, Q: AsRef<Path>>(
         &self,
         p: &[(P, Q)],
-        options: vnfs::files::CopyOption,
+        options: vnfs::files::CopyOptions,
     ) -> Result<()> {
         self.calls.borrow_mut().copies += 1;
         self.fs.vcopy(p, options)
@@ -257,7 +259,9 @@ fn recursive_copy_is_bounded_and_short_reads_have_no_gaps() {
         &fs,
         "/src",
         "/dst",
-        CopyOptions::new().with_chunk_size(16).with_batch_size(2),
+        TransferOptions::new()
+            .with_chunk_size(16)
+            .with_batch_size(2),
     )
     .unwrap();
     assert_eq!(s.files_copied, 3);
@@ -279,12 +283,12 @@ fn conflict_policies_preserve_hard_links_and_reject_self_copy() {
     std::fs::create_dir(t.path().join("dst")).unwrap();
     std::fs::write(t.path().join("dst/a"), b"old").unwrap();
     std::fs::hard_link(t.path().join("dst/a"), t.path().join("unrelated")).unwrap();
-    assert!(copy_items(&fs, &["/src/a"], "/dst", CopyOptions::new()).is_err());
+    assert!(copy_items(&fs, &["/src/a"], "/dst", TransferOptions::new()).is_err());
     let skipped = copy_items(
         &fs,
         &["/src/a"],
         "/dst",
-        CopyOptions::new().with_existing(Existing::Skip),
+        TransferOptions::new().with_existing(Existing::Skip),
     )
     .unwrap();
     assert_eq!(skipped.entries_skipped, 1);
@@ -293,7 +297,7 @@ fn conflict_policies_preserve_hard_links_and_reject_self_copy() {
         &fs,
         &["/src/a"],
         "/dst",
-        CopyOptions::new().with_existing(Existing::Replace),
+        TransferOptions::new().with_existing(Existing::Replace),
     )
     .unwrap();
     assert_eq!(replaced.bytes_copied, None);
@@ -307,7 +311,7 @@ fn conflict_policies_preserve_hard_links_and_reject_self_copy() {
             &fs,
             &["/src/a"],
             "/dst",
-            CopyOptions::new().with_existing(Existing::Replace)
+            TransferOptions::new().with_existing(Existing::Replace)
         )
         .is_err()
     );
@@ -322,13 +326,13 @@ fn layouts_permissions_and_stats() {
         std::fs::Permissions::from_mode(0o640),
     )
     .unwrap();
-    copy_items(&fs, &["/src"], "/container", CopyOptions::new()).unwrap();
+    copy_items(&fs, &["/src"], "/container", TransferOptions::new()).unwrap();
     assert!(t.path().join("container/src/nested/b").exists());
     copy_items(
         &fs,
         &["/src"],
         "/contents",
-        CopyOptions::new()
+        TransferOptions::new()
             .with_layout(CopyLayout::Contents)
             .with_preserve_permissions(true),
     )
@@ -349,12 +353,12 @@ fn layouts_permissions_and_stats() {
         (s.files, s.directories, s.symlinks, s.file_bytes),
         (3, 2, 1, 157)
     );
-    assert!(copy_tree(&fs, "/src", "/reject", CopyOptions::new()).is_err());
+    assert!(copy_tree(&fs, "/src", "/reject", TransferOptions::new()).is_err());
     let s = copy_tree(
         &fs,
         "/src",
         "/skip",
-        CopyOptions::new().with_unsupported_entries(UnsupportedEntry::Skip),
+        TransferOptions::new().with_unsupported_entries(UnsupportedEntry::Skip),
     )
     .unwrap();
     assert_eq!(s.entries_skipped, 1);
@@ -365,22 +369,22 @@ fn layouts_permissions_and_stats() {
 fn overlap_depth_and_budgets_are_explicit() {
     let (t, fs) = fixture();
     for options in [
-        CopyOptions::new().with_max_entries(0),
-        CopyOptions::new().with_max_path_bytes(1),
-        CopyOptions::new().with_batch_size(0),
-        CopyOptions::new().with_chunk_size(0),
+        TransferOptions::new().with_max_entries(0),
+        TransferOptions::new().with_max_path_bytes(1),
+        TransferOptions::new().with_batch_size(0),
+        TransferOptions::new().with_chunk_size(0),
     ] {
         assert!(copy_tree(&fs, "/src", "/dst", options).is_err());
         assert!(!t.path().join("dst").exists());
     }
-    assert!(copy_tree(&fs, "/src", "/src/dst", CopyOptions::new()).is_err());
-    assert!(copy_items(&fs, &["/src", "/src/a"], "/dst", CopyOptions::new()).is_err());
-    assert!(copy_tree(&fs, "../src", "/dst", CopyOptions::new()).is_err());
+    assert!(copy_tree(&fs, "/src", "/src/dst", TransferOptions::new()).is_err());
+    assert!(copy_items(&fs, &["/src", "/src/a"], "/dst", TransferOptions::new()).is_err());
+    assert!(copy_tree(&fs, "../src", "/dst", TransferOptions::new()).is_err());
     let s = move_items(
         &fs,
         &["/src"],
         "/dst",
-        CopyOptions::new().with_max_depth(DepthLimit::new(0)),
+        TransferOptions::new().with_max_depth(DepthLimit::new(0)),
     )
     .unwrap();
     assert_eq!(s.entries_skipped, 1);
@@ -396,7 +400,7 @@ fn cancellation_reports_completed_wave_and_retains_sources() {
         &fs,
         &["/src/a", "/src/c"],
         "/dst",
-        CopyOptions::new()
+        TransferOptions::new()
             .with_chunk_size(16)
             .with_preserve_permissions(true),
         |p| {
@@ -417,7 +421,7 @@ fn cancellation_reports_completed_wave_and_retains_sources() {
         &fs,
         &["/src/a", "/src/c"],
         "/wave",
-        CopyOptions::new().with_chunk_size(16),
+        TransferOptions::new().with_chunk_size(16),
         |p| {
             assert_eq!(p.summary.bytes_copied, Some(32));
             Ok(ControlFlow::Break(()))
@@ -444,7 +448,7 @@ fn malformed_reads_lost_write_and_close_failure_never_delete_or_replay() {
                 &fs,
                 &["/src/a"],
                 "/dst",
-                CopyOptions::new().with_chunk_size(16)
+                TransferOptions::new().with_chunk_size(16)
             )
             .is_err()
         );
@@ -474,7 +478,7 @@ fn move_rename_and_cross_device_fallback_are_not_general_retry() {
             &fs,
             &["/src"],
             "/dst",
-            CopyOptions::new().with_existing(Existing::Replace),
+            TransferOptions::new().with_existing(Existing::Replace),
         );
         if fault == Fault::Rename {
             assert!(result.is_err());
@@ -502,13 +506,13 @@ fn skipped_move_and_callback_error_keep_source() {
         &fs,
         &["/src/a"],
         "/dst",
-        CopyOptions::new().with_existing(Existing::Skip),
+        TransferOptions::new().with_existing(Existing::Skip),
     )
     .unwrap();
     assert_eq!(s.roots_removed, 0);
     assert!(t.path().join("src/a").exists());
     assert!(
-        move_items_with_progress(&fs, &["/src/a"], "/error", CopyOptions::new(), |_| Err(
+        move_items_with_progress(&fs, &["/src/a"], "/error", TransferOptions::new(), |_| Err(
             Error::client(0, libc::ECANCELED as u32)
         ))
         .is_err()
@@ -529,7 +533,7 @@ fn vector_counts_and_storage_follow_cohort_limits() {
         &fs,
         &sources,
         "/batch",
-        CopyOptions::new()
+        TransferOptions::new()
             .with_chunk_size(16)
             .with_preserve_permissions(true),
     )
@@ -547,7 +551,9 @@ fn vector_counts_and_storage_follow_cohort_limits() {
         &fs,
         &sources,
         "/serial",
-        CopyOptions::new().with_batch_size(1).with_chunk_size(16),
+        TransferOptions::new()
+            .with_batch_size(1)
+            .with_chunk_size(16),
     )
     .unwrap();
     assert_eq!(fs.calls.borrow().reads, 12);
@@ -562,7 +568,7 @@ fn vector_errors_map_to_original_mixed_root_index() {
         &fs,
         &["/src/nested", "/src/a", "/other"],
         "/dst",
-        CopyOptions::new().with_chunk_size(16),
+        TransferOptions::new().with_chunk_size(16),
     )
     .unwrap_err();
     assert_eq!(e.index(), Some(2));
@@ -578,7 +584,7 @@ fn aggregate_move_budget_and_progress_span_all_roots() {
         &fs,
         &["/src/a", "/src/empty"],
         "/done",
-        CopyOptions::new(),
+        TransferOptions::new(),
         |p| {
             seen.push(p.summary.bytes_copied);
             Ok(ControlFlow::Continue(()))
@@ -597,7 +603,7 @@ fn aggregate_move_budget_and_progress_span_all_roots() {
             &fs,
             &["/src/nested", "/second"],
             "/out",
-            CopyOptions::new().with_max_entries(3)
+            TransferOptions::new().with_max_entries(3)
         )
         .is_err()
     );
@@ -616,14 +622,14 @@ fn replacement_refuses_destination_symlinks() {
             &fs,
             &["/src/a"],
             "/dst",
-            CopyOptions::new().with_existing(Existing::Replace)
+            TransferOptions::new().with_existing(Existing::Replace)
         )
         .is_err()
     );
     assert_eq!(std::fs::read(t.path().join("outside")).unwrap(), b"keep");
     std::fs::create_dir(t.path().join("real")).unwrap();
     symlink("real", t.path().join("alias")).unwrap();
-    assert!(copy_tree(&fs, "/src", "/alias", CopyOptions::new()).is_err());
+    assert!(copy_tree(&fs, "/src", "/alias", TransferOptions::new()).is_err());
     assert!(!t.path().join("real/a").exists());
 }
 
@@ -631,8 +637,13 @@ fn replacement_refuses_destination_symlinks() {
 fn recursive_callback_errors_keep_original_root_index_and_path() {
     let (t, fs) = fixture();
     std::os::unix::fs::symlink("b", t.path().join("src/nested/link")).unwrap();
-    let error =
-        copy_items(&fs, &["/src/a", "/src/nested"], "/out", CopyOptions::new()).unwrap_err();
+    let error = copy_items(
+        &fs,
+        &["/src/a", "/src/nested"],
+        "/out",
+        TransferOptions::new(),
+    )
+    .unwrap_err();
     assert_eq!(error.index(), Some(1));
     assert_eq!(error.path(), Some(Path::new("/src/nested/link")));
 }
@@ -646,7 +657,7 @@ fn tiny_files_fill_the_budget_without_reserving_whole_chunks() {
     for p in &paths {
         std::fs::write(t.path().join(p.trim_start_matches('/')), b"tiny").unwrap();
     }
-    copy_items(&fs, &paths, "/out", CopyOptions::new()).unwrap();
+    copy_items(&fs, &paths, "/out", TransferOptions::new()).unwrap();
     let calls = fs.calls.borrow();
     assert_eq!(calls.reads, 1);
     assert_eq!(calls.writes, 1);
@@ -663,7 +674,7 @@ fn bulk_move_copies_closes_and_deletes_in_vectors() {
     for p in &paths {
         std::fs::write(t.path().join(p.trim_start_matches('/')), b"tiny").unwrap();
     }
-    let result = move_items(&fs, &paths, "/out", CopyOptions::new()).unwrap();
+    let result = move_items(&fs, &paths, "/out", TransferOptions::new()).unwrap();
     assert_eq!(result.roots_removed, 12);
     let calls = fs.calls.borrow();
     assert_eq!(calls.opens, 2);
@@ -689,7 +700,7 @@ fn bulk_move_renames_independent_roots_in_one_vector() {
         &fs,
         &paths,
         "/out",
-        CopyOptions::new().with_existing(Existing::Replace),
+        TransferOptions::new().with_existing(Existing::Replace),
     )
     .unwrap();
     assert_eq!(result.roots_renamed, 12);
@@ -778,7 +789,7 @@ fn partial_cross_device_rename_reconciles_without_replaying_prefix() {
         &fs,
         &["/src/a", "/src/empty", "/src/nested"],
         "/out",
-        CopyOptions::new().with_existing(Existing::Replace),
+        TransferOptions::new().with_existing(Existing::Replace),
     )
     .unwrap();
     assert_eq!(result.roots_renamed, 1);
@@ -803,7 +814,7 @@ fn lost_batch_rename_reply_never_falls_back_or_replays() {
         &fs,
         &["/src/a", "/src/empty"],
         "/out",
-        CopyOptions::new().with_existing(Existing::Replace),
+        TransferOptions::new().with_existing(Existing::Replace),
     );
     assert!(result.unwrap_err().is_transport());
     let calls = fs.calls.borrow();
@@ -823,7 +834,7 @@ fn move_wave_keeps_skipped_roots_but_deletes_complete_siblings() {
         &fs,
         &["/src/a", "/src/empty", "/src/nested"],
         "/out",
-        CopyOptions::new().with_existing(Existing::Skip),
+        TransferOptions::new().with_existing(Existing::Skip),
     )
     .unwrap();
     assert_eq!(result.roots_removed, 2);
@@ -839,7 +850,15 @@ fn batch_copy_error_or_close_error_retains_every_source() {
     for fault in [Fault::LostWrite, Fault::Close] {
         let (t, fs) = fixture();
         fs.fault.set(fault);
-        assert!(move_items(&fs, &["/src/a", "/src/empty"], "/out", CopyOptions::new()).is_err());
+        assert!(
+            move_items(
+                &fs,
+                &["/src/a", "/src/empty"],
+                "/out",
+                TransferOptions::new()
+            )
+            .is_err()
+        );
         assert!(t.path().join("src/a").exists());
         assert!(t.path().join("src/empty").exists());
         let calls = fs.calls.borrow();
@@ -915,7 +934,7 @@ fn absent_sizes_make_copy_and_tree_statistics_fail_instead_of_reporting_zero() {
         std::io::ErrorKind::Unsupported
     );
     assert_eq!(
-        copy_items(&fs, &["/source"], "/dest", CopyOptions::new())
+        copy_items(&fs, &["/source"], "/dest", TransferOptions::new())
             .unwrap_err()
             .kind(),
         std::io::ErrorKind::Unsupported
