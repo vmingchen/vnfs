@@ -2733,6 +2733,12 @@ fn portable_handle_queries_and_sync_batch_and_preflight_every_handle() {
 }
 #[test]
 fn sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices() {
+    #[cfg(feature = "test-support")]
+    if vfsi_sync::test_support::supervise_with_deadline(
+        "sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices",
+    ) {
+        return;
+    }
     use vfsi_core::api::SyncMode;
     for index in [None, Some(1), Some(2)] {
         let error = index.map_or_else(
@@ -2749,12 +2755,25 @@ fn sync_errors_preserve_valid_indices_and_reject_invalid_backend_indices() {
         let a = fs.open("/a").unwrap();
         let b = fs.open("/b").unwrap();
         let error = fs.vfsync(&[&a, &b], SyncMode::Data).unwrap_err();
-        if index == Some(1) {
-            assert_eq!(error.index(), Some(1));
-            assert_eq!(error.path(), Some(std::path::Path::new("/b")));
-        } else {
-            assert!(error.is_transport());
-            assert_eq!(error.index(), None);
+        let calls = std::cell::Cell::new(0);
+        let projected_error = fs
+            .vfsync_projected_native(&[&a, &b], SyncMode::Data, |file| {
+                calls.set(calls.get() + 1);
+                // Projection is caller code: reentry must remain outside the
+                // backend lock, including when attributing an indexed error.
+                fs.capabilities().unwrap();
+                *file
+            })
+            .unwrap_err();
+        assert_eq!(calls.get(), 2, "project each input exactly once");
+        for error in [error, projected_error] {
+            if index == Some(1) {
+                assert_eq!(error.index(), Some(1));
+                assert_eq!(error.path(), Some(std::path::Path::new("/b")));
+            } else {
+                assert!(error.is_transport());
+                assert_eq!(error.index(), None);
+            }
         }
     }
 }

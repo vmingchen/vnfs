@@ -13,6 +13,7 @@ impl<F: HandleBackend> FsClient<F> {
     }
 
     /// Adapter projection fused with full-vector ownership preflight.
+    /// Each input is projected once before acquiring the backend lock.
     #[doc(hidden)]
     pub fn vfsync_projected_native<'a, P>(
         &self,
@@ -27,6 +28,7 @@ impl<F: HandleBackend> FsClient<F> {
             return Ok(());
         }
         let mut raw = Vec::with_capacity(files.len());
+        let mut projected = Vec::with_capacity(files.len());
         for (index, file) in files.iter().enumerate() {
             let file = project(file);
             if !Arc::ptr_eq(&self.inner, &file.inner) {
@@ -39,18 +41,18 @@ impl<F: HandleBackend> FsClient<F> {
                     .map_err(|e| e.with_index(index).with_context("vfsync", &file.path))?
                     .clone(),
             );
+            // Retain only a borrowed handle for error context, not a cloned
+            // path or another call to potentially reentrant projection code.
+            projected.push(file);
         }
-        self.lock()?
-            .vfsync_impl(&raw, mode)
-            .map_err(|error| match error.index() {
-                Some(index) if index < files.len() => {
-                    error.with_context("vfsync", &project(&files[index]).path)
-                }
-                Some(_) => {
-                    VfError::transport(None, "fsync backend returned an invalid error index")
-                }
-                None => error,
-            })
+        let result = self.lock()?.vfsync_impl(&raw, mode);
+        result.map_err(|error| match error.index() {
+            Some(index) if index < projected.len() => {
+                error.with_context("vfsync", &projected[index].path)
+            }
+            Some(_) => VfError::transport(None, "fsync backend returned an invalid error index"),
+            None => error,
+        })
     }
 
     /// Query filesystems using one native vector of paths and retained handles.
