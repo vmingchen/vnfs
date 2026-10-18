@@ -130,10 +130,13 @@ cargo run --release -p vnfs --no-default-features --features uring,posix \
 ```
 
 An optional second argument selects an existing scratch parent directory.
-Further arguments select `both|both-reverse|posix|uring`, a phase (`all`, `warm`,
-`cold`, `write-shapes`, an individual `small-read|small-write|large-read|large-write|mixed-read`,
-or `owned-read|owned-large-read|owned-cold-read|owned-cold-large-read`), queue
-depth (default 256), and maximum scratch bytes (default 2097152). For example,
+Further arguments select `both|both-reverse|posix|uring`, a phase, queue
+depth (default 256), and maximum scratch bytes (default 2097152). `all` runs
+all 14 distinct cases, including owned, mixed-cache and write-shape cases.
+`warm`, `cold`, and `write-shapes` select subsets. Every individual case can
+also be selected, including `directories`, `cold-small-read`, `cold-large-read`,
+`mixed-read`, the `owned-*` cases, `single-large-write`, and `many-files-write`.
+For example,
 `-- 300 target uring large-write 256 2097152` isolates the large buffered-write
 workload for profiling; varying `max_batch_bytes` tests byte-window tuning
 without changing library defaults.
@@ -150,6 +153,66 @@ target/release/examples/uring_bench 300 target both write-shapes 256 2097152 ada
 `write-shapes` compares equal 16 MiB payloads: one request, 128 contiguous
 128 KiB requests on one file, and 256 independent 64 KiB requests on many files.
 It retains the same alternating-payload and independent-content checks.
+These are the defaults; trailing named options customize the geometry:
+
+| Option | Default | Meaning |
+|---|---:|---|
+| `--files` | 256 | Independent small-file requests; also partitions the many-file write shape |
+| `--small-bytes` | 4096 | Bytes per small-file request |
+| `--large-bytes` | 16777216 | Total single-file payload and equal-payload write-shape budget |
+| `--chunk-bytes` | 131072 | Request size within the large file; must divide `large-bytes` |
+| `--order` | `sequential` | `random` deterministically permutes single-file range order, without overlap |
+| `--seed` | 1 | Seed for the range permutation |
+| `--max-case-bytes` | 67108864 | Maximum payload per vector call; increase explicitly for larger cases |
+| `--json` | none | New report path; existing files are never overwritten |
+
+Payload limits are validated before fixture creation. Validation/alternate
+buffers can require approximately three times the payload, plus request/result
+metadata. File count is capped at 65,536 and ranges at 1,048,576. Write-shape
+comparisons require `large-bytes` to divide evenly among `files`.
+Directory geometry remains a fixed 16-by-16 shared-syscall control.
+The harness checks the process descriptor limit before creating fixtures: each
+file needs a backend handle and an independent validation handle, plus a small
+reserve. For large cohorts, raise only the benchmark shell's soft limit within
+its existing hard limit (for example `ulimit -Sn 16384` for 4,096 files), or reduce
+`--files`. No process or system limits are changed automatically.
+
+For a small complete run, including actual ring I/O and both backends:
+
+```sh
+target/release/examples/uring_bench 5 target both all 16 65536 ring \
+  --files 16 --small-bytes 4096 --large-bytes 65536 --chunk-bytes 4096 \
+  --order random --seed 42 --json /tmp/uring-small-run.json
+```
+
+Build once, then sweep file counts and queue depth using distinct report paths.
+Repeat with `both-reverse` to balance backend order; the harness pairs each
+case across backends. Keep execution policy and allocation mode matched.
+
+```sh
+ulimit -Sn 16384 # Requires a sufficient existing hard limit; scoped to this shell.
+for files in 1 16 256 4096; do
+  for depth in 1 16 256; do
+    target/release/examples/uring_bench 200 target both small-read "$depth" 2097152 ring \
+      --files "$files" --json "/tmp/uring-read-${files}-${depth}.json"
+  done
+done
+```
+
+JSON reports preserve raw nanosecond samples, nearest-rank p50/p95/p99,
+throughput, request rate and measured process CPU time. Low-sample tail estimates
+are flagged; advisory-cold cases retain the 20-sample cap, so their p99 is not a
+well-established tail estimate. Process CPU time is not system-wide CPU usage.
+Each case uses a fresh executor. Counter deltas exclude warmups; case-local
+peak bytes and total scratch growth include warmups and are labelled accordingly.
+POSIX records have null ring telemetry rather than implying zero ring cost.
+Environment records include runtime source revision/dirty status, executable
+SHA-256, kernel/architecture, filesystem mount information and options.
+Runtime source/compiler metadata does not prove how the binary was built;
+retain the binary, build command and source diff alongside important results.
+Reports are written only after every selected case succeeds; a failed run may
+leave an empty reserved report file, not a successful benchmark record.
+
 The `owned-*` phases use `ReadOp::range` and include result allocation in timing;
 ordinary read phases use reusable caller buffers. Compare each phase against
 the same phase, not owned allocations against reusable-buffer timings.
@@ -160,7 +223,7 @@ distinct file/range patterns, poisons read buffers before each call, changes
 write payloads every round, and independently reads written files through the
 standard filesystem API. Validation and source reset stay outside timing. It
 keeps opens/closes outside timed I/O, warms up five rounds, and reports
-median per-vector time. Directory listings retain the same implementation.
+per-vector latency percentiles. Directory listings retain the same implementation.
 Writes exclude fsync. Advisory-cold reads use `POSIX_FADV_DONTNEED` after syncing,
 outside timing; this does not evict device/controller caches or guarantee cold
 physical media. See `docs/uring-benchmark.md` in the repository for results and

@@ -1434,6 +1434,7 @@ dependencies = [
  "bitfields",
  "libc",
  "nfsv41-sys",
+ "serde_json",
  "tempfile",
  "vfsi-core",
  "vfsi-local",

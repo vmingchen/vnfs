@@ -1,7 +1,32 @@
 //! Reproducible buffered-I/O comparison; only advisory per-file cache eviction.
 #[cfg(target_os = "linux")]
+#[path = "uring_bench/support.rs"]
+mod support;
+
+#[cfg(target_os = "linux")]
+enum Mode {
+    Read,
+    Write,
+    ColdRead,
+    MixedRead,
+    OwnedRead(bool),
+}
+
+#[cfg(target_os = "linux")]
+struct Case {
+    name: &'static str,
+    paths: Vec<String>,
+    offsets: Vec<u64>,
+    size: usize,
+    mode: Mode,
+}
+#[cfg(target_os = "linux")]
 fn pattern_byte(file: usize, offset: u64, generation: u8) -> u8 {
-    ((file as u64 * 67 + offset % 251) as u8).wrapping_add(generation)
+    // Mix the full file index and offset: simple byte arithmetic made files
+    // 0 and 256 indistinguishable when scaling beyond the original fixture.
+    let value = (file as u64).wrapping_mul(0x9e3779b97f4a7c15) ^ offset;
+    let value = (value ^ (value >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    ((value ^ (value >> 27)) as u8).wrapping_add(generation)
 }
 
 #[cfg(target_os = "linux")]
@@ -34,7 +59,7 @@ fn verify_buffers(
 }
 
 #[cfg(target_os = "linux")]
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn run(config: support::Config) -> Result<(), Box<dyn std::error::Error>> {
     use std::{
         num::NonZeroUsize, os::fd::AsRawFd, os::unix::fs::FileExt, path::Path, time::Instant,
     };
@@ -42,23 +67,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         OpenFlags, OpenOp, ReadOp, ReadOptions, Vfsi, VfsiExt, WriteOp, WriteOptions,
     };
 
-    enum Mode {
-        Read,
-        Write,
-        ColdRead,
-        MixedRead,
-        OwnedRead(bool),
-    }
-
     fn measure(
         (fs, root): (&impl Vfsi, &Path),
-        name: &str,
-        paths: &[String],
-        offsets: &[u64],
-        size: usize,
+        backend: &str,
+        case: &Case,
         rounds: usize,
-        mode: Mode,
+        report: &mut support::Report,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let Case {
+            paths,
+            offsets,
+            size,
+            mode,
+            ..
+        } = case;
+        let size = *size;
         let write = matches!(mode, Mode::Write);
         let cold = matches!(
             mode,
@@ -76,6 +99,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let budget = ReadOptions::new()
             .with_max_total_bytes(NonZeroUsize::new(size * offsets.len()).unwrap());
         let mut samples = Vec::new();
+        let mut cpu = 0.0;
+        let mut before = report.snapshot();
         let source: Vec<_> = paths
             .iter()
             .map(|path| {
@@ -130,6 +155,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Err(std::io::Error::from_raw_os_error(result).into());
                 }
             }
+            if round == 5 {
+                before = report.snapshot();
+            }
+            let cpu_start = support::cpu_seconds()?;
             let start = Instant::now();
             if write {
                 let ops: Vec<_> = offsets
@@ -168,14 +197,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 assert_eq!(results.len(), offsets.len());
                 assert!(results.iter().all(|result| result.bytes_read() == size));
             }
-            let elapsed = start.elapsed().as_secs_f64();
+            let elapsed = start.elapsed().as_nanos() as u64;
+            let used_cpu = support::cpu_seconds()? - cpu_start;
             if !write && buffers != expected {
                 return Err("benchmark read contents differ".into());
             }
             if round >= 5 {
                 samples.push(elapsed);
+                cpu += used_cpu;
             }
         }
+        let after = report.snapshot();
         // Verify actual contents outside the timed region, not just throughput.
         if write {
             for (i, (buffer, offset)) in buffers.iter_mut().zip(offsets).enumerate() {
@@ -185,81 +217,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         verify_buffers(&buffers, offsets, files.len(), generation)?;
         fs.close_files(files)?;
-        samples.sort_by(f64::total_cmp);
-        let median = samples[samples.len() / 2];
-        println!(
-            "{name}: median_us={:.1} MiB_s={:.1}",
-            median * 1e6,
-            size as f64 * offsets.len() as f64 / (1024.0 * 1024.0 * median)
-        );
+        report.record(backend, case, (samples, cpu), (before, after));
         Ok(())
     }
 
-    let rounds = std::env::args()
-        .nth(1)
-        .map(|arg| arg.parse())
-        .transpose()?
-        .unwrap_or(100usize);
-    if rounds == 0 {
-        return Err("rounds must be nonzero".into());
-    }
-    // /tmp is often tmpfs; use disk-backed build storage by default. A second
-    // argument can select another existing scratch parent/filesystem.
-    let parent = std::env::args().nth(2).unwrap_or_else(|| "target".into());
-    let backend = std::env::args().nth(3).unwrap_or_else(|| "both".into());
-    let phase = std::env::args().nth(4).unwrap_or_else(|| "all".into());
-    if !matches!(
-        backend.as_str(),
-        "both" | "both-reverse" | "posix" | "uring"
-    ) || !matches!(
-        phase.as_str(),
-        "all"
-            | "warm"
-            | "cold"
-            | "large-write"
-            | "small-write"
-            | "small-read"
-            | "large-read"
-            | "mixed-read"
-            | "write-shapes"
-            | "owned-read"
-            | "owned-large-read"
-            | "owned-cold-read"
-            | "owned-cold-large-read"
-    ) {
-        return Err(
-            "usage: uring_bench [rounds] [parent] [both|both-reverse|posix|uring] [all|warm|cold|small-read|small-write|large-read|large-write|mixed-read|write-shapes|owned-read|owned-large-read|owned-cold-read|owned-cold-large-read] [queue_depth] [max_batch_bytes] [ring|cached|adaptive]"
-                .into(),
-        );
-    }
-    let depth = std::env::args()
-        .nth(5)
-        .map(|arg| arg.parse::<u32>())
-        .transpose()?
-        .unwrap_or(256);
-    let bytes = std::env::args()
-        .nth(6)
-        .map(|arg| arg.parse::<usize>())
-        .transpose()?
-        .unwrap_or(2 * 1024 * 1024);
-    let read_mode = std::env::args().nth(7).unwrap_or_else(|| "ring".into());
-    if !matches!(read_mode.as_str(), "ring" | "cached" | "adaptive") {
-        return Err("execution mode must be ring, cached or adaptive".into());
-    }
-    let options = vfsi_uring::Options::default()
-        .with_cached_reads(read_mode != "ring")
-        .with_syscall_writes(read_mode == "adaptive")
-        .with_queue_depth(std::num::NonZeroU32::new(depth).ok_or("queue_depth must be nonzero")?)
-        .with_max_batch_bytes(NonZeroUsize::new(bytes).ok_or("max_batch_bytes must be nonzero")?);
+    let cases = config.cases()?;
+    support::check_fd_limit(&cases)?;
     let temp = tempfile::Builder::new()
         .prefix("vfsi-uring-bench-")
-        .tempdir_in(parent)?;
+        .tempdir_in(&config.parent)?;
     let root = temp.path();
-    let paths: Vec<_> = (0..256).map(|i| format!("/file-{i}")).collect();
-    for path in &paths {
-        std::fs::write(root.join(&path[1..]), vec![0; 4096])?;
+    let mut report = support::Report::new(&config, root)?;
+    // Fixtures start empty: each case initializes its own ranges in bounded
+    // buffers, rather than allocating a second large-file preparation buffer.
+    for i in 0..config.files {
+        std::fs::File::create(root.join(format!("file-{i}")))?;
     }
-    std::fs::write(root.join("large"), vec![0; 16 * 1024 * 1024])?;
+    std::fs::File::create(root.join("large"))?;
     for i in 0..16 {
         let dir = root.join(format!("dir-{i}"));
         std::fs::create_dir(&dir)?;
@@ -267,233 +241,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::fs::write(dir.join(format!("file-{j}")), b"directory")?;
         }
     }
-    let local = vfsi_posix::connect(root)?;
-    // Identical FsClient adapters: compare execution engines rather than an
-    // opaque facade on one side and a native adapter on the other.
-    let (uring, telemetry) = vfsi_uring::connect_with_telemetry(root, options)?;
-    println!(
-        "phase={phase}, buffered I/O, no fsync, {} measured rounds; queue_depth={depth} max_batch_bytes={bytes} execution_mode={read_mode}; root={}",
-        rounds,
-        root.display()
-    );
-    if phase == "mixed-read" {
-        println!("first file warm, advisory eviction of the other 255 files outside timing");
-    }
-    fn cases(
-        fs: &impl Vfsi,
-        root: &Path,
-        name: &str,
-        paths: &[String],
-        rounds: usize,
-        phase: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if phase.starts_with("owned-") {
-            let large = phase.contains("large");
-            let cold = phase.contains("cold");
-            let offsets: Vec<_> = if large {
-                (0..128).map(|i| i * 128 * 1024).collect()
+    println!("{config:?}\nBuffered I/O, no fsync; eviction is advisory; five warmups per case.");
+    for case in cases {
+        for backend in config.backends() {
+            // Fresh executors make peak/scratch counters case-local, not
+            // inherited from an earlier workload. Setup stays outside timing.
+            let fs = if backend == "posix" {
+                report.telemetry = None;
+                vfsi_posix::connect(root)?
             } else {
-                vec![0; paths.len()]
+                let options = vfsi_uring::Options::default()
+                    .with_cached_reads(config.execution != "ring")
+                    .with_syscall_writes(config.execution == "adaptive")
+                    .with_queue_depth(std::num::NonZeroU32::new(config.depth).unwrap())
+                    .with_max_batch_bytes(NonZeroUsize::new(config.window).unwrap());
+                let (fs, telemetry) = vfsi_uring::connect_with_telemetry(root, options)?;
+                report.telemetry = Some(telemetry);
+                fs
             };
-            let large_path = ["/large".into()];
-            return measure(
-                (fs, root),
-                &format!("{name}/{phase}"),
-                if large { &large_path } else { paths },
-                &offsets,
-                if large { 128 * 1024 } else { 4096 },
-                if cold { rounds.min(20) } else { rounds },
-                Mode::OwnedRead(cold),
-            );
-        }
-        if phase == "write-shapes" {
-            // Equal 16 MiB payloads distinguish one large request, contiguous
-            // requests on one inode, and independent requests on many inodes.
-            for (size, count, independent, label) in [
-                (16 * 1024 * 1024, 1, false, "single-16m-write"),
-                (128 * 1024, 128, false, "large-write"),
-                (64 * 1024, paths.len(), true, "many-64k-write"),
-            ] {
-                let offsets: Vec<_> = (0..count)
-                    .map(|i| if independent { 0 } else { (i * size) as u64 })
-                    .collect();
-                let large_path = ["/large".into()];
-                measure(
-                    (fs, root),
-                    &format!("{name}/{label}"),
-                    if independent { paths } else { &large_path },
-                    &offsets,
-                    size,
-                    rounds,
-                    Mode::Write,
-                )?;
-            }
-            return Ok(());
-        }
-        if matches!(
-            phase,
-            "small-read" | "small-write" | "large-read" | "large-write" | "mixed-read"
-        ) {
-            let large = phase.starts_with("large");
-            let offsets: Vec<_> = if large {
-                (0..128).map(|i| i * 128 * 1024).collect()
+            let rounds = if matches!(
+                case.mode,
+                Mode::ColdRead | Mode::MixedRead | Mode::OwnedRead(true)
+            ) {
+                config.rounds.min(20)
             } else {
-                vec![0; paths.len()]
+                config.rounds
             };
-            let large_path = ["/large".into()];
-            return measure(
-                (fs, root),
-                &format!("{name}/{phase}"),
-                if large { &large_path } else { paths },
-                &offsets,
-                if large { 128 * 1024 } else { 4096 },
-                rounds,
-                if phase == "mixed-read" {
-                    Mode::MixedRead
-                } else if phase.ends_with("write") {
-                    Mode::Write
-                } else {
-                    Mode::Read
-                },
-            );
-        }
-        let offsets = vec![0; paths.len()];
-        measure(
-            (fs, root),
-            &format!("{name}/small-read"),
-            paths,
-            &offsets,
-            4096,
-            rounds,
-            Mode::Read,
-        )?;
-        measure(
-            (fs, root),
-            &format!("{name}/small-write"),
-            paths,
-            &offsets,
-            4096,
-            rounds,
-            Mode::Write,
-        )?;
-        let offsets: Vec<_> = (0..128).map(|i| i * 128 * 1024).collect();
-        measure(
-            (fs, root),
-            &format!("{name}/large-read"),
-            &["/large".into()],
-            &offsets,
-            128 * 1024,
-            rounds,
-            Mode::Read,
-        )?;
-        measure(
-            (fs, root),
-            &format!("{name}/large-write"),
-            &["/large".into()],
-            &offsets,
-            128 * 1024,
-            rounds,
-            Mode::Write,
-        )?;
-        let dirs: Vec<_> = (0..16).map(|i| format!("/dir-{i}")).collect();
-        let start = Instant::now();
-        for _ in 0..rounds {
-            let listings = fs.read_dirs(&dirs)?;
-            assert_eq!(listings.len(), dirs.len());
-            for listing in listings {
-                assert_eq!(listing.entries.len(), 16);
+            if case.name == "directories" {
+                let mut samples = Vec::with_capacity(rounds);
+                let mut cpu = 0.0;
+                let mut before = report.snapshot();
+                for round in 0..rounds + 5 {
+                    if round == 5 {
+                        before = report.snapshot();
+                    }
+                    let cpu_start = support::cpu_seconds()?;
+                    let start = Instant::now();
+                    let listings = fs.read_dirs(&case.paths)?;
+                    let elapsed = start.elapsed().as_nanos() as u64;
+                    let used_cpu = support::cpu_seconds()? - cpu_start;
+                    assert_eq!(listings.len(), case.paths.len());
+                    assert!(listings.iter().all(|listing| listing.entries.len() == 16));
+                    if round >= 5 {
+                        samples.push(elapsed);
+                        cpu += used_cpu;
+                    }
+                }
+                report.record(backend, &case, (samples, cpu), (before, report.snapshot()));
+            } else {
+                measure((&fs, root), backend, &case, rounds, &mut report)?;
             }
         }
-        println!(
-            "{name}/directories: mean_us={:.1}",
-            start.elapsed().as_secs_f64() * 1e6 / rounds as f64
-        );
-        Ok(())
     }
-    let backends = if backend == "both-reverse" {
-        [(&uring, "uring"), (&local, "local")]
-    } else {
-        [(&local, "local"), (&uring, "uring")]
-    };
-    let selected = |name: &str| match backend.as_str() {
-        "posix" => name == "local",
-        "uring" => name == "uring",
-        _ => true,
-    };
-    if phase != "cold" {
-        for (fs, name) in backends.iter().filter(|(_, name)| selected(name)) {
-            cases(*fs, root, name, &paths, rounds, &phase)?;
-        }
-    }
-    if matches!(
-        phase.as_str(),
-        "warm"
-            | "small-read"
-            | "small-write"
-            | "large-read"
-            | "large-write"
-            | "mixed-read"
-            | "write-shapes"
-            | "owned-read"
-            | "owned-large-read"
-            | "owned-cold-read"
-            | "owned-cold-large-read"
-    ) {
-        let stats = telemetry.snapshot();
-        println!("ring: {stats:?}");
-        assert_eq!(stats.submissions, stats.completions);
+    report.finish(&config)?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().any(|arg| arg == "--help") {
+        println!("{}", support::USAGE);
         return Ok(());
     }
-    println!("advisory page-cache eviction before each read; sync/eviction outside timing");
-    let cold_rounds = rounds.min(20);
-    let offsets = vec![0; paths.len()];
-    for (fs, name) in backends.iter().filter(|(_, name)| selected(name)) {
-        measure(
-            (*fs, root),
-            &format!("{name}/cold-small-read"),
-            &paths,
-            &offsets,
-            4096,
-            cold_rounds,
-            Mode::ColdRead,
-        )?;
-    }
-    let offsets: Vec<_> = (0..128).map(|i| i * 128 * 1024).collect();
-    for (fs, name) in backends.iter().filter(|(_, name)| selected(name)) {
-        measure(
-            (*fs, root),
-            &format!("{name}/cold-large-read"),
-            &["/large".into()],
-            &offsets,
-            128 * 1024,
-            cold_rounds,
-            Mode::ColdRead,
-        )?;
-    }
-    let stats = telemetry.snapshot();
-    println!(
-        "ring: waves={} submissions={} completions={} peak_transfer_bytes={} enters={} scratch_growths={} copied_read_bytes={}",
-        stats.waves,
-        stats.submissions,
-        stats.completions,
-        stats.peak_bytes,
-        stats.enters,
-        stats.scratch_growths,
-        stats.copied_read_bytes
-    );
-    println!(
-        "cache: probes={} hits={} ring_fallbacks={} syscall_reads={} syscall_writes={}",
-        stats.cache_probes,
-        stats.cache_hits,
-        stats.cache_misses,
-        stats.syscall_reads,
-        stats.syscall_writes
-    );
-    assert_eq!(stats.submissions, stats.completions);
-    if backend != "posix" && depth > 1 {
-        assert!(stats.submissions > stats.waves);
-    }
-    Ok(())
+    run(support::Config::parse(std::env::args().skip(1))?)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -531,5 +341,79 @@ mod tests {
         buffers.swap(0, 1);
         assert!(verify_buffers(&buffers, &[1, offsets[1]], 2, 0).is_err());
         assert!(verify_buffers(&buffers[..1], &offsets, 2, 0).is_err());
+    }
+
+    #[test]
+    fn patterns_distinguish_large_file_indices_and_old_offset_periods() {
+        let pattern = |file, offset| {
+            let mut buffer = vec![0; 32];
+            fill_pattern(&mut buffer, file, offset, 0);
+            buffer
+        };
+        assert_ne!(pattern(0, 0), pattern(256, 0));
+        assert_ne!(pattern(0, 0), pattern(0, 251));
+    }
+
+    #[test]
+    fn complete_small_suite_executes_both_backends_and_reports_real_ring_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("complete.json");
+        let config = support::Config::parse(
+            [
+                "2",
+                temp.path().to_str().unwrap(),
+                "both-reverse",
+                "all",
+                "2",
+                "8192",
+                "ring",
+                "--files",
+                "8",
+                "--small-bytes",
+                "4096",
+                "--large-bytes",
+                "65536",
+                "--chunk-bytes",
+                "4096",
+                "--order",
+                "random",
+                "--seed",
+                "42",
+                "--json",
+                path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .unwrap();
+        run(config).unwrap();
+        let report: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open(path).unwrap()).unwrap();
+        let cases = report["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 28);
+        for pair in cases.chunks_exact(2) {
+            assert_eq!(pair[0]["case"], pair[1]["case"]);
+            assert_eq!(pair[0]["backend"], "uring");
+            assert_eq!(pair[1]["backend"], "posix");
+            assert!(pair[1]["telemetry"].is_null());
+            for case in pair {
+                assert_eq!(case["rounds"], 2);
+                assert_eq!(case["samples_ns"].as_array().unwrap().len(), 2);
+                assert!(case["p50_ns"].as_u64().unwrap() > 0);
+            }
+            let stats = &pair[0]["telemetry"];
+            assert_eq!(stats["submissions"], stats["completions"]);
+            assert!(stats["case_peak_bytes_including_warmup"].as_u64().unwrap() <= 8192);
+            if pair[0]["case"] != "directories" {
+                assert!(stats["submissions"].as_u64().unwrap() > 0);
+                assert!(stats["waves"].as_u64().unwrap() > 0);
+            }
+            if pair[0]["case"] == "small-read" {
+                // Eight reads, two per wave, two measured rounds; five warmups
+                // must not leak into the per-case measured counters.
+                assert_eq!(stats["submissions"], 16);
+                assert_eq!(stats["waves"], 8);
+            }
+        }
     }
 }
