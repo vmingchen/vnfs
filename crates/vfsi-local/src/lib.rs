@@ -1158,8 +1158,15 @@ impl LocalBackend {
         }
         if a.masks.intersects(AttrMask::ATIME | AttrMask::MTIME) {
             let mut options = OpenOptions::new();
-            options.read(true);
-            Self::protect_create_open(path, &mut options);
+            // This descriptor only updates metadata: a FIFO must not wait
+            // for a writer before its timestamps can be changed.
+            let flags = libc::O_NONBLOCK
+                | if path.nofollow_on_open {
+                    libc::O_NOFOLLOW
+                } else {
+                    0
+                };
+            options.read(true).custom_flags(flags);
             let file = options
                 .open(path)
                 .map_err(|error| VfError::failure(i, Self::errno(&error)))?;

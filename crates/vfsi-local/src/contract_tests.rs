@@ -1447,6 +1447,54 @@ mod tests {
         assert_eq!(actual.size, 8);
     }
 
+    #[cfg(feature = "test-faults")]
+    #[test]
+    fn setattr_times_do_not_block_on_a_fifo_without_a_writer() {
+        const CHILD: &str = "VFSI_LOCAL_FIFO_TIMES_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            run_filtered_test_child(
+                "contract_tests::tests::setattr_times_do_not_block_on_a_fifo_without_a_writer",
+                CHILD,
+            );
+            return;
+        }
+
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+        let (root, mut backend) = fs("setattr-times-fifo");
+        let path = root.0.join("fifo");
+        let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: name is a live NUL-terminated path for this synchronous syscall.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        for follow in [true, false] {
+            let attrs = VfAttrs {
+                file: FileOperand::from_path("/fifo"),
+                masks: AttrMask::ATIME | AttrMask::MTIME,
+                atime_sec: 1_700_000_001,
+                atime_nsec: 123_456_789,
+                mtime_sec: 1_700_000_002 + i64::from(follow),
+                mtime_nsec: 987_654_321,
+                ..VfAttrs::default()
+            };
+            if follow {
+                backend.vsetattrs_raw_impl(std::slice::from_ref(&attrs))
+            } else {
+                backend.vsetattrs_raw_nofollow_impl(std::slice::from_ref(&attrs))
+            }
+            .unwrap();
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            assert!(metadata.file_type().is_fifo());
+            assert_eq!(
+                (metadata.atime(), metadata.atime_nsec()),
+                (attrs.atime_sec, i64::from(attrs.atime_nsec))
+            );
+            assert_eq!(
+                (metadata.mtime(), metadata.mtime_nsec()),
+                (attrs.mtime_sec, i64::from(attrs.mtime_nsec))
+            );
+        }
+    }
+
     #[test]
     fn lsetattrsv_does_not_follow_final_symlink() {
         use std::os::unix::fs::PermissionsExt;
